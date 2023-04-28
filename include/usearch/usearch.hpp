@@ -443,14 +443,8 @@ using lock_t = std::unique_lock<mutex_t>;
 /**
  *  @brief Implements append-only linked arenas, great for rapid point-cloud construction.
  */
-class append_only_allocator_t {
-    std::uintptr_t address;
-    struct arena_head_t {
-        std::uintptr_t next_address;
-    };
-};
-
-template <typename element_at = char, std::size_t alignment_ak = 64> class aligned_allocator_gt {
+template <typename element_at = char, std::size_t alignment_ak = 64> //
+class aligned_allocator_gt {
   public:
     using value_type = element_at;
     using size_type = std::size_t;
@@ -608,8 +602,8 @@ class index_gt {
     };
     static constexpr std::size_t bytes_per_head_k = sizeof(label_t) + sizeof(dim_t) + sizeof(level_t);
 
-    struct point_and_vector_t {
-        byte_t* point_;
+    struct point_t {
+        byte_t* tape_;
         scalar_t* vector_;
     };
 
@@ -622,9 +616,7 @@ class index_gt {
 
         inline point_ref_t(mutex_t& m, point_head_t& h, scalar_t* s) noexcept : mutex_(&m), head(h), vector(s) {}
         inline lock_t lock() const noexcept { return mutex_ ? lock_t{*mutex_} : lock_t{}; }
-        inline operator point_and_vector_t() const noexcept {
-            return {mutex_ ? (byte_t*)mutex_ : (byte_t*)&head, vector};
-        }
+        inline operator point_t() const noexcept { return {mutex_ ? (byte_t*)mutex_ : (byte_t*)&head, vector}; }
     };
 
     struct usearch_align_m thread_context_t {
@@ -638,17 +630,17 @@ class index_gt {
 
     config_t config_{};
     precomputed_constants_t pre_;
-    std::size_t capacity_{0};
-
-    usearch_align_m mutable std::atomic<std::size_t> size_{};
     int viewed_file_descriptor_{};
+
+    usearch_align_m mutable std::atomic<std::size_t> capacity_{};
+    usearch_align_m mutable std::atomic<std::size_t> size_{};
 
     mutex_t global_mutex_{};
     level_t max_level_{};
     id_t entry_id_{};
 
-    using point_and_vector_allocator_t = typename allocator_traits_t::template rebind_alloc<point_and_vector_t>;
-    std::vector<point_and_vector_t, point_and_vector_allocator_t> points_and_vectors_{};
+    using point_allocator_t = typename allocator_traits_t::template rebind_alloc<point_t>;
+    std::vector<point_t, point_allocator_t> points_{};
 
     using thread_context_allocator_t = typename allocator_traits_t::template rebind_alloc<thread_context_t>;
     mutable std::vector<thread_context_t, thread_context_allocator_t> thread_contexts_;
@@ -695,7 +687,7 @@ class index_gt {
     void reserve(std::size_t new_capacity) noexcept(false) {
 
         assert_m(new_capacity >= size_, "Can't drop existing values");
-        points_and_vectors_.resize(new_capacity);
+        points_.resize(new_capacity);
         for (thread_context_t& context : thread_contexts_)
             context.visits = visits_bitset_t(new_capacity);
 
@@ -728,7 +720,6 @@ class index_gt {
              std::size_t thread_idx = 0, bool store_vector = true) {
 
         assert_m(!is_immutable(), "Can't add to an immutable index");
-        assert_m(size_ < capacity_, "Inserting beyond capacity, reserve first");
         id_t new_id = static_cast<id_t>(size_.fetch_add(1));
 
         // Determining how much memory to allocate depends on the target level.
@@ -743,7 +734,7 @@ class index_gt {
         new_dim = new_dim ? new_dim : static_cast<dim_t>(config_.dim);
         point_ref_t new_point = point_malloc(new_label, new_vector, new_dim, new_target_level, store_vector);
         lock_t new_lock = new_point.lock();
-        points_and_vectors_[new_id] = new_point;
+        points_[new_id] = new_point;
 
         // Do nothing for the first element
         if (!new_id) {
@@ -790,8 +781,8 @@ class index_gt {
     }
 
     template <typename label_and_distance_callback_at>
-    void search(scalar_t const* query_vec, dim_t query_dim, std::size_t k, std::size_t thread_idx,
-                label_and_distance_callback_at&& callback) const {
+    void search(scalar_t const* query_vec, dim_t query_dim, std::size_t k, label_and_distance_callback_at&& callback,
+                std::size_t thread_idx = 0) const {
 
         if (!size_)
             return;
@@ -933,7 +924,7 @@ class index_gt {
                 throw std::runtime_error(std::strerror(errno));
             }
 
-            points_and_vectors_[i] = point_ref;
+            points_[i] = point_ref;
         }
 
         std::fclose(file);
@@ -985,8 +976,8 @@ class index_gt {
         for (std::size_t i = 0; i != state.size; ++i) {
             point_head_t const& head = *(point_head_t const*)(file + progress);
             std::size_t bytes_to_dump = point_dump_size(head.dim, head.level);
-            points_and_vectors_[i].point_ = (byte_t*)(file + progress);
-            points_and_vectors_[i].vector_ = (scalar_t*)(file + progress + bytes_to_dump - sizeof(scalar_t) * head.dim);
+            points_[i].tape_ = (byte_t*)(file + progress);
+            points_[i].vector_ = (scalar_t*)(file + progress + bytes_to_dump - sizeof(scalar_t) * head.dim);
             progress += bytes_to_dump;
             max_level_ = std::max(max_level_, head.level);
         }
@@ -1018,22 +1009,22 @@ class index_gt {
             return;
 
         // This function is rarely called and can be as expensive as needed for higher space-efficiency.
-        point_and_vector_t& pair = points_and_vectors_[id];
-        if (!pair.point_)
+        point_t& point = points_[id];
+        if (!point.tape_)
             return;
 
-        point_head_t const& head = *(point_head_t const*)(pair.point_ + pre_.bytes_per_mutex);
+        point_head_t const& head = *(point_head_t const*)(point.tape_ + pre_.bytes_per_mutex);
         std::size_t size_levels = pre_.bytes_per_neighbors_base + pre_.bytes_per_neighbors * head.level;
-        bool store_vector = (byte_t*)(pair.point_ + pre_.bytes_per_mutex + bytes_per_head_k + size_levels) == //
-                            (byte_t*)(pair.vector_);
+        bool store_vector = (byte_t*)(point.tape_ + pre_.bytes_per_mutex + bytes_per_head_k + size_levels) == //
+                            (byte_t*)(point.vector_);
         std::size_t size_point =                       //
             pre_.bytes_per_mutex +                     // Optional concurrency-control
             bytes_per_head_k + size_levels +           // Obligatory neighborhood index
             sizeof(scalar_t) * head.dim * store_vector // Optional vector copy
             ;
 
-        allocator_t{}.deallocate(pair.point_, size_point);
-        pair = {};
+        allocator_t{}.deallocate(point.tape_, size_point);
+        point = {};
     }
 
     point_ref_t point_malloc(                             //
@@ -1069,11 +1060,11 @@ class index_gt {
 
     inline point_ref_t point(id_t id) const noexcept {
 
-        point_and_vector_t pair = points_and_vectors_[id];
-        byte_t* data = pair.point_;
+        point_t point = points_[id];
+        byte_t* data = point.tape_;
         mutex_t* mutex = synchronize() ? (mutex_t*)data : nullptr;
         point_head_t& head = *(point_head_t*)(data + pre_.bytes_per_mutex);
-        scalar_t* scalars = pair.vector_;
+        scalar_t* scalars = point.vector_;
 
         return {*mutex, head, scalars};
     }
@@ -1240,13 +1231,13 @@ class index_gt {
 
         while (!candidates_set.empty()) {
 
-            distance_and_id_t current_node_pair = candidates_set.top();
-            if ((-current_node_pair.first) > closest_dist)
+            distance_and_id_t current_node_point = candidates_set.top();
+            if ((-current_node_point.first) > closest_dist)
                 break;
 
             candidates_set.pop();
 
-            id_t candidate_id = current_node_pair.second;
+            id_t candidate_id = current_node_point.second;
             neighbors_ref_t candidate_header = neighbors_base(point(candidate_id));
 
             iterate_through_neighbors(candidate_header, [&](id_t successor_id) noexcept {
