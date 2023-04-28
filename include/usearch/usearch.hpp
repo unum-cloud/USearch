@@ -301,14 +301,15 @@ class max_heap_gt {
     using value_type = element_t;
 
   private:
-    element_t* elements_{};
-    std::size_t size_{};
-    std::size_t capacity_{};
-    std::size_t max_capacity_{};
+    element_t* elements_;
+    std::size_t size_;
+    std::size_t capacity_;
+    std::size_t max_capacity_;
 
   public:
-    max_heap_gt() noexcept {}
-    max_heap_gt(std::size_t max_capacity) noexcept : max_capacity_(max_capacity) {}
+    max_heap_gt(std::size_t max_capacity = 0) noexcept
+        : elements_(nullptr), size_(0), capacity_(0), max_capacity_(max_capacity) {}
+
     bool empty() const noexcept { return !size_; }
     std::size_t size() const noexcept { return size_; }
     std::size_t capacity() const noexcept { return capacity_; }
@@ -337,8 +338,10 @@ class max_heap_gt {
         if (!new_elements)
             return false;
 
-        std::uninitialized_copy_n(elements_, size_, new_elements);
-        allocator.deallocate(elements_, capacity_);
+        if (elements_) {
+            std::uninitialized_copy_n(elements_, size_, new_elements);
+            allocator.deallocate(elements_, capacity_);
+        }
         elements_ = new_elements;
         capacity_ = new_capacity;
         return new_elements;
@@ -557,7 +560,8 @@ class index_gt {
     using id_t = id_at;
     using allocator_t = allocator_at;
 
-    using distance_t = typename distance_function_t::result_type;
+    using distance_t =
+        typename std::result_of<distance_function_t(scalar_t const*, scalar_t const*, dim_t, dim_t)>::type;
     using neighbors_count_t = id_t;
 
   private:
@@ -654,6 +658,7 @@ class index_gt {
     std::size_t connectivity() const noexcept { return config_.connectivity; }
     std::size_t capacity() const noexcept { return capacity_; }
     std::size_t size() const noexcept { return size_; }
+    std::size_t max_threads_add() const noexcept { return config_.max_threads_add; }
     bool is_immutable() const noexcept { return viewed_file_descriptor_ != 0; }
     bool synchronize() const noexcept { return config_.max_threads_add > 1; }
 
