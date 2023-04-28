@@ -478,7 +478,9 @@ class usearch_pack_m uint40_t {
     inline uint40_t() noexcept { std::memset(octets, 0, 5); }
     inline uint40_t(std::uint32_t n) noexcept { std::memcpy(octets + 1, (char*)&n, 4), octets[0] = 0; }
     inline uint40_t(std::uint64_t n) noexcept { std::memcpy(octets, (char*)&n + 3, 5); }
+#if defined(__clang__)
     inline uint40_t(std::size_t n) noexcept { std::memcpy(octets, (char*)&n + 3, 5); }
+#endif
 
     uint40_t(uint40_t&&) = default;
     uint40_t(uint40_t const&) = default;
