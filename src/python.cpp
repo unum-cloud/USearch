@@ -13,52 +13,19 @@
  *  @copyright Copyright (c) 2023
  */
 #define PY_SSIZE_T_CLEAN
-#include <omp.h> // `omp_get_num_threads()`
+#include <thread>
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 
-#include <fp16/fp16.h>
-
 #include <usearch/usearch.hpp>
+
+#include "advanced.hpp"
 
 using namespace unum::usearch;
 using namespace unum;
 
 namespace py = pybind11;
-
-struct f16_converted_t {
-    uint16_t uint16{};
-
-    inline f16_converted_t() noexcept : uint16(0) {}
-    inline f16_converted_t(f16_converted_t&&) = default;
-    inline f16_converted_t& operator=(f16_converted_t&&) = default;
-    inline f16_converted_t(f16_converted_t const&) = default;
-    inline f16_converted_t& operator=(f16_converted_t const&) = default;
-
-    inline f16_converted_t(float v) noexcept : uint16(fp16_ieee_from_fp32_value(v)) {}
-    inline operator float() const noexcept { return fp16_ieee_to_fp32_value(uint16); }
-
-    inline f16_converted_t& operator+=(float v) noexcept {
-        uint16 = fp16_ieee_from_fp32_value(v + fp16_ieee_to_fp32_value(uint16));
-        return *this;
-    }
-
-    inline f16_converted_t& operator-=(float v) noexcept {
-        uint16 = fp16_ieee_from_fp32_value(v - fp16_ieee_to_fp32_value(uint16));
-        return *this;
-    }
-
-    inline f16_converted_t& operator*=(float v) noexcept {
-        uint16 = fp16_ieee_from_fp32_value(v * fp16_ieee_to_fp32_value(uint16));
-        return *this;
-    }
-
-    inline f16_converted_t& operator/=(float v) noexcept {
-        uint16 = fp16_ieee_from_fp32_value(v / fp16_ieee_to_fp32_value(uint16));
-        return *this;
-    }
-};
 
 class py_search_api_t {
   public:
@@ -111,7 +78,7 @@ class py_index_gt final : public py_search_api_t {
 
     void set_distance(std::string const& name) override {
         distance_name_ = name;
-        if (name == "l2" || name == "euclidean") {
+        if (name == "l2_sq" || name == "euclidean_sq") {
             distance_function_t dist = &type_punned_distance_function<l2_squared_gt<scalar_t>>;
             native_.adjust_metric(dist);
         } else if (name == "ip" || name == "inner" || name == "dot") {
@@ -133,7 +100,7 @@ class py_index_gt final : public py_search_api_t {
             distance_function_t dist = &type_punned_distance_function<haversine_gt<allowed_t>>;
             native_.adjust_metric(dist);
         } else
-            throw std::runtime_error("Unknown distance! Supported: l2, ip, cos, hamming, jaccard");
+            throw std::runtime_error("Unknown distance! Supported: l2_sq, ip, cos, hamming, jaccard");
     }
 
     void add(py::buffer labels, py::buffer vectors, bool copy) override {
@@ -167,12 +134,13 @@ class py_index_gt final : public py_search_api_t {
 
         char const* vectors_data = reinterpret_cast<char const*>(vectors_info.ptr);
         char const* labels_data = reinterpret_cast<char const*>(labels_info.ptr);
-#pragma omp parallel for
-        for (ssize_t i = 0; i < vectors_count; ++i) {
-            label_t label = *reinterpret_cast<label_t const*>(labels_data + i * labels_info.strides[0]);
-            scalar_t const* vector = reinterpret_cast<scalar_t const*>(vectors_data + i * vectors_info.strides[0]);
-            native_.add(label, vector, vectors_dimensions, omp_get_thread_num(), copy);
-        }
+
+        multithreaded(native_.max_threads_add(), vectors_count, [&](std::size_t thread_idx, std::size_t task_idx) {
+            label_t label = *reinterpret_cast<label_t const*>(labels_data + task_idx * labels_info.strides[0]);
+            scalar_t const* vector =
+                reinterpret_cast<scalar_t const*>(vectors_data + task_idx * vectors_info.strides[0]);
+            native_.add(label, vector, vectors_dimensions, thread_idx, copy);
+        });
     }
 
     /**
@@ -206,20 +174,20 @@ class py_index_gt final : public py_search_api_t {
         auto distances_py2d = distances_py.mutable_unchecked<2>();
         auto counts_py1d = counts_py.mutable_unchecked<1>();
 
-#pragma omp parallel for
-        for (ssize_t i = 0; i < vectors_count; ++i) {
+        multithreaded(native_.max_threads_add(), vectors_count, [&](std::size_t thread_idx, std::size_t task_idx) {
             std::size_t matches_found = 0;
-            scalar_t const* vector = reinterpret_cast<scalar_t const*>(vectors_data + i * vectors_info.strides[0]);
+            scalar_t const* vector =
+                reinterpret_cast<scalar_t const*>(vectors_data + task_idx * vectors_info.strides[0]);
             auto callback = [&](label_t id, distance_t distance) {
-                labels_py2d(i, matches_found) = id;
-                distances_py2d(i, matches_found) = distance;
+                labels_py2d(task_idx, matches_found) = id;
+                distances_py2d(task_idx, matches_found) = distance;
                 matches_found++;
             };
-            native_.search(vector, vectors_dimensions, matches_wanted, omp_get_thread_num(), callback);
-            std::reverse(&labels_py2d(i, 0), &labels_py2d(i, matches_found));
-            std::reverse(&distances_py2d(i, 0), &distances_py2d(i, matches_found));
-            counts_py1d(i) = static_cast<Py_ssize_t>(matches_found);
-        }
+            native_.search(vector, vectors_dimensions, matches_wanted, callback, thread_idx);
+            std::reverse(&labels_py2d(task_idx, 0), &labels_py2d(task_idx, matches_found));
+            std::reverse(&distances_py2d(task_idx, 0), &distances_py2d(task_idx, matches_found));
+            counts_py1d(task_idx) = static_cast<Py_ssize_t>(matches_found);
+        });
 
         py::tuple results(3);
         results[0] = std::move(labels_py);
@@ -260,8 +228,8 @@ static std::shared_ptr<py_search_api_t> make_index( //
     config.connectivity = connectivity;
     config.max_elements = capacity;
     config.dim = dim;
-    config.max_threads_add = omp_get_num_threads();
-    config.max_threads_search = omp_get_num_threads();
+    config.max_threads_add = std::thread::hardware_concurrency();
+    config.max_threads_search = std::thread::hardware_concurrency();
 
     if (!can_exceed_four_billion) {
         if (scalar_type == "f32")

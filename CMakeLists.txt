@@ -12,9 +12,14 @@ project(
 # Determine if USearch is built as a subproject (using `add_subdirectory`) or if it is the main project
 set(USEARCH_IS_MAIN_PROJECT OFF)
 
+<<<<<<< HEAD
 if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
     set(USEARCH_IS_MAIN_PROJECT ON)
 endif ()
+=======
+option(USEARCH_USE_JEMALLOC "Use JeMalloc for Faster Memory Allocations" OFF)
+option(USEARCH_USE_OPENMP "Use OpenMP for a thread pool" OFF)
+>>>>>>> 0c2b175 (Refactor: CPython without OpenMP)
 
 # Allow CMake 3.13+ to override options when using FetchContent / add_subdirectory
 if (POLICY CMP0077)
@@ -223,6 +228,7 @@ if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif ()
 
+<<<<<<< HEAD
 # Include directories
 set(USEARCH_HEADER_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/fp16/include"
                             "${CMAKE_CURRENT_SOURCE_DIR}/simsimd/include"
@@ -440,3 +446,14 @@ endif ()
 if (${USEARCH_BUILD_SQLITE})
     add_subdirectory(sqlite)
 endif ()
+=======
+# Define the targets
+add_executable(bench src/bench.cpp)
+target_link_libraries(bench PRIVATE Threads::Threads)
+if(${USEARCH_USE_OPENMP})
+    target_link_libraries(bench PRIVATE ${OPENMP_LIBRARIES})
+endif()
+if(${USEARCH_USE_JEMALLOC})
+    target_link_libraries(bench PRIVATE ${JEMALLOC_LIBRARIES})
+endif()
+>>>>>>> 0c2b175 (Refactor: CPython without OpenMP)

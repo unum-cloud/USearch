@@ -27,6 +27,13 @@ cmake \
 pip install -e .
 ```
 
+### JavaScript
+
+```sh
+npm install
+node src/test.js
+```
+
 ## Benchmarks
 
 ### Datasets

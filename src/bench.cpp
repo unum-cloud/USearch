@@ -173,12 +173,8 @@ void search_many(index_at& native, std::size_t n, real_at const* vecs, std::size
 #pragma omp parallel for
     for (std::size_t i = 0; i < n; ++i) {
         std::size_t j = 0;
-        native.search(vecs + native.dim() * i, native.dim(), k, omp_get_thread_num(),
-                      [&](vector_id_at id, real_at distance) {
-                          ids[k * i + j] = id;
-                          distances[k * i + j] = distance;
-                          j++;
-                      });
+        auto call = [&](vector_id_at id, real_at d) { ids[k * i + j] = id, distances[k * i + j] = d, j++; };
+        native.search(vecs + native.dim() * i, native.dim(), k, call, omp_get_thread_num());
         std::reverse(ids + k * i, ids + k * i + j);
         std::reverse(distances + k * i, distances + k * i + j);
     }
@@ -243,12 +239,6 @@ void handler(int sig) {
     fprintf(stderr, "Error: signal %d:\n", sig);
     backtrace_symbols_fd(array, size, STDERR_FILENO);
     exit(1);
-}
-
-template <typename distance_function_at>
-static float type_punned_distance_function(void const* a, void const* b, dim_t a_dim, dim_t b_dim) noexcept {
-    using scalar_t = typename distance_function_at::scalar_t;
-    return distance_function_at{}((scalar_t const*)a, (scalar_t const*)b, a_dim, b_dim);
 }
 
 int main(int, char**) {
