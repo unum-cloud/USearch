@@ -150,6 +150,7 @@
             "MIMode": "gdb"
         },
         {
+<<<<<<< HEAD
             "name": "Debug PyTest",
             "type": "python",
             "request": "launch",
@@ -201,6 +202,36 @@
             "cwd": "${workspaceFolder}",
             "program": "${workspaceFolder}/.build/debug/USearchTestsSwift",
             "preLaunchTask": "Swift Build"
+=======
+            "name": "Debug PyBind11 Test",
+            "type": "pythoncpp",
+            "request": "launch",
+            "pythonLaunchName": "Python: Current File",
+            "cppAttachName": "Debug PyBind11: Attach with GDB"
+        },
+        {
+            "name": "Debug PyBind11: Attach with GDB",
+            "type": "cppdbg",
+            "request": "attach",
+            "program": "/home/ubuntu/miniconda3/bin/python",
+            "processId": "",
+            "MIMode": "gdb",
+            "sudo": true,
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ]
+        },
+        {
+            "name": "Python: Current File",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+>>>>>>> 2f02aa7 (Refactor: GDB, C-style function pointers in Py)
         }
     ]
 }

@@ -76,12 +76,11 @@ class py_search_api_t {
     virtual void view(std::string const& path) = 0;
 };
 
-template <typename distance_function_at> struct type_punned_distance_function_gt {
-    float operator()(void const* a, void const* b, dim_t a_dim, dim_t b_dim) const noexcept {
-        using scalar_t = typename distance_function_at::scalar_t;
-        return distance_function_at{}((scalar_t const*)a, (scalar_t const*)b, a_dim, b_dim);
-    }
-};
+template <typename distance_function_at>
+static float type_punned_distance_function(void const* a, void const* b, dim_t a_dim, dim_t b_dim) noexcept {
+    using scalar_t = typename distance_function_at::scalar_t;
+    return distance_function_at{}((scalar_t const*)a, (scalar_t const*)b, a_dim, b_dim);
+}
 
 template <typename scalar_at = float, typename neighbor_at = std::uint32_t> //
 class py_index_gt final : public py_search_api_t {
@@ -91,8 +90,8 @@ class py_index_gt final : public py_search_api_t {
     using neighbor_t = neighbor_at;
 
     using distance_t = float;
-    using distance_function_t = std::function<distance_t(void const*, void const*, dim_t, dim_t)>;
-    using index_t = index_gt<distance_function_t, label_t, neighbor_t, scalar_t>;
+    using distance_function_t = distance_t (*)(void const*, void const*, dim_t, dim_t);
+    using index_t = index_gt<distance_function_t, label_t, neighbor_t, scalar_t, aligned_allocator_gt<char>>;
 
     index_t native_;
     std::string distance_name_;
@@ -108,30 +107,30 @@ class py_index_gt final : public py_search_api_t {
             set_distance(distance_name_);
     }
 
-    void set_distance(py::function f) override { distance_name_.clear(); }
+    void set_distance(py::function) override { distance_name_.clear(); }
 
     void set_distance(std::string const& name) override {
         distance_name_ = name;
         if (name == "l2" || name == "euclidean") {
-            distance_function_t dist = type_punned_distance_function_gt<l2_squared_gt<scalar_t>>{};
+            distance_function_t dist = &type_punned_distance_function<l2_squared_gt<scalar_t>>;
             native_.adjust_metric(dist);
         } else if (name == "ip" || name == "inner" || name == "dot") {
-            distance_function_t dist = type_punned_distance_function_gt<ip_gt<scalar_t>>{};
+            distance_function_t dist = &type_punned_distance_function<ip_gt<scalar_t>>;
             native_.adjust_metric(dist);
         } else if (name == "cos" || name == "angular") {
-            distance_function_t dist = type_punned_distance_function_gt<cos_gt<scalar_t>>{};
+            distance_function_t dist = &type_punned_distance_function<cos_gt<scalar_t>>;
             native_.adjust_metric(dist);
         } else if (name == "hamming") {
             using allowed_t = typename std::conditional<std::is_unsigned<scalar_t>::value, scalar_t, unsigned>::type;
-            distance_function_t dist = type_punned_distance_function_gt<bit_hamming_gt<allowed_t>>{};
+            distance_function_t dist = &type_punned_distance_function<bit_hamming_gt<allowed_t>>;
             native_.adjust_metric(dist);
         } else if (name == "jaccard") {
             using allowed_t = typename std::conditional<std::is_integral<scalar_t>::value, scalar_t, unsigned>::type;
-            distance_function_t dist = type_punned_distance_function_gt<jaccard_gt<allowed_t>>{};
+            distance_function_t dist = &type_punned_distance_function<jaccard_gt<allowed_t>>;
             native_.adjust_metric(dist);
         } else if (name == "haversine") {
             using allowed_t = typename std::conditional<std::is_floating_point<scalar_t>::value, scalar_t, float>::type;
-            distance_function_t dist = type_punned_distance_function_gt<haversine_gt<allowed_t>>{};
+            distance_function_t dist = &type_punned_distance_function<haversine_gt<allowed_t>>;
             native_.adjust_metric(dist);
         } else
             throw std::runtime_error("Unknown distance! Supported: l2, ip, cos, hamming, jaccard");
@@ -157,6 +156,9 @@ class py_index_gt final : public py_search_api_t {
         ssize_t labels_count = labels_info.shape[0];
         ssize_t vectors_count = vectors_info.shape[0];
         ssize_t vectors_dimensions = vectors_info.shape[1];
+
+        if (labels_count != vectors_count)
+            throw std::runtime_error("Number of labels and vectors must match!");
 
         if (native_.size() + vectors_count >= native_.capacity()) {
             std::size_t next_capacity = ceil2(native_.size() + vectors_count);
@@ -243,14 +245,13 @@ using py_index_f64u40_t = py_index_gt<double, uint40_t>;
 using py_index_i32u40_t = py_index_gt<std::int32_t, uint40_t>;
 using py_index_i8u40_t = py_index_gt<std::int8_t, uint40_t>;
 
-static std::unique_ptr<py_search_api_t> make_index( //
+static std::shared_ptr<py_search_api_t> make_index( //
     std::string const& scalar_type,                 //
     std::size_t expansion_construction,             //
     std::size_t expansion_search,                   //
     std::size_t connectivity,                       //
     dim_t dim,                                      //
     std::size_t capacity,                           //
-    bool automatic_downcasting,                     //
     bool can_exceed_four_billion) {
 
     config_t config;
@@ -264,26 +265,26 @@ static std::unique_ptr<py_search_api_t> make_index( //
 
     if (!can_exceed_four_billion) {
         if (scalar_type == "f32")
-            return std::unique_ptr<py_search_api_t>(new py_index_f32u32_t(config));
+            return std::make_shared<py_index_f32u32_t>(config);
         if (scalar_type == "f64")
-            return std::unique_ptr<py_search_api_t>(new py_index_f64u32_t(config));
+            return std::make_shared<py_index_f64u32_t>(config);
         if (scalar_type == "i32")
-            return std::unique_ptr<py_search_api_t>(new py_index_i32u32_t(config));
+            return std::make_shared<py_index_i32u32_t>(config);
         if (scalar_type == "i8")
-            return std::unique_ptr<py_search_api_t>(new py_index_i8u32_t(config));
-        if (scalar_type == "f16")
-            return std::unique_ptr<py_search_api_t>(new py_index_f16u32_t(config));
+            return std::make_shared<py_index_i8u32_t>(config);
+        // if (scalar_type == "f16")
+        //     return std::make_shared<py_index_f16u32_t>(config);
     } else {
         if (scalar_type == "f32")
-            return std::unique_ptr<py_search_api_t>(new py_index_f32u40_t(config));
+            return std::make_shared<py_index_f32u40_t>(config);
         if (scalar_type == "f64")
-            return std::unique_ptr<py_search_api_t>(new py_index_f64u40_t(config));
+            return std::make_shared<py_index_f64u40_t>(config);
         if (scalar_type == "i32")
-            return std::unique_ptr<py_search_api_t>(new py_index_i32u40_t(config));
+            return std::make_shared<py_index_i32u40_t>(config);
         if (scalar_type == "i8")
-            return std::unique_ptr<py_search_api_t>(new py_index_i8u40_t(config));
-        if (scalar_type == "f16")
-            return std::unique_ptr<py_search_api_t>(new py_index_f16u40_t(config));
+            return std::make_shared<py_index_i8u40_t>(config);
+        // if (scalar_type == "f16")
+        //     return std::shared_ptr<py_search_api_t>(new py_index_f16u40_t(config));
     }
 
     return {};
@@ -321,7 +322,6 @@ PYBIND11_MODULE(usearch, m) {
         py::arg("connectivity") = 16,            //
         py::arg("dim") = 0,                      //
         py::arg("capacity") = 0,                 //
-        py::arg("downcast") = false,             //
         py::arg("big") = false                   //
     );
 }
