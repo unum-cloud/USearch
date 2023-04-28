@@ -136,8 +136,13 @@ if is_windows:
 
 ext_modules = [
     Pybind11Extension(
+<<<<<<< HEAD
         "usearch.compiled",
         ["python/lib.cpp"],
+=======
+        'usearch',
+        ['src/python.cpp'],
+>>>>>>> e41c574 (Add: Submodules for simpler bindings builds)
         extra_compile_args=compile_args,
         extra_link_args=link_args,
         define_macros=macros_args,
@@ -211,7 +216,12 @@ setup(
         "Topic :: Database :: Database Engines/Servers",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
+<<<<<<< HEAD
     include_dirs=include_dirs,
+=======
+
+    include_dirs=['include', 'fp16/include', 'simsimd/include'],
+>>>>>>> e41c574 (Add: Submodules for simpler bindings builds)
     ext_modules=ext_modules,
     install_requires=install_requires,
 )

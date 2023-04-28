@@ -17,6 +17,7 @@ Similarity Search & Clustering Engine for <a href="https://github.com/ashvardani
 <a href="https://github.com/unum-cloud/usearch"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/github.svg" alt="GitHub"></a>
 </p>
 
+<<<<<<< HEAD
 <p align="center">
 Spatial • Binary • Probabilistic • User-Defined Metrics
 <br/>
@@ -74,6 +75,37 @@ __Technical Insights__ and related articles:
 - [Uses Arm SVE and x86 AVX-512's masked loads to eliminate tail `for`-loops](https://ashvardanian.com/posts/simsimd-faster-scipy/#tails-of-the-past-the-significance-of-masked-loads).
 - [Uses Horner's method for polynomial approximations, beating GCC 12 by 119x](https://ashvardanian.com/posts/gcc-12-vs-avx512fp16/).
 - [For every language implements a custom separate binding](https://ashvardanian.com/posts/porting-cpp-library-to-ten-languages/).
+=======
+- [x] Single C++11 header, easily extendible.
+- [x] 4B+ sized space efficient point-clouds with `uint40_t`.
+- [x] Half-precision support with `maratyszcza/fp16`.
+- [x] View from disk, without loading into RAM.
+- [x] Multiple vectors per label.
+- [x] Any metric, includes: 
+  - [x] Euclidean, Dot-product, Cosine,
+  - [x] Jaccard, Hamming, Haversine.
+  - [x] Hardware-accelerated `ashvardanian/simsimd`. 
+- [x] Variable dimensionality vectors.
+- [x] Don't copy vectors if not needed.
+- [x] Bring your threads.
+- [x] CPython bindings for Python 3.
+- [ ] Node.js bindings for JavaScript.
+- [ ] Wolfram language bindings.
+- [x] For Linux: GCC, Clang.
+- [x] For MacOS: Apple Clang.
+- [ ] For Windows.
+- [ ] Distributed construction.
+- [ ] Multi-index lookups.
+
+|                | Pinecone | Weaviate | USearch |
+| :------------- | :------: | :------: | :-----: |
+| 4B+ indexes    |    ❌     |    ❌     |    ✅    |
+| Half-precision |    ❌     |    ❌     |    ✅    |
+| Non-ML metrics |    ❌     |    ❌     |    ✅    |
+| Variable dims  |    ❌     |    ❌     |    ✅    |
+| Open-source    |    ❌     |    ✅     |    ✅    |
+| Performance    |          |          |         |
+>>>>>>> e41c574 (Add: Submodules for simpler bindings builds)
 
 
 ## Comparison with FAISS

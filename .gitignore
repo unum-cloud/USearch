@@ -29,8 +29,15 @@ perf.data
 # Python wrappers
 __pycache__
 *.egg-info
+package-lock.json
 dist/
+<<<<<<< HEAD
 wheelhouse/
+=======
+datasets
+node_modules/
+*.usearch
+>>>>>>> e41c574 (Add: Submodules for simpler bindings builds)
 
 # Python Environments
 venv/
