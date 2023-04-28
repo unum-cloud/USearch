@@ -1,14 +1,22 @@
 {
     "name": "usearch",
+<<<<<<< HEAD
     "version": "2.21.0",
     "description": "Smaller & Faster Single-File Vector Search Engine from Unum",
     "author": "Ash Vardanian (https://ashvardanian.com/)",
     "license": "Apache 2.0",
     "homepage": "https://unum-cloud.github.io/usearch/",
+=======
+    "version": "0.1.0",
+    "description": "",
+    "author": "Ashot Vardanian",
+    "license": "Apache 2.0",
+>>>>>>> 59cbf86 (Add: NodeJS bindings)
     "repository": {
         "type": "git",
         "url": "https://github.com/unum-cloud/usearch.git"
     },
+<<<<<<< HEAD
     "bugs": {
         "url": "https://github.com/unum-cloud/usearch/issues",
         "email": "info@unum.cloud"
@@ -56,3 +64,15 @@
         }
     }
 }
+=======
+    "private": true,
+    "gypfile": true,
+    "engines": {
+        "node": "~10 >=10.20 || >=12.17"
+    },
+    "dependencies": {
+        "bindings": "~1.2.1",
+        "node-addon-api": "^3.0.0"
+    }
+}
+>>>>>>> 59cbf86 (Add: NodeJS bindings)
