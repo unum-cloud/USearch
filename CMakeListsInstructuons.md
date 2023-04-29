@@ -34,6 +34,12 @@ npm install
 node src/test.js
 ```
 
+### JavaScript
+
+```sh
+cargo run
+```
+
 ## Benchmarks
 
 ### Datasets

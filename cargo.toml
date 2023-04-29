@@ -1,0 +1,15 @@
+[package]
+name = "usearch"
+version = "0.1.0"
+authors = ["Ashot Vardanian <1983160+ashvardanian@users.noreply.github.com>"]
+description = "The Tiny Vector Search Engine from Unum"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/unum-cloud/usearch"
+
+[dependencies]
+cxx = "1.0"
+
+[build-dependencies]
+cxx-build = "1.0"

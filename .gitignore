@@ -1,10 +1,14 @@
+<<<<<<< HEAD
 # Ignore all files without an extension
 
+=======
+>>>>>>> 73a88b7 (Add: Initial Rust version)
 # Temporary files
 .DS_Store
 *.fbin
 *.ibin
 datasets
+<<<<<<< HEAD
 bin
 *.usearch
 .cache
@@ -72,6 +76,32 @@ csharp/**/[Bb]in/
 csharp/**/[Oo]bj/
 csharp/lib
 csharp/packages
+=======
+*.usearch
+
+# C++ builds
+build
+build_release
+build_debug
+
+# Profiling with GProf and `perf` on Linux
+gmon.out 
+perf.data
+
+# Python wrappers
+__pycache__
+*.egg-info
+dist/
+
+# JS wrappers
+package-lock.json
+node_modules/
+
+# Rust builds
+Cargo.lock
+target/ 
+
+>>>>>>> 73a88b7 (Add: Initial Rust version)
 
 # Prerequisites
 *.d
