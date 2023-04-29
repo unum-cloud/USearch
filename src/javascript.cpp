@@ -12,7 +12,7 @@
 #include <napi.h>
 #include <node_api.h>
 
-#include <usearch/usearch.hpp>
+#include "advanced.hpp"
 
 using namespace unum;
 
@@ -21,13 +21,8 @@ using label_t = std::uint32_t;
 using neighbor_t = std::uint32_t;
 using distance_t = float;
 using dim_t = usearch::dim_t;
-using distance_function_t = distance_t (*)(real_t const*, real_t const*, dim_t, dim_t);
-using index_t = usearch::index_gt<distance_function_t, label_t, neighbor_t, real_t>;
-
-template <typename distance_function_at>
-static distance_t type_punned_distance_function(real_t const* a, real_t const* b, dim_t a_dim, dim_t b_dim) noexcept {
-    return distance_function_at{}(a, b, a_dim, b_dim);
-}
+using metric_t = usearch::punned_metric_t;
+using index_t = usearch::index_gt<metric_t, label_t, neighbor_t, real_t>;
 
 class Index : public Napi::ObjectWrap<Index> {
   public:
@@ -78,7 +73,7 @@ Index::Index(Napi::CallbackInfo const& ctx) : Napi::ObjectWrap<Index>(ctx) {
     }
 
     usearch::config_t config;
-    distance_function_t distance_function = &type_punned_distance_function<usearch::cos_gt<real_t>>;
+    metric_t metric = &usearch::punned_metric<usearch::cos_gt<real_t>>;
 
     if (length) {
         Napi::Object params = ctx[0].As<Napi::Object>();
@@ -91,13 +86,13 @@ Index::Index(Napi::CallbackInfo const& ctx) : Napi::ObjectWrap<Index>(ctx) {
         if (params.Has("metric")) {
             std::string name = params.Get("metric").As<Napi::String>().Utf8Value();
             if (name == "l2_sq" || name == "euclidean_sq") {
-                distance_function = type_punned_distance_function<usearch::l2_squared_gt<real_t>>;
+                metric = usearch::punned_metric<usearch::l2_squared_gt<real_t>>;
             } else if (name == "ip" || name == "inner" || name == "dot") {
-                distance_function = type_punned_distance_function<usearch::ip_gt<real_t>>;
+                metric = usearch::punned_metric<usearch::ip_gt<real_t>>;
             } else if (name == "cos" || name == "angular") {
-                distance_function = type_punned_distance_function<usearch::cos_gt<real_t>>;
+                metric = usearch::punned_metric<usearch::cos_gt<real_t>>;
             } else if (name == "haversine") {
-                distance_function = type_punned_distance_function<usearch::haversine_gt<real_t>>;
+                metric = usearch::punned_metric<usearch::haversine_gt<real_t>>;
             } else {
                 Napi::TypeError::New(env, "Supported metrics are: [ip, cos, l2_sq, haversine]")
                     .ThrowAsJavaScriptException();
@@ -107,7 +102,7 @@ Index::Index(Napi::CallbackInfo const& ctx) : Napi::ObjectWrap<Index>(ctx) {
     }
 
     native_ = std::make_unique<index_t>(config);
-    native_->adjust_metric(distance_function);
+    native_->adjust_metric(metric);
 }
 
 Napi::Value Index::GetDim(Napi::CallbackInfo const& ctx) { return Napi::Number::New(ctx.Env(), native_->dim()); }

@@ -43,12 +43,6 @@ class py_search_api_t {
     virtual void view(std::string const& path) = 0;
 };
 
-template <typename distance_function_at>
-static float type_punned_distance_function(void const* a, void const* b, dim_t a_dim, dim_t b_dim) noexcept {
-    using scalar_t = typename distance_function_at::scalar_t;
-    return distance_function_at{}((scalar_t const*)a, (scalar_t const*)b, a_dim, b_dim);
-}
-
 template <typename scalar_at = float, typename neighbor_at = std::uint32_t> //
 class py_index_gt final : public py_search_api_t {
 
@@ -56,9 +50,9 @@ class py_index_gt final : public py_search_api_t {
     using label_t = Py_ssize_t;
     using neighbor_t = neighbor_at;
 
-    using distance_t = float;
-    using distance_function_t = distance_t (*)(void const*, void const*, dim_t, dim_t);
-    using index_t = index_gt<distance_function_t, label_t, neighbor_t, scalar_t, aligned_allocator_gt<char>>;
+    using distance_t = punned_distance_t;
+    using metric_t = punned_metric_t;
+    using index_t = index_gt<metric_t, label_t, neighbor_t, scalar_t, aligned_allocator_gt<char>>;
 
     index_t native_;
     std::string distance_name_;
@@ -79,25 +73,25 @@ class py_index_gt final : public py_search_api_t {
     void set_distance(std::string const& name) override {
         distance_name_ = name;
         if (name == "l2_sq" || name == "euclidean_sq") {
-            distance_function_t dist = &type_punned_distance_function<l2_squared_gt<scalar_t>>;
+            metric_t dist = &punned_metric<l2_squared_gt<scalar_t>>;
             native_.adjust_metric(dist);
         } else if (name == "ip" || name == "inner" || name == "dot") {
-            distance_function_t dist = &type_punned_distance_function<ip_gt<scalar_t>>;
+            metric_t dist = &punned_metric<ip_gt<scalar_t>>;
             native_.adjust_metric(dist);
         } else if (name == "cos" || name == "angular") {
-            distance_function_t dist = &type_punned_distance_function<cos_gt<scalar_t>>;
+            metric_t dist = &punned_metric<cos_gt<scalar_t>>;
             native_.adjust_metric(dist);
         } else if (name == "hamming") {
             using allowed_t = typename std::conditional<std::is_unsigned<scalar_t>::value, scalar_t, unsigned>::type;
-            distance_function_t dist = &type_punned_distance_function<bit_hamming_gt<allowed_t>>;
+            metric_t dist = &punned_metric<bit_hamming_gt<allowed_t>>;
             native_.adjust_metric(dist);
         } else if (name == "jaccard") {
             using allowed_t = typename std::conditional<std::is_integral<scalar_t>::value, scalar_t, unsigned>::type;
-            distance_function_t dist = &type_punned_distance_function<jaccard_gt<allowed_t>>;
+            metric_t dist = &punned_metric<jaccard_gt<allowed_t>>;
             native_.adjust_metric(dist);
         } else if (name == "haversine") {
             using allowed_t = typename std::conditional<std::is_floating_point<scalar_t>::value, scalar_t, float>::type;
-            distance_function_t dist = &type_punned_distance_function<haversine_gt<allowed_t>>;
+            metric_t dist = &punned_metric<haversine_gt<allowed_t>>;
             native_.adjust_metric(dist);
         } else
             throw std::runtime_error("Unknown distance! Supported: l2_sq, ip, cos, hamming, jaccard");

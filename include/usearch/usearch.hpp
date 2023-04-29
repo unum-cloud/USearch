@@ -523,11 +523,11 @@ struct config_t {
  *      Approximate Nearest Neighbors Search index using the
  *      Hierarchical Navigable Small World graph algorithm.
  *
- *  @tparam distance_function_at
+ *  @tparam metric_at
  *      A function object resposible for computing the distance
  *      between two vectors. Must define:
- *          - `distance_function_at::scalar_t`
- *          - `distance_function_at::result_type`
+ *          - `metric_at::scalar_t`
+ *          - `metric_at::result_type`
  *      Must overload the call operator with the following signature:
  *          - `result_type (*) (scalar_t const *, scalar_t const *, dim_t, dim_t)`
  *
@@ -541,21 +541,21 @@ struct config_t {
  *  @tparam allocator_at
  *      Dynamic memory allocator to
  */
-template <typename distance_function_at = ip_gt<float>, //
+template <typename metric_at = ip_gt<float>, //
           typename label_at = std::size_t,              //
           typename id_at = std::uint32_t,               //
           typename scalar_at = float,                   //
           typename allocator_at = std::allocator<char>> //
 class index_gt {
   public:
-    using distance_function_t = distance_function_at;
+    using metric_t = metric_at;
     using scalar_t = scalar_at;
     using label_t = label_at;
     using id_t = id_at;
     using allocator_t = allocator_at;
 
     using distance_t =
-        typename std::result_of<distance_function_t(scalar_t const*, scalar_t const*, dim_t, dim_t)>::type;
+        typename std::result_of<metric_t(scalar_t const*, scalar_t const*, dim_t, dim_t)>::type;
     using neighbors_count_t = id_t;
 
   private:
@@ -625,7 +625,7 @@ class index_gt {
         distances_and_ids_t candidates_filter;
         visits_bitset_t visits;
         std::default_random_engine level_generator;
-        distance_function_t distance;
+        metric_t distance;
     };
 
     config_t config_{};
@@ -699,7 +699,7 @@ class index_gt {
     template <typename... args_at> //
     void adjust_metric(args_at&&... args) noexcept {
         for (thread_context_t& context : thread_contexts_)
-            context.distance = distance_function_t(std::forward<args_at>(args)...);
+            context.distance = metric_t(std::forward<args_at>(args)...);
     }
 
     static config_t optimize(config_t const& config) noexcept {

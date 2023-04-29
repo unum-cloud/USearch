@@ -4,8 +4,19 @@
 
 #include <fp16/fp16.h>
 
+#include <usearch/usearch.hpp>
+
 namespace unum {
 namespace usearch {
+
+using punned_distance_t = float;
+using punned_metric_t = punned_distance_t (*)(void const*, void const*, dim_t, dim_t);
+
+template <typename metric_at>
+static punned_distance_t punned_metric(void const* a, void const* b, dim_t a_dim, dim_t b_dim) noexcept {
+    using scalar_t = typename metric_at::scalar_t;
+    return metric_at{}((scalar_t const*)a, (scalar_t const*)b, a_dim, b_dim);
+}
 
 class f16_converted_t {
     uint16_t uint16_{};
