@@ -50,10 +50,6 @@
 namespace unum {
 namespace usearch {
 
-using label_t = std::size_t;
-using dim_t = std::int32_t;
-using level_t = std::int32_t;
-
 using f64_t = double;
 using f32_t = float;
 
@@ -83,7 +79,7 @@ template <typename scalar_at> struct ip_gt {
     using scalar_t = scalar_at;
     using result_type = scalar_t;
 
-    inline result_type operator()(scalar_t const* a, scalar_t const* b, dim_t dim, dim_t = 0) const noexcept {
+    inline scalar_t operator()(scalar_t const* a, scalar_t const* b, std::size_t dim, std::size_t = 0) const noexcept {
         result_type ab = 0;
 #if defined(_OPENMP)
 #pragma omp simd reduction(+ : ab)
@@ -92,7 +88,7 @@ template <typename scalar_at> struct ip_gt {
 #elif defined(__clang__)
 #pragma clang loop vectorize(enable)
 #endif
-        for (dim_t i = 0; i != dim; ++i)
+        for (std::size_t i = 0; i != dim; ++i)
             ab += a[i] * b[i];
         return 1 - ab;
     }
@@ -102,7 +98,7 @@ template <typename scalar_at> struct cos_gt {
     using scalar_t = scalar_at;
     using result_type = scalar_t;
 
-    inline result_type operator()(scalar_t const* a, scalar_t const* b, dim_t dim, dim_t = 0) const noexcept {
+    inline scalar_t operator()(scalar_t const* a, scalar_t const* b, std::size_t dim, std::size_t = 0) const noexcept {
         result_type ab = 0, a2 = 0, b2 = 0;
 #if defined(_OPENMP)
 #pragma omp simd reduction(+ : ab, a2, b2)
@@ -111,7 +107,7 @@ template <typename scalar_at> struct cos_gt {
 #elif defined(__clang__)
 #pragma clang loop vectorize(enable)
 #endif
-        for (dim_t i = 0; i != dim; ++i)
+        for (std::size_t i = 0; i != dim; ++i)
             ab += a[i] * b[i], a2 += a[i] * a[i], b2 += b[i] * b[i];
         return ab / (std::sqrt(a2) * std::sqrt(b2));
     }
@@ -121,7 +117,7 @@ template <typename scalar_at> struct l2_squared_gt {
     using scalar_t = scalar_at;
     using result_type = scalar_t;
 
-    inline result_type operator()(scalar_t const* a, scalar_t const* b, dim_t dim, dim_t = 0) const noexcept {
+    inline scalar_t operator()(scalar_t const* a, scalar_t const* b, std::size_t dim, std::size_t = 0) const noexcept {
         result_type ab_deltas_sq = 0;
 #if defined(_OPENMP)
 #pragma omp simd reduction(+ : ab_deltas_sq)
@@ -130,7 +126,7 @@ template <typename scalar_at> struct l2_squared_gt {
 #elif defined(__clang__)
 #pragma clang loop vectorize(enable)
 #endif
-        for (dim_t i = 0; i != dim; ++i)
+        for (std::size_t i = 0; i != dim; ++i)
             ab_deltas_sq += (a[i] - b[i]) * (a[i] - b[i]);
         return ab_deltas_sq;
     }
@@ -143,13 +139,13 @@ template <typename scalar_at> struct l2_squared_gt {
  */
 template <typename scalar_at> struct bit_hamming_gt {
     using scalar_t = scalar_at;
-    using result_type = dim_t;
-    static_assert(!std::is_floating_point<scalar_t>::value && std::is_unsigned<scalar_t>::value,
-                  "Hamming distance requires unsigned integral words");
+    using result_type = std::size_t;
+    static_assert(std::is_unsigned<scalar_t>::value, "Hamming distance requires unsigned integral words");
     static constexpr std::size_t bits_per_word_k = sizeof(scalar_t) * CHAR_BIT;
 
-    inline result_type operator()(scalar_t const* a, scalar_t const* b, dim_t dim_words, dim_t = 0) const noexcept {
-        dim_t matches = 0;
+    inline std::size_t operator()(scalar_t const* a, scalar_t const* b, std::size_t words,
+                                  std::size_t = 0) const noexcept {
+        std::size_t matches = 0;
 #if defined(_OPENMP)
 #pragma omp simd reduction(+ : matches)
 #elif defined(__GNUC__)
@@ -157,7 +153,7 @@ template <typename scalar_at> struct bit_hamming_gt {
 #elif defined(__clang__)
 #pragma clang loop vectorize(enable)
 #endif
-        for (dim_t i = 0; i != dim_words; ++i)
+        for (std::size_t i = 0; i != words; ++i)
             matches += std::bitset<bits_per_word_k>(a[i] ^ b[i]).count();
         return matches;
     }
@@ -173,16 +169,17 @@ template <typename scalar_at> struct jaccard_gt {
     using result_type = f32_t;
     static_assert(!std::is_floating_point<scalar_t>::value, "Jaccard distance requires integral scalars");
 
-    inline result_type operator()(scalar_t const* a, scalar_t const* b, dim_t a_dim, dim_t b_dim) const noexcept {
-        dim_t intersection = 0;
-        dim_t i = 0;
-        dim_t j = 0;
-        while (i != a_dim && j != b_dim) {
+    inline result_type operator()( //
+        scalar_t const* a, scalar_t const* b, std::size_t a_length, std::size_t b_length) const noexcept {
+        std::size_t intersection = 0;
+        std::size_t i = 0;
+        std::size_t j = 0;
+        while (i != a_length && j != b_length) {
             intersection += a[i] == b[j];
             i += a[i] < b[j];
             j += a[i] >= b[j];
         }
-        return 1.f - intersection * 1.f / (a_dim + b_dim - intersection);
+        return 1.f - intersection * 1.f / (a_length + b_length - intersection);
     }
 };
 
@@ -195,7 +192,8 @@ template <typename scalar_at> struct pearson_correlation_gt {
     using scalar_t = scalar_at;
     using result_type = scalar_t;
 
-    inline result_type operator()(scalar_t const* a, scalar_t const* b, dim_t dim, dim_t = 0) const noexcept {
+    inline result_type operator()( //
+        scalar_t const* a, scalar_t const* b, std::size_t dim, std::size_t = 0) const noexcept {
         scalar_t a_sum = 0, b_sum = 0, ab_sum = 0;
         scalar_t a_sq_sum = 0, b_sq_sum = 0;
 #if defined(_OPENMP)
@@ -205,7 +203,7 @@ template <typename scalar_at> struct pearson_correlation_gt {
 #elif defined(__clang__)
 #pragma clang loop vectorize(enable)
 #endif
-        for (dim_t i = 0; i != dim; ++i) {
+        for (std::size_t i = 0; i != dim; ++i) {
             a_sum += a[i];
             b_sum += b[i];
             ab_sum += a[i] * b[i];
@@ -219,15 +217,15 @@ template <typename scalar_at> struct pearson_correlation_gt {
 };
 
 /**
- *  @brief  Haversine distance for the shortest distance between two points on
+ *  @brief  Haversine distance for the shortest distance between two nodes on
  *          the surface of a 3D sphere, defined with latitude and longitude.
  */
 template <typename scalar_at> struct haversine_gt {
     using scalar_t = scalar_at;
     using result_type = scalar_t;
-    static_assert(std::is_floating_point<scalar_t>::value, "Latitude and longtitude must be floating-point");
+    static_assert(std::is_floating_point<scalar_t>::value, "Latitude and longitude must be floating-node");
 
-    inline result_type operator()(scalar_t const* a, scalar_t const* b, dim_t = 2, dim_t = 2) const noexcept {
+    inline scalar_t operator()(scalar_t const* a, scalar_t const* b, std::size_t = 2, std::size_t = 2) const noexcept {
         scalar_t lat_a = a[0], lon_a = a[1];
         scalar_t lat_b = b[0], lon_b = b[1];
 
@@ -406,8 +404,9 @@ class max_heap_gt {
     }
 };
 
-#if defined(__GNUC__) or defined(__clang__)
-
+/**
+ *
+ */
 class mutex_t {
     using slot_t = std::int32_t;
     slot_t flag_;
@@ -434,39 +433,10 @@ class mutex_t {
 
 static_assert(sizeof(mutex_t) == sizeof(std::int32_t), "Mutex is larger than expected");
 
-#else
-using mutex_t = std::mutex;
-#endif
-
 using lock_t = std::unique_lock<mutex_t>;
 
 /**
- *  @brief Implements append-only linked arenas, great for rapid point-cloud construction.
- */
-template <typename element_at = char, std::size_t alignment_ak = 64> //
-class aligned_allocator_gt {
-  public:
-    using value_type = element_at;
-    using size_type = std::size_t;
-    using pointer = element_at*;
-    using const_pointer = element_at const*;
-    template <typename other_element_at> struct rebind {
-        using other = aligned_allocator_gt<other_element_at>;
-    };
-
-    pointer allocate(size_type length) const noexcept {
-        void* result = nullptr;
-        int status = posix_memalign(&result, alignment_ak, ceil2(length * sizeof(value_type)));
-        return status == 0 ? (pointer)result : nullptr;
-    }
-
-    void deallocate(pointer begin, size_type) const noexcept { std::free(begin); }
-};
-
-using aligned_allocator_t = aligned_allocator_gt<>;
-
-/**
- *  @brief Five-byte integer type to address point clouds with over 4B entries.
+ *  @brief Five-byte integer type to address node clouds with over 4B entries.
  */
 class usearch_pack_m uint40_t {
     unsigned char octets[5];
@@ -515,7 +485,6 @@ struct config_t {
     std::size_t expansion_search = 100;
     std::size_t max_threads_add = 64;
     std::size_t max_threads_search = 64;
-    dim_t dim = 0;
 };
 
 /**
@@ -523,13 +492,15 @@ struct config_t {
  *      Approximate Nearest Neighbors Search index using the
  *      Hierarchical Navigable Small World graph algorithm.
  *
+ *  @section Features
+ *      - Search for vectors of different dimensionality.
+ *      - Thread-safe.
+ *      - Bring your threads!
+ *
  *  @tparam metric_at
- *      A function object resposible for computing the distance
- *      between two vectors. Must define:
- *          - `metric_at::scalar_t`
- *          - `metric_at::result_type`
+ *      A function vector responsible for computing the distance between two vectors.
  *      Must overload the call operator with the following signature:
- *          - `result_type (*) (scalar_t const *, scalar_t const *, dim_t, dim_t)`
+ *          - `result_type (*) (scalar_t const *, scalar_t const *, std::size_t, std::size_t)`
  *
  *  @tparam label_at
  *      The type of unique labels to assign to vectors.
@@ -539,9 +510,9 @@ struct config_t {
  *      Can be a built-in `uint32_t`, `uint64_t`, or our custom `uint40_t`.
  *
  *  @tparam allocator_at
- *      Dynamic memory allocator to
+ *      Dynamic memory allocator.
  */
-template <typename metric_at = ip_gt<float>, //
+template <typename metric_at = ip_gt<float>,            //
           typename label_at = std::size_t,              //
           typename id_at = std::uint32_t,               //
           typename scalar_at = float,                   //
@@ -555,10 +526,13 @@ class index_gt {
     using allocator_t = allocator_at;
 
     using distance_t =
-        typename std::result_of<metric_t(scalar_t const*, scalar_t const*, dim_t, dim_t)>::type;
-    using neighbors_count_t = id_t;
+        typename std::result_of<metric_t(scalar_t const*, scalar_t const*, std::size_t, std::size_t)>::type;
 
   private:
+    using neighbors_count_t = id_t;
+    using dim_t = std::uint32_t;
+    using level_t = std::int32_t;
+
     using allocator_traits_t = std::allocator_traits<allocator_t>;
     using byte_t = typename allocator_t::value_type;
     static_assert(sizeof(byte_t) == 1, "Allocator must allocate separate addressable bytes");
@@ -569,9 +543,9 @@ class index_gt {
     struct precomputed_constants_t {
         double inverse_log_connectivity{};
         std::size_t connectivity_max_base{};
-        std::size_t bytes_per_neighbors{};
-        std::size_t bytes_per_neighbors_base{};
-        std::size_t bytes_per_mutex{};
+        std::size_t neighbors_bytes{};
+        std::size_t neighbors_base_bytes{};
+        std::size_t mutex_bytes{};
     };
     struct distance_and_id_t {
         distance_t first;
@@ -592,7 +566,7 @@ class index_gt {
             : count(*(neighbors_count_t*)tape), neighbors((neighbors_count_t*)tape + 1) {}
     };
 
-    struct usearch_pack_m point_head_t {
+    struct usearch_pack_m node_head_t {
         label_t label;
         dim_t dim;
         level_t level;
@@ -600,23 +574,23 @@ class index_gt {
         // Each starts with a `neighbors_count_t` and is followed by such number of `id_t`s.
         byte_t neighbors[1];
     };
-    static constexpr std::size_t bytes_per_head_k = sizeof(label_t) + sizeof(dim_t) + sizeof(level_t);
+    static constexpr std::size_t head_bytes_k = sizeof(label_t) + sizeof(dim_t) + sizeof(level_t);
 
-    struct point_t {
+    struct node_t {
         byte_t* tape_;
         scalar_t* vector_;
     };
 
-    class point_ref_t {
+    class node_ref_t {
         mutex_t* mutex_{};
 
       public:
-        point_head_t& head{};
+        node_head_t& head{};
         scalar_t* vector{};
 
-        inline point_ref_t(mutex_t& m, point_head_t& h, scalar_t* s) noexcept : mutex_(&m), head(h), vector(s) {}
+        inline node_ref_t(mutex_t& m, node_head_t& h, scalar_t* s) noexcept : mutex_(&m), head(h), vector(s) {}
         inline lock_t lock() const noexcept { return mutex_ ? lock_t{*mutex_} : lock_t{}; }
-        inline operator point_t() const noexcept { return {mutex_ ? (byte_t*)mutex_ : (byte_t*)&head, vector}; }
+        inline operator node_t() const noexcept { return {mutex_ ? (byte_t*)mutex_ : (byte_t*)&head, vector}; }
     };
 
     struct usearch_align_m thread_context_t {
@@ -625,7 +599,7 @@ class index_gt {
         distances_and_ids_t candidates_filter;
         visits_bitset_t visits;
         std::default_random_engine level_generator;
-        metric_t distance;
+        metric_t metric;
     };
 
     config_t config_{};
@@ -639,14 +613,13 @@ class index_gt {
     level_t max_level_{};
     id_t entry_id_{};
 
-    using point_allocator_t = typename allocator_traits_t::template rebind_alloc<point_t>;
-    std::vector<point_t, point_allocator_t> points_{};
+    using node_allocator_t = typename allocator_traits_t::template rebind_alloc<node_t>;
+    std::vector<node_t, node_allocator_t> nodes_{};
 
     using thread_context_allocator_t = typename allocator_traits_t::template rebind_alloc<thread_context_t>;
     mutable std::vector<thread_context_t, thread_context_allocator_t> thread_contexts_;
 
   public:
-    std::size_t dim() const noexcept { return config_.dim; }
     std::size_t connectivity() const noexcept { return config_.connectivity; }
     std::size_t capacity() const noexcept { return capacity_; }
     std::size_t size() const noexcept { return size_; }
@@ -654,7 +627,7 @@ class index_gt {
     bool is_immutable() const noexcept { return viewed_file_descriptor_ != 0; }
     bool synchronize() const noexcept { return config_.max_threads_add > 1; }
 
-    index_gt(config_t config = {}) : config_(config) {
+    index_gt(config_t config = {}, metric_t metric = {}, allocator_t allocator = {}) : config_(config) {
 
         // Externally defined hyper-parameters:
         config_.expansion_construction = std::max(config_.expansion_construction, config_.connectivity);
@@ -668,6 +641,8 @@ class index_gt {
 
         // Dynamic memory:
         thread_contexts_.resize(std::max(config.max_threads_search, config.max_threads_add));
+        for (thread_context_t& context : thread_contexts_)
+            context.metric = metric;
         reserve(config.max_elements);
     }
 
@@ -678,7 +653,7 @@ class index_gt {
     void clear() noexcept {
         std::size_t n = size_;
         for (std::size_t i = 0; i != n; ++i)
-            point_free(i);
+            node_free(i);
         size_ = 0;
         max_level_ = -1;
         entry_id_ = 0u;
@@ -687,25 +662,17 @@ class index_gt {
     void reserve(std::size_t new_capacity) noexcept(false) {
 
         assert_m(new_capacity >= size_, "Can't drop existing values");
-        points_.resize(new_capacity);
+        nodes_.resize(new_capacity);
         for (thread_context_t& context : thread_contexts_)
             context.visits = visits_bitset_t(new_capacity);
 
         capacity_ = new_capacity;
     }
 
-    void adjust_dimensions(std::size_t n) noexcept { config_.dim = n; }
-
-    template <typename... args_at> //
-    void adjust_metric(args_at&&... args) noexcept {
-        for (thread_context_t& context : thread_contexts_)
-            context.distance = metric_t(std::forward<args_at>(args)...);
-    }
-
     static config_t optimize(config_t const& config) noexcept {
         precomputed_constants_t pre = precompute(config);
-        std::size_t bytes_per_point_base = bytes_per_head_k + pre.bytes_per_neighbors_base + pre.bytes_per_mutex;
-        std::size_t rounded_size = divide_round_up<64>(bytes_per_point_base) * 64;
+        std::size_t bytes_per_node_base = head_bytes_k + pre.neighbors_base_bytes + pre.mutex_bytes;
+        std::size_t rounded_size = divide_round_up<64>(bytes_per_node_base) * 64;
         std::size_t added_connections = (rounded_size - rounded_size) / sizeof(id_t);
         config_t result = config;
         result.connectivity = config.connectivity + added_connections / base_level_multiple_k;
@@ -716,8 +683,9 @@ class index_gt {
 
 #pragma region Construction and Search
 
-    id_t add(label_t new_label, scalar_t const* new_vector, dim_t new_dim, //
-             std::size_t thread_idx = 0, bool store_vector = true) {
+    id_t add(                                                               //
+        label_t new_label, scalar_t const* new_vector, std::size_t new_dim, //
+        std::size_t thread_idx = 0, bool store_vector = true) {
 
         assert_m(!is_immutable(), "Can't add to an immutable index");
         id_t new_id = static_cast<id_t>(size_.fetch_add(1));
@@ -731,10 +699,9 @@ class index_gt {
             new_level_lock.unlock();
 
         // Allocate the neighbors
-        new_dim = new_dim ? new_dim : static_cast<dim_t>(config_.dim);
-        point_ref_t new_point = point_malloc(new_label, new_vector, new_dim, new_target_level, store_vector);
-        lock_t new_lock = new_point.lock();
-        points_[new_id] = new_point;
+        node_ref_t new_node = node_malloc(new_label, new_vector, new_dim, new_target_level, store_vector);
+        lock_t new_lock = new_node.lock();
+        nodes_[new_id] = new_node;
 
         // Do nothing for the first element
         if (!new_id) {
@@ -745,18 +712,18 @@ class index_gt {
         // Go down the level, tracking only the closest match
         id_t closest_id = entry_id_;
         distance_t closest_dist =
-            context.distance(new_vector, point(closest_id).vector, new_dim, point(closest_id).head.dim);
+            context.metric(new_vector, node(closest_id).vector, new_dim, node(closest_id).head.dim);
         for (level_t level = max_level; level > new_target_level; level--) {
             bool changed;
             do {
                 changed = false;
-                point_ref_t closest_point = point(closest_id);
-                lock_t closest_lock = closest_point.lock();
-                neighbors_ref_t closest_header = neighbors_non_base(closest_point, level);
+                node_ref_t closest_node = node(closest_id);
+                lock_t closest_lock = closest_node.lock();
+                neighbors_ref_t closest_header = neighbors_non_base(closest_node, level);
                 iterate_through_neighbors(closest_header, [&](id_t candidate_id) noexcept {
-                    point_ref_t candidate_point = point(candidate_id);
+                    node_ref_t candidate_node = node(candidate_id);
                     distance_t candidate_dist =
-                        context.distance(new_vector, candidate_point.vector, new_dim, candidate_point.head.dim);
+                        context.metric(new_vector, candidate_node.vector, new_dim, candidate_node.head.dim);
                     if (candidate_dist < closest_dist) {
                         closest_dist = candidate_dist;
                         closest_id = candidate_id;
@@ -781,8 +748,9 @@ class index_gt {
     }
 
     template <typename label_and_distance_callback_at>
-    void search(scalar_t const* query_vec, dim_t query_dim, std::size_t k, label_and_distance_callback_at&& callback,
-                std::size_t thread_idx = 0) const {
+    void search( //
+        scalar_t const* query_vec, std::size_t query_dim, std::size_t k, label_and_distance_callback_at&& callback,
+        std::size_t thread_idx = 0) const {
 
         if (!size_)
             return;
@@ -791,17 +759,17 @@ class index_gt {
         thread_context_t& context = thread_contexts_[thread_idx];
         id_t closest_id = entry_id_;
         distance_t closest_dist =
-            context.distance(query_vec, point(closest_id).vector, query_dim, point(closest_id).head.dim);
+            context.metric(query_vec, node(closest_id).vector, query_dim, node(closest_id).head.dim);
         for (level_t level = max_level_; level > 0; level--) {
             bool changed;
             do {
                 changed = false;
-                point_ref_t closest_point = point(closest_id);
-                neighbors_ref_t closest_header = neighbors_non_base(closest_point, level);
+                node_ref_t closest_node = node(closest_id);
+                neighbors_ref_t closest_header = neighbors_non_base(closest_node, level);
                 iterate_through_neighbors(closest_header, [&](id_t candidate_id) noexcept {
-                    point_ref_t candidate_point = point(candidate_id);
-                    distance_t candidate_dist =
-                        context.distance(query_vec, candidate_point.vector, query_dim, candidate_point.head.dim);
+                    node_ref_t candidate_node = node(candidate_id);
+                    distance_t candidate_dist = context.metric( //
+                        query_vec, candidate_node.vector, query_dim, candidate_node.head.dim);
                     if (candidate_dist < closest_dist) {
                         closest_dist = candidate_dist;
                         closest_id = candidate_id;
@@ -813,13 +781,14 @@ class index_gt {
         }
 
         // For bottom layer we need a more optimized procedure
-        search_to_find_in_base(closest_id, query_vec, query_dim, std::max(config_.expansion_search, k), context);
+        search_to_find_in_base( //
+            closest_id, query_vec, query_dim, std::max(config_.expansion_search, k), context);
         while (context.top_candidates.size() > k)
             context.top_candidates.pop();
 
         while (context.top_candidates.size()) {
             distance_and_id_t top = context.top_candidates.top();
-            callback(point(top.second).head.label, top.first);
+            callback(node(top.second).head.label, top.first);
             context.top_candidates.pop();
         }
     }
@@ -829,11 +798,15 @@ class index_gt {
 #pragma region Serialization
 
     struct state_t {
-        std::uint64_t connectivity = 16;
-        std::uint64_t dim = 0;
-        std::uint64_t size = 0;
-        std::uint64_t entry_id = 0;
-        std::uint64_t max_level = 0;
+        // Check compatibility
+        std::uint64_t bytes_per_label{};
+        std::uint64_t bytes_per_id{};
+
+        // Describe state
+        std::uint64_t connectivity{};
+        std::uint64_t size{};
+        std::uint64_t entry_id{};
+        std::uint64_t max_level{};
     };
 
     /**
@@ -843,7 +816,6 @@ class index_gt {
 
         state_t state;
         state.connectivity = config_.connectivity;
-        state.dim = config_.dim;
         state.size = size_;
         state.entry_id = entry_id_;
         state.max_level = max_level_;
@@ -861,17 +833,16 @@ class index_gt {
             }
         }
 
-        // Serialize points one by one
+        // Serialize nodes one by one
         for (std::size_t i = 0; i != state.size; ++i) {
-            point_ref_t point_ref = point(static_cast<id_t>(i));
-            std::size_t bytes_to_dump = point_dump_size(point_ref.head.dim, point_ref.head.level);
-            std::size_t bytes_in_vector = point_ref.head.dim * sizeof(scalar_t);
-            std::size_t written = std::fwrite(&point_ref.head, bytes_to_dump - bytes_in_vector, 1, file);
+            node_ref_t node_ref = node(static_cast<id_t>(i));
+            std::size_t bytes_to_dump = node_dump_size(node_ref.head.dim, node_ref.head.level);
+            std::size_t written = std::fwrite(&node_ref.head, bytes_to_dump - node_ref.head.dim, 1, file);
             if (!written) {
                 std::fclose(file);
                 throw std::runtime_error(std::strerror(errno));
             }
-            written = std::fwrite(point_ref.vector, bytes_in_vector, 1, file);
+            written = std::fwrite(node_ref.vector, node_ref.head.dim, 1, file);
             if (!written) {
                 std::fclose(file);
                 throw std::runtime_error(std::strerror(errno));
@@ -897,7 +868,6 @@ class index_gt {
                 std::fclose(file);
                 throw std::runtime_error(std::strerror(errno));
             }
-            config_.dim = state.dim;
             config_.connectivity = state.connectivity;
             config_.max_elements = state.size;
             pre_ = precompute(config_);
@@ -907,24 +877,24 @@ class index_gt {
             entry_id_ = state.entry_id;
         }
 
-        // Load points one by one
+        // Load nodes one by one
         for (std::size_t i = 0; i != state.size; ++i) {
-            point_head_t head;
-            std::size_t read = std::fread(&head, bytes_per_head_k, 1, file);
+            node_head_t head;
+            std::size_t read = std::fread(&head, head_bytes_k, 1, file);
             if (!read) {
                 std::fclose(file);
                 throw std::runtime_error(std::strerror(errno));
             }
 
-            std::size_t bytes_to_dump = point_dump_size(head.dim, head.level);
-            point_ref_t point_ref = point_malloc(head.label, nullptr, head.dim, head.level, true);
-            read = std::fread((byte_t*)&point_ref.head + bytes_per_head_k, bytes_to_dump - bytes_per_head_k, 1, file);
+            std::size_t bytes_to_dump = node_dump_size(head.dim, head.level);
+            node_ref_t node_ref = node_malloc(head.label, nullptr, head.dim, head.level, true);
+            read = std::fread((byte_t*)&node_ref.head + head_bytes_k, bytes_to_dump - head_bytes_k, 1, file);
             if (!read) {
                 std::fclose(file);
                 throw std::runtime_error(std::strerror(errno));
             }
 
-            points_[i] = point_ref;
+            nodes_[i] = node_ref;
         }
 
         std::fclose(file);
@@ -960,7 +930,6 @@ class index_gt {
         // Read the header
         {
             std::memcpy(&state, file, sizeof(state));
-            config_.dim = state.dim;
             config_.connectivity = state.connectivity;
             config_.max_elements = state.size;
             config_.max_threads_add = 0;
@@ -971,13 +940,13 @@ class index_gt {
             entry_id_ = state.entry_id;
         }
 
-        // Locate every point packed into file
+        // Locate every node packed into file
         std::size_t progress = sizeof(state);
         for (std::size_t i = 0; i != state.size; ++i) {
-            point_head_t const& head = *(point_head_t const*)(file + progress);
-            std::size_t bytes_to_dump = point_dump_size(head.dim, head.level);
-            points_[i].tape_ = (byte_t*)(file + progress);
-            points_[i].vector_ = (scalar_t*)(file + progress + bytes_to_dump - sizeof(scalar_t) * head.dim);
+            node_head_t const& head = *(node_head_t const*)(file + progress);
+            std::size_t bytes_to_dump = node_dump_size(head.dim, head.level);
+            nodes_[i].tape_ = (byte_t*)(file + progress);
+            nodes_[i].vector_ = (scalar_t*)(file + progress + bytes_to_dump - head.dim);
             progress += bytes_to_dump;
             max_level_ = std::max(max_level_, head.level);
         }
@@ -992,96 +961,95 @@ class index_gt {
         precomputed_constants_t pre;
         pre.connectivity_max_base = config.connectivity * base_level_multiple_k;
         pre.inverse_log_connectivity = 1.0 / std::log(static_cast<double>(config.connectivity));
-        pre.bytes_per_neighbors = config.connectivity * sizeof(id_t) + sizeof(neighbors_count_t);
-        pre.bytes_per_neighbors_base = pre.connectivity_max_base * sizeof(id_t) + sizeof(neighbors_count_t);
-        pre.bytes_per_mutex = sizeof(mutex_t) * (config.max_threads_add > 1);
+        pre.neighbors_bytes = config.connectivity * sizeof(id_t) + sizeof(neighbors_count_t);
+        pre.neighbors_base_bytes = pre.connectivity_max_base * sizeof(id_t) + sizeof(neighbors_count_t);
+        pre.mutex_bytes = sizeof(mutex_t) * (config.max_threads_add > 1);
         return pre;
     }
 
-    inline std::size_t point_dump_size(dim_t dim, level_t level) const noexcept {
-        return bytes_per_head_k + pre_.bytes_per_neighbors_base + pre_.bytes_per_neighbors * level +
-               sizeof(scalar_t) * dim;
+    inline std::size_t node_dump_size(dim_t dim, level_t level) const noexcept {
+        return head_bytes_k + pre_.neighbors_base_bytes + pre_.neighbors_bytes * level + sizeof(scalar_t) * dim;
     }
 
-    void point_free(std::size_t id) noexcept {
+    void node_free(std::size_t id) noexcept {
 
         if (viewed_file_descriptor_)
             return;
 
         // This function is rarely called and can be as expensive as needed for higher space-efficiency.
-        point_t& point = points_[id];
-        if (!point.tape_)
+        node_t& node = nodes_[id];
+        if (!node.tape_)
             return;
 
-        point_head_t const& head = *(point_head_t const*)(point.tape_ + pre_.bytes_per_mutex);
-        std::size_t size_levels = pre_.bytes_per_neighbors_base + pre_.bytes_per_neighbors * head.level;
-        bool store_vector = (byte_t*)(point.tape_ + pre_.bytes_per_mutex + bytes_per_head_k + size_levels) == //
-                            (byte_t*)(point.vector_);
-        std::size_t size_point =                       //
-            pre_.bytes_per_mutex +                     // Optional concurrency-control
-            bytes_per_head_k + size_levels +           // Obligatory neighborhood index
-            sizeof(scalar_t) * head.dim * store_vector // Optional vector copy
+        node_head_t const& head = *(node_head_t const*)(node.tape_ + pre_.mutex_bytes);
+        std::size_t levels_bytes = pre_.neighbors_base_bytes + pre_.neighbors_bytes * head.level;
+        bool store_vector = (byte_t*)(node.tape_ + pre_.mutex_bytes + head_bytes_k + levels_bytes) == //
+                            (byte_t*)(node.vector_);
+        std::size_t node_bytes =          //
+            pre_.mutex_bytes +            // Optional concurrency-control
+            head_bytes_k + levels_bytes + // Obligatory neighborhood index
+            head.dim * store_vector       // Optional vector copy
             ;
 
-        allocator_t{}.deallocate(point.tape_, size_point);
-        point = {};
+        allocator_t{}.deallocate(node.tape_, node_bytes);
+        node = {};
     }
 
-    point_ref_t point_malloc(                             //
-        label_t label, scalar_t const* vector, dim_t dim, //
+    node_ref_t node_malloc(                                     //
+        label_t label, scalar_t const* vector, std::size_t dim, //
         level_t level, bool store_vector = true) noexcept(false) {
 
         // This function is rarely called and can be as expensive as needed for higher space-efficiency.
-        std::size_t size_levels = pre_.bytes_per_neighbors_base + pre_.bytes_per_neighbors * level;
-        std::size_t size_point =                  //
-            pre_.bytes_per_mutex +                // Optional concurrency-control
-            bytes_per_head_k + size_levels +      // Obligatory neighborhood index
+        std::size_t levels_bytes = pre_.neighbors_base_bytes + pre_.neighbors_bytes * level;
+        std::size_t node_bytes =                  //
+            pre_.mutex_bytes +                    // Optional concurrency-control
+            head_bytes_k + levels_bytes +         // Obligatory neighborhood index
             sizeof(scalar_t) * dim * store_vector // Optional vector copy
             ;
 
-        byte_t* data = (byte_t*)allocator_t{}.allocate(size_point);
+        byte_t* data = (byte_t*)allocator_t{}.allocate(node_bytes);
         assert_m(data, "Not enough memory for links");
 
         mutex_t* mutex = synchronize() ? (mutex_t*)data : nullptr;
         scalar_t* scalars = store_vector //
-                                ? (scalar_t*)(data + pre_.bytes_per_mutex + bytes_per_head_k + size_levels)
+                                ? (scalar_t*)(data + pre_.mutex_bytes + head_bytes_k + levels_bytes)
                                 : (scalar_t*)(vector);
 
-        std::memset(data, 0, size_point);
+        std::memset(data, 0, node_bytes);
         std::memcpy(scalars, vector, sizeof(scalar_t) * dim * (store_vector && vector));
 
-        point_head_t& head = *(point_head_t*)(data + pre_.bytes_per_mutex);
+        node_head_t& head = *(node_head_t*)(data + pre_.mutex_bytes);
         head.label = label;
-        head.dim = dim;
+        head.dim = static_cast<dim_t>(dim);
         head.level = level;
 
         return {*mutex, head, scalars};
     }
 
-    inline point_ref_t point(id_t id) const noexcept {
+    inline node_ref_t node(id_t id) const noexcept {
 
-        point_t point = points_[id];
-        byte_t* data = point.tape_;
+        node_t node = nodes_[id];
+        byte_t* data = node.tape_;
         mutex_t* mutex = synchronize() ? (mutex_t*)data : nullptr;
-        point_head_t& head = *(point_head_t*)(data + pre_.bytes_per_mutex);
-        scalar_t* scalars = point.vector_;
+        node_head_t& head = *(node_head_t*)(data + pre_.mutex_bytes);
+        scalar_t* scalars = node.vector_;
 
         return {*mutex, head, scalars};
     }
 
-    inline neighbors_ref_t neighbors_base(point_ref_t point) const noexcept { return {point.head.neighbors}; }
+    inline neighbors_ref_t neighbors_base(node_ref_t node) const noexcept { return {node.head.neighbors}; }
 
-    inline neighbors_ref_t neighbors_non_base(point_ref_t point, level_t level) const noexcept {
-        return {point.head.neighbors + pre_.bytes_per_neighbors_base + (level - 1) * pre_.bytes_per_neighbors};
+    inline neighbors_ref_t neighbors_non_base(node_ref_t node, level_t level) const noexcept {
+        return {node.head.neighbors + pre_.neighbors_base_bytes + (level - 1) * pre_.neighbors_bytes};
     }
 
-    inline neighbors_ref_t neighbors(point_ref_t point, level_t level) const noexcept {
-        return level ? neighbors_non_base(point, level) : neighbors_base(point);
+    inline neighbors_ref_t neighbors(node_ref_t node, level_t level) const noexcept {
+        return level ? neighbors_non_base(node, level) : neighbors_base(node);
     }
 
     id_t connect_new_element(id_t new_id, level_t level, thread_context_t& context) noexcept(false) {
 
-        point_ref_t new_point = point(new_id);
+        node_ref_t new_node = node(new_id);
         distances_and_ids_t& top_candidates = context.top_candidates;
         std::size_t connectivity_max = level ? config_.connectivity : pre_.connectivity_max_base;
         filter_top_candidates_with_heuristic(top_candidates, context.candidates_set, config_.connectivity, context);
@@ -1093,13 +1061,13 @@ class index_gt {
 
         // Outgoing links from `new_id`:
         {
-            neighbors_ref_t new_neighbors = neighbors(new_point, level);
+            neighbors_ref_t new_neighbors = neighbors(new_node, level);
             assert_m(!new_neighbors.count, "The newly inserted element should have blank link list");
 
             new_neighbors.count = static_cast<neighbors_count_t>(top_count);
             for (std::size_t idx = 0; idx < top_count; idx++) {
                 assert_m(!new_neighbors.neighbors[idx], "Possible memory corruption");
-                assert_m(level <= point(top_unordered[idx].second).head.level, "Linking to missing level");
+                assert_m(level <= node(top_unordered[idx].second).head.level, "Linking to missing level");
 
                 new_neighbors.neighbors[idx] = top_unordered[idx].second;
                 if (top_unordered[idx].first < next_closest_distance) {
@@ -1112,13 +1080,13 @@ class index_gt {
         // Reverse links from the neighbors:
         for (std::size_t idx = 0; idx < top_count; idx++) {
             id_t close_id = top_unordered[idx].second;
-            point_ref_t close_point = point(close_id);
-            lock_t close_lock = close_point.lock();
+            node_ref_t close_node = node(close_id);
+            lock_t close_lock = close_node.lock();
 
-            neighbors_ref_t close_header = neighbors(close_point, level);
+            neighbors_ref_t close_header = neighbors(close_node, level);
             assert_m(close_header.count <= connectivity_max, "Possible corruption");
             assert_m(close_id != new_id, "Self-loops are impossible");
-            assert_m(level <= close_point.head.level, "Linking to missing level");
+            assert_m(level <= close_node.head.level, "Linking to missing level");
 
             // If `new_id` is already present in the neighboring connections of `close_id`
             // then no need to modify any connections or run the heuristics.
@@ -1131,14 +1099,16 @@ class index_gt {
             // To fit a new connection we need to drop an existing one.
             distances_and_ids_t& candidates = context.candidates_filter;
             candidates.clear();
-            candidates.emplace(
-                context.distance(new_point.vector, close_point.vector, new_point.head.dim, close_point.head.dim),
+            candidates.emplace( //
+                context.metric( //
+                    new_node.vector, close_node.vector, new_node.head.dim, close_node.head.dim),
                 new_id);
             iterate_through_neighbors(close_header, [&](id_t successor_id) noexcept {
-                point_ref_t successor_point = point(successor_id);
-                candidates.emplace(context.distance(successor_point.vector, close_point.vector,
-                                                    successor_point.head.dim, close_point.head.dim),
-                                   successor_id);
+                node_ref_t successor_node = node(successor_id);
+                candidates.emplace( //
+                    context.metric( //
+                        successor_node.vector, close_node.vector, successor_node.head.dim, close_node.head.dim),
+                    successor_id);
             });
             filter_top_candidates_with_heuristic(candidates, context.candidates_set, connectivity_max, context);
 
@@ -1172,8 +1142,7 @@ class index_gt {
         candidates_set.clear();
         visits.clear();
 
-        distance_t closest_dist =
-            context.distance(query_vec, point(start_id).vector, query_dim, point(start_id).head.dim);
+        distance_t closest_dist = context.metric(query_vec, node(start_id).vector, query_dim, node(start_id).head.dim);
         top_candidates.emplace(closest_dist, start_id);
         candidates_set.emplace(-closest_dist, start_id);
         visits.set(start_id);
@@ -1186,18 +1155,18 @@ class index_gt {
 
             candidates_set.pop();
             id_t candidate_id = candidacy.second;
-            point_ref_t candidate_point = point(candidate_id);
-            lock_t candidate_lock = candidate_point.lock();
-            neighbors_ref_t candidate_header = neighbors(candidate_point, level);
+            node_ref_t candidate_node = node(candidate_id);
+            lock_t candidate_lock = candidate_node.lock();
+            neighbors_ref_t candidate_header = neighbors(candidate_node, level);
 
             iterate_through_neighbors(candidate_header, [&](id_t successor_id) noexcept {
                 if (visits.test(successor_id))
                     return;
 
                 visits.set(successor_id);
-                point_ref_t successor_point = point(successor_id);
+                node_ref_t successor_node = node(successor_id);
                 distance_t successor_dist =
-                    context.distance(query_vec, successor_point.vector, query_dim, successor_point.head.dim);
+                    context.metric(query_vec, successor_node.vector, query_dim, successor_node.head.dim);
                 if (top_candidates.size() < config_.expansion_construction || closest_dist > successor_dist) {
                     candidates_set.emplace(-successor_dist, successor_id);
 
@@ -1223,31 +1192,30 @@ class index_gt {
         top_candidates.clear();
         candidates_set.clear();
 
-        distance_t closest_dist =
-            context.distance(query_vec, point(start_id).vector, query_dim, point(start_id).head.dim);
+        distance_t closest_dist = context.metric(query_vec, node(start_id).vector, query_dim, node(start_id).head.dim);
         top_candidates.emplace(closest_dist, start_id);
         candidates_set.emplace(-closest_dist, start_id);
         visits.set(start_id);
 
         while (!candidates_set.empty()) {
 
-            distance_and_id_t current_node_point = candidates_set.top();
-            if ((-current_node_point.first) > closest_dist)
+            distance_and_id_t current_node_node = candidates_set.top();
+            if ((-current_node_node.first) > closest_dist)
                 break;
 
             candidates_set.pop();
 
-            id_t candidate_id = current_node_point.second;
-            neighbors_ref_t candidate_header = neighbors_base(point(candidate_id));
+            id_t candidate_id = current_node_node.second;
+            neighbors_ref_t candidate_header = neighbors_base(node(candidate_id));
 
             iterate_through_neighbors(candidate_header, [&](id_t successor_id) noexcept {
                 if (visits.test(successor_id))
                     return;
 
                 visits.set(successor_id);
-                point_ref_t successor_point = point(successor_id);
+                node_ref_t successor_node = node(successor_id);
                 distance_t successor_dist =
-                    context.distance(query_vec, successor_point.vector, query_dim, successor_point.head.dim);
+                    context.metric(query_vec, successor_node.vector, query_dim, successor_node.head.dim);
 
                 if (top_candidates.size() < expansion || closest_dist > successor_dist) {
                     candidates_set.emplace(-successor_dist, successor_id);
@@ -1297,10 +1265,10 @@ class index_gt {
             std::size_t const top_count = top_candidates.size();
             for (std::size_t idx = 0; idx < top_count; idx++) {
                 distance_and_id_t other = top_unordered[idx];
-                point_ref_t other_point = point(other.second);
-                point_ref_t best_point = point(best.second);
+                node_ref_t other_node = node(other.second);
+                node_ref_t best_node = node(best.second);
                 distance_t inter_result_dist =
-                    context.distance(other_point.vector, best_point.vector, other_point.head.dim, best_point.head.dim);
+                    context.metric(other_node.vector, best_node.vector, other_node.head.dim, best_node.head.dim);
                 if (inter_result_dist < dist_to_query) {
                     good = false;
                     break;
