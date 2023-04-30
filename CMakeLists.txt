@@ -77,6 +77,7 @@ main(int argc, char *argv)
     USEARCH_CAN_COMPILE_FP16
 )
 
+<<<<<<< HEAD
 # Check for `_Float16` support
 check_c_source_compiles(
     [=[
@@ -206,6 +207,9 @@ endif ()
 
 # Find required packages
 if (CMAKE_HOST_SYSTEM_NAME MATCHES "Darwin")
+=======
+if(APPLE)
+>>>>>>> 5461e0a (Add: Argument parser for C++ benchmarks)
     set(CMAKE_THREAD_LIBS_INIT "-lpthread")
     set(CMAKE_HAVE_THREADS_LIBRARY 1)
     set(CMAKE_USE_WIN32_THREADS_INIT 0)
@@ -215,10 +219,15 @@ endif ()
 
 find_package(Threads REQUIRED)
 
+<<<<<<< HEAD
 if (USEARCH_USE_OPENMP)
+=======
+if(${USEARCH_USE_OPENMP})
+>>>>>>> 5461e0a (Add: Argument parser for C++ benchmarks)
     find_package(OpenMP REQUIRED)
 endif ()
 
+<<<<<<< HEAD
 if (USEARCH_USE_JEMALLOC)
     include(jemalloc)
 endif ()
@@ -227,6 +236,16 @@ endif ()
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif ()
+=======
+if(${USEARCH_USE_JEMALLOC})
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/jemalloc.cmake")
+endif()
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/clipp.cmake")
+
+include_directories("${CMAKE_CURRENT_SOURCE_DIR}/include")
+include_directories("${CMAKE_CURRENT_SOURCE_DIR}/fp16/include")
+include_directories("${CMAKE_CURRENT_SOURCE_DIR}/simsimd/include")
+>>>>>>> 5461e0a (Add: Argument parser for C++ benchmarks)
 
 <<<<<<< HEAD
 # Include directories

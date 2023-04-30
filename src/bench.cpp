@@ -3,31 +3,25 @@
  * and the resulting accuracy (recall) of the Approximate Nearest Neighbors
  * Search queries.
  */
-#include <fcntl.h>    // `open
-#include <omp.h>      // `omp_get_num_threads()`
-#include <pthread.h>  // `pthread_setaffinity_np`
+#include <execinfo.h>
+#include <fcntl.h>    // `open`
 #include <stdlib.h>   // `getenv`
 #include <sys/mman.h> // `mmap`
 #include <sys/stat.h> // `stat`
+#include <unistd.h>
 
 #include <csignal>
 #include <cstdio>
-#include <execinfo.h>
-#include <unistd.h>
+#include <iostream>  // `std::cerr`
+#include <numeric>   // `std::iota`
+#include <stdexcept> // `std::invalid_argument`
+#include <thread>    // `std::thread::hardware_concurrency()`
+#include <variant>   // `std::monostate`
 
-#include <algorithm>     // `std::generate`
-#include <barrier>       // `std::barrier`
-#include <cstring>       // `std::strlen`
-#include <mutex>         // `std::mutex`
-#include <numeric>       // `std::iota`
-#include <random>        // `std::random_device`
-#include <stdexcept>     // `std::invalid_argument`
-#include <thread>        // `std::thread::hardware_concurrency()`
-#include <unordered_map> // `std::unordered_map`
-#include <unordered_set> // `std::unordered_set`
-#include <variant>       // `std::monostate`
+#include <clipp.h> // Command Line Interface
+#include <omp.h>   // `omp_get_num_threads()`
 
-#include <usearch/usearch.hpp>
+#include "advanced.hpp"
 
 using namespace unum::usearch;
 using namespace unum;
@@ -55,6 +49,8 @@ struct alignas(32) persisted_matrix_gt {
     scalar_t const* scalars{};
 
     persisted_matrix_gt(char const* path) noexcept(false) {
+        if (!path || !std::strlen(path))
+            throw std::invalid_argument("The file path is empty");
         auto file_descriptor = open(path, O_RDONLY | O_CLOEXEC);
         if (file_descriptor == -1)
             throw std::invalid_argument("Couldn't open provided file path");
@@ -132,8 +128,9 @@ struct in_memory_dataset_gt {
     std::size_t neighborhood_size_{};
     std::size_t queries_count_{};
 
-    in_memory_dataset_gt(std::size_t dimensions, std::size_t vectors_count, std::size_t queries_count,
-                         std::size_t neighborhood_size) noexcept(false)
+    in_memory_dataset_gt( //
+        std::size_t dimensions, std::size_t vectors_count, std::size_t queries_count,
+        std::size_t neighborhood_size) noexcept(false)
         : vectors_(vectors_count * dimensions), queries_(queries_count * dimensions),
           neighborhoods_(queries_count * neighborhood_size), dimensions_(dimensions), vectors_count_(vectors_count),
           queries_count_(queries_count), neighborhood_size_(neighborhood_size) {}
@@ -158,25 +155,29 @@ struct in_memory_dataset_gt {
 char const* getenv_or(char const* name, char const* default_) { return getenv(name) ? getenv(name) : default_; }
 
 template <typename index_at, typename vector_id_at, typename real_at>
-void index_many(index_at& native, std::size_t n, vector_id_at const* ids, real_at const* vecs) {
+void index_many(index_at& native, std::size_t n, vector_id_at const* ids, real_at const* vectors) {
 #pragma omp parallel for
     for (std::size_t i = 0; i < n; ++i) {
-        native.add(ids[i], vecs + native.dim() * i, native.dim(), omp_get_thread_num(), false);
+        native.add(ids[i], vectors + native.dimensions() * i, omp_get_thread_num(), false);
         if (((i + 1) % 100000) == 0)
             std::printf("- added point # %zu\n", i + 1);
     }
 }
 
 template <typename index_at, typename vector_id_at, typename real_at>
-void search_many(index_at& native, std::size_t n, real_at const* vecs, std::size_t k, vector_id_at* ids,
-                 real_at* distances) {
+void search_many(                                         //
+    index_at& native,                                     //
+    std::size_t n, real_at const* vectors, std::size_t k, //
+    vector_id_at* ids, real_at* distances) {
+
 #pragma omp parallel for
     for (std::size_t i = 0; i < n; ++i) {
-        std::size_t j = 0;
-        auto call = [&](vector_id_at id, real_at d) { ids[k * i + j] = id, distances[k * i + j] = d, j++; };
-        native.search(vecs + native.dim() * i, native.dim(), k, call, omp_get_thread_num());
-        std::reverse(ids + k * i, ids + k * i + j);
-        std::reverse(distances + k * i, distances + k * i + j);
+        std::size_t found = native.search(        //
+            vectors + native.dimensions() * i, k, //
+            ids + k * i, distances + k * i,       //
+            omp_get_thread_num());
+        std::reverse(ids + k * i, ids + k * i + found);
+        std::reverse(distances + k * i, distances + k * i + found);
     }
 }
 
@@ -241,76 +242,123 @@ void handler(int sig) {
     exit(1);
 }
 
-int main(int, char**) {
+bool ends_with(std::string const& value, std::string const& ending) {
+    if (ending.size() > value.size())
+        return false;
+    return std::equal(ending.rbegin(), ending.rend(), value.rbegin());
+}
 
-    signal(SIGSEGV, handler); // install our handler
+int main(int argc, char** argv) {
 
+    // Print backtrace if something goes wrong.
+    signal(SIGSEGV, handler);
+
+    using namespace clipp;
+
+    std::string path_vectors;
+    std::string path_queries;
+    std::string path_neighbors;
+    std::size_t threads = std::thread::hardware_concurrency();
+    std::size_t connectivity = config_t{}.connectivity;
+    bool help = false;
+    bool quantize_f16 = false;
+    bool quantize_i8 = false;
+    bool metric_ip = true;
+    bool metric_l2 = false;
+    bool metric_cos = false;
+    bool metric_haversine = false;
+
+    auto cli = ( //
+        (option("--vectors") & value("path", path_vectors)).doc(".fbin file path to construct the index"),
+        (option("--queries") & value("path", path_queries)).doc(".fbin file path to query the index"),
+        (option("--neighbors") & value("path", path_neighbors)).doc(".ibin file path with ground truth"),
+        (option("-j", "--threads") & value("threads", threads)).doc("Uses all available cores by default"),
+        (option("-c", "--connectivity") & value("connectivity", connectivity)).doc("Index granularity"),
+        ( //
+            option("--f16quant").set(quantize_f16).doc("Enable half-precision quantization") |
+            option("--i8quant").set(quantize_i8).doc("Enable int8_t quantization")),
+        ( //
+            option("--ip").set(metric_ip).doc("Choose Inner Product metric") |
+            option("--l2").set(metric_l2).doc("Choose L2 Euclidean metric") |
+            option("--cos").set(metric_cos).doc("Choose Angular metric") |
+            option("--haversine").set(metric_haversine).doc("Choose Haversine metric")),
+        option("-h", "--help").set(help).doc("Print this help information on this tool and exit"));
+
+    if (!parse(argc, argv, cli)) {
+        std::cerr << make_man_page(cli, argv[0]);
+        exit(1);
+    }
+    if (help) {
+        std::cout << make_man_page(cli, argv[0]);
+        exit(0);
+    }
+
+    // Instead of relying on `multithreaded` from "advanced.hpp" we will use OpenMP
+    // to better estimate statistics between tasks batches, without having to recreate
+    // the threads.
     omp_set_dynamic(true);
-    omp_set_num_threads(std::thread::hardware_concurrency());
+    omp_set_num_threads(threads);
     std::printf("- OpenMP threads: %d\n", omp_get_max_threads());
 
-    auto path_vectors = getenv_or("path_vectors", "");
-    auto path_queries = getenv_or("path_queries", path_vectors);
-    auto path_neighbors = getenv_or("path_neighbors", "");
     std::printf("- Dataset: \n");
-    std::printf("-- Base vectors path: %s\n", path_vectors);
-    std::printf("-- Query vectors path: %s\n", path_queries);
-    std::printf("-- Ground truth neighbors path: %s\n", path_neighbors);
-    persisted_dataset_gt<float, unsigned> dataset{path_vectors, path_queries, path_neighbors};
+    std::printf("-- Base vectors path: %s\n", path_vectors.c_str());
+    std::printf("-- Query vectors path: %s\n", path_queries.c_str());
+    std::printf("-- Ground truth neighbors path: %s\n", path_neighbors.c_str());
 
+    using vector_id_t = std::uint32_t;
+    using real_t = float;
+
+    persisted_dataset_gt<float, vector_id_t> dataset{
+        path_vectors.c_str(),
+        path_queries.c_str(),
+        path_neighbors.c_str(),
+    };
     std::printf("-- Dimensions: %zu\n", dataset.dimensions());
     std::printf("-- Vectors count: %zu\n", dataset.vectors_count());
     std::printf("-- Queries count: %zu\n", dataset.queries_count());
     std::printf("-- Neighbors per query: %zu\n", dataset.neighborhood_size());
 
-    // We can forward SimSIMD functions:
-    // struct simsimd_f32_t {
-    //     inline real_t operator()(real_t const* a, real_t const* b, dim_t d, dim_t) const noexcept {
-    //         return 1 - simsimd_dot_f32sve(a, b, d);
-    //     }
-    // };
+    config_t config;
+    config.connectivity = connectivity;
+    config.max_threads_add = config.max_threads_search = threads;
+    config.max_elements = dataset.vectors_count();
 
-    {
-        using vector_id_t = unsigned;
-        using real_t = float;
-        using index_t = index_gt<ip_gt<real_t>, vector_id_t, std::uint32_t, real_t, std::allocator<char>>;
+    accuracy_t accuracy = accuracy_t::f32_k;
+    if (quantize_f16)
+        accuracy = accuracy_t::f16_k;
+    if (quantize_i8)
+        accuracy = accuracy_t::i8q100_k;
 
-        config_t config;
-        config.connectivity = 16;
-        config.max_threads_add = config.max_threads_search = omp_get_max_threads();
-        config.max_elements = dataset.vectors_count();
-        config.dim = dataset.dimensions();
-        index_t index(config);
-        single_shot(dataset, index, true);
-        index.save("index.usearch");
+    auto_index_t index;
+    if (metric_ip)
+        index = auto_index_t::ip(dataset.dimensions(), accuracy, config);
+    if (metric_l2)
+        index = auto_index_t::l2(dataset.dimensions(), accuracy, config);
+    if (metric_cos)
+        index = auto_index_t::cos(dataset.dimensions(), accuracy, config);
+    if (metric_haversine)
+        index = auto_index_t::haversine(accuracy, config);
 
-        index_t index_copy;
-        index_copy.load("index.usearch");
-        single_shot(dataset, index_copy, false);
+    single_shot(dataset, index, true);
+    index.save("tmp/index.usearch");
 
-        index_t index_view;
-        index_view.view("index.usearch");
-        single_shot(dataset, index_view, false);
-    }
+    auto_index_t index_copy;
+    index_copy.load("tmp/index.usearch");
+    single_shot(dataset, index_copy, false);
 
+    auto_index_t index_view;
+    index_view.view("tmp/index.usearch");
+    single_shot(dataset, index_view, false);
+
+    // Test compilation of more obscure index types.
     {
         using index_t = index_gt<ip_gt<float>, std::size_t, uint40_t>;
-
         index_t index;
         index.reserve(2);
-
         float vec[2]{4, 5};
-        index.add(10, &vec[0], 2, 0, true);
-        index.add(11, &vec[0], 2, 0, false);
-        index.save("index40.usearch");
-
-        index_t index_copy;
-        index_copy.load("index40.usearch");
-        single_shot(dataset, index_copy, false);
-
-        index_t index_view;
-        index_view.view("index40.usearch");
-        single_shot(dataset, index_view, false);
+        index.add(10, &vec[0], 2);
+        index.add(11, &vec[0], 2);
+        index.search(&vec[0], 2, 10, [](std::size_t, float) {});
     }
 
     return 0;

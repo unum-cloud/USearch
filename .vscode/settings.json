@@ -359,9 +359,12 @@
         "queue": "cpp",
         "stack": "cpp",
         "__memory": "cpp",
-        "filesystem": "cpp"
+        "filesystem": "cpp",
+        "__availability": "cpp",
+        "version": "cpp"
     },
     "cSpell.words": [
+        "equidimensional",
         "jaccard",
         "ndim",
         "simsimd",

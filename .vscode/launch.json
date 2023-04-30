@@ -7,8 +7,17 @@
             "request": "launch",
             "program": "${workspaceFolder}/build_debug/test_cpp",
             "cwd": "${workspaceFolder}",
+            "args": [
+                "--vectors",
+                "datasets/wiki_1M/base.1M.fbin",
+                "--queries",
+                "datasets/wiki_1M/query.public.100K.fbin",
+                "--neighbors",
+                "datasets/wiki_1M/groundtruth.public.100K.ibin",
+            ],
             "environment": [
                 {
+<<<<<<< HEAD
                     "name": "ASAN_OPTIONS",
                     "value": "detect_leaks=0:atexit=1:strict_init_order=1:strict_string_checks=1:abort_on_error=0"
                 },
@@ -80,6 +89,8 @@
             ],
             "environment": [
                 {
+=======
+>>>>>>> 5461e0a (Add: Argument parser for C++ benchmarks)
                     "name": "ASAN_OPTIONS",
                     "value": "detect_leaks=0:atexit=1:strict_init_order=1:strict_string_checks=1"
                 }
@@ -108,12 +119,20 @@
             "cwd": "${workspaceFolder}",
             "args": [
                 "--vectors",
+<<<<<<< HEAD
                 "datasets/t2i_1B/base.1B.fbin",
                 "--queries",
                 "datasets/t2i_1B/query.public.100K.fbin",
                 "--neighbors",
                 "datasets/t2i_1B/groundtruth.public.100K.ibin",
                 "--cos"
+=======
+                "datasets/t2i_1M/base.1M.fbin",
+                "--queries",
+                "datasets/t2i_1M/query.public.100K.fbin",
+                "--neighbors",
+                "datasets/t2i_1M/groundtruth.public.100K.ibin",
+>>>>>>> 5461e0a (Add: Argument parser for C++ benchmarks)
             ],
             "environment": [
                 {
@@ -213,10 +232,9 @@
             "name": "Debug PyBind11: Attach with GDB",
             "type": "cppdbg",
             "request": "attach",
-            "program": "/home/ubuntu/miniconda3/bin/python",
+            "program": "/Users/av/miniconda3/bin/python",
             "processId": "",
-            "MIMode": "gdb",
-            "sudo": true,
+            "MIMode": "lldb",
             "setupCommands": [
                 {
                     "description": "Enable pretty-printing for gdb",
