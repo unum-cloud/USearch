@@ -4,9 +4,6 @@
 [submodule "fp16"]
 	path = fp16
 	url = https://github.com/maratyszcza/fp16
-<<<<<<< HEAD
 [submodule "stringzilla"]
 	path = stringzilla
 	url = https://github.com/ashvardanian/stringzilla
-=======
->>>>>>> e41c574 (Add: Submodules for simpler bindings builds)
