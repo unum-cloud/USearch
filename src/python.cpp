@@ -209,7 +209,7 @@ using py_index_i8u40_t = py_index_gt<std::int8_t, uint40_t>;
 
 static std::shared_ptr<py_search_api_t> make_index( //
     std::string const& scalar_type,                 //
-    std::size_t expansion_construction,             //
+    std::size_t expansion_add,                      //
     std::size_t expansion_search,                   //
     std::size_t connectivity,                       //
     dim_t dim,                                      //
@@ -217,7 +217,7 @@ static std::shared_ptr<py_search_api_t> make_index( //
     bool can_exceed_four_billion) {
 
     config_t config;
-    config.expansion_construction = expansion_construction;
+    config.expansion_add = expansion_add;
     config.expansion_search = expansion_search;
     config.connectivity = connectivity;
     config.max_elements = capacity;
@@ -275,15 +275,15 @@ PYBIND11_MODULE(usearch, m) {
     i.def("load", &py_search_api_t::load, py::arg("path"));
     i.def("view", &py_search_api_t::view, py::arg("path"));
 
-    m.def(                                       //
-        "make_index", &make_index,               //
-        py::kw_only(),                           //
-        py::arg("dtype") = std::string("f32"),   //
-        py::arg("expansion_construction") = 200, //
-        py::arg("expansion_search") = 100,       //
-        py::arg("connectivity") = 16,            //
-        py::arg("dim") = 0,                      //
-        py::arg("capacity") = 0,                 //
-        py::arg("big") = false                   //
+    m.def(                                                                     //
+        "make_index", &make_index,                                             //
+        py::kw_only(),                                                         //
+        py::arg("dtype") = std::string("f32"),                                 //
+        py::arg("expansion_add") = config_t::expansion_construction_default_k, //
+        py::arg("expansion_search") = config_t::expansion_search_default_k,    //
+        py::arg("connectivity") = config_t::connectivity_default_k,            //
+        py::arg("dim") = 0,                                                    //
+        py::arg("capacity") = 0,                                               //
+        py::arg("big") = false                                                 //
     );
 }

@@ -8,27 +8,44 @@ import usearch
 print('Welcome to basic kANN benchmark!')
 
 
-def read_fbin(filename, start_idx=0, chunk_size=None):
-    """ Read *.fbin file that contains float32 vectors
-    Args:
-        :param filename (str): path to *.fbin file
-        :param start_idx (int): start reading vectors from this index
-        :param chunk_size (int): number of vectors to read. 
-                                 If None, read all vectors
-    Returns:
-        Array of float32 vectors (numpy.ndarray)
+def read_matrix(filename: str, start_row: int = 0, count_rows: int = None):
     """
-    with open(filename, "rb") as f:
-        nvecs, dim = np.fromfile(f, count=2, dtype=np.int32)
-        nvecs = (nvecs - start_idx) if chunk_size is None else chunk_size
-        arr = np.fromfile(f, count=nvecs * dim, dtype=np.float32,
-                          offset=start_idx * 4 * dim)
-    return arr.reshape(nvecs, dim)
+    Read *.ibin, *.hbin, *.fbin, *.dbin files with matrixes.
+    Args:
+        :param filename (str): path to the matrix file
+        :param start_row (int): start reading vectors from this index
+        :param count_rows (int): number of vectors to read. If None, read all vectors
+    Returns:
+        Parsed matrix (numpy.ndarray)
+    """
+    dtype = np.float32
+    scalar_size = 4
+    if filename.endswith('.fbin'):
+        dtype = np.float32
+        scalar_size = 4
+    elif filename.endswith('.dbin'):
+        dtype = np.float64
+        scalar_size = 8
+    elif filename.endswith('.hbin'):
+        dtype = np.float16
+        scalar_size = 2
+    elif filename.endswith('.ibin'):
+        dtype = np.int32
+        scalar_size = 4
+    else:
+        raise Exception('Unknown file type')
+    with open(filename, 'rb') as f:
+        rows, cols = np.fromfile(f, count=2, dtype=np.int32)
+        rows = (rows - start_row) if count_rows is None else count_rows
+        arr = np.fromfile(
+            f, count=rows * cols, dtype=dtype,
+            offset=start_row * scalar_size * cols)
+    return arr.reshape(rows, cols)
 
 
 print('Will read datasets!')
-xb = read_fbin('datasets/wiki_1M/base.1M.fbin')
-xq = read_fbin('datasets/wiki_1M/query.public.100K.fbin')
+xb = read_matrix('datasets/wiki_1M/base.1M.fbin')
+xq = read_matrix('datasets/wiki_1M/query.public.100K.fbin')
 
 d = 256  # vector size
 M = 16
@@ -55,7 +72,7 @@ def construct_both() -> tuple:
     dt_meta = measure(lambda: index_meta.add(xb))
 
     index_unum = usearch.make_index(
-        expansion_construction=efConstruction,
+        expansion_add=efConstruction,
         expansion_search=efSearch,
         connectivity=M,
     )

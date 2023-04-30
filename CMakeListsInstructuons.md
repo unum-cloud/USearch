@@ -5,7 +5,15 @@
 ### Linux
 
 ```
-cmake -B ./build_release -DCMAKE_BUILD_TYPE=RelWithDebInfo && make -C ./build_release -j && mv build_release/usearch.cpython* src/
+cmake -B ./build_release -DCMAKE_BUILD_TYPE=Release -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_JEMALLOC=0 && make -C ./build_release -j
+
+cmake -B ./build_release -DCMAKE_BUILD_TYPE=Release -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_JEMALLOC=1 && make -C ./build_release -j
+
+./build_release/bench \
+    --vectors datasets/wiki_1M/base.1M.fbin \
+    --queries datasets/wiki_1M/query.public.100K.fbin \
+    --neighbors datasets/wiki_1M/groundtruth.public.100K.ibin \
+    --ip
 ```
 
 ### MacOS

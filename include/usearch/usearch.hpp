@@ -80,13 +80,13 @@ template <typename scalar_at> struct ip_gt {
     using result_type = scalar_t;
 
     inline scalar_t operator()(scalar_t const* a, scalar_t const* b, std::size_t dim, std::size_t = 0) const noexcept {
-        result_type ab = 0;
-#if defined(_OPENMP)
-#pragma omp simd reduction(+ : ab)
-#elif defined(__GNUC__)
+        result_type ab{};
+#if defined(__GNUC__)
 #pragma GCC ivdep
 #elif defined(__clang__)
 #pragma clang loop vectorize(enable)
+#elif defined(_OPENMP)
+#pragma omp simd reduction(+ : ab)
 #endif
         for (std::size_t i = 0; i != dim; ++i)
             ab += a[i] * b[i];
@@ -99,13 +99,13 @@ template <typename scalar_at> struct cos_gt {
     using result_type = scalar_t;
 
     inline scalar_t operator()(scalar_t const* a, scalar_t const* b, std::size_t dim, std::size_t = 0) const noexcept {
-        result_type ab = 0, a2 = 0, b2 = 0;
-#if defined(_OPENMP)
-#pragma omp simd reduction(+ : ab, a2, b2)
-#elif defined(__GNUC__)
+        result_type ab{}, a2{}, b2{};
+#if defined(__GNUC__)
 #pragma GCC ivdep
 #elif defined(__clang__)
 #pragma clang loop vectorize(enable)
+#elif defined(_OPENMP)
+#pragma omp simd reduction(+ : ab, a2, b2)
 #endif
         for (std::size_t i = 0; i != dim; ++i)
             ab += a[i] * b[i], a2 += a[i] * a[i], b2 += b[i] * b[i];
@@ -118,13 +118,13 @@ template <typename scalar_at> struct l2_squared_gt {
     using result_type = scalar_t;
 
     inline scalar_t operator()(scalar_t const* a, scalar_t const* b, std::size_t dim, std::size_t = 0) const noexcept {
-        result_type ab_deltas_sq = 0;
-#if defined(_OPENMP)
-#pragma omp simd reduction(+ : ab_deltas_sq)
-#elif defined(__GNUC__)
+        result_type ab_deltas_sq{};
+#if defined(__GNUC__)
 #pragma GCC ivdep
 #elif defined(__clang__)
 #pragma clang loop vectorize(enable)
+#elif defined(_OPENMP)
+#pragma omp simd reduction(+ : ab_deltas_sq)
 #endif
         for (std::size_t i = 0; i != dim; ++i)
             ab_deltas_sq += (a[i] - b[i]) * (a[i] - b[i]);
@@ -145,13 +145,13 @@ template <typename scalar_at> struct bit_hamming_gt {
 
     inline std::size_t operator()(scalar_t const* a, scalar_t const* b, std::size_t words,
                                   std::size_t = 0) const noexcept {
-        std::size_t matches = 0;
-#if defined(_OPENMP)
-#pragma omp simd reduction(+ : matches)
-#elif defined(__GNUC__)
+        std::size_t matches{};
+#if defined(__GNUC__)
 #pragma GCC ivdep
 #elif defined(__clang__)
 #pragma clang loop vectorize(enable)
+#elif defined(_OPENMP)
+#pragma omp simd reduction(+ : matches)
 #endif
         for (std::size_t i = 0; i != words; ++i)
             matches += std::bitset<bits_per_word_k>(a[i] ^ b[i]).count();
@@ -171,9 +171,9 @@ template <typename scalar_at> struct jaccard_gt {
 
     inline result_type operator()( //
         scalar_t const* a, scalar_t const* b, std::size_t a_length, std::size_t b_length) const noexcept {
-        std::size_t intersection = 0;
-        std::size_t i = 0;
-        std::size_t j = 0;
+        std::size_t intersection{};
+        std::size_t i{};
+        std::size_t j{};
         while (i != a_length && j != b_length) {
             intersection += a[i] == b[j];
             i += a[i] < b[j];
@@ -194,14 +194,14 @@ template <typename scalar_at> struct pearson_correlation_gt {
 
     inline result_type operator()( //
         scalar_t const* a, scalar_t const* b, std::size_t dim, std::size_t = 0) const noexcept {
-        scalar_t a_sum = 0, b_sum = 0, ab_sum = 0;
-        scalar_t a_sq_sum = 0, b_sq_sum = 0;
-#if defined(_OPENMP)
-#pragma omp simd reduction(+ : a_sum, b_sum, ab_sum, a_sq_sum, b_sq_sum)
-#elif defined(__GNUC__)
+        scalar_t a_sum{}, b_sum{}, ab_sum{};
+        scalar_t a_sq_sum{}, b_sq_sum{};
+#if defined(__GNUC__)
 #pragma GCC ivdep
 #elif defined(__clang__)
 #pragma clang loop vectorize(enable)
+#elif defined(_OPENMP)
+#pragma omp simd reduction(+ : a_sum, b_sum, ab_sum, a_sq_sum, b_sq_sum)
 #endif
         for (std::size_t i = 0; i != dim; ++i) {
             a_sum += a[i];
@@ -478,11 +478,47 @@ class usearch_pack_m uint40_t {
 
 static_assert(sizeof(uint40_t) == 5, "uint40_t must be exactly 5 bytes");
 
+template <typename scalar_at> class span_gt {
+    scalar_at* data_;
+    std::size_t size_;
+
+  public:
+    span_gt(scalar_at* begin, scalar_at* end) noexcept : data_(begin), size_(end - begin) {}
+    span_gt(scalar_at* begin, std::size_t size) noexcept : data_(begin), size_(size) {}
+    scalar_at* data() const noexcept { return data_; }
+    std::size_t size() const noexcept { return size_; }
+    operator scalar_at*() const noexcept { return data(); }
+};
+
+/**
+ *  @brief
+ *      Configuration settings for the index construction.
+ *      Includes the main `::connectivity` parameter (`M` in the paper)
+ *      and two expansion factors - for construction and search.
+ */
 struct config_t {
+
+    /// @brief Number of neighbors per graph node.
+    /// Defaults to 32 in FAISS and 16 in hnswlib.
+    /// > It is called `M` in the paper.
+    static constexpr std::size_t connectivity_default_k = 16;
+
+    /// @brief Hyper-parameter controlling the quality of indexing.
+    /// Defaults to 40 in FAISS and 200 in hnswlib.
+    /// > It is called `efConstruction` in the paper.
+    static constexpr std::size_t expansion_construction_default_k = 128;
+
+    /// @brief Hyper-parameter controlling the quality of search.
+    /// Defaults to 16 in FAISS and 10 in hnswlib.
+    /// > It is called `ef` in the paper.
+    static constexpr std::size_t expansion_search_default_k = 64;
+
+    std::size_t connectivity = connectivity_default_k;
+    std::size_t expansion_add = expansion_construction_default_k;
+    std::size_t expansion_search = expansion_search_default_k;
+
+    ///
     std::size_t max_elements = 0;
-    std::size_t connectivity = 16;
-    std::size_t expansion_construction = 200;
-    std::size_t expansion_search = 100;
     std::size_t max_threads_add = 64;
     std::size_t max_threads_search = 64;
 };
@@ -627,10 +663,10 @@ class index_gt {
     bool is_immutable() const noexcept { return viewed_file_descriptor_ != 0; }
     bool synchronize() const noexcept { return config_.max_threads_add > 1; }
 
-    index_gt(config_t config = {}, metric_t metric = {}, allocator_t allocator = {}) : config_(config) {
+    index_gt(config_t config = {}, metric_t metric = {}, allocator_t = {}) : config_(config) {
 
         // Externally defined hyper-parameters:
-        config_.expansion_construction = std::max(config_.expansion_construction, config_.connectivity);
+        config_.expansion_add = std::max(config_.expansion_add, config_.connectivity);
         pre_ = precompute(config);
 
         // Configure initial empty state:
@@ -683,12 +719,14 @@ class index_gt {
 
 #pragma region Construction and Search
 
-    id_t add(                                                               //
-        label_t new_label, scalar_t const* new_vector, std::size_t new_dim, //
+    id_t add(                                                //
+        label_t new_label, span_gt<scalar_t const> new_span, //
         std::size_t thread_idx = 0, bool store_vector = true) {
 
         assert_m(!is_immutable(), "Can't add to an immutable index");
         id_t new_id = static_cast<id_t>(size_.fetch_add(1));
+        scalar_t const* new_vector = new_span.data();
+        std::size_t new_dim = new_span.size();
 
         // Determining how much memory to allocate depends on the target level.
         lock_t new_level_lock(global_mutex_);
@@ -748,12 +786,15 @@ class index_gt {
     }
 
     template <typename label_and_distance_callback_at>
-    void search( //
-        scalar_t const* query_vec, std::size_t query_dim, std::size_t k, label_and_distance_callback_at&& callback,
-        std::size_t thread_idx = 0) const {
+    void search(                                                //
+        span_gt<scalar_t const> query_span, std::size_t wanted, //
+        label_and_distance_callback_at&& callback, std::size_t thread_idx = 0) const {
 
         if (!size_)
             return;
+
+        scalar_t const* query_vec = query_span.data();
+        std::size_t query_dim = query_span.size();
 
         // Go down the level, tracking only the closest match
         thread_context_t& context = thread_contexts_[thread_idx];
@@ -782,8 +823,8 @@ class index_gt {
 
         // For bottom layer we need a more optimized procedure
         search_to_find_in_base( //
-            closest_id, query_vec, query_dim, std::max(config_.expansion_search, k), context);
-        while (context.top_candidates.size() > k)
+            closest_id, query_vec, query_dim, std::max(config_.expansion_search, wanted), context);
+        while (context.top_candidates.size() > wanted)
             context.top_candidates.pop();
 
         while (context.top_candidates.size()) {
@@ -791,6 +832,25 @@ class index_gt {
             callback(node(top.second).head.label, top.first);
             context.top_candidates.pop();
         }
+    }
+
+    std::size_t search(                                         //
+        span_gt<scalar_t const> query_span, std::size_t wanted, //
+        label_t* matches, distance_t* distances,                //
+        std::size_t thread_idx = 0) const {
+
+        std::size_t found = 0;
+        auto callback = [&](label_t label, distance_t distance) noexcept {
+            if (matches)
+                matches[found] = label;
+            if (distances)
+                distances[found] = distance;
+            ++found;
+        };
+        search(query_span, wanted, callback, thread_idx);
+        std::reverse(matches, matches + found * (matches != nullptr));
+        std::reverse(distances, distances + found * (distances != nullptr));
+        return found;
     }
 
 #pragma endregion
@@ -1150,7 +1210,7 @@ class index_gt {
         while (!candidates_set.empty()) {
 
             distance_and_id_t candidacy = candidates_set.top();
-            if ((-candidacy.first) > closest_dist && top_candidates.size() == config_.expansion_construction)
+            if ((-candidacy.first) > closest_dist && top_candidates.size() == config_.expansion_add)
                 break;
 
             candidates_set.pop();
@@ -1167,11 +1227,11 @@ class index_gt {
                 node_ref_t successor_node = node(successor_id);
                 distance_t successor_dist =
                     context.metric(query_vec, successor_node.vector, query_dim, successor_node.head.dim);
-                if (top_candidates.size() < config_.expansion_construction || closest_dist > successor_dist) {
+                if (top_candidates.size() < config_.expansion_add || closest_dist > successor_dist) {
                     candidates_set.emplace(-successor_dist, successor_id);
 
                     top_candidates.emplace(successor_dist, successor_id);
-                    if (top_candidates.size() > config_.expansion_construction)
+                    if (top_candidates.size() > config_.expansion_add)
                         top_candidates.pop();
                     if (!top_candidates.empty())
                         closest_dist = top_candidates.top().first;

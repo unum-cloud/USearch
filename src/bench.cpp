@@ -155,29 +155,30 @@ struct in_memory_dataset_gt {
 char const* getenv_or(char const* name, char const* default_) { return getenv(name) ? getenv(name) : default_; }
 
 template <typename index_at, typename vector_id_at, typename real_at>
-void index_many(index_at& native, std::size_t n, vector_id_at const* ids, real_at const* vectors) {
+void index_many(index_at& native, std::size_t n, vector_id_at const* ids, real_at const* vectors, std::size_t dims) {
+
+    using span_t = span_gt<float const>;
+
 #pragma omp parallel for
     for (std::size_t i = 0; i < n; ++i) {
-        native.add(ids[i], vectors + native.dimensions() * i, omp_get_thread_num(), false);
+        native.add(ids[i], span_t{vectors + dims * i, dims}, omp_get_thread_num(), false);
         if (((i + 1) % 100000) == 0)
-            std::printf("- added point # %zu\n", i + 1);
+            std::printf("-- added point # %zu\n", i + 1);
     }
 }
 
 template <typename index_at, typename vector_id_at, typename real_at>
-void search_many(                                         //
-    index_at& native,                                     //
-    std::size_t n, real_at const* vectors, std::size_t k, //
-    vector_id_at* ids, real_at* distances) {
+void search_many(index_at& native, std::size_t n, real_at const* vectors, std::size_t dims, std::size_t wanted,
+                 vector_id_at* ids, real_at* distances) {
+
+    using span_t = span_gt<float const>;
 
 #pragma omp parallel for
     for (std::size_t i = 0; i < n; ++i) {
-        std::size_t found = native.search(        //
-            vectors + native.dimensions() * i, k, //
-            ids + k * i, distances + k * i,       //
+        std::size_t found = native.search(            //
+            span_t{vectors + dims * i, dims}, wanted, //
+            ids + wanted * i, distances + wanted * i, //
             omp_get_thread_num());
-        std::reverse(ids + k * i, ids + k * i + found);
-        std::reverse(distances + k * i, distances + k * i + found);
     }
 }
 
@@ -198,7 +199,8 @@ static void single_shot(dataset_at& dataset, index_at& index, bool construct = t
         // Perform insertions, evaluate speed
         std::vector<label_t> ids(dataset.vectors_count());
         std::iota(ids.begin(), ids.end(), 0);
-        auto dt_add = nanoseconds([&] { index_many(index, dataset.vectors_count(), ids.data(), dataset.vector(0)); });
+        auto dt_add = nanoseconds(
+            [&] { index_many(index, dataset.vectors_count(), ids.data(), dataset.vector(0), dataset.dimensions()); });
         std::printf("- Added %.2f vectors/sec\n", dataset.vectors_count() * 1e9 / dt_add);
     }
 
@@ -209,8 +211,8 @@ static void single_shot(dataset_at& dataset, index_at& index, bool construct = t
 
     auto dt_search = nanoseconds([&] {
         while (executed_search_queries < dataset.vectors_count()) {
-            search_many(index, dataset.queries_count(), dataset.query(0), dataset.neighborhood_size(),
-                        found_neighbors.data(), found_distances.data());
+            search_many(index, dataset.queries_count(), dataset.query(0), dataset.dimensions(),
+                        dataset.neighborhood_size(), found_neighbors.data(), found_distances.data());
             executed_search_queries += dataset.queries_count();
             std::printf("- Searched %zu vectors\n", executed_search_queries);
         }
@@ -248,6 +250,94 @@ bool ends_with(std::string const& value, std::string const& ending) {
     return std::equal(ending.rbegin(), ending.rend(), value.rbegin());
 }
 
+struct args_t {
+    std::string path_vectors;
+    std::string path_queries;
+    std::string path_neighbors;
+
+    std::size_t connectivity = config_t::connectivity_default_k;
+    std::size_t expansion_add = config_t::expansion_construction_default_k;
+    std::size_t expansion_search = config_t::expansion_search_default_k;
+    std::size_t threads = std::thread::hardware_concurrency();
+
+    bool help = false;
+
+    bool big = false;
+    bool native = false;
+    bool quantize_f16 = false;
+    bool quantize_i8 = false;
+
+    bool metric_ip = true;
+    bool metric_l2 = false;
+    bool metric_cos = false;
+    bool metric_haversine = false;
+};
+
+template <typename index_at, typename dataset_at> //
+void run_type_punned(dataset_at& dataset, args_t const& args, config_t config) {
+
+    accuracy_t accuracy = accuracy_t::f32_k;
+    if (args.quantize_f16)
+        accuracy = accuracy_t::f16_k;
+    if (args.quantize_i8)
+        accuracy = accuracy_t::i8q100_k;
+
+    index_at index;
+    if (args.metric_ip)
+        index = index_at::ip(dataset.dimensions(), accuracy, config);
+    if (args.metric_l2)
+        index = index_at::l2(dataset.dimensions(), accuracy, config);
+    if (args.metric_cos)
+        index = index_at::cos(dataset.dimensions(), accuracy, config);
+    if (args.metric_haversine)
+        index = index_at::haversine(accuracy, config);
+
+    std::printf("- Hardware acceleration: %s\n", isa(index.acceleration()));
+    std::printf("-- Will benchmark in-memory\n");
+
+    single_shot(dataset, index, true);
+    index.save("tmp.usearch");
+
+    std::printf("-------\n");
+    std::printf("-- Will benchmark an on-disk view\n");
+
+    index_at index_view = index.fork();
+    index_view.view("tmp.usearch");
+    single_shot(dataset, index_view, false);
+}
+
+template <typename index_at, typename dataset_at> //
+void run_typed(dataset_at& dataset, config_t config) {
+
+    index_at index(config);
+    std::printf("-- Will benchmark in-memory\n");
+
+    single_shot(dataset, index, true);
+    index.save("tmp.usearch");
+
+    std::printf("-------\n");
+    std::printf("-- Will benchmark an on-disk view\n");
+
+    auto_index_t index_view;
+    index_view.view("tmp.usearch");
+    single_shot(dataset, index_view, false);
+}
+
+template <typename neighbor_id_at, typename dataset_at> //
+void run_big_or_small(dataset_at& dataset, args_t const& args, config_t config) {
+    if (args.native) {
+        if (args.metric_cos)
+            run_typed<index_gt<ip_gt<float>, std::size_t, neighbor_id_at>>(dataset, config);
+        else if (args.metric_l2)
+            run_typed<index_gt<l2_squared_gt<float>, std::size_t, neighbor_id_at>>(dataset, config);
+        else if (args.metric_haversine)
+            run_typed<index_gt<haversine_gt<float>, std::size_t, neighbor_id_at>>(dataset, config);
+        else
+            run_typed<index_gt<ip_gt<float>, std::size_t, neighbor_id_at>>(dataset, config);
+    } else
+        run_type_punned<auto_index_gt<std::size_t, neighbor_id_at>>(dataset, args, config);
+}
+
 int main(int argc, char** argv) {
 
     // Print backtrace if something goes wrong.
@@ -255,40 +345,32 @@ int main(int argc, char** argv) {
 
     using namespace clipp;
 
-    std::string path_vectors;
-    std::string path_queries;
-    std::string path_neighbors;
-    std::size_t threads = std::thread::hardware_concurrency();
-    std::size_t connectivity = config_t{}.connectivity;
-    bool help = false;
-    bool quantize_f16 = false;
-    bool quantize_i8 = false;
-    bool metric_ip = true;
-    bool metric_l2 = false;
-    bool metric_cos = false;
-    bool metric_haversine = false;
-
+    auto args = args_t{};
     auto cli = ( //
-        (option("--vectors") & value("path", path_vectors)).doc(".fbin file path to construct the index"),
-        (option("--queries") & value("path", path_queries)).doc(".fbin file path to query the index"),
-        (option("--neighbors") & value("path", path_neighbors)).doc(".ibin file path with ground truth"),
-        (option("-j", "--threads") & value("threads", threads)).doc("Uses all available cores by default"),
-        (option("-c", "--connectivity") & value("connectivity", connectivity)).doc("Index granularity"),
+        (option("--vectors") & value("path", args.path_vectors)).doc(".fbin file path to construct the index"),
+        (option("--queries") & value("path", args.path_queries)).doc(".fbin file path to query the index"),
+        (option("--neighbors") & value("path", args.path_neighbors)).doc(".ibin file path with ground truth"),
+        (option("-b", "--big").set(args.big)).doc("Will switch to uint40_t for neighbors lists with over 4B entries"),
+        (option("-j", "--threads") & value("integer", args.threads)).doc("Uses all available cores by default"),
+        (option("-c", "--connectivity") & value("integer", args.connectivity)).doc("Index granularity"),
+        (option("--expansion-add") & value("integer", args.expansion_add)).doc("Affects indexing depth"),
+        (option("--expansion-search") & value("integer", args.expansion_search)).doc("Affects search depth"),
         ( //
-            option("--f16quant").set(quantize_f16).doc("Enable half-precision quantization") |
-            option("--i8quant").set(quantize_i8).doc("Enable int8_t quantization")),
+            option("--native").set(args.native).doc("Use raw templates instead of type-punned classes") |
+            option("--f16quant").set(args.quantize_f16).doc("Enable `f16_t` quantization") |
+            option("--i8quant").set(args.quantize_i8).doc("Enable `int8_t` quantization")),
         ( //
-            option("--ip").set(metric_ip).doc("Choose Inner Product metric") |
-            option("--l2").set(metric_l2).doc("Choose L2 Euclidean metric") |
-            option("--cos").set(metric_cos).doc("Choose Angular metric") |
-            option("--haversine").set(metric_haversine).doc("Choose Haversine metric")),
-        option("-h", "--help").set(help).doc("Print this help information on this tool and exit"));
+            option("--ip").set(args.metric_ip).doc("Choose Inner Product metric") |
+            option("--l2").set(args.metric_l2).doc("Choose L2 Euclidean metric") |
+            option("--cos").set(args.metric_cos).doc("Choose Angular metric") |
+            option("--haversine").set(args.metric_haversine).doc("Choose Haversine metric")),
+        option("-h", "--help").set(args.help).doc("Print this help information on this tool and exit"));
 
     if (!parse(argc, argv, cli)) {
         std::cerr << make_man_page(cli, argv[0]);
         exit(1);
     }
-    if (help) {
+    if (args.help) {
         std::cout << make_man_page(cli, argv[0]);
         exit(0);
     }
@@ -297,21 +379,20 @@ int main(int argc, char** argv) {
     // to better estimate statistics between tasks batches, without having to recreate
     // the threads.
     omp_set_dynamic(true);
-    omp_set_num_threads(threads);
+    omp_set_num_threads(args.threads);
     std::printf("- OpenMP threads: %d\n", omp_get_max_threads());
 
     std::printf("- Dataset: \n");
-    std::printf("-- Base vectors path: %s\n", path_vectors.c_str());
-    std::printf("-- Query vectors path: %s\n", path_queries.c_str());
-    std::printf("-- Ground truth neighbors path: %s\n", path_neighbors.c_str());
+    std::printf("-- Base vectors path: %s\n", args.path_vectors.c_str());
+    std::printf("-- Query vectors path: %s\n", args.path_queries.c_str());
+    std::printf("-- Ground truth neighbors path: %s\n", args.path_neighbors.c_str());
 
     using vector_id_t = std::uint32_t;
-    using real_t = float;
 
     persisted_dataset_gt<float, vector_id_t> dataset{
-        path_vectors.c_str(),
-        path_queries.c_str(),
-        path_neighbors.c_str(),
+        args.path_vectors.c_str(),
+        args.path_queries.c_str(),
+        args.path_neighbors.c_str(),
     };
     std::printf("-- Dimensions: %zu\n", dataset.dimensions());
     std::printf("-- Vectors count: %zu\n", dataset.vectors_count());
@@ -319,47 +400,16 @@ int main(int argc, char** argv) {
     std::printf("-- Neighbors per query: %zu\n", dataset.neighborhood_size());
 
     config_t config;
-    config.connectivity = connectivity;
-    config.max_threads_add = config.max_threads_search = threads;
+    config.connectivity = args.connectivity;
+    config.expansion_add = args.expansion_add;
+    config.expansion_search = args.expansion_search;
+    config.max_threads_add = config.max_threads_search = args.threads;
     config.max_elements = dataset.vectors_count();
 
-    accuracy_t accuracy = accuracy_t::f32_k;
-    if (quantize_f16)
-        accuracy = accuracy_t::f16_k;
-    if (quantize_i8)
-        accuracy = accuracy_t::i8q100_k;
-
-    auto_index_t index;
-    if (metric_ip)
-        index = auto_index_t::ip(dataset.dimensions(), accuracy, config);
-    if (metric_l2)
-        index = auto_index_t::l2(dataset.dimensions(), accuracy, config);
-    if (metric_cos)
-        index = auto_index_t::cos(dataset.dimensions(), accuracy, config);
-    if (metric_haversine)
-        index = auto_index_t::haversine(accuracy, config);
-
-    single_shot(dataset, index, true);
-    index.save("tmp/index.usearch");
-
-    auto_index_t index_copy;
-    index_copy.load("tmp/index.usearch");
-    single_shot(dataset, index_copy, false);
-
-    auto_index_t index_view;
-    index_view.view("tmp/index.usearch");
-    single_shot(dataset, index_view, false);
-
-    // Test compilation of more obscure index types.
-    {
-        using index_t = index_gt<ip_gt<float>, std::size_t, uint40_t>;
-        index_t index;
-        index.reserve(2);
-        float vec[2]{4, 5};
-        index.add(10, &vec[0], 2);
-        index.add(11, &vec[0], 2);
-        index.search(&vec[0], 2, 10, [](std::size_t, float) {});
-    }
+    if (args.big)
+        run_big_or_small<uint40_t>(dataset, args, config);
+    else
+        run_big_or_small<std::uint32_t>(dataset, args, config);
 
     return 0;
 }
