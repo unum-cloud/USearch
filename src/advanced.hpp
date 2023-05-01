@@ -118,16 +118,16 @@ void multithreaded(std::size_t threads, std::size_t tasks, callback_at&& callbac
 
     std::vector<std::thread> threads_pool;
     std::size_t tasks_per_thread = threads / tasks + (threads % tasks) != 0;
-    for (std::size_t thread_idx = 0; thread_idx != threads; ++thread_idx) {
+    for (std::size_t thread = 0; thread != threads; ++thread) {
         threads_pool.emplace_back([=]() {
-            for (std::size_t task_idx = thread_idx * tasks_per_thread;
-                 task_idx < std::min(tasks, thread_idx * tasks_per_thread + tasks_per_thread); ++task_idx)
-                callback(thread_idx, task_idx);
+            for (std::size_t task_idx = thread * tasks_per_thread;
+                 task_idx < std::min(tasks, thread * tasks_per_thread + tasks_per_thread); ++task_idx)
+                callback(thread, task_idx);
         });
     }
 
-    for (std::size_t thread_idx = 0; thread_idx != threads; ++thread_idx)
-        threads_pool[thread_idx].join();
+    for (std::size_t thread = 0; thread != threads; ++thread)
+        threads_pool[thread].join();
 }
 
 /**
@@ -186,6 +186,7 @@ inline std::size_t bytes_per_scalar(accuracy_t accuracy) noexcept {
     case accuracy_t::f16_k: return 2;
     case accuracy_t::f64_k: return 8;
     case accuracy_t::i8q100_k: return 1;
+    default: return 0;
     }
 }
 
@@ -252,7 +253,7 @@ class auto_index_gt {
 
     isa_t acceleration_ = isa_t::auto_k;
     std::size_t casted_vector_bytes_ = 0;
-    std::vector<byte_t> cast_buffer_;
+    mutable std::vector<byte_t> cast_buffer_;
     struct casts_t {
         cast_t from_i8q100{};
         cast_t from_f16{};
@@ -268,42 +269,42 @@ class auto_index_gt {
     std::size_t connectivity() const noexcept { return index_->connectivity(); }
     std::size_t size() const noexcept { return index_->size(); }
     std::size_t capacity() const noexcept { return index_->capacity(); }
+
     isa_t acceleration() const noexcept { return acceleration_; }
-
-    void save(char const* path) { index_->save(path); }
-    void load(char const* path) { index_->load(path); }
-    void view(char const* path) { index_->view(path); }
-
-    void add(label_t label, f32_t const* vector, std::size_t thread_idx = 0, bool copy = true) {
-        byte_t const* vector_data = reinterpret_cast<byte_t const*>(vector);
-        std::size_t vector_bytes = dimensions_ * sizeof(f32_t);
-
-        byte_t* casted_data = cast_buffer_.data() + casted_vector_bytes_ * thread_idx;
-        bool casted = casts_.from_f32(vector_data, casted_vector_bytes_, casted_data);
-        if (casted) {
-            vector_data = casted_data;
-            vector_bytes = casted_vector_bytes_;
-            copy = true;
-        }
-
-        index_->add(label, {vector_data, vector_bytes}, thread_idx, copy);
+    std::size_t concurrency() const noexcept {
+        return std::min(root_config_.max_threads_add, root_config_.max_threads_search);
     }
 
-    std::size_t search(                          //
-        f32_t const* vector, std::size_t wanted, //
-        label_t* matches, f32_t* distances, std::size_t thread_idx = 0) {
+    void save(char const* path) const { index_->save(path); }
+    void load(char const* path) { index_->load(path); }
+    void view(char const* path) { index_->view(path); }
+    void reserve(std::size_t capacity) { index_->reserve(capacity); }
 
-        byte_t const* vector_data = reinterpret_cast<byte_t const*>(vector);
-        std::size_t vector_bytes = dimensions_ * sizeof(f32_t);
+    void add(label_t label, f32_t const* vector, std::size_t thread = 0, bool copy = true) {
+        return add(label, vector, thread, copy, casts_.from_f32);
+    }
 
-        byte_t* casted_data = cast_buffer_.data() + casted_vector_bytes_ * thread_idx;
-        bool casted = casts_.from_f32(vector_data, casted_vector_bytes_, casted_data);
-        if (casted) {
-            vector_data = casted_data;
-            vector_bytes = casted_vector_bytes_;
-        }
+    std::size_t search(f32_t const* vector, std::size_t wanted, label_t* matches, distance_t* distances,
+                       std::size_t thread = 0) const {
+        return search(vector, wanted, matches, distances, thread, casts_.from_f32);
+    }
 
-        return index_->search({vector_data, vector_bytes}, wanted, matches, distances, thread_idx);
+    void add(label_t label, f64_t const* vector, std::size_t thread = 0, bool copy = true) {
+        return add(label, vector, thread, copy, casts_.from_f64);
+    }
+
+    std::size_t search(f64_t const* vector, std::size_t wanted, label_t* matches, distance_t* distances,
+                       std::size_t thread = 0) const {
+        return search(vector, wanted, matches, distances, thread, casts_.from_f64);
+    }
+
+    void add(label_t label, f16_converted_t const* vector, std::size_t thread = 0, bool copy = true) {
+        return add(label, vector, thread, copy, casts_.from_f16);
+    }
+
+    std::size_t search(f16_converted_t const* vector, std::size_t wanted, label_t* matches, distance_t* distances,
+                       std::size_t thread = 0) const {
+        return search(vector, wanted, matches, distances, thread, casts_.from_f16);
     }
 
     static auto_index_gt ip(std::size_t dimensions, accuracy_t accuracy = accuracy_t::f16_k, config_t config = {}) {
@@ -337,6 +338,34 @@ class auto_index_gt {
     }
 
   private:
+    template <typename scalar_at>
+    void add(label_t label, scalar_at const* vector, std::size_t thread, bool copy, cast_t const& cast) {
+        byte_t const* vector_data = reinterpret_cast<byte_t const*>(vector);
+        std::size_t vector_bytes = dimensions_ * sizeof(scalar_at);
+
+        byte_t* casted_data = cast_buffer_.data() + casted_vector_bytes_ * thread;
+        bool casted = cast(vector_data, casted_vector_bytes_, casted_data);
+        if (casted)
+            vector_data = casted_data, vector_bytes = casted_vector_bytes_, copy = true;
+
+        index_->add(label, {vector_data, vector_bytes}, thread, copy);
+    }
+
+    template <typename scalar_at>
+    std::size_t search(scalar_at const* vector, std::size_t wanted, label_t* matches, distance_t* distances,
+                       std::size_t thread, cast_t const& cast) const {
+
+        byte_t const* vector_data = reinterpret_cast<byte_t const*>(vector);
+        std::size_t vector_bytes = dimensions_ * sizeof(scalar_at);
+
+        byte_t* casted_data = cast_buffer_.data() + casted_vector_bytes_ * thread;
+        bool casted = cast(vector_data, casted_vector_bytes_, casted_data);
+        if (casted)
+            vector_data = casted_data, vector_bytes = casted_vector_bytes_;
+
+        return index_->search({vector_data, vector_bytes}, wanted, matches, distances, thread);
+    }
+
     static auto_index_gt make(                            //
         std::size_t dimensions, accuracy_t accuracy,      //
         metric_and_meta_t metric_and_meta, casts_t casts, //
@@ -371,6 +400,7 @@ class auto_index_gt {
         case accuracy_t::f32_k: return make_casts<f32_t>();
         case accuracy_t::f16_k: return make_casts<f16_converted_t>();
         case accuracy_t::i8q100_k: return make_casts<i8q100_converted_t>();
+        default: return {};
         }
     }
 
@@ -440,6 +470,7 @@ class auto_index_gt {
         case accuracy_t::f16_k: return ip_metric_f16(dimensions);
         case accuracy_t::f32_k: return ip_metric_f32(dimensions);
         case accuracy_t::f64_k: return {pun_metric<f64_t>(ip_gt<f64_t>{}), isa_t::auto_k};
+        default: return {};
         }
     }
 
@@ -449,6 +480,7 @@ class auto_index_gt {
         case accuracy_t::f16_k: return {pun_metric<f16_converted_t>(l2_squared_gt<f16_converted_t>{}), isa_t::auto_k};
         case accuracy_t::f32_k: return {pun_metric<f32_t>(l2_squared_gt<f32_t>{}), isa_t::auto_k};
         case accuracy_t::f64_k: return {pun_metric<f64_t>(l2_squared_gt<f64_t>{}), isa_t::auto_k};
+        default: return {};
         }
     }
 
@@ -458,6 +490,7 @@ class auto_index_gt {
         case accuracy_t::f16_k: return {pun_metric<f16_converted_t>(cos_gt<f16_converted_t>{}), isa_t::auto_k};
         case accuracy_t::f32_k: return {pun_metric<f32_t>(cos_gt<f32_t>{}), isa_t::auto_k};
         case accuracy_t::f64_k: return {pun_metric<f64_t>(cos_gt<f64_t>{}), isa_t::auto_k};
+        default: return {};
         }
     }
 };

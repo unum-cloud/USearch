@@ -44,6 +44,7 @@ mv build_release/usearch.cpython* src/ && \
 
 ```sh
 pip install -e .
+python src/test.py
 ```
 
 ### JavaScript

@@ -18,8 +18,6 @@
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 
-#include <usearch/usearch.hpp>
-
 #include "advanced.hpp"
 
 using namespace unum::usearch;
@@ -27,263 +25,202 @@ using namespace unum;
 
 namespace py = pybind11;
 
-class py_search_api_t {
-  public:
-    virtual ~py_search_api_t() {}
+using label_t = Py_ssize_t;
+using distance_t = punned_distance_t;
+using index_t = auto_index_gt<label_t>;
 
-    virtual void add(py::buffer labels, py::buffer vectors, bool copy) = 0;
-    virtual py::tuple search(py::buffer vectors, ssize_t count) = 0;
-
-    virtual void set_dimensions(ssize_t) = 0;
-    virtual void set_distance(py::function) = 0;
-    virtual void set_distance(std::string const& name) = 0;
-
-    virtual void save(std::string const& path) const = 0;
-    virtual void load(std::string const& path) = 0;
-    virtual void view(std::string const& path) = 0;
-};
-
-template <typename scalar_at = float, typename neighbor_at = std::uint32_t> //
-class py_index_gt final : public py_search_api_t {
-
-    using scalar_t = scalar_at;
-    using label_t = Py_ssize_t;
-    using neighbor_t = neighbor_at;
-
-    using distance_t = punned_distance_t;
-    using metric_t = punned_metric_t;
-    using index_t = index_gt<metric_t, label_t, neighbor_t, scalar_t, aligned_allocator_gt<char>>;
-
-    index_t native_;
-    std::string distance_name_;
-
-  public:
-    ~py_index_gt() override {}
-
-    py_index_gt(config_t config = {}) : native_(config) { set_distance("ip"); }
-
-    void set_dimensions(ssize_t n) override {
-        native_.adjust_dimensions(n);
-        if (!distance_name_.empty())
-            set_distance(distance_name_);
-    }
-
-    void set_distance(py::function) override { distance_name_.clear(); }
-
-    void set_distance(std::string const& name) override {
-        distance_name_ = name;
-        if (name == "l2_sq" || name == "euclidean_sq") {
-            metric_t dist = &punned_metric<l2_squared_gt<scalar_t>>;
-            native_.adjust_metric(dist);
-        } else if (name == "ip" || name == "inner" || name == "dot") {
-            metric_t dist = &punned_metric<ip_gt<scalar_t>>;
-            native_.adjust_metric(dist);
-        } else if (name == "cos" || name == "angular") {
-            metric_t dist = &punned_metric<cos_gt<scalar_t>>;
-            native_.adjust_metric(dist);
-        } else if (name == "hamming") {
-            using allowed_t = typename std::conditional<std::is_unsigned<scalar_t>::value, scalar_t, unsigned>::type;
-            metric_t dist = &punned_metric<bit_hamming_gt<allowed_t>>;
-            native_.adjust_metric(dist);
-        } else if (name == "jaccard") {
-            using allowed_t = typename std::conditional<std::is_integral<scalar_t>::value, scalar_t, unsigned>::type;
-            metric_t dist = &punned_metric<jaccard_gt<allowed_t>>;
-            native_.adjust_metric(dist);
-        } else if (name == "haversine") {
-            using allowed_t = typename std::conditional<std::is_floating_point<scalar_t>::value, scalar_t, float>::type;
-            metric_t dist = &punned_metric<haversine_gt<allowed_t>>;
-            native_.adjust_metric(dist);
-        } else
-            throw std::runtime_error("Unknown distance! Supported: l2_sq, ip, cos, hamming, jaccard");
-    }
-
-    void add(py::buffer labels, py::buffer vectors, bool copy) override {
-
-        py::buffer_info labels_info = labels.request();
-        py::buffer_info vectors_info = vectors.request();
-
-        if (labels_info.format != py::format_descriptor<label_t>::format())
-            throw std::runtime_error("Incompatible label type!");
-
-        if (labels_info.ndim != 1)
-            throw std::runtime_error("Labels must be placed in a single-dimensional array!");
-
-        if (vectors_info.format != py::format_descriptor<scalar_t>::format())
-            throw std::runtime_error("Incompatible scalars in the vectors matrix!");
-
-        if (vectors_info.ndim != 2)
-            throw std::runtime_error("Expects a matrix of vectors to add!");
-
-        ssize_t labels_count = labels_info.shape[0];
-        ssize_t vectors_count = vectors_info.shape[0];
-        ssize_t vectors_dimensions = vectors_info.shape[1];
-
-        if (labels_count != vectors_count)
-            throw std::runtime_error("Number of labels and vectors must match!");
-
-        if (native_.size() + vectors_count >= native_.capacity()) {
-            std::size_t next_capacity = ceil2(native_.size() + vectors_count);
-            native_.reserve(next_capacity);
-        }
-
-        char const* vectors_data = reinterpret_cast<char const*>(vectors_info.ptr);
-        char const* labels_data = reinterpret_cast<char const*>(labels_info.ptr);
-
-        multithreaded(native_.max_threads_add(), vectors_count, [&](std::size_t thread_idx, std::size_t task_idx) {
-            label_t label = *reinterpret_cast<label_t const*>(labels_data + task_idx * labels_info.strides[0]);
-            scalar_t const* vector =
-                reinterpret_cast<scalar_t const*>(vectors_data + task_idx * vectors_info.strides[0]);
-            native_.add(label, vector, vectors_dimensions, thread_idx, copy);
-        });
-    }
-
-    /**
-     *  @param vectors Matrix of vectors to search for..
-     *  @param matches_wanted Number of matches per request.
-     *
-     *  @return Tuple with:
-     *      1. matrix of neighbors,
-     *      2. matrix of distances,
-     *      3. array with match counts.
-     */
-    py::tuple search(py::buffer vectors, ssize_t matches_wanted) override {
-
-        py::buffer_info vectors_info = vectors.request();
-
-        if (vectors_info.format != py::format_descriptor<scalar_t>::format())
-            throw std::runtime_error("Incompatible scalars in the vectors matrix!");
-
-        if (vectors_info.ndim != 2)
-            throw std::runtime_error("Expects a matrix of vectors to add!");
-
-        ssize_t vectors_count = vectors_info.shape[0];
-        ssize_t vectors_dimensions = vectors_info.shape[1];
-
-        char const* vectors_data = reinterpret_cast<char const*>(vectors_info.ptr);
-
-        py::array_t<label_t> labels_py({vectors_count, matches_wanted});
-        py::array_t<distance_t> distances_py({vectors_count, matches_wanted});
-        py::array_t<Py_ssize_t> counts_py(vectors_count);
-        auto labels_py2d = labels_py.mutable_unchecked<2>();
-        auto distances_py2d = distances_py.mutable_unchecked<2>();
-        auto counts_py1d = counts_py.mutable_unchecked<1>();
-
-        multithreaded(native_.max_threads_add(), vectors_count, [&](std::size_t thread_idx, std::size_t task_idx) {
-            std::size_t matches_found = 0;
-            scalar_t const* vector =
-                reinterpret_cast<scalar_t const*>(vectors_data + task_idx * vectors_info.strides[0]);
-            auto callback = [&](label_t id, distance_t distance) {
-                labels_py2d(task_idx, matches_found) = id;
-                distances_py2d(task_idx, matches_found) = distance;
-                matches_found++;
-            };
-            native_.search(vector, vectors_dimensions, matches_wanted, callback, thread_idx);
-            std::reverse(&labels_py2d(task_idx, 0), &labels_py2d(task_idx, matches_found));
-            std::reverse(&distances_py2d(task_idx, 0), &distances_py2d(task_idx, matches_found));
-            counts_py1d(task_idx) = static_cast<Py_ssize_t>(matches_found);
-        });
-
-        py::tuple results(3);
-        results[0] = std::move(labels_py);
-        results[1] = std::move(distances_py);
-        results[2] = std::move(counts_py);
-        return results;
-    }
-
-    void save(std::string const& path) const override { native_.save(path.c_str()); }
-    void load(std::string const& path) override { native_.load(path.c_str()); }
-    void view(std::string const& path) override { native_.view(path.c_str()); }
-};
-
-using py_index_f16u32_t = py_index_gt<f16_converted_t, std::uint32_t>;
-using py_index_f32u32_t = py_index_gt<float, std::uint32_t>;
-using py_index_f64u32_t = py_index_gt<double, std::uint32_t>;
-using py_index_i32u32_t = py_index_gt<std::int32_t, std::uint32_t>;
-using py_index_i8u32_t = py_index_gt<std::int8_t, std::uint32_t>;
-
-using py_index_f16u40_t = py_index_gt<f16_converted_t, uint40_t>;
-using py_index_f32u40_t = py_index_gt<float, uint40_t>;
-using py_index_f64u40_t = py_index_gt<double, uint40_t>;
-using py_index_i32u40_t = py_index_gt<std::int32_t, uint40_t>;
-using py_index_i8u40_t = py_index_gt<std::int8_t, uint40_t>;
-
-static std::shared_ptr<py_search_api_t> make_index( //
-    std::string const& scalar_type,                 //
-    std::size_t expansion_add,                      //
-    std::size_t expansion_search,                   //
-    std::size_t connectivity,                       //
-    dim_t dim,                                      //
-    std::size_t capacity,                           //
-    bool can_exceed_four_billion) {
+static index_t make_index(          //
+    std::size_t dimensions,         //
+    std::size_t capacity,           //
+    std::string const& scalar_type, //
+    std::string const& metric,      //
+    std::size_t connectivity,       //
+    std::size_t expansion_add,      //
+    std::size_t expansion_search    //
+) {
 
     config_t config;
     config.expansion_add = expansion_add;
     config.expansion_search = expansion_search;
     config.connectivity = connectivity;
     config.max_elements = capacity;
-    config.dim = dim;
     config.max_threads_add = std::thread::hardware_concurrency();
     config.max_threads_search = std::thread::hardware_concurrency();
 
-    if (!can_exceed_four_billion) {
-        if (scalar_type == "f32")
-            return std::make_shared<py_index_f32u32_t>(config);
-        if (scalar_type == "f64")
-            return std::make_shared<py_index_f64u32_t>(config);
-        if (scalar_type == "i32")
-            return std::make_shared<py_index_i32u32_t>(config);
-        if (scalar_type == "i8")
-            return std::make_shared<py_index_i8u32_t>(config);
-        // if (scalar_type == "f16")
-        //     return std::make_shared<py_index_f16u32_t>(config);
-    } else {
-        if (scalar_type == "f32")
-            return std::make_shared<py_index_f32u40_t>(config);
-        if (scalar_type == "f64")
-            return std::make_shared<py_index_f64u40_t>(config);
-        if (scalar_type == "i32")
-            return std::make_shared<py_index_i32u40_t>(config);
-        if (scalar_type == "i8")
-            return std::make_shared<py_index_i8u40_t>(config);
-        // if (scalar_type == "f16")
-        //     return std::shared_ptr<py_search_api_t>(new py_index_f16u40_t(config));
-    }
+    accuracy_t accuracy;
+    if (scalar_type == "f32")
+        accuracy = accuracy_t::f32_k;
+    else if (scalar_type == "f64")
+        accuracy = accuracy_t::f64_k;
+    else if (scalar_type == "f16")
+        accuracy = accuracy_t::f16_k;
+    else if (scalar_type == "i8q100")
+        accuracy = accuracy_t::i8q100_k;
+    else
+        throw std::runtime_error("Unknown type, choose: f32, f16, f64, i8q100");
+
+    if (metric == "l2_sq" || metric == "euclidean_sq")
+        return index_t::l2(dimensions, accuracy, config);
+    else if (metric == "ip" || metric == "inner" || metric == "dot")
+        return index_t::ip(dimensions, accuracy, config);
+    else if (metric == "cos" || metric == "angular")
+        return index_t::cos(dimensions, accuracy, config);
+    else if (metric == "haversine")
+        return index_t::haversine(accuracy, config);
+    else
+        throw std::runtime_error("Unknown distance, choose: l2_sq, ip, cos, hamming, jaccard");
 
     return {};
 }
 
+static void add_to_index(index_t& index, py::buffer labels, py::buffer vectors, bool copy) {
+
+    py::buffer_info labels_info = labels.request();
+    py::buffer_info vectors_info = vectors.request();
+
+    if (labels_info.format != py::format_descriptor<label_t>::format())
+        throw std::runtime_error("Incompatible label type!");
+
+    if (labels_info.ndim != 1)
+        throw std::runtime_error("Labels must be placed in a single-dimensional array!");
+
+    if (vectors_info.ndim != 2)
+        throw std::runtime_error("Expects a matrix of vectors to add!");
+
+    ssize_t labels_count = labels_info.shape[0];
+    ssize_t vectors_count = vectors_info.shape[0];
+    ssize_t vectors_dimensions = vectors_info.shape[1];
+    if (vectors_dimensions != index.dimensions())
+        throw std::runtime_error("The number of vector dimensions doesn't match!");
+
+    if (labels_count != vectors_count)
+        throw std::runtime_error("Number of labels and vectors must match!");
+
+    if (index.size() + vectors_count >= index.capacity()) {
+        std::size_t next_capacity = ceil2(index.size() + vectors_count);
+        index.reserve(next_capacity);
+    }
+
+    char const* vectors_data = reinterpret_cast<char const*>(vectors_info.ptr);
+    char const* labels_data = reinterpret_cast<char const*>(labels_info.ptr);
+
+    // https://docs.python.org/3/library/struct.html#format-characters
+    if (vectors_info.format == "e")
+        multithreaded(index.concurrency(), vectors_count, [&](std::size_t thread_idx, std::size_t task_idx) {
+            label_t label = *reinterpret_cast<label_t const*>(labels_data + task_idx * labels_info.strides[0]);
+            f16_converted_t const* vector =
+                reinterpret_cast<f16_converted_t const*>(vectors_data + task_idx * vectors_info.strides[0]);
+            index.add(label, vector, thread_idx, copy);
+        });
+    else if (vectors_info.format == "f")
+        multithreaded(index.concurrency(), vectors_count, [&](std::size_t thread_idx, std::size_t task_idx) {
+            label_t label = *reinterpret_cast<label_t const*>(labels_data + task_idx * labels_info.strides[0]);
+            float const* vector = reinterpret_cast<float const*>(vectors_data + task_idx * vectors_info.strides[0]);
+            index.add(label, vector, thread_idx, copy);
+        });
+    else if (vectors_info.format == "d")
+        multithreaded(index.concurrency(), vectors_count, [&](std::size_t thread_idx, std::size_t task_idx) {
+            label_t label = *reinterpret_cast<label_t const*>(labels_data + task_idx * labels_info.strides[0]);
+            double const* vector = reinterpret_cast<double const*>(vectors_data + task_idx * vectors_info.strides[0]);
+            index.add(label, vector, thread_idx, copy);
+        });
+    else
+        throw std::runtime_error("Incompatible scalars in the vectors matrix!");
+}
+
+/**
+ *  @param vectors Matrix of vectors to search for..
+ *  @param wanted Number of matches per request.
+ *
+ *  @return Tuple with:
+ *      1. matrix of neighbors,
+ *      2. matrix of distances,
+ *      3. array with match counts.
+ */
+static py::tuple search_in_index(index_t& index, py::buffer vectors, ssize_t wanted) {
+
+    py::buffer_info vectors_info = vectors.request();
+    if (vectors_info.ndim != 2)
+        throw std::runtime_error("Expects a matrix of vectors to add!");
+
+    ssize_t vectors_count = vectors_info.shape[0];
+    ssize_t vectors_dimensions = vectors_info.shape[1];
+    if (vectors_dimensions != index.dimensions())
+        throw std::runtime_error("The number of vector dimensions doesn't match!");
+
+    py::array_t<label_t> labels_py({vectors_count, wanted});
+    py::array_t<distance_t> distances_py({vectors_count, wanted});
+    py::array_t<Py_ssize_t> counts_py(vectors_count);
+    auto labels_py2d = labels_py.mutable_unchecked<2>();
+    auto distances_py2d = distances_py.mutable_unchecked<2>();
+    auto counts_py1d = counts_py.mutable_unchecked<1>();
+
+    char const* vectors_data = reinterpret_cast<char const*>(vectors_info.ptr);
+
+    // https://docs.python.org/3/library/struct.html#format-characters
+    if (vectors_info.format == "e")
+        multithreaded(index.concurrency(), vectors_count, [&](std::size_t thread_idx, std::size_t task_idx) {
+            f16_converted_t const* vector = (f16_converted_t const*)(vectors_data + task_idx * vectors_info.strides[0]);
+            counts_py1d(task_idx) = static_cast<Py_ssize_t>(
+                index.search(vector, wanted, &labels_py2d(task_idx, 0), &distances_py2d(task_idx, 0), thread_idx));
+        });
+    else if (vectors_info.format == "f")
+        multithreaded(index.concurrency(), vectors_count, [&](std::size_t thread_idx, std::size_t task_idx) {
+            float const* vector = (float const*)(vectors_data + task_idx * vectors_info.strides[0]);
+            counts_py1d(task_idx) = static_cast<Py_ssize_t>(
+                index.search(vector, wanted, &labels_py2d(task_idx, 0), &distances_py2d(task_idx, 0), thread_idx));
+        });
+    else if (vectors_info.format == "d")
+        multithreaded(index.concurrency(), vectors_count, [&](std::size_t thread_idx, std::size_t task_idx) {
+            double const* vector = (double const*)(vectors_data + task_idx * vectors_info.strides[0]);
+            counts_py1d(task_idx) = static_cast<Py_ssize_t>(
+                index.search(vector, wanted, &labels_py2d(task_idx, 0), &distances_py2d(task_idx, 0), thread_idx));
+        });
+    else
+        throw std::runtime_error("Incompatible scalars in the query matrix!");
+
+    py::tuple results(3);
+    results[0] = labels_py;
+    results[1] = distances_py;
+    results[2] = counts_py;
+    return results;
+}
+
+static void save_index(index_t const& index, std::string const& path) { index.save(path.c_str()); }
+static void load_index(index_t& index, std::string const& path) { index.load(path.c_str()); }
+static void view_index(index_t& index, std::string const& path) { index.view(path.c_str()); }
+
 PYBIND11_MODULE(usearch, m) {
-    m.doc() = "Unum USearch Python Bindings";
+    m.doc() = "Unum USearch Python bindings";
 
-    auto i = py::class_<py_search_api_t>(m, "Index");
+    auto i = py::class_<index_t>(m, "Index");
 
-    i.def(                            //
-        "add", &py_search_api_t::add, //
-        py::arg("labels"),            //
-        py::arg("vectors"),           //
-        py::kw_only(),                //
-        py::arg("copy") = true        //
+    i.def(py::init(&make_index),                                                 //
+          py::kw_only(),                                                         //
+          py::arg("dim"),                                                        //
+          py::arg("capacity") = 0,                                               //
+          py::arg("dtype") = std::string("f32"),                                 //
+          py::arg("metric") = std::string("ip"),                                 //
+          py::arg("connectivity") = config_t::connectivity_default_k,            //
+          py::arg("expansion_add") = config_t::expansion_construction_default_k, //
+          py::arg("expansion_search") = config_t::expansion_search_default_k     //
     );
 
-    i.def(                                  //
-        "search", &py_search_api_t::search, //
-        py::arg("vectors"),                 //
-        py::arg("count") = 10               //
+    i.def(                     //
+        "add", &add_to_index,  //
+        py::arg("labels"),     //
+        py::arg("vectors"),    //
+        py::kw_only(),         //
+        py::arg("copy") = true //
     );
 
-    i.def("save", &py_search_api_t::save, py::arg("path"));
-    i.def("load", &py_search_api_t::load, py::arg("path"));
-    i.def("view", &py_search_api_t::view, py::arg("path"));
-
-    m.def(                                                                     //
-        "make_index", &make_index,                                             //
-        py::kw_only(),                                                         //
-        py::arg("dtype") = std::string("f32"),                                 //
-        py::arg("expansion_add") = config_t::expansion_construction_default_k, //
-        py::arg("expansion_search") = config_t::expansion_search_default_k,    //
-        py::arg("connectivity") = config_t::connectivity_default_k,            //
-        py::arg("dim") = 0,                                                    //
-        py::arg("capacity") = 0,                                               //
-        py::arg("big") = false                                                 //
+    i.def(                          //
+        "search", &search_in_index, //
+        py::arg("vectors"),         //
+        py::arg("count") = 10       //
     );
+
+    i.def("save", &save_index, py::arg("path"));
+    i.def("load", &load_index, py::arg("path"));
+    i.def("view", &view_index, py::arg("path"));
 }
