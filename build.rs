@@ -1,5 +1,6 @@
 fn main() {
 <<<<<<< HEAD
+<<<<<<< HEAD
     let mut build = cxx_build::bridge("rust/lib.rs");
 
     build
@@ -125,6 +126,8 @@ fn main() {
     println!("cargo:rerun-if-changed=include/index_dense.hpp");
     println!("cargo:rerun-if-changed=include/usearch/index.hpp");
 =======
+=======
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
     cxx_build::bridge("src/main.rs")
         .file("src/rust.cpp")
         .flag_if_supported("-std=c++11")
@@ -137,5 +140,8 @@ fn main() {
     println!("cargo:rerun-if-changed=src/main.rs");
     println!("cargo:rerun-if-changed=src/rust.cpp");
     println!("cargo:rerun-if-changed=src/rust.h");
+<<<<<<< HEAD
 >>>>>>> 73a88b7 (Add: Initial Rust version)
+=======
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
 }

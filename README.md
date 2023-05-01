@@ -1,7 +1,12 @@
 <h1 align="center">USearch</h1>
 <h3 align="center">
+<<<<<<< HEAD
 Smaller & <a href="https://www.unum.cloud/blog/2023-11-07-scaling-vector-search-with-intel">Faster</a> Single-File<br/>
 Similarity Search & Clustering Engine for <a href="https://github.com/ashvardanian/simsimd">Vectors</a> & 🔜 <a href="https://github.com/ashvardanian/stringzilla">Texts</a>
+=======
+C++11 Single Header Vector Search<br/>
+Compact, yet Powerful<br/>
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
 </h3>
 <br/>
 
@@ -17,6 +22,7 @@ Similarity Search & Clustering Engine for <a href="https://github.com/ashvardani
 <a href="https://github.com/unum-cloud/usearch"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/github.svg" alt="GitHub"></a>
 </p>
 
+<<<<<<< HEAD
 <<<<<<< HEAD
 <p align="center">
 Spatial • Binary • Probabilistic • User-Defined Metrics
@@ -595,6 +601,33 @@ month = oct,
 }
 ```
 =======
+=======
+- [x] Single C++11 header, easily extendible.
+- [x] 4B+ sized space efficient point-clouds with `uint40_t`.
+- [x] Half-precision support with [`maratyszcza/fp16`](https://github.com/maratyszcza/fp16).
+- [x] View from disk, without loading into RAM.
+- [x] Any metric, includes: 
+  - [x] Euclidean, Dot-product, Cosine,
+  - [x] Jaccard, Hamming, Haversine.
+  - [x] Hardware-accelerated [`ashvardanian/simsimd`](https://github.com/ashvardanian/simsimd). 
+- [x] Variable dimensionality vectors.
+- [x] Don't copy vectors if not needed.
+- [x] Bring your threads.
+- [x] Multiple vectors per label.
+- [x] CPython bindings for Python 3.
+- [ ] Node.js bindings for JavaScript.
+- [ ] Wolfram language bindings.
+- [x] For Linux: GCC, Clang.
+- [x] For MacOS: Apple Clang.
+- [ ] For Windows.
+- [ ] Distributed construction.
+- [ ] Multi-index lookups.
+
+## Usage
+
+### C++
+
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
 To use in a C++ project simply copy the `include/usearch/usearch.hpp` header into your project.
 
 ```c++
@@ -620,4 +653,7 @@ FetchContent_MakeAvailable(usearch)
 ### Bring your Threads
 
 ## Performance
+<<<<<<< HEAD
 >>>>>>> 7f6edc2 (Docs: C++ usage instructions)
+=======
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)

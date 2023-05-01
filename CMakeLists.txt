@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # This CMake file is heavily inspired by following `usearch` CMake:
 # https://github.com/nlohmann/json/blob/develop/CMakeLists.txt
 cmake_minimum_required(VERSION 3.11 FATAL_ERROR)
@@ -210,11 +211,62 @@ if (CMAKE_HOST_SYSTEM_NAME MATCHES "Darwin")
 =======
 if(APPLE)
 >>>>>>> 5461e0a (Add: Argument parser for C++ benchmarks)
+=======
+cmake_minimum_required(VERSION 3.11 FATAL_ERROR)
+project(usearch LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED YES)
+set(CMAKE_CXX_EXTENSIONS NO)
+
+option(USEARCH_USE_JEMALLOC "Use JeMalloc for Faster Memory Allocations" OFF)
+option(USEARCH_USE_OPENMP "Use OpenMP for a thread pool" OFF)
+
+# Make "Release" by default
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0")
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -O3 -pg -g")
+
+# List of all possible compiler IDs:
+# https://cmake.org/cmake/help/latest/variable/CMAKE_LANG_COMPILER_ID.html
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=address")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wno-conversion -Wno-unknown-pragmas")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fmax-errors=1")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fopenmp")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pedantic")
+
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wfatal-errors")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fopenmp")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pedantic")
+
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "NVIDIA" OR CMAKE_CXX_COMPILER_ID STREQUAL "NVHPC")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr --extended-lambda")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_86,code=sm_86")
+    set_property(SOURCE src/bench.cpp PROPERTY LANGUAGE CUDA)
+    set_target_properties(bench PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    set_target_properties(bench PROPERTIES CUDA_ARCHITECTURES "86")
+
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ferror-limit=1")
+
+endif()
+
+if(APPLE)
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
     set(CMAKE_THREAD_LIBS_INIT "-lpthread")
     set(CMAKE_HAVE_THREADS_LIBRARY 1)
     set(CMAKE_USE_WIN32_THREADS_INIT 0)
     set(CMAKE_USE_PTHREADS_INIT 1)
     set(THREADS_PREFER_PTHREAD_FLAG ON)
+<<<<<<< HEAD
 endif ()
 
 find_package(Threads REQUIRED)
@@ -237,6 +289,16 @@ if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif ()
 =======
+=======
+endif()
+find_package(Threads REQUIRED)
+
+if(${USEARCH_USE_OPENMP})
+    find_package(OpenMP REQUIRED)
+    include_directories(${OPENMP_INCLUDE_DIRS})
+endif()
+
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
 if(${USEARCH_USE_JEMALLOC})
     include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/jemalloc.cmake")
 endif()
@@ -245,6 +307,7 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/clipp.cmake")
 include_directories("${CMAKE_CURRENT_SOURCE_DIR}/include")
 include_directories("${CMAKE_CURRENT_SOURCE_DIR}/fp16/include")
 include_directories("${CMAKE_CURRENT_SOURCE_DIR}/simsimd/include")
+<<<<<<< HEAD
 >>>>>>> 5461e0a (Add: Argument parser for C++ benchmarks)
 
 <<<<<<< HEAD
@@ -468,12 +531,18 @@ if (${USEARCH_BUILD_SQLITE})
 endif ()
 =======
 =======
+=======
+
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
 # Define our header-only library.
 add_library(usearch INTERFACE)
 target_sources(usearch INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include/usearch/usearch.hpp")
 target_include_directories(usearch INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
+<<<<<<< HEAD
 >>>>>>> 7f6edc2 (Docs: C++ usage instructions)
+=======
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
 # Define the targets
 add_executable(bench src/bench.cpp)
 target_link_libraries(bench PRIVATE Threads::Threads)
@@ -483,4 +552,7 @@ endif()
 if(${USEARCH_USE_JEMALLOC})
     target_link_libraries(bench PRIVATE ${JEMALLOC_LIBRARIES})
 endif()
+<<<<<<< HEAD
 >>>>>>> 0c2b175 (Refactor: CPython without OpenMP)
+=======
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)

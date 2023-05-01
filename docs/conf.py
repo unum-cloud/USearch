@@ -6,11 +6,19 @@
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
+<<<<<<< HEAD
 project = "Unum · USearch"
 copyright = "2023, Unum"
 author = "Unum"
 release = open("../VERSION", "r").read().strip()
 with open("_static/custom.js", "r+") as js:
+=======
+project = 'Unum · USearch'
+copyright = '2023, Unum'
+author = 'Unum'
+release = open('../VERSION', 'r').read().strip()
+with open('_static/custom.js', 'r+') as js:
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
     content = js.read()
     js.seek(0)
     js.truncate()
@@ -49,6 +57,7 @@ html_css_files = ["custom.css"]
 html_js_files = ["custom.js"]
 html_baseurl = "/docs/usearch/"
 
+<<<<<<< HEAD
 breathe_projects = {"USearch": "../build/xml"}
 breathe_default_project = "USearch"
 
@@ -58,3 +67,7 @@ breathe_default_project = "USearch"
 #   js_source_path = "../javascript/usearch.ts"
 #   jsdoc_config_path = "../javascript/tsconfig-cjs.json"
 js_source_path = "../javascript/dist/cjs/usearch.js"
+=======
+breathe_projects = {'USearch': '../build/xml'}
+breathe_default_project = 'USearch'
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)

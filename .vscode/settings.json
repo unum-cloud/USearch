@@ -1,5 +1,6 @@
 {
 <<<<<<< HEAD
+<<<<<<< HEAD
   "[go]": {
     "editor.defaultFormatter": "golang.go",
     "editor.formatOnSave": true
@@ -258,6 +259,8 @@
   "python.testing.pytestEnabled": true,
   "python.testing.unittestEnabled": false
 =======
+=======
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
     "files.associations": {
         "array": "cpp",
         "atomic": "cpp",
@@ -333,10 +336,13 @@
         "typeinfo": "cpp",
         "valarray": "cpp",
 <<<<<<< HEAD
+<<<<<<< HEAD
         "variant": "cpp"
     }
 >>>>>>> 2f02aa7 (Refactor: GDB, C-style function pointers in Py)
 =======
+=======
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
         "variant": "cpp",
         "__bit_reference": "cpp",
         "__bits": "cpp",
@@ -370,5 +376,8 @@
         "simsimd",
         "usearch"
     ]
+<<<<<<< HEAD
 >>>>>>> 3d72930 (Refactor: Shorter names)
+=======
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
 }

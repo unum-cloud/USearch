@@ -1,21 +1,28 @@
 {
     "name": "usearch",
 <<<<<<< HEAD
+<<<<<<< HEAD
     "version": "2.21.0",
     "description": "Smaller & Faster Single-File Vector Search Engine from Unum",
     "author": "Ash Vardanian (https://ashvardanian.com/)",
     "license": "Apache 2.0",
     "homepage": "https://unum-cloud.github.io/usearch/",
 =======
+=======
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
     "version": "0.1.0",
     "description": "",
     "author": "Ashot Vardanian",
     "license": "Apache 2.0",
+<<<<<<< HEAD
 >>>>>>> 59cbf86 (Add: NodeJS bindings)
+=======
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
     "repository": {
         "type": "git",
         "url": "https://github.com/unum-cloud/usearch.git"
     },
+<<<<<<< HEAD
 <<<<<<< HEAD
     "bugs": {
         "url": "https://github.com/unum-cloud/usearch/issues",
@@ -65,6 +72,8 @@
     }
 }
 =======
+=======
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
     "private": true,
     "gypfile": true,
     "engines": {
@@ -74,5 +83,9 @@
         "bindings": "~1.2.1",
         "node-addon-api": "^3.0.0"
     }
+<<<<<<< HEAD
 }
 >>>>>>> 59cbf86 (Add: NodeJS bindings)
+=======
+}
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)

@@ -3,6 +3,7 @@
         {
             "target_name": "usearch",
 <<<<<<< HEAD
+<<<<<<< HEAD
             "sources": ["javascript/lib.cpp", "simsimd/c/lib.c"],
             "cflags": [
                 "-fexceptions",
@@ -20,11 +21,16 @@
             "sources": [
                 "src/javascript.cpp"
 >>>>>>> 59cbf86 (Add: NodeJS bindings)
+=======
+            "sources": [
+                "src/javascript.cpp"
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
             ],
             "include_dirs": [
                 "<!@(node -p \"require('node-addon-api').include\")",
                 "include",
                 "fp16/include",
+<<<<<<< HEAD
 <<<<<<< HEAD
                 "simsimd/include",
             ],
@@ -104,6 +110,8 @@
                 ],
             ],
 =======
+=======
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
                 "simsimd/include"
             ],
             "dependencies": [
@@ -118,7 +126,10 @@
                     }
                 }]
             ]
+<<<<<<< HEAD
 >>>>>>> 59cbf86 (Add: NodeJS bindings)
+=======
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
         }
     ]
 }

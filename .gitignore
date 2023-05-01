@@ -1,13 +1,17 @@
 <<<<<<< HEAD
+<<<<<<< HEAD
 # Ignore all files without an extension
 
 =======
 >>>>>>> 73a88b7 (Add: Initial Rust version)
+=======
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
 # Temporary files
 .DS_Store
 *.fbin
 *.ibin
 datasets
+<<<<<<< HEAD
 <<<<<<< HEAD
 bin
 *.usearch
@@ -77,6 +81,8 @@ csharp/**/[Oo]bj/
 csharp/lib
 csharp/packages
 =======
+=======
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
 *.usearch
 
 # C++ builds
@@ -101,7 +107,10 @@ node_modules/
 Cargo.lock
 target/ 
 
+<<<<<<< HEAD
 >>>>>>> 73a88b7 (Add: Initial Rust version)
+=======
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
 
 # Prerequisites
 *.d
@@ -125,9 +134,12 @@ target/
 *.mod
 *.smod
 
+<<<<<<< HEAD
 # Allow golang go.mod
 !go.mod
 
+=======
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
 # Compiled Static libraries
 *.lai
 *.la
@@ -138,4 +150,7 @@ target/
 *.exe
 *.out
 *.app
+<<<<<<< HEAD
 
+=======
+>>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
