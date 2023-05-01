@@ -248,6 +248,7 @@ include_directories("${CMAKE_CURRENT_SOURCE_DIR}/simsimd/include")
 >>>>>>> 5461e0a (Add: Argument parser for C++ benchmarks)
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 # Include directories
 set(USEARCH_HEADER_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/fp16/include"
                             "${CMAKE_CURRENT_SOURCE_DIR}/simsimd/include"
@@ -466,6 +467,13 @@ if (${USEARCH_BUILD_SQLITE})
     add_subdirectory(sqlite)
 endif ()
 =======
+=======
+# Define our header-only library.
+add_library(usearch INTERFACE)
+target_sources(usearch INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include/usearch/usearch.hpp")
+target_include_directories(usearch INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+
+>>>>>>> 7f6edc2 (Docs: C++ usage instructions)
 # Define the targets
 add_executable(bench src/bench.cpp)
 target_link_libraries(bench PRIVATE Threads::Threads)
