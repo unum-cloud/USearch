@@ -92,12 +92,16 @@ def test_exact_search(rows: int, cols: int, k: int, reordered: bool):
 
     matches: BatchMatches = search(original, original[reordered_keys], k, exact=True)
 <<<<<<< HEAD
+<<<<<<< HEAD
     top_matches = [int(m.keys[0]) for m in matches] if rows > 1 else [int(matches.keys[0])]
 =======
     top_matches = (
         [int(m.keys[0]) for m in matches] if rows > 1 else [int(matches.keys[0][0])]
     )
 >>>>>>> 6adab3d (Breaking: Modify search method to always return BatchMatches for batched inputs)
+=======
+    top_matches = [int(m.keys[0]) for m in matches]
+>>>>>>> 52a6e44 (Refactor: Align with updated search method behavior)
     assert top_matches == list(reordered_keys)
 
     matches: Matches = search(original, original[-1], k, exact=True)
