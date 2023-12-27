@@ -55,6 +55,8 @@ Checks: '*,
 CheckOptions:
   - key: hicpp-special-member-functions.AllowSoleDefaultDtor
     value: 1
+  - key: readability-braces-around-statements.ShortStatementLines
+    value: 10
 
 WarningsAsErrors: '*'
 HeaderFilterRegex: '.*hpp$'
