@@ -3030,17 +3030,18 @@ class index_gt {
      *  @param[in] callback On-success callback, executed while the `member_ref_t` is still under lock.
      */
     template <                                   //
-        typename node_proxy_at,                  //
         typename value_at,                       //
+        typename node_proxy_at,                  //
         typename metric_at,                      //
         typename callback_at = dummy_callback_t, //
         typename prefetch_at = dummy_prefetch_t  //
         >
-    add_result_t add(                                           //
-        node_proxy_at&& ext_node_at_,                           //
-        vector_key_t key, value_at&& value, metric_at&& metric, //
-        index_update_config_t config = {},                      //
-        callback_at&& callback = callback_at{},                 //
+    add_result_t add(                           //
+        vector_key_t key, value_at&& value,     //
+        node_proxy_at&& ext_node_at_,           //
+        metric_at&& metric,                     //
+        index_update_config_t config = {},      //
+        callback_at&& callback = callback_at{}, //
         prefetch_at&& prefetch = prefetch_at{}) usearch_noexcept_m {
 
         add_result_t result;
@@ -3185,17 +3186,17 @@ class index_gt {
      *  @param[in] callback On-success callback, executed while the `member_ref_t` is still under lock.
      */
     template <                                   //
-        typename node_proxy_at,                  //
         typename value_at,                       //
+        typename node_proxy_at,                  //
         typename metric_at,                      //
         typename callback_at = dummy_callback_t, //
         typename prefetch_at = dummy_prefetch_t  //
         >
     add_result_t update(                        //
-        node_proxy_at&& ext_node_at_,           //
         member_iterator_t iterator,             //
         vector_key_t key,                       //
         value_at&& value,                       //
+        node_proxy_at&& ext_node_at_,           //
         metric_at&& metric,                     //
         index_update_config_t config = {},      //
         callback_at&& callback = callback_at{}, //
@@ -3479,16 +3480,16 @@ class index_gt {
      *  @return Smart object referencing temporary memory. Valid until next `search()`, `add()`, or `cluster()`.
      */
     template <                                     //
-        typename nodes_proxy_at,                   //
         typename value_at,                         //
+        typename nodes_proxy_at,                   //
         typename metric_at,                        //
         typename predicate_at = dummy_predicate_t, //
         typename prefetch_at = dummy_prefetch_t    //
         >
     search_result_t search(                        //
-        nodes_proxy_at&& nodes_proxy,              //
         value_at&& query,                          //
         std::size_t wanted,                        //
+        nodes_proxy_at&& nodes_proxy,              //
         metric_at&& metric,                        //
         index_search_config_t config = {},         //
         predicate_at&& predicate = predicate_at{}, //
@@ -3562,16 +3563,16 @@ class index_gt {
      *  @return Smart object referencing temporary memory. Valid until next `search()`, `add()`, or `cluster()`.
      */
     template <                                     //
-        typename node_proxy_at,                    //
         typename value_at,                         //
+        typename node_proxy_at,                    //
         typename metric_at,                        //
         typename predicate_at = dummy_predicate_t, //
         typename prefetch_at = dummy_prefetch_t    //
         >
     cluster_result_t cluster(                      //
-        node_proxy_at&& ext_node_at_,              //
         value_at&& query,                          //
         std::size_t level,                         //
+        node_proxy_at&& ext_node_at_,              //
         metric_at&& metric,                        //
         index_cluster_config_t config = {},        //
         predicate_at&& predicate = predicate_at{}, //
@@ -4609,11 +4610,12 @@ class index_gt {
             do {
                 changed = false;
                 node_lock_t closest_lock = node_lock_(closest_slot);
+                ext_node_at_.node_lock_(closest_slot);
                 neighbors_ref_t closest_neighbors = neighbors_non_base_(node_at_(closest_slot), level);
 
                 using vvv = typename std::decay<decltype(*this)>::type::vector_key_t;
                 static_assert(std::is_same<vvv, vector_key_t>::value, "this cannot happen");
-                ext_node_at_(closest_slot);
+                node_t a = ext_node_at_(closest_slot);
 
                 // Optional prefetching
                 if (!is_dummy<prefetch_at>()) {
