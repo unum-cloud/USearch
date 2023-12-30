@@ -273,7 +273,11 @@ void test_minimal_three_vectors(index_at& index, //
     expect((index.stats(0).nodes == 3));
 
     // Check if clustering endpoint compiles
+<<<<<<< HEAD
     index.cluster(vector_first.data(), 0, args...);
+=======
+    // index.cluster(vector_first, 0, args...);
+>>>>>>> aac0233 (Slowly moving index storage outside of index.hpp)
 
     // Try removals and replacements
     if constexpr (punned_ak) {
@@ -675,6 +679,7 @@ void test_cosine(std::size_t collection_size, std::size_t dimensions) {
     using slot_t = slot_at;
 
     using index_typed_t = index_gt<float, vector_key_t, slot_t>;
+    using index_storage_t = nodes_proxy_t<vector_key_t, uint32_t>;
     using member_cref_t = typename index_typed_t::member_cref_t;
     using member_citerator_t = typename index_typed_t::member_citerator_t;
 
@@ -710,6 +715,7 @@ void test_cosine(std::size_t collection_size, std::size_t dimensions) {
         std::printf("-- templates with connectivity %zu \n", connectivity);
         metric_t metric{&vector_of_vectors, dimensions};
         index_config_t config(connectivity);
+<<<<<<< HEAD
 
         // Toy example
         if (vector_of_vectors.size() >= 3) {
@@ -728,6 +734,13 @@ void test_cosine(std::size_t collection_size, std::size_t dimensions) {
     };
     // for (std::size_t connectivity : {3, 13, 50})
     //     run_templated(connectivity);
+=======
+        index_typed_t index_typed(config);
+        std::vector<node_t<vector_key_t>> nodes;
+        index_storage_t storage{&nodes};
+        test_cosine<false>(index_typed, matrix, storage, metric);
+    }
+>>>>>>> aac0233 (Slowly moving index storage outside of index.hpp)
 
     // Type-punned:
     auto run_punned = [&](bool multi, bool enable_key_lookups, std::size_t connectivity) {

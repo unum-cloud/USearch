@@ -372,8 +372,9 @@ template <typename nodes_proxy_key_t, typename compressed_slot_at = default_slot
     using vector_key_t = nodes_proxy_key_t;
     using dynamic_allocator_t = aligned_allocator_gt<byte_t, 64>;
     using nodes_mutexes_t = bitset_gt<dynamic_allocator_t>;
+    using nodes_t = std::vector<node_t<nodes_proxy_key_t>>;
     // index_dense_gt const* index_ = nullptr;
-    std::vector<node_t<nodes_proxy_key_t>> node_;
+    nodes_t* nodes_;
     /// @brief  Mutex, that limits concurrent access to `nodes_`.
     mutable nodes_mutexes_t nodes_mutexes_{};
     struct node_lock_t {
@@ -384,11 +385,14 @@ template <typename nodes_proxy_key_t, typename compressed_slot_at = default_slot
     };
 
   public:
-    nodes_proxy_t() noexcept { node_ = std::move(std::vector<node_t<nodes_proxy_key_t>>(1000)); }
+    nodes_proxy_t(nodes_t* nodes) noexcept { nodes_ = nodes; }
 
     // warning: key_t is used in sys/types.h
     inline node_t<vector_key_t> operator()(std::size_t slot) const noexcept { /*return index_->nodes_[];*/
-        return node_[slot];
+        nodes_t v = *nodes_;
+        if (slot >= v.size())
+            v.resize(slot + 1);
+        return v[slot];
     }
 
     inline node_lock_t node_lock_(std::size_t slot) const noexcept {
@@ -489,6 +493,7 @@ class index_dense_gt {
     using vectors_lookup_allocator_t = aligned_allocator_gt<byte_t*, 64>;
     using vectors_lookup_t = buffer_gt<byte_t*, vectors_lookup_allocator_t>;
 
+<<<<<<< HEAD
     /// @brief For every managed `compressed_slot_t` stores a pointer to the allocated vector copy.
     mutable vectors_lookup_t vectors_lookup_;
 
@@ -497,6 +502,13 @@ class index_dense_gt {
 
     /// @brief Originally forms and array of integers [0, threads], marking all as available.
     mutable available_threads_t available_threads_;
+=======
+    /// @brief  C-style array of `node_t` smart-pointers.
+    std::vector<node_t<key_t>> nodes_;
+
+    /// @brief Originally forms and array of integers [0, threads], marking all
+    mutable std::vector<std::size_t> available_threads_;
+>>>>>>> aac0233 (Slowly moving index storage outside of index.hpp)
 
     /// @brief Mutex, controlling concurrent access to `available_threads_`.
     mutable std::mutex available_threads_mutex_;
@@ -2106,7 +2118,7 @@ class index_dense_gt {
         update_config.thread = lock.thread_id;
         update_config.expansion = config_.expansion_add;
 
-        auto prox = nodes_proxy_t<vector_key_t, compressed_slot_t>();
+        nodes_proxy_t<vector_key_t, compressed_slot_t> prox(&this->nodes_);
         metric_proxy_t metric{*this};
         return reuse_node ? typed_->update(typed_->iterator_at(free_slot), key, vector_data, prox, metric,
                                            update_config, on_success)
@@ -2150,11 +2162,15 @@ class index_dense_gt {
 =======
         auto allow = [=](member_cref_t const& member) noexcept { return member.key != free_key_; };
 
+<<<<<<< HEAD
         auto prox = nodes_proxy_t<vector_key_t>();
 <<<<<<< HEAD
         return typed_->search(prox, vector_data, wanted, metric_proxy_t{*this}, search_config, allow);
 >>>>>>> 2df158c (Initial trials to move node allocation outside of index.hpp)
 =======
+=======
+        auto prox = nodes_proxy_t<vector_key_t>(&this->nodes_);
+>>>>>>> aac0233 (Slowly moving index storage outside of index.hpp)
         return typed_->search(vector_data, wanted, prox, metric_proxy_t{*this}, search_config, allow);
 >>>>>>> d4fb277 (Move storage parameter to right before metric)
     }
