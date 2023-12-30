@@ -1997,6 +1997,48 @@ template <typename key_at = default_key_t> struct member_ref_gt {
 template <typename key_at> inline std::size_t get_slot(member_ref_gt<key_at> const& m) noexcept { return m.slot; }
 template <typename key_at> inline key_at get_key(member_ref_gt<key_at> const& m) noexcept { return m.key; }
 
+using level_t = std::int16_t;
+// todo:: this is public, but then we make assumptions which are not communicated via this interface
+// clean these up later
+//
+/**
+ *  @brief  A loosely-structured handle for every node. One such node is created for every member.
+ *          To minimize memory usage and maximize the number of entries per cache-line, it only
+ *          stores to pointers. The internal tape starts with a `vector_key_t` @b key, then
+ *          a `level_t` for the number of graph @b levels in which this member appears,
+ *          then the { `neighbors_count_t`, `compressed_slot_t`, `compressed_slot_t` ... } sequences
+ *          for @b each-level.
+ */
+template <typename key_at> class node_t {
+    byte_t* tape_{};
+
+    /**
+     *  @brief  How many bytes of memory are needed to form the "head" of the node.
+     */
+    static constexpr std::size_t node_head_bytes_() { return sizeof(vector_key_t) + sizeof(level_t); }
+
+  public:
+    using vector_key_t = key_at;
+    explicit node_t(byte_t* tape) noexcept : tape_(tape) {}
+    byte_t* tape() const noexcept { return tape_; }
+    byte_t* neighbors_tape() const noexcept { return tape_ + node_head_bytes_(); }
+    explicit operator bool() const noexcept { return tape_; }
+
+    node_t() = default;
+    node_t(node_t const&) = default;
+    node_t& operator=(node_t const&) = default;
+
+    misaligned_ref_gt<vector_key_t const> ckey() const noexcept { return {tape_}; }
+    misaligned_ref_gt<vector_key_t> key() const noexcept { return {tape_}; }
+    misaligned_ref_gt<level_t> level() const noexcept { return {tape_ + sizeof(vector_key_t)}; }
+
+    void key(vector_key_t v) noexcept { return misaligned_store<vector_key_t>(tape_, v); }
+    void level(level_t v) noexcept { return misaligned_store<level_t>(tape_ + sizeof(vector_key_t), v); }
+};
+
+static_assert(std::is_trivially_copy_constructible<node_t<default_key_t>>::value, "Nodes must be light!");
+static_assert(std::is_trivially_destructible<node_t<default_key_t>>::value, "Nodes must be light!");
+
 /**
  *  @brief  Approximate Nearest Neighbors Search @b index-structure using the
  *          Hierarchical Navigable Small World @b (HNSW) graphs algorithm.
@@ -2116,6 +2158,9 @@ class index_gt {
     using member_cref_t = member_cref_gt<vector_key_t>;
     using member_ref_t = member_ref_gt<vector_key_t>;
 
+    template <typename v> using o_node_t = node_t<v>;
+    using node_t = node_t<vector_key_t>;
+
     template <typename ref_at, typename index_at> class member_iterator_gt {
         using ref_t = ref_at;
         using index_t = index_at;
@@ -2198,7 +2243,6 @@ class index_gt {
      *          alignment in most common cases.
      */
     using neighbors_count_t = std::uint32_t;
-    using level_t = std::int16_t;
 
     /**
      *  @brief  How many bytes of memory are needed to form the "head" of the node.
@@ -2227,6 +2271,7 @@ class index_gt {
     using next_candidates_t = max_heap_gt<candidate_t, std::less<candidate_t>, candidates_allocator_t>;
 
     /**
+<<<<<<< HEAD
      *  @brief  A loosely-structured handle for every node. One such node is created for every member.
      *          To minimize memory usage and maximize the number of entries per cache-line, it only
      *          stores to pointers. The internal tape starts with a `vector_key_t` @b key, then
@@ -2261,6 +2306,8 @@ class index_gt {
     static_assert(std::is_trivially_destructible<node_t>::value, "Nodes must be light!");
 
     /**
+=======
+>>>>>>> 2df158c (Initial trials to move node allocation outside of index.hpp)
      *  @brief  A slice of the node's tape, containing a the list of neighbors
      *          for a node in a single graph level. It's pre-allocated to fit
      *          as many neighbors "slots", as may be needed at the target level,
@@ -2983,12 +3030,14 @@ class index_gt {
      *  @param[in] callback On-success callback, executed while the `member_ref_t` is still under lock.
      */
     template <                                   //
+        typename node_proxy_at,                  //
         typename value_at,                       //
         typename metric_at,                      //
         typename callback_at = dummy_callback_t, //
         typename prefetch_at = dummy_prefetch_t  //
         >
     add_result_t add(                                           //
+        node_proxy_at&& ext_node_at_,                           //
         vector_key_t key, value_at&& value, metric_at&& metric, //
         index_update_config_t config = {},                      //
         callback_at&& callback = callback_at{},                 //
@@ -3069,6 +3118,7 @@ class index_gt {
         result.computed_distances_in_reverse_refines = context.computed_distances_in_reverse_refines;
         result.visited_members = context.iteration_cycles;
 
+<<<<<<< HEAD
         // Go down the level, tracking only the closest match
         compressed_slot_t closest_slot = search_for_one_( //
             value, metric, prefetch,                      //
@@ -3087,6 +3137,13 @@ class index_gt {
             }
             form_reverse_links_(metric, new_slot, closest_view, value, level, context);
         }
+=======
+        connect_node_across_levels_(                                //
+            ext_node_at_,                                           //
+            value, metric, prefetch,                                //
+            new_slot, entry_idx_copy, max_level_copy, target_level, //
+            config, context);
+>>>>>>> 2df158c (Initial trials to move node allocation outside of index.hpp)
 
         // Normalize stats
         result.computed_distances = context.computed_distances - result.computed_distances;
@@ -3128,12 +3185,14 @@ class index_gt {
      *  @param[in] callback On-success callback, executed while the `member_ref_t` is still under lock.
      */
     template <                                   //
+        typename node_proxy_at,                  //
         typename value_at,                       //
         typename metric_at,                      //
         typename callback_at = dummy_callback_t, //
         typename prefetch_at = dummy_prefetch_t  //
         >
     add_result_t update(                        //
+        node_proxy_at&& ext_node_at_,           //
         member_iterator_t iterator,             //
         vector_key_t key,                       //
         value_at&& value,                       //
@@ -3182,6 +3241,7 @@ class index_gt {
         result.computed_distances = context.computed_distances;
         result.visited_members = context.iteration_cycles;
 
+<<<<<<< HEAD
         // Go down the level, tracking only the closest match;
         // It may even be equal to the `updated_slot`
         compressed_slot_t closest_slot =
@@ -3213,6 +3273,14 @@ class index_gt {
             form_reverse_links_(metric, updated_slot, closest_view, value, level, context);
         }
         updated_node.key(key);
+=======
+        connect_node_across_levels_(                       //
+            ext_node_at_,                                  //
+            value, metric, prefetch,                       //
+            old_slot, entry_slot_, max_level_, node_level, //
+            config, context);
+        node.key(key);
+>>>>>>> 2df158c (Initial trials to move node allocation outside of index.hpp)
 
         // Normalize stats
         result.computed_distances = context.computed_distances - result.computed_distances;
@@ -3411,12 +3479,14 @@ class index_gt {
      *  @return Smart object referencing temporary memory. Valid until next `search()`, `add()`, or `cluster()`.
      */
     template <                                     //
+        typename nodes_proxy_at,                   //
         typename value_at,                         //
         typename metric_at,                        //
         typename predicate_at = dummy_predicate_t, //
         typename prefetch_at = dummy_prefetch_t    //
         >
     search_result_t search(                        //
+        nodes_proxy_at&& nodes_proxy,              //
         value_at&& query,                          //
         std::size_t wanted,                        //
         metric_at&& metric,                        //
@@ -3459,8 +3529,13 @@ class index_gt {
             if (!top.reserve(expansion))
                 return result.failed("Out of memory!");
 
+<<<<<<< HEAD
             compressed_slot_t closest_slot = search_for_one_(
                 query, metric, prefetch, static_cast<compressed_slot_t>(entry_slot_), max_level_, 0, context);
+=======
+            std::size_t closest_slot =
+                search_for_one_(nodes_proxy, query, metric, prefetch, entry_slot_, max_level_, 0, context);
+>>>>>>> 2df158c (Initial trials to move node allocation outside of index.hpp)
 
             // For bottom layer we need a more optimized procedure
             if (!search_to_find_in_base_(query, metric, predicate, prefetch, closest_slot, expansion, context))
@@ -3487,12 +3562,14 @@ class index_gt {
      *  @return Smart object referencing temporary memory. Valid until next `search()`, `add()`, or `cluster()`.
      */
     template <                                     //
+        typename node_proxy_at,                    //
         typename value_at,                         //
         typename metric_at,                        //
         typename predicate_at = dummy_predicate_t, //
         typename prefetch_at = dummy_prefetch_t    //
         >
     cluster_result_t cluster(                      //
+        node_proxy_at&& ext_node_at_,              //
         value_at&& query,                          //
         std::size_t level,                         //
         metric_at&& metric,                        //
@@ -3515,8 +3592,12 @@ class index_gt {
             return result.failed("Out of memory!");
 
         result.cluster.member =
+<<<<<<< HEAD
             at(search_for_one_(query, metric, prefetch, static_cast<compressed_slot_t>(entry_slot_), max_level_,
                                static_cast<level_t>(level <= 0 ? 0 : level - 1), context));
+=======
+            at(search_for_one_(ext_node_at_, query, metric, prefetch, entry_slot_, max_level_, level - 1, context));
+>>>>>>> 2df158c (Initial trials to move node allocation outside of index.hpp)
         result.cluster.distance = context.measure(query, result.cluster.member, metric);
 
         // Normalize stats
@@ -4079,6 +4160,8 @@ class index_gt {
 #pragma endregion
 #endif
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
     /**
      *  @brief  Performs compaction on the whole HNSW index, purging some entries
      *          and links to them, while also generating a more efficient mapping,
@@ -4104,6 +4187,7 @@ class index_gt {
         executor_at&& executor = executor_at{}, //
         progress_at&& progress = progress_at{}, //
         prefetch_at&& prefetch = prefetch_at{}) noexcept {
+<<<<<<< HEAD
 
         // Export all the keys, slots, and levels.
         // Partition them with the predicate.
@@ -4183,7 +4267,11 @@ class index_gt {
         nodes_ = std::move(reordered_nodes);
         tape_allocator_ = std::move(reordered_tape);
         entry_slot_ = old_slot_to_new[entry_slot_];
+=======
+        return;
+>>>>>>> 2df158c (Initial trials to move node allocation outside of index.hpp)
     }
+#pragma GCC diagnostic pop
 
     /**
      *  @brief  Scans the whole collection, removing the links leading towards
@@ -4322,12 +4410,33 @@ class index_gt {
         return {nodes_mutexes_, slot};
     }
 
+<<<<<<< HEAD
     struct node_conditional_lock_t {
         nodes_mutexes_t& mutexes;
         std::size_t slot;
         inline ~node_conditional_lock_t() noexcept {
             if (slot != std::numeric_limits<std::size_t>::max())
                 mutexes.atomic_reset(slot);
+=======
+    template <typename nodes_proxy_at, typename value_at, typename metric_at, typename prefetch_at>
+    void connect_node_across_levels_(                                                                //
+        nodes_proxy_at&& ext_node_at_, value_at&& value, metric_at&& metric, prefetch_at&& prefetch, //
+        std::size_t node_slot, std::size_t entry_slot, level_t max_level, level_t target_level,      //
+        index_update_config_t const& config, context_t& context) usearch_noexcept_m {
+        using vv = typename std::decay<decltype(*this)>::type::vector_key_t;
+
+        // Go down the level, tracking only the closest match
+        std::size_t closest_slot = search_for_one_( //
+            ext_node_at_, value, metric, prefetch,  //
+            entry_slot, max_level, target_level, context);
+
+        // From `target_level` down perform proper extensive search
+        for (level_t level = (std::min)(target_level, max_level); level >= 0; --level) {
+            // TODO: Handle out of memory conditions
+            search_to_insert_(value, metric, prefetch, closest_slot, node_slot, level, config.expansion, context);
+            closest_slot = connect_new_node_(metric, node_slot, level, context);
+            reconnect_neighbor_nodes_(metric, node_slot, value, level, context);
+>>>>>>> 2df158c (Initial trials to move node allocation outside of index.hpp)
         }
     };
 
@@ -4476,8 +4585,14 @@ class index_gt {
         candidates_iterator_t end() const noexcept { return {index, neighbors, visits, neighbors.size()}; }
     };
 
+<<<<<<< HEAD
     template <typename value_at, typename metric_at, typename prefetch_at = dummy_prefetch_t>
     compressed_slot_t search_for_one_(                                //
+=======
+    template <typename ext_node_at_at, typename value_at, typename metric_at, typename prefetch_at = dummy_prefetch_t>
+    std::size_t search_for_one_(                                      //
+        ext_node_at_at&& ext_node_at_,                                //
+>>>>>>> 2df158c (Initial trials to move node allocation outside of index.hpp)
         value_at&& query, metric_at&& metric, prefetch_at&& prefetch, //
         compressed_slot_t closest_slot, level_t begin_level, level_t end_level, context_t& context) const noexcept {
 
@@ -4495,6 +4610,10 @@ class index_gt {
                 changed = false;
                 node_lock_t closest_lock = node_lock_(closest_slot);
                 neighbors_ref_t closest_neighbors = neighbors_non_base_(node_at_(closest_slot), level);
+
+                using vvv = typename std::decay<decltype(*this)>::type::vector_key_t;
+                static_assert(std::is_same<vvv, vector_key_t>::value, "this cannot happen");
+                ext_node_at_(closest_slot);
 
                 // Optional prefetching
                 if (!is_dummy<prefetch_at>()) {

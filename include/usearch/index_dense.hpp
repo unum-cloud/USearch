@@ -368,6 +368,39 @@ inline index_dense_metadata_result_t index_dense_metadata_from_buffer(memory_map
     return result.failed("Not a dense USearch index!");
 }
 
+template <typename nodes_proxy_key_t, typename compressed_slot_at = default_slot_t> class nodes_proxy_t {
+    using vector_key_t = nodes_proxy_key_t;
+    using dynamic_allocator_t = aligned_allocator_gt<byte_t, 64>;
+    using nodes_mutexes_t = bitset_gt<dynamic_allocator_t>;
+    // index_dense_gt const* index_ = nullptr;
+    std::vector<node_t<nodes_proxy_key_t>> node_;
+    /// @brief  Mutex, that limits concurrent access to `nodes_`.
+    mutable nodes_mutexes_t nodes_mutexes_{};
+    struct node_lock_t {
+        nodes_mutexes_t& mutexes;
+        std::size_t slot;
+        inline ~node_lock_t() noexcept { /*mutexes.atomic_reset(slot);*/
+        }
+    };
+
+  public:
+    nodes_proxy_t() noexcept { node_ = std::move(std::vector<node_t<nodes_proxy_key_t>>(1000)); }
+
+    // warning: key_t is used in sys/types.h
+    inline node_t<vector_key_t> operator()(std::size_t slot) const noexcept { /*return index_->nodes_[];*/
+        return node_[slot];
+    }
+
+    inline node_lock_t node_lock_(std::size_t slot) const noexcept {
+        // while (nodes_mutexes_.atomic_set(slot))
+        //     ;
+        return {nodes_mutexes_, slot};
+    }
+};
+// template <typename key_at = default_key_t, typename compressed_slot_at = default_slot_t> //
+// nodes_proxy_t<vector_key_t> make_storage(index_dense_gt<key_at, compressed_slot_at>index) { return
+// nodes_proxy_t<vector_key_t>(index); }
+
 /**
  *  @brief  Oversimplified type-punned index for equidimensional vectors
  *          with automatic @b down-casting, hardware-specific @b SIMD metrics,
@@ -2073,10 +2106,11 @@ class index_dense_gt {
         update_config.thread = lock.thread_id;
         update_config.expansion = config_.expansion_add;
 
+        auto prox = nodes_proxy_t<vector_key_t, compressed_slot_t>();
         metric_proxy_t metric{*this};
-        return reuse_node //
-                   ? typed_->update(typed_->iterator_at(free_slot), key, vector_data, metric, update_config, on_success)
-                   : typed_->add(key, vector_data, metric, update_config, on_success);
+        return reuse_node ? typed_->update(prox, typed_->iterator_at(free_slot), key, vector_data, metric,
+                                           update_config, on_success)
+                          : typed_->add(prox, key, vector_data, metric, update_config, on_success);
     }
 
     template <typename scalar_at, typename predicate_at>
@@ -2098,6 +2132,7 @@ class index_dense_gt {
         search_config.expansion = config_.expansion_search;
         search_config.exact = exact;
 
+<<<<<<< HEAD
         vector_key_t free_key_copy = free_key_;
         if (std::is_same<typename std::decay<predicate_at>::type, dummy_predicate_t>::value) {
             auto allow = [free_key_copy](member_cref_t const& member) noexcept {
@@ -2112,6 +2147,12 @@ class index_dense_gt {
             auto typed_result = typed_->search(vector_data, wanted, metric_proxy_t{*this}, search_config, allow);
             return search_result_t{std::move(typed_result), std::move(lock)};
         }
+=======
+        auto allow = [=](member_cref_t const& member) noexcept { return member.key != free_key_; };
+
+        auto prox = nodes_proxy_t<vector_key_t>();
+        return typed_->search(prox, vector_data, wanted, metric_proxy_t{*this}, search_config, allow);
+>>>>>>> 2df158c (Initial trials to move node allocation outside of index.hpp)
     }
 
     template <typename scalar_at>
