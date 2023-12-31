@@ -12,6 +12,7 @@
  *      - 128-bit `uuid_t` keys and `enum slot64_t : std::uint64_t` make most sense for
  *        for database users, implementing portable, concurrent systems.
  */
+<<<<<<< HEAD
 #include <algorithm>     // `std::shuffle`
 #include <cassert>       // `assert`
 #include <cmath>         // `std::abs`
@@ -22,6 +23,13 @@
 
 #define SZ_USE_X86_AVX512 0            // Sanitizers hate AVX512
 #include <stringzilla/stringzilla.hpp> // Levenshtein distance implementation
+=======
+#include <algorithm> // `std::shuffle`
+#include <cassert>   // `assert`
+#include <random>    // `std::default_random_engine`
+#include <stdexcept>
+#include <vector> // for std::vector
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
 
 #include <usearch/index.hpp>
 #include <usearch/index_dense.hpp>
@@ -679,7 +687,7 @@ void test_cosine(std::size_t collection_size, std::size_t dimensions) {
     using slot_t = slot_at;
 
     using index_typed_t = index_gt<float, vector_key_t, slot_t>;
-    using index_storage_t = nodes_proxy_t<vector_key_t, uint32_t>;
+    using index_storage_t = storage_proxy_t<vector_key_t, uint32_t>;
     using member_cref_t = typename index_typed_t::member_cref_t;
     using member_citerator_t = typename index_typed_t::member_citerator_t;
 
@@ -737,7 +745,7 @@ void test_cosine(std::size_t collection_size, std::size_t dimensions) {
 =======
         index_typed_t index_typed(config);
         std::vector<node_t<vector_key_t>> nodes;
-        index_storage_t storage{&nodes};
+        index_storage_t storage{&nodes, config};
         test_cosine<false>(index_typed, matrix, storage, metric);
     }
 >>>>>>> aac0233 (Slowly moving index storage outside of index.hpp)

@@ -8,6 +8,15 @@
 #include "index.hpp"
 #include <stdlib.h> // `aligned_alloc`
 
+<<<<<<< HEAD
+=======
+#include <functional> // `std::function`
+#include <iostream>
+#include <numeric> // `std::iota`
+#include <thread>  // `std::thread`
+#include <vector>  // `std::vector`
+
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
 #include <usearch/index.hpp>
 #include <usearch/index_plugins.hpp>
 
@@ -368,11 +377,17 @@ inline index_dense_metadata_result_t index_dense_metadata_from_buffer(memory_map
     return result.failed("Not a dense USearch index!");
 }
 
-template <typename nodes_proxy_key_t, typename compressed_slot_at = default_slot_t> class nodes_proxy_t {
-    using vector_key_t = nodes_proxy_key_t;
+template <typename storage_proxy_key_t, typename compressed_slot_at = default_slot_t> class storage_proxy_t {
+    using vector_key_t = storage_proxy_key_t;
     using dynamic_allocator_t = aligned_allocator_gt<byte_t, 64>;
     using nodes_mutexes_t = bitset_gt<dynamic_allocator_t>;
-    using nodes_t = std::vector<node_t<nodes_proxy_key_t>>;
+    using nodes_t = std::vector<node_t<storage_proxy_key_t>>;
+    /**
+     *  @brief  Integer for the number of node neighbors at a specific level of the
+     *          multi-level graph. It's selected to be `std::uint32_t` to improve the
+     *          alignment in most common cases.
+     */
+    using neighbors_count_t = std::uint32_t;
     // index_dense_gt const* index_ = nullptr;
     nodes_t* nodes_;
     /// @brief  Mutex, that limits concurrent access to `nodes_`.
@@ -383,9 +398,27 @@ template <typename nodes_proxy_key_t, typename compressed_slot_at = default_slot
         inline ~node_lock_t() noexcept { /*mutexes.atomic_reset(slot);*/
         }
     };
+    struct precomputed_constants_t {
+        double inverse_log_connectivity{};
+        std::size_t neighbors_bytes{};
+        std::size_t neighbors_base_bytes{};
+    };
+
+    precomputed_constants_t pre_;
+
+    inline static precomputed_constants_t precompute_(index_config_t const& config) noexcept {
+        precomputed_constants_t pre;
+        pre.inverse_log_connectivity = 1.0 / std::log(static_cast<double>(config.connectivity));
+        pre.neighbors_bytes = config.connectivity * sizeof(compressed_slot_at) + sizeof(neighbors_count_t);
+        pre.neighbors_base_bytes = config.connectivity_base * sizeof(compressed_slot_at) + sizeof(neighbors_count_t);
+        return pre;
+    }
 
   public:
-    nodes_proxy_t(nodes_t* nodes) noexcept { nodes_ = nodes; }
+    storage_proxy_t(nodes_t* nodes, index_config_t config) noexcept {
+        nodes_ = nodes;
+        pre_ = precompute_(config);
+    }
 
     // warning: key_t is used in sys/types.h
     inline node_t<vector_key_t> operator()(std::size_t slot) const noexcept { /*return index_->nodes_[];*/
@@ -393,6 +426,44 @@ template <typename nodes_proxy_key_t, typename compressed_slot_at = default_slot
         if (slot >= v.size())
             v.resize(slot + 1);
         return v[slot];
+    }
+
+    inline node_t<vector_key_t> node_at_(std::size_t idx) const noexcept { return (*this)(idx); }
+
+    using span_bytes_t = span_gt<byte_t>;
+
+    // todo:: make these private
+    using node_t = node_t<vector_key_t>;
+    inline span_bytes_t node_bytes_(node_t node) const noexcept { return {node.tape(), node_bytes_(node.level())}; }
+    static constexpr std::size_t node_head_bytes_() { return sizeof(vector_key_t) + sizeof(level_t); }
+    inline std::size_t node_neighbors_bytes_(node_t node) const noexcept { return node_neighbors_bytes_(node.level()); }
+    inline std::size_t node_neighbors_bytes_(level_t level) const noexcept {
+        return pre_.neighbors_base_bytes + pre_.neighbors_bytes * level;
+    }
+    inline std::size_t node_bytes_(level_t level) const noexcept {
+        return node_head_bytes_() + node_neighbors_bytes_(level);
+    }
+    span_bytes_t node_malloc_(level_t level) noexcept {
+        std::size_t node_bytes = node_bytes_(level);
+        byte_t* data = (byte_t*)malloc(node_bytes);
+        return data ? span_bytes_t{data, node_bytes} : span_bytes_t{};
+    }
+
+    node_t node_make_(vector_key_t key, level_t level) noexcept {
+        span_bytes_t node_bytes = node_malloc_(level);
+        if (!node_bytes)
+            return {};
+
+        std::memset(node_bytes.data(), 0, node_bytes.size());
+        node_t node{(byte_t*)node_bytes.data()};
+        node.key(key);
+        node.level(level);
+        return node;
+    }
+
+    void node_append_(vector_key_t key, level_t level) {
+        std::cout << "append caled\n";
+        nodes_->push_back(node_make_(key, level));
     }
 
     inline node_lock_t node_lock_(std::size_t slot) const noexcept {
@@ -2118,7 +2189,7 @@ class index_dense_gt {
         update_config.thread = lock.thread_id;
         update_config.expansion = config_.expansion_add;
 
-        nodes_proxy_t<vector_key_t, compressed_slot_t> prox(&this->nodes_);
+        storage_proxy_t<vector_key_t, compressed_slot_t> prox(&this->nodes_, config_);
         metric_proxy_t metric{*this};
         return reuse_node ? typed_->update(typed_->iterator_at(free_slot), key, vector_data, prox, metric,
                                            update_config, on_success)
@@ -2163,6 +2234,7 @@ class index_dense_gt {
         auto allow = [=](member_cref_t const& member) noexcept { return member.key != free_key_; };
 
 <<<<<<< HEAD
+<<<<<<< HEAD
         auto prox = nodes_proxy_t<vector_key_t>();
 <<<<<<< HEAD
         return typed_->search(prox, vector_data, wanted, metric_proxy_t{*this}, search_config, allow);
@@ -2171,6 +2243,9 @@ class index_dense_gt {
 =======
         auto prox = nodes_proxy_t<vector_key_t>(&this->nodes_);
 >>>>>>> aac0233 (Slowly moving index storage outside of index.hpp)
+=======
+        auto prox = storage_proxy_t<vector_key_t>(&this->nodes_, config_);
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
         return typed_->search(vector_data, wanted, prox, metric_proxy_t{*this}, search_config, allow);
 >>>>>>> d4fb277 (Move storage parameter to right before metric)
     }

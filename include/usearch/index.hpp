@@ -86,6 +86,7 @@
 #endif
 
 // STL includes
+<<<<<<< HEAD
 #include <algorithm>  // `std::sort_heap`
 #include <atomic>     // `std::atomic`
 #include <bitset>     // `std::bitset`
@@ -106,6 +107,21 @@
 #define usearch_concat_m(a, b) usearch_concat_helper_m(a, b)
 #define usearch_stringify_helper_m(x) #x
 #define usearch_stringify_m(x) usearch_stringify_helper_m(x)
+=======
+#include <algorithm> // `std::sort_heap`
+#include <atomic>    // `std::atomic`
+#include <bitset>    // `std::bitset`
+#include <cassert>
+#include <climits>   // `CHAR_BIT`
+#include <cmath>     // `std::sqrt`
+#include <cstring>   // `std::memset`
+#include <iterator>  // `std::reverse_iterator`
+#include <mutex>     // `std::unique_lock` - replacement candidate
+#include <random>    // `std::default_random_engine` - replacement candidate
+#include <stdexcept> // `std::runtime_exception`
+#include <thread>    // `std::thread`
+#include <utility>   // `std::pair`
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
 
 // Prefetching
 #if defined(USEARCH_DEFINED_GCC)
@@ -2186,8 +2202,14 @@ class index_gt {
         using pointer = void;
         using reference = ref_t;
 
+<<<<<<< HEAD
         reference operator*() const noexcept { return call_key<0>(std::is_const<index_t>()); }
         vector_key_t key() const noexcept { return index_->node_at_(slot_).ckey(); }
+=======
+        // todo:: take care of these to use external storage
+        reference operator*() const noexcept { return {index_->node_at_11_(slot_).key(), slot_}; }
+        vector_key_t key() const noexcept { return index_->node_at_11_(slot_).key(); }
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
 
         friend inline compressed_slot_t get_slot(member_iterator_gt const& it) noexcept { return it.slot_; }
         friend inline vector_key_t get_key(member_iterator_gt const& it) noexcept { return it.key(); }
@@ -3031,14 +3053,14 @@ class index_gt {
      */
     template <                                   //
         typename value_at,                       //
-        typename node_proxy_at,                  //
+        typename storage_at,                     //
         typename metric_at,                      //
         typename callback_at = dummy_callback_t, //
         typename prefetch_at = dummy_prefetch_t  //
         >
     add_result_t add(                           //
         vector_key_t key, value_at&& value,     //
-        node_proxy_at&& ext_node_at_,           //
+        storage_at&& storage,                   //
         metric_at&& metric,                     //
         index_update_config_t config = {},      //
         callback_at&& callback = callback_at{}, //
@@ -3092,6 +3114,7 @@ class index_gt {
         if (new_target_level <= max_level_copy)
             new_level_lock.unlock();
 
+<<<<<<< HEAD
         nodes_[old_size] = new_node;
         result.new_size = old_size + 1;
         if (mapped_file_ && is_mutable_) {
@@ -3100,6 +3123,16 @@ class index_gt {
         }
         compressed_slot_t new_slot = result.slot = static_cast<compressed_slot_t>(old_size);
         callback(at(result.slot));
+=======
+        nodes_[new_slot] = node;
+        storage.node_append_(key, target_level);
+        node = storage.node_at_(new_slot);
+
+        result.new_size = new_slot + 1;
+        result.slot = new_slot;
+        callback(at(new_slot));
+        node_lock_t new_lock = node_lock_(new_slot);
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
 
         // Do nothing for the first element
         if (!old_size) {
@@ -3140,7 +3173,7 @@ class index_gt {
         }
 =======
         connect_node_across_levels_(                                //
-            ext_node_at_,                                           //
+            storage,                                                //
             value, metric, prefetch,                                //
             new_slot, entry_idx_copy, max_level_copy, target_level, //
             config, context);
@@ -3187,7 +3220,7 @@ class index_gt {
      */
     template <                                   //
         typename value_at,                       //
-        typename node_proxy_at,                  //
+        typename storage_at,                     //
         typename metric_at,                      //
         typename callback_at = dummy_callback_t, //
         typename prefetch_at = dummy_prefetch_t  //
@@ -3196,7 +3229,7 @@ class index_gt {
         member_iterator_t iterator,             //
         vector_key_t key,                       //
         value_at&& value,                       //
-        node_proxy_at&& ext_node_at_,           //
+        storage_at&& storage,                   //
         metric_at&& metric,                     //
         index_update_config_t config = {},      //
         callback_at&& callback = callback_at{}, //
@@ -3226,8 +3259,13 @@ class index_gt {
         if (!next.reserve(config.expansion))
             return result.failed("Out of memory!");
 
+<<<<<<< HEAD
         node_t updated_node = node_at_(updated_slot);
         level_t updated_node_level = updated_node.level();
+=======
+        node_lock_t new_lock = node_lock_(old_slot);
+        node_t node = storage.node_at_(old_slot);
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
 
         // Copy entry coordinates under locks
         level_t max_level_copy;
@@ -3276,7 +3314,7 @@ class index_gt {
         updated_node.key(key);
 =======
         connect_node_across_levels_(                       //
-            ext_node_at_,                                  //
+            storage,                                       //
             value, metric, prefetch,                       //
             old_slot, entry_slot_, max_level_, node_level, //
             config, context);
@@ -3481,7 +3519,7 @@ class index_gt {
      */
     template <                                     //
         typename value_at,                         //
-        typename nodes_proxy_at,                   //
+        typename storage_at,                       //
         typename metric_at,                        //
         typename predicate_at = dummy_predicate_t, //
         typename prefetch_at = dummy_prefetch_t    //
@@ -3489,7 +3527,7 @@ class index_gt {
     search_result_t search(                        //
         value_at&& query,                          //
         std::size_t wanted,                        //
-        nodes_proxy_at&& nodes_proxy,              //
+        storage_at&& storage,                      //
         metric_at&& metric,                        //
         index_search_config_t config = {},         //
         predicate_at&& predicate = predicate_at{}, //
@@ -3535,11 +3573,15 @@ class index_gt {
                 query, metric, prefetch, static_cast<compressed_slot_t>(entry_slot_), max_level_, 0, context);
 =======
             std::size_t closest_slot =
+<<<<<<< HEAD
                 search_for_one_(nodes_proxy, query, metric, prefetch, entry_slot_, max_level_, 0, context);
 >>>>>>> 2df158c (Initial trials to move node allocation outside of index.hpp)
+=======
+                search_for_one_(query, storage, metric, prefetch, entry_slot_, max_level_, 0, context);
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
 
             // For bottom layer we need a more optimized procedure
-            if (!search_to_find_in_base_(query, metric, predicate, prefetch, closest_slot, expansion, context))
+            if (!search_to_find_in_base_(query, storage, metric, predicate, prefetch, closest_slot, expansion, context))
                 return result.failed("Out of memory!");
         }
 
@@ -3564,7 +3606,7 @@ class index_gt {
      */
     template <                                     //
         typename value_at,                         //
-        typename node_proxy_at,                    //
+        typename storage_at,                       //
         typename metric_at,                        //
         typename predicate_at = dummy_predicate_t, //
         typename prefetch_at = dummy_prefetch_t    //
@@ -3572,7 +3614,7 @@ class index_gt {
     cluster_result_t cluster(                      //
         value_at&& query,                          //
         std::size_t level,                         //
-        node_proxy_at&& ext_node_at_,              //
+        storage_at&& storage,                      //
         metric_at&& metric,                        //
         index_cluster_config_t config = {},        //
         predicate_at&& predicate = predicate_at{}, //
@@ -3594,11 +3636,15 @@ class index_gt {
 
         result.cluster.member =
 <<<<<<< HEAD
+<<<<<<< HEAD
             at(search_for_one_(query, metric, prefetch, static_cast<compressed_slot_t>(entry_slot_), max_level_,
                                static_cast<level_t>(level <= 0 ? 0 : level - 1), context));
 =======
             at(search_for_one_(ext_node_at_, query, metric, prefetch, entry_slot_, max_level_, level - 1, context));
 >>>>>>> 2df158c (Initial trials to move node allocation outside of index.hpp)
+=======
+            at(search_for_one_(query, storage, metric, prefetch, entry_slot_, max_level_, level - 1, context));
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
         result.cluster.distance = context.measure(query, result.cluster.member, metric);
 
         // Normalize stats
@@ -3712,18 +3758,21 @@ class index_gt {
     stats_t stats() const noexcept {
         stats_t result{};
 
-        for (std::size_t i = 0; i != size(); ++i) {
-            node_t node = node_at_(i);
-            std::size_t max_edges = node.level() * config_.connectivity + config_.connectivity_base;
-            std::size_t edges = 0;
-            for (level_t level = 0; level <= node.level(); ++level)
-                edges += neighbors_(node, level).size();
+        assert(false);
+        /*
+            for (std::size_t i = 0; i != size(); ++i) {
+                node_t node = node_at_(i);
+                std::size_t max_edges = node.level() * config_.connectivity + config_.connectivity_base;
+                std::size_t edges = 0;
+                for (level_t level = 0; level <= node.level(); ++level)
+                    edges += neighbors_(node, level).size();
 
-            ++result.nodes;
-            result.allocated_bytes += node_bytes_(node).size();
-            result.edges += edges;
-            result.max_edges += max_edges;
-        }
+                ++result.nodes;
+                result.allocated_bytes += node_bytes_(node).size();
+                result.edges += edges;
+                result.max_edges += max_edges;
+            }
+            */
         return result;
     }
 
@@ -3736,19 +3785,34 @@ class index_gt {
     stats_t stats(std::size_t level) const noexcept {
         stats_t result{};
         std::size_t neighbors_bytes = !level ? pre_.neighbors_base_bytes : pre_.neighbors_bytes;
+<<<<<<< HEAD
         std::size_t max_edges_per_node = !level ? config_.connectivity_base : config_.connectivity;
 
         for (std::size_t i = 0; i != size(); ++i) {
             node_t node = node_at_(i);
             if (static_cast<std::size_t>(node.level()) < level)
                 continue;
+=======
+        assert(false);
+        /*
+            for (std::size_t i = 0; i != size(); ++i) {
+                node_t node = node_at_(i);
+                if (static_cast<std::size_t>(node.level()) < level)
+                    continue;
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
 
-            ++result.nodes;
-            result.edges += neighbors_(node, level).size();
-            result.allocated_bytes += node_head_bytes_() + neighbors_bytes;
-        }
+                ++result.nodes;
+                result.edges += neighbors_(node, level).size();
+                result.allocated_bytes += node_head_bytes_() + neighbors_bytes;
+            }
 
+<<<<<<< HEAD
         result.max_edges = result.nodes * max_edges_per_node;
+=======
+            std::size_t max_edges_per_node = level ? config_.connectivity_base : config_.connectivity;
+            result.max_edges = result.nodes * max_edges_per_node;
+            */
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
         return result;
     }
 
@@ -3762,34 +3826,36 @@ class index_gt {
     stats_t stats(stats_t* stats_per_level, std::size_t max_level) const noexcept {
 
         std::size_t head_bytes = node_head_bytes_();
-        for (std::size_t i = 0; i != size(); ++i) {
-            node_t node = node_at_(i);
+        assert(false);
+        /*
+            for (std::size_t i = 0; i != size(); ++i) {
+                node_t node = node_at_(i);
 
-            stats_per_level[0].nodes++;
-            stats_per_level[0].edges += neighbors_(node, 0).size();
-            stats_per_level[0].allocated_bytes += pre_.neighbors_base_bytes + head_bytes;
+                stats_per_level[0].nodes++;
+                stats_per_level[0].edges += neighbors_(node, 0).size();
+                stats_per_level[0].allocated_bytes += pre_.neighbors_base_bytes + head_bytes;
 
-            level_t node_level = static_cast<level_t>(node.level());
-            for (level_t l = 1; l <= (std::min)(node_level, static_cast<level_t>(max_level)); ++l) {
-                stats_per_level[l].nodes++;
-                stats_per_level[l].edges += neighbors_(node, l).size();
-                stats_per_level[l].allocated_bytes += pre_.neighbors_bytes;
+                level_t node_level = static_cast<level_t>(node.level());
+                for (level_t l = 1; l <= (std::min)(node_level, static_cast<level_t>(max_level)); ++l) {
+                    stats_per_level[l].nodes++;
+                    stats_per_level[l].edges += neighbors_(node, l).size();
+                    stats_per_level[l].allocated_bytes += pre_.neighbors_bytes;
+                }
             }
-        }
-
         // The `max_edges` parameter can be inferred from `nodes`
         stats_per_level[0].max_edges = stats_per_level[0].nodes * config_.connectivity_base;
         for (std::size_t l = 1; l <= max_level; ++l)
             stats_per_level[l].max_edges = stats_per_level[l].nodes * config_.connectivity;
 
         // Aggregate stats across levels
-        stats_t result{};
         for (std::size_t l = 0; l <= max_level; ++l)
             result.nodes += stats_per_level[l].nodes,                         //
                 result.edges += stats_per_level[l].edges,                     //
                 result.allocated_bytes += stats_per_level[l].allocated_bytes, //
                 result.max_edges += stats_per_level[l].max_edges;             //
 
+    */
+        stats_t result{};
         return result;
     }
 
@@ -3834,8 +3900,12 @@ class index_gt {
      */
     std::size_t serialized_length() const noexcept {
         std::size_t neighbors_length = 0;
-        for (std::size_t i = 0; i != size(); ++i)
-            neighbors_length += node_bytes_(node_at_(i).level()) + sizeof(level_t);
+        assert(false);
+
+        /*
+            for (std::size_t i = 0; i != size(); ++i)
+                neighbors_length += node_bytes_(node_at_(i).level()) + sizeof(level_t);
+            */
         return sizeof(index_serialized_header_t) + neighbors_length;
     }
 
@@ -3864,24 +3934,26 @@ class index_gt {
         // Export the number of levels per node
         // That is both enough to estimate the overall memory consumption,
         // and to be able to estimate the offsets of every entry in the file.
-        for (std::size_t i = 0; i != header.size; ++i) {
-            node_t node = node_at_(i);
-            level_t level = node.level();
-            if (!output(&level, sizeof(level)))
-                return result.failed("Failed to serialize into stream");
-            if (!progress(++processed, total))
-                return result.failed("Terminated by user");
-        }
+        /*
+            for (std::size_t i = 0; i != header.size; ++i) {
+                node_t node = node_at_(i);
+                level_t level = node.level();
+                if (!output(&level, sizeof(level)))
+                    return result.failed("Failed to serialize into stream");
+                if (!progress(++processed, total))
+                    return result.failed("Terminated by user");
+            }
 
-        // After that dump the nodes themselves
-        for (std::size_t i = 0; i != header.size; ++i) {
-            span_bytes_t node_bytes = node_bytes_(node_at_(i));
-            if (!output(node_bytes.data(), node_bytes.size()))
-                return result.failed("Failed to serialize into stream");
-            if (!progress(++processed, total))
-                return result.failed("Terminated by user");
-        }
+            // After that dump the nodes themselves
+            for (std::size_t i = 0; i != header.size; ++i) {
+                span_bytes_t node_bytes = node_bytes_(node_at_(i));
+                if (!output(node_bytes.data(), node_bytes.size()))
+                    return result.failed("Failed to serialize into stream");
+                if (!progress(++processed, total))
+                    return result.failed("Terminated by user");
+            }
 
+    */
         return {};
     }
 
@@ -4298,7 +4370,9 @@ class index_gt {
         // Progress status
         std::atomic<bool> do_tasks{true};
         std::atomic<std::size_t> processed{0};
+        assert(false);
 
+<<<<<<< HEAD
         // Erase all the incoming links
         std::size_t nodes_count = size();
         executor.dynamic(nodes_count, [&](std::size_t thread_idx, std::size_t node_idx) {
@@ -4315,9 +4389,33 @@ class index_gt {
                 do_tasks = progress(processed.load(), nodes_count);
             return do_tasks.load();
         });
+=======
+        /*
+            // Erase all the incoming links
+            std::size_t nodes_count = size();
+            executor.dynamic(nodes_count, [&](std::size_t thread_idx, std::size_t node_idx) {
+                node_t node = node_at_(node_idx);
+                for (level_t level = 0; level <= node.level(); ++level) {
+                    neighbors_ref_t neighbors = neighbors_(node, level);
+                    std::size_t old_size = neighbors.size();
+                    neighbors.clear();
+                    for (std::size_t i = 0; i != old_size; ++i) {
+                        compressed_slot_t neighbor_slot = neighbors[i];
+                        node_t neighbor = node_at_(neighbor_slot);
+                        if (allow_member(member_cref_t{neighbor.ckey(), neighbor_slot}))
+                            neighbors.push_back(neighbor_slot);
+                    }
+                }
+                ++processed;
+                if (thread_idx == 0)
+                    do_tasks = progress(processed.load(), nodes_count);
+                return do_tasks.load();
+            });
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
 
-        // At the end report the latest numbers, because the reporter thread may be finished earlier
-        progress(processed.load(), nodes_count);
+            // At the end report the latest numbers, because the reporter thread may be finished earlier
+            progress(processed.load(), nodes_count);
+            */
     }
 
   private:
@@ -4387,7 +4485,7 @@ class index_gt {
         node = node_t{};
     }
 
-    inline node_t node_at_(std::size_t idx) const noexcept { return nodes_[idx]; }
+    inline node_t node_at_11_(std::size_t idx) const noexcept { return nodes_[idx]; }
     inline neighbors_ref_t neighbors_base_(node_t node) const noexcept { return {node.neighbors_tape()}; }
 
     inline neighbors_ref_t neighbors_non_base_(node_t node, level_t level) const noexcept {
@@ -4410,7 +4508,9 @@ class index_gt {
             ;
         return {nodes_mutexes_, slot};
     }
+    // ^^^ move these to storage
 
+<<<<<<< HEAD
 <<<<<<< HEAD
     struct node_conditional_lock_t {
         nodes_mutexes_t& mutexes;
@@ -4423,21 +4523,34 @@ class index_gt {
     void connect_node_across_levels_(                                                                //
         nodes_proxy_at&& ext_node_at_, value_at&& value, metric_at&& metric, prefetch_at&& prefetch, //
         std::size_t node_slot, std::size_t entry_slot, level_t max_level, level_t target_level,      //
+=======
+    template <typename storage_at, typename value_at, typename metric_at, typename prefetch_at>
+    void connect_node_across_levels_(                                                           //
+        storage_at&& storage, value_at&& value, metric_at&& metric, prefetch_at&& prefetch,     //
+        std::size_t node_slot, std::size_t entry_slot, level_t max_level, level_t target_level, //
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
         index_update_config_t const& config, context_t& context) usearch_noexcept_m {
         using vv = typename std::decay<decltype(*this)>::type::vector_key_t;
 
         // Go down the level, tracking only the closest match
         std::size_t closest_slot = search_for_one_( //
-            ext_node_at_, value, metric, prefetch,  //
+            value, storage, metric, prefetch,       //
             entry_slot, max_level, target_level, context);
 
         // From `target_level` down perform proper extensive search
         for (level_t level = (std::min)(target_level, max_level); level >= 0; --level) {
             // TODO: Handle out of memory conditions
+<<<<<<< HEAD
             search_to_insert_(value, metric, prefetch, closest_slot, node_slot, level, config.expansion, context);
             closest_slot = connect_new_node_(metric, node_slot, level, context);
             reconnect_neighbor_nodes_(metric, node_slot, value, level, context);
 >>>>>>> 2df158c (Initial trials to move node allocation outside of index.hpp)
+=======
+            search_to_insert_(value, storage, metric, prefetch, closest_slot, node_slot, level, config.expansion,
+                              context);
+            closest_slot = connect_new_node_(storage, metric, node_slot, level, context);
+            reconnect_neighbor_nodes_(storage, metric, node_slot, value, level, context);
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
         }
     };
 
@@ -4447,11 +4560,18 @@ class index_gt {
         return {nodes_mutexes_, failed_to_acquire ? std::numeric_limits<std::size_t>::max() : slot};
     }
 
+<<<<<<< HEAD
     template <typename metric_at, bool require_non_empty_ak = false>
     candidates_view_t form_links_to_closest_( //
         metric_at&& metric, std::size_t new_slot, level_t level, context_t& context) usearch_noexcept_m {
+=======
+    template <typename storage_at, typename metric_at>
+    std::size_t connect_new_node_(                //
+        storage_at&& storage, metric_at&& metric, //
+        std::size_t new_slot, level_t level, context_t& context) usearch_noexcept_m {
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
 
-        node_t new_node = node_at_(new_slot);
+        node_t new_node = storage.node_at_(new_slot);
         top_candidates_t& top = context.top_candidates;
         usearch_assert_m(top.size() || !require_non_empty_ak, "No candidates found");
         candidates_view_t top_view =
@@ -4460,16 +4580,29 @@ class index_gt {
 
         // Outgoing links from `new_slot`:
         neighbors_ref_t new_neighbors = neighbors_(new_node, level);
+<<<<<<< HEAD
         usearch_assert_m(!new_neighbors.size(), "The newly inserted element should have blank link list");
         for (std::size_t idx = 0; idx != top_view.size(); idx++) {
             usearch_assert_m(!new_neighbors[idx], "Possible memory corruption");
             usearch_assert_m(level <= node_at_(top_view[idx].slot).level(), "Linking to missing level");
             new_neighbors.push_back(top_view[idx].slot);
+=======
+        {
+            usearch_assert_m(!new_neighbors.size(), "The newly inserted element should have blank link list");
+            candidates_view_t top_view = refine_(metric, config_.connectivity, top, context);
+
+            for (std::size_t idx = 0; idx != top_view.size(); idx++) {
+                usearch_assert_m(!new_neighbors[idx], "Possible memory corruption");
+                usearch_assert_m(level <= storage.node_at_(top_view[idx].slot).level(), "Linking to missing level");
+                new_neighbors.push_back(top_view[idx].slot);
+            }
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
         }
 
         return top_view;
     }
 
+<<<<<<< HEAD
     template <typename value_at, typename metric_at>
     void form_reverse_links_( //
         metric_at&& metric, compressed_slot_t new_slot, candidates_view_t new_neighbors, value_at&& value,
@@ -4477,6 +4610,16 @@ class index_gt {
 
         top_candidates_t& top_for_refine = context.top_for_refine;
         std::size_t const connectivity_max = level ? config_.connectivity : config_.connectivity_base;
+=======
+    template <typename value_at, typename storage_at, typename metric_at>
+    void reconnect_neighbor_nodes_(               //
+        storage_at&& storage, metric_at&& metric, //
+        std::size_t new_slot, value_at&& value, level_t level, context_t& context) usearch_noexcept_m {
+
+        node_t new_node = storage.node_at_(new_slot);
+        top_candidates_t& top = context.top_candidates;
+        neighbors_ref_t new_neighbors = neighbors_(new_node, level);
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
 
         // Reverse links from the neighbors:
         for (auto new_neighbor : new_neighbors) {
@@ -4484,7 +4627,12 @@ class index_gt {
             if (close_slot == new_slot)
                 continue;
             node_lock_t close_lock = node_lock_(close_slot);
+<<<<<<< HEAD
             node_t close_node = node_at_(close_slot);
+=======
+            node_t close_node = storage.node_at_(close_slot);
+
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
             neighbors_ref_t close_header = neighbors_(close_node, level);
 
             // The node may have no neighbors only in one case, when it's the first one in the index,
@@ -4569,7 +4717,11 @@ class index_gt {
         bool operator==(candidates_iterator_t const& other) noexcept { return current_ == other.current_; }
         bool operator!=(candidates_iterator_t const& other) noexcept { return current_ != other.current_; }
 
+<<<<<<< HEAD
         vector_key_t key() const noexcept { return index_.node_at_(slot()).key(); }
+=======
+        // vector_key_t key() const noexcept { return index_->node_at_(slot()).key(); }
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
         compressed_slot_t slot() const noexcept { return neighbors_[current_]; }
         friend inline std::size_t get_slot(candidates_iterator_t const& it) noexcept { return it.slot(); }
         friend inline vector_key_t get_key(candidates_iterator_t const& it) noexcept { return it.key(); }
@@ -4587,6 +4739,7 @@ class index_gt {
     };
 
 <<<<<<< HEAD
+<<<<<<< HEAD
     template <typename value_at, typename metric_at, typename prefetch_at = dummy_prefetch_t>
     compressed_slot_t search_for_one_(                                //
 =======
@@ -4596,6 +4749,13 @@ class index_gt {
 >>>>>>> 2df158c (Initial trials to move node allocation outside of index.hpp)
         value_at&& query, metric_at&& metric, prefetch_at&& prefetch, //
         compressed_slot_t closest_slot, level_t begin_level, level_t end_level, context_t& context) const noexcept {
+=======
+    template <typename value_at, typename storage_at, typename metric_at, typename prefetch_at = dummy_prefetch_t>
+    std::size_t search_for_one_(                                          //
+        value_at&& query,                                                 //
+        storage_at&& storage, metric_at&& metric, prefetch_at&& prefetch, //
+        std::size_t closest_slot, level_t begin_level, level_t end_level, context_t& context) const noexcept {
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
 
         visits_hash_set_t& visits = context.visits;
         visits.clear();
@@ -4610,12 +4770,12 @@ class index_gt {
             do {
                 changed = false;
                 node_lock_t closest_lock = node_lock_(closest_slot);
-                ext_node_at_.node_lock_(closest_slot);
-                neighbors_ref_t closest_neighbors = neighbors_non_base_(node_at_(closest_slot), level);
+                storage.node_lock_(closest_slot);
+                neighbors_ref_t closest_neighbors = neighbors_non_base_(storage.node_at_(closest_slot), level);
 
                 using vvv = typename std::decay<decltype(*this)>::type::vector_key_t;
                 static_assert(std::is_same<vvv, vector_key_t>::value, "this cannot happen");
-                node_t a = ext_node_at_(closest_slot);
+                node_t a = storage(closest_slot);
 
                 // Optional prefetching
                 if (!is_dummy<prefetch_at>()) {
@@ -4644,10 +4804,18 @@ class index_gt {
      *          Locks the nodes in the process, assuming other threads are updating neighbors lists.
      *  @return `true` if procedure succeeded, `false` if run out of memory.
      */
+<<<<<<< HEAD
     template <typename value_at, typename metric_at, typename prefetch_at = dummy_prefetch_t>
     bool search_to_insert_(                                           //
         value_at&& query, metric_at&& metric, prefetch_at&& prefetch, //
         compressed_slot_t start_slot, level_t level, std::size_t top_limit, context_t& context) noexcept {
+=======
+    template <typename value_at, typename storage_at, typename metric_at, typename prefetch_at = dummy_prefetch_t>
+    bool search_to_insert_(                                                                 //
+        value_at&& query, storage_at&& storage, metric_at&& metric, prefetch_at&& prefetch, //
+        std::size_t start_slot, std::size_t new_slot, level_t level, std::size_t top_limit,
+        context_t& context) noexcept {
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
 
         visits_hash_set_t& visits = context.visits;
         next_candidates_t& next = context.next_candidates; // pop min, push
@@ -4681,7 +4849,13 @@ class index_gt {
             context.iteration_cycles++;
 
             compressed_slot_t candidate_slot = candidacy.slot;
+<<<<<<< HEAD
             node_t candidate_ref = node_at_(candidate_slot);
+=======
+            if (new_slot == candidate_slot)
+                continue;
+            node_t candidate_ref = storage.node_at_(candidate_slot);
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
             node_lock_t candidate_lock = node_lock_(candidate_slot);
             neighbors_ref_t candidate_neighbors = neighbors_(candidate_ref, level);
 
@@ -4809,10 +4983,17 @@ class index_gt {
      *          Doesn't lock any nodes, assuming read-only simultaneous access.
      *  @return `true` if procedure succeeded, `false` if run out of memory.
      */
+<<<<<<< HEAD
     template <typename value_at, typename metric_at, typename predicate_at, typename prefetch_at>
     bool search_to_find_in_base_(                                                               //
         value_at&& query, metric_at&& metric, predicate_at&& predicate, prefetch_at&& prefetch, //
         compressed_slot_t start_slot, std::size_t expansion, context_t& context) const usearch_noexcept_m {
+=======
+    template <typename value_at, typename storage_at, typename metric_at, typename predicate_at, typename prefetch_at>
+    bool search_to_find_in_base_(                                                                                     //
+        value_at&& query, storage_at&& storage, metric_at&& metric, predicate_at&& predicate, prefetch_at&& prefetch, //
+        std::size_t start_slot, std::size_t expansion, context_t& context) const noexcept {
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
 
         visits_hash_set_t& visits = context.visits;
         next_candidates_t& next = context.next_candidates; // pop min, push
@@ -4850,7 +5031,7 @@ class index_gt {
             next.pop();
             context.iteration_cycles++;
 
-            neighbors_ref_t candidate_neighbors = neighbors_base_(node_at_(candidate.slot));
+            neighbors_ref_t candidate_neighbors = neighbors_base_(storage.node_at_(candidate.slot));
 
             // Optional prefetching
             if (!is_dummy<prefetch_at>()) {
@@ -4870,11 +5051,21 @@ class index_gt {
                 if (top.size() < top_limit || successor_dist < radius) {
                     // This can substantially grow our priority queue:
                     next.insert({-successor_dist, successor_slot});
+<<<<<<< HEAD
                     if (is_dummy<predicate_at>() ||
                         predicate(member_cref_t{node_at_(successor_slot).ckey(), successor_slot})) {
                         top.insert({successor_dist, successor_slot}, top_limit);
                         radius = top.top().distance;
                     }
+=======
+                    if (!is_dummy<predicate_at>())
+                        if (!predicate(member_cref_t{storage.node_at_(successor_slot).ckey(), successor_slot}))
+                            continue;
+
+                    // This will automatically evict poor matches:
+                    top.insert({successor_dist, successor_slot}, top_limit);
+                    radius = top.top().distance;
+>>>>>>> 8209b52 (Make external storage more functional by adding a vector storage which is actually used by index.hpp)
                 }
             }
         }
