@@ -686,8 +686,8 @@ void test_cosine(std::size_t collection_size, std::size_t dimensions) {
     using vector_key_t = key_at;
     using slot_t = slot_at;
 
-    using index_typed_t = index_gt<float, vector_key_t, slot_t>;
     using index_storage_t = storage_proxy_t<vector_key_t, uint32_t>;
+    using index_typed_t = index_gt<index_storage_t, float, vector_key_t, slot_t>;
     using member_cref_t = typename index_typed_t::member_cref_t;
     using member_citerator_t = typename index_typed_t::member_citerator_t;
 
@@ -724,6 +724,7 @@ void test_cosine(std::size_t collection_size, std::size_t dimensions) {
         metric_t metric{&vector_of_vectors, dimensions};
         index_config_t config(connectivity);
 <<<<<<< HEAD
+<<<<<<< HEAD
 
         // Toy example
         if (vector_of_vectors.size() >= 3) {
@@ -744,8 +745,11 @@ void test_cosine(std::size_t collection_size, std::size_t dimensions) {
     //     run_templated(connectivity);
 =======
         index_typed_t index_typed(config);
+=======
+>>>>>>> a16e11f (Move storage to a separate class and revert stats back to index)
         std::vector<node_t<vector_key_t>> nodes;
         index_storage_t storage{&nodes, config};
+        index_typed_t index_typed({&nodes, config}, config);
         test_cosine<false>(index_typed, matrix, storage, metric);
     }
 >>>>>>> aac0233 (Slowly moving index storage outside of index.hpp)
