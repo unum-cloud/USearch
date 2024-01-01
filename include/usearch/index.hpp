@@ -524,14 +524,31 @@ template <typename allocator_at = std::allocator<byte_t>> struct bitset_gt {
         return bits ? divide_round_up<bits_per_word()>(bits) : 0;
     }
 
+<<<<<<< HEAD
     word_t* words_{};
     std::size_t bits_count_{};
+=======
+    static constexpr std::size_t bits_per_slot() { return sizeof(compressed_slot_t) * CHAR_BIT; }
+    static constexpr compressed_slot_t bits_mask() { return sizeof(compressed_slot_t) * CHAR_BIT - 1; }
+    static constexpr std::size_t slots(std::size_t bits) { return divide_round_up<bits_per_slot()>(bits); }
+
+    compressed_slot_t* slots_{};
+    /// @brief capacitiy - number of bits in the bitset
+    std::size_t capacity_{};
+    /// @brief Number of slots.
+    std::size_t count_{};
+>>>>>>> c36756b (Add size to bitset_gt)
 
   public:
     bitset_gt() noexcept {}
     ~bitset_gt() noexcept { reset(); }
 
+<<<<<<< HEAD
     explicit operator bool() const noexcept { return words_; }
+=======
+    explicit operator bool() const noexcept { return slots_; }
+    std::size_t size() const noexcept { return capacity_; }
+>>>>>>> c36756b (Add size to bitset_gt)
     void clear() noexcept {
         if (words_)
             std::memset(words_, 0, words_count() * sizeof(word_t));
@@ -545,11 +562,17 @@ template <typename allocator_at = std::allocator<byte_t>> struct bitset_gt {
     }
 
     bitset_gt(std::size_t capacity) noexcept
+<<<<<<< HEAD
         : words_((word_t*)allocator_t{}.allocate(words_count(capacity) * sizeof(word_t))), bits_count_(capacity) {
+=======
+        : slots_((compressed_slot_t*)allocator_t{}.allocate(slots(capacity) * sizeof(compressed_slot_t))),
+          capacity_(slots_ ? capacity : 0u), count_(slots_ ? slots(capacity) : 0u) {
+>>>>>>> c36756b (Add size to bitset_gt)
         clear();
     }
 
     bitset_gt(bitset_gt&& other) noexcept {
+<<<<<<< HEAD
         words_ = exchange(other.words_, nullptr);
         bits_count_ = exchange(other.bits_count_, 0);
     }
@@ -557,6 +580,17 @@ template <typename allocator_at = std::allocator<byte_t>> struct bitset_gt {
     bitset_gt& operator=(bitset_gt&& other) noexcept {
         std::swap(words_, other.words_);
         std::swap(bits_count_, other.bits_count_);
+=======
+        slots_ = exchange(other.slots_, nullptr);
+        count_ = exchange(other.count_, 0);
+        capacity_ = exchange(other.capacity_, 0);
+    }
+
+    bitset_gt& operator=(bitset_gt&& other) noexcept {
+        std::swap(slots_, other.slots_);
+        std::swap(count_, other.count_);
+        std::swap(capacity_, other.capacity_);
+>>>>>>> c36756b (Add size to bitset_gt)
         return *this;
     }
 
