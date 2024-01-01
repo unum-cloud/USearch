@@ -384,7 +384,8 @@ inline index_dense_metadata_result_t index_dense_metadata_from_buffer(memory_map
 template <typename storage_proxy_key_t, typename compressed_slot_at = default_slot_t> class storage_proxy_t {
     using vector_key_t = storage_proxy_key_t;
     using dynamic_allocator_t = aligned_allocator_gt<byte_t, 64>;
-    using nodes_mutexes_t = bitset_gt<dynamic_allocator_t>;
+    // using nodes_mutexes_t = bitset_gt<dynamic_allocator_t>;
+    using nodes_mutexes_t = bitset_gt<>;
     using nodes_t = std::vector<node_t<storage_proxy_key_t>>;
     /**
      *  @brief  Integer for the number of node neighbors at a specific level of the
@@ -395,13 +396,13 @@ template <typename storage_proxy_key_t, typename compressed_slot_at = default_sl
     // index_dense_gt const* index_ = nullptr;
     nodes_t* nodes_;
     index_config_t config_;
+    mutable std::mutex* vector_lock_;
     /// @brief  Mutex, that limits concurrent access to `nodes_`.
-    mutable nodes_mutexes_t nodes_mutexes_{};
+    mutable nodes_mutexes_t* nodes_mutexes_{};
     struct node_lock_t {
         nodes_mutexes_t& mutexes;
         std::size_t slot;
-        inline ~node_lock_t() noexcept { /*mutexes.atomic_reset(slot);*/
-        }
+        inline ~node_lock_t() noexcept { mutexes.atomic_reset(slot); }
     };
     struct precomputed_constants_t {
         double inverse_log_connectivity{};
@@ -420,25 +421,46 @@ template <typename storage_proxy_key_t, typename compressed_slot_at = default_sl
     }
 
   public:
-    storage_proxy_t(nodes_t* nodes, index_config_t config) noexcept {
+    storage_proxy_t(nodes_t* nodes, std::mutex* vector_lock, nodes_mutexes_t* nodes_mutexes,
+                    index_config_t config) noexcept {
         nodes_ = nodes;
+        vector_lock_ = vector_lock;
+        nodes_mutexes_ = nodes_mutexes;
         pre_ = precompute_(config);
         config_ = config;
     }
     // copy constructor. todo:: safety??
-    storage_proxy_t(storage_proxy_t& other) noexcept : nodes_(other.nodes_), pre_(other.pre_), config_(other.config_) {}
+    // storage_proxy_t(storage_proxy_t& other) noexcept : nodes_(other.nodes_), pre_(other.pre_), config_(other.config_)
+    // {}
 
     // warning: key_t is used in sys/types.h
     inline node_t<vector_key_t> operator()(std::size_t slot) const noexcept { /*return index_->nodes_[];*/
+        std::unique_lock<std::mutex> lock(*vector_lock_);
         nodes_t v = *nodes_;
         usearch_assert_m(slot < v.size(), "Storage node index out of bounds");
         return v[slot];
     }
 
     inline node_t<vector_key_t> node_at_(std::size_t idx) const noexcept { return (*this)(idx); }
+    // todo:: reserve is not thread safe if another thread is running search or insert
+    bool reserve(std::size_t count) {
+        std::unique_lock<std::mutex> lock(*vector_lock_);
+        if (count < nodes_->size())
+            return true;
+        nodes_mutexes_t new_mutexes(count);
+        *nodes_mutexes_ = std::move(new_mutexes);
+        nodes_->resize(count);
+        return true;
+    }
 
-    void clear() { nodes_->clear(); }
+    void clear() {
+        std::unique_lock<std::mutex> lock(*vector_lock_);
+        nodes_mutexes_->clear();
+        // std::fill(nodes_->begin(), nodes_->end(), 0);
+    }
     void reset() {
+        std::unique_lock<std::mutex> lock(*vector_lock_);
+        *nodes_mutexes_ = {};
         nodes_->clear();
         nodes_->shrink_to_fit();
     }
@@ -475,17 +497,35 @@ template <typename storage_proxy_key_t, typename compressed_slot_at = default_sl
         return node;
     }
 
-    void node_append_(vector_key_t key, level_t level) {
-        std::cout << "append caled\n";
-        nodes_->push_back(node_make_(key, level));
+    void node_append_(size_t slot, vector_key_t key, level_t level) {
+        std::unique_lock<std::mutex> lock(*vector_lock_);
+
+        auto count = nodes_->size();
+        if (count > nodes_mutexes_->size()) {
+            assert(false);
+            nodes_mutexes_t new_mutexes(count);
+            *nodes_mutexes_ = std::move(new_mutexes);
+        }
+        (*nodes_)[slot] = node_make_(key, level);
     }
 
-    void node_append_(node_t node) { nodes_->push_back(node); }
+    void node_append_(size_t slot, node_t node) {
+        std::unique_lock<std::mutex> lock(*vector_lock_);
 
+        auto count = nodes_->size();
+        if (count > nodes_mutexes_->size()) {
+            assert(false);
+            nodes_mutexes_t new_mutexes(count);
+            *nodes_mutexes_ = std::move(new_mutexes);
+        }
+        (*nodes_)[slot] = node;
+    }
+
+    /// -------- node locking logic
     inline node_lock_t node_lock_(std::size_t slot) const noexcept {
-        // while (nodes_mutexes_.atomic_set(slot))
-        //     ;
-        return {nodes_mutexes_, slot};
+        while (nodes_mutexes_->atomic_set(slot))
+            ;
+        return {*nodes_mutexes_, slot};
     }
     inline size_t size() { return nodes_->size(); }
 };
@@ -516,7 +556,7 @@ class index_dense_gt {
     using key_t = vector_key_t;
     using compressed_slot_t = compressed_slot_at;
     using distance_t = distance_punned_t;
-    using storage_t = storage_proxy_t<vector_key_t>;
+    using storage_t = storage_proxy_t<vector_key_t, compressed_slot_at>;
     using metric_t = metric_punned_t;
 
     using member_ref_t = member_ref_gt<vector_key_t>;
@@ -595,7 +635,9 @@ class index_dense_gt {
 =======
     /// @brief  C-style array of `node_t` smart-pointers.
     std::vector<node_t<key_t>> nodes_;
-    storage_t storage_{&nodes_, config_};
+    std::mutex vector_mutex_;
+    bitset_t nodes_mutexes_;
+    storage_t storage_{&nodes_, &vector_mutex_, &nodes_mutexes_, config_};
 
     /// @brief Originally forms and array of integers [0, threads], marking all
     mutable std::vector<std::size_t> available_threads_;
@@ -791,6 +833,7 @@ class index_dense_gt {
             return state_result_t{}.failed(std::move(error));
         index_t* raw = index_allocator_t{}.allocate(1);
 <<<<<<< HEAD
+<<<<<<< HEAD
         if (!raw)
             return state_result_t{}.failed("Failed to allocate memory for the index!");
 
@@ -812,6 +855,11 @@ class index_dense_gt {
         }
 =======
         new (raw) index_t({&result.nodes_, config}, config);
+=======
+        result.storage_ = storage_proxy_t<vector_key_t, compressed_slot_t>{&result.nodes_, &result.vector_mutex_,
+                                                                           &result.nodes_mutexes_, config};
+        new (raw) index_t(result.storage_, config);
+>>>>>>> 76325fd (External storage with usearch working)
         result.typed_ = raw;
 >>>>>>> a16e11f (Move storage to a separate class and revert stats back to index)
         return result;
