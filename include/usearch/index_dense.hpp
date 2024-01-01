@@ -445,7 +445,7 @@ template <typename storage_proxy_key_t, typename compressed_slot_at = default_sl
     // todo:: reserve is not thread safe if another thread is running search or insert
     bool reserve(std::size_t count) {
         std::unique_lock<std::mutex> lock(*vector_lock_);
-        if (count < nodes_->size())
+        if (count < nodes_mutexes_->size())
             return true;
         nodes_mutexes_t new_mutexes(count);
         *nodes_mutexes_ = std::move(new_mutexes);
