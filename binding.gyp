@@ -7,11 +7,13 @@
                 "-fexceptions",
                 "-Wno-unknown-pragmas",
                 "-Wno-maybe-uninitialized",
+                "-Wpass=transform-warning"
             ],
             "cflags_cc": [
                 "-fexceptions",
                 "-Wno-unknown-pragmas",
                 "-Wno-maybe-uninitialized",
+                "-Wpass=transform-warning",
                 "-std=c++17",
             ],
             "include_dirs": [

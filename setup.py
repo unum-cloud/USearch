@@ -86,6 +86,7 @@ if is_linux:
     compile_args.append("-std=c++17")
     compile_args.append("-O3")  # Maximize performance
     compile_args.append("-ffast-math")  # Maximize floating-point performance
+    compile_args.append("-Wpass-failed=transform-warning")
     compile_args.append("-Wno-unknown-pragmas")
     compile_args.append("-fdiagnostics-color=always")
 
@@ -108,6 +109,7 @@ if is_macos:
     compile_args.append("-O3")  # Maximize performance
     compile_args.append("-ffast-math")  # Maximize floating-point performance
     compile_args.append("-fcolor-diagnostics")
+    compile_args.append("-Wpass-failed=transform-warning")
     compile_args.append("-Wno-unknown-pragmas")
 
     # Simplify debugging, but the normal `-g` may make builds much longer!
