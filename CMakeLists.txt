@@ -131,6 +131,7 @@ target_compile_definitions(${USEARCH_TARGET_NAME} INTERFACE "USEARCH_USE_OPENMP=
 # Supplementary compilation settings affecting "index_plugins.hpp"
 target_compile_definitions(${USEARCH_TARGET_NAME} INTERFACE "USEARCH_USE_FP16LIB=$<BOOL:${USEARCH_USE_FP16LIB}>")
 target_compile_definitions(${USEARCH_TARGET_NAME} INTERFACE "USEARCH_USE_SIMSIMD=$<BOOL:${USEARCH_USE_SIMSIMD}>")
+<<<<<<< HEAD
 
 # Define which types can be compiled
 target_compile_definitions(
@@ -145,6 +146,8 @@ target_compile_definitions(
 target_compile_definitions(
     ${USEARCH_TARGET_NAME} INTERFACE "USEARCH_CAN_COMPILE_BFLOAT16=$<BOOL:${USEARCH_CAN_COMPILE_BFLOAT16}>"
 )
+=======
+>>>>>>> 61db8e5 (Fix simd, openmp anf fp16 option value propagation to the compiler)
 
 target_include_directories(
     ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE} INTERFACE $<BUILD_INTERFACE:${USEARCH_INCLUDE_BUILD_DIR}>
@@ -393,6 +396,7 @@ function (setup_target TARGET_NAME)
     target_compile_definitions(${TARGET_NAME} PRIVATE "USEARCH_USE_FP16LIB=$<BOOL:${USEARCH_USE_FP16LIB}>")
     target_compile_definitions(${TARGET_NAME} PRIVATE "USEARCH_USE_SIMSIMD=$<BOOL:${USEARCH_USE_SIMSIMD}>")
 
+<<<<<<< HEAD
     # Pass through SIMSIMD target definitions if they're set
     foreach(target IN ITEMS HASWELL SKYLAKE ICE GENOA SAPPHIRE TURIN SIERRA NEON NEON_I8 NEON_F16 NEON_BF16 SVE SVE_I8 SVE_F16 SVE_BF16 SVE2)
         if(DEFINED SIMSIMD_TARGET_${target})
@@ -404,6 +408,8 @@ function (setup_target TARGET_NAME)
     if(DEFINED SIMSIMD_DYNAMIC_DISPATCH)
         target_compile_definitions(${TARGET_NAME} PRIVATE "SIMSIMD_DYNAMIC_DISPATCH=${SIMSIMD_DYNAMIC_DISPATCH}")
     endif()
+=======
+>>>>>>> 61db8e5 (Fix simd, openmp anf fp16 option value propagation to the compiler)
 
 endfunction ()
 
