@@ -43,12 +43,25 @@
 
 #if USEARCH_USE_SIMSIMD
 // Propagate the `f16` settings
+<<<<<<< HEAD
 #if defined(USEARCH_CAN_COMPILE_FP16) || defined(USEARCH_CAN_COMPILE_FLOAT16)
 #if USEARCH_CAN_COMPILE_FP16 || USEARCH_CAN_COMPILE_FLOAT16
 #define SIMSIMD_NATIVE_F16 1
 #else
 #define SIMSIMD_NATIVE_F16 0
 #endif
+=======
+#define SIMSIMD_NATIVE_F16 !USEARCH_USE_FP16LIB
+
+#if !defined(SIMSIMD_TARGET_X86_AVX512) && defined(USEARCH_DEFINED_LINUX)
+#if defined(__AVX512F__) && defined(__AVX512FP16__) && defined(__AVX512VNNI__) && defined(__AVX512VPOPCNTDQ__)
+#define SIMSIMD_TARGET_X86_AVX512 1
+#endif
+#endif
+
+#if !defined(SIMSIMD_TARGET_ARM_SVE) && defined(USEARCH_DEFINED_LINUX)
+#define SIMSIMD_TARGET_ARM_SVE 1
+>>>>>>> 211a103 (Fix AVX512 detection logic)
 #endif
 // Propagate the `bf16` settings
 #if defined(USEARCH_CAN_COMPILE_BF16) || defined(USEARCH_CAN_COMPILE_BFLOAT16)
