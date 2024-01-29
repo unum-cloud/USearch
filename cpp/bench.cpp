@@ -42,6 +42,13 @@
 #include <omp.h> // `omp_set_num_threads()`
 #endif
 
+<<<<<<< HEAD
+=======
+#if USEARCH_USE_SIMSIMD
+#include <simsimd/simsimd.h>
+#endif
+
+>>>>>>> d416092 (Pull in simsimd headers only if simsimd feature is enabled)
 #include <usearch/index_dense.hpp>
 
 using namespace unum::usearch;
