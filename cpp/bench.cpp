@@ -43,12 +43,15 @@
 #endif
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
 #if USEARCH_USE_SIMSIMD
 #include <simsimd/simsimd.h>
 #endif
 
 >>>>>>> d416092 (Pull in simsimd headers only if simsimd feature is enabled)
+=======
+>>>>>>> c4394ce (Avoid including simsimd before index_plugins)
 #include <usearch/index_dense.hpp>
 
 using namespace unum::usearch;
