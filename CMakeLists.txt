@@ -287,6 +287,13 @@ function (setup_target TARGET_NAME)
                     -fPIC
                     -pedantic
                     -Wfatal-errors
+<<<<<<< HEAD
+=======
+                    -march=native
+                    -ftree-vectorize
+                    # Don't complain if the for-loops were not vectorzied
+                    -Wpass-failed=transform-warning
+>>>>>>> cf0fff3 (Add -march=native in clang compile flags to enable auto-vectorization)
                     -fcolor-diagnostics
         )
         target_link_options(
