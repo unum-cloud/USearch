@@ -201,7 +201,12 @@ JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1add_1f32( //
     (*env).ReleaseFloatArrayElements(vector, vector_data, 0);
 }
 
+<<<<<<< HEAD
 JNIEXPORT jfloatArray JNICALL Java_cloud_unum_usearch_Index_c_1get(JNIEnv* env, jclass, jlong c_ptr, jlong key) {
+=======
+JNIEXPORT jfloatArray JNICALL Java_cloud_unum_usearch_Index_c_1get(JNIEnv* env, jclass, jlong c_ptr, jint key) {
+
+>>>>>>> e715532 (Fix: Remove logging)
     auto index = reinterpret_cast<index_dense_t*>(c_ptr);
     size_t dim = index->dimensions();
     std::unique_ptr<jfloat[]> vector(new jfloat[dim]);
@@ -211,7 +216,11 @@ JNIEXPORT jfloatArray JNICALL Java_cloud_unum_usearch_Index_c_1get(JNIEnv* env, 
             env->ThrowNew(jc, "key not found");
         }
     }
+<<<<<<< HEAD
     jfloatArray jvector = env->NewFloatArray(to_jsize(env, dim));
+=======
+    jfloatArray jvector = env->NewFloatArray(dim);
+>>>>>>> e715532 (Fix: Remove logging)
     if (jvector == nullptr) { // out of memory
         return nullptr;
     }
