@@ -407,7 +407,9 @@ def test_index_oversubscribed_search(batch_size: int, threads: int):
     )
     for i, match in enumerate(batch_matches):
         assert i == match.keys[0]
-        assert len(match.keys) == batch_size
+        assert sorted(list(match.keys)) == list(
+            range(batch_size)
+        ), f"Missing values: {set(range(batch_size)) - set(match.keys)}"
 
 
 @pytest.mark.parametrize("ndim", [3, 97, 256])

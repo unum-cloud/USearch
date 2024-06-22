@@ -731,6 +731,9 @@ class index_dense_gt {
     stats_t stats(stats_t* stats_per_level, std::size_t max_level) const {
         return typed_->stats(stats_per_level, max_level);
     }
+    expected_gt<std::size_t> unreachable_nodes(std::size_t level = 0) const noexcept {
+        return typed_->unreachable_nodes(level);
+    }
 
     dynamic_allocator_t const& allocator() const { return typed_->dynamic_allocator(); }
     vector_key_t const& free_key() const { return free_key_; }

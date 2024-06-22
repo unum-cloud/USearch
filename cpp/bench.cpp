@@ -407,6 +407,20 @@ static void single_shot(dataset_at& dataset, index_at& index, bool construct, ad
 >>>>>>> 56e77ae (Add support for benchmarking merge)
     }
 
+    // Measure index stats
+    using index_stats_t = typename index_at::stats_t;
+    index_stats_t global_stats = index.stats();
+    index_stats_t base_stats = index.stats(0);
+    std::size_t base_unreachable_nodes = index.unreachable_nodes(0);
+    std::printf("-- Nodes: %zu\n", global_stats.nodes);
+    std::printf("-- Edges: %zu (%.2f density)\n", global_stats.edges,
+                global_stats.edges * 100.f / global_stats.max_edges);
+    std::printf("-- Edges in base: %zu (%.2f %% density)\n", base_stats.edges,
+                base_stats.edges * 100.f / base_stats.max_edges);
+    std::printf("-- Memory usage: %.2e bytes\n", (double)global_stats.allocated_bytes);
+    std::printf("-- Unreachable nodes in base: %zu (%.3f %%)\n", base_unreachable_nodes,
+                base_unreachable_nodes * 100.f / global_stats.nodes);
+
     // Perform search, evaluate speed
     std::vector<default_key_t> found_neighbors(dataset.queries_count() * dataset.neighborhood_size());
     std::vector<distance_t> found_distances(dataset.queries_count() * dataset.neighborhood_size());

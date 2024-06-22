@@ -566,6 +566,15 @@ template <typename allocator_at = std::allocator<byte_t>> class bitset_gt {
         InterlockedAnd((long volatile*)&slots_[i / bits_per_slot()], ~mask);
     }
 
+    std::size_t count() const noexcept {
+        std::size_t result = 0;
+        for (std::size_t i = 0; i < count_; ++i) {
+            compressed_slot_t slot = slots_[i];
+            result += __popcnt64(slot);
+        }
+        return result;
+    }
+
 #else
 
     inline bool atomic_set(std::size_t i) noexcept {
@@ -576,6 +585,15 @@ template <typename allocator_at = std::allocator<byte_t>> class bitset_gt {
     inline void atomic_reset(std::size_t i) noexcept {
         compressed_slot_t mask{1ul << (i & bits_mask())};
         __atomic_fetch_and(&slots_[i / bits_per_slot()], ~mask, __ATOMIC_RELEASE);
+    }
+
+    std::size_t count() const noexcept {
+        std::size_t result = 0;
+        for (std::size_t i = 0; i < count_; ++i) {
+            compressed_slot_t slot = slots_[i];
+            result += __builtin_popcountll(slot);
+        }
+        return result;
     }
 
 #endif
@@ -2140,7 +2158,8 @@ class index_gt {
      */
     static constexpr std::size_t node_head_bytes_() { return sizeof(vector_key_t) + sizeof(level_t); }
 
-    using nodes_mutexes_t = bitset_gt<dynamic_allocator_t>;
+    using bitset_t = bitset_gt<dynamic_allocator_t>;
+    using nodes_mutexes_t = bitset_t;
 
     using visits_hash_set_t = growing_hash_set_gt<compressed_slot_t, hash_gt<compressed_slot_t>, dynamic_allocator_t>;
 
@@ -3473,6 +3492,32 @@ class index_gt {
         std::size_t max_edges{};
         std::size_t allocated_bytes{};
     };
+
+    /**
+     *  @brief  An @b expensive operation that checks if the graph contains any unreachable nodes.
+     *
+     *  It's well known, that depending on a pruning heuristic, some nodes may become unreachable.
+     *  https://github.com/apache/lucene/issues/12627#issuecomment-1767662289
+     */
+    expected_gt<std::size_t> unreachable_nodes(std::size_t level = 0) const noexcept {
+        expected_gt<std::size_t> expected{};
+        level_t node_level = static_cast<level_t>(level);
+        if (node_level > max_level_)
+            return expected.failed("Level out of bounds");
+
+        std::size_t total_nodes = size();
+        bitset_t reachable_nodes(total_nodes);
+        if (!reachable_nodes)
+            return expected.failed("Can't allocate flags");
+
+        for (std::size_t i = 0; i != total_nodes; ++i) {
+            node_t node = node_at_(i);
+            for (auto neighbor : neighbors_(node, node_level))
+                reachable_nodes.atomic_set(static_cast<compressed_slot_t>(neighbor));
+        }
+        expected.result = total_nodes - reachable_nodes.count();
+        return expected;
+    }
 
     /**
      *  @brief  Aggregates stats on the number of nodes, edges, and memory usage across all levels.
