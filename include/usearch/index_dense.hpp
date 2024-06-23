@@ -539,6 +539,7 @@ class index_dense_gt {
     using add_result_t = typename index_t::add_result_t;
     using stats_t = typename index_t::stats_t;
     using match_t = typename index_t::match_t;
+    using bitset_t = typename index_t::bitset_t;
 
     /**
      *  @brief  A search result, containing the found keys and distances.
@@ -731,8 +732,10 @@ class index_dense_gt {
     stats_t stats(stats_t* stats_per_level, std::size_t max_level) const {
         return typed_->stats(stats_per_level, max_level);
     }
-    expected_gt<std::size_t> unreachable_nodes(std::size_t level = 0) const noexcept {
-        return typed_->unreachable_nodes(level);
+
+    expected_gt<bitset_t> unreachable_nodes() const noexcept { return typed_->unreachable_nodes(); }
+    expected_gt<bitset_t> disconnected_nodes(std::size_t level = 0) const noexcept {
+        return typed_->disconnected_nodes(level);
     }
 
     dynamic_allocator_t const& allocator() const { return typed_->dynamic_allocator(); }

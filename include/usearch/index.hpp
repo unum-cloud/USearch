@@ -493,84 +493,95 @@ template <typename result_at> struct expected_gt {
  *  @brief  Light-weight bitset implementation to sync nodes updates during graph mutations.
  *          Extends basic functionality with @b atomic operations.
  */
-template <typename allocator_at = std::allocator<byte_t>> class bitset_gt {
+template <typename allocator_at = std::allocator<byte_t>> struct bitset_gt {
+
+    using word_t = unsigned long;
+
+  private:
     using allocator_t = allocator_at;
     using byte_t = typename allocator_t::value_type;
     static_assert(sizeof(byte_t) == 1, "Allocator must allocate separate addressable bytes");
 
-    using compressed_slot_t = unsigned long;
+    static constexpr std::size_t bits_per_word() { return sizeof(word_t) * CHAR_BIT; }
+    static constexpr word_t bits_mask() { return sizeof(word_t) * CHAR_BIT - 1; }
+    static constexpr std::size_t words_count(std::size_t bits) {
+        return bits ? divide_round_up<bits_per_word()>(bits) : 0;
+    }
 
-    static constexpr std::size_t bits_per_slot() { return sizeof(compressed_slot_t) * CHAR_BIT; }
-    static constexpr compressed_slot_t bits_mask() { return sizeof(compressed_slot_t) * CHAR_BIT - 1; }
-    static constexpr std::size_t slots(std::size_t bits) { return divide_round_up<bits_per_slot()>(bits); }
-
-    compressed_slot_t* slots_{};
-    /// @brief Number of slots.
-    std::size_t count_{};
+    word_t* words_{};
+    std::size_t bits_count_{};
 
   public:
     bitset_gt() noexcept {}
     ~bitset_gt() noexcept { reset(); }
 
-    explicit operator bool() const noexcept { return slots_; }
+    explicit operator bool() const noexcept { return words_; }
     void clear() noexcept {
-        if (slots_)
-            std::memset(slots_, 0, count_ * sizeof(compressed_slot_t));
+        if (words_)
+            std::memset(words_, 0, words_count() * sizeof(word_t));
     }
 
     void reset() noexcept {
-        if (slots_)
-            allocator_t{}.deallocate((byte_t*)slots_, count_ * sizeof(compressed_slot_t));
-        slots_ = nullptr;
-        count_ = 0;
+        if (words_)
+            allocator_t{}.deallocate((byte_t*)words_, words_count() * sizeof(word_t));
+        words_ = nullptr;
+        bits_count_ = 0;
     }
 
     bitset_gt(std::size_t capacity) noexcept
-        : slots_((compressed_slot_t*)allocator_t{}.allocate(slots(capacity) * sizeof(compressed_slot_t))),
-          count_(slots_ ? slots(capacity) : 0u) {
+        : words_((word_t*)allocator_t{}.allocate(words_count(capacity) * sizeof(word_t))), bits_count_(capacity) {
         clear();
     }
 
     bitset_gt(bitset_gt&& other) noexcept {
-        slots_ = exchange(other.slots_, nullptr);
-        count_ = exchange(other.count_, 0);
+        words_ = exchange(other.words_, nullptr);
+        bits_count_ = exchange(other.bits_count_, 0);
     }
 
     bitset_gt& operator=(bitset_gt&& other) noexcept {
-        std::swap(slots_, other.slots_);
-        std::swap(count_, other.count_);
+        std::swap(words_, other.words_);
+        std::swap(bits_count_, other.bits_count_);
         return *this;
     }
 
     bitset_gt(bitset_gt const&) = delete;
     bitset_gt& operator=(bitset_gt const&) = delete;
 
-    inline bool test(std::size_t i) const noexcept { return slots_[i / bits_per_slot()] & (1ul << (i & bits_mask())); }
+    inline std::size_t words_count() const noexcept { return words_count(bits_count_); }
+    inline span_gt<word_t> words() noexcept { return {words_, words_count()}; }
+    inline bool test(std::size_t i) const noexcept { return words_[i / bits_per_word()] & (1ul << (i & bits_mask())); }
     inline bool set(std::size_t i) noexcept {
-        compressed_slot_t& slot = slots_[i / bits_per_slot()];
-        compressed_slot_t mask{1ul << (i & bits_mask())};
-        bool value = slot & mask;
-        slot |= mask;
-        return value;
+        word_t& word = words_[i / bits_per_word()];
+        word_t mask{1ul << (i & bits_mask())};
+        bool old_value = word & mask;
+        word |= mask;
+        return old_value;
+    }
+    inline bool reset(std::size_t i) noexcept {
+        word_t& word = words_[i / bits_per_word()];
+        word_t mask{1ul << (i & bits_mask())};
+        bool old_value = word & mask;
+        word &= ~mask;
+        return old_value;
     }
 
 #if defined(USEARCH_DEFINED_WINDOWS)
 
     inline bool atomic_set(std::size_t i) noexcept {
-        compressed_slot_t mask{1ul << (i & bits_mask())};
-        return InterlockedOr((long volatile*)&slots_[i / bits_per_slot()], mask) & mask;
+        word_t mask{1ul << (i & bits_mask())};
+        return InterlockedOr((long volatile*)&words_[i / bits_per_word()], mask) & mask;
     }
 
     inline void atomic_reset(std::size_t i) noexcept {
-        compressed_slot_t mask{1ul << (i & bits_mask())};
-        InterlockedAnd((long volatile*)&slots_[i / bits_per_slot()], ~mask);
+        word_t mask{1ul << (i & bits_mask())};
+        InterlockedAnd((long volatile*)&words_[i / bits_per_word()], ~mask);
     }
 
     std::size_t count() const noexcept {
         std::size_t result = 0;
-        for (std::size_t i = 0; i < count_; ++i) {
-            compressed_slot_t slot = slots_[i];
-            result += __popcnt64(slot);
+        for (std::size_t i = 0; i < words_count(); ++i) {
+            word_t word = words_[i];
+            result += __popcnt64(word);
         }
         return result;
     }
@@ -578,25 +589,38 @@ template <typename allocator_at = std::allocator<byte_t>> class bitset_gt {
 #else
 
     inline bool atomic_set(std::size_t i) noexcept {
-        compressed_slot_t mask{1ul << (i & bits_mask())};
-        return __atomic_fetch_or(&slots_[i / bits_per_slot()], mask, __ATOMIC_ACQUIRE) & mask;
+        word_t mask{1ul << (i & bits_mask())};
+        return __atomic_fetch_or(&words_[i / bits_per_word()], mask, __ATOMIC_ACQUIRE) & mask;
     }
 
     inline void atomic_reset(std::size_t i) noexcept {
-        compressed_slot_t mask{1ul << (i & bits_mask())};
-        __atomic_fetch_and(&slots_[i / bits_per_slot()], ~mask, __ATOMIC_RELEASE);
+        word_t mask{1ul << (i & bits_mask())};
+        __atomic_fetch_and(&words_[i / bits_per_word()], ~mask, __ATOMIC_RELEASE);
     }
 
     std::size_t count() const noexcept {
         std::size_t result = 0;
-        for (std::size_t i = 0; i < count_; ++i) {
-            compressed_slot_t slot = slots_[i];
-            result += __builtin_popcountll(slot);
+        for (std::size_t i = 0; i < words_count(); ++i) {
+            word_t word = words_[i];
+            result += __builtin_popcountll(word);
         }
         return result;
     }
 
 #endif
+
+    void flip() noexcept {
+        if (!bits_count_)
+            return;
+
+        word_t* const end = words_ + words_count();
+        for (word_t* it = words_; it != end; ++it)
+            *it = ~(*it);
+
+        // We have to be carefull with the last word, as it might have unused bits.
+        for (std::size_t i = bits_count_; i != words_count() * bits_per_word(); ++i)
+            reset(i);
+    }
 
     class lock_t {
         bitset_gt& bitset_;
@@ -1334,10 +1358,11 @@ class ring_gt {
     }
 
     bool try_push(element_t const& value) noexcept {
-        if (head_ == tail_ && !empty_)
-            return false; // `elements_` is full
+        if (head_ == tail_ && (!empty_ || !capacity_)) // `elements_` is full
+            if (!reserve(capacity_ + 1))
+                return false;
 
-        return push(value);
+        push(value);
         return true;
     }
 
@@ -2005,11 +2030,11 @@ template <typename key_at> inline key_at get_key(member_ref_gt<key_at> const& m)
  *
  *  @section Features
  *
- *      - Thread-safe for concurrent construction, search, and updates.
- *      - Doesn't allocate new threads, and reuses the ones its called from.
- *      - Allows storing value externally, managing just the similarity index.
- *      - Joins.
-
+ *  - Thread-safe for concurrent construction, search, and updates.
+ *  - Doesn't allocate new threads, and reuses the ones its called from.
+ *  - Allows storing value externally, managing just the similarity index.
+ *  - Joins.
+ *
  *  @section Usage
  *
  *  @subsection Exceptions
@@ -2038,19 +2063,39 @@ template <typename key_at> inline key_at get_key(member_ref_gt<key_at> const& m)
  *  tallest "level" of the graph that it belongs to, the external "key", and the
  *  number of "dimensions" in the vector.
  *
- *  @section Metrics, Predicates and Callbacks
+ *  @section Metrics, Predicates, and Callbacks
  *
+ *  Metrics:
+ *  - Metrics are functions or functors used to compute the distance (dis-similarity)
+ *    between two objects.
+ *  - The metric must be callable in different contexts:
+ *      - `distance_t operator() (value_at, entry_at)`: Calculates the distance between a new object
+ *        and an existing entry.
+ *      - `distance_t operator() (entry_at, entry_at)`: Calculates the distance between two existing entries.
+ *  - Any possible `entry_at` must support the following interfaces:
+ *      - `std::size_t slot()`
+ *      - `vector_key_t key()`
+ *
+ *  Predicates:
+ *  - Predicates are used to filter the results during the search process.
+ *  - The predicate is a callable object that takes a `member_cref_t` and returns a boolean value.
+ *  - Only entries for which the predicate returns `true` will be considered in the final result.
+ *
+ *  Callbacks:
+ *  - Callbacks are user-defined functions that are executed on specific events, such as a successful addition
+ *    or update of an entry.
+ *  - The callback is executed while the `member_ref_t` is still under lock, ensuring that the operation
+ *    remains thread-safe.
+ *  - Callbacks can be used for custom operations, such as logging, additional processing, or integration
+ *    with other systems.
  *
  *  @section Smart References and Iterators
  *
- *      -   `member_citerator_t` and `member_iterator_t` have only slots, no indirections.
- *
- *      -   `member_cref_t` and `member_ref_t` contains the `slot` and a reference
- *          to the key. So it passes through 1 level of visited_members in `nodes_`.
- *          Retrieving the key via `get_key` will cause fetching yet another cache line.
- *
- *      -   `member_gt` contains an already prefetched copy of the key.
- *
+ *  - `member_citerator_t` and `member_iterator_t` only contain slots, with no indirections.
+ *  - `member_cref_t` and `member_ref_t` contain the slot and a reference to the key,
+ *    passing through one level of visited members in `nodes_`. Retrieving the key via `get_key`
+ *    will fetch yet another cache line.
+ *  - `member_gt` contains a prefetched copy of the key.
  */
 template <typename distance_at = default_distance_t,              //
           typename key_at = default_key_t,                        //
@@ -2144,6 +2189,8 @@ class index_gt {
         sizeof(typename tape_allocator_traits_t::value_type) == 1, //
         "Tape allocator must allocate separate addressable bytes");
 
+    using bitset_t = bitset_gt<dynamic_allocator_t>;
+
   private:
     /**
      *  @brief  Integer for the number of node neighbors at a specific level of the
@@ -2158,7 +2205,6 @@ class index_gt {
      */
     static constexpr std::size_t node_head_bytes_() { return sizeof(vector_key_t) + sizeof(level_t); }
 
-    using bitset_t = bitset_gt<dynamic_allocator_t>;
     using nodes_mutexes_t = bitset_t;
 
     using visits_hash_set_t = growing_hash_set_gt<compressed_slot_t, hash_gt<compressed_slot_t>, dynamic_allocator_t>;
@@ -2363,6 +2409,7 @@ class index_gt {
     buffer_gt<node_t, nodes_allocator_t> nodes_{};
 
     /// @brief  Mutex, that limits concurrent access to `nodes_`.
+    ///         This structure must be as small as possible to fit more into CPU caches.
     mutable nodes_mutexes_t nodes_mutexes_{};
 
     using contexts_allocator_t = typename dynamic_allocator_traits_t::template rebind_alloc<context_t>;
@@ -3494,13 +3541,14 @@ class index_gt {
     };
 
     /**
-     *  @brief  An @b expensive operation that checks if the graph contains any unreachable nodes.
+     *  @brief  An @b expensive operation that checks if the graph contains any disconnected nodes,
+     *          in other words, nodes that don't have a single other node pointing to them.
      *
-     *  It's well known, that depending on a pruning heuristic, some nodes may become unreachable.
+     *  It's well known, that depending on a pruning heuristic, some nodes may become disconnected.
      *  https://github.com/apache/lucene/issues/12627#issuecomment-1767662289
      */
-    expected_gt<std::size_t> unreachable_nodes(std::size_t level = 0) const noexcept {
-        expected_gt<std::size_t> expected{};
+    expected_gt<bitset_t> disconnected_nodes(std::size_t level = 0) const noexcept {
+        expected_gt<bitset_t> expected{};
         level_t node_level = static_cast<level_t>(level);
         if (node_level > max_level_)
             return expected.failed("Level out of bounds");
@@ -3515,7 +3563,64 @@ class index_gt {
             for (auto neighbor : neighbors_(node, node_level))
                 reachable_nodes.atomic_set(static_cast<compressed_slot_t>(neighbor));
         }
-        expected.result = total_nodes - reachable_nodes.count();
+
+        // Once we know which nodes are reachable, toggling all the bits will give us the unreachable ones
+        expected.result = std::move(reachable_nodes);
+        expected.result.flip();
+        return expected;
+    }
+
+    /**
+     *  @brief  An @b expensive & @b sequential operation that checks if the graph contains any unreachable nodes,
+     *          in other words, nodes that can't be reached from the top-level root. The result is
+     *          greater or equal to `disconnected_nodes(0)`.
+     *
+     *  It's well known, that depending on a pruning heuristic, some nodes may become unreachable.
+     *  https://github.com/apache/lucene/issues/12627#issuecomment-1767662289
+     */
+    expected_gt<bitset_t> unreachable_nodes() const noexcept {
+        expected_gt<bitset_t> expected{};
+
+        std::size_t total_nodes = size();
+        bitset_t reachable_nodes(total_nodes), reachable_level_nodes(total_nodes);
+        if (!reachable_nodes || !reachable_level_nodes)
+            return expected.failed("Can't allocate flags");
+        reachable_nodes.set(static_cast<compressed_slot_t>(entry_slot_));
+        reachable_level_nodes.set(static_cast<compressed_slot_t>(entry_slot_));
+
+        // For BFS traversal we need a queue
+        ring_gt<compressed_slot_t> next_nodes, previous_level_nodes;
+        if (!previous_level_nodes.try_push(static_cast<compressed_slot_t>(entry_slot_)))
+            return expected.failed("Can't allocate BFS queue");
+
+        // That one queue will be reused across all levels
+        for (level_t level = max_level_; level >= 0; --level) {
+
+            // The starting nodes of the level are the points of the previous level
+            for (compressed_slot_t slot; previous_level_nodes.try_pop(slot);)
+                if (!next_nodes.try_push(slot))
+                    return expected.failed("Can't grow BFS queue");
+            reachable_level_nodes.clear();
+
+            for (compressed_slot_t current_slot; next_nodes.try_pop(current_slot);) {
+                node_t current_node = node_at_(current_slot);
+                for (auto neighbor : neighbors_(current_node, level)) {
+                    if (!reachable_level_nodes.set(static_cast<compressed_slot_t>(neighbor))) {
+                        reachable_nodes.set(static_cast<compressed_slot_t>(neighbor));
+                        if (!next_nodes.try_push(static_cast<compressed_slot_t>(neighbor)))
+                            return expected.failed("Can't grow BFS queue");
+
+                        // Aggregate an append-only list of nodes if only we are not in the base level
+                        if (level && !previous_level_nodes.try_push(static_cast<compressed_slot_t>(neighbor)))
+                            return expected.failed("Can't grow previous level list");
+                    }
+                }
+            }
+        }
+
+        // Once we know which nodes are reachable, toggling all the bits will give us the unreachable ones
+        expected.result = std::move(reachable_nodes);
+        expected.result.flip();
         return expected;
     }
 

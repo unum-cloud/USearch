@@ -411,15 +411,22 @@ static void single_shot(dataset_at& dataset, index_at& index, bool construct, ad
     using index_stats_t = typename index_at::stats_t;
     index_stats_t global_stats = index.stats();
     index_stats_t base_stats = index.stats(0);
-    std::size_t base_unreachable_nodes = index.unreachable_nodes(0);
+    std::size_t base_disconnected_nodes = (*index.disconnected_nodes(0)).count();
+    std::size_t unreachable_nodes = (*index.unreachable_nodes()).count();
     std::printf("-- Nodes: %zu\n", global_stats.nodes);
-    std::printf("-- Edges: %zu (%.2f density)\n", global_stats.edges,
+    std::printf("-- Edges: %zu (%.2f %% density)\n", global_stats.edges,
                 global_stats.edges * 100.f / global_stats.max_edges);
     std::printf("-- Edges in base: %zu (%.2f %% density)\n", base_stats.edges,
                 base_stats.edges * 100.f / base_stats.max_edges);
+    std::printf("-- Edges above base: %zu (%.2f %% density)\n", global_stats.edges - base_stats.edges,
+                (global_stats.edges - base_stats.edges) * 100.f / (global_stats.max_edges - base_stats.max_edges));
     std::printf("-- Memory usage: %.2e bytes\n", (double)global_stats.allocated_bytes);
-    std::printf("-- Unreachable nodes in base: %zu (%.3f %%)\n", base_unreachable_nodes,
-                base_unreachable_nodes * 100.f / global_stats.nodes);
+    std::printf("-- Memory usage in base: %.2e bytes (%.2f %%)\n", (double)base_stats.allocated_bytes,
+                base_stats.allocated_bytes * 100.f / global_stats.allocated_bytes);
+    std::printf("-- Disconnected nodes in base: %zu (%.3f %%)\n", base_disconnected_nodes,
+                base_disconnected_nodes * 100.f / global_stats.nodes);
+    std::printf("-- Unreachable nodes: %zu (%.3f %%)\n", unreachable_nodes,
+                unreachable_nodes * 100.f / global_stats.nodes);
 
     // Perform search, evaluate speed
     std::vector<default_key_t> found_neighbors(dataset.queries_count() * dataset.neighborhood_size());
