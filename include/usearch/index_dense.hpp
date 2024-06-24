@@ -690,6 +690,7 @@ class index_dense_gt {
         return result;
     }
 
+<<<<<<< HEAD
     explicit operator bool() const { return typed_; }
     std::size_t connectivity() const { return typed_->connectivity(); }
     std::size_t size() const { return typed_->size() - free_keys_.size(); }
@@ -702,13 +703,24 @@ class index_dense_gt {
     std::size_t neighbors_bytes() const { return typed_->neighbors_bytes(); }
     bool multi() const { return config_.multi; }
     std::size_t currently_available_threads() const {
+=======
+    explicit operator bool() const noexcept { return typed_; }
+    std::size_t connectivity() const noexcept { return typed_->connectivity(); }
+    std::size_t size() const noexcept { return typed_->size() - free_keys_.size(); }
+    std::size_t capacity() const noexcept { return typed_->capacity(); }
+    std::size_t max_level() const noexcept { return typed_->max_level(); }
+    index_dense_config_t const& config() const { return config_; }
+    index_limits_t const& limits() const noexcept { return typed_->limits(); }
+    bool multi() const noexcept { return config_.multi; }
+    std::size_t currently_available_threads() const noexcept {
+>>>>>>> 5bddeed (Improve: `noexcept` annotation)
         std::unique_lock<std::mutex> available_threads_lock(available_threads_mutex_);
         return available_threads_.size();
     }
 
     // The metric and its properties
-    metric_t const& metric() const { return metric_; }
-    void change_metric(metric_t metric) { metric_ = std::move(metric); }
+    metric_t const& metric() const noexcept { return metric_; }
+    void change_metric(metric_t metric) noexcept { metric_ = std::move(metric); }
 
     scalar_kind_t scalar_kind() const { return metric_.scalar_kind(); }
     metric_kind_t metric_kind() const { return metric_.metric_kind(); }
@@ -717,19 +729,28 @@ class index_dense_gt {
     std::size_t dimensions() const { return metric_.dimensions(); }
 
     // Fetching and changing search criteria
-    std::size_t expansion_add() const { return config_.expansion_add; }
-    std::size_t expansion_search() const { return config_.expansion_search; }
-    void change_expansion_add(std::size_t n) { config_.expansion_add = n; }
-    void change_expansion_search(std::size_t n) { config_.expansion_search = n; }
+    std::size_t expansion_add() const noexcept { return config_.expansion_add; }
+    std::size_t expansion_search() const noexcept { return config_.expansion_search; }
+    void change_expansion_add(std::size_t n) noexcept { config_.expansion_add = n; }
+    void change_expansion_search(std::size_t n) noexcept { config_.expansion_search = n; }
 
+<<<<<<< HEAD
     member_citerator_t cbegin() const { return typed_->cbegin(); }
     member_citerator_t cend() const { return typed_->cend(); }
     member_iterator_t begin() { return typed_->begin(); }
     member_iterator_t end() { return typed_->end(); }
+=======
+    member_citerator_t cbegin() const noexcept { return typed_->cbegin(); }
+    member_citerator_t cend() const noexcept { return typed_->cend(); }
+    member_citerator_t begin() const noexcept { return typed_->begin(); }
+    member_citerator_t end() const noexcept { return typed_->end(); }
+    member_iterator_t begin() noexcept { return typed_->begin(); }
+    member_iterator_t end() noexcept { return typed_->end(); }
+>>>>>>> 5bddeed (Improve: `noexcept` annotation)
 
-    stats_t stats() const { return typed_->stats(); }
-    stats_t stats(std::size_t level) const { return typed_->stats(level); }
-    stats_t stats(stats_t* stats_per_level, std::size_t max_level) const {
+    stats_t stats() const noexcept { return typed_->stats(); }
+    stats_t stats(std::size_t level) const noexcept { return typed_->stats(level); }
+    stats_t stats(stats_t* stats_per_level, std::size_t max_level) const noexcept {
         return typed_->stats(stats_per_level, max_level);
     }
 
@@ -738,8 +759,8 @@ class index_dense_gt {
         return typed_->disconnected_nodes(level);
     }
 
-    dynamic_allocator_t const& allocator() const { return typed_->dynamic_allocator(); }
-    vector_key_t const& free_key() const { return free_key_; }
+    dynamic_allocator_t const& allocator() const noexcept { return typed_->dynamic_allocator(); }
+    vector_key_t const& free_key() const noexcept { return free_key_; }
 
     /**
      *  @brief  A relatively accurate lower bound on the amount of memory consumed by the system.
@@ -747,7 +768,7 @@ class index_dense_gt {
      *
      *  @see    `serialized_length` for the length of the binary serialized representation.
      */
-    std::size_t memory_usage() const {
+    std::size_t memory_usage() const noexcept {
         return                                          //
             typed_->memory_usage(0) +                   //
             typed_->tape_allocator().total_wasted() +   //
