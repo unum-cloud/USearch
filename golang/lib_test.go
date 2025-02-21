@@ -79,6 +79,11 @@ func TestUSearch(t *testing.T) {
 			t.Fatalf("Failed to reserve capacity: %s", err)
 		}
 
+		err = ind.ChangeThreadsAdd(10)
+		if err != nil {
+			t.Fatalf("Failed to change threads add: %s", err)
+		}
+
 		vec := make([]float32, dim)
 		vec[0] = 40.0
 		vec[1] = 2.0
@@ -111,6 +116,11 @@ func TestUSearch(t *testing.T) {
 			t.Fatalf("Failed to reserve capacity: %s", err)
 		}
 
+		err = ind.ChangeThreadsSearch(10)
+		if err != nil {
+			t.Fatalf("Failed to change threads search: %s", err)
+		}
+
 		vec := make([]float32, dim)
 		vec[0] = 40.0
 		vec[1] = 2.0
@@ -125,12 +135,12 @@ func TestUSearch(t *testing.T) {
 			t.Fatalf("Failed to search: %s", err)
 		}
 
-		const tolerance = 1e-2  // For example, this sets the tolerance to 0.01
+		const tolerance = 1e-2 // For example, this sets the tolerance to 0.01
 		if keys[0] != 42 || math.Abs(float64(distances[0])) > tolerance {
 			t.Fatalf("Expected result 42 with distance 0, got key %d with distance %f", keys[0], distances[0])
 		}
 
-        // TODO: Add exact search
+		// TODO: Add exact search
 	})
 
 	t.Run("Test Save and Load", func(t *testing.T) {
@@ -158,22 +168,22 @@ func TestUSearch(t *testing.T) {
 		}
 
 		vec := make([]float32, dim)
-        for i := uint(0); i < dim; i++ {
-		    vec[i] = float32(i) + 0.2
-		    err = ind.Add(uint64(i), vec)
-		    if err != nil {
-			    t.Fatalf("Failed to insert: %s", err)
-		    }
-        }
+		for i := uint(0); i < dim; i++ {
+			vec[i] = float32(i) + 0.2
+			err = ind.Add(uint64(i), vec)
+			if err != nil {
+				t.Fatalf("Failed to insert: %s", err)
+			}
+		}
 
 		ind_length, err := ind.Len()
 		if err != nil {
 			t.Fatalf("Failed to retrieve size: %s", err)
 		}
 
-        // TODO: Add invalid save and loads?
-        buffer_size := uint(1*1024*1024)
-        buf := make([]byte, buffer_size)
+		// TODO: Add invalid save and loads?
+		buffer_size := uint(1 * 1024 * 1024)
+		buf := make([]byte, buffer_size)
 		err = ind.SaveBuffer(buf, buffer_size)
 		if err != nil {
 			t.Fatalf("Failed to save the index to a buffer: %s", err)
@@ -191,7 +201,7 @@ func TestUSearch(t *testing.T) {
 		if ind_length != ind2_length {
 			t.Fatalf("Loaded index length %d doesn't match original of %d ", ind2_length, ind_length)
 		}
-        // TODO: Check some values
+		// TODO: Check some values
 
 		err = indView.ViewBuffer(buf, buffer_size)
 		if err != nil {
@@ -214,6 +224,6 @@ func TestUSearch(t *testing.T) {
 			t.Fatalf("Loaded metadata doesn't match the index metadata")
 		}
 
-        // TODO: Check file save/load/metadata
+		// TODO: Check file save/load/metadata
 	})
 }

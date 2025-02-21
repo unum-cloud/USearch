@@ -75,7 +75,7 @@ func (m Metric) CValue() C.usearch_metric_kind_t {
 	case Sorensen:
 		return C.usearch_metric_sorensen_k
 	}
-    return C.usearch_metric_l2sq_k
+	return C.usearch_metric_l2sq_k
 }
 
 // Quantization represents the type for different scalar kinds used in quantization.
@@ -158,7 +158,7 @@ func NewIndex(conf IndexConfig) (index *Index, err error) {
 	options.expansion_add = expansion_add
 	options.expansion_search = expansion_search
 	options.multi = multi
-    options.metric_kind = conf.Metric.CValue()
+	options.metric_kind = conf.Metric.CValue()
 
 	// Map the quantization method
 	switch conf.Quantization {
@@ -250,6 +250,26 @@ func (index *Index) ChangeExpansionAdd(val uint) error {
 func (index *Index) ChangeExpansionSearch(val uint) error {
 	var errorMessage *C.char
 	C.usearch_change_expansion_search((C.usearch_index_t)(unsafe.Pointer(index.opaque_handle)), C.size_t(val), (*C.usearch_error_t)(&errorMessage))
+	if errorMessage != nil {
+		return errors.New(C.GoString(errorMessage))
+	}
+	return nil
+}
+
+// ChangeThreadsAdd sets the threads limit for add
+func (index *Index) ChangeThreadsAdd(val uint) error {
+	var errorMessage *C.char
+	C.usearch_change_threads_add((C.usearch_index_t)(unsafe.Pointer(index.opaque_handle)), C.size_t(val), (*C.usearch_error_t)(&errorMessage))
+	if errorMessage != nil {
+		return errors.New(C.GoString(errorMessage))
+	}
+	return nil
+}
+
+// ChangeThreadsSearch sets the threads limit for search
+func (index *Index) ChangeThreadsSearch(val uint) error {
+	var errorMessage *C.char
+	C.usearch_change_threads_search((C.usearch_index_t)(unsafe.Pointer(index.opaque_handle)), C.size_t(val), (*C.usearch_error_t)(&errorMessage))
 	if errorMessage != nil {
 		return errors.New(C.GoString(errorMessage))
 	}
@@ -375,7 +395,7 @@ func (index *Index) Get(key Key, count uint) (vectors []float32, err error) {
 		panic("Index is uninitialized")
 	}
 
-	vectors = make([]float32, index.config.Dimensions * count)
+	vectors = make([]float32, index.config.Dimensions*count)
 	var errorMessage *C.char
 	found := uint(C.usearch_get((C.usearch_index_t)(unsafe.Pointer(index.opaque_handle)), (C.usearch_key_t)(key), (C.size_t)(count), unsafe.Pointer(&vectors[0]), C.usearch_scalar_f32_k, (*C.usearch_error_t)(&errorMessage)))
 	if errorMessage != nil {
@@ -432,8 +452,8 @@ func (index *Index) Search(query []float32, limit uint) (keys []Key, distances [
 
 // ExactSearch is a multithreaded exact nearest neighbors search
 func ExactSearch(dataset []float32, queries []float32, dataset_size uint, queries_size uint,
-                dataset_stride uint, queries_stride uint, dims uint, metric Metric, 
-                count uint, threads uint, keys_stride uint, distances_stride uint) (keys []Key, distances []float32, err error) {
+	dataset_stride uint, queries_stride uint, dims uint, metric Metric,
+	count uint, threads uint, keys_stride uint, distances_stride uint) (keys []Key, distances []float32, err error) {
 	if (len(dataset) % int(dims)) != 0 {
 		return nil, nil, errors.New("Dataset length must be a multiple of the dimensions")
 	}
@@ -444,9 +464,9 @@ func ExactSearch(dataset []float32, queries []float32, dataset_size uint, querie
 	keys = make([]Key, count)
 	distances = make([]float32, count)
 	var errorMessage *C.char
-	C.usearch_exact_search(unsafe.Pointer(&dataset[0]), C.size_t(dataset_size), C.size_t(dataset_stride), unsafe.Pointer(&queries[0]), C.size_t(queries_size), C.size_t(queries_stride), 
-            C.usearch_scalar_f32_k, C.size_t(dims), metric.CValue(), C.size_t(count), C.size_t(threads),
-            (*C.usearch_key_t)(&keys[0]), C.size_t(keys_stride), (*C.usearch_distance_t)(&distances[0]), C.size_t(distances_stride), (*C.usearch_error_t)(&errorMessage))
+	C.usearch_exact_search(unsafe.Pointer(&dataset[0]), C.size_t(dataset_size), C.size_t(dataset_stride), unsafe.Pointer(&queries[0]), C.size_t(queries_size), C.size_t(queries_stride),
+		C.usearch_scalar_f32_k, C.size_t(dims), metric.CValue(), C.size_t(count), C.size_t(threads),
+		(*C.usearch_key_t)(&keys[0]), C.size_t(keys_stride), (*C.usearch_distance_t)(&distances[0]), C.size_t(distances_stride), (*C.usearch_error_t)(&errorMessage))
 	if errorMessage != nil {
 		return nil, nil, errors.New(C.GoString(errorMessage))
 	}
@@ -521,43 +541,43 @@ func MetadataBuffer(buf []byte, buffer_size uint) (c IndexConfig, err error) {
 
 	// Map the metric kind
 	switch options.metric_kind {
-    case C.usearch_metric_l2sq_k:
-	    c.Metric = L2sq
+	case C.usearch_metric_l2sq_k:
+		c.Metric = L2sq
 	case C.usearch_metric_ip_k:
-	    c.Metric = InnerProduct
-    case C.usearch_metric_cos_k:
-	    c.Metric = Cosine
-    case C.usearch_metric_haversine_k:
-	    c.Metric = Haversine
-    case C.usearch_metric_pearson_k:
-	    c.Metric = Pearson
-    case C.usearch_metric_hamming_k:
-	    c.Metric = Hamming
-    case C.usearch_metric_tanimoto_k:
-	    c.Metric = Tanimoto
-    case C.usearch_metric_sorensen_k:
-	    c.Metric = Sorensen
-    }
+		c.Metric = InnerProduct
+	case C.usearch_metric_cos_k:
+		c.Metric = Cosine
+	case C.usearch_metric_haversine_k:
+		c.Metric = Haversine
+	case C.usearch_metric_pearson_k:
+		c.Metric = Pearson
+	case C.usearch_metric_hamming_k:
+		c.Metric = Hamming
+	case C.usearch_metric_tanimoto_k:
+		c.Metric = Tanimoto
+	case C.usearch_metric_sorensen_k:
+		c.Metric = Sorensen
+	}
 
 	// Map the quantization method
 	switch options.quantization {
-    case C.usearch_scalar_f16_k:
-	    c.Quantization = F16
-    case C.usearch_scalar_f32_k:
-	    c.Quantization = F32
+	case C.usearch_scalar_f16_k:
+		c.Quantization = F16
+	case C.usearch_scalar_f32_k:
+		c.Quantization = F32
 	case C.usearch_scalar_f64_k:
-	    c.Quantization = F64
+		c.Quantization = F64
 	case C.usearch_scalar_i8_k:
-	    c.Quantization = I8
+		c.Quantization = I8
 	case C.usearch_scalar_b1_k:
-	    c.Quantization = B1
+		c.Quantization = B1
 	}
 
 	return c, nil
 }
 
 // Metadata loads the metadata from a specified file.
-func Metadata(path string) (c IndexConfig, err error)  {
+func Metadata(path string) (c IndexConfig, err error) {
 
 	c_path := C.CString(path)
 	defer C.free(unsafe.Pointer(c_path))
@@ -578,36 +598,36 @@ func Metadata(path string) (c IndexConfig, err error)  {
 
 	// Map the metric kind
 	switch options.metric_kind {
-    case C.usearch_metric_l2sq_k:
-	    c.Metric = L2sq
+	case C.usearch_metric_l2sq_k:
+		c.Metric = L2sq
 	case C.usearch_metric_ip_k:
-	    c.Metric = InnerProduct
-    case C.usearch_metric_cos_k:
-	    c.Metric = Cosine
-    case C.usearch_metric_haversine_k:
-	    c.Metric = Haversine
-    case C.usearch_metric_pearson_k:
-	    c.Metric = Pearson
-    case C.usearch_metric_hamming_k:
-	    c.Metric = Hamming
-    case C.usearch_metric_tanimoto_k:
-	    c.Metric = Tanimoto
-    case C.usearch_metric_sorensen_k:
-	    c.Metric = Sorensen
-    }
+		c.Metric = InnerProduct
+	case C.usearch_metric_cos_k:
+		c.Metric = Cosine
+	case C.usearch_metric_haversine_k:
+		c.Metric = Haversine
+	case C.usearch_metric_pearson_k:
+		c.Metric = Pearson
+	case C.usearch_metric_hamming_k:
+		c.Metric = Hamming
+	case C.usearch_metric_tanimoto_k:
+		c.Metric = Tanimoto
+	case C.usearch_metric_sorensen_k:
+		c.Metric = Sorensen
+	}
 
 	// Map the quantization method
 	switch options.quantization {
-    case C.usearch_scalar_f16_k:
-	    c.Quantization = F16
-    case C.usearch_scalar_f32_k:
-	    c.Quantization = F32
+	case C.usearch_scalar_f16_k:
+		c.Quantization = F16
+	case C.usearch_scalar_f32_k:
+		c.Quantization = F32
 	case C.usearch_scalar_f64_k:
-	    c.Quantization = F64
+		c.Quantization = F64
 	case C.usearch_scalar_i8_k:
-	    c.Quantization = I8
+		c.Quantization = I8
 	case C.usearch_scalar_b1_k:
-	    c.Quantization = B1
+		c.Quantization = B1
 	}
 
 	return c, nil

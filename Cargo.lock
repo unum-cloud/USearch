@@ -135,7 +135,7 @@ checksum = "68f5e5f3158ecfd4b8ff6fe086db7c8467a2dfdac97fe420f2b7c4aa97af66d6"
 
 [[package]]
 name = "usearch"
-version = "2.17.0"
+version = "2.17.2"
 dependencies = [
  "cxx",
  "cxx-build",
