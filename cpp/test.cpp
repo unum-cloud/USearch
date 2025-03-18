@@ -1181,7 +1181,7 @@ void test_isolate() {
 =======
  * @brief Tests merging.
  */
-void test_merge() {
+void test_merge(std::size_t base_n) {
     using index_t = index_gt<>;
     using distance_t = typename index_t::distance_t;
     using key_t = typename index_t::key_t;
@@ -1225,24 +1225,49 @@ void test_merge() {
         expect(result);
     };
 
+    std::size_t n_nodes1 = base_n;
+    std::size_t n_nodes2 = base_n * 2;
+
+    // Prepare expected index
+    auto expected_index = create_index();
+    metric_t expected_metric;
+    expect(expected_index.reserve(n_nodes1 + n_nodes2));
+
     // Prepare index 1
     auto index1 = create_index();
     metric_t metric1;
-    expect(index1.reserve(3));
-    add(index1, 11, 1.1f, metric1);
-    add(index1, 12, 2.1f, metric1);
-    add(index1, 13, 3.1f, metric1);
-    expect_eq(index1.size(), 3);
+    expect(index1.reserve(n_nodes1));
+    {
+        // Use static seed for easy to reproduce
+        std::default_random_engine engine(n_nodes1);
+        std::uniform_real_distribution<float> distribution(-1.0, 1.0);
+        for (std::size_t i = 0; i < n_nodes1; ++i) {
+            std::size_t key = 10000 + i;
+            value_t value = distribution(engine);
+            add(index1, key, value, metric1);
+            add(expected_index, key, value, expected_metric);
+        }
+    }
+    expect_eq(index1.size(), n_nodes1);
+    expect_eq(expected_index.size(), n_nodes1);
 
     // Prepare index 2
     auto index2 = create_index();
     metric_t metric2;
-    expect(index2.reserve(4));
-    add(index2, 21, -1.1f, metric2);
-    add(index2, 22, -2.1f, metric2);
-    add(index2, 23, -3.1f, metric2);
-    add(index2, 24, -4.1f, metric2);
-    expect_eq(index2.size(), 4);
+    expect(index2.reserve(n_nodes2));
+    {
+        // Use static seed for easy to reproduce
+        std::default_random_engine engine(n_nodes2);
+        std::uniform_real_distribution<float> distribution(-1.0, 1.0);
+        for (std::size_t i = 0; i < n_nodes2; ++i) {
+            std::size_t key = 20000 + i;
+            value_t value = distribution(engine);
+            add(index2, key, value, metric2);
+            add(expected_index, key, value, expected_metric);
+        }
+    }
+    expect_eq(index2.size(), n_nodes2);
+    expect_eq(expected_index.size(), n_nodes1 + n_nodes2);
 
     // Merge indexes
     char const* merge_file_path = "merge.usearch";
@@ -1254,31 +1279,52 @@ void test_merge() {
     auto merge_on_success = [&](member_ref_t member, value_t const& value) {
         merged_metric.values[member.slot] = value;
     };
+
+    // Merge index1
     auto get_value1 = [&](member_cref_t member) -> value_t& { return metric1.values[member.slot]; };
     expect(merged_index.merge(index1, get_value1, merged_metric, {}, merge_on_success));
+    expect_eq(merged_index.size(), n_nodes1);
+    // Assert after we merge index1
+    auto search = merged_index.search(0.75f, 3, merged_metric);
+    auto expected_search = index1.search(0.75f, 3, expected_metric);
+    expect_eq(search.size(), 3);
+    expect(search[0].distance <= expected_search[0].distance);
+    expect(search[1].distance <= expected_search[1].distance);
+    expect(search[2].distance <= expected_search[2].distance);
+    auto loaded_index = create_index();
+    loaded_index.view(merge_file_path);
+    search = merged_index.search(0.75f, 3, merged_metric);
+
+    // Merge index2
     auto get_value2 = [&](member_cref_t member) -> value_t& { return metric2.values[member.slot]; };
     expect(merged_index.merge(index2, get_value2, merged_metric, {}, merge_on_success));
-
-    // Assert
-    expect_eq(merged_index.size(), 7);
-    auto search = merged_index.search(0.75f, 3, merged_metric);
+    // Assert after we merge index1 and index2
+    expect_eq(merged_index.size(), n_nodes1 + n_nodes2);
+    search = merged_index.search(0.75f, 3, merged_metric);
+    expected_search = expected_index.search(0.75f, 3, expected_metric);
     expect_eq(search.size(), 3);
-    expect_eq(static_cast<key_t>(search[0].member.key), 11);
-    expect_eq(static_cast<key_t>(search[1].member.key), 12);
-    expect_eq(static_cast<key_t>(search[2].member.key), 21);
+    expect(search[0].distance <= expected_search[0].distance);
+    expect(search[1].distance <= expected_search[1].distance);
+    expect(search[2].distance <= expected_search[2].distance);
 
-    // Re-load merged indexes
+    // Re-load the merged index
     merged_index.reset();
     merged_index.load(merge_file_path);
 
-    // Assert
-    expect_eq(merged_index.size(), 7);
+    // Assert after we reload the merged index
+    expect_eq(merged_index.size(), n_nodes1 + n_nodes2);
     search = merged_index.search(0.75f, 3, merged_metric);
     expect_eq(search.size(), 3);
+<<<<<<< HEAD
     expect_eq(static_cast<key_t>(search[0].member.key), 11);
     expect_eq(static_cast<key_t>(search[1].member.key), 12);
     expect_eq(static_cast<key_t>(search[2].member.key), 21);
 >>>>>>> e8d3fae (Add: Add index_gt::merge())
+=======
+    expect(search[0].distance <= expected_search[0].distance);
+    expect(search[1].distance <= expected_search[1].distance);
+    expect(search[2].distance <= expected_search[2].distance);
+>>>>>>> fdb2aae (Optimize merge)
 }
 
 int main(int, char**) {
@@ -1363,7 +1409,8 @@ int main(int, char**) {
 =======
     // Test merge
     std::printf("Testing merge\n");
-    test_merge();
+    test_merge(10);   // Use only the 0-level layer
+    test_merge(1000); // Use multiple layers
 
 >>>>>>> e8d3fae (Add: Add index_gt::merge())
     return 0;
