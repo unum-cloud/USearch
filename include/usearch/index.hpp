@@ -3204,7 +3204,7 @@ class index_gt {
         if (size() == 0 && same_connectivity) {
             // If the base index is empty, we just copy nodes in the target index.
             for (member_cref_t target_member : index) {
-                auto& value = get_value(target_member);
+                auto value = get_value(target_member);
                 const std::size_t target_slot = get_slot(target_member);
                 const std::size_t base_slot = target_slot;
                 node_t target_node = index.node_at_(target_slot);
@@ -3249,7 +3249,7 @@ class index_gt {
             //   index map for the 2nd path
             buffer_gt<std::size_t> target_slot_to_base(index.size());
             for (member_cref_t target_member : index) {
-                auto& value = get_value(target_member);
+                auto value = get_value(target_member);
                 const std::size_t target_slot = get_slot(target_member);
                 node_t target_node = index.node_at_(target_slot);
                 level_t level = target_node.level();
@@ -3318,7 +3318,7 @@ class index_gt {
         } else {
             // Add all values in the target index to the base index.
             for (const auto& member : index) {
-                auto& value = get_value(member);
+                auto value = get_value(member);
                 auto merge_callback = [&](member_ref_t m) { callback(m, value); };
                 add_result_t result = add(get_key(member), value, metric, update_config, merge_callback, prefetch);
                 if (!result) {
