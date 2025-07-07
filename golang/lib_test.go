@@ -938,8 +938,8 @@ func TestNewIndex(t *testing.T) {
 			}
 
 		}(j)
-		wg.Wait()
 	}
+	wg.Wait()
 
 	if int(ndone.Load()) != ncreate {
 		t.Fatalf("ncreate is different %d = %d", ncreate, int(ndone.Load()))
