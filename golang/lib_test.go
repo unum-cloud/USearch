@@ -907,7 +907,7 @@ func TestNewIndex(t *testing.T) {
 
 				err = index.Reserve(dim)
 				if err != nil {
-					t.Fatalf("Failed to create index: %s", err)
+					t.Fatalf("Failed to reserve index: %s", err)
 				}
 
 				vec := make([]float32, dim)
