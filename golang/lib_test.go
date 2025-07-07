@@ -899,7 +899,7 @@ func TestNewIndex(t *testing.T) {
 				}
 				ndone.Add(1)
 				dim := uint(128)
-				config := IndexConfig{Quantization: I8, Metric: L2sq, Dimensions: dim}
+				config := IndexConfig{Quantization: F32, Metric: L2sq, Dimensions: dim}
 				index, err := NewIndex(config)
 				if err != nil {
 					t.Fatalf("Failed to create index: %s", err)
