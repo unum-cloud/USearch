@@ -274,7 +274,34 @@ public class Index implements AutoCloseable {
         if (c_ptr == 0) {
             throw new IllegalStateException("Index already closed");
         }
-        c_reserve(c_ptr, capacity);
+        // Pass zeros to use all available contexts on the device
+        c_reserve(c_ptr, capacity, 0, 0);
+    }
+
+    /**
+     * Reserves memory and configures thread contexts.
+     * Use this to explicitly control concurrent add/search capacities.
+     *
+     * @param capacity desired total capacity
+     * @param threadsAdd maximum concurrent add contexts
+     * @param threadsSearch maximum concurrent search contexts
+     */
+    public void reserve(long capacity, long threadsAdd, long threadsSearch) {
+        if (c_ptr == 0) {
+            throw new IllegalStateException("Index already closed");
+        }
+        c_reserve(c_ptr, capacity, threadsAdd, threadsSearch);
+    }
+
+    /**
+     * Reserves memory and sets the same number of contexts
+     * for both add and search operations.
+     *
+     * @param capacity desired total capacity
+     * @param threads number of contexts for both add and search
+     */
+    public void reserve(long capacity, long threads) {
+        reserve(capacity, threads, threads);
     }
 
     /**
@@ -1021,7 +1048,7 @@ public class Index implements AutoCloseable {
 
     private static native long c_capacity(long ptr);
 
-    private static native void c_reserve(long ptr, long capacity);
+    private static native void c_reserve(long ptr, long capacity, long threadsAdd, long threadsSearch);
 
     private static native void c_save(long ptr, String path);
 

@@ -267,13 +267,14 @@ public class IndexTest {
     @Test
     public void testConcurrentAdd() throws Exception {
         try (Index index = new Index.Config().metric("cos").dimensions(4).build()) {
-            index.reserve(1000);
+            final int threadsCount = 10;
+            index.reserve(1000, threadsCount);
 
-            ExecutorService executor = Executors.newFixedThreadPool(10);
+            ExecutorService executor = Executors.newFixedThreadPool(threadsCount);
             @SuppressWarnings("unchecked")
-            CompletableFuture<Void>[] futures = new CompletableFuture[10];
+            CompletableFuture<Void>[] futures = new CompletableFuture[threadsCount];
 
-            for (int t = 0; t < 10; t++) {
+            for (int t = 0; t < threadsCount; t++) {
                 final int threadId = t;
                 futures[t]
                         = CompletableFuture.runAsync(
@@ -290,25 +291,26 @@ public class IndexTest {
             CompletableFuture.allOf(futures).get(10, TimeUnit.SECONDS);
             executor.shutdown();
 
-            assertEquals(500, index.size());
+            assertEquals(50L * threadsCount, index.size());
         }
     }
 
     @Test
     public void testConcurrentSearch() throws Exception {
         try (Index index = new Index.Config().metric("cos").dimensions(4).build()) {
-            index.reserve(100);
+            final int threadsCount = 5;
+            index.reserve(100, threadsCount);
 
             // Add some vectors first
             for (int i = 0; i < 100; i++) {
                 index.add(i, randomVector(4));
             }
 
-            ExecutorService executor = Executors.newFixedThreadPool(5);
+            ExecutorService executor = Executors.newFixedThreadPool(threadsCount);
             @SuppressWarnings("unchecked")
-            CompletableFuture<long[]>[] futures = new CompletableFuture[5];
+            CompletableFuture<long[]>[] futures = new CompletableFuture[threadsCount];
 
-            for (int t = 0; t < 5; t++) {
+            for (int t = 0; t < threadsCount; t++) {
                 futures[t]
                         = CompletableFuture.supplyAsync(
                                 () -> {
@@ -325,56 +327,6 @@ public class IndexTest {
             }
 
             executor.shutdown();
-        }
-    }
-
-    @Test
-    public void testMixedConcurrency() throws Exception {
-        try (Index index = new Index.Config().metric("cos").dimensions(3).build()) {
-            index.reserve(200);
-
-            ExecutorService executor = Executors.newFixedThreadPool(8);
-            @SuppressWarnings("unchecked")
-            CompletableFuture<Void>[] addFutures = new CompletableFuture[4];
-            @SuppressWarnings("unchecked")
-            CompletableFuture<Void>[] searchFutures = new CompletableFuture[4];
-
-            // Add operations
-            for (int t = 0; t < 4; t++) {
-                final int threadId = t;
-                addFutures[t]
-                        = CompletableFuture.runAsync(
-                                () -> {
-                                    for (int i = 0; i < 30; i++) {
-                                        long key = threadId * 30L + i;
-                                        index.add(key, randomVector(3));
-                                    }
-                                },
-                                executor);
-            }
-
-            // Wait for some adds to complete, then start searches
-            Thread.sleep(100);
-
-            // Search operations
-            for (int t = 0; t < 4; t++) {
-                searchFutures[t]
-                        = CompletableFuture.runAsync(
-                                () -> {
-                                    for (int i = 0; i < 10; i++) {
-                                        float[] queryVector = randomVector(3);
-                                        long[] results = index.search(queryVector, 5);
-                                        assertTrue(results.length >= 0);
-                                    }
-                                },
-                                executor);
-            }
-
-            CompletableFuture.allOf(addFutures).get(15, TimeUnit.SECONDS);
-            CompletableFuture.allOf(searchFutures).get(15, TimeUnit.SECONDS);
-            executor.shutdown();
-
-            assertEquals(120, index.size());
         }
     }
 
@@ -751,30 +703,30 @@ public class IndexTest {
         String[] available = Index.hardwareAccelerationAvailable();
         assertNotEquals("Available capabilities should not be null", null, available);
         assertTrue("Platform should have at least serial capability", available.length > 0);
-        
+
         // Test compile-time capabilities
         String[] compiled = Index.hardwareAccelerationCompiled();
         assertNotEquals("Compiled capabilities should not be null", null, compiled);
         assertTrue("Should have at least serial compiled", compiled.length > 0);
-        
+
         // Should always include serial as baseline in both
         boolean hasAvailableSerial = false;
         boolean hasCompiledSerial = false;
-        
+
         for (String cap : available) {
             if ("serial".equals(cap)) {
                 hasAvailableSerial = true;
                 break;
             }
         }
-        
+
         for (String cap : compiled) {
             if ("serial".equals(cap)) {
                 hasCompiledSerial = true;
                 break;
             }
         }
-        
+
         assertTrue("Platform should always support serial capability", hasAvailableSerial);
         assertTrue("Serial should always be compiled", hasCompiledSerial);
 

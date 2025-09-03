@@ -66,10 +66,10 @@ JNIEXPORT jlong JNICALL Java_cloud_unum_usearch_Index_c_1capacity
 /*
  * Class:     cloud_unum_usearch_Index
  * Method:    c_reserve
- * Signature: (JJ)V
+ * Signature: (JJJJ)V
  */
 JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1reserve
-  (JNIEnv *, jclass, jlong, jlong);
+  (JNIEnv *, jclass, jlong, jlong, jlong, jlong);
 
 /*
  * Class:     cloud_unum_usearch_Index
