@@ -641,9 +641,10 @@ class index_dense_gt {
      *  ! the `change_metric` method before the index can be used. Alternatively,
      *  ! if you are loading an existing index, the metric will be set automatically.
      */
-    static state_result_t make(           //
-        metric_t metric = {},             //
-        index_dense_config_t config = {}, //
+    static state_result_t make(             //
+        metric_t metric = {},               //
+        index_dense_config_t config = {},   //
+        bool create_internal_index = true,  //
         vector_key_t free_key = default_free_value<vector_key_t>()) {
 
         if (metric.missing())
@@ -667,8 +668,10 @@ class index_dense_gt {
             index.metric_ = metric;
         }
 
-        new (raw) index_t(config);
-        index.typed_ = raw;
+        if (create_internal_index) {
+            new (raw) index_t(config);
+            index.typed_ = raw;
+        }
         return result;
     }
 
