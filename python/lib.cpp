@@ -958,13 +958,21 @@ static py::object get_typed_vectors_for_keys(index_at const& index, py::buffer k
         }
         return results;
     } else {
-        py::array_t<external_at> result_py({keys_count, static_cast<Py_ssize_t>(index.scalar_words())});
-        auto result_py2d = result_py.template mutable_unchecked<2>();
+        py::tuple results(keys_count);
+
         for (Py_ssize_t task_idx = 0; task_idx != keys_count; ++task_idx) {
             dense_key_t key = *reinterpret_cast<dense_key_t const*>(keys_data + task_idx * keys_info.strides[0]);
-            index.get(key, (internal_at*)&result_py2d(task_idx, 0), 1);
+            if (!index.contains(key)) {
+                results[task_idx] = py::none();
+                continue;
+            }
+
+            py::array_t<external_at> result_py({static_cast<Py_ssize_t>(index.scalar_words())});
+            auto result_py1d = result_py.template mutable_unchecked<1>();
+            index.get(key, (internal_at*)&result_py1d(0), 1);
+            results[task_idx] = result_py;
         }
-        return result_py;
+        return results;
     }
 }
 
