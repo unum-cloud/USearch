@@ -2,9 +2,9 @@ name: Pre-Release
 
 on:
   push:
-    branches: ['main-dev']
+    branches: ["main-dev"]
   pull_request:
-    branches: ['main-dev']
+    branches: ["main-dev"]
 
 env:
   GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
@@ -13,7 +13,7 @@ env:
   DOTNET_VERSION: 8.0.x
   NODE_VERSION: 20
   JAVA_VERSION: 21
-  GO_VERSION: '^1.21.0'
+  GO_VERSION: "^1.21.0"
   ANDROID_NDK_VERSION: 26.3.11579264
   ANDROID_SDK_VERSION: 21
 
@@ -34,8 +34,8 @@ jobs:
       - name: Run TinySemVer
         uses: ashvardanian/tinysemver@v2.1.1
         with:
-          verbose: 'true'
-          version-file: 'VERSION'
+          verbose: "true"
+          version-file: "VERSION"
           update-version-in: |
             package.json:"version": "(\d+\.\d+\.\d+)"
             package-lock.json:"usearch",\n\s+"version": "(\d+\.\d+\.\d+)"
@@ -55,7 +55,7 @@ jobs:
             include/usearch/index.hpp:^#define USEARCH_VERSION_MINOR (\d+)
           update-patch-version-in: |
             include/usearch/index.hpp:^#define USEARCH_VERSION_PATCH (\d+)
-          dry-run: 'true'
+          dry-run: "true"
 
   test_ubuntu_gcc:
     name: Ubuntu (GCC 14)
@@ -123,7 +123,7 @@ jobs:
         uses: actions/setup-java@v5
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: 'adopt'
+          distribution: "adopt"
       - name: Setup Gradle
         uses: gradle/gradle-build-action@v2.4.2
       - name: Check Java formatting
@@ -429,7 +429,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
-        python-version: ['38', '39', '310', '311', '312', '313', '313t']
+        python-version: ["38", "39", "310", "311", "312", "313", "313t"]
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -571,7 +571,7 @@ jobs:
         uses: actions/setup-java@v5
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: 'adopt'
+          distribution: "adopt"
 
         # We skip native compilation with Gradle and focus just on the Java part,
         # assuming the we won't be able to tun the tests without emulation

@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    branches: ['main']
+    branches: ["main"]
 
 env:
   GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
@@ -11,7 +11,7 @@ env:
   DOTNET_VERSION: 8.0.x
   NODE_VERSION: 20
   JAVA_VERSION: 21
-  GO_VERSION: '^1.21.0'
+  GO_VERSION: "^1.21.0"
   ANDROID_NDK_VERSION: 26.3.11579264
   ANDROID_SDK_VERSION: 21
   EMSCRIPTEN_VERSION: 3.1.47
@@ -37,8 +37,8 @@ jobs:
       - name: Run TinySemVer
         uses: ashvardanian/tinysemver@v2.1.1
         with:
-          verbose: 'true'
-          version-file: 'VERSION'
+          verbose: "true"
+          version-file: "VERSION"
           update-version-in: |
             package.json:"version": "(\d+\.\d+\.\d+)"
             package-lock.json:"usearch",\n\s+"version": "(\d+\.\d+\.\d+)"
@@ -58,9 +58,9 @@ jobs:
             include/usearch/index.hpp:^#define USEARCH_VERSION_MINOR (\d+)
           update-patch-version-in: |
             include/usearch/index.hpp:^#define USEARCH_VERSION_PATCH (\d+)
-          dry-run: 'false'
-          push: 'true'
-          create-release: 'true'
+          dry-run: "false"
+          push: "true"
+          create-release: "true"
           github-token: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
 
   rebase:
@@ -111,7 +111,7 @@ jobs:
       - name: Check out refreshed version
         uses: actions/checkout@v4
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -167,7 +167,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          file: '*.so;*.deb'
+          file: "*.so;*.deb"
           update_latest_release: true
 
   create_windows_dll_library:
@@ -182,7 +182,7 @@ jobs:
       - name: Check out refreshed version
         uses: actions/checkout@v4
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -239,7 +239,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          file: 'usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar'
+          file: "usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar"
           update_latest_release: true
 
   create_macos_dylib_library:
@@ -254,7 +254,7 @@ jobs:
       - name: Check out refreshed version
         uses: actions/checkout@v4
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -295,7 +295,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          file: '*.dylib'
+          file: "*.dylib"
           update_latest_release: true
 
       - name: Upload archive
@@ -303,7 +303,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          file: '*.zip'
+          file: "*.zip"
           update_latest_release: true
 
   create_android_library:
@@ -327,7 +327,7 @@ jobs:
       - name: Check out refreshed version
         uses: actions/checkout@v4
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -370,7 +370,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          file: '*.zip'
+          file: "*.zip"
           update_latest_release: true
 
   build_jni_linux:
@@ -390,7 +390,7 @@ jobs:
       - name: Check out refreshed version
         uses: actions/checkout@v4
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -398,7 +398,7 @@ jobs:
         uses: actions/setup-java@v5
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: 'adopt'
+          distribution: "adopt"
 
       - name: Install dependencies
         run: |
@@ -463,7 +463,7 @@ jobs:
       - name: Check out refreshed version
         uses: actions/checkout@v4
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -471,7 +471,7 @@ jobs:
         uses: actions/setup-java@v5
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: 'adopt'
+          distribution: "adopt"
 
       - name: Build JNI library
         run: |
@@ -516,7 +516,7 @@ jobs:
       - name: Check out refreshed version
         uses: actions/checkout@v4
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -524,7 +524,7 @@ jobs:
         uses: actions/setup-java@v5
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: 'adopt'
+          distribution: "adopt"
 
       - name: Build JNI library
         run: |
@@ -572,7 +572,7 @@ jobs:
       - name: Check out refreshed version
         uses: actions/checkout@v4
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -580,7 +580,7 @@ jobs:
         uses: actions/setup-java@v5
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: 'adopt'
+          distribution: "adopt"
 
       - name: Install NDK
         run: |
@@ -623,7 +623,7 @@ jobs:
       - name: Check out refreshed version
         uses: actions/checkout@v4
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -662,7 +662,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          file: 'usearch_wasm_*.tar.gz;usearch_wasm_*.zip'
+          file: "usearch_wasm_*.tar.gz;usearch_wasm_*.zip"
           update_latest_release: true
 
   publish_checksums:
@@ -691,8 +691,8 @@ jobs:
         uses: robinraju/release-downloader@v1.12
         with:
           latest: true
-          fileName: '*'
-          out-file-path: 'downloads'
+          fileName: "*"
+          out-file-path: "downloads"
           tarBall: true
           zipBall: true
 
@@ -727,12 +727,12 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
-        python-version: ['38', '39', '310', '311', '312', '313', '313t']
+        python-version: ["38", "39", "310", "311", "312", "313", "313t"]
     steps:
       - name: Check out refreshed version
         uses: actions/checkout@v4
         with:
-          ref: 'main'
+          ref: "main"
       - name: Setup Docker
         if: matrix.os == 'ubuntu-24.04'
         uses: crazy-max/ghaction-setup-docker@v1.0.0
@@ -750,7 +750,7 @@ jobs:
         env:
           CIBW_BUILD: cp${{ matrix.python-version }}-*
           CIBW_ENABLE: cpython-freethreading # No-GIL 3.13t builds
-          CIBW_TEST_SKIP: '*-win_arm64' # Too complex to emulate Windows ARM
+          CIBW_TEST_SKIP: "*-win_arm64" # Too complex to emulate Windows ARM
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
@@ -808,7 +808,7 @@ jobs:
       - name: Checkout the latest code
         uses: actions/checkout@v4
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -864,7 +864,7 @@ jobs:
       - name: Check out refreshed version
         uses: actions/checkout@v4
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -911,7 +911,7 @@ jobs:
       - name: Check out refreshed version
         uses: actions/checkout@v4
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
       - name: Hide submodule Crates
@@ -952,7 +952,7 @@ jobs:
       - name: Check out refreshed version
         uses: actions/checkout@v4
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -965,7 +965,7 @@ jobs:
         uses: actions/setup-java@v5
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: 'adopt'
+          distribution: "adopt"
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
       - name: Build fat JAR with all platforms
@@ -1032,7 +1032,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          file: 'build/libs/*.jar'
+          file: "build/libs/*.jar"
           update_latest_release: true
 
   publish_swift:
@@ -1043,7 +1043,7 @@ jobs:
       - name: Check out refreshed version
         uses: actions/checkout@v4
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
       - name: Build
@@ -1064,7 +1064,7 @@ jobs:
       - name: Check out refreshed version
         uses: actions/checkout@v4
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
       - name: Login to Docker Hub
@@ -1111,7 +1111,7 @@ jobs:
       - name: Check out refreshed version
         uses: actions/checkout@v4
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -1165,7 +1165,7 @@ jobs:
       - name: Check out refreshed version
         uses: actions/checkout@v4
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -1215,7 +1215,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: 'main'
+          ref: "main"
       - name: Install dependencies
         run: |
           sudo apt update && 
@@ -1280,4 +1280,4 @@ jobs:
         uses: fjogeleit/http-request-action@v1
         with:
           url: ${{ secrets.DOCS_VERCEL }}
-          method: 'POST'
+          method: "POST"
