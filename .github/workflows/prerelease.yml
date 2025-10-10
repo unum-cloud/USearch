@@ -306,11 +306,9 @@ jobs:
         run: |
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_c.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
-          dotnet test -c Debug --logger "console;verbosity=detailed" --filter "FullyQualifiedName!=Cloud.Unum.USearch.Tests.UsearchIndexTests.PersistAndRestore"
+          dotnet test -c Debug --logger "console;verbosity=minimal" --filter "FullyQualifiedName!=Cloud.Unum.USearch.Tests.UsearchIndexTests.PersistAndRestore"
         shell: bash
         working-directory: ${{ github.workspace }}/csharp
-        env:
-          DYLD_PRINT_LIBRARIES: 1
 
   test_windows_x86:
     name: Windows (x86)
