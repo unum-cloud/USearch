@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -65,7 +65,8 @@ jobs:
       CXX: g++
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v5
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -83,7 +84,7 @@ jobs:
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
@@ -97,7 +98,7 @@ jobs:
 
         # JavaScript
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
@@ -125,7 +126,7 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: "adopt"
       - name: Setup Gradle
-        uses: gradle/gradle-build-action@v2.4.2
+        uses: gradle/actions/setup-gradle@v5
       - name: Check Java formatting
         run: gradle spotlessCheck
       - name: Test Java
@@ -133,7 +134,7 @@ jobs:
 
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
@@ -161,7 +162,8 @@ jobs:
       CXX: clang++
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v5
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -180,7 +182,7 @@ jobs:
 
         # JavaScript
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
@@ -192,7 +194,7 @@ jobs:
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
@@ -220,7 +222,7 @@ jobs:
 
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
@@ -236,7 +238,8 @@ jobs:
     runs-on: macos-15
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v5
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -254,7 +257,7 @@ jobs:
 
         # JavaScript
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
@@ -266,7 +269,7 @@ jobs:
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
@@ -299,7 +302,7 @@ jobs:
 
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
@@ -314,7 +317,8 @@ jobs:
     name: Windows (x86)
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v5
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -331,7 +335,7 @@ jobs:
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
@@ -344,7 +348,7 @@ jobs:
 
         # JavaScript
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
@@ -367,7 +371,7 @@ jobs:
 
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
@@ -382,7 +386,8 @@ jobs:
     name: Windows (Arm)
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v5
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -405,7 +410,8 @@ jobs:
     name: Docker
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v5
       - name: Pull Git submodules
         run: git submodule update --init --recursive
       - name: Build
@@ -431,9 +437,10 @@ jobs:
         os: [ubuntu-24.04, macos-14, windows-2022]
         python-version: ["38", "39", "310", "311", "312", "313", "313t"]
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v5
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: 3.x
 
@@ -469,7 +476,8 @@ jobs:
             target: aarch64-linux-gnu
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v5
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -518,7 +526,8 @@ jobs:
             target: aarch64-linux-android
             arch: arm64
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v5
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 

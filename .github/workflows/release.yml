@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -69,7 +69,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout the latest code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -109,7 +109,7 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -180,17 +180,17 @@ jobs:
         arch: [x64, x86, arm64]
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
       - name: Setup CMake
-        uses: jwlawson/actions-setup-cmake@v2.0.2
+        uses: jwlawson/actions-setup-cmake@v2
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
@@ -252,14 +252,14 @@ jobs:
         arch: [arm64, x86_64]
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
@@ -325,7 +325,7 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -388,7 +388,7 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -461,7 +461,7 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -514,7 +514,7 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -570,7 +570,7 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -621,7 +621,7 @@ jobs:
     needs: versioning
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -730,14 +730,14 @@ jobs:
         python-version: ["38", "39", "310", "311", "312", "313", "313t"]
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: "main"
       - name: Setup Docker
         if: matrix.os == 'ubuntu-24.04'
-        uses: crazy-max/ghaction-setup-docker@v1.0.0
+        uses: crazy-max/ghaction-setup-docker@v3.4.0
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Setup QEMU
@@ -806,14 +806,14 @@ jobs:
 
     steps:
       - name: Checkout the latest code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           architecture: ${{ matrix.arch }}
@@ -849,7 +849,8 @@ jobs:
         run: |
           npm run prebuild-arm64
           aarch64-linux-gnu-strip prebuilds/linux-arm64/*node
-      - uses: actions/upload-artifact@v4
+      - name: Upload prebuilds
+        uses: actions/upload-artifact@v4
         with:
           name: prebuilds-${{ matrix.os }}-${{ matrix.arch }}
           path: prebuilds
@@ -862,14 +863,14 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -909,7 +910,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -919,11 +920,9 @@ jobs:
           mv simsimd/Cargo.toml simsimd/Cargo.toml.bak
           mv stringzilla/Cargo.toml stringzilla/Cargo.toml.bak
       - name: Set up Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-      - uses: katyo/publish-crates@v2
+        uses: dtolnay/rust-toolchain@stable
+      - name: Publish to crates.io
+        uses: katyo/publish-crates@v2
         with:
           registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -950,7 +949,7 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -967,7 +966,7 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: "adopt"
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
       - name: Build fat JAR with all platforms
         run: |
           # First build the JAR, which will build local native lib
@@ -1041,7 +1040,7 @@ jobs:
     runs-on: macos-15
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -1062,27 +1061,27 @@ jobs:
       packages: write
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
       - name: Login to Docker Hub
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Log in to GitHub Registry
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
       - name: Extract tags & labels for Docker
         id: meta
-        uses: docker/metadata-action@v4
+        uses: docker/metadata-action@v5
         with:
           images: |
             unum/usearch
@@ -1109,7 +1108,7 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -1163,7 +1162,7 @@ jobs:
       GITHUB_PACKAGES_SOURCE: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -1177,7 +1176,7 @@ jobs:
           path: ${{ env.USEARCH_LIBS }}
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
@@ -1213,7 +1212,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: "main"
       - name: Install dependencies
