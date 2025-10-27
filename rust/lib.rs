@@ -527,6 +527,7 @@ pub enum MetricFunction {
 /// refer to the individual method documentation.
 pub struct Index {
     inner: cxx::UniquePtr<ffi::NativeIndex>,
+    scalar_kind: ScalarKind,
     metric_fn: Option<MetricFunction>,
 }
 
@@ -585,10 +586,65 @@ impl Clone for ffi::IndexOptions {
     }
 }
 
+/// Data types are cast on the C++ side, but only some conversions are valid.
+/// TODO: think about this more. I guess you can cast int8 to double,
+/// but it's more likely an error. Maybe all casts except float to smaller float should be errors?
+fn is_kind_convertible_to(a: ScalarKind, b: ScalarKind) -> bool {
+    match a {
+        ScalarKind::F16 | ScalarKind::F32 | ScalarKind::F64 | ScalarKind::BF16 => [
+            ScalarKind::F16,
+            ScalarKind::F32,
+            ScalarKind::F64,
+            ScalarKind::BF16,
+        ]
+        .contains(&b),
+        ScalarKind::B1 | ScalarKind::I8 => a == b,
+        ScalarKind::Unknown => false,
+        ScalarKind { repr: _ } => unreachable!("Invalid Enum representation"),
+    }
+}
+
+#[non_exhaustive]
+pub enum IndexOperationError {
+    TypeError(ScalarKind, ScalarKind),
+    CXXException(cxx::Exception),
+}
+
+impl std::error::Error for IndexOperationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            IndexOperationError::CXXException(exception) => Some(exception),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for IndexOperationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IndexOperationError::TypeError(twant, tgot) => write!(
+                f,
+                "Type Error: Attempted to use an Index storing type {twant:?} with type {tgot:?}.",
+            ),
+            IndexOperationError::CXXException(exception) => {
+                write!(f, "C++ Exception: {}", exception)
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for IndexOperationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
 /// The `VectorType` trait defines operations for managing and querying vectors
 /// in an index. It supports generic operations on vectors of different types,
 /// allowing for the addition, retrieval, and search of vectors within an index.
 pub trait VectorType {
+    const KIND: ScalarKind;
+
     /// Adds a vector to the index under the specified key.
     ///
     /// # Parameters
@@ -598,8 +654,33 @@ pub trait VectorType {
     ///
     /// # Returns
     /// - `Ok(())` if the vector was successfully added to the index.
-    /// - `Err(cxx::Exception)` if an error occurred during the operation.
-    fn add(index: &Index, key: Key, vector: &[Self]) -> Result<(), cxx::Exception>
+    /// - `Err(IndexOperationError)` if an error occurred during the operation.
+    fn add(index: &Index, key: Key, vector: &[Self]) -> Result<(), IndexOperationError>
+    where
+        Self: Sized,
+    {
+        if !is_kind_convertible_to(index.scalar_kind, Self::KIND) {
+            return Err(IndexOperationError::TypeError(
+                Self::KIND,
+                index.scalar_kind,
+            ));
+        }
+
+        // SAFETY: index and vector scalar types are compatible
+        // Check that `vector.len()` matches `dimensionality` happens on the C++ side.
+        unsafe {
+            Self::add_unchecked(index, key, vector).map_err(IndexOperationError::CXXException)
+        }
+    }
+
+    /// Adds a vector to the index under the specified key.
+    /// Refer to [VectorType::add] for usage.
+    ///
+    /// # Safety
+    ///
+    ///  - The scalar element type of `index` (the `quantization` field in [ffi::IndexOptions])
+    ///  must be the same as that of `vector`.
+    unsafe fn add_unchecked(index: &Index, key: Key, vector: &[Self]) -> Result<(), cxx::Exception>
     where
         Self: Sized;
 
@@ -611,10 +692,39 @@ pub trait VectorType {
     /// - `buffer`: A mutable slice where the retrieved vector will be stored. The size of the
     ///   buffer determines the maximum number of elements that can be retrieved.
     ///
-    /// # Returns
+    /// # Retuns
     /// - `Ok(usize)` indicating the number of elements actually written into the `buffer`.
-    /// - `Err(cxx::Exception)` if an error occurred during the operation.
-    fn get(index: &Index, key: Key, buffer: &mut [Self]) -> Result<usize, cxx::Exception>
+    /// - `Err(IndexOperationError)` if an error occurred during the operation.
+    fn get(index: &Index, key: Key, buffer: &mut [Self]) -> Result<usize, IndexOperationError>
+    where
+        Self: Sized,
+    {
+        if !is_kind_convertible_to(index.scalar_kind, Self::KIND) {
+            return Err(IndexOperationError::TypeError(
+                Self::KIND,
+                index.scalar_kind,
+            ));
+        }
+
+        // SAFETY: index and vector scalar types are the same.
+        // Check that `buffer` is large enough happens on the C++ side.
+        unsafe {
+            Self::get_unchecked(index, key, buffer).map_err(IndexOperationError::CXXException)
+        }
+    }
+
+    /// Retrieves a vector from the index by its key.
+    /// Refer to [Index::get] for usage.
+    ///
+    /// # Safety
+    ///
+    /// The scalar element type of `index` (the `quantization` field in [ffi::IndexOptions])
+    /// must be the same as that of `buffer`.
+    unsafe fn get_unchecked(
+        index: &Index,
+        key: Key,
+        buffer: &mut [Self],
+    ) -> Result<usize, cxx::Exception>
     where
         Self: Sized;
 
@@ -628,8 +738,41 @@ pub trait VectorType {
     ///
     /// # Returns
     /// - `Ok(ffi::Matches)` containing the matches found.
-    /// - `Err(cxx::Exception)` if an error occurred during the search operation.
-    fn search(index: &Index, query: &[Self], count: usize) -> Result<ffi::Matches, cxx::Exception>
+    /// - `Err(IndexOperationError)` if an error occurred during the search operation.
+    fn search(
+        index: &Index,
+        query: &[Self],
+        count: usize,
+    ) -> Result<ffi::Matches, IndexOperationError>
+    where
+        Self: Sized,
+    {
+        if !is_kind_convertible_to(index.scalar_kind, Self::KIND) {
+            return Err(IndexOperationError::TypeError(
+                Self::KIND,
+                index.scalar_kind,
+            ));
+        }
+
+        // SAFETY: index and vector scalar types are the same.
+        unsafe {
+            Self::search_unchecked(index, query, count).map_err(IndexOperationError::CXXException)
+        }
+    }
+
+    /// Performs a search in the index using the given query vector, returning
+    /// up to `count` closest matches.
+    /// Refer to [Index::search] for usage.
+    ///
+    /// # Safety
+    ///
+    /// The scalar element type of `index` (the `quantization` field in [ffi::IndexOptions])
+    /// must be the same as that of `query`.
+    unsafe fn search_unchecked(
+        index: &Index,
+        query: &[Self],
+        count: usize,
+    ) -> Result<ffi::Matches, cxx::Exception>
     where
         Self: Sized;
 
@@ -644,8 +787,37 @@ pub trait VectorType {
     ///
     /// # Returns
     /// - `Ok(ffi::Matches)` containing the matches found.
-    /// - `Err(cxx::Exception)` if an error occurred during the search operation.
+    /// - `Err(IndexOperationError)` if an error occurred during the search operation.
     fn exact_search(
+        index: &Index,
+        query: &[Self],
+        count: usize,
+    ) -> Result<ffi::Matches, IndexOperationError>
+    where
+        Self: Sized,
+    {
+        if !is_kind_convertible_to(index.scalar_kind, Self::KIND) {
+            return Err(IndexOperationError::TypeError(
+                Self::KIND,
+                index.scalar_kind,
+            ));
+        }
+
+        // SAFETY: index and vector scalar types are the same.
+        unsafe {
+            Self::exact_search_unchecked(index, query, count)
+                .map_err(IndexOperationError::CXXException)
+        }
+    }
+
+    /// Performs an exact (brute force) search in the index using the given query vector.
+    /// Refer to [Index::exact_search] for usage.
+    ///
+    /// # Safety
+    ///
+    /// The scalar element type of `index` (the `quantization` field in [ffi::IndexOptions])
+    /// must be the same as that of `query`.
+    unsafe fn exact_search_unchecked(
         index: &Index,
         query: &[Self],
         count: usize,
@@ -671,6 +843,38 @@ pub trait VectorType {
         query: &[Self],
         count: usize,
         filter: F,
+    ) -> Result<ffi::Matches, IndexOperationError>
+    where
+        Self: Sized,
+        F: Fn(Key) -> bool,
+    {
+        if !is_kind_convertible_to(index.scalar_kind, Self::KIND) {
+            return Err(IndexOperationError::TypeError(
+                Self::KIND,
+                index.scalar_kind,
+            ));
+        }
+
+        // SAFETY: index and vector scalar types are the same.
+        unsafe {
+            Self::filtered_search_unchecked(index, query, count, filter)
+                .map_err(IndexOperationError::CXXException)
+        }
+    }
+
+    /// Performs a filtered search in the index using a query vector and a custom
+    /// filter function.
+    /// Refer to [Index::filtered_search] for usage.
+    ///
+    /// # Safety
+    ///
+    /// The scalar element type of `index` (the `quantization` field in [ffi::IndexOptions])
+    /// must be the same as that of `query`.
+    unsafe fn filtered_search_unchecked<F>(
+        index: &Index,
+        query: &[Self],
+        count: usize,
+        filter: F,
     ) -> Result<ffi::Matches, cxx::Exception>
     where
         Self: Sized,
@@ -685,8 +889,36 @@ pub trait VectorType {
     ///
     /// # Returns
     /// - `Ok(())` if the metric was successfully changed.
-    /// - `Err(cxx::Exception)` if an error occurred during the operation.
+    /// - `Err(IndexOperationError)` if an error occurred during the operation.
     fn change_metric(
+        index: &mut Index,
+        metric: std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
+    ) -> Result<(), IndexOperationError>
+    where
+        Self: Sized,
+    {
+        // TODO: same question as higher up. what kind of casts are allowed and sensible here?
+        if !is_kind_convertible_to(index.scalar_kind, Self::KIND) {
+            return Err(IndexOperationError::TypeError(
+                Self::KIND,
+                index.scalar_kind,
+            ));
+        }
+
+        // SAFETY: index and metric types are the same.
+        unsafe {
+            Self::change_metric_unchecked(index, metric).map_err(IndexOperationError::CXXException)
+        }
+    }
+
+    /// Changes the metric used for distance calculations within the index.
+    /// Refer to [Index::change_metric] for usage.
+    ///
+    /// # Safety
+    ///
+    /// The scalar element type of `index` (the `quantization` field in [ffi::IndexOptions])
+    /// must be the same as the arguments to `metric`.
+    unsafe fn change_metric_unchecked(
         index: &mut Index,
         metric: std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
     ) -> Result<(), cxx::Exception>
@@ -695,11 +927,17 @@ pub trait VectorType {
 }
 
 impl VectorType for f32 {
-    fn search(index: &Index, query: &[Self], count: usize) -> Result<ffi::Matches, cxx::Exception> {
+    const KIND: ScalarKind = ScalarKind::F32;
+
+    unsafe fn search_unchecked(
+        index: &Index,
+        query: &[Self],
+        count: usize,
+    ) -> Result<ffi::Matches, cxx::Exception> {
         index.inner.search_f32(query, count)
     }
 
-    fn exact_search(
+    unsafe fn exact_search_unchecked(
         index: &Index,
         query: &[Self],
         count: usize,
@@ -707,15 +945,23 @@ impl VectorType for f32 {
         index.inner.exact_search_f32(query, count)
     }
 
-    fn get(index: &Index, key: Key, vector: &mut [Self]) -> Result<usize, cxx::Exception> {
+    unsafe fn get_unchecked(
+        index: &Index,
+        key: Key,
+        vector: &mut [Self],
+    ) -> Result<usize, cxx::Exception> {
         index.inner.get_f32(key, vector)
     }
 
-    fn add(index: &Index, key: Key, vector: &[Self]) -> Result<(), cxx::Exception> {
+    unsafe fn add_unchecked(
+        index: &Index,
+        key: Key,
+        vector: &[Self],
+    ) -> Result<(), cxx::Exception> {
         index.inner.add_f32(key, vector)
     }
 
-    fn filtered_search<F>(
+    unsafe fn filtered_search_unchecked<F>(
         index: &Index,
         query: &[Self],
         count: usize,
@@ -739,7 +985,7 @@ impl VectorType for f32 {
             .filtered_search_f32(query, count, trampoline_fn, closure_address)
     }
 
-    fn change_metric(
+    unsafe fn change_metric_unchecked(
         index: &mut Index,
         metric: std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
     ) -> Result<(), cxx::Exception> {
@@ -770,11 +1016,17 @@ impl VectorType for f32 {
 }
 
 impl VectorType for i8 {
-    fn search(index: &Index, query: &[Self], count: usize) -> Result<ffi::Matches, cxx::Exception> {
+    const KIND: ScalarKind = ScalarKind::I8;
+
+    unsafe fn search_unchecked(
+        index: &Index,
+        query: &[Self],
+        count: usize,
+    ) -> Result<ffi::Matches, cxx::Exception> {
         index.inner.search_i8(query, count)
     }
 
-    fn exact_search(
+    unsafe fn exact_search_unchecked(
         index: &Index,
         query: &[Self],
         count: usize,
@@ -782,15 +1034,23 @@ impl VectorType for i8 {
         index.inner.exact_search_i8(query, count)
     }
 
-    fn get(index: &Index, key: Key, vector: &mut [Self]) -> Result<usize, cxx::Exception> {
+    unsafe fn get_unchecked(
+        index: &Index,
+        key: Key,
+        vector: &mut [Self],
+    ) -> Result<usize, cxx::Exception> {
         index.inner.get_i8(key, vector)
     }
 
-    fn add(index: &Index, key: Key, vector: &[Self]) -> Result<(), cxx::Exception> {
+    unsafe fn add_unchecked(
+        index: &Index,
+        key: Key,
+        vector: &[Self],
+    ) -> Result<(), cxx::Exception> {
         index.inner.add_i8(key, vector)
     }
 
-    fn filtered_search<F>(
+    unsafe fn filtered_search_unchecked<F>(
         index: &Index,
         query: &[Self],
         count: usize,
@@ -813,7 +1073,7 @@ impl VectorType for i8 {
             .inner
             .filtered_search_i8(query, count, trampoline_fn, closure_address)
     }
-    fn change_metric(
+    unsafe fn change_metric_unchecked(
         index: &mut Index,
         metric: std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
     ) -> Result<(), cxx::Exception> {
@@ -844,11 +1104,17 @@ impl VectorType for i8 {
 }
 
 impl VectorType for f64 {
-    fn search(index: &Index, query: &[Self], count: usize) -> Result<ffi::Matches, cxx::Exception> {
+    const KIND: ScalarKind = ScalarKind::F64;
+
+    unsafe fn search_unchecked(
+        index: &Index,
+        query: &[Self],
+        count: usize,
+    ) -> Result<ffi::Matches, cxx::Exception> {
         index.inner.search_f64(query, count)
     }
 
-    fn exact_search(
+    unsafe fn exact_search_unchecked(
         index: &Index,
         query: &[Self],
         count: usize,
@@ -856,15 +1122,23 @@ impl VectorType for f64 {
         index.inner.exact_search_f64(query, count)
     }
 
-    fn get(index: &Index, key: Key, vector: &mut [Self]) -> Result<usize, cxx::Exception> {
+    unsafe fn get_unchecked(
+        index: &Index,
+        key: Key,
+        vector: &mut [Self],
+    ) -> Result<usize, cxx::Exception> {
         index.inner.get_f64(key, vector)
     }
 
-    fn add(index: &Index, key: Key, vector: &[Self]) -> Result<(), cxx::Exception> {
+    unsafe fn add_unchecked(
+        index: &Index,
+        key: Key,
+        vector: &[Self],
+    ) -> Result<(), cxx::Exception> {
         index.inner.add_f64(key, vector)
     }
 
-    fn filtered_search<F>(
+    unsafe fn filtered_search_unchecked<F>(
         index: &Index,
         query: &[Self],
         count: usize,
@@ -887,7 +1161,7 @@ impl VectorType for f64 {
             .inner
             .filtered_search_f64(query, count, trampoline_fn, closure_address)
     }
-    fn change_metric(
+    unsafe fn change_metric_unchecked(
         index: &mut Index,
         metric: std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
     ) -> Result<(), cxx::Exception> {
@@ -918,11 +1192,17 @@ impl VectorType for f64 {
 }
 
 impl VectorType for f16 {
-    fn search(index: &Index, query: &[Self], count: usize) -> Result<ffi::Matches, cxx::Exception> {
+    const KIND: ScalarKind = ScalarKind::F16;
+
+    unsafe fn search_unchecked(
+        index: &Index,
+        query: &[Self],
+        count: usize,
+    ) -> Result<ffi::Matches, cxx::Exception> {
         index.inner.search_f16(f16::to_i16s(query), count)
     }
 
-    fn exact_search(
+    unsafe fn exact_search_unchecked(
         index: &Index,
         query: &[Self],
         count: usize,
@@ -930,15 +1210,23 @@ impl VectorType for f16 {
         index.inner.exact_search_f16(f16::to_i16s(query), count)
     }
 
-    fn get(index: &Index, key: Key, vector: &mut [Self]) -> Result<usize, cxx::Exception> {
+    unsafe fn get_unchecked(
+        index: &Index,
+        key: Key,
+        vector: &mut [Self],
+    ) -> Result<usize, cxx::Exception> {
         index.inner.get_f16(key, f16::to_mut_i16s(vector))
     }
 
-    fn add(index: &Index, key: Key, vector: &[Self]) -> Result<(), cxx::Exception> {
+    unsafe fn add_unchecked(
+        index: &Index,
+        key: Key,
+        vector: &[Self],
+    ) -> Result<(), cxx::Exception> {
         index.inner.add_f16(key, f16::to_i16s(vector))
     }
 
-    fn filtered_search<F>(
+    unsafe fn filtered_search_unchecked<F>(
         index: &Index,
         query: &[Self],
         count: usize,
@@ -957,15 +1245,12 @@ impl VectorType for f16 {
         // Temporarily cast the closure to a raw pointer for passing.
         let trampoline_fn: usize = trampoline::<F> as *const () as usize;
         let closure_address: usize = &filter as *const F as usize;
-        index.inner.filtered_search_f16(
-            f16::to_i16s(query),
-            count,
-            trampoline_fn,
-            closure_address,
-        )
+        index
+            .inner
+            .filtered_search_f16(f16::to_i16s(query), count, trampoline_fn, closure_address)
     }
 
-    fn change_metric(
+    unsafe fn change_metric_unchecked(
         index: &mut Index,
         metric: std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
     ) -> Result<(), cxx::Exception> {
@@ -996,11 +1281,17 @@ impl VectorType for f16 {
 }
 
 impl VectorType for b1x8 {
-    fn search(index: &Index, query: &[Self], count: usize) -> Result<ffi::Matches, cxx::Exception> {
+    const KIND: ScalarKind = ScalarKind::B1;
+
+    unsafe fn search_unchecked(
+        index: &Index,
+        query: &[Self],
+        count: usize,
+    ) -> Result<ffi::Matches, cxx::Exception> {
         index.inner.search_b1x8(b1x8::to_u8s(query), count)
     }
 
-    fn exact_search(
+    unsafe fn exact_search_unchecked(
         index: &Index,
         query: &[Self],
         count: usize,
@@ -1008,15 +1299,23 @@ impl VectorType for b1x8 {
         index.inner.exact_search_b1x8(b1x8::to_u8s(query), count)
     }
 
-    fn get(index: &Index, key: Key, vector: &mut [Self]) -> Result<usize, cxx::Exception> {
+    unsafe fn get_unchecked(
+        index: &Index,
+        key: Key,
+        vector: &mut [Self],
+    ) -> Result<usize, cxx::Exception> {
         index.inner.get_b1x8(key, b1x8::to_mut_u8s(vector))
     }
 
-    fn add(index: &Index, key: Key, vector: &[Self]) -> Result<(), cxx::Exception> {
+    unsafe fn add_unchecked(
+        index: &Index,
+        key: Key,
+        vector: &[Self],
+    ) -> Result<(), cxx::Exception> {
         index.inner.add_b1x8(key, b1x8::to_u8s(vector))
     }
 
-    fn filtered_search<F>(
+    unsafe fn filtered_search_unchecked<F>(
         index: &Index,
         query: &[Self],
         count: usize,
@@ -1035,15 +1334,12 @@ impl VectorType for b1x8 {
         // Temporarily cast the closure to a raw pointer for passing.
         let trampoline_fn: usize = trampoline::<F> as *const () as usize;
         let closure_address: usize = &filter as *const F as usize;
-        index.inner.filtered_search_b1x8(
-            b1x8::to_u8s(query),
-            count,
-            trampoline_fn,
-            closure_address,
-        )
+        index
+            .inner
+            .filtered_search_b1x8(b1x8::to_u8s(query), count, trampoline_fn, closure_address)
     }
 
-    fn change_metric(
+    unsafe fn change_metric_unchecked(
         index: &mut Index,
         metric: std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
     ) -> Result<(), cxx::Exception> {
@@ -1078,6 +1374,7 @@ impl Index {
         match ffi::new_native_index(options) {
             Ok(inner) => Result::Ok(Self {
                 inner,
+                scalar_kind: options.quantization,
                 metric_fn: None,
             }),
             Err(err) => Err(err),
@@ -1113,8 +1410,8 @@ impl Index {
     pub fn change_metric<T: VectorType>(
         self: &mut Index,
         metric: std::boxed::Box<dyn Fn(*const T, *const T) -> Distance + Send + Sync>,
-    ) {
-        T::change_metric(self, metric).unwrap();
+    ) -> Result<(), IndexOperationError> {
+        T::change_metric(self, metric)
     }
 
     /// Retrieves the hardware acceleration information.
@@ -1140,7 +1437,7 @@ impl Index {
         self: &Index,
         query: &[T],
         count: usize,
-    ) -> Result<ffi::Matches, cxx::Exception> {
+    ) -> Result<ffi::Matches, IndexOperationError> {
         T::search(self, query, count)
     }
 
@@ -1160,7 +1457,7 @@ impl Index {
         self: &Index,
         query: &[T],
         count: usize,
-    ) -> Result<ffi::Matches, cxx::Exception> {
+    ) -> Result<ffi::Matches, IndexOperationError> {
         T::exact_search(self, query, count)
     }
 
@@ -1181,7 +1478,7 @@ impl Index {
         query: &[T],
         count: usize,
         filter: F,
-    ) -> Result<ffi::Matches, cxx::Exception>
+    ) -> Result<ffi::Matches, IndexOperationError>
     where
         F: Fn(Key) -> bool,
     {
@@ -1194,7 +1491,11 @@ impl Index {
     ///
     /// * `key` - The key associated with the vector.
     /// * `vector` - A slice containing the vector data.
-    pub fn add<T: VectorType>(self: &Index, key: Key, vector: &[T]) -> Result<(), cxx::Exception> {
+    pub fn add<T: VectorType>(
+        self: &Index,
+        key: Key,
+        vector: &[T],
+    ) -> Result<(), IndexOperationError> {
         T::add(self, key, vector)
     }
 
@@ -1213,7 +1514,7 @@ impl Index {
         self: &Index,
         key: Key,
         vector: &mut [T],
-    ) -> Result<usize, cxx::Exception> {
+    ) -> Result<usize, IndexOperationError> {
         T::get(self, key, vector)
     }
 
@@ -1228,7 +1529,7 @@ impl Index {
         self: &Index,
         key: Key,
         vector: &mut Vec<T>,
-    ) -> Result<usize, cxx::Exception> {
+    ) -> Result<usize, IndexOperationError> {
         let dim = self.dimensions();
         let max_matches = self.count(key);
         vector.resize(dim * max_matches, T::default());
@@ -1531,10 +1832,12 @@ mod tests {
         let second: [f32; 5] = [0.3, 0.2, 0.4, 0.0, 0.1];
         let too_long: [f32; 6] = [0.3, 0.2, 0.4, 0.0, 0.1, 0.1];
         let too_short: [f32; 4] = [0.3, 0.2, 0.4, 0.0];
+        let wrong_type: [i8; 5] = [1, 2, 3, 4, 5];
         assert!(index.add(1, &first).is_ok());
         assert!(index.add(2, &second).is_ok());
         assert!(index.add(3, &too_long).is_err());
         assert!(index.add(4, &too_short).is_err());
+        assert!(index.add(5, &wrong_type).is_err());
         assert_eq!(index.size(), 2);
 
         // Test using Vec<T>
@@ -1567,6 +1870,7 @@ mod tests {
         let second: [f32; 5] = [0.3, 0.2, 0.4, 0.0, 0.1];
         let too_long: [f32; 6] = [0.3, 0.2, 0.4, 0.0, 0.1, 0.1];
         let too_short: [f32; 4] = [0.3, 0.2, 0.4, 0.0];
+        let wrong_type: [i8; 5] = [1, 2, 3, 4, 5];
         assert!(index.add(1, &first).is_ok());
         assert!(index.add(2, &second).is_ok());
         assert_eq!(index.size(), 2);
@@ -1574,7 +1878,11 @@ mod tests {
         //assert!(index.add(4, &too_short).is_err());
 
         assert!(index.search(&too_long, 1).is_err());
+        assert!(index.exact_search(&too_long, 1).is_err());
         assert!(index.search(&too_short, 1).is_err());
+        assert!(index.exact_search(&too_short, 1).is_err());
+        assert!(index.search(&wrong_type, 1).is_err());
+        assert!(index.exact_search(&wrong_type, 1).is_err());
     }
 
     #[test]
@@ -1887,7 +2195,10 @@ mod tests {
             (a_slice[0] - b_slice[0]).abs() * first_factor
                 + (a_slice[1] - b_slice[1]).abs() * second_factor
         });
-        index.change_metric(stateful_distance);
+        assert!(index.change_metric(stateful_distance).is_ok());
+
+        let wrong_type = Box::new(move |_: *const b1x8, _: *const b1x8| 0.0);
+        assert!(index.change_metric(wrong_type).is_err());
 
         let another_vector: [f32; 2] = [0.0, 1.0];
         index.add(2, &another_vector).unwrap();
