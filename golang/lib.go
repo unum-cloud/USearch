@@ -696,6 +696,11 @@ func (index *Index) FilteredSearchUnsafe(query unsafe.Pointer, limit uint, handl
 	if query == nil {
 		return nil, nil, errors.New("query pointer cannot be nil")
 	}
+
+	if handler == nil {
+		return nil, nil, errors.New("filtered search handler cannot be nil")
+	}
+
 	if limit == 0 {
 		return []Key{}, []float32{}, nil
 	}
