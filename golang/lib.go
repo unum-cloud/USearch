@@ -687,7 +687,7 @@ func goFilteredSearchCallback(key C.usearch_key_t, ptr unsafe.Pointer) C.int {
 	return C.int(handler.f(Key(key), ptr))
 }
 
-// Search performs k-Approximate Nearest Neighbors Search for the closest vectors to the query vector.
+// Filtred Search performs k-Approximate Nearest Neighbors Search for the closest vectors to the query vector with filtering.
 func (index *Index) FilteredSearchUnsafe(query unsafe.Pointer, limit uint, handler *FilteredSearchHandler) (keys []Key, distances []float32, err error) {
 	if index.handle == nil {
 		panic("index is uninitialized")
