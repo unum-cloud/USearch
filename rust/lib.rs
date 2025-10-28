@@ -2122,6 +2122,34 @@ mod tests {
     }
 
     #[test]
+    fn test_change_metric_leak() {
+        let options = IndexOptions {
+            dimensions: 2,
+            quantization: ScalarKind::F32,
+            ..Default::default()
+        };
+        let mut index = Index::new(&options).unwrap();
+        index.reserve(10).unwrap();
+
+        let vector: [f32; 2] = [1.0, 0.0];
+        index.add(1, &vector).unwrap();
+
+        let counter = std::sync::Arc::new(std::sync::Mutex::new(0f32));
+
+        let n: i32 = 100;
+        for _ in 0..n {
+            let counter_copy = counter.clone();
+            let metric =
+                Box::new(move |_: *const f32, _: *const f32| *counter_copy.lock().unwrap());
+            index.change_metric(metric).unwrap();
+        }
+        drop(index);
+        // Only one reference to counter (the one held in this scope, not the closure)
+        // should be left.
+        assert_eq!(std::sync::Arc::strong_count(&counter), 1);
+    }
+
+    #[test]
     fn test_binary_vectors_and_hamming_distance() {
         let index = Index::new(&IndexOptions {
             dimensions: 8,
