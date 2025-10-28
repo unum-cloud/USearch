@@ -642,7 +642,7 @@ impl std::fmt::Debug for IndexOperationError {
 /// The `VectorType` trait defines operations for managing and querying vectors
 /// in an index. It supports generic operations on vectors of different types,
 /// allowing for the addition, retrieval, and search of vectors within an index.
-pub trait VectorType {
+pub unsafe trait VectorType: Sized {
     const KIND: ScalarKind;
 
     /// Adds a vector to the index under the specified key.
@@ -655,10 +655,7 @@ pub trait VectorType {
     /// # Returns
     /// - `Ok(())` if the vector was successfully added to the index.
     /// - `Err(IndexOperationError)` if an error occurred during the operation.
-    fn add(index: &Index, key: Key, vector: &[Self]) -> Result<(), IndexOperationError>
-    where
-        Self: Sized,
-    {
+    fn add(index: &Index, key: Key, vector: &[Self]) -> Result<(), IndexOperationError> {
         if !is_kind_convertible_to(index.scalar_kind, Self::KIND) {
             return Err(IndexOperationError::TypeError(
                 Self::KIND,
@@ -695,10 +692,7 @@ pub trait VectorType {
     /// # Retuns
     /// - `Ok(usize)` indicating the number of elements actually written into the `buffer`.
     /// - `Err(IndexOperationError)` if an error occurred during the operation.
-    fn get(index: &Index, key: Key, buffer: &mut [Self]) -> Result<usize, IndexOperationError>
-    where
-        Self: Sized,
-    {
+    fn get(index: &Index, key: Key, buffer: &mut [Self]) -> Result<usize, IndexOperationError> {
         if !is_kind_convertible_to(index.scalar_kind, Self::KIND) {
             return Err(IndexOperationError::TypeError(
                 Self::KIND,
@@ -724,9 +718,7 @@ pub trait VectorType {
         index: &Index,
         key: Key,
         buffer: &mut [Self],
-    ) -> Result<usize, cxx::Exception>
-    where
-        Self: Sized;
+    ) -> Result<usize, cxx::Exception>;
 
     /// Performs a search in the index using the given query vector, returning
     /// up to `count` closest matches.
@@ -743,10 +735,7 @@ pub trait VectorType {
         index: &Index,
         query: &[Self],
         count: usize,
-    ) -> Result<ffi::Matches, IndexOperationError>
-    where
-        Self: Sized,
-    {
+    ) -> Result<ffi::Matches, IndexOperationError> {
         if !is_kind_convertible_to(index.scalar_kind, Self::KIND) {
             return Err(IndexOperationError::TypeError(
                 Self::KIND,
@@ -772,9 +761,7 @@ pub trait VectorType {
         index: &Index,
         query: &[Self],
         count: usize,
-    ) -> Result<ffi::Matches, cxx::Exception>
-    where
-        Self: Sized;
+    ) -> Result<ffi::Matches, cxx::Exception>;
 
     /// Performs an exact (brute force) search in the index using the given query vector, returning
     /// up to `count` closest matches. This search checks all vectors in the index, guaranteeing to find
@@ -792,10 +779,7 @@ pub trait VectorType {
         index: &Index,
         query: &[Self],
         count: usize,
-    ) -> Result<ffi::Matches, IndexOperationError>
-    where
-        Self: Sized,
-    {
+    ) -> Result<ffi::Matches, IndexOperationError> {
         if !is_kind_convertible_to(index.scalar_kind, Self::KIND) {
             return Err(IndexOperationError::TypeError(
                 Self::KIND,
@@ -821,9 +805,7 @@ pub trait VectorType {
         index: &Index,
         query: &[Self],
         count: usize,
-    ) -> Result<ffi::Matches, cxx::Exception>
-    where
-        Self: Sized;
+    ) -> Result<ffi::Matches, cxx::Exception>;
 
     /// Performs a filtered search in the index using a query vector and a custom
     /// filter function, returning up to `count` matches that satisfy the filter.
@@ -845,7 +827,6 @@ pub trait VectorType {
         filter: F,
     ) -> Result<ffi::Matches, IndexOperationError>
     where
-        Self: Sized,
         F: Fn(Key) -> bool,
     {
         if !is_kind_convertible_to(index.scalar_kind, Self::KIND) {
@@ -877,7 +858,6 @@ pub trait VectorType {
         filter: F,
     ) -> Result<ffi::Matches, cxx::Exception>
     where
-        Self: Sized,
         F: Fn(Key) -> bool;
 
     /// Changes the metric used for distance calculations within the index.
@@ -893,10 +873,7 @@ pub trait VectorType {
     fn change_metric(
         index: &mut Index,
         metric: std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
-    ) -> Result<(), IndexOperationError>
-    where
-        Self: Sized,
-    {
+    ) -> Result<(), IndexOperationError> {
         // TODO: same question as higher up. what kind of casts are allowed and sensible here?
         if !is_kind_convertible_to(index.scalar_kind, Self::KIND) {
             return Err(IndexOperationError::TypeError(
@@ -922,11 +899,9 @@ pub trait VectorType {
         index: &mut Index,
         metric: std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
     ) -> Result<(), cxx::Exception>
-    where
-        Self: Sized;
 }
 
-impl VectorType for f32 {
+unsafe impl VectorType for f32 {
     const KIND: ScalarKind = ScalarKind::F32;
 
     unsafe fn search_unchecked(
@@ -1015,7 +990,7 @@ impl VectorType for f32 {
     }
 }
 
-impl VectorType for i8 {
+unsafe impl VectorType for i8 {
     const KIND: ScalarKind = ScalarKind::I8;
 
     unsafe fn search_unchecked(
@@ -1103,7 +1078,7 @@ impl VectorType for i8 {
     }
 }
 
-impl VectorType for f64 {
+unsafe impl VectorType for f64 {
     const KIND: ScalarKind = ScalarKind::F64;
 
     unsafe fn search_unchecked(
@@ -1191,7 +1166,7 @@ impl VectorType for f64 {
     }
 }
 
-impl VectorType for f16 {
+unsafe impl VectorType for f16 {
     const KIND: ScalarKind = ScalarKind::F16;
 
     unsafe fn search_unchecked(
@@ -1280,7 +1255,7 @@ impl VectorType for f16 {
     }
 }
 
-impl VectorType for b1x8 {
+unsafe impl VectorType for b1x8 {
     const KIND: ScalarKind = ScalarKind::B1;
 
     unsafe fn search_unchecked(
