@@ -654,6 +654,7 @@ func TestUnsafeOperations(t *testing.T) {
 				}
 				return 1
 			},
+			data: int64(1),
 		}
 
 		keys, distances, err = index.FilteredSearchUnsafe(ptr, 5, handler)
