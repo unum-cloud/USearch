@@ -206,6 +206,12 @@ func DefaultConfig(dimensions uint) IndexConfig {
 	return c
 }
 
+// FilteredSearchHandler include the callback functiona and user data
+type FilteredSearchHandler struct {
+	f    func(key Key, ptr unsafe.Pointer) int
+	data any
+}
+
 // Index represents a USearch approximate nearest neighbor index.
 // It implements io.Closer for idiomatic resource cleanup.
 //
@@ -666,6 +672,43 @@ func (index *Index) SearchUnsafe(query unsafe.Pointer, limit uint) (keys []Key, 
 	resultCount := uint(C.usearch_search(index.handle, query, index.config.Quantization.CValue(), (C.size_t)(limit), (*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
 	runtime.KeepAlive(keys)
 	runtime.KeepAlive(distances)
+	if errorMessage != nil {
+		return nil, nil, errors.New(C.GoString(errorMessage))
+	}
+
+	keys = keys[:resultCount]
+	distances = distances[:resultCount]
+	return keys, distances, nil
+}
+
+//export goFilteredSearchCallback
+func goFilteredSearchCallback(key C.usearch_key_t, ptr unsafe.Pointer) C.int {
+	handler := (*FilteredSearchHandler)(ptr)
+	return C.int(handler.f(Key(key), ptr))
+}
+
+// Search performs k-Approximate Nearest Neighbors Search for the closest vectors to the query vector.
+func (index *Index) FilteredSearchUnsafe(query unsafe.Pointer, limit uint, handler *FilteredSearchHandler) (keys []Key, distances []float32, err error) {
+	if index.handle == nil {
+		panic("index is uninitialized")
+	}
+
+	if query == nil {
+		return nil, nil, errors.New("query pointer cannot be nil")
+	}
+	if limit == 0 {
+		return []Key{}, []float32{}, nil
+	}
+
+	keys = make([]Key, limit)
+	distances = make([]float32, limit)
+	var errorMessage *C.char
+	resultCount := uint(C.usearch_filtered_search(index.handle, query, index.config.Quantization.CValue(), (C.size_t)(limit),
+		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler),
+		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
+	runtime.KeepAlive(keys)
+	runtime.KeepAlive(distances)
+	runtime.KeepAlive(handler)
 	if errorMessage != nil {
 		return nil, nil, errors.New(C.GoString(errorMessage))
 	}
