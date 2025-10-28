@@ -481,12 +481,51 @@ pub use ffi::{IndexOptions, MetricKind, ScalarKind};
 /// ```
 ///
 /// In this example, `dimensions` should be defined and valid for the vectors `a` and `b`.
-pub enum MetricFunction {
+pub enum MetricFunctionPtr {
     B1X8Metric(*mut std::boxed::Box<dyn Fn(*const b1x8, *const b1x8) -> Distance + Send + Sync>),
     I8Metric(*mut std::boxed::Box<dyn Fn(*const i8, *const i8) -> Distance + Send + Sync>),
     F16Metric(*mut std::boxed::Box<dyn Fn(*const f16, *const f16) -> Distance + Send + Sync>),
     F32Metric(*mut std::boxed::Box<dyn Fn(*const f32, *const f32) -> Distance + Send + Sync>),
     F64Metric(*mut std::boxed::Box<dyn Fn(*const f64, *const f64) -> Distance + Send + Sync>),
+}
+
+impl MetricFunctionPtr {
+    /// Cast inner non-owning raw pointer to boxed closure into owned Box.
+    ///
+    /// # Safety
+    ///
+    /// Pointer must be valid, and the returned value must not be dropped
+    /// as long as the C++ side is still using the pointer to the closure.
+    unsafe fn into_owned(self) -> MetricFunctionOwned {
+        unsafe {
+            match self {
+                MetricFunctionPtr::B1X8Metric(pointer) => {
+                    MetricFunctionOwned::B1X8Metric(Box::from_raw(pointer))
+                }
+                MetricFunctionPtr::I8Metric(pointer) => {
+                    MetricFunctionOwned::I8Metric(Box::from_raw(pointer))
+                }
+                MetricFunctionPtr::F16Metric(pointer) => {
+                    MetricFunctionOwned::F16Metric(Box::from_raw(pointer))
+                }
+                MetricFunctionPtr::F32Metric(pointer) => {
+                    MetricFunctionOwned::F32Metric(Box::from_raw(pointer))
+                }
+                MetricFunctionPtr::F64Metric(pointer) => {
+                    MetricFunctionOwned::F64Metric(Box::from_raw(pointer))
+                }
+            }
+        }
+    }
+}
+
+enum MetricFunctionOwned {
+    // Double boxed because Box<dyn > is a wide pointer, and the C++ side needs a regular pointer
+    B1X8Metric(Box<Box<dyn Fn(*const b1x8, *const b1x8) -> Distance + Send + Sync>>),
+    I8Metric(Box<Box<dyn Fn(*const i8, *const i8) -> Distance + Send + Sync>>),
+    F16Metric(Box<Box<dyn Fn(*const f16, *const f16) -> Distance + Send + Sync>>),
+    F32Metric(Box<Box<dyn Fn(*const f32, *const f32) -> Distance + Send + Sync>>),
+    F64Metric(Box<Box<dyn Fn(*const f64, *const f64) -> Distance + Send + Sync>>),
 }
 
 /// Approximate Nearest Neighbors search index for dense vectors.
@@ -528,7 +567,7 @@ pub enum MetricFunction {
 pub struct Index {
     inner: cxx::UniquePtr<ffi::NativeIndex>,
     scalar_kind: ScalarKind,
-    metric_fn: Option<MetricFunction>,
+    metric_fn: Option<MetricFunctionPtr>,
 }
 
 unsafe impl Send for Index {}
@@ -536,23 +575,10 @@ unsafe impl Sync for Index {}
 
 impl Drop for Index {
     fn drop(&mut self) {
-        if let Some(metric) = &self.metric_fn {
-            match metric {
-                MetricFunction::B1X8Metric(pointer) => unsafe {
-                    drop(Box::from_raw(*pointer));
-                },
-                MetricFunction::I8Metric(pointer) => unsafe {
-                    drop(Box::from_raw(*pointer));
-                },
-                MetricFunction::F16Metric(pointer) => unsafe {
-                    drop(Box::from_raw(*pointer));
-                },
-                MetricFunction::F32Metric(pointer) => unsafe {
-                    drop(Box::from_raw(*pointer));
-                },
-                MetricFunction::F64Metric(pointer) => unsafe {
-                    drop(Box::from_raw(*pointer));
-                },
+        if let Some(metric) = self.metric_fn.take() {
+            // SAFETY: the pointed-to closure is never used again after Index is dropped.
+            unsafe {
+                drop(metric.into_owned());
             }
         }
     }
@@ -646,7 +672,7 @@ pub unsafe trait VectorType: Sized {
     const KIND: ScalarKind;
     const METRIC_FN: fn(
         *mut std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
-    ) -> MetricFunction;
+    ) -> MetricFunctionPtr;
 
     /// Adds a vector to the index under the specified key.
     ///
@@ -930,11 +956,11 @@ pub unsafe trait VectorType: Sized {
 
         let trampoline_fn: usize = trampoline::<Self> as *const () as usize;
         let closure_address = match index.metric_fn.as_ref().expect("Was just set to Some") {
-            MetricFunction::F32Metric(metric) => (*metric as *mut _) as *mut () as usize,
-            MetricFunction::B1X8Metric(metric) => (*metric as *mut _) as *mut () as usize,
-            MetricFunction::I8Metric(metric) => (*metric as *mut _) as *mut () as usize,
-            MetricFunction::F16Metric(metric) => (*metric as *mut _) as *mut () as usize,
-            MetricFunction::F64Metric(metric) => (*metric as *mut _) as *mut () as usize,
+            MetricFunctionPtr::F32Metric(metric) => (*metric as *mut _) as *mut () as usize,
+            MetricFunctionPtr::B1X8Metric(metric) => (*metric as *mut _) as *mut () as usize,
+            MetricFunctionPtr::I8Metric(metric) => (*metric as *mut _) as *mut () as usize,
+            MetricFunctionPtr::F16Metric(metric) => (*metric as *mut _) as *mut () as usize,
+            MetricFunctionPtr::F64Metric(metric) => (*metric as *mut _) as *mut () as usize,
         };
         index.inner.change_metric(trampoline_fn, closure_address);
 
@@ -946,7 +972,7 @@ unsafe impl VectorType for f32 {
     const KIND: ScalarKind = ScalarKind::F32;
     const METRIC_FN: fn(
         *mut std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
-    ) -> MetricFunction = MetricFunction::F32Metric;
+    ) -> MetricFunctionPtr = MetricFunctionPtr::F32Metric;
 
     unsafe fn search_unchecked(
         index: &Index,
@@ -1009,7 +1035,7 @@ unsafe impl VectorType for i8 {
     const KIND: ScalarKind = ScalarKind::I8;
     const METRIC_FN: fn(
         *mut std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
-    ) -> MetricFunction = MetricFunction::I8Metric;
+    ) -> MetricFunctionPtr = MetricFunctionPtr::I8Metric;
 
     unsafe fn search_unchecked(
         index: &Index,
@@ -1072,7 +1098,7 @@ unsafe impl VectorType for f64 {
     const KIND: ScalarKind = ScalarKind::F64;
     const METRIC_FN: fn(
         *mut std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
-    ) -> MetricFunction = MetricFunction::F64Metric;
+    ) -> MetricFunctionPtr = MetricFunctionPtr::F64Metric;
 
     unsafe fn search_unchecked(
         index: &Index,
@@ -1135,7 +1161,7 @@ unsafe impl VectorType for f16 {
     const KIND: ScalarKind = ScalarKind::F16;
     const METRIC_FN: fn(
         *mut std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
-    ) -> MetricFunction = MetricFunction::F16Metric;
+    ) -> MetricFunctionPtr = MetricFunctionPtr::F16Metric;
 
     unsafe fn search_unchecked(
         index: &Index,
@@ -1198,7 +1224,7 @@ unsafe impl VectorType for b1x8 {
     const KIND: ScalarKind = ScalarKind::B1;
     const METRIC_FN: fn(
         *mut std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
-    ) -> MetricFunction = MetricFunction::B1X8Metric;
+    ) -> MetricFunctionPtr = MetricFunctionPtr::B1X8Metric;
 
     unsafe fn search_unchecked(
         index: &Index,
@@ -1262,7 +1288,9 @@ unsafe impl VectorType for b1x8 {
     ) -> Result<(), cxx::Exception> {
         // Store the metric function in the Index.
         type MetricFn = Box<dyn Fn(*const b1x8, *const b1x8) -> Distance>;
-        index.metric_fn = Some(MetricFunction::B1X8Metric(Box::into_raw(Box::new(metric))));
+        index.metric_fn = Some(MetricFunctionPtr::B1X8Metric(Box::into_raw(Box::new(
+            metric,
+        ))));
 
         // Trampoline is the function that knows how to call the Rust closure.
         // The `first` is a pointer to the first vector, `second` is a pointer to the second vector,
@@ -1277,7 +1305,7 @@ unsafe impl VectorType for b1x8 {
 
         let trampoline_fn: usize = trampoline as *const () as usize;
         let closure_address = match index.metric_fn {
-            Some(MetricFunction::B1X8Metric(metric)) => metric as *mut () as usize,
+            Some(MetricFunctionPtr::B1X8Metric(metric)) => metric as *mut () as usize,
             _ => panic!("Expected F1X8Metric"),
         };
         index.inner.change_metric(trampoline_fn, closure_address);
