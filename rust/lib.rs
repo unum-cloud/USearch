@@ -431,6 +431,8 @@ pub mod ffi {
     }
 }
 
+use std::marker::PhantomData;
+
 // Re-export the FFI structs and enums at the crate root for easy access
 pub use ffi::{IndexOptions, MetricKind, ScalarKind};
 
@@ -520,6 +522,7 @@ impl MetricFunctionPtr {
     }
 }
 
+#[allow(unused)]
 enum MetricFunctionOwned {
     // Double boxed because Box<dyn > is a wide pointer, and the C++ side needs a regular pointer
     B1X8Metric(Box<Box<dyn Fn(*const b1x8, *const b1x8) -> Distance + Send + Sync>>),
@@ -540,7 +543,7 @@ enum MetricFunctionOwned {
 /// Basic usage:
 ///
 /// ```rust
-/// use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
+/// use usearch::{Index, IndexMethods, IndexViewMethods, IndexOptions, MetricKind, ScalarKind};
 ///
 /// let mut options = IndexOptions::default();
 /// options.dimensions = 4; // Set the number of dimensions for vectors
@@ -573,6 +576,15 @@ pub struct Index {
 
 unsafe impl Send for Index {}
 unsafe impl Sync for Index {}
+
+/// A read-only view into an index, read from a file or in-memory buffer.
+pub struct IndexView<'buf> {
+    inner: Index,
+    _phantom_data: PhantomData<(&'buf [u8], *const ())>,
+}
+
+unsafe impl Send for IndexView<'static> {}
+unsafe impl Sync for IndexView<'static> {}
 
 impl Drop for Index {
     fn drop(&mut self) {
@@ -1315,59 +1327,15 @@ unsafe impl VectorType for b1x8 {
     }
 }
 
-impl Index {
-    pub fn new(options: &ffi::IndexOptions) -> Result<Self, cxx::Exception> {
-        match ffi::new_native_index(options) {
-            Ok(inner) => Result::Ok(Self {
-                inner,
-                scalar_kind: options.quantization,
-                metric_fn: None,
-            }),
-            Err(err) => Err(err),
-        }
-    }
-
+pub trait IndexViewMethods {
     /// Retrieves the expansion value used during index creation.
-    pub fn expansion_add(self: &Index) -> usize {
-        self.inner.expansion_add()
-    }
+    fn expansion_add(&self) -> usize;
 
     /// Retrieves the expansion value used during search.
-    pub fn expansion_search(self: &Index) -> usize {
-        self.inner.expansion_search()
-    }
-
-    /// Updates the expansion value used during index creation. Rarely used.
-    pub fn change_expansion_add(self: &Index, n: usize) {
-        self.inner.change_expansion_add(n)
-    }
-
-    /// Updates the expansion value used during search operations.
-    pub fn change_expansion_search(self: &Index, n: usize) {
-        self.inner.change_expansion_search(n)
-    }
-
-    /// Changes the metric kind used to calculate the distance between vectors.
-    pub fn change_metric_kind(self: &Index, metric: ffi::MetricKind) {
-        self.inner.change_metric_kind(metric)
-    }
-
-    /// Overrides the metric function used to calculate the distance between vectors.
-    pub fn change_metric<T: VectorType>(
-        self: &mut Index,
-        metric: std::boxed::Box<dyn Fn(*const T, *const T) -> Distance + Send + Sync>,
-    ) -> Result<(), IndexOperationError> {
-        T::change_metric(self, metric)
-    }
+    fn expansion_search(&self) -> usize;
 
     /// Retrieves the hardware acceleration information.
-    pub fn hardware_acceleration(&self) -> String {
-        use core::ffi::CStr;
-        unsafe {
-            let c_str = CStr::from_ptr(self.inner.hardware_acceleration());
-            c_str.to_string_lossy().into_owned()
-        }
-    }
+    fn hardware_acceleration(&self) -> String;
 
     /// Performs k-Approximate Nearest Neighbors (kANN) Search for closest vectors to the provided query.
     ///
@@ -1379,13 +1347,11 @@ impl Index {
     /// # Returns
     ///
     /// A `Result` containing the matches found.
-    pub fn search<T: VectorType>(
-        self: &Index,
+    fn search<T: VectorType>(
+        &self,
         query: &[T],
         count: usize,
-    ) -> Result<ffi::Matches, IndexOperationError> {
-        T::search(self, query, count)
-    }
+    ) -> Result<ffi::Matches, IndexOperationError>;
 
     /// Performs exact (brute force) Nearest Neighbors Search for closest vectors to the provided query.
     /// This search checks all vectors in the index, guaranteeing to find the true nearest neighbors,
@@ -1399,13 +1365,11 @@ impl Index {
     /// # Returns
     ///
     /// A `Result` containing the matches found.
-    pub fn exact_search<T: VectorType>(
-        self: &Index,
+    fn exact_search<T: VectorType>(
+        &self,
         query: &[T],
         count: usize,
-    ) -> Result<ffi::Matches, IndexOperationError> {
-        T::exact_search(self, query, count)
-    }
+    ) -> Result<ffi::Matches, IndexOperationError>;
 
     /// Performs k-Approximate Nearest Neighbors (kANN) Search for closest vectors to the provided query
     /// satisfying a custom filter function.
@@ -1419,31 +1383,14 @@ impl Index {
     /// # Returns
     ///
     /// A `Result` containing the matches found.
-    pub fn filtered_search<T: VectorType, F>(
-        self: &Index,
+    fn filtered_search<T: VectorType, F>(
+        &self,
         query: &[T],
         count: usize,
         filter: F,
     ) -> Result<ffi::Matches, IndexOperationError>
     where
-        F: Fn(Key) -> bool,
-    {
-        T::filtered_search(self, query, count, filter)
-    }
-
-    /// Adds a vector with a specified key to the index.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key associated with the vector.
-    /// * `vector` - A slice containing the vector data.
-    pub fn add<T: VectorType>(
-        self: &Index,
-        key: Key,
-        vector: &[T],
-    ) -> Result<(), IndexOperationError> {
-        T::add(self, key, vector)
-    }
+        F: Fn(Key) -> bool;
 
     /// Extracts one or more vectors matching the specified key.
     /// The `vector` slice must be a multiple of the number of dimensions in the index.
@@ -1456,13 +1403,7 @@ impl Index {
     ///
     /// * `key` - The key associated with the vector.
     /// * `vector` - A slice containing the vector data.
-    pub fn get<T: VectorType>(
-        self: &Index,
-        key: Key,
-        vector: &mut [T],
-    ) -> Result<usize, IndexOperationError> {
-        T::get(self, key, vector)
-    }
+    fn get<T: VectorType>(&self, key: Key, vector: &mut [T]) -> Result<usize, IndexOperationError>;
 
     /// Extracts one or more vectors matching specified key into supplied resizable vector.
     /// The `vector` is resized to a multiple of the number of dimensions in the index.
@@ -1471,27 +1412,98 @@ impl Index {
     ///
     /// * `key` - The key associated with the vector.
     /// * `vector` - A mutable vector containing the vector data.
-    pub fn export<T: VectorType + Default + Clone>(
-        self: &Index,
+    fn export<T: VectorType + Default + Clone>(
+        &self,
         key: Key,
         vector: &mut Vec<T>,
-    ) -> Result<usize, IndexOperationError> {
-        let dim = self.dimensions();
-        let max_matches = self.count(key);
-        vector.resize(dim * max_matches, T::default());
-        let matches = T::get(self, key, &mut vector[..])?;
-        vector.resize(dim * matches, T::default());
-        Ok(matches)
-    }
+    ) -> Result<usize, IndexOperationError>;
+
+    /// Retrieves the number of dimensions in the vectors indexed.
+    fn dimensions(&self) -> usize;
+
+    /// Retrieves the connectivity parameter that limits connections-per-node in the graph.
+    fn connectivity(&self) -> usize;
+
+    /// Retrieves the current number of vectors in the index.
+    fn size(&self) -> usize;
+
+    /// Retrieves the total capacity of the index, including reserved space.
+    fn capacity(&self) -> usize;
+
+    /// Reports expected file size after serialization.
+    fn serialized_length(&self) -> usize;
+
+    /// Checks if the index contains a vector with a specified key.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to be checked.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the index contains the vector with the given key, `false` otherwise.
+    fn contains(&self, key: Key) -> bool;
+
+    /// Count the count of vectors with the same specified key.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to be checked.
+    ///
+    /// # Returns
+    ///
+    /// Number of vectors found.
+    fn count(&self, key: Key) -> usize;
+
+    /// Saves the index to a specified file.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The file path where the index will be saved.
+    fn save(&self, path: &str) -> Result<(), cxx::Exception>;
+
+    /// A relatively accurate lower bound on the amount of memory consumed by the system.
+    /// In practice, its error will be below 10%.
+    fn memory_usage(&self) -> usize;
+
+    /// Saves the index to a specified file.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - The buffer where the index will be saved.
+    fn save_to_buffer(&self, buffer: &mut [u8]) -> Result<(), cxx::Exception>;
+}
+
+pub trait IndexMethods: IndexViewMethods {
+    /// Updates the expansion value used during index creation. Rarely used.
+    fn change_expansion_add(&self, n: usize);
+
+    /// Updates the expansion value used during search operations.
+    fn change_expansion_search(&self, n: usize);
+
+    /// Changes the metric kind used to calculate the distance between vectors.
+    fn change_metric_kind(self: &Self, metric: ffi::MetricKind);
+
+    /// Overrides the metric function used to calculate the distance between vectors.
+    fn change_metric<T: VectorType>(
+        &mut self,
+        metric: std::boxed::Box<dyn Fn(*const T, *const T) -> Distance + Send + Sync>,
+    ) -> Result<(), IndexOperationError>;
+
+    /// Adds a vector with a specified key to the index.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key associated with the vector.
+    /// * `vector` - A slice containing the vector data.
+    fn add<T: VectorType>(&self, key: Key, vector: &[T]) -> Result<(), IndexOperationError>;
 
     /// Reserves memory for a specified number of incoming vectors.
     ///
     /// # Arguments
     ///
     /// * `capacity` - The desired total capacity, including the current size.
-    pub fn reserve(self: &Index, capacity: usize) -> Result<(), cxx::Exception> {
-        self.inner.reserve(capacity)
-    }
+    fn reserve(&self, capacity: usize) -> Result<(), cxx::Exception>;
 
     /// Reserves memory for a specified number of incoming vectors & active threads.
     ///
@@ -1499,38 +1511,11 @@ impl Index {
     ///
     /// * `capacity` - The desired total capacity, including the current size.
     /// * `threads` - The number of threads to use for the operation.
-    pub fn reserve_capacity_and_threads(
-        self: &Index,
+    fn reserve_capacity_and_threads(
+        &self,
         capacity: usize,
         threads: usize,
-    ) -> Result<(), cxx::Exception> {
-        self.inner.reserve_capacity_and_threads(capacity, threads)
-    }
-
-    /// Retrieves the number of dimensions in the vectors indexed.
-    pub fn dimensions(self: &Index) -> usize {
-        self.inner.dimensions()
-    }
-
-    /// Retrieves the connectivity parameter that limits connections-per-node in the graph.
-    pub fn connectivity(self: &Index) -> usize {
-        self.inner.connectivity()
-    }
-
-    /// Retrieves the current number of vectors in the index.
-    pub fn size(self: &Index) -> usize {
-        self.inner.size()
-    }
-
-    /// Retrieves the total capacity of the index, including reserved space.
-    pub fn capacity(self: &Index) -> usize {
-        self.inner.capacity()
-    }
-
-    /// Reports expected file size after serialization.
-    pub fn serialized_length(self: &Index) -> usize {
-        self.inner.serialized_length()
-    }
+    ) -> Result<(), cxx::Exception>;
 
     /// Removes the vector associated with the given key from the index.
     ///
@@ -1541,9 +1526,7 @@ impl Index {
     /// # Returns
     ///
     /// `true` if the vector is successfully removed, `false` otherwise.
-    pub fn remove(self: &Index, key: Key) -> Result<usize, cxx::Exception> {
-        self.inner.remove(key)
-    }
+    fn remove(&self, key: Key) -> Result<usize, cxx::Exception>;
 
     /// Renames the vector under a specific key.
     ///
@@ -1555,81 +1538,185 @@ impl Index {
     /// # Returns
     ///
     /// `true` if the vector is renamed, `false` otherwise.
-    pub fn rename(self: &Index, from: Key, to: Key) -> Result<usize, cxx::Exception> {
-        self.inner.rename(from, to)
-    }
-
-    /// Checks if the index contains a vector with a specified key.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key to be checked.
-    ///
-    /// # Returns
-    ///
-    /// `true` if the index contains the vector with the given key, `false` otherwise.
-    pub fn contains(self: &Index, key: Key) -> bool {
-        self.inner.contains(key)
-    }
-
-    /// Count the count of vectors with the same specified key.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key to be checked.
-    ///
-    /// # Returns
-    ///
-    /// Number of vectors found.
-    pub fn count(self: &Index, key: Key) -> usize {
-        self.inner.count(key)
-    }
-
-    /// Saves the index to a specified file.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The file path where the index will be saved.
-    pub fn save(self: &Index, path: &str) -> Result<(), cxx::Exception> {
-        self.inner.save(path)
-    }
+    fn rename(&self, from: Key, to: Key) -> Result<usize, cxx::Exception>;
 
     /// Loads the index from a specified file.
     ///
     /// # Arguments
     ///
     /// * `path` - The file path from where the index will be loaded.
-    pub fn load(self: &Index, path: &str) -> Result<(), cxx::Exception> {
-        self.inner.load(path)
-    }
-
-    /// Creates a view of the index from a file without loading it into memory.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The file path from where the view will be created.
-    pub fn view(self: &Index, path: &str) -> Result<(), cxx::Exception> {
-        self.inner.view(path)
-    }
+    fn load(&self, path: &str) -> Result<(), cxx::Exception>;
 
     /// Erases all members from the index, closes files, and returns RAM to OS.
-    pub fn reset(self: &Index) -> Result<(), cxx::Exception> {
-        self.inner.reset()
+    fn reset(&self) -> Result<(), cxx::Exception>;
+}
+
+impl IndexViewMethods for Index {
+    fn expansion_add(&self) -> usize {
+        self.inner.expansion_add()
     }
 
-    /// A relatively accurate lower bound on the amount of memory consumed by the system.
-    /// In practice, its error will be below 10%.
-    pub fn memory_usage(self: &Index) -> usize {
+    fn expansion_search(&self) -> usize {
+        self.inner.expansion_search()
+    }
+
+    fn hardware_acceleration(&self) -> String {
+        use core::ffi::CStr;
+        unsafe {
+            let c_str = CStr::from_ptr(self.inner.hardware_acceleration());
+            c_str.to_string_lossy().into_owned()
+        }
+    }
+
+    fn search<T: VectorType>(
+        &self,
+        query: &[T],
+        count: usize,
+    ) -> Result<ffi::Matches, IndexOperationError> {
+        T::search(self, query, count)
+    }
+
+    fn exact_search<T: VectorType>(
+        &self,
+        query: &[T],
+        count: usize,
+    ) -> Result<ffi::Matches, IndexOperationError> {
+        T::exact_search(self, query, count)
+    }
+
+    fn filtered_search<T: VectorType, F>(
+        &self,
+        query: &[T],
+        count: usize,
+        filter: F,
+    ) -> Result<ffi::Matches, IndexOperationError>
+    where
+        F: Fn(Key) -> bool,
+    {
+        T::filtered_search(self, query, count, filter)
+    }
+
+    fn get<T: VectorType>(&self, key: Key, vector: &mut [T]) -> Result<usize, IndexOperationError> {
+        T::get(self, key, vector)
+    }
+
+    fn export<T: VectorType + Default + Clone>(
+        &self,
+        key: Key,
+        vector: &mut Vec<T>,
+    ) -> Result<usize, IndexOperationError> {
+        let dim = self.dimensions();
+        let max_matches = self.count(key);
+        vector.resize(dim * max_matches, T::default());
+        let matches = T::get(self, key, &mut vector[..])?;
+        vector.resize(dim * matches, T::default());
+        Ok(matches)
+    }
+
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+
+    fn connectivity(&self) -> usize {
+        self.inner.connectivity()
+    }
+
+    fn size(&self) -> usize {
+        self.inner.size()
+    }
+
+    fn capacity(&self) -> usize {
+        self.inner.capacity()
+    }
+
+    fn serialized_length(&self) -> usize {
+        self.inner.serialized_length()
+    }
+
+    fn contains(&self, key: Key) -> bool {
+        self.inner.contains(key)
+    }
+
+    fn count(&self, key: Key) -> usize {
+        self.inner.count(key)
+    }
+
+    fn save(&self, path: &str) -> Result<(), cxx::Exception> {
+        self.inner.save(path)
+    }
+
+    fn memory_usage(&self) -> usize {
         self.inner.memory_usage()
     }
 
-    /// Saves the index to a specified file.
-    ///
-    /// # Arguments
-    ///
-    /// * `buffer` - The buffer where the index will be saved.
-    pub fn save_to_buffer(self: &Index, buffer: &mut [u8]) -> Result<(), cxx::Exception> {
+    fn save_to_buffer(&self, buffer: &mut [u8]) -> Result<(), cxx::Exception> {
         self.inner.save_to_buffer(buffer)
+    }
+}
+
+impl IndexMethods for Index {
+    fn change_expansion_add(&self, n: usize) {
+        self.inner.change_expansion_add(n)
+    }
+
+    fn change_expansion_search(&self, n: usize) {
+        self.inner.change_expansion_search(n)
+    }
+
+    fn change_metric_kind(&self, metric: ffi::MetricKind) {
+        self.inner.change_metric_kind(metric)
+    }
+
+    fn change_metric<T: VectorType>(
+        &mut self,
+        metric: std::boxed::Box<dyn Fn(*const T, *const T) -> Distance + Send + Sync>,
+    ) -> Result<(), IndexOperationError> {
+        T::change_metric(self, metric)
+    }
+
+    fn add<T: VectorType>(&self, key: Key, vector: &[T]) -> Result<(), IndexOperationError> {
+        T::add(self, key, vector)
+    }
+
+    fn reserve(&self, capacity: usize) -> Result<(), cxx::Exception> {
+        self.inner.reserve(capacity)
+    }
+
+    fn reserve_capacity_and_threads(
+        &self,
+        capacity: usize,
+        threads: usize,
+    ) -> Result<(), cxx::Exception> {
+        self.inner.reserve_capacity_and_threads(capacity, threads)
+    }
+
+    fn remove(&self, key: Key) -> Result<usize, cxx::Exception> {
+        self.inner.remove(key)
+    }
+
+    fn rename(&self, from: Key, to: Key) -> Result<usize, cxx::Exception> {
+        self.inner.rename(from, to)
+    }
+
+    fn load(&self, path: &str) -> Result<(), cxx::Exception> {
+        self.inner.load(path)
+    }
+
+    fn reset(&self) -> Result<(), cxx::Exception> {
+        self.inner.reset()
+    }
+}
+
+impl Index {
+    pub fn new(options: &ffi::IndexOptions) -> Result<Self, cxx::Exception> {
+        match ffi::new_native_index(options) {
+            Ok(inner) => Result::Ok(Self {
+                inner,
+                scalar_kind: options.quantization,
+                metric_fn: None,
+            }),
+            Err(err) => Err(err),
+        }
     }
 
     /// Loads the index from a specified file.
@@ -1637,40 +1724,134 @@ impl Index {
     /// # Arguments
     ///
     /// * `buffer` - The buffer from where the index will be loaded.
-    pub fn load_from_buffer(self: &Index, buffer: &[u8]) -> Result<(), cxx::Exception> {
+    pub fn load_from_buffer(&self, buffer: &[u8]) -> Result<(), cxx::Exception> {
         self.inner.load_from_buffer(buffer)
     }
+}
 
+impl<'buf> IndexViewMethods for IndexView<'buf> {
+    fn expansion_add(&self) -> usize {
+        self.inner.expansion_add()
+    }
+
+    fn expansion_search(&self) -> usize {
+        self.inner.expansion_search()
+    }
+
+    fn hardware_acceleration(&self) -> String {
+        self.inner.hardware_acceleration()
+    }
+
+    fn search<T: VectorType>(
+        &self,
+        query: &[T],
+        count: usize,
+    ) -> Result<ffi::Matches, IndexOperationError> {
+        self.inner.search(query, count)
+    }
+
+    fn exact_search<T: VectorType>(
+        &self,
+        query: &[T],
+        count: usize,
+    ) -> Result<ffi::Matches, IndexOperationError> {
+        self.inner.exact_search(query, count)
+    }
+
+    fn filtered_search<T: VectorType, F>(
+        &self,
+        query: &[T],
+        count: usize,
+        filter: F,
+    ) -> Result<ffi::Matches, IndexOperationError>
+    where
+        F: Fn(Key) -> bool,
+    {
+        self.inner.filtered_search(query, count, filter)
+    }
+
+    fn get<T: VectorType>(&self, key: Key, vector: &mut [T]) -> Result<usize, IndexOperationError> {
+        self.inner.get(key, vector)
+    }
+
+    fn export<T: VectorType + Default + Clone>(
+        &self,
+        key: Key,
+        vector: &mut Vec<T>,
+    ) -> Result<usize, IndexOperationError> {
+        self.inner.export(key, vector)
+    }
+
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+
+    fn connectivity(&self) -> usize {
+        self.inner.connectivity()
+    }
+
+    fn size(&self) -> usize {
+        self.inner.size()
+    }
+
+    fn capacity(&self) -> usize {
+        self.inner.capacity()
+    }
+
+    fn serialized_length(&self) -> usize {
+        self.inner.serialized_length()
+    }
+
+    fn contains(&self, key: Key) -> bool {
+        self.inner.contains(key)
+    }
+
+    fn count(&self, key: Key) -> usize {
+        self.inner.count(key)
+    }
+
+    fn save(&self, path: &str) -> Result<(), cxx::Exception> {
+        self.inner.save(path)
+    }
+
+    fn memory_usage(&self) -> usize {
+        self.inner.memory_usage()
+    }
+
+    fn save_to_buffer(&self, buffer: &mut [u8]) -> Result<(), cxx::Exception> {
+        self.inner.save_to_buffer(buffer)
+    }
+}
+
+impl<'buf> IndexView<'buf> {
     /// Creates a view of the index from a file without loading it into memory.
     ///
     /// # Arguments
     ///
     /// * `buffer` - The buffer from where the view will be created.
+    pub fn new_from_buffer(buffer: &'buf [u8]) -> Result<Self, cxx::Exception> {
+        let inner = Index::new(&IndexOptions::default())?;
+        inner.inner.view_from_buffer(buffer)?;
+        Ok(IndexView {
+            inner,
+            _phantom_data: PhantomData,
+        })
+    }
+}
+
+impl IndexView<'static> {
+    /// Creates a view of the index from a file without loading it into memory.
     ///
-    /// # Safety
+    /// # Arguments
     ///
-    /// This function is marked as `unsafe` because it stores a pointer to the input buffer.
-    /// The caller must ensure that the buffer outlives the index and is not dropped
-    /// or modified for the duration of the index's use. Dereferencing a pointer to a
-    /// temporary buffer after it has been dropped can lead to undefined behavior,
-    /// which violates Rust's memory safety guarantees.
-    ///
-    /// Example of misuse:
-    ///
-    /// ```rust,ignore
-    /// let index: usearch::Index = usearch::new_index(&usearch::IndexOptions::default()).unwrap();
-    ///
-    /// let temporary = vec![0u8; 100];
-    /// index.view_from_buffer(&temporary);
-    /// std::mem::drop(temporary);
-    ///
-    /// let query = vec![0.0; 256];
-    /// let results = index.search(&query, 5).unwrap();
-    /// ```
-    ///
-    /// The above example would result in use-after-free and undefined behavior.
-    pub unsafe fn view_from_buffer(self: &Index, buffer: &[u8]) -> Result<(), cxx::Exception> {
-        self.inner.view_from_buffer(buffer)
+    /// * `path` - The file path from where the view will be created.
+    pub fn new_from_file(path: &str) -> Result<Self, cxx::Exception> {
+        let inner = Index::new(&IndexOptions::default())?;
+        inner.inner.view(path)?;
+        Ok(IndexView {
+            inner,
+            _phantom_data: PhantomData,
+        })
     }
 }
 
@@ -1686,8 +1867,9 @@ mod tests {
 
     use crate::b1x8;
     use crate::new_index;
-    use crate::Index;
     use crate::Key;
+    use crate::{Index, IndexView};
+    use crate::{IndexMethods, IndexViewMethods};
 
     use std::env;
 
@@ -1939,7 +2121,13 @@ mod tests {
         // Validate serialization
         assert!(index.save("index.rust.usearch").is_ok());
         assert!(index.load("index.rust.usearch").is_ok());
-        assert!(index.view("index.rust.usearch").is_ok());
+
+        let index_view = IndexView::new_from_file("index.rust.usearch").unwrap();
+        let results = index_view.search(&first, 10).unwrap();
+        println!("{:?}", results);
+        assert_eq!(results.keys.len(), 2);
+        let mut out = [0f32; 5];
+        assert!(index_view.get(43, &mut out).is_ok());
 
         // Make sure every function is called at least once
         assert!(new_index(&options).is_ok());
@@ -2319,5 +2507,16 @@ mod tests {
             search_results.iter().all(|&x| x),
             "All searches should find exact matches"
         );
+    }
+
+    #[test]
+    fn test_index_file_view_is_sync() {
+        #[allow(unused)]
+        fn assert_sync<T: Sync>() {}
+        #[allow(unused)]
+        fn assert_send<T: Send>() {}
+
+        assert_sync::<IndexView<'static>>();
+        assert_send::<IndexView<'static>>();
     }
 }
