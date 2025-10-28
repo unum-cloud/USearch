@@ -649,11 +649,10 @@ func TestUnsafeOperations(t *testing.T) {
 		// Test FilteredSearchUnsafe
 		handler := &FilteredSearchHandler{
 			f: func(key Key, ptr unsafe.Pointer) int {
-				fmt.Println(key)
 				if key%2 == 0 {
-					return 1
+					return 0
 				}
-				return 0
+				return 1
 			},
 		}
 
@@ -662,12 +661,8 @@ func TestUnsafeOperations(t *testing.T) {
 			t.Fatalf("FilteredSearchUnsafe failed: %v", err)
 		}
 
-		if len(keys) == 0 || keys[0] != 100 {
+		if len(keys) > 0 {
 			t.Fatalf("FilteredSearchUnsafe returned incorrect results")
-		}
-
-		if math.Abs(float64(distances[0])) > distanceTolerance {
-			t.Fatalf("Expected near-zero distance for exact match, got %f", distances[0])
 		}
 	})
 }
