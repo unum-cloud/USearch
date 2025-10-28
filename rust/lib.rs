@@ -481,6 +481,7 @@ pub use ffi::{IndexOptions, MetricKind, ScalarKind};
 /// ```
 ///
 /// In this example, `dimensions` should be defined and valid for the vectors `a` and `b`.
+#[doc(hidden)]
 pub enum MetricFunctionPtr {
     B1X8Metric(*mut std::boxed::Box<dyn Fn(*const b1x8, *const b1x8) -> Distance + Send + Sync>),
     I8Metric(*mut std::boxed::Box<dyn Fn(*const i8, *const i8) -> Distance + Send + Sync>),
