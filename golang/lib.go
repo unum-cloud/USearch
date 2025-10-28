@@ -657,7 +657,7 @@ func (index *Index) Search(query []float32, limit uint) (keys []Key, distances [
 //
 // The actual number of results may be less than limit if the index
 // contains fewer vectors.
-func (index *Index) FilteredSearch(query []float32, limit uint, handler *FilterdSearchHandler) (keys []Key, distances []float32, err error) {
+func (index *Index) FilteredSearch(query []float32, limit uint, handler *FilteredSearchHandler) (keys []Key, distances []float32, err error) {
 	if index.handle == nil {
 		panic("index is uninitialized")
 	}
@@ -678,7 +678,7 @@ func (index *Index) FilteredSearch(query []float32, limit uint, handler *Filterd
 	keys = make([]Key, limit)
 	distances = make([]float32, limit)
 	var errorMessage *C.char
-	resultCount := uint(C.usearch_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_f32_k, (C.size_t)(limit),
+	resultCount := uint(C.usearch_filtered_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_f32_k, (C.size_t)(limit),
 		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler),
 		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
 	runtime.KeepAlive(query)
@@ -917,7 +917,7 @@ func (index *Index) SearchI8(query []int8, limit uint) (keys []Key, distances []
 	return keys, distances, nil
 }
 
-func (index *Index) FilteredSearchI8(query []int8, limit uint, handler *FilterdSearchHandler) (keys []Key, distances []float32, err error) {
+func (index *Index) FilteredSearchI8(query []int8, limit uint, handler *FilteredSearchHandler) (keys []Key, distances []float32, err error) {
 	if index.handle == nil {
 		panic("index is uninitialized")
 	}
@@ -938,7 +938,7 @@ func (index *Index) FilteredSearchI8(query []int8, limit uint, handler *FilterdS
 	keys = make([]Key, limit)
 	distances = make([]float32, limit)
 	var errorMessage *C.char
-	resultCount := uint(C.usearch_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_i8_k, (C.size_t)(limit),
+	resultCount := uint(C.usearch_filtered_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_i8_k, (C.size_t)(limit),
 		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler),
 		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
 	runtime.KeepAlive(query)
