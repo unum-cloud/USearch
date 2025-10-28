@@ -644,6 +644,56 @@ func (index *Index) Search(query []float32, limit uint) (keys []Key, distances [
 	return keys, distances, nil
 }
 
+// Search finds the k nearest neighbors to the query vector.
+//
+// Parameters:
+//   - query: Must have exactly Dimensions() elements
+//   - limit: Maximum number of results to return
+//
+// Returns:
+//   - keys: IDs of the nearest vectors (up to limit)
+//   - distances: Distance to each result (same length as keys)
+//   - err: Error if query is invalid or search fails
+//
+// The actual number of results may be less than limit if the index
+// contains fewer vectors.
+func (index *Index) FilteredSearch(query []float32, limit uint, handler *FilterdSearchHandler) (keys []Key, distances []float32, err error) {
+	if index.handle == nil {
+		panic("index is uninitialized")
+	}
+
+	if len(query) == 0 {
+		return nil, nil, errors.New("query vector cannot be empty")
+	}
+	if uint(len(query)) != index.config.Dimensions {
+		return nil, nil, fmt.Errorf("query dimension mismatch: got %d, expected %d", len(query), index.config.Dimensions)
+	}
+	if handler == nil {
+		return nil, nil, errors.New("filtered search handler cannot be nil")
+	}
+	if limit == 0 {
+		return []Key{}, []float32{}, nil
+	}
+
+	keys = make([]Key, limit)
+	distances = make([]float32, limit)
+	var errorMessage *C.char
+	resultCount := uint(C.usearch_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_f32_k, (C.size_t)(limit),
+		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler),
+		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
+	runtime.KeepAlive(query)
+	runtime.KeepAlive(keys)
+	runtime.KeepAlive(distances)
+	runtime.KeepAlive(handler)
+	if errorMessage != nil {
+		return nil, nil, errors.New(C.GoString(errorMessage))
+	}
+
+	keys = keys[:resultCount]
+	distances = distances[:resultCount]
+	return keys, distances, nil
+}
+
 // SearchUnsafe performs k-Approximate Nearest Neighbors Search using an unsafe pointer.
 //
 // SAFETY REQUIREMENTS:
@@ -862,6 +912,43 @@ func (index *Index) SearchI8(query []int8, limit uint) (keys []Key, distances []
 	if errorMessage != nil {
 		return nil, nil, errors.New(C.GoString(errorMessage))
 	}
+	keys = keys[:resultCount]
+	distances = distances[:resultCount]
+	return keys, distances, nil
+}
+
+func (index *Index) FilteredSearchI8(query []int8, limit uint, handler *FilterdSearchHandler) (keys []Key, distances []float32, err error) {
+	if index.handle == nil {
+		panic("index is uninitialized")
+	}
+
+	if len(query) == 0 {
+		return nil, nil, errors.New("query vector cannot be empty")
+	}
+	if uint(len(query)) != index.config.Dimensions {
+		return nil, nil, fmt.Errorf("query dimension mismatch: got %d, expected %d", len(query), index.config.Dimensions)
+	}
+	if handler == nil {
+		return nil, nil, errors.New("filtered search handler cannot be nil")
+	}
+	if limit == 0 {
+		return []Key{}, []float32{}, nil
+	}
+
+	keys = make([]Key, limit)
+	distances = make([]float32, limit)
+	var errorMessage *C.char
+	resultCount := uint(C.usearch_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_i8_k, (C.size_t)(limit),
+		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler),
+		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
+	runtime.KeepAlive(query)
+	runtime.KeepAlive(keys)
+	runtime.KeepAlive(distances)
+	runtime.KeepAlive(handler)
+	if errorMessage != nil {
+		return nil, nil, errors.New(C.GoString(errorMessage))
+	}
+
 	keys = keys[:resultCount]
 	distances = distances[:resultCount]
 	return keys, distances, nil
