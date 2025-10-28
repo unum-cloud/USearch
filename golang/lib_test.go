@@ -30,19 +30,19 @@ func createTestIndex(t *testing.T, dimensions uint, quantization Quantization) *
 }
 
 func generateTestVector(dimensions uint) []float32 {
-    vector := make([]float32, dimensions)
-    for i := uint(0); i < dimensions; i++ {
-        vector[i] = float32(i) + 0.1
-    }
-    return vector
+	vector := make([]float32, dimensions)
+	for i := uint(0); i < dimensions; i++ {
+		vector[i] = float32(i) + 0.1
+	}
+	return vector
 }
 
 func generateTestVectorI8(dimensions uint) []int8 {
-    vector := make([]int8, dimensions)
-    for i := uint(0); i < dimensions; i++ {
-        vector[i] = int8((i % 127) + 1)
-    }
-    return vector
+	vector := make([]int8, dimensions)
+	for i := uint(0); i < dimensions; i++ {
+		vector[i] = int8((i % 127) + 1)
+	}
+	return vector
 }
 
 func populateIndex(t *testing.T, index *Index, vectorCount int) [][]float32 {
@@ -57,16 +57,16 @@ func populateIndex(t *testing.T, index *Index, vectorCount int) [][]float32 {
 		t.Fatalf("Failed to get dimensions: %v", err)
 	}
 
-    for i := 0; i < vectorCount; i++ {
-        vector := generateTestVector(dimensions)
-        vector[0] = float32(i) // Make each vector unique
-        vectors[i] = vector
+	for i := 0; i < vectorCount; i++ {
+		vector := generateTestVector(dimensions)
+		vector[0] = float32(i) // Make each vector unique
+		vectors[i] = vector
 
-        err = index.Add(Key(i), vector)
-        if err != nil {
-            t.Fatalf("Failed to add vector %d: %v", i, err)
-        }
-    }
+		err = index.Add(Key(i), vector)
+		if err != nil {
+			t.Fatalf("Failed to add vector %d: %v", i, err)
+		}
+	}
 	return vectors
 }
 
@@ -189,12 +189,12 @@ func TestBasicOperations(t *testing.T) {
 			t.Fatalf("Failed to reserve capacity: %v", err)
 		}
 
-        // Add a vector
-        vector := generateTestVector(defaultTestDimensions)
-        vector[0] = 42.0
-        vector[1] = 24.0
+		// Add a vector
+		vector := generateTestVector(defaultTestDimensions)
+		vector[0] = 42.0
+		vector[1] = 24.0
 
-        err := index.Add(100, vector)
+		err := index.Add(100, vector)
 		if err != nil {
 			t.Fatalf("Failed to add vector: %v", err)
 		}
@@ -524,13 +524,13 @@ func TestQuantizationTypes(t *testing.T) {
 		if err := index.Reserve(1); err != nil {
 			t.Fatalf("Failed to reserve capacity: %v", err)
 		}
-        vector := generateTestVector(32)
-        err := index.Add(1, vector)
+		vector := generateTestVector(32)
+		err := index.Add(1, vector)
 		if err != nil {
 			t.Fatalf("F32 Add failed: %v", err)
 		}
 
-        keys, _, err := index.Search(vector, 1)
+		keys, _, err := index.Search(vector, 1)
 		if err != nil {
 			t.Fatalf("F32 Search failed: %v", err)
 		}
@@ -551,17 +551,17 @@ func TestQuantizationTypes(t *testing.T) {
 		if err := index.Reserve(1); err != nil {
 			t.Fatalf("Failed to reserve capacity: %v", err)
 		}
-        vector := make([]float64, 32)
-        for i := range vector {
-            vector[i] = float64(i) + 0.5
-        }
+		vector := make([]float64, 32)
+		for i := range vector {
+			vector[i] = float64(i) + 0.5
+		}
 
-        err := index.AddUnsafe(1, unsafe.Pointer(&vector[0]))
+		err := index.AddUnsafe(1, unsafe.Pointer(&vector[0]))
 		if err != nil {
 			t.Fatalf("F64 AddUnsafe failed: %v", err)
 		}
 
-        keys, _, err := index.SearchUnsafe(unsafe.Pointer(&vector[0]), 1)
+		keys, _, err := index.SearchUnsafe(unsafe.Pointer(&vector[0]), 1)
 		if err != nil {
 			t.Fatalf("F64 SearchUnsafe failed: %v", err)
 		}
@@ -582,13 +582,13 @@ func TestQuantizationTypes(t *testing.T) {
 		if err := index.Reserve(1); err != nil {
 			t.Fatalf("Failed to reserve capacity: %v", err)
 		}
-        vector := generateTestVectorI8(32)
-        err := index.AddI8(1, vector)
+		vector := generateTestVectorI8(32)
+		err := index.AddI8(1, vector)
 		if err != nil {
 			t.Fatalf("I8 Add failed: %v", err)
 		}
 
-        keys, _, err := index.SearchI8(vector, 1)
+		keys, _, err := index.SearchI8(vector, 1)
 		if err != nil {
 			t.Fatalf("I8 Search failed: %v", err)
 		}
@@ -614,8 +614,8 @@ func TestUnsafeOperations(t *testing.T) {
 		if err := index.Reserve(1); err != nil {
 			t.Fatalf("Failed to reserve capacity: %v", err)
 		}
-        vector := generateTestVector(64)
-        ptr := unsafe.Pointer(&vector[0])
+		vector := generateTestVector(64)
+		ptr := unsafe.Pointer(&vector[0])
 
 		// Test AddUnsafe
 		err := index.AddUnsafe(100, ptr)
@@ -640,6 +640,30 @@ func TestUnsafeOperations(t *testing.T) {
 
 		if len(keys) == 0 || keys[0] != 100 {
 			t.Fatalf("SearchUnsafe returned incorrect results")
+		}
+
+		if math.Abs(float64(distances[0])) > distanceTolerance {
+			t.Fatalf("Expected near-zero distance for exact match, got %f", distances[0])
+		}
+
+		// Test FilteredSearchUnsafe
+		handler := &FilteredSearchHandler{
+			f: func(key Key, ptr unsafe.Pointer) int {
+				fmt.Println(key)
+				if key%2 == 0 {
+					return 1
+				}
+				return 0
+			},
+		}
+
+		keys, distances, err = index.FilteredSearchUnsafe(ptr, 5, handler)
+		if err != nil {
+			t.Fatalf("FilteredSearchUnsafe failed: %v", err)
+		}
+
+		if len(keys) == 0 || keys[0] != 100 {
+			t.Fatalf("FilteredSearchUnsafe returned incorrect results")
 		}
 
 		if math.Abs(float64(distances[0])) > distanceTolerance {
@@ -671,12 +695,12 @@ func TestConcurrentInsertions(t *testing.T) {
 		_ = index.ChangeThreadsAdd(uint(runtime.NumCPU()))
 
 		for i := 0; i < totalVectors; i++ {
-            vector := generateTestVector(64)
-            vector[0] = float32(i)
-            if err := index.Add(Key(i), vector); err != nil {
-                t.Fatalf("Insertion failed at %d: %v", i, err)
-            }
-        }
+			vector := generateTestVector(64)
+			vector[0] = float32(i)
+			if err := index.Add(Key(i), vector); err != nil {
+				t.Fatalf("Insertion failed at %d: %v", i, err)
+			}
+		}
 
 		// Verify final count
 		finalSize, err := index.Len()
