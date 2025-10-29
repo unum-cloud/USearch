@@ -541,13 +541,13 @@ func TestQuantizationTypes(t *testing.T) {
 
 		// Test FilteredSearch
 		handler := &FilteredSearchHandler{
-			f: func(key Key, ptr unsafe.Pointer) int {
+			Callback: func(key Key, handler *FilteredSearchHandler) int {
 				if key%2 == 0 {
 					return 1
 				}
 				return 0
 			},
-			data: int64(1),
+			Data: int64(1),
 		}
 
 		keys, _, err = index.FilteredSearch(vector, 1, handler)
@@ -592,13 +592,13 @@ func TestQuantizationTypes(t *testing.T) {
 
 		// Test F64 FilteredSearchUnsafe
 		handler := &FilteredSearchHandler{
-			f: func(key Key, ptr unsafe.Pointer) int {
+			Callback: func(key Key, handler *FilteredSearchHandler) int {
 				if key%2 == 0 {
 					return 1
 				}
 				return 0
 			},
-			data: int64(1),
+			Data: int64(1),
 		}
 
 		keys, _, err = index.FilteredSearchUnsafe(unsafe.Pointer(&vector[0]), 5, handler)
@@ -639,13 +639,13 @@ func TestQuantizationTypes(t *testing.T) {
 
 		// Test FilteredSearchI8
 		handler := &FilteredSearchHandler{
-			f: func(key Key, ptr unsafe.Pointer) int {
+			Callback: func(key Key, handler *FilteredSearchHandler) int {
 				if key%2 == 0 {
 					return 1
 				}
 				return 0
 			},
-			data: int64(1),
+			Data: int64(1),
 		}
 
 		keys, _, err = index.FilteredSearchI8(vector, 1, handler)
@@ -708,13 +708,13 @@ func TestUnsafeOperations(t *testing.T) {
 
 		// Test FilteredSearchUnsafe
 		handler := &FilteredSearchHandler{
-			f: func(key Key, ptr unsafe.Pointer) int {
+			Callback: func(key Key, handler *FilteredSearchHandler) int {
 				if key%2 == 0 {
 					return 0
 				}
 				return 1
 			},
-			data: int64(1),
+			Data: int64(1),
 		}
 
 		keys, _, err = index.FilteredSearchUnsafe(ptr, 5, handler)
