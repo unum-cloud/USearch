@@ -4239,6 +4239,34 @@ class index_gt {
                         radius = top.top().distance;
                     }
                 }
+	    }
+
+            // predicate exists and explore 2-hop neighbors (ACORN-1)
+            if (!is_dummy<predicate_at>()) {
+                for (compressed_slot_t successor_slot : candidate_neighbors) {
+                    neighbors_ref_t hop2_candidate_neighbors = neighbors_base_(node_at_(successor_slot));
+
+                    // Assume the worst-case when reserving memory
+                    if (!visits.reserve(visits.size() + hop2_candidate_neighbors.size()))
+                        return false;
+
+                    for (compressed_slot_t hop2_successor_slot : hop2_candidate_neighbors) {
+
+                        if (visits.set(hop2_successor_slot))
+                  	    continue;
+
+                        distance_t hop2_successor_dist = context.measure(query, citerator_at(hop2_successor_slot), metric);
+                        if (top.size() < top_limit || hop2_successor_dist < radius) {
+                            // This can substantially grow our priority queue:
+                            next.insert({-hop2_successor_dist, hop2_successor_slot});
+                            if (is_dummy<predicate_at>() ||
+                                predicate(member_cref_t{node_at_(hop2_successor_slot).ckey(), hop2_successor_slot})) {
+                       	        top.insert({hop2_successor_dist, hop2_successor_slot}, top_limit);
+                       	        radius = top.top().distance;
+                            }
+                        }
+	    	    }
+		}
             }
         }
 
