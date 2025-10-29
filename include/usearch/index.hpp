@@ -4265,7 +4265,7 @@ class index_gt {
                        	        radius = top.top().distance;
                             }
                         }
-	    	    }
+                    }
                 }
             }
         }
