@@ -4239,7 +4239,7 @@ class index_gt {
                         radius = top.top().distance;
                     }
                 }
-	    }
+            }
 
             // predicate exists and explore 2-hop neighbors (ACORN-1)
             if (!is_dummy<predicate_at>()) {
@@ -4266,7 +4266,7 @@ class index_gt {
                             }
                         }
 	    	    }
-		}
+                }
             }
         }
 
