@@ -4292,9 +4292,6 @@ class index_gt {
 
                     for (compressed_slot_t hop2_successor_slot : hop2_candidate_neighbors) {
 
-                        if (visits.set(hop2_successor_slot))
-                            continue;
-
                         if (predicate(member_cref_t{node_at_(hop2_successor_slot).ckey(), hop2_successor_slot})) {
                             distance_t hop2_successor_dist =
                                 context.measure(query, citerator_at(hop2_successor_slot), metric);
