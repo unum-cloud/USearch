@@ -4308,8 +4308,7 @@ class index_gt {
                         }
                     }
                 }
-        }
-
+            }
         }
 
         return true;
