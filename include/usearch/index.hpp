@@ -3806,6 +3806,25 @@ class index_gt {
         return {nodes_mutexes_, slot};
     }
 
+    struct optional_node_lock_t {
+        nodes_mutexes_t& mutexes;
+        std::size_t slot;
+        inline ~optional_node_lock_t() noexcept {
+            if (slot != std::numeric_limits<std::size_t>::max())
+                mutexes.atomic_reset(slot);
+        }
+    };
+
+    inline optional_node_lock_t optional_node_lock_(std::size_t slot, bool condition) const noexcept {
+        if (condition) {
+            while (nodes_mutexes_.atomic_set(slot))
+                ;
+            return {nodes_mutexes_, slot};
+        } else {
+            return {nodes_mutexes_, std::numeric_limits<std::size_t>::max()};
+        }
+    }
+
     struct node_conditional_lock_t {
         nodes_mutexes_t& mutexes;
         std::size_t slot;
@@ -4133,6 +4152,8 @@ class index_gt {
                 node_try_conditional_lock_(candidate_slot, updated_slot != candidate_slot, failed_to_acquire);
             if (failed_to_acquire)
                 continue;
+            auto optional_node_lock =
+                optional_node_lock_(candidate_slot, updated_slot == candidate_slot);
             neighbors_ref_t candidate_neighbors = neighbors_(candidate_ref, level);
 
             // Optional prefetching
