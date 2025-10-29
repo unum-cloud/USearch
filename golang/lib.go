@@ -208,8 +208,8 @@ func DefaultConfig(dimensions uint) IndexConfig {
 
 // FilteredSearchHandler include the callback functiona and user data
 type FilteredSearchHandler struct {
-	f    func(key Key, ptr unsafe.Pointer) int
-	data any
+	Callback func(key Key, handler *FilteredSearchHandler) int
+	Data     any
 }
 
 // Index represents a USearch approximate nearest neighbor index.
@@ -734,7 +734,7 @@ func (index *Index) SearchUnsafe(query unsafe.Pointer, limit uint) (keys []Key, 
 //export goFilteredSearchCallback
 func goFilteredSearchCallback(key C.usearch_key_t, ptr unsafe.Pointer) C.int {
 	handler := (*FilteredSearchHandler)(ptr)
-	return C.int(handler.f(Key(key), ptr))
+	return C.int(handler.Callback(Key(key), handler))
 }
 
 // Filtred Search performs k-Approximate Nearest Neighbors Search for the closest vectors to the query vector with filtering.
