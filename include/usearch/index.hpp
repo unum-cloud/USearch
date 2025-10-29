@@ -4246,6 +4246,12 @@ class index_gt {
                 for (compressed_slot_t successor_slot : candidate_neighbors) {
                     neighbors_ref_t hop2_candidate_neighbors = neighbors_base_(node_at_(successor_slot));
 
+                    // Optional prefetching
+                    if (!is_dummy<prefetch_at>()) {
+                        candidates_range_t missing_candidates{*this, hop2_candidate_neighbors, visits};
+                        prefetch(missing_candidates.begin(), missing_candidates.end());
+                    }
+
                     // Assume the worst-case when reserving memory
                     if (!visits.reserve(visits.size() + hop2_candidate_neighbors.size()))
                         return false;
