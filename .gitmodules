@@ -4,9 +4,6 @@
 [submodule "fp16"]
 	path = fp16
 	url = https://github.com/maratyszcza/fp16
-<<<<<<< HEAD
 [submodule "stringzilla"]
 	path = stringzilla
 	url = https://github.com/ashvardanian/stringzilla
-=======
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
