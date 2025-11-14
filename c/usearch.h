@@ -109,6 +109,10 @@ USEARCH_EXPORT typedef struct usearch_init_options_t {
     bool multi;
 } usearch_init_options_t;
 
+extern int goFilteredSearchCallback(usearch_key_t, void*);
+
+USEARCH_EXPORT typedef int (*usearch_filtered_search_callback_t)(usearch_key_t, void*);
+
 /**
  *  @brief Retrieves the version of the library.
  *  @return The version of the library.
@@ -391,7 +395,7 @@ USEARCH_EXPORT size_t usearch_search(                                         //
 USEARCH_EXPORT size_t usearch_filtered_search(                                //
     usearch_index_t index,                                                    //
     void const* query_vector, usearch_scalar_kind_t query_kind, size_t count, //
-    int (*filter)(usearch_key_t key, void* filter_state), void* filter_state, //
+    usearch_filtered_search_callback_t filter, void* filter_state, //
     usearch_key_t* keys, usearch_distance_t* distances, usearch_error_t* error);
 
 /**
