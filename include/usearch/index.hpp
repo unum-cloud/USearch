@@ -3836,7 +3836,10 @@ class index_gt {
 
     inline node_conditional_lock_t node_try_conditional_lock_(std::size_t slot, bool condition,
                                                               bool& failed_to_acquire) const noexcept {
-        if (!condition) return {nodes_mutexes_, std::numeric_limits<std::size_t>::max()};
+        if (!condition) {
+            failed_to_acquire = false;
+            return {nodes_mutexes_, std::numeric_limits<std::size_t>::max()};
+        }
         failed_to_acquire = nodes_mutexes_.atomic_set(slot);
         return {nodes_mutexes_, failed_to_acquire ? std::numeric_limits<std::size_t>::max() : slot};
     }
