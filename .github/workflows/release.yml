@@ -454,10 +454,16 @@ jobs:
         include:
           - arch: x64
             cmake_arch: x64
+            simsimd_target_x86: 1
+            simsimd_target_arm: 0
           - arch: x86
             cmake_arch: Win32
+            simsimd_target_x86: 1
+            simsimd_target_arm: 0
           - arch: arm64
             cmake_arch: ARM64
+            simsimd_target_x86: 0
+            simsimd_target_arm: 1
 
     steps:
       - name: Check out refreshed version
@@ -483,9 +489,10 @@ jobs:
             -DUSEARCH_BUILD_LIB_C=0 `
             -DUSEARCH_USE_FP16LIB=1 `
             -DUSEARCH_USE_SIMSIMD=1 `
-            -DSIMSIMD_TARGET_HASWELL=1 `
-            -DSIMSIMD_TARGET_SKYLAKE=1 `
-            -DSIMSIMD_TARGET_ICE=1 `
+            -DSIMSIMD_TARGET_NEON=${{ matrix.simsimd_target_arm }} `
+            -DSIMSIMD_TARGET_HASWELL=${{ matrix.simsimd_target_x86 }} `
+            -DSIMSIMD_TARGET_SKYLAKE=${{ matrix.simsimd_target_x86 }} `
+            -DSIMSIMD_TARGET_ICE=${{ matrix.simsimd_target_x86 }} `
             -DSIMSIMD_TARGET_GENOA=0 `
             -DSIMSIMD_TARGET_SAPPHIRE=0 `
             -DSIMSIMD_DYNAMIC_DISPATCH=1
