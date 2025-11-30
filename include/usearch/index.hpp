@@ -2987,7 +2987,8 @@ class index_gt {
             }
             form_reverse_links_(metric, updated_slot, closest_view, value, level, context);
         }
-        updated_node.key(key);
+        if (static_cast<vector_key_t>(updated_node.key()) != key)
+            updated_node.key(key);
 
         // Normalize stats
         result.computed_distances = context.computed_distances - result.computed_distances;
