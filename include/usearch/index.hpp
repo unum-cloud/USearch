@@ -2624,7 +2624,10 @@ class index_gt {
         inline bool empty() const noexcept { return !count; }
         inline match_t operator[](std::size_t i) const noexcept { return at(i); }
         inline match_t front() const noexcept { return at(0); }
-        inline match_t back() const noexcept { return at(count - 1); }
+        inline match_t back() const noexcept {
+            usearch_assert_m(count > 0, "Can't call back() on an empty result set");
+            return at(count - 1);
+        }
         inline bool contains(vector_key_t key) const noexcept {
             for (std::size_t i = 0; i != count; ++i)
                 if (at(i).member.key == key)
@@ -4157,8 +4160,7 @@ class index_gt {
                 node_try_conditional_lock_(candidate_slot, updated_slot != candidate_slot, failed_to_acquire);
             if (failed_to_acquire)
                 continue;
-            auto optional_node_lock =
-                optional_node_lock_(candidate_slot, updated_slot == candidate_slot);
+            auto optional_node_lock = optional_node_lock_(candidate_slot, updated_slot == candidate_slot);
             neighbors_ref_t candidate_neighbors = neighbors_(candidate_ref, level);
 
             // Optional prefetching

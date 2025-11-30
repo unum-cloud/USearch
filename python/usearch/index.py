@@ -210,6 +210,8 @@ def _search_in_compiled(
     ) -> Union[BatchMatches, Matches]:
         return batch_matches[0] if count_vectors == 1 else batch_matches
 
+    progress_callback = progress
+
     # Create progress bar if needed
     if log:
         name = log if isinstance(log, str) else "Search"
@@ -219,14 +221,23 @@ def _search_in_compiled(
             unit="vector",
         )
 
+        user_progress = progress
+
         def update_progress_bar(processed: int, total: int) -> bool:
             progress_bar.update(processed - progress_bar.n)
-            return progress if progress else True
+            if user_progress:
+                return user_progress(processed, total)
+            return True
 
-        tuple_ = compiled_callable(vectors, progress=update_progress_bar, **kwargs)
-        progress_bar.close()
+        progress_callback = update_progress_bar
+
+    if progress_callback:
+        tuple_ = compiled_callable(vectors, progress=progress_callback, **kwargs)
     else:
         tuple_ = compiled_callable(vectors, **kwargs)
+
+    if log:
+        progress_bar.close()
 
     return distill_batch(BatchMatches(*tuple_))
 
@@ -265,14 +276,14 @@ def _add_to_compiled(
     # Create progress bar if needed
     if log:
         name = log if isinstance(log, str) else "Add"
-        pbar = tqdm(
+        progress_bar = tqdm(
             desc=name,
             total=count_vectors,
             unit="vector",
         )
 
         def update_progress_bar(processed: int, total: int) -> bool:
-            pbar.update(processed - pbar.n)
+            progress_bar.update(processed - progress_bar.n)
             return progress(processed, total) if progress else True
 
         compiled.add_many(
@@ -282,7 +293,7 @@ def _add_to_compiled(
             threads=threads,
             progress=update_progress_bar,
         )
-        pbar.close()
+        progress_bar.close()
     else:
         compiled.add_many(keys, vectors, copy=copy, threads=threads, progress=progress)
 
@@ -367,7 +378,7 @@ class BatchMatches(Sequence):
             raise IndexError(f"`index` must be an integer under {len(self)}")
 
     def to_list(self) -> List[List[tuple]]:
-        """Convert the result for each query to the list of tuples with information about its matches."""
+        """Flatten matches for all queries into a list of `(key, distance)` tuples."""
         list_of_matches = [self.__getitem__(row) for row in range(self.__len__())]
         return [match.to_tuple() for matches in list_of_matches for match in matches]
 
@@ -420,9 +431,9 @@ class Clustering:
     def members_of(self, centroid: Key) -> np.ndarray:
         return self.queries[self.matches.keys.flatten() == centroid]
 
-    def subcluster(self, centroid: Key, **clustering_kwards) -> Clustering:
+    def subcluster(self, centroid: Key, **clustering_kwargs) -> Clustering:
         sub_keys = self.members_of(centroid)
-        return self.index.cluster(keys=sub_keys, **clustering_kwards)
+        return self.index.cluster(keys=sub_keys, **clustering_kwargs)
 
     def plot_centroids_popularity(self):
         from matplotlib import pyplot as plt
