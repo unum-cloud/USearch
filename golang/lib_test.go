@@ -854,6 +854,64 @@ func TestExactSearch(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("unsafe exact search", func(t *testing.T) {
+		const datasetSize = 10
+		const querySize = 10
+		const vectorDims = 3
+		const maxResults = 1
+
+		dataset := []float32{0.57402676, 0.416747, 0.7048512,
+			0.031865682, 0.81882423, 0.57315916,
+			0.2874403, 0.045098174, 0.95673627,
+			0.006364229, 0.71774554, 0.6962764,
+			0.33764744, 0.44205195, 0.831014,
+			0.3366346, 0.829091, 0.4464138,
+			0.11070566, 0.96180826, 0.2503381,
+			0.538731, 0.2840365, 0.7931533,
+			0.7719648, 0.20657142, 0.6011644,
+			0.21957317, 0.94966024, 0.22345713,
+		}
+
+		queries := []float32{0.57402676, 0.416747, 0.7048512,
+			0.031865682, 0.81882423, 0.57315916,
+			0.2874403, 0.045098174, 0.95673627,
+			0.006364229, 0.71774554, 0.6962764,
+			0.33764744, 0.44205195, 0.831014,
+			0.3366346, 0.829091, 0.4464138,
+			0.11070566, 0.96180826, 0.2503381,
+			0.538731, 0.2840365, 0.7931533,
+			0.7719648, 0.20657142, 0.6011644,
+			0.21957317, 0.94966024, 0.22345713,
+		}
+
+		keys, distances, err := ExactSearchUnsafe(
+			unsafe.Pointer(&dataset[0]), unsafe.Pointer(&queries[0]),
+			datasetSize, querySize,
+			vectorDims, vectorDims, // Stride in bytes for int8
+			vectorDims, L2sq, F32,
+			maxResults, 0, // maxResults=3, numThreads=0 (auto)
+		)
+
+		if err != nil {
+			t.Fatalf("ExactSearchI8 failed: %v", err)
+		}
+
+		if len(keys) != maxResults*querySize || len(distances) != maxResults*querySize {
+			t.Fatalf("Expected 3*querySize results from ExactSearchI8, got %d keys and %d distances",
+				len(keys), len(distances))
+		}
+
+		fmt.Printf("keys %v\n", keys)
+		fmt.Printf("distances %v\n", distances)
+
+		for i := 0; i < querySize; i++ {
+			if keys[i] != Key(i) || distances[i] != 0 {
+				t.Fatalf("Expected same results from ExactSearch for all keys and distances")
+			}
+		}
+
+	})
 }
 
 func TestDistanceCalculations(t *testing.T) {
