@@ -30,19 +30,19 @@ func createTestIndex(t *testing.T, dimensions uint, quantization Quantization) *
 }
 
 func generateTestVector(dimensions uint) []float32 {
-    vector := make([]float32, dimensions)
-    for i := uint(0); i < dimensions; i++ {
-        vector[i] = float32(i) + 0.1
-    }
-    return vector
+	vector := make([]float32, dimensions)
+	for i := uint(0); i < dimensions; i++ {
+		vector[i] = float32(i) + 0.1
+	}
+	return vector
 }
 
 func generateTestVectorI8(dimensions uint) []int8 {
-    vector := make([]int8, dimensions)
-    for i := uint(0); i < dimensions; i++ {
-        vector[i] = int8((i % 127) + 1)
-    }
-    return vector
+	vector := make([]int8, dimensions)
+	for i := uint(0); i < dimensions; i++ {
+		vector[i] = int8((i % 127) + 1)
+	}
+	return vector
 }
 
 func populateIndex(t *testing.T, index *Index, vectorCount int) [][]float32 {
@@ -57,16 +57,16 @@ func populateIndex(t *testing.T, index *Index, vectorCount int) [][]float32 {
 		t.Fatalf("Failed to get dimensions: %v", err)
 	}
 
-    for i := 0; i < vectorCount; i++ {
-        vector := generateTestVector(dimensions)
-        vector[0] = float32(i) // Make each vector unique
-        vectors[i] = vector
+	for i := 0; i < vectorCount; i++ {
+		vector := generateTestVector(dimensions)
+		vector[0] = float32(i) // Make each vector unique
+		vectors[i] = vector
 
-        err = index.Add(Key(i), vector)
-        if err != nil {
-            t.Fatalf("Failed to add vector %d: %v", i, err)
-        }
-    }
+		err = index.Add(Key(i), vector)
+		if err != nil {
+			t.Fatalf("Failed to add vector %d: %v", i, err)
+		}
+	}
 	return vectors
 }
 
@@ -189,12 +189,12 @@ func TestBasicOperations(t *testing.T) {
 			t.Fatalf("Failed to reserve capacity: %v", err)
 		}
 
-        // Add a vector
-        vector := generateTestVector(defaultTestDimensions)
-        vector[0] = 42.0
-        vector[1] = 24.0
+		// Add a vector
+		vector := generateTestVector(defaultTestDimensions)
+		vector[0] = 42.0
+		vector[1] = 24.0
 
-        err := index.Add(100, vector)
+		err := index.Add(100, vector)
 		if err != nil {
 			t.Fatalf("Failed to add vector: %v", err)
 		}
@@ -524,13 +524,13 @@ func TestQuantizationTypes(t *testing.T) {
 		if err := index.Reserve(1); err != nil {
 			t.Fatalf("Failed to reserve capacity: %v", err)
 		}
-        vector := generateTestVector(32)
-        err := index.Add(1, vector)
+		vector := generateTestVector(32)
+		err := index.Add(1, vector)
 		if err != nil {
 			t.Fatalf("F32 Add failed: %v", err)
 		}
 
-        keys, _, err := index.Search(vector, 1)
+		keys, _, err := index.Search(vector, 1)
 		if err != nil {
 			t.Fatalf("F32 Search failed: %v", err)
 		}
@@ -551,17 +551,17 @@ func TestQuantizationTypes(t *testing.T) {
 		if err := index.Reserve(1); err != nil {
 			t.Fatalf("Failed to reserve capacity: %v", err)
 		}
-        vector := make([]float64, 32)
-        for i := range vector {
-            vector[i] = float64(i) + 0.5
-        }
+		vector := make([]float64, 32)
+		for i := range vector {
+			vector[i] = float64(i) + 0.5
+		}
 
-        err := index.AddUnsafe(1, unsafe.Pointer(&vector[0]))
+		err := index.AddUnsafe(1, unsafe.Pointer(&vector[0]))
 		if err != nil {
 			t.Fatalf("F64 AddUnsafe failed: %v", err)
 		}
 
-        keys, _, err := index.SearchUnsafe(unsafe.Pointer(&vector[0]), 1)
+		keys, _, err := index.SearchUnsafe(unsafe.Pointer(&vector[0]), 1)
 		if err != nil {
 			t.Fatalf("F64 SearchUnsafe failed: %v", err)
 		}
@@ -582,13 +582,13 @@ func TestQuantizationTypes(t *testing.T) {
 		if err := index.Reserve(1); err != nil {
 			t.Fatalf("Failed to reserve capacity: %v", err)
 		}
-        vector := generateTestVectorI8(32)
-        err := index.AddI8(1, vector)
+		vector := generateTestVectorI8(32)
+		err := index.AddI8(1, vector)
 		if err != nil {
 			t.Fatalf("I8 Add failed: %v", err)
 		}
 
-        keys, _, err := index.SearchI8(vector, 1)
+		keys, _, err := index.SearchI8(vector, 1)
 		if err != nil {
 			t.Fatalf("I8 Search failed: %v", err)
 		}
@@ -614,8 +614,8 @@ func TestUnsafeOperations(t *testing.T) {
 		if err := index.Reserve(1); err != nil {
 			t.Fatalf("Failed to reserve capacity: %v", err)
 		}
-        vector := generateTestVector(64)
-        ptr := unsafe.Pointer(&vector[0])
+		vector := generateTestVector(64)
+		ptr := unsafe.Pointer(&vector[0])
 
 		// Test AddUnsafe
 		err := index.AddUnsafe(100, ptr)
@@ -671,12 +671,12 @@ func TestConcurrentInsertions(t *testing.T) {
 		_ = index.ChangeThreadsAdd(uint(runtime.NumCPU()))
 
 		for i := 0; i < totalVectors; i++ {
-            vector := generateTestVector(64)
-            vector[0] = float32(i)
-            if err := index.Add(Key(i), vector); err != nil {
-                t.Fatalf("Insertion failed at %d: %v", i, err)
-            }
-        }
+			vector := generateTestVector(64)
+			vector[0] = float32(i)
+			if err := index.Add(Key(i), vector); err != nil {
+				t.Fatalf("Insertion failed at %d: %v", i, err)
+			}
+		}
 
 		// Verify final count
 		finalSize, err := index.Len()
@@ -763,17 +763,22 @@ func TestExactSearch(t *testing.T) {
 		const datasetSize = 100
 		const querySize = 10
 		const vectorDims = 32
+		const maxResults = 5
 
 		dataset := make([]float32, datasetSize*vectorDims)
 		queries := make([]float32, querySize*vectorDims)
 
 		// Fill with test data
-		for i := 0; i < len(dataset); i++ {
-			dataset[i] = float32(i%100) + 0.1
+		for i := 0; i < datasetSize; i++ {
+			for j := 0; j < vectorDims; j++ {
+				dataset[i*vectorDims+j] = float32(i%100+j) + 0.1
+			}
 		}
 
-		for i := 0; i < len(queries); i++ {
-			queries[i] = float32(i%50) + 0.1
+		for i := 0; i < querySize; i++ {
+			for j := 0; j < vectorDims; j++ {
+				queries[i*vectorDims+j] = float32(j%50) + 0.1
+			}
 		}
 
 		keys, distances, err := ExactSearch(
@@ -781,17 +786,24 @@ func TestExactSearch(t *testing.T) {
 			datasetSize, querySize,
 			vectorDims*4, vectorDims*4, // Stride in bytes for float32
 			vectorDims, Cosine,
-			5, 0, // maxResults=5, numThreads=0 (auto)
-			8, 4, // resultKeysStride, resultDistancesStride
+			maxResults, 0, // maxResults=5, numThreads=0 (auto)
 		)
 
 		if err != nil {
 			t.Fatalf("ExactSearch failed: %v", err)
 		}
 
-		if len(keys) != 5 || len(distances) != 5 {
-			t.Fatalf("Expected 5 results from ExactSearch, got %d keys and %d distances",
+		if len(keys) != maxResults*querySize || len(distances) != maxResults*querySize {
+			t.Fatalf("Expected 5*10 results from ExactSearch, got %d keys and %d distances",
 				len(keys), len(distances))
+		}
+
+		for i := 0; i < querySize; i++ {
+			for j := 0; j < maxResults; j++ {
+				if keys[j] != keys[i*maxResults+j] || distances[j] != distances[i*maxResults+j] {
+					t.Fatalf("Expected same results from ExactSearch for all keys and distances")
+				}
+			}
 		}
 	})
 
@@ -799,17 +811,22 @@ func TestExactSearch(t *testing.T) {
 		const datasetSize = 50
 		const querySize = 5
 		const vectorDims = 16
+		const maxResults = 3
 
 		dataset := make([]int8, datasetSize*vectorDims)
 		queries := make([]int8, querySize*vectorDims)
 
 		// Fill with test data
-		for i := 0; i < len(dataset); i++ {
-			dataset[i] = int8((i % 100) + 1)
+		for i := 0; i < datasetSize; i++ {
+			for j := 0; j < vectorDims; j++ {
+				dataset[i*vectorDims+j] = int8(i%100+j) + 1
+			}
 		}
 
-		for i := 0; i < len(queries); i++ {
-			queries[i] = int8((i % 50) + 1)
+		for i := 0; i < querySize; i++ {
+			for j := 0; j < vectorDims; j++ {
+				queries[i*vectorDims+j] = int8(j%50) + 1
+			}
 		}
 
 		keys, distances, err := ExactSearchI8(
@@ -817,17 +834,24 @@ func TestExactSearch(t *testing.T) {
 			datasetSize, querySize,
 			vectorDims, vectorDims, // Stride in bytes for int8
 			vectorDims, L2sq,
-			3, 0, // maxResults=3, numThreads=0 (auto)
-			8, 4, // resultKeysStride, resultDistancesStride
+			maxResults, 0, // maxResults=3, numThreads=0 (auto)
 		)
 
 		if err != nil {
 			t.Fatalf("ExactSearchI8 failed: %v", err)
 		}
 
-		if len(keys) != 3 || len(distances) != 3 {
-			t.Fatalf("Expected 3 results from ExactSearchI8, got %d keys and %d distances",
+		if len(keys) != maxResults*querySize || len(distances) != maxResults*querySize {
+			t.Fatalf("Expected 3*querySize results from ExactSearchI8, got %d keys and %d distances",
 				len(keys), len(distances))
+		}
+
+		for i := 0; i < querySize; i++ {
+			for j := 0; j < maxResults; j++ {
+				if keys[j] != keys[i*maxResults+j] || distances[j] != distances[i*maxResults+j] {
+					t.Fatalf("Expected same results from ExactSearch for all keys and distances")
+				}
+			}
 		}
 	})
 }
