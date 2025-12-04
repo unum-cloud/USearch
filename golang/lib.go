@@ -703,6 +703,9 @@ func ExactSearch(dataset []float32, queries []float32, datasetSize uint, queryCo
 	if (len(queries) % int(vectorDimensions)) != 0 {
 		return nil, nil, errors.New("queries length must be a multiple of the dimensions")
 	}
+	if maxResults == 0 {
+		return nil, nil, errors.New("maxResults must be greater than zero")
+	}
 
 	keys = make([]Key, queryCount*maxResults)
 	distances = make([]float32, queryCount*maxResults)
@@ -742,8 +745,8 @@ func ExactSearchUnsafe(dataset unsafe.Pointer, queries unsafe.Pointer, datasetSi
 	if dataset == nil || queries == nil {
 		return nil, nil, errors.New("dataset and queries pointers cannot be nil")
 	}
-	if vectorDimensions == 0 || datasetSize == 0 || queryCount == 0 {
-		return nil, nil, errors.New("dimensions and sizes must be greater than zero")
+	if vectorDimensions == 0 || datasetSize == 0 || queryCount == 0 || maxResults == 0 {
+		return nil, nil, errors.New("dimensions, query count, max results and sizes must be greater than zero")
 	}
 
 	keys = make([]Key, queryCount*maxResults)
@@ -858,6 +861,9 @@ func ExactSearchI8(dataset []int8, queries []int8, datasetSize uint, queryCount 
 	}
 	if vectorDimensions == 0 {
 		return nil, nil, errors.New("dimensions must be greater than zero")
+	}
+	if maxResults == 0 {
+		return nil, nil, errors.New("maxResults must be greater than zero")
 	}
 	keys = make([]Key, queryCount*maxResults)
 	distances = make([]float32, queryCount*maxResults)
