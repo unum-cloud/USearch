@@ -1,7 +1,7 @@
 package usearch
 
 import (
-	"fmt"
+	"errors"
 	"io"
 	"math"
 	"runtime"
@@ -30,19 +30,19 @@ func createTestIndex(t *testing.T, dimensions uint, quantization Quantization) *
 }
 
 func generateTestVector(dimensions uint) []float32 {
-    vector := make([]float32, dimensions)
-    for i := uint(0); i < dimensions; i++ {
-        vector[i] = float32(i) + 0.1
-    }
-    return vector
+	vector := make([]float32, dimensions)
+	for i := uint(0); i < dimensions; i++ {
+		vector[i] = float32(i) + 0.1
+	}
+	return vector
 }
 
 func generateTestVectorI8(dimensions uint) []int8 {
-    vector := make([]int8, dimensions)
-    for i := uint(0); i < dimensions; i++ {
-        vector[i] = int8((i % 127) + 1)
-    }
-    return vector
+	vector := make([]int8, dimensions)
+	for i := uint(0); i < dimensions; i++ {
+		vector[i] = int8((i % 127) + 1)
+	}
+	return vector
 }
 
 func populateIndex(t *testing.T, index *Index, vectorCount int) [][]float32 {
@@ -57,16 +57,16 @@ func populateIndex(t *testing.T, index *Index, vectorCount int) [][]float32 {
 		t.Fatalf("Failed to get dimensions: %v", err)
 	}
 
-    for i := 0; i < vectorCount; i++ {
-        vector := generateTestVector(dimensions)
-        vector[0] = float32(i) // Make each vector unique
-        vectors[i] = vector
+	for i := 0; i < vectorCount; i++ {
+		vector := generateTestVector(dimensions)
+		vector[0] = float32(i) // Make each vector unique
+		vectors[i] = vector
 
-        err = index.Add(Key(i), vector)
-        if err != nil {
-            t.Fatalf("Failed to add vector %d: %v", i, err)
-        }
-    }
+		err = index.Add(Key(i), vector)
+		if err != nil {
+			t.Fatalf("Failed to add vector %d: %v", i, err)
+		}
+	}
 	return vectors
 }
 
@@ -189,12 +189,12 @@ func TestBasicOperations(t *testing.T) {
 			t.Fatalf("Failed to reserve capacity: %v", err)
 		}
 
-        // Add a vector
-        vector := generateTestVector(defaultTestDimensions)
-        vector[0] = 42.0
-        vector[1] = 24.0
+		// Add a vector
+		vector := generateTestVector(defaultTestDimensions)
+		vector[0] = 42.0
+		vector[1] = 24.0
 
-        err := index.Add(100, vector)
+		err := index.Add(100, vector)
 		if err != nil {
 			t.Fatalf("Failed to add vector: %v", err)
 		}
@@ -524,19 +524,39 @@ func TestQuantizationTypes(t *testing.T) {
 		if err := index.Reserve(1); err != nil {
 			t.Fatalf("Failed to reserve capacity: %v", err)
 		}
-        vector := generateTestVector(32)
-        err := index.Add(1, vector)
+		vector := generateTestVector(32)
+		err := index.Add(1, vector)
 		if err != nil {
 			t.Fatalf("F32 Add failed: %v", err)
 		}
 
-        keys, _, err := index.Search(vector, 1)
+		keys, _, err := index.Search(vector, 1)
 		if err != nil {
 			t.Fatalf("F32 Search failed: %v", err)
 		}
 
 		if len(keys) == 0 || keys[0] != 1 {
 			t.Fatalf("F32 search results incorrect")
+		}
+
+		// Test FilteredSearch
+		handler := &FilteredSearchHandler{
+			Callback: func(key Key, handler *FilteredSearchHandler) int {
+				if key%2 == 0 {
+					return 1
+				}
+				return 0
+			},
+			Data: int64(1),
+		}
+
+		keys, _, err = index.FilteredSearch(vector, 1, handler)
+		if err != nil {
+			t.Fatalf("F32 FilteredSearch failed: %v", err)
+		}
+
+		if len(keys) > 0 {
+			t.Fatalf("F32 FilteredSearch returned incorrect results")
 		}
 	})
 
@@ -551,23 +571,43 @@ func TestQuantizationTypes(t *testing.T) {
 		if err := index.Reserve(1); err != nil {
 			t.Fatalf("Failed to reserve capacity: %v", err)
 		}
-        vector := make([]float64, 32)
-        for i := range vector {
-            vector[i] = float64(i) + 0.5
-        }
+		vector := make([]float64, 32)
+		for i := range vector {
+			vector[i] = float64(i) + 0.5
+		}
 
-        err := index.AddUnsafe(1, unsafe.Pointer(&vector[0]))
+		err := index.AddUnsafe(1, unsafe.Pointer(&vector[0]))
 		if err != nil {
 			t.Fatalf("F64 AddUnsafe failed: %v", err)
 		}
 
-        keys, _, err := index.SearchUnsafe(unsafe.Pointer(&vector[0]), 1)
+		keys, _, err := index.SearchUnsafe(unsafe.Pointer(&vector[0]), 1)
 		if err != nil {
 			t.Fatalf("F64 SearchUnsafe failed: %v", err)
 		}
 
 		if len(keys) == 0 || keys[0] != 1 {
 			t.Fatalf("F64 search results incorrect")
+		}
+
+		// Test F64 FilteredSearchUnsafe
+		handler := &FilteredSearchHandler{
+			Callback: func(key Key, handler *FilteredSearchHandler) int {
+				if key%2 == 0 {
+					return 1
+				}
+				return 0
+			},
+			Data: int64(1),
+		}
+
+		keys, _, err = index.FilteredSearchUnsafe(unsafe.Pointer(&vector[0]), 5, handler)
+		if err != nil {
+			t.Fatalf("F64 FilteredSearchUnsafe failed: %v", err)
+		}
+
+		if len(keys) > 0 {
+			t.Fatalf("F64 FilteredSearchUnsafe returned incorrect results")
 		}
 	})
 
@@ -582,19 +622,39 @@ func TestQuantizationTypes(t *testing.T) {
 		if err := index.Reserve(1); err != nil {
 			t.Fatalf("Failed to reserve capacity: %v", err)
 		}
-        vector := generateTestVectorI8(32)
-        err := index.AddI8(1, vector)
+		vector := generateTestVectorI8(32)
+		err := index.AddI8(1, vector)
 		if err != nil {
 			t.Fatalf("I8 Add failed: %v", err)
 		}
 
-        keys, _, err := index.SearchI8(vector, 1)
+		keys, _, err := index.SearchI8(vector, 1)
 		if err != nil {
 			t.Fatalf("I8 Search failed: %v", err)
 		}
 
 		if len(keys) == 0 || keys[0] != 1 {
 			t.Fatalf("I8 search results incorrect")
+		}
+
+		// Test FilteredSearchI8
+		handler := &FilteredSearchHandler{
+			Callback: func(key Key, handler *FilteredSearchHandler) int {
+				if key%2 == 0 {
+					return 1
+				}
+				return 0
+			},
+			Data: int64(1),
+		}
+
+		keys, _, err = index.FilteredSearchI8(vector, 1, handler)
+		if err != nil {
+			t.Fatalf("FilteredSearchI8 failed: %v", err)
+		}
+
+		if len(keys) > 0 {
+			t.Fatalf("FilteredSearchI8 returned incorrect results")
 		}
 	})
 }
@@ -614,8 +674,8 @@ func TestUnsafeOperations(t *testing.T) {
 		if err := index.Reserve(1); err != nil {
 			t.Fatalf("Failed to reserve capacity: %v", err)
 		}
-        vector := generateTestVector(64)
-        ptr := unsafe.Pointer(&vector[0])
+		vector := generateTestVector(64)
+		ptr := unsafe.Pointer(&vector[0])
 
 		// Test AddUnsafe
 		err := index.AddUnsafe(100, ptr)
@@ -645,6 +705,26 @@ func TestUnsafeOperations(t *testing.T) {
 		if math.Abs(float64(distances[0])) > distanceTolerance {
 			t.Fatalf("Expected near-zero distance for exact match, got %f", distances[0])
 		}
+
+		// Test FilteredSearchUnsafe
+		handler := &FilteredSearchHandler{
+			Callback: func(key Key, handler *FilteredSearchHandler) int {
+				if key%2 == 0 {
+					return 0
+				}
+				return 1
+			},
+			Data: int64(1),
+		}
+
+		keys, _, err = index.FilteredSearchUnsafe(ptr, 5, handler)
+		if err != nil {
+			t.Fatalf("FilteredSearchUnsafe failed: %v", err)
+		}
+
+		if len(keys) > 0 {
+			t.Fatalf("FilteredSearchUnsafe returned incorrect results")
+		}
 	})
 }
 
@@ -671,12 +751,12 @@ func TestConcurrentInsertions(t *testing.T) {
 		_ = index.ChangeThreadsAdd(uint(runtime.NumCPU()))
 
 		for i := 0; i < totalVectors; i++ {
-            vector := generateTestVector(64)
-            vector[0] = float32(i)
-            if err := index.Add(Key(i), vector); err != nil {
-                t.Fatalf("Insertion failed at %d: %v", i, err)
-            }
-        }
+			vector := generateTestVector(64)
+			vector[0] = float32(i)
+			if err := index.Add(Key(i), vector); err != nil {
+				t.Fatalf("Insertion failed at %d: %v", i, err)
+			}
+		}
 
 		// Verify final count
 		finalSize, err := index.Len()
@@ -706,16 +786,15 @@ func TestConcurrentSearches(t *testing.T) {
 		// Pre-populate with data
 		testVectors := populateIndex(t, index, 200)
 
-		// Let the library parallelize search internally as well
-		_ = index.ChangeThreadsSearch(uint(runtime.NumCPU()))
-
 		const numGoroutines = 30
 		const searchesPerGoroutine = 50
 
-		var wg sync.WaitGroup
-		errorChan := make(chan error, numGoroutines)
+		// Reserve enough threads for all concurrent search operations
+		_ = index.ChangeThreadsSearch(numGoroutines)
 
-		// Only concurrent searches - no mixed operations
+		var wg sync.WaitGroup
+		errChan := make(chan error, numGoroutines)
+
 		for i := 0; i < numGoroutines; i++ {
 			wg.Add(1)
 			go func(goroutineID int) {
@@ -728,19 +807,19 @@ func TestConcurrentSearches(t *testing.T) {
 
 					keys, distances, err := index.Search(query, 10)
 					if err != nil {
-						errorChan <- err
+						errChan <- err
 						return
 					}
 
 					// Basic validation - should find at least the exact match
 					if len(keys) == 0 || len(distances) == 0 {
-						errorChan <- fmt.Errorf("search returned empty results")
+						errChan <- errors.New("search returned empty results")
 						return
 					}
 
 					// First result should be the exact match
 					if keys[0] != Key(queryIndex) || math.Abs(float64(distances[0])) > distanceTolerance {
-						errorChan <- fmt.Errorf("search results inconsistent: expected key %d, got %d", queryIndex, keys[0])
+						errChan <- errors.New("search results inconsistent")
 						return
 					}
 				}
@@ -748,10 +827,10 @@ func TestConcurrentSearches(t *testing.T) {
 		}
 
 		wg.Wait()
-		close(errorChan)
+		close(errChan)
 
 		// Check for any errors
-		for err := range errorChan {
+		for err := range errChan {
 			t.Fatalf("Concurrent search failed: %v", err)
 		}
 	})
@@ -763,17 +842,22 @@ func TestExactSearch(t *testing.T) {
 		const datasetSize = 100
 		const querySize = 10
 		const vectorDims = 32
+		const maxResults = 5
 
 		dataset := make([]float32, datasetSize*vectorDims)
 		queries := make([]float32, querySize*vectorDims)
 
 		// Fill with test data
-		for i := 0; i < len(dataset); i++ {
-			dataset[i] = float32(i%100) + 0.1
+		for i := 0; i < datasetSize; i++ {
+			for j := 0; j < vectorDims; j++ {
+				dataset[i*vectorDims+j] = float32(i%100+j) + 0.1
+			}
 		}
 
-		for i := 0; i < len(queries); i++ {
-			queries[i] = float32(i%50) + 0.1
+		for i := 0; i < querySize; i++ {
+			for j := 0; j < vectorDims; j++ {
+				queries[i*vectorDims+j] = float32(j%50) + 0.1
+			}
 		}
 
 		keys, distances, err := ExactSearch(
@@ -781,17 +865,24 @@ func TestExactSearch(t *testing.T) {
 			datasetSize, querySize,
 			vectorDims*4, vectorDims*4, // Stride in bytes for float32
 			vectorDims, Cosine,
-			5, 0, // maxResults=5, numThreads=0 (auto)
-			8, 4, // resultKeysStride, resultDistancesStride
+			maxResults, 0, // maxResults=5, numThreads=0 (auto)
 		)
 
 		if err != nil {
 			t.Fatalf("ExactSearch failed: %v", err)
 		}
 
-		if len(keys) != 5 || len(distances) != 5 {
-			t.Fatalf("Expected 5 results from ExactSearch, got %d keys and %d distances",
+		if len(keys) != maxResults*querySize || len(distances) != maxResults*querySize {
+			t.Fatalf("Expected 5*10 results from ExactSearch, got %d keys and %d distances",
 				len(keys), len(distances))
+		}
+
+		for i := 0; i < querySize; i++ {
+			for j := 0; j < maxResults; j++ {
+				if keys[j] != keys[i*maxResults+j] || distances[j] != distances[i*maxResults+j] {
+					t.Fatalf("Expected same results from ExactSearch for all keys and distances")
+				}
+			}
 		}
 	})
 
@@ -799,17 +890,22 @@ func TestExactSearch(t *testing.T) {
 		const datasetSize = 50
 		const querySize = 5
 		const vectorDims = 16
+		const maxResults = 3
 
 		dataset := make([]int8, datasetSize*vectorDims)
 		queries := make([]int8, querySize*vectorDims)
 
 		// Fill with test data
-		for i := 0; i < len(dataset); i++ {
-			dataset[i] = int8((i % 100) + 1)
+		for i := 0; i < datasetSize; i++ {
+			for j := 0; j < vectorDims; j++ {
+				dataset[i*vectorDims+j] = int8(i%100+j) + 1
+			}
 		}
 
-		for i := 0; i < len(queries); i++ {
-			queries[i] = int8((i % 50) + 1)
+		for i := 0; i < querySize; i++ {
+			for j := 0; j < vectorDims; j++ {
+				queries[i*vectorDims+j] = int8(j%50) + 1
+			}
 		}
 
 		keys, distances, err := ExactSearchI8(
@@ -817,18 +913,80 @@ func TestExactSearch(t *testing.T) {
 			datasetSize, querySize,
 			vectorDims, vectorDims, // Stride in bytes for int8
 			vectorDims, L2sq,
-			3, 0, // maxResults=3, numThreads=0 (auto)
-			8, 4, // resultKeysStride, resultDistancesStride
+			maxResults, 0, // maxResults=3, numThreads=0 (auto)
 		)
 
 		if err != nil {
 			t.Fatalf("ExactSearchI8 failed: %v", err)
 		}
 
-		if len(keys) != 3 || len(distances) != 3 {
-			t.Fatalf("Expected 3 results from ExactSearchI8, got %d keys and %d distances",
+		if len(keys) != maxResults*querySize || len(distances) != maxResults*querySize {
+			t.Fatalf("Expected 3*querySize results from ExactSearchI8, got %d keys and %d distances",
 				len(keys), len(distances))
 		}
+
+		for i := 0; i < querySize; i++ {
+			for j := 0; j < maxResults; j++ {
+				if keys[j] != keys[i*maxResults+j] || distances[j] != distances[i*maxResults+j] {
+					t.Fatalf("Expected same results from ExactSearch for all keys and distances")
+				}
+			}
+		}
+	})
+
+	t.Run("unsafe exact search", func(t *testing.T) {
+		const datasetSize = 10
+		const querySize = 10
+		const vectorDims = 3
+		const maxResults = 1
+
+		dataset := []float32{0.57402676, 0.416747, 0.7048512,
+			0.031865682, 0.81882423, 0.57315916,
+			0.2874403, 0.045098174, 0.95673627,
+			0.006364229, 0.71774554, 0.6962764,
+			0.33764744, 0.44205195, 0.831014,
+			0.3366346, 0.829091, 0.4464138,
+			0.11070566, 0.96180826, 0.2503381,
+			0.538731, 0.2840365, 0.7931533,
+			0.7719648, 0.20657142, 0.6011644,
+			0.21957317, 0.94966024, 0.22345713,
+		}
+
+		queries := []float32{0.57402676, 0.416747, 0.7048512,
+			0.031865682, 0.81882423, 0.57315916,
+			0.2874403, 0.045098174, 0.95673627,
+			0.006364229, 0.71774554, 0.6962764,
+			0.33764744, 0.44205195, 0.831014,
+			0.3366346, 0.829091, 0.4464138,
+			0.11070566, 0.96180826, 0.2503381,
+			0.538731, 0.2840365, 0.7931533,
+			0.7719648, 0.20657142, 0.6011644,
+			0.21957317, 0.94966024, 0.22345713,
+		}
+
+		keys, distances, err := ExactSearchUnsafe(
+			unsafe.Pointer(&dataset[0]), unsafe.Pointer(&queries[0]),
+			datasetSize, querySize,
+			vectorDims, vectorDims, // Stride in bytes for int8
+			vectorDims, L2sq, F32,
+			maxResults, 0, // maxResults=3, numThreads=0 (auto)
+		)
+
+		if err != nil {
+			t.Fatalf("ExactSearchI8 failed: %v", err)
+		}
+
+		if len(keys) != maxResults*querySize || len(distances) != maxResults*querySize {
+			t.Fatalf("Expected 3*querySize results from ExactSearchI8, got %d keys and %d distances",
+				len(keys), len(distances))
+		}
+
+		for i := 0; i < querySize; i++ {
+			if keys[i] != Key(i) || distances[i] != 0 {
+				t.Fatalf("Expected same results from ExactSearch for all keys and distances")
+			}
+		}
+
 	})
 }
 
@@ -874,4 +1032,145 @@ func TestDistanceCalculations(t *testing.T) {
 			t.Fatalf("I8 distance mismatch: expected %f, got %f", expected, distance)
 		}
 	})
+}
+
+func TestVersion(t *testing.T) {
+	version := Version()
+	if version == "" {
+		t.Fatal("Version() returned empty string")
+	}
+	// Version should be in format like "2.21.4"
+	if len(version) < 5 {
+		t.Fatalf("Version() returned unexpectedly short string: %s", version)
+	}
+}
+
+func TestClear(t *testing.T) {
+	index := createTestIndex(t, 32, F32)
+	defer index.Destroy()
+
+	if err := index.Reserve(10); err != nil {
+		t.Fatalf("Failed to reserve capacity: %v", err)
+	}
+
+	// Add some vectors
+	for i := 0; i < 5; i++ {
+		vector := generateTestVector(32)
+		vector[0] = float32(i)
+		if err := index.Add(Key(i), vector); err != nil {
+			t.Fatalf("Failed to add vector %d: %v", i, err)
+		}
+	}
+
+	// Verify vectors were added
+	size, err := index.Len()
+	if err != nil {
+		t.Fatalf("Failed to get index size: %v", err)
+	}
+	if size != 5 {
+		t.Fatalf("Expected 5 vectors, got %d", size)
+	}
+
+	// Clear the index
+	if err := index.Clear(); err != nil {
+		t.Fatalf("Failed to clear index: %v", err)
+	}
+
+	// Verify index is empty
+	size, err = index.Len()
+	if err != nil {
+		t.Fatalf("Failed to get index size after clear: %v", err)
+	}
+	if size != 0 {
+		t.Fatalf("Expected 0 vectors after clear, got %d", size)
+	}
+}
+
+func TestCount(t *testing.T) {
+	index := createTestIndex(t, 32, F32)
+	defer index.Destroy()
+
+	if err := index.Reserve(10); err != nil {
+		t.Fatalf("Failed to reserve capacity: %v", err)
+	}
+
+	// Count for non-existent key should be 0
+	count, err := index.Count(Key(42))
+	if err != nil {
+		t.Fatalf("Failed to count key: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("Expected count 0 for non-existent key, got %d", count)
+	}
+
+	// Add a vector
+	vector := generateTestVector(32)
+	if err := index.Add(Key(42), vector); err != nil {
+		t.Fatalf("Failed to add vector: %v", err)
+	}
+
+	// Count should now be 1
+	count, err = index.Count(Key(42))
+	if err != nil {
+		t.Fatalf("Failed to count key after add: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("Expected count 1 after add, got %d", count)
+	}
+}
+
+func TestRename(t *testing.T) {
+	index := createTestIndex(t, 32, F32)
+	defer index.Destroy()
+
+	if err := index.Reserve(10); err != nil {
+		t.Fatalf("Failed to reserve capacity: %v", err)
+	}
+
+	// Add a vector with key 1
+	vector := generateTestVector(32)
+	if err := index.Add(Key(1), vector); err != nil {
+		t.Fatalf("Failed to add vector: %v", err)
+	}
+
+	// Verify key 1 exists
+	found, err := index.Contains(Key(1))
+	if err != nil {
+		t.Fatalf("Failed to check contains: %v", err)
+	}
+	if !found {
+		t.Fatal("Key 1 should exist before rename")
+	}
+
+	// Rename key 1 to key 2
+	if err := index.Rename(Key(1), Key(2)); err != nil {
+		t.Fatalf("Failed to rename key: %v", err)
+	}
+
+	// Verify key 1 no longer exists
+	found, err = index.Contains(Key(1))
+	if err != nil {
+		t.Fatalf("Failed to check contains after rename: %v", err)
+	}
+	if found {
+		t.Fatal("Key 1 should not exist after rename")
+	}
+
+	// Verify key 2 now exists
+	found, err = index.Contains(Key(2))
+	if err != nil {
+		t.Fatalf("Failed to check contains for new key: %v", err)
+	}
+	if !found {
+		t.Fatal("Key 2 should exist after rename")
+	}
+
+	// Verify we can search and find the renamed vector
+	keys, _, err := index.Search(vector, 1)
+	if err != nil {
+		t.Fatalf("Failed to search: %v", err)
+	}
+	if len(keys) != 1 || keys[0] != Key(2) {
+		t.Fatalf("Expected to find key 2, got %v", keys)
+	}
 }

@@ -413,7 +413,7 @@ USEARCH_EXPORT size_t usearch_search(                                           
 USEARCH_EXPORT size_t usearch_filtered_search(                                 //
     usearch_index_t index,                                                     //
     void const* query, usearch_scalar_kind_t query_kind, size_t results_limit, //
-    int (*filter)(usearch_key_t key, void* filter_state), void* filter_state,  //
+    usearch_filtered_search_callback_t filter, void* filter_state,  //
     usearch_key_t* found_keys, usearch_distance_t* found_distances, usearch_error_t* error) {
 
     USEARCH_ASSERT(index && query && filter && error && "Missing arguments");
@@ -478,7 +478,7 @@ USEARCH_EXPORT void usearch_exact_search(                             //
 
     metric_punned_t metric(dimensions, metric_kind_to_cpp(metric_kind), scalar_kind_to_cpp(scalar_kind));
     executor_default_t executor(threads);
-    static exact_search_t search;
+    exact_search_t search;
     exact_search_results_t result = search(                    //
         (byte_t const*)dataset, dataset_count, dataset_stride, //
         (byte_t const*)queries, queries_count, queries_stride, //
