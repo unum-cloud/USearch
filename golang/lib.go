@@ -101,6 +101,8 @@ func (m Metric) CValue() C.usearch_metric_kind_t {
 		return C.usearch_metric_cos_k
 	case Haversine:
 		return C.usearch_metric_haversine_k
+	case Divergence:
+		return C.usearch_metric_divergence_k
 	case Pearson:
 		return C.usearch_metric_pearson_k
 	case Hamming:
@@ -134,8 +136,8 @@ const (
 )
 
 // String returns the string representation of the Quantization.
-func (a Quantization) String() string {
-	switch a {
+func (q Quantization) String() string {
+	switch q {
 	case BF16:
 		return "BF16"
 	case F16:
@@ -153,8 +155,8 @@ func (a Quantization) String() string {
 	}
 }
 
-func (a Quantization) CValue() C.usearch_scalar_kind_t {
-	switch a {
+func (q Quantization) CValue() C.usearch_scalar_kind_t {
+	switch q {
 	case F16:
 		return C.usearch_scalar_f16_k
 	case F32:
@@ -1213,6 +1215,8 @@ func Metadata(path string) (c IndexConfig, err error) {
 		c.Quantization = I8
 	case C.usearch_scalar_b1_k:
 		c.Quantization = B1
+	case C.usearch_scalar_bf16_k:
+		c.Quantization = BF16
 	}
 
 	return c, nil
