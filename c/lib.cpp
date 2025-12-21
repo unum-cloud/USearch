@@ -478,7 +478,7 @@ USEARCH_EXPORT void usearch_exact_search(                             //
 
     metric_punned_t metric(dimensions, metric_kind_to_cpp(metric_kind), scalar_kind_to_cpp(scalar_kind));
     executor_default_t executor(threads);
-    static exact_search_t search;
+    exact_search_t search;
     exact_search_results_t result = search(                    //
         (byte_t const*)dataset, dataset_count, dataset_stride, //
         (byte_t const*)queries, queries_count, queries_stride, //

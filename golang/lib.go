@@ -689,7 +689,7 @@ func (index *Index) SearchUnsafe(query unsafe.Pointer, limit uint) (keys []Key, 
 //   - numThreads: Number of threads to use (0 for auto-detection)
 func ExactSearch(dataset []float32, queries []float32, datasetSize uint, queryCount uint,
 	datasetStride uint, queryStride uint, vectorDimensions uint, metric Metric,
-	maxResults uint, numThreads uint, resultKeysStride uint, resultDistancesStride uint) (keys []Key, distances []float32, err error) {
+	maxResults uint, numThreads uint) (keys []Key, distances []float32, err error) {
 
 	if len(dataset) == 0 || len(queries) == 0 {
 		return nil, nil, errors.New("dataset and queries cannot be empty")
@@ -703,9 +703,15 @@ func ExactSearch(dataset []float32, queries []float32, datasetSize uint, queryCo
 	if (len(queries) % int(vectorDimensions)) != 0 {
 		return nil, nil, errors.New("queries length must be a multiple of the dimensions")
 	}
+	if maxResults == 0 {
+		return nil, nil, errors.New("maxResults must be greater than zero")
+	}
 
-	keys = make([]Key, maxResults)
-	distances = make([]float32, maxResults)
+	keys = make([]Key, queryCount*maxResults)
+	distances = make([]float32, queryCount*maxResults)
+	resultKeysStride := uint32(maxResults * 8)      // int64 - 8 bytes
+	resultDistancesStride := uint32(maxResults * 4) // float32 - 4 bytes
+
 	var errorMessage *C.char
 	C.usearch_exact_search(unsafe.Pointer(&dataset[0]), C.size_t(datasetSize), C.size_t(datasetStride), unsafe.Pointer(&queries[0]), C.size_t(queryCount), C.size_t(queryStride),
 		C.usearch_scalar_f32_k, C.size_t(vectorDimensions), metric.CValue(), C.size_t(maxResults), C.size_t(numThreads),
@@ -718,8 +724,6 @@ func ExactSearch(dataset []float32, queries []float32, datasetSize uint, queryCo
 		return nil, nil, errors.New(C.GoString(errorMessage))
 	}
 
-	keys = keys[:maxResults]
-	distances = distances[:maxResults]
 	return keys, distances, nil
 }
 
@@ -736,17 +740,19 @@ func ExactSearch(dataset []float32, queries []float32, datasetSize uint, queryCo
 // For contiguous data, use vectorDimensions * sizeof(element_type).
 func ExactSearchUnsafe(dataset unsafe.Pointer, queries unsafe.Pointer, datasetSize uint, queryCount uint,
 	datasetStride uint, queryStride uint, vectorDimensions uint, metric Metric, quantization Quantization,
-	maxResults uint, numThreads uint, resultKeysStride uint, resultDistancesStride uint) (keys []Key, distances []float32, err error) {
+	maxResults uint, numThreads uint) (keys []Key, distances []float32, err error) {
 
 	if dataset == nil || queries == nil {
 		return nil, nil, errors.New("dataset and queries pointers cannot be nil")
 	}
-	if vectorDimensions == 0 || datasetSize == 0 || queryCount == 0 {
-		return nil, nil, errors.New("dimensions and sizes must be greater than zero")
+	if vectorDimensions == 0 || datasetSize == 0 || queryCount == 0 || maxResults == 0 {
+		return nil, nil, errors.New("dimensions, query count, max results and sizes must be greater than zero")
 	}
 
-	keys = make([]Key, maxResults)
-	distances = make([]float32, maxResults)
+	keys = make([]Key, queryCount*maxResults)
+	distances = make([]float32, queryCount*maxResults)
+	resultKeysStride := uint32(maxResults * 8)      // int64 - 8 bytes
+	resultDistancesStride := uint32(maxResults * 4) // float32 - 4 bytes
 	var errorMessage *C.char
 	C.usearch_exact_search(dataset, C.size_t(datasetSize), C.size_t(datasetStride), queries, C.size_t(queryCount), C.size_t(queryStride),
 		quantization.CValue(), C.size_t(vectorDimensions), metric.CValue(), C.size_t(maxResults), C.size_t(numThreads),
@@ -757,8 +763,6 @@ func ExactSearchUnsafe(dataset unsafe.Pointer, queries unsafe.Pointer, datasetSi
 		return nil, nil, errors.New(C.GoString(errorMessage))
 	}
 
-	keys = keys[:maxResults]
-	distances = distances[:maxResults]
 	return keys, distances, nil
 }
 
@@ -850,7 +854,7 @@ func DistanceI8(vec1 []int8, vec2 []int8, vectorDimensions uint, metric Metric) 
 // For contiguous int8 data, use vectorDimensions * 1 byte.
 func ExactSearchI8(dataset []int8, queries []int8, datasetSize uint, queryCount uint,
 	datasetStride uint, queryStride uint, vectorDimensions uint, metric Metric,
-	maxResults uint, numThreads uint, resultKeysStride uint, resultDistancesStride uint) (keys []Key, distances []float32, err error) {
+	maxResults uint, numThreads uint) (keys []Key, distances []float32, err error) {
 
 	if len(dataset) == 0 || len(queries) == 0 {
 		return nil, nil, errors.New("dataset and queries cannot be empty")
@@ -858,9 +862,13 @@ func ExactSearchI8(dataset []int8, queries []int8, datasetSize uint, queryCount 
 	if vectorDimensions == 0 {
 		return nil, nil, errors.New("dimensions must be greater than zero")
 	}
-
-	keys = make([]Key, maxResults)
-	distances = make([]float32, maxResults)
+	if maxResults == 0 {
+		return nil, nil, errors.New("maxResults must be greater than zero")
+	}
+	keys = make([]Key, queryCount*maxResults)
+	distances = make([]float32, queryCount*maxResults)
+	resultKeysStride := uint32(maxResults * 8)      // int64 - 8 bytes
+	resultDistancesStride := uint32(maxResults * 4) // float32 - 4 bytes
 	var errorMessage *C.char
 	C.usearch_exact_search(unsafe.Pointer(&dataset[0]), C.size_t(datasetSize), C.size_t(datasetStride), unsafe.Pointer(&queries[0]), C.size_t(queryCount), C.size_t(queryStride),
 		C.usearch_scalar_i8_k, C.size_t(vectorDimensions), metric.CValue(), C.size_t(maxResults), C.size_t(numThreads),
@@ -872,8 +880,6 @@ func ExactSearchI8(dataset []int8, queries []int8, datasetSize uint, queryCount 
 	if errorMessage != nil {
 		return nil, nil, errors.New(C.GoString(errorMessage))
 	}
-	keys = keys[:maxResults]
-	distances = distances[:maxResults]
 	return keys, distances, nil
 }
 
