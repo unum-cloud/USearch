@@ -84,9 +84,7 @@ func main() {
 }
 ```
 
-Notes:
-- Always call `Reserve(capacity)` before the first write.
-- Prefer single-caller writes with internal parallelism via `ChangeThreadsAdd` and internal parallel searches via `ChangeThreadsSearch`, instead of calling `Add` concurrently.
+Always call `Reserve(capacity)` before the first write.
 
 3. Get USearch:
 
@@ -183,4 +181,33 @@ keys, distances, err := usearch.ExactSearch(
     vectorDims, usearch.Cosine,
     maxResults, 0,  // 0 threads = auto-detect
 )
+```
+
+## Concurrency
+
+USearch supports concurrent operations from multiple goroutines. Use `ChangeThreadsAdd` and `ChangeThreadsSearch` to configure the number of concurrent operations allowed:
+
+```go
+err := index.ChangeThreadsAdd(8)	// Allow up to 8 concurrent additions
+err = index.ChangeThreadsSearch(16)	// Allow up to 16 concurrent searches
+```
+
+When using multiple goroutines, reserve at least as many threads as the number of concurrent callers:
+
+```go
+const numWorkers = 10
+
+// Reserve threads for concurrent searches
+_ = index.ChangeThreadsSearch(numWorkers)
+
+var wg sync.WaitGroup
+for i := 0; i < numWorkers; i++ {
+    wg.Add(1)
+    go func() {
+        defer wg.Done()
+        keys, distances, err := index.Search(queryVector, 10)
+        // ...
+    }()
+}
+wg.Wait()
 ```

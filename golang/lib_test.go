@@ -1,7 +1,7 @@
 package usearch
 
 import (
-	"fmt"
+	"errors"
 	"io"
 	"math"
 	"runtime"
@@ -786,16 +786,15 @@ func TestConcurrentSearches(t *testing.T) {
 		// Pre-populate with data
 		testVectors := populateIndex(t, index, 200)
 
-		// Let the library parallelize search internally as well
-		_ = index.ChangeThreadsSearch(uint(runtime.NumCPU()))
-
 		const numGoroutines = 30
 		const searchesPerGoroutine = 50
 
-		var wg sync.WaitGroup
-		errorChan := make(chan error, numGoroutines)
+		// Reserve enough threads for all concurrent search operations
+		_ = index.ChangeThreadsSearch(numGoroutines)
 
-		// Only concurrent searches - no mixed operations
+		var wg sync.WaitGroup
+		errChan := make(chan error, numGoroutines)
+
 		for i := 0; i < numGoroutines; i++ {
 			wg.Add(1)
 			go func(goroutineID int) {
@@ -808,19 +807,19 @@ func TestConcurrentSearches(t *testing.T) {
 
 					keys, distances, err := index.Search(query, 10)
 					if err != nil {
-						errorChan <- err
+						errChan <- err
 						return
 					}
 
 					// Basic validation - should find at least the exact match
 					if len(keys) == 0 || len(distances) == 0 {
-						errorChan <- fmt.Errorf("search returned empty results")
+						errChan <- errors.New("search returned empty results")
 						return
 					}
 
 					// First result should be the exact match
 					if keys[0] != Key(queryIndex) || math.Abs(float64(distances[0])) > distanceTolerance {
-						errorChan <- fmt.Errorf("search results inconsistent: expected key %d, got %d", queryIndex, keys[0])
+						errChan <- errors.New("search results inconsistent")
 						return
 					}
 				}
@@ -828,10 +827,10 @@ func TestConcurrentSearches(t *testing.T) {
 		}
 
 		wg.Wait()
-		close(errorChan)
+		close(errChan)
 
 		// Check for any errors
-		for err := range errorChan {
+		for err := range errChan {
 			t.Fatalf("Concurrent search failed: %v", err)
 		}
 	})
