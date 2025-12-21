@@ -538,6 +538,26 @@ func TestQuantizationTypes(t *testing.T) {
 		if len(keys) == 0 || keys[0] != 1 {
 			t.Fatalf("F32 search results incorrect")
 		}
+
+		// Test FilteredSearch
+		handler := &FilteredSearchHandler{
+			Callback: func(key Key, handler *FilteredSearchHandler) int {
+				if key%2 == 0 {
+					return 1
+				}
+				return 0
+			},
+			Data: int64(1),
+		}
+
+		keys, _, err = index.FilteredSearch(vector, 1, handler)
+		if err != nil {
+			t.Fatalf("F32 FilteredSearch failed: %v", err)
+		}
+
+		if len(keys) > 0 {
+			t.Fatalf("F32 FilteredSearch returned incorrect results")
+		}
 	})
 
 	t.Run("F64 operations", func(t *testing.T) {
@@ -569,6 +589,26 @@ func TestQuantizationTypes(t *testing.T) {
 		if len(keys) == 0 || keys[0] != 1 {
 			t.Fatalf("F64 search results incorrect")
 		}
+
+		// Test F64 FilteredSearchUnsafe
+		handler := &FilteredSearchHandler{
+			Callback: func(key Key, handler *FilteredSearchHandler) int {
+				if key%2 == 0 {
+					return 1
+				}
+				return 0
+			},
+			Data: int64(1),
+		}
+
+		keys, _, err = index.FilteredSearchUnsafe(unsafe.Pointer(&vector[0]), 5, handler)
+		if err != nil {
+			t.Fatalf("F64 FilteredSearchUnsafe failed: %v", err)
+		}
+
+		if len(keys) > 0 {
+			t.Fatalf("F64 FilteredSearchUnsafe returned incorrect results")
+		}
 	})
 
 	t.Run("I8 operations", func(t *testing.T) {
@@ -595,6 +635,26 @@ func TestQuantizationTypes(t *testing.T) {
 
 		if len(keys) == 0 || keys[0] != 1 {
 			t.Fatalf("I8 search results incorrect")
+		}
+
+		// Test FilteredSearchI8
+		handler := &FilteredSearchHandler{
+			Callback: func(key Key, handler *FilteredSearchHandler) int {
+				if key%2 == 0 {
+					return 1
+				}
+				return 0
+			},
+			Data: int64(1),
+		}
+
+		keys, _, err = index.FilteredSearchI8(vector, 1, handler)
+		if err != nil {
+			t.Fatalf("FilteredSearchI8 failed: %v", err)
+		}
+
+		if len(keys) > 0 {
+			t.Fatalf("FilteredSearchI8 returned incorrect results")
 		}
 	})
 }
@@ -644,6 +704,26 @@ func TestUnsafeOperations(t *testing.T) {
 
 		if math.Abs(float64(distances[0])) > distanceTolerance {
 			t.Fatalf("Expected near-zero distance for exact match, got %f", distances[0])
+		}
+
+		// Test FilteredSearchUnsafe
+		handler := &FilteredSearchHandler{
+			Callback: func(key Key, handler *FilteredSearchHandler) int {
+				if key%2 == 0 {
+					return 0
+				}
+				return 1
+			},
+			Data: int64(1),
+		}
+
+		keys, _, err = index.FilteredSearchUnsafe(ptr, 5, handler)
+		if err != nil {
+			t.Fatalf("FilteredSearchUnsafe failed: %v", err)
+		}
+
+		if len(keys) > 0 {
+			t.Fatalf("FilteredSearchUnsafe returned incorrect results")
 		}
 	})
 }
