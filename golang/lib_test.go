@@ -982,9 +982,6 @@ func TestExactSearch(t *testing.T) {
 				len(keys), len(distances))
 		}
 
-		fmt.Printf("keys %v\n", keys)
-		fmt.Printf("distances %v\n", distances)
-
 		for i := 0; i < querySize; i++ {
 			if keys[i] != Key(i) || distances[i] != 0 {
 				t.Fatalf("Expected same results from ExactSearch for all keys and distances")
@@ -1036,4 +1033,145 @@ func TestDistanceCalculations(t *testing.T) {
 			t.Fatalf("I8 distance mismatch: expected %f, got %f", expected, distance)
 		}
 	})
+}
+
+func TestVersion(t *testing.T) {
+	version := Version()
+	if version == "" {
+		t.Fatal("Version() returned empty string")
+	}
+	// Version should be in format like "2.21.4"
+	if len(version) < 5 {
+		t.Fatalf("Version() returned unexpectedly short string: %s", version)
+	}
+}
+
+func TestClear(t *testing.T) {
+	index := createTestIndex(t, 32, F32)
+	defer index.Destroy()
+
+	if err := index.Reserve(10); err != nil {
+		t.Fatalf("Failed to reserve capacity: %v", err)
+	}
+
+	// Add some vectors
+	for i := 0; i < 5; i++ {
+		vector := generateTestVector(32)
+		vector[0] = float32(i)
+		if err := index.Add(Key(i), vector); err != nil {
+			t.Fatalf("Failed to add vector %d: %v", i, err)
+		}
+	}
+
+	// Verify vectors were added
+	size, err := index.Len()
+	if err != nil {
+		t.Fatalf("Failed to get index size: %v", err)
+	}
+	if size != 5 {
+		t.Fatalf("Expected 5 vectors, got %d", size)
+	}
+
+	// Clear the index
+	if err := index.Clear(); err != nil {
+		t.Fatalf("Failed to clear index: %v", err)
+	}
+
+	// Verify index is empty
+	size, err = index.Len()
+	if err != nil {
+		t.Fatalf("Failed to get index size after clear: %v", err)
+	}
+	if size != 0 {
+		t.Fatalf("Expected 0 vectors after clear, got %d", size)
+	}
+}
+
+func TestCount(t *testing.T) {
+	index := createTestIndex(t, 32, F32)
+	defer index.Destroy()
+
+	if err := index.Reserve(10); err != nil {
+		t.Fatalf("Failed to reserve capacity: %v", err)
+	}
+
+	// Count for non-existent key should be 0
+	count, err := index.Count(Key(42))
+	if err != nil {
+		t.Fatalf("Failed to count key: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("Expected count 0 for non-existent key, got %d", count)
+	}
+
+	// Add a vector
+	vector := generateTestVector(32)
+	if err := index.Add(Key(42), vector); err != nil {
+		t.Fatalf("Failed to add vector: %v", err)
+	}
+
+	// Count should now be 1
+	count, err = index.Count(Key(42))
+	if err != nil {
+		t.Fatalf("Failed to count key after add: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("Expected count 1 after add, got %d", count)
+	}
+}
+
+func TestRename(t *testing.T) {
+	index := createTestIndex(t, 32, F32)
+	defer index.Destroy()
+
+	if err := index.Reserve(10); err != nil {
+		t.Fatalf("Failed to reserve capacity: %v", err)
+	}
+
+	// Add a vector with key 1
+	vector := generateTestVector(32)
+	if err := index.Add(Key(1), vector); err != nil {
+		t.Fatalf("Failed to add vector: %v", err)
+	}
+
+	// Verify key 1 exists
+	found, err := index.Contains(Key(1))
+	if err != nil {
+		t.Fatalf("Failed to check contains: %v", err)
+	}
+	if !found {
+		t.Fatal("Key 1 should exist before rename")
+	}
+
+	// Rename key 1 to key 2
+	if err := index.Rename(Key(1), Key(2)); err != nil {
+		t.Fatalf("Failed to rename key: %v", err)
+	}
+
+	// Verify key 1 no longer exists
+	found, err = index.Contains(Key(1))
+	if err != nil {
+		t.Fatalf("Failed to check contains after rename: %v", err)
+	}
+	if found {
+		t.Fatal("Key 1 should not exist after rename")
+	}
+
+	// Verify key 2 now exists
+	found, err = index.Contains(Key(2))
+	if err != nil {
+		t.Fatalf("Failed to check contains for new key: %v", err)
+	}
+	if !found {
+		t.Fatal("Key 2 should exist after rename")
+	}
+
+	// Verify we can search and find the renamed vector
+	keys, _, err := index.Search(vector, 1)
+	if err != nil {
+		t.Fatalf("Failed to search: %v", err)
+	}
+	if len(keys) != 1 || keys[0] != Key(2) {
+		t.Fatalf("Expected to find key 2, got %v", keys)
+	}
 }
