@@ -489,6 +489,7 @@ func (index *Index) AddUnsafe(key Key, vec unsafe.Pointer) error {
 
 	var errorMessage *C.char
 	C.usearch_add(index.handle, (C.usearch_key_t)(key), vec, index.config.Quantization.CValue(), (*C.usearch_error_t)(&errorMessage))
+	runtime.KeepAlive(vec)
 	if errorMessage != nil {
 		return errors.New(C.GoString(errorMessage))
 	}
@@ -594,6 +595,8 @@ func DistanceUnsafe(vec1 unsafe.Pointer, vec2 unsafe.Pointer, vectorDimensions u
 
 	var errorMessage *C.char
 	dist := C.usearch_distance(vec1, vec2, quantization.CValue(), C.size_t(vectorDimensions), metric.CValue(), (*C.usearch_error_t)(&errorMessage))
+	runtime.KeepAlive(vec1)
+	runtime.KeepAlive(vec2)
 	if errorMessage != nil {
 		return 0, errors.New(C.GoString(errorMessage))
 	}
@@ -720,6 +723,7 @@ func (index *Index) SearchUnsafe(query unsafe.Pointer, limit uint) (keys []Key, 
 	distances = make([]float32, limit)
 	var errorMessage *C.char
 	resultCount := uint(C.usearch_search(index.handle, query, index.config.Quantization.CValue(), (C.size_t)(limit), (*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
+	runtime.KeepAlive(query)
 	runtime.KeepAlive(keys)
 	runtime.KeepAlive(distances)
 	if errorMessage != nil {
@@ -761,6 +765,7 @@ func (index *Index) FilteredSearchUnsafe(query unsafe.Pointer, limit uint, handl
 	resultCount := uint(C.usearch_filtered_search(index.handle, query, index.config.Quantization.CValue(), (C.size_t)(limit),
 		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler),
 		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
+	runtime.KeepAlive(query)
 	runtime.KeepAlive(keys)
 	runtime.KeepAlive(distances)
 	runtime.KeepAlive(handler)
