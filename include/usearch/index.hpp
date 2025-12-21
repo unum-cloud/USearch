@@ -3999,7 +3999,7 @@ class index_gt {
         if (!is_dummy<prefetch_at>())
             prefetch(citerator_at(closest_slot), citerator_at(closest_slot) + 1);
 
-        const bool need_lock = not is_immutable();
+        bool const need_lock = !is_immutable();
         distance_t closest_dist = context.measure(query, citerator_at(closest_slot), metric);
         for (level_t level = begin_level; level > end_level; --level) {
             bool changed;
