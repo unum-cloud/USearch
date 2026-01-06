@@ -173,6 +173,14 @@ namespace unum {
 namespace usearch {
 
 using byte_t = char;
+using level_t = std::int16_t;
+
+// C++14-compatible void_t
+#ifdef USEARCH_DEFINED_CPP17
+template <typename...ts> using void_t = std::void_t<ts...>;
+#else
+template <typename...> using void_t = void;
+#endif
 
 template <std::size_t multiple_ak> std::size_t divide_round_up(std::size_t num) noexcept {
     return (num + multiple_ak - 1) / multiple_ak;
@@ -1521,6 +1529,8 @@ struct dummy_progress_t {
 struct dummy_prefetch_t {
     template <typename member_citerator_like_at>
     inline void operator()(member_citerator_like_at, member_citerator_like_at) const noexcept {}
+    template <typename member_citerator_like_at>
+    inline void operator()(member_citerator_like_at, member_citerator_like_at, level_t) const noexcept {}
 };
 
 /**
@@ -1580,6 +1590,37 @@ template <typename object_at> static constexpr bool is_dummy() {
            std::is_same<typename std::decay<object_t>::type, dummy_prefetch_t>::value ||  //
            std::is_same<typename std::decay<object_t>::type, dummy_executor_t>::value ||  //
            std::is_same<typename std::decay<object_t>::type, dummy_key_to_key_mapping_t>::value;
+}
+
+/**
+ *  @brief  Compile-time check if a prefetch functor supports the 3-argument version with level.
+ *          This enables backward compatibility: existing 2-arg prefetch implementations still work,
+ *          while new implementations can receive level information.
+ */
+template <typename prefetch_at, typename iterator_at, typename = void>
+struct has_level_prefetch : std::false_type {};
+
+template <typename prefetch_at, typename iterator_at>
+struct has_level_prefetch<prefetch_at, iterator_at,
+    void_t<decltype(std::declval<prefetch_at>()(
+        std::declval<iterator_at>(),
+        std::declval<iterator_at>(),
+        std::declval<level_t>()))>> : std::true_type {};
+
+template <typename prefetch_at, typename iterator_at>
+void invoke_prefetch(prefetch_at&& prefetch, iterator_at begin, iterator_at end, level_t level, std::true_type) {
+    prefetch(begin, end, level);
+}
+
+template <typename prefetch_at, typename iterator_at>
+void invoke_prefetch(prefetch_at&& prefetch, iterator_at begin, iterator_at end, level_t, std::false_type) {
+    prefetch(begin, end);
+}
+
+template <typename prefetch_at, typename iterator_at>
+void invoke_prefetch(prefetch_at&& prefetch, iterator_at begin, iterator_at end, level_t level) {
+    invoke_prefetch(std::forward<prefetch_at>(prefetch), begin, end, level,
+                    typename has_level_prefetch<typename std::decay<prefetch_at>::type, iterator_at>::type{});
 }
 
 template <typename, typename at> struct has_reset_gt {
@@ -2077,7 +2118,7 @@ class index_gt {
      *          alignment in most common cases.
      */
     using neighbors_count_t = std::uint32_t;
-    using level_t = std::int16_t;
+    using level_t = usearch::level_t;
 
     /**
      *  @brief  How many bytes of memory are needed to form the "head" of the node.
@@ -3997,7 +4038,7 @@ class index_gt {
 
         // Optional prefetching
         if (!is_dummy<prefetch_at>())
-            prefetch(citerator_at(closest_slot), citerator_at(closest_slot) + 1);
+            invoke_prefetch(prefetch, citerator_at(closest_slot), citerator_at(closest_slot) + 1, begin_level);
 
         bool const need_lock = !is_immutable();
         distance_t closest_dist = context.measure(query, citerator_at(closest_slot), metric);
@@ -4011,7 +4052,7 @@ class index_gt {
                 // Optional prefetching
                 if (!is_dummy<prefetch_at>()) {
                     candidates_range_t missing_candidates{*this, closest_neighbors, visits};
-                    prefetch(missing_candidates.begin(), missing_candidates.end());
+                    invoke_prefetch(prefetch, missing_candidates.begin(), missing_candidates.end(), level);
                 }
 
                 // Actual traversal
@@ -4054,7 +4095,7 @@ class index_gt {
 
         // Optional prefetching
         if (!is_dummy<prefetch_at>())
-            prefetch(citerator_at(start_slot), citerator_at(start_slot) + 1);
+            invoke_prefetch(prefetch, citerator_at(start_slot), citerator_at(start_slot) + 1, level);
 
         distance_t radius = context.measure(query, citerator_at(start_slot), metric);
         next.insert_reserved({-radius, start_slot});
@@ -4079,7 +4120,7 @@ class index_gt {
             // Optional prefetching
             if (!is_dummy<prefetch_at>()) {
                 candidates_range_t missing_candidates{*this, candidate_neighbors, visits};
-                prefetch(missing_candidates.begin(), missing_candidates.end());
+                invoke_prefetch(prefetch, missing_candidates.begin(), missing_candidates.end(), level);
             }
 
             // Assume the worst-case when reserving memory
@@ -4131,7 +4172,7 @@ class index_gt {
 
         // Optional prefetching
         if (!is_dummy<prefetch_at>())
-            prefetch(citerator_at(start_slot), citerator_at(start_slot) + 1);
+            invoke_prefetch(prefetch, citerator_at(start_slot), citerator_at(start_slot) + 1, level);
 
         distance_t radius = context.measure(query, citerator_at(start_slot), metric);
         next.insert_reserved({-radius, start_slot});
@@ -4167,7 +4208,7 @@ class index_gt {
             // Optional prefetching
             if (!is_dummy<prefetch_at>()) {
                 candidates_range_t missing_candidates{*this, candidate_neighbors, visits};
-                prefetch(missing_candidates.begin(), missing_candidates.end());
+                invoke_prefetch(prefetch, missing_candidates.begin(), missing_candidates.end(), level);
             }
 
             // Assume the worst-case when reserving memory
@@ -4219,7 +4260,7 @@ class index_gt {
 
         // Optional prefetching
         if (!is_dummy<prefetch_at>())
-            prefetch(citerator_at(start_slot), citerator_at(start_slot) + 1);
+            invoke_prefetch(prefetch, citerator_at(start_slot), citerator_at(start_slot) + 1, level_t{0});
 
         distance_t radius = context.measure(query, citerator_at(start_slot), metric);
         usearch_assert_m(next.capacity(), "The `max_heap_gt` must have been reserved in the search entry point");
@@ -4247,7 +4288,7 @@ class index_gt {
             // Optional prefetching
             if (!is_dummy<prefetch_at>()) {
                 candidates_range_t missing_candidates{*this, candidate_neighbors, visits};
-                prefetch(missing_candidates.begin(), missing_candidates.end());
+                invoke_prefetch(prefetch, missing_candidates.begin(), missing_candidates.end(), level_t{0});
             }
 
             // Assume the worst-case when reserving memory
