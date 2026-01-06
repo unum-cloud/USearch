@@ -3,7 +3,7 @@
 #   - `macos` wheels for x86_64, arm64, and universal2;
 #   - `windows` wheels for AMD64, and ARM64. But not x86.
 #   - `manylinux` and `musllinux` wheels for Linux on x86_64, aarch64. But not i686, ppc64le, s390x;
-#   * for CPython versions from 3.7 to 3.13.
+#   * for CPython versions from 3.7 to 3.14.
 #   * for PyPy versions from 3.7 to 3.10.
 #   = meaning 7 platforms * 11 Python versions = 77 builds.
 [build-system]
@@ -90,4 +90,4 @@ before-build = [
 # https://black.readthedocs.io/en/latest/usage_and_configuration/the_basics.html#where-black-looks-for-the-file
 [tool.black]
 line-length = 120                  # Set line length to the same value as in `.clang-format` for modern wide screens
-target-version = ['py36', 'py313']
+target-version = ['py36', 'py314']
