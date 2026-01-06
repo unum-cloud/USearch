@@ -173,6 +173,7 @@ namespace unum {
 namespace usearch {
 
 using byte_t = char;
+using level_t = std::int16_t;
 
 template <std::size_t multiple_ak> std::size_t divide_round_up(std::size_t num) noexcept {
     return (num + multiple_ak - 1) / multiple_ak;
@@ -1521,6 +1522,8 @@ struct dummy_progress_t {
 struct dummy_prefetch_t {
     template <typename member_citerator_like_at>
     inline void operator()(member_citerator_like_at, member_citerator_like_at) const noexcept {}
+    template <typename member_citerator_like_at>
+    inline void operator()(member_citerator_like_at, member_citerator_like_at, level_t) const noexcept {}
 };
 
 /**
@@ -1581,6 +1584,21 @@ template <typename object_at> static constexpr bool is_dummy() {
            std::is_same<typename std::decay<object_t>::type, dummy_executor_t>::value ||  //
            std::is_same<typename std::decay<object_t>::type, dummy_key_to_key_mapping_t>::value;
 }
+
+/**
+ *  @brief  Compile-time check if a prefetch functor supports the 3-argument version with level.
+ *          This enables backward compatibility: existing 2-arg prefetch implementations still work,
+ *          while new implementations can receive level information.
+ */
+template <typename prefetch_at, typename iterator_at, typename = void>
+struct has_level_prefetch : std::false_type {};
+
+template <typename prefetch_at, typename iterator_at>
+struct has_level_prefetch<prefetch_at, iterator_at,
+    std::void_t<decltype(std::declval<prefetch_at>()(
+        std::declval<iterator_at>(),
+        std::declval<iterator_at>(),
+        std::declval<level_t>()))>> : std::true_type {};
 
 template <typename, typename at> struct has_reset_gt {
     static_assert(std::integral_constant<at, false>::value, "Second template parameter needs to be of function type.");
@@ -2077,7 +2095,7 @@ class index_gt {
      *          alignment in most common cases.
      */
     using neighbors_count_t = std::uint32_t;
-    using level_t = std::int16_t;
+    using level_t = usearch::level_t;
 
     /**
      *  @brief  How many bytes of memory are needed to form the "head" of the node.
@@ -3996,8 +4014,12 @@ class index_gt {
         visits.clear();
 
         // Optional prefetching
-        if (!is_dummy<prefetch_at>())
-            prefetch(citerator_at(closest_slot), citerator_at(closest_slot) + 1);
+        if (!is_dummy<prefetch_at>()) {
+            if constexpr (has_level_prefetch<prefetch_at, member_citerator_t>::value)
+                prefetch(citerator_at(closest_slot), citerator_at(closest_slot) + 1, begin_level);
+            else
+                prefetch(citerator_at(closest_slot), citerator_at(closest_slot) + 1);
+        }
 
         bool const need_lock = !is_immutable();
         distance_t closest_dist = context.measure(query, citerator_at(closest_slot), metric);
@@ -4011,7 +4033,10 @@ class index_gt {
                 // Optional prefetching
                 if (!is_dummy<prefetch_at>()) {
                     candidates_range_t missing_candidates{*this, closest_neighbors, visits};
-                    prefetch(missing_candidates.begin(), missing_candidates.end());
+                    if constexpr (has_level_prefetch<prefetch_at, candidates_iterator_t>::value)
+                        prefetch(missing_candidates.begin(), missing_candidates.end(), level);
+                    else
+                        prefetch(missing_candidates.begin(), missing_candidates.end());
                 }
 
                 // Actual traversal
@@ -4053,8 +4078,12 @@ class index_gt {
             return false;
 
         // Optional prefetching
-        if (!is_dummy<prefetch_at>())
-            prefetch(citerator_at(start_slot), citerator_at(start_slot) + 1);
+        if (!is_dummy<prefetch_at>()) {
+            if constexpr (has_level_prefetch<prefetch_at, member_citerator_t>::value)
+                prefetch(citerator_at(start_slot), citerator_at(start_slot) + 1, level);
+            else
+                prefetch(citerator_at(start_slot), citerator_at(start_slot) + 1);
+        }
 
         distance_t radius = context.measure(query, citerator_at(start_slot), metric);
         next.insert_reserved({-radius, start_slot});
@@ -4079,7 +4108,10 @@ class index_gt {
             // Optional prefetching
             if (!is_dummy<prefetch_at>()) {
                 candidates_range_t missing_candidates{*this, candidate_neighbors, visits};
-                prefetch(missing_candidates.begin(), missing_candidates.end());
+                if constexpr (has_level_prefetch<prefetch_at, candidates_iterator_t>::value)
+                    prefetch(missing_candidates.begin(), missing_candidates.end(), level);
+                else
+                    prefetch(missing_candidates.begin(), missing_candidates.end());
             }
 
             // Assume the worst-case when reserving memory
@@ -4130,8 +4162,12 @@ class index_gt {
             return false;
 
         // Optional prefetching
-        if (!is_dummy<prefetch_at>())
-            prefetch(citerator_at(start_slot), citerator_at(start_slot) + 1);
+        if (!is_dummy<prefetch_at>()) {
+            if constexpr (has_level_prefetch<prefetch_at, member_citerator_t>::value)
+                prefetch(citerator_at(start_slot), citerator_at(start_slot) + 1, level);
+            else
+                prefetch(citerator_at(start_slot), citerator_at(start_slot) + 1);
+        }
 
         distance_t radius = context.measure(query, citerator_at(start_slot), metric);
         next.insert_reserved({-radius, start_slot});
@@ -4167,7 +4203,10 @@ class index_gt {
             // Optional prefetching
             if (!is_dummy<prefetch_at>()) {
                 candidates_range_t missing_candidates{*this, candidate_neighbors, visits};
-                prefetch(missing_candidates.begin(), missing_candidates.end());
+                if constexpr (has_level_prefetch<prefetch_at, candidates_iterator_t>::value)
+                    prefetch(missing_candidates.begin(), missing_candidates.end(), level);
+                else
+                    prefetch(missing_candidates.begin(), missing_candidates.end());
             }
 
             // Assume the worst-case when reserving memory
@@ -4218,8 +4257,12 @@ class index_gt {
             return false;
 
         // Optional prefetching
-        if (!is_dummy<prefetch_at>())
-            prefetch(citerator_at(start_slot), citerator_at(start_slot) + 1);
+        if (!is_dummy<prefetch_at>()) {
+            if constexpr (has_level_prefetch<prefetch_at, member_citerator_t>::value)
+                prefetch(citerator_at(start_slot), citerator_at(start_slot) + 1, level_t{0});
+            else
+                prefetch(citerator_at(start_slot), citerator_at(start_slot) + 1);
+        }
 
         distance_t radius = context.measure(query, citerator_at(start_slot), metric);
         usearch_assert_m(next.capacity(), "The `max_heap_gt` must have been reserved in the search entry point");
@@ -4247,7 +4290,10 @@ class index_gt {
             // Optional prefetching
             if (!is_dummy<prefetch_at>()) {
                 candidates_range_t missing_candidates{*this, candidate_neighbors, visits};
-                prefetch(missing_candidates.begin(), missing_candidates.end());
+                if constexpr (has_level_prefetch<prefetch_at, candidates_iterator_t>::value)
+                    prefetch(missing_candidates.begin(), missing_candidates.end(), level_t{0});
+                else
+                    prefetch(missing_candidates.begin(), missing_candidates.end());
             }
 
             // Assume the worst-case when reserving memory
