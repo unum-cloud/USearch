@@ -3899,7 +3899,11 @@ class index_gt {
             // If `new_slot` is already present in the neighboring connections of `close_slot`
             // then no need to modify any connections or run the heuristics.
             if (close_header.size() < connectivity_max) {
-                close_header.push_back(new_slot);
+                if (std::all_of(close_header.begin(), close_header.end(), [new_slot](compressed_slot_t slot) {
+                    return slot != new_slot;
+                })) {
+                    close_header.push_back(new_slot);
+                }
                 continue;
             }
 
