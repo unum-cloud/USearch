@@ -194,11 +194,17 @@ void NativeIndex::view_from_buffer(rust::Slice<uint8_t const> buffer) const {
     index_->view(memory_mapped_file_t((byte_t*)buffer.data(), buffer.size())).error.raise();
 }
 
-std::unique_ptr<NativeIndex> wrap(index_t&& index) {
+std::unique_ptr<NativeIndex> wrap(index_t&& index, bool call_reserve = true) {
     std::unique_ptr<index_t> punned_ptr;
     punned_ptr.reset(new index_t(std::move(index)));
     std::unique_ptr<NativeIndex> result;
     result.reset(new NativeIndex(std::move(punned_ptr)));
+
+    // Call reserve() after heap allocation to avoid dangling pointers in Rust bindings
+    if (call_reserve) {
+        result->reserve(10);
+    }
+
     return result;
 }
 
@@ -211,8 +217,6 @@ std::unique_ptr<NativeIndex> new_native_index(IndexOptions const& options) {
     index_dense_config_t config(options.connectivity, options.expansion_add, options.expansion_search);
     config.multi = options.multi;
     index_t index = index_t::make(metric, config);
-    // In Rust we have the luxury of returning a `Result` type even for the constructor.
-    // So let's pre-reserve the maximal number of threads and return the error if it fails.
-    index.reserve(index_limits_t{});
+    // Don't call reserve() here - wrap() handles it after heap allocation
     return wrap(std::move(index));
 }
