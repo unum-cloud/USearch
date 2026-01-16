@@ -276,6 +276,16 @@ func Version() string {
 	return C.GoString(C.usearch_version())
 }
 
+// GetHandle returns the C index handel.
+func (index *Index) GetHandle() C.usearch_index_t {
+	return index.handle
+}
+
+// GetConfig returns the index config.
+func (index *Index) GetConfig() IndexConfig {
+	return index.config
+}
+
 // Len returns the number of vectors in the index.
 func (index *Index) Len() (len uint, err error) {
 	var errorMessage *C.char
