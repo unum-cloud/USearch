@@ -8,8 +8,8 @@
 #define UNUM_USEARCH_HPP
 
 #define USEARCH_VERSION_MAJOR 2
-#define USEARCH_VERSION_MINOR 21
-#define USEARCH_VERSION_PATCH 1
+#define USEARCH_VERSION_MINOR 23
+#define USEARCH_VERSION_PATCH 0
 
 // Inferring C++ version
 // https://stackoverflow.com/a/61552074
@@ -2624,7 +2624,10 @@ class index_gt {
         inline bool empty() const noexcept { return !count; }
         inline match_t operator[](std::size_t i) const noexcept { return at(i); }
         inline match_t front() const noexcept { return at(0); }
-        inline match_t back() const noexcept { return at(count - 1); }
+        inline match_t back() const noexcept {
+            usearch_assert_m(count > 0, "Can't call back() on an empty result set");
+            return at(count - 1);
+        }
         inline bool contains(vector_key_t key) const noexcept {
             for (std::size_t i = 0; i != count; ++i)
                 if (at(i).member.key == key)
@@ -2987,7 +2990,8 @@ class index_gt {
             }
             form_reverse_links_(metric, updated_slot, closest_view, value, level, context);
         }
-        updated_node.key(key);
+        if (static_cast<vector_key_t>(updated_node.key()) != key)
+            updated_node.key(key);
 
         // Normalize stats
         result.computed_distances = context.computed_distances - result.computed_distances;
@@ -3806,6 +3810,25 @@ class index_gt {
         return {nodes_mutexes_, slot};
     }
 
+    struct optional_node_lock_t {
+        nodes_mutexes_t& mutexes;
+        std::size_t slot;
+        inline ~optional_node_lock_t() noexcept {
+            if (slot != std::numeric_limits<std::size_t>::max())
+                mutexes.atomic_reset(slot);
+        }
+    };
+
+    inline optional_node_lock_t optional_node_lock_(std::size_t slot, bool condition) const noexcept {
+        if (condition) {
+            while (nodes_mutexes_.atomic_set(slot))
+                ;
+            return {nodes_mutexes_, slot};
+        } else {
+            return {nodes_mutexes_, std::numeric_limits<std::size_t>::max()};
+        }
+    }
+
     struct node_conditional_lock_t {
         nodes_mutexes_t& mutexes;
         std::size_t slot;
@@ -3817,7 +3840,11 @@ class index_gt {
 
     inline node_conditional_lock_t node_try_conditional_lock_(std::size_t slot, bool condition,
                                                               bool& failed_to_acquire) const noexcept {
-        failed_to_acquire = condition ? nodes_mutexes_.atomic_set(slot) : false;
+        if (!condition) {
+            failed_to_acquire = false;
+            return {nodes_mutexes_, std::numeric_limits<std::size_t>::max()};
+        }
+        failed_to_acquire = nodes_mutexes_.atomic_set(slot);
         return {nodes_mutexes_, failed_to_acquire ? std::numeric_limits<std::size_t>::max() : slot};
     }
 
@@ -3972,12 +3999,13 @@ class index_gt {
         if (!is_dummy<prefetch_at>())
             prefetch(citerator_at(closest_slot), citerator_at(closest_slot) + 1);
 
+        bool const need_lock = !is_immutable();
         distance_t closest_dist = context.measure(query, citerator_at(closest_slot), metric);
         for (level_t level = begin_level; level > end_level; --level) {
             bool changed;
             do {
                 changed = false;
-                node_lock_t closest_lock = node_lock_(closest_slot);
+                optional_node_lock_t closest_lock = optional_node_lock_(closest_slot, need_lock);
                 neighbors_ref_t closest_neighbors = neighbors_non_base_(node_at_(closest_slot), level);
 
                 // Optional prefetching
@@ -4133,6 +4161,7 @@ class index_gt {
                 node_try_conditional_lock_(candidate_slot, updated_slot != candidate_slot, failed_to_acquire);
             if (failed_to_acquire)
                 continue;
+            auto optional_node_lock = optional_node_lock_(candidate_slot, updated_slot == candidate_slot);
             neighbors_ref_t candidate_neighbors = neighbors_(candidate_ref, level);
 
             // Optional prefetching

@@ -30,12 +30,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Run TinySemVer
-        uses: ashvardanian/tinysemver@v2.1.1
+        uses: ashvardanian/tinysemver@v3.0.0
         with:
           verbose: "true"
           version-file: "VERSION"
@@ -69,7 +69,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout the latest code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -109,7 +109,7 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -156,7 +156,7 @@ jobs:
           dpkg-deb --build "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}"
 
       - name: Upload native library for Java
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: native-libs-linux-${{ matrix.arch }}
           path: build_release/libusearch_c.so
@@ -180,7 +180,7 @@ jobs:
         arch: [x64, x86, arm64]
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -190,7 +190,7 @@ jobs:
         uses: jwlawson/actions-setup-cmake@v2
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
@@ -228,7 +228,7 @@ jobs:
           tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar .\build_release\libusearch_c.dll .\c\usearch.h
 
       - name: Upload native library for Java
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: native-libs-windows-${{ matrix.arch }}
           path: build_release/libusearch_c.dll
@@ -252,14 +252,14 @@ jobs:
         arch: [arm64, x86_64]
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
@@ -284,7 +284,7 @@ jobs:
           mv build_release/libusearch_sqlite.dylib usearch_sqlite_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.dylib
 
       - name: Upload native library for Java
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: native-libs-macos-${{ matrix.arch }}
           path: build_release/libusearch_c.dylib
@@ -325,7 +325,7 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -359,7 +359,7 @@ jobs:
           zip -r usearch_android_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip build_artifacts/libusearch_c.so c/usearch.h
 
       - name: Upload native library for Java
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: native-libs-android-${{ matrix.arch }}
           path: build_artifacts/libusearch_c.so
@@ -388,7 +388,7 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -438,7 +438,7 @@ jobs:
           cmake --build build_artifacts --config Release -j
 
       - name: Upload JNI library artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: usearch-jni-linux-${{ matrix.arch }}
           path: build_artifacts/libusearch_jni.so
@@ -454,14 +454,20 @@ jobs:
         include:
           - arch: x64
             cmake_arch: x64
+            simsimd_target_x86: 1
+            simsimd_target_arm: 0
           - arch: x86
             cmake_arch: Win32
+            simsimd_target_x86: 1
+            simsimd_target_arm: 0
           - arch: arm64
             cmake_arch: ARM64
+            simsimd_target_x86: 0
+            simsimd_target_arm: 1
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -483,9 +489,10 @@ jobs:
             -DUSEARCH_BUILD_LIB_C=0 `
             -DUSEARCH_USE_FP16LIB=1 `
             -DUSEARCH_USE_SIMSIMD=1 `
-            -DSIMSIMD_TARGET_HASWELL=1 `
-            -DSIMSIMD_TARGET_SKYLAKE=1 `
-            -DSIMSIMD_TARGET_ICE=1 `
+            -DSIMSIMD_TARGET_NEON=${{ matrix.simsimd_target_arm }} `
+            -DSIMSIMD_TARGET_HASWELL=${{ matrix.simsimd_target_x86 }} `
+            -DSIMSIMD_TARGET_SKYLAKE=${{ matrix.simsimd_target_x86 }} `
+            -DSIMSIMD_TARGET_ICE=${{ matrix.simsimd_target_x86 }} `
             -DSIMSIMD_TARGET_GENOA=0 `
             -DSIMSIMD_TARGET_SAPPHIRE=0 `
             -DSIMSIMD_DYNAMIC_DISPATCH=1
@@ -493,7 +500,7 @@ jobs:
           cmake --build build_artifacts --config Release
 
       - name: Upload JNI library artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: usearch-jni-windows-${{ matrix.arch }}
           path: build_artifacts/libusearch_jni.dll
@@ -514,7 +521,7 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -547,7 +554,7 @@ jobs:
           cmake --build build_artifacts --config Release
 
       - name: Upload JNI library artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: usearch-jni-macos-${{ matrix.arch }}
           path: build_artifacts/libusearch_jni.dylib
@@ -570,7 +577,7 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -609,7 +616,7 @@ jobs:
           cmake --build build_artifacts --config Release
 
       - name: Upload JNI library artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: usearch-jni-android-${{ matrix.arch }}
           path: build_artifacts/libusearch_jni.so
@@ -621,7 +628,7 @@ jobs:
     needs: versioning
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -727,15 +734,15 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
-        python-version: ["38", "39", "310", "311", "312", "313", "313t"]
+        python-version: ["38", "39", "310", "311", "312", "313", "313t", "314", "314t"]
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: "main"
       - name: Setup Docker
         if: matrix.os == 'ubuntu-24.04'
-        uses: crazy-max/ghaction-setup-docker@v3.4.0
+        uses: docker/setup-docker-action@v4
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -752,7 +759,7 @@ jobs:
           CIBW_ENABLE: cpython-freethreading # No-GIL 3.13t builds
           CIBW_TEST_SKIP: "*-win_arm64" # Too complex to emulate Windows ARM
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: cibw-wheels-${{ matrix.os }}-${{ strategy.job-index }}
           path: ./wheelhouse/*.whl
@@ -770,7 +777,7 @@ jobs:
 
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           # unpacks all CIBW artifacts into dist/
           pattern: cibw-*
@@ -806,14 +813,14 @@ jobs:
 
     steps:
       - name: Checkout the latest code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
       - name: Set up Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           architecture: ${{ matrix.arch }}
@@ -850,7 +857,7 @@ jobs:
           npm run prebuild-arm64
           aarch64-linux-gnu-strip prebuilds/linux-arm64/*node
       - name: Upload prebuilds
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: prebuilds-${{ matrix.os }}-${{ matrix.arch }}
           path: prebuilds
@@ -863,19 +870,19 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
       - name: Set up Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Download prebuilds
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           pattern: prebuilds-*
           merge-multiple: true
@@ -910,7 +917,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -949,14 +956,14 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
       - name: Download all JNI libraries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           pattern: usearch-jni-*
 
@@ -1040,7 +1047,7 @@ jobs:
     runs-on: macos-15
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -1061,7 +1068,7 @@ jobs:
       packages: write
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -1108,7 +1115,7 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: "main"
       - name: Pull Git submodules
@@ -1144,7 +1151,7 @@ jobs:
           cp "${{ github.workspace }}\build_artifacts\libusearch_c.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
 
       - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: usearch-csharp-dependencies-${{ matrix.os }}
           path: ${{ github.workspace }}/csharp/lib/**/*
@@ -1162,14 +1169,14 @@ jobs:
       GITHUB_PACKAGES_SOURCE: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
       - name: Download usearch libs artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           pattern: usearch-csharp-dependencies-*
           merge-multiple: true
@@ -1212,7 +1219,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: "main"
       - name: Install dependencies
