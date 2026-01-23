@@ -1539,7 +1539,8 @@ template <typename scalar_at = float, typename result_at = float> struct metric_
             b_sq_sum += bi * bi;
         }
         result_t denom = (dim * a_sq_sum - a_sum * a_sum) * (dim * b_sq_sum - b_sum * b_sum);
-        if (denom == 0)
+        // could be negative
+        if (denom <= 0)
             return 0;
         result_t corr = dim * ab_sum - a_sum * b_sum;
         denom = std::sqrt(denom);
