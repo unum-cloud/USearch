@@ -14,7 +14,7 @@ They are most efficient when vectors are stored as BLOBs, but for broader compat
 
 ## Installation
 
-USearch currently ships the SQLite extensions as part of the Python wheels, so they can be obtained from PyPi.
+USearch currently ships the SQLite extensions as part of the Python wheels, so they can be obtained from PyPI.
 
 ```sh
 pip install usearch # brings sqlite extensions
@@ -22,7 +22,7 @@ pip install usearch # brings sqlite extensions
 
 ## Quickstart
 
-To USearch extensions to your SQLite database, you can use the following commands:
+To add USearch extensions to your SQLite database, you can use the following commands:
 
 ```py
 import sqlite3
@@ -38,7 +38,7 @@ Afterwards, the following script should work fine.
 ```sql
 -- Create a table with a JSON column for vectors
 CREATE TABLE vectors_table (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY,
     vector JSON NOT NULL
 );
 
@@ -68,21 +68,21 @@ This includes:
 - `distance_hamming_bytes`, 
 - `distance_hamming_unicode`.
 
-The Levenshtein distance would report the number of insertions, deletions, and substitutions required to transform one string into another, while the Hamming distance would only report the substitutons.
-When applied to strings of different length, the Hamming distance would evalute the prefix of the longer string and will add the length difference to the result.
-The `_bytes` variants compute the distance in the number of bytes, while the `_unicode` variants compute the distance in the number of Unicode code points, assuming the inputs are UTF8 encoded.
+The Levenshtein distance reports the number of insertions, deletions, and substitutions required to transform one string into another, while the Hamming distance only reports the substitutions.
+When applied to strings of different length, the Hamming distance evaluates the prefix of the longer string and adds the length difference to the result.
+The `_bytes` variants compute the distance in the number of bytes, while the `_unicode` variants compute the distance in the number of Unicode code points, assuming the inputs are UTF-8 encoded.
 Take a look at the following three similar looking, but distinct strings:
 
-- `école` - 6 codepoints (runes), 7 bytes.
-- `école` - 5 codepoints (runes), 6 bytes.
-- `écolé` - 5 codepoints (runes), 7 bytes.
+- `école` - 6 code points (runes), 7 bytes.
+- `école` - 5 code points (runes), 6 bytes.
+- `écolé` - 5 code points (runes), 7 bytes.
 
-Those have three different letter "e" variants, including etter "é" as a single character, etter as "e" and an accent "´", as well as the plain letter "e".
+Those have three different letter "e" variants, including the letter "é" as a single character, the letter "e" plus the accent "´", as well as the plain letter "e".
 This would result in different distances between those strings, depending on the chosen metric.
 
 ```sql
 CREATE TABLE strings_table (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY,
     word TEXT NOT NULL
 );
 
@@ -127,7 +127,7 @@ Here is an example:
 
 ```sql
 CREATE TABLE binary_vectors (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY,
     vector BLOB NOT NULL
 );
 INSERT INTO binary_vectors (id, vector)

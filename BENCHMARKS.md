@@ -168,28 +168,30 @@ python/scripts/bench_cluster.py --help
 BigANN benchmark is a good starting point, if you are searching for large collections of high-dimensional vectors.
 Those often come with precomputed ground-truth neighbors, which is handy for recall evaluation.
 
-| Dataset                                    | Scalar Type | Dimensions | Metric |   Size    |
-| :----------------------------------------- | :---------: | :--------: | :----: | :-------: |
-| [Unum UForm Creative Captions][unum-cc-3m] |   float32   |    256     |   IP   |   3 GB    |
-| [Unum UForm Wiki][unum-wiki-1m]            |   float32   |    256     |   IP   |   1 GB    |
-| [Yandex Text-to-Image Sample][unum-t2i]    |   float32   |    200     |  Cos   |   1 GB    |
-|                                            |             |            |        |           |
-| [Microsoft SPACEV][spacev]                 |    int8     |    100     |   L2   |   93 GB   |
-| [Microsoft Turing-ANNS][turing]            |   float32   |    100     |   L2   |  373 GB   |
-| [Yandex Deep1B][deep]                      |   float32   |     96     |   L2   |  358 GB   |
-| [Yandex Text-to-Image][t2i]                |   float32   |    200     |  Cos   |  750 GB   |
-|                                            |             |            |        |           |
-| [ViT-L/12 LAION][laion]                    |   float32   |    2048    |  Cos   | 2 - 10 TB |
+| Dataset                                     | Scalar Type | Dimensions | Metric |   Size    |
+| :------------------------------------------ | :---------: | :--------: | :----: | :-------: |
+| [Unum UForm Creative Captions][unum-cc-3m]  |    `f32`    |    256     |   IP   |   3 GB    |
+| [Unum UForm Wiki][unum-wiki-1m]             |    `f32`    |    256     |   IP   |   1 GB    |
+| [Yandex Text-to-Image][yandex-t2i] subset   |    `f32`    |    200     |  Cos   |   1 GB    |
+| [Yandex Deep10M][yandex-deep] subset        |    `f32`    |     96     |   L2   |  358 GB   |
+| [Microsoft SpaceV-100M][msft-spacev] subset |    `i8`     |    100     |   L2   |  9.3 GB   |
+|                                             |             |            |        |           |
+| [Microsoft SpaceV-1B][msft-spacev]          |    `i8`     |    100     |   L2   |   93 GB   |
+| [Microsoft Turing-ANNS][msft-turing]        |    `f32`    |    100     |   L2   |  373 GB   |
+| [Yandex Deep1B][yandex-deep]                |    `f32`    |     96     |   L2   |  358 GB   |
+| [Yandex Text-to-Image][t2i]                 |    `f32`    |    200     |  Cos   |  750 GB   |
+|                                             |             |            |        |           |
+| [ViT-L/12 LAION][laion]                     |    `f32`    |    2048    |  Cos   | 2 - 10 TB |
 
 Luckily, smaller samples of those datasets are available.
 
 [unum-cc-3m]: https://huggingface.co/datasets/unum-cloud/ann-cc-3m
 [unum-wiki-1m]: https://huggingface.co/datasets/unum-cloud/ann-wiki-1m
-[unum-t2i]: https://huggingface.co/datasets/unum-cloud/ann-t2i-1m
-[spacev]: https://github.com/microsoft/SPTAG/tree/main/datasets/SPACEV1B
-[turing]: https://learning2hash.github.io/publications/microsoftturinganns1B/
-[t2i]: https://research.yandex.com/blog/benchmarks-for-billion-scale-similarity-search
-[deep]: https://research.yandex.com/blog/benchmarks-for-billion-scale-similarity-search
+[unum-t2i-1m]: https://huggingface.co/datasets/unum-cloud/ann-t2i-1m
+[msft-spacev]: https://github.com/ashvardanian/SpaceV
+[msft-turing]: https://learning2hash.github.io/publications/microsoftturinganns1B/
+[yandex-t2i]: https://research.yandex.com/blog/benchmarks-for-billion-scale-similarity-search
+[yandex-deep]: https://research.yandex.com/blog/benchmarks-for-billion-scale-similarity-search
 [laion]: https://laion.ai/blog/laion-5b/#download-the-data
 
 ### Unum UForm Wiki
@@ -227,6 +229,38 @@ mkdir -p datasets/deep_1B/ && \
 mkdir -p datasets/arxiv_2M/ && \
     wget -nc https://huggingface.co/datasets/unum-cloud/ann-arxiv-2m/resolve/main/abstract.e5-base-v2.fbin -P datasets/arxiv_2M/ &&
     wget -nc https://huggingface.co/datasets/unum-cloud/ann-arxiv-2m/resolve/main/title.e5-base-v2.fbin -P datasets/arxiv_2M/
+```
+
+### Microsoft SpaceV
+
+The original dataset can be pulled in a USearch-compatible form from AWS S3:
+
+```sh
+mkdir -p datasets/spacev_1B/ && \
+    aws s3 cp s3://your-bucket/path/to/spacev/ datasets/spacev_1B/ --recursive
+```
+
+A smaller 100M dataset can be pulled from Hugging Face.
+
+```sh
+mkdir -p datasets/spacev_100M/ && \
+    wget -nc https://huggingface.co/datasets/unum-cloud/ann-spacev-100m/resolve/main/ids.100M.i32bin -P datasets/spacev_100M/ &&
+    wget -nc https://huggingface.co/datasets/unum-cloud/ann-spacev-100m/resolve/main/base.100M.i8bin -P datasets/spacev_100M/ &&
+    wget -nc https://huggingface.co/datasets/unum-cloud/ann-spacev-100m/resolve/main/query.30K.i8bin -P datasets/spacev_100M/ &&
+    wget -nc https://huggingface.co/datasets/unum-cloud/ann-spacev-100m/resolve/main/groundtruth.30K.i32bin -P datasets/spacev_100M/ &&
+    wget -nc https://huggingface.co/datasets/unum-cloud/ann-spacev-100m/resolve/main/groundtruth.30K.f32bin -P datasets/spacev_100M/
+```
+
+To run the benchmark on those 100M datasets:
+
+```bash
+build_profile/bench_cpp \
+    --vectors datasets/spacev_100M/base.100M.i8bin \
+    --queries datasets/spacev_100M/query.30K.i8bin \
+    --neighbors datasets/spacev_100M/groundtruth.30K.i32bin \
+    --output datasets/spacev_100M/index.usearch \
+    --i8quant \
+    --l2sq
 ```
 
 ## Profiling

@@ -27,7 +27,7 @@ If this is your first experience with CMake, use the following commands to get s
 
 ```sh
 sudo apt-get update && sudo apt-get install cmake build-essential libjemalloc-dev g++-12 gcc-12 # Ubuntu
-brew install libomp llvm # MacOS
+brew install libomp llvm # macOS
 ```
 
 Using modern syntax, this is how you build and run the test suite:
@@ -38,7 +38,7 @@ cmake --build build_debug --config Debug
 build_debug/test_cpp
 ```
 
-If there build mode is not specified, the default is `Release`.
+If the build mode is not specified, the default is `Release`.
 
 ```sh
 cmake -D USEARCH_BUILD_TEST_CPP=1 -B build_release
@@ -78,7 +78,7 @@ build_release/test_cpp
 build_release/test_c
 ```
 
-Similarly, to use the most recent Clang compiler version from HomeBrew on MacOS:
+Similarly, to use the most recent Clang compiler version from Homebrew on macOS:
 
 ```sh
 brew install clang++ clang cmake
@@ -106,8 +106,8 @@ Linting:
 ```sh
 cppcheck --enable=all --force --suppress=cstyleCast --suppress=unusedFunction \
     include/usearch/index.hpp \
-    include/index_dense.hpp \
-    include/index_plugins.hpp
+    include/usearch/index_dense.hpp \
+    include/usearch/index_plugins.hpp
 ```
 
 I'd recommend putting the following breakpoints when debugging the code in GDB:
@@ -116,7 +116,7 @@ I'd recommend putting the following breakpoints when debugging the code in GDB:
 - `__ubsan::ScopedReport::~ScopedReport` - to catch undefined behavior.
 - `__GI_exit` - to stop at exit points - the end of running any executable.
 - `__builtin_unreachable` - to catch all the places where the code is expected to be unreachable.
-- `__usearch_raise_runtime_error` - for USearch-specific assertions.
+- `usearch_raise_runtime_error` - for USearch-specific assertions.
 
 ### Cross Compilation
 
@@ -156,14 +156,54 @@ cmake -D CMAKE_BUILD_TYPE=Release \
 cmake --build build_artifacts --config Release
 ```
 
-## Python 3
-
-Python bindings are built using PyBind11 and are available on [PyPi](https://pypi.org/project/usearch/).
-The compilation settings are controlled by the `setup.py` and are independent from CMake used for C/C++ builds.
-To install USearch locally:
+For Android development, you can cross-compile for ARM architectures without requiring the full Android NDK setup.
+Here's an example targeting 32-bit ARM (`armeabi-v7a`):
 
 ```sh
-pip install -e .
+sudo apt-get update
+sudo apt-get install -y clang lld crossbuild-essential-armhf
+
+# Cross-compile for 32-bit ARM (Android compatible)
+CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+cmake -B build_artifacts \
+  -D CMAKE_C_COMPILER=clang \
+  -D CMAKE_CXX_COMPILER=clang++ \
+  -D CMAKE_C_COMPILER_TARGET=armv7-linux-gnueabihf \
+  -D CMAKE_CXX_COMPILER_TARGET=armv7-linux-gnueabihf \
+  -D CMAKE_SYSTEM_NAME=Linux \
+  -D CMAKE_SYSTEM_PROCESSOR=armv7 \
+  -D CMAKE_C_FLAGS="--target=armv7-linux-gnueabihf -march=armv7-a" \
+  -D CMAKE_CXX_FLAGS="--target=armv7-linux-gnueabihf -march=armv7-a" \
+  -D CMAKE_BUILD_TYPE=RelWithDebInfo \
+  -D USEARCH_BUILD_LIB_C=1 \
+  -D USEARCH_BUILD_TEST_CPP=0 \
+  -D USEARCH_BUILD_BENCH_CPP=0 \
+  -D USEARCH_USE_SIMSIMD=0 \
+  -D USEARCH_USE_FP16LIB=1
+
+cmake --build build_artifacts --config RelWithDebInfo
+file build_artifacts/libusearch_c.so # Verify the output
+# Should show: ELF 32-bit LSB shared object, ARM, EABI5 version 1 (SYSV), dynamically linked, ...
+```
+
+The resulting `libusearch_c.so` can be used in Android projects by placing it in `src/main/jniLibs/armeabi-v7a/` for 32-bit ARM or `arm64-v8a/` for 64-bit ARM.
+
+## Python 3
+
+Python bindings are built using PyBind11 and are available on [PyPI](https://pypi.org/project/usearch/).
+The compilation settings are controlled by the `setup.py` and are independent from CMake used for C/C++ builds.
+To install USearch locally using `uv`:
+
+```sh
+uv venv --python 3.11                   # or your preferred Python version
+source .venv/bin/activate               # to activate the virtual environment
+uv pip install -e . --force-reinstall   # to build locally from source
+```
+
+Or using `pip` directly:
+
+```sh
+pip install -e . --force-reinstall
 ```
 
 For testing USearch uses PyTest, which is pre-configured in `pyproject.toml`.
@@ -174,20 +214,20 @@ Following options are enabled:
 - The `-p no:warnings` option will suppress and allow warnings.
 
 ```sh
-pip install pytest pytest-repeat            # for repeated fuzzy tests
-pytest                                      # if you trust the default settings
-pytest python/scripts/ -s -x -p no:warnings # to overwrite the default settings
+uv pip install pytest pytest-repeat numpy             # for repeated fuzzy tests
+python -m pytest                                      # if you trust the default settings
+python -m pytest python/scripts/ -s -x -p no:warnings # to overwrite the default settings
 ```
 
 Linting:
 
 ```sh
 pip install ruff
-ruff --format=github --select=E9,F63,F7,F82 --target-version=py37 python
+ruff --format=github --select=E9,F63,F7,F82 --target-version=py310 python
 ```
 
 Before merging your changes you may want to test your changes against the entire matrix of Python versions USearch supports.
-For that you need the `cibuildwheel`, which is tricky to use on MacOS and Windows, as it would target just the local environment.
+For that you need the `cibuildwheel`, which is tricky to use on macOS and Windows, as it would target just the local environment.
 Still, if you have Docker running on any desktop OS, you can use it to build and test the Python bindings for all Python versions for Linux:
 
 ```sh
@@ -196,7 +236,7 @@ cibuildwheel
 cibuildwheel --platform linux                   # works on any OS and builds all Linux backends
 cibuildwheel --platform linux --archs x86_64    # 64-bit x86, the most common on desktop and servers
 cibuildwheel --platform linux --archs aarch64   # 64-bit Arm for mobile devices, Apple M-series, and AWS Graviton
-cibuildwheel --platform macos                   # works only on MacOS
+cibuildwheel --platform macos                   # works only on macOS
 cibuildwheel --platform windows                 # works only on Windows
 ```
 
@@ -206,7 +246,7 @@ You may need root privileges for multi-architecture builds:
 sudo $(which cibuildwheel) --platform linux
 ```
 
-On Windows and MacOS, to avoid frequent path resolution issues, you may want to use:
+On Windows and macOS, to avoid frequent path resolution issues, you may want to use:
 
 ```sh
 python -m cibuildwheel --platform windows
@@ -226,10 +266,10 @@ nvm install 20
 Testing:
 
 ```sh
-npm install -g typescript
-npm install
-npm run build-js
-npm test
+npm install -g typescript   # Install TypeScript globally
+npm install                 # Compile `javascript/lib.cpp`
+npm run build-js            # Generate JS from TS
+npm test                    # Run the test suite
 ```
 
 To compile for AWS Lambda you'd need to recompile the binding.
@@ -242,7 +282,7 @@ RUN yum install tar git python3 cmake gcc-c++ -y && yum groupinstall "Developmen
 
 # Assuming AWS Linux 2 uses old compilers:
 ENV USEARCH_USE_FP16LIB 1
-ENV DUSEARCH_USE_SIMSIMD 1
+ENV USEARCH_USE_SIMSIMD 1
 ENV SIMSIMD_TARGET_HASWELL 1
 ENV SIMSIMD_TARGET_SKYLAKE 0
 ENV SIMSIMD_TARGET_ICE 0
@@ -277,6 +317,7 @@ The compilation settings are controlled by the `build.rs` and are independent fr
 
 ```sh
 cargo test -p usearch -- --nocapture --test-threads=1
+cargo clippy --all-targets --all-features
 ```
 
 Publishing the crate is a bit more complicated than normally.
@@ -326,25 +367,48 @@ swift-format . -i -r
 The style is controlled by the `.swift-format` JSON file in the root of the repository.
 As there is no standard for Swift formatting, even Apple's own `swift-format` tool and Xcode differ in their formatting rules, and available settings.
 
-## GoLang
+---
 
-USearch provides GoLang bindings, that depend on the C library that must be installed beforehand.
-So one should first compile the C library, link it with GoLang, and only then run tests.
+Running Swift on Linux requires a couple of extra steps - [`swift.org/install` page](https://www.swift.org/install).
+Alternatively, on Linux, the official Swift Docker image can be used for builds and tests:
+
+```bash
+sudo docker run --rm -v "$PWD:/workspace" -w /workspace swift:6.0 /bin/bash -cl "swift build -c release --static-swift-stdlib && swift test -c release --enable-test-discovery"
+```
+
+To format the code on Linux:
+
+```bash
+sudo docker run --rm -v "$PWD:/workspace" -w /workspace swift:6.0 /bin/bash -c "swift format . -i -r"
+```
+
+## Go
+
+USearch provides Go bindings, that depend on the C library that must be installed beforehand.
+So one should first compile the C library, link it with Go, and only then run tests.
 
 ```sh
 cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_USE_OPENMP=1 -D USEARCH_USE_SIMSIMD=1 
 cmake --build build_release --config Release -j
 
-cp build_release/libusearch_c.so golang/ # or .dylib to install the library on MacOS
-cp c/usearch.h golang/                   # to make the header available to GoLang
+cp build_release/libusearch_c.so golang/ # or .dylib to install the library on macOS
+cp c/usearch.h golang/                   # to make the header available to Go
 
 cd golang && LD_LIBRARY_PATH=. go test -v ; cd ..
 ```
 
+For static checks:
+
+```sh
+cd golang
+go vet ./...
+staticcheck ./...   # if installed
+golangci-lint run   # if installed
+```
+
 ## Java
 
-USearch provides Java bindings available from the [GitHub Maven registry](https://github.com/unum-cloud/usearch/packages/1867475) and the [Sonatype Maven Central Repository](https://central.sonatype.com/artifact/cloud.unum/usearch).
-The compilation settings are controlled by the `build.gradle` and are independent from CMake used for C/C++ builds.
+USearch provides Java bindings as a fat-JAR published with prebuilt JNI libraries via GitHub releases. Installation via Maven Central is deprecated; prefer downloading the fat-JAR from the latest GitHub release. The compilation settings are controlled by `build.gradle` and are independent from CMake used for C/C++ builds.
 
 To setup the Gradle environment:
 
@@ -358,8 +422,9 @@ sdk install gradle
 Afterwards, in a new terminal:
 
 ```sh
-gradle clean build
-gradle test
+gradle clean build --warning-mode=all # ensure passing builds
+gradle test --rerun-tasks             # pass unit tests
+gradle spotlessApply                  # apply formatting
 ```
 
 Alternatively, to run the `Index.main`:
@@ -371,32 +436,36 @@ java -cp "$(pwd)/build/classes/java/main" -Djava.library.path="$(pwd)/build/libs
 Or step by-step:
 
 ```sh
-cd java/cloud/unum/usearch
-javac -h . Index.java NativeUtils.java
+javac -cp java -h java/cloud/unum/usearch/ java/cloud/unum/usearch/Index.java
 
 # Ensure JAVA_HOME system environment variable has been set
 # e.g. export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
 
 # Ubuntu:
-g++ -c -fPIC -I${JAVA_HOME}/include -I${JAVA_HOME}/include/linux -I../../../../include cloud_unum_usearch_Index.cpp -o cloud_unum_usearch_Index.o
-g++ -shared -fPIC -o libusearch.so cloud_unum_usearch_Index.o -lc
+g++ -c -fPIC -I${JAVA_HOME}/include -I${JAVA_HOME}/include/linux -Iinclude java/cloud/unum/usearch/cloud_unum_usearch_Index.cpp -o java/cloud/unum/usearch/cloud_unum_usearch_Index.o
+g++ -shared -fPIC -o java/cloud/unum/usearch/libusearch.so java/cloud/unum/usearch/cloud_unum_usearch_Index.o -lc
 
 # Windows
-g++ -c -I%JAVA_HOME%\include -I%JAVA_HOME%\include\win32 cloud_unum_usearch_Index.cpp -I..\..\..\..\include -o cloud_unum_usearch_Index.o
-g++ -shared -o USearchJNI.dll cloud_unum_usearch_Index.o -Wl,--add-stdcall-alias
+g++ -c -I%JAVA_HOME%\include -I%JAVA_HOME%\include\win32 java\cloud\unum\usearch\cloud_unum_usearch_Index.cpp -Iinclude -o java\cloud\unum\usearch\cloud_unum_usearch_Index.o
+g++ -shared -o java\cloud\unum\usearch\USearchJNI.dll java\cloud\unum\usearch\cloud_unum_usearch_Index.o -Wl,--add-stdcall-alias
 
-# MacOS
+# macOS
 g++ -std=c++11 -c -fPIC \
-    -I../../../../include \
-    -I../../../../fp16/include \
-    -I../../../../simsimd/include \
-    -I${JAVA_HOME}/include -I${JAVA_HOME}/include/darwin cloud_unum_usearch_Index.cpp -o cloud_unum_usearch_Index.o
-g++ -dynamiclib -o libusearch.dylib cloud_unum_usearch_Index.o -lc
+    -Iinclude \
+    -Ifp16/include \
+    -Isimsimd/include \
+    -I${JAVA_HOME}/include -I${JAVA_HOME}/include/darwin java/cloud/unum/usearch/cloud_unum_usearch_Index.cpp -o java/cloud/unum/usearch/cloud_unum_usearch_Index.o
+g++ -dynamiclib -o java/cloud/unum/usearch/libusearch.dylib java/cloud/unum/usearch/cloud_unum_usearch_Index.o -lc
 
-# Run linking to that directory
-cd ../../../..
-cp cloud/unum/usearch/libusearch.* .
-java -cp . -Djava.library.path="$(pwd)" cloud.unum.usearch.Index
+# Run from project root
+java -cp java -Djava.library.path="java/cloud/unum/usearch" cloud.unum.usearch.Index
+```
+
+Or using CMake:
+
+```bash
+cmake -B build_artifacts -D USEARCH_BUILD_JNI=1
+cmake --build build_artifacts --config Release -j
 ```
 
 ## C#

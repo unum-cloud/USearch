@@ -1,6 +1,6 @@
 [package]
 name = "usearch"
-version = "2.17.2"
+version = "2.23.0"
 authors = ["Ash Vardanian <1983160+ashvardanian@users.noreply.github.com>"]
 description = "Smaller & Faster Single-File Vector Search Engine from Unum"
 edition = "2021"
@@ -29,7 +29,13 @@ name = "usearch"
 path = "rust/lib.rs"
 
 [dependencies]
-cxx = "1.0"
+cxx = "1.0.160"
 
 [build-dependencies]
-cxx-build = "1.0"
+cxx-build = "1.0.160"
+
+[dev-dependencies]
+fork_union = "2.1.1"  # for concurrency tests
+rand_distr = "0.5.1"  # uniform floats distribution
+rand_chacha = "0.9.0" # random number generator
+rand = "0.9.1"

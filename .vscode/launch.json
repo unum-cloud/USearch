@@ -189,6 +189,18 @@
             ],
             "cwd": "${workspaceFolder}/csharp",
             "stopAtEntry": false
+        },
+        {
+            "type": "lldb",
+            "name": "Debug Swift",
+            "request": "launch",
+            "sourceLanguages": [
+                "swift"
+            ],
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "program": "${workspaceFolder}/.build/debug/USearchTestsSwift",
+            "preLaunchTask": "Swift Build"
         }
     ]
 }

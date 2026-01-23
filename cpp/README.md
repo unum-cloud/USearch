@@ -164,7 +164,7 @@ As in many other bulk-processing APIs, the `executor` and `progress` are optiona
 In its high-level interface, USearch supports a variety of metrics, including the most popular ones:
 
 - `metric_cos_gt<scalar_t>` for "Cosine" or "Angular" distance.
-- `metric_ip_gt<scalar_t>` for "Inner Product" or "Dot Product" distance.
+- `metric_ip_gt<scalar_t>` for "Inner Product" or "Dot Product" distance with normalized vectors.
 - `metric_l2sq_gt<scalar_t>` for the squared "L2" or "Euclidean" distance.
 - `metric_jaccard_gt<scalar_t>` for "Jaccard" distance between two ordered sets of unique elements.
 - `metric_hamming_gt<scalar_t>` for "Hamming" distance, as the number of shared bits in hashes.

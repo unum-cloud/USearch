@@ -867,7 +867,7 @@ WARN_LOGFILE           =
 
 # - README.md
 # - C API: Tutorial, Docs
-# - SDKs: Python, Java, GoLang, Rust, JS
+# - SDKs: Python, Java, Go, Rust, JS
 # - Implementations
 # - Testing
 # - Benchmarks

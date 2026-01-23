@@ -227,6 +227,38 @@ public class UsearchIndexTests
         }
     }
 
+
+    [Fact]
+    public void Add_BitsVector_UpdatesIndexOptions()
+    {
+        // Arrange
+        const uint Dimensions = 10;
+        const uint AddKey = 1;
+        const uint NonExistentKey = 2;
+        const uint ExpectedSize = 1;
+        const uint ExpectedCapacity = 1;
+
+        var indexOptions = new IndexOptions(
+            metricKind: MetricKind.Hamming,
+            quantization: ScalarKind.Bits1,
+            dimensions: Dimensions
+        );
+
+        var inputVector = GenerateBitsVector((int)Dimensions);
+
+        using (var index = new USearchIndex(indexOptions))
+        {
+            // Act
+            index.Add(AddKey, inputVector);
+
+            // Assert
+            Assert.True(index.Contains(AddKey));
+            Assert.False(index.Contains(NonExistentKey));
+            Assert.Equal(ExpectedSize, index.Size());
+            Assert.True(ExpectedCapacity <= index.Capacity());
+        }
+    }
+
     [Fact]
     public void Add_ManyFloatVectorsUnderSameKeySeparatelyInMultiKeyIndex_UpdatesIndexOptions()
     {
@@ -474,6 +506,39 @@ public class UsearchIndexTests
         (var inputKeys, var inputVectors) = (
             Enumerable.Repeat(AddKey, BatchSize).ToArray(),
             GenerateManyByteVectors(BatchSize, (int)Dimensions)
+        );
+
+        using (var index = new USearchIndex(indexOptions))
+        {
+            index.Add(inputKeys, inputVectors);
+
+            // Act
+            int foundVectorsCount = index.Get(AddKey, RetrieveCount, out float[][] retrievedVectors);
+
+            // Assert
+            Assert.Equal(RetrieveCount, foundVectorsCount);
+        }
+    }
+
+    [Fact]
+    public void Get_ManyBitsVectorsUnderSameKeyInMultiKeyIndex_ReturnsCorrectValue()
+    {
+        // Arrange
+        const uint Dimensions = 10;
+        const ulong AddKey = 1;
+        const int RetrieveCount = 5;
+        const int BatchSize = 10;
+
+        var indexOptions = new IndexOptions(
+            metricKind: MetricKind.Hamming,
+            quantization: ScalarKind.Bits1,
+            dimensions: Dimensions,
+            multi: true
+        );
+
+        (var inputKeys, var inputVectors) = (
+            Enumerable.Repeat(AddKey, BatchSize).ToArray(),
+            GenerateManyBitsVectors(BatchSize, (int)Dimensions)
         );
 
         using (var index = new USearchIndex(indexOptions))
@@ -1213,12 +1278,27 @@ public class UsearchIndexTests
         return Enumerable.Range(0, vectorLength).Select(i => (sbyte)i).ToArray();
     }
 
+    private static byte[] GenerateBitsVector(int vectorLength)
+    {
+        return Enumerable.Range(0, vectorLength).Select(i => (byte)i).ToArray();
+    }
+
     private static sbyte[][] GenerateManyByteVectors(int n, int vectorLength)
     {
         var result = new sbyte[n][];
         for (int i = 0; i < n; i++)
         {
             result[i] = Enumerable.Range(0, vectorLength).Select(i => (sbyte)i).ToArray();
+        }
+        return result;
+    }
+
+    private static byte[][] GenerateManyBitsVectors(int n, int vectorLength)
+    {
+        var result = new byte[n][];
+        for (int i = 0; i < n; i++)
+        {
+            result[i] = Enumerable.Range(0, vectorLength).Select(i => (byte)i).ToArray();
         }
         return result;
     }
@@ -1241,7 +1321,7 @@ public class UsearchIndexTests
     #endregion
 }
 
-internal class RealEqualityComparer<T> : IEqualityComparer<T> where T : unmanaged
+internal sealed class RealEqualityComparer<T> : IEqualityComparer<T> where T : unmanaged
 {
     private readonly T _threshold;
 

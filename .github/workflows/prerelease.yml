@@ -10,7 +10,10 @@ env:
   GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
   PYTHONUTF8: 1
   PYTHON_VERSION: 3.11
-  DOTNET_VERSION: 7.0.x
+  DOTNET_VERSION: 8.0.x
+  NODE_VERSION: 20
+  JAVA_VERSION: 21
+  GO_VERSION: "^1.21.0"
   ANDROID_NDK_VERSION: 26.3.11579264
   ANDROID_SDK_VERSION: 21
 
@@ -21,15 +24,15 @@ permissions:
 jobs:
   versioning:
     name: Update Version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Run TinySemVer
-        uses: ashvardanian/tinysemver@v2.0.7
+        uses: ashvardanian/tinysemver@v3.0.0
         with:
           verbose: "true"
           version-file: "VERSION"
@@ -41,7 +44,8 @@ jobs:
             Cargo.lock:name = "usearch"\nversion = "(\d+\.\d+\.\d+)"
             wasmer.toml:^version = "(\d+\.\d+\.\d+)"
             conanfile.py:version = "(\d+\.\d+\.\d+)"
-            java/README.md:<version>(\d+\.\d+\.\d+)</version>
+            java/README.md:usearchVersion = '(\d+\.\d+\.\d+)'
+            java/README.md:version: '(\d+\.\d+\.\d+)'
             README.md:version = {(\d+\.\d+\.\d+)}
             csharp/nuget/nuget-package.props:>(\d+\.\d+\.\d+)</Version>
             CMakeLists.txt:VERSION (\d+\.\d+\.\d+)
@@ -61,8 +65,10 @@ jobs:
       CXX: g++
 
     steps:
-      - uses: actions/checkout@v4
-      - run: git submodule update --init --recursive
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Pull Git submodules
+        run: git submodule update --init --recursive
 
         # C/C++
       - name: Build C/C++
@@ -78,7 +84,7 @@ jobs:
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
@@ -92,9 +98,9 @@ jobs:
 
         # JavaScript
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
         run: npm ci --skip-scripts
       - name: Build JavaScript
@@ -115,18 +121,20 @@ jobs:
 
         # Java
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
-          java-version: "21"
+          java-version: ${{ env.JAVA_VERSION }}
           distribution: "adopt"
       - name: Setup Gradle
-        uses: gradle/gradle-build-action@v2.4.2
+        uses: gradle/actions/setup-gradle@v5
+      - name: Check Java formatting
+        run: gradle spotlessCheck
       - name: Test Java
         run: gradle clean build
 
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v3
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
@@ -154,8 +162,10 @@ jobs:
       CXX: clang++
 
     steps:
-      - uses: actions/checkout@v4
-      - run: git submodule update --init --recursive
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Pull Git submodules
+        run: git submodule update --init --recursive
 
         # C/C++
         # Clang 16 isn't available from default repos on Ubuntu 22.04, so we have to install it manually
@@ -172,9 +182,9 @@ jobs:
 
         # JavaScript
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
         run: npm ci --skip-scripts
       - name: Build JavaScript
@@ -184,7 +194,7 @@ jobs:
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
@@ -212,7 +222,7 @@ jobs:
 
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v3
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
@@ -225,17 +235,19 @@ jobs:
 
   test_macos:
     name: MacOS
-    runs-on: macos-14
+    runs-on: macos-15
 
     steps:
-      - uses: actions/checkout@v4
-      - run: git submodule update --init --recursive
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Pull Git submodules
+        run: git submodule update --init --recursive
 
         # C/C++
       - name: Build C/C++
         run: |
           brew update
-          brew install cmake
+          brew reinstall cmake
           cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=1
           cmake --build build_artifacts --config RelWithDebInfo
       - name: Test C++
@@ -245,9 +257,9 @@ jobs:
 
         # JavaScript
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
         run: npm ci --skip-scripts
       - name: Build JavaScript
@@ -257,7 +269,7 @@ jobs:
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
@@ -290,25 +302,25 @@ jobs:
 
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v3
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
         run: |
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_c.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
-          dotnet test -c Debug --logger "console;verbosity=detailed" --filter "FullyQualifiedName!=Cloud.Unum.USearch.Tests.UsearchIndexTests.PersistAndRestore"
+          dotnet test -c Debug --logger "console;verbosity=minimal" --filter "FullyQualifiedName!=Cloud.Unum.USearch.Tests.UsearchIndexTests.PersistAndRestore"
         shell: bash
         working-directory: ${{ github.workspace }}/csharp
-        env:
-          DYLD_PRINT_LIBRARIES: 1
 
-  test_windows:
-    name: Windows
+  test_windows_x86:
+    name: Windows (x86)
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
-      - run: git submodule update --init --recursive
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Pull Git submodules
+        run: git submodule update --init --recursive
 
         # C/C++
       - name: Build C/C++
@@ -323,7 +335,7 @@ jobs:
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
@@ -336,9 +348,9 @@ jobs:
 
         # JavaScript
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
         run: npm ci --skip-scripts
       - name: Build JavaScript
@@ -359,7 +371,7 @@ jobs:
 
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v3
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
@@ -370,12 +382,38 @@ jobs:
         shell: bash
         working-directory: ${{ github.workspace }}/csharp
 
+  test_windows_arm:
+    name: Windows (Arm)
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Pull Git submodules
+        run: git submodule update --init --recursive
+
+      - name: Setup MSVC for ARM64
+        uses: microsoft/setup-msbuild@v2
+
+        # C/C++
+      - name: Build C/C++ (ARM64)
+        run: |
+          choco install cmake
+          cmake -G "Visual Studio 17 2022" -A ARM64 -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=0 -D USEARCH_BUILD_TEST_CPP=0 -D USEARCH_BUILD_TEST_C=0
+          cmake --build build_artifacts --config RelWithDebInfo
+
+      - name: Verify ARM64 build artifacts
+        run: |
+          if (!(Test-Path "build_artifacts\libusearch_c.dll")) { exit 1 }
+          Write-Host "ARM64 DLL built successfully"
+
   build_docker:
     name: Docker
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - run: git submodule update --init --recursive
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Pull Git submodules
+        run: git submodule update --init --recursive
       - name: Build
         uses: docker/build-push-action@v6
         with:
@@ -386,21 +424,29 @@ jobs:
   build_wheels:
     name: Build Python Wheels
     runs-on: ${{ matrix.os }}
-    needs: [test_ubuntu_gcc, test_ubuntu_clang, test_macos, test_windows]
+    needs:
+      [
+        test_ubuntu_gcc,
+        test_ubuntu_clang,
+        test_macos,
+        test_windows_x86,
+        test_windows_arm,
+      ]
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["37", "38", "39", "310", "311", "312", "313"]
+        os: [ubuntu-24.04, macos-14, windows-2022]
+        python-version: ["38", "39", "310", "311", "312", "313", "313t", "314", "314t"]
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: 3.x
 
         # We only need QEMU for Linux builds
       - name: Setup QEMU
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         uses: docker/setup-qemu-action@v3
       - name: Install cibuildwheel
         run: python -m pip install cibuildwheel
@@ -408,6 +454,7 @@ jobs:
         run: cibuildwheel --output-dir wheelhouse
         env:
           CIBW_BUILD: cp${{ matrix.python-version }}-*
+          CIBW_ENABLE: cpython-freethreading # No-GIL 3.13t builds
 
   test_ubuntu_cross_compilation:
     name: Cross Compilation
@@ -429,8 +476,10 @@ jobs:
             target: aarch64-linux-gnu
 
     steps:
-      - uses: actions/checkout@v4
-      - run: git submodule update --init --recursive
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Pull Git submodules
+        run: git submodule update --init --recursive
 
         # C/C++
         # We need to install the cross-compilation toolchain for ARM64 and ARMHF
@@ -456,28 +505,33 @@ jobs:
           cmake --build build_artifacts --config RelWithDebInfo
 
         # We can't run the produced builds, but we can make sure they exist
-      - name: Test artifacts presense
+      - name: Test artifacts presence
         run: |
           test -e build_artifacts/libusearch_c.so
           test -e build_artifacts/libusearch_sqlite.so
 
-  test_ubuntu_android_ndk:
-    name: Android NDK Build
+  test_android:
+    name: Android
     runs-on: ubuntu-22.04
     strategy:
+      fail-fast: false
       matrix:
         include:
           - processor: armv7a
             abi: armeabi-v7a
             target: armv7-linux-androideabi
+            arch: arm32
           - processor: aarch64
             abi: arm64-v8a
             target: aarch64-linux-android
+            arch: arm64
     steps:
-      - uses: actions/checkout@v4
-      - run: git submodule update --init --recursive
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Pull Git submodules
+        run: git submodule update --init --recursive
 
-      - name: Install NDK ndk
+      - name: Install NDK
         run: |
           ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;${{ env.ANDROID_NDK_VERSION }}"
 
@@ -497,9 +551,8 @@ jobs:
           cmake --build build_artifacts --config RelWithDebInfo
 
         # We can't run the produced builds, but we can make sure they exist
-      - name: Test artifacts presense
-        run: |
-          test -e build_artifacts/libusearch_c.so
+      - name: Test artifacts presence
+        run: test -e build_artifacts/libusearch_c.so
 
         # Rust
       - name: Set up Rust
@@ -520,5 +573,33 @@ jobs:
           echo "CARGO_${{ matrix.target }}=${TOOLCHAIN}/llvm-ar" >> ${GITHUB_ENV}
 
       - name: Build Rust
+        run: cargo build --target ${{ matrix.target }}
+
+        # Java
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: "adopt"
+
+        # We skip native compilation with Gradle and focus just on the Java part,
+        # assuming the we won't be able to tun the tests without emulation
+      - name: Check Java formatting
+        run: gradle spotlessCheck
+      - name: Test Java bindings with Android library
         run: |
-          cargo build --target ${{ matrix.target }}
+          mkdir -p build/libs/usearch/shared/
+          cp build_artifacts/libusearch_c.so build/libs/usearch/shared/
+          javac -cp . java/cloud/unum/usearch/*.java
+          echo "Java compilation successful with Android NDK library"
+
+      - name: Package Android libraries for release
+        run: |
+          version=$(cat VERSION)
+          zip -r usearch_android_${{ matrix.arch }}_${version}.zip build_artifacts/libusearch_c.so c/usearch.h
+
+      - name: Upload Android libraries
+        uses: actions/upload-artifact@v5
+        with:
+          name: android-${{ matrix.abi }}-libraries
+          path: usearch_android_*.zip

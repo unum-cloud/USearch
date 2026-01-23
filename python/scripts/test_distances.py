@@ -1,3 +1,23 @@
+#!/usr/bin/env -S uv run --quiet --script
+"""
+USearch Distance Functions Tests
+
+Test suite for various distance metrics and their implementations in USearch,
+including cosine, L2, inner product, and custom distance functions.
+
+Usage:
+    uv run python/scripts/test_distances.py
+    
+Dependencies listed in the script header for uv to resolve automatically.
+"""
+# /// script
+# dependencies = [
+#   "pytest",
+#   "numpy",
+#   "usearch"
+# ]
+# ///
+
 import pytest
 import numpy as np
 

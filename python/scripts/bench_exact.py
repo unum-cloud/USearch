@@ -1,4 +1,24 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --quiet --script
+"""
+USearch Exact Search Benchmarking
+
+Benchmarks exact nearest neighbor search performance comparing USearch 
+implementations against FAISS baseline with various data types and metrics.
+
+Usage:
+    uv run python/scripts/bench_exact.py --help
+    uv run python/scripts/bench_exact.py --count 10000 --ndim 256
+    
+Dependencies listed in the script header for uv to resolve automatically.
+"""
+# /// script
+# dependencies = [
+#   "numpy",
+#   "faiss-cpu",
+#   "usearch",
+#   "tqdm"
+# ]
+# ///
 import argparse
 from time import time
 from typing import Literal

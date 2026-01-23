@@ -81,7 +81,9 @@ DTypeLike = Union[str, ScalarKind]
 
 MetricLike = Union[str, MetricKind, CompiledMetric]
 
-PathOrBuffer = Union[str, os.PathLike, bytes]
+BytesLike = Union[bytes, bytearray, memoryview]
+
+PathOrBuffer = Union[str, os.PathLike, BytesLike]
 
 ProgressCallback = Callable[[int, int], bool]
 
@@ -176,6 +178,16 @@ def _normalize_metric(metric) -> MetricKind:
     return metric
 
 
+def _is_buffer(obj: Any) -> bool:
+    """Check if the object is a buffer-like object.
+    More portable than `hasattr(obj, "__buffer__")`, which requires Python 3.11+."""
+    try:
+        memoryview(obj)
+        return True
+    except TypeError:
+        return False
+
+
 def _search_in_compiled(
     compiled_callable: Callable,
     vectors: np.ndarray,
@@ -198,6 +210,8 @@ def _search_in_compiled(
     ) -> Union[BatchMatches, Matches]:
         return batch_matches[0] if count_vectors == 1 else batch_matches
 
+    progress_callback = progress
+
     # Create progress bar if needed
     if log:
         name = log if isinstance(log, str) else "Search"
@@ -207,14 +221,23 @@ def _search_in_compiled(
             unit="vector",
         )
 
+        user_progress = progress
+
         def update_progress_bar(processed: int, total: int) -> bool:
             progress_bar.update(processed - progress_bar.n)
-            return progress if progress else True
+            if user_progress:
+                return user_progress(processed, total)
+            return True
 
-        tuple_ = compiled_callable(vectors, progress=update_progress_bar, **kwargs)
-        progress_bar.close()
+        progress_callback = update_progress_bar
+
+    if progress_callback:
+        tuple_ = compiled_callable(vectors, progress=progress_callback, **kwargs)
     else:
         tuple_ = compiled_callable(vectors, **kwargs)
+
+    if log:
+        progress_bar.close()
 
     return distill_batch(BatchMatches(*tuple_))
 
@@ -253,14 +276,14 @@ def _add_to_compiled(
     # Create progress bar if needed
     if log:
         name = log if isinstance(log, str) else "Add"
-        pbar = tqdm(
+        progress_bar = tqdm(
             desc=name,
             total=count_vectors,
             unit="vector",
         )
 
         def update_progress_bar(processed: int, total: int) -> bool:
-            pbar.update(processed - pbar.n)
+            progress_bar.update(processed - progress_bar.n)
             return progress(processed, total) if progress else True
 
         compiled.add_many(
@@ -270,7 +293,7 @@ def _add_to_compiled(
             threads=threads,
             progress=update_progress_bar,
         )
-        pbar.close()
+        progress_bar.close()
     else:
         compiled.add_many(keys, vectors, copy=copy, threads=threads, progress=progress)
 
@@ -279,7 +302,7 @@ def _add_to_compiled(
 
 @dataclass
 class Match:
-    """This class contains information about retrieved vector."""
+    """Single search result with key and distance."""
 
     key: int
     distance: float
@@ -290,8 +313,7 @@ class Match:
 
 @dataclass
 class Matches:
-    """This class contains information about multiple retrieved vectors for single query,
-    i.e it is a set of `Match` instances."""
+    """Search results for a single query."""
 
     keys: np.ndarray
     distances: np.ndarray
@@ -312,10 +334,7 @@ class Matches:
             raise IndexError(f"`index` must be an integer under {len(self)}")
 
     def to_list(self) -> List[tuple]:
-        """
-        Convert matches to the list of tuples which contain matches' indices and distances to them.
-        """
-
+        """Convert to list of (key, distance) tuples."""
         return [(int(key), float(distance)) for key, distance in zip(self.keys, self.distances)]
 
     def __repr__(self) -> str:
@@ -324,8 +343,18 @@ class Matches:
 
 @dataclass
 class BatchMatches(Sequence):
-    """This class contains information about multiple retrieved vectors for multiple queries,
-    i.e it is a set of `Matches` instances."""
+    """Search results for multiple queries in batch operations.
+
+    Unused positions in arrays contain sentinel values (default keys, max distances).
+    Access individual results via indexing: batch_matches[i] returns valid matches only.
+
+    Attributes:
+        keys: 2D array of shape (n_queries, k) containing match keys
+        distances: 2D array of shape (n_queries, k) containing distances  
+        counts: 1D array of shape (n_queries,) with actual number of matches per query
+        visited_members: Total graph nodes visited during search
+        computed_distances: Total distance computations performed
+    """
 
     keys: np.ndarray
     distances: np.ndarray
@@ -349,7 +378,7 @@ class BatchMatches(Sequence):
             raise IndexError(f"`index` must be an integer under {len(self)}")
 
     def to_list(self) -> List[List[tuple]]:
-        """Convert the result for each query to the list of tuples with information about its matches."""
+        """Flatten matches for all queries into a list of `(key, distance)` tuples."""
         list_of_matches = [self.__getitem__(row) for row in range(self.__len__())]
         return [match.to_tuple() for matches in list_of_matches for match in matches]
 
@@ -402,9 +431,9 @@ class Clustering:
     def members_of(self, centroid: Key) -> np.ndarray:
         return self.queries[self.matches.keys.flatten() == centroid]
 
-    def subcluster(self, centroid: Key, **clustering_kwards) -> Clustering:
+    def subcluster(self, centroid: Key, **clustering_kwargs) -> Clustering:
         sub_keys = self.members_of(centroid)
-        return self.index.cluster(keys=sub_keys, **clustering_kwards)
+        return self.index.cluster(keys=sub_keys, **clustering_kwargs)
 
     def plot_centroids_popularity(self):
         from matplotlib import pyplot as plt
@@ -433,7 +462,7 @@ class Clustering:
 
 
 class IndexedKeys(Sequence):
-    """Smart-reference for the range of keys present in a specific `Index`"""
+    """View of all keys in the index."""
 
     def __init__(self, index: Index) -> None:
         self.index = index
@@ -447,8 +476,8 @@ class IndexedKeys(Sequence):
     ) -> Union[Key, np.ndarray]:
         if isinstance(offset_offsets_or_slice, slice):
             start, stop, step = offset_offsets_or_slice.indices(len(self))
-            if step:
-                raise
+            if step != 1:
+                raise ValueError("Slicing with a step is not supported")
             return self.index._compiled.get_keys_in_slice(start, stop - start)
 
         elif isinstance(offset_offsets_or_slice, Iterable):
@@ -457,6 +486,10 @@ class IndexedKeys(Sequence):
 
         else:
             offset = int(offset_offsets_or_slice)
+            if offset < 0:
+                offset += len(self)
+            if offset < 0 or offset >= len(self):
+                raise IndexError("Index out of range")
             return self.index._compiled.get_key_at_offset(offset)
 
     def __array__(self, dtype=None) -> np.ndarray:
@@ -466,13 +499,16 @@ class IndexedKeys(Sequence):
 
 
 class Index:
-    """Fast vector-search engine for dense equi-dimensional embeddings.
+    """Fast approximate nearest neighbor search for dense vectors.
 
-    Vector keys must be integers.
-    Vectors must have the same number of dimensions within the index.
-    Supports Inner Product, Cosine Distance, L^n measures like the Euclidean metric,
-    as well as automatic downcasting to low-precision floating-point and integral
-    representations.
+    Supports various distance metrics (cosine, euclidean, inner product, etc.) 
+    and automatic precision optimization. Vector keys must be integers.
+    All vectors must have the same dimensionality.
+
+    Example:
+        >>> index = Index(ndim=128, metric='cos')
+        >>> index.add(key=42, vector=np.random.rand(128))
+        >>> matches = index.search(query_vector, count=10)
     """
 
     def __init__(
@@ -591,9 +627,7 @@ class Index:
     @staticmethod
     def metadata(path_or_buffer: PathOrBuffer) -> Optional[dict]:
         try:
-            if isinstance(path_or_buffer, bytearray):
-                path_or_buffer = bytes(path_or_buffer)
-            if isinstance(path_or_buffer, bytes):
+            if _is_buffer(path_or_buffer):
                 return _index_dense_metadata_from_buffer(path_or_buffer)
             else:
                 path_or_buffer = os.fspath(path_or_buffer)
@@ -604,7 +638,7 @@ class Index:
             raise e
 
     @staticmethod
-    def restore(path_or_buffer: PathOrBuffer, view: bool = False) -> Optional[Index]:
+    def restore(path_or_buffer: PathOrBuffer, view: bool = False, **kwargs) -> Optional[Index]:
         meta = Index.metadata(path_or_buffer)
         if not meta:
             return None
@@ -613,6 +647,7 @@ class Index:
             ndim=meta["dimensions"],
             dtype=meta["kind_scalar"],
             metric=meta["kind_metric"],
+            **kwargs,
         )
 
         if view:
@@ -684,13 +719,19 @@ class Index:
         log: Union[str, bool] = False,
         progress: Optional[ProgressCallback] = None,
     ) -> Union[Matches, BatchMatches]:
-        """
-        Performs approximate nearest neighbors search for one or more queries.
-
+        """Performs approximate nearest neighbors search for one or more queries.
+        
+        When searching with batch queries, returns BatchMatches that pre-allocates arrays
+        for the requested `count` size. If fewer matches exist than requested (e.g., when
+        count > index size), use individual query access via batch_matches[i] to get only
+        valid results, or check batch_matches.counts to see actual result counts per query.
+        
         :param vectors: Query vector or vectors.
         :type vectors: VectorOrVectorsLike
         :param count: Upper count on the number of matches to find
         :type count: int, defaults to 10
+            When count > index size, only available vectors will be returned.
+            For BatchMatches, unused positions contain sentinel values.
         :param threads: Optimal number of cores to use
         :type threads: int, defaults to 0
         :param exact: Perform exhaustive linear-time exact search
@@ -701,6 +742,8 @@ class Index:
         :type progress: Optional[ProgressCallback], defaults to None
         :return: Matches for one or more queries
         :rtype: Union[Matches, BatchMatches]
+            For single queries: Matches with only valid results
+            For batch queries: BatchMatches - use indexing for individual results
         """
 
         return _search_in_compiled(
@@ -820,7 +863,7 @@ class Index:
             return self._compiled.remove_many(keys, compact=compact, threads=threads)
 
     def __delitem__(self, keys: KeyOrKeysLike) -> Union[int, np.ndarray]:
-        raise self.remove(keys)
+        return self.remove(keys)
 
     def rename(
         self,
@@ -1042,7 +1085,7 @@ class Index:
         """
         assert not progress or _match_signature(progress, [int, int], bool), "Invalid callback signature"
 
-        path_or_buffer = path_or_buffer if path_or_buffer else self.path
+        path_or_buffer = path_or_buffer if path_or_buffer is not None else self.path
         if path_or_buffer is None:
             return self._compiled.save_index_to_buffer(progress)
         else:
@@ -1050,7 +1093,7 @@ class Index:
 
     def load(
         self,
-        path_or_buffer: Union[str, os.PathLike, bytes, NoneType] = None,
+        path_or_buffer: Union[PathOrBuffer, NoneType] = None,
         progress: Optional[ProgressCallback] = None,
     ):
         """Loads the index from a file or buffer.
@@ -1058,7 +1101,7 @@ class Index:
         If `path_or_buffer` is not provided, it defaults to the path stored in `self.path`.
 
         :param path_or_buffer: The path or buffer from which the index will be loaded.
-        :type path_or_buffer: Union[str, os.PathLike, bytes, NoneType], optional
+        :type path_or_buffer: Union[str, os.PathLike, BytesLike, NoneType], optional
         :param progress: A callback function for progress tracking.
         :type progress: Optional[ProgressCallback], optional
         :raises Exception: If no source is defined.
@@ -1066,23 +1109,21 @@ class Index:
         """
         assert not progress or _match_signature(progress, [int, int], bool), "Invalid callback signature"
 
-        path_or_buffer = path_or_buffer if path_or_buffer else self.path
+        path_or_buffer = path_or_buffer if path_or_buffer is not None else self.path
         if path_or_buffer is None:
-            raise Exception("Define the source")
-        if isinstance(path_or_buffer, bytearray):
-            path_or_buffer = bytes(path_or_buffer)
-        if isinstance(path_or_buffer, bytes):
+            raise ValueError("path_or_buffer is required")
+        if _is_buffer(path_or_buffer):
             self._compiled.load_index_from_buffer(path_or_buffer, progress)
         else:
             path_or_buffer = os.fspath(path_or_buffer)
             if os.path.exists(path_or_buffer):
                 self._compiled.load_index_from_path(path_or_buffer, progress)
             else:
-                raise RuntimeError("Missing file!")
+                raise FileNotFoundError(f"File not found: {path_or_buffer}")
 
     def view(
         self,
-        path_or_buffer: Union[str, os.PathLike, bytes, bytearray, NoneType] = None,
+        path_or_buffer: Union[PathOrBuffer, NoneType] = None,
         progress: Optional[ProgressCallback] = None,
     ):
         """Maps the index from a file or buffer without loading it into memory.
@@ -1097,12 +1138,10 @@ class Index:
         """
         assert not progress or _match_signature(progress, [int, int], bool), "Invalid callback signature"
 
-        path_or_buffer = path_or_buffer if path_or_buffer else self.path
+        path_or_buffer = path_or_buffer if path_or_buffer is not None else self.path
         if path_or_buffer is None:
-            raise Exception("Define the source")
-        if isinstance(path_or_buffer, bytearray):
-            path_or_buffer = bytes(path_or_buffer)
-        if isinstance(path_or_buffer, bytes):
+            raise ValueError("path_or_buffer is required")
+        if _is_buffer(path_or_buffer):
             self._compiled.view_index_from_buffer(path_or_buffer, progress)
         else:
             self._compiled.view_index_from_path(os.fspath(path_or_buffer), progress)

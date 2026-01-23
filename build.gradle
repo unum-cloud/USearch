@@ -6,9 +6,10 @@ plugins {
     id 'cpp'
     id 'maven-publish'
     id 'signing'
+    id 'com.diffplug.spotless' version '6.25.0'
 }
 
-group "cloud.unum"
+group = "cloud.unum"
 version = file("VERSION").text.trim()
 
 java {
@@ -29,7 +30,7 @@ sourceSets {
         // Ensure native libraries are included in the main source set
         resources {
             srcDirs "$buildDir/libs"
-            include "usearch/**"
+            include "usearch-native/**"
         }
     }
     test {
@@ -44,6 +45,12 @@ task sourcesJar(type: Jar, dependsOn: classes) {
     from sourceSets.main.allSource
 }
 
+javadoc {
+    options.addStringOption('Xdoclint:all,-missing', '-quiet')
+    options.encoding = 'UTF-8'
+    options.charSet = 'UTF-8'
+}
+
 task javadocJar(type: Jar, dependsOn: javadoc) {
     archiveClassifier.set('javadoc')
     from javadoc.destinationDir
@@ -53,10 +60,29 @@ dependencies {
     testImplementation('junit:junit:4.13.2')
 }
 
+spotless {
+    format 'gradle', {
+        target '*.gradle'
+        trimTrailingWhitespace()
+        indentWithSpaces(4)
+        endWithNewline()
+    }
+
+    // Use AOSP style but preserve Javadoc formatting
+    // java {
+    //     target 'java/**/*.java'
+    //     googleJavaFormat('1.17.0').aosp().skipJavadocFormatting()
+    //     removeUnusedImports()
+    //     trimTrailingWhitespace()
+    //     endWithNewline()
+    // }
+}
+
 model {
 
     components {
         usearch(NativeLibrarySpec) {
+            baseName = "usearch_jni"  // JNI library for Java bindings
             sources {
                 cpp {
                     source {
@@ -81,23 +107,78 @@ model {
                 buildable = false
             }
             binaries.withType(SharedLibraryBinarySpec) {
-                if (targetPlatform.operatingSystem.linux) {
-                    cppCompiler.args '-I', "${Jvm.current().javaHome}/include/linux"
-                    cppCompiler.args '-D_FILE_OFFSET_BITS=64'
-                    cppCompiler.args '-std=c++11'
-                } else if (targetPlatform.operatingSystem.macOsX) {
-                    cppCompiler.args '-I', "${Jvm.current().javaHome}/include/darwin"
-                    cppCompiler.args '-D_FILE_OFFSET_BITS=64'
-                    cppCompiler.args '-std=c++11'
-                } else if (targetPlatform.operatingSystem.windows){
-                    cppCompiler.args "-I${Jvm.current().javaHome}/include/win32"
-                    cppCompiler.args '/std:c++11'
-                }
                 cppCompiler.args '-DUSEARCH_USE_FP16LIB=1'
                 cppCompiler.args '-DUSEARCH_USE_SIMSIMD=1'
                 cppCompiler.args '-DSIMSIMD_DYNAMIC_DISPATCH=1'
                 cppCompiler.args '-DSIMSIMD_NATIVE_BF16=0'
                 cppCompiler.args '-DSIMSIMD_NATIVE_F16=0'
+
+                if (targetPlatform.operatingSystem.linux) {
+                    cppCompiler.args '-I', "${Jvm.current().javaHome}/include/linux"
+                    cppCompiler.args '-D_FILE_OFFSET_BITS=64'
+                    cppCompiler.args '-std=c++17'
+                    cppCompiler.args '-O2'
+                    cppCompiler.args '-ffast-math'
+                    cppCompiler.args '-Wno-unknown-pragmas'
+
+                    // x86_64 targets for Linux CI
+                    cppCompiler.args '-DSIMSIMD_TARGET_HASWELL=1'
+                    cppCompiler.args '-DSIMSIMD_TARGET_SKYLAKE=1'
+                    cppCompiler.args '-DSIMSIMD_TARGET_ICE=1'
+                    cppCompiler.args '-DSIMSIMD_TARGET_GENOA=1'
+                    cppCompiler.args '-DSIMSIMD_TARGET_SAPPHIRE=1'
+                    cppCompiler.args '-DSIMSIMD_TARGET_TURIN=0'
+                    cppCompiler.args '-DSIMSIMD_TARGET_SIERRA=0'
+
+                    // ARM targets for Linux ARM64 builds
+                    cppCompiler.args '-DSIMSIMD_TARGET_NEON=1'
+                    cppCompiler.args '-DSIMSIMD_TARGET_NEON_BF16=1'
+                    cppCompiler.args '-DSIMSIMD_TARGET_NEON_F16=1'
+                    cppCompiler.args '-DSIMSIMD_TARGET_NEON_I8=1'
+                    cppCompiler.args '-DSIMSIMD_TARGET_SVE=1'
+                    cppCompiler.args '-DSIMSIMD_TARGET_SVE_BF16=1'
+                    cppCompiler.args '-DSIMSIMD_TARGET_SVE_F16=1'
+                    cppCompiler.args '-DSIMSIMD_TARGET_SVE_I8=1'
+                    cppCompiler.args '-DSIMSIMD_TARGET_SVE2=1'
+
+                } else if (targetPlatform.operatingSystem.macOsX) {
+                    cppCompiler.args '-I', "${Jvm.current().javaHome}/include/darwin"
+                    cppCompiler.args '-D_FILE_OFFSET_BITS=64'
+                    cppCompiler.args '-mmacosx-version-min=10.15'
+                    cppCompiler.args '-std=c++17'
+                    cppCompiler.args '-O2'
+                    cppCompiler.args '-ffast-math'
+                    cppCompiler.args '-Wno-unknown-pragmas'
+
+                    // ARM targets for Apple Silicon (M1/M2/M3/M4)
+                    cppCompiler.args '-DSIMSIMD_TARGET_NEON=1'
+                    cppCompiler.args '-DSIMSIMD_TARGET_NEON_BF16=1'
+                    cppCompiler.args '-DSIMSIMD_TARGET_NEON_F16=1'
+                    cppCompiler.args '-DSIMSIMD_TARGET_NEON_I8=1'
+
+                    // x86_64 targets for Intel Macs
+                    cppCompiler.args '-DSIMSIMD_TARGET_HASWELL=1'
+
+                } else if (targetPlatform.operatingSystem.windows) {
+                    cppCompiler.args "-I${Jvm.current().javaHome}/include/win32"
+                    cppCompiler.args '/std:c++17'
+                    cppCompiler.args '/O2'
+                    cppCompiler.args '/fp:fast'
+                    cppCompiler.args '/W1'
+
+                } else if (targetPlatform.name.contains("android")) {
+                    // Android support - similar to macOS ARM settings
+                    cppCompiler.args '-std=c++17'
+                    cppCompiler.args '-O2'
+                    cppCompiler.args '-ffast-math'
+                    cppCompiler.args '-Wno-unknown-pragmas'
+
+                    // ARM targets for Android devices
+                    cppCompiler.args '-DSIMSIMD_TARGET_NEON=1'
+                    cppCompiler.args '-DSIMSIMD_TARGET_NEON_BF16=1'
+                    cppCompiler.args '-DSIMSIMD_TARGET_NEON_F16=1'
+                    cppCompiler.args '-DSIMSIMD_TARGET_NEON_I8=1'
+                }
             }
         }
     }
@@ -111,11 +192,11 @@ model {
                 }
             }
         }
-    }    
+    }
 }
 
 test {
-    forkEvery 1
+    forkEvery = 1
 
     dependsOn jar
 
@@ -135,11 +216,56 @@ test {
 
 jar {
     dependsOn("usearchSharedLibrary")
+
+    // Include all native libraries with their platform-specific directory structure
     from("$buildDir/libs/usearch/shared") {
-        include "libusearch.so", "libusearch.dylib", "libusearch.dll"
-        into "usearch"
+        include "**/*"
+        into "usearch-native"
     }
+
     from sourceSets.main.output
+}
+
+// Separate task for creating a fat JAR with all platform native libraries
+// This is used in CI/CD where we pre-download all platform libraries
+task fatJar(type: Jar) {
+    archiveClassifier = ''
+    archiveBaseName = 'usearch'
+
+    from sourceSets.main.output
+
+    // Include pre-built native libraries from all platforms
+    from("build/libs/usearch/shared") {
+        include "**/*"
+        into "usearch-native"
+    }
+
+    manifest {
+        attributes 'Implementation-Title': 'USearch',
+                   'Implementation-Version': version
+    }
+
+    // Log what we're packaging for transparency
+    doFirst {
+        def nativeDir = file("build/libs/usearch/shared")
+        println "Looking for native libraries in: ${nativeDir.absolutePath}"
+        println "Directory exists: ${nativeDir.exists()}"
+        if (nativeDir.exists()) {
+            def platforms = []
+            nativeDir.eachDir { platforms.add(it.name) }
+            println "Found ${platforms.size()} platform directories: ${platforms}"
+            if (platforms.size() > 0) {
+                println "Packaging native libraries for platforms: ${platforms.join(', ')}"
+            } else {
+                println "ERROR: Native library directory exists but contains no platform subdirectories"
+                println "Directory contents:"
+                nativeDir.eachFile { println "  - ${it.name} (${it.isDirectory() ? 'dir' : 'file'})" }
+                throw new GradleException("No platform directories found in build/libs/usearch/shared")
+            }
+        } else {
+            throw new GradleException("Native libraries directory not found at build/libs/usearch/shared - ensure native libraries are downloaded first")
+        }
+    }
 }
 
 signing {
@@ -153,7 +279,7 @@ publishing {
     publications {
         library(MavenPublication) {
             from components.java
-            
+
             artifact sourcesJar
             artifact javadocJar
 
@@ -191,17 +317,23 @@ publishing {
     }
 
 
-    // Publishing to GitHub is much easier ;)
+    // Maven Central via central.sonatype.com would be great, but it doesn't support Gradle yet :(
+    // Info: https://central.sonatype.org/publish/publish-portal-gradle/
+    /*
     repositories {
         maven {
-            name = "OSSRH"
-            url = "https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/"
+            name = "MavenCentral"
+            url = "https://central.sonatype.com/api/v1/publisher/upload"
             credentials {
-                username = System.getenv("MAVEN_USERNAME")
-                password = System.getenv("MAVEN_PASSWORD")
+                username = System.getenv("MAVEN_CENTRAL_USERNAME")
+                password = System.getenv("MAVEN_CENTRAL_TOKEN")
+            }
+            authentication {
+                basic(BasicAuthentication)
             }
         }
     }
+    */
 
     repositories {
         maven {

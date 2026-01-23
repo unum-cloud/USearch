@@ -37,9 +37,8 @@ scalar_kind_t rust_to_cpp_scalar(ScalarKind value) {
     }
 }
 
-template <typename scalar_at, typename predicate_at = dummy_predicate_t>
-Matches search_(index_dense_t& index, scalar_at const* vec, size_t vec_dims, size_t count,
-                predicate_at&& predicate = predicate_at{}) {
+template <typename scalar_at>
+Matches search_(index_dense_t& index, scalar_at const* vec, size_t vec_dims, size_t count, bool exact = false) {
     if (vec_dims != index.scalar_words())
         throw std::invalid_argument("Vector length must match index dimensionality");
     Matches matches;
@@ -47,9 +46,29 @@ Matches search_(index_dense_t& index, scalar_at const* vec, size_t vec_dims, siz
     matches.distances.reserve(count);
     for (size_t i = 0; i != count; ++i)
         matches.keys.push_back(0), matches.distances.push_back(0);
+
+    search_result_t result = index.search(vec, count, index_dense_t::any_thread(), exact);
+    result.error.raise();
+    count = result.dump_to(matches.keys.data(), matches.distances.data(), count);
+    matches.keys.truncate(count);
+    matches.distances.truncate(count);
+    return matches;
+}
+
+template <typename scalar_at, typename predicate_at>
+Matches filtered_search_(index_dense_t& index, scalar_at const* vec, size_t vec_dims, size_t count,
+                         predicate_at&& predicate) {
+    if (vec_dims != index.scalar_words())
+        throw std::invalid_argument("Vector length must match index dimensionality");
+    Matches matches;
+    matches.keys.reserve(count);
+    matches.distances.reserve(count);
+    for (size_t i = 0; i != count; ++i)
+        matches.keys.push_back(0), matches.distances.push_back(0);
+
     search_result_t result = index.filtered_search(vec, count, std::forward<predicate_at>(predicate));
     result.error.raise();
-    count = result.dump_to(matches.keys.data(), matches.distances.data());
+    count = result.dump_to(matches.keys.data(), matches.distances.data(), count);
     matches.keys.truncate(count);
     matches.distances.truncate(count);
     return matches;
@@ -78,17 +97,26 @@ void NativeIndex::add_f16(vector_key_t key, rust::Slice<int16_t const> vec) cons
 void NativeIndex::add_f32(vector_key_t key, rust::Slice<float const> vec) const { add_(*index_, key, vec.data(), vec.size()); }
 void NativeIndex::add_f64(vector_key_t key, rust::Slice<double const> vec) const { add_(*index_, key, vec.data(), vec.size()); }
 
-Matches NativeIndex::search_b1x8(rust::Slice<uint8_t const> vec, size_t count) const { return search_(*index_, (b1x8_t const*)vec.data(), vec.size(), count); }
-Matches NativeIndex::search_i8(rust::Slice<int8_t const> vec, size_t count) const { return search_(*index_, vec.data(), vec.size(), count); }
-Matches NativeIndex::search_f16(rust::Slice<int16_t const> vec, size_t count) const { return search_(*index_, (f16_t const*)vec.data(), vec.size(), count); }
-Matches NativeIndex::search_f32(rust::Slice<float const> vec, size_t count) const { return search_(*index_, vec.data(), vec.size(), count); }
-Matches NativeIndex::search_f64(rust::Slice<double const> vec, size_t count) const { return search_(*index_, vec.data(), vec.size(), count); }
+// Regular approximate search
+Matches NativeIndex::search_b1x8(rust::Slice<uint8_t const> vec, size_t count) const { return search_(*index_, (b1x8_t const*)vec.data(), vec.size(), count, false); }
+Matches NativeIndex::search_i8(rust::Slice<int8_t const> vec, size_t count) const { return search_(*index_, vec.data(), vec.size(), count, false); }
+Matches NativeIndex::search_f16(rust::Slice<int16_t const> vec, size_t count) const { return search_(*index_, (f16_t const*)vec.data(), vec.size(), count, false); }
+Matches NativeIndex::search_f32(rust::Slice<float const> vec, size_t count) const { return search_(*index_, vec.data(), vec.size(), count, false); }
+Matches NativeIndex::search_f64(rust::Slice<double const> vec, size_t count) const { return search_(*index_, vec.data(), vec.size(), count, false); }
 
-Matches NativeIndex::filtered_search_b1x8(rust::Slice<uint8_t const> vec, size_t count, uptr_t metric, uptr_t metric_state) const { return search_(*index_, (b1x8_t const*)vec.data(), vec.size(), count, make_predicate(metric, metric_state)); }
-Matches NativeIndex::filtered_search_i8(rust::Slice<int8_t const> vec, size_t count, uptr_t metric, uptr_t metric_state) const { return search_(*index_, vec.data(), vec.size(), count, make_predicate(metric, metric_state)); }
-Matches NativeIndex::filtered_search_f16(rust::Slice<int16_t const> vec, size_t count, uptr_t metric, uptr_t metric_state) const { return search_(*index_, (f16_t const*)vec.data(), vec.size(), count, make_predicate(metric, metric_state)); }
-Matches NativeIndex::filtered_search_f32(rust::Slice<float const> vec, size_t count, uptr_t metric, uptr_t metric_state) const { return search_(*index_, vec.data(), vec.size(), count, make_predicate(metric, metric_state)); }
-Matches NativeIndex::filtered_search_f64(rust::Slice<double const> vec, size_t count, uptr_t metric, uptr_t metric_state) const { return search_(*index_, vec.data(), vec.size(), count, make_predicate(metric, metric_state)); }
+// Exact (brute force) search
+Matches NativeIndex::exact_search_b1x8(rust::Slice<uint8_t const> vec, size_t count) const { return search_(*index_, (b1x8_t const*)vec.data(), vec.size(), count, true); }
+Matches NativeIndex::exact_search_i8(rust::Slice<int8_t const> vec, size_t count) const { return search_(*index_, vec.data(), vec.size(), count, true); }
+Matches NativeIndex::exact_search_f16(rust::Slice<int16_t const> vec, size_t count) const { return search_(*index_, (f16_t const*)vec.data(), vec.size(), count, true); }
+Matches NativeIndex::exact_search_f32(rust::Slice<float const> vec, size_t count) const { return search_(*index_, vec.data(), vec.size(), count, true); }
+Matches NativeIndex::exact_search_f64(rust::Slice<double const> vec, size_t count) const { return search_(*index_, vec.data(), vec.size(), count, true); }
+
+// Filtered search (always approximate)
+Matches NativeIndex::filtered_search_b1x8(rust::Slice<uint8_t const> vec, size_t count, uptr_t metric, uptr_t metric_state) const { return filtered_search_(*index_, (b1x8_t const*)vec.data(), vec.size(), count, make_predicate(metric, metric_state)); }
+Matches NativeIndex::filtered_search_i8(rust::Slice<int8_t const> vec, size_t count, uptr_t metric, uptr_t metric_state) const { return filtered_search_(*index_, vec.data(), vec.size(), count, make_predicate(metric, metric_state)); }
+Matches NativeIndex::filtered_search_f16(rust::Slice<int16_t const> vec, size_t count, uptr_t metric, uptr_t metric_state) const { return filtered_search_(*index_, (f16_t const*)vec.data(), vec.size(), count, make_predicate(metric, metric_state)); }
+Matches NativeIndex::filtered_search_f32(rust::Slice<float const> vec, size_t count, uptr_t metric, uptr_t metric_state) const { return filtered_search_(*index_, vec.data(), vec.size(), count, make_predicate(metric, metric_state)); }
+Matches NativeIndex::filtered_search_f64(rust::Slice<double const> vec, size_t count, uptr_t metric, uptr_t metric_state) const { return filtered_search_(*index_, vec.data(), vec.size(), count, make_predicate(metric, metric_state)); }
 
 size_t NativeIndex::get_b1x8(vector_key_t key, rust::Slice<uint8_t> vec) const { if (vec.size() % dimensions()) throw std::invalid_argument("Vector length must match index dimensionality"); return index_->get(key, (b1x8_t*)vec.data(), vec.size() / dimensions()); }
 size_t NativeIndex::get_i8(vector_key_t key, rust::Slice<int8_t> vec) const { if (vec.size() % dimensions()) throw std::invalid_argument("Vector length must match index dimensionality"); return index_->get(key, vec.data(), vec.size() / dimensions()); }
@@ -134,6 +162,9 @@ size_t NativeIndex::count(vector_key_t key) const { return index_->count(key); }
 bool NativeIndex::contains(vector_key_t key) const { return index_->contains(key); }
 
 void NativeIndex::reserve(size_t capacity) const { index_->reserve(capacity); }
+void NativeIndex::reserve_capacity_and_threads(size_t capacity, size_t threads) const {
+    index_->reserve({capacity, threads});
+}
 
 size_t NativeIndex::dimensions() const { return index_->dimensions(); }
 size_t NativeIndex::connectivity() const { return index_->connectivity(); }

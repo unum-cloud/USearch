@@ -1,17 +1,30 @@
+#!/usr/bin/env -S uv run --quiet --script
 """
+USearch Index Joining Utility
+
+Script for joining and benchmarking multimodal datasets (images and texts)
+using different embedding models and distance metrics. Includes support for
+cross-modal search and evaluation.
+
+Usage:
+    uv run python/scripts/join.py
+
+To download the required datasets, run:
 wget -nc https://huggingface.co/datasets/unum-cloud/ann-cc-3m/resolve/main/clip_images.fbin -P datasets/cc_3M/
 wget -nc https://huggingface.co/datasets/unum-cloud/ann-cc-3m/resolve/main/clip_texts.fbin -P datasets/cc_3M/
 wget -nc https://huggingface.co/datasets/unum-cloud/ann-cc-3m/resolve/main/images.fbin -P datasets/cc_3M/
 wget -nc https://huggingface.co/datasets/unum-cloud/ann-cc-3m/resolve/main/texts.fbin -P datasets/cc_3M/
-wget -nc https://huggingface.co/datasets/unum-cloud/ann-cc-3m/resolve/main/uform_english_images.fbin -P datasets/cc_3M/
-wget -nc https://huggingface.co/datasets/unum-cloud/ann-cc-3m/resolve/main/uform_english_texts.fbin -P datasets/cc_3M/
-wget -nc https://huggingface.co/datasets/unum-cloud/ann-cc-3m/resolve/main/clipbigg_images.fbin -P datasets/cc_3M/
-wget -nc https://huggingface.co/datasets/unum-cloud/ann-cc-3m/resolve/main/clipbigg_texts.fbin -P datasets/cc_3M/
-wget -nc https://huggingface.co/datasets/unum-cloud/ann-arxiv-2m/resolve/main/e5base_abstract.fbin -P datasets/arxiv_2M/
-wget -nc https://huggingface.co/datasets/unum-cloud/ann-arxiv-2m/resolve/main/e5base_title.fbin -P datasets/arxiv_2M/
-rm -rf datasets/cc_3M/*.usearch datasets/arxiv_2M/*.usearch
-python python/scripts/join.py
+
+Dependencies listed in the script header for uv to resolve automatically.
 """
+# /// script
+# dependencies = [
+#   "numpy",
+#   "simsimd",
+#   "usearch",
+#   "tqdm"
+# ]
+# ///
 
 from numpy import dot
 from numpy.linalg import norm

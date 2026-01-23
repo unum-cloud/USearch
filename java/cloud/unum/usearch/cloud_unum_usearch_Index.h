@@ -66,34 +66,10 @@ JNIEXPORT jlong JNICALL Java_cloud_unum_usearch_Index_c_1capacity
 /*
  * Class:     cloud_unum_usearch_Index
  * Method:    c_reserve
- * Signature: (JJ)V
+ * Signature: (JJJJ)V
  */
 JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1reserve
-  (JNIEnv *, jclass, jlong, jlong);
-
-/*
- * Class:     cloud_unum_usearch_Index
- * Method:    c_add
- * Signature: (JI[F)V
- */
-JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1add
-  (JNIEnv *, jclass, jlong, jint, jfloatArray);
-
-/*
- * Class:     cloud_unum_usearch_Index
- * Method:    c_search
- * Signature: (J[FJ)[I
- */
-JNIEXPORT jintArray JNICALL Java_cloud_unum_usearch_Index_c_1search
-  (JNIEnv *, jclass, jlong, jfloatArray, jlong);
-
-/*
- * Class:     cloud_unum_usearch_Index
- * Method:    c_get
- * Signature: (JI)[F
- */
-JNIEXPORT jfloatArray JNICALL Java_cloud_unum_usearch_Index_c_1get
-  (JNIEnv *, jclass, jlong, jint);
+  (JNIEnv *, jclass, jlong, jlong, jlong, jlong);
 
 /*
  * Class:     cloud_unum_usearch_Index
@@ -122,18 +98,234 @@ JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1view
 /*
  * Class:     cloud_unum_usearch_Index
  * Method:    c_remove
- * Signature: (JI)Z
+ * Signature: (JJ)Z
  */
 JNIEXPORT jboolean JNICALL Java_cloud_unum_usearch_Index_c_1remove
-  (JNIEnv *, jclass, jlong, jint);
+  (JNIEnv *, jclass, jlong, jlong);
 
 /*
  * Class:     cloud_unum_usearch_Index
  * Method:    c_rename
- * Signature: (JII)Z
+ * Signature: (JJJ)Z
  */
 JNIEXPORT jboolean JNICALL Java_cloud_unum_usearch_Index_c_1rename
-  (JNIEnv *, jclass, jlong, jint, jint);
+  (JNIEnv *, jclass, jlong, jlong, jlong);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_memory_usage
+ * Signature: (J)J
+ */
+JNIEXPORT jlong JNICALL Java_cloud_unum_usearch_Index_c_1memory_1usage
+  (JNIEnv *, jclass, jlong);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_hardware_acceleration
+ * Signature: (J)Ljava/lang/String;
+ */
+JNIEXPORT jstring JNICALL Java_cloud_unum_usearch_Index_c_1hardware_1acceleration
+  (JNIEnv *, jclass, jlong);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_metric_kind
+ * Signature: (J)Ljava/lang/String;
+ */
+JNIEXPORT jstring JNICALL Java_cloud_unum_usearch_Index_c_1metric_1kind
+  (JNIEnv *, jclass, jlong);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_scalar_kind
+ * Signature: (J)Ljava/lang/String;
+ */
+JNIEXPORT jstring JNICALL Java_cloud_unum_usearch_Index_c_1scalar_1kind
+  (JNIEnv *, jclass, jlong);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_hardware_acceleration_available
+ * Signature: ()[Ljava/lang/String;
+ */
+JNIEXPORT jobjectArray JNICALL Java_cloud_unum_usearch_Index_c_1hardware_1acceleration_1available
+  (JNIEnv *, jclass);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_hardware_acceleration_compiled
+ * Signature: ()[Ljava/lang/String;
+ */
+JNIEXPORT jobjectArray JNICALL Java_cloud_unum_usearch_Index_c_1hardware_1acceleration_1compiled
+  (JNIEnv *, jclass);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_library_version
+ * Signature: ()Ljava/lang/String;
+ */
+JNIEXPORT jstring JNICALL Java_cloud_unum_usearch_Index_c_1library_1version
+  (JNIEnv *, jclass);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_uses_dynamic_dispatch
+ * Signature: ()Z
+ */
+JNIEXPORT jboolean JNICALL Java_cloud_unum_usearch_Index_c_1uses_1dynamic_1dispatch
+  (JNIEnv *, jclass);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_get
+ * Signature: (JJ)[F
+ */
+JNIEXPORT jfloatArray JNICALL Java_cloud_unum_usearch_Index_c_1get
+  (JNIEnv *, jclass, jlong, jlong);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_add_f32
+ * Signature: (JJ[F)V
+ */
+JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1add_1f32
+  (JNIEnv *, jclass, jlong, jlong, jfloatArray);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_add_f64
+ * Signature: (JJ[D)V
+ */
+JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1add_1f64
+  (JNIEnv *, jclass, jlong, jlong, jdoubleArray);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_add_i8
+ * Signature: (JJ[B)V
+ */
+JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1add_1i8
+  (JNIEnv *, jclass, jlong, jlong, jbyteArray);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_search_f32
+ * Signature: (J[FJ)[J
+ */
+JNIEXPORT jlongArray JNICALL Java_cloud_unum_usearch_Index_c_1search_1f32
+  (JNIEnv *, jclass, jlong, jfloatArray, jlong);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_search_f64
+ * Signature: (J[DJ)[J
+ */
+JNIEXPORT jlongArray JNICALL Java_cloud_unum_usearch_Index_c_1search_1f64
+  (JNIEnv *, jclass, jlong, jdoubleArray, jlong);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_search_i8
+ * Signature: (J[BJ)[J
+ */
+JNIEXPORT jlongArray JNICALL Java_cloud_unum_usearch_Index_c_1search_1i8
+  (JNIEnv *, jclass, jlong, jbyteArray, jlong);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_get_into_f32
+ * Signature: (JJ[F)V
+ */
+JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1get_1into_1f32
+  (JNIEnv *, jclass, jlong, jlong, jfloatArray);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_get_into_f64
+ * Signature: (JJ[D)V
+ */
+JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1get_1into_1f64
+  (JNIEnv *, jclass, jlong, jlong, jdoubleArray);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_get_into_i8
+ * Signature: (JJ[B)V
+ */
+JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1get_1into_1i8
+  (JNIEnv *, jclass, jlong, jlong, jbyteArray);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_add_f32_buffer
+ * Signature: (JJLjava/nio/FloatBuffer;)V
+ */
+JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1add_1f32_1buffer
+  (JNIEnv *, jclass, jlong, jlong, jobject);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_add_f64_buffer
+ * Signature: (JJLjava/nio/DoubleBuffer;)V
+ */
+JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1add_1f64_1buffer
+  (JNIEnv *, jclass, jlong, jlong, jobject);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_add_i8_buffer
+ * Signature: (JJLjava/nio/ByteBuffer;)V
+ */
+JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1add_1i8_1buffer
+  (JNIEnv *, jclass, jlong, jlong, jobject);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_search_f32_buffer
+ * Signature: (JLjava/nio/FloatBuffer;J)[J
+ */
+JNIEXPORT jlongArray JNICALL Java_cloud_unum_usearch_Index_c_1search_1f32_1buffer
+  (JNIEnv *, jclass, jlong, jobject, jlong);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_search_f64_buffer
+ * Signature: (JLjava/nio/DoubleBuffer;J)[J
+ */
+JNIEXPORT jlongArray JNICALL Java_cloud_unum_usearch_Index_c_1search_1f64_1buffer
+  (JNIEnv *, jclass, jlong, jobject, jlong);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_search_i8_buffer
+ * Signature: (JLjava/nio/ByteBuffer;J)[J
+ */
+JNIEXPORT jlongArray JNICALL Java_cloud_unum_usearch_Index_c_1search_1i8_1buffer
+  (JNIEnv *, jclass, jlong, jobject, jlong);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_search_into_f32_buffer
+ * Signature: (JLjava/nio/FloatBuffer;Ljava/nio/LongBuffer;J)I
+ */
+JNIEXPORT jint JNICALL Java_cloud_unum_usearch_Index_c_1search_1into_1f32_1buffer
+  (JNIEnv *, jclass, jlong, jobject, jobject, jlong);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_search_into_f64_buffer
+ * Signature: (JLjava/nio/DoubleBuffer;Ljava/nio/LongBuffer;J)I
+ */
+JNIEXPORT jint JNICALL Java_cloud_unum_usearch_Index_c_1search_1into_1f64_1buffer
+  (JNIEnv *, jclass, jlong, jobject, jobject, jlong);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_search_into_i8_buffer
+ * Signature: (JLjava/nio/ByteBuffer;Ljava/nio/LongBuffer;J)I
+ */
+JNIEXPORT jint JNICALL Java_cloud_unum_usearch_Index_c_1search_1into_1i8_1buffer
+  (JNIEnv *, jclass, jlong, jobject, jobject, jlong);
 
 #ifdef __cplusplus
 }

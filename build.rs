@@ -104,10 +104,8 @@ fn main() {
                     "cargo:warning=Failed to compile after disabling {:?}, trying next configuration...",
                     flag
                 );
-            } else {
-                if !flags_to_try.is_empty() {
-                    print!("cargo:warning=Failed to compile with all SIMD backends...");
-                }
+            } else if !flags_to_try.is_empty() {
+                print!("cargo:warning=Failed to compile with all SIMD backends...");
             }
 
             pop_flag = flags_to_try.pop();

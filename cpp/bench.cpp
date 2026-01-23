@@ -76,7 +76,7 @@ struct alignas(32) persisted_matrix_gt {
 
     persisted_matrix_gt(char const* path) noexcept(false) {
         if (!path || !std::strlen(path))
-            throw std::invalid_argument("The file path is empty");
+            return; // Empty path results in default-constructed matrix
 #if defined(USEARCH_DEFINED_WINDOWS)
 
         HANDLE file_handle =
@@ -147,13 +147,14 @@ struct persisted_dataset_gt {
     persisted_matrix_gt<scalar_t> vectors_;
     persisted_matrix_gt<scalar_t> queries_;
     persisted_matrix_gt<compressed_slot_t> neighborhoods_;
+    std::vector<default_key_t> vector_ids_;
     std::vector<compressed_slot_t> neighborhoods_iota_{};
     std::size_t vectors_to_skip_{};
     std::size_t vectors_to_take_{};
 
     persisted_dataset_gt(char const* path_vectors, std::size_t vectors_to_skip = 0,
                          std::size_t vectors_to_take = 0) noexcept(false)
-        : vectors_(path_vectors), queries_(), neighborhoods_(), vectors_to_skip_(vectors_to_skip),
+        : vectors_(path_vectors), queries_(), neighborhoods_(), vector_ids_(), vectors_to_skip_(vectors_to_skip),
           vectors_to_take_(vectors_to_take) {
         neighborhoods_iota_.resize(vectors_.rows);
         std::iota(neighborhoods_iota_.begin(), neighborhoods_iota_.end(), 0);
@@ -161,8 +162,8 @@ struct persisted_dataset_gt {
 
     persisted_dataset_gt(char const* path_vectors, char const* path_queries, char const* path_neighbors,
                          std::size_t vectors_to_skip = 0, std::size_t vectors_to_take = 0) noexcept(false)
-        : vectors_(path_vectors), queries_(path_queries), neighborhoods_(path_neighbors), neighborhoods_iota_(),
-          vectors_to_skip_(vectors_to_skip), vectors_to_take_(vectors_to_take) {
+        : vectors_(path_vectors), queries_(path_queries), neighborhoods_(path_neighbors), vector_ids_(),
+          neighborhoods_iota_(), vectors_to_skip_(vectors_to_skip), vectors_to_take_(vectors_to_take) {
 
         if (vectors_.cols != queries_.cols)
             throw std::invalid_argument("Contents and queries have different dimensionality");
@@ -170,7 +171,45 @@ struct persisted_dataset_gt {
             throw std::invalid_argument("Number of ground-truth neighborhoods doesn't match number of queries");
     }
 
+    persisted_dataset_gt(char const* path_vectors, char const* path_queries, char const* path_neighbors,
+                         char const* path_ids, std::size_t vectors_to_skip = 0,
+                         std::size_t vectors_to_take = 0) noexcept(false)
+        : vectors_(path_vectors), queries_(path_queries), neighborhoods_(path_neighbors), vector_ids_(),
+          neighborhoods_iota_(), vectors_to_skip_(vectors_to_skip), vectors_to_take_(vectors_to_take) {
+
+        // Handle self-search case (no queries/neighbors)
+        if (!queries_.scalars && !neighborhoods_.scalars) {
+            neighborhoods_iota_.resize(vectors_.rows);
+            std::iota(neighborhoods_iota_.begin(), neighborhoods_iota_.end(), 0);
+        } else {
+            if (vectors_.cols != queries_.cols)
+                throw std::invalid_argument("Contents and queries have different dimensionality");
+            if (queries_.rows != neighborhoods_.rows)
+                throw std::invalid_argument("Number of ground-truth neighborhoods doesn't match number of queries");
+        }
+
+        // Load IDs file if provided
+        if (path_ids && std::strlen(path_ids)) {
+            persisted_matrix_gt<std::int32_t> ids_matrix(path_ids);
+            if (ids_matrix.rows != vectors_.rows)
+                throw std::invalid_argument("Number of vector IDs doesn't match number of vectors");
+            if (ids_matrix.cols != 1)
+                throw std::invalid_argument("Vector IDs file should have exactly 1 column");
+
+            // Convert and copy IDs into memory
+            vector_ids_.resize(ids_matrix.rows);
+            for (std::size_t i = 0; i < ids_matrix.rows; ++i)
+                vector_ids_[i] = static_cast<default_key_t>(*ids_matrix.row(i));
+        }
+    }
+
     bool search_itself() const noexcept { return vectors_count() && !queries_.rows; }
+    bool has_vector_ids() const noexcept { return !vector_ids_.empty(); }
+
+    default_key_t vector_id(std::size_t i) const noexcept {
+        return has_vector_ids() ? vector_ids_[i + vectors_to_skip_]
+                                : static_cast<default_key_t>(i + vectors_to_skip_);
+    }
 
     std::size_t dimensions() const noexcept { return vectors_.cols; }
     std::size_t queries_count() const noexcept { return search_itself() ? vectors_count() : queries_.rows; }
@@ -214,6 +253,7 @@ struct in_memory_dataset_gt {
     std::size_t vectors_count() const noexcept { return vectors_count_; }
     std::size_t queries_count() const noexcept { return vectors_count(); }
     std::size_t neighborhood_size() const noexcept { return 1; }
+    default_key_t vector_id(std::size_t i) const noexcept { return static_cast<default_key_t>(i); }
     scalar_t const* vector(std::size_t i) const noexcept { return vectors_.data() + i * dimensions_; }
     scalar_t const* query(std::size_t i) const noexcept { return queries_.data() + i * dimensions_; }
     compressed_slot_t const* neighborhood(std::size_t i) const noexcept {
@@ -299,8 +339,7 @@ void index_many(index_at& index, std::size_t n, vector_id_at const* ids, scalar_
 #if USEARCH_USE_OPENMP
         config.thread = omp_get_thread_num();
 #endif
-        span_gt<scalar_at const> vector{vectors + dims * i, dims};
-        index.add(ids[i], vector, config.thread);
+        index.add(ids[i], vectors + dims * i, config.thread);
         printer.progress++;
         if (config.thread == 0)
             printer.refresh();
@@ -327,7 +366,7 @@ void search_many( //
         config.thread = omp_get_thread_num();
 #endif
         span_gt<scalar_at const> vector{vectors + dims * i, dims};
-        index.search(vector, wanted, config.thread).dump_to(ids + wanted * i, distances + wanted * i);
+        index.search(vector, wanted, config.thread).dump_to(ids + wanted * i, distances + wanted * i, wanted);
         printer.progress++;
         if (config.thread == 0)
             printer.refresh();
@@ -347,7 +386,8 @@ static void single_shot(dataset_at& dataset, index_at& index, bool construct = t
     if (construct) {
         // Perform insertions, evaluate speed
         std::vector<default_key_t> ids(dataset.vectors_count());
-        std::iota(ids.begin(), ids.end(), 0);
+        for (std::size_t i = 0; i < dataset.vectors_count(); ++i)
+            ids[i] = static_cast<default_key_t>(dataset.vector_id(i));
         index_many(index, dataset.vectors_count(), ids.data(), dataset.vector(0), dataset.dimensions());
     }
 
@@ -433,7 +473,7 @@ void handler(int sig) {
             name = "<unknown>";
         }
         DWORD bytes_written;
-        WriteFile(STDERR_FILENO, name, strlen(name), &bytes_written, NULL);
+        WriteFile(STDERR_FILENO, name, std::strlen(name), &bytes_written, NULL);
         WriteFile(STDERR_FILENO, "\n", 1, &bytes_written, NULL);
     }
     free(symbol);
@@ -454,6 +494,7 @@ struct args_t {
     std::string path_vectors;
     std::string path_queries;
     std::string path_neighbors;
+    std::string path_ids;
     std::string path_output = "last.usearch";
 
     std::size_t connectivity = default_connectivity();
@@ -514,7 +555,7 @@ struct args_t {
 };
 
 template <typename index_at, typename dataset_at> //
-void run_punned(dataset_at& dataset, args_t const& args, index_config_t config, index_limits_t limits) {
+void run_punned(dataset_at& dataset, args_t const& args, index_dense_config_t config, index_limits_t limits) {
 
     scalar_kind_t quantization = args.quantization();
     std::printf("-- Quantization: %s\n", scalar_kind_name(quantization));
@@ -557,17 +598,9 @@ void run_typed(dataset_at& dataset, args_t const& args, index_config_t config, i
 
 template <typename dataset_scalar_at> void bench_with_args(args_t const& args) {
     using dataset_t = persisted_dataset_gt<dataset_scalar_at, compressed_slot_t>;
-    dataset_t dataset = args.path_queries.empty() && args.path_neighbors.empty()
-                            ? dataset_t(args.path_vectors.c_str(), //
-                                        args.vectors_to_skip,      //
-                                        args.vectors_to_take       //
-                                        )
-                            : dataset_t(args.path_vectors.c_str(),   //
-                                        args.path_queries.c_str(),   //
-                                        args.path_neighbors.c_str(), //
-                                        args.vectors_to_skip,        //
-                                        args.vectors_to_take         //
-                              );
+
+    dataset_t dataset(args.path_vectors.c_str(), args.path_queries.c_str(), args.path_neighbors.c_str(),
+                      args.path_ids.c_str(), args.vectors_to_skip, args.vectors_to_take);
     std::printf("-- Dimensions: %zu\n", dataset.dimensions());
     std::printf("-- Vectors count: %zu\n", dataset.vectors_count());
     std::printf("-- Queries count: %zu\n", dataset.queries_count());
@@ -602,9 +635,12 @@ int main(int argc, char** argv) {
 
     auto args = args_t{};
     auto cli = ( //
-        (option("--vectors") & value("path", args.path_vectors)).doc(".[fhbd]bin file path to construct the index"),
-        (option("--queries") & value("path", args.path_queries)).doc(".[fhbd]bin file path to query the index"),
-        (option("--neighbors") & value("path", args.path_neighbors)).doc(".ibin file path with ground truth"),
+        (option("--vectors") & value("path", args.path_vectors))
+            .doc(".[fhbd]bin, .i8bin, .f32bin file path to construct the index"),
+        (option("--queries") & value("path", args.path_queries))
+            .doc(".[fhbd]bin, .i8bin, .f32bin file path to query the index"),
+        (option("--neighbors") & value("path", args.path_neighbors)).doc(".ibin, .i32bin file path with ground truth"),
+        (option("--ids") & value("path", args.path_ids)).doc(".i32bin file path with vector IDs (optional)"),
         (option("-o", "--output") & value("path", args.path_output)).doc(".usearch output file path"),
         (option("-b", "--big").set(args.big)).doc("Will switch to uint40_t for neighbors lists with over 4B entries"),
         (option("-j", "--threads") & value("integer", args.threads)).doc("Uses all available cores by default"),
@@ -665,6 +701,10 @@ int main(int argc, char** argv) {
         bench_with_args<f16_t>(args);
     else if (ends_with(args.path_vectors, ".bbin"))
         bench_with_args<b1x8_t>(args);
+    else if (ends_with(args.path_vectors, ".i8bin"))
+        bench_with_args<i8_t>(args);
+    else if (ends_with(args.path_vectors, ".f32bin"))
+        bench_with_args<f32_t>(args);
     else
         throw std::runtime_error("Unknown input file path");
 

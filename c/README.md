@@ -36,7 +36,7 @@ int main() {
     if (error) goto cleanup;
     
     // Check up:
-    assert(usearch_size(index, &error) == vectors_count);
+    assert(usearch_size(index, &error) == 1);
     assert(usearch_capacity(index, &error) == vectors_count);
     assert(usearch_contains(index, 42, &error));
 
@@ -46,8 +46,6 @@ int main() {
     size_t found_count = usearch_search(
         index, &vector[0], usearch_scalar_f32_k, 10, 
         &found_keys[0], &found_distances[0], &error);
-
-    usearch_free(index, &error);
 
   cleanup:
     if (error) fprintf(stderr, "Error: %s\n", error);
@@ -66,13 +64,13 @@ usearch_load(index, "index.usearch", &error);
 usearch_view(index, "index.usearch", &error);
 ```
 
-Before saving them do disk, you can determine exactly how much disk space the index will take:
+Before saving to disk, you can determine exactly how much disk space the index will take:
 
 ```c
 size_t bytes = usearch_serialized_length(index, &error);
 ```
 
-With a known size, you can serialize the index into an in-memory a buffer:
+With a known size, you can serialize the index into an in-memory buffer:
 
 ```c
 void* buffer = malloc(bytes);
@@ -158,7 +156,7 @@ size_t count_removed = usearch_remove(index, 43, &error);
 assert(count_renamed == count_removed);
 ```
 
-USearch can also be used for multi-indicies, where each key may map to multiple vectors.
+USearch can also be used for multi-indices, where each key may map to multiple vectors.
 That's a common case when implementing semantic search for long documents, where the entire documents can't fit into one input sequence in a transformer-model, and you have to split them into chunks.
 
 ```c
@@ -179,7 +177,7 @@ usearch_distance_t distance = usearch_distance(
     &vector_a[0], &vector_b[0], usearch_scalar_f32_k, dimensions, usearch_metric_cos_k, &error);
 ```
 
-Alternatively, you can benefir from faster thread-pools and priority queues for parallel exact batch-search.
+Alternatively, you can benefit from faster thread-pools and priority queues for parallel exact batch-search.
 
 ```c
 size_t threads = 0;
@@ -247,4 +245,3 @@ The second will print the memory usage of the index in bytes.
 printf("Hardware acceleration: %s\n", usearch_hardware_acceleration(index, &error));
 printf("Memory usage: %zu\n", usearch_memory_usage(index, &error));
 ```
-

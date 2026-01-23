@@ -1,3 +1,23 @@
+#!/usr/bin/env -S uv run --quiet --script
+"""
+FAISS Index Wrapper for USearch Benchmarking
+
+Provides FAISS index implementations compatible with USearch benchmarking framework
+for performance comparison between USearch and FAISS libraries.
+
+Usage:
+    uv run python/scripts/index_faiss.py
+    
+Dependencies listed in the script header for uv to resolve automatically.
+"""
+# /// script
+# dependencies = [
+#   "numpy",
+#   "faiss-cpu",
+#   "usearch"
+# ]
+# ///
+
 import os
 from typing import Optional
 

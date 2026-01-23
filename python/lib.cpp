@@ -292,7 +292,7 @@ static void search_typed(                                   //
         }
 
         counts_py1d(task_idx) =
-            static_cast<Py_ssize_t>(result.dump_to(&keys_py2d(task_idx, 0), &distances_py2d(task_idx, 0)));
+            static_cast<Py_ssize_t>(result.dump_to(&keys_py2d(task_idx, 0), &distances_py2d(task_idx, 0), wanted));
 
         stats_visited_members += result.visited_members;
         stats_computed_distances += result.computed_distances;
@@ -420,8 +420,8 @@ static py::tuple search_many_in_index( //
     if (wanted == 0)
         return py::tuple(5);
 
-    if (index.limits().threads_search < threads)
-        throw std::invalid_argument("Can't use that many threads!");
+    // Clamp threads to hardware limit instead of throwing
+    threads = std::min<std::size_t>(threads, std::thread::hardware_concurrency());
 
     py::buffer_info vectors_info = vectors.request();
     if (vectors_info.ndim != 2)
@@ -663,8 +663,8 @@ static py::tuple cluster_vectors(        //
     index_at& index, py::buffer queries, //
     std::size_t min_count, std::size_t max_count, std::size_t threads, progress_func_t const& progress) {
 
-    if (index.limits().threads_search < threads)
-        throw std::invalid_argument("Can't use that many threads!");
+    // Clamp threads to hardware limit instead of throwing
+    threads = std::min<std::size_t>(threads, std::thread::hardware_concurrency());
 
     py::buffer_info queries_info = queries.request();
     if (queries_info.ndim != 2)
@@ -737,8 +737,8 @@ static py::tuple cluster_keys(                            //
     index_at& index, py::array_t<dense_key_t> queries_py, //
     std::size_t min_count, std::size_t max_count, std::size_t threads, progress_func_t const& progress) {
 
-    if (index.limits().threads_search < threads)
-        throw std::invalid_argument("Can't use that many threads!");
+    // Clamp threads to hardware limit instead of throwing
+    threads = std::min<std::size_t>(threads, std::thread::hardware_concurrency());
 
     std::size_t queries_count = static_cast<std::size_t>(queries_py.size());
     auto queries_py1d = queries_py.template unchecked<1>();
@@ -842,8 +842,6 @@ static py::dict index_metadata(index_dense_metadata_result_t const& meta) {
 
 // clang-format off
 template <typename index_at> void save_index_to_path(index_at const& index, std::string const& path, progress_func_t const& progress) { index.save(path.c_str(), {}, progress_t{progress}).error.raise(); }
-template <typename index_at> void load_index_from_path(index_at& index, std::string const& path, progress_func_t const& progress) { index.load(path.c_str(), {}, progress_t{progress}).error.raise(); }
-template <typename index_at> void view_index_from_path(index_at& index, std::string const& path, progress_func_t const& progress) { index.view(path.c_str(), 0, {}, progress_t{progress}).error.raise(); }
 template <typename index_at> void reset_index(index_at& index) { index.reset(); }
 template <typename index_at> void clear_index(index_at& index) { index.clear(); }
 template <typename index_at> std::size_t max_level(index_at const &index) { return index.max_level(); }
@@ -851,6 +849,26 @@ template <typename index_at> std::size_t serialized_length(index_at const &index
 template <typename index_at> typename index_at::stats_t compute_stats(index_at const &index) { return index.stats(); }
 template <typename index_at> typename index_at::stats_t compute_level_stats(index_at const &index, std::size_t level) { return index.stats(level); }
 // clang-format on
+
+template <typename index_at>
+void load_index_from_path(index_at& index, std::string const& path, progress_func_t const& progress) {
+    index.load(path.c_str(), {}, progress_t{progress}).error.raise();
+
+    // Reserve memory and threads for restored index.
+    std::size_t threads = std::thread::hardware_concurrency();
+    if (!index.try_reserve(index_limits_t(index.size(), threads)))
+        throw std::invalid_argument("Out of memory!");
+}
+
+template <typename index_at>
+void view_index_from_path(index_at& index, std::string const& path, progress_func_t const& progress) {
+    index.view(path.c_str(), 0, {}, progress_t{progress}).error.raise();
+
+    // Reserve memory and threads for restored index.
+    std::size_t threads = std::thread::hardware_concurrency();
+    if (!index.try_reserve(index_limits_t(index.size(), threads)))
+        throw std::invalid_argument("Out of memory!");
+}
 
 template <typename py_bytes_at> memory_mapped_file_t memory_map_from_bytes(py_bytes_at&& bytes) {
     py::buffer_info info(py::buffer(bytes).request());
@@ -884,12 +902,23 @@ template <typename index_at> py::object save_index_to_buffer(index_at const& ind
 }
 
 template <typename index_at>
-void load_index_from_buffer(index_at& index, py::bytes const& buffer, progress_func_t const& progress) {
-    index.load(memory_map_from_bytes(buffer), {}, {}, progress_t{progress}).error.raise();
+void load_index_from_buffer(index_at& index, py::object const& buffer_obj, progress_func_t const& progress) {
+    index.load(memory_map_from_bytes(buffer_obj), {}, {}, progress_t{progress}).error.raise();
+
+    // Reserve memory and threads for restored index.
+    std::size_t threads = std::thread::hardware_concurrency();
+    if (!index.try_reserve(index_limits_t(index.size(), threads)))
+        throw std::invalid_argument("Out of memory!");
 }
+
 template <typename index_at>
-void view_index_from_buffer(index_at& index, py::bytes const& buffer, progress_func_t const& progress) {
-    index.view(memory_map_from_bytes(buffer), {}, {}, progress_t{progress}).error.raise();
+void view_index_from_buffer(index_at& index, py::object const& buffer_obj, progress_func_t const& progress) {
+    index.view(memory_map_from_bytes(buffer_obj), {}, {}, progress_t{progress}).error.raise();
+
+    // Reserve memory and threads for restored index.
+    std::size_t threads = std::thread::hardware_concurrency();
+    if (!index.try_reserve(index_limits_t(index.size(), threads)))
+        throw std::invalid_argument("Out of memory!");
 }
 
 template <typename index_at> std::vector<typename index_at::stats_t> compute_levels_stats(index_at const& index) {
@@ -974,11 +1003,11 @@ PYBIND11_MODULE(compiled, m) {
     m.attr("VERSION_MINOR") = py::int_(USEARCH_VERSION_MINOR);
     m.attr("VERSION_PATCH") = py::int_(USEARCH_VERSION_PATCH);
 
-    py::enum_<metric_punned_signature_t>(m, "MetricSignature")
+    py::enum_<metric_punned_signature_t>(m, "MetricSignature", py::arithmetic())
         .value("ArrayArray", metric_punned_signature_t::array_array_k)
         .value("ArrayArraySize", metric_punned_signature_t::array_array_size_k);
 
-    py::enum_<metric_kind_t>(m, "MetricKind")
+    py::enum_<metric_kind_t>(m, "MetricKind", py::arithmetic())
         .value("Unknown", metric_kind_t::unknown_k)
 
         .value("IP", metric_kind_t::ip_k)
@@ -996,7 +1025,7 @@ PYBIND11_MODULE(compiled, m) {
         .value("Cosine", metric_kind_t::cos_k)
         .value("InnerProduct", metric_kind_t::ip_k);
 
-    py::enum_<scalar_kind_t>(m, "ScalarKind")
+    py::enum_<scalar_kind_t>(m, "ScalarKind", py::arithmetic())
         .value("Unknown", scalar_kind_t::unknown_k)
         .value("B1", scalar_kind_t::b1x8_k)
         .value("U40", scalar_kind_t::u40_k)
@@ -1021,8 +1050,8 @@ PYBIND11_MODULE(compiled, m) {
         return index_metadata(meta);
     });
 
-    m.def("index_dense_metadata_from_buffer", [](py::bytes const& buffer) -> py::dict {
-        index_dense_metadata_result_t meta = index_dense_metadata_from_buffer(memory_map_from_bytes(buffer));
+    m.def("index_dense_metadata_from_buffer", [](py::object const& buffer_obj) -> py::dict {
+        index_dense_metadata_result_t meta = index_dense_metadata_from_buffer(memory_map_from_bytes(buffer_obj));
         forward_error(meta);
         return index_metadata(meta);
     });
@@ -1319,9 +1348,9 @@ PYBIND11_MODULE(compiled, m) {
           py::arg("progress") = nullptr);
 
     i.def("save_index_to_buffer", &save_index_to_buffer<dense_index_py_t>, py::arg("progress") = nullptr);
-    i.def("load_index_from_buffer", &load_index_from_buffer<dense_index_py_t>, py::arg("buffer"),
+    i.def("load_index_from_buffer", &load_index_from_buffer<dense_index_py_t>, py::arg("buffer_obj"),
           py::arg("progress") = nullptr);
-    i.def("view_index_from_buffer", &view_index_from_buffer<dense_index_py_t>, py::arg("buffer"),
+    i.def("view_index_from_buffer", &view_index_from_buffer<dense_index_py_t>, py::arg("buffer_obj"),
           py::arg("progress") = nullptr);
 
     i.def("reset", &reset_index<dense_index_py_t>);

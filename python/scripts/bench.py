@@ -1,3 +1,24 @@
+#!/usr/bin/env -S uv run --quiet --script
+"""
+USearch Benchmarking Utility
+
+This script provides benchmarking functions for USearch approximate nearest neighbor
+search performance evaluation across different configurations and data types.
+
+Usage:
+    uv run python/scripts/bench.py
+
+Dependencies listed in the script header for uv to resolve automatically.
+"""
+# /// script
+# dependencies = [
+#   "numpy",
+#   "pandas", 
+#   "usearch",
+#   "tqdm"
+# ]
+# ///
+
 import itertools
 from typing import List
 from dataclasses import asdict

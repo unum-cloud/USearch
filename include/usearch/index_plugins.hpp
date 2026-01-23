@@ -483,8 +483,8 @@ class f16_bits_t {
     inline operator float() const noexcept { return f16_to_f32(uint16_); }
     inline explicit operator bool() const noexcept { return f16_to_f32(uint16_) > 0.5f; }
 
-    inline f16_bits_t(std::int8_t v) noexcept : uint16_(f32_to_f16(v)) {}
-    inline f16_bits_t(bool v) noexcept : uint16_(f32_to_f16(v)) {}
+    inline f16_bits_t(int v) noexcept : uint16_(f32_to_f16(static_cast<float>(v))) {}
+    inline f16_bits_t(bool v) noexcept : uint16_(f32_to_f16(static_cast<float>(v))) {}
     inline f16_bits_t(float v) noexcept : uint16_(f32_to_f16(v)) {}
     inline f16_bits_t(double v) noexcept : uint16_(f32_to_f16(static_cast<float>(v))) {}
 
@@ -524,6 +524,11 @@ class f16_bits_t {
     }
 };
 
+#if USEARCH_USE_OPENMP
+#pragma omp declare reduction(+ : unum::usearch::f16_bits_t : omp_out = omp_out + omp_in)                              \
+    initializer(omp_priv = unum::usearch::f16_bits_t())
+#endif
+
 /**
  *  @brief  Numeric type for brain-floating point half-precision floating point.
  *          If hardware support isn't available, falls back to a hardware
@@ -542,8 +547,8 @@ class bf16_bits_t {
     inline operator float() const noexcept { return bf16_to_f32(uint16_); }
     inline explicit operator bool() const noexcept { return bf16_to_f32(uint16_) > 0.5f; }
 
-    inline bf16_bits_t(std::int8_t v) noexcept : uint16_(f32_to_bf16(v)) {}
-    inline bf16_bits_t(bool v) noexcept : uint16_(f32_to_bf16(v)) {}
+    inline bf16_bits_t(int v) noexcept : uint16_(f32_to_bf16(static_cast<float>(v))) {}
+    inline bf16_bits_t(bool v) noexcept : uint16_(f32_to_bf16(static_cast<float>(v))) {}
     inline bf16_bits_t(float v) noexcept : uint16_(f32_to_bf16(v)) {}
     inline bf16_bits_t(double v) noexcept : uint16_(f32_to_bf16(static_cast<float>(v))) {}
 
@@ -581,7 +586,17 @@ class bf16_bits_t {
         uint16_ = f32_to_bf16(v / bf16_to_f32(uint16_));
         return *this;
     }
+
+    inline bf16_bits_t& operator=(float v) noexcept {
+        uint16_ = f32_to_bf16(v);
+        return *this;
+    }
 };
+
+#if USEARCH_USE_OPENMP
+#pragma omp declare reduction(+ : unum::usearch::bf16_bits_t : omp_out = omp_out + omp_in)                             \
+    initializer(omp_priv = unum::usearch::bf16_bits_t())
+#endif
 
 /**
  *  @brief  An STL-based executor or a "thread-pool" for parallel execution.
@@ -760,7 +775,9 @@ class executor_openmp_t {
     template <typename thread_aware_function_at>
     void parallel(thread_aware_function_at&& thread_aware_function) noexcept(false) {
 #pragma omp parallel
-        { thread_aware_function(omp_get_thread_num()); }
+        {
+            thread_aware_function(omp_get_thread_num());
+        }
     }
 };
 
@@ -1223,6 +1240,7 @@ struct casts_punned_t {
         cast_punned_t b1x8{};
         cast_punned_t i8{};
         cast_punned_t f16{};
+        cast_punned_t bf16{};
         cast_punned_t f32{};
         cast_punned_t f64{};
 
@@ -1231,7 +1249,7 @@ struct casts_punned_t {
             case scalar_kind_t::f64_k: return f64;
             case scalar_kind_t::f32_k: return f32;
             case scalar_kind_t::f16_k: return f16;
-            case scalar_kind_t::bf16_k: return f16;
+            case scalar_kind_t::bf16_k: return bf16;
             case scalar_kind_t::i8_k: return i8;
             case scalar_kind_t::b1x8_k: return b1x8;
             default: return nullptr;
@@ -1246,12 +1264,14 @@ struct casts_punned_t {
         result.from.b1x8 = &cast_gt<b1x8_t, scalar_at>::try_;
         result.from.i8 = &cast_gt<i8_t, scalar_at>::try_;
         result.from.f16 = &cast_gt<f16_t, scalar_at>::try_;
+        result.from.bf16 = &cast_gt<bf16_t, scalar_at>::try_;
         result.from.f32 = &cast_gt<f32_t, scalar_at>::try_;
         result.from.f64 = &cast_gt<f64_t, scalar_at>::try_;
 
         result.to.b1x8 = &cast_gt<scalar_at, b1x8_t>::try_;
         result.to.i8 = &cast_gt<scalar_at, i8_t>::try_;
         result.to.f16 = &cast_gt<scalar_at, f16_t>::try_;
+        result.to.bf16 = &cast_gt<scalar_at, bf16_t>::try_;
         result.to.f32 = &cast_gt<scalar_at, f32_t>::try_;
         result.to.f64 = &cast_gt<scalar_at, f64_t>::try_;
 
@@ -1283,6 +1303,8 @@ struct casts_punned_t {
 
 /**
  *  @brief  Inner (Dot) Product distance.
+ *          Vectors should be normalized to unit length,
+ *          otherwise `::metric_cos_gt` should be used instead.
  */
 template <typename scalar_at = float, typename result_at = scalar_at> struct metric_ip_gt {
     using scalar_t = scalar_at;
@@ -2566,7 +2588,7 @@ class flat_hash_multi_set_gt {
         // Allocate new memory
         data_ = (char*)allocator_t{}.allocate(other.buckets_ * bytes_per_bucket());
         if (!data_)
-            __usearch_raise_runtime_error("failed memory allocation");
+            usearch_raise_runtime_error("failed memory allocation");
 
         // Copy metadata
         buckets_ = other.buckets_;
@@ -2606,7 +2628,7 @@ class flat_hash_multi_set_gt {
         // Allocate new memory
         data_ = (char*)allocator_t{}.allocate(other.buckets_ * bytes_per_bucket());
         if (!data_)
-            __usearch_raise_runtime_error("failed memory allocation");
+            usearch_raise_runtime_error("failed memory allocation");
 
         // Copy metadata
         buckets_ = other.buckets_;
@@ -2979,7 +3001,7 @@ class flat_hash_multi_set_gt {
 
     void reserve(std::size_t capacity) {
         if (!try_reserve(capacity))
-            __usearch_raise_runtime_error("failed to reserve memory");
+            usearch_raise_runtime_error("failed to reserve memory");
     }
 
     bool try_emplace(element_t const& element) noexcept {

@@ -76,6 +76,9 @@ The first controls the number of threads spawned for the task.
 The second controls whether the vector itself will be persisted inside the index.
 If you can preserve the lifetime of the vector somewhere else, you can avoid the copy.
 
+> When using `BatchMatches`, be aware that unused positions in the results arrays will be filled with sentinel values, like the signaling `NaN` for floating-point distances.
+> Don't forget to check for `matches.counts` if you are using the recommended batch interfaces.
+
 ## User-Defined Metrics and JIT in Python
 
 ### [Numba][numba]

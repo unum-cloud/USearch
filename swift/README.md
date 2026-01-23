@@ -18,7 +18,7 @@ Here’s a basic example:
 ```swift
 let index = USearchIndex.make(metric: .Cos, dimensions: 3, connectivity: 8)
 let vectorA: [Float32] = [0.3, 0.5, 1.2] // `Float32` and `Float64` are always supported
-let vectorB: [Float32] = [0.4, 0.2, 1.2] // `Float16` supports on the OS & hardware version
+let vectorB: [Float32] = [0.4, 0.2, 1.2] // `Float16` support depends on the OS and hardware
 index.add(key: 42, vector: vectorA) // Pass full arrays or slices
 index.add(key: 43, vector: vectorB)
 
@@ -28,7 +28,7 @@ let retrieved: [[Float32]]? = index.get(key: 42)
 assert(retrieved![0] == vectorA)
 ```
 
-If using in a SwiftUI application, make sure to annulate the void responses:
+If using in a SwiftUI application, make sure to ignore return values where appropriate:
 
 ```swift
 import SwiftUI
@@ -43,7 +43,7 @@ struct USearchMobileApp: App {
             let coordinates: Array<Float32> = [40.177200, 44.503490]
             let _ = index.add(key: 10, vector: coordinates)            
             VStack {
-                Text("USearch index contains \(index.length) vectors")
+                Text("USearch index contains \(index.count) vectors")
                 Spacer()
             }
 

@@ -1,4 +1,24 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --quiet --script
+"""
+USearch Clustering Benchmarking
+
+Benchmarks clustering performance comparing USearch k-means implementation
+against FAISS baseline with various datasets and configurations.
+
+Usage:
+    uv run python/scripts/bench_cluster.py --help
+    uv run python/scripts/bench_cluster.py --data datasets/wiki_1M/base.1M.fbin
+    
+Dependencies listed in the script header for uv to resolve automatically.
+"""
+# /// script
+# dependencies = [
+#   "numpy",
+#   "faiss-cpu", 
+#   "usearch",
+#   "tqdm"
+# ]
+# ///
 import os
 import argparse
 

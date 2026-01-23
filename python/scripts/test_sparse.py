@@ -1,3 +1,23 @@
+#!/usr/bin/env -S uv run --quiet --script
+"""
+USearch Sparse Vector Tests
+
+Test suite for sparse vector operations and indexing in USearch,
+including sparse data structures and search algorithms.
+
+Usage:
+    uv run python/scripts/test_sparse.py
+
+Dependencies listed in the script header for uv to resolve automatically.
+"""
+# /// script
+# dependencies = [
+#   "pytest",
+#   "numpy",
+#   "usearch"
+# ]
+# ///
+
 import pytest
 import numpy as np
 

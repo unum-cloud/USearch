@@ -1,6 +1,6 @@
 {
     "name": "usearch",
-    "version": "2.17.2",
+    "version": "2.23.0",
     "description": "Smaller & Faster Single-File Vector Search Engine from Unum",
     "author": "Ash Vardanian (https://ashvardanian.com/)",
     "license": "Apache 2.0",
@@ -29,8 +29,8 @@
     ],
     "dependencies": {
         "bindings": "^1.5.0",
-        "node-addon-api": "^8.0.0",
-        "node-gyp-build": "^4.8.0"
+        "node-addon-api": "^8.5.0",
+        "node-gyp-build": "^4.8.4"
     },
     "scripts": {
         "test": "node --test ./javascript/usearch.test.js",
@@ -42,10 +42,10 @@
     },
     "devDependencies": {
         "@types/bindings": "^1.5.5",
-        "@types/node": "^20.12.4",
-        "node-gyp": "^10.1.0",
-        "prebuildify": "^6.0.0",
-        "typescript": "^5.4.4"
+        "@types/node": "^24.3.0",
+        "node-gyp": "^11.4.2",
+        "prebuildify": "^6.0.1",
+        "typescript": "^5.9.2"
     },
     "main": "javascript/dist/cjs/usearch.js",
     "module": "javascript/dist/esm/usearch.js",

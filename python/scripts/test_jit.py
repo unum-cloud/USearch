@@ -1,3 +1,23 @@
+#!/usr/bin/env -S uv run --quiet --script
+"""
+USearch JIT Compilation Tests
+
+Test suite for Just-In-Time compilation functionality in USearch,
+testing custom compiled metrics and performance optimizations.
+
+Usage:
+    uv run python/scripts/test_jit.py
+
+Dependencies listed in the script header for uv to resolve automatically.
+"""
+# /// script
+# dependencies = [
+#   "pytest",
+#   "numpy",
+#   "usearch"
+# ]
+# ///
+
 import pytest
 import numpy as np
 

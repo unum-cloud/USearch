@@ -1,3 +1,23 @@
+#!/usr/bin/env -S uv run --quiet --script
+"""
+USearch SQLite Integration Tests
+
+Test suite for USearch SQLite integration functionality,
+testing database operations and vector search within SQLite.
+
+Usage:
+    uv run python/scripts/test_sqlite.py
+    
+Dependencies listed in the script header for uv to resolve automatically.
+"""
+# /// script
+# dependencies = [
+#   "pytest",
+#   "numpy", 
+#   "usearch"
+# ]
+# ///
+
 import sqlite3
 import json
 import math

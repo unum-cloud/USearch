@@ -25,6 +25,7 @@ class NativeIndex {
     NativeIndex(std::unique_ptr<index_dense_t> index);
 
     void reserve(size_t) const;
+    void reserve_capacity_and_threads(size_t, size_t) const;
 
     void add_b1x8(vector_key_t key, rust::Slice<uint8_t const> vector) const;
     void add_i8(vector_key_t key, rust::Slice<int8_t const> vector) const;
@@ -37,6 +38,12 @@ class NativeIndex {
     Matches search_f16(rust::Slice<int16_t const> query, size_t count) const;
     Matches search_f32(rust::Slice<float const> query, size_t count) const;
     Matches search_f64(rust::Slice<double const> query, size_t count) const;
+
+    Matches exact_search_b1x8(rust::Slice<uint8_t const> query, size_t count) const;
+    Matches exact_search_i8(rust::Slice<int8_t const> query, size_t count) const;
+    Matches exact_search_f16(rust::Slice<int16_t const> query, size_t count) const;
+    Matches exact_search_f32(rust::Slice<float const> query, size_t count) const;
+    Matches exact_search_f64(rust::Slice<double const> query, size_t count) const;
 
     // clang-format off
     Matches filtered_search_b1x8(rust::Slice<uint8_t const> query, size_t count, uptr_t filter_function, uptr_t filter_state) const;

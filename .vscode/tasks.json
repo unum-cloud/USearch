@@ -66,6 +66,17 @@
                     ]
                 }
             }
+        },
+        {
+            "label": "Swift Build",
+            "type": "swift",
+            "args": [
+                "build",
+                "--build-tests",
+            ],
+            "env": {},
+            "cwd": "${workspaceFolder}",
+            "group": "build"
         }
     ]
 }

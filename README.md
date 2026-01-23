@@ -20,28 +20,28 @@ Similarity Search & Clustering Engine for <a href="https://github.com/ashvardani
 <p align="center">
 Spatial • Binary • Probabilistic • User-Defined Metrics
 <br/>
-<a href="https://unum-cloud.github.io/usearch/cpp">C++ 11</a> •
+<a href="https://unum-cloud.github.io/usearch/cpp">C++11</a> •
 <a href="https://unum-cloud.github.io/usearch/python">Python 3</a> •
 <a href="https://unum-cloud.github.io/usearch/javascript">JavaScript</a> •
 <a href="https://unum-cloud.github.io/usearch/java">Java</a> •
 <a href="https://unum-cloud.github.io/usearch/rust">Rust</a> •
-<a href="https://unum-cloud.github.io/usearch/c">C 99</a> •
+<a href="https://unum-cloud.github.io/usearch/c">C99</a> •
 <a href="https://unum-cloud.github.io/usearch/objective-c">Objective-C</a> •
 <a href="https://unum-cloud.github.io/usearch/swift">Swift</a> •
 <a href="https://unum-cloud.github.io/usearch/csharp">C#</a> •
-<a href="https://unum-cloud.github.io/usearch/golang">GoLang</a> •
+<a href="https://unum-cloud.github.io/usearch/golang">Go</a> •
 <a href="https://unum-cloud.github.io/usearch/wolfram">Wolfram</a>
 <br/>
-Linux • MacOS • Windows • iOS • Android • WebAssembly •
-<a href="https://unum-cloud.github.io/usearch/sqlite">SQLite3</a>
+Linux • macOS • Windows • iOS • Android • WebAssembly •
+<a href="https://unum-cloud.github.io/usearch/sqlite">SQLite</a>
 </p>
 
 <div align="center">
-<a href="https://pepy.tech/project/usearch"> <img alt="PyPI" src="https://static.pepy.tech/personalized-badge/usearch?period=total&units=abbreviation&left_color=black&right_color=blue&left_text=Python%20PyPi%20installs"> </a>
+<a href="https://pepy.tech/project/usearch"> <img alt="PyPI" src="https://static.pepy.tech/personalized-badge/usearch?period=total&units=abbreviation&left_color=black&right_color=blue&left_text=Python%20PyPI%20installs"> </a>
 <a href="https://www.npmjs.com/package/usearch"> <img alt="NPM" src="https://img.shields.io/npm/dy/usearch?label=JavaScript%20NPM%20installs"> </a>
 <a href="https://crates.io/crates/usearch"> <img alt="Crate" src="https://img.shields.io/crates/d/usearch?label=Rust%20Crate%20installs"> </a>
 <a href="https://www.nuget.org/packages/Cloud.Unum.USearch"> <img alt="NuGet" src="https://img.shields.io/nuget/dt/Cloud.Unum.USearch?label=CSharp%20NuGet%20installs"> </a>
-<a href="https://central.sonatype.com/artifact/cloud.unum/usearch/overview"> <img alt="Maven" src="https://img.shields.io/nexus/r/cloud.unum/usearch?server=https%3A%2F%2Fs01.oss.sonatype.org%2F&label=Java%20Maven%20version"> </a>
+<!-- Maven Central publishing is deprecated for now; fat-JAR download is the supported path. -->
 <img alt="GitHub code size in bytes" src="https://img.shields.io/github/languages/code-size/unum-cloud/usearch?label=Repo%20size">
 </div>
 
@@ -160,8 +160,8 @@ This can result in __20x cost reduction__ on AWS and other public clouds.
 ```py
 index.save("index.usearch")
 
-loaded_copy = index.load("index.usearch")
-view = Index.restore("index.usearch", view=True)
+index.load("index.usearch")
+view = Index.restore("index.usearch", view=True, ...)
 
 other_view = Index(ndim=..., metric=...)
 other_view.view("index.usearch")
@@ -200,6 +200,8 @@ You can use [Numba][numba], [Cppyy][cppyy], or [PeachPy][peachpy] to define your
 ```py
 from numba import cfunc, types, carray
 from usearch.index import Index, MetricKind, MetricSignature, CompiledMetric
+
+ndim = 256
 
 @cfunc(types.float32(types.CPointer(types.float32), types.CPointer(types.float32)))
 def python_inner_product(a, b):
@@ -352,16 +354,16 @@ By now, the core functionality is supported across all bindings.
 Broader functionality is ported per request.
 In some cases, like Batch operations, feature parity is meaningless, as the host language has full multi-threading capabilities and the USearch index structure is concurrent by design, so the users can implement batching/scheduling/load-balancing in the most optimal way for their applications.
 
-|                         | C++ 11 | Python 3 | C 99  | Java  | JavaScript | Rust  | GoLang | Swift |
-| :---------------------- | :----: | :------: | :---: | :---: | :--------: | :---: | :----: | :---: |
-| Add, search, remove     |   ✅    |    ✅     |   ✅   |   ✅   |     ✅      |   ✅   |   ✅    |   ✅   |
-| Save, load, view        |   ✅    |    ✅     |   ✅   |   ✅   |     ✅      |   ✅   |   ✅    |   ✅   |
-| User-defined metrics    |   ✅    |    ✅     |   ✅   |   ❌   |     ❌      |   ❌   |   ❌    |   ❌   |
-| Batch operations        |   ❌    |    ✅     |   ❌   |   ❌   |     ✅      |   ❌   |   ❌    |   ❌   |
-| Filter predicates       |   ✅    |    ❌     |   ✅   |   ❌   |     ❌      |   ✅   |   ❌    |   ❌   |
-| Joins                   |   ✅    |    ✅     |   ❌   |   ❌   |     ❌      |   ❌   |   ❌    |   ❌   |
-| Variable-length vectors |   ✅    |    ❌     |   ❌   |   ❌   |     ❌      |   ❌   |   ❌    |   ❌   |
-| 4B+ capacities          |   ✅    |    ❌     |   ❌   |   ❌   |     ❌      |   ❌   |   ❌    |   ❌   |
+|                         | C++ 11 | Python 3 | C 99  | Java  | JavaScript | Rust  |  Go   | Swift |
+| :---------------------- | :----: | :------: | :---: | :---: | :--------: | :---: | :---: | :---: |
+| Add, search, remove     |   ✅    |    ✅     |   ✅   |   ✅   |     ✅      |   ✅   |   ✅   |   ✅   |
+| Save, load, view        |   ✅    |    ✅     |   ✅   |   ✅   |     ✅      |   ✅   |   ✅   |   ✅   |
+| User-defined metrics    |   ✅    |    ✅     |   ✅   |   ❌   |     ❌      |   ✅   |   ❌   |   ❌   |
+| Batch operations        |   ❌    |    ✅     |   ❌   |   ✅   |     ✅      |   ❌   |   ❌   |   ❌   |
+| Filter predicates       |   ✅    |    ❌     |   ✅   |   ❌   |     ❌      |   ✅   |   ❌   |   ✅   |
+| Joins                   |   ✅    |    ✅     |   ❌   |   ❌   |     ❌      |   ❌   |   ❌   |   ❌   |
+| Variable-length vectors |   ✅    |    ❌     |   ❌   |   ❌   |     ❌      |   ❌   |   ❌   |   ❌   |
+| 4B+ capacities          |   ✅    |    ❌     |   ❌   |   ❌   |     ❌      |   ❌   |   ❌   |   ❌   |
 
 ## Application Examples
 
@@ -528,15 +530,19 @@ index = Index(ndim=ndim, metric=CompiledMetric(
 
 - [x] ClickHouse: [C++](https://github.com/ClickHouse/ClickHouse/pull/53447), [docs](https://clickhouse.com/docs/en/engines/table-engines/mergetree-family/annindexes#usearch).
 - [x] DuckDB: [post](https://duckdb.org/2024/05/03/vector-similarity-search-vss.html).
+- [x] ScyllaDB: [Rust](https://github.com/scylladb/vector-store), [presentation](https://www.slideshare.net/slideshow/vector-search-with-scylladb-by-szymon-wasik/276571548).
+- [x] TiDB & TiFlash: [C++](https://github.com/pingcap/tiflash), [announcement](https://www.pingcap.com/article/introduce-vector-search-indexes-in-tidb/).
+- [x] YugaByte: [C++](https://github.com/yugabyte/yugabyte-db/blob/366b9f5e3c4df3a1a17d553db41d6dc50146f488/src/yb/vector_index/usearch_wrapper.cc).
 - [x] Google: [UniSim](https://github.com/google/unisim), [RetSim](https://arxiv.org/abs/2311.17264) paper.
+- [x] MemGraph: [C++](https://github.com/memgraph/memgraph/blob/784dd8520f65050d033aea8b29446e84e487d091/src/storage/v2/indices/vector_index.cpp), [announcement](https://memgraph.com/blog/simplify-data-retrieval-memgraph-vector-search).
 - [x] LanternDB: [C++](https://github.com/lanterndata/lantern), [Rust](https://github.com/lanterndata/lantern_extras), [docs](https://lantern.dev/blog/hnsw-index-creation).
 - [x] LangChain: [Python](https://github.com/langchain-ai/langchain/releases/tag/v0.0.257) and [JavaScript](https://github.com/hwchase17/langchainjs/releases/tag/0.0.125).
 - [x] Microsoft Semantic Kernel: [Python](https://github.com/microsoft/semantic-kernel/releases/tag/python-0.3.9.dev) and C#.
 - [x] GPTCache: [Python](https://github.com/zilliztech/GPTCache/releases/tag/0.1.29).
 - [x] Sentence-Transformers: Python [docs](https://www.sbert.net/docs/package_reference/quantization.html#sentence_transformers.quantization.semantic_search_usearch).
 - [x] Pathway: [Rust](https://github.com/pathwaycom/pathway).
-- [x] Memgraph: [C++ MVP](https://github.com/memgraph/memgraph/pull/2406), [C++ Stable](https://github.com/memgraph/memgraph/pull/2500), [docs](https://memgraph.com/docs/querying/vector-search)
-- [x] TiDB: [C++](https://github.com/pingcap/tiflash/pull/9486), [docs](https://docs.pingcap.com/tidb/stable/vector-search-index#vector-search-index)
+- [x] Vald: [GoLang](https://github.com/vdaas/vald).
+  
 
 ## Citations
 
@@ -546,7 +552,7 @@ doi = {10.5281/zenodo.7949416},
 author = {Vardanian, Ash},
 title = {{USearch by Unum Cloud}},
 url = {https://github.com/unum-cloud/usearch},
-version = {2.17.2},
+version = {2.23.0},
 year = {2023},
 month = oct,
 }

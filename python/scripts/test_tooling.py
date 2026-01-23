@@ -1,3 +1,23 @@
+#!/usr/bin/env -S uv run --quiet --script
+"""
+USearch Tooling Tests
+
+Test suite for USearch utility functions and tooling,
+including I/O operations, matrix handling, and helper functions.
+
+Usage:
+    uv run python/scripts/test_tooling.py
+    
+Dependencies listed in the script header for uv to resolve automatically.
+"""
+# /// script
+# dependencies = [
+#   "pytest",
+#   "numpy",
+#   "usearch"
+# ]
+# ///
+
 import os
 
 import pytest

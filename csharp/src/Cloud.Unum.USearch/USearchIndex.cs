@@ -252,6 +252,27 @@ public class USearchIndex : IDisposable
     }
 
     /// <summary>
+    /// Adds a vector with a specific key to the index.
+    /// </summary>
+    /// <param name="key">The key associated with the vector.</param>
+    /// <param name="vector">The vector data to be added.</param>
+    public void Add(ulong key, byte[] vector)
+    {
+        this.CheckIncreaseCapacity(1);
+        GCHandle handle = GCHandle.Alloc(vector, GCHandleType.Pinned);
+        try
+        {
+            IntPtr vectorPtr = handle.AddrOfPinnedObject();
+            usearch_add(this._index, key, vectorPtr, ScalarKind.Bits1, out IntPtr error);
+            HandleError(error);
+        }
+        finally
+        {
+            handle.Free();
+        }
+    }
+
+    /// <summary>
     /// Adds multiple vectors with specific keys to the index.
     /// </summary>
     /// <param name="keys">The keys associated with the vectors.</param>
@@ -290,6 +311,30 @@ public class USearchIndex : IDisposable
             {
                 IntPtr vectorPtr = handle.AddrOfPinnedObject();
                 usearch_add(this._index, keys[i], vectorPtr, ScalarKind.Int8, out IntPtr error);
+                HandleError(error);
+            }
+            finally
+            {
+                handle.Free();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Adds multiple vectors with specific keys to the index.
+    /// </summary>
+    /// <param name="keys">The keys associated with the vectors.</param>
+    /// <param name="vectors">The vector data to be added.</param>
+    public void Add(ulong[] keys, byte[][] vectors)
+    {
+        this.CheckIncreaseCapacity((ulong)vectors.Length);
+        for (int i = 0; i < vectors.Length; i++)
+        {
+            GCHandle handle = GCHandle.Alloc(vectors[i], GCHandleType.Pinned);
+            try
+            {
+                IntPtr vectorPtr = handle.AddrOfPinnedObject();
+                usearch_add(this._index, keys[i], vectorPtr, ScalarKind.Bits1, out IntPtr error);
                 HandleError(error);
             }
             finally

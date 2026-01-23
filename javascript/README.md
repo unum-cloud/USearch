@@ -10,12 +10,6 @@ For Node.js environments, install USearch using `npm`:
 npm install usearch
 ```
 
-For front-end applications using WASM, use the Wasmer package manager:
-
-```sh
-wasmer install unum/usearch
-```
-
 ## Quickstart
 
 Create an index, add vectors, and perform searches with ease:
@@ -33,6 +27,8 @@ assert.deepEqual(results.distances, new Float32Array([0]));
 
 index.remove(42n);
 ```
+
+Note: keys are 64-bit integers represented as JavaScript `BigInt` (e.g., `42n`).
 
 ## Serialization
 
@@ -76,6 +72,14 @@ Retrieve batch search results:
 ```js
 const batchResults = index.search(vectors, 2);
 const firstMatch = batchResults.get(0);
+```
+
+Multi-threading is supported for batch operations:
+
+```js
+const threads_count = 0; // Zero for auto-detection or pass an unsigned integer
+index.add(keys, vectors, threads_count);
+const batchResults = index.search(vectors, 2, threads_count);
 ```
 
 ## Index Introspection

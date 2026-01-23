@@ -32,6 +32,12 @@ def guess_numpy_dtype_from_filename(filename) -> typing.Optional[type]:
         return np.int32
     elif filename.endswith(".bbin"):
         return np.uint8
+    elif filename.endswith(".i8bin"):
+        return np.int8
+    elif filename.endswith(".i32bin"):
+        return np.int32
+    elif filename.endswith(".f32bin"):
+        return np.float32
     else:
         return None
 
@@ -43,7 +49,7 @@ def load_matrix(
     view: bool = False,
     dtype: typing.Optional[type] = None,
 ) -> typing.Optional[np.ndarray]:
-    """Read *.ibin, *.bbib, *.hbin, *.fbin, *.dbin files with matrices.
+    """Read *.ibin, *.bbib, *.hbin, *.fbin, *.dbin, *.i8bin, *.i32bin files with matrices.
 
     :param filename: path to the matrix file
     :param start_row: start reading vectors from this index
@@ -64,6 +70,19 @@ def load_matrix(
 
     with open(filename, "rb") as f:
         rows, cols = np.fromfile(f, count=2, dtype=np.int32).astype(np.uint64)
+        
+        # Validate file size matches expected data size
+        f.seek(0, 2)  # Go to end
+        file_size = f.tell()
+        expected_size = 8 + (rows * cols * scalar_size)  # Header + data
+        
+        if file_size != expected_size:
+            if file_size < expected_size:
+                raise ValueError(f"File {filename} is truncated. Expected {expected_size:,} bytes, got {file_size:,} bytes")
+            else:
+                raise ValueError(f"File {filename} is larger than expected. Expected {expected_size:,} bytes, got {file_size:,} bytes")
+        
+        f.seek(8)  # Back to start of data
         rows = (rows - start_row) if count_rows is None else count_rows
         row_offset = start_row * scalar_size * cols
 
@@ -85,7 +104,7 @@ def load_matrix(
 
 
 def save_matrix(vectors: np.ndarray, filename: str):
-    """Write *.ibin, *.bbib, *.hbin, *.fbin, *.dbin files with matrices.
+    """Write *.ibin, *.bbib, *.hbin, *.fbin, *.dbin, *.i8bin, *.i32bin, *.f32bin files with matrices.
 
     :param vectors: the matrix to serialize
     :type vectors: numpy.ndarray
@@ -102,6 +121,12 @@ def save_matrix(vectors: np.ndarray, filename: str):
         dtype = np.int32
     elif filename.endswith(".bbin"):
         dtype = np.uint8
+    elif filename.endswith(".i8bin"):
+        dtype = np.int8
+    elif filename.endswith(".i32bin"):
+        dtype = np.int32
+    elif filename.endswith(".f32bin"):
+        dtype = np.float32
     else:
         dtype = vectors.dtype
 

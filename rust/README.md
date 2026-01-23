@@ -156,7 +156,7 @@ assert!(
 ## Quantization and Custom Scalar Types
 
 USearch supports the Rust-native `f32` and `f64` scalar types, as well as the `i8` for quantized 8-bit scalars.
-Goign beyond that, USearch supports non-native `f16` and `b1x8` for half-precision floating point and binary vectors, respectively.
+Going beyond that, USearch supports non-native `f16` and `b1x8` for half-precision floating point and binary vectors, respectively.
 
 ### Half Precision Floating Point
 
@@ -171,8 +171,8 @@ use half::f16 as HalfF16;
 let vector_a: Vec<HalfF16> = ...
 let vector_b: Vec<HalfF16> = ...
 
-let buffer_a: &[USearchF16] = unsafe { std::slice::from_raw_parts(a_half.as_ptr() as *const SimF16, a_half.len()) };
-let buffer_b: &[USearchF16] = unsafe { std::slice::from_raw_parts(b_half.as_ptr() as *const SimF16, b_half.len()) };
+let buffer_a: &[USearchF16] = unsafe { std::slice::from_raw_parts(a_half.as_ptr() as *const USearchF16, a_half.len()) };
+let buffer_b: &[USearchF16] = unsafe { std::slice::from_raw_parts(b_half.as_ptr() as *const USearchF16, b_half.len()) };
 
 index.add(42, buffer_a);
 index.add(43, buffer_b);
@@ -180,15 +180,15 @@ index.add(43, buffer_b);
 
 ### Binary Vectors
 
-USearch also implement binary distance functions and natively supports bit-vectors.
-If you initialize the index with `quantization: ScalarKind::B1`, you can add floating-point vectors and they will be quantized mapping positive values to `1` and negative and zero values to `0`.
+USearch also implements binary distance functions and natively supports bit-vectors.
+If you initialize the index with `quantization: ScalarKind::B1x8`, you can add floating-point vectors and they will be quantized mapping positive values to `1` and negative and zero values to `0`.
 Alternatively, you can use the `b1x8` type to represent packed binary vectors directly.
 
 ```rs
 let index = Index::new(&IndexOptions {
     dimensions: 8,
     metric: MetricKind::Hamming,
-    quantization: ScalarKind::B1,
+    quantization: ScalarKind::B1x8,
     ..Default::default()
 })
 .unwrap();

@@ -1,6 +1,10 @@
 #ifndef UNUM_USEARCH_H
 #define UNUM_USEARCH_H
 
+#include <stdbool.h> // `bool`
+#include <stddef.h>  // `size_t`
+#include <stdint.h>  // `uint64_t`
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -12,10 +16,6 @@ extern "C" {
 #define USEARCH_EXPORT
 #endif
 #endif
-
-#include <stdbool.h> // `bool`
-#include <stddef.h>  // `size_t`
-#include <stdint.h>  // `uint64_t`
 
 USEARCH_EXPORT typedef void* usearch_index_t;
 USEARCH_EXPORT typedef uint64_t usearch_key_t;
@@ -58,6 +58,7 @@ USEARCH_EXPORT typedef enum usearch_scalar_kind_t {
     usearch_scalar_f16_k = 3,
     usearch_scalar_i8_k = 4,
     usearch_scalar_b1_k = 5,
+    usearch_scalar_bf16_k = 6,
 } usearch_scalar_kind_t;
 
 USEARCH_EXPORT typedef struct usearch_init_options_t {
@@ -107,6 +108,10 @@ USEARCH_EXPORT typedef struct usearch_init_options_t {
      */
     bool multi;
 } usearch_init_options_t;
+
+extern int goFilteredSearchCallback(usearch_key_t, void*);
+
+USEARCH_EXPORT typedef int (*usearch_filtered_search_callback_t)(usearch_key_t, void*);
 
 /**
  *  @brief Retrieves the version of the library.
@@ -390,7 +395,7 @@ USEARCH_EXPORT size_t usearch_search(                                         //
 USEARCH_EXPORT size_t usearch_filtered_search(                                //
     usearch_index_t index,                                                    //
     void const* query_vector, usearch_scalar_kind_t query_kind, size_t count, //
-    int (*filter)(usearch_key_t key, void* filter_state), void* filter_state, //
+    usearch_filtered_search_callback_t filter, void* filter_state, //
     usearch_key_t* keys, usearch_distance_t* distances, usearch_error_t* error);
 
 /**
@@ -471,6 +476,13 @@ USEARCH_EXPORT void usearch_exact_search(                            //
     usearch_key_t* keys, size_t keys_stride,                         //
     usearch_distance_t* distances, size_t distances_stride,          //
     usearch_error_t* error);
+
+/**
+ * @brief Erases all the vectors from the index.
+ *  @param[inout] index The handle to the USearch index to be modified.
+ *  @param[out] error Pointer to a string where the error message will be stored, if an error occurs.
+ */
+USEARCH_EXPORT void usearch_clear(usearch_index_t index, usearch_error_t* error);
 
 #ifdef __cplusplus
 }

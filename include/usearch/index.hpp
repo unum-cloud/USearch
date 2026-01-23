@@ -8,8 +8,8 @@
 #define UNUM_USEARCH_HPP
 
 #define USEARCH_VERSION_MAJOR 2
-#define USEARCH_VERSION_MINOR 17
-#define USEARCH_VERSION_PATCH 2
+#define USEARCH_VERSION_MINOR 23
+#define USEARCH_VERSION_PATCH 0
 
 // Inferring C++ version
 // https://stackoverflow.com/a/61552074
@@ -55,13 +55,14 @@
 #endif
 
 // Inferring hardware bitness: 32 vs 64
+// Using compiler predefined macros for is technically safer than including `<cstdint>` and
+// using the commonly advised `UINTPTR_MAX` trick, as that constant is optional in standard C/C++.
 // https://stackoverflow.com/a/5273354
-#if INTPTR_MAX == INT64_MAX
+// https://en.cppreference.com/w/cpp/types/integer.html
+#if defined(_WIN64) || defined(__LP64__) || defined(__x86_64__) || defined(__aarch64__) || defined(__powerpc64__)
 #define USEARCH_64BIT_ENV
-#elif INTPTR_MAX == INT32_MAX
-#define USEARCH_32BIT_ENV
 #else
-#error Unknown pointer size or missing size macros!
+#define USEARCH_32BIT_ENV
 #endif
 
 #if !defined(USEARCH_USE_OPENMP)
@@ -149,15 +150,15 @@
 #else
 #define usearch_assert_m(must_be_true, message)                                                                        \
     if (!(must_be_true)) {                                                                                             \
-        __usearch_raise_runtime_error(message);                                                                        \
+        usearch_raise_runtime_error(message);                                                                          \
     }
 #define usearch_noexcept_m
 #endif
 
 extern "C" {
-/// @brief  Helper function to simplify debugging - trace just one symbol - `__usearch_raise_runtime_error`.
+/// @brief  Helper function to simplify debugging - trace just one symbol - `usearch_raise_runtime_error`.
 ///         Assuming the `extern C` block, the name won't be mangled.
-inline static void __usearch_raise_runtime_error(char const* message) {
+inline static void usearch_raise_runtime_error(char const* message) {
     // On Windows we compile with `/EHc` flag, which specifies that functions
     // with C linkage do not throw C++ exceptions.
 #if !defined(__cpp_exceptions) || defined(USEARCH_DEFINED_WINDOWS)
@@ -202,7 +203,7 @@ template <typename at> void misaligned_store(void* ptr, at v) noexcept {
 }
 
 /// @brief  Simply dereferencing misaligned pointers can be dangerous.
-template <typename at> at misaligned_load(void* ptr) noexcept {
+template <typename at> at misaligned_load(void const* ptr) noexcept {
     static_assert(!std::is_reference<at>::value, "Can't load a reference");
     at v;
     std::memcpy(&v, ptr, sizeof(at));
@@ -1751,6 +1752,9 @@ class memory_mapped_file_t {
     {
     }
 
+    memory_mapped_file_t(memory_mapped_file_t const&) = delete;
+    memory_mapped_file_t& operator=(memory_mapped_file_t const&) = delete;
+
     memory_mapped_file_t(byte_t* data, std::size_t length) noexcept : ptr_(data), length_(length) {}
 
     memory_mapped_file_t& operator=(memory_mapped_file_t&& other) noexcept {
@@ -1900,7 +1904,7 @@ template <typename key_at> inline key_at get_key(member_ref_gt<key_at> const& m)
  *          If classical containers store @b Key->Value mappings, this one can
  *          be seen as a network of keys, accelerating approximate @b Value~>Key visited_members.
  *
- *  Unlike most implementations, this one is generic anc can be used for any search,
+ *  Unlike most implementations, this one is generic and can be used for any search,
  *  not just within equi-dimensional vectors. Examples range from Texts to similar Chess
  *  positions, Geo-Spatial Search, and even Graphs.
  *
@@ -2174,6 +2178,20 @@ class index_gt {
             misaligned_store<compressed_slot_t>(tape_ + shift(n), slot);
             misaligned_store<neighbors_count_t>(tape_, n + 1);
         }
+        template <typename allow_slot_at> std::size_t erase_if(allow_slot_at&& allow_slot) noexcept {
+            std::size_t old_count = misaligned_load<neighbors_count_t>(tape_);
+            std::size_t removed_count = 0;
+            for (std::size_t i = 0; i < old_count; ++i) {
+                compressed_slot_t slot = misaligned_load<compressed_slot_t>(tape_ + shift(i));
+                if (allow_slot(slot)) {
+                    removed_count++;
+                } else {
+                    misaligned_store<compressed_slot_t>(tape_ + shift(i - removed_count), slot);
+                }
+            }
+            misaligned_store<neighbors_count_t>(tape_, old_count - removed_count);
+            return removed_count;
+        }
     };
 
     /**
@@ -2183,6 +2201,7 @@ class index_gt {
      */
     struct usearch_align_m context_t {
         top_candidates_t top_candidates{};
+        top_candidates_t top_for_refine{};
         next_candidates_t next_candidates{};
         visits_hash_set_t visits{};
         std::default_random_engine level_generator{};
@@ -2326,7 +2345,7 @@ class index_gt {
         state_result_t failed(error_t message) noexcept { return {std::move(index), std::move(message)}; }
         operator index_gt&&() && {
             if (error)
-                __usearch_raise_runtime_error(error.what());
+                usearch_raise_runtime_error(error.what());
             return std::move(index);
         }
     };
@@ -2498,6 +2517,13 @@ class index_gt {
         if (nodes_)
             std::memcpy(new_nodes.data(), nodes_.data(), sizeof(node_t) * size());
 
+        // Pre-reserve the capacity for `top_for_refine`, which always contains at most one more
+        // element than the connectivity factors.
+        std::size_t connectivity_max = (std::max)(config_.connectivity_base, config_.connectivity);
+        for (std::size_t i = 0; i != new_contexts.size(); ++i)
+            if (!new_contexts[i].top_for_refine.reserve(connectivity_max + 1))
+                return false;
+
         limits_ = limits;
         nodes_capacity_ = limits.members;
         nodes_ = std::move(new_nodes);
@@ -2598,7 +2624,10 @@ class index_gt {
         inline bool empty() const noexcept { return !count; }
         inline match_t operator[](std::size_t i) const noexcept { return at(i); }
         inline match_t front() const noexcept { return at(0); }
-        inline match_t back() const noexcept { return at(count - 1); }
+        inline match_t back() const noexcept {
+            usearch_assert_m(count > 0, "Can't call back() on an empty result set");
+            return at(count - 1);
+        }
         inline bool contains(vector_key_t key) const noexcept {
             for (std::size_t i = 0; i != count; ++i)
                 if (at(i).member.key == key)
@@ -2669,6 +2698,49 @@ class index_gt {
                 keys[i] = result.member.key;
             }
             return count;
+        }
+
+        /**
+         *  @brief  Extracts the search results into a user-provided buffer.
+         *  @return The number of results stored in the buffer.
+         *  @param[in] keys The buffer to store the keys of the search results.
+         *  @param[in] distances The buffer to store the distances to the search results.
+         *  @param[in] capacity The maximum number of results that can be stored in the buffers.
+         */
+        inline std::size_t dump_to(vector_key_t* keys, distance_t* distances, std::size_t capacity) const noexcept {
+            std::size_t i = 0;
+            std::size_t initialized_count = (std::min)(count, capacity);
+            for (; i != initialized_count; ++i) {
+                match_t result = operator[](i);
+                keys[i] = result.member.key;
+                distances[i] = result.distance;
+            }
+            for (; i != capacity; ++i) {
+                keys[i] = vector_key_t{};
+                distances[i] = std::numeric_limits<distance_t>::has_signaling_NaN
+                                   ? std::numeric_limits<distance_t>::signaling_NaN()
+                                   : std::numeric_limits<distance_t>::max();
+            }
+            return initialized_count;
+        }
+
+        /**
+         *  @brief  Extracts the search results into a user-provided buffer.
+         *  @return The number of results stored in the buffer.
+         *  @param[in] keys The buffer to store the keys of the search results.
+         *  @param[in] capacity The maximum number of results that can be stored in the buffers.
+         */
+        inline std::size_t dump_to(vector_key_t* keys, std::size_t capacity) const noexcept {
+            std::size_t i = 0;
+            std::size_t initialized_count = (std::min)(this->count, capacity);
+            for (; i != initialized_count; ++i) {
+                match_t result = operator[](i);
+                keys[i] = result.member.key;
+            }
+            for (; i != capacity; ++i)
+                keys[i] = vector_key_t{};
+
+            return initialized_count;
         }
     };
 
@@ -2918,7 +2990,8 @@ class index_gt {
             }
             form_reverse_links_(metric, updated_slot, closest_view, value, level, context);
         }
-        updated_node.key(key);
+        if (static_cast<vector_key_t>(updated_node.key()) != key)
+            updated_node.key(key);
 
         // Normalize stats
         result.computed_distances = context.computed_distances - result.computed_distances;
@@ -3179,17 +3252,11 @@ class index_gt {
 
     std::size_t memory_usage_per_node(level_t level) const noexcept { return node_bytes_(level); }
 
-    double inverse_log_connectivity() const {
-        return pre_.inverse_log_connectivity;
-    }
+    double inverse_log_connectivity() const { return pre_.inverse_log_connectivity; }
 
-    std::size_t neighbors_base_bytes() const {
-        return pre_.neighbors_base_bytes;
-    }
+    std::size_t neighbors_base_bytes() const { return pre_.neighbors_base_bytes; }
 
-    std::size_t neighbors_bytes() const {
-        return pre_.neighbors_bytes;
-    }
+    std::size_t neighbors_bytes() const { return pre_.neighbors_bytes; }
 
 #if defined(USEARCH_USE_PRAGMA_REGION)
 #pragma endregion
@@ -3649,14 +3716,10 @@ class index_gt {
             node_t node = node_at_(node_idx);
             for (level_t level = 0; level <= node.level(); ++level) {
                 neighbors_ref_t neighbors = neighbors_(node, level);
-                std::size_t old_size = neighbors.size();
-                neighbors.clear();
-                for (std::size_t i = 0; i != old_size; ++i) {
-                    compressed_slot_t neighbor_slot = neighbors[i];
+                neighbors.erase_if([&](compressed_slot_t neighbor_slot) {
                     node_t neighbor = node_at_(neighbor_slot);
-                    if (allow_member(member_cref_t{neighbor.ckey(), neighbor_slot}))
-                        neighbors.push_back(neighbor_slot);
-                }
+                    return !allow_member(member_cref_t{neighbor.ckey(), neighbor_slot});
+                });
             }
             ++processed;
             if (thread_idx == 0)
@@ -3747,6 +3810,25 @@ class index_gt {
         return {nodes_mutexes_, slot};
     }
 
+    struct optional_node_lock_t {
+        nodes_mutexes_t& mutexes;
+        std::size_t slot;
+        inline ~optional_node_lock_t() noexcept {
+            if (slot != std::numeric_limits<std::size_t>::max())
+                mutexes.atomic_reset(slot);
+        }
+    };
+
+    inline optional_node_lock_t optional_node_lock_(std::size_t slot, bool condition) const noexcept {
+        if (condition) {
+            while (nodes_mutexes_.atomic_set(slot))
+                ;
+            return {nodes_mutexes_, slot};
+        } else {
+            return {nodes_mutexes_, std::numeric_limits<std::size_t>::max()};
+        }
+    }
+
     struct node_conditional_lock_t {
         nodes_mutexes_t& mutexes;
         std::size_t slot;
@@ -3758,7 +3840,11 @@ class index_gt {
 
     inline node_conditional_lock_t node_try_conditional_lock_(std::size_t slot, bool condition,
                                                               bool& failed_to_acquire) const noexcept {
-        failed_to_acquire = condition ? nodes_mutexes_.atomic_set(slot) : false;
+        if (!condition) {
+            failed_to_acquire = false;
+            return {nodes_mutexes_, std::numeric_limits<std::size_t>::max()};
+        }
+        failed_to_acquire = nodes_mutexes_.atomic_set(slot);
         return {nodes_mutexes_, failed_to_acquire ? std::numeric_limits<std::size_t>::max() : slot};
     }
 
@@ -3790,7 +3876,7 @@ class index_gt {
         metric_at&& metric, compressed_slot_t new_slot, candidates_view_t new_neighbors, value_at&& value,
         level_t level, context_t& context) usearch_noexcept_m {
 
-        top_candidates_t& top = context.top_candidates;
+        top_candidates_t& top_for_refine = context.top_for_refine;
         std::size_t const connectivity_max = level ? config_.connectivity : config_.connectivity_base;
 
         // Reverse links from the neighbors:
@@ -3817,19 +3903,16 @@ class index_gt {
                 continue;
             }
 
-            // To fit a new connection we need to drop an existing one.
-            top.clear();
-            usearch_assert_m((top.capacity() >= (close_header.size() + 1)),
-                             "The memory must have been reserved in `add`");
-            top.insert_reserved({context.measure(value, citerator_at(close_slot), metric), new_slot});
+            top_for_refine.clear();
+            top_for_refine.insert_reserved({context.measure(value, citerator_at(close_slot), metric), new_slot});
             for (compressed_slot_t successor_slot : close_header)
-                top.insert_reserved(
+                top_for_refine.insert_reserved(
                     {context.measure(citerator_at(close_slot), citerator_at(successor_slot), metric), successor_slot});
 
             // Export the results:
             close_header.clear();
-            candidates_view_t top_view =
-                refine_(metric, connectivity_max, top, context, context.computed_distances_in_reverse_refines);
+            candidates_view_t top_view = refine_(metric, connectivity_max, top_for_refine, context,
+                                                 context.computed_distances_in_reverse_refines);
             usearch_assert_m(top_view.size(), "This would lead to isolated nodes");
             for (std::size_t idx = 0; idx != top_view.size(); idx++)
                 close_header.push_back(top_view[idx].slot);
@@ -3916,12 +3999,13 @@ class index_gt {
         if (!is_dummy<prefetch_at>())
             prefetch(citerator_at(closest_slot), citerator_at(closest_slot) + 1);
 
+        bool const need_lock = !is_immutable();
         distance_t closest_dist = context.measure(query, citerator_at(closest_slot), metric);
         for (level_t level = begin_level; level > end_level; --level) {
             bool changed;
             do {
                 changed = false;
-                node_lock_t closest_lock = node_lock_(closest_slot);
+                optional_node_lock_t closest_lock = optional_node_lock_(closest_slot, need_lock);
                 neighbors_ref_t closest_neighbors = neighbors_non_base_(node_at_(closest_slot), level);
 
                 // Optional prefetching
@@ -4077,6 +4161,7 @@ class index_gt {
                 node_try_conditional_lock_(candidate_slot, updated_slot != candidate_slot, failed_to_acquire);
             if (failed_to_acquire)
                 continue;
+            auto optional_node_lock = optional_node_lock_(candidate_slot, updated_slot == candidate_slot);
             neighbors_ref_t candidate_neighbors = neighbors_(candidate_ref, level);
 
             // Optional prefetching
@@ -4178,9 +4263,10 @@ class index_gt {
                     // This can substantially grow our priority queue:
                     next.insert({-successor_dist, successor_slot});
                     if (is_dummy<predicate_at>() ||
-                        predicate(member_cref_t{node_at_(successor_slot).ckey(), successor_slot}))
+                        predicate(member_cref_t{node_at_(successor_slot).ckey(), successor_slot})) {
                         top.insert({successor_dist, successor_slot}, top_limit);
-                    radius = top.top().distance;
+                        radius = top.top().distance;
+                    }
                 }
             }
         }

@@ -17,6 +17,11 @@
 //!
 //! Refer to the `Index` struct for detailed usage examples.
 
+/// Returns the version of the USearch crate.
+pub fn version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
 /// The key type used to identify vectors in the index.
 /// It is a 64-bit unsigned integer.
 pub type Key = u64;
@@ -332,6 +337,12 @@ pub mod ffi {
 
         pub fn new_native_index(options: &IndexOptions) -> Result<UniquePtr<NativeIndex>>;
         pub fn reserve(self: &NativeIndex, capacity: usize) -> Result<()>;
+        pub fn reserve_capacity_and_threads(
+            self: &NativeIndex,
+            capacity: usize,
+            threads: usize,
+        ) -> Result<()>;
+
         pub fn dimensions(self: &NativeIndex) -> usize;
         pub fn connectivity(self: &NativeIndex) -> usize;
         pub fn size(self: &NativeIndex) -> usize;
@@ -349,6 +360,16 @@ pub mod ffi {
         pub fn search_f16(self: &NativeIndex, query: &[i16], count: usize) -> Result<Matches>;
         pub fn search_f32(self: &NativeIndex, query: &[f32], count: usize) -> Result<Matches>;
         pub fn search_f64(self: &NativeIndex, query: &[f64], count: usize) -> Result<Matches>;
+
+        pub fn exact_search_b1x8(self: &NativeIndex, query: &[u8], count: usize)
+            -> Result<Matches>;
+        pub fn exact_search_i8(self: &NativeIndex, query: &[i8], count: usize) -> Result<Matches>;
+        pub fn exact_search_f16(self: &NativeIndex, query: &[i16], count: usize)
+            -> Result<Matches>;
+        pub fn exact_search_f32(self: &NativeIndex, query: &[f32], count: usize)
+            -> Result<Matches>;
+        pub fn exact_search_f64(self: &NativeIndex, query: &[f64], count: usize)
+            -> Result<Matches>;
 
         pub fn filtered_search_b1x8(
             self: &NativeIndex,
@@ -425,8 +446,7 @@ pub use ffi::{IndexOptions, MetricKind, ScalarKind};
 ///
 /// - `B1X8Metric`: A metric function for binary vectors packed in `u8` containers, represented here by `b1x8`.
 /// - `I8Metric`: A metric function for vectors of 8-bit signed integers (`i8`).
-/// - `F16Metric`: A metric function for vectors of 16-bit floating-point numbers, using a custom `f16` type
-///   to represent half-precision floats.
+/// - `F16Metric`: A metric function for vectors of 16-bit half-precision floating-point numbers (`f16`).
 /// - `F32Metric`: A metric function for vectors of 32-bit floating-point numbers (`f32`).
 /// - `F64Metric`: A metric function for vectors of 64-bit floating-point numbers (`f64`).
 ///
@@ -447,28 +467,26 @@ pub use ffi::{IndexOptions, MetricKind, ScalarKind};
 /// # Examples
 ///
 /// ```
-/// use usearch::{MetricFunction, Distance, f16, b1x8};
+/// use usearch::{Distance, f16, b1x8};
 ///
-/// // Example of defining a custom Euclidean distance function for f32 vectors
-/// let euclidean: MetricFunction = MetricFunction::F32Metric(Box::new(|a, b| {
-///     // Safety: Assume a and b are valid for the number of dimensions in context.
+/// let euclidean_fn = Box::new(|a: *const f32, b: *const f32| -> f32 {
 ///     let dimensions = 256;
 ///     let a = unsafe { std::slice::from_raw_parts(a, dimensions) };
 ///     let b = unsafe { std::slice::from_raw_parts(b, dimensions) };
 ///     a.iter().zip(b.iter())
-///         .map(|(a, b)| (a - b).powi(2))
+///         .map(|(a, b)| (*a - *b).powi(2))
 ///         .sum::<f32>()
 ///         .sqrt()
-/// }));
+/// });
 /// ```
 ///
 /// In this example, `dimensions` should be defined and valid for the vectors `a` and `b`.
 pub enum MetricFunction {
-    B1X8Metric(std::boxed::Box<dyn Fn(*const b1x8, *const b1x8) -> Distance + Send + Sync>),
-    I8Metric(std::boxed::Box<dyn Fn(*const i8, *const i8) -> Distance + Send + Sync>),
-    F16Metric(std::boxed::Box<dyn Fn(*const f16, *const f16) -> Distance + Send + Sync>),
-    F32Metric(std::boxed::Box<dyn Fn(*const f32, *const f32) -> Distance + Send + Sync>),
-    F64Metric(std::boxed::Box<dyn Fn(*const f64, *const f64) -> Distance + Send + Sync>),
+    B1X8Metric(*mut std::boxed::Box<dyn Fn(*const b1x8, *const b1x8) -> Distance + Send + Sync>),
+    I8Metric(*mut std::boxed::Box<dyn Fn(*const i8, *const i8) -> Distance + Send + Sync>),
+    F16Metric(*mut std::boxed::Box<dyn Fn(*const f16, *const f16) -> Distance + Send + Sync>),
+    F32Metric(*mut std::boxed::Box<dyn Fn(*const f32, *const f32) -> Distance + Send + Sync>),
+    F64Metric(*mut std::boxed::Box<dyn Fn(*const f64, *const f64) -> Distance + Send + Sync>),
 }
 
 /// Approximate Nearest Neighbors search index for dense vectors.
@@ -515,6 +533,29 @@ pub struct Index {
 unsafe impl Send for Index {}
 unsafe impl Sync for Index {}
 
+impl Drop for Index {
+    fn drop(&mut self) {
+        if let Some(metric) = &self.metric_fn {
+            match metric {
+                MetricFunction::B1X8Metric(pointer) => unsafe {
+                    drop(Box::from_raw(*pointer));
+                },
+                MetricFunction::I8Metric(pointer) => unsafe {
+                    drop(Box::from_raw(*pointer));
+                },
+                MetricFunction::F16Metric(pointer) => unsafe {
+                    drop(Box::from_raw(*pointer));
+                },
+                MetricFunction::F32Metric(pointer) => unsafe {
+                    drop(Box::from_raw(*pointer));
+                },
+                MetricFunction::F64Metric(pointer) => unsafe {
+                    drop(Box::from_raw(*pointer));
+                },
+            }
+        }
+    }
+}
 
 impl Default for ffi::IndexOptions {
     fn default() -> Self {
@@ -592,6 +633,26 @@ pub trait VectorType {
     where
         Self: Sized;
 
+    /// Performs an exact (brute force) search in the index using the given query vector, returning
+    /// up to `count` closest matches. This search checks all vectors in the index, guaranteeing to find
+    /// the true nearest neighbors, but will be slower especially for large indices.
+    ///
+    /// # Parameters
+    /// - `index`: A reference to the `Index` where the search is to be performed.
+    /// - `query`: A slice representing the query vector.
+    /// - `count`: The maximum number of matches to return.
+    ///
+    /// # Returns
+    /// - `Ok(ffi::Matches)` containing the matches found.
+    /// - `Err(cxx::Exception)` if an error occurred during the search operation.
+    fn exact_search(
+        index: &Index,
+        query: &[Self],
+        count: usize,
+    ) -> Result<ffi::Matches, cxx::Exception>
+    where
+        Self: Sized;
+
     /// Performs a filtered search in the index using a query vector and a custom
     /// filter function, returning up to `count` matches that satisfy the filter.
     ///
@@ -637,12 +698,23 @@ impl VectorType for f32 {
     fn search(index: &Index, query: &[Self], count: usize) -> Result<ffi::Matches, cxx::Exception> {
         index.inner.search_f32(query, count)
     }
+
+    fn exact_search(
+        index: &Index,
+        query: &[Self],
+        count: usize,
+    ) -> Result<ffi::Matches, cxx::Exception> {
+        index.inner.exact_search_f32(query, count)
+    }
+
     fn get(index: &Index, key: Key, vector: &mut [Self]) -> Result<usize, cxx::Exception> {
         index.inner.get_f32(key, vector)
     }
+
     fn add(index: &Index, key: Key, vector: &[Self]) -> Result<(), cxx::Exception> {
         index.inner.add_f32(key, vector)
     }
+
     fn filtered_search<F>(
         index: &Index,
         query: &[Self],
@@ -660,13 +732,11 @@ impl VectorType for f32 {
         }
 
         // Temporarily cast the closure to a raw pointer for passing.
-        unsafe {
-            let trampoline_fn: usize = std::mem::transmute(trampoline::<F> as *const ());
-            let closure_address: usize = &filter as *const F as usize;
-            index
-                .inner
-                .filtered_search_f32(query, count, trampoline_fn, closure_address)
-        }
+        let trampoline_fn: usize = trampoline::<F> as *const () as usize;
+        let closure_address: usize = &filter as *const F as usize;
+        index
+            .inner
+            .filtered_search_f32(query, count, trampoline_fn, closure_address)
     }
 
     fn change_metric(
@@ -674,8 +744,8 @@ impl VectorType for f32 {
         metric: std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
     ) -> Result<(), cxx::Exception> {
         // Store the metric function in the Index.
-        type MetricFn = fn(*const f32, *const f32) -> Distance;
-        index.metric_fn = Some(MetricFunction::F32Metric(metric));
+        type MetricFn = Box<dyn Fn(*const f32, *const f32) -> Distance>;
+        index.metric_fn = Some(MetricFunction::F32Metric(Box::into_raw(Box::new(metric))));
 
         // Trampoline is the function that knows how to call the Rust closure.
         // The `first` is a pointer to the first vector, `second` is a pointer to the second vector,
@@ -684,18 +754,16 @@ impl VectorType for f32 {
         extern "C" fn trampoline(first: usize, second: usize, closure_address: usize) -> Distance {
             let first_ptr = first as *const f32;
             let second_ptr = second as *const f32;
-            let closure: MetricFn = unsafe { std::mem::transmute(closure_address) };
-            closure(first_ptr, second_ptr)
+            let closure: *mut MetricFn = closure_address as *mut MetricFn;
+            unsafe { (*closure)(first_ptr, second_ptr) }
         }
 
-        unsafe {
-            let trampoline_fn: usize = std::mem::transmute(trampoline as *const ());
-            let closure_address = match index.metric_fn {
-                Some(MetricFunction::F32Metric(ref metric)) => metric as *const _ as usize,
-                _ => panic!("Expected F32Metric"),
-            };
-            index.inner.change_metric(trampoline_fn, closure_address)
-        }
+        let trampoline_fn: usize = trampoline as *const () as usize;
+        let closure_address = match index.metric_fn {
+            Some(MetricFunction::F32Metric(metric)) => metric as *mut () as usize,
+            _ => panic!("Expected F32Metric"),
+        };
+        index.inner.change_metric(trampoline_fn, closure_address);
 
         Ok(())
     }
@@ -705,12 +773,23 @@ impl VectorType for i8 {
     fn search(index: &Index, query: &[Self], count: usize) -> Result<ffi::Matches, cxx::Exception> {
         index.inner.search_i8(query, count)
     }
+
+    fn exact_search(
+        index: &Index,
+        query: &[Self],
+        count: usize,
+    ) -> Result<ffi::Matches, cxx::Exception> {
+        index.inner.exact_search_i8(query, count)
+    }
+
     fn get(index: &Index, key: Key, vector: &mut [Self]) -> Result<usize, cxx::Exception> {
         index.inner.get_i8(key, vector)
     }
+
     fn add(index: &Index, key: Key, vector: &[Self]) -> Result<(), cxx::Exception> {
         index.inner.add_i8(key, vector)
     }
+
     fn filtered_search<F>(
         index: &Index,
         query: &[Self],
@@ -728,21 +807,19 @@ impl VectorType for i8 {
         }
 
         // Temporarily cast the closure to a raw pointer for passing.
-        unsafe {
-            let trampoline_fn: usize = std::mem::transmute(trampoline::<F> as *const ());
-            let closure_address: usize = &filter as *const F as usize;
-            index
-                .inner
-                .filtered_search_i8(query, count, trampoline_fn, closure_address)
-        }
+        let trampoline_fn: usize = trampoline::<F> as *const () as usize;
+        let closure_address: usize = &filter as *const F as usize;
+        index
+            .inner
+            .filtered_search_i8(query, count, trampoline_fn, closure_address)
     }
     fn change_metric(
         index: &mut Index,
         metric: std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
     ) -> Result<(), cxx::Exception> {
         // Store the metric function in the Index.
-        type MetricFn = fn(*const i8, *const i8) -> Distance;
-        index.metric_fn = Some(MetricFunction::I8Metric(metric));
+        type MetricFn = Box<dyn Fn(*const i8, *const i8) -> Distance>;
+        index.metric_fn = Some(MetricFunction::I8Metric(Box::into_raw(Box::new(metric))));
 
         // Trampoline is the function that knows how to call the Rust closure.
         // The `first` is a pointer to the first vector, `second` is a pointer to the second vector,
@@ -751,18 +828,16 @@ impl VectorType for i8 {
         extern "C" fn trampoline(first: usize, second: usize, closure_address: usize) -> Distance {
             let first_ptr = first as *const i8;
             let second_ptr = second as *const i8;
-            let closure: MetricFn = unsafe { std::mem::transmute(closure_address) };
-            closure(first_ptr, second_ptr)
+            let closure: *mut MetricFn = closure_address as *mut MetricFn;
+            unsafe { (*closure)(first_ptr, second_ptr) }
         }
 
-        unsafe {
-            let trampoline_fn: usize = std::mem::transmute(trampoline as *const ());
-            let closure_address = match index.metric_fn {
-                Some(MetricFunction::I8Metric(ref metric)) => metric as *const _ as usize,
-                _ => panic!("Expected I8Metric"),
-            };
-            index.inner.change_metric(trampoline_fn, closure_address)
-        }
+        let trampoline_fn: usize = trampoline as *const () as usize;
+        let closure_address = match index.metric_fn {
+            Some(MetricFunction::I8Metric(metric)) => metric as *mut () as usize,
+            _ => panic!("Expected I8Metric"),
+        };
+        index.inner.change_metric(trampoline_fn, closure_address);
 
         Ok(())
     }
@@ -772,12 +847,23 @@ impl VectorType for f64 {
     fn search(index: &Index, query: &[Self], count: usize) -> Result<ffi::Matches, cxx::Exception> {
         index.inner.search_f64(query, count)
     }
+
+    fn exact_search(
+        index: &Index,
+        query: &[Self],
+        count: usize,
+    ) -> Result<ffi::Matches, cxx::Exception> {
+        index.inner.exact_search_f64(query, count)
+    }
+
     fn get(index: &Index, key: Key, vector: &mut [Self]) -> Result<usize, cxx::Exception> {
         index.inner.get_f64(key, vector)
     }
+
     fn add(index: &Index, key: Key, vector: &[Self]) -> Result<(), cxx::Exception> {
         index.inner.add_f64(key, vector)
     }
+
     fn filtered_search<F>(
         index: &Index,
         query: &[Self],
@@ -795,21 +881,19 @@ impl VectorType for f64 {
         }
 
         // Temporarily cast the closure to a raw pointer for passing.
-        unsafe {
-            let trampoline_fn: usize = std::mem::transmute(trampoline::<F> as *const ());
-            let closure_address: usize = &filter as *const F as usize;
-            index
-                .inner
-                .filtered_search_f64(query, count, trampoline_fn, closure_address)
-        }
+        let trampoline_fn: usize = trampoline::<F> as *const () as usize;
+        let closure_address: usize = &filter as *const F as usize;
+        index
+            .inner
+            .filtered_search_f64(query, count, trampoline_fn, closure_address)
     }
     fn change_metric(
         index: &mut Index,
         metric: std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
     ) -> Result<(), cxx::Exception> {
         // Store the metric function in the Index.
-        type MetricFn = fn(*const f64, *const f64) -> Distance;
-        index.metric_fn = Some(MetricFunction::F64Metric(metric));
+        type MetricFn = Box<dyn Fn(*const f64, *const f64) -> Distance>;
+        index.metric_fn = Some(MetricFunction::F64Metric(Box::into_raw(Box::new(metric))));
 
         // Trampoline is the function that knows how to call the Rust closure.
         // The `first` is a pointer to the first vector, `second` is a pointer to the second vector,
@@ -818,18 +902,16 @@ impl VectorType for f64 {
         extern "C" fn trampoline(first: usize, second: usize, closure_address: usize) -> Distance {
             let first_ptr = first as *const f64;
             let second_ptr = second as *const f64;
-            let closure: MetricFn = unsafe { std::mem::transmute(closure_address) };
-            closure(first_ptr, second_ptr)
+            let closure: *mut MetricFn = closure_address as *mut MetricFn;
+            unsafe { (*closure)(first_ptr, second_ptr) }
         }
 
-        unsafe {
-            let trampoline_fn: usize = std::mem::transmute(trampoline as *const ());
-            let closure_address = match index.metric_fn {
-                Some(MetricFunction::F64Metric(ref metric)) => metric as *const _ as usize,
-                _ => panic!("Expected F64Metric"),
-            };
-            index.inner.change_metric(trampoline_fn, closure_address)
-        }
+        let trampoline_fn: usize = trampoline as *const () as usize;
+        let closure_address = match index.metric_fn {
+            Some(MetricFunction::F64Metric(metric)) => metric as *mut () as usize,
+            _ => panic!("Expected F64Metric"),
+        };
+        index.inner.change_metric(trampoline_fn, closure_address);
 
         Ok(())
     }
@@ -839,12 +921,23 @@ impl VectorType for f16 {
     fn search(index: &Index, query: &[Self], count: usize) -> Result<ffi::Matches, cxx::Exception> {
         index.inner.search_f16(f16::to_i16s(query), count)
     }
+
+    fn exact_search(
+        index: &Index,
+        query: &[Self],
+        count: usize,
+    ) -> Result<ffi::Matches, cxx::Exception> {
+        index.inner.exact_search_f16(f16::to_i16s(query), count)
+    }
+
     fn get(index: &Index, key: Key, vector: &mut [Self]) -> Result<usize, cxx::Exception> {
         index.inner.get_f16(key, f16::to_mut_i16s(vector))
     }
+
     fn add(index: &Index, key: Key, vector: &[Self]) -> Result<(), cxx::Exception> {
         index.inner.add_f16(key, f16::to_i16s(vector))
     }
+
     fn filtered_search<F>(
         index: &Index,
         query: &[Self],
@@ -862,16 +955,14 @@ impl VectorType for f16 {
         }
 
         // Temporarily cast the closure to a raw pointer for passing.
-        unsafe {
-            let trampoline_fn: usize = std::mem::transmute(trampoline::<F> as *const ());
-            let closure_address: usize = &filter as *const F as usize;
-            index.inner.filtered_search_f16(
-                f16::to_i16s(query),
-                count,
-                trampoline_fn,
-                closure_address,
-            )
-        }
+        let trampoline_fn: usize = trampoline::<F> as *const () as usize;
+        let closure_address: usize = &filter as *const F as usize;
+        index.inner.filtered_search_f16(
+            f16::to_i16s(query),
+            count,
+            trampoline_fn,
+            closure_address,
+        )
     }
 
     fn change_metric(
@@ -879,8 +970,8 @@ impl VectorType for f16 {
         metric: std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
     ) -> Result<(), cxx::Exception> {
         // Store the metric function in the Index.
-        type MetricFn = fn(*const f16, *const f16) -> Distance;
-        index.metric_fn = Some(MetricFunction::F16Metric(metric));
+        type MetricFn = Box<dyn Fn(*const f16, *const f16) -> Distance>;
+        index.metric_fn = Some(MetricFunction::F16Metric(Box::into_raw(Box::new(metric))));
 
         // Trampoline is the function that knows how to call the Rust closure.
         // The `first` is a pointer to the first vector, `second` is a pointer to the second vector,
@@ -889,18 +980,16 @@ impl VectorType for f16 {
         extern "C" fn trampoline(first: usize, second: usize, closure_address: usize) -> Distance {
             let first_ptr = first as *const f16;
             let second_ptr = second as *const f16;
-            let closure: MetricFn = unsafe { std::mem::transmute(closure_address) };
-            closure(first_ptr, second_ptr)
+            let closure: *mut MetricFn = closure_address as *mut MetricFn;
+            unsafe { (*closure)(first_ptr, second_ptr) }
         }
 
-        unsafe {
-            let trampoline_fn: usize = std::mem::transmute(trampoline as *const ());
-            let closure_address = match index.metric_fn {
-                Some(MetricFunction::F16Metric(ref metric)) => metric as *const _ as usize,
-                _ => panic!("Expected F16Metric"),
-            };
-            index.inner.change_metric(trampoline_fn, closure_address)
-        }
+        let trampoline_fn: usize = trampoline as *const () as usize;
+        let closure_address = match index.metric_fn {
+            Some(MetricFunction::F16Metric(metric)) => metric as *mut () as usize,
+            _ => panic!("Expected F16Metric"),
+        };
+        index.inner.change_metric(trampoline_fn, closure_address);
 
         Ok(())
     }
@@ -910,12 +999,23 @@ impl VectorType for b1x8 {
     fn search(index: &Index, query: &[Self], count: usize) -> Result<ffi::Matches, cxx::Exception> {
         index.inner.search_b1x8(b1x8::to_u8s(query), count)
     }
+
+    fn exact_search(
+        index: &Index,
+        query: &[Self],
+        count: usize,
+    ) -> Result<ffi::Matches, cxx::Exception> {
+        index.inner.exact_search_b1x8(b1x8::to_u8s(query), count)
+    }
+
     fn get(index: &Index, key: Key, vector: &mut [Self]) -> Result<usize, cxx::Exception> {
         index.inner.get_b1x8(key, b1x8::to_mut_u8s(vector))
     }
+
     fn add(index: &Index, key: Key, vector: &[Self]) -> Result<(), cxx::Exception> {
         index.inner.add_b1x8(key, b1x8::to_u8s(vector))
     }
+
     fn filtered_search<F>(
         index: &Index,
         query: &[Self],
@@ -933,16 +1033,14 @@ impl VectorType for b1x8 {
         }
 
         // Temporarily cast the closure to a raw pointer for passing.
-        unsafe {
-            let trampoline_fn: usize = std::mem::transmute(trampoline::<F> as *const ());
-            let closure_address: usize = &filter as *const F as usize;
-            index.inner.filtered_search_b1x8(
-                b1x8::to_u8s(query),
-                count,
-                trampoline_fn,
-                closure_address,
-            )
-        }
+        let trampoline_fn: usize = trampoline::<F> as *const () as usize;
+        let closure_address: usize = &filter as *const F as usize;
+        index.inner.filtered_search_b1x8(
+            b1x8::to_u8s(query),
+            count,
+            trampoline_fn,
+            closure_address,
+        )
     }
 
     fn change_metric(
@@ -950,8 +1048,8 @@ impl VectorType for b1x8 {
         metric: std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
     ) -> Result<(), cxx::Exception> {
         // Store the metric function in the Index.
-        type MetricFn = fn(*const b1x8, *const b1x8) -> Distance;
-        index.metric_fn = Some(MetricFunction::B1X8Metric(metric));
+        type MetricFn = Box<dyn Fn(*const b1x8, *const b1x8) -> Distance>;
+        index.metric_fn = Some(MetricFunction::B1X8Metric(Box::into_raw(Box::new(metric))));
 
         // Trampoline is the function that knows how to call the Rust closure.
         // The `first` is a pointer to the first vector, `second` is a pointer to the second vector,
@@ -960,18 +1058,16 @@ impl VectorType for b1x8 {
         extern "C" fn trampoline(first: usize, second: usize, closure_address: usize) -> Distance {
             let first_ptr = first as *const b1x8;
             let second_ptr = second as *const b1x8;
-            let closure: MetricFn = unsafe { std::mem::transmute(closure_address) };
-            closure(first_ptr, second_ptr)
+            let closure: *mut MetricFn = closure_address as *mut MetricFn;
+            unsafe { (*closure)(first_ptr, second_ptr) }
         }
 
-        unsafe {
-            let trampoline_fn: usize = std::mem::transmute(trampoline as *const ());
-            let closure_address = match index.metric_fn {
-                Some(MetricFunction::B1X8Metric(ref metric)) => metric as *const _ as usize,
-                _ => panic!("Expected B1X8Metric"),
-            };
-            index.inner.change_metric(trampoline_fn, closure_address)
-        }
+        let trampoline_fn: usize = trampoline as *const () as usize;
+        let closure_address = match index.metric_fn {
+            Some(MetricFunction::B1X8Metric(metric)) => metric as *mut () as usize,
+            _ => panic!("Expected F1X8Metric"),
+        };
+        index.inner.change_metric(trampoline_fn, closure_address);
 
         Ok(())
     }
@@ -1048,6 +1144,26 @@ impl Index {
         T::search(self, query, count)
     }
 
+    /// Performs exact (brute force) Nearest Neighbors Search for closest vectors to the provided query.
+    /// This search checks all vectors in the index, guaranteeing to find the true nearest neighbors,
+    /// but may be slower for large indices.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - A slice containing the query vector data.
+    /// * `count` - The maximum number of neighbors to search for.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the matches found.
+    pub fn exact_search<T: VectorType>(
+        self: &Index,
+        query: &[T],
+        count: usize,
+    ) -> Result<ffi::Matches, cxx::Exception> {
+        T::exact_search(self, query, count)
+    }
+
     /// Performs k-Approximate Nearest Neighbors (kANN) Search for closest vectors to the provided query
     /// satisfying a custom filter function.
     ///
@@ -1116,12 +1232,9 @@ impl Index {
         let dim = self.dimensions();
         let max_matches = self.count(key);
         vector.resize(dim * max_matches, T::default());
-        let matches = T::get(self, key, &mut vector[..]);
-        if matches.is_err() {
-            return matches;
-        }
-        vector.resize(dim * matches.as_ref().unwrap(), T::default());
-        return matches;
+        let matches = T::get(self, key, &mut vector[..])?;
+        vector.resize(dim * matches, T::default());
+        Ok(matches)
     }
 
     /// Reserves memory for a specified number of incoming vectors.
@@ -1131,6 +1244,20 @@ impl Index {
     /// * `capacity` - The desired total capacity, including the current size.
     pub fn reserve(self: &Index, capacity: usize) -> Result<(), cxx::Exception> {
         self.inner.reserve(capacity)
+    }
+
+    /// Reserves memory for a specified number of incoming vectors & active threads.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - The desired total capacity, including the current size.
+    /// * `threads` - The number of threads to use for the operation.
+    pub fn reserve_capacity_and_threads(
+        self: &Index,
+        capacity: usize,
+        threads: usize,
+    ) -> Result<(), cxx::Exception> {
+        self.inner.reserve_capacity_and_threads(capacity, threads)
     }
 
     /// Retrieves the number of dimensions in the vectors indexed.
@@ -1311,9 +1438,7 @@ mod tests {
     use crate::ffi::ScalarKind;
 
     use crate::b1x8;
-    use crate::f16;
     use crate::new_index;
-    use crate::Distance;
     use crate::Index;
     use crate::Key;
 
@@ -1321,7 +1446,7 @@ mod tests {
 
     #[test]
     fn print_specs() {
-        print!("--------------------------------------------------\n");
+        println!("--------------------------------------------------");
         println!("OS: {}", env::consts::OS);
         println!(
             "Rust version: {}",
@@ -1389,14 +1514,16 @@ mod tests {
             "b1 hardware acceleration: {}",
             b1_index.hardware_acceleration()
         );
-        print!("--------------------------------------------------\n");
+        println!("--------------------------------------------------");
     }
 
     #[test]
     fn test_add_get_vector() {
-        let mut options = IndexOptions::default();
-        options.dimensions = 5;
-        options.quantization = ScalarKind::F32;
+        let options = IndexOptions {
+            dimensions: 5,
+            quantization: ScalarKind::F32,
+            ..Default::default()
+        };
         let index = Index::new(&options).unwrap();
         assert!(index.reserve(10).is_ok());
 
@@ -1417,20 +1544,22 @@ mod tests {
         assert_eq!(found_vec, first.to_vec());
 
         // Test using slice
-        let mut found_slice = [0.0 as f32; 5];
+        let mut found_slice = [0.0f32; 5];
         assert_eq!(index.get(1, &mut found_slice).unwrap(), 1);
         assert_eq!(found_slice, first);
 
         // Create a slice with incorrect size
-        let mut found = [0.0 as f32; 6]; // This isn't a multiple of the index's dimensions.
+        let mut found = [0.0f32; 6]; // This isn't a multiple of the index's dimensions.
         let result = index.get(1, &mut found);
         assert!(result.is_err());
     }
     #[test]
     fn test_search_vector() {
-        let mut options = IndexOptions::default();
-        options.dimensions = 5;
-        options.quantization = ScalarKind::F32;
+        let options = IndexOptions {
+            dimensions: 5,
+            quantization: ScalarKind::F32,
+            ..Default::default()
+        };
         let index = Index::new(&options).unwrap();
         assert!(index.reserve(10).is_ok());
 
@@ -1450,13 +1579,15 @@ mod tests {
 
     #[test]
     fn test_add_remove_vector() {
-        let mut options = IndexOptions::default();
-        options.dimensions = 4;
-        options.metric = MetricKind::IP;
-        options.quantization = ScalarKind::F64;
-        options.connectivity = 10;
-        options.expansion_add = 128;
-        options.expansion_search = 3;
+        let options = IndexOptions {
+            dimensions: 4,
+            metric: MetricKind::IP,
+            quantization: ScalarKind::F64,
+            connectivity: 10,
+            expansion_add: 128,
+            expansion_search: 3,
+            ..Default::default()
+        };
         let index = Index::new(&options).unwrap();
         assert!(index.reserve(10).is_ok());
         assert!(index.capacity() >= 10);
@@ -1471,22 +1602,22 @@ mod tests {
         let id4 = 483367403120624233;
 
         assert!(index.add(id1, &first).is_ok());
-        let mut found_slice = [0.0 as f32; 4];
+        let mut found_slice = [0.0f32; 4];
         assert_eq!(index.get(id1, &mut found_slice).unwrap(), 1);
         assert!(index.remove(id1).is_ok());
 
         assert!(index.add(id2, &second).is_ok());
-        let mut found_slice = [0.0 as f32; 4];
+        let mut found_slice = [0.0f32; 4];
         assert_eq!(index.get(id2, &mut found_slice).unwrap(), 1);
         assert!(index.remove(id2).is_ok());
 
         assert!(index.add(id3, &second).is_ok());
-        let mut found_slice = [0.0 as f32; 4];
+        let mut found_slice = [0.0f32; 4];
         assert_eq!(index.get(id3, &mut found_slice).unwrap(), 1);
         assert!(index.remove(id3).is_ok());
 
         assert!(index.add(id4, &second).is_ok());
-        let mut found_slice = [0.0 as f32; 4];
+        let mut found_slice = [0.0f32; 4];
         assert_eq!(index.get(id4, &mut found_slice).unwrap(), 1);
         assert!(index.remove(id4).is_ok());
 
@@ -1495,8 +1626,10 @@ mod tests {
 
     #[test]
     fn integration() {
-        let mut options = IndexOptions::default();
-        options.dimensions = 5;
+        let mut options = IndexOptions {
+            dimensions: 5,
+            ..Default::default()
+        };
 
         let index = Index::new(&options).unwrap();
 
@@ -1512,7 +1645,7 @@ mod tests {
         let first: [f32; 5] = [0.2, 0.1, 0.2, 0.1, 0.3];
         let second: [f32; 5] = [0.3, 0.2, 0.4, 0.0, 0.1];
 
-        print!("--------------------------------------------------\n");
+        println!("--------------------------------------------------");
         println!(
             "before add, memory_usage: {} \
             cap: {} \
@@ -1547,7 +1680,7 @@ mod tests {
         let results = index.search(&first, 10).unwrap();
         println!("{:?}", results);
         assert_eq!(results.keys.len(), 2);
-        print!("--------------------------------------------------\n");
+        println!("--------------------------------------------------");
 
         // Validate serialization
         assert!(index.save("index.rust.usearch").is_ok());
@@ -1565,8 +1698,7 @@ mod tests {
         options.dimensions = 2;
         assert!(new_index(&options).is_ok());
 
-        let mut serialization_buffer = Vec::new();
-        serialization_buffer.resize(index.serialized_length(), 0);
+        let mut serialization_buffer = vec![0; index.serialized_length()];
         assert!(index.save_to_buffer(&mut serialization_buffer).is_ok());
 
         let deserialized_index = new_index(&options).unwrap();
@@ -1594,8 +1726,10 @@ mod tests {
 
     #[test]
     fn test_search_with_stateless_filter() {
-        let mut options = IndexOptions::default();
-        options.dimensions = 5;
+        let options = IndexOptions {
+            dimensions: 5,
+            ..Default::default()
+        };
         let index = Index::new(&options).unwrap();
         index.reserve(10).unwrap();
 
@@ -1619,8 +1753,10 @@ mod tests {
     fn test_search_with_stateful_filter() {
         use std::collections::HashSet;
 
-        let mut options = IndexOptions::default();
-        options.dimensions = 5;
+        let options = IndexOptions {
+            dimensions: 5,
+            ..Default::default()
+        };
         let index = Index::new(&options).unwrap();
         index.reserve(10).unwrap();
 
@@ -1675,9 +1811,66 @@ mod tests {
     }
 
     #[test]
+    fn test_exact_search() {
+        use std::collections::HashSet;
+
+        // Create an index with many vectors
+        let options = IndexOptions {
+            dimensions: 4,
+            metric: MetricKind::L2sq,
+            quantization: ScalarKind::F32,
+            ..Default::default()
+        };
+        let index = new_index(&options).unwrap();
+        index.reserve(100).unwrap();
+        // Add 100 vectors to the index
+        for i in 0..100 {
+            let vec = vec![
+                i as f32 * 0.1,
+                (i as f32 * 0.05).sin(),
+                (i as f32 * 0.05).cos(),
+                0.0,
+            ];
+            index.add(i, &vec).unwrap();
+        }
+        // Query vector
+        let query = vec![4.5, 0.0, 1.0, 0.0];
+        // Compare approximate and exact search results
+        let approx_matches = index.search(&query, 10).unwrap();
+        let exact_matches = index.exact_search(&query, 10).unwrap();
+        // Collect the keys from both result sets
+        let approx_keys: HashSet<Key> = approx_matches.keys.iter().cloned().collect();
+        let exact_keys: HashSet<Key> = exact_matches.keys.iter().cloned().collect();
+        // Check that both methods return 10 results
+        assert_eq!(approx_matches.keys.len(), 10);
+        assert_eq!(exact_matches.keys.len(), 10);
+
+        // The exact search should find the true nearest neighbors
+        // Verify that the minimum distance in exact results is <= minimum distance in approximate results
+        assert!(exact_matches.distances[0] <= approx_matches.distances[0]);
+        // The nearest neighbor according to exact search might be different from approximate search
+        println!(
+            "Approximate search first match: key={}, distance={}",
+            approx_matches.keys[0], approx_matches.distances[0]
+        );
+        println!(
+            "Exact search first match: key={}, distance={}",
+            exact_matches.keys[0], exact_matches.distances[0]
+        );
+        // Results from both should be mostly similar, but may differ due to approximation
+        let intersection: HashSet<_> = approx_keys.intersection(&exact_keys).collect();
+        println!(
+            "Number of common results between approximate and exact search: {}",
+            intersection.len()
+        );
+    }
+
+    #[test]
     fn test_change_distance_function() {
-        let mut options = IndexOptions::default();
-        options.dimensions = 2; // Adjusted for simplicity in creating test vectors
+        let options = IndexOptions {
+            dimensions: 2, // Adjusted for simplicity in creating test vectors
+            ..Default::default()
+        };
         let mut index = Index::new(&options).unwrap();
         index.reserve(10).unwrap();
 
@@ -1695,6 +1888,9 @@ mod tests {
                 + (a_slice[1] - b_slice[1]).abs() * second_factor
         });
         index.change_metric(stateful_distance);
+
+        let another_vector: [f32; 2] = [0.0, 1.0];
+        index.add(2, &another_vector).unwrap();
     }
 
     #[test]
@@ -1725,5 +1921,118 @@ mod tests {
         assert_eq!(results.distances[0], 2.0);
         assert_eq!(results.keys[1], 42);
         assert_eq!(results.distances[1], 6.0);
+    }
+
+    #[test]
+    fn test_concurrency() {
+        use fork_union as fu;
+        use rand::{Rng, SeedableRng};
+        use rand_chacha::ChaCha8Rng;
+        use rand_distr::Uniform;
+        use std::sync::Arc;
+
+        const DIMENSIONS: usize = 128;
+        const VECTOR_COUNT: usize = 1000;
+        const THREAD_COUNT: usize = 4;
+
+        let options = IndexOptions {
+            dimensions: DIMENSIONS,
+            metric: MetricKind::Cos,
+            quantization: ScalarKind::F32,
+            ..Default::default()
+        };
+
+        let index = Arc::new(Index::new(&options).unwrap());
+        index
+            .reserve_capacity_and_threads(VECTOR_COUNT, THREAD_COUNT)
+            .unwrap();
+
+        // Generate deterministic vectors using rand crate for reproducible testing
+        let seed = 42; // Fixed seed for reproducibility
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let uniform = Uniform::new(-1.0f32, 1.0f32).unwrap();
+
+        // Store reference vectors for validation
+        let mut reference_vectors: Vec<[f32; DIMENSIONS]> = Vec::with_capacity(VECTOR_COUNT);
+        for _ in 0..VECTOR_COUNT {
+            let mut vector = [0.0f32; DIMENSIONS];
+            // Fill with random values in [-1, 1]
+            for item in vector.iter_mut().take(DIMENSIONS) {
+                *item = rng.sample(uniform);
+            }
+            reference_vectors.push(vector);
+        }
+
+        let mut pool = fu::spawn(THREAD_COUNT);
+
+        // Concurrent indexing
+        pool.for_n(VECTOR_COUNT, |prong| {
+            let index_clone = Arc::clone(&index);
+            let i = prong.task_index;
+            let vector = reference_vectors[i];
+            index_clone.add(i as u64, &vector).unwrap();
+        });
+
+        assert_eq!(index.size(), VECTOR_COUNT);
+
+        // Concurrent retrieval and validation
+        let mut pool = fu::spawn(THREAD_COUNT);
+        let validation_results = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        pool.for_n(VECTOR_COUNT, |prong| {
+            let index_clone = Arc::clone(&index);
+            let results_clone = Arc::clone(&validation_results);
+            let i = prong.task_index;
+            let expected_vector = &reference_vectors[i];
+
+            let mut retrieved_vector = [0.0f32; DIMENSIONS];
+            let count = index_clone.get(i as u64, &mut retrieved_vector).unwrap();
+            assert_eq!(count, 1);
+
+            // Validate retrieved vector matches expected
+            let matches = retrieved_vector
+                .iter()
+                .zip(expected_vector.iter())
+                .all(|(a, b)| (a - b).abs() < 1e-6);
+
+            let mut results = results_clone.lock().unwrap();
+            results.push(matches);
+        });
+
+        let validation_results = validation_results.lock().unwrap();
+        assert_eq!(validation_results.len(), VECTOR_COUNT);
+        assert!(
+            validation_results.iter().all(|&x| x),
+            "All retrieved vectors should match the original ones"
+        );
+
+        // Concurrent search testing
+        let mut pool = fu::spawn(THREAD_COUNT);
+        let search_results = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        pool.for_n(100, |prong| {
+            // Test 100 searches
+            let index_clone = Arc::clone(&index);
+            let results_clone = Arc::clone(&search_results);
+            let query_idx = prong.task_index % VECTOR_COUNT;
+            let query_vector = &reference_vectors[query_idx];
+
+            let matches = index_clone.exact_search(query_vector, 10).unwrap();
+
+            // The first result should be the exact match with distance ~0
+            let exact_match_found = !matches.keys.is_empty()
+                && matches.keys[0] == query_idx as u64
+                && matches.distances[0] < 1e-6;
+
+            let mut results = results_clone.lock().unwrap();
+            results.push(exact_match_found);
+        });
+
+        let search_results = search_results.lock().unwrap();
+        assert_eq!(search_results.len(), 100);
+        assert!(
+            search_results.iter().all(|&x| x),
+            "All searches should find exact matches"
+        );
     }
 }

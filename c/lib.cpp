@@ -59,6 +59,7 @@ scalar_kind_t scalar_kind_to_cpp(usearch_scalar_kind_t kind) {
     case usearch_scalar_f32_k: return scalar_kind_t::f32_k;
     case usearch_scalar_f64_k: return scalar_kind_t::f64_k;
     case usearch_scalar_f16_k: return scalar_kind_t::f16_k;
+    case usearch_scalar_bf16_k: return scalar_kind_t::bf16_k;
     case usearch_scalar_i8_k: return scalar_kind_t::i8_k;
     case usearch_scalar_b1_k: return scalar_kind_t::b1x8_k;
     default: return scalar_kind_t::unknown_k;
@@ -70,6 +71,7 @@ usearch_scalar_kind_t scalar_kind_to_c(scalar_kind_t kind) {
     case scalar_kind_t::f32_k: return usearch_scalar_f32_k;
     case scalar_kind_t::f64_k: return usearch_scalar_f64_k;
     case scalar_kind_t::f16_k: return usearch_scalar_f16_k;
+    case scalar_kind_t::bf16_k: return usearch_scalar_bf16_k;
     case scalar_kind_t::i8_k: return usearch_scalar_i8_k;
     case scalar_kind_t::b1x8_k: return usearch_scalar_b1_k;
     default: return usearch_scalar_unknown_k;
@@ -81,6 +83,7 @@ add_result_t add_(index_dense_t* index, usearch_key_t key, void const* vector, s
     case scalar_kind_t::f32_k: return index->add(key, (f32_t const*)vector);
     case scalar_kind_t::f64_k: return index->add(key, (f64_t const*)vector);
     case scalar_kind_t::f16_k: return index->add(key, (f16_t const*)vector);
+    case scalar_kind_t::bf16_k: return index->add(key, (bf16_t const*)vector);
     case scalar_kind_t::i8_k: return index->add(key, (i8_t const*)vector);
     case scalar_kind_t::b1x8_k: return index->add(key, (b1x8_t const*)vector);
     default: return add_result_t{}.failed("Unknown scalar kind!");
@@ -92,6 +95,7 @@ std::size_t get_(index_dense_t* index, usearch_key_t key, size_t count, void* ve
     case scalar_kind_t::f32_k: return index->get(key, (f32_t*)vector, count);
     case scalar_kind_t::f64_k: return index->get(key, (f64_t*)vector, count);
     case scalar_kind_t::f16_k: return index->get(key, (f16_t*)vector, count);
+    case scalar_kind_t::bf16_k: return index->get(key, (bf16_t*)vector, count);
     case scalar_kind_t::i8_k: return index->get(key, (i8_t*)vector, count);
     case scalar_kind_t::b1x8_k: return index->get(key, (b1x8_t*)vector, count);
     default: return search_result_t(*index).failed("Unknown scalar kind!");
@@ -108,6 +112,8 @@ search_result_t search_(index_dense_t* index, void const* vector, scalar_kind_t 
         return index->filtered_search((f64_t const*)vector, n, std::forward<predicate_at>(predicate));
     case scalar_kind_t::f16_k:
         return index->filtered_search((f16_t const*)vector, n, std::forward<predicate_at>(predicate));
+    case scalar_kind_t::bf16_k:
+        return index->filtered_search((bf16_t const*)vector, n, std::forward<predicate_at>(predicate));
     case scalar_kind_t::i8_k:
         return index->filtered_search((i8_t const*)vector, n, std::forward<predicate_at>(predicate));
     case scalar_kind_t::b1x8_k:
@@ -401,13 +407,13 @@ USEARCH_EXPORT size_t usearch_search(                                           
         return 0;
     }
 
-    return result.dump_to(found_keys, found_distances);
+    return result.dump_to(found_keys, found_distances, results_limit);
 }
 
 USEARCH_EXPORT size_t usearch_filtered_search(                                 //
     usearch_index_t index,                                                     //
     void const* query, usearch_scalar_kind_t query_kind, size_t results_limit, //
-    int (*filter)(usearch_key_t key, void* filter_state), void* filter_state,  //
+    usearch_filtered_search_callback_t filter, void* filter_state,  //
     usearch_key_t* found_keys, usearch_distance_t* found_distances, usearch_error_t* error) {
 
     USEARCH_ASSERT(index && query && filter && error && "Missing arguments");
@@ -419,7 +425,7 @@ USEARCH_EXPORT size_t usearch_filtered_search(                                 /
         return 0;
     }
 
-    return result.dump_to(found_keys, found_distances);
+    return result.dump_to(found_keys, found_distances, results_limit);
 }
 
 USEARCH_EXPORT size_t usearch_get(                          //
@@ -472,7 +478,7 @@ USEARCH_EXPORT void usearch_exact_search(                             //
 
     metric_punned_t metric(dimensions, metric_kind_to_cpp(metric_kind), scalar_kind_to_cpp(scalar_kind));
     executor_default_t executor(threads);
-    static exact_search_t search;
+    exact_search_t search;
     exact_search_results_t result = search(                    //
         (byte_t const*)dataset, dataset_count, dataset_stride, //
         (byte_t const*)queries, queries_count, queries_stride, //
@@ -492,5 +498,10 @@ USEARCH_EXPORT void usearch_exact_search(                             //
             query_keys[i] = static_cast<usearch_key_t>(query_result[i].offset),
             query_distances[i] = static_cast<usearch_distance_t>(query_result[i].distance);
     }
+}
+
+USEARCH_EXPORT void usearch_clear(usearch_index_t index, usearch_error_t* error) {
+    USEARCH_ASSERT(index && error && "Missing arguments");
+    reinterpret_cast<index_dense_t*>(index)->clear();
 }
 }

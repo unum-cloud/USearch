@@ -624,7 +624,7 @@ class index_dense_gt {
         }
         operator index_dense_gt&&() && {
             if (error)
-                __usearch_raise_runtime_error(error.what());
+                usearch_raise_runtime_error(error.what());
             return std::move(index);
         }
     };
@@ -757,39 +757,45 @@ class index_dense_gt {
     };
 
     // clang-format off
-    add_result_t add(vector_key_t key, b1x8_t const* vector, std::size_t thread = any_thread(), bool force_vector_copy = true) { return add_(key, vector, thread, force_vector_copy, casts_.from.b1x8); }
-    add_result_t add(vector_key_t key, i8_t const* vector, std::size_t thread = any_thread(), bool force_vector_copy = true) { return add_(key, vector, thread, force_vector_copy, casts_.from.i8); }
-    add_result_t add(vector_key_t key, f16_t const* vector, std::size_t thread = any_thread(), bool force_vector_copy = true) { return add_(key, vector, thread, force_vector_copy, casts_.from.f16); }
-    add_result_t add(vector_key_t key, f32_t const* vector, std::size_t thread = any_thread(), bool force_vector_copy = true) { return add_(key, vector, thread, force_vector_copy, casts_.from.f32); }
-    add_result_t add(vector_key_t key, f64_t const* vector, std::size_t thread = any_thread(), bool force_vector_copy = true) { return add_(key, vector, thread, force_vector_copy, casts_.from.f64); }
+    add_result_t add(vector_key_t key, b1x8_t const* vector, std::size_t thread = any_thread(), bool copy_vector = true) { return add_(key, vector, thread, copy_vector, casts_.from.b1x8); }
+    add_result_t add(vector_key_t key, i8_t const* vector, std::size_t thread = any_thread(), bool copy_vector = true) { return add_(key, vector, thread, copy_vector, casts_.from.i8); }
+    add_result_t add(vector_key_t key, f16_t const* vector, std::size_t thread = any_thread(), bool copy_vector = true) { return add_(key, vector, thread, copy_vector, casts_.from.f16); }
+    add_result_t add(vector_key_t key, bf16_t const* vector, std::size_t thread = any_thread(), bool copy_vector = true) { return add_(key, vector, thread, copy_vector, casts_.from.bf16); }
+    add_result_t add(vector_key_t key, f32_t const* vector, std::size_t thread = any_thread(), bool copy_vector = true) { return add_(key, vector, thread, copy_vector, casts_.from.f32); }
+    add_result_t add(vector_key_t key, f64_t const* vector, std::size_t thread = any_thread(), bool copy_vector = true) { return add_(key, vector, thread, copy_vector, casts_.from.f64); }
 
     search_result_t search(b1x8_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.b1x8); }
     search_result_t search(i8_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.i8); }
     search_result_t search(f16_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.f16); }
+    search_result_t search(bf16_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.bf16); }
     search_result_t search(f32_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.f32); }
     search_result_t search(f64_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.f64); }
 
     template <typename predicate_at> search_result_t filtered_search(b1x8_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.b1x8); }
     template <typename predicate_at> search_result_t filtered_search(i8_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.i8); }
     template <typename predicate_at> search_result_t filtered_search(f16_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.f16); }
+    template <typename predicate_at> search_result_t filtered_search(bf16_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.bf16); }
     template <typename predicate_at> search_result_t filtered_search(f32_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.f32); }
     template <typename predicate_at> search_result_t filtered_search(f64_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.f64); }
 
     std::size_t get(vector_key_t key, b1x8_t* vector, std::size_t vectors_count = 1) const { return get_(key, vector, vectors_count, casts_.to.b1x8); }
     std::size_t get(vector_key_t key, i8_t* vector, std::size_t vectors_count = 1) const { return get_(key, vector, vectors_count, casts_.to.i8); }
     std::size_t get(vector_key_t key, f16_t* vector, std::size_t vectors_count = 1) const { return get_(key, vector, vectors_count, casts_.to.f16); }
+    std::size_t get(vector_key_t key, bf16_t* vector, std::size_t vectors_count = 1) const { return get_(key, vector, vectors_count, casts_.to.bf16); }
     std::size_t get(vector_key_t key, f32_t* vector, std::size_t vectors_count = 1) const { return get_(key, vector, vectors_count, casts_.to.f32); }
     std::size_t get(vector_key_t key, f64_t* vector, std::size_t vectors_count = 1) const { return get_(key, vector, vectors_count, casts_.to.f64); }
 
     cluster_result_t cluster(b1x8_t const* vector, std::size_t level, std::size_t thread = any_thread()) const { return cluster_(vector, level, thread, casts_.from.b1x8); }
     cluster_result_t cluster(i8_t const* vector, std::size_t level, std::size_t thread = any_thread()) const { return cluster_(vector, level, thread, casts_.from.i8); }
     cluster_result_t cluster(f16_t const* vector, std::size_t level, std::size_t thread = any_thread()) const { return cluster_(vector, level, thread, casts_.from.f16); }
+    cluster_result_t cluster(bf16_t const* vector, std::size_t level, std::size_t thread = any_thread()) const { return cluster_(vector, level, thread, casts_.from.bf16); }
     cluster_result_t cluster(f32_t const* vector, std::size_t level, std::size_t thread = any_thread()) const { return cluster_(vector, level, thread, casts_.from.f32); }
     cluster_result_t cluster(f64_t const* vector, std::size_t level, std::size_t thread = any_thread()) const { return cluster_(vector, level, thread, casts_.from.f64); }
 
     aggregated_distances_t distance_between(vector_key_t key, b1x8_t const* vector, std::size_t thread = any_thread()) const { return distance_between_(key, vector, thread, casts_.to.b1x8); }
     aggregated_distances_t distance_between(vector_key_t key, i8_t const* vector, std::size_t thread = any_thread()) const { return distance_between_(key, vector, thread, casts_.to.i8); }
     aggregated_distances_t distance_between(vector_key_t key, f16_t const* vector, std::size_t thread = any_thread()) const { return distance_between_(key, vector, thread, casts_.to.f16); }
+    aggregated_distances_t distance_between(vector_key_t key, bf16_t const* vector, std::size_t thread = any_thread()) const { return distance_between_(key, vector, thread, casts_.to.bf16); }
     aggregated_distances_t distance_between(vector_key_t key, f32_t const* vector, std::size_t thread = any_thread()) const { return distance_between_(key, vector, thread, casts_.to.f32); }
     aggregated_distances_t distance_between(vector_key_t key, f64_t const* vector, std::size_t thread = any_thread()) const { return distance_between_(key, vector, thread, casts_.to.f64); }
     // clang-format on
@@ -940,7 +946,7 @@ class index_dense_gt {
 
     void reserve(index_limits_t limits) {
         if (!try_reserve(limits))
-            __usearch_raise_runtime_error("failed to reserve memory");
+            usearch_raise_runtime_error("failed to reserve memory");
     }
 
     /**
@@ -1070,8 +1076,9 @@ class index_dense_gt {
 
     /**
      *  @brief Parses the index from file to RAM.
-     *  @param[in] path The path to the file.
+     *  @param[in] input The input stream to read from.
      *  @param[in] config Configuration parameters for imports.
+     *  @param[in] progress Callback to report the execution progress.
      *  @return Outcome descriptor explicitly convertible to boolean.
      */
     template <typename input_callback_at, typename progress_at = dummy_progress_t>
@@ -1141,7 +1148,9 @@ class index_dense_gt {
 
             config_.multi = head.multi;
             metric_ = metric_t::builtin(head.dimensions, head.kind_metric, head.kind_scalar);
-            cast_buffer_ = cast_buffer_t(available_threads_.size() * metric_.bytes_per_vector());
+            // available_threads_.size() will be updated to old_limits.threads() later in this
+            // method, so use that as the number of threads to prepare for.
+            cast_buffer_ = cast_buffer_t(old_limits.threads() * metric_.bytes_per_vector());
             if (!cast_buffer_)
                 return result.failed("Failed to allocate memory for the casts");
             casts_ = casts_punned_t::make(head.kind_scalar);
@@ -1180,8 +1189,10 @@ class index_dense_gt {
 
     /**
      *  @brief Parses the index from file, without loading it into RAM.
-     *  @param[in] path The path to the file.
+     *  @param[in] file The input file to read from.
+     *  @param[in] offset The offset in the file to start reading from.
      *  @param[in] config Configuration parameters for imports.
+     *  @param[in] progress Callback to report the execution progress.
      *  @return Outcome descriptor explicitly convertible to boolean.
      */
     template <typename progress_at = dummy_progress_t>
@@ -1253,7 +1264,9 @@ class index_dense_gt {
 
             config_.multi = head.multi;
             metric_ = metric_t::builtin(head.dimensions, head.kind_metric, head.kind_scalar);
-            cast_buffer_ = cast_buffer_t(available_threads_.size() * metric_.bytes_per_vector());
+            // available_threads_.size() will be updated to old_limits.threads() later in this
+            // method, so use that as the number of threads to prepare for.
+            cast_buffer_ = cast_buffer_t(old_limits.threads() * metric_.bytes_per_vector());
             if (!cast_buffer_)
                 return result.failed("Failed to allocate memory for the casts");
             casts_ = casts_punned_t::make(head.kind_scalar);
@@ -1301,8 +1314,9 @@ class index_dense_gt {
 
     /**
      *  @brief Saves the index to a file.
-     *  @param[in] path The path to the file.
+     *  @param[in] file The output file to write to.
      *  @param[in] config Configuration parameters for exports.
+     *  @param[in] progress Callback to report the execution progress.
      *  @return Outcome descriptor explicitly convertible to boolean.
      */
     template <typename progress_at = dummy_progress_t>
@@ -1356,8 +1370,9 @@ class index_dense_gt {
 
     /**
      *  @brief Parses the index from file to RAM.
-     *  @param[in] path The path to the file.
+     *  @param[in] file The input file to read from.
      *  @param[in] config Configuration parameters for imports.
+     *  @param[in] progress Progress callback.
      *  @return Outcome descriptor explicitly convertible to boolean.
      */
     template <typename progress_at = dummy_progress_t>
@@ -1694,12 +1709,12 @@ class index_dense_gt {
     compaction_result_t isolate(executor_at&& executor = executor_at{}, progress_at&& progress = progress_at{}) {
         compaction_result_t result;
         std::atomic<std::size_t> pruned_edges;
-        auto disallow = [&](member_cref_t const& member) noexcept {
+        auto allow = [&](member_cref_t const& member) noexcept {
             bool freed = member.key == free_key_;
             pruned_edges += freed;
-            return freed;
+            return !freed;
         };
-        typed_->isolate(disallow, std::forward<executor_at>(executor), std::forward<progress_at>(progress));
+        typed_->isolate(allow, std::forward<executor_at>(executor), std::forward<progress_at>(progress));
         result.pruned_edges = pruned_edges;
         return result;
     }
@@ -1959,6 +1974,7 @@ class index_dense_gt {
 
         result.computed_distances = computed_distances;
         result.visited_members = visited_members;
+        result.clusters = unique_clusters;
 
         (void)progress;
         return result;
@@ -1986,14 +2002,13 @@ class index_dense_gt {
     template <typename scalar_at>
     add_result_t add_(                             //
         vector_key_t key, scalar_at const* vector, //
-        std::size_t thread, bool force_vector_copy, cast_punned_t const& cast) {
+        std::size_t thread, bool copy_vector, cast_punned_t const& cast) {
 
         if (!multi() && config().enable_key_lookups && contains(key))
             return add_result_t{}.failed("Duplicate keys not allowed in high-level wrappers");
 
         // Cast the vector, if needed for compatibility with `metric_`
         thread_lock_t lock = thread_lock_(thread);
-        bool copy_vector = !config_.exclude_vectors || force_vector_copy;
         byte_t const* vector_data = reinterpret_cast<byte_t const*>(vector);
         {
             byte_t* casted_data = cast_buffer_.data() + metric_.bytes_per_vector() * lock.thread_id;
