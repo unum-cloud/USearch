@@ -401,7 +401,7 @@ inline float f16_to_f32(std::uint16_t u16) noexcept {
 #elif USEARCH_USE_SIMSIMD
     return simsimd_f16_to_f32((simsimd_f16_t const*)&u16);
 #else
-#warning "It's recommended to use SimSIMD and fp16lib for half-precision numerics"
+#pragma message("It's recommended to use SimSIMD and fp16lib for half-precision numerics")
     _Float16 f16;
     std::memcpy(&f16, &u16, sizeof(std::uint16_t));
     return float(f16);
@@ -419,7 +419,7 @@ inline std::uint16_t f32_to_f16(float f32) noexcept {
     simsimd_f32_to_f16(f32, (simsimd_f16_t*)&result);
     return result;
 #else
-#warning "It's recommended to use SimSIMD and fp16lib for half-precision numerics"
+#pragma message("It's recommended to use SimSIMD and fp16lib for half-precision numerics")
     _Float16 f16 = _Float16(f32);
     std::uint16_t u16;
     std::memcpy(&u16, &f16, sizeof(std::uint16_t));
