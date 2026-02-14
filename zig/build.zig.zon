@@ -1,0 +1,13 @@
+.{
+    .name = .usearch_zig,
+    .version = "0.0.1",
+    .fingerprint = 0x20d43150bf11d52,
+    .minimum_zig_version = "0.15.1",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "usearch",
+    },
+}
