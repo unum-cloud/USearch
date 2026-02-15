@@ -1,3 +1,6 @@
+using System;
+using System.Runtime.InteropServices;
+
 namespace Cloud.Unum.USearch;
 
 /// <summary>
@@ -100,45 +103,64 @@ public enum ScalarKind : uint
 /// <summary>
 /// Represents the initialization options for creating a USearch index.
 /// </summary>
-public record struct IndexOptions
+[StructLayout(LayoutKind.Sequential)]
+public struct IndexOptions
 {
     /// <summary>
     /// The metric kind used for distance calculation between vectors.
     /// </summary>
-    public MetricKind MetricKind { get; init; }
+    public MetricKind metric_kind;
+
+    /// <summary>
+    /// The optional custom metric function for distance calculation between vectors. Not supported yet.
+    /// </summary>
+    public IntPtr metric;
 
     /// <summary>
     /// The scalar kind used for quantization of vector data during indexing.
     /// </summary>
-    public ScalarKind Quantization { get; init; }
+    public ScalarKind quantization;
 
     /// <summary>
     /// The number of dimensions in the vectors to be indexed.
     /// </summary>
-    public ulong Dimensions { get; init; }
+    public ulong dimensions;
 
     /// <summary>
     /// The optional connectivity parameter that limits connections-per-node in the graph.
     /// </summary>
-    public ulong Connectivity { get; init; }
+    public ulong connectivity;
 
     /// <summary>
     /// The optional expansion factor used for index construction when adding vectors.
     /// </summary>
-    public ulong ExpansionAdd { get; init; }
+    public ulong expansion_add;
 
     /// <summary>
     /// The optional expansion factor used for index construction during search operations.
     /// </summary>
-    public ulong ExpansionSearch { get; init; }
+    public ulong expansion_search;
 
     /// <summary>
     /// Indicates whether multiple vectors can map to the same key.
     /// </summary>
-    public bool Multi { get; init; }
+    [MarshalAs(UnmanagedType.Bool)]
+    public bool multi;
 
+    /// <summary>
+    /// Initializes a new instance of the IndexOptions struct with specified parameters.
+    /// </summary>
+    /// <param name="metricKind">The metric kind used for distance calculation between vectors.</param>
+    /// <param name="metric">The optional custom metric function for distance calculation between vectors. Not supported yet.</param>
+    /// <param name="quantization">The scalar kind used for quantization of vector data during indexing.</param>
+    /// <param name="dimensions">The number of dimensions in the vectors to be indexed.</param>
+    /// <param name="connectivity">The optional connectivity parameter that limits connections-per-node in the graph.</param>
+    /// <param name="expansionAdd">The optional expansion factor used for index construction when adding vectors.</param>
+    /// <param name="expansionSearch">The optional expansion factor used for index construction during search operations.</param>
+    /// <param name="multi">Indicates whether multiple vectors can map to the same key.</param>
     public IndexOptions(
         MetricKind metricKind = MetricKind.Unknown,
+        IntPtr metric = default,
         ScalarKind quantization = ScalarKind.Unknown,
         ulong dimensions = 0,
         ulong connectivity = 0,
@@ -147,12 +169,13 @@ public record struct IndexOptions
         bool multi = false
     )
     {
-        MetricKind = metricKind;
-        Quantization = quantization;
-        Dimensions = dimensions;
-        Connectivity = connectivity;
-        ExpansionAdd = expansionAdd;
-        ExpansionSearch = expansionSearch;
-        Multi = multi;
+        this.metric_kind = metricKind;
+        this.metric = metric;
+        this.quantization = quantization;
+        this.dimensions = dimensions;
+        this.connectivity = connectivity;
+        this.expansion_add = expansionAdd;
+        this.expansion_search = expansionSearch;
+        this.multi = multi;
     }
 }

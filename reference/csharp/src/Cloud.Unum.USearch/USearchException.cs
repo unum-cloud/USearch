@@ -4,9 +4,5 @@ namespace Cloud.Unum.USearch;
 
 public class USearchException : Exception
 {
-    public USearchException() { }
-
     public USearchException(string message) : base(message) { }
-
-    public USearchException(string message, Exception innerException) : base(message, innerException) { }
 }
