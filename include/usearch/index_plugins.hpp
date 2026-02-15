@@ -854,7 +854,7 @@ class page_allocator_t {
 #if defined(USEARCH_DEFINED_WINDOWS)
         return (byte_t*)(::VirtualAlloc(NULL, count_bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
 #else
-        return (byte_t*)mmap(NULL, count_bytes, PROT_WRITE | PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+        return (byte_t*)mmap(NULL, count_bytes, PROT_WRITE | PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 #endif
     }
 
@@ -959,7 +959,7 @@ template <std::size_t alignment_ak = 1> class memory_mapping_allocator_gt {
         if (!last_arena_ || (last_usage_ + extended_bytes >= last_capacity_)) {
             std::size_t new_cap = (std::max)(last_capacity_, ceil2(extended_bytes)) * capacity_multiplier();
             byte_t* new_arena = page_allocator_t{}.allocate(new_cap);
-            if (!new_arena)
+            if (!new_arena || new_arena == (byte_t*)MAP_FAILED)
                 return nullptr;
             std::memcpy(new_arena, &last_arena_, sizeof(byte_t*));
             std::memcpy(new_arena + sizeof(byte_t*), &new_cap, sizeof(std::size_t));
