@@ -20,20 +20,20 @@ Similarity Search & Clustering Engine for <a href="https://github.com/ashvardani
 <p align="center">
 Spatial • Binary • Probabilistic • User-Defined Metrics
 <br/>
-<a href="https://unum-cloud.github.io/usearch/cpp">C++11</a> •
-<a href="https://unum-cloud.github.io/usearch/python">Python 3</a> •
-<a href="https://unum-cloud.github.io/usearch/javascript">JavaScript</a> •
-<a href="https://unum-cloud.github.io/usearch/java">Java</a> •
-<a href="https://unum-cloud.github.io/usearch/rust">Rust</a> •
-<a href="https://unum-cloud.github.io/usearch/c">C99</a> •
-<a href="https://unum-cloud.github.io/usearch/objective-c">Objective-C</a> •
-<a href="https://unum-cloud.github.io/usearch/swift">Swift</a> •
-<a href="https://unum-cloud.github.io/usearch/csharp">C#</a> •
-<a href="https://unum-cloud.github.io/usearch/golang">Go</a> •
-<a href="https://unum-cloud.github.io/usearch/wolfram">Wolfram</a>
+<a href="https://unum-cloud.github.io/USearch/cpp">C++11</a> •
+<a href="https://unum-cloud.github.io/USearch/python">Python 3</a> •
+<a href="https://unum-cloud.github.io/USearch/javascript">JavaScript</a> •
+<a href="https://unum-cloud.github.io/USearch/java">Java</a> •
+<a href="https://unum-cloud.github.io/USearch/rust">Rust</a> •
+<a href="https://unum-cloud.github.io/USearch/c">C99</a> •
+<a href="https://unum-cloud.github.io/USearch/objective-c">Objective-C</a> •
+<a href="https://unum-cloud.github.io/USearch/swift">Swift</a> •
+<a href="https://unum-cloud.github.io/USearch/csharp">C#</a> •
+<a href="https://unum-cloud.github.io/USearch/golang">Go</a> •
+<a href="https://unum-cloud.github.io/USearch/wolfram">Wolfram</a>
 <br/>
 Linux • macOS • Windows • iOS • Android • WebAssembly •
-<a href="https://unum-cloud.github.io/usearch/sqlite">SQLite</a>
+<a href="https://unum-cloud.github.io/USearch/sqlite">SQLite</a>
 </p>
 
 <div align="center">
@@ -57,7 +57,7 @@ Linux • macOS • Windows • iOS • Android • WebAssembly •
 - ✅ Binary Tanimoto and Sorensen coefficients for [Genomics and Chemistry applications](#usearch--rdkit--molecular-search).
 - ✅ Space-efficient point-clouds with `uint40_t`, accommodating 4B+ size.
 - ✅ Compatible with OpenMP and custom "executors" for fine-grained parallelism.
-- ✅ [Semantic Search](#usearch--ai--multi-modal-semantic-search) and [Joins](#joins-one-to-one-one-to-many-and-many-to-many-mappings).
+- ✅ [Semantic Search](#usearch--uform--ucall--multimodal-semantic-search) and [Joins](#joins-one-to-one-one-to-many-and-many-to-many-mappings).
 - 🔄 Near-real-time [clustering and sub-clustering](#clustering) for Tens or Millions of clusters.
 
 [faiss]: https://github.com/facebookresearch/faiss
@@ -195,7 +195,7 @@ When compared to FAISS's `IndexFlatL2` in Google Colab, __[USearch may offer up 
 
 While most vector search packages concentrate on just two metrics, "Inner Product distance" and "Euclidean distance", USearch allows arbitrary user-defined metrics.
 This flexibility allows you to customize your search for various applications, from computing geospatial coordinates with the rare [Haversine][haversine] distance to creating custom metrics for composite embeddings from multiple AI models, like joint image-text embeddings.
-You can use [Numba][numba], [Cppyy][cppyy], or [PeachPy][peachpy] to define your [custom metric even in Python](https://unum-cloud.github.io/usearch/python#user-defined-metrics-and-jit-in-python):
+You can use [Numba][numba], [Cppyy][cppyy], or [PeachPy][peachpy] to define your [custom metric even in Python](https://unum-cloud.github.io/USearch/python#user-defined-metrics-and-jit-in-python):
 
 ```py
 from numba import cfunc, types, carray

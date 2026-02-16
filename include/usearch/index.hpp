@@ -72,7 +72,9 @@
 // OS-specific includes
 #if defined(USEARCH_DEFINED_WINDOWS)
 #define _USE_MATH_DEFINES
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <Windows.h>
 #include <sys/stat.h> // `fstat` for file size
 #undef NOMINMAX
@@ -500,7 +502,7 @@ template <typename allocator_at = std::allocator<byte_t>> class bitset_gt {
 
     static constexpr std::size_t bits_per_slot() { return sizeof(compressed_slot_t) * CHAR_BIT; }
     static constexpr compressed_slot_t bits_mask() { return sizeof(compressed_slot_t) * CHAR_BIT - 1; }
-    static constexpr std::size_t slots(std::size_t bits) { return divide_round_up<bits_per_slot()>(bits); }
+    static constexpr std::size_t bits_slots(std::size_t bits) { return divide_round_up<bits_per_slot()>(bits); }
 
     compressed_slot_t* slots_{};
     /// @brief Number of slots.
@@ -524,8 +526,8 @@ template <typename allocator_at = std::allocator<byte_t>> class bitset_gt {
     }
 
     bitset_gt(std::size_t capacity) noexcept
-        : slots_((compressed_slot_t*)allocator_t{}.allocate(slots(capacity) * sizeof(compressed_slot_t))),
-          count_(slots_ ? slots(capacity) : 0u) {
+        : slots_((compressed_slot_t*)allocator_t{}.allocate(bits_slots(capacity) * sizeof(compressed_slot_t))),
+          count_(slots_ ? bits_slots(capacity) : 0u) {
         clear();
     }
 
@@ -1778,7 +1780,7 @@ class memory_mapped_file_t {
 #if defined(USEARCH_DEFINED_WINDOWS)
 
         HANDLE file_handle =
-            CreateFile(path_, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+            CreateFileA(path_, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
         if (file_handle == INVALID_HANDLE_VALUE)
             return result.failed("Opening file failed!");
 
