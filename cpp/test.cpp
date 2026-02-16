@@ -1144,6 +1144,68 @@ void test_filtered_search() {
     }
 }
 
+
+void test_radius_search() {
+    constexpr std::size_t dataset_count = 256;
+    constexpr std::size_t dimensions = 32;
+    metric_punned_t metric(dimensions, metric_kind_t::l2sq_k);
+
+    std::random_device seed_source;
+    std::mt19937 generator(seed_source());
+    std::uniform_real_distribution<float> distribution(0.0, 1.0);
+    using vector_of_vectors_t = std::vector<std::vector<float>>;
+
+    vector_of_vectors_t vector_of_vectors(dataset_count);
+    for (auto& vector : vector_of_vectors) {
+        vector.resize(dimensions);
+        std::generate(vector.begin(), vector.end(), [&] { return distribution(generator); });
+    }
+
+    index_dense_t index = index_dense_t::make(metric);
+    index.reserve(dataset_count);
+    for (std::size_t idx = 0; idx < dataset_count; ++idx)
+        index.add(idx, vector_of_vectors[idx].data());
+    expect_eq(index.size(), dataset_count);
+
+    // Search without radius (default) - should return up to `wanted` results
+    auto result_default = index.search(vector_of_vectors[0].data(), 10);
+    expect(result_default);
+    expect(result_default.count > 0);
+    expect(result_default.count <= 10);
+
+    // Search with a tight radius - verify all returned distances are within radius
+    float tight_radius = 0.5f;
+    auto result_tight = index.search(vector_of_vectors[0].data(), 10,
+                                     index_dense_t::any_thread(), false, tight_radius);
+    expect(result_tight);
+    expect(result_tight.count <= result_default.count);
+
+    std::vector<index_dense_t::vector_key_t> keys(result_tight.count);
+    std::vector<float> distances(result_tight.count);
+    result_tight.dump_to(keys.data(), distances.data());
+    for (std::size_t i = 0; i < result_tight.count; ++i)
+        expect(distances[i] <= tight_radius);
+
+    // Search with radius = 0.0 for a vector that is in the index.
+    // L2sq self-distance of identical f32 vectors is exactly 0.0.
+    auto result_zero = index.search(vector_of_vectors[0].data(), 10,
+                                    index_dense_t::any_thread(), false, 0.0f);
+    expect(result_zero);
+    expect(result_zero.count >= 1);
+    keys.resize(result_zero.count);
+    distances.resize(result_zero.count);
+    result_zero.dump_to(keys.data(), distances.data());
+    for (std::size_t i = 0; i < result_zero.count; ++i)
+        expect(distances[i] <= 0.0f);
+
+    // Infinite radius (default) should match no-radius search
+    auto result_inf = index.search(vector_of_vectors[0].data(), 10,
+                                   index_dense_t::any_thread(), false,
+                                   std::numeric_limits<float>::infinity());
+    expect(result_inf);
+    expect_eq(result_inf.count, result_default.count);
+}
+
 void test_isolate() {
     constexpr std::size_t dataset_count = 16;
     constexpr std::size_t dimensions = 32;
@@ -1256,6 +1318,7 @@ int main(int, char**) {
     test_strings<std::int64_t, slot32_t>();
 
     test_filtered_search();
+    test_radius_search();
     test_isolate();
     return 0;
 }

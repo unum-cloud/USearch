@@ -1437,6 +1437,10 @@ struct index_search_config_t {
 
     /// @brief Brute-forces exhaustive search over all entries in the index.
     bool exact = false;
+
+    /// @brief Maximum search radius. Results with distance greater than this are excluded.
+    /// Defaults to infinity, meaning no filtering is applied.
+    float radius = std::numeric_limits<float>::infinity();
 };
 
 struct index_cluster_config_t {
@@ -3072,6 +3076,18 @@ class index_gt {
 
         top.sort_ascending();
         top.shrink(wanted);
+
+        if (std::isfinite(config.radius)) {
+            candidate_t const* data = top.data();
+            std::size_t within_radius = top.size();
+            for (std::size_t i = 0; i < top.size(); ++i) {
+                if (data[i].distance > static_cast<distance_t>(config.radius)) {
+                    within_radius = i;
+                    break;
+                }
+            }
+            top.shrink(within_radius);
+        }
 
         // Normalize stats
         result.computed_distances = context.computed_distances - result.computed_distances;

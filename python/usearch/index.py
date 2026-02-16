@@ -194,6 +194,7 @@ def _search_in_compiled(
     *,
     log: Union[str, bool],
     progress: Optional[ProgressCallback],
+    radius: float = math.inf,
     **kwargs,
 ) -> Union[Matches, BatchMatches]:
     #
@@ -239,7 +240,16 @@ def _search_in_compiled(
     if log:
         progress_bar.close()
 
-    return distill_batch(BatchMatches(*tuple_))
+    batch_matches = BatchMatches(*tuple_)
+
+    if math.isfinite(radius):
+        for i in range(len(batch_matches.counts)):
+            count = int(batch_matches.counts[i])
+            new_count = int(np.searchsorted(
+                batch_matches.distances[i, :count], radius, side='right'))
+            batch_matches.counts[i] = new_count
+
+    return distill_batch(batch_matches)
 
 
 def _add_to_compiled(
@@ -732,6 +742,10 @@ class Index:
         :type count: int, defaults to 10
             When count > index size, only available vectors will be returned.
             For BatchMatches, unused positions contain sentinel values.
+        :param radius: Maximum distance threshold for results
+        :type radius: float, defaults to math.inf
+            Only matches with distance <= radius are returned.
+            When set to math.inf (default), no distance filtering is applied.
         :param threads: Optimal number of cores to use
         :type threads: int, defaults to 0
         :param exact: Perform exhaustive linear-time exact search
@@ -753,6 +767,7 @@ class Index:
             log=log,
             # Search constraints:
             count=count,
+            radius=radius,
             exact=exact,
             threads=threads,
             progress=progress,
@@ -1507,6 +1522,7 @@ class Indexes:
         self,
         vectors,
         count: int = 10,
+        radius: float = math.inf,
         *,
         threads: int = 0,
         exact: bool = False,
@@ -1519,6 +1535,7 @@ class Indexes:
             log=False,
             # Search constraints:
             count=count,
+            radius=radius,
             exact=exact,
             threads=threads,
             progress=progress,
@@ -1531,6 +1548,7 @@ def search(
     count: int = 10,
     metric: MetricLike = MetricKind.Cos,
     *,
+    radius: float = math.inf,
     exact: bool = False,
     threads: int = 0,
     log: Union[str, bool] = False,
@@ -1553,6 +1571,10 @@ def search(
         Possible `MetricKind` values: IP, Cos, L2sq, Haversine, Pearson,
         Hamming, Tanimoto, Sorensen.
 
+    :param radius: Maximum distance threshold for results, defaults to math.inf
+    :type radius: float, optional
+        Only matches with distance <= radius are returned.
+        When set to math.inf (default), no distance filtering is applied.
     :param threads: Optimal number of cores to use, defaults to 0
     :type threads: int, optional
     :param exact: Perform exhaustive linear-time exact search, defaults to False
@@ -1583,6 +1605,7 @@ def search(
         return index.search(
             query,
             count,
+            radius=radius,
             threads=threads,
             log=log,
             progress=progress,
@@ -1621,6 +1644,7 @@ def search(
         log=log,
         # Search constraints:
         count=count,
+        radius=radius,
         threads=threads,
         progress=progress,
     )
