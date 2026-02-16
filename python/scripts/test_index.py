@@ -395,6 +395,110 @@ def test_index_oversubscribed_search(batch_size: int, threads: int):
         assert len(match.keys) == batch_size
 
 
+@pytest.mark.parametrize("ndim", [3, 97, 25, 1024, 4096])
+@pytest.mark.parametrize("metric", [MetricKind.Cos, MetricKind.L2sq])
+def test_index_search_radius_filters_results(ndim, metric):
+    """Verify that radius constrains returned results by distance."""
+    reset_randomness()
+
+    batch_size = 100
+    index = Index(ndim=ndim, metric=metric, dtype=ScalarKind.F32, multi=False)
+    vectors = random_vectors(count=batch_size, ndim=ndim, dtype=np.float32)
+    keys = np.arange(batch_size)
+    index.add(keys, vectors, threads=threads)
+
+    query = vectors[:1]
+
+    # Unconstrained search
+    matches_all: Matches = index.search(query, 10, threads=threads)
+    assert len(matches_all) > 0
+
+    # Pick a radius that is smaller than the farthest distance
+    if len(matches_all) >= 2:
+        mid_distance = float(matches_all.distances[len(matches_all) // 2])
+        matches_radius: Matches = index.search(query, 10, radius=mid_distance, threads=threads)
+        assert len(matches_radius) <= len(matches_all)
+        for i in range(len(matches_radius)):
+            assert matches_radius.distances[i] <= mid_distance
+
+
+def test_index_search_radius_default_matches_no_radius():
+    """Verify that radius=math.inf returns identical results to no-radius search."""
+    import math
+
+    reset_randomness()
+
+    ndim = 32
+    batch_size = 50
+    index = Index(ndim=ndim, metric=MetricKind.L2sq, dtype=ScalarKind.F32, multi=False)
+    vectors = random_vectors(count=batch_size, ndim=ndim, dtype=np.float32)
+    keys = np.arange(batch_size)
+    index.add(keys, vectors, threads=threads)
+
+    query = vectors[:1]
+    matches_default: Matches = index.search(query, 10, threads=threads)
+    matches_inf: Matches = index.search(query, 10, radius=math.inf, threads=threads)
+
+    assert len(matches_default) == len(matches_inf)
+    assert np.array_equal(matches_default.keys, matches_inf.keys)
+    assert np.allclose(matches_default.distances, matches_inf.distances)
+
+
+def test_index_search_radius_zero():
+    """Verify that radius=0 returns only exact matches (distance = 0.0)."""
+    reset_randomness()
+
+    ndim = 32
+    batch_size = 50
+    index = Index(ndim=ndim, metric=MetricKind.L2sq, dtype=ScalarKind.F32, multi=False)
+    vectors = random_vectors(count=batch_size, ndim=ndim, dtype=np.float32)
+    keys = np.arange(batch_size)
+    index.add(keys, vectors, threads=threads)
+
+    # Search for a vector that is in the index; L2sq self-distance is exactly 0.0
+    query = vectors[:1]
+    matches: Matches = index.search(query, 10, radius=0.0, threads=threads)
+    assert len(matches) >= 1
+    for i in range(len(matches)):
+        assert matches.distances[i] <= 0.0
+
+
+@pytest.mark.parametrize("batch_size", [1, 7, 32])
+def test_index_search_radius_single_and_batch(batch_size):
+    """Verify radius works for both single (Matches) and batch (BatchMatches) queries."""
+    reset_randomness()
+
+    ndim = 16
+    dataset_size = 100
+    index = Index(ndim=ndim, metric=MetricKind.L2sq, dtype=ScalarKind.F32, multi=False)
+    vectors = random_vectors(count=dataset_size, ndim=ndim, dtype=np.float32)
+    keys = np.arange(dataset_size)
+    index.add(keys, vectors, threads=threads)
+
+    queries = vectors[:batch_size]
+
+    # First do an unconstrained search to find a reasonable radius
+    if batch_size == 1:
+        unconstrained: Matches = index.search(queries, 10, threads=threads)
+        if len(unconstrained) >= 2:
+            radius = float(unconstrained.distances[len(unconstrained) // 2])
+            constrained: Matches = index.search(queries, 10, radius=radius, threads=threads)
+            assert isinstance(constrained, Matches)
+            assert len(constrained) <= len(unconstrained)
+            for i in range(len(constrained)):
+                assert constrained.distances[i] <= radius
+    else:
+        unconstrained: BatchMatches = index.search(queries, 10, threads=threads)
+        # Use a tight radius to ensure filtering happens
+        radius = 0.0
+        constrained: BatchMatches = index.search(queries, 10, radius=radius, threads=threads)
+        assert isinstance(constrained, BatchMatches)
+        for i in range(len(constrained)):
+            match = constrained[i]
+            for j in range(len(match)):
+                assert match.distances[j] <= radius
+
+
 @pytest.mark.parametrize("ndim", [3, 97, 256])
 @pytest.mark.parametrize("metric", [MetricKind.Cos, MetricKind.L2sq])
 @pytest.mark.parametrize("batch_size", [500, 1024])

@@ -764,19 +764,19 @@ class index_dense_gt {
     add_result_t add(vector_key_t key, f32_t const* vector, std::size_t thread = any_thread(), bool copy_vector = true) { return add_(key, vector, thread, copy_vector, casts_.from.f32); }
     add_result_t add(vector_key_t key, f64_t const* vector, std::size_t thread = any_thread(), bool copy_vector = true) { return add_(key, vector, thread, copy_vector, casts_.from.f64); }
 
-    search_result_t search(b1x8_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.b1x8); }
-    search_result_t search(i8_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.i8); }
-    search_result_t search(f16_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.f16); }
-    search_result_t search(bf16_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.bf16); }
-    search_result_t search(f32_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.f32); }
-    search_result_t search(f64_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.f64); }
+    search_result_t search(b1x8_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false, float radius = std::numeric_limits<float>::infinity()) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, radius, casts_.from.b1x8); }
+    search_result_t search(i8_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false, float radius = std::numeric_limits<float>::infinity()) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, radius, casts_.from.i8); }
+    search_result_t search(f16_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false, float radius = std::numeric_limits<float>::infinity()) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, radius, casts_.from.f16); }
+    search_result_t search(bf16_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false, float radius = std::numeric_limits<float>::infinity()) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, radius, casts_.from.bf16); }
+    search_result_t search(f32_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false, float radius = std::numeric_limits<float>::infinity()) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, radius, casts_.from.f32); }
+    search_result_t search(f64_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false, float radius = std::numeric_limits<float>::infinity()) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, radius, casts_.from.f64); }
 
-    template <typename predicate_at> search_result_t filtered_search(b1x8_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.b1x8); }
-    template <typename predicate_at> search_result_t filtered_search(i8_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.i8); }
-    template <typename predicate_at> search_result_t filtered_search(f16_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.f16); }
-    template <typename predicate_at> search_result_t filtered_search(bf16_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.bf16); }
-    template <typename predicate_at> search_result_t filtered_search(f32_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.f32); }
-    template <typename predicate_at> search_result_t filtered_search(f64_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.f64); }
+    template <typename predicate_at> search_result_t filtered_search(b1x8_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false, float radius = std::numeric_limits<float>::infinity()) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, radius, casts_.from.b1x8); }
+    template <typename predicate_at> search_result_t filtered_search(i8_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false, float radius = std::numeric_limits<float>::infinity()) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, radius, casts_.from.i8); }
+    template <typename predicate_at> search_result_t filtered_search(f16_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false, float radius = std::numeric_limits<float>::infinity()) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, radius, casts_.from.f16); }
+    template <typename predicate_at> search_result_t filtered_search(bf16_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false, float radius = std::numeric_limits<float>::infinity()) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, radius, casts_.from.bf16); }
+    template <typename predicate_at> search_result_t filtered_search(f32_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false, float radius = std::numeric_limits<float>::infinity()) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, radius, casts_.from.f32); }
+    template <typename predicate_at> search_result_t filtered_search(f64_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false, float radius = std::numeric_limits<float>::infinity()) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, radius, casts_.from.f64); }
 
     std::size_t get(vector_key_t key, b1x8_t* vector, std::size_t vectors_count = 1) const { return get_(key, vector, vectors_count, casts_.to.b1x8); }
     std::size_t get(vector_key_t key, i8_t* vector, std::size_t vectors_count = 1) const { return get_(key, vector, vectors_count, casts_.to.i8); }
@@ -2051,7 +2051,7 @@ class index_dense_gt {
 
     template <typename scalar_at, typename predicate_at>
     search_result_t search_(scalar_at const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread,
-                            bool exact, cast_punned_t const& cast) const {
+                            bool exact, float radius, cast_punned_t const& cast) const {
 
         // Cast the vector, if needed for compatibility with `metric_`
         thread_lock_t lock = thread_lock_(thread);
@@ -2067,6 +2067,7 @@ class index_dense_gt {
         search_config.thread = lock.thread_id;
         search_config.expansion = config_.expansion_search;
         search_config.exact = exact;
+        search_config.radius = radius;
 
         vector_key_t free_key_copy = free_key_;
         if (std::is_same<typename std::decay<predicate_at>::type, dummy_predicate_t>::value) {
