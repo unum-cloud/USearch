@@ -4244,30 +4244,99 @@ class index_gt {
             next.pop();
             context.iteration_cycles++;
 
-            neighbors_ref_t candidate_neighbors = neighbors_base_(node_at_(candidate.slot));
+            if (is_dummy<predicate_at>()) {
 
-            // Optional prefetching
-            if (!is_dummy<prefetch_at>()) {
-                candidates_range_t missing_candidates{*this, candidate_neighbors, visits};
-                prefetch(missing_candidates.begin(), missing_candidates.end());
-            }
+                neighbors_ref_t candidate_neighbors = neighbors_base_(node_at_(candidate.slot));
 
-            // Assume the worst-case when reserving memory
-            if (!visits.reserve(visits.size() + candidate_neighbors.size()))
-                return false;
+                // Optional prefetching
+                if (!is_dummy<prefetch_at>()) {
+                    candidates_range_t missing_candidates{*this, candidate_neighbors, visits};
+                    prefetch(missing_candidates.begin(), missing_candidates.end());
+                }
 
-            for (compressed_slot_t successor_slot : candidate_neighbors) {
-                if (visits.set(successor_slot))
-                    continue;
+                // Assume the worst-case when reserving memory
+                if (!visits.reserve(visits.size() + candidate_neighbors.size()))
+                    return false;
 
-                distance_t successor_dist = context.measure(query, citerator_at(successor_slot), metric);
-                if (top.size() < top_limit || successor_dist < radius) {
-                    // This can substantially grow our priority queue:
-                    next.insert({-successor_dist, successor_slot});
-                    if (is_dummy<predicate_at>() ||
-                        predicate(member_cref_t{node_at_(successor_slot).ckey(), successor_slot})) {
-                        top.insert({successor_dist, successor_slot}, top_limit);
-                        radius = top.top().distance;
+                for (compressed_slot_t successor_slot : candidate_neighbors) {
+                    if (visits.set(successor_slot))
+                        continue;
+
+                    distance_t successor_dist = context.measure(query, citerator_at(successor_slot), metric);
+                    if (top.size() < top_limit || successor_dist < radius) {
+                        // This can substantially grow our priority queue:
+                        next.insert({-successor_dist, successor_slot});
+                        if (is_dummy<predicate_at>() ||
+                            predicate(member_cref_t{node_at_(successor_slot).ckey(), successor_slot})) {
+                            top.insert({successor_dist, successor_slot}, top_limit);
+                            radius = top.top().distance;
+                        }
+                    }
+                }
+
+            } else {
+                // ACORN-1
+
+                // explore 1-hop neighbors
+                neighbors_ref_t candidate_neighbors = neighbors_base_(node_at_(candidate.slot));
+
+                // Optional prefetching
+                if (!is_dummy<prefetch_at>()) {
+                    candidates_range_t missing_candidates{*this, candidate_neighbors, visits};
+                    prefetch(missing_candidates.begin(), missing_candidates.end());
+                }
+
+                // Assume the worst-case when reserving memory
+                if (!visits.reserve(visits.size() + candidate_neighbors.size()))
+                    return false;
+
+                for (compressed_slot_t successor_slot : candidate_neighbors) {
+                    if (visits.set(successor_slot))
+                        continue;
+
+                    if (predicate(member_cref_t{node_at_(successor_slot).ckey(), successor_slot})) {
+                        distance_t successor_dist = context.measure(query, citerator_at(successor_slot), metric);
+                        if (top.size() < top_limit || successor_dist < radius) {
+                            // This can substantially grow our priority queue:
+                            next.insert({-successor_dist, successor_slot});
+
+                            top.insert({successor_dist, successor_slot}, top_limit);
+                            radius = top.top().distance;
+                        }
+                    }
+                }
+
+
+                // explore 2-hop neighbors
+                for (compressed_slot_t successor_slot : candidate_neighbors) {
+                    neighbors_ref_t hop2_candidate_neighbors = neighbors_base_(node_at_(successor_slot));
+
+                    // Optional prefetching
+                    if (!is_dummy<prefetch_at>()) {
+                        candidates_range_t missing_candidates{*this, hop2_candidate_neighbors, visits};
+                        prefetch(missing_candidates.begin(), missing_candidates.end());
+                    }
+
+                    // Assume the worst-case when reserving memory
+                    if (!visits.reserve(visits.size() + hop2_candidate_neighbors.size()))
+                        return false;
+
+                    for (compressed_slot_t hop2_successor_slot : hop2_candidate_neighbors) {
+
+                        if (visits.set(hop2_successor_slot))
+                            continue;
+
+                        if (predicate(member_cref_t{node_at_(hop2_successor_slot).ckey(), hop2_successor_slot})) {
+                            distance_t hop2_successor_dist =
+                                context.measure(query, citerator_at(hop2_successor_slot), metric);
+                            if (top.size() < top_limit || hop2_successor_dist < radius) {
+                                // This can substantially grow our priority queue:
+                                next.insert({-hop2_successor_dist, hop2_successor_slot});
+
+                                top.insert({hop2_successor_dist, hop2_successor_slot}, top_limit);
+                                radius = top.top().distance;
+                            }
+                        }
                     }
                 }
             }
