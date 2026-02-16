@@ -542,6 +542,7 @@ index = Index(ndim=ndim, metric=CompiledMetric(
 - [x] Sentence-Transformers: Python [docs](https://www.sbert.net/docs/package_reference/quantization.html#sentence_transformers.quantization.semantic_search_usearch).
 - [x] Pathway: [Rust](https://github.com/pathwaycom/pathway).
 - [x] Vald: [GoLang](https://github.com/vdaas/vald).
+- [x] Antarys: [Zig](https://github.com/antarys-ai/edge).
   
 
 ## Citations
