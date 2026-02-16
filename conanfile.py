@@ -7,7 +7,7 @@ required_conan_version = ">=1.53.0"
 class USearchConan(ConanFile):
 
     name = "usearch"
-    version = "2.23.0"
+    version = "2.24.0"
     license = "Apache-2.0"
     description = "Smaller & Faster Single-File Vector Search Engine from Unum"
     homepage = "https://github.com/unum-cloud/usearch"

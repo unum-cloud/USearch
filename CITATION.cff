@@ -5,7 +5,7 @@ authors:
     given-names: "Ash"
     orcid: "https://orcid.org/0000-0002-4882-1815"
 title: "USearch by Unum Cloud"
-version: 2.23.0
+version: 2.24.0
 doi: 10.5281/zenodo.7949416
 date-released: 2023-10-22
 url: "https://github.com/unum-cloud/usearch"

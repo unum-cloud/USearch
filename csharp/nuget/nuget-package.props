@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project>
   <PropertyGroup>
-    <Version Condition="'$(Version)' == ''">2.23.0</Version>
+    <Version Condition="'$(Version)' == ''">2.24.0</Version>
 
     <Authors>Unum</Authors>
     <Company>Unum</Company>

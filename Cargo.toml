@@ -1,6 +1,6 @@
 [package]
 name = "usearch"
-version = "2.23.0"
+version = "2.24.0"
 authors = ["Ash Vardanian <1983160+ashvardanian@users.noreply.github.com>"]
 description = "Smaller & Faster Single-File Vector Search Engine from Unum"
 edition = "2021"

@@ -19,7 +19,7 @@ repositories {
 // Task to download USearch JAR from GitHub releases
 task downloadUSearchJar {
     doLast {
-        def usearchVersion = '2.23.0'
+        def usearchVersion = '2.24.0'
         def usearchUrl = "https://github.com/unum-cloud/usearch/releases/download/v${usearchVersion}/usearch-${usearchVersion}.jar"
         def usearchFile = file("lib/usearch-${usearchVersion}.jar")
         
@@ -38,7 +38,7 @@ compileJava.dependsOn downloadUSearchJar
 
 dependencies {
     // USearch JAR from local lib directory (downloaded automatically)
-    implementation name: 'usearch', version: '2.23.0', ext: 'jar'
+    implementation name: 'usearch', version: '2.24.0', ext: 'jar'
 }
 ```
 
