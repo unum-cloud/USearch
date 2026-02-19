@@ -1236,7 +1236,7 @@ PYBIND11_MODULE(compiled, m) {
     i.def_property_readonly( //
         "dtype", [](dense_index_py_t const& index) -> scalar_kind_t { return index.scalar_kind(); });
 
-    i.def_property_readonly("serialized_length", &dense_index_py_t::serialized_length);
+    i.def_property_readonly("serialized_length", [](dense_index_py_t const& self) -> std::size_t { return self.serialized_length({}); });
     i.def_property_readonly("memory_usage", &dense_index_py_t::memory_usage);
 
     i.def_property("expansion_add", &dense_index_py_t::expansion_add, &dense_index_py_t::change_expansion_add);
