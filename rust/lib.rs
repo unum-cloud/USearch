@@ -301,6 +301,24 @@ pub mod ffi {
         distances: Vec<f32>,
     }
 
+    /// Detailed memory statistics with separate breakdowns for the graph
+    /// and vectors allocator tapes.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct MemoryStats {
+        /// Total memory allocated by the graph structure allocator, in bytes.
+        graph_allocated: usize,
+        /// Memory wasted due to alignment in the graph allocator, in bytes.
+        graph_wasted: usize,
+        /// Reserved but unused memory in the graph allocator, in bytes.
+        graph_reserved: usize,
+        /// Total memory allocated by the vectors data allocator, in bytes.
+        vectors_allocated: usize,
+        /// Memory wasted due to alignment in the vectors allocator, in bytes.
+        vectors_wasted: usize,
+        /// Reserved but unused memory in the vectors allocator, in bytes.
+        vectors_reserved: usize,
+    }
+
     /// The index options used to configure the dense index during creation.
     /// It contains the number of dimensions, the metric kind, the scalar kind,
     /// the connectivity, the expansion values, and the multi-flag.
@@ -423,6 +441,7 @@ pub mod ffi {
         pub fn view(self: &NativeIndex, path: &str) -> Result<()>;
         pub fn reset(self: &NativeIndex) -> Result<()>;
         pub fn memory_usage(self: &NativeIndex) -> usize;
+        pub fn memory_stats(self: &NativeIndex) -> MemoryStats;
         pub fn hardware_acceleration(self: &NativeIndex) -> *const c_char;
 
         pub fn save_to_buffer(self: &NativeIndex, buffer: &mut [u8]) -> Result<()>;
@@ -432,7 +451,7 @@ pub mod ffi {
 }
 
 // Re-export the FFI structs and enums at the crate root for easy access
-pub use ffi::{IndexOptions, MetricKind, ScalarKind};
+pub use ffi::{IndexOptions, MemoryStats, MetricKind, ScalarKind};
 
 /// Represents custom metric functions for calculating distances between vectors in various formats.
 ///
@@ -1374,6 +1393,12 @@ impl Index {
     /// In practice, its error will be below 10%.
     pub fn memory_usage(self: &Index) -> usize {
         self.inner.memory_usage()
+    }
+
+    /// Returns detailed memory statistics with separate breakdowns for the graph
+    /// and vectors allocator tapes.
+    pub fn memory_stats(self: &Index) -> ffi::MemoryStats {
+        self.inner.memory_stats()
     }
 
     /// Saves the index to a specified file.

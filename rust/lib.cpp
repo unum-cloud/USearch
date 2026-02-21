@@ -180,6 +180,19 @@ void NativeIndex::view(rust::Str path) const {
 
 void NativeIndex::reset() const { index_->reset(); }
 size_t NativeIndex::memory_usage() const { return index_->memory_usage(); }
+
+MemoryStats NativeIndex::memory_stats() const {
+    auto stats = index_->memory_stats();
+    MemoryStats result;
+    result.graph_allocated = stats.graph_allocated;
+    result.graph_wasted = stats.graph_wasted;
+    result.graph_reserved = stats.graph_reserved;
+    result.vectors_allocated = stats.vectors_allocated;
+    result.vectors_wasted = stats.vectors_wasted;
+    result.vectors_reserved = stats.vectors_reserved;
+    return result;
+}
+
 char const* NativeIndex::hardware_acceleration() const { return index_->metric().isa_name(); }
 
 void NativeIndex::save_to_buffer(rust::Slice<uint8_t> buffer) const {
