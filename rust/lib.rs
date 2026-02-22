@@ -1543,6 +1543,43 @@ mod tests {
     }
 
     #[test]
+    fn test_new_index_does_not_preallocate_members() {
+        let options = IndexOptions {
+            dimensions: 8,
+            quantization: ScalarKind::F32,
+            ..Default::default()
+        };
+        let index = Index::new(&options).unwrap();
+
+        // Regression check: constructor should preserve `index_limits_t{}` behavior
+        // and avoid reserving member slots up front.
+        assert_eq!(index.capacity(), 0);
+    }
+
+    #[test]
+    fn test_index_survives_box_and_arc_moves_after_construction() {
+        let options = IndexOptions {
+            dimensions: 4,
+            quantization: ScalarKind::F32,
+            ..Default::default()
+        };
+        let vector = [0.25f32, 0.5, 0.75, 1.0];
+
+        let boxed = Box::new(Index::new(&options).unwrap());
+        boxed.reserve(8).unwrap();
+        boxed.add(7, &vector).unwrap();
+        let boxed_matches = boxed.search(&vector, 1).unwrap();
+        assert_eq!(boxed_matches.keys.first().copied(), Some(7));
+
+        let arc = std::sync::Arc::new(Index::new(&options).unwrap());
+        let moved_arc = std::sync::Arc::clone(&arc);
+        moved_arc.reserve_capacity_and_threads(8, 2).unwrap();
+        moved_arc.add(9, &vector).unwrap();
+        let arc_matches = arc.search(&vector, 1).unwrap();
+        assert_eq!(arc_matches.keys.first().copied(), Some(9));
+    }
+
+    #[test]
     fn test_add_get_vector() {
         let options = IndexOptions {
             dimensions: 5,
