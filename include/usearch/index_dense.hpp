@@ -746,6 +746,37 @@ class index_dense_gt {
             vectors_tape_allocator_.total_allocated();
     }
 
+    /**
+     *  @brief  Aggregated memory statistics for the allocator tapes used by the dense index.
+     */
+    struct memory_stats_t {
+        /// Memory stats for the graph structure allocator.
+        std::size_t graph_allocated;
+        std::size_t graph_wasted;
+        std::size_t graph_reserved;
+        /// Memory stats for the vectors data allocator.
+        std::size_t vectors_allocated;
+        std::size_t vectors_wasted;
+        std::size_t vectors_reserved;
+    };
+
+    /**
+     *  @brief  Returns detailed memory statistics with separate breakdowns for the graph
+     *          and vectors allocator tapes.
+     *  @return A `memory_stats_t` struct with per-tape allocated, wasted, and reserved bytes.
+     */
+    memory_stats_t memory_stats() const {
+        auto const& graph_alloc = typed_->tape_allocator();
+        return {
+            graph_alloc.total_allocated(),
+            graph_alloc.total_wasted(),
+            graph_alloc.total_reserved(),
+            vectors_tape_allocator_.total_allocated(),
+            vectors_tape_allocator_.total_wasted(),
+            vectors_tape_allocator_.total_reserved(),
+        };
+    }
+
     static constexpr std::size_t any_thread() { return std::numeric_limits<std::size_t>::max(); }
     static constexpr distance_t infinite_distance() { return std::numeric_limits<distance_t>::max(); }
 
