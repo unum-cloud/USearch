@@ -2029,8 +2029,8 @@ class index_gt {
         friend inline vector_key_t get_key(member_iterator_gt const& it) noexcept { return it.key(); }
 
         // clang-format off
-        member_iterator_gt operator++(int) noexcept { return member_iterator_gt(index_, static_cast<compressed_slot_t>(static_cast<std::size_t>(slot_) + 1)); }
-        member_iterator_gt operator--(int) noexcept { return member_iterator_gt(index_, static_cast<compressed_slot_t>(static_cast<std::size_t>(slot_) - 1)); }
+        member_iterator_gt operator++(int) noexcept { member_iterator_gt old(index_, slot_); ++(*this); return old; }
+        member_iterator_gt operator--(int) noexcept { member_iterator_gt old(index_, slot_); --(*this); return old; }
         member_iterator_gt operator+(difference_type d) noexcept { return member_iterator_gt(index_, static_cast<compressed_slot_t>(static_cast<std::size_t>(slot_) + d)); }
         member_iterator_gt operator-(difference_type d) noexcept { return member_iterator_gt(index_, static_cast<compressed_slot_t>(static_cast<std::size_t>(slot_) - d)); }
         member_iterator_gt& operator++() noexcept { slot_ = static_cast<compressed_slot_t>(static_cast<std::size_t>(slot_) + 1); return *this; }
@@ -3960,7 +3960,9 @@ class index_gt {
                               std::size_t progress) noexcept
             : index_(index), neighbors_(neighbors), visits_(visits), current_(progress) {}
         candidates_iterator_t operator++(int) noexcept {
-            return candidates_iterator_t(index_, neighbors_, visits_, current_ + 1).skip_missing();
+            candidates_iterator_t old(index_, neighbors_, visits_, current_);
+            ++(*this);
+            return old;
         }
         candidates_iterator_t& operator++() noexcept {
             ++current_;
