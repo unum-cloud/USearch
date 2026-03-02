@@ -112,9 +112,10 @@ struct alignas(32) persisted_matrix_gt {
         if (fstat(file_descriptor, &stat_vectors) == -1)
             throw std::invalid_argument("Couldn't obtain file stats");
         raw_length = stat_vectors.st_size;
-        raw_handle = (std::uint8_t*)mmap(NULL, raw_length, PROT_READ, MAP_PRIVATE, file_descriptor, 0);
-        if (raw_handle == nullptr)
+        auto* result = mmap(NULL, raw_length, PROT_READ, MAP_PRIVATE, file_descriptor, 0);
+        if (result == MAP_FAILED)
             throw std::invalid_argument("Couldn't memory-map the file");
+        raw_handle = (std::uint8_t*)result;
         std::memcpy(&rows, raw_handle, sizeof(rows));
         std::memcpy(&cols, raw_handle + sizeof(rows), sizeof(cols));
         scalars = (scalar_t*)(raw_handle + sizeof(rows) + sizeof(cols));
