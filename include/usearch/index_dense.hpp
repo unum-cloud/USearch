@@ -2026,6 +2026,13 @@ class index_dense_gt {
 
         // Perform the insertion or the update
         bool reuse_node = free_slot != default_free_value<compressed_slot_t>();
+
+        byte_t* allocated_vector = nullptr;
+        if (copy_vector && !reuse_node) {
+            allocated_vector = vectors_tape_allocator_.allocate(metric_.bytes_per_vector());
+            if (!allocated_vector)
+                return add_result_t{}.failed("Out of memory!");
+        }
         auto on_success = [&](member_ref_t member) {
             if (config_.enable_key_lookups) {
                 unique_lock_t slot_lock(slot_lookup_mutex_);
@@ -2033,7 +2040,7 @@ class index_dense_gt {
             }
             if (copy_vector) {
                 if (!reuse_node)
-                    vectors_lookup_[member.slot] = vectors_tape_allocator_.allocate(metric_.bytes_per_vector());
+                    vectors_lookup_[member.slot] = allocated_vector;
                 std::memcpy(vectors_lookup_[member.slot], vector_data, metric_.bytes_per_vector());
             } else
                 vectors_lookup_[member.slot] = (byte_t*)vector_data;
