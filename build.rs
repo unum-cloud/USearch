@@ -110,7 +110,9 @@ fn main() {
 
             pop_flag = flags_to_try.pop();
             if pop_flag.is_none() {
-                result.unwrap();
+                if let Err(err) = result {
+                    panic!("Failed to compile usearch C++ backend: {:?}", err);
+                }
             }
         } else {
             break;
