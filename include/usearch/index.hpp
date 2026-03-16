@@ -4304,6 +4304,31 @@ class index_gt {
         }
     }
 
+    /// @brief  Helper for `refine_()`: computes inter-neighbor distance, substituting
+    ///         @p override_value when either slot matches @p override_slot.
+    ///         The `std::nullptr_t` overload below avoids instantiating the override
+    ///         branch when no override is provided, keeping the code C++11 compatible.
+    template <typename metric_at, typename override_value_at>
+    distance_t inter_neighbor_distance_(                                   //
+        candidate_t const& candidate, candidate_t const& submitted,        //
+        compressed_slot_t override_slot, override_value_at override_value, //
+        metric_at&& metric, context_t& context) const noexcept {
+        if (candidate.slot == override_slot)
+            return context.measure(override_value, citerator_at(submitted.slot), metric);
+        else if (submitted.slot == override_slot)
+            return context.measure(override_value, citerator_at(candidate.slot), metric);
+        else
+            return context.measure(citerator_at(candidate.slot), citerator_at(submitted.slot), metric);
+    }
+
+    template <typename metric_at>
+    distance_t inter_neighbor_distance_(                            //
+        candidate_t const& candidate, candidate_t const& submitted, //
+        compressed_slot_t, std::nullptr_t,                          //
+        metric_at&& metric, context_t& context) const noexcept {
+        return context.measure(citerator_at(candidate.slot), citerator_at(submitted.slot), metric);
+    }
+
     /**
      *  @brief  This algorithm from the original paper implements a heuristic,
      *          that massively reduces the number of connections a point has,
@@ -4341,19 +4366,8 @@ class index_gt {
             std::size_t idx = 0;
             for (; idx < submitted_count; idx++) {
                 candidate_t submitted = top_data[idx];
-                distance_t inter_result_dist;
-                if constexpr (!std::is_null_pointer_v<std::decay_t<override_value_at>>) {
-                    if (candidate.slot == override_slot)
-                        inter_result_dist = context.measure(override_value, citerator_at(submitted.slot), metric);
-                    else if (submitted.slot == override_slot)
-                        inter_result_dist = context.measure(override_value, citerator_at(candidate.slot), metric);
-                    else
-                        inter_result_dist = context.measure( //
-                            citerator_at(candidate.slot), citerator_at(submitted.slot), metric);
-                } else {
-                    inter_result_dist = context.measure( //
-                        citerator_at(candidate.slot), citerator_at(submitted.slot), metric);
-                }
+                distance_t inter_result_dist = inter_neighbor_distance_( //
+                    candidate, submitted, override_slot, override_value, metric, context);
                 if (inter_result_dist < candidate.distance) {
                     good = false;
                     break;
