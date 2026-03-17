@@ -193,7 +193,7 @@ TEST_P(index_gt_test, add_and_search) {
     search_config.expansion = ef_search;
     auto result = index.search(store.row(0), wanted_count, metric, search_config);
     ASSERT_TRUE(static_cast<bool>(result));
-    ASSERT_GT(result.size(), 0u);
+    ASSERT_EQ(result.size(), wanted_count);
     EXPECT_EQ(result[0].member.key, vector_key_t{0}) << "query vector should be its own nearest neighbor";
 }
 
@@ -420,7 +420,7 @@ TEST(index_gt_basic, different_connectivity) {
 
         auto result = index.search(store.row(0), 5, metric);
         ASSERT_TRUE(static_cast<bool>(result)) << "connectivity=" << connectivity;
-        ASSERT_GT(result.size(), 0u) << "connectivity=" << connectivity;
+        ASSERT_EQ(result.size(), 5u) << "connectivity=" << connectivity;
         EXPECT_EQ(result[0].member.key, vector_key_t{0}) << "connectivity=" << connectivity;
     }
 }
@@ -460,7 +460,7 @@ TEST(index_gt_basic, higher_ef_search_finds_closer) {
 
     // Both should find key 0 (itself), but high ef is more reliable
     ASSERT_TRUE(static_cast<bool>(res_high));
-    ASSERT_GT(res_high.size(), 0u);
+    ASSERT_EQ(res_high.size(), 1u);
     EXPECT_EQ(res_high[0].member.key, vector_key_t{0});
 }
 
@@ -491,14 +491,14 @@ TEST(index_gt_basic, copy_index) {
     EXPECT_EQ(copied.size(), n);
 
     auto res = copied.search(store.row(0), 3, metric);
-    ASSERT_GT(res.size(), 0u);
+    ASSERT_EQ(res.size(), 3u);
     EXPECT_EQ(res[0].member.key, vector_key_t{0});
 
     // Move
     index_t moved(std::move(copied));
     EXPECT_EQ(moved.size(), n);
     auto res2 = moved.search(store.row(0), 3, metric);
-    ASSERT_GT(res2.size(), 0u);
+    ASSERT_EQ(res2.size(), 3u);
     EXPECT_EQ(res2[0].member.key, vector_key_t{0});
 }
 
@@ -525,7 +525,7 @@ TEST(index_gt_edge, one_dimensional) {
     EXPECT_EQ(index.size(), n);
     auto result = index.search(store.row(0), 5, metric);
     ASSERT_TRUE(static_cast<bool>(result));
-    ASSERT_GT(result.size(), 0u);
+    ASSERT_EQ(result.size(), 5u);
 }
 
 // ---------------------------------------------------------------------------
@@ -551,7 +551,7 @@ TEST(index_gt_edge, minimum_connectivity) {
     EXPECT_EQ(index.size(), n);
     auto result = index.search(store.row(0), 5, metric);
     ASSERT_TRUE(static_cast<bool>(result));
-    EXPECT_GT(result.size(), 0u);
+    EXPECT_EQ(result.size(), 5u);
 }
 
 // ---------------------------------------------------------------------------
@@ -632,7 +632,7 @@ TEST(index_gt_types, uint64_key_uint32_slot) {
 
     EXPECT_EQ(index.size(), n);
     auto result = index.search(store.row(0), 5, metric);
-    ASSERT_GT(result.size(), 0u);
+    ASSERT_EQ(result.size(), 5u);
     EXPECT_EQ(result[0].member.key, vector_key_t{1000});
 }
 
@@ -691,7 +691,7 @@ TEST(index_gt_prefetch, search_invokes_prefetch) {
     auto result = index.search(store.row(0), 10, metric, search_config, dummy_predicate_t{}, prefetch);
 
     ASSERT_TRUE(static_cast<bool>(result));
-    ASSERT_GT(result.size(), 0u);
+    ASSERT_EQ(result.size(), 10u);
     EXPECT_EQ(result[0].member.key, vector_key_t{0});
     EXPECT_GT(prefetch_calls, 0u) << "prefetch should be invoked during search";
 }
@@ -725,7 +725,7 @@ TEST(index_gt_prefetch, candidates_iterator_postfix_semantics) {
     auto result = index.search(store.row(0), 10, metric, search_config, dummy_predicate_t{}, prefetch);
 
     ASSERT_TRUE(static_cast<bool>(result));
-    ASSERT_GT(result.size(), 0u);
+    ASSERT_EQ(result.size(), 10u);
     EXPECT_TRUE(postfix_ok) << "candidates_iterator_t postfix ++ must return old position and advance *this (PR #718)";
 }
 
@@ -825,7 +825,7 @@ TEST(index_gt_prefetch, search_with_cache_metric) {
     auto result = index.search(store.row(0), 10, search_metric, search_config, dummy_predicate_t{}, prefetch);
 
     ASSERT_TRUE(static_cast<bool>(result));
-    ASSERT_GT(result.size(), 0u);
+    ASSERT_EQ(result.size(), 10u);
     EXPECT_EQ(result[0].member.key, vector_key_t{0});
     EXPECT_GT(prefetch_calls, 0u) << "prefetch should have been invoked";
     EXPECT_GT(cache.size(), 0u) << "cache should have been populated";
@@ -863,7 +863,7 @@ TEST(index_gt_predicate, even_key_filter) {
     auto result = index.search(store.row(0), 10, metric, search_config, even_predicate);
 
     ASSERT_TRUE(static_cast<bool>(result));
-    ASSERT_GT(result.size(), 0u);
+    ASSERT_EQ(result.size(), 10u);
     for (std::size_t i = 0; i < result.size(); ++i) {
         EXPECT_EQ(result[i].member.key % 2, 0u) << "result[" << i << "].key=" << result[i].member.key << " is odd";
     }
@@ -926,7 +926,7 @@ TEST(index_gt_predicate, exclude_query_self) {
     auto result = index.search(store.row(0), 10, metric, search_config, exclude_zero);
 
     ASSERT_TRUE(static_cast<bool>(result));
-    ASSERT_GT(result.size(), 0u);
+    ASSERT_EQ(result.size(), 10u);
     for (std::size_t i = 0; i < result.size(); ++i) {
         EXPECT_NE(result[i].member.key, vector_key_t{0}) << "key 0 should be excluded by predicate";
     }
@@ -963,7 +963,7 @@ TEST(index_gt_predicate, with_prefetch) {
     auto result = index.search(store.row(0), 10, metric, search_config, mod3_predicate, prefetch);
 
     ASSERT_TRUE(static_cast<bool>(result));
-    ASSERT_GT(result.size(), 0u);
+    ASSERT_EQ(result.size(), 10u);
     EXPECT_GT(prefetch_calls, 0u) << "prefetch should be invoked";
     for (std::size_t i = 0; i < result.size(); ++i) {
         EXPECT_EQ(result[i].member.key % 3, 0u)
