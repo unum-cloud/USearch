@@ -728,10 +728,12 @@ class max_heap_gt {
      */
     usearch_profiled_m bool reserve(std::size_t new_capacity) noexcept {
         usearch_profile_name_m(max_heap_reserve);
-        if (new_capacity < capacity_)
+        if (new_capacity <= capacity_)
             return true;
 
         new_capacity = ceil2(new_capacity);
+        if (new_capacity == 0)
+            return false;
         new_capacity = (std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u));
         auto allocator = allocator_t{};
         auto new_elements = allocator.allocate(new_capacity);
@@ -894,10 +896,12 @@ class sorted_buffer_gt {
     inline void clear() noexcept { size_ = 0; }
 
     bool reserve(std::size_t new_capacity) noexcept {
-        if (new_capacity < capacity_)
+        if (new_capacity <= capacity_)
             return true;
 
         new_capacity = ceil2(new_capacity);
+        if (new_capacity == 0)
+            return false;
         new_capacity = (std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u));
         auto allocator = allocator_t{};
         auto new_elements = allocator.allocate(new_capacity);
@@ -4058,6 +4062,10 @@ class index_gt {
         // At the very least we are going to explore the starting node and its neighbors
         if (!visits.reserve(config_.connectivity_base + 1u))
             return false;
+        if (!top.reserve(top_limit))
+            return false;
+        if (!next.reserve(top_limit))
+            return false;
 
         // Optional prefetching
         if (!is_dummy<prefetch_at>())
@@ -4134,6 +4142,10 @@ class index_gt {
 
         // At the very least we are going to explore the starting node and its neighbors
         if (!visits.reserve(config_.connectivity_base + 1u))
+            return false;
+        if (!top.reserve(top_limit))
+            return false;
+        if (!next.reserve(top_limit))
             return false;
 
         // Optional prefetching

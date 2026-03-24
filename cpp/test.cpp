@@ -1179,7 +1179,91 @@ void test_isolate() {
     }
 }
 
+/**
+ *  @brief Regression tests for sorted_buffer_gt heap-buffer-overflow.
+ *
+ *  Root cause: search_to_insert_() / search_to_update_() never called
+ *  top.reserve() / next.reserve() before using sorted_buffer_gt, and
+ *  reserve() had an off-by-one (< vs <=) causing spurious reallocation.
+ */
+void test_sorted_buffer_overflow() {
+    using candidate_t = typename index_gt<float, std::int64_t, slot32_t>::candidate_t;
+    using candidates_allocator_t = std::allocator<candidate_t>;
+    using sorted_buffer_t = sorted_buffer_gt<candidate_t, std::less<candidate_t>, candidates_allocator_t>;
+
+    // Test 1: reserve with equal capacity should be a no-op (<=  fix)
+    {
+        sorted_buffer_t buf;
+        buf.reserve(16);
+        std::size_t cap1 = buf.capacity();
+        buf.reserve(16);
+        std::size_t cap2 = buf.capacity();
+        expect(cap1 == cap2);
+    }
+
+    // Test 2: normal fill and eviction works correctly
+    {
+        sorted_buffer_t buf;
+        std::size_t limit = 4;
+        buf.reserve(limit);
+        for (std::size_t i = 1; i <= limit; i++)
+            buf.insert({static_cast<float>(i), static_cast<slot32_t>(i)}, limit);
+        expect(buf.size() == limit);
+        bool inserted = buf.insert({0.5f, static_cast<slot32_t>(99)}, limit);
+        expect(inserted);
+        expect(buf.size() == limit);
+        expect(buf.top().distance < 4.0f);
+    }
+
+    // Test 3: insert_reserved with proper capacity
+    {
+        sorted_buffer_t buf;
+        buf.reserve(4);
+        buf.insert_reserved({0.5f, static_cast<slot32_t>(0)});
+        buf.insert_reserved({0.3f, static_cast<slot32_t>(1)});
+        buf.insert_reserved({0.7f, static_cast<slot32_t>(2)});
+        expect(buf.size() == 3);
+        expect(buf.top().distance == 0.7f);
+    }
+}
+
+/**
+ *  @brief Regression test: full index search path exercises the fixed code paths.
+ *
+ *  Builds a small HNSW index and runs searches with large expansion values to
+ *  exercise search_to_find_in_base_ → sorted_buffer_gt::insert() under ASAN.
+ */
+void test_search_path_no_overflow() {
+    using index_t = index_dense_gt<std::int64_t, slot32_t>;
+    index_config_t config;
+    config.connectivity = 16;
+
+    metric_punned_t metric(3, metric_kind_t::l2sq_k, scalar_kind_t::f32_k);
+    index_t index = index_t::make(metric, config);
+    index.reserve(100);
+
+    // Add vectors
+    std::default_random_engine engine(42);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    for (std::size_t i = 0; i < 100; i++) {
+        float vec[3] = {dist(engine), dist(engine), dist(engine)};
+        index.add(static_cast<std::int64_t>(i), vec);
+    }
+
+    // Search with various expansion values — exercises search_to_find_in_base_
+    for (std::size_t expansion : {10, 50, 100, 256, 512}) {
+        float query[3] = {dist(engine), dist(engine), dist(engine)};
+        auto results = index.search(query, 10, index_t::any_thread(), false, expansion);
+        expect(results.size() <= 10);
+    }
+}
+
 int main(int, char**) {
+    // Regression tests for sorted_buffer_gt overflow fix
+    std::printf("Testing sorted_buffer_gt overflow fixes\n");
+    test_sorted_buffer_overflow();
+    test_search_path_no_overflow();
+    std::printf("- sorted_buffer_gt overflow tests passed\n\n");
     test_uint40();
     test_cosine<float, std::int64_t, uint40_t>(10, 10);
 
