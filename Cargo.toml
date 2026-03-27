@@ -3,11 +3,11 @@ name = "usearch"
 version = "2.24.0"
 authors = ["Ash Vardanian <1983160+ashvardanian@users.noreply.github.com>"]
 description = "Smaller & Faster Single-File Vector Search Engine from Unum"
+documentation = "https://unum-cloud.github.io/USearch"
 edition = "2021"
 license = "Apache-2.0"
 publish = true
-repository = "https://github.com/unum-cloud/usearch"
-documentation = "https://unum-cloud.github.io/usearch"
+repository = "https://github.com/unum-cloud/USearch"
 include = [
     "/rust/**",
     "/include/**",

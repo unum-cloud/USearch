@@ -234,7 +234,7 @@ inline scalar_kind_t convert_pre_2_10_scalar_kind(scalar_kind_t scalar_kind) noe
 
 /**
  *  @brief  Fixes the metadata for pre-v2.10 versions, until we can upgrade to v3.
- *          Originates from: https://github.com/unum-cloud/usearch/issues/423
+ *          Originates from: https://github.com/unum-cloud/USearch/issues/423
  */
 inline void fix_pre_2_10_metadata(index_dense_head_t& head) {
     if (head.version_major == 2 && head.version_minor < 10) {
@@ -768,12 +768,9 @@ class index_dense_gt {
     memory_stats_t memory_stats() const {
         auto const& graph_alloc = typed_->tape_allocator();
         return {
-            graph_alloc.total_allocated(),
-            graph_alloc.total_wasted(),
-            graph_alloc.total_reserved(),
-            vectors_tape_allocator_.total_allocated(),
-            vectors_tape_allocator_.total_wasted(),
-            vectors_tape_allocator_.total_reserved(),
+            graph_alloc.total_allocated(),          graph_alloc.total_wasted(),
+            graph_alloc.total_reserved(),           vectors_tape_allocator_.total_allocated(),
+            vectors_tape_allocator_.total_wasted(), vectors_tape_allocator_.total_reserved(),
         };
     }
 

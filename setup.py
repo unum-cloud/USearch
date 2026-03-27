@@ -102,7 +102,7 @@ if is_linux:
 
 if is_macos:
     # MacOS 10.15 or higher is needed for `aligned_alloc` support.
-    # https://github.com/unum-cloud/usearch/actions/runs/4975434891/jobs/8902603392
+    # https://github.com/unum-cloud/USearch/actions/runs/4975434891/jobs/8902603392
     compile_args.append("-mmacosx-version-min=10.15")
     compile_args.append("-std=c++17")
     compile_args.append("-O3")  # Maximize performance
@@ -184,7 +184,7 @@ setup(
     description="Smaller & Faster Single-File Vector Search Engine from Unum",
     author="Ash Vardanian",
     author_email="info@unum.cloud",
-    url="https://github.com/unum-cloud/usearch",
+    url="https://github.com/unum-cloud/USearch",
     long_description=long_description,
     long_description_content_type="text/markdown",
     license="Apache-2.0",

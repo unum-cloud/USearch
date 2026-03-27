@@ -6,7 +6,7 @@ project(
     VERSION 2.24.0
     LANGUAGES C CXX
     DESCRIPTION "Smaller & Faster Single-File Vector Search Engine from Unum"
-    HOMEPAGE_URL "https://github.com/unum-cloud/usearch"
+    HOMEPAGE_URL "https://github.com/unum-cloud/USearch"
 )
 
 # Determine if USearch is built as a subproject (using `add_subdirectory`) or if it is the main project

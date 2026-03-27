@@ -64,9 +64,9 @@
  * management. Always use try-with-resources or explicitly call {@link #close()}
  * to free native memory.</p>
  *
- * @see <a href="https://github.com/unum-cloud/usearch">USearch GitHub
+ * @see <a href="https://github.com/unum-cloud/USearch">USearch GitHub
  * Repository</a>
- * @see <a href="https://unum-cloud.github.io/usearch/">USearch
+ * @see <a href="https://unum-cloud.github.io/USearch/">USearch
  * Documentation</a>
  */
 package cloud.unum.usearch;

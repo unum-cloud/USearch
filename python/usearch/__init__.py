@@ -68,7 +68,7 @@ class BinaryManager:
 
     @staticmethod
     def determine_download_url(version: str, filename: str) -> str:
-        base_url = "https://github.com/unum-cloud/usearch/releases/download"
+        base_url = "https://github.com/unum-cloud/USearch/releases/download"
         url = f"{base_url}/v{version}/{filename}"
         return url
 

@@ -10,7 +10,7 @@ class USearchConan(ConanFile):
     version = "2.24.0"
     license = "Apache-2.0"
     description = "Smaller & Faster Single-File Vector Search Engine from Unum"
-    homepage = "https://github.com/unum-cloud/usearch"
+    homepage = "https://github.com/unum-cloud/USearch"
     topics = ("search", "vector", "simd")
     settings = "os", "arch", "compiler", "build_type"
     url = "https://github.com/conan-io/conan-center-index"

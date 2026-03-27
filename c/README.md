@@ -3,7 +3,7 @@
 ## Installation
 
 USearch vector-search engine can be integrated into your project using CMake.
-Alternatively, you can download one of the precompiled binaries from the [releases page](https://github.com/unum-cloud/usearch/releases).
+Alternatively, you can download one of the precompiled binaries from the [releases page](https://github.com/unum-cloud/USearch/releases).
 
 ## Quickstart
 
