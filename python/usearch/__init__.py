@@ -40,8 +40,9 @@ from usearch.compiled import (
     DEFAULT_EXPANSION_SEARCH,
     # Dependencies:
     USES_OPENMP,
-    USES_FP16LIB,
+    USES_NUMKONG,
     USES_SIMSIMD,
+    USES_NUMKONG_DYNAMIC_DISPATCH,
     USES_SIMSIMD_DYNAMIC_DISPATCH,
 )
 

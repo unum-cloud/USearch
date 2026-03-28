@@ -991,12 +991,14 @@ PYBIND11_MODULE(compiled, m) {
     m.attr("DEFAULT_EXPANSION_SEARCH") = py::int_(default_expansion_search());
 
     m.attr("USES_OPENMP") = py::int_(USEARCH_USE_OPENMP);
-    m.attr("USES_FP16LIB") = py::int_(USEARCH_USE_FP16LIB);
-    m.attr("USES_SIMSIMD") = py::int_(USEARCH_USE_SIMSIMD);
-#if USEARCH_USE_SIMSIMD
-    m.attr("USES_SIMSIMD_DYNAMIC_DISPATCH") = py::int_(simsimd_uses_dynamic_dispatch());
+    m.attr("USES_NUMKONG") = py::int_(USEARCH_USE_NUMKONG);
+    m.attr("USES_SIMSIMD") = py::int_(USEARCH_USE_NUMKONG); // backwards compatibility
+#if USEARCH_USE_NUMKONG
+    m.attr("USES_NUMKONG_DYNAMIC_DISPATCH") = py::int_(nk_uses_dynamic_dispatch());
+    m.attr("USES_SIMSIMD_DYNAMIC_DISPATCH") = py::int_(nk_uses_dynamic_dispatch()); // backwards compatibility
 #else
-    m.attr("USES_SIMSIMD_DYNAMIC_DISPATCH") = py::int_(0);
+    m.attr("USES_NUMKONG_DYNAMIC_DISPATCH") = py::int_(0);
+    m.attr("USES_SIMSIMD_DYNAMIC_DISPATCH") = py::int_(0); // backwards compatibility
 #endif
 
     m.attr("VERSION_MAJOR") = py::int_(USEARCH_VERSION_MAJOR);
@@ -1236,7 +1238,8 @@ PYBIND11_MODULE(compiled, m) {
     i.def_property_readonly( //
         "dtype", [](dense_index_py_t const& index) -> scalar_kind_t { return index.scalar_kind(); });
 
-    i.def_property_readonly("serialized_length", [](dense_index_py_t const& self) -> std::size_t { return self.serialized_length({}); });
+    i.def_property_readonly("serialized_length",
+                            [](dense_index_py_t const& self) -> std::size_t { return self.serialized_length({}); });
     i.def_property_readonly("memory_usage", &dense_index_py_t::memory_usage);
 
     i.def_property("expansion_add", &dense_index_py_t::expansion_add, &dense_index_py_t::change_expansion_add);
