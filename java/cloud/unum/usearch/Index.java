@@ -772,12 +772,30 @@ public class Index implements AutoCloseable {
     }
 
     /**
+     * Returns a comma-separated list of SIMD capabilities available on the current platform at runtime.
+     *
+     * @return comma-separated string of runtime capability names (e.g., "serial, haswell, skylake")
+     */
+    public static String hardwareAccelerationAvailableString() {
+        return c_hardware_acceleration_available_string();
+    }
+
+    /**
+     * Returns a comma-separated list of SIMD capabilities compiled into this library build.
+     *
+     * @return comma-separated string of compiled capability names
+     */
+    public static String hardwareAccelerationCompiledString() {
+        return c_hardware_acceleration_compiled_string();
+    }
+
+    /**
      * Returns all SIMD capabilities available on the current platform at runtime.
      *
      * @return array of runtime capability names (e.g., ["serial", "haswell", "skylake", "neon"])
      */
     public static String[] hardwareAccelerationAvailable() {
-        return c_hardware_acceleration_available();
+        return c_hardware_acceleration_available_string().split(", ");
     }
 
     /**
@@ -786,7 +804,7 @@ public class Index implements AutoCloseable {
      * @return array of compiled capability names based on preprocessor macros
      */
     public static String[] hardwareAccelerationCompiled() {
-        return c_hardware_acceleration_compiled();
+        return c_hardware_acceleration_compiled_string().split(", ");
     }
 
     /**
@@ -1068,9 +1086,9 @@ public class Index implements AutoCloseable {
 
     private static native String c_scalar_kind(long ptr);
 
-    private static native String[] c_hardware_acceleration_available();
+    private static native String c_hardware_acceleration_available_string();
 
-    private static native String[] c_hardware_acceleration_compiled();
+    private static native String c_hardware_acceleration_compiled_string();
 
     private static native String c_library_version();
 

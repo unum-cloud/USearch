@@ -133,6 +133,10 @@ USEARCH_EXPORT char const* usearch_version(void) {
     return version;
 }
 
+USEARCH_EXPORT char const* usearch_hardware_acceleration_compiled(void) { return hardware_acceleration_compiled(); }
+
+USEARCH_EXPORT char const* usearch_hardware_acceleration_available(void) { return hardware_acceleration_available(); }
+
 USEARCH_EXPORT usearch_index_t usearch_init(usearch_init_options_t* options, usearch_error_t* error) {
 
     USEARCH_ASSERT(error && "Missing arguments");
@@ -413,7 +417,7 @@ USEARCH_EXPORT size_t usearch_search(                                           
 USEARCH_EXPORT size_t usearch_filtered_search(                                 //
     usearch_index_t index,                                                     //
     void const* query, usearch_scalar_kind_t query_kind, size_t results_limit, //
-    usearch_filtered_search_callback_t filter, void* filter_state,  //
+    usearch_filtered_search_callback_t filter, void* filter_state,             //
     usearch_key_t* found_keys, usearch_distance_t* found_distances, usearch_error_t* error) {
 
     USEARCH_ASSERT(index && query && filter && error && "Missing arguments");

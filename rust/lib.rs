@@ -22,6 +22,26 @@ pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// Returns a comma-separated list of ISAs compiled into this binary.
+pub fn hardware_acceleration_compiled() -> String {
+    use core::ffi::CStr;
+    unsafe {
+        CStr::from_ptr(ffi::hardware_acceleration_compiled())
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+/// Returns a comma-separated list of ISAs available at runtime (compiled AND supported by CPU).
+pub fn hardware_acceleration_available() -> String {
+    use core::ffi::CStr;
+    unsafe {
+        CStr::from_ptr(ffi::hardware_acceleration_available())
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
 /// The key type used to identify vectors in the index.
 /// It is a 64-bit unsigned integer.
 pub type Key = u64;
@@ -336,6 +356,9 @@ pub mod ffi {
     // C++ types and signatures exposed to Rust.
     unsafe extern "C++" {
         include!("lib.hpp");
+
+        pub fn hardware_acceleration_compiled() -> *const c_char;
+        pub fn hardware_acceleration_available() -> *const c_char;
 
         /// Low-level C++ interface that is further wrapped into the high-level `Index`
         type NativeIndex;

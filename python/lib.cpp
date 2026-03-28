@@ -1098,6 +1098,9 @@ PYBIND11_MODULE(compiled, m) {
         py::arg("metric_kind") = metric_kind_t::cos_k //
     );
 
+    m.def("hardware_acceleration_compiled", &hardware_acceleration_compiled);
+    m.def("hardware_acceleration_available", &hardware_acceleration_available);
+
     auto i = py::class_<dense_index_py_t, std::shared_ptr<dense_index_py_t>>(m, "Index");
 
     i.def(                                                                      //

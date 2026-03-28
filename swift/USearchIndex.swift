@@ -157,6 +157,21 @@ public enum USearchError: Error {
     }
 }
 
+/** Returns the USearch library version string. */
+public func usearchVersion() -> String {
+    String(cString: usearch_version())
+}
+
+/** Returns a comma-separated list of ISAs compiled into this binary. */
+public func usearchHardwareAccelerationCompiled() -> String {
+    String(cString: usearch_hardware_acceleration_compiled())
+}
+
+/** Returns a comma-separated list of ISAs available at runtime. */
+public func usearchHardwareAccelerationAvailable() -> String {
+    String(cString: usearch_hardware_acceleration_available())
+}
+
 @available(iOS 13.0, macOS 11.0, tvOS 13.0, watchOS 6.0, visionOS 1.0, *)
 public class USearchIndex: NSObject {
     private var nativeIndex: usearch_index_t

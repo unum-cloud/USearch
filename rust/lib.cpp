@@ -10,6 +10,9 @@ using search_result_t = typename index_t::search_result_t;
 using labeling_result_t = typename index_t::labeling_result_t;
 using vector_key_t = typename index_dense_t::vector_key_t;
 
+char const* hardware_acceleration_compiled() { return unum::usearch::hardware_acceleration_compiled(); }
+char const* hardware_acceleration_available() { return unum::usearch::hardware_acceleration_available(); }
+
 metric_kind_t rust_to_cpp_metric(MetricKind value) {
     switch (value) {
     case MetricKind::IP: return metric_kind_t::ip_k;

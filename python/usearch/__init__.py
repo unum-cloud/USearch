@@ -44,6 +44,9 @@ from usearch.compiled import (
     USES_SIMSIMD,
     USES_NUMKONG_DYNAMIC_DISPATCH,
     USES_SIMSIMD_DYNAMIC_DISPATCH,
+    # Hardware capabilities:
+    hardware_acceleration_compiled,
+    hardware_acceleration_available,
 )
 
 __version__ = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}"

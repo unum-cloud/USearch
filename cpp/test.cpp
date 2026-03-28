@@ -1180,6 +1180,8 @@ void test_isolate() {
 }
 
 int main(int, char**) {
+    std::printf("Hardware acceleration compiled: %s\n", hardware_acceleration_compiled());
+    std::printf("Hardware acceleration available: %s\n", hardware_acceleration_available());
     test_uint40();
     test_cosine<float, std::int64_t, uint40_t>(10, 10);
 

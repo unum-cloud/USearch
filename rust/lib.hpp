@@ -96,3 +96,6 @@ class NativeIndex {
 };
 
 std::unique_ptr<NativeIndex> new_native_index(IndexOptions const& options);
+
+char const* hardware_acceleration_compiled();
+char const* hardware_acceleration_available();

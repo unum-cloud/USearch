@@ -224,6 +224,21 @@ type Index struct {
 	config IndexConfig
 }
 
+// Version returns the USearch library version string.
+func Version() string {
+	return C.GoString(C.usearch_version())
+}
+
+// HardwareAccelerationCompiled returns a comma-separated list of ISAs compiled into the binary.
+func HardwareAccelerationCompiled() string {
+	return C.GoString(C.usearch_hardware_acceleration_compiled())
+}
+
+// HardwareAccelerationAvailable returns a comma-separated list of ISAs available at runtime.
+func HardwareAccelerationAvailable() string {
+	return C.GoString(C.usearch_hardware_acceleration_available())
+}
+
 // NewIndex creates a new approximate nearest neighbor index with the specified configuration.
 //
 // The index must be destroyed with Destroy() when no longer needed.
@@ -269,11 +284,6 @@ func NewIndex(conf IndexConfig) (index *Index, err error) {
 
 	index.handle = ptr
 	return index, nil
-}
-
-// Version returns the USearch library version string.
-func Version() string {
-	return C.GoString(C.usearch_version())
 }
 
 // GetHandle returns the C index handel.

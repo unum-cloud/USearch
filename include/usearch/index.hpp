@@ -1937,7 +1937,7 @@ template <typename key_at> inline key_at get_key(member_ref_gt<key_at> const& m)
  *      - Doesn't allocate new threads, and reuses the ones its called from.
  *      - Allows storing value externally, managing just the similarity index.
  *      - Joins.
-
+ *
  *  @section Usage
  *
  *  @subsection Exceptions
@@ -3901,8 +3901,9 @@ class index_gt {
             // If `new_slot` is already present in the neighboring connections of `close_slot`
             // then no need to modify any connections or run the heuristics.
             if (close_header.size() < connectivity_max) {
-                if (std::find_if(close_header.begin(), close_header.end(),
-                                 [new_slot](compressed_slot_t slot) { return slot == new_slot; }) == close_header.end()) {
+                if (std::find_if(close_header.begin(), close_header.end(), [new_slot](compressed_slot_t slot) {
+                        return slot == new_slot;
+                    }) == close_header.end()) {
                     close_header.push_back(new_slot);
                 }
                 continue;
