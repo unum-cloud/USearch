@@ -1,0 +1,34 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{3A93FBE3-99F5-4179-88AB-E8A887C4E85C}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Cloud.Unum.USearch", "src\Cloud.Unum.USearch\Cloud.Unum.USearch.csproj", "{8828F7DE-3AB9-4CAE-BFFA-3EA9355BD976}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Cloud.Unum.USearch.Tests", "src\Cloud.Unum.USearch.Tests\Cloud.Unum.USearch.Tests.csproj", "{F7F5E1D6-25DD-4FE8-ABE9-B05E7449B2A9}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{8828F7DE-3AB9-4CAE-BFFA-3EA9355BD976}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8828F7DE-3AB9-4CAE-BFFA-3EA9355BD976}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8828F7DE-3AB9-4CAE-BFFA-3EA9355BD976}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8828F7DE-3AB9-4CAE-BFFA-3EA9355BD976}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F7F5E1D6-25DD-4FE8-ABE9-B05E7449B2A9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F7F5E1D6-25DD-4FE8-ABE9-B05E7449B2A9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F7F5E1D6-25DD-4FE8-ABE9-B05E7449B2A9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F7F5E1D6-25DD-4FE8-ABE9-B05E7449B2A9}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{8828F7DE-3AB9-4CAE-BFFA-3EA9355BD976} = {3A93FBE3-99F5-4179-88AB-E8A887C4E85C}
+		{F7F5E1D6-25DD-4FE8-ABE9-B05E7449B2A9} = {3A93FBE3-99F5-4179-88AB-E8A887C4E85C}
+	EndGlobalSection
+EndGlobal

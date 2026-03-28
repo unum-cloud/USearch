@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>netstandard2.0</TargetFrameworks>
+    <AssemblyName>Cloud.Unum.USearch</AssemblyName>
+    <RootNamespace>Cloud.Unum.USearch</RootNamespace>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <!-- IMPORT NUGET PACKAGE SHARED PROPERTIES -->
+  <Import Project="$(CSharpDir)/nuget/nuget-package.props" />
+</Project>
