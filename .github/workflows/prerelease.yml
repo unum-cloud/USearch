@@ -75,7 +75,7 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev gcc-12 g++-12
-          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=1 -D USEARCH_USE_OPENMP=1 -D USEARCH_USE_SIMSIMD=1 -D USEARCH_USE_JEMALLOC=1
+          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=1 -D USEARCH_USE_OPENMP=1 -D USEARCH_USE_NUMKONG=1 -D USEARCH_USE_JEMALLOC=1
           cmake --build build_artifacts --config RelWithDebInfo
       - name: Test C++
         run: build_artifacts/test_cpp
@@ -173,7 +173,7 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y cmake build-essential libjemalloc-dev clang
-          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=1 -D USEARCH_USE_OPENMP=0 -D USEARCH_USE_SIMSIMD=1 -D USEARCH_USE_JEMALLOC=1
+          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=1 -D USEARCH_USE_OPENMP=0 -D USEARCH_USE_NUMKONG=1 -D USEARCH_USE_JEMALLOC=1
           cmake --build build_artifacts --config RelWithDebInfo
       - name: Test C++
         run: build_artifacts/test_cpp
@@ -435,7 +435,8 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
-        python-version: ["38", "39", "310", "311", "312", "313", "313t", "314", "314t"]
+        python-version:
+          ["38", "39", "310", "311", "312", "313", "313t", "314", "314t"]
     steps:
       - name: Checkout
         uses: actions/checkout@v6

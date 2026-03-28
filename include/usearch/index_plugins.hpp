@@ -10,6 +10,10 @@
 
 #include <usearch/index.hpp> // `expected_gt` and macros
 
+#if defined(USEARCH_DEFINED_LINUX)
+#include <sys/auxv.h> // `getauxval()`
+#endif
+
 #if !defined(USEARCH_USE_OPENMP)
 #define USEARCH_USE_OPENMP 0
 #endif
@@ -18,44 +22,25 @@
 #include <omp.h> // `omp_get_num_threads()`
 #endif
 
-#if defined(USEARCH_DEFINED_LINUX)
-#include <sys/auxv.h> // `getauxval()`
+#if !defined(USEARCH_USE_NUMKONG)
+#define USEARCH_USE_NUMKONG 0
 #endif
 
-#if !defined(USEARCH_USE_FP16LIB)
-#if defined(__AVX512F__)
-#define USEARCH_USE_FP16LIB 0
-#elif defined(USEARCH_DEFINED_ARM)
-#include <arm_fp16.h> // `__fp16`
-#define USEARCH_USE_FP16LIB 0
-#else
-#define USEARCH_USE_FP16LIB 1
-#endif
-#endif
-
-#if USEARCH_USE_FP16LIB
-#include <fp16/fp16.h>
-#endif
-
-#if !defined(USEARCH_USE_SIMSIMD)
-#define USEARCH_USE_SIMSIMD 0
-#endif
-
-#if USEARCH_USE_SIMSIMD
+#if USEARCH_USE_NUMKONG
 // Propagate the `f16` settings
 #if defined(USEARCH_CAN_COMPILE_FP16) || defined(USEARCH_CAN_COMPILE_FLOAT16)
 #if USEARCH_CAN_COMPILE_FP16 || USEARCH_CAN_COMPILE_FLOAT16
-#define SIMSIMD_NATIVE_F16 1
+#define NK_NATIVE_F16 1
 #else
-#define SIMSIMD_NATIVE_F16 0
+#define NK_NATIVE_F16 0
 #endif
 #endif
 // Propagate the `bf16` settings
 #if defined(USEARCH_CAN_COMPILE_BF16) || defined(USEARCH_CAN_COMPILE_BFLOAT16)
 #if USEARCH_CAN_COMPILE_BF16 || USEARCH_CAN_COMPILE_BFLOAT16
-#define SIMSIMD_NATIVE_BF16 1
+#define NK_NATIVE_BF16 1
 #else
-#define SIMSIMD_NATIVE_BF16 0
+#define NK_NATIVE_BF16 0
 #endif
 #endif
 // No problem, if some of the functions are unused or undefined
@@ -71,7 +56,7 @@
 #pragma warning(disable : 4101) // "Unused variables"
 #pragma warning(disable : 4068) // "Unknown pragmas", when MSVC tries to read GCC pragmas
 #endif                          // _MSC_VER
-#include <simsimd/simsimd.h>
+#include <numkong/numkong.h>
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif // _MSC_VER
@@ -396,12 +381,12 @@ inline expected_gt<metric_kind_t> metric_from_name(char const* name) {
  *  @brief Convenience function to upcast a half-precision floating point number to a single-precision one.
  */
 inline float f16_to_f32(std::uint16_t u16) noexcept {
-#if USEARCH_USE_FP16LIB
-    return fp16_ieee_to_fp32_value(u16);
-#elif USEARCH_USE_SIMSIMD
-    return simsimd_f16_to_f32((simsimd_f16_t const*)&u16);
+#if USEARCH_USE_NUMKONG
+    nk_f32_t result;
+    nk_f16_to_f32_serial((nk_f16_t const*)&u16, &result);
+    return result;
 #else
-#warning "It's recommended to use SimSIMD and fp16lib for half-precision numerics"
+#warning "It's recommended to use NumKong for half-precision numerics"
     _Float16 f16;
     std::memcpy(&f16, &u16, sizeof(std::uint16_t));
     return float(f16);
@@ -412,14 +397,14 @@ inline float f16_to_f32(std::uint16_t u16) noexcept {
  *  @brief Convenience function to downcast a single-precision floating point number to a half-precision one.
  */
 inline std::uint16_t f32_to_f16(float f32) noexcept {
-#if USEARCH_USE_FP16LIB
-    return fp16_ieee_from_fp32_value(f32);
-#elif USEARCH_USE_SIMSIMD
-    std::uint16_t result;
-    simsimd_f32_to_f16(f32, (simsimd_f16_t*)&result);
-    return result;
+#if USEARCH_USE_NUMKONG
+    nk_f16_t result;
+    nk_f32_to_f16_serial((nk_f32_t const*)&f32, &result);
+    std::uint16_t u16;
+    std::memcpy(&u16, &result, sizeof(u16));
+    return u16;
 #else
-#warning "It's recommended to use SimSIMD and fp16lib for half-precision numerics"
+#warning "It's recommended to use NumKong for half-precision numerics"
     _Float16 f16 = _Float16(f32);
     std::uint16_t u16;
     std::memcpy(&u16, &f16, sizeof(std::uint16_t));
@@ -429,11 +414,13 @@ inline std::uint16_t f32_to_f16(float f32) noexcept {
 
 /**
  *  @brief Convenience function to upcast a brain-floating point number to a single-precision one.
- *  https://github.com/ashvardanian/SimSIMD/blob/ff51434d90c66f916e94ff05b24530b127aa4cff/include/simsimd/types.h#L395-L410
+ *  https://github.com/ashvardanian/NumKong/blob/7e58e9fee9e096238cf29f7c30774fa3dcd0fe85/include/numkong/cast/serial.h#L226-L244
  */
 inline float bf16_to_f32(std::uint16_t u16) noexcept {
-#if USEARCH_USE_SIMSIMD
-    return simsimd_bf16_to_f32((simsimd_bf16_t const*)&u16);
+#if USEARCH_USE_NUMKONG
+    nk_f32_t result;
+    nk_bf16_to_f32_serial((nk_bf16_t const*)&u16, &result);
+    return result;
 #else
     union float_or_unsigned_int_t {
         float f;
@@ -446,13 +433,15 @@ inline float bf16_to_f32(std::uint16_t u16) noexcept {
 
 /**
  *  @brief Convenience function to downcast a single-precision floating point number to a brain-floating point one.
- *  https://github.com/ashvardanian/SimSIMD/blob/ff51434d90c66f916e94ff05b24530b127aa4cff/include/simsimd/types.h#L412-L425
+ *  https://github.com/ashvardanian/NumKong/blob/7e58e9fee9e096238cf29f7c30774fa3dcd0fe85/include/numkong/cast/serial.h#L244-L262
  */
 inline std::uint16_t f32_to_bf16(float f32) noexcept {
-#if USEARCH_USE_SIMSIMD
-    std::uint16_t result;
-    simsimd_f32_to_bf16(f32, (simsimd_bf16_t*)&result);
-    return result;
+#if USEARCH_USE_NUMKONG
+    nk_bf16_t result;
+    nk_f32_to_bf16_serial((nk_f32_t const*)&f32, &result);
+    std::uint16_t u16;
+    std::memcpy(&u16, &result, sizeof(u16));
+    return u16;
 #else
     union float_or_unsigned_int_t {
         float f;
@@ -709,7 +698,7 @@ class executor_stl_t {
 
 /**
  *  @brief  An OpenMP-based executor or a "thread-pool" for parallel execution.
- *          Is the preferred implementation, when available, and maximum performance is needed.
+ *          Is the preferred implementation, when available, and target environment has OpenMP.
  */
 class executor_openmp_t {
   public:
@@ -1666,10 +1655,30 @@ enum class metric_punned_signature_t {
     array_array_state_k,
 };
 
+#if USEARCH_USE_NUMKONG
+inline nk_capability_t nk_cached_capabilities() noexcept {
+    static nk_capability_t caps = nk_capabilities();
+    return caps;
+}
+
+inline nk_dtype_t scalar_kind_to_nk_dtype(scalar_kind_t sk) noexcept {
+    switch (sk) {
+    case scalar_kind_t::f32_k: return (nk_dtype_t)nk_f32_k;
+    case scalar_kind_t::f64_k: return (nk_dtype_t)nk_f64_k;
+    case scalar_kind_t::f16_k: return (nk_dtype_t)nk_f16_k;
+    case scalar_kind_t::bf16_k: return (nk_dtype_t)nk_bf16_k;
+    case scalar_kind_t::i8_k: return (nk_dtype_t)nk_i8_k;
+    case scalar_kind_t::u8_k: return (nk_dtype_t)nk_u8_k;
+    case scalar_kind_t::b1x8_k: return (nk_dtype_t)nk_u1_k;
+    default: return (nk_dtype_t)0;
+    }
+}
+#endif
+
 /**
  *  @brief  Type-punned metric class, which unlike STL's `std::function` avoids any memory allocations.
  *          It also provides additional APIs to check, if SIMD hardware-acceleration is available.
- *          Wraps the `simsimd_metric_dense_punned_t` when available. The auto-vectorized backend otherwise.
+ *          Wraps the `nk_metric_dense_punned_t` when available. The auto-vectorized backend otherwise.
  */
 class metric_punned_t {
   public:
@@ -1696,8 +1705,8 @@ class metric_punned_t {
     metric_kind_t metric_kind_ = metric_kind_t::unknown_k;
     scalar_kind_t scalar_kind_ = scalar_kind_t::unknown_k;
 
-#if USEARCH_USE_SIMSIMD
-    simsimd_capability_t isa_kind_ = simsimd_cap_serial_k;
+#if USEARCH_USE_NUMKONG
+    nk_capability_t isa_kind_ = nk_cap_serial_k;
 #endif
 
   public:
@@ -1724,7 +1733,7 @@ class metric_punned_t {
 
     /**
      *  @brief  Creates a metric of a natively supported kind, choosing the best
-     *          available backend internally or from SimSIMD.
+     *          available backend internally or from NumKong.
      *
      *  @param  dimensions      The number of elements in the input arrays.
      *  @param  metric_kind     The kind of metric to use.
@@ -1742,12 +1751,8 @@ class metric_punned_t {
         metric.metric_kind_ = metric_kind;
         metric.scalar_kind_ = scalar_kind;
 
-#if USEARCH_USE_SIMSIMD
-        if (!metric.configure_with_simsimd())
+        if (!metric.configure_with_numkong())
             metric.configure_with_autovec();
-#else
-        metric.configure_with_autovec();
-#endif
 
         return metric;
     }
@@ -1824,22 +1829,43 @@ class metric_punned_t {
         if (!*this)
             return "uninitialized";
 
-#if USEARCH_USE_SIMSIMD
+#if USEARCH_USE_NUMKONG
         switch (isa_kind_) {
-        case simsimd_cap_serial_k: return "serial";
-        case simsimd_cap_neon_k: return "neon";
-        case simsimd_cap_neon_i8_k: return "neon_i8";
-        case simsimd_cap_neon_f16_k: return "neon_f16";
-        case simsimd_cap_neon_bf16_k: return "neon_bf16";
-        case simsimd_cap_sve_k: return "sve";
-        case simsimd_cap_sve_i8_k: return "sve_i8";
-        case simsimd_cap_sve_f16_k: return "sve_f16";
-        case simsimd_cap_sve_bf16_k: return "sve_bf16";
-        case simsimd_cap_haswell_k: return "haswell";
-        case simsimd_cap_skylake_k: return "skylake";
-        case simsimd_cap_ice_k: return "ice";
-        case simsimd_cap_genoa_k: return "genoa";
-        case simsimd_cap_sapphire_k: return "sapphire";
+        case nk_cap_serial_k: return "serial";
+        case nk_cap_neon_k: return "neon";
+        case nk_cap_neonhalf_k: return "neon_f16";
+        case nk_cap_neonsdot_k: return "neon_i8";
+        case nk_cap_neonbfdot_k: return "neon_bf16";
+        case nk_cap_sve_k: return "sve";
+        case nk_cap_svehalf_k: return "sve_f16";
+        case nk_cap_svebfdot_k: return "sve_bf16";
+        case nk_cap_sve2_k: return "sve2";
+        case nk_cap_haswell_k: return "haswell";
+        case nk_cap_skylake_k: return "skylake";
+        case nk_cap_icelake_k: return "ice";
+        case nk_cap_genoa_k: return "genoa";
+        case nk_cap_sapphire_k: return "sapphire";
+        case nk_cap_turin_k: return "turin";
+        case nk_cap_sierra_k: return "sierra";
+        case nk_cap_neonfhm_k: return "neon_fhm";
+        case nk_cap_alder_k: return "alder";
+        case nk_cap_sapphireamx_k: return "sapphire_amx";
+        case nk_cap_graniteamx_k: return "granite_amx";
+        case nk_cap_v128relaxed_k: return "wasm_relaxed";
+        case nk_cap_rvv_k: return "rvv";
+        case nk_cap_rvvhalf_k: return "rvv_f16";
+        case nk_cap_rvvbf16_k: return "rvv_bf16";
+        case nk_cap_rvvbb_k: return "rvv_bb";
+        case nk_cap_sme_k: return "sme";
+        case nk_cap_sme2_k: return "sme2";
+        case nk_cap_sme2p1_k: return "sme2p1";
+        case nk_cap_smef64_k: return "sme_f64";
+        case nk_cap_smefa64_k: return "sme_fa64";
+        case nk_cap_smehalf_k: return "sme_f16";
+        case nk_cap_smebf16_k: return "sme_bf16";
+        case nk_cap_smelut2_k: return "sme_lut2";
+        case nk_cap_sve2p1_k: return "sve2p1";
+        case nk_cap_svesdot_k: return "sve_i8";
         default: return "unknown";
         }
 #endif
@@ -1855,63 +1881,76 @@ class metric_punned_t {
     }
 
   private:
-#if USEARCH_USE_SIMSIMD
-    bool configure_with_simsimd(simsimd_capability_t simd_caps) noexcept {
-        simsimd_metric_kind_t kind = simsimd_metric_unknown_k;
-        simsimd_datatype_t datatype = simsimd_datatype_unknown_k;
-        simsimd_capability_t allowed = simsimd_cap_any_k;
+#if USEARCH_USE_NUMKONG
+    bool configure_with_numkong(nk_capability_t simd_caps) noexcept {
+        nk_kernel_kind_t kind = (nk_kernel_kind_t)0;
         switch (metric_kind_) {
-        case metric_kind_t::ip_k: kind = simsimd_metric_dot_k; break;
-        case metric_kind_t::cos_k: kind = simsimd_metric_cos_k; break;
-        case metric_kind_t::l2sq_k: kind = simsimd_metric_l2sq_k; break;
-        case metric_kind_t::hamming_k: kind = simsimd_metric_hamming_k; break;
-        case metric_kind_t::tanimoto_k: kind = simsimd_metric_jaccard_k; break;
-        case metric_kind_t::jaccard_k: kind = simsimd_metric_jaccard_k; break;
+        case metric_kind_t::ip_k: kind = nk_kernel_dot_k; break;
+        case metric_kind_t::cos_k: kind = nk_kernel_angular_k; break;
+        case metric_kind_t::l2sq_k: kind = nk_kernel_sqeuclidean_k; break;
+        case metric_kind_t::hamming_k: kind = nk_kernel_hamming_k; break;
+        case metric_kind_t::tanimoto_k: kind = nk_kernel_jaccard_k; break;
+        case metric_kind_t::jaccard_k: kind = nk_kernel_jaccard_k; break;
         default: break;
         }
-        switch (scalar_kind_) {
-        case scalar_kind_t::f32_k: datatype = simsimd_datatype_f32_k; break;
-        case scalar_kind_t::f64_k: datatype = simsimd_datatype_f64_k; break;
-        case scalar_kind_t::f16_k: datatype = simsimd_datatype_f16_k; break;
-        case scalar_kind_t::bf16_k: datatype = simsimd_datatype_bf16_k; break;
-        case scalar_kind_t::i8_k: datatype = simsimd_datatype_i8_k; break;
-        case scalar_kind_t::b1x8_k: datatype = simsimd_datatype_b8_k; break;
-        default: break;
-        }
-        simsimd_metric_dense_punned_t simd_metric = NULL;
-        simsimd_capability_t simd_kind = simsimd_cap_any_k;
-        simsimd_find_kernel_punned(kind, datatype, simd_caps, allowed, (simsimd_kernel_punned_t*)&simd_metric,
-                                   &simd_kind);
+        nk_dtype_t datatype = scalar_kind_to_nk_dtype(scalar_kind_);
+        nk_metric_dense_punned_t simd_metric = NULL;
+        nk_capability_t simd_kind = nk_cap_any_k;
+        nk_find_kernel_punned(kind, datatype, simd_caps, (nk_kernel_punned_t*)&simd_metric, &simd_kind);
         if (simd_metric == nullptr)
             return false;
 
         std::memcpy(&metric_ptr_, &simd_metric, sizeof(simd_metric));
-        metric_routed_ = metric_kind_ == metric_kind_t::ip_k
-                             ? reinterpret_cast<metric_routed_t>(&metric_punned_t::invoke_simsimd_reverse)
-                             : reinterpret_cast<metric_routed_t>(&metric_punned_t::invoke_simsimd);
+        // Select the typed invoke variant based on the kernel's output dtype to avoid per-call branching.
+        // The output type depends on both scalar_kind and metric_kind (e.g. i8 dot→i32, i8 l2sq→u32, i8 cos→f32).
+        nk_dtype_t out_dtype = nk_kernel_output_dtype(kind, datatype);
+        bool is_ip = (metric_kind_ == metric_kind_t::ip_k);
+        switch (out_dtype) {
+        case nk_f64_k:
+            metric_routed_ =
+                is_ip ? reinterpret_cast<metric_routed_t>(&metric_punned_t::invoke_numkong_<nk_f64_t, true>)
+                      : reinterpret_cast<metric_routed_t>(&metric_punned_t::invoke_numkong_<nk_f64_t, false>);
+            break;
+        case nk_f32_k:
+            metric_routed_ =
+                is_ip ? reinterpret_cast<metric_routed_t>(&metric_punned_t::invoke_numkong_<nk_f32_t, true>)
+                      : reinterpret_cast<metric_routed_t>(&metric_punned_t::invoke_numkong_<nk_f32_t, false>);
+            break;
+        case nk_i32_k:
+            metric_routed_ =
+                is_ip ? reinterpret_cast<metric_routed_t>(&metric_punned_t::invoke_numkong_<std::int32_t, true>)
+                      : reinterpret_cast<metric_routed_t>(&metric_punned_t::invoke_numkong_<std::int32_t, false>);
+            break;
+        case nk_u32_k:
+            metric_routed_ =
+                is_ip ? reinterpret_cast<metric_routed_t>(&metric_punned_t::invoke_numkong_<std::uint32_t, true>)
+                      : reinterpret_cast<metric_routed_t>(&metric_punned_t::invoke_numkong_<std::uint32_t, false>);
+            break;
+        default:
+            metric_routed_ =
+                is_ip ? reinterpret_cast<metric_routed_t>(&metric_punned_t::invoke_numkong_<nk_f64_t, true>)
+                      : reinterpret_cast<metric_routed_t>(&metric_punned_t::invoke_numkong_<nk_f64_t, false>);
+            break;
+        }
         isa_kind_ = simd_kind;
         return true;
     }
-    bool configure_with_simsimd() noexcept {
-        static simsimd_capability_t static_capabilities = simsimd_capabilities();
-        return configure_with_simsimd(static_capabilities);
-    }
+    bool configure_with_numkong() noexcept { return configure_with_numkong(nk_cached_capabilities()); }
 
+    /// Typed invoke template — the accumulator type and IP-reversal flag are selected once
+    /// in `configure_with_numkong` and baked into the member-function pointer stored in `metric_routed_`.
+    template <typename accumulator_at, bool reverse_ak>
 #if defined(USEARCH_DEFINED_CLANG) || defined(USEARCH_DEFINED_GCC)
     __attribute__((no_sanitize("all")))
 #endif
-    result_t
-    invoke_simsimd(uptr_t a, uptr_t b) const noexcept {
-        simsimd_distance_t result;
-        // Here `reinterpret_cast` raises warning and UBSan reports an issue... we know what we are doing!
-        auto function_pointer = (simsimd_metric_dense_punned_t)(metric_ptr_);
-        function_pointer(reinterpret_cast<void const*>(a), reinterpret_cast<void const*>(b), metric_third_arg_,
-                         &result);
-        return (result_t)result;
+    result_t invoke_numkong_(uptr_t a, uptr_t b) const noexcept {
+        accumulator_at result = 0;
+        auto metric_punned = (nk_metric_dense_punned_t)(metric_ptr_);
+        metric_punned(reinterpret_cast<void const*>(a), reinterpret_cast<void const*>(b), metric_third_arg_, &result);
+        return reverse_ak ? (result_t)(1 - (result_t)result) : (result_t)result;
     }
-    result_t invoke_simsimd_reverse(uptr_t a, uptr_t b) const noexcept { return 1 - invoke_simsimd(a, b); }
 #else
-    bool configure_with_simsimd() noexcept { return false; }
+    bool configure_with_numkong() noexcept { return false; }
 #endif
     result_t invoke_array_array_third(uptr_t a, uptr_t b) const noexcept {
         auto function_pointer = (metric_array_array_size_t)(metric_ptr_);
@@ -1927,70 +1966,68 @@ class metric_punned_t {
         switch (metric_kind_) {
         case metric_kind_t::ip_k: {
             switch (scalar_kind_) {
-            case scalar_kind_t::bf16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<bf16_t, f32_t>>; break;
-            case scalar_kind_t::i8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<i8_t, f32_t>>; break;
-            case scalar_kind_t::f16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<f16_t, f32_t>>; break;
-            case scalar_kind_t::f32_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<f32_t>>; break;
             case scalar_kind_t::f64_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<f64_t>>; break;
+            case scalar_kind_t::f32_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<f32_t>>; break;
+            case scalar_kind_t::bf16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<bf16_t, f32_t>>; break;
+            case scalar_kind_t::f16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<f16_t, f32_t>>; break;
+            case scalar_kind_t::i8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<i8_t, f32_t>>; break;
             default: metric_ptr_ = 0; break;
             }
             break;
         }
         case metric_kind_t::cos_k: {
             switch (scalar_kind_) {
-            case scalar_kind_t::bf16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_gt<bf16_t, f32_t>>; break;
-            case scalar_kind_t::i8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_i8_t>; break;
-            case scalar_kind_t::f16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_gt<f16_t, f32_t>>; break;
-            case scalar_kind_t::f32_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_gt<f32_t>>; break;
             case scalar_kind_t::f64_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_gt<f64_t>>; break;
+            case scalar_kind_t::f32_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_gt<f32_t>>; break;
+            case scalar_kind_t::bf16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_gt<bf16_t, f32_t>>; break;
+            case scalar_kind_t::f16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_gt<f16_t, f32_t>>; break;
+            case scalar_kind_t::i8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_i8_t>; break;
             default: metric_ptr_ = 0; break;
             }
             break;
         }
         case metric_kind_t::l2sq_k: {
             switch (scalar_kind_) {
-            case scalar_kind_t::bf16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_gt<bf16_t, f32_t>>; break;
-            case scalar_kind_t::i8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_i8_t>; break;
-            case scalar_kind_t::f16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_gt<f16_t, f32_t>>; break;
-            case scalar_kind_t::f32_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_gt<f32_t>>; break;
             case scalar_kind_t::f64_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_gt<f64_t>>; break;
+            case scalar_kind_t::f32_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_gt<f32_t>>; break;
+            case scalar_kind_t::bf16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_gt<bf16_t, f32_t>>; break;
+            case scalar_kind_t::f16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_gt<f16_t, f32_t>>; break;
+            case scalar_kind_t::i8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_i8_t>; break;
             default: metric_ptr_ = 0; break;
             }
             break;
         }
         case metric_kind_t::pearson_k: {
             switch (scalar_kind_) {
+            case scalar_kind_t::f64_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_pearson_gt<f64_t>>; break;
+            case scalar_kind_t::f32_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_pearson_gt<f32_t>>; break;
             case scalar_kind_t::bf16_k:
                 metric_ptr_ = (uptr_t)&equidimensional_<metric_pearson_gt<bf16_t, f32_t>>;
                 break;
-            case scalar_kind_t::i8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_pearson_gt<i8_t, f32_t>>; break;
             case scalar_kind_t::f16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_pearson_gt<f16_t, f32_t>>; break;
-            case scalar_kind_t::f32_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_pearson_gt<f32_t>>; break;
-            case scalar_kind_t::f64_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_pearson_gt<f64_t>>; break;
+            case scalar_kind_t::i8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_pearson_gt<i8_t, f32_t>>; break;
             default: metric_ptr_ = 0; break;
             }
             break;
         }
         case metric_kind_t::haversine_k: {
             switch (scalar_kind_) {
-            case scalar_kind_t::bf16_k: metric_ptr_ = 0; break; //< Half-precision 2D vectors are silly.
-            case scalar_kind_t::f16_k: metric_ptr_ = 0; break;  //< Half-precision 2D vectors are silly.
-            case scalar_kind_t::f32_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_haversine_gt<f32_t>>; break;
             case scalar_kind_t::f64_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_haversine_gt<f64_t>>; break;
+            case scalar_kind_t::f32_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_haversine_gt<f32_t>>; break;
             default: metric_ptr_ = 0; break;
             }
             break;
         }
         case metric_kind_t::divergence_k: {
             switch (scalar_kind_) {
+            case scalar_kind_t::f64_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_divergence_gt<f64_t>>; break;
+            case scalar_kind_t::f32_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_divergence_gt<f32_t>>; break;
             case scalar_kind_t::bf16_k:
                 metric_ptr_ = (uptr_t)&equidimensional_<metric_divergence_gt<bf16_t, f32_t>>;
                 break;
             case scalar_kind_t::f16_k:
                 metric_ptr_ = (uptr_t)&equidimensional_<metric_divergence_gt<f16_t, f32_t>>;
                 break;
-            case scalar_kind_t::f32_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_divergence_gt<f32_t>>; break;
-            case scalar_kind_t::f64_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_divergence_gt<f64_t>>; break;
             default: metric_ptr_ = 0; break;
             }
             break;
@@ -2056,6 +2093,16 @@ struct exact_offset_and_distance_t {
 
 using exact_search_results_t = matrix_slice_gt<exact_offset_and_distance_t const>;
 
+#if USEARCH_USE_NUMKONG
+struct exact_packed_dataset_t {
+    buffer_gt<byte_t> packed_data;
+    std::size_t dataset_count = 0;
+    std::size_t dimensions = 0;
+    nk_dtype_t input_dtype = (nk_dtype_t)0;
+    explicit operator bool() const noexcept { return packed_data && dataset_count; }
+};
+#endif
+
 /**
  *  @brief  Helper-structure for exact search operations.
  *          Perfect if you have @b <1M vectors and @b <100 queries per call.
@@ -2072,6 +2119,8 @@ class exact_search_t {
 
     using keys_and_distances_t = buffer_gt<exact_offset_and_distance_t>;
     keys_and_distances_t keys_and_distances;
+    buffer_gt<byte_t> packed_buffer_;
+    buffer_gt<byte_t> distance_matrix_;
 
   public:
     template <typename scalar_at, typename executor_at = dummy_executor_t, typename progress_at = dummy_progress_t>
@@ -2080,10 +2129,9 @@ class exact_search_t {
         std::size_t wanted, metric_punned_t const& metric,                                  //
         executor_at&& executor = executor_at{}, progress_at&& progress = progress_at{}) {
         return operator()(                                                                           //
-            metric,                                                                                  //
             reinterpret_cast<byte_t const*>(dataset.data()), dataset.size(), dataset.stride_bytes(), //
             reinterpret_cast<byte_t const*>(queries.data()), queries.size(), queries.stride_bytes(), //
-            wanted, executor, progress);
+            wanted, metric, executor, progress);
     }
 
     template <typename executor_at = dummy_executor_t, typename progress_at = dummy_progress_t>
@@ -2106,7 +2154,31 @@ class exact_search_t {
         exact_offset_and_distance_t* keys_and_distances_per_dataset = keys_and_distances.data();
         exact_offset_and_distance_t* keys_and_distances_per_query = keys_and_distances_per_dataset + tasks_count;
 
-        // §1. Compute distances in a data-parallel fashion
+#if USEARCH_USE_NUMKONG
+        // Try the batched GEMM-style kernel path for supported metric/scalar combinations.
+        // This computes the full queries×dataset distance matrix in one call, outputting
+        // directly in query-major order, avoiding the transpose step entirely.
+        if (try_batched_search_(metric, dataset_data, dataset_count, dataset_stride, //
+                                queries_data, queries_count, queries_stride,         //
+                                keys_and_distances_per_query)) {
+            // §3. Partial-sort every query result (same as the per-pair path)
+            executor.fixed(queries_count, [&](std::size_t, std::size_t query_idx) {
+                auto start = keys_and_distances_per_query + dataset_count * query_idx;
+                if (wanted > 1)
+                    std::partial_sort(start, start + wanted, start + dataset_count, &smaller_distance);
+                else {
+                    auto min_it = std::min_element(start, start + dataset_count, &smaller_distance);
+                    if (min_it != start)
+                        std::swap(*min_it, *start);
+                }
+            });
+            progress(tasks_count, tasks_count);
+            return {keys_and_distances_per_query, wanted, queries_count,
+                    dataset_count * sizeof(exact_offset_and_distance_t)};
+        }
+#endif
+
+        // §1. Compute distances in a data-parallel fashion (per-pair fallback)
         std::atomic<std::size_t> processed{0};
         executor.dynamic(dataset_count, [&](std::size_t thread_idx, std::size_t dataset_idx) {
             byte_t const* dataset = dataset_data + dataset_idx * dataset_stride;
@@ -2141,9 +2213,6 @@ class exact_search_t {
         executor.fixed(queries_count, [&](std::size_t, std::size_t query_idx) {
             auto start = keys_and_distances_per_query + dataset_count * query_idx;
             if (wanted > 1) {
-                // TODO: Consider alternative sorting approaches
-                // radix_sort(start, start + dataset_count, wanted);
-                // std::sort(start, start + dataset_count, &smaller_distance);
                 std::partial_sort(start, start + wanted, start + dataset_count, &smaller_distance);
             } else {
                 auto min_it = std::min_element(start, start + dataset_count, &smaller_distance);
@@ -2157,6 +2226,176 @@ class exact_search_t {
         return {keys_and_distances_per_query, wanted, queries_count,
                 dataset_count * sizeof(exact_offset_and_distance_t)};
     }
+
+#if USEARCH_USE_NUMKONG
+    static exact_packed_dataset_t pack(byte_t const* dataset_data, std::size_t dataset_count,
+                                       std::size_t dataset_stride, std::size_t dimensions, scalar_kind_t scalar_kind) {
+
+        exact_packed_dataset_t result;
+        nk_dtype_t nk_dtype = scalar_kind_to_nk_dtype(scalar_kind);
+        if (!nk_dtype)
+            return result;
+
+        nk_capability_t caps = nk_cached_capabilities();
+        nk_capability_t used_cap;
+
+        nk_dots_packed_size_punned_t size_fn = nullptr;
+        nk_find_kernel_punned(nk_kernel_dots_packed_size_k, nk_dtype, caps, (nk_kernel_punned_t*)&size_fn, &used_cap);
+        nk_dots_pack_punned_t pack_fn = nullptr;
+        nk_find_kernel_punned(nk_kernel_dots_pack_k, nk_dtype, caps, (nk_kernel_punned_t*)&pack_fn, &used_cap);
+        if (!size_fn || !pack_fn)
+            return result;
+
+        std::size_t packed_size = size_fn(dataset_count, dimensions);
+        if (!packed_size)
+            return result;
+
+        result.packed_data = buffer_gt<byte_t>(packed_size);
+        if (!result.packed_data)
+            return result;
+        pack_fn(dataset_data, dataset_count, dimensions, dataset_stride, result.packed_data.data());
+        result.dataset_count = dataset_count;
+        result.dimensions = dimensions;
+        result.input_dtype = nk_dtype;
+        return result;
+    }
+
+    template <typename executor_at = dummy_executor_t, typename progress_at = dummy_progress_t>
+    exact_search_results_t operator()(exact_packed_dataset_t const& packed, byte_t const* queries_data,
+                                      std::size_t queries_count, std::size_t queries_stride, std::size_t wanted,
+                                      metric_kind_t metric_kind, executor_at&& executor = executor_at{},
+                                      progress_at&& progress = progress_at{}) {
+
+        std::size_t tasks_count = packed.dataset_count * queries_count;
+        if (keys_and_distances.size() < tasks_count)
+            keys_and_distances = keys_and_distances_t(tasks_count);
+        if (keys_and_distances.size() < tasks_count)
+            return {};
+
+        exact_offset_and_distance_t* keys_and_distances_per_query = keys_and_distances.data();
+
+        if (!search_packed_(packed.packed_data.data(), packed.dataset_count, packed.dimensions, packed.input_dtype,
+                            metric_kind, queries_data, queries_count, queries_stride, keys_and_distances_per_query))
+            return {};
+
+        // Partial-sort every query result
+        executor.fixed(queries_count, [&](std::size_t, std::size_t query_idx) {
+            auto start = keys_and_distances_per_query + packed.dataset_count * query_idx;
+            if (wanted > 1)
+                std::partial_sort(start, start + wanted, start + packed.dataset_count, &smaller_distance);
+            else {
+                auto min_it = std::min_element(start, start + packed.dataset_count, &smaller_distance);
+                if (min_it != start)
+                    std::swap(*min_it, *start);
+            }
+        });
+        progress(tasks_count, tasks_count);
+        return {keys_and_distances_per_query, wanted, queries_count,
+                packed.dataset_count * sizeof(exact_offset_and_distance_t)};
+    }
+#endif
+
+  private:
+#if USEARCH_USE_NUMKONG
+    void populate_results_(exact_offset_and_distance_t* out, std::size_t queries_count, std::size_t dataset_count,
+                           nk_dtype_t out_dtype, bool is_dot) {
+        byte_t const* dm = distance_matrix_.data();
+        std::size_t elem_size = nk_dtype_bits(out_dtype) / CHAR_BIT;
+        for (std::size_t q = 0; q < queries_count; ++q) {
+            for (std::size_t d = 0; d < dataset_count; ++d) {
+                std::size_t idx = dataset_count * q + d;
+                out[idx].offset = static_cast<u32_t>(d);
+                nk_f32_t dist;
+                nk_cast(dm + idx * elem_size, out_dtype, 1, &dist, nk_f32_k);
+                if (is_dot)
+                    dist = 1.0f - dist;
+                out[idx].distance = dist;
+            }
+        }
+    }
+
+    bool search_packed_(void const* packed_data, std::size_t dataset_count, std::size_t dimensions, nk_dtype_t nk_dtype,
+                        metric_kind_t metric_kind, byte_t const* queries_data, std::size_t queries_count,
+                        std::size_t queries_stride, exact_offset_and_distance_t* keys_and_distances_per_query) {
+
+        // Map metric_kind to the appropriate batched kernel kind
+        nk_kernel_kind_t compute_kind;
+        bool is_dot = (metric_kind == metric_kind_t::ip_k);
+        if (metric_kind == metric_kind_t::ip_k || metric_kind == metric_kind_t::cos_k ||
+            metric_kind == metric_kind_t::l2sq_k) {
+            if (is_dot)
+                compute_kind = nk_kernel_dots_packed_k;
+            else if (metric_kind == metric_kind_t::cos_k)
+                compute_kind = nk_kernel_angulars_packed_k;
+            else
+                compute_kind = nk_kernel_euclideans_packed_k;
+        } else {
+            return false;
+        }
+
+        // Look up compute kernel
+        nk_capability_t caps = nk_cached_capabilities();
+        nk_capability_t used_cap;
+        nk_dots_packed_punned_t compute_fn = nullptr;
+        nk_find_kernel_punned(compute_kind, nk_dtype, caps, (nk_kernel_punned_t*)&compute_fn, &used_cap);
+        if (!compute_fn)
+            return false;
+
+        // Determine output element size
+        nk_dtype_t out_dtype = nk_kernel_output_dtype(compute_kind, nk_dtype);
+        std::size_t out_elem_size = nk_dtype_bits(out_dtype) / CHAR_BIT;
+        std::size_t dm_bytes = queries_count * dataset_count * out_elem_size;
+        std::size_t c_stride = dataset_count * out_elem_size;
+
+        // Resize distance matrix if needed
+        if (distance_matrix_.size() < dm_bytes)
+            distance_matrix_ = buffer_gt<byte_t>(dm_bytes);
+        if (!distance_matrix_)
+            return false;
+
+        // Compute full distance matrix
+        compute_fn(queries_data, packed_data, distance_matrix_.data(), queries_count, dataset_count, dimensions,
+                   queries_stride, c_stride);
+
+        // Convert to offset+distance pairs
+        populate_results_(keys_and_distances_per_query, queries_count, dataset_count, out_dtype, is_dot);
+        return true;
+    }
+
+    bool try_batched_search_(metric_punned_t const& metric, byte_t const* dataset_data, std::size_t dataset_count,
+                             std::size_t dataset_stride, byte_t const* queries_data, std::size_t queries_count,
+                             std::size_t queries_stride, exact_offset_and_distance_t* keys_and_distances_per_query) {
+
+        nk_dtype_t nk_dtype = scalar_kind_to_nk_dtype(metric.scalar_kind());
+        if (!nk_dtype)
+            return false;
+
+        nk_capability_t caps = nk_cached_capabilities();
+        nk_capability_t used_cap;
+
+        // Look up pack kernels
+        nk_dots_packed_size_punned_t size_fn = nullptr;
+        nk_find_kernel_punned(nk_kernel_dots_packed_size_k, nk_dtype, caps, (nk_kernel_punned_t*)&size_fn, &used_cap);
+        nk_dots_pack_punned_t pack_fn = nullptr;
+        nk_find_kernel_punned(nk_kernel_dots_pack_k, nk_dtype, caps, (nk_kernel_punned_t*)&pack_fn, &used_cap);
+        if (!size_fn || !pack_fn)
+            return false;
+
+        // Pack dataset
+        std::size_t packed_size = size_fn(dataset_count, metric.dimensions());
+        if (!packed_size)
+            return false;
+        if (packed_buffer_.size() < packed_size)
+            packed_buffer_ = buffer_gt<byte_t>(packed_size);
+        if (!packed_buffer_)
+            return false;
+        pack_fn(dataset_data, dataset_count, metric.dimensions(), dataset_stride, packed_buffer_.data());
+
+        // Delegate to shared search path
+        return search_packed_(packed_buffer_.data(), dataset_count, metric.dimensions(), nk_dtype, metric.metric_kind(),
+                              queries_data, queries_count, queries_stride, keys_and_distances_per_query);
+    }
+#endif
 };
 
 struct kmeans_clustering_result_t {

@@ -25,9 +25,8 @@ endif ()
 option(USEARCH_INSTALL "Install CMake targets" OFF)
 
 option(USEARCH_USE_OPENMP "Use OpenMP for a thread pool" OFF)
-option(USEARCH_USE_SIMSIMD "Use SimSIMD hardware-accelerated metrics" OFF)
+option(USEARCH_USE_NUMKONG "Use NumKong hardware-accelerated metrics" OFF)
 option(USEARCH_USE_JEMALLOC "Use JeMalloc for faster memory allocations" OFF)
-option(USEARCH_USE_FP16LIB "Use software emulation for half-precision types" ON)
 
 option(USEARCH_BUILD_TEST_CPP "Compile a native unit test in C++" ${USEARCH_IS_MAIN_PROJECT})
 option(USEARCH_BUILD_BENCH_CPP "Compile a native benchmark in C++" ${USEARCH_IS_MAIN_PROJECT})
@@ -129,8 +128,7 @@ endif ()
 target_compile_definitions(${USEARCH_TARGET_NAME} INTERFACE "USEARCH_USE_OPENMP=$<BOOL:${USEARCH_USE_OPENMP}>")
 
 # Supplementary compilation settings affecting "index_plugins.hpp"
-target_compile_definitions(${USEARCH_TARGET_NAME} INTERFACE "USEARCH_USE_FP16LIB=$<BOOL:${USEARCH_USE_FP16LIB}>")
-target_compile_definitions(${USEARCH_TARGET_NAME} INTERFACE "USEARCH_USE_SIMSIMD=$<BOOL:${USEARCH_USE_SIMSIMD}>")
+target_compile_definitions(${USEARCH_TARGET_NAME} INTERFACE "USEARCH_USE_NUMKONG=$<BOOL:${USEARCH_USE_NUMKONG}>")
 
 # Define which types can be compiled
 target_compile_definitions(
@@ -150,19 +148,12 @@ target_include_directories(
     ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE} INTERFACE $<BUILD_INTERFACE:${USEARCH_INCLUDE_BUILD_DIR}>
                                                                $<INSTALL_INTERFACE:include>
 )
-if (USEARCH_USE_FP16LIB)
-    target_include_directories(
-        ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE} INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/fp16/include>
-                                                                   $<INSTALL_INTERFACE:fp16/include>
-    )
-endif ()
-if (USEARCH_USE_SIMSIMD)
+if (USEARCH_USE_NUMKONG)
     target_include_directories(
         ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE}
-        INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/simsimd/include> $<INSTALL_INTERFACE:simsimd/include>
+        INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/numkong/include> $<INSTALL_INTERFACE:numkong/include>
     )
 endif ()
-
 # Install a pkg-config file, so other tools can find this
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/pkg-config.pc.in" "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc")
 
@@ -221,9 +212,7 @@ if (NOT CMAKE_BUILD_TYPE)
 endif ()
 
 # Include directories
-set(USEARCH_HEADER_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/fp16/include"
-                            "${CMAKE_CURRENT_SOURCE_DIR}/simsimd/include"
-)
+set(USEARCH_HEADER_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/numkong/include")
 
 # Function to setup target
 function (setup_target TARGET_NAME)
@@ -383,22 +372,26 @@ function (setup_target TARGET_NAME)
     target_compile_definitions(${TARGET_NAME} PRIVATE "USEARCH_USE_OPENMP=$<BOOL:${USEARCH_USE_OPENMP}>")
 
     # Supplementary compilation settings affecting "index_plugins.hpp"
-    target_compile_definitions(${TARGET_NAME} PRIVATE "USEARCH_USE_FP16LIB=$<BOOL:${USEARCH_USE_FP16LIB}>")
-    target_compile_definitions(${TARGET_NAME} PRIVATE "USEARCH_USE_SIMSIMD=$<BOOL:${USEARCH_USE_SIMSIMD}>")
+    target_compile_definitions(${TARGET_NAME} PRIVATE "USEARCH_USE_NUMKONG=$<BOOL:${USEARCH_USE_NUMKONG}>")
 
-    # Pass through SIMSIMD target definitions if they're set
-    foreach(target IN ITEMS HASWELL SKYLAKE ICE GENOA SAPPHIRE TURIN SIERRA NEON NEON_I8 NEON_F16 NEON_BF16 SVE SVE_I8 SVE_F16 SVE_BF16 SVE2)
-        if(DEFINED SIMSIMD_TARGET_${target})
-            target_compile_definitions(${TARGET_NAME} PRIVATE "SIMSIMD_TARGET_${target}=${SIMSIMD_TARGET_${target}}")
-        endif()
-    endforeach()
-
-    # Pass through SIMSIMD_DYNAMIC_DISPATCH if set
-    if(DEFINED SIMSIMD_DYNAMIC_DISPATCH)
-        target_compile_definitions(${TARGET_NAME} PRIVATE "SIMSIMD_DYNAMIC_DISPATCH=${SIMSIMD_DYNAMIC_DISPATCH}")
-    endif()
+    # Link NumKong: the `nk_shared` target from `add_subdirectory(numkong)` carries its own include paths, compile
+    # definitions (NK_DYNAMIC_DISPATCH, NK_TARGET_*), and ISA probes.
+    if (USEARCH_USE_NUMKONG AND TARGET nk_shared)
+        target_compile_definitions(${TARGET_NAME} PRIVATE "NK_DYNAMIC_DISPATCH=1")
+        target_link_libraries(${TARGET_NAME} PRIVATE nk_shared)
+    endif ()
 
 endfunction ()
+
+# Delegate NumKong compilation to its own CMakeLists.txt — it handles ISA detection, NK_TARGET_* flags, and SIMD
+# dispatch backends internally.
+if (USEARCH_USE_NUMKONG)
+    set(NK_BUILD_SHARED
+        ON
+        CACHE BOOL "" FORCE
+    )
+    add_subdirectory(numkong)
+endif ()
 
 # Must be called before "add_subdirectory()". See
 # https://stackoverflow.com/questions/30250494/ctest-not-detecting-tests.
