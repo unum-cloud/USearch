@@ -976,12 +976,9 @@ impl VectorType for f16 {
         // Temporarily cast the closure to a raw pointer for passing.
         let trampoline_fn: usize = trampoline::<F> as *const () as usize;
         let closure_address: usize = &filter as *const F as usize;
-        index.inner.filtered_search_f16(
-            f16::to_i16s(query),
-            count,
-            trampoline_fn,
-            closure_address,
-        )
+        index
+            .inner
+            .filtered_search_f16(f16::to_i16s(query), count, trampoline_fn, closure_address)
     }
 
     fn change_metric(
@@ -1054,12 +1051,9 @@ impl VectorType for b1x8 {
         // Temporarily cast the closure to a raw pointer for passing.
         let trampoline_fn: usize = trampoline::<F> as *const () as usize;
         let closure_address: usize = &filter as *const F as usize;
-        index.inner.filtered_search_b1x8(
-            b1x8::to_u8s(query),
-            count,
-            trampoline_fn,
-            closure_address,
-        )
+        index
+            .inner
+            .filtered_search_b1x8(b1x8::to_u8s(query), count, trampoline_fn, closure_address)
     }
 
     fn change_metric(
@@ -1951,7 +1945,7 @@ mod tests {
     #[test]
     fn test_concurrency() {
         use fork_union as fu;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
         use rand_chacha::ChaCha8Rng;
         use rand_distr::Uniform;
         use std::sync::Arc;
