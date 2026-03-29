@@ -86,8 +86,24 @@ before-build = [
     "git submodule update --init --recursive",
 ]
 
-# Configuration options for the Black formatter:
-# https://black.readthedocs.io/en/latest/usage_and_configuration/the_basics.html#where-black-looks-for-the-file
-[tool.black]
-line-length = 120                  # Set line length to the same value as in `.clang-format` for modern wide screens
-target-version = ['py36', 'py314']
+
+[dependency-groups]
+lint = [
+    "ruff>=0.15.8",
+]
+tests = [
+    "numpy>=2.4.3",
+    "pytest>=9.0.2",
+    "pytest-repeat>=0.9.4",
+]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E9",
+    "F63",
+    "F7",
+    "F82",
+]

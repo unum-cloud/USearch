@@ -214,7 +214,7 @@ Following options are enabled:
 - The `-p no:warnings` option will suppress and allow warnings.
 
 ```sh
-uv pip install pytest pytest-repeat numpy             # for repeated fuzzy tests
+uv pip install -e . --group tests             # for repeated fuzzy tests
 python -m pytest                                      # if you trust the default settings
 python -m pytest python/scripts/ -s -x -p no:warnings # to overwrite the default settings
 ```
@@ -222,8 +222,8 @@ python -m pytest python/scripts/ -s -x -p no:warnings # to overwrite the default
 Linting:
 
 ```sh
-pip install ruff
-ruff --format=github --select=E9,F63,F7,F82 --target-version=py310 python
+uv pip install -e . --group lint
+ruff --format=github python
 ```
 
 Before merging your changes you may want to test your changes against the entire matrix of Python versions USearch supports.
