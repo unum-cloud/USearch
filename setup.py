@@ -159,6 +159,7 @@ include_dirs = [
 install_requires = [
     "numpy",
     "tqdm",
+    "ucall",
 ]
 if use_simsimd:
     include_dirs.append("simsimd/include")
@@ -209,6 +210,11 @@ setup(
         "Topic :: Database :: Database Engines/Servers",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
+    extras_require={
+        "sklearn": ["scikit-learn>=1.0.0, <2.0.0",],
+        "graph": ["networkx"],
+        "plot": ["matplotlib"],
+    },
     include_dirs=include_dirs,
     ext_modules=ext_modules,
     install_requires=install_requires,

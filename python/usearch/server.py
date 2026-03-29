@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+from __future__ import annotations
 
-import os
 import argparse
+import os
+from typing import TYPE_CHECKING, Any
+
 import numpy as np
-from typing import List
+from ucall.rich_posix import Server  # type: ignore[import-untyped]
 
-from ucall.rich_posix import Server
-from usearch.index import Index, Matches, Key
+from usearch.index import Index, Key
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
+    from usearch.index import BatchMatches, Matches
 
 
-def _ascii_to_vector(string: str) -> np.ndarray:
+def _ascii_to_vector(string: str) -> NDArray[Any]:
     """
     WARNING: A dirty performance hack!
     Assuming the `i8` vectors in our implementations are just integers,
@@ -52,33 +58,31 @@ def serve(
 
     @server
     def capacity() -> int:
-        return index.capacity()
+        return index.capacity
 
     @server
     def connectivity() -> int:
-        return index.connectivity()
+        return index.connectivity
 
     @server
-    def add_one(key: int, vector: np.ndarray):
-        print("adding", key, vector)
+    def add_one(key: int, vector: NDArray[Any]):
         keys = np.array([key], dtype=Key)
         vectors = vector.flatten().reshape(vector.shape[0], 1)
         index.add(keys, vectors)
 
     @server
-    def add_many(keys: np.ndarray, vectors: np.ndarray):
+    def add_many(keys: NDArray[Any], vectors: NDArray[Any]):
         index.add(keys, vectors, threads=threads)
 
     @server
-    def search_one(vector: np.ndarray, count: int) -> List[dict]:
-        print("search", vector, count)
+    def search_one(vector: NDArray[Any], count: int) -> list[tuple]:
         vectors = vector.reshape(vector.shape[0], 1)
-        results: Matches = index.search(vectors, count)
+        results: Matches | BatchMatches = index.search(vectors, count)
         return results.to_list()
 
     @server
-    def search_many(vectors: np.ndarray, count: int) -> List[List[dict]]:
-        results: Matches = index.search(vectors, count)
+    def search_many(vectors: NDArray[Any], count: int) -> list[tuple]:
+        results: Matches | BatchMatches = index.search(vectors, count)
         return results.to_list()
 
     @server
@@ -100,7 +104,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-v", "--verbose", help="log server activity")
     parser.add_argument("--ndim", type=int, help="dimensionality of the vectors")
-    parser.add_argument("--immutable", type=bool, default=False, help="the index can not be updated")
+    parser.add_argument(
+        "--immutable", type=bool, default=False, help="the index can not be updated"
+    )
 
     parser.add_argument(
         "--metric",
@@ -116,8 +122,12 @@ if __name__ == "__main__":
         default=8545,
         help="port to open for client connections",
     )
-    parser.add_argument("-j", "--threads", type=int, default=1, help="number of CPU threads to use")
-    parser.add_argument("--path", type=str, default="index.usearch", help="where to store the index")
+    parser.add_argument(
+        "-j", "--threads", type=int, default=1, help="number of CPU threads to use"
+    )
+    parser.add_argument(
+        "--path", type=str, default="index.usearch", help="where to store the index"
+    )
 
     args = parser.parse_args()
     assert args.ndim is not None, "Define the number of dimensions!"

@@ -1,10 +1,9 @@
-import os
-import sys
 import ctypes
+import os
 import platform
-import warnings
+import sys
 import urllib.request
-from typing import Optional, Tuple
+import warnings
 from urllib.error import HTTPError
 
 #! Load SimSIMD before the USearch compiled module
@@ -30,26 +29,26 @@ except ImportError:
     pass  # If the user doesn't want SimSIMD, we assume they know what they're doing
 
 
-from usearch.compiled import (
-    VERSION_MAJOR,
-    VERSION_MINOR,
-    VERSION_PATCH,
+from usearch.compiled import (  # type: ignore[import-not-found]
     # Default values:
     DEFAULT_CONNECTIVITY,
     DEFAULT_EXPANSION_ADD,
     DEFAULT_EXPANSION_SEARCH,
+    USES_FP16LIB,
     # Dependencies:
     USES_OPENMP,
-    USES_FP16LIB,
     USES_SIMSIMD,
     USES_SIMSIMD_DYNAMIC_DISPATCH,
+    VERSION_MAJOR,
+    VERSION_MINOR,
+    VERSION_PATCH,
 )
 
 __version__ = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}"
 
 
 class BinaryManager:
-    def __init__(self, version: Optional[str] = None):
+    def __init__(self, version: str | None = None):
         if version is None:
             version = __version__
         self.version = version or __version__
@@ -72,7 +71,7 @@ class BinaryManager:
         url = f"{base_url}/v{version}/{filename}"
         return url
 
-    def get_binary_name(self) -> Tuple[str, str]:
+    def get_binary_name(self) -> tuple[str, str]:
         version = self.version
         os_map = {"Linux": "linux", "Windows": "windows", "Darwin": "macos"}
         arch_map = {
@@ -85,12 +84,14 @@ class BinaryManager:
         os_part = os_map.get(platform.system(), "")
         arch = platform.machine()
         arch_part = arch_map.get(arch, "")
-        extension = {"Linux": "so", "Windows": "dll", "Darwin": "dylib"}.get(platform.system(), "")
+        extension = {"Linux": "so", "Windows": "dll", "Darwin": "dylib"}.get(
+            platform.system(), ""
+        )
         source_filename = f"usearch_sqlite_{os_part}_{arch_part}_{version}.{extension}"
         target_filename = f"usearch_sqlite.{extension}"
         return source_filename, target_filename
 
-    def sqlite_found_or_downloaded(self) -> Optional[str]:
+    def sqlite_found_or_downloaded(self) -> str | None:
         """
         Attempts to locate the pre-installed `usearch_sqlite` binary.
         If not found, downloads it from GitHub.
@@ -104,7 +105,6 @@ class BinaryManager:
 
         # Check local development directories first
         for local_dir in local_dirs:
-
             local_path = os.path.join(local_dir, target_filename)
             if os.path.exists(local_path):
                 path_wout_extension, _, _ = local_path.rpartition(".")
@@ -120,9 +120,10 @@ class BinaryManager:
         download_dir = self.determine_download_dir()
         local_path = os.path.join(download_dir, target_filename)
         if not os.path.exists(local_path):
-
             # If not found locally, warn the user and download from GitHub
-            warnings.warn("Will download `usearch_sqlite` binary from GitHub.", UserWarning)
+            warnings.warn(
+                "Will download `usearch_sqlite` binary from GitHub.", UserWarning
+            )
             try:
                 source_url = self.determine_download_url(self.version, source_filename)
                 os.makedirs(download_dir, exist_ok=True)
@@ -130,9 +131,14 @@ class BinaryManager:
             except HTTPError as e:
                 # If the download fails due to HTTPError (e.g., 404 Not Found), like a missing lib version
                 if e.code == 404:
-                    warnings.warn(f"Download failed: {e.url} could not be found.", UserWarning)
+                    warnings.warn(
+                        f"Download failed: {e.url} could not be found.", UserWarning
+                    )
                 else:
-                    warnings.warn(f"Download failed with HTTP error: {e.code} {e.reason}", UserWarning)
+                    warnings.warn(
+                        f"Download failed with HTTP error: {e.code} {e.reason}",
+                        UserWarning,
+                    )
                 return None
 
         # Handle the case where binary_path does not exist after supposed successful download
@@ -140,11 +146,13 @@ class BinaryManager:
             path_wout_extension, _, _ = local_path.rpartition(".")
             return path_wout_extension
         else:
-            warnings.warn("Failed to download `usearch_sqlite` binary from GitHub.", UserWarning)
+            warnings.warn(
+                "Failed to download `usearch_sqlite` binary from GitHub.", UserWarning
+            )
             return None
 
 
-def sqlite_path(version: str = None) -> str:
+def sqlite_path(version: str | None = None) -> str:
     manager = BinaryManager(version=version)
     result = manager.sqlite_found_or_downloaded()
     if result is None:

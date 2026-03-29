@@ -1,33 +1,39 @@
 from __future__ import annotations
-from time import time_ns
-from typing import Tuple, Any, Callable, Union, Optional, List
-from dataclasses import dataclass, asdict
+
 from collections import defaultdict
+from dataclasses import asdict, dataclass
 from math import ceil
+from time import time_ns
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from usearch.io import load_matrix
 from usearch.index import (
-    Index,
     BatchMatches,
-    ScalarKind,
+    Index,
+    Key,
     MetricKind,
     MetricKindBitwise,
-    Key,
-    _normalize_metric,
+    ScalarKind,
     _normalize_dtype,
+    _normalize_metric,
     _to_numpy_dtype,
 )
+from usearch.io import load_matrix
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from numpy.typing import NDArray
 
 
 def random_vectors(
     count: int,
     metric: MetricKind = MetricKind.IP,
     dtype: ScalarKind = ScalarKind.F32,
-    ndim: Optional[int] = None,
-    index: Optional[Index] = None,
-) -> np.ndarray:
+    ndim: int | None = None,
+    index: Index | None = None,
+) -> NDArray[Any]:
     """Produces a collection of random vectors normalized for the provided `metric`
     and matching wanted `dtype`, which can both be inferred from an existing `index`.
     """
@@ -38,18 +44,19 @@ def random_vectors(
             raise ValueError("Unsupported `index` type")
 
         ndim = index.ndim
-        dtype = index.numpy_dtype
+        dtype = index.dtype
         metric = index.metric
 
     else:
-        metric: MetricKind = _normalize_metric(metric)
-        dtype: ScalarKind = _normalize_dtype(dtype, ndim=ndim, metric=metric)
+        metric = _normalize_metric(metric)
+        dtype = _normalize_dtype(dtype, ndim=ndim or 0, metric=metric)
+
+    assert ndim is not None, "ndim must be provided when index is not given"
 
     # Produce data
     if metric in MetricKindBitwise or dtype == ScalarKind.B1:
-        bit_vectors = np.random.randint(2, size=(count, ndim))
-        bit_vectors = np.packbits(bit_vectors, axis=1)
-        return bit_vectors
+        bits = np.random.randint(2, size=(count, ndim))
+        return np.packbits(bits, axis=1)
 
     else:
         x = np.random.rand(count, ndim)
@@ -87,14 +94,16 @@ class SearchStats:
 
     @property
     def mean_efficiency(self) -> float:
-        return 1 - float(self.computed_distances) / (self.count_queries * self.index_size)
+        return 1 - float(self.computed_distances) / (
+            self.count_queries * self.index_size
+        )
 
     @property
     def mean_recall(self) -> float:
         return self.count_matches / self.count_queries
 
 
-def self_recall(index: Index, sample: Union[float, int] = 1.0, **kwargs) -> SearchStats:
+def self_recall(index: Index, sample: float | int = 1.0, **kwargs) -> SearchStats:
     """Simplest benchmark for a quality of search, which queries every
     existing member of the index, to make sure approximate search finds
     the point itself.
@@ -107,7 +116,13 @@ def self_recall(index: Index, sample: Union[float, int] = 1.0, **kwargs) -> Sear
     :rtype: SearchStats
     """
     if len(index) == 0:
-        return 0
+        return SearchStats(
+            index_size=0,
+            count_queries=0,
+            count_matches=0,
+            visited_members=0,
+            computed_distances=0,
+        )
     if "count" not in kwargs:
         kwargs["count"] = 1
 
@@ -128,7 +143,9 @@ def self_recall(index: Index, sample: Union[float, int] = 1.0, **kwargs) -> Sear
 
     matches = index.search(vectors, **kwargs)
     count_matches: int = (
-        matches.count_matches(keys) if isinstance(matches, BatchMatches) else int(matches.keys[0] == keys[0])
+        matches.count_matches(keys)
+        if isinstance(matches, BatchMatches)
+        else int(matches.keys[0] == keys[0])
     )
     return SearchStats(
         index_size=len(index),
@@ -139,7 +156,7 @@ def self_recall(index: Index, sample: Union[float, int] = 1.0, **kwargs) -> Sear
     )
 
 
-def measure_seconds(f: Callable) -> Tuple[float, Any]:
+def measure_seconds(f: Callable) -> tuple[float, Any]:
     """Simple function profiling decorator.
 
     :param f: Function to be profiled
@@ -155,11 +172,11 @@ def measure_seconds(f: Callable) -> Tuple[float, Any]:
     return secs, result
 
 
-def dcg(relevances: np.ndarray, k: Optional[int] = None) -> np.ndarray:
+def dcg(relevances: NDArray[Any], k: int | None = None) -> float | np.floating[Any]:
     """Calculate DCG (Discounted Cumulative Gain) up to position k.
 
     :param relevances: List of true relevance scores (in the order as they are ranked)
-    :type relevances: list
+    :type relevances: np.ndarray
     :param k: Position up to which DCG is computed
     :type k: int
     :return: The DCG score at position k
@@ -176,7 +193,7 @@ def dcg(relevances: np.ndarray, k: Optional[int] = None) -> np.ndarray:
     return np.sum(relevances / discounts)
 
 
-def ndcg(relevances: np.ndarray, k: Optional[int] = None) -> np.ndarray:
+def ndcg(relevances: NDArray[Any], k: int | None = None) -> float:
     """Calculate NDCG (Normalized Discounted Cumulative Gain) at position k.
 
     :param relevances: List of true relevance scores (in the order as they are ranked)
@@ -186,14 +203,16 @@ def ndcg(relevances: np.ndarray, k: Optional[int] = None) -> np.ndarray:
     :return: The NDCG score at position k
     :rtype: float
     """
-    best_dcg = dcg(sorted(relevances, reverse=True), k)
+    best_dcg = dcg(np.array(sorted(relevances, reverse=True)), k)
     if best_dcg == 0:
         return 0.0
 
-    return dcg(relevances, k) / best_dcg
+    return float(dcg(relevances, k) / best_dcg)
 
 
-def relevance(expected: np.ndarray, predicted: np.ndarray, k: Optional[int] = None) -> np.ndarray:
+def relevance(
+    expected: NDArray[Any], predicted: NDArray[Any], k: int | None = None
+) -> list[int]:
     """Calculate relevance scores. Binary relevance scores
 
     :param expected: ground-truth keys
@@ -208,12 +227,13 @@ def relevance(expected: np.ndarray, predicted: np.ndarray, k: Optional[int] = No
 
 @dataclass
 class Dataset:
-    keys: np.ndarray
-    vectors: np.ndarray
-    queries: np.ndarray
-    neighbors: np.ndarray
+    keys: NDArray[Any] | None
+    vectors: NDArray[Any] | None
+    queries: NDArray[Any] | None
+    neighbors: NDArray[Any] | None
 
     def crop_neighbors(self, k: int):
+        assert self.neighbors is not None
         self.neighbors = self.neighbors[:, k]
 
     @property
@@ -222,12 +242,12 @@ class Dataset:
 
     @staticmethod
     def build(
-        vectors: Optional[str] = None,
-        queries: Optional[str] = None,
-        neighbors: Optional[str] = None,
-        count: Optional[int] = None,
-        ndim: Optional[int] = None,
-        k: Optional[int] = None,
+        vectors: str | None = None,
+        queries: str | None = None,
+        neighbors: str | None = None,
+        count: int | None = None,
+        ndim: int | None = None,
+        k: int | None = None,
     ):
         """Either loads an existing dataset from disk, or generates one on the fly.
 
@@ -250,19 +270,33 @@ class Dataset:
         if vectors is not None:
             assert ndim is None
 
-            d.vectors = load_matrix(vectors)
+            loaded_vectors = load_matrix(vectors)
+            assert loaded_vectors is not None, f"Failed to load vectors from {vectors}"
+            d.vectors = loaded_vectors
             ndim = d.vectors.shape[1]
-            count = min(d.vectors.shape[0], count) if count is not None else d.vectors.shape[0]
+            count = (
+                min(d.vectors.shape[0], count)
+                if count is not None
+                else d.vectors.shape[0]
+            )
             d.vectors = d.vectors[:count, :]
             d.keys = np.arange(count, dtype=Key)
 
             if queries is not None:
-                d.queries = load_matrix(queries)
+                loaded_queries = load_matrix(queries)
+                assert loaded_queries is not None, (
+                    f"Failed to load queries from {queries}"
+                )
+                d.queries = loaded_queries
             else:
                 d.queries = d.vectors
 
             if neighbors is not None:
-                d.neighbors = load_matrix(neighbors)
+                loaded_neighbors = load_matrix(neighbors)
+                assert loaded_neighbors is not None, (
+                    f"Failed to load neighbors from {neighbors}"
+                )
+                d.neighbors = loaded_neighbors
                 if k is not None:
                     d.neighbors = d.neighbors[:, :k]
             else:
@@ -284,12 +318,12 @@ class Dataset:
 
 @dataclass
 class TaskResult:
-    add_operations: Optional[int] = None
-    add_per_second: Optional[float] = None
+    add_operations: int | None = None
+    add_per_second: float | None = None
 
-    search_operations: Optional[int] = None
-    search_per_second: Optional[float] = None
-    recall_at_one: Optional[float] = None
+    search_operations: int | None = None
+    search_per_second: float | None = None
+    recall_at_one: float | None = None
 
     def __repr__(self) -> str:
         parts = []
@@ -303,17 +337,21 @@ class TaskResult:
 
     @property
     def add_seconds(self) -> float:
+        assert self.add_operations is not None and self.add_per_second is not None
         return self.add_operations / self.add_per_second
 
     @property
     def search_seconds(self) -> float:
+        assert self.search_operations is not None and self.search_per_second is not None
         return self.search_operations / self.search_per_second
 
     def __add__(self, other: TaskResult):
         result = TaskResult()
         if self.add_operations and other.add_operations:
             result.add_operations = self.add_operations + other.add_operations
-            result.add_per_second = result.add_operations / (self.add_seconds + other.add_seconds)
+            result.add_per_second = result.add_operations / (
+                self.add_seconds + other.add_seconds
+            )
         else:
             base = self if self.add_operations else other
             result.add_operations = base.add_operations
@@ -322,9 +360,12 @@ class TaskResult:
         if self.search_operations and other.search_operations:
             result.search_operations = self.search_operations + other.search_operations
             result.recall_at_one = (
-                self.recall_at_one * self.search_operations + other.recall_at_one * other.search_operations
+                (self.recall_at_one or 0.0) * self.search_operations
+                + (other.recall_at_one or 0.0) * other.search_operations
             ) / (self.search_operations + other.search_operations)
-            result.search_per_second = result.search_operations / (self.search_seconds + other.search_seconds)
+            result.search_per_second = result.search_operations / (
+                self.search_seconds + other.search_seconds
+            )
         else:
             base = self if self.search_operations else other
             result.search_operations = base.search_operations
@@ -336,8 +377,8 @@ class TaskResult:
 
 @dataclass
 class AddTask:
-    keys: np.ndarray
-    vectors: np.ndarray
+    keys: NDArray[Any]
+    vectors: NDArray[Any]
 
     def __call__(self, index: Index) -> TaskResult:
         batch_size: int = self.vectors.shape[0]
@@ -366,7 +407,7 @@ class AddTask:
         self.keys = self.keys[new_order]
         self.vectors = self.vectors[new_order, :]
 
-    def slices(self, batch_size: int) -> List[AddTask]:
+    def slices(self, batch_size: int) -> list[AddTask]:
         """Splits this dataset into smaller chunks."""
 
         return [
@@ -377,10 +418,10 @@ class AddTask:
             for start_row in range(0, self.count, batch_size)
         ]
 
-    def clusters(self, number_of_clusters: int) -> List[AddTask]:
+    def clusters(self, number_of_clusters: int) -> list[AddTask]:
         """Splits this dataset into smaller chunks."""
 
-        from sklearn.cluster import KMeans
+        from sklearn.cluster import KMeans  # type: ignore[import-untyped]
 
         clustering = KMeans(
             n_clusters=number_of_clusters,
@@ -403,18 +444,20 @@ class AddTask:
 
 @dataclass
 class SearchTask:
-    queries: np.ndarray
-    neighbors: np.ndarray
+    queries: NDArray[Any]
+    neighbors: NDArray[Any]
 
     def __call__(self, index: Index) -> TaskResult:
-        dt, results = measure_seconds(lambda: index.search(self.queries, self.neighbors.shape[1]))
+        dt, results = measure_seconds(
+            lambda: index.search(self.queries, self.neighbors.shape[1])
+        )
 
         return TaskResult(
             search_per_second=self.queries.shape[0] / dt,
             recall_at_one=results.mean_recall(self.neighbors[:, 0].flatten()),
         )
 
-    def slices(self, batch_size: int) -> List[SearchTask]:
+    def slices(self, batch_size: int) -> list[SearchTask]:
         """Splits this dataset into smaller chunks."""
 
         return [
@@ -428,13 +471,17 @@ class SearchTask:
 
 @dataclass
 class Evaluation:
-    tasks: List[Union[AddTask, SearchTask]]
+    tasks: list[AddTask | SearchTask]
     count: int
     ndim: int
 
     @staticmethod
-    def for_dataset(dataset: Dataset, batch_size: int = 0, clusters: int = 1) -> Evaluation:
-        tasks = []
+    def for_dataset(
+        dataset: Dataset, batch_size: int = 0, clusters: int = 1
+    ) -> Evaluation:
+        tasks: list[AddTask | SearchTask] = []
+        assert dataset.vectors is not None and dataset.keys is not None
+        assert dataset.queries is not None and dataset.neighbors is not None
         add = AddTask(vectors=dataset.vectors, keys=dataset.keys)
         search = SearchTask(queries=dataset.queries, neighbors=dataset.neighbors)
 
@@ -443,7 +490,6 @@ class Evaluation:
             tasks.extend(search.slices(batch_size))
         elif clusters != 1:
             tasks.extend(add.clusters(clusters))
-            print(tasks)
             tasks.append(search)
         else:
             tasks.append(add)
@@ -476,18 +522,49 @@ if __name__ == "__main__":
     import argparse
 
     # Initialize the argument parser
-    parser = argparse.ArgumentParser(description="Evaluate vector search index for speed and accuracy.")
+    parser = argparse.ArgumentParser(
+        description="Evaluate vector search index for speed and accuracy."
+    )
 
     # Define expected arguments
-    parser.add_argument("--vectors", type=str, required=False, help="Path to the file containing the vectors.")
-    parser.add_argument("--queries", type=str, required=False, help="Path to the file containing the query vectors.")
-    parser.add_argument("--neighbors", type=str, required=False, help="Path to the file with neighbor arrays.")
-    parser.add_argument("--dtype", type=str, required=False, help="Quantization type for internal storage.")
+    parser.add_argument(
+        "--vectors",
+        type=str,
+        required=False,
+        help="Path to the file containing the vectors.",
+    )
+    parser.add_argument(
+        "--queries",
+        type=str,
+        required=False,
+        help="Path to the file containing the query vectors.",
+    )
+    parser.add_argument(
+        "--neighbors",
+        type=str,
+        required=False,
+        help="Path to the file with neighbor arrays.",
+    )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        required=False,
+        help="Quantization type for internal storage.",
+    )
     parser.add_argument("--metric", type=str, required=False, help="Distance function.")
     parser.add_argument("--count", type=int, help="Number of vectors to use.")
-    parser.add_argument("--ndim", type=int, help="Number of dimensions for the vectors.")
-    parser.add_argument("--batch_size", type=int, default=0, help="Batch size for indexing and searching.")
-    parser.add_argument("--clusters", type=int, default=1, help="Number of clusters for indexing.")
+    parser.add_argument(
+        "--ndim", type=int, help="Number of dimensions for the vectors."
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=0,
+        help="Batch size for indexing and searching.",
+    )
+    parser.add_argument(
+        "--clusters", type=int, default=1, help="Number of clusters for indexing."
+    )
 
     # Parse arguments from the command line
     args = parser.parse_args()
@@ -502,11 +579,10 @@ if __name__ == "__main__":
     )
 
     # Prepare the evaluation
-    evaluation = Evaluation.for_dataset(dataset, batch_size=args.batch_size, clusters=args.clusters)
+    evaluation = Evaluation.for_dataset(
+        dataset, batch_size=args.batch_size, clusters=args.clusters
+    )
     index = Index(ndim=dataset.ndim, dtype=args.dtype, metric=args.metric)
 
     # Perform the evaluation
     results = evaluation(index)
-
-    # Print the evaluation results
-    print("Evaluation results:", results)
