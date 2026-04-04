@@ -2679,16 +2679,6 @@ struct exact_offset_and_distance_t {
 
 using exact_search_results_t = matrix_slice_gt<exact_offset_and_distance_t const>;
 
-#if USEARCH_USE_NUMKONG
-struct exact_packed_dataset_t {
-    buffer_gt<byte_t> packed_data;
-    std::size_t dataset_count = 0;
-    std::size_t dimensions = 0;
-    nk_dtype_t input_dtype = (nk_dtype_t)0;
-    explicit operator bool() const noexcept { return packed_data && dataset_count; }
-};
-#endif
-
 /**
  *  @brief  Helper-structure for exact search operations.
  *          Perfect if you have @b <1M vectors and @b <100 queries per call.
@@ -2705,8 +2695,6 @@ class exact_search_t {
 
     using keys_and_distances_t = buffer_gt<exact_offset_and_distance_t>;
     keys_and_distances_t keys_and_distances;
-    buffer_gt<byte_t> packed_buffer_;
-    buffer_gt<byte_t> distance_matrix_;
 
   public:
     template <typename scalar_at, typename executor_at = dummy_executor_t, typename progress_at = dummy_progress_t>
@@ -2727,9 +2715,8 @@ class exact_search_t {
         std::size_t wanted, metric_punned_t const& metric, executor_at&& executor = executor_at{},
         progress_at&& progress = progress_at{}) {
 
-        // Allocate temporary memory to store the distance matrix
-        // Previous version didn't need temporary memory, but the performance was much lower.
-        // In the new design we keep two buffers - original and transposed, as in-place transpositions
+        // Allocate temporary memory to store the distance matrix.
+        // We keep two buffers - original and transposed, as in-place transpositions
         // of non-rectangular matrixes is expensive.
         std::size_t tasks_count = dataset_count * queries_count;
         if (keys_and_distances.size() < tasks_count * 2)
@@ -2740,31 +2727,7 @@ class exact_search_t {
         exact_offset_and_distance_t* keys_and_distances_per_dataset = keys_and_distances.data();
         exact_offset_and_distance_t* keys_and_distances_per_query = keys_and_distances_per_dataset + tasks_count;
 
-#if USEARCH_USE_NUMKONG
-        // Try the batched GEMM-style kernel path for supported metric/scalar combinations.
-        // This computes the full queries×dataset distance matrix in one call, outputting
-        // directly in query-major order, avoiding the transpose step entirely.
-        if (try_batched_search_(metric, dataset_data, dataset_count, dataset_stride, //
-                                queries_data, queries_count, queries_stride,         //
-                                keys_and_distances_per_query)) {
-            // §3. Partial-sort every query result (same as the per-pair path)
-            executor.fixed(queries_count, [&](std::size_t, std::size_t query_idx) {
-                auto start = keys_and_distances_per_query + dataset_count * query_idx;
-                if (wanted > 1)
-                    std::partial_sort(start, start + wanted, start + dataset_count, &smaller_distance);
-                else {
-                    auto min_it = std::min_element(start, start + dataset_count, &smaller_distance);
-                    if (min_it != start)
-                        std::swap(*min_it, *start);
-                }
-            });
-            progress(tasks_count, tasks_count);
-            return {keys_and_distances_per_query, wanted, queries_count,
-                    dataset_count * sizeof(exact_offset_and_distance_t)};
-        }
-#endif
-
-        // §1. Compute distances in a data-parallel fashion (per-pair fallback)
+        // §1. Compute distances in a data-parallel fashion
         std::atomic<std::size_t> processed{0};
         executor.dynamic(dataset_count, [&](std::size_t thread_idx, std::size_t dataset_idx) {
             byte_t const* dataset = dataset_data + dataset_idx * dataset_stride;
@@ -2812,176 +2775,6 @@ class exact_search_t {
         return {keys_and_distances_per_query, wanted, queries_count,
                 dataset_count * sizeof(exact_offset_and_distance_t)};
     }
-
-#if USEARCH_USE_NUMKONG
-    static exact_packed_dataset_t pack(byte_t const* dataset_data, std::size_t dataset_count,
-                                       std::size_t dataset_stride, std::size_t dimensions, scalar_kind_t scalar_kind) {
-
-        exact_packed_dataset_t result;
-        nk_dtype_t nk_dtype = scalar_kind_to_nk_dtype(scalar_kind);
-        if (!nk_dtype)
-            return result;
-
-        nk_capability_t caps = nk_cached_capabilities();
-        nk_capability_t used_cap;
-
-        nk_dots_packed_size_punned_t size_fn = nullptr;
-        nk_find_kernel_punned(nk_kernel_dots_packed_size_k, nk_dtype, caps, (nk_kernel_punned_t*)&size_fn, &used_cap);
-        nk_dots_pack_punned_t pack_fn = nullptr;
-        nk_find_kernel_punned(nk_kernel_dots_pack_k, nk_dtype, caps, (nk_kernel_punned_t*)&pack_fn, &used_cap);
-        if (!size_fn || !pack_fn)
-            return result;
-
-        std::size_t packed_size = size_fn(dataset_count, dimensions);
-        if (!packed_size)
-            return result;
-
-        result.packed_data = buffer_gt<byte_t>(packed_size);
-        if (!result.packed_data)
-            return result;
-        pack_fn(dataset_data, dataset_count, dimensions, dataset_stride, result.packed_data.data());
-        result.dataset_count = dataset_count;
-        result.dimensions = dimensions;
-        result.input_dtype = nk_dtype;
-        return result;
-    }
-
-    template <typename executor_at = dummy_executor_t, typename progress_at = dummy_progress_t>
-    exact_search_results_t operator()(exact_packed_dataset_t const& packed, byte_t const* queries_data,
-                                      std::size_t queries_count, std::size_t queries_stride, std::size_t wanted,
-                                      metric_kind_t metric_kind, executor_at&& executor = executor_at{},
-                                      progress_at&& progress = progress_at{}) {
-
-        std::size_t tasks_count = packed.dataset_count * queries_count;
-        if (keys_and_distances.size() < tasks_count)
-            keys_and_distances = keys_and_distances_t(tasks_count);
-        if (keys_and_distances.size() < tasks_count)
-            return {};
-
-        exact_offset_and_distance_t* keys_and_distances_per_query = keys_and_distances.data();
-
-        if (!search_packed_(packed.packed_data.data(), packed.dataset_count, packed.dimensions, packed.input_dtype,
-                            metric_kind, queries_data, queries_count, queries_stride, keys_and_distances_per_query))
-            return {};
-
-        // Partial-sort every query result
-        executor.fixed(queries_count, [&](std::size_t, std::size_t query_idx) {
-            auto start = keys_and_distances_per_query + packed.dataset_count * query_idx;
-            if (wanted > 1)
-                std::partial_sort(start, start + wanted, start + packed.dataset_count, &smaller_distance);
-            else {
-                auto min_it = std::min_element(start, start + packed.dataset_count, &smaller_distance);
-                if (min_it != start)
-                    std::swap(*min_it, *start);
-            }
-        });
-        progress(tasks_count, tasks_count);
-        return {keys_and_distances_per_query, wanted, queries_count,
-                packed.dataset_count * sizeof(exact_offset_and_distance_t)};
-    }
-#endif
-
-  private:
-#if USEARCH_USE_NUMKONG
-    void populate_results_(exact_offset_and_distance_t* out, std::size_t queries_count, std::size_t dataset_count,
-                           nk_dtype_t out_dtype, bool is_dot) {
-        byte_t const* dm = distance_matrix_.data();
-        std::size_t elem_size = nk_dtype_bits(out_dtype) / CHAR_BIT;
-        for (std::size_t q = 0; q < queries_count; ++q) {
-            for (std::size_t d = 0; d < dataset_count; ++d) {
-                std::size_t idx = dataset_count * q + d;
-                out[idx].offset = static_cast<u32_t>(d);
-                nk_f32_t dist;
-                nk_cast(dm + idx * elem_size, out_dtype, 1, &dist, nk_f32_k);
-                if (is_dot)
-                    dist = 1.0f - dist;
-                out[idx].distance = dist;
-            }
-        }
-    }
-
-    bool search_packed_(void const* packed_data, std::size_t dataset_count, std::size_t dimensions, nk_dtype_t nk_dtype,
-                        metric_kind_t metric_kind, byte_t const* queries_data, std::size_t queries_count,
-                        std::size_t queries_stride, exact_offset_and_distance_t* keys_and_distances_per_query) {
-
-        // Map metric_kind to the appropriate batched kernel kind
-        nk_kernel_kind_t compute_kind;
-        bool is_dot = (metric_kind == metric_kind_t::ip_k);
-        if (metric_kind == metric_kind_t::ip_k || metric_kind == metric_kind_t::cos_k ||
-            metric_kind == metric_kind_t::l2sq_k) {
-            if (is_dot)
-                compute_kind = nk_kernel_dots_packed_k;
-            else if (metric_kind == metric_kind_t::cos_k)
-                compute_kind = nk_kernel_angulars_packed_k;
-            else
-                compute_kind = nk_kernel_euclideans_packed_k;
-        } else {
-            return false;
-        }
-
-        // Look up compute kernel
-        nk_capability_t caps = nk_cached_capabilities();
-        nk_capability_t used_cap;
-        nk_dots_packed_punned_t compute_fn = nullptr;
-        nk_find_kernel_punned(compute_kind, nk_dtype, caps, (nk_kernel_punned_t*)&compute_fn, &used_cap);
-        if (!compute_fn)
-            return false;
-
-        // Determine output element size
-        nk_dtype_t out_dtype = nk_kernel_output_dtype(compute_kind, nk_dtype);
-        std::size_t out_elem_size = nk_dtype_bits(out_dtype) / CHAR_BIT;
-        std::size_t dm_bytes = queries_count * dataset_count * out_elem_size;
-        std::size_t c_stride = dataset_count * out_elem_size;
-
-        // Resize distance matrix if needed
-        if (distance_matrix_.size() < dm_bytes)
-            distance_matrix_ = buffer_gt<byte_t>(dm_bytes);
-        if (!distance_matrix_)
-            return false;
-
-        // Compute full distance matrix
-        compute_fn(queries_data, packed_data, distance_matrix_.data(), queries_count, dataset_count, dimensions,
-                   queries_stride, c_stride);
-
-        // Convert to offset+distance pairs
-        populate_results_(keys_and_distances_per_query, queries_count, dataset_count, out_dtype, is_dot);
-        return true;
-    }
-
-    bool try_batched_search_(metric_punned_t const& metric, byte_t const* dataset_data, std::size_t dataset_count,
-                             std::size_t dataset_stride, byte_t const* queries_data, std::size_t queries_count,
-                             std::size_t queries_stride, exact_offset_and_distance_t* keys_and_distances_per_query) {
-
-        nk_dtype_t nk_dtype = scalar_kind_to_nk_dtype(metric.scalar_kind());
-        if (!nk_dtype)
-            return false;
-
-        nk_capability_t caps = nk_cached_capabilities();
-        nk_capability_t used_cap;
-
-        // Look up pack kernels
-        nk_dots_packed_size_punned_t size_fn = nullptr;
-        nk_find_kernel_punned(nk_kernel_dots_packed_size_k, nk_dtype, caps, (nk_kernel_punned_t*)&size_fn, &used_cap);
-        nk_dots_pack_punned_t pack_fn = nullptr;
-        nk_find_kernel_punned(nk_kernel_dots_pack_k, nk_dtype, caps, (nk_kernel_punned_t*)&pack_fn, &used_cap);
-        if (!size_fn || !pack_fn)
-            return false;
-
-        // Pack dataset
-        std::size_t packed_size = size_fn(dataset_count, metric.dimensions());
-        if (!packed_size)
-            return false;
-        if (packed_buffer_.size() < packed_size)
-            packed_buffer_ = buffer_gt<byte_t>(packed_size);
-        if (!packed_buffer_)
-            return false;
-        pack_fn(dataset_data, dataset_count, metric.dimensions(), dataset_stride, packed_buffer_.data());
-
-        // Delegate to shared search path
-        return search_packed_(packed_buffer_.data(), dataset_count, metric.dimensions(), nk_dtype, metric.metric_kind(),
-                              queries_data, queries_count, queries_stride, keys_and_distances_per_query);
-    }
-#endif
 };
 
 struct kmeans_clustering_result_t {
