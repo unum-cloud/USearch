@@ -174,7 +174,7 @@ In its high-level interface, USearch supports a variety of metrics, including th
 - `metric_haversine_gt<scalar_t>` for "Haversine" or "Great Circle" distance between coordinates used in GIS applications.
 - `metric_divergence_gt<scalar_t>` for the "Jensen Shannon" similarity between probability distributions.
 
-In reality, for most common types, one of the [SimSIMD](https://github.com/ashvardanian/SimSIMD) backends will be triggered, providing hardware-acceleration for most common CPUs.
+In reality, for most common types, one of the [NumKong](https://github.com/ashvardanian/numkong) backends will be triggered, providing hardware-acceleration for most common CPUs.
 
 If you need a different metric, you can implement it yourself and wrap it into a `metric_punned_t`, which is our alternative to the `std::function`.
 Unlike the `std::function`, it is a trivial type, which is important for performance.

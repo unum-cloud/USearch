@@ -20,7 +20,7 @@ Dependencies listed in the script header for uv to resolve automatically.
 # /// script
 # dependencies = [
 #   "numpy",
-#   "simsimd",
+#   "numkong",
 #   "usearch",
 #   "tqdm"
 # ]

@@ -7,27 +7,27 @@ import urllib.request
 from typing import Optional, Tuple
 from urllib.error import HTTPError
 
-#! Load SimSIMD before the USearch compiled module
-#! We can't just use the `import simsimd` as on Linux and Windows (unlike MacOS),
+#! Load NumKong before the USearch compiled module
+#! We can't just use the `import numkong` as on Linux and Windows (unlike MacOS),
 #! the symbols are not automatically loaded into the global namespace.
 try:
-    import simsimd
+    import numkong
 
     # Cross-platform check for Windows
     if sys.platform == "win32":
         # Add the directory where the `.dll` is located
-        dll_directory = os.path.dirname(simsimd.__file__)
+        dll_directory = os.path.dirname(numkong.__file__)
         os.add_dll_directory(dll_directory)
 
-        # Load SimSIMD library using `ctypes` without `RTLD_GLOBAL`
-        simsimd_lib = ctypes.CDLL(simsimd.__file__)
+        # Load NumKong library using `ctypes` without `RTLD_GLOBAL`
+        numkong_lib = ctypes.CDLL(numkong.__file__)
 
     else:
         # Non-Windows: Use `RTLD_GLOBAL` for Unix-based systems (Linux/macOS)
-        simsimd_lib = ctypes.CDLL(simsimd.__file__, mode=ctypes.RTLD_GLOBAL)
+        numkong_lib = ctypes.CDLL(numkong.__file__, mode=ctypes.RTLD_GLOBAL)
 
 except ImportError:
-    pass  # If the user doesn't want SimSIMD, we assume they know what they're doing
+    pass  # If the user doesn't want NumKong, we assume they know what they're doing
 
 
 from usearch.compiled import (

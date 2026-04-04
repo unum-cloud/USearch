@@ -1,7 +1,7 @@
 <h1 align="center">USearch</h1>
 <h3 align="center">
 Smaller & <a href="https://www.unum.cloud/blog/2023-11-07-scaling-vector-search-with-intel">Faster</a> Single-File<br/>
-Similarity Search & Clustering Engine for <a href="https://github.com/ashvardanian/simsimd">Vectors</a> & 🔜 <a href="https://github.com/ashvardanian/stringzilla">Texts</a>
+Similarity Search & Clustering Engine for <a href="https://github.com/ashvardanian/numkong">Vectors</a> & 🔜 <a href="https://github.com/ashvardanian/stringzilla">Texts</a>
 </h3>
 <br/>
 
@@ -185,7 +185,7 @@ one_in_many: Matches = search(vectors, vector, 50, MetricKind.L2sq, exact=True)
 many_in_many: BatchMatches = search(vectors, vectors, 50, MetricKind.L2sq, exact=True)
 ```
 
-If you pass the `exact=True` argument, the system bypasses indexing altogether and performs a brute-force search through the entire dataset using SIMD-optimized similarity metrics from [SimSIMD](https://github.com/ashvardanian/simsimd).
+If you pass the `exact=True` argument, the system bypasses indexing altogether and performs a brute-force search through the entire dataset using SIMD-optimized similarity metrics from [NumKong](https://github.com/ashvardanian/numkong).
 When compared to FAISS's `IndexFlatL2` in Google Colab, __[USearch may offer up to a 20x performance improvement](https://github.com/unum-cloud/USearch/issues/176#issuecomment-1666650778)__:
 
 - `faiss.IndexFlatL2`: __55.3 ms__.

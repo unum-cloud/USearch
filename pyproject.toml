@@ -13,7 +13,7 @@ requires = [
     "cmake>=3.22",
     "pybind11",
     "numpy",
-    "simsimd>=6.0.5,<7.0.0",
+    "numkong>=7.0.0",
 ]
 build-backend = "setuptools.build_meta"
 

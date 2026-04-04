@@ -559,5 +559,5 @@ cmake -DCMAKE_TOOLCHAIN_FILE=${WASI_SDK_PATH}/share/cmake/wasi-sdk.cmake .
 Extending metrics in NumKong:
 
 ```sh
-git push --set-upstream https://github.com/ashvardanian/simsimd.git HEAD:main
+git push --set-upstream https://github.com/ashvardanian/numkong.git HEAD:main
 ```
