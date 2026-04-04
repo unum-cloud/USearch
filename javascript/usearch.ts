@@ -72,6 +72,8 @@ export enum ScalarKind {
   F64 = "f64",
   F16 = "f16",
   BF16 = "bf16",
+  E5M2 = "e5m2",
+  E4M3 = "e4m3",
   I8 = "i8",
   B1 = "b1",
 }

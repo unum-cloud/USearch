@@ -220,7 +220,7 @@ inline scalar_kind_t convert_pre_2_10_scalar_kind(scalar_kind_t scalar_kind) noe
     case 4: return scalar_kind_t::f64_k;
     case 5: return scalar_kind_t::f32_k;
     case 6: return scalar_kind_t::f16_k;
-    case 7: return scalar_kind_t::f8_k;
+    case 7: return scalar_kind_t::e5m2_k;
     case 8: return scalar_kind_t::u64_k;
     case 9: return scalar_kind_t::u32_k;
     case 10: return scalar_kind_t::u8_k;

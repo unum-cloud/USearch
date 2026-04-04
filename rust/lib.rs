@@ -303,10 +303,14 @@ pub mod ffi {
         F64,
         /// 32-bit single-precision IEEE 754 floating-point number.
         F32,
-        /// 16-bit half-precision IEEE 754 floating-point number (different from `bf16`).
-        F16,
         /// 16-bit brain floating-point number.
         BF16,
+        /// 16-bit half-precision IEEE 754 floating-point number (different from `bf16`).
+        F16,
+        /// 8-bit floating point: 1 sign + 5 exponent + 2 mantissa.
+        E5M2,
+        /// 8-bit floating point: 1 sign + 4 exponent + 3 mantissa.
+        E4M3,
         /// 8-bit signed integer.
         I8,
         /// 1-bit binary value, packed 8 per byte.

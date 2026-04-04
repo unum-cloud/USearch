@@ -55,10 +55,12 @@ USEARCH_EXPORT typedef enum usearch_scalar_kind_t {
     usearch_scalar_unknown_k = 0,
     usearch_scalar_f32_k = 1,
     usearch_scalar_f64_k = 2,
+    usearch_scalar_bf16_k = 6,
     usearch_scalar_f16_k = 3,
+    usearch_scalar_e5m2_k = 7,
+    usearch_scalar_e4m3_k = 8,
     usearch_scalar_i8_k = 4,
     usearch_scalar_b1_k = 5,
-    usearch_scalar_bf16_k = 6,
 } usearch_scalar_kind_t;
 
 USEARCH_EXPORT typedef struct usearch_init_options_t {

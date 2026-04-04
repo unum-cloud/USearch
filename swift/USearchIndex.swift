@@ -9,9 +9,12 @@ import Foundation
 import USearchC
 
 public enum USearchScalar: UInt {
-    case f32
-    case f16
     case f64
+    case f32
+    case bf16
+    case f16
+    case e5m2
+    case e4m3
     case i8
     case b1
 }
@@ -62,16 +65,22 @@ extension USearchMetric {
 extension USearchScalar {
     func toNative() -> usearch_scalar_kind_t {
         switch self {
-        case .i8:
-            return usearch_scalar_i8_k
-        case .f16:
-            return usearch_scalar_f16_k
-        case .b1:
-            return usearch_scalar_b1_k
-        case .f32:
-            return usearch_scalar_f32_k
         case .f64:
             return usearch_scalar_f64_k
+        case .f32:
+            return usearch_scalar_f32_k
+        case .bf16:
+            return usearch_scalar_bf16_k
+        case .f16:
+            return usearch_scalar_f16_k
+        case .e5m2:
+            return usearch_scalar_e5m2_k
+        case .e4m3:
+            return usearch_scalar_e4m3_k
+        case .i8:
+            return usearch_scalar_i8_k
+        case .b1:
+            return usearch_scalar_b1_k
         }
     }
 }
