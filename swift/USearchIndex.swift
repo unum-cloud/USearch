@@ -446,6 +446,11 @@ public class USearchIndex: NSObject {
         )
     }
 
+    // Float16 is only available on arm64 Apple platforms. The @available annotation
+    // alone is insufficient because Float16 is a type-level absence on x86_64,
+    // not a runtime availability issue. See: https://github.com/unum-cloud/usearch/issues/589
+    #if arch(arm64)
+
     /**
      * @brief Adds a labeled vector to the index.
      * @param vector Half-precision vector.
@@ -518,6 +523,8 @@ public class USearchIndex: NSObject {
             distances: distances
         )
     }
+
+    #endif // arch(arm64)
 
     public func contains(key: USearchKey) throws -> Bool {
         return try throwing { usearch_contains(nativeIndex, key, $0) }
