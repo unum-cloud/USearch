@@ -16,13 +16,13 @@ internal static class NativeMethods
     private const string LibraryName = "libusearch_c";
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    public static extern IntPtr usearch_version();
+    public static extern void_ptr_t usearch_version();
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    public static extern IntPtr usearch_hardware_acceleration_compiled();
+    public static extern void_ptr_t usearch_hardware_acceleration_compiled();
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    public static extern IntPtr usearch_hardware_acceleration_available();
+    public static extern void_ptr_t usearch_hardware_acceleration_available();
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     public static extern usearch_index_t usearch_init(ref IndexOptions options, out usearch_error_t error);
@@ -100,5 +100,5 @@ internal static class NativeMethods
     public static extern size_t usearch_rename(usearch_index_t index, usearch_key_t key_from, usearch_key_t key_to, out usearch_error_t error);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    public static extern IntPtr usearch_hardware_acceleration(usearch_index_t index, out usearch_error_t error);
+    public static extern void_ptr_t usearch_hardware_acceleration(usearch_index_t index, out usearch_error_t error);
 }
