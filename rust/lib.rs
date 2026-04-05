@@ -278,7 +278,7 @@ pub mod ffi {
         IP,
         /// The squared Euclidean Distance metric, defined as `L2 = sum((a[i] - b[i])^2)`.
         L2sq,
-        /// The Cosine Similarity metric, defined as `Cos = 1 - sum(a[i] * b[i]) / (sqrt(sum(a[i]^2) * sqrt(sum(b[i]^2)))`.
+        /// The Cosine Distance metric, defined as `Cos = 1 - sum(a[i] * b[i]) / (sqrt(sum(a[i]^2)) * sqrt(sum(b[i]^2)))`.
         Cos,
         /// The Pearson Correlation metric.
         Pearson,
