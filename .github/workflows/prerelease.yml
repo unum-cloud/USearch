@@ -153,11 +153,11 @@ jobs:
         working-directory: ${{ github.workspace }}/golang/
 
   test_ubuntu_clang:
-    name: Ubuntu (Clang 18)
+    name: Ubuntu (Clang 20)
     runs-on: ubuntu-24.04
     env:
-      CC: clang
-      CXX: clang++
+      CC: clang-20
+      CXX: clang++-20
 
     steps:
       - name: Checkout
@@ -166,11 +166,10 @@ jobs:
         run: git submodule update --init --recursive
 
         # C/C++
-        # Clang 16 isn't available from default repos on Ubuntu 22.04, so we have to install it manually
-      - name: Build C/C++
+              - name: Build C/C++
         run: |
           sudo apt update
-          sudo apt install -y cmake build-essential libjemalloc-dev clang
+          sudo apt install -y cmake build-essential libjemalloc-dev clang-20
           cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=1 -D USEARCH_USE_OPENMP=0 -D USEARCH_USE_NUMKONG=1 -D USEARCH_USE_JEMALLOC=1
           cmake --build build_artifacts --config RelWithDebInfo
       - name: Test C++
