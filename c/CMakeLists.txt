@@ -1,9 +1,4 @@
-
-# Define the source files conditionally
 set(USEARCH_LIB_SOURCES lib.cpp)
-if (USEARCH_USE_SIMSIMD)
-    list(APPEND USEARCH_LIB_SOURCES ../simsimd/c/lib.c)
-endif ()
 
 if (USEARCH_BUILD_TEST_C)
     add_executable(test_c test.c ${USEARCH_LIB_SOURCES})

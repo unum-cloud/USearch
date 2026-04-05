@@ -20,7 +20,7 @@ Dependencies listed in the script header for uv to resolve automatically.
 # /// script
 # dependencies = [
 #   "numpy",
-#   "simsimd",
+#   "numkong",
 #   "usearch",
 #   "tqdm"
 # ]
@@ -29,7 +29,7 @@ Dependencies listed in the script header for uv to resolve automatically.
 from numpy import dot
 from numpy.linalg import norm
 from tqdm import tqdm
-from simsimd import cos_f32x4_neon, to_int
+from numkong import pointer_to_angular
 
 import usearch
 from usearch.index import Index, MetricKind, CompiledMetric, MetricSignature
@@ -56,7 +56,7 @@ print("---------------Indexing---------------")
 print("--------------------------------------")
 
 metric = CompiledMetric(
-    pointer=to_int(cos_f32x4_neon),
+    pointer=pointer_to_angular("f32"),
     kind=MetricKind.Cos,
     signature=MetricSignature.ArrayArraySize,
 )

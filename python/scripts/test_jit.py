@@ -181,8 +181,10 @@ def test_index_numba_negative(ndim: int, batch_size: int):
     translated_matches = translated_index.search(vectors, count_queries, exact=False)
 
     for query in keys.tolist():
-        normal_keys = [normal_matches[query][i].key for i in range(count_queries)]
-        translated_keys = [translated_matches[query][i].key for i in range(count_queries)]
+        # Use set equality because without a deterministic seed, ties in distance
+        # can be broken differently, causing ordering differences for equally-distant results
+        normal_keys = set(normal_matches[query][i].key for i in range(count_queries))
+        translated_keys = set(translated_matches[query][i].key for i in range(count_queries))
         assert normal_keys == translated_keys, f"Expected {normal_keys} == {translated_keys} for key {query}"
 
 

@@ -285,7 +285,7 @@ jobs:
                 -DUSEARCH_BUILD_BENCH_CPP=0 \
                 -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
                 -B ./build_release
-          cmake --build ./build_release --config Release        
+          cmake --build ./build_release --config Release
           zip -j usearch_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip build_release/libusearch_c.dylib c/usearch.h
           mv build_release/libusearch_sqlite.dylib usearch_sqlite_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.dylib
 
@@ -423,23 +423,22 @@ jobs:
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0 \
             -DUSEARCH_BUILD_LIB_C=0 \
-            -DUSEARCH_USE_FP16LIB=1 \
-            -DUSEARCH_USE_SIMSIMD=1 \
-            -DSIMSIMD_TARGET_HASWELL=1 \
-            -DSIMSIMD_TARGET_SKYLAKE=1 \
-            -DSIMSIMD_TARGET_ICE=1 \
-            -DSIMSIMD_TARGET_GENOA=1 \
-            -DSIMSIMD_TARGET_SAPPHIRE=1 \
-            -DSIMSIMD_TARGET_NEON=1 \
-            -DSIMSIMD_TARGET_NEON_BF16=1 \
-            -DSIMSIMD_TARGET_NEON_F16=1 \
-            -DSIMSIMD_TARGET_NEON_I8=1 \
-            -DSIMSIMD_TARGET_SVE=1 \
-            -DSIMSIMD_TARGET_SVE_BF16=1 \
-            -DSIMSIMD_TARGET_SVE_F16=1 \
-            -DSIMSIMD_TARGET_SVE_I8=1 \
-            -DSIMSIMD_TARGET_SVE2=1 \
-            -DSIMSIMD_DYNAMIC_DISPATCH=1
+            -DUSEARCH_USE_NUMKONG=1 \
+            -DNK_TARGET_HASWELL=1 \
+            -DNK_TARGET_SKYLAKE=1 \
+            -DNK_TARGET_ICELAKE=1 \
+            -DNK_TARGET_GENOA=1 \
+            -DNK_TARGET_SAPPHIRE=1 \
+            -DNK_TARGET_NEON=1 \
+            -DNK_TARGET_NEONBFDOT=1 \
+            -DNK_TARGET_NEONHALF=1 \
+            -DNK_TARGET_NEONSDOT=1 \
+            -DNK_TARGET_SVE=1 \
+            -DNK_TARGET_SVEBFDOT=1 \
+            -DNK_TARGET_SVEHALF=1 \
+            -DNK_TARGET_SVESDOT=1 \
+            -DNK_TARGET_SVE2=1 \
+            -DNK_DYNAMIC_DISPATCH=1
 
           cmake --build build_artifacts --config Release -j
 
@@ -460,16 +459,16 @@ jobs:
         include:
           - arch: x64
             cmake_arch: x64
-            simsimd_target_x86: 1
-            simsimd_target_arm: 0
+            nk_target_x86: 1
+            nk_target_arm: 0
           - arch: x86
             cmake_arch: Win32
-            simsimd_target_x86: 1
-            simsimd_target_arm: 0
+            nk_target_x86: 1
+            nk_target_arm: 0
           - arch: arm64
             cmake_arch: ARM64
-            simsimd_target_x86: 0
-            simsimd_target_arm: 1
+            nk_target_x86: 0
+            nk_target_arm: 1
 
     steps:
       - name: Check out refreshed version
@@ -493,15 +492,14 @@ jobs:
             -DUSEARCH_BUILD_TEST_CPP=0 `
             -DUSEARCH_BUILD_BENCH_CPP=0 `
             -DUSEARCH_BUILD_LIB_C=0 `
-            -DUSEARCH_USE_FP16LIB=1 `
-            -DUSEARCH_USE_SIMSIMD=1 `
-            -DSIMSIMD_TARGET_NEON=${{ matrix.simsimd_target_arm }} `
-            -DSIMSIMD_TARGET_HASWELL=${{ matrix.simsimd_target_x86 }} `
-            -DSIMSIMD_TARGET_SKYLAKE=${{ matrix.simsimd_target_x86 }} `
-            -DSIMSIMD_TARGET_ICE=${{ matrix.simsimd_target_x86 }} `
-            -DSIMSIMD_TARGET_GENOA=0 `
-            -DSIMSIMD_TARGET_SAPPHIRE=0 `
-            -DSIMSIMD_DYNAMIC_DISPATCH=1
+            -DUSEARCH_USE_NUMKONG=1 `
+            -DNK_TARGET_NEON=${{ matrix.nk_target_arm }} `
+            -DNK_TARGET_HASWELL=${{ matrix.nk_target_x86 }} `
+            -DNK_TARGET_SKYLAKE=${{ matrix.nk_target_x86 }} `
+            -DNK_TARGET_ICELAKE=${{ matrix.nk_target_x86 }} `
+            -DNK_TARGET_GENOA=0 `
+            -DNK_TARGET_SAPPHIRE=0 `
+            -DNK_DYNAMIC_DISPATCH=1
 
           cmake --build build_artifacts --config Release
 
@@ -548,14 +546,13 @@ jobs:
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0 \
             -DUSEARCH_BUILD_LIB_C=0 \
-            -DUSEARCH_USE_FP16LIB=1 \
-            -DUSEARCH_USE_SIMSIMD=1 \
-            -DSIMSIMD_TARGET_HASWELL=1 \
-            -DSIMSIMD_TARGET_NEON=1 \
-            -DSIMSIMD_TARGET_NEON_BF16=1 \
-            -DSIMSIMD_TARGET_NEON_F16=1 \
-            -DSIMSIMD_TARGET_NEON_I8=1 \
-            -DSIMSIMD_DYNAMIC_DISPATCH=1
+            -DUSEARCH_USE_NUMKONG=1 \
+            -DNK_TARGET_HASWELL=1 \
+            -DNK_TARGET_NEON=1 \
+            -DNK_TARGET_NEONBFDOT=1 \
+            -DNK_TARGET_NEONHALF=1 \
+            -DNK_TARGET_NEONSDOT=1 \
+            -DNK_DYNAMIC_DISPATCH=1
 
           cmake --build build_artifacts --config Release
 
@@ -611,13 +608,12 @@ jobs:
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0 \
             -DUSEARCH_BUILD_LIB_C=0 \
-            -DUSEARCH_USE_FP16LIB=1 \
-            -DUSEARCH_USE_SIMSIMD=1 \
-            -DSIMSIMD_TARGET_NEON=1 \
-            -DSIMSIMD_TARGET_NEON_BF16=1 \
-            -DSIMSIMD_TARGET_NEON_F16=1 \
-            -DSIMSIMD_TARGET_NEON_I8=1 \
-            -DSIMSIMD_DYNAMIC_DISPATCH=1
+            -DUSEARCH_USE_NUMKONG=1 \
+            -DNK_TARGET_NEON=1 \
+            -DNK_TARGET_NEONBFDOT=1 \
+            -DNK_TARGET_NEONHALF=1 \
+            -DNK_TARGET_NEONSDOT=1 \
+            -DNK_DYNAMIC_DISPATCH=1
 
           cmake --build build_artifacts --config Release
 
@@ -661,7 +657,7 @@ jobs:
             -DUSEARCH_BUILD_BENCH_CPP=OFF \
             -DUSEARCH_BUILD_SQLITE=OFF \
             -DUSEARCH_USE_OPENMP=OFF \
-            -DUSEARCH_USE_SIMSIMD=ON \
+            -DUSEARCH_USE_NUMKONG=ON \
             -DUSEARCH_USE_JEMALLOC=OFF
 
           emmake cmake --build build_wasm --config Release
@@ -741,7 +737,8 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
-        python-version: ["38", "39", "310", "311", "312", "313", "313t", "314", "314t"]
+        python-version:
+          ["38", "39", "310", "311", "312", "313", "313t", "314", "314t"]
     steps:
       - name: Check out refreshed version
         uses: actions/checkout@v6
@@ -931,7 +928,7 @@ jobs:
         run: git submodule update --init --recursive
       - name: Hide submodule Crates
         run: |
-          mv simsimd/Cargo.toml simsimd/Cargo.toml.bak
+          mv numkong/Cargo.toml numkong/Cargo.toml.bak
           mv stringzilla/Cargo.toml stringzilla/Cargo.toml.bak
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -994,7 +991,7 @@ jobs:
           cp usearch-jni-linux-amd64/libusearch_jni.so build/libs/usearch/shared/linux-amd64/libusearch_jni.so || true
           cp usearch-jni-linux-arm64/libusearch_jni.so build/libs/usearch/shared/linux-arm64/libusearch_jni.so || true
 
-          # Windows  
+          # Windows
           cp usearch-jni-windows-x64/libusearch_jni.dll build/libs/usearch/shared/windows-amd64/libusearch_jni.dll || true
           cp usearch-jni-windows-x86/libusearch_jni.dll build/libs/usearch/shared/windows-x86/libusearch_jni.dll || true
           cp usearch-jni-windows-arm64/libusearch_jni.dll build/libs/usearch/shared/windows-arm64/libusearch_jni.dll || true
@@ -1133,7 +1130,7 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev gcc-12 g++-12
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_SIMSIMD=1 -DUSEARCH_USE_JEMALLOC=1
+          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=1
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_c.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
@@ -1143,7 +1140,7 @@ jobs:
         run: |
           brew update
           brew reinstall cmake
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=0 -DUSEARCH_USE_SIMSIMD=1 -DUSEARCH_USE_JEMALLOC=0
+          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=0 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=0
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_c.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
@@ -1152,7 +1149,7 @@ jobs:
         if: matrix.os == 'windows-2022'
         run: |
           choco install cmake
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=0 -DUSEARCH_USE_SIMSIMD=0 -DUSEARCH_USE_JEMALLOC=0
+          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=0 -DUSEARCH_USE_NUMKONG=0 -DUSEARCH_USE_JEMALLOC=0
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
           cp "${{ github.workspace }}\build_artifacts\libusearch_c.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
@@ -1231,9 +1228,9 @@ jobs:
           ref: "main"
       - name: Install dependencies
         run: |
-          sudo apt update && 
-          sudo apt install -y doxygen graphviz dia git && 
-          pip install -r docs/requirements.txt && 
+          sudo apt update &&
+          sudo apt install -y doxygen graphviz dia git &&
+          pip install -r docs/requirements.txt &&
           npm install -g jsdoc typedoc
       - name: Install USearch from PyPi
         run: pip install usearch

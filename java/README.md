@@ -20,7 +20,7 @@ repositories {
 task downloadUSearchJar {
     doLast {
         def usearchVersion = '2.24.0'
-        def usearchUrl = "https://github.com/unum-cloud/usearch/releases/download/v${usearchVersion}/usearch-${usearchVersion}.jar"
+        def usearchUrl = "https://github.com/unum-cloud/USearch/releases/download/v${usearchVersion}/usearch-${usearchVersion}.jar"
         def usearchFile = file("lib/usearch-${usearchVersion}.jar")
         
         usearchFile.parentFile.mkdirs()

@@ -75,19 +75,34 @@ public enum ScalarKind : uint
     Unknown = 0,
 
     /// <summary>
-    /// 32-bit floating point.
-    /// </summary>
-    Float32 = 1,
-
-    /// <summary>
     /// 64-bit floating point.
     /// </summary>
     Float64 = 2,
 
     /// <summary>
+    /// 32-bit floating point.
+    /// </summary>
+    Float32 = 1,
+
+    /// <summary>
+    /// Brain floating point (16-bit).
+    /// </summary>
+    BFloat16 = 6,
+
+    /// <summary>
     /// 16-bit floating point.
     /// </summary>
     Float16 = 3,
+
+    /// <summary>
+    /// FP8 E5M2 (1 sign + 5 exponent + 2 mantissa).
+    /// </summary>
+    E5M2 = 7,
+
+    /// <summary>
+    /// FP8 E4M3 (1 sign + 4 exponent + 3 mantissa).
+    /// </summary>
+    E4M3 = 8,
 
     /// <summary>
     /// 8-bit integer.

@@ -9,8 +9,8 @@
     <PackageId>Cloud.Unum.USearch</PackageId>
 
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
-    <PackageProjectUrl>https://github.com/unum-cloud/usearch</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/unum-cloud/usearch</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/unum-cloud/USearch</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/unum-cloud/USearch</RepositoryUrl>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
 
     <PackageIcon>unum.png</PackageIcon>

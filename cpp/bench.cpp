@@ -26,16 +26,18 @@
 
 #include <sys/stat.h> // `stat`
 
-#include <algorithm>
 #include <csignal>
 #include <cstdio>
-#include <iostream>  // `std::cerr`
-#include <numeric>   // `std::iota`
-#include <stdexcept> // `std::invalid_argument`
-#include <string>    // `std::to_string`
-#include <thread>    // `std::thread::hardware_concurrency()`
-#include <variant>   // `std::monostate`
-#include <vector>
+
+#include <algorithm>     // ?
+#include <iostream>      // `std::cerr`
+#include <numeric>       // `std::iota`
+#include <stdexcept>     // `std::invalid_argument`
+#include <string>        // `std::to_string`
+#include <thread>        // `std::thread::hardware_concurrency()`
+#include <unordered_map> // `std::unordered_map`
+#include <variant>       // `std::monostate`
+#include <vector>        // `std::vector`
 
 #include <clipp.h> // Command Line Interface
 #if USEARCH_USE_OPENMP
@@ -201,14 +203,20 @@ struct persisted_dataset_gt {
             for (std::size_t i = 0; i < ids_matrix.rows; ++i)
                 vector_ids_[i] = static_cast<default_key_t>(*ids_matrix.row(i));
         }
+
+        // When custom IDs are loaded and self-search is active, populate
+        // neighborhoods_iota_ with the actual IDs so recall comparison works.
+        if (has_vector_ids() && !queries_.scalars && !neighborhoods_.scalars) {
+            for (std::size_t i = 0; i < neighborhoods_iota_.size(); ++i)
+                neighborhoods_iota_[i] = static_cast<compressed_slot_t>(vector_ids_[i]);
+        }
     }
 
     bool search_itself() const noexcept { return vectors_count() && !queries_.rows; }
     bool has_vector_ids() const noexcept { return !vector_ids_.empty(); }
 
     default_key_t vector_id(std::size_t i) const noexcept {
-        return has_vector_ids() ? vector_ids_[i + vectors_to_skip_]
-                                : static_cast<default_key_t>(i + vectors_to_skip_);
+        return has_vector_ids() ? vector_ids_[i + vectors_to_skip_] : static_cast<default_key_t>(i + vectors_to_skip_);
     }
 
     std::size_t dimensions() const noexcept { return vectors_.cols; }
@@ -224,9 +232,7 @@ struct persisted_dataset_gt {
     std::size_t vectors_count() const noexcept {
         return vectors_to_take_ ? vectors_to_take_ : (vectors_.rows - vectors_to_skip_);
     }
-    matrix_slice_gt<scalar_t const> vectors_view() const noexcept {
-        return {vector(vectors_to_skip_), vectors_count(), dimensions()};
-    }
+    matrix_slice_gt<scalar_t const> vectors_view() const noexcept { return {vector(0), vectors_count(), dimensions()}; }
 };
 
 template <typename scalar_at, typename vector_id_at> //
@@ -379,7 +385,6 @@ void search_many( //
 template <typename dataset_at, typename index_at> //
 static void single_shot(dataset_at& dataset, index_at& index, bool construct = true) {
     using distance_t = typename index_at::distance_t;
-    constexpr default_key_t missing_key = std::numeric_limits<default_key_t>::max();
 
     std::printf("\n");
     std::printf("------------\n");
@@ -409,21 +414,19 @@ static void single_shot(dataset_at& dataset, index_at& index, bool construct = t
     std::printf("Recall@1 %.2f %%\n", recall_at_1 * 100.f / dataset.queries_count());
     std::printf("Recall %.2f %%\n", recall_full * 100.f / dataset.queries_count());
 
-    // Perform joins
-    std::vector<default_key_t> man_to_woman(dataset.vectors_count());
-    std::vector<default_key_t> woman_to_man(dataset.vectors_count());
+    // Perform joins using maps to support non-contiguous IDs
+    std::unordered_map<default_key_t, default_key_t> man_to_woman;
+    std::unordered_map<default_key_t, default_key_t> woman_to_man;
     std::size_t join_attempts = 0;
     {
         index_at& men = index;
         index_at women = index.copy();
-        std::fill(man_to_woman.begin(), man_to_woman.end(), missing_key);
-        std::fill(woman_to_man.begin(), woman_to_man.end(), missing_key);
         {
             executor_default_t executor(index.limits().threads());
             running_stats_printer_t printer{1, "Join"};
             join_result_t result = join(                          //
                 men, women, index_join_config_t{executor.size()}, //
-                man_to_woman.data(), woman_to_man.data(),         //
+                man_to_woman, woman_to_man,                       //
                 executor, [&](std::size_t progress, std::size_t total) {
                     if (progress % 1000 == 0)
                         printer.print(progress, total);
@@ -435,11 +438,10 @@ static void single_shot(dataset_at& dataset, index_at& index, bool construct = t
         }
     }
     // Evaluate join quality
-    std::size_t recall_join = 0, unmatched_count = 0;
-    for (std::size_t i = 0; i != index.size(); ++i) {
-        recall_join += man_to_woman[i] == static_cast<default_key_t>(i);
-        unmatched_count += man_to_woman[i] == missing_key;
-    }
+    std::size_t recall_join = 0;
+    for (auto const& [man, woman] : man_to_woman)
+        recall_join += (man == woman);
+    std::size_t unmatched_count = dataset.vectors_count() - man_to_woman.size();
     std::printf("Recall Joins %.2f %%\n", recall_join * 100.f / index.size());
     std::printf("Unmatched %.2f %% (%zu items)\n", unmatched_count * 100.f / index.size(), unmatched_count);
     std::printf("Proposals %.2f / man (%zu total)\n", join_attempts * 1.f / index.size(), join_attempts);
@@ -511,6 +513,8 @@ struct args_t {
 
     bool quantize_bf16 = false;
     bool quantize_f16 = false;
+    bool quantize_e5m2 = false;
+    bool quantize_e4m3 = false;
     bool quantize_i8 = false;
     bool quantize_b1 = false;
 
@@ -546,6 +550,10 @@ struct args_t {
             return scalar_kind_t::bf16_k;
         if (quantize_f16)
             return scalar_kind_t::f16_k;
+        if (quantize_e5m2)
+            return scalar_kind_t::e5m2_k;
+        if (quantize_e4m3)
+            return scalar_kind_t::e4m3_k;
         if (quantize_i8)
             return scalar_kind_t::i8_k;
         if (quantize_b1)
@@ -652,6 +660,8 @@ int main(int argc, char** argv) {
         ( //
             option("-bf16", "--bf16quant").set(args.quantize_bf16).doc("Enable `bf16_t` quantization") |
             option("-f16", "--f16quant").set(args.quantize_f16).doc("Enable `f16_t` quantization") |
+            option("-e5m2", "--e5m2quant").set(args.quantize_e5m2).doc("Enable `e5m2_t` quantization") |
+            option("-e4m3", "--e4m3quant").set(args.quantize_e4m3).doc("Enable `e4m3_t` quantization") |
             option("-i8", "--i8quant").set(args.quantize_i8).doc("Enable `i8_t` quantization") |
             option("-b1", "--b1quant").set(args.quantize_b1).doc("Enable `b1x8_t` quantization")),
         ( //
@@ -682,6 +692,8 @@ int main(int argc, char** argv) {
     std::printf("- OpenMP threads: %d\n", omp_get_max_threads());
 #endif
 
+    std::printf("- Hardware acceleration compiled: %s\n", hardware_acceleration_compiled());
+    std::printf("- Hardware acceleration available: %s\n", hardware_acceleration_available());
     std::printf("- Dataset: \n");
     std::printf("-- Base vectors path: %s\n", args.path_vectors.c_str());
     std::printf("-- Query vectors path: %s\n", args.path_queries.c_str());
