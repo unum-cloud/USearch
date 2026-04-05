@@ -64,9 +64,9 @@
  * management. Always use try-with-resources or explicitly call {@link #close()}
  * to free native memory.</p>
  *
- * @see <a href="https://github.com/unum-cloud/usearch">USearch GitHub
+ * @see <a href="https://github.com/unum-cloud/USearch">USearch GitHub
  * Repository</a>
- * @see <a href="https://unum-cloud.github.io/usearch/">USearch
+ * @see <a href="https://unum-cloud.github.io/USearch/">USearch
  * Documentation</a>
  */
 package cloud.unum.usearch;
@@ -138,6 +138,16 @@ public class Index implements AutoCloseable {
          * 16-bit floating point (half precision)
          */
         public static final String FLOAT16 = "f16";
+
+        /**
+         * FP8 E5M2 (IEEE 754-like, 1 sign + 5 exponent + 2 mantissa)
+         */
+        public static final String E5M2 = "e5m2";
+
+        /**
+         * FP8 E4M3 (OCP, 1 sign + 4 exponent + 3 mantissa)
+         */
+        public static final String E4M3 = "e4m3";
 
         /**
          * 8-bit integer quantization
@@ -772,12 +782,30 @@ public class Index implements AutoCloseable {
     }
 
     /**
+     * Returns a comma-separated list of SIMD capabilities available on the current platform at runtime.
+     *
+     * @return comma-separated string of runtime capability names (e.g., "serial, haswell, skylake")
+     */
+    public static String hardwareAccelerationAvailableString() {
+        return c_hardware_acceleration_available_string();
+    }
+
+    /**
+     * Returns a comma-separated list of SIMD capabilities compiled into this library build.
+     *
+     * @return comma-separated string of compiled capability names
+     */
+    public static String hardwareAccelerationCompiledString() {
+        return c_hardware_acceleration_compiled_string();
+    }
+
+    /**
      * Returns all SIMD capabilities available on the current platform at runtime.
      *
      * @return array of runtime capability names (e.g., ["serial", "haswell", "skylake", "neon"])
      */
     public static String[] hardwareAccelerationAvailable() {
-        return c_hardware_acceleration_available();
+        return c_hardware_acceleration_available_string().split(", ");
     }
 
     /**
@@ -786,7 +814,7 @@ public class Index implements AutoCloseable {
      * @return array of compiled capability names based on preprocessor macros
      */
     public static String[] hardwareAccelerationCompiled() {
-        return c_hardware_acceleration_compiled();
+        return c_hardware_acceleration_compiled_string().split(", ");
     }
 
     /**
@@ -1068,9 +1096,9 @@ public class Index implements AutoCloseable {
 
     private static native String c_scalar_kind(long ptr);
 
-    private static native String[] c_hardware_acceleration_available();
+    private static native String c_hardware_acceleration_available_string();
 
-    private static native String[] c_hardware_acceleration_compiled();
+    private static native String c_hardware_acceleration_compiled_string();
 
     private static native String c_library_version();
 

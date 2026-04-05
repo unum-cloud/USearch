@@ -48,7 +48,7 @@ def bench_speed(
     # Build various indexes:
     indexes = []
     jit_options = [False, True] if jit else [False]
-    dtype_options = [ScalarKind.F32, ScalarKind.F16, ScalarKind.BF16, ScalarKind.I8]
+    dtype_options = [ScalarKind.F32, ScalarKind.F16, ScalarKind.BF16, ScalarKind.I8, ScalarKind.E5M2, ScalarKind.E4M3]
     for jit, dtype in itertools.product(jit_options, dtype_options):
         metric = MetricKind.IP
         if jit:

@@ -4,6 +4,7 @@
 // We don't have to forward declare all of those:
 struct Matches;
 struct IndexOptions;
+struct MemoryStats;
 enum class MetricKind;
 enum class ScalarKind;
 
@@ -83,6 +84,7 @@ class NativeIndex {
     void view(rust::Str path) const;
     void reset() const;
     size_t memory_usage() const;
+    MemoryStats memory_stats() const;
     char const* hardware_acceleration() const;
 
     void save_to_buffer(rust::Slice<uint8_t> buffer) const;
@@ -94,3 +96,6 @@ class NativeIndex {
 };
 
 std::unique_ptr<NativeIndex> new_native_index(IndexOptions const& options);
+
+char const* hardware_acceleration_compiled();
+char const* hardware_acceleration_available();

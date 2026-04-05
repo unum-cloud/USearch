@@ -94,6 +94,7 @@
     "rtype",
     "SIMD",
     "simsimd",
+    "numkong",
     "SLOC",
     "Sonatype",
     "sorensen",
@@ -120,6 +121,11 @@
   "dotnet.defaultSolution": "csharp/Cloud.Unum.USearch.sln",
   "editor.insertSpaces": true,
   "editor.tabSize": 4,
+  "extensions.experimental.affinity": {
+    "ms-python.vscode-pylance": 3,
+    "ms-vscode.cpptools": 2,
+    "rust-lang.rust-analyzer": 1
+  },
   "files.associations": {
     "__availability": "cpp",
     "__bit_reference": "cpp",
@@ -247,15 +253,33 @@
     "xtree": "cpp",
     "xutility": "cpp"
   },
+  "files.watcherExclude": {
+    "**/build_*/**": true,
+    "**/datasets/**": true,
+    "**/node_modules/**": true,
+    "**/numkong/**": true,
+    "**/stringzilla/**": true,
+    "**/target/**": true
+  },
   "java.configuration.updateBuildConfiguration": "automatic",
   "java.format.enabled": false,
-  "java.saveActions.organizeImports": false,
   "prettier.singleQuote": true,
   "prettier.useTabs": false,
   "python.analysis.diagnosticSeverityOverrides": {
     "reportMissingImports": "none"
   },
-  "python.testing.pytestArgs": ["python"],
+  "python.testing.pytestArgs": [
+    "python"
+  ],
   "python.testing.pytestEnabled": true,
-  "python.testing.unittestEnabled": false
+  "python.testing.unittestEnabled": false,
+  "rust-analyzer.cargo.features": [],
+  "search.exclude": {
+    "**/build_*/**": true,
+    "**/datasets/**": true,
+    "**/node_modules/**": true,
+    "**/numkong/**": true,
+    "**/stringzilla/**": true,
+    "**/target/**": true
+  }
 }
