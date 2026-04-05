@@ -76,9 +76,15 @@ products.append(
 
 let package = Package(
     name: "USearch",
+    platforms: [
+        .macOS(.v12),
+        .iOS(.v15),
+        .watchOS(.v8),
+        .tvOS(.v15),
+    ],
     products: products,
     dependencies: [
-        .package(url: "https://github.com/ashvardanian/NumKong", branch: "main-dev"),
+        .package(url: "https://github.com/ashvardanian/NumKong", from: "7.4.3"),
     ],
     targets: targets,
     cxxLanguageStandard: CXXLanguageStandard.cxx11

@@ -55,6 +55,7 @@ target/
 # ObjC and Swift
 .build
 .swiftpm
+Package.resolved
 
 # Golang builds
 golang/usearch.h
