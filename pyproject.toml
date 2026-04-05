@@ -13,7 +13,7 @@ requires = [
     "cmake>=3.22",
     "pybind11",
     "numpy",
-    "simsimd>=6.0.5,<7.0.0",
+    "numkong>=7.0.0",
 ]
 build-backend = "setuptools.build_meta"
 
@@ -92,12 +92,13 @@ lint = [
     "ruff>=0.15.8",
 ]
 tests = [
-    "numpy>=2.4.3",
+    "numpy>=1.21",
     "pytest>=9.0.2",
     "pytest-repeat>=0.9.4",
 ]
 
 [tool.ruff]
+line-length = 120
 target-version = "py310"
 
 [tool.ruff.lint]
