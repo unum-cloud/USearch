@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project>
   <PropertyGroup>
-    <Version Condition="'$(Version)' == ''">2.23.0</Version>
+    <Version Condition="'$(Version)' == ''">2.24.0</Version>
 
     <Authors>Unum</Authors>
     <Company>Unum</Company>
@@ -9,8 +9,8 @@
     <PackageId>Cloud.Unum.USearch</PackageId>
 
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
-    <PackageProjectUrl>https://github.com/unum-cloud/usearch</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/unum-cloud/usearch</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/unum-cloud/USearch</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/unum-cloud/USearch</RepositoryUrl>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
 
     <PackageIcon>unum.png</PackageIcon>

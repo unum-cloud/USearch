@@ -8,7 +8,7 @@
 #define UNUM_USEARCH_HPP
 
 #define USEARCH_VERSION_MAJOR 2
-#define USEARCH_VERSION_MINOR 23
+#define USEARCH_VERSION_MINOR 24
 #define USEARCH_VERSION_PATCH 0
 
 // Inferring C++ version
@@ -72,7 +72,9 @@
 // OS-specific includes
 #if defined(USEARCH_DEFINED_WINDOWS)
 #define _USE_MATH_DEFINES
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <Windows.h>
 #include <sys/stat.h> // `fstat` for file size
 #undef NOMINMAX
@@ -500,7 +502,7 @@ template <typename allocator_at = std::allocator<byte_t>> class bitset_gt {
 
     static constexpr std::size_t bits_per_slot() { return sizeof(compressed_slot_t) * CHAR_BIT; }
     static constexpr compressed_slot_t bits_mask() { return sizeof(compressed_slot_t) * CHAR_BIT - 1; }
-    static constexpr std::size_t slots(std::size_t bits) { return divide_round_up<bits_per_slot()>(bits); }
+    static constexpr std::size_t bits_slots(std::size_t bits) { return divide_round_up<bits_per_slot()>(bits); }
 
     compressed_slot_t* slots_{};
     /// @brief Number of slots.
@@ -524,8 +526,8 @@ template <typename allocator_at = std::allocator<byte_t>> class bitset_gt {
     }
 
     bitset_gt(std::size_t capacity) noexcept
-        : slots_((compressed_slot_t*)allocator_t{}.allocate(slots(capacity) * sizeof(compressed_slot_t))),
-          count_(slots_ ? slots(capacity) : 0u) {
+        : slots_((compressed_slot_t*)allocator_t{}.allocate(bits_slots(capacity) * sizeof(compressed_slot_t))),
+          count_(slots_ ? bits_slots(capacity) : 0u) {
         clear();
     }
 
@@ -726,10 +728,12 @@ class max_heap_gt {
      */
     usearch_profiled_m bool reserve(std::size_t new_capacity) noexcept {
         usearch_profile_name_m(max_heap_reserve);
-        if (new_capacity < capacity_)
+        if (new_capacity <= capacity_)
             return true;
 
         new_capacity = ceil2(new_capacity);
+        if (new_capacity == 0)
+            return false;
         new_capacity = (std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u));
         auto allocator = allocator_t{};
         auto new_elements = allocator.allocate(new_capacity);
@@ -892,10 +896,12 @@ class sorted_buffer_gt {
     inline void clear() noexcept { size_ = 0; }
 
     bool reserve(std::size_t new_capacity) noexcept {
-        if (new_capacity < capacity_)
+        if (new_capacity <= capacity_)
             return true;
 
         new_capacity = ceil2(new_capacity);
+        if (new_capacity == 0)
+            return false;
         new_capacity = (std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u));
         auto allocator = allocator_t{};
         auto new_elements = allocator.allocate(new_capacity);
@@ -1778,7 +1784,7 @@ class memory_mapped_file_t {
 #if defined(USEARCH_DEFINED_WINDOWS)
 
         HANDLE file_handle =
-            CreateFile(path_, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+            CreateFileA(path_, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
         if (file_handle == INVALID_HANDLE_VALUE)
             return result.failed("Opening file failed!");
 
@@ -2029,8 +2035,8 @@ class index_gt {
         friend inline vector_key_t get_key(member_iterator_gt const& it) noexcept { return it.key(); }
 
         // clang-format off
-        member_iterator_gt operator++(int) noexcept { return member_iterator_gt(index_, static_cast<compressed_slot_t>(static_cast<std::size_t>(slot_) + 1)); }
-        member_iterator_gt operator--(int) noexcept { return member_iterator_gt(index_, static_cast<compressed_slot_t>(static_cast<std::size_t>(slot_) - 1)); }
+        member_iterator_gt operator++(int) noexcept { member_iterator_gt old(index_, slot_); ++(*this); return old; }
+        member_iterator_gt operator--(int) noexcept { member_iterator_gt old(index_, slot_); --(*this); return old; }
         member_iterator_gt operator+(difference_type d) noexcept { return member_iterator_gt(index_, static_cast<compressed_slot_t>(static_cast<std::size_t>(slot_) + d)); }
         member_iterator_gt operator-(difference_type d) noexcept { return member_iterator_gt(index_, static_cast<compressed_slot_t>(static_cast<std::size_t>(slot_) - d)); }
         member_iterator_gt& operator++() noexcept { slot_ = static_cast<compressed_slot_t>(static_cast<std::size_t>(slot_) + 1); return *this; }
@@ -2786,6 +2792,10 @@ class index_gt {
         callback_at&& callback = callback_at{},                 //
         prefetch_at&& prefetch = prefetch_at{}) usearch_noexcept_m {
 
+        // Zero expansion is meaningless, fall back to default
+        if (!config.expansion)
+            config.expansion = default_expansion_add();
+
         add_result_t result;
         if (is_immutable())
             return result.failed("Can't add to an immutable index");
@@ -3100,6 +3110,9 @@ class index_gt {
         index_cluster_config_t config = {},        //
         predicate_at&& predicate = predicate_at{}, //
         prefetch_at&& prefetch = prefetch_at{}) const noexcept {
+
+        if (!config.expansion)
+            config.expansion = default_expansion_search();
 
         context_t& context = contexts_[config.thread];
         cluster_result_t result;
@@ -3896,8 +3909,12 @@ class index_gt {
             usearch_assert_m(close_slot != new_slot, "Self-loops are impossible");
             usearch_assert_m(level <= close_node.level(), "Linking to missing level");
 
-            // If `new_slot` is already present in the neighboring connections of `close_slot`
-            // then no need to modify any connections or run the heuristics.
+            // Skip to prevent duplicate entries in the neighbor list.
+            if (std::find_if(close_header.begin(), close_header.end(),
+                             [new_slot](compressed_slot_t slot) { return slot == new_slot; }) != close_header.end()) {
+                continue;
+            }
+
             if (close_header.size() < connectivity_max) {
                 close_header.push_back(new_slot);
                 continue;
@@ -3912,7 +3929,7 @@ class index_gt {
             // Export the results:
             close_header.clear();
             candidates_view_t top_view = refine_(metric, connectivity_max, top_for_refine, context,
-                                                 context.computed_distances_in_reverse_refines);
+                                                 context.computed_distances_in_reverse_refines, new_slot, value);
             usearch_assert_m(top_view.size(), "This would lead to isolated nodes");
             for (std::size_t idx = 0; idx != top_view.size(); idx++)
                 close_header.push_back(top_view[idx].slot);
@@ -3960,7 +3977,9 @@ class index_gt {
                               std::size_t progress) noexcept
             : index_(index), neighbors_(neighbors), visits_(visits), current_(progress) {}
         candidates_iterator_t operator++(int) noexcept {
-            return candidates_iterator_t(index_, neighbors_, visits_, current_ + 1).skip_missing();
+            candidates_iterator_t old(index_, neighbors_, visits_, current_);
+            ++(*this);
+            return old;
         }
         candidates_iterator_t& operator++() noexcept {
             ++current_;
@@ -4051,6 +4070,10 @@ class index_gt {
         // At the very least we are going to explore the starting node and its neighbors
         if (!visits.reserve(config_.connectivity_base + 1u))
             return false;
+        if (!top.reserve(top_limit))
+            return false;
+        if (!next.reserve(top_limit))
+            return false;
 
         // Optional prefetching
         if (!is_dummy<prefetch_at>())
@@ -4127,6 +4150,10 @@ class index_gt {
 
         // At the very least we are going to explore the starting node and its neighbors
         if (!visits.reserve(config_.connectivity_base + 1u))
+            return false;
+        if (!top.reserve(top_limit))
+            return false;
+        if (!next.reserve(top_limit))
             return false;
 
         // Optional prefetching
@@ -4296,16 +4323,50 @@ class index_gt {
         }
     }
 
+    /// @brief  Helper for `refine_()`: computes inter-neighbor distance, substituting
+    ///         @p override_value when either slot matches @p override_slot.
+    ///         The `std::nullptr_t` overload below avoids instantiating the override
+    ///         branch when no override is provided, keeping the code C++11 compatible.
+    template <typename metric_at, typename override_value_at>
+    distance_t inter_neighbor_distance_(                                   //
+        candidate_t const& candidate, candidate_t const& submitted,        //
+        compressed_slot_t override_slot, override_value_at override_value, //
+        metric_at&& metric, context_t& context) const noexcept {
+        if (candidate.slot == override_slot)
+            return context.measure(override_value, citerator_at(submitted.slot), metric);
+        else if (submitted.slot == override_slot)
+            return context.measure(override_value, citerator_at(candidate.slot), metric);
+        else
+            return context.measure(citerator_at(candidate.slot), citerator_at(submitted.slot), metric);
+    }
+
+    template <typename metric_at>
+    distance_t inter_neighbor_distance_(                            //
+        candidate_t const& candidate, candidate_t const& submitted, //
+        compressed_slot_t, std::nullptr_t,                          //
+        metric_at&& metric, context_t& context) const noexcept {
+        return context.measure(citerator_at(candidate.slot), citerator_at(submitted.slot), metric);
+    }
+
     /**
      *  @brief  This algorithm from the original paper implements a heuristic,
      *          that massively reduces the number of connections a point has,
      *          to keep only the neighbors, that are from each other.
+     *
+     *  @param[in] override_slot  Optional slot whose stored vector is stale (e.g. during update,
+     *                            where the callback has not yet committed the new vector).
+     *                            When set, inter-result distances involving this slot will use
+     *                            @p override_value instead of reading from `citerator_at()`.
+     *  @param[in] override_value The up-to-date vector for @p override_slot. Only used when
+     *                            @p override_value_at is not `std::nullptr_t`.
      */
-    template <typename metric_at>
+    template <typename metric_at, typename override_value_at = std::nullptr_t>
     candidates_view_t refine_(                                         //
         metric_at&& metric,                                            //
         std::size_t needed, top_candidates_t& top, context_t& context, //
-        std::size_t& refines_counter) const noexcept {
+        std::size_t& refines_counter,                                  //
+        compressed_slot_t override_slot = (std::numeric_limits<compressed_slot_t>::max)(),
+        override_value_at override_value = {}) const noexcept {
 
         // Avoid expensive computation, if the set is already small
         candidate_t* top_data = top.data();
@@ -4324,10 +4385,8 @@ class index_gt {
             std::size_t idx = 0;
             for (; idx < submitted_count; idx++) {
                 candidate_t submitted = top_data[idx];
-                distance_t inter_result_dist = context.measure( //
-                    citerator_at(candidate.slot),               //
-                    citerator_at(submitted.slot),               //
-                    metric);
+                distance_t inter_result_dist = inter_neighbor_distance_( //
+                    candidate, submitted, override_slot, override_value, metric, context);
                 if (inter_result_dist < candidate.distance) {
                     good = false;
                     break;

@@ -1,7 +1,7 @@
 <h1 align="center">USearch</h1>
 <h3 align="center">
 Smaller & <a href="https://www.unum.cloud/blog/2023-11-07-scaling-vector-search-with-intel">Faster</a> Single-File<br/>
-Similarity Search & Clustering Engine for <a href="https://github.com/ashvardanian/simsimd">Vectors</a> & 🔜 <a href="https://github.com/ashvardanian/stringzilla">Texts</a>
+Similarity Search & Clustering Engine for <a href="https://github.com/ashvardanian/numkong">Vectors</a> & 🔜 <a href="https://github.com/ashvardanian/stringzilla">Texts</a>
 </h3>
 <br/>
 
@@ -14,26 +14,26 @@ Similarity Search & Clustering Engine for <a href="https://github.com/ashvardani
 &nbsp;&nbsp;&nbsp;
 <a href="https://unum.cloud/post"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/blog.svg" alt="Blog"></a>
 &nbsp;&nbsp;&nbsp;
-<a href="https://github.com/unum-cloud/usearch"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/github.svg" alt="GitHub"></a>
+<a href="https://github.com/unum-cloud/USearch"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/github.svg" alt="GitHub"></a>
 </p>
 
 <p align="center">
 Spatial • Binary • Probabilistic • User-Defined Metrics
 <br/>
-<a href="https://unum-cloud.github.io/usearch/cpp">C++11</a> •
-<a href="https://unum-cloud.github.io/usearch/python">Python 3</a> •
-<a href="https://unum-cloud.github.io/usearch/javascript">JavaScript</a> •
-<a href="https://unum-cloud.github.io/usearch/java">Java</a> •
-<a href="https://unum-cloud.github.io/usearch/rust">Rust</a> •
-<a href="https://unum-cloud.github.io/usearch/c">C99</a> •
-<a href="https://unum-cloud.github.io/usearch/objective-c">Objective-C</a> •
-<a href="https://unum-cloud.github.io/usearch/swift">Swift</a> •
-<a href="https://unum-cloud.github.io/usearch/csharp">C#</a> •
-<a href="https://unum-cloud.github.io/usearch/golang">Go</a> •
-<a href="https://unum-cloud.github.io/usearch/wolfram">Wolfram</a>
+<a href="https://unum-cloud.github.io/USearch/cpp">C++11</a> •
+<a href="https://unum-cloud.github.io/USearch/python">Python 3</a> •
+<a href="https://unum-cloud.github.io/USearch/javascript">JavaScript</a> •
+<a href="https://unum-cloud.github.io/USearch/java">Java</a> •
+<a href="https://unum-cloud.github.io/USearch/rust">Rust</a> •
+<a href="https://unum-cloud.github.io/USearch/c">C99</a> •
+<a href="https://unum-cloud.github.io/USearch/objective-c">Objective-C</a> •
+<a href="https://unum-cloud.github.io/USearch/swift">Swift</a> •
+<a href="https://unum-cloud.github.io/USearch/csharp">C#</a> •
+<a href="https://unum-cloud.github.io/USearch/golang">Go</a> •
+<a href="https://unum-cloud.github.io/USearch/wolfram">Wolfram</a>
 <br/>
 Linux • macOS • Windows • iOS • Android • WebAssembly •
-<a href="https://unum-cloud.github.io/usearch/sqlite">SQLite</a>
+<a href="https://unum-cloud.github.io/USearch/sqlite">SQLite</a>
 </p>
 
 <div align="center">
@@ -57,11 +57,11 @@ Linux • macOS • Windows • iOS • Android • WebAssembly •
 - ✅ Binary Tanimoto and Sorensen coefficients for [Genomics and Chemistry applications](#usearch--rdkit--molecular-search).
 - ✅ Space-efficient point-clouds with `uint40_t`, accommodating 4B+ size.
 - ✅ Compatible with OpenMP and custom "executors" for fine-grained parallelism.
-- ✅ [Semantic Search](#usearch--ai--multi-modal-semantic-search) and [Joins](#joins-one-to-one-one-to-many-and-many-to-many-mappings).
+- ✅ [Semantic Search](#usearch--uform--ucall--multimodal-semantic-search) and [Joins](#joins-one-to-one-one-to-many-and-many-to-many-mappings).
 - 🔄 Near-real-time [clustering and sub-clustering](#clustering) for Tens or Millions of clusters.
 
 [faiss]: https://github.com/facebookresearch/faiss
-[usearch-header]: https://github.com/unum-cloud/usearch/blob/main/include/usearch/index.hpp
+[usearch-header]: https://github.com/unum-cloud/USearch/blob/main/include/usearch/index.hpp
 [obscure-use-cases]: https://ashvardanian.com/posts/abusing-vector-search
 [hnsw-algorithm]: https://arxiv.org/abs/1603.09320
 [simd]: https://en.wikipedia.org/wiki/Single_instruction,_multiple_data
@@ -185,8 +185,8 @@ one_in_many: Matches = search(vectors, vector, 50, MetricKind.L2sq, exact=True)
 many_in_many: BatchMatches = search(vectors, vectors, 50, MetricKind.L2sq, exact=True)
 ```
 
-If you pass the `exact=True` argument, the system bypasses indexing altogether and performs a brute-force search through the entire dataset using SIMD-optimized similarity metrics from [SimSIMD](https://github.com/ashvardanian/simsimd).
-When compared to FAISS's `IndexFlatL2` in Google Colab, __[USearch may offer up to a 20x performance improvement](https://github.com/unum-cloud/usearch/issues/176#issuecomment-1666650778)__:
+If you pass the `exact=True` argument, the system bypasses indexing altogether and performs a brute-force search through the entire dataset using SIMD-optimized similarity metrics from [NumKong](https://github.com/ashvardanian/numkong).
+When compared to FAISS's `IndexFlatL2` in Google Colab, __[USearch may offer up to a 20x performance improvement](https://github.com/unum-cloud/USearch/issues/176#issuecomment-1666650778)__:
 
 - `faiss.IndexFlatL2`: __55.3 ms__.
 - `usearch.index.search`: __2.54 ms__.
@@ -195,7 +195,7 @@ When compared to FAISS's `IndexFlatL2` in Google Colab, __[USearch may offer up 
 
 While most vector search packages concentrate on just two metrics, "Inner Product distance" and "Euclidean distance", USearch allows arbitrary user-defined metrics.
 This flexibility allows you to customize your search for various applications, from computing geospatial coordinates with the rare [Haversine][haversine] distance to creating custom metrics for composite embeddings from multiple AI models, like joint image-text embeddings.
-You can use [Numba][numba], [Cppyy][cppyy], or [PeachPy][peachpy] to define your [custom metric even in Python](https://unum-cloud.github.io/usearch/python#user-defined-metrics-and-jit-in-python):
+You can use [Numba][numba], [Cppyy][cppyy], or [PeachPy][peachpy] to define your [custom metric even in Python](https://unum-cloud.github.io/USearch/python#user-defined-metrics-and-jit-in-python):
 
 ```py
 from numba import cfunc, types, carray
@@ -268,7 +268,7 @@ As part of the quantization process, the vectors are normalized to unit length a
 When quantizing to `b1x8_t` single-bit representations, note that it's only valid for binary metrics like Jaccard, Hamming, etc.
 As part of the quantization process, the scalar components greater than zero are set to `true`, and the rest to `false`.
 
-![USearch uint40_t support](https://github.com/unum-cloud/usearch/blob/main/assets/usearch-neighbor-types.png?raw=true)
+![USearch uint40_t support](https://github.com/unum-cloud/USearch/blob/main/assets/usearch-neighbor-types.png?raw=true)
 
 Using smaller numeric types will save you RAM needed to store the vectors, but you can also compress the neighbors lists forming our proximity graphs.
 By default, 32-bit `uint32_t` is used to enumerate those, which is not enough if you need to address over 4 Billion entries.
@@ -551,8 +551,8 @@ index = Index(ndim=ndim, metric=CompiledMetric(
 doi = {10.5281/zenodo.7949416},
 author = {Vardanian, Ash},
 title = {{USearch by Unum Cloud}},
-url = {https://github.com/unum-cloud/usearch},
-version = {2.23.0},
+url = {https://github.com/unum-cloud/USearch},
+version = {2.24.0},
 year = {2023},
 month = oct,
 }

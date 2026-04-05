@@ -14,7 +14,7 @@ To keep the quality of the code high, we have a set of guidelines common to [all
 ## Before you start
 
 Before building the first time, please pull `git` submodules.
-That's how we bring in SimSIMD and other optional dependencies to test all of the available functionality.
+That's how we bring in NumKong and other optional dependencies to test all of the available functionality.
 
 ```sh
 git submodule update --init --recursive
@@ -64,14 +64,13 @@ The CMakeLists.txt file has a number of options you can pass:
   - `USEARCH_BUILD_SQLITE` - build the SQLite extension ([no Windows](https://gist.github.com/zeljic/d8b542788b225b1bcb5fce169ee28c55))
 - Which dependencies to use:
   - `USEARCH_USE_OPENMP` - use OpenMP for parallelism
-  - `USEARCH_USE_SIMSIMD` - use SimSIMD for vectorization
+  - `USEARCH_USE_NUMKONG` - use NumKong for vectorization
   - `USEARCH_USE_JEMALLOC` - use Jemalloc for memory management
-  - `USEARCH_USE_FP16LIB` - use software emulation for half-precision floating point
 
 Putting all of this together, compiling all targets on most platforms should work with the following snippet:
 
 ```sh
-cmake -D CMAKE_BUILD_TYPE=Release -D USEARCH_USE_FP16LIB=1 -D USEARCH_USE_OPENMP=1 -D USEARCH_USE_SIMSIMD=1 -D USEARCH_USE_JEMALLOC=1 -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_BENCH_CPP=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_SQLITE=0 -B build_release
+cmake -D CMAKE_BUILD_TYPE=Release -D USEARCH_USE_NUMKONG=1 -D USEARCH_USE_OPENMP=1 -D USEARCH_USE_JEMALLOC=1 -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_BENCH_CPP=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_SQLITE=0 -B build_release
 
 cmake --build build_release --config Release
 build_release/test_cpp
@@ -86,9 +85,8 @@ cmake \
     -D CMAKE_BUILD_TYPE=Release \
     -D CMAKE_C_COMPILER="$(brew --prefix llvm)/bin/clang" \
     -D CMAKE_CXX_COMPILER="$(brew --prefix llvm)/bin/clang++" \
-    -D USEARCH_USE_FP16LIB=1 \
+    -D USEARCH_USE_NUMKONG=1 \
     -D USEARCH_USE_OPENMP=1 \
-    -D USEARCH_USE_SIMSIMD=1 \
     -D USEARCH_USE_JEMALLOC=1 \
     -D USEARCH_BUILD_TEST_CPP=1 \
     -D USEARCH_BUILD_BENCH_CPP=1 \
@@ -178,8 +176,7 @@ cmake -B build_artifacts \
   -D USEARCH_BUILD_LIB_C=1 \
   -D USEARCH_BUILD_TEST_CPP=0 \
   -D USEARCH_BUILD_BENCH_CPP=0 \
-  -D USEARCH_USE_SIMSIMD=0 \
-  -D USEARCH_USE_FP16LIB=1
+  -D USEARCH_USE_NUMKONG=0
 
 cmake --build build_artifacts --config RelWithDebInfo
 file build_artifacts/libusearch_c.so # Verify the output
@@ -214,7 +211,7 @@ Following options are enabled:
 - The `-p no:warnings` option will suppress and allow warnings.
 
 ```sh
-uv pip install pytest pytest-repeat numpy             # for repeated fuzzy tests
+uv pip install -e . --group tests             # for repeated fuzzy tests
 python -m pytest                                      # if you trust the default settings
 python -m pytest python/scripts/ -s -x -p no:warnings # to overwrite the default settings
 ```
@@ -222,8 +219,8 @@ python -m pytest python/scripts/ -s -x -p no:warnings # to overwrite the default
 Linting:
 
 ```sh
-pip install ruff
-ruff --format=github --select=E9,F63,F7,F82 --target-version=py310 python
+uv pip install -e . --group lint
+ruff --format=github python
 ```
 
 Before merging your changes you may want to test your changes against the entire matrix of Python versions USearch supports.
@@ -281,14 +278,13 @@ RUN npm init -y
 RUN yum install tar git python3 cmake gcc-c++ -y && yum groupinstall "Development Tools" -y
 
 # Assuming AWS Linux 2 uses old compilers:
-ENV USEARCH_USE_FP16LIB 1
-ENV USEARCH_USE_SIMSIMD 1
-ENV SIMSIMD_TARGET_HASWELL 1
-ENV SIMSIMD_TARGET_SKYLAKE 0
-ENV SIMSIMD_TARGET_ICE 0
-ENV SIMSIMD_TARGET_SAPPHIRE 0
-ENV SIMSIMD_TARGET_NEON 1
-ENV SIMSIMD_TARGET_SVE 0
+ENV USEARCH_USE_NUMKONG 1
+ENV NK_TARGET_HASWELL 1
+ENV NK_TARGET_SKYLAKE 0
+ENV NK_TARGET_ICELAKE 0
+ENV NK_TARGET_SAPPHIRE 0
+ENV NK_TARGET_NEON 1
+ENV NK_TARGET_SVE 0
 
 # For specific PR:
 # RUN npm install --build-from-source unum-cloud/usearch#pull/302/head
@@ -332,16 +328,16 @@ The reason for that is the heuristic that Cargo uses to determine the files to i
 > Regardless of whether exclude or include is specified, the following files are always excluded:
 > Any sub-packages will be skipped (any subdirectory that contains a Cargo.toml file).
 
-Assuming both SimSIMD and StringZilla contain their own `Cargo.toml` files, we need to temporarily exclude them from the package.
+Assuming both NumKong and StringZilla contain their own `Cargo.toml` files, we need to temporarily exclude them from the package.
 
 ```sh
-mv simsimd/Cargo.toml simsimd/Cargo.toml.bak
+mv numkong/Cargo.toml numkong/Cargo.toml.bak
 mv stringzilla/Cargo.toml stringzilla/Cargo.toml.bak
 cargo package --list --allow-dirty
 cargo publish
 
 # Revert back
-mv simsimd/Cargo.toml.bak simsimd/Cargo.toml
+mv numkong/Cargo.toml.bak numkong/Cargo.toml
 mv stringzilla/Cargo.toml.bak stringzilla/Cargo.toml
 ```
 
@@ -388,7 +384,7 @@ USearch provides Go bindings, that depend on the C library that must be installe
 So one should first compile the C library, link it with Go, and only then run tests.
 
 ```sh
-cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_USE_OPENMP=1 -D USEARCH_USE_SIMSIMD=1 
+cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_USE_NUMKONG=1 -D USEARCH_USE_OPENMP=1
 cmake --build build_release --config Release -j
 
 cp build_release/libusearch_c.so golang/ # or .dylib to install the library on macOS
@@ -452,8 +448,7 @@ g++ -shared -o java\cloud\unum\usearch\USearchJNI.dll java\cloud\unum\usearch\cl
 # macOS
 g++ -std=c++11 -c -fPIC \
     -Iinclude \
-    -Ifp16/include \
-    -Isimsimd/include \
+    -Inumkong/include \
     -I${JAVA_HOME}/include -I${JAVA_HOME}/include/darwin java/cloud/unum/usearch/cloud_unum_usearch_Index.cpp -o java/cloud/unum/usearch/cloud_unum_usearch_Index.o
 g++ -dynamiclib -o java/cloud/unum/usearch/libusearch.dylib java/cloud/unum/usearch/cloud_unum_usearch_Index.o -lc
 
@@ -480,7 +475,7 @@ USearch provides CSharp bindings, that depend on the C library that must be inst
 So one should first compile the C library, link it with CSharp, and only then run tests.
 
 ```sh
-cmake -B build_artifacts -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_USE_OPENMP=1 -D USEARCH_USE_SIMSIMD=1 
+cmake -B build_artifacts -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_USE_NUMKONG=1 -D USEARCH_USE_OPENMP=1
 cmake --build build_artifacts --config Release -j
 ```
 
@@ -561,8 +556,8 @@ cmake -DCMAKE_TOOLCHAIN_FILE=${WASI_SDK_PATH}/share/cmake/wasi-sdk.cmake .
 
 ## Working on Sub-Modules
 
-Extending metrics in SimSIMD:
+Extending metrics in NumKong:
 
 ```sh
-git push --set-upstream https://github.com/ashvardanian/simsimd.git HEAD:main
+git push --set-upstream https://github.com/ashvardanian/numkong.git HEAD:main
 ```

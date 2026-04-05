@@ -119,16 +119,21 @@ func (m Metric) CValue() C.usearch_metric_kind_t {
 // Different quantization types offer different trade-offs between memory usage and precision.
 type Quantization uint8
 
-// Different quantization kinds supported by the USearch library.
+// Different quantization kinds supported by the USearch library,
+// ordered by descending dynamic range.
 const (
+	// F64 uses 64-bit double precision floating point
+	F64 Quantization = iota
 	// F32 uses 32-bit floating point (standard precision)
-	F32 Quantization = iota
+	F32
 	// BF16 uses brain floating-point format (16-bit)
 	BF16
 	// F16 uses half-precision floating point (16-bit)
 	F16
-	// F64 uses 64-bit double precision floating point
-	F64
+	// E5M2 uses 8-bit floating point (1 sign + 5 exponent + 2 mantissa)
+	E5M2
+	// E4M3 uses 8-bit floating point (1 sign + 4 exponent + 3 mantissa)
+	E4M3
 	// I8 uses 8-bit signed integers (quantized)
 	I8
 	// B1 uses binary representation (1-bit per dimension)
@@ -138,14 +143,18 @@ const (
 // String returns the string representation of the Quantization.
 func (q Quantization) String() string {
 	switch q {
+	case F64:
+		return "F64"
+	case F32:
+		return "F32"
 	case BF16:
 		return "BF16"
 	case F16:
 		return "F16"
-	case F32:
-		return "F32"
-	case F64:
-		return "F64"
+	case E5M2:
+		return "E5M2"
+	case E4M3:
+		return "E4M3"
 	case I8:
 		return "I8"
 	case B1:
@@ -157,18 +166,22 @@ func (q Quantization) String() string {
 
 func (q Quantization) CValue() C.usearch_scalar_kind_t {
 	switch q {
-	case F16:
-		return C.usearch_scalar_f16_k
-	case F32:
-		return C.usearch_scalar_f32_k
 	case F64:
 		return C.usearch_scalar_f64_k
+	case F32:
+		return C.usearch_scalar_f32_k
+	case BF16:
+		return C.usearch_scalar_bf16_k
+	case F16:
+		return C.usearch_scalar_f16_k
+	case E5M2:
+		return C.usearch_scalar_e5m2_k
+	case E4M3:
+		return C.usearch_scalar_e4m3_k
 	case I8:
 		return C.usearch_scalar_i8_k
 	case B1:
 		return C.usearch_scalar_b1_k
-	case BF16:
-		return C.usearch_scalar_bf16_k
 	default:
 		return C.usearch_scalar_unknown_k
 	}
@@ -224,6 +237,21 @@ type Index struct {
 	config IndexConfig
 }
 
+// Version returns the USearch library version string.
+func Version() string {
+	return C.GoString(C.usearch_version())
+}
+
+// HardwareAccelerationCompiled returns a comma-separated list of ISAs compiled into the binary.
+func HardwareAccelerationCompiled() string {
+	return C.GoString(C.usearch_hardware_acceleration_compiled())
+}
+
+// HardwareAccelerationAvailable returns a comma-separated list of ISAs available at runtime.
+func HardwareAccelerationAvailable() string {
+	return C.GoString(C.usearch_hardware_acceleration_available())
+}
+
 // NewIndex creates a new approximate nearest neighbor index with the specified configuration.
 //
 // The index must be destroyed with Destroy() when no longer needed.
@@ -271,9 +299,14 @@ func NewIndex(conf IndexConfig) (index *Index, err error) {
 	return index, nil
 }
 
-// Version returns the USearch library version string.
-func Version() string {
-	return C.GoString(C.usearch_version())
+// GetHandle returns the C index handel.
+func (index *Index) GetHandle() C.usearch_index_t {
+	return index.handle
+}
+
+// GetConfig returns the index config.
+func (index *Index) GetConfig() IndexConfig {
+	return index.config
 }
 
 // Len returns the number of vectors in the index.

@@ -10,6 +10,9 @@ using search_result_t = typename index_t::search_result_t;
 using labeling_result_t = typename index_t::labeling_result_t;
 using vector_key_t = typename index_dense_t::vector_key_t;
 
+char const* hardware_acceleration_compiled() { return unum::usearch::hardware_acceleration_compiled(); }
+char const* hardware_acceleration_available() { return unum::usearch::hardware_acceleration_available(); }
+
 metric_kind_t rust_to_cpp_metric(MetricKind value) {
     switch (value) {
     case MetricKind::IP: return metric_kind_t::ip_k;
@@ -180,6 +183,19 @@ void NativeIndex::view(rust::Str path) const {
 
 void NativeIndex::reset() const { index_->reset(); }
 size_t NativeIndex::memory_usage() const { return index_->memory_usage(); }
+
+MemoryStats NativeIndex::memory_stats() const {
+    auto stats = index_->memory_stats();
+    MemoryStats result;
+    result.graph_allocated = stats.graph_allocated;
+    result.graph_wasted = stats.graph_wasted;
+    result.graph_reserved = stats.graph_reserved;
+    result.vectors_allocated = stats.vectors_allocated;
+    result.vectors_wasted = stats.vectors_wasted;
+    result.vectors_reserved = stats.vectors_reserved;
+    return result;
+}
+
 char const* NativeIndex::hardware_acceleration() const { return index_->metric().isa_name(); }
 
 void NativeIndex::save_to_buffer(rust::Slice<uint8_t> buffer) const {
@@ -211,8 +227,10 @@ std::unique_ptr<NativeIndex> new_native_index(IndexOptions const& options) {
     index_dense_config_t config(options.connectivity, options.expansion_add, options.expansion_search);
     config.multi = options.multi;
     index_t index = index_t::make(metric, config);
-    // In Rust we have the luxury of returning a `Result` type even for the constructor.
-    // So let's pre-reserve the maximal number of threads and return the error if it fails.
-    index.reserve(index_limits_t{});
-    return wrap(std::move(index));
+
+    // Preserve constructor pre-allocation semantics (`index_limits_t{}`), but execute
+    // reserve after heap allocation to avoid move-induced pointer invalidation.
+    std::unique_ptr<NativeIndex> native = wrap(std::move(index));
+    native->reserve_capacity_and_threads(0, std::thread::hardware_concurrency());
+    return native;
 }

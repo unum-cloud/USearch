@@ -55,20 +55,26 @@ metric_kind_t to_native_metric(USearchMetric m) {
 
 scalar_kind_t to_native_scalar(USearchScalar m) {
     switch (m) {
-        case USearchScalarI8:
-            return scalar_kind_t::i8_k;
-
-        case USearchScalarF16:
-            return scalar_kind_t::f16_k;
-
-        case USearchScalarBF16:
-            return scalar_kind_t::bf16_k;
+        case USearchScalarF64:
+            return scalar_kind_t::f64_k;
 
         case USearchScalarF32:
             return scalar_kind_t::f32_k;
 
-        case USearchScalarF64:
-            return scalar_kind_t::f64_k;
+        case USearchScalarBF16:
+            return scalar_kind_t::bf16_k;
+
+        case USearchScalarF16:
+            return scalar_kind_t::f16_k;
+
+        case USearchScalarE5M2:
+            return scalar_kind_t::e5m2_k;
+
+        case USearchScalarE4M3:
+            return scalar_kind_t::e4m3_k;
+
+        case USearchScalarI8:
+            return scalar_kind_t::i8_k;
 
         default:
             return scalar_kind_t::unknown_k;

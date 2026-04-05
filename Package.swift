@@ -4,10 +4,10 @@ import PackageDescription
 
 let cxxSettings: [CXXSetting] = [
     .headerSearchPath("../include/"),
-    .headerSearchPath("../fp16/include/"),
-    .headerSearchPath("../simsimd/include/"),
-    .define("USEARCH_USE_FP16LIB", to: "1"),
-    .define("USEARCH_USE_SIMSIMD", to: "1"),
+    .define("USEARCH_USE_NUMKONG", to: "1"),
+    .define("NK_DYNAMIC_DISPATCH", to: "1"),
+    .define("NK_NATIVE_F16", to: "0"),
+    .define("NK_NATIVE_BF16", to: "0"),
 ]
 
 var targets: [Target] = []
@@ -17,8 +17,11 @@ var targets: [Target] = []
     targets.append(
         .target(
             name: "USearchObjectiveC",
+            dependencies: [
+                .product(name: "CNumKongDispatch", package: "NumKong"),
+            ],
             path: "objc",
-            sources: ["USearchObjective.mm", "../simsimd/c/lib.c"],
+            sources: ["USearchObjective.mm"],
             cxxSettings: cxxSettings
         )
     )
@@ -28,6 +31,9 @@ var targets: [Target] = []
 targets += [
     .target(
         name: "USearchC",
+        dependencies: [
+            .product(name: "CNumKongDispatch", package: "NumKong"),
+        ],
         path: "c",
         sources: ["usearch.h", "lib.cpp"],
         publicHeadersPath: ".",
@@ -71,7 +77,9 @@ products.append(
 let package = Package(
     name: "USearch",
     products: products,
-    dependencies: [],
+    dependencies: [
+        .package(url: "https://github.com/ashvardanian/NumKong", branch: "main-dev"),
+    ],
     targets: targets,
     cxxLanguageStandard: CXXLanguageStandard.cxx11
 )
