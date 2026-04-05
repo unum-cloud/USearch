@@ -2792,6 +2792,10 @@ class index_gt {
         callback_at&& callback = callback_at{},                 //
         prefetch_at&& prefetch = prefetch_at{}) usearch_noexcept_m {
 
+        // Zero expansion is meaningless, fall back to default
+        if (!config.expansion)
+            config.expansion = default_expansion_add();
+
         add_result_t result;
         if (is_immutable())
             return result.failed("Can't add to an immutable index");
@@ -3106,6 +3110,9 @@ class index_gt {
         index_cluster_config_t config = {},        //
         predicate_at&& predicate = predicate_at{}, //
         prefetch_at&& prefetch = prefetch_at{}) const noexcept {
+
+        if (!config.expansion)
+            config.expansion = default_expansion_search();
 
         context_t& context = contexts_[config.thread];
         cluster_result_t result;
