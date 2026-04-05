@@ -3370,12 +3370,17 @@ class flat_hash_multi_set_gt {
                           equals_t const& equals)
             : index_(index), parent_(parent), query_(query), equals_(equals) {}
 
-        // Pre-increment
+        // Pre-increment: advance past tombstones and non-matching entries,
+        // stopping at the next matching live entry or an empty slot.
         equal_iterator_gt& operator++() {
             do {
                 index_ = (index_ + 1) & (parent_->capacity_slots_ - 1);
-            } while (!equals_(parent_->slot_ref(index_).element, query_) &&
-                     (parent_->slot_ref(index_).header.populated & parent_->slot_ref(index_).mask));
+                auto slot = parent_->slot_ref(index_);
+                bool is_empty = ~slot.header.populated & slot.mask;
+                bool is_match = !(slot.header.deleted & slot.mask) && equals_(slot.element, query_);
+                if (is_empty || is_match)
+                    break;
+            } while (true);
             return *this;
         }
 
