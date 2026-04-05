@@ -7,30 +7,30 @@
 #   * for PyPy versions from 3.7 to 3.10.
 #   = meaning 7 platforms * 11 Python versions = 77 builds.
 [build-system]
-requires = [
-    "setuptools>=42",
-    "wheel",
-    "cmake>=3.22",
-    "pybind11",
-    "numpy",
-    "numkong>=7.0.0",
-]
 build-backend = "setuptools.build_meta"
+requires = [
+  "setuptools>=42",
+  "wheel",
+  "cmake>=3.22",
+  "pybind11",
+  "numpy",
+  "numkong>=7.4.0",
+]
 
 [tool.pytest.ini_options]
-minversion = "6.0"
 addopts = "-ra --showlocals --strict-markers --strict-config -s -x -p no:warnings"
-xfail_strict = true
 filterwarnings = ["error"]
+minversion = "6.0"
+xfail_strict = true
 
 # Avoid running tests, as everything is happening in a super slow container
 # We have already run all the relavent Python tests in `prerelease.yml`
 #   test-requires = ["pytest", "numpy"]
 #   test-command = "pytest {project}/python/scripts"
 [tool.cibuildwheel]
-test-requires = []
-test-command = ""
 build-verbosity = 0
+test-command = ""
+test-requires = []
 
 # Add "pp*" to skip PyPy builds, but they should work fine these days :)
 # https://cibuildwheel.readthedocs.io/en/stable/options/#build-skip
@@ -40,9 +40,9 @@ skip = []
 [tool.cibuildwheel.linux]
 archs = ["x86_64", "aarch64"]
 before-build = [
-    "rm -rf {project}/CMakeCache.txt {project}/build {project}/build_debug {project}/CMakeFiles.txt {project}/_deps {project}/.pytest_cache",
-    "mkdir -p build/usearch",
-    "git submodule update --init --recursive",
+  "rm -rf {project}/CMakeCache.txt {project}/build {project}/build_debug {project}/CMakeFiles.txt {project}/_deps {project}/.pytest_cache",
+  "mkdir -p build/usearch",
+  "git submodule update --init --recursive",
 ]
 repair-wheel-command = "auditwheel repair --lib-sdir . -w {dest_dir} {wheel}"
 
@@ -51,10 +51,10 @@ repair-wheel-command = "auditwheel repair --lib-sdir . -w {dest_dir} {wheel}"
 # You can keep track of the most recent images on Quay:
 # - for `manylinux`: https://quay.io/search?q=manylinux
 # - for `musllinux`: https://quay.io/search?q=musllinux
-manylinux-x86_64-image = "manylinux_2_28"
 manylinux-aarch64-image = "manylinux_2_28"
-musllinux-x86_64-image = "musllinux_1_2"
+manylinux-x86_64-image = "manylinux_2_28"
 musllinux-aarch64-image = "musllinux_1_2"
+musllinux-x86_64-image = "musllinux_1_2"
 
 # On CentOS we have to use `yum`.
 # The healthy version would be: `apt-get update && apt-get install -y libc6-dev wget python3-dev`.
@@ -64,47 +64,48 @@ before-all = ["yum update -y && yum install -y glibc-devel wget python3-devel"]
 # This may also be handy for using custom dependencies for different Python versions:
 # https://cibuildwheel.readthedocs.io/en/stable/options/#overrides
 [[tool.cibuildwheel.overrides]]
-select = "*-musllinux*"
 before-all = "apk add --update wget python3-dev"
+select = "*-musllinux*"
 
 [tool.cibuildwheel.macos]
 archs = ["x86_64", "universal2", "arm64"]
 before-build = [
-    "rm -rf {project}/CMakeCache.txt {project}/build {project}/build_debug {project}/CMakeFiles.txt {project}/_deps {project}/.pytest_cache",
-    "mkdir -p build/usearch",
-    "git submodule update --init --recursive",
-    "export CC=$(echo CXX)",
+  "rm -rf {project}/CMakeCache.txt {project}/build {project}/build_debug {project}/CMakeFiles.txt {project}/_deps {project}/.pytest_cache",
+  "mkdir -p build/usearch",
+  "git submodule update --init --recursive",
+  "export CC=$(echo CXX)",
 ]
 repair-wheel-command = "delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel}"
-
 
 [tool.cibuildwheel.windows]
 archs = ["AMD64", "ARM64"]
 before-build = [
-    "rd /s /q {project}\\CMakeCache.txt {project}\\build {project}\\build_debug {project}\\CMakeFiles.txt {project}\\_deps {project}\\.pytest_cache || echo Done",
-    "md build\\usearch",
-    "git submodule update --init --recursive",
+  "rd /s /q {project}\\CMakeCache.txt {project}\\build {project}\\build_debug {project}\\CMakeFiles.txt {project}\\_deps {project}\\.pytest_cache || echo Done",
+  "md build\\usearch",
+  "git submodule update --init --recursive",
 ]
-
 
 [dependency-groups]
 lint = [
-    "ruff>=0.15.8",
+  "ruff>=0.15.8",
 ]
 tests = [
-    "numpy>=1.21",
-    "pytest>=9.0.2",
-    "pytest-repeat>=0.9.4",
+  "numpy>=1.21",
+  "pytest>=9.0.2",
+  "pytest-repeat>=0.9.4",
 ]
 
 [tool.ruff]
 line-length = 120
 target-version = "py310"
 
+[tool.ruff.format]
+quote-style = "double"
+
 [tool.ruff.lint]
 select = [
-    "E9",
-    "F63",
-    "F7",
-    "F82",
+  "E9",
+  "F63",
+  "F7",
+  "F82",
 ]
