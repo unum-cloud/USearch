@@ -728,10 +728,12 @@ class max_heap_gt {
      */
     usearch_profiled_m bool reserve(std::size_t new_capacity) noexcept {
         usearch_profile_name_m(max_heap_reserve);
-        if (new_capacity < capacity_)
+        if (new_capacity <= capacity_)
             return true;
 
         new_capacity = ceil2(new_capacity);
+        if (new_capacity == 0)
+            return false;
         new_capacity = (std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u));
         auto allocator = allocator_t{};
         auto new_elements = allocator.allocate(new_capacity);
@@ -894,10 +896,12 @@ class sorted_buffer_gt {
     inline void clear() noexcept { size_ = 0; }
 
     bool reserve(std::size_t new_capacity) noexcept {
-        if (new_capacity < capacity_)
+        if (new_capacity <= capacity_)
             return true;
 
         new_capacity = ceil2(new_capacity);
+        if (new_capacity == 0)
+            return false;
         new_capacity = (std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u));
         auto allocator = allocator_t{};
         auto new_elements = allocator.allocate(new_capacity);
@@ -1937,7 +1941,7 @@ template <typename key_at> inline key_at get_key(member_ref_gt<key_at> const& m)
  *      - Doesn't allocate new threads, and reuses the ones its called from.
  *      - Allows storing value externally, managing just the similarity index.
  *      - Joins.
- *
+
  *  @section Usage
  *
  *  @subsection Exceptions
@@ -3901,9 +3905,8 @@ class index_gt {
             // If `new_slot` is already present in the neighboring connections of `close_slot`
             // then no need to modify any connections or run the heuristics.
             if (close_header.size() < connectivity_max) {
-                if (std::find_if(close_header.begin(), close_header.end(), [new_slot](compressed_slot_t slot) {
-                        return slot == new_slot;
-                    }) == close_header.end()) {
+                if (std::find_if(close_header.begin(), close_header.end(),
+                                 [new_slot](compressed_slot_t slot) { return slot == new_slot; }) == close_header.end()) {
                     close_header.push_back(new_slot);
                 }
                 continue;
@@ -4059,6 +4062,10 @@ class index_gt {
         // At the very least we are going to explore the starting node and its neighbors
         if (!visits.reserve(config_.connectivity_base + 1u))
             return false;
+        if (!top.reserve(top_limit))
+            return false;
+        if (!next.reserve(top_limit))
+            return false;
 
         // Optional prefetching
         if (!is_dummy<prefetch_at>())
@@ -4135,6 +4142,10 @@ class index_gt {
 
         // At the very least we are going to explore the starting node and its neighbors
         if (!visits.reserve(config_.connectivity_base + 1u))
+            return false;
+        if (!top.reserve(top_limit))
+            return false;
+        if (!next.reserve(top_limit))
             return false;
 
         // Optional prefetching
