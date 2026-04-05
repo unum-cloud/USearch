@@ -3902,13 +3902,14 @@ class index_gt {
             usearch_assert_m(close_slot != new_slot, "Self-loops are impossible");
             usearch_assert_m(level <= close_node.level(), "Linking to missing level");
 
-            // If `new_slot` is already present in the neighboring connections of `close_slot`
-            // then no need to modify any connections or run the heuristics.
+            // Skip to prevent duplicate entries in the neighbor list.
+            if (std::find_if(close_header.begin(), close_header.end(),
+                             [new_slot](compressed_slot_t slot) { return slot == new_slot; }) != close_header.end()) {
+                continue;
+            }
+
             if (close_header.size() < connectivity_max) {
-                if (std::find_if(close_header.begin(), close_header.end(),
-                                 [new_slot](compressed_slot_t slot) { return slot == new_slot; }) == close_header.end()) {
-                    close_header.push_back(new_slot);
-                }
+                close_header.push_back(new_slot);
                 continue;
             }
 
