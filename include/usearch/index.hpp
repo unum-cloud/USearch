@@ -3922,7 +3922,7 @@ class index_gt {
             // Export the results:
             close_header.clear();
             candidates_view_t top_view = refine_(metric, connectivity_max, top_for_refine, context,
-                                                 context.computed_distances_in_reverse_refines);
+                                                 context.computed_distances_in_reverse_refines, new_slot, value);
             usearch_assert_m(top_view.size(), "This would lead to isolated nodes");
             for (std::size_t idx = 0; idx != top_view.size(); idx++)
                 close_header.push_back(top_view[idx].slot);
@@ -4316,16 +4316,50 @@ class index_gt {
         }
     }
 
+    /// @brief  Helper for `refine_()`: computes inter-neighbor distance, substituting
+    ///         @p override_value when either slot matches @p override_slot.
+    ///         The `std::nullptr_t` overload below avoids instantiating the override
+    ///         branch when no override is provided, keeping the code C++11 compatible.
+    template <typename metric_at, typename override_value_at>
+    distance_t inter_neighbor_distance_(                                   //
+        candidate_t const& candidate, candidate_t const& submitted,        //
+        compressed_slot_t override_slot, override_value_at override_value, //
+        metric_at&& metric, context_t& context) const noexcept {
+        if (candidate.slot == override_slot)
+            return context.measure(override_value, citerator_at(submitted.slot), metric);
+        else if (submitted.slot == override_slot)
+            return context.measure(override_value, citerator_at(candidate.slot), metric);
+        else
+            return context.measure(citerator_at(candidate.slot), citerator_at(submitted.slot), metric);
+    }
+
+    template <typename metric_at>
+    distance_t inter_neighbor_distance_(                            //
+        candidate_t const& candidate, candidate_t const& submitted, //
+        compressed_slot_t, std::nullptr_t,                          //
+        metric_at&& metric, context_t& context) const noexcept {
+        return context.measure(citerator_at(candidate.slot), citerator_at(submitted.slot), metric);
+    }
+
     /**
      *  @brief  This algorithm from the original paper implements a heuristic,
      *          that massively reduces the number of connections a point has,
      *          to keep only the neighbors, that are from each other.
+     *
+     *  @param[in] override_slot  Optional slot whose stored vector is stale (e.g. during update,
+     *                            where the callback has not yet committed the new vector).
+     *                            When set, inter-result distances involving this slot will use
+     *                            @p override_value instead of reading from `citerator_at()`.
+     *  @param[in] override_value The up-to-date vector for @p override_slot. Only used when
+     *                            @p override_value_at is not `std::nullptr_t`.
      */
-    template <typename metric_at>
+    template <typename metric_at, typename override_value_at = std::nullptr_t>
     candidates_view_t refine_(                                         //
         metric_at&& metric,                                            //
         std::size_t needed, top_candidates_t& top, context_t& context, //
-        std::size_t& refines_counter) const noexcept {
+        std::size_t& refines_counter,                                  //
+        compressed_slot_t override_slot = (std::numeric_limits<compressed_slot_t>::max)(),
+        override_value_at override_value = {}) const noexcept {
 
         // Avoid expensive computation, if the set is already small
         candidate_t* top_data = top.data();
@@ -4344,10 +4378,8 @@ class index_gt {
             std::size_t idx = 0;
             for (; idx < submitted_count; idx++) {
                 candidate_t submitted = top_data[idx];
-                distance_t inter_result_dist = context.measure( //
-                    citerator_at(candidate.slot),               //
-                    citerator_at(submitted.slot),               //
-                    metric);
+                distance_t inter_result_dist = inter_neighbor_distance_( //
+                    candidate, submitted, override_slot, override_value, metric, context);
                 if (inter_result_dist < candidate.distance) {
                     good = false;
                     break;
