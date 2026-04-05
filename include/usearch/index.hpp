@@ -77,6 +77,9 @@
 #endif
 #include <Windows.h>
 #include <sys/stat.h> // `fstat` for file size
+#if !defined(MAP_FAILED)
+#define MAP_FAILED ((void *) -1)
+#endif
 #undef NOMINMAX
 #undef _USE_MATH_DEFINES
 #else
