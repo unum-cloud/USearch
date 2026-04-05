@@ -218,14 +218,20 @@ jobs:
         run: |
           cmake -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_SQLITE=0 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 -B ./build_release
           cmake --build ./build_release --config Release
-          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar .\build_release\libusearch_c.dll .\c\usearch.h
+          mkdir pkg
+          copy .\build_release\libusearch_c.dll pkg\
+          copy .\c\usearch.h pkg\
+          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_c.dll usearch.h
 
       - name: Build library (MSVC ARM64)
         if: matrix.arch == 'arm64'
         run: |
           cmake -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_SQLITE=0 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 -B ./build_release
           cmake --build ./build_release --config Release
-          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar .\build_release\libusearch_c.dll .\c\usearch.h
+          mkdir pkg
+          copy .\build_release\libusearch_c.dll pkg\
+          copy .\c\usearch.h pkg\
+          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_c.dll usearch.h
 
       - name: Upload native library for Java
         uses: actions/upload-artifact@v5
@@ -280,7 +286,7 @@ jobs:
                 -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
                 -B ./build_release
           cmake --build ./build_release --config Release        
-          zip -r usearch_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip build_release/libusearch_c.dylib c/usearch.h
+          zip -j usearch_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip build_release/libusearch_c.dylib c/usearch.h
           mv build_release/libusearch_sqlite.dylib usearch_sqlite_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.dylib
 
       - name: Upload native library for Java
@@ -356,7 +362,7 @@ jobs:
 
       - name: Package library
         run: |
-          zip -r usearch_android_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip build_artifacts/libusearch_c.so c/usearch.h
+          zip -j usearch_android_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip build_artifacts/libusearch_c.so c/usearch.h
 
       - name: Upload native library for Java
         uses: actions/upload-artifact@v5
@@ -661,8 +667,9 @@ jobs:
           emmake cmake --build build_wasm --config Release
 
           cd build_wasm
-          tar -czf ../usearch_wasm_${{ steps.set_version.outputs.version }}.tar.gz libusearch_c.* ../c/usearch.h          
-          zip -r ../usearch_wasm_${{ steps.set_version.outputs.version }}.zip libusearch_c.* ../c/usearch.h
+          cp ../c/usearch.h .
+          tar -czf ../usearch_wasm_${{ steps.set_version.outputs.version }}.tar.gz libusearch_c.* usearch.h
+          zip -j ../usearch_wasm_${{ steps.set_version.outputs.version }}.zip libusearch_c.* usearch.h
 
       - name: Upload archives
         uses: xresloader/upload-to-github-release@v1
