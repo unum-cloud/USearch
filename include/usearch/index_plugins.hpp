@@ -1361,7 +1361,7 @@ template <std::size_t alignment_ak = 1> class memory_mapping_allocator_gt {
         if (!last_arena_ || (last_usage_ + extended_bytes >= last_capacity_)) {
             std::size_t new_cap = (std::max)(last_capacity_, ceil2(extended_bytes)) * capacity_multiplier();
             byte_t* new_arena = page_allocator_t{}.allocate(new_cap);
-            if (!new_arena || new_arena == (byte_t*)MAP_FAILED)
+            if (!new_arena)
                 return nullptr;
             std::memcpy(new_arena, &last_arena_, sizeof(byte_t*));
             std::memcpy(new_arena + sizeof(byte_t*), &new_cap, sizeof(std::size_t));
