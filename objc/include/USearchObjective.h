@@ -5,12 +5,14 @@
 NS_ASSUME_NONNULL_BEGIN
 
 typedef NS_ENUM(NSUInteger, USearchScalar) {
-    USearchScalarF32,
-    USearchScalarF16,
     USearchScalarF64,
+    USearchScalarF32,
+    USearchScalarBF16,
+    USearchScalarF16,
+    USearchScalarE5M2,
+    USearchScalarE4M3,
     USearchScalarI8,
     USearchScalarB1,
-    USearchScalarBF16,
 };
 
 typedef NS_ENUM(NSUInteger, USearchMetric) {

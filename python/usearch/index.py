@@ -120,6 +120,8 @@ def _normalize_dtype(
         "f32": ScalarKind.F32,
         "bf16": ScalarKind.BF16,
         "f16": ScalarKind.F16,
+        "e5m2": ScalarKind.E5M2,
+        "e4m3": ScalarKind.E4M3,
         "i8": ScalarKind.I8,
         "b1": ScalarKind.B1,
         "b1x8": ScalarKind.B1,

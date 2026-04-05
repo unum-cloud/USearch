@@ -140,16 +140,6 @@ public class Index implements AutoCloseable {
         public static final String FLOAT16 = "f16";
 
         /**
-         * 8-bit integer quantization
-         */
-        public static final String INT8 = "i8";
-
-        /**
-         * Binary quantization (1 bit per dimension, 8 dimensions per word)
-         */
-        public static final String BINARY = "b1";
-
-        /**
          * FP8 E5M2 (IEEE 754-like, 1 sign + 5 exponent + 2 mantissa)
          */
         public static final String E5M2 = "e5m2";
@@ -158,6 +148,16 @@ public class Index implements AutoCloseable {
          * FP8 E4M3 (OCP, 1 sign + 4 exponent + 3 mantissa)
          */
         public static final String E4M3 = "e4m3";
+
+        /**
+         * 8-bit integer quantization
+         */
+        public static final String INT8 = "i8";
+
+        /**
+         * Binary quantization (1 bit per dimension, 8 dimensions per word)
+         */
+        public static final String BINARY = "b1";
     }
 
     private long c_ptr = 0;

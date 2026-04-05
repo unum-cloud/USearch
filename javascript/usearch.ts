@@ -68,10 +68,10 @@ export enum MetricKind {
  */
 export enum ScalarKind {
   Unknown = "unknown",
-  F32 = "f32",
   F64 = "f64",
-  F16 = "f16",
+  F32 = "f32",
   BF16 = "bf16",
+  F16 = "f16",
   E5M2 = "e5m2",
   E4M3 = "e4m3",
   I8 = "i8",

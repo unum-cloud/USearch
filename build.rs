@@ -21,9 +21,9 @@ fn build_usearch() -> Result<(), Box<dyn Error>> {
         build.define("USEARCH_USE_OPENMP", "0");
     }
 
-    // When the `numkong` feature is enabled, the `numkong` crate compiles the SIMD
-    // kernels itself (with dynamic dispatch and fallback across SIMD backends).
-    // We only need its include path for the C++ headers.
+    // When the `numkong` feature is enabled, the `numkong` crate (pulled from crates.io,
+    // not the local git submodule) compiles all SIMD kernels itself, with dynamic dispatch
+    // and fallback across ISA backends. We only need its include path for the C++ headers.
     if cfg!(feature = "numkong") {
         let numkong_include = std::env::var("DEP_NUMKONG_INCLUDE")
             .map_err(|_| "numkong crate must set DEP_NUMKONG_INCLUDE via `links` metadata")?;

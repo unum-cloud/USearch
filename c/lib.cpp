@@ -56,10 +56,10 @@ usearch_metric_kind_t metric_kind_to_c(metric_kind_t kind) {
 }
 scalar_kind_t scalar_kind_to_cpp(usearch_scalar_kind_t kind) {
     switch (kind) {
-    case usearch_scalar_f32_k: return scalar_kind_t::f32_k;
     case usearch_scalar_f64_k: return scalar_kind_t::f64_k;
-    case usearch_scalar_f16_k: return scalar_kind_t::f16_k;
+    case usearch_scalar_f32_k: return scalar_kind_t::f32_k;
     case usearch_scalar_bf16_k: return scalar_kind_t::bf16_k;
+    case usearch_scalar_f16_k: return scalar_kind_t::f16_k;
     case usearch_scalar_e5m2_k: return scalar_kind_t::e5m2_k;
     case usearch_scalar_e4m3_k: return scalar_kind_t::e4m3_k;
     case usearch_scalar_i8_k: return scalar_kind_t::i8_k;
@@ -70,10 +70,10 @@ scalar_kind_t scalar_kind_to_cpp(usearch_scalar_kind_t kind) {
 
 usearch_scalar_kind_t scalar_kind_to_c(scalar_kind_t kind) {
     switch (kind) {
-    case scalar_kind_t::f32_k: return usearch_scalar_f32_k;
     case scalar_kind_t::f64_k: return usearch_scalar_f64_k;
-    case scalar_kind_t::f16_k: return usearch_scalar_f16_k;
+    case scalar_kind_t::f32_k: return usearch_scalar_f32_k;
     case scalar_kind_t::bf16_k: return usearch_scalar_bf16_k;
+    case scalar_kind_t::f16_k: return usearch_scalar_f16_k;
     case scalar_kind_t::e5m2_k: return usearch_scalar_e5m2_k;
     case scalar_kind_t::e4m3_k: return usearch_scalar_e4m3_k;
     case scalar_kind_t::i8_k: return usearch_scalar_i8_k;

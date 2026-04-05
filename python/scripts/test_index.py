@@ -42,10 +42,12 @@ from usearch.index import (
 ndims = [3, 97, 256]
 batch_sizes = [1, 11, 77]
 quantizations = [
-    ScalarKind.F32,
     ScalarKind.F64,
-    ScalarKind.F16,
+    ScalarKind.F32,
     ScalarKind.BF16,
+    ScalarKind.F16,
+    ScalarKind.E5M2,
+    ScalarKind.E4M3,
     ScalarKind.I8,
 ]
 dtypes = [np.float32, np.float64, np.float16]

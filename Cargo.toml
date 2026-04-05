@@ -27,7 +27,9 @@ path = "rust/lib.rs"
 
 [dependencies]
 cxx = "1.0.194"
-numkong = {version = "7", path = "numkong", optional = true}
+# Published crates pull `numkong` from crates.io (the `path` is stripped at publish time).
+# The local `path = "numkong"` is only used during development against the git submodule.
+numkong = {version = ">=7.4", path = "numkong", optional = true}
 
 [build-dependencies]
 cxx-build = "1.0.194"

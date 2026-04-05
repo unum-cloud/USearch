@@ -2556,6 +2556,8 @@ class metric_punned_t {
             case scalar_kind_t::f32_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<f32_t>>; break;
             case scalar_kind_t::bf16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<bf16_t, f32_t>>; break;
             case scalar_kind_t::f16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<f16_t, f32_t>>; break;
+            case scalar_kind_t::e5m2_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<e5m2_t, f32_t>>; break;
+            case scalar_kind_t::e4m3_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<e4m3_t, f32_t>>; break;
             case scalar_kind_t::i8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<i8_t, f32_t>>; break;
             default: metric_ptr_ = 0; break;
             }
@@ -2567,6 +2569,8 @@ class metric_punned_t {
             case scalar_kind_t::f32_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_gt<f32_t>>; break;
             case scalar_kind_t::bf16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_gt<bf16_t, f32_t>>; break;
             case scalar_kind_t::f16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_gt<f16_t, f32_t>>; break;
+            case scalar_kind_t::e5m2_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_gt<e5m2_t, f32_t>>; break;
+            case scalar_kind_t::e4m3_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_gt<e4m3_t, f32_t>>; break;
             case scalar_kind_t::i8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_i8_t>; break;
             default: metric_ptr_ = 0; break;
             }
@@ -2578,6 +2582,8 @@ class metric_punned_t {
             case scalar_kind_t::f32_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_gt<f32_t>>; break;
             case scalar_kind_t::bf16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_gt<bf16_t, f32_t>>; break;
             case scalar_kind_t::f16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_gt<f16_t, f32_t>>; break;
+            case scalar_kind_t::e5m2_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_gt<e5m2_t, f32_t>>; break;
+            case scalar_kind_t::e4m3_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_gt<e4m3_t, f32_t>>; break;
             case scalar_kind_t::i8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_i8_t>; break;
             default: metric_ptr_ = 0; break;
             }
@@ -2591,6 +2597,12 @@ class metric_punned_t {
                 metric_ptr_ = (uptr_t)&equidimensional_<metric_pearson_gt<bf16_t, f32_t>>;
                 break;
             case scalar_kind_t::f16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_pearson_gt<f16_t, f32_t>>; break;
+            case scalar_kind_t::e5m2_k:
+                metric_ptr_ = (uptr_t)&equidimensional_<metric_pearson_gt<e5m2_t, f32_t>>;
+                break;
+            case scalar_kind_t::e4m3_k:
+                metric_ptr_ = (uptr_t)&equidimensional_<metric_pearson_gt<e4m3_t, f32_t>>;
+                break;
             case scalar_kind_t::i8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_pearson_gt<i8_t, f32_t>>; break;
             default: metric_ptr_ = 0; break;
             }
@@ -2613,6 +2625,12 @@ class metric_punned_t {
                 break;
             case scalar_kind_t::f16_k:
                 metric_ptr_ = (uptr_t)&equidimensional_<metric_divergence_gt<f16_t, f32_t>>;
+                break;
+            case scalar_kind_t::e5m2_k:
+                metric_ptr_ = (uptr_t)&equidimensional_<metric_divergence_gt<e5m2_t, f32_t>>;
+                break;
+            case scalar_kind_t::e4m3_k:
+                metric_ptr_ = (uptr_t)&equidimensional_<metric_divergence_gt<e4m3_t, f32_t>>;
                 break;
             default: metric_ptr_ = 0; break;
             }

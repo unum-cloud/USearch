@@ -1499,7 +1499,7 @@ mod tests {
             env::var("RUST_VERSION").unwrap_or_else(|_| "unknown".into())
         );
 
-        // Create indexes with different configurations
+        // Create indexes with different configurations, ordered by descending dynamic range
         let f64_index = Index::new(&IndexOptions {
             dimensions: 256,
             metric: MetricKind::Cos,
@@ -1516,10 +1516,34 @@ mod tests {
         })
         .unwrap();
 
+        let bf16_index = Index::new(&IndexOptions {
+            dimensions: 256,
+            metric: MetricKind::Cos,
+            quantization: ScalarKind::BF16,
+            ..Default::default()
+        })
+        .unwrap();
+
         let f16_index = Index::new(&IndexOptions {
             dimensions: 256,
             metric: MetricKind::Cos,
             quantization: ScalarKind::F16,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let e5m2_index = Index::new(&IndexOptions {
+            dimensions: 256,
+            metric: MetricKind::Cos,
+            quantization: ScalarKind::E5M2,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let e4m3_index = Index::new(&IndexOptions {
+            dimensions: 256,
+            metric: MetricKind::Cos,
+            quantization: ScalarKind::E4M3,
             ..Default::default()
         })
         .unwrap();
@@ -1549,8 +1573,20 @@ mod tests {
             f32_index.hardware_acceleration()
         );
         println!(
+            "bf16 hardware acceleration: {}",
+            bf16_index.hardware_acceleration()
+        );
+        println!(
             "f16 hardware acceleration: {}",
             f16_index.hardware_acceleration()
+        );
+        println!(
+            "e5m2 hardware acceleration: {}",
+            e5m2_index.hardware_acceleration()
+        );
+        println!(
+            "e4m3 hardware acceleration: {}",
+            e4m3_index.hardware_acceleration()
         );
         println!(
             "i8 hardware acceleration: {}",
