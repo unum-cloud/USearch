@@ -2733,19 +2733,17 @@ class flat_hash_multi_set_gt {
                           equals_t const& equals)
             : index_(index), parent_(parent), query_(query), equals_(equals) {}
 
-        // Pre-increment
+        // Pre-increment: advance past tombstones and non-matching entries,
+        // stopping at the next matching live entry or an empty slot.
         equal_iterator_gt& operator++() {
-            auto should_skip = [&](std::size_t i) -> bool {
-                auto slot = parent_->slot_ref(i);
-                if (!(slot.header.populated & slot.mask))
-                    return false; // empty slot — stop
-                if (slot.header.deleted & slot.mask)
-                    return true; // tombstone — skip
-                return !equals_(slot.element, query_); // skip non-matching live entries
-            };
             do {
                 index_ = (index_ + 1) & (parent_->capacity_slots_ - 1);
-            } while (should_skip(index_));
+                auto slot = parent_->slot_ref(index_);
+                bool is_empty = ~slot.header.populated & slot.mask;
+                bool is_match = !(slot.header.deleted & slot.mask) && equals_(slot.element, query_);
+                if (is_empty || is_match)
+                    break;
+            } while (true);
             return *this;
         }
 
