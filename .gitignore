@@ -39,10 +39,9 @@ venv/
 node_modules/
 javascript/dist/
 prebuilds/
-
+package-lock.json
 
 # Wasm
-
 wasi-sdk-*
 
 # Rust builds
@@ -102,3 +101,4 @@ csharp/packages
 *.out
 *.app
 
+package-lock.json

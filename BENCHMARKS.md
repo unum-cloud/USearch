@@ -64,7 +64,7 @@ To achieve best highest results we suggest compiling locally for the target arch
 
 ```sh
 git submodule update --init --recursive
-cmake -USEARCH_BUILD_BENCH_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_SIMSIMD=1 -DCMAKE_BUILD_TYPE=RelWithDebInfo -B build_profile
+cmake -DUSEARCH_BUILD_BENCH_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_OPENMP=1 -DCMAKE_BUILD_TYPE=RelWithDebInfo -B build_profile
 cmake --build build_profile --config RelWithDebInfo -j
 build_profile/bench_cpp --help
 ```

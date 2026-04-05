@@ -6,27 +6,27 @@ import urllib.request
 import warnings
 from urllib.error import HTTPError
 
-#! Load SimSIMD before the USearch compiled module
-#! We can't just use the `import simsimd` as on Linux and Windows (unlike MacOS),
+#! Load NumKong before the USearch compiled module
+#! We can't just use the `import numkong` as on Linux and Windows (unlike MacOS),
 #! the symbols are not automatically loaded into the global namespace.
 try:
-    import simsimd
+    import numkong
 
     # Cross-platform check for Windows
     if sys.platform == "win32":
         # Add the directory where the `.dll` is located
-        dll_directory = os.path.dirname(simsimd.__file__)
+        dll_directory = os.path.dirname(numkong.__file__)
         os.add_dll_directory(dll_directory)
 
-        # Load SimSIMD library using `ctypes` without `RTLD_GLOBAL`
-        simsimd_lib = ctypes.CDLL(simsimd.__file__)
+        # Load NumKong library using `ctypes` without `RTLD_GLOBAL`
+        numkong_lib = ctypes.CDLL(numkong.__file__)
 
     else:
         # Non-Windows: Use `RTLD_GLOBAL` for Unix-based systems (Linux/macOS)
-        simsimd_lib = ctypes.CDLL(simsimd.__file__, mode=ctypes.RTLD_GLOBAL)
+        numkong_lib = ctypes.CDLL(numkong.__file__, mode=ctypes.RTLD_GLOBAL)
 
 except ImportError:
-    pass  # If the user doesn't want SimSIMD, we assume they know what they're doing
+    pass  # If the user doesn't want NumKong, we assume they know what they're doing
 
 
 from usearch.compiled import (  # type: ignore[import-not-found]
@@ -37,11 +37,13 @@ from usearch.compiled import (  # type: ignore[import-not-found]
     USES_FP16LIB,
     # Dependencies:
     USES_OPENMP,
+    USES_NUMKONG,
     USES_SIMSIMD,
+    USES_NUMKONG_DYNAMIC_DISPATCH,
     USES_SIMSIMD_DYNAMIC_DISPATCH,
-    VERSION_MAJOR,
-    VERSION_MINOR,
-    VERSION_PATCH,
+    # Hardware capabilities:
+    hardware_acceleration_compiled,
+    hardware_acceleration_available,
 )
 
 __version__ = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}"
@@ -67,7 +69,7 @@ class BinaryManager:
 
     @staticmethod
     def determine_download_url(version: str, filename: str) -> str:
-        base_url = "https://github.com/unum-cloud/usearch/releases/download"
+        base_url = "https://github.com/unum-cloud/USearch/releases/download"
         url = f"{base_url}/v{version}/{filename}"
         return url
 

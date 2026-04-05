@@ -720,7 +720,50 @@ public class USearchIndex : IDisposable
 
 
     /// <summary>
+    /// Returns the SIMD capability used by this index.
+    /// </summary>
+    public string HardwareAcceleration()
+    {
+        var ptr = NativeMethods.usearch_hardware_acceleration(_index, out var error);
+        HandleError(error);
+        return Marshal.PtrToStringAnsi(ptr) ?? "serial";
+    }
+
+    /// <summary>
     /// Destructor for the USearchIndex class.
     /// </summary>
     ~USearchIndex() => this.Dispose(false);
+}
+
+/// <summary>
+/// System-wide hardware capability queries — not tied to any index instance.
+/// </summary>
+public static class USearchCapabilities
+{
+    /// <summary>
+    /// Returns the USearch library version string.
+    /// </summary>
+    public static string Version()
+    {
+        var ptr = NativeMethods.usearch_version();
+        return Marshal.PtrToStringAnsi(ptr) ?? "unknown";
+    }
+
+    /// <summary>
+    /// Returns a comma-separated list of ISAs compiled into this binary.
+    /// </summary>
+    public static string HardwareAccelerationCompiled()
+    {
+        var ptr = NativeMethods.usearch_hardware_acceleration_compiled();
+        return Marshal.PtrToStringAnsi(ptr) ?? "serial";
+    }
+
+    /// <summary>
+    /// Returns a comma-separated list of ISAs available at runtime.
+    /// </summary>
+    public static string HardwareAccelerationAvailable()
+    {
+        var ptr = NativeMethods.usearch_hardware_acceleration_available();
+        return Marshal.PtrToStringAnsi(ptr) ?? "serial";
+    }
 }
