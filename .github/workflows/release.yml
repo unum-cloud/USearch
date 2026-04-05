@@ -41,10 +41,8 @@ jobs:
           version-file: "VERSION"
           update-version-in: |
             package.json:"version": "(\d+\.\d+\.\d+)"
-            package-lock.json:"usearch",\n\s+"version": "(\d+\.\d+\.\d+)"
             CITATION.cff:^version: (\d+\.\d+\.\d+)
             Cargo.toml:^version = "(\d+\.\d+\.\d+)"
-            Cargo.lock:name = "usearch"\nversion = "(\d+\.\d+\.\d+)"
             wasmer.toml:^version = "(\d+\.\d+\.\d+)"
             conanfile.py:version = "(\d+\.\d+\.\d+)"
             java/README.md:usearchVersion = '(\d+\.\d+\.\d+)'
