@@ -8,7 +8,7 @@ Download and install the Debian package from the latest release.
 Substitute `<release_tag>`, `<arch>`, and `<usearch_version>` with your settings.
 
 ```sh
-wget https://github.com/unum-cloud/usearch/releases/download/<release_tag>/usearch_linux_<arch>_<usearch_version>.deb
+wget https://github.com/unum-cloud/USearch/releases/download/<release_tag>/usearch_linux_<arch>_<usearch_version>.deb
 dpkg -i usearch_linux_<arch>_<usearch_version>.deb
 ```
 
@@ -27,7 +27,7 @@ Download and unpack the zip archive from the latest release.
 Move the USearch library and the include file to their respective folders.
 
 ```sh
-wget https://github.com/unum-cloud/usearch/releases/download/<release_tag>/usearch_macos_<arch>_<usearch_version>.zip
+wget https://github.com/unum-cloud/USearch/releases/download/<release_tag>/usearch_macos_<arch>_<usearch_version>.zip
 unzip usearch_macos_<arch>_<usearch_version>.zip
 sudo mv libusearch_c.dylib /usr/local/lib && sudo mv usearch.h /usr/local/include
 ```

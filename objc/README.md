@@ -10,7 +10,7 @@ To install it, simply add the following line to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/unum-cloud/usearch", .upToNextMajor(from: "2.0.0"))
+    .package(url: "https://github.com/unum-cloud/USearch", .upToNextMajor(from: "2.0.0"))
 ]
 ```
 

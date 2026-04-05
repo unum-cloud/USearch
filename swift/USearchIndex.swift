@@ -9,9 +9,12 @@ import Foundation
 import USearchC
 
 public enum USearchScalar: UInt {
-    case f32
-    case f16
     case f64
+    case f32
+    case bf16
+    case f16
+    case e5m2
+    case e4m3
     case i8
     case b1
 }
@@ -62,16 +65,22 @@ extension USearchMetric {
 extension USearchScalar {
     func toNative() -> usearch_scalar_kind_t {
         switch self {
-        case .i8:
-            return usearch_scalar_i8_k
-        case .f16:
-            return usearch_scalar_f16_k
-        case .b1:
-            return usearch_scalar_b1_k
-        case .f32:
-            return usearch_scalar_f32_k
         case .f64:
             return usearch_scalar_f64_k
+        case .f32:
+            return usearch_scalar_f32_k
+        case .bf16:
+            return usearch_scalar_bf16_k
+        case .f16:
+            return usearch_scalar_f16_k
+        case .e5m2:
+            return usearch_scalar_e5m2_k
+        case .e4m3:
+            return usearch_scalar_e4m3_k
+        case .i8:
+            return usearch_scalar_i8_k
+        case .b1:
+            return usearch_scalar_b1_k
         }
     }
 }
@@ -155,6 +164,21 @@ public enum USearchError: Error {
             return .unknownError(errorString)
         }
     }
+}
+
+/** Returns the USearch library version string. */
+public func usearchVersion() -> String {
+    String(cString: usearch_version())
+}
+
+/** Returns a comma-separated list of ISAs compiled into this binary. */
+public func usearchHardwareAccelerationCompiled() -> String {
+    String(cString: usearch_hardware_acceleration_compiled())
+}
+
+/** Returns a comma-separated list of ISAs available at runtime. */
+public func usearchHardwareAccelerationAvailable() -> String {
+    String(cString: usearch_hardware_acceleration_available())
 }
 
 @available(iOS 13.0, macOS 11.0, tvOS 13.0, watchOS 6.0, visionOS 1.0, *)
@@ -422,6 +446,11 @@ public class USearchIndex: NSObject {
         )
     }
 
+    // Float16 is only available on arm64 Apple platforms. The @available annotation
+    // alone is insufficient because Float16 is a type-level absence on x86_64,
+    // not a runtime availability issue. See: https://github.com/unum-cloud/usearch/issues/589
+    #if arch(arm64)
+
     /**
      * @brief Adds a labeled vector to the index.
      * @param vector Half-precision vector.
@@ -494,6 +523,8 @@ public class USearchIndex: NSObject {
             distances: distances
         )
     }
+
+    #endif // arch(arm64)
 
     public func contains(key: USearchKey) throws -> Bool {
         return try throwing { usearch_contains(nativeIndex, key, $0) }

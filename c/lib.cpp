@@ -56,10 +56,12 @@ usearch_metric_kind_t metric_kind_to_c(metric_kind_t kind) {
 }
 scalar_kind_t scalar_kind_to_cpp(usearch_scalar_kind_t kind) {
     switch (kind) {
-    case usearch_scalar_f32_k: return scalar_kind_t::f32_k;
     case usearch_scalar_f64_k: return scalar_kind_t::f64_k;
-    case usearch_scalar_f16_k: return scalar_kind_t::f16_k;
+    case usearch_scalar_f32_k: return scalar_kind_t::f32_k;
     case usearch_scalar_bf16_k: return scalar_kind_t::bf16_k;
+    case usearch_scalar_f16_k: return scalar_kind_t::f16_k;
+    case usearch_scalar_e5m2_k: return scalar_kind_t::e5m2_k;
+    case usearch_scalar_e4m3_k: return scalar_kind_t::e4m3_k;
     case usearch_scalar_i8_k: return scalar_kind_t::i8_k;
     case usearch_scalar_b1_k: return scalar_kind_t::b1x8_k;
     default: return scalar_kind_t::unknown_k;
@@ -68,10 +70,12 @@ scalar_kind_t scalar_kind_to_cpp(usearch_scalar_kind_t kind) {
 
 usearch_scalar_kind_t scalar_kind_to_c(scalar_kind_t kind) {
     switch (kind) {
-    case scalar_kind_t::f32_k: return usearch_scalar_f32_k;
     case scalar_kind_t::f64_k: return usearch_scalar_f64_k;
-    case scalar_kind_t::f16_k: return usearch_scalar_f16_k;
+    case scalar_kind_t::f32_k: return usearch_scalar_f32_k;
     case scalar_kind_t::bf16_k: return usearch_scalar_bf16_k;
+    case scalar_kind_t::f16_k: return usearch_scalar_f16_k;
+    case scalar_kind_t::e5m2_k: return usearch_scalar_e5m2_k;
+    case scalar_kind_t::e4m3_k: return usearch_scalar_e4m3_k;
     case scalar_kind_t::i8_k: return usearch_scalar_i8_k;
     case scalar_kind_t::b1x8_k: return usearch_scalar_b1_k;
     default: return usearch_scalar_unknown_k;
@@ -132,6 +136,10 @@ USEARCH_EXPORT char const* usearch_version(void) {
     std::snprintf(version, sizeof(version), "%d.%d.%d", major, minor, patch);
     return version;
 }
+
+USEARCH_EXPORT char const* usearch_hardware_acceleration_compiled(void) { return hardware_acceleration_compiled(); }
+
+USEARCH_EXPORT char const* usearch_hardware_acceleration_available(void) { return hardware_acceleration_available(); }
 
 USEARCH_EXPORT usearch_index_t usearch_init(usearch_init_options_t* options, usearch_error_t* error) {
 
@@ -413,7 +421,7 @@ USEARCH_EXPORT size_t usearch_search(                                           
 USEARCH_EXPORT size_t usearch_filtered_search(                                 //
     usearch_index_t index,                                                     //
     void const* query, usearch_scalar_kind_t query_kind, size_t results_limit, //
-    usearch_filtered_search_callback_t filter, void* filter_state,  //
+    usearch_filtered_search_callback_t filter, void* filter_state,             //
     usearch_key_t* found_keys, usearch_distance_t* found_distances, usearch_error_t* error) {
 
     USEARCH_ASSERT(index && query && filter && error && "Missing arguments");

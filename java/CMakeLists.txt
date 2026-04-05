@@ -6,11 +6,6 @@ find_package(JNI REQUIRED)
 # Define JNI library sources
 set(USEARCH_JNI_SOURCES cloud/unum/usearch/cloud_unum_usearch_Index.cpp)
 
-# Add SimSIMD source if enabled
-if (USEARCH_USE_SIMSIMD)
-    list(APPEND USEARCH_JNI_SOURCES ../simsimd/c/lib.c)
-endif ()
-
 # Build JNI shared library
 add_library(usearch_jni SHARED ${USEARCH_JNI_SOURCES})
 

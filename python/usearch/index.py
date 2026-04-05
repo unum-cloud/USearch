@@ -46,8 +46,8 @@ from usearch.compiled import (
     DEFAULT_EXPANSION_ADD,
     DEFAULT_EXPANSION_SEARCH,
     USES_OPENMP,
+    USES_NUMKONG,
     USES_SIMSIMD,
-    USES_FP16LIB,
 )
 
 MetricKindBitwise = (
@@ -120,6 +120,8 @@ def _normalize_dtype(
         "f32": ScalarKind.F32,
         "bf16": ScalarKind.BF16,
         "f16": ScalarKind.F16,
+        "e5m2": ScalarKind.E5M2,
+        "e4m3": ScalarKind.E4M3,
         "i8": ScalarKind.I8,
         "b1": ScalarKind.B1,
         "b1x8": ScalarKind.B1,
@@ -1407,8 +1409,8 @@ class Index:
             "dtype": self.dtype,
             "path": self.path,
             "compiled_with_openmp": USES_OPENMP,
+            "compiled_with_numkong": USES_NUMKONG,
             "compiled_with_simsimd": USES_SIMSIMD,
-            "compiled_with_native_f16": USES_FP16LIB,
         }
 
     def __repr__(self) -> str:
@@ -1458,8 +1460,7 @@ class Index:
                 f"-- expansion on search: {self.expansion_search} candidates",
                 "- binary",
                 f"-- uses OpenMP: {USES_OPENMP}",
-                f"-- uses SimSIMD: {USES_SIMSIMD}",
-                f"-- supports half-precision: {USES_FP16LIB}",
+                f"-- uses NumKong: {USES_NUMKONG}",
                 f"-- uses hardware acceleration: {self.hardware_acceleration}",
                 "- state",
                 f"-- size: {self.size:,} vectors",

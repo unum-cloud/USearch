@@ -9,7 +9,7 @@ body:
     attributes:
       value: |
         Thanks for taking the time to fill out this feature request!
-        We have already scheduled a few features for our [next milestone](https://github.com/unum-cloud/usearch/milestones).
+        We have already scheduled a few features for our [next milestone](https://github.com/unum-cloud/USearch/milestones).
         Still, if it is something we have yet to think about, we will happily extend our [roadmap](https://github.com/orgs/unum-cloud/projects/2).
         It is also worth noting that choosing between speed and functionality, we generally prefer the former.
         So in some cases, it makes more sense to build something on top of USearch rather than patch it 🤗
@@ -50,7 +50,7 @@ body:
     id: duplicate
     attributes:
       label: Is there an existing issue for this?
-      description: Please search [our issues](https://github.com/unum-cloud/usearch/issues) to see if this bug already exists.
+      description: Please search [our issues](https://github.com/unum-cloud/USearch/issues) to see if this bug already exists.
       options:
         - label: I have searched the existing issues
           required: true
@@ -58,7 +58,7 @@ body:
     id: terms
     attributes:
       label: Code of Conduct
-      description: By submitting this issue, you agree to follow our [Code of Conduct](https://github.com/unum-cloud/usearch/blob/main/CODE_OF_CONDUCT.md)
+      description: By submitting this issue, you agree to follow our [Code of Conduct](https://github.com/unum-cloud/USearch/blob/main/CODE_OF_CONDUCT.md)
       options:
         - label: I agree to follow this project's Code of Conduct
           required: true

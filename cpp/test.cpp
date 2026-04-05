@@ -1180,12 +1180,16 @@ void test_isolate() {
 }
 
 int main(int, char**) {
-    test_uint40();
-    test_cosine<float, std::int64_t, uint40_t>(10, 10);
+    std::printf("Hardware acceleration compiled: %s\n", hardware_acceleration_compiled());
+    std::printf("Hardware acceleration available: %s\n", hardware_acceleration_available());
 
     // Non-default floating-point types may result in many compilation & rounding issues.
-    test_cosine<f16_t, std::int64_t, uint40_t>(10, 10);
+    test_uint40();
+    test_cosine<f32_t, std::int64_t, uint40_t>(10, 10);
     test_cosine<bf16_t, std::int64_t, uint40_t>(10, 10);
+    test_cosine<f16_t, std::int64_t, uint40_t>(10, 10);
+    test_cosine<e5m2_t, std::int64_t, uint40_t>(10, 10);
+    test_cosine<e4m3_t, std::int64_t, uint40_t>(10, 10);
 
     // Test plugins, like K-Means clustering.
     {
@@ -1209,9 +1213,11 @@ int main(int, char**) {
     for (std::size_t dataset_count : {10, 100})
         for (std::size_t queries_count : {1, 10})
             for (std::size_t wanted_count : {1, 5}) {
-                test_exact_search<float>(dataset_count, queries_count, wanted_count);
-                test_exact_search<f16_t>(dataset_count, queries_count, wanted_count);
+                test_exact_search<f32_t>(dataset_count, queries_count, wanted_count);
                 test_exact_search<bf16_t>(dataset_count, queries_count, wanted_count);
+                test_exact_search<f16_t>(dataset_count, queries_count, wanted_count);
+                test_exact_search<e5m2_t>(dataset_count, queries_count, wanted_count);
+                test_exact_search<e4m3_t>(dataset_count, queries_count, wanted_count);
             }
 
     // Make sure the initializers and the algorithms can work with inadequately small values.
@@ -1235,12 +1241,16 @@ int main(int, char**) {
     std::printf("Testing common cases\n");
     for (std::size_t collection_size : {10, 500})
         for (std::size_t dimensions : {97, 256}) {
-            std::printf("- Indexing %zu vectors with cos: <float, std::int64_t, slot32_t> \n", collection_size);
-            test_cosine<float, std::int64_t, slot32_t>(collection_size, dimensions);
-            std::printf("- Indexing %zu vectors with cos: <float, std::int64_t, uint40_t> \n", collection_size);
-            test_cosine<float, std::int64_t, uint40_t>(collection_size, dimensions);
+            std::printf("- Indexing %zu vectors with cos: <f32_t, std::int64_t, slot32_t> \n", collection_size);
+            test_cosine<f32_t, std::int64_t, slot32_t>(collection_size, dimensions);
+            std::printf("- Indexing %zu vectors with cos: <f32_t, std::int64_t, uint40_t> \n", collection_size);
+            test_cosine<f32_t, std::int64_t, uint40_t>(collection_size, dimensions);
             std::printf("- Indexing %zu vectors with cos: <bf16, std::int64_t, uint40_t> \n", collection_size);
             test_cosine<bf16_t, std::int64_t, uint40_t>(collection_size, dimensions);
+            std::printf("- Indexing %zu vectors with cos: <e5m2, std::int64_t, uint40_t> \n", collection_size);
+            test_cosine<e5m2_t, std::int64_t, uint40_t>(collection_size, dimensions);
+            std::printf("- Indexing %zu vectors with cos: <e4m3, std::int64_t, uint40_t> \n", collection_size);
+            test_cosine<e4m3_t, std::int64_t, uint40_t>(collection_size, dimensions);
         }
 
     // Test with binary vectors

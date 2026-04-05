@@ -45,8 +45,10 @@ from usearch.index import (
     "quantization",
     [
         ScalarKind.F32,
-        ScalarKind.F16,
         ScalarKind.BF16,
+        ScalarKind.F16,
+        ScalarKind.E5M2,
+        ScalarKind.E4M3,
         ScalarKind.I8,
     ],
 )

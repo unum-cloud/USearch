@@ -991,12 +991,14 @@ PYBIND11_MODULE(compiled, m) {
     m.attr("DEFAULT_EXPANSION_SEARCH") = py::int_(default_expansion_search());
 
     m.attr("USES_OPENMP") = py::int_(USEARCH_USE_OPENMP);
-    m.attr("USES_FP16LIB") = py::int_(USEARCH_USE_FP16LIB);
-    m.attr("USES_SIMSIMD") = py::int_(USEARCH_USE_SIMSIMD);
-#if USEARCH_USE_SIMSIMD
-    m.attr("USES_SIMSIMD_DYNAMIC_DISPATCH") = py::int_(simsimd_uses_dynamic_dispatch());
+    m.attr("USES_NUMKONG") = py::int_(USEARCH_USE_NUMKONG);
+    m.attr("USES_SIMSIMD") = py::int_(USEARCH_USE_NUMKONG); // backwards compatibility
+#if USEARCH_USE_NUMKONG
+    m.attr("USES_NUMKONG_DYNAMIC_DISPATCH") = py::int_(nk_uses_dynamic_dispatch());
+    m.attr("USES_SIMSIMD_DYNAMIC_DISPATCH") = py::int_(nk_uses_dynamic_dispatch()); // backwards compatibility
 #else
-    m.attr("USES_SIMSIMD_DYNAMIC_DISPATCH") = py::int_(0);
+    m.attr("USES_NUMKONG_DYNAMIC_DISPATCH") = py::int_(0);
+    m.attr("USES_SIMSIMD_DYNAMIC_DISPATCH") = py::int_(0); // backwards compatibility
 #endif
 
     m.attr("VERSION_MAJOR") = py::int_(USEARCH_VERSION_MAJOR);
@@ -1034,7 +1036,8 @@ PYBIND11_MODULE(compiled, m) {
         .value("F64", scalar_kind_t::f64_k)
         .value("F32", scalar_kind_t::f32_k)
         .value("F16", scalar_kind_t::f16_k)
-        .value("F8", scalar_kind_t::f8_k)
+        .value("E5M2", scalar_kind_t::e5m2_k)
+        .value("E4M3", scalar_kind_t::e4m3_k)
         .value("U64", scalar_kind_t::u64_k)
         .value("U32", scalar_kind_t::u32_k)
         .value("U16", scalar_kind_t::u16_k)
@@ -1095,6 +1098,9 @@ PYBIND11_MODULE(compiled, m) {
         py::arg("ndim") = 0,                          //
         py::arg("metric_kind") = metric_kind_t::cos_k //
     );
+
+    m.def("hardware_acceleration_compiled", &hardware_acceleration_compiled);
+    m.def("hardware_acceleration_available", &hardware_acceleration_available);
 
     auto i = py::class_<dense_index_py_t, std::shared_ptr<dense_index_py_t>>(m, "Index");
 
@@ -1236,7 +1242,8 @@ PYBIND11_MODULE(compiled, m) {
     i.def_property_readonly( //
         "dtype", [](dense_index_py_t const& index) -> scalar_kind_t { return index.scalar_kind(); });
 
-    i.def_property_readonly("serialized_length", [](dense_index_py_t const& self) -> std::size_t { return self.serialized_length({}); });
+    i.def_property_readonly("serialized_length",
+                            [](dense_index_py_t const& self) -> std::size_t { return self.serialized_length({}); });
     i.def_property_readonly("memory_usage", &dense_index_py_t::memory_usage);
 
     i.def_property("expansion_add", &dense_index_py_t::expansion_add, &dense_index_py_t::change_expansion_add);
