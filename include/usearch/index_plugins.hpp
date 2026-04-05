@@ -403,10 +403,31 @@ inline float f16_to_f32(std::uint16_t u16) noexcept {
     nk_f16_to_f32_serial((nk_f16_t const*)&u16, &result);
     return result;
 #else
-#warning "It's recommended to use NumKong for half-precision numerics"
-    _Float16 f16;
-    std::memcpy(&f16, &u16, sizeof(std::uint16_t));
-    return float(f16);
+    std::uint32_t sign = (u16 >> 15) & 1;
+    std::uint32_t exponent = (u16 >> 10) & 0x1F;
+    std::uint32_t mantissa = u16 & 0x03FF;
+    union {
+        float f;
+        std::uint32_t u;
+    } conv;
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            conv.u = sign << 31;
+        } else {
+            // Denormal: use FPU normalization trick
+            union {
+                float f;
+                std::uint32_t u;
+            } temp;
+            temp.f = (float)mantissa;
+            conv.u = (sign << 31) | (temp.u - 0x0C000000u);
+        }
+    } else if (exponent == 31) {
+        conv.u = (sign << 31) | 0x7F800000u | (mantissa << 13);
+    } else {
+        conv.u = (sign << 31) | ((exponent + 112u) << 23) | (mantissa << 13);
+    }
+    return conv.f;
 #endif
 }
 
@@ -421,11 +442,59 @@ inline std::uint16_t f32_to_f16(float f32) noexcept {
     std::memcpy(&u16, &result, sizeof(u16));
     return u16;
 #else
-#warning "It's recommended to use NumKong for half-precision numerics"
-    _Float16 f16 = _Float16(f32);
-    std::uint16_t u16;
-    std::memcpy(&u16, &f16, sizeof(std::uint16_t));
-    return u16;
+    union {
+        float f;
+        std::uint32_t u;
+    } conv;
+    conv.f = f32;
+    std::uint32_t sign = (conv.u >> 31) & 1;
+    std::uint32_t exponent = (conv.u >> 23) & 0xFF;
+    std::uint32_t mantissa = conv.u & 0x007FFFFFu;
+    std::uint16_t result;
+    if (exponent == 0) {
+        result = (std::uint16_t)(sign << 15);
+    } else if (exponent == 255) {
+        std::uint16_t payload = (std::uint16_t)(mantissa >> 13);
+        if (mantissa != 0 && payload == 0)
+            payload = 1;
+        result = (std::uint16_t)((sign << 15) | 0x7C00 | payload);
+    } else if (exponent <= 102) {
+        if (exponent == 102 && mantissa > 0)
+            result = (std::uint16_t)((sign << 15) | 0x0001);
+        else
+            result = (std::uint16_t)(sign << 15);
+    } else if (exponent < 113) {
+        // Denormal range with RNE rounding
+        unsigned shift = 113 - exponent;
+        unsigned shift_amount = shift + 13;
+        std::uint64_t full_mant = 0x00800000ULL | mantissa;
+        std::uint32_t mant = (std::uint32_t)(full_mant >> shift_amount);
+        std::uint32_t round_bit = (std::uint32_t)((full_mant >> (shift_amount - 1)) & 1);
+        std::uint64_t sticky_bits = full_mant & ((1ULL << (shift_amount - 1)) - 1);
+        if (round_bit && (sticky_bits || (mant & 1)))
+            mant++;
+        result = (std::uint16_t)((sign << 15) | mant);
+    } else if (exponent < 143) {
+        // Normal range with RNE rounding
+        std::uint32_t f16_exp = exponent - 112;
+        std::uint32_t f16_mant = mantissa >> 13;
+        std::uint32_t round_bit = (mantissa >> 12) & 1;
+        std::uint32_t sticky_bits = mantissa & 0xFFF;
+        if (round_bit && (sticky_bits || (f16_mant & 1))) {
+            f16_mant++;
+            if (f16_mant > 0x3FF) {
+                f16_mant = 0;
+                f16_exp++;
+            }
+        }
+        if (f16_exp > 30)
+            result = (std::uint16_t)((sign << 15) | 0x7C00);
+        else
+            result = (std::uint16_t)((sign << 15) | (f16_exp << 10) | f16_mant);
+    } else {
+        result = (std::uint16_t)((sign << 15) | 0x7C00);
+    }
+    return result;
 #endif
 }
 
