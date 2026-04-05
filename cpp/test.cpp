@@ -1127,20 +1127,20 @@ void test_filtered_search() {
     {
         auto predicate = [](index_dense_t::key_t key) { return key != 0; };
         auto results = index.filtered_search(vector_of_vectors[0].data(), 10, predicate);
-        expect_eq(10, results.size()); // ! Should not contain 0
+        expect_eq(10u, results.size()); // ! Should not contain 0
         for (std::size_t i = 0; i != results.size(); ++i)
             expect(0 != results[i].member.key);
     }
     {
         auto predicate = [](index_dense_t::key_t) { return false; };
         auto results = index.filtered_search(vector_of_vectors[0].data(), 10, predicate);
-        expect_eq(0, results.size()); // ! Should not contain 0
+        expect_eq(0u, results.size()); // ! Should not contain 0
     }
     {
         auto predicate = [](index_dense_t::key_t key) { return key == 10; };
         auto results = index.filtered_search(vector_of_vectors[0].data(), 10, predicate);
-        expect_eq(1, results.size()); // ! Should not contain 0
-        expect_eq(10, results[0].member.key);
+        expect_eq(1u, results.size()); // ! Should not contain 0
+        expect_eq(index_dense_t::key_t(10), results[0].member.key);
     }
 }
 

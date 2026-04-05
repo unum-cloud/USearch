@@ -2195,7 +2195,7 @@ class index_gt {
                     misaligned_store<compressed_slot_t>(tape_ + shift(i - removed_count), slot);
                 }
             }
-            misaligned_store<neighbors_count_t>(tape_, old_count - removed_count);
+            misaligned_store<neighbors_count_t>(tape_, static_cast<neighbors_count_t>(old_count - removed_count));
             return removed_count;
         }
     };
@@ -3192,7 +3192,7 @@ class index_gt {
                 continue;
 
             ++result.nodes;
-            result.edges += neighbors_(node, level).size();
+            result.edges += neighbors_(node, static_cast<level_t>(level)).size();
             result.allocated_bytes += node_head_bytes_() + neighbors_bytes;
         }
 
@@ -4477,7 +4477,7 @@ static join_result_t join(               //
         return result.failed("Can't join with itself, consider copying");
 
     if (config.max_proposals == 0)
-        config.max_proposals = std::log(men.size()) + executor.size();
+        config.max_proposals = static_cast<std::size_t>(std::log(men.size())) + executor.size();
 
     using proposals_count_t = std::uint16_t;
     config.max_proposals = (std::min)(men.size(), config.max_proposals);
