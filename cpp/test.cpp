@@ -664,7 +664,7 @@ void test_cosine(std::size_t collection_size, std::size_t dimensions) {
     vector_of_vectors_t vector_of_vectors(collection_size);
     for (auto& vector : vector_of_vectors) {
         vector.resize(dimensions);
-        std::generate(vector.begin(), vector.end(), [=] { return float(std::rand()) / float(INT_MAX); });
+        std::generate(vector.begin(), vector.end(), [=] { return float(std::rand()) / float(RAND_MAX); });
     }
 
     struct metric_t {
@@ -1199,7 +1199,7 @@ int main(int, char**) {
         std::vector<float> vectors(vectors_count * dimensions), centroids(centroids_count * dimensions);
         matrix_slice_gt<float const> vectors_slice(vectors.data(), dimensions, vectors_count);
         matrix_slice_gt<float> centroids_slice(centroids.data(), dimensions, centroids_count);
-        std::generate(vectors.begin(), vectors.end(), [] { return float(std::rand()) / float(INT_MAX); });
+        std::generate(vectors.begin(), vectors.end(), [] { return float(std::rand()) / float(RAND_MAX); });
         std::vector<std::size_t> assignments(vectors_count);
         std::vector<distance_punned_t> distances(vectors_count);
         auto clustering_result = clustering(vectors_slice, centroids_slice, {assignments.data(), assignments.size()},
