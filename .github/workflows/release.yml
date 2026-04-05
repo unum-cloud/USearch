@@ -836,7 +836,7 @@ jobs:
         # NPM installation fails spuriously all the time
       - name: Install Dependencies
         run: |
-          npm ci --ignore-scripts || npm ci --ignore-scripts || npm ci --ignore-scripts
+          npm install --ignore-scripts
       - run: npm run prebuild-single
         if: matrix.os != 'macos-14'
       - run: npm run prebuild-darwin-x64+arm64
@@ -896,7 +896,7 @@ jobs:
         # NPM installation fails spuriously all the time
       - name: Install Dependencies
         run: |
-          npm ci --ignore-scripts || npm ci --ignore-scripts || npm ci --ignore-scripts
+          npm install --ignore-scripts
 
       - name: Build the JS from TS
         run: npm run build-js
@@ -1236,7 +1236,7 @@ jobs:
         # NPM installation fails spuriously all the time
       - name: Build CJS JS
         run: |
-          npm ci --ignore-scripts || npm ci --ignore-scripts || npm ci --ignore-scripts
+          npm install --ignore-scripts
           npm run build-js
       - name: Build documentation
         run: cd docs && doxygen conf.dox && make html

@@ -100,7 +100,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
-        run: npm ci --skip-scripts
+        run: npm install --skip-scripts
       - name: Build JavaScript
         run: npm run build-js
       - name: Test JavaScript
@@ -166,7 +166,7 @@ jobs:
         run: git submodule update --init --recursive
 
         # C/C++
-              - name: Build C/C++
+      - name: Build C/C++
         run: |
           sudo apt update
           sudo apt install -y cmake build-essential libjemalloc-dev clang-20
@@ -183,7 +183,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
-        run: npm ci --skip-scripts
+        run: npm install --skip-scripts
       - name: Build JavaScript
         run: npm run build-js
       - name: Test JavaScript
@@ -258,7 +258,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
-        run: npm ci --skip-scripts
+        run: npm install --skip-scripts
       - name: Build JavaScript
         run: npm run build-js
       - name: Test JavaScript
@@ -349,7 +349,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
-        run: npm ci --skip-scripts
+        run: npm install --skip-scripts
       - name: Build JavaScript
         run: npm run build-js
       - name: Test JavaScript
