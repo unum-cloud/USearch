@@ -873,114 +873,14 @@ JNIEXPORT jint JNICALL Java_cloud_unum_usearch_Index_c_1search_1into_1i8_1buffer
     }
 }
 
-JNIEXPORT jobjectArray JNICALL Java_cloud_unum_usearch_Index_c_1hardware_1acceleration_1available(JNIEnv* env, jclass) {
-#if USEARCH_USE_SIMSIMD
-    simsimd_capability_t caps = simsimd_capabilities();
-
-    // Define capability mappings
-    struct {
-        simsimd_capability_t cap;
-        const char* name;
-    } capabilities[] = {
-        {simsimd_cap_serial_k, "serial"},     {simsimd_cap_haswell_k, "haswell"},
-        {simsimd_cap_skylake_k, "skylake"},   {simsimd_cap_ice_k, "ice"},
-        {simsimd_cap_genoa_k, "genoa"},       {simsimd_cap_sapphire_k, "sapphire"},
-        {simsimd_cap_turin_k, "turin"},       {simsimd_cap_sierra_k, "sierra"},
-        {simsimd_cap_neon_k, "neon"},         {simsimd_cap_neon_i8_k, "neon_i8"},
-        {simsimd_cap_neon_f16_k, "neon_f16"}, {simsimd_cap_neon_bf16_k, "neon_bf16"},
-        {simsimd_cap_sve_k, "sve"},           {simsimd_cap_sve_i8_k, "sve_i8"},
-        {simsimd_cap_sve_f16_k, "sve_f16"},   {simsimd_cap_sve_bf16_k, "sve_bf16"},
-        {simsimd_cap_sve2_k, "sve2"},         {simsimd_cap_sve2p1_k, "sve2p1"},
-    };
-    int const cap_count = sizeof(capabilities) / sizeof(capabilities[0]);
-
-    // Count supported capabilities
-    int supported_count = 0;
-    for (int i = 0; i < cap_count; i++)
-        if (caps & capabilities[i].cap)
-            supported_count++;
-
-    // Create Java string array
-    jclass stringClass = env->FindClass("java/lang/String");
-    jobjectArray result = env->NewObjectArray(supported_count, stringClass, nullptr);
-
-    int index = 0;
-    for (int i = 0; i < cap_count; i++) {
-        if (caps & capabilities[i].cap) {
-            jstring capName = env->NewStringUTF(capabilities[i].name);
-            env->SetObjectArrayElement(result, index++, capName);
-            env->DeleteLocalRef(capName);
-        }
-    }
-
-    return result;
-#else
-    // If SimSIMD is not enabled, return only serial
-    jclass stringClass = env->FindClass("java/lang/String");
-    jobjectArray result = env->NewObjectArray(1, stringClass, nullptr);
-    jstring serialCap = env->NewStringUTF("serial");
-    env->SetObjectArrayElement(result, 0, serialCap);
-    env->DeleteLocalRef(serialCap);
-    return result;
-#endif
+JNIEXPORT jstring JNICALL Java_cloud_unum_usearch_Index_c_1hardware_1acceleration_1available_1string(JNIEnv* env,
+                                                                                                     jclass) {
+    return env->NewStringUTF(hardware_acceleration_available());
 }
 
-JNIEXPORT jobjectArray JNICALL Java_cloud_unum_usearch_Index_c_1hardware_1acceleration_1compiled(JNIEnv* env, jclass) {
-#if USEARCH_USE_SIMSIMD
-    // Define compile-time capabilities based on preprocessor macros
-    struct {
-        int compiled;
-        char const* name;
-    } compiled_capabilities[] = {
-        {1, "serial"}, // Always available
-        {SIMSIMD_TARGET_HASWELL, "haswell"},
-        {SIMSIMD_TARGET_SKYLAKE, "skylake"},
-        {SIMSIMD_TARGET_ICE, "ice"},
-        {SIMSIMD_TARGET_GENOA, "genoa"},
-        {SIMSIMD_TARGET_SAPPHIRE, "sapphire"},
-        {SIMSIMD_TARGET_TURIN, "turin"},
-        {SIMSIMD_TARGET_SIERRA, "sierra"},
-        {SIMSIMD_TARGET_NEON, "neon"},
-        {SIMSIMD_TARGET_NEON_I8, "neon_i8"},
-        {SIMSIMD_TARGET_NEON_F16, "neon_f16"},
-        {SIMSIMD_TARGET_NEON_BF16, "neon_bf16"},
-        {SIMSIMD_TARGET_SVE, "sve"},
-        {SIMSIMD_TARGET_SVE_I8, "sve_i8"},
-        {SIMSIMD_TARGET_SVE_F16, "sve_f16"},
-        {SIMSIMD_TARGET_SVE_BF16, "sve_bf16"},
-        {SIMSIMD_TARGET_SVE2, "sve2"},
-    };
-    int const cap_count = sizeof(compiled_capabilities) / sizeof(compiled_capabilities[0]);
-
-    // Count compiled capabilities
-    int compiled_count = 0;
-    for (int i = 0; i < cap_count; i++)
-        if (compiled_capabilities[i].compiled)
-            compiled_count++;
-
-    // Create Java string array
-    jclass stringClass = env->FindClass("java/lang/String");
-    jobjectArray result = env->NewObjectArray(compiled_count, stringClass, nullptr);
-
-    int index = 0;
-    for (int i = 0; i < cap_count; i++) {
-        if (compiled_capabilities[i].compiled) {
-            jstring capName = env->NewStringUTF(compiled_capabilities[i].name);
-            env->SetObjectArrayElement(result, index++, capName);
-            env->DeleteLocalRef(capName);
-        }
-    }
-
-    return result;
-#else
-    // If SimSIMD is not enabled, return only serial
-    jclass stringClass = env->FindClass("java/lang/String");
-    jobjectArray result = env->NewObjectArray(1, stringClass, nullptr);
-    jstring serialCap = env->NewStringUTF("serial");
-    env->SetObjectArrayElement(result, 0, serialCap);
-    env->DeleteLocalRef(serialCap);
-    return result;
-#endif
+JNIEXPORT jstring JNICALL Java_cloud_unum_usearch_Index_c_1hardware_1acceleration_1compiled_1string(JNIEnv* env,
+                                                                                                    jclass) {
+    return env->NewStringUTF(hardware_acceleration_compiled());
 }
 
 JNIEXPORT jstring JNICALL Java_cloud_unum_usearch_Index_c_1library_1version(JNIEnv* env, jclass) {
@@ -991,8 +891,8 @@ JNIEXPORT jstring JNICALL Java_cloud_unum_usearch_Index_c_1library_1version(JNIE
 }
 
 JNIEXPORT jboolean JNICALL Java_cloud_unum_usearch_Index_c_1uses_1dynamic_1dispatch(JNIEnv* env, jclass) {
-#if USEARCH_USE_SIMSIMD
-    return simsimd_uses_dynamic_dispatch() ? JNI_TRUE : JNI_FALSE;
+#if USEARCH_USE_NUMKONG
+    return nk_uses_dynamic_dispatch() ? JNI_TRUE : JNI_FALSE;
 #else
     return JNI_FALSE;
 #endif

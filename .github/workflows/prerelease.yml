@@ -38,10 +38,8 @@ jobs:
           version-file: "VERSION"
           update-version-in: |
             package.json:"version": "(\d+\.\d+\.\d+)"
-            package-lock.json:"usearch",\n\s+"version": "(\d+\.\d+\.\d+)"
             CITATION.cff:^version: (\d+\.\d+\.\d+)
             Cargo.toml:^version = "(\d+\.\d+\.\d+)"
-            Cargo.lock:name = "usearch"\nversion = "(\d+\.\d+\.\d+)"
             wasmer.toml:^version = "(\d+\.\d+\.\d+)"
             conanfile.py:version = "(\d+\.\d+\.\d+)"
             java/README.md:usearchVersion = '(\d+\.\d+\.\d+)'
@@ -75,7 +73,7 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev gcc-12 g++-12
-          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=1 -D USEARCH_USE_OPENMP=1 -D USEARCH_USE_SIMSIMD=1 -D USEARCH_USE_JEMALLOC=1
+          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=1 -D USEARCH_USE_OPENMP=1 -D USEARCH_USE_NUMKONG=1 -D USEARCH_USE_JEMALLOC=1
           cmake --build build_artifacts --config RelWithDebInfo
       - name: Test C++
         run: build_artifacts/test_cpp
@@ -102,7 +100,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
-        run: npm ci --skip-scripts
+        run: npm install --skip-scripts
       - name: Build JavaScript
         run: npm run build-js
       - name: Test JavaScript
@@ -155,11 +153,11 @@ jobs:
         working-directory: ${{ github.workspace }}/golang/
 
   test_ubuntu_clang:
-    name: Ubuntu (Clang 18)
+    name: Ubuntu (Clang 20)
     runs-on: ubuntu-24.04
     env:
-      CC: clang
-      CXX: clang++
+      CC: clang-20
+      CXX: clang++-20
 
     steps:
       - name: Checkout
@@ -168,12 +166,11 @@ jobs:
         run: git submodule update --init --recursive
 
         # C/C++
-        # Clang 16 isn't available from default repos on Ubuntu 22.04, so we have to install it manually
       - name: Build C/C++
         run: |
           sudo apt update
-          sudo apt install -y cmake build-essential libjemalloc-dev clang
-          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=1 -D USEARCH_USE_OPENMP=0 -D USEARCH_USE_SIMSIMD=1 -D USEARCH_USE_JEMALLOC=1
+          sudo apt install -y cmake build-essential libjemalloc-dev clang-20
+          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=1 -D USEARCH_USE_OPENMP=0 -D USEARCH_USE_NUMKONG=1 -D USEARCH_USE_JEMALLOC=1
           cmake --build build_artifacts --config RelWithDebInfo
       - name: Test C++
         run: build_artifacts/test_cpp
@@ -186,7 +183,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
-        run: npm ci --skip-scripts
+        run: npm install --skip-scripts
       - name: Build JavaScript
         run: npm run build-js
       - name: Test JavaScript
@@ -261,7 +258,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
-        run: npm ci --skip-scripts
+        run: npm install --skip-scripts
       - name: Build JavaScript
         run: npm run build-js
       - name: Test JavaScript
@@ -352,7 +349,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
-        run: npm ci --skip-scripts
+        run: npm install --skip-scripts
       - name: Build JavaScript
         run: npm run build-js
       - name: Test JavaScript
@@ -435,7 +432,8 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
-        python-version: ["38", "39", "310", "311", "312", "313", "313t", "314", "314t"]
+        python-version:
+          ["38", "39", "310", "311", "312", "313", "313t", "314", "314t"]
     steps:
       - name: Checkout
         uses: actions/checkout@v6

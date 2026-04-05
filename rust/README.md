@@ -15,7 +15,7 @@ This will add a USearch dependency to your `Cargo.toml` file.
 usearch = "..."
 ```
 
-By default, [SimSIMD](https://github.com/ashvardanian/simsimd) is used to provide dynamic dispatch for SIMD operations.
+By default, [NumKong](https://github.com/ashvardanian/numkong) is used to provide dynamic dispatch for SIMD operations.
 You can, however, override that by specifying custom features in your `Cargo.toml` file.
 To disable all features, use the following configuration:
 
@@ -28,7 +28,7 @@ To enable specific features, use the following configuration:
 
 ```toml
 [dependencies]
-usearch = { version = "...", features = ["simsimd", "openmp", "fp16lib"] }
+usearch = { version = "...", features = ["numkong", "openmp", "fp16lib"] }
 ```
 
 OpenMP (`openmp`) will use the OpenMP runtime for parallelism.
@@ -91,7 +91,7 @@ assert!(index.view_from_buffer(&serialization_buffer).is_ok());
 
 ## Metrics
 
-USearch comes pre-packaged with SimSIMD, bringing over 100 SIMD-accelerated distance kernels for x86 and ARM architectures.
+USearch comes pre-packaged with NumKong, bringing over 100 SIMD-accelerated distance kernels for x86 and ARM architectures.
 That includes:
 
 - `MetricKind::IP` - Inner Product metric, defined as `IP = 1 - sum(a[i] * b[i])`.
@@ -111,7 +111,7 @@ To use a custom metric with USearch, define a function that matches the expected
 Let's say you are implementing a weighted distance function to search through joint embeddings of images and textual descriptions of some products in a catalog, taking some [UForm](https://github.com/unum-cloud/uform) or CLIP-like models.
 
 ```rust
-use simsimd::SpatialSimilarity;
+use numkong::SpatialSimilarity;
 
 let image_dimensions: usize = 768;
 let text_dimensions: usize = 512;

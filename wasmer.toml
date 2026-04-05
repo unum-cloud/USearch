@@ -1,11 +1,11 @@
 [package]
-name = "unum/usearch"
-version = "2.24.0"
 description = "Smaller & Faster Single-File Vector Search Engine from Unum"
+homepage = "https://unum-cloud.github.io/USearch/javascript"
 license = "Apache-2.0"
+name = "unum/usearch"
 readme = "README.md"
-repository = "https://github.com/unum-cloud/usearch"
-homepage = "https://unum-cloud.github.io/usearch/javascript"
+repository = "https://github.com/unum-cloud/USearch"
+version = "2.24.0"
 
 [[module]]
 name = "index"
