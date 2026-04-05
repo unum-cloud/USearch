@@ -295,7 +295,7 @@ struct running_stats_printer_t {
         std::size_t count = progress.load();
         timestamp_t time = std::chrono::high_resolution_clock::now();
         std::size_t duration = std::chrono::duration_cast<std::chrono::nanoseconds>(time - start_time).count();
-        float vectors_per_second = count * 1e9 / duration;
+        float vectors_per_second = static_cast<float>(count * 1e9 / duration);
         std::printf("\r\33[2K100 %% completed, %.0f vectors/s\n", vectors_per_second);
     }
 
@@ -321,7 +321,7 @@ struct running_stats_printer_t {
         timestamp_t time_new = std::chrono::high_resolution_clock::now();
         std::size_t duration =
             std::chrono::duration_cast<std::chrono::nanoseconds>(time_new - last_printed_time).count();
-        float vectors_per_second = count_new * 1e9 / duration;
+        float vectors_per_second = static_cast<float>(count_new * 1e9 / duration);
 
         std::printf("\r%3.3f%% [%.*s%*s] %.0f vectors/s, finished %zu/%zu", percentage * 100.f, left_pad, bars_k,
                     right_pad, "", vectors_per_second, progress, total);
@@ -476,7 +476,7 @@ void handler(int sig) {
             name = "<unknown>";
         }
         DWORD bytes_written;
-        WriteFile(STDERR_FILENO, name, std::strlen(name), &bytes_written, NULL);
+        WriteFile(STDERR_FILENO, name, static_cast<DWORD>(std::strlen(name)), &bytes_written, NULL);
         WriteFile(STDERR_FILENO, "\n", 1, &bytes_written, NULL);
     }
     free(symbol);
@@ -689,7 +689,7 @@ int main(int argc, char** argv) {
     // to better estimate statistics between tasks batches, without having to recreate
     // the threads.
     omp_set_dynamic(true);
-    omp_set_num_threads(args.threads);
+    omp_set_num_threads(static_cast<int>(args.threads));
     std::printf("- OpenMP threads: %d\n", omp_get_max_threads());
 #endif
 
