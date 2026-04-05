@@ -17,6 +17,13 @@ fn build_usearch() -> Result<(), Box<dyn Error>> {
     // Check for optional features
     if cfg!(feature = "openmp") {
         build.define("USEARCH_USE_OPENMP", "1");
+        let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+        if target_os == "windows" {
+            build.flag_if_supported("/openmp");
+        } else {
+            build.flag_if_supported("-fopenmp");
+            println!("cargo:rustc-link-lib=dylib=omp");
+        }
     } else {
         build.define("USEARCH_USE_OPENMP", "0");
     }
