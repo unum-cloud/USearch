@@ -181,7 +181,6 @@ include_dirs = [
 install_requires = [
     "numpy",
     "tqdm",
-    "ucall",
 ]
 if use_numkong:
     include_dirs.append("numkong/include")
