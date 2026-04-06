@@ -1325,55 +1325,67 @@ impl Index {
         self.inner.serialized_length()
     }
 
-    /// Removes the vector associated with the given key from the index.
+    /// Removes all vectors associated with the given key from the index.
+    /// In a multi-index, a single key may map to several vectors; this removes all of them.
     ///
     /// # Arguments
     ///
-    /// * `key` - The key of the vector to be removed.
+    /// * `key` - The key of the vector(s) to be removed.
     ///
     /// # Returns
     ///
-    /// `true` if the vector is successfully removed, `false` otherwise.
+    /// The number of vectors that were removed. Zero when the key is absent.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// index.add(42, &vec)?;
+    /// assert_eq!(index.remove(42)?, 1);
+    /// assert_eq!(index.remove(42)?, 0); // already gone
+    /// ```
     pub fn remove(self: &Index, key: Key) -> Result<usize, cxx::Exception> {
         self.inner.remove(key)
     }
 
-    /// Renames the vector under a specific key.
+    /// Reassigns every vector stored under `from` to the new key `to`.
+    /// The original key is freed and subsequent lookups should use `to`.
     ///
     /// # Arguments
     ///
-    /// * `from` - The key of the vector to be renamed.
-    /// * `to` - The new name.
+    /// * `from` - The current key.
+    /// * `to`   - The key that will replace it.
     ///
     /// # Returns
     ///
-    /// `true` if the vector is renamed, `false` otherwise.
+    /// The number of vectors that were reassigned. Zero when `from` is absent.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// index.add(1, &vec)?;
+    /// assert_eq!(index.rename(1, 2)?, 1);
+    /// assert!(!index.contains(1));
+    /// assert!(index.contains(2));
+    /// ```
     pub fn rename(self: &Index, from: Key, to: Key) -> Result<usize, cxx::Exception> {
         self.inner.rename(from, to)
     }
 
-    /// Checks if the index contains a vector with a specified key.
+    /// Checks whether at least one vector with the given key exists in the index.
     ///
     /// # Arguments
     ///
-    /// * `key` - The key to be checked.
-    ///
-    /// # Returns
-    ///
-    /// `true` if the index contains the vector with the given key, `false` otherwise.
+    /// * `key` - The key to look up.
     pub fn contains(self: &Index, key: Key) -> bool {
         self.inner.contains(key)
     }
 
-    /// Count the count of vectors with the same specified key.
+    /// Returns the number of vectors stored under the given key.
+    /// Always 0 or 1 for a unique index; may be greater than 1 when `multi` is enabled.
     ///
     /// # Arguments
     ///
-    /// * `key` - The key to be checked.
-    ///
-    /// # Returns
-    ///
-    /// Number of vectors found.
+    /// * `key` - The key to look up.
     pub fn count(self: &Index, key: Key) -> usize {
         self.inner.count(key)
     }
@@ -1600,7 +1612,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_index_does_not_preallocate_members() {
+    fn new_index_does_not_preallocate_members() {
         let options = IndexOptions {
             dimensions: 8,
             quantization: ScalarKind::F32,
@@ -1614,7 +1626,7 @@ mod tests {
     }
 
     #[test]
-    fn test_index_survives_box_and_arc_moves_after_construction() {
+    fn index_survives_box_and_arc_moves_after_construction() {
         let options = IndexOptions {
             dimensions: 4,
             quantization: ScalarKind::F32,
@@ -1637,7 +1649,7 @@ mod tests {
     }
 
     #[test]
-    fn test_add_get_vector() {
+    fn add_get_vector() {
         let options = IndexOptions {
             dimensions: 5,
             quantization: ScalarKind::F32,
@@ -1671,9 +1683,25 @@ mod tests {
         let mut found = [0.0f32; 6]; // This isn't a multiple of the index's dimensions.
         let result = index.get(1, &mut found);
         assert!(result.is_err());
+
+        // i8 vector type
+        let i8_index = Index::new(&IndexOptions {
+            dimensions: 5,
+            metric: MetricKind::L2sq,
+            quantization: ScalarKind::I8,
+            ..Default::default()
+        })
+        .unwrap();
+        i8_index.reserve(10).unwrap();
+        let i8_vec: [i8; 5] = [10, -20, 30, -40, 50];
+        i8_index.add(1, &i8_vec).unwrap();
+        let mut i8_found = [0i8; 5];
+        assert_eq!(i8_index.get(1, &mut i8_found).unwrap(), 1);
+        assert_eq!(i8_found, i8_vec);
     }
+
     #[test]
-    fn test_search_vector() {
+    fn search_vector() {
         let options = IndexOptions {
             dimensions: 5,
             quantization: ScalarKind::F32,
@@ -1686,18 +1714,24 @@ mod tests {
         let second: [f32; 5] = [0.3, 0.2, 0.4, 0.0, 0.1];
         let too_long: [f32; 6] = [0.3, 0.2, 0.4, 0.0, 0.1, 0.1];
         let too_short: [f32; 4] = [0.3, 0.2, 0.4, 0.0];
+
+        // Search on empty index should return zero results
+        let empty_results = index.search(&first, 10).unwrap();
+        assert_eq!(empty_results.keys.len(), 0);
+
         assert!(index.add(1, &first).is_ok());
         assert!(index.add(2, &second).is_ok());
         assert_eq!(index.size(), 2);
-        //assert!(index.add(3, &too_long).is_err());
-        //assert!(index.add(4, &too_short).is_err());
 
+        // Vectors that were not added - shouldn't be visible!
+        // assert!(index.add(3, &too_long).is_err());
+        // assert!(index.add(4, &too_short).is_err());
         assert!(index.search(&too_long, 1).is_err());
         assert!(index.search(&too_short, 1).is_err());
     }
 
     #[test]
-    fn test_add_remove_vector() {
+    fn add_remove_vector() {
         let options = IndexOptions {
             dimensions: 4,
             metric: MetricKind::IP,
@@ -1720,15 +1754,25 @@ mod tests {
         let id3 = 483367403120624232;
         let id4 = 483367403120624233;
 
+        // Add and verify contains/count
+        assert!(!index.contains(id1));
+        assert_eq!(index.count(id1), 0);
         assert!(index.add(id1, &first).is_ok());
-        let mut found_slice = [0.0f32; 4];
-        assert_eq!(index.get(id1, &mut found_slice).unwrap(), 1);
-        assert!(index.remove(id1).is_ok());
+        assert!(index.contains(id1));
+        assert_eq!(index.count(id1), 1);
 
-        assert!(index.add(id2, &second).is_ok());
+        // Rename id1 → id2 and verify the move
+        assert_eq!(index.rename(id1, id2).unwrap(), 1);
+        assert!(!index.contains(id1));
+        assert!(index.contains(id2));
         let mut found_slice = [0.0f32; 4];
         assert_eq!(index.get(id2, &mut found_slice).unwrap(), 1);
+        assert_eq!(found_slice, first);
+
+        // Remove and verify
         assert!(index.remove(id2).is_ok());
+        assert!(!index.contains(id2));
+        assert_eq!(index.count(id2), 0);
 
         assert!(index.add(id3, &second).is_ok());
         let mut found_slice = [0.0f32; 4];
@@ -1801,9 +1845,17 @@ mod tests {
         assert_eq!(results.keys.len(), 2);
         println!("--------------------------------------------------");
 
-        // Validate serialization
+        let stats = index.memory_stats();
+        assert!(
+            stats.vectors_allocated > 0,
+            "vectors should have allocated memory"
+        );
+
+        // Validate serialization with round-trip content checks
         assert!(index.save("index.rust.usearch").is_ok());
         assert!(index.load("index.rust.usearch").is_ok());
+        let results = index.search(&first, 10).unwrap();
+        assert!(results.keys.contains(&42), "key 42 survives save/load");
         assert!(index.view("index.rust.usearch").is_ok());
 
         // Make sure every function is called at least once
@@ -1817,6 +1869,7 @@ mod tests {
         options.dimensions = 2;
         assert!(new_index(&options).is_ok());
 
+        // Buffer serialization with round-trip content checks
         let mut serialization_buffer = vec![0; index.serialized_length()];
         assert!(index.save_to_buffer(&mut serialization_buffer).is_ok());
 
@@ -1825,14 +1878,34 @@ mod tests {
             .load_from_buffer(&serialization_buffer)
             .is_ok());
         assert_eq!(index.size(), deserialized_index.size());
+        let results = deserialized_index.search(&first, 10).unwrap();
+        assert!(results.keys.contains(&42), "key 42 survives buffer round-trip");
 
-        // reset
+        // Borrow the buffer as a read-only view instead of deserializing
+        let viewed_index = Index::new(&IndexOptions {
+            dimensions: 5,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(unsafe { viewed_index.view_from_buffer(&serialization_buffer) }.is_ok());
+        assert_eq!(viewed_index.size(), index.size());
+        let results = viewed_index.search(&first, 10).unwrap();
+        assert!(results.keys.contains(&42), "key 42 visible via view_from_buffer");
+
+        // After a full reset the index must be reusable from scratch
         assert_ne!(index.memory_usage(), 0);
         assert!(index.reset().is_ok());
         assert_eq!(index.size(), 0);
         assert_eq!(index.memory_usage(), 0);
 
-        // clone
+        assert!(index.reserve(10).is_ok());
+        assert!(index.add(100, &first).is_ok());
+        assert!(index.add(101, &second).is_ok());
+        assert_eq!(index.size(), 2);
+        let results = index.search(&first, 10).unwrap();
+        assert_eq!(results.keys.len(), 2);
+
+        // Clone
         options.metric = MetricKind::Haversine;
         let mut opts = options.clone();
         assert_eq!(opts.metric, options.metric);
@@ -1844,7 +1917,7 @@ mod tests {
     }
 
     #[test]
-    fn test_search_with_stateless_filter() {
+    fn search_with_stateless_filter() {
         let options = IndexOptions {
             dimensions: 5,
             ..Default::default()
@@ -1869,7 +1942,7 @@ mod tests {
     }
 
     #[test]
-    fn test_search_with_stateful_filter() {
+    fn search_with_stateful_filter() {
         use std::collections::HashSet;
 
         let options = IndexOptions {
@@ -1900,7 +1973,7 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_distances() {
+    fn zero_distances() {
         let options = IndexOptions {
             dimensions: 8,
             metric: MetricKind::L2sq,
@@ -1930,7 +2003,7 @@ mod tests {
     }
 
     #[test]
-    fn test_exact_search() {
+    fn exact_search() {
         use std::collections::HashSet;
 
         // Create an index with many vectors
@@ -1985,7 +2058,7 @@ mod tests {
     }
 
     #[test]
-    fn test_change_distance_function() {
+    fn change_distance_function() {
         let options = IndexOptions {
             dimensions: 2, // Adjusted for simplicity in creating test vectors
             ..Default::default()
@@ -2013,7 +2086,7 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_vectors_and_hamming_distance() {
+    fn binary_vectors_and_hamming_distance() {
         let index = Index::new(&IndexOptions {
             dimensions: 8,
             metric: MetricKind::Hamming,
@@ -2043,7 +2116,45 @@ mod tests {
     }
 
     #[test]
-    fn test_concurrency() {
+    fn multi_index() {
+        let options = IndexOptions {
+            dimensions: 4,
+            metric: MetricKind::L2sq,
+            quantization: ScalarKind::F32,
+            multi: true,
+            ..Default::default()
+        };
+        let index = Index::new(&options).unwrap();
+        index.reserve(10).unwrap();
+
+        let vec_a: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
+        let vec_b: [f32; 4] = [0.0, 1.0, 0.0, 0.0];
+        let key: Key = 42;
+
+        // Two vectors under the same key
+        index.add(key, &vec_a).unwrap();
+        index.add(key, &vec_b).unwrap();
+        assert_eq!(index.size(), 2);
+        assert_eq!(index.count(key), 2);
+        assert!(index.contains(key));
+
+        // Retrieve both vectors
+        let mut buf = [0.0f32; 8]; // 2 * dims
+        let found = index.get(key, &mut buf).unwrap();
+        assert_eq!(found, 2);
+
+        // Export convenience
+        let mut exported: Vec<f32> = Vec::new();
+        assert_eq!(index.export(key, &mut exported).unwrap(), 2);
+        assert_eq!(exported.len(), 8);
+
+        // Search should find the key
+        let results = index.search(&vec_a, 5).unwrap();
+        assert!(results.keys.contains(&key));
+    }
+
+    #[test]
+    fn concurrency() {
         use fork_union as fu;
         use rand::{RngExt, SeedableRng};
         use rand_chacha::ChaCha8Rng;

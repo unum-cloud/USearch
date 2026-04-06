@@ -14,13 +14,14 @@ requires = [
   "cmake>=3.22",
   "pybind11",
   "numpy",
-  "numkong>=7.4.0",
+  "numkong>=7.4.3",
 ]
 
 [tool.pytest.ini_options]
 addopts = "-ra --showlocals --strict-markers --strict-config -s -x -p no:warnings"
 filterwarnings = ["error"]
 minversion = "6.0"
+testpaths = ["python/scripts"]
 xfail_strict = true
 
 # Avoid running tests, as everything is happening in a super slow container
