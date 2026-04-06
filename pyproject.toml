@@ -14,7 +14,7 @@ requires = [
   "cmake>=3.22",
   "pybind11",
   "numpy",
-  "numkong>=7.4.3",
+  "numkong>=7.4.4",
 ]
 
 [tool.pytest.ini_options]
