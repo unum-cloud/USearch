@@ -208,12 +208,12 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     license="Apache-2.0",
+    license_files=["LICENSE"],
     classifiers=[
         "Development Status :: 5 - Production/Stable",
         "Natural Language :: English",
         "Intended Audience :: Developers",
         "Intended Audience :: Information Technology",
-        "License :: OSI Approved :: Apache Software License",
         "Programming Language :: C++",
         "Programming Language :: Python :: 3 :: Only",
         "Programming Language :: Python :: Implementation :: CPython",
