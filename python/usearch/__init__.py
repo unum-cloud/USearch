@@ -30,11 +30,13 @@ except ImportError:
 
 
 from usearch.compiled import (  # type: ignore[import-not-found]
+    VERSION_MAJOR,
+    VERSION_MINOR,
+    VERSION_PATCH,
     # Default values:
     DEFAULT_CONNECTIVITY,
     DEFAULT_EXPANSION_ADD,
     DEFAULT_EXPANSION_SEARCH,
-    USES_FP16LIB,
     # Dependencies:
     USES_OPENMP,
     USES_NUMKONG,

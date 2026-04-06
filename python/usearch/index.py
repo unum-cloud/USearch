@@ -21,7 +21,6 @@ from usearch.compiled import (  # type: ignore[import-not-found]
     DEFAULT_CONNECTIVITY,
     DEFAULT_EXPANSION_ADD,
     DEFAULT_EXPANSION_SEARCH,
-    USES_FP16LIB,
     USES_OPENMP,
     USES_SIMSIMD,
     MetricKind,
