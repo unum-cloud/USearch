@@ -129,6 +129,10 @@ if is_macos:
     # Simplify debugging, but the normal `-g` may make builds much longer!
     compile_args.append("-g1")
 
+    # NumKong symbols are resolved at runtime via ctypes.CDLL in __init__.py
+    link_args.append("-undefined")
+    link_args.append("dynamic_lookup")
+
     # Linking OpenMP requires additional preparation in CIBuildWheel.
     # We must install `brew install llvm` ahead of time.
     # import subprocess as cli
@@ -148,11 +152,7 @@ if is_windows:
     link_args.append("/FORCE")  # Force linking with missing NumKong symbols
 
 
-import glob
-
 sources = ["python/lib.cpp"]
-if use_numkong:
-    sources.extend(glob.glob("numkong/c/*.c"))
 
 ext_modules = [
     Pybind11Extension(
