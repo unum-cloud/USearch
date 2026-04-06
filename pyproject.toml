@@ -22,6 +22,9 @@ addopts = "-ra --showlocals --strict-markers --strict-config -s -x -p no:warning
 filterwarnings = ["error"]
 minversion = "6.0"
 xfail_strict = true
+testpaths = [
+    "python/tests",
+]
 
 # Avoid running tests, as everything is happening in a super slow container
 # We have already run all the relavent Python tests in `prerelease.yml`
