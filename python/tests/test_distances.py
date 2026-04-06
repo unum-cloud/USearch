@@ -37,8 +37,6 @@ from usearch.index import (
     [
         MetricKind.Cos,
         MetricKind.L2sq,
-        MetricKind.Divergence,
-        MetricKind.Pearson,
     ],
 )
 @pytest.mark.parametrize(

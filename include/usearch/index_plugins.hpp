@@ -2570,7 +2570,7 @@ class metric_punned_t {
         case metric_kind_t::hamming_k: kind = nk_kernel_hamming_k; break;
         case metric_kind_t::tanimoto_k: kind = nk_kernel_jaccard_k; break;
         case metric_kind_t::jaccard_k: kind = nk_kernel_jaccard_k; break;
-        default: break;
+        default: return false;
         }
         nk_dtype_t datatype = scalar_kind_to_nk_dtype(scalar_kind_);
         nk_metric_dense_punned_t simd_metric = NULL;
@@ -2601,6 +2601,12 @@ class metric_punned_t {
         default: metric_routed_ = is_ip ? numkong_routed<nk_f64_t, true>() : numkong_routed<nk_f64_t, false>(); break;
         }
         isa_kind_ = simd_kind;
+
+        // NumKong binary-set kernels (Hamming, Jaccard/Tanimoto) expect the third argument
+        // to be the number of dimensions (bits), not the number of bytes.
+        if (scalar_kind_ == scalar_kind_t::b1x8_k)
+            metric_third_arg_ = dimensions_;
+
         return true;
     }
 

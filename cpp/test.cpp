@@ -664,7 +664,7 @@ void test_cosine(std::size_t collection_size, std::size_t dimensions) {
     vector_of_vectors_t vector_of_vectors(collection_size);
     for (auto& vector : vector_of_vectors) {
         vector.resize(dimensions);
-        std::generate(vector.begin(), vector.end(), [=] { return float(std::rand()) / float(INT_MAX); });
+        std::generate(vector.begin(), vector.end(), [=] { return float(std::rand()) / float(RAND_MAX); });
     }
 
     struct metric_t {
@@ -1127,20 +1127,20 @@ void test_filtered_search() {
     {
         auto predicate = [](index_dense_t::key_t key) { return key != 0; };
         auto results = index.filtered_search(vector_of_vectors[0].data(), 10, predicate);
-        expect_eq(10, results.size()); // ! Should not contain 0
+        expect_eq(10u, results.size()); // ! Should not contain 0
         for (std::size_t i = 0; i != results.size(); ++i)
             expect(0 != results[i].member.key);
     }
     {
         auto predicate = [](index_dense_t::key_t) { return false; };
         auto results = index.filtered_search(vector_of_vectors[0].data(), 10, predicate);
-        expect_eq(0, results.size()); // ! Should not contain 0
+        expect_eq(0u, results.size()); // ! Should not contain 0
     }
     {
         auto predicate = [](index_dense_t::key_t key) { return key == 10; };
         auto results = index.filtered_search(vector_of_vectors[0].data(), 10, predicate);
-        expect_eq(1, results.size()); // ! Should not contain 0
-        expect_eq(10, results[0].member.key);
+        expect_eq(1u, results.size()); // ! Should not contain 0
+        expect_eq(index_dense_t::key_t(10), results[0].member.key);
     }
 }
 
@@ -1199,7 +1199,7 @@ int main(int, char**) {
         std::vector<float> vectors(vectors_count * dimensions), centroids(centroids_count * dimensions);
         matrix_slice_gt<float const> vectors_slice(vectors.data(), dimensions, vectors_count);
         matrix_slice_gt<float> centroids_slice(centroids.data(), dimensions, centroids_count);
-        std::generate(vectors.begin(), vectors.end(), [] { return float(std::rand()) / float(INT_MAX); });
+        std::generate(vectors.begin(), vectors.end(), [] { return float(std::rand()) / float(RAND_MAX); });
         std::vector<std::size_t> assignments(vectors_count);
         std::vector<distance_punned_t> distances(vectors_count);
         auto clustering_result = clustering(vectors_slice, centroids_slice, {assignments.data(), assignments.size()},
