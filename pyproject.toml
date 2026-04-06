@@ -21,7 +21,6 @@ requires = [
 addopts = "-ra --showlocals --strict-markers --strict-config -s -x -p no:warnings"
 filterwarnings = ["error"]
 minversion = "6.0"
-testpaths = ["python/scripts"]
 xfail_strict = true
 testpaths = [
     "python/tests",
