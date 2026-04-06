@@ -3,9 +3,8 @@
 #   - `macos` wheels for x86_64, arm64, and universal2;
 #   - `windows` wheels for AMD64, and ARM64. But not x86.
 #   - `manylinux` and `musllinux` wheels for Linux on x86_64, aarch64. But not i686, ppc64le, s390x;
-#   * for CPython versions from 3.7 to 3.14.
-#   * for PyPy versions from 3.7 to 3.10.
-#   = meaning 7 platforms * 11 Python versions = 77 builds.
+#   * for CPython versions from 3.10 to 3.14 (including free-threaded 3.13t and 3.14t).
+#   = meaning 7 platforms * 7 Python versions = 49 builds.
 [build-system]
 build-backend = "setuptools.build_meta"
 requires = [

@@ -26,7 +26,7 @@ Our primary C++ implementation uses CMake for builds.
 If this is your first experience with CMake, use the following commands to get started:
 
 ```sh
-sudo apt-get update && sudo apt-get install cmake build-essential libjemalloc-dev g++-12 gcc-12 # Ubuntu
+sudo apt-get update && sudo apt-get install cmake build-essential libjemalloc-dev # Ubuntu
 brew install libomp llvm # macOS
 ```
 

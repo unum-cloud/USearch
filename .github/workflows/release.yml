@@ -11,7 +11,7 @@ env:
   DOTNET_VERSION: 8.0.x
   NODE_VERSION: 20
   JAVA_VERSION: 21
-  GO_VERSION: "^1.21.0"
+  GO_VERSION: "^1.22.0"
   ANDROID_NDK_VERSION: 26.3.11579264
   ANDROID_SDK_VERSION: 21
   EMSCRIPTEN_VERSION: 3.1.47
@@ -27,7 +27,7 @@ permissions:
 jobs:
   versioning:
     name: Update Version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -64,7 +64,7 @@ jobs:
   rebase:
     name: Rebase Dev. Branch
     needs: versioning
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout the latest code
         uses: actions/checkout@v6
@@ -87,7 +87,7 @@ jobs:
 
   create_linux_deb_package:
     name: Create Debian Package
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: versioning
     env:
       CC: clang
@@ -312,7 +312,7 @@ jobs:
 
   create_android_library:
     name: Create Android Libraries
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: versioning
     strategy:
       fail-fast: false
@@ -624,7 +624,7 @@ jobs:
 
   create_wasm_library:
     name: Create WASM Libraries
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: versioning
     steps:
       - name: Check out refreshed version
@@ -675,7 +675,7 @@ jobs:
 
   publish_checksums:
     name: Compute Assets Checksums
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs:
       [
         versioning,
@@ -736,7 +736,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
         python-version:
-          ["38", "39", "310", "311", "312", "313", "313t", "314", "314t"]
+          ["310", "311", "312", "313", "313t", "314", "314t"]
     steps:
       - name: Check out refreshed version
         uses: actions/checkout@v6
@@ -770,7 +770,7 @@ jobs:
   publish_python:
     name: Publish Python
     needs: build_wheels
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     environment:
       name: pypi
       url: https://pypi.org/p/usearch
@@ -1068,7 +1068,7 @@ jobs:
   publish_docker:
     name: Publish Docker Image
     needs: versioning
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -1113,7 +1113,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-15, windows-2022]
+        os: [ubuntu-24.04, macos-15, windows-2022]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -1128,11 +1128,11 @@ jobs:
         run: git submodule update --init --recursive
 
       - name: Build C library for Linux
-        if: matrix.os == 'ubuntu-22.04'
+        if: matrix.os == 'ubuntu-24.04'
         run: |
           sudo apt update
-          sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev gcc-12 g++-12
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=1
+          sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev
+          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=1
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_c.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
@@ -1164,7 +1164,7 @@ jobs:
 
   publish_csharp:
     name: Publish C#
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: [build_csharp]
     env:
       SOLUTION: ${{ github.workspace }}/csharp
@@ -1209,7 +1209,7 @@ jobs:
 
   build_docs:
     name: Build Docs
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: ${{ always() }}
     needs:
       [
@@ -1261,7 +1261,7 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: ${{ always() }}
     needs: build_docs
     steps:
@@ -1284,7 +1284,7 @@ jobs:
 
   deploy_docs_vercel:
     name: Deploy Vercel
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: ${{ always() }}
     needs: build_docs
     steps:

@@ -13,7 +13,7 @@ env:
   DOTNET_VERSION: 8.0.x
   NODE_VERSION: 20
   JAVA_VERSION: 21
-  GO_VERSION: "^1.21.0"
+  GO_VERSION: "^1.22.0"
   ANDROID_NDK_VERSION: 26.3.11579264
   ANDROID_SDK_VERSION: 21
 
@@ -72,7 +72,7 @@ jobs:
       - name: Build C/C++
         run: |
           sudo apt update
-          sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev gcc-12 g++-12
+          sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev
           cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=1 -D USEARCH_USE_OPENMP=1 -D USEARCH_USE_NUMKONG=1 -D USEARCH_USE_JEMALLOC=1
           cmake --build build_artifacts --config RelWithDebInfo
       - name: Test C++
@@ -408,7 +408,7 @@ jobs:
 
   build_docker:
     name: Docker
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -436,7 +436,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
         python-version:
-          ["38", "39", "310", "311", "312", "313", "313t", "314", "314t"]
+          ["310", "311", "312", "313", "313t", "314", "314t"]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -459,7 +459,7 @@ jobs:
 
   test_ubuntu_cross_compilation:
     name: Cross Compilation
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       CC: clang
       CXX: clang++
@@ -513,7 +513,7 @@ jobs:
 
   test_android:
     name: Android
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
