@@ -234,7 +234,7 @@ jobs:
         working-directory: ${{ github.workspace }}/csharp
 
   test_macos:
-    name: MacOS
+    name: macOS
     runs-on: macos-15
 
     steps:
@@ -314,7 +314,7 @@ jobs:
         working-directory: ${{ github.workspace }}/csharp
 
   test_windows_x86:
-    name: Windows (x86)
+    name: Windows (X86)
     runs-on: windows-2022
     steps:
       - name: Checkout
@@ -383,7 +383,7 @@ jobs:
         working-directory: ${{ github.workspace }}/csharp
 
   test_windows_arm:
-    name: Windows (Arm)
+    name: Windows (ARM)
     runs-on: windows-2022
     steps:
       - name: Checkout
@@ -407,7 +407,7 @@ jobs:
           Write-Host "ARM64 DLL built successfully"
 
   build_docker:
-    name: Docker
+    name: Build Docker
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -421,44 +421,109 @@ jobs:
           load: true
           push: false
 
-  build_wheels:
-    name: Build Python Wheels
-    runs-on: ${{ matrix.os }}
-    needs:
-      [
-        test_ubuntu_gcc,
-        test_ubuntu_clang,
-        test_macos,
-        test_windows_x86,
-        test_windows_arm,
-      ]
+  build_wheels_linux:
+    name: Build Python Wheels (Linux)
+    runs-on: ubuntu-24.04
+    needs: [test_ubuntu_gcc, test_ubuntu_clang]
     strategy:
       matrix:
-        os: [ubuntu-24.04, macos-14, windows-2022]
-        python-version:
-          ["310", "311", "312", "313", "313t", "314", "314t"]
+        python-version: ["310", "311", "312", "313", "313t", "314", "314t"]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: 3.x
-
-        # We only need QEMU for Linux builds
+          python-version: "3.13"
       - name: Setup QEMU
-        if: matrix.os == 'ubuntu-24.04'
         uses: docker/setup-qemu-action@v3
       - name: Install cibuildwheel
-        run: python -m pip install cibuildwheel
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 3
+          retry_wait_seconds: 10
+          timeout_minutes: 180
+          command: python -m pip install cibuildwheel
       - name: Build wheels
-        run: cibuildwheel --output-dir wheelhouse
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 2
+          retry_wait_seconds: 30
+          timeout_minutes: 180
+          command: cibuildwheel --output-dir wheelhouse
         env:
           CIBW_BUILD: cp${{ matrix.python-version }}-*
-          CIBW_ENABLE: cpython-freethreading # No-GIL 3.13t builds
+          CIBW_ENABLE: cpython-freethreading
+          CIBW_PLATFORM: linux
+
+  build_wheels_macos:
+    name: Build Python Wheels (macOS)
+    runs-on: macos-14
+    needs: [test_macos]
+    strategy:
+      matrix:
+        python-version: ["310", "311", "312", "313", "313t", "314", "314t"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install cibuildwheel
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 3
+          retry_wait_seconds: 10
+          timeout_minutes: 180
+          command: python -m pip install cibuildwheel
+      - name: Build wheels
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 2
+          retry_wait_seconds: 30
+          timeout_minutes: 180
+          command: cibuildwheel --output-dir wheelhouse
+        env:
+          CIBW_BUILD: cp${{ matrix.python-version }}-*
+          CIBW_ENABLE: cpython-freethreading
+          CIBW_PLATFORM: macos
+
+  build_wheels_windows:
+    name: Build Python Wheels (Windows)
+    runs-on: windows-2022
+    needs: [test_windows_x86]
+    strategy:
+      matrix:
+        python-version: ["310", "311", "312", "313", "313t", "314", "314t"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install cibuildwheel
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 3
+          retry_wait_seconds: 10
+          timeout_minutes: 180
+          command: python -m pip install cibuildwheel
+      - name: Build wheels
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 2
+          retry_wait_seconds: 30
+          timeout_minutes: 180
+          command: cibuildwheel --output-dir wheelhouse
+        env:
+          CIBW_BUILD: cp${{ matrix.python-version }}-*
+          CIBW_ENABLE: cpython-freethreading
+          CIBW_PLATFORM: windows
 
   test_ubuntu_cross_compilation:
-    name: Cross Compilation
+    name: Cross-Compile Linux
     runs-on: ubuntu-24.04
     env:
       CC: clang
