@@ -27,18 +27,10 @@ def jit(
 
     from numba import carray, cfunc, types  # type: ignore[import-not-found]
 
-    signature_i8args = types.float32(
-        types.CPointer(types.int8), types.CPointer(types.int8)
-    )
-    signature_f16args = types.float32(
-        types.CPointer(types.float16), types.CPointer(types.float16)
-    )
-    signature_f32args = types.float32(
-        types.CPointer(types.float32), types.CPointer(types.float32)
-    )
-    signature_f64args = types.float32(
-        types.CPointer(types.float64), types.CPointer(types.float64)
-    )
+    signature_i8args = types.float32(types.CPointer(types.int8), types.CPointer(types.int8))
+    signature_f16args = types.float32(types.CPointer(types.float16), types.CPointer(types.float16))
+    signature_f32args = types.float32(types.CPointer(types.float32), types.CPointer(types.float32))
+    signature_f64args = types.float32(types.CPointer(types.float64), types.CPointer(types.float64))
 
     numba_supported_types = (
         ScalarKind.I8,

@@ -17,10 +17,12 @@ from numpy.typing import NDArray
 from tqdm import tqdm
 
 # Precompiled symbols that will be exposed
+# Precompiled symbols that will be exposed
 from usearch.compiled import (  # type: ignore[import-not-found]
     DEFAULT_CONNECTIVITY,
     DEFAULT_EXPANSION_ADD,
     DEFAULT_EXPANSION_SEARCH,
+    USES_NUMKONG,
     USES_OPENMP,
     USES_SIMSIMD,
     MetricKind,
@@ -50,18 +52,7 @@ from usearch.compiled import (
 from usearch.compiled import (
     kmeans as _kmeans,
 )
-# Precompiled symbols that will be exposed
-from usearch.compiled import (
-    MetricKind,
-    ScalarKind,
-    MetricSignature,
-    DEFAULT_CONNECTIVITY,
-    DEFAULT_EXPANSION_ADD,
-    DEFAULT_EXPANSION_SEARCH,
-    USES_OPENMP,
-    USES_NUMKONG,
-    USES_SIMSIMD,
-)
+
 if TYPE_CHECKING:
     from usearch.compiled import (
         IndexStats as _CompiledIndexStats,  # type: ignore[import-not-found]
@@ -84,9 +75,7 @@ Key: TypeAlias = np.uint64
 
 NoneType: TypeAlias = type(None)
 
-KeyOrKeysLike: TypeAlias = (
-    Key | Iterable[Key] | int | Iterable[int] | NDArray[Any] | memoryview
-)
+KeyOrKeysLike: TypeAlias = Key | Iterable[Key] | int | Iterable[int] | NDArray[Any] | memoryview
 
 VectorOrVectorsLike: TypeAlias = NDArray[Any] | Iterable[NDArray[Any]] | memoryview
 
@@ -101,9 +90,7 @@ PathOrBuffer: TypeAlias = str | os.PathLike | BytesLike
 ProgressCallback = Callable[[int, int], bool]
 
 
-def _match_signature(
-    func: Callable[..., Any], arg_types: list[type], ret_type: type
-) -> bool:
+def _match_signature(func: Callable[..., Any], arg_types: list[type], ret_type: type) -> bool:
     assert callable(func), "Not callable"
     sig = signature(func)
     param_types = [param.annotation for param in sig.parameters.values()]
@@ -216,9 +203,7 @@ def _search_in_compiled(
     #
     assert isinstance(vectors, np.ndarray), "Expects a NumPy array"
     assert vectors.ndim == 1 or vectors.ndim == 2, "Expects a matrix or vector"
-    assert not progress or _match_signature(progress, [int, int], bool), (
-        "Invalid callback"
-    )
+    assert not progress or _match_signature(progress, [int, int], bool), "Invalid callback"
 
     if vectors.ndim == 1:
         vectors = vectors.reshape(1, len(vectors))
@@ -273,9 +258,7 @@ def _add_to_compiled(
 ) -> int | NDArray[Any]:
     #
     assert isinstance(vectors, np.ndarray), "Expects a NumPy array"
-    assert not progress or _match_signature(progress, [int, int], bool), (
-        "Invalid callback"
-    )
+    assert not progress or _match_signature(progress, [int, int], bool), "Invalid callback"
     assert vectors.ndim == 1 or vectors.ndim == 2, "Expects a matrix or vector"
     if vectors.ndim == 1:
         vectors = vectors.reshape(1, len(vectors))
@@ -360,10 +343,7 @@ class Matches:
 
     def to_list(self) -> list[tuple]:
         """Convert to list of (key, distance) tuples."""
-        return [
-            (int(key), float(distance))
-            for key, distance in zip(self.keys, self.distances)
-        ]
+        return [(int(key), float(distance)) for key, distance in zip(self.keys, self.distances)]
 
     def __repr__(self) -> str:
         return f"usearch.Matches({len(self)})"
@@ -636,9 +616,7 @@ class Index:
             self._metric_pointer = metric.pointer
             self._metric_signature = metric.signature
         else:
-            raise ValueError(
-                "The `metric` must be a `CompiledMetric` or a `MetricKind`"
-            )
+            raise ValueError("The `metric` must be a `CompiledMetric` or a `MetricKind`")
 
         # Validate, that the right scalar type is defined
         dtype = _normalize_dtype(dtype, ndim, self._metric_kind)
@@ -676,9 +654,7 @@ class Index:
             raise e
 
     @staticmethod
-    def restore(
-        path_or_buffer: PathOrBuffer, view: bool = False, **kwargs
-    ) -> Index | None:
+    def restore(path_or_buffer: PathOrBuffer, view: bool = False, **kwargs) -> Index | None:
         meta = Index.metadata(path_or_buffer)
         if not meta:
             return None
@@ -840,9 +816,7 @@ class Index:
             dtype = _normalize_dtype(dtype)
             view_dtype = _to_numpy_dtype(dtype)
             if view_dtype is None:
-                raise NotImplementedError(
-                    "The requested representation type is not supported by NumPy"
-                )
+                raise NotImplementedError("The requested representation type is not supported by NumPy")
 
         def cast(result):
             if result is not None:
@@ -858,11 +832,7 @@ class Index:
             actual_keys = np.array(list(keys), dtype=Key)  # type: ignore[arg-type]
 
         results = self._compiled.get_many(actual_keys, dtype)
-        results = (
-            cast(results)
-            if isinstance(results, np.ndarray)
-            else [cast(result) for result in results]
-        )
+        results = cast(results) if isinstance(results, np.ndarray) else [cast(result) for result in results]
         return results[0] if is_one else results
 
     def __getitem__(self, keys: KeyOrKeysLike) -> Any:
@@ -1025,9 +995,7 @@ class Index:
             metric_pointer = metric.pointer
             metric_signature = metric.signature
         else:
-            raise ValueError(
-                "The `metric` must be a `CompiledMetric` or a `MetricKind`"
-            )
+            raise ValueError("The `metric` must be a `CompiledMetric` or a `MetricKind`")
 
         return self._compiled.change_metric(
             metric_kind=metric_kind,
@@ -1131,9 +1099,7 @@ class Index:
         :return: The index data as bytes if saving to a buffer, otherwise None.
         :rtype: Optional[bytes]
         """
-        assert not progress or _match_signature(progress, [int, int], bool), (
-            "Invalid callback signature"
-        )
+        assert not progress or _match_signature(progress, [int, int], bool), "Invalid callback signature"
 
         path_or_buffer = path_or_buffer if path_or_buffer is not None else self.path
         if path_or_buffer is None:
@@ -1158,9 +1124,7 @@ class Index:
         :raises Exception: If no source is defined.
         :raises RuntimeError: If the file does not exist.
         """
-        assert not progress or _match_signature(progress, [int, int], bool), (
-            "Invalid callback signature"
-        )
+        assert not progress or _match_signature(progress, [int, int], bool), "Invalid callback signature"
 
         path_or_buffer = path_or_buffer if path_or_buffer is not None else self.path
         if path_or_buffer is None:
@@ -1189,9 +1153,7 @@ class Index:
         :type progress: Optional[ProgressCallback], optional
         :raises Exception: If no source is defined.
         """
-        assert not progress or _match_signature(progress, [int, int], bool), (
-            "Invalid callback signature"
-        )
+        assert not progress or _match_signature(progress, [int, int], bool), "Invalid callback signature"
 
         path_or_buffer = path_or_buffer if path_or_buffer is not None else self.path
         if path_or_buffer is None:
@@ -1256,9 +1218,7 @@ class Index:
         :return: Mapping from keys of `self` to keys of `other`
         :rtype: Dict[Key, Key]
         """
-        assert not progress or _match_signature(progress, [int, int], bool), (
-            "Invalid callback signature"
-        )
+        assert not progress or _match_signature(progress, [int, int], bool), "Invalid callback signature"
 
         return self._compiled.join(
             other=other._compiled,
@@ -1295,9 +1255,7 @@ class Index:
         :return: Matches for one or more queries
         :rtype: Union[Matches, BatchMatches]
         """
-        assert not progress or _match_signature(progress, [int, int], bool), (
-            "Invalid callback signature"
-        )
+        assert not progress or _match_signature(progress, [int, int], bool), "Invalid callback signature"
 
         if min_count is None:
             min_count = 0
@@ -1330,9 +1288,7 @@ class Index:
         batch_matches = BatchMatches(*results)
         return Clustering(self, batch_matches, keys)
 
-    def pairwise_distance(
-        self, left: KeyOrKeysLike, right: KeyOrKeysLike
-    ) -> NDArray[Any] | float:
+    def pairwise_distance(self, left: KeyOrKeysLike, right: KeyOrKeysLike) -> NDArray[Any] | float:
         """Computes the pairwise distance between keys or key arrays.
 
         If `left` and `right` are single keys, returns the distance between them.
@@ -1505,9 +1461,7 @@ class Index:
         """
         if not hasattr(self, "_compiled"):
             return "usearch.Index(failed)"
-        level_stats = [
-            f"--- {i}. {self.level_stats(i).nodes:,} nodes" for i in range(self.nlevels)
-        ]
+        level_stats = [f"--- {i}. {self.level_stats(i).nodes:,} nodes" for i in range(self.nlevels)]
         lines = "\n".join(
             [
                 "usearch.Index",
@@ -1626,9 +1580,7 @@ def search(
     :return: Matches for one or more queries
     :rtype: Union[Matches, BatchMatches]
     """
-    assert not progress or _match_signature(progress, [int, int], bool), (
-        "Invalid callback signature"
-    )
+    assert not progress or _match_signature(progress, [int, int], bool), "Invalid callback signature"
     assert dataset.ndim == 2, "Dataset must be a matrix, with a vector in each row"
 
     if not exact:
@@ -1771,9 +1723,7 @@ def kmeans(
 
     # Generating a 64-bit unsigned integer in NumPy may be somewhat tricky.
     actual_seed: int | np.unsignedinteger = (
-        np.random.default_rng().integers(0, 2**64, dtype=np.uint64)
-        if seed is None
-        else seed
+        np.random.default_rng().integers(0, 2**64, dtype=np.uint64) if seed is None else seed
     )
     assignments, distances, centroids = _kmeans(
         X,

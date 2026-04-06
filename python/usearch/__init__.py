@@ -30,22 +30,22 @@ except ImportError:
 
 
 from usearch.compiled import (  # type: ignore[import-not-found]
-    VERSION_MAJOR,
-    VERSION_MINOR,
-    VERSION_PATCH,
     # Default values:
     DEFAULT_CONNECTIVITY,
     DEFAULT_EXPANSION_ADD,
     DEFAULT_EXPANSION_SEARCH,
+    USES_NUMKONG,
+    USES_NUMKONG_DYNAMIC_DISPATCH,
     # Dependencies:
     USES_OPENMP,
-    USES_NUMKONG,
     USES_SIMSIMD,
-    USES_NUMKONG_DYNAMIC_DISPATCH,
     USES_SIMSIMD_DYNAMIC_DISPATCH,
+    VERSION_MAJOR,
+    VERSION_MINOR,
+    VERSION_PATCH,
+    hardware_acceleration_available,
     # Hardware capabilities:
     hardware_acceleration_compiled,
-    hardware_acceleration_available,
 )
 
 __version__ = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}"
@@ -88,9 +88,7 @@ class BinaryManager:
         os_part = os_map.get(platform.system(), "")
         arch = platform.machine()
         arch_part = arch_map.get(arch, "")
-        extension = {"Linux": "so", "Windows": "dll", "Darwin": "dylib"}.get(
-            platform.system(), ""
-        )
+        extension = {"Linux": "so", "Windows": "dll", "Darwin": "dylib"}.get(platform.system(), "")
         source_filename = f"usearch_sqlite_{os_part}_{arch_part}_{version}.{extension}"
         target_filename = f"usearch_sqlite.{extension}"
         return source_filename, target_filename
@@ -125,9 +123,7 @@ class BinaryManager:
         local_path = os.path.join(download_dir, target_filename)
         if not os.path.exists(local_path):
             # If not found locally, warn the user and download from GitHub
-            warnings.warn(
-                "Will download `usearch_sqlite` binary from GitHub.", UserWarning
-            )
+            warnings.warn("Will download `usearch_sqlite` binary from GitHub.", UserWarning)
             try:
                 source_url = self.determine_download_url(self.version, source_filename)
                 os.makedirs(download_dir, exist_ok=True)
@@ -135,9 +131,7 @@ class BinaryManager:
             except HTTPError as e:
                 # If the download fails due to HTTPError (e.g., 404 Not Found), like a missing lib version
                 if e.code == 404:
-                    warnings.warn(
-                        f"Download failed: {e.url} could not be found.", UserWarning
-                    )
+                    warnings.warn(f"Download failed: {e.url} could not be found.", UserWarning)
                 else:
                     warnings.warn(
                         f"Download failed with HTTP error: {e.code} {e.reason}",
@@ -150,9 +144,7 @@ class BinaryManager:
             path_wout_extension, _, _ = local_path.rpartition(".")
             return path_wout_extension
         else:
-            warnings.warn(
-                "Failed to download `usearch_sqlite` binary from GitHub.", UserWarning
-            )
+            warnings.warn("Failed to download `usearch_sqlite` binary from GitHub.", UserWarning)
             return None
 
 

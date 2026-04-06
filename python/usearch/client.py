@@ -26,9 +26,7 @@ def _vector_to_ascii(vector: NDArray[Any]) -> str | None:
 
 
 class IndexClient:
-    def __init__(
-        self, uri: str = "127.0.0.1", port: int = 8545, use_http: bool = True
-    ) -> None:
+    def __init__(self, uri: str = "127.0.0.1", port: int = 8545, use_http: bool = True) -> None:
         self.client = Client(uri=uri, port=port, use_http=use_http)
 
     def add_one(self, key: int, vector: NDArray[Any]):
@@ -50,9 +48,7 @@ class IndexClient:
 
     def add(self, keys: NDArray[Any] | int, vectors: NDArray[Any]):
         if isinstance(keys, int) or len(keys) == 1:
-            return self.add_one(
-                int(keys) if isinstance(keys, np.ndarray) else keys, vectors
-            )
+            return self.add_one(int(keys) if isinstance(keys, np.ndarray) else keys, vectors)
         else:
             return self.add_many(keys, vectors)
 
@@ -76,9 +72,7 @@ class IndexClient:
 
     def search_many(self, vectors: NDArray[Any], count: int) -> BatchMatches:
         batch_size: int = vectors.shape[0]
-        list_of_matches: list[list[dict]] = self.client.search_many(
-            vectors=vectors, count=count
-        )
+        list_of_matches: list[list[dict]] = self.client.search_many(vectors=vectors, count=count)
 
         keys = np.zeros((batch_size, count), dtype=np.uint32)
         distances = np.zeros((batch_size, count), dtype=np.float32)

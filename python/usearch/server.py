@@ -104,9 +104,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-v", "--verbose", help="log server activity")
     parser.add_argument("--ndim", type=int, help="dimensionality of the vectors")
-    parser.add_argument(
-        "--immutable", type=bool, default=False, help="the index can not be updated"
-    )
+    parser.add_argument("--immutable", type=bool, default=False, help="the index can not be updated")
 
     parser.add_argument(
         "--metric",
@@ -122,12 +120,8 @@ if __name__ == "__main__":
         default=8545,
         help="port to open for client connections",
     )
-    parser.add_argument(
-        "-j", "--threads", type=int, default=1, help="number of CPU threads to use"
-    )
-    parser.add_argument(
-        "--path", type=str, default="index.usearch", help="where to store the index"
-    )
+    parser.add_argument("-j", "--threads", type=int, default=1, help="number of CPU threads to use")
+    parser.add_argument("--path", type=str, default="index.usearch", help="where to store the index")
 
     args = parser.parse_args()
     assert args.ndim is not None, "Define the number of dimensions!"
