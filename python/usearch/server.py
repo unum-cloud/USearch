@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+from __future__ import annotations
 
-import os
 import argparse
+import os
+from typing import TYPE_CHECKING, Any, cast
+
 import numpy as np
-from typing import List
+from ucall.rich_posix import Server  # type: ignore[import-not-found]
 
-from ucall.rich_posix import Server
-from usearch.index import Index, Matches, Key
+from usearch.index import Index, Key
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
+    from usearch.index import BatchMatches, Matches
 
 
-def _ascii_to_vector(string: str) -> np.ndarray:
+def _ascii_to_vector(string: str) -> NDArray[Any]:
     """
     WARNING: A dirty performance hack!
     Assuming the `i8` vectors in our implementations are just integers,
@@ -32,7 +38,7 @@ def serve(
     threads: int = 1,
     path: str = "index.usearch",
     immutable: bool = False,
-):
+) -> None:
     server = Server(port=port)
     index = Index(ndim=ndim_, metric=metric)
 
@@ -42,52 +48,50 @@ def serve(
         else:
             index.load(path)
 
-    @server
+    @server  # type: ignore[untyped-decorator]
     def size() -> int:
         return len(index)
 
-    @server
+    @server  # type: ignore[untyped-decorator]
     def ndim() -> int:
         return index.ndim
 
-    @server
+    @server  # type: ignore[untyped-decorator]
     def capacity() -> int:
-        return index.capacity()
+        return index.capacity
 
-    @server
+    @server  # type: ignore[untyped-decorator]
     def connectivity() -> int:
-        return index.connectivity()
+        return index.connectivity
 
-    @server
-    def add_one(key: int, vector: np.ndarray):
-        print("adding", key, vector)
+    @server  # type: ignore[untyped-decorator]
+    def add_one(key: int, vector: NDArray[Any]) -> None:
         keys = np.array([key], dtype=Key)
         vectors = vector.flatten().reshape(vector.shape[0], 1)
         index.add(keys, vectors)
 
-    @server
-    def add_many(keys: np.ndarray, vectors: np.ndarray):
+    @server  # type: ignore[untyped-decorator]
+    def add_many(keys: NDArray[Any], vectors: NDArray[Any]) -> None:
         index.add(keys, vectors, threads=threads)
 
-    @server
-    def search_one(vector: np.ndarray, count: int) -> List[dict]:
-        print("search", vector, count)
+    @server  # type: ignore[untyped-decorator]
+    def search_one(vector: NDArray[Any], count: int) -> list[tuple[int, float]]:
         vectors = vector.reshape(vector.shape[0], 1)
-        results: Matches = index.search(vectors, count)
+        results: Matches | BatchMatches = index.search(vectors, count)
         return results.to_list()
 
-    @server
-    def search_many(vectors: np.ndarray, count: int) -> List[List[dict]]:
-        results: Matches = index.search(vectors, count)
+    @server  # type: ignore[untyped-decorator]
+    def search_many(vectors: NDArray[Any], count: int) -> list[tuple[int, float]]:
+        results: Matches | BatchMatches = index.search(vectors, count)
         return results.to_list()
 
-    @server
-    def add_ascii(key: int, string: str):
-        return add_one(key, _ascii_to_vector(string))
+    @server  # type: ignore[untyped-decorator]
+    def add_ascii(key: int, string: str) -> None:
+        add_one(key, _ascii_to_vector(string))
 
-    @server
-    def search_ascii(string: str, count: int):
-        return search_one(_ascii_to_vector(string), count)
+    @server  # type: ignore[untyped-decorator]
+    def search_ascii(string: str, count: int) -> list[tuple[int, float]]:
+        return cast("list[tuple[int, float]]", search_one(_ascii_to_vector(string), count))
 
     try:
         server.run()

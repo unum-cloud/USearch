@@ -3,15 +3,16 @@
 # Python tooling, linters, and static analyzers. It also embeds JIT
 # into the primary `Index` class, connecting USearch with Numba.
 from math import sqrt
+from typing import Any
 
-from usearch.index import MetricKind, ScalarKind, MetricSignature, CompiledMetric
+from usearch.index import CompiledMetric, MetricKind, MetricSignature, ScalarKind
 
 
 def jit(
     ndim: int,
     metric: MetricKind = MetricKind.Cos,
     dtype: ScalarKind = ScalarKind.F32,
-) -> CompiledMetric:
+) -> CompiledMetric | MetricKind:
     """JIT-compiles the metric for target hardware and number of dimensions.
 
     This can result in up-to 3x performance difference on very large vectors
@@ -25,7 +26,7 @@ def jit(
     assert isinstance(metric, MetricKind)
     assert isinstance(dtype, ScalarKind)
 
-    from numba import cfunc, types, carray
+    from numba import carray, cfunc, types  # type: ignore[import-not-found]
 
     signature_i8args = types.float32(types.CPointer(types.int8), types.CPointer(types.int8))
     signature_f16args = types.float32(types.CPointer(types.float16), types.CPointer(types.float16))
@@ -51,7 +52,7 @@ def jit(
     }
     accumulator = scalar_kind_to_accumulator_type[dtype]
 
-    def numba_ip(a, b):
+    def numba_ip(a: Any, b: Any) -> Any:
         a_array = carray(a, ndim)
         b_array = carray(b, ndim)
         ab = accumulator(0)
@@ -59,7 +60,7 @@ def jit(
             ab += a_array[i] * b_array[i]
         return types.float32(1 - ab)
 
-    def numba_cos(a, b):
+    def numba_cos(a: Any, b: Any) -> Any:
         a_array = carray(a, ndim)
         b_array = carray(b, ndim)
         ab = accumulator(0)
@@ -78,7 +79,7 @@ def jit(
         else:
             return types.float32(1 - ab / (a_norm * b_norm))
 
-    def numba_l2sq(a, b):
+    def numba_l2sq(a: Any, b: Any) -> Any:
         a_array = carray(a, ndim)
         b_array = carray(b, ndim)
         ab_delta_sq = accumulator(0)

@@ -1,11 +1,17 @@
+from __future__ import annotations
+
 import os
 import struct
 import typing
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
 
-def numpy_scalar_size(dtype) -> int:
+
+def numpy_scalar_size(dtype: Any) -> int:
     return {
         np.float64: 8,
         np.int64: 8,
@@ -21,7 +27,7 @@ def numpy_scalar_size(dtype) -> int:
     }[dtype]
 
 
-def guess_numpy_dtype_from_filename(filename) -> typing.Optional[type]:
+def guess_numpy_dtype_from_filename(filename: str) -> type | None:
     if filename.endswith(".fbin"):
         return np.float32
     elif filename.endswith(".dbin"):
@@ -45,10 +51,10 @@ def guess_numpy_dtype_from_filename(filename) -> typing.Optional[type]:
 def load_matrix(
     filename: str,
     start_row: int = 0,
-    count_rows: int = None,
+    count_rows: int | None = None,
     view: bool = False,
-    dtype: typing.Optional[type] = None,
-) -> typing.Optional[np.ndarray]:
+    dtype: type | None = None,
+) -> NDArray[Any] | None:
     """Read *.ibin, *.bbib, *.hbin, *.fbin, *.dbin, *.i8bin, *.i32bin files with matrices.
 
     :param filename: path to the matrix file
@@ -70,18 +76,22 @@ def load_matrix(
 
     with open(filename, "rb") as f:
         rows, cols = np.fromfile(f, count=2, dtype=np.int32).astype(np.uint64)
-        
+
         # Validate file size matches expected data size
         f.seek(0, 2)  # Go to end
         file_size = f.tell()
         expected_size = 8 + (rows * cols * scalar_size)  # Header + data
-        
+
         if file_size != expected_size:
             if file_size < expected_size:
-                raise ValueError(f"File {filename} is truncated. Expected {expected_size:,} bytes, got {file_size:,} bytes")
+                raise ValueError(
+                    f"File {filename} is truncated. Expected {expected_size:,} bytes, got {file_size:,} bytes"
+                )
             else:
-                raise ValueError(f"File {filename} is larger than expected. Expected {expected_size:,} bytes, got {file_size:,} bytes")
-        
+                raise ValueError(
+                    f"File {filename} is larger than expected. Expected {expected_size:,} bytes, got {file_size:,} bytes"
+                )
+
         f.seek(8)  # Back to start of data
         rows = (rows - start_row) if count_rows is None else count_rows
         row_offset = start_row * scalar_size * cols
@@ -103,7 +113,7 @@ def load_matrix(
             ).reshape(rows, cols)
 
 
-def save_matrix(vectors: np.ndarray, filename: str):
+def save_matrix(vectors: NDArray[Any], filename: str) -> None:
     """Write *.ibin, *.bbib, *.hbin, *.fbin, *.dbin, *.i8bin, *.i32bin, *.f32bin files with matrices.
 
     :param vectors: the matrix to serialize
@@ -111,6 +121,7 @@ def save_matrix(vectors: np.ndarray, filename: str):
     :param filename: path to the matrix file
     :type filename: str
     """
+    dtype: type | np.dtype[typing.Any]
     if filename.endswith(".fbin"):
         dtype = np.float32
     elif filename.endswith(".dbin"):

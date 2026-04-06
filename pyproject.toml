@@ -95,6 +95,12 @@ tests = [
   "pytest>=9.0.2",
   "pytest-repeat>=0.9.4",
 ]
+typing = [
+    "mypy>=1.19.1",
+    "types-networkx>=3.6.1.20260321",
+    "types-setuptools>=82.0.0.20260210",
+    "types-tqdm>=4.67.3.20260303",
+]
 
 [tool.ruff]
 line-length = 120
@@ -105,8 +111,24 @@ quote-style = "double"
 
 [tool.ruff.lint]
 select = [
-  "E9",
-  "F63",
-  "F7",
-  "F82",
+    "E9",
+    "F63",
+    "F7",
+    "F82",
+    "TC",
+    "T20",
+    "UP",
+    "I",
 ]
+future-annotations = true  # For TC rules
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+
+[[tool.mypy.overrides]]
+# these modules not typed and don't have stubs
+module = [
+    "matplotlib",
+]
+ignore_missing_imports = true
