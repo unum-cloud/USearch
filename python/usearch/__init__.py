@@ -58,7 +58,7 @@ class BinaryManager:
         self.version = version or __version__
 
     @staticmethod
-    def determine_download_dir():
+    def determine_download_dir() -> str:
         # Check if running within a virtual environment
         virtual_env = os.getenv("VIRTUAL_ENV")
         if virtual_env:

@@ -124,6 +124,7 @@ future-annotations = true  # For TC rules
 
 [tool.mypy]
 python_version = "3.10"
+strict = true
 
 [[tool.mypy.overrides]]
 # these modules not typed and don't have stubs

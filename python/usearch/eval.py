@@ -4,7 +4,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass
 from math import ceil
 from time import time_ns
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
@@ -65,7 +65,7 @@ def random_vectors(
         else:
             x = x.astype(_to_numpy_dtype(dtype))
             if metric == MetricKind.IP:
-                return x / np.linalg.norm(x, axis=1, keepdims=True)
+                return cast("NDArray[Any]", x / np.linalg.norm(x, axis=1, keepdims=True))
         return x
 
 
@@ -101,7 +101,7 @@ class SearchStats:
         return self.count_matches / self.count_queries
 
 
-def self_recall(index: Index, sample: float | int = 1.0, **kwargs) -> SearchStats:
+def self_recall(index: Index, sample: float | int = 1.0, **kwargs: Any) -> SearchStats:
     """Simplest benchmark for a quality of search, which queries every
     existing member of the index, to make sure approximate search finds
     the point itself.
@@ -152,7 +152,7 @@ def self_recall(index: Index, sample: float | int = 1.0, **kwargs) -> SearchStat
     )
 
 
-def measure_seconds(f: Callable) -> tuple[float, Any]:
+def measure_seconds(f: Callable[[], Any]) -> tuple[float, Any]:
     """Simple function profiling decorator.
 
     :param f: Function to be profiled
@@ -226,13 +226,14 @@ class Dataset:
     queries: NDArray[Any] | None
     neighbors: NDArray[Any] | None
 
-    def crop_neighbors(self, k: int):
+    def crop_neighbors(self, k: int) -> None:
         assert self.neighbors is not None
         self.neighbors = self.neighbors[:, k]
 
     @property
-    def ndim(self):
-        return self.vectors.shape[1]
+    def ndim(self) -> int:
+        assert self.vectors is not None
+        return int(self.vectors.shape[1])
 
     @staticmethod
     def build(
@@ -242,7 +243,7 @@ class Dataset:
         count: int | None = None,
         ndim: int | None = None,
         k: int | None = None,
-    ):
+    ) -> Dataset:
         """Either loads an existing dataset from disk, or generates one on the fly.
 
         :param vectors: _description_, defaults to None
@@ -331,7 +332,7 @@ class TaskResult:
         assert self.search_operations is not None and self.search_per_second is not None
         return self.search_operations / self.search_per_second
 
-    def __add__(self, other: TaskResult):
+    def __add__(self, other: TaskResult) -> TaskResult:
         result = TaskResult()
         if self.add_operations and other.add_operations:
             result.add_operations = self.add_operations + other.add_operations
@@ -374,14 +375,14 @@ class AddTask:
         )
 
     @property
-    def ndim(self):
-        return self.vectors.shape[1]
+    def ndim(self) -> int:
+        return int(self.vectors.shape[1])
 
     @property
-    def count(self):
-        return self.vectors.shape[0]
+    def count(self) -> int:
+        return int(self.vectors.shape[0])
 
-    def inplace_shuffle(self):
+    def inplace_shuffle(self) -> None:
         """Reorders the `vectors` and `keys`. Often used for robustness benchmarks."""
 
         new_order = np.arange(self.count)
@@ -403,7 +404,7 @@ class AddTask:
     def clusters(self, number_of_clusters: int) -> list[AddTask]:
         """Splits this dataset into smaller chunks."""
 
-        from sklearn.cluster import KMeans  # type: ignore[import-untyped]
+        from sklearn.cluster import KMeans  # type: ignore[import-not-found]
 
         clustering = KMeans(
             n_clusters=number_of_clusters,
@@ -479,7 +480,7 @@ class Evaluation:
             ndim=add.ndim,
         )
 
-    def __call__(self, index: Index, post_clean: bool = True) -> dict:
+    def __call__(self, index: Index, post_clean: bool = True) -> dict[str, Any]:
         task_result = TaskResult()
 
         try:

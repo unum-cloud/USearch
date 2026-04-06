@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from ucall.client import Client  # type: ignore[import-untyped]
+from ucall.client import Client  # type: ignore[import-not-found]
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -29,7 +29,7 @@ class IndexClient:
     def __init__(self, uri: str = "127.0.0.1", port: int = 8545, use_http: bool = True) -> None:
         self.client = Client(uri=uri, port=port, use_http=use_http)
 
-    def add_one(self, key: int, vector: NDArray[Any]):
+    def add_one(self, key: int, vector: NDArray[Any]) -> None:
         assert isinstance(key, int)
         assert isinstance(vector, np.ndarray)
         vector = vector.flatten()
@@ -39,14 +39,14 @@ class IndexClient:
         else:
             self.client.add_one(key=key, vectors=vector)
 
-    def add_many(self, keys: NDArray[Any], vectors: NDArray[Any]):
+    def add_many(self, keys: NDArray[Any], vectors: NDArray[Any]) -> None:
         assert isinstance(keys, int)
         assert isinstance(vectors, np.ndarray)
         assert keys.ndim == 1 and vectors.ndim == 2
         assert keys.shape[0] == vectors.shape[0]
         self.client.add_many(keys=keys, vectors=vectors)
 
-    def add(self, keys: NDArray[Any] | int, vectors: NDArray[Any]):
+    def add(self, keys: NDArray[Any] | int, vectors: NDArray[Any]) -> None:
         if isinstance(keys, int) or len(keys) == 1:
             return self.add_one(int(keys) if isinstance(keys, np.ndarray) else keys, vectors)
         else:
@@ -60,7 +60,7 @@ class IndexClient:
         else:
             raw = self.client.search_one(vector=vector, count=count)
 
-        matches: list[dict] = raw.json
+        matches: list[dict[str, Any]] = raw.json
 
         keys = np.array(count, dtype=np.uint32)
         distances = np.array(count, dtype=np.float32)
@@ -72,7 +72,7 @@ class IndexClient:
 
     def search_many(self, vectors: NDArray[Any], count: int) -> BatchMatches:
         batch_size: int = vectors.shape[0]
-        list_of_matches: list[list[dict]] = self.client.search_many(vectors=vectors, count=count)
+        list_of_matches: list[list[dict[str, Any]]] = self.client.search_many(vectors=vectors, count=count)
 
         keys = np.zeros((batch_size, count), dtype=np.uint32)
         distances = np.zeros((batch_size, count), dtype=np.float32)
@@ -91,26 +91,26 @@ class IndexClient:
         else:
             return self.search_many(vectors, count)
 
-    def __len__(self):
-        return self.client.size().json()
+    def __len__(self) -> int:
+        return int(self.client.size().json())
 
     @property
-    def ndim(self):
+    def ndim(self) -> Any:
         return self.client.ndim().json()
 
-    def capacity(self):
+    def capacity(self) -> Any:
         return self.client.capacity().json()
 
-    def connectivity(self):
+    def connectivity(self) -> Any:
         return self.client.connectivity().json()
 
-    def load(self, path: str):
+    def load(self, path: str) -> None:
         raise NotImplementedError()
 
-    def view(self, path: str):
+    def view(self, path: str) -> None:
         raise NotImplementedError()
 
-    def save(self, path: str):
+    def save(self, path: str) -> None:
         raise NotImplementedError()
 
 

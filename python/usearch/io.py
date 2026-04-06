@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
-def numpy_scalar_size(dtype) -> int:
+def numpy_scalar_size(dtype: Any) -> int:
     return {
         np.float64: 8,
         np.int64: 8,
@@ -113,7 +113,7 @@ def load_matrix(
             ).reshape(rows, cols)
 
 
-def save_matrix(vectors: NDArray[Any], filename: str):
+def save_matrix(vectors: NDArray[Any], filename: str) -> None:
     """Write *.ibin, *.bbib, *.hbin, *.fbin, *.dbin, *.i8bin, *.i32bin, *.f32bin files with matrices.
 
     :param vectors: the matrix to serialize
