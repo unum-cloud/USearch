@@ -248,11 +248,12 @@ static void add_many_to_index(                            //
 
     // clang-format off
     switch (numpy_string_to_kind(vectors_info.format)) {
-    case scalar_kind_t::b1x8_k: add_typed_to_index<b1x8_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
-    case scalar_kind_t::i8_k: add_typed_to_index<i8_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
-    case scalar_kind_t::f16_k: add_typed_to_index<f16_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
-    case scalar_kind_t::f32_k: add_typed_to_index<f32_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
     case scalar_kind_t::f64_k: add_typed_to_index<f64_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    case scalar_kind_t::f32_k: add_typed_to_index<f32_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    case scalar_kind_t::f16_k: add_typed_to_index<f16_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    case scalar_kind_t::i8_k: add_typed_to_index<i8_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    case scalar_kind_t::u8_k: add_typed_to_index<u8_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    case scalar_kind_t::b1x8_k: add_typed_to_index<b1x8_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
     default: throw std::invalid_argument("Incompatible scalars in the vectors matrix: " + vectors_info.format);
     }
     // clang-format on
@@ -442,11 +443,12 @@ static py::tuple search_many_in_index( //
 
     // clang-format off
     switch (numpy_string_to_kind(vectors_info.format)) {
-    case scalar_kind_t::b1x8_k: search_typed<b1x8_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
-    case scalar_kind_t::i8_k: search_typed<i8_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
-    case scalar_kind_t::f16_k: search_typed<f16_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
-    case scalar_kind_t::f32_k: search_typed<f32_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
     case scalar_kind_t::f64_k: search_typed<f64_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::f32_k: search_typed<f32_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::f16_k: search_typed<f16_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::i8_k: search_typed<i8_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::u8_k: search_typed<u8_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::b1x8_k: search_typed<b1x8_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
     default: throw std::invalid_argument("Incompatible scalars in the query matrix: " + vectors_info.format);
     }
     // clang-format on
@@ -695,11 +697,12 @@ static py::tuple cluster_vectors(        //
 
     // clang-format off
     switch (numpy_string_to_kind(queries_info.format)) {
-    case scalar_kind_t::b1x8_k: cluster_result = index.cluster(queries_begin.as<b1x8_t const>(), queries_end.as<b1x8_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
-    case scalar_kind_t::i8_k: cluster_result = index.cluster(queries_begin.as<i8_t const>(), queries_end.as<i8_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
-    case scalar_kind_t::f16_k: cluster_result = index.cluster(queries_begin.as<f16_t const>(), queries_end.as<f16_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
-    case scalar_kind_t::f32_k: cluster_result = index.cluster(queries_begin.as<f32_t const>(), queries_end.as<f32_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
     case scalar_kind_t::f64_k: cluster_result = index.cluster(queries_begin.as<f64_t const>(), queries_end.as<f64_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    case scalar_kind_t::f32_k: cluster_result = index.cluster(queries_begin.as<f32_t const>(), queries_end.as<f32_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    case scalar_kind_t::f16_k: cluster_result = index.cluster(queries_begin.as<f16_t const>(), queries_end.as<f16_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    case scalar_kind_t::i8_k: cluster_result = index.cluster(queries_begin.as<i8_t const>(), queries_end.as<i8_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    case scalar_kind_t::u8_k: cluster_result = index.cluster(queries_begin.as<u8_t const>(), queries_end.as<u8_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    case scalar_kind_t::b1x8_k: cluster_result = index.cluster(queries_begin.as<b1x8_t const>(), queries_end.as<b1x8_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
     default: throw std::invalid_argument("Incompatible scalars in the query matrix: " + queries_info.format);
     }
     // clang-format on
@@ -969,14 +972,16 @@ static py::object get_typed_vectors_for_keys(index_at const& index, py::buffer k
 }
 
 template <typename index_at> py::object get_many(index_at const& index, py::buffer keys, scalar_kind_t scalar_kind) {
-    if (scalar_kind == scalar_kind_t::f32_k)
-        return get_typed_vectors_for_keys<f32_t>(index, keys);
-    else if (scalar_kind == scalar_kind_t::f64_k)
+    if (scalar_kind == scalar_kind_t::f64_k)
         return get_typed_vectors_for_keys<f64_t>(index, keys);
+    else if (scalar_kind == scalar_kind_t::f32_k)
+        return get_typed_vectors_for_keys<f32_t>(index, keys);
     else if (scalar_kind == scalar_kind_t::f16_k)
         return get_typed_vectors_for_keys<f16_t, std::uint16_t>(index, keys);
     else if (scalar_kind == scalar_kind_t::i8_k)
         return get_typed_vectors_for_keys<i8_t, std::int8_t>(index, keys);
+    else if (scalar_kind == scalar_kind_t::u8_k)
+        return get_typed_vectors_for_keys<u8_t, std::uint8_t>(index, keys);
     else if (scalar_kind == scalar_kind_t::b1x8_k)
         return get_typed_vectors_for_keys<b1x8_t, std::uint8_t>(index, keys);
     else
@@ -1029,23 +1034,25 @@ PYBIND11_MODULE(compiled, m) {
 
     py::enum_<scalar_kind_t>(m, "ScalarKind", py::arithmetic())
         .value("Unknown", scalar_kind_t::unknown_k)
-        .value("B1", scalar_kind_t::b1x8_k)
-        .value("U40", scalar_kind_t::u40_k)
-        .value("UUID", scalar_kind_t::uuid_k)
-        .value("BF16", scalar_kind_t::bf16_k)
         .value("F64", scalar_kind_t::f64_k)
         .value("F32", scalar_kind_t::f32_k)
+        .value("BF16", scalar_kind_t::bf16_k)
         .value("F16", scalar_kind_t::f16_k)
         .value("E5M2", scalar_kind_t::e5m2_k)
         .value("E4M3", scalar_kind_t::e4m3_k)
+        .value("E3M2", scalar_kind_t::e3m2_k)
+        .value("E2M3", scalar_kind_t::e2m3_k)
+        .value("I8", scalar_kind_t::i8_k)
+        .value("U8", scalar_kind_t::u8_k)
+        .value("B1", scalar_kind_t::b1x8_k)
+        .value("U40", scalar_kind_t::u40_k)
+        .value("UUID", scalar_kind_t::uuid_k)
         .value("U64", scalar_kind_t::u64_k)
         .value("U32", scalar_kind_t::u32_k)
         .value("U16", scalar_kind_t::u16_k)
-        .value("U8", scalar_kind_t::u8_k)
         .value("I64", scalar_kind_t::i64_k)
         .value("I32", scalar_kind_t::i32_k)
-        .value("I16", scalar_kind_t::i16_k)
-        .value("I8", scalar_kind_t::i8_k);
+        .value("I16", scalar_kind_t::i16_k);
 
     m.def("index_dense_metadata_from_path", [](std::string const& path) -> py::dict {
         index_dense_metadata_result_t meta = index_dense_metadata_from_path(path.c_str());

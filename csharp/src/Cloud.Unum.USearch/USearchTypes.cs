@@ -105,9 +105,24 @@ public enum ScalarKind : uint
     E4M3 = 8,
 
     /// <summary>
+    /// FP6 E3M2 (1 sign + 3 exponent + 2 mantissa).
+    /// </summary>
+    E3M2 = 11,
+
+    /// <summary>
+    /// FP6 E2M3 (1 sign + 2 exponent + 3 mantissa).
+    /// </summary>
+    E2M3 = 10,
+
+    /// <summary>
     /// 8-bit integer.
     /// </summary>
     Int8 = 4,
+
+    /// <summary>
+    /// 8-bit unsigned integer.
+    /// </summary>
+    U8 = 9,
 
     /// <summary>
     /// 1-bit binary.

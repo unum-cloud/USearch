@@ -150,9 +150,24 @@ public class Index implements AutoCloseable {
         public static final String E4M3 = "e4m3";
 
         /**
+         * FP6 E3M2 (1 sign + 3 exponent + 2 mantissa)
+         */
+        public static final String E3M2 = "e3m2";
+
+        /**
+         * FP6 E2M3 (1 sign + 2 exponent + 3 mantissa)
+         */
+        public static final String E2M3 = "e2m3";
+
+        /**
          * 8-bit integer quantization
          */
         public static final String INT8 = "i8";
+
+        /**
+         * 8-bit unsigned integer quantization
+         */
+        public static final String UINT8 = "u8";
 
         /**
          * Binary quantization (1 bit per dimension, 8 dimensions per word)

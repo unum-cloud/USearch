@@ -11,7 +11,10 @@ typedef NS_ENUM(NSUInteger, USearchScalar) {
     USearchScalarF16,
     USearchScalarE5M2,
     USearchScalarE4M3,
+    USearchScalarE3M2,
+    USearchScalarE2M3,
     USearchScalarI8,
+    USearchScalarU8,
     USearchScalarB1,
 };
 

@@ -122,7 +122,11 @@ def _normalize_dtype(
         "f16": ScalarKind.F16,
         "e5m2": ScalarKind.E5M2,
         "e4m3": ScalarKind.E4M3,
+        "e3m2": ScalarKind.E3M2,
+        "e2m3": ScalarKind.E2M3,
         "i8": ScalarKind.I8,
+        "u8": ScalarKind.U8,
+        "uint8": ScalarKind.U8,
         "b1": ScalarKind.B1,
         "b1x8": ScalarKind.B1,
         "bits": ScalarKind.B1,
@@ -148,6 +152,7 @@ def _to_numpy_dtype(dtype: ScalarKind):
         ScalarKind.F32: np.float32,
         ScalarKind.F16: np.float16,
         ScalarKind.I8: np.int8,
+        ScalarKind.U8: np.uint8,
         ScalarKind.B1: np.uint8,
     }
     if dtype in _normalize.values():

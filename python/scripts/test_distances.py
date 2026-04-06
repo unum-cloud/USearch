@@ -47,7 +47,10 @@ from usearch.index import (
         ScalarKind.F16,
         ScalarKind.E5M2,
         ScalarKind.E4M3,
+        ScalarKind.E3M2,
+        ScalarKind.E2M3,
         ScalarKind.I8,
+        ScalarKind.U8,
     ],
 )
 @pytest.mark.parametrize(

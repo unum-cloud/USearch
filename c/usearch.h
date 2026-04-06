@@ -59,7 +59,10 @@ USEARCH_EXPORT typedef enum usearch_scalar_kind_t {
     usearch_scalar_f16_k = 3,
     usearch_scalar_e5m2_k = 7,
     usearch_scalar_e4m3_k = 8,
+    usearch_scalar_e3m2_k = 11,
+    usearch_scalar_e2m3_k = 10,
     usearch_scalar_i8_k = 4,
+    usearch_scalar_u8_k = 9,
     usearch_scalar_b1_k = 5,
 } usearch_scalar_kind_t;
 

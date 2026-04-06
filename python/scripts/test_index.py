@@ -48,7 +48,10 @@ quantizations = [
     ScalarKind.F16,
     ScalarKind.E5M2,
     ScalarKind.E4M3,
+    ScalarKind.E3M2,
+    ScalarKind.E2M3,
     ScalarKind.I8,
+    ScalarKind.U8,
 ]
 dtypes = [np.float32, np.float64, np.float16]
 threads = 2

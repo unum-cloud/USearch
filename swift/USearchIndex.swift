@@ -15,7 +15,10 @@ public enum USearchScalar: UInt {
     case f16
     case e5m2
     case e4m3
+    case e3m2
+    case e2m3
     case i8
+    case u8
     case b1
 }
 
@@ -77,8 +80,14 @@ extension USearchScalar {
             return usearch_scalar_e5m2_k
         case .e4m3:
             return usearch_scalar_e4m3_k
+        case .e3m2:
+            return usearch_scalar_e3m2_k
+        case .e2m3:
+            return usearch_scalar_e2m3_k
         case .i8:
             return usearch_scalar_i8_k
+        case .u8:
+            return usearch_scalar_u8_k
         case .b1:
             return usearch_scalar_b1_k
         }

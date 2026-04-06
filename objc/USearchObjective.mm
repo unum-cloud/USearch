@@ -73,8 +73,20 @@ scalar_kind_t to_native_scalar(USearchScalar m) {
         case USearchScalarE4M3:
             return scalar_kind_t::e4m3_k;
 
+        case USearchScalarE3M2:
+            return scalar_kind_t::e3m2_k;
+
+        case USearchScalarE2M3:
+            return scalar_kind_t::e2m3_k;
+
         case USearchScalarI8:
             return scalar_kind_t::i8_k;
+
+        case USearchScalarU8:
+            return scalar_kind_t::u8_k;
+
+        case USearchScalarB1:
+            return scalar_kind_t::b1_k;
 
         default:
             return scalar_kind_t::unknown_k;

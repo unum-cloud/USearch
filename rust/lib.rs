@@ -311,8 +311,14 @@ pub mod ffi {
         E5M2,
         /// 8-bit floating point: 1 sign + 4 exponent + 3 mantissa.
         E4M3,
+        /// 8-bit floating point: 1 sign + 3 exponent + 2 mantissa, range +/-28.
+        E3M2,
+        /// 8-bit floating point: 1 sign + 2 exponent + 3 mantissa, range +/-7.5.
+        E2M3,
         /// 8-bit signed integer.
         I8,
+        /// 8-bit unsigned integer.
+        U8,
         /// 1-bit binary value, packed 8 per byte.
         B1,
     }
@@ -394,45 +400,34 @@ pub mod ffi {
         pub fn capacity(self: &NativeIndex) -> usize;
         pub fn serialized_length(self: &NativeIndex) -> usize;
 
-        pub fn add_b1x8(self: &NativeIndex, key: u64, vector: &[u8]) -> Result<()>;
-        pub fn add_i8(self: &NativeIndex, key: u64, vector: &[i8]) -> Result<()>;
-        pub fn add_f16(self: &NativeIndex, key: u64, vector: &[i16]) -> Result<()>;
-        pub fn add_f32(self: &NativeIndex, key: u64, vector: &[f32]) -> Result<()>;
         pub fn add_f64(self: &NativeIndex, key: u64, vector: &[f64]) -> Result<()>;
+        pub fn add_f32(self: &NativeIndex, key: u64, vector: &[f32]) -> Result<()>;
+        pub fn add_f16(self: &NativeIndex, key: u64, vector: &[i16]) -> Result<()>;
+        pub fn add_i8(self: &NativeIndex, key: u64, vector: &[i8]) -> Result<()>;
+        pub fn add_u8(self: &NativeIndex, key: u64, vector: &[u8]) -> Result<()>;
+        pub fn add_b1x8(self: &NativeIndex, key: u64, vector: &[u8]) -> Result<()>;
 
-        pub fn search_b1x8(self: &NativeIndex, query: &[u8], count: usize) -> Result<Matches>;
-        pub fn search_i8(self: &NativeIndex, query: &[i8], count: usize) -> Result<Matches>;
-        pub fn search_f16(self: &NativeIndex, query: &[i16], count: usize) -> Result<Matches>;
-        pub fn search_f32(self: &NativeIndex, query: &[f32], count: usize) -> Result<Matches>;
         pub fn search_f64(self: &NativeIndex, query: &[f64], count: usize) -> Result<Matches>;
+        pub fn search_f32(self: &NativeIndex, query: &[f32], count: usize) -> Result<Matches>;
+        pub fn search_f16(self: &NativeIndex, query: &[i16], count: usize) -> Result<Matches>;
+        pub fn search_i8(self: &NativeIndex, query: &[i8], count: usize) -> Result<Matches>;
+        pub fn search_u8(self: &NativeIndex, query: &[u8], count: usize) -> Result<Matches>;
+        pub fn search_b1x8(self: &NativeIndex, query: &[u8], count: usize) -> Result<Matches>;
 
-        pub fn exact_search_b1x8(self: &NativeIndex, query: &[u8], count: usize)
-            -> Result<Matches>;
-        pub fn exact_search_i8(self: &NativeIndex, query: &[i8], count: usize) -> Result<Matches>;
-        pub fn exact_search_f16(self: &NativeIndex, query: &[i16], count: usize)
+        pub fn exact_search_f64(self: &NativeIndex, query: &[f64], count: usize)
             -> Result<Matches>;
         pub fn exact_search_f32(self: &NativeIndex, query: &[f32], count: usize)
             -> Result<Matches>;
-        pub fn exact_search_f64(self: &NativeIndex, query: &[f64], count: usize)
+        pub fn exact_search_f16(self: &NativeIndex, query: &[i16], count: usize)
+            -> Result<Matches>;
+        pub fn exact_search_i8(self: &NativeIndex, query: &[i8], count: usize) -> Result<Matches>;
+        pub fn exact_search_u8(self: &NativeIndex, query: &[u8], count: usize) -> Result<Matches>;
+        pub fn exact_search_b1x8(self: &NativeIndex, query: &[u8], count: usize)
             -> Result<Matches>;
 
-        pub fn filtered_search_b1x8(
+        pub fn filtered_search_f64(
             self: &NativeIndex,
-            query: &[u8],
-            count: usize,
-            filter: usize,
-            filter_state: usize,
-        ) -> Result<Matches>;
-        pub fn filtered_search_i8(
-            self: &NativeIndex,
-            query: &[i8],
-            count: usize,
-            filter: usize,
-            filter_state: usize,
-        ) -> Result<Matches>;
-        pub fn filtered_search_f16(
-            self: &NativeIndex,
-            query: &[i16],
+            query: &[f64],
             count: usize,
             filter: usize,
             filter_state: usize,
@@ -444,19 +439,41 @@ pub mod ffi {
             filter: usize,
             filter_state: usize,
         ) -> Result<Matches>;
-        pub fn filtered_search_f64(
+        pub fn filtered_search_f16(
             self: &NativeIndex,
-            query: &[f64],
+            query: &[i16],
+            count: usize,
+            filter: usize,
+            filter_state: usize,
+        ) -> Result<Matches>;
+        pub fn filtered_search_i8(
+            self: &NativeIndex,
+            query: &[i8],
+            count: usize,
+            filter: usize,
+            filter_state: usize,
+        ) -> Result<Matches>;
+        pub fn filtered_search_u8(
+            self: &NativeIndex,
+            query: &[u8],
+            count: usize,
+            filter: usize,
+            filter_state: usize,
+        ) -> Result<Matches>;
+        pub fn filtered_search_b1x8(
+            self: &NativeIndex,
+            query: &[u8],
             count: usize,
             filter: usize,
             filter_state: usize,
         ) -> Result<Matches>;
 
-        pub fn get_b1x8(self: &NativeIndex, key: u64, buffer: &mut [u8]) -> Result<usize>;
-        pub fn get_i8(self: &NativeIndex, key: u64, buffer: &mut [i8]) -> Result<usize>;
-        pub fn get_f16(self: &NativeIndex, key: u64, buffer: &mut [i16]) -> Result<usize>;
-        pub fn get_f32(self: &NativeIndex, key: u64, buffer: &mut [f32]) -> Result<usize>;
         pub fn get_f64(self: &NativeIndex, key: u64, buffer: &mut [f64]) -> Result<usize>;
+        pub fn get_f32(self: &NativeIndex, key: u64, buffer: &mut [f32]) -> Result<usize>;
+        pub fn get_f16(self: &NativeIndex, key: u64, buffer: &mut [i16]) -> Result<usize>;
+        pub fn get_i8(self: &NativeIndex, key: u64, buffer: &mut [i8]) -> Result<usize>;
+        pub fn get_u8(self: &NativeIndex, key: u64, buffer: &mut [u8]) -> Result<usize>;
+        pub fn get_b1x8(self: &NativeIndex, key: u64, buffer: &mut [u8]) -> Result<usize>;
 
         pub fn remove(self: &NativeIndex, key: u64) -> Result<usize>;
         pub fn rename(self: &NativeIndex, from: u64, to: u64) -> Result<usize>;
@@ -492,6 +509,7 @@ pub use ffi::{IndexOptions, MemoryStats, MetricKind, ScalarKind};
 ///
 /// - `B1X8Metric`: A metric function for binary vectors packed in `u8` containers, represented here by `b1x8`.
 /// - `I8Metric`: A metric function for vectors of 8-bit signed integers (`i8`).
+/// - `U8Metric`: A metric function for vectors of 8-bit unsigned integers (`u8`).
 /// - `F16Metric`: A metric function for vectors of 16-bit half-precision floating-point numbers (`f16`).
 /// - `F32Metric`: A metric function for vectors of 32-bit floating-point numbers (`f32`).
 /// - `F64Metric`: A metric function for vectors of 64-bit floating-point numbers (`f64`).
@@ -530,6 +548,7 @@ pub use ffi::{IndexOptions, MemoryStats, MetricKind, ScalarKind};
 pub enum MetricFunction {
     B1X8Metric(*mut std::boxed::Box<dyn Fn(*const b1x8, *const b1x8) -> Distance + Send + Sync>),
     I8Metric(*mut std::boxed::Box<dyn Fn(*const i8, *const i8) -> Distance + Send + Sync>),
+    U8Metric(*mut std::boxed::Box<dyn Fn(*const u8, *const u8) -> Distance + Send + Sync>),
     F16Metric(*mut std::boxed::Box<dyn Fn(*const f16, *const f16) -> Distance + Send + Sync>),
     F32Metric(*mut std::boxed::Box<dyn Fn(*const f32, *const f32) -> Distance + Send + Sync>),
     F64Metric(*mut std::boxed::Box<dyn Fn(*const f64, *const f64) -> Distance + Send + Sync>),
@@ -587,6 +606,9 @@ impl Drop for Index {
                     drop(Box::from_raw(*pointer));
                 },
                 MetricFunction::I8Metric(pointer) => unsafe {
+                    drop(Box::from_raw(*pointer));
+                },
+                MetricFunction::U8Metric(pointer) => unsafe {
                     drop(Box::from_raw(*pointer));
                 },
                 MetricFunction::F16Metric(pointer) => unsafe {
