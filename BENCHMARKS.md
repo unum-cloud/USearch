@@ -65,7 +65,7 @@ To achieve best highest results we suggest compiling locally for the target arch
 ```sh
 git submodule update --init --recursive
 cmake -DUSEARCH_BUILD_BENCH_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_OPENMP=1 -DCMAKE_BUILD_TYPE=RelWithDebInfo -B build_profile
-cmake --build build_profile --config RelWithDebInfo -j
+cmake --build build_profile --config RelWithDebInfo --parallel
 build_profile/bench_cpp --help
 ```
 
@@ -168,20 +168,23 @@ python/scripts/bench_cluster.py --help
 BigANN benchmark is a good starting point, if you are searching for large collections of high-dimensional vectors.
 Those often come with precomputed ground-truth neighbors, which is handy for recall evaluation.
 
-| Dataset                                     | Scalar Type | Dimensions | Metric |   Size    |
-| :------------------------------------------ | :---------: | :--------: | :----: | :-------: |
-| [Unum UForm Creative Captions][unum-cc-3m]  |    `f32`    |    256     |   IP   |   3 GB    |
-| [Unum UForm Wiki][unum-wiki-1m]             |    `f32`    |    256     |   IP   |   1 GB    |
-| [Yandex Text-to-Image][yandex-t2i] subset   |    `f32`    |    200     |  Cos   |   1 GB    |
-| [Yandex Deep10M][yandex-deep] subset        |    `f32`    |     96     |   L2   |  358 GB   |
-| [Microsoft SpaceV-100M][msft-spacev] subset |    `i8`     |    100     |   L2   |  9.3 GB   |
-|                                             |             |            |        |           |
-| [Microsoft SpaceV-1B][msft-spacev]          |    `i8`     |    100     |   L2   |   93 GB   |
-| [Microsoft Turing-ANNS][msft-turing]        |    `f32`    |    100     |   L2   |  373 GB   |
-| [Yandex Deep1B][yandex-deep]                |    `f32`    |     96     |   L2   |  358 GB   |
-| [Yandex Text-to-Image][t2i]                 |    `f32`    |    200     |  Cos   |  750 GB   |
-|                                             |             |            |        |           |
-| [ViT-L/12 LAION][laion]                     |    `f32`    |    2048    |  Cos   | 2 - 10 TB |
+| Dataset                                          | Scalar Type | Dimensions | Metric |   Size    |
+| :----------------------------------------------- | :---------: | :--------: | :----: | :-------: |
+| [Unum UForm Creative Captions][unum-cc-3m]       |    `f32`    |    256     |   IP   |   3 GB    |
+| [Unum UForm Wiki][unum-wiki-1m]                  |    `f32`    |    256     |   IP   |   1 GB    |
+| [Yandex Text-to-Image][yandex-t2i] subset        |    `f32`    |    200     |  Cos   |   1 GB    |
+| [Yandex Deep10M][yandex-deep] subset             |    `f32`    |     96     |   L2   |  358 GB   |
+| [Microsoft SpaceV-100M][msft-spacev] subset      |    `i8`     |    100     |   L2   |  9.3 GB   |
+| [Meta BIGANN (SIFT) 100M][bigann] subset         |    `u8`     |    128     |   L2   |   12 GB   |
+| [Microsoft Turing-ANNS 100M][msft-turing] subset |    `f32`    |    100     |   L2   |   37 GB   |
+|                                                  |             |            |        |           |
+| [Meta BIGANN (SIFT) 1B][bigann]                  |    `u8`     |    128     |   L2   |  119 GB   |
+| [Microsoft SpaceV-1B][msft-spacev]               |    `i8`     |    100     |   L2   |   93 GB   |
+| [Microsoft Turing-ANNS][msft-turing]             |    `f32`    |    100     |   L2   |  373 GB   |
+| [Yandex Deep1B][yandex-deep]                     |    `f32`    |     96     |   L2   |  358 GB   |
+| [Yandex Text-to-Image][t2i]                      |    `f32`    |    200     |  Cos   |  750 GB   |
+|                                                  |             |            |        |           |
+| [ViT-L/12 LAION][laion]                          |    `f32`    |    2048    |  Cos   | 2 - 10 TB |
 
 Luckily, smaller samples of those datasets are available.
 
@@ -192,6 +195,7 @@ Luckily, smaller samples of those datasets are available.
 [msft-turing]: https://learning2hash.github.io/publications/microsoftturinganns1B/
 [yandex-t2i]: https://research.yandex.com/blog/benchmarks-for-billion-scale-similarity-search
 [yandex-deep]: https://research.yandex.com/blog/benchmarks-for-billion-scale-similarity-search
+[bigann]: https://dl.fbaipublicfiles.com/billion-scale-ann-benchmarks/bigann/
 [laion]: https://laion.ai/blog/laion-5b/#download-the-data
 
 ### Unum UForm Wiki
@@ -229,6 +233,71 @@ mkdir -p datasets/deep_1B/ && \
 mkdir -p datasets/arxiv_2M/ && \
     wget -nc https://huggingface.co/datasets/unum-cloud/ann-arxiv-2m/resolve/main/abstract.e5-base-v2.fbin -P datasets/arxiv_2M/ &&
     wget -nc https://huggingface.co/datasets/unum-cloud/ann-arxiv-2m/resolve/main/title.e5-base-v2.fbin -P datasets/arxiv_2M/
+```
+
+### Meta BIGANN (SIFT)
+
+The full 1B dataset and query/ground-truth files are available from Meta.
+No pre-sliced 100M base file exists, so a range request is used to download only the first 100M vectors (~12 GB).
+After the range request, the header must be patched to reflect 100M vectors instead of 1B.
+
+```sh
+mkdir -p datasets/sift_100M/ && \
+    wget -nc https://dl.fbaipublicfiles.com/billion-scale-ann-benchmarks/bigann/query.public.10K.u8bin -P datasets/sift_100M/ && \
+    wget -nc https://dl.fbaipublicfiles.com/billion-scale-ann-benchmarks/GT_100M/bigann-100M -O datasets/sift_100M/groundtruth.public.10K.ibin && \
+    wget --header="Range: bytes=0-12800000007" \
+        https://dl.fbaipublicfiles.com/billion-scale-ann-benchmarks/bigann/base.1B.u8bin \
+        -O datasets/sift_100M/base.100M.u8bin && \
+    python3 -c "
+import struct
+with open('datasets/sift_100M/base.100M.u8bin', 'r+b') as f:
+    f.write(struct.pack('I', 100_000_000))
+"
+```
+
+To run the benchmark on the 100M dataset:
+
+```bash
+build_profile/bench_cpp \
+    --vectors datasets/sift_100M/base.100M.u8bin \
+    --queries datasets/sift_100M/query.public.10K.u8bin \
+    --neighbors datasets/sift_100M/groundtruth.public.10K.ibin \
+    --output datasets/sift_100M/index.usearch \
+    --i8quant \
+    --l2sq
+```
+
+### Microsoft Turing-ANNS
+
+The full 1B dataset is ~373 GB of `f32` vectors with 100 dimensions.
+A 100M subset (~37 GB) can be obtained via a range request, followed by a header patch to update the vector count.
+Pre-computed ground truth for the 100M subset is available as a separate file.
+
+```sh
+mkdir -p datasets/turing_100M/ && \
+    wget -nc https://comp21storage.z5.web.core.windows.net/comp21/MSFT-TURING-ANNS/query100K.fbin \
+        -O datasets/turing_100M/query.public.100K.fbin && \
+    wget -nc https://comp21storage.z5.web.core.windows.net/comp21/MSFT-TURING-ANNS/msturing-gt-100M \
+        -O datasets/turing_100M/groundtruth.public.100K.ibin && \
+    wget --header="Range: bytes=0-40000000007" \
+        https://comp21storage.z5.web.core.windows.net/comp21/MSFT-TURING-ANNS/base1b.fbin \
+        -O datasets/turing_100M/base.100M.fbin && \
+    python3 -c "
+import struct
+with open('datasets/turing_100M/base.100M.fbin', 'r+b') as f:
+    f.write(struct.pack('I', 100_000_000))
+"
+```
+
+To run the benchmark on the 100M dataset:
+
+```bash
+build_profile/bench_cpp \
+    --vectors datasets/turing_100M/base.100M.fbin \
+    --queries datasets/turing_100M/query.public.100K.fbin \
+    --neighbors datasets/turing_100M/groundtruth.public.100K.ibin \
+    --output datasets/turing_100M/index.usearch \
+    --l2sq
 ```
 
 ### Microsoft SpaceV

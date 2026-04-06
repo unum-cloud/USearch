@@ -384,7 +384,7 @@ void search_many( //
 }
 
 template <typename dataset_at, typename index_at> //
-static void single_shot(dataset_at& dataset, index_at& index, bool construct = true) {
+static void single_shot(dataset_at& dataset, index_at& index, bool construct = true, bool bench_join = false) {
     using distance_t = typename index_at::distance_t;
 
     std::printf("\n");
@@ -396,6 +396,9 @@ static void single_shot(dataset_at& dataset, index_at& index, bool construct = t
             ids[i] = static_cast<default_key_t>(dataset.vector_id(i));
         index_many(index, dataset.vectors_count(), ids.data(), dataset.vector(0), dataset.dimensions());
     }
+
+    std::size_t mem = index.memory_usage();
+    std::printf("Memory usage: %.2f GB\n", mem / (1024.0 * 1024.0 * 1024.0));
 
     // Perform search, evaluate speed
     std::vector<default_key_t> found_neighbors(dataset.queries_count() * dataset.neighborhood_size());
@@ -415,37 +418,38 @@ static void single_shot(dataset_at& dataset, index_at& index, bool construct = t
     std::printf("Recall@1 %.2f %%\n", recall_at_1 * 100.f / dataset.queries_count());
     std::printf("Recall %.2f %%\n", recall_full * 100.f / dataset.queries_count());
 
-    // Perform joins using maps to support non-contiguous IDs
-    std::unordered_map<default_key_t, default_key_t> man_to_woman;
-    std::unordered_map<default_key_t, default_key_t> woman_to_man;
-    std::size_t join_attempts = 0;
-    {
+    if (!bench_join) {
+        // Perform joins using maps to support non-contiguous IDs
+        std::unordered_map<default_key_t, default_key_t> man_to_woman;
+        std::unordered_map<default_key_t, default_key_t> woman_to_man;
+        std::size_t join_attempts = 0;
+
         index_at& men = index;
         index_at women = index.copy();
-        {
-            executor_default_t executor(index.limits().threads());
-            running_stats_printer_t printer{1, "Join"};
-            join_result_t result = join(                          //
-                men, women, index_join_config_t{executor.size()}, //
-                man_to_woman, woman_to_man,                       //
-                executor, [&](std::size_t progress, std::size_t total) {
-                    if (progress % 1000 == 0)
-                        printer.print(progress, total);
-                    return true;
-                });
-            // Refresh once again to show 100% completion
-            printer.print();
-            join_attempts = result.visited_members;
-        }
+
+        executor_default_t executor(index.limits().threads());
+        running_stats_printer_t printer{1, "Join"};
+        join_result_t result = join(                          //
+            men, women, index_join_config_t{executor.size()}, //
+            man_to_woman, woman_to_man,                       //
+            executor, [&](std::size_t progress, std::size_t total) {
+                if (progress % 1000 == 0)
+                    printer.print(progress, total);
+                return true;
+            });
+        // Refresh once again to show 100% completion
+        printer.print();
+        join_attempts = result.visited_members;
+
+        // Evaluate join quality
+        std::size_t recall_join = 0;
+        for (auto const& [man, woman] : man_to_woman)
+            recall_join += (man == woman);
+        std::size_t unmatched_count = dataset.vectors_count() - man_to_woman.size();
+        std::printf("Recall Joins %.2f %%\n", recall_join * 100.f / index.size());
+        std::printf("Unmatched %.2f %% (%zu items)\n", unmatched_count * 100.f / index.size(), unmatched_count);
+        std::printf("Proposals %.2f / man (%zu total)\n", join_attempts * 1.f / index.size(), join_attempts);
     }
-    // Evaluate join quality
-    std::size_t recall_join = 0;
-    for (auto const& [man, woman] : man_to_woman)
-        recall_join += (man == woman);
-    std::size_t unmatched_count = dataset.vectors_count() - man_to_woman.size();
-    std::printf("Recall Joins %.2f %%\n", recall_join * 100.f / index.size());
-    std::printf("Unmatched %.2f %% (%zu items)\n", unmatched_count * 100.f / index.size(), unmatched_count);
-    std::printf("Proposals %.2f / man (%zu total)\n", join_attempts * 1.f / index.size(), join_attempts);
 
     std::printf("------------\n");
     std::printf("\n");
@@ -511,12 +515,17 @@ struct args_t {
     bool help = false;
 
     bool big = false;
+    bool join = false;
+    bool view = false;
 
     bool quantize_bf16 = false;
     bool quantize_f16 = false;
     bool quantize_e5m2 = false;
     bool quantize_e4m3 = false;
+    bool quantize_e3m2 = false;
+    bool quantize_e2m3 = false;
     bool quantize_i8 = false;
+    bool quantize_u8 = false;
     bool quantize_b1 = false;
 
     bool metric_ip = false;
@@ -555,8 +564,14 @@ struct args_t {
             return scalar_kind_t::e5m2_k;
         if (quantize_e4m3)
             return scalar_kind_t::e4m3_k;
+        if (quantize_e3m2)
+            return scalar_kind_t::e3m2_k;
+        if (quantize_e2m3)
+            return scalar_kind_t::e2m3_k;
         if (quantize_i8)
             return scalar_kind_t::i8_k;
+        if (quantize_u8)
+            return scalar_kind_t::u8_k;
         if (quantize_b1)
             return scalar_kind_t::b1x8_k;
         return scalar_kind_t::f32_k;
@@ -578,14 +593,16 @@ void run_punned(dataset_at& dataset, args_t const& args, index_dense_config_t co
     std::printf("-- Hardware acceleration: %s\n", index.metric().isa_name());
     std::printf("Will benchmark in-memory\n");
 
-    single_shot(dataset, index, true);
+    single_shot(dataset, index, true, args.join);
     index.save(args.path_output.c_str());
 
+    if (!args.view)
+        return;
     std::printf("Will benchmark an on-disk view\n");
 
     index_at index_view = index.fork();
     index_view.view(args.path_output.c_str());
-    single_shot(dataset, index_view, false);
+    single_shot(dataset, index_view, false, args.join);
 }
 
 template <typename index_at, typename dataset_at> //
@@ -595,14 +612,16 @@ void run_typed(dataset_at& dataset, args_t const& args, index_config_t config, i
     index.reserve(limits);
     std::printf("Will benchmark in-memory\n");
 
-    single_shot(dataset, index, true);
+    single_shot(dataset, index, true, args.join);
     index.save(args.path_output.c_str());
 
+    if (!args.view)
+        return;
     std::printf("Will benchmark an on-disk view\n");
 
     index_at index_view = index.fork();
     index_view.view(args.path_output.c_str());
-    single_shot(dataset, index_view, false);
+    single_shot(dataset, index_view, false, args.join);
 }
 
 template <typename dataset_scalar_at> void bench_with_args(args_t const& args) {
@@ -645,9 +664,9 @@ int main(int argc, char** argv) {
     auto args = args_t{};
     auto cli = ( //
         (option("--vectors") & value("path", args.path_vectors))
-            .doc(".[fhbd]bin, .i8bin, .f32bin file path to construct the index"),
+            .doc(".[fhbd]bin, .i8bin, .u8bin, .f32bin file path to construct the index"),
         (option("--queries") & value("path", args.path_queries))
-            .doc(".[fhbd]bin, .i8bin, .f32bin file path to query the index"),
+            .doc(".[fhbd]bin, .i8bin, .u8bin, .f32bin file path to query the index"),
         (option("--neighbors") & value("path", args.path_neighbors)).doc(".ibin, .i32bin file path with ground truth"),
         (option("--ids") & value("path", args.path_ids)).doc(".i32bin file path with vector IDs (optional)"),
         (option("-o", "--output") & value("path", args.path_output)).doc(".usearch output file path"),
@@ -663,7 +682,10 @@ int main(int argc, char** argv) {
             option("-f16", "--f16quant").set(args.quantize_f16).doc("Enable `f16_t` quantization") |
             option("-e5m2", "--e5m2quant").set(args.quantize_e5m2).doc("Enable `e5m2_t` quantization") |
             option("-e4m3", "--e4m3quant").set(args.quantize_e4m3).doc("Enable `e4m3_t` quantization") |
+            option("-e3m2", "--e3m2quant").set(args.quantize_e3m2).doc("Enable `e3m2_t` quantization") |
+            option("-e2m3", "--e2m3quant").set(args.quantize_e2m3).doc("Enable `e2m3_t` quantization") |
             option("-i8", "--i8quant").set(args.quantize_i8).doc("Enable `i8_t` quantization") |
+            option("-u8", "--u8quant").set(args.quantize_u8).doc("Enable `u8_t` quantization") |
             option("-b1", "--b1quant").set(args.quantize_b1).doc("Enable `b1x8_t` quantization")),
         ( //
             option("--ip").set(args.metric_ip).doc("Choose Inner Product metric") |
@@ -673,7 +695,9 @@ int main(int argc, char** argv) {
             option("--tanimoto").set(args.metric_tanimoto).doc("Choose Tanimoto metric") |
             option("--sorensen").set(args.metric_sorensen).doc("Choose Sorensen metric") |
             option("--haversine").set(args.metric_haversine).doc("Choose Haversine metric")),
-        option("-h", "--help").set(args.help).doc("Print this help information on this tool and exit"));
+        option("-h", "--help").set(args.help).doc("Print this help information on this tool and exit"),
+        option("--join").set(args.join).doc("Also benchmark joins"),
+        option("--view").set(args.view).doc("Also benchmark on-disk view"));
 
     if (!parse(argc, argv, cli)) {
         std::cerr << make_man_page(cli, argv[0]);
@@ -706,18 +730,18 @@ int main(int argc, char** argv) {
         return stack.find(needle, stack.size() - needle.size()) != std::string_view::npos;
     };
 
-    if (ends_with(args.path_vectors, ".fbin"))
-        bench_with_args<f32_t>(args);
-    else if (ends_with(args.path_vectors, ".dbin"))
+    if (ends_with(args.path_vectors, ".dbin"))
         bench_with_args<f64_t>(args);
+    else if (ends_with(args.path_vectors, ".fbin") || ends_with(args.path_vectors, ".f32bin"))
+        bench_with_args<f32_t>(args);
     else if (ends_with(args.path_vectors, ".hbin"))
         bench_with_args<f16_t>(args);
-    else if (ends_with(args.path_vectors, ".bbin"))
-        bench_with_args<b1x8_t>(args);
     else if (ends_with(args.path_vectors, ".i8bin"))
         bench_with_args<i8_t>(args);
-    else if (ends_with(args.path_vectors, ".f32bin"))
-        bench_with_args<f32_t>(args);
+    else if (ends_with(args.path_vectors, ".u8bin"))
+        bench_with_args<u8_t>(args);
+    else if (ends_with(args.path_vectors, ".bbin"))
+        bench_with_args<b1x8_t>(args);
     else
         throw std::runtime_error("Unknown input file path");
 
