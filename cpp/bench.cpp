@@ -518,63 +518,21 @@ struct args_t {
     bool join = false;
     bool view = false;
 
-    bool quantize_bf16 = false;
-    bool quantize_f16 = false;
-    bool quantize_e5m2 = false;
-    bool quantize_e4m3 = false;
-    bool quantize_e3m2 = false;
-    bool quantize_e2m3 = false;
-    bool quantize_i8 = false;
-    bool quantize_u8 = false;
-    bool quantize_b1 = false;
-
-    bool metric_ip = false;
-    bool metric_l2 = false;
-    bool metric_cos = false;
-    bool metric_haversine = false;
-    bool metric_divergence = false;
-    bool metric_hamming = false;
-    bool metric_tanimoto = false;
-    bool metric_sorensen = false;
+    std::string dtype_str = "f32";
+    std::string metric_str = "ip";
 
     metric_kind_t metric() const noexcept {
-        if (metric_l2)
-            return metric_kind_t::l2sq_k;
-        if (metric_cos)
-            return metric_kind_t::cos_k;
-        if (metric_haversine)
-            return metric_kind_t::haversine_k;
-        if (metric_divergence)
-            return metric_kind_t::divergence_k;
-        if (metric_hamming)
-            return metric_kind_t::hamming_k;
-        if (metric_tanimoto)
-            return metric_kind_t::tanimoto_k;
-        if (metric_sorensen)
-            return metric_kind_t::sorensen_k;
-        return metric_kind_t::ip_k;
+        auto parsed = metric_from_name(metric_str.c_str(), metric_str.size());
+        if (!parsed)
+            return metric_kind_t::ip_k;
+        return parsed.result;
     }
 
     scalar_kind_t quantization() const noexcept {
-        if (quantize_bf16)
-            return scalar_kind_t::bf16_k;
-        if (quantize_f16)
-            return scalar_kind_t::f16_k;
-        if (quantize_e5m2)
-            return scalar_kind_t::e5m2_k;
-        if (quantize_e4m3)
-            return scalar_kind_t::e4m3_k;
-        if (quantize_e3m2)
-            return scalar_kind_t::e3m2_k;
-        if (quantize_e2m3)
-            return scalar_kind_t::e2m3_k;
-        if (quantize_i8)
-            return scalar_kind_t::i8_k;
-        if (quantize_u8)
-            return scalar_kind_t::u8_k;
-        if (quantize_b1)
-            return scalar_kind_t::b1x8_k;
-        return scalar_kind_t::f32_k;
+        auto parsed = scalar_kind_from_name(dtype_str.c_str(), dtype_str.size());
+        if (!parsed)
+            return scalar_kind_t::f32_k;
+        return parsed.result;
     }
 };
 
@@ -677,24 +635,10 @@ int main(int argc, char** argv) {
         (option("--expansion-search") & value("integer", args.expansion_search)).doc("Affects search depth"),
         (option("--rows-skip") & value("integer", args.vectors_to_skip)).doc("Number of vectors to skip"),
         (option("--rows-take") & value("integer", args.vectors_to_take)).doc("Number of vectors to take"),
-        ( //
-            option("-bf16", "--bf16quant").set(args.quantize_bf16).doc("Enable `bf16_t` quantization") |
-            option("-f16", "--f16quant").set(args.quantize_f16).doc("Enable `f16_t` quantization") |
-            option("-e5m2", "--e5m2quant").set(args.quantize_e5m2).doc("Enable `e5m2_t` quantization") |
-            option("-e4m3", "--e4m3quant").set(args.quantize_e4m3).doc("Enable `e4m3_t` quantization") |
-            option("-e3m2", "--e3m2quant").set(args.quantize_e3m2).doc("Enable `e3m2_t` quantization") |
-            option("-e2m3", "--e2m3quant").set(args.quantize_e2m3).doc("Enable `e2m3_t` quantization") |
-            option("-i8", "--i8quant").set(args.quantize_i8).doc("Enable `i8_t` quantization") |
-            option("-u8", "--u8quant").set(args.quantize_u8).doc("Enable `u8_t` quantization") |
-            option("-b1", "--b1quant").set(args.quantize_b1).doc("Enable `b1x8_t` quantization")),
-        ( //
-            option("--ip").set(args.metric_ip).doc("Choose Inner Product metric") |
-            option("--l2sq").set(args.metric_l2).doc("Choose L2 Euclidean metric") |
-            option("--cos").set(args.metric_cos).doc("Choose Angular metric") |
-            option("--hamming").set(args.metric_hamming).doc("Choose Hamming metric") |
-            option("--tanimoto").set(args.metric_tanimoto).doc("Choose Tanimoto metric") |
-            option("--sorensen").set(args.metric_sorensen).doc("Choose Sorensen metric") |
-            option("--haversine").set(args.metric_haversine).doc("Choose Haversine metric")),
+        (option("--dtype") & value("type", args.dtype_str))
+            .doc("Quantization type: f64, f32, bf16, f16, e5m2, e4m3, e3m2, e2m3, i8, u8, b1"),
+        (option("--metric") & value("name", args.metric_str))
+            .doc("Distance metric: ip, l2sq, cos, hamming, tanimoto, sorensen, haversine"),
         option("-h", "--help").set(args.help).doc("Print this help information on this tool and exit"),
         option("--join").set(args.join).doc("Also benchmark joins"),
         option("--view").set(args.view).doc("Also benchmark on-disk view"));

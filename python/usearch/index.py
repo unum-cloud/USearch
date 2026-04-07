@@ -204,6 +204,7 @@ def _search_in_compiled(
     *,
     log: str | bool,
     progress: ProgressCallback | None,
+    dtype: ScalarKind | None = None,
     **kwargs,
 ) -> Matches | BatchMatches:
     #
@@ -242,9 +243,11 @@ def _search_in_compiled(
         progress_callback = update_progress_bar
 
     if progress_callback:
-        tuple_ = compiled_callable(vectors, progress=progress_callback, **kwargs)
+        tuple_ = compiled_callable(
+            vectors, progress=progress_callback, dtype=dtype if dtype is not None else ScalarKind.Unknown, **kwargs
+        )
     else:
-        tuple_ = compiled_callable(vectors, **kwargs)
+        tuple_ = compiled_callable(vectors, dtype=dtype if dtype is not None else ScalarKind.Unknown, **kwargs)
 
     if log:
         progress_bar.close()
@@ -261,6 +264,7 @@ def _add_to_compiled(
     threads: int,
     log: str | bool,
     progress: ProgressCallback | None,
+    dtype: ScalarKind | None = None,
 ) -> int | np.ndarray:
     #
     assert isinstance(vectors, np.ndarray), "Expects a NumPy array"
@@ -302,10 +306,18 @@ def _add_to_compiled(
             copy=copy,
             threads=threads,
             progress=update_progress_bar,
+            dtype=dtype if dtype is not None else ScalarKind.Unknown,
         )
         progress_bar.close()
     else:
-        compiled.add_many(keys, vectors, copy=copy, threads=threads, progress=progress)
+        compiled.add_many(
+            keys,
+            vectors,
+            copy=copy,
+            threads=threads,
+            progress=progress,
+            dtype=dtype if dtype is not None else ScalarKind.Unknown,
+        )
 
     return keys
 
@@ -678,6 +690,7 @@ class Index:
         threads: int = 0,
         log: str | bool = False,
         progress: ProgressCallback | None = None,
+        dtype: DTypeLike | None = None,
     ) -> int | np.ndarray:
         """Inserts one or move vectors into the index.
 
@@ -716,6 +729,7 @@ class Index:
             threads=threads,
             log=log,
             progress=progress,
+            dtype=_normalize_dtype(dtype) if dtype is not None else None,
         )
 
     def search(
@@ -728,6 +742,7 @@ class Index:
         exact: bool = False,
         log: str | bool = False,
         progress: ProgressCallback | None = None,
+        dtype: DTypeLike | None = None,
     ) -> Matches | BatchMatches:
         """Performs approximate nearest neighbors search for one or more queries.
 
@@ -766,6 +781,7 @@ class Index:
             exact=exact,
             threads=threads,
             progress=progress,
+            dtype=_normalize_dtype(dtype) if dtype is not None else None,
         )
 
     def contains(self, keys: KeyOrKeysLike) -> bool | np.ndarray:
@@ -1230,6 +1246,7 @@ class Index:
         threads: int = 0,
         log: str | bool = False,
         progress: ProgressCallback | None = None,
+        dtype: DTypeLike | None = None,
     ) -> Clustering:
         """
         Clusters already indexed or provided `vectors`, mapping them to various centroids.
@@ -1263,6 +1280,7 @@ class Index:
                 max_count=max_count,
                 threads=threads,
                 progress=progress,
+                dtype=_normalize_dtype(dtype) if dtype is not None else ScalarKind.Unknown,
             )
         else:
             if keys is None:
@@ -1520,6 +1538,7 @@ class Indexes:
         threads: int = 0,
         exact: bool = False,
         progress: ProgressCallback | None = None,
+        dtype: DTypeLike | None = None,
     ):
         return _search_in_compiled(
             self._compiled.search_many,
@@ -1531,6 +1550,7 @@ class Indexes:
             exact=exact,
             threads=threads,
             progress=progress,
+            dtype=_normalize_dtype(dtype) if dtype is not None else None,
         )
 
 
@@ -1544,6 +1564,7 @@ def search(
     threads: int = 0,
     log: str | bool = False,
     progress: ProgressCallback | None = None,
+    dtype: DTypeLike | None = None,
 ) -> Matches | BatchMatches:
     """Shortcut for search, that can avoid index construction. Particularly useful for
     tiny datasets, where brute-force exact search works fast enough.
@@ -1576,6 +1597,8 @@ def search(
     assert not progress or _match_signature(progress, [int, int], bool), "Invalid callback signature"
     assert dataset.ndim == 2, "Dataset must be a matrix, with a vector in each row"
 
+    scalar_kind = _normalize_dtype(dtype) if dtype is not None else ScalarKind.Unknown
+
     if not exact:
         index = Index(
             ndim=dataset.shape[1],
@@ -1588,6 +1611,7 @@ def search(
             threads=threads,
             log=log,
             progress=progress,
+            dtype=scalar_kind,
         )
         return index.search(
             query,
@@ -1595,6 +1619,7 @@ def search(
             threads=threads,
             log=log,
             progress=progress,
+            dtype=scalar_kind,
         )
 
     metric = _normalize_metric(metric)
@@ -1620,6 +1645,7 @@ def search(
             metric_kind=metric_kind,
             metric_signature=metric_signature,
             metric_pointer=metric_pointer,
+            dtype=scalar_kind,
             **kwargs,
         )
 

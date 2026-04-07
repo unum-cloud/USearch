@@ -54,16 +54,16 @@ def main():
 
     # Load or generate data
     if args.vectors_a and args.vectors_b:
-        a_mat = load_matrix(args.vectors_a, count_rows=args.count)
-        b_mat = load_matrix(args.vectors_b, count_rows=args.count)
-        print(f"Loaded datasets: A={a_mat.shape}, B={b_mat.shape}")
+        vectors_a = load_matrix(args.vectors_a, count_rows=args.count)
+        vectors_b = load_matrix(args.vectors_b, count_rows=args.count)
+        print(f"Loaded datasets: A={vectors_a.shape}, B={vectors_b.shape}")
     else:
         print(f"Generating synthetic data: {args.count:,} x {args.ndim}")
-        a_mat = random_vectors(args.count, ndim=args.ndim).astype(np.float32)
-        b_mat = random_vectors(args.count, ndim=args.ndim).astype(np.float32)
+        vectors_a = random_vectors(args.count, ndim=args.ndim).astype(np.float32)
+        vectors_b = random_vectors(args.count, ndim=args.ndim).astype(np.float32)
 
-    ndim = a_mat.shape[1]
-    min_elements = min(a_mat.shape[0], b_mat.shape[0])
+    ndim = vectors_a.shape[1]
+    min_elements = min(vectors_a.shape[0], vectors_b.shape[0])
 
     # Build metric
     try:
@@ -79,12 +79,12 @@ def main():
 
     # Build indexes
     print("--- Indexing ---")
-    a = Index(ndim, metric=metric, dtype=args.dtype)
-    b = Index(ndim, metric=metric, dtype=args.dtype)
+    index_a = Index(ndim, metric=metric, dtype=args.dtype)
+    index_b = Index(ndim, metric=metric, dtype=args.dtype)
 
-    a.add(None, a_mat, log=True)
-    b.add(None, b_mat, log=True)
-    print(f"Indexed: A={len(a):,}, B={len(b):,}")
+    index_a.add(None, vectors_a, log=True)
+    index_b.add(None, vectors_b, log=True)
+    print(f"Indexed: A={len(index_a):,}, B={len(index_b):,}")
 
     # Diagnostics
     if args.diagnostics:
@@ -93,7 +93,7 @@ def main():
         # Pairwise similarity
         mean_sim = 0.0
         for i in tqdm(range(min_elements), desc="Pairwise Similarity"):
-            a_vec, b_vec = a_mat[i], b_mat[i]
+            a_vec, b_vec = vectors_a[i], vectors_b[i]
             a_norm, b_norm = norm(a_vec), norm(b_vec)
             if a_norm > 0 and b_norm > 0:
                 mean_sim += dot(a_vec, b_vec) / (a_norm * b_norm)
@@ -102,23 +102,31 @@ def main():
 
         search_kwargs = dict(count=args.k, log=True)
 
-        secs, a_self = measure_seconds(lambda: a.search(a_mat, **search_kwargs).recall(np.arange(len(a))))
-        print(f"Self-recall @{args.k} of A: {a_self * 100:.2f}% ({secs:.2f}s)")
+        secs, recall_a = measure_seconds(
+            lambda: index_a.search(vectors_a, **search_kwargs).recall(np.arange(len(index_a)))
+        )
+        print(f"Self-recall @{args.k} of A: {recall_a * 100:.2f}% ({secs:.2f}s)")
 
-        secs, b_self = measure_seconds(lambda: b.search(b_mat, **search_kwargs).recall(np.arange(len(b))))
-        print(f"Self-recall @{args.k} of B: {b_self * 100:.2f}% ({secs:.2f}s)")
+        secs, recall_b = measure_seconds(
+            lambda: index_b.search(vectors_b, **search_kwargs).recall(np.arange(len(index_b)))
+        )
+        print(f"Self-recall @{args.k} of B: {recall_b * 100:.2f}% ({secs:.2f}s)")
 
-        secs, ab = measure_seconds(lambda: b.search(a_mat, **search_kwargs).recall(np.arange(min_elements)))
-        print(f"Cross-recall @{args.k} A->B: {ab * 100:.2f}% ({secs:.2f}s)")
+        secs, recall_ab = measure_seconds(
+            lambda: index_b.search(vectors_a, **search_kwargs).recall(np.arange(min_elements))
+        )
+        print(f"Cross-recall @{args.k} A->B: {recall_ab * 100:.2f}% ({secs:.2f}s)")
 
-        secs, ba = measure_seconds(lambda: a.search(b_mat, **search_kwargs).recall(np.arange(min_elements)))
-        print(f"Cross-recall @{args.k} B->A: {ba * 100:.2f}% ({secs:.2f}s)")
+        secs, recall_ba = measure_seconds(
+            lambda: index_a.search(vectors_b, **search_kwargs).recall(np.arange(min_elements))
+        )
+        print(f"Cross-recall @{args.k} B->A: {recall_ba * 100:.2f}% ({secs:.2f}s)")
 
     # Join
     print("\n--- Join ---")
-    t0 = perf_counter()
-    bimapping = a.join(b, max_proposals=100)
-    join_elapsed = perf_counter() - t0
+    start_time = perf_counter()
+    bimapping = index_a.join(index_b, max_proposals=100)
+    join_elapsed = perf_counter() - start_time
 
     recall = sum(1 for i, j in bimapping.items() if i == j)
     recall_pct = recall * 100.0 / min_elements

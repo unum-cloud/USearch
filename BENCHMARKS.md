@@ -198,6 +198,28 @@ Luckily, smaller samples of those datasets are available.
 [bigann]: https://dl.fbaipublicfiles.com/billion-scale-ann-benchmarks/bigann/
 [laion]: https://laion.ai/blog/laion-5b/#download-the-data
 
+### Unum UForm Creative Captions
+
+A cross-modal dataset of ~2.75M image-text pairs embedded with UForm VL English (256 dimensions).
+No separate query/ground-truth files — the natural ground truth is the image-text pairing: `image[i]` matches `text[i]`.
+
+```sh
+mkdir -p datasets/cc_3M/ && \
+    wget -nc https://huggingface.co/datasets/unum-cloud/ann-cc-3m/resolve/main/images.uform-vl-english.fbin \
+        -O datasets/cc_3M/images.fbin && \
+    wget -nc https://huggingface.co/datasets/unum-cloud/ann-cc-3m/resolve/main/texts.uform-vl-english.fbin \
+        -O datasets/cc_3M/texts.fbin
+```
+
+To benchmark cross-modal join:
+
+```bash
+python python/scripts/join.py \
+    --vectors-a datasets/cc_3M/texts.fbin \
+    --vectors-b datasets/cc_3M/images.fbin \
+    --metric cos --diagnostics
+```
+
 ### Unum UForm Wiki
 
 ```sh

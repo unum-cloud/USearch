@@ -215,7 +215,8 @@ template <typename index_at>
 static void add_many_to_index(                            //
     index_at& index, py::buffer keys, py::buffer vectors, //
     bool force_copy, std::size_t threads,                 //
-    progress_func_t const& progress) {
+    progress_func_t const& progress,                      //
+    scalar_kind_t scalar_kind = scalar_kind_t::unknown_k) {
 
     py::buffer_info keys_info = keys.request();
     py::buffer_info vectors_info = vectors.request();
@@ -247,10 +248,18 @@ static void add_many_to_index(                            //
         throw std::invalid_argument("Out of memory!");
 
     // clang-format off
-    switch (numpy_string_to_kind(vectors_info.format)) {
+    scalar_kind_t kind = (scalar_kind != scalar_kind_t::unknown_k)
+        ? scalar_kind
+        : numpy_string_to_kind(vectors_info.format);
+    switch (kind) {
     case scalar_kind_t::f64_k: add_typed_to_index<f64_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
     case scalar_kind_t::f32_k: add_typed_to_index<f32_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    case scalar_kind_t::bf16_k: add_typed_to_index<bf16_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
     case scalar_kind_t::f16_k: add_typed_to_index<f16_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    case scalar_kind_t::e5m2_k: add_typed_to_index<e5m2_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    case scalar_kind_t::e4m3_k: add_typed_to_index<e4m3_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    case scalar_kind_t::e3m2_k: add_typed_to_index<e3m2_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    case scalar_kind_t::e2m3_k: add_typed_to_index<e2m3_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
     case scalar_kind_t::i8_k: add_typed_to_index<i8_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
     case scalar_kind_t::u8_k: add_typed_to_index<u8_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
     case scalar_kind_t::b1x8_k: add_typed_to_index<b1x8_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
@@ -416,7 +425,7 @@ static void search_typed(                                       //
 template <typename index_at>
 static py::tuple search_many_in_index( //
     index_at& index, py::buffer vectors, std::size_t wanted, bool exact, std::size_t threads,
-    progress_func_t const& progress) {
+    progress_func_t const& progress, scalar_kind_t scalar_kind = scalar_kind_t::unknown_k) {
 
     if (wanted == 0)
         return py::tuple(5);
@@ -442,10 +451,18 @@ static py::tuple search_many_in_index( //
     std::atomic<std::size_t> stats_computed_distances(0);
 
     // clang-format off
-    switch (numpy_string_to_kind(vectors_info.format)) {
+    scalar_kind_t kind = (scalar_kind != scalar_kind_t::unknown_k)
+        ? scalar_kind
+        : numpy_string_to_kind(vectors_info.format);
+    switch (kind) {
     case scalar_kind_t::f64_k: search_typed<f64_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
     case scalar_kind_t::f32_k: search_typed<f32_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::bf16_k: search_typed<bf16_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
     case scalar_kind_t::f16_k: search_typed<f16_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::e5m2_k: search_typed<e5m2_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::e4m3_k: search_typed<e4m3_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::e3m2_k: search_typed<e3m2_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::e2m3_k: search_typed<e2m3_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
     case scalar_kind_t::i8_k: search_typed<i8_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
     case scalar_kind_t::u8_k: search_typed<u8_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
     case scalar_kind_t::b1x8_k: search_typed<b1x8_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
@@ -472,7 +489,8 @@ static py::tuple search_many_brute_force(       //
     metric_kind_t metric_kind,                  //
     metric_punned_signature_t metric_signature, //
     std::uintptr_t metric_uintptr,              //
-    progress_func_t const& progress_func) {
+    progress_func_t const& progress_func,       //
+    scalar_kind_t scalar_kind = scalar_kind_t::unknown_k) {
 
     if (wanted == 0)
         return py::tuple(5);
@@ -498,8 +516,12 @@ static py::tuple search_many_brute_force(       //
     if (wanted > dataset_count)
         throw std::invalid_argument("You can't request more matches than in the dataset!");
 
-    scalar_kind_t dataset_kind = numpy_string_to_kind(dataset_info.format);
-    scalar_kind_t queries_kind = numpy_string_to_kind(queries_info.format);
+    scalar_kind_t dataset_kind = (scalar_kind != scalar_kind_t::unknown_k)
+        ? scalar_kind
+        : numpy_string_to_kind(dataset_info.format);
+    scalar_kind_t queries_kind = (scalar_kind != scalar_kind_t::unknown_k)
+        ? scalar_kind
+        : numpy_string_to_kind(queries_info.format);
     if (dataset_kind != queries_kind)
         throw std::invalid_argument("The types of vectors don't match!");
 
@@ -663,7 +685,8 @@ template <typename scalar_at> struct rows_lookup_gt {
 template <typename index_at>
 static py::tuple cluster_vectors(        //
     index_at& index, py::buffer queries, //
-    std::size_t min_count, std::size_t max_count, std::size_t threads, progress_func_t const& progress) {
+    std::size_t min_count, std::size_t max_count, std::size_t threads, progress_func_t const& progress,
+    scalar_kind_t scalar_kind = scalar_kind_t::unknown_k) {
 
     // Clamp threads to hardware limit instead of throwing
     threads = std::min<std::size_t>(threads, std::thread::hardware_concurrency());
@@ -696,10 +719,18 @@ static py::tuple cluster_vectors(        //
     rows_lookup_gt<byte_t const> queries_end = queries_begin + queries_count;
 
     // clang-format off
-    switch (numpy_string_to_kind(queries_info.format)) {
+    scalar_kind_t kind = (scalar_kind != scalar_kind_t::unknown_k)
+        ? scalar_kind
+        : numpy_string_to_kind(queries_info.format);
+    switch (kind) {
     case scalar_kind_t::f64_k: cluster_result = index.cluster(queries_begin.as<f64_t const>(), queries_end.as<f64_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
     case scalar_kind_t::f32_k: cluster_result = index.cluster(queries_begin.as<f32_t const>(), queries_end.as<f32_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    case scalar_kind_t::bf16_k: cluster_result = index.cluster(queries_begin.as<bf16_t const>(), queries_end.as<bf16_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
     case scalar_kind_t::f16_k: cluster_result = index.cluster(queries_begin.as<f16_t const>(), queries_end.as<f16_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    case scalar_kind_t::e5m2_k: cluster_result = index.cluster(queries_begin.as<e5m2_t const>(), queries_end.as<e5m2_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    case scalar_kind_t::e4m3_k: cluster_result = index.cluster(queries_begin.as<e4m3_t const>(), queries_end.as<e4m3_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    case scalar_kind_t::e3m2_k: cluster_result = index.cluster(queries_begin.as<e3m2_t const>(), queries_end.as<e3m2_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    case scalar_kind_t::e2m3_k: cluster_result = index.cluster(queries_begin.as<e2m3_t const>(), queries_end.as<e2m3_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
     case scalar_kind_t::i8_k: cluster_result = index.cluster(queries_begin.as<i8_t const>(), queries_end.as<i8_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
     case scalar_kind_t::u8_k: cluster_result = index.cluster(queries_begin.as<u8_t const>(), queries_end.as<u8_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
     case scalar_kind_t::b1x8_k: cluster_result = index.cluster(queries_begin.as<b1x8_t const>(), queries_end.as<b1x8_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
@@ -982,6 +1013,16 @@ template <typename index_at> py::object get_many(index_at const& index, py::buff
         return get_typed_vectors_for_keys<i8_t, std::int8_t>(index, keys);
     else if (scalar_kind == scalar_kind_t::u8_k)
         return get_typed_vectors_for_keys<u8_t, std::uint8_t>(index, keys);
+    else if (scalar_kind == scalar_kind_t::bf16_k)
+        return get_typed_vectors_for_keys<bf16_t, std::uint16_t>(index, keys);
+    else if (scalar_kind == scalar_kind_t::e5m2_k)
+        return get_typed_vectors_for_keys<e5m2_t, std::uint8_t>(index, keys);
+    else if (scalar_kind == scalar_kind_t::e4m3_k)
+        return get_typed_vectors_for_keys<e4m3_t, std::uint8_t>(index, keys);
+    else if (scalar_kind == scalar_kind_t::e3m2_k)
+        return get_typed_vectors_for_keys<e3m2_t, std::uint8_t>(index, keys);
+    else if (scalar_kind == scalar_kind_t::e2m3_k)
+        return get_typed_vectors_for_keys<e2m3_t, std::uint8_t>(index, keys);
     else if (scalar_kind == scalar_kind_t::b1x8_k)
         return get_typed_vectors_for_keys<b1x8_t, std::uint8_t>(index, keys);
     else
@@ -1076,7 +1117,8 @@ PYBIND11_MODULE(compiled, m, py::mod_gil_not_used()) {
         py::arg("metric_kind") = metric_kind_t::cos_k,                          //
         py::arg("metric_signature") = metric_punned_signature_t::array_array_k, //
         py::arg("metric_pointer") = 0,                                          //
-        py::arg("progress") = nullptr                                           //
+        py::arg("progress") = nullptr,                                          //
+        py::arg("dtype") = scalar_kind_t::unknown_k                             //
     );
 
     m.def(                                                                               //
@@ -1133,7 +1175,8 @@ PYBIND11_MODULE(compiled, m, py::mod_gil_not_used()) {
         py::kw_only(),                                    //
         py::arg("copy") = true,                           //
         py::arg("threads") = 0,                           //
-        py::arg("progress") = nullptr                     //
+        py::arg("progress") = nullptr,                    //
+        py::arg("dtype") = scalar_kind_t::unknown_k       //
     );
 
     i.def(                                                      //
@@ -1142,7 +1185,8 @@ PYBIND11_MODULE(compiled, m, py::mod_gil_not_used()) {
         py::arg("count") = 10,                                  //
         py::arg("exact") = false,                               //
         py::arg("threads") = 0,                                 //
-        py::arg("progress") = nullptr                           //
+        py::arg("progress") = nullptr,                          //
+        py::arg("dtype") = scalar_kind_t::unknown_k             //
     );
 
     i.def(                                                     //
@@ -1151,7 +1195,8 @@ PYBIND11_MODULE(compiled, m, py::mod_gil_not_used()) {
         py::arg("min_count") = 0,                              //
         py::arg("max_count") = 0,                              //
         py::arg("threads") = 0,                                //
-        py::arg("progress") = nullptr                          //
+        py::arg("progress") = nullptr,                         //
+        py::arg("dtype") = scalar_kind_t::unknown_k            //
     );
 
     i.def(                                               //
@@ -1398,6 +1443,7 @@ PYBIND11_MODULE(compiled, m, py::mod_gil_not_used()) {
         py::arg("count") = 10,                                    //
         py::arg("exact") = false,                                 //
         py::arg("threads") = 0,                                   //
-        py::arg("progress") = nullptr                             //
+        py::arg("progress") = nullptr,                            //
+        py::arg("dtype") = scalar_kind_t::unknown_k               //
     );
 }

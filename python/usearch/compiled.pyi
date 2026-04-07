@@ -87,6 +87,7 @@ class Index:
         copy: bool = True,
         threads: int = 0,
         progress: Callable[[int, int], bool] | None = None,
+        dtype: ScalarKind = ...,
     ) -> None: ...
     def search_many(
         self,
@@ -95,6 +96,7 @@ class Index:
         exact: bool = False,
         threads: int = 0,
         progress: Callable[[int, int], bool] | None = None,
+        dtype: ScalarKind = ...,
     ) -> tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray, int, int]: ...
     def cluster_vectors(
         self,
@@ -103,6 +105,7 @@ class Index:
         max_count: int = 0,
         threads: int = 0,
         progress: Callable[[int, int], bool] | None = None,
+        dtype: ScalarKind = ...,
     ) -> tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray, int, int]: ...
     def cluster_keys(
         self,
@@ -233,6 +236,7 @@ class Indexes:
         exact: bool = False,
         threads: int = 0,
         progress: Callable[[int, int], bool] | None = None,
+        dtype: ScalarKind = ...,
     ) -> tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray, int, int]: ...
 
 def exact_search(
@@ -245,6 +249,7 @@ def exact_search(
     metric_signature: MetricSignature = ...,
     metric_pointer: int = 0,
     progress: Callable[[int, int], bool] | None = None,
+    dtype: ScalarKind = ...,
 ) -> tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray, int, int]: ...
 def kmeans(
     dataset: numpy.ndarray,
