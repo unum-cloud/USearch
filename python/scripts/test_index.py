@@ -21,23 +21,20 @@ Dependencies listed in the script header for uv to resolve automatically.
 import os
 from time import time
 
-import pytest
 import numpy as np
+import pytest
 
-from usearch.eval import random_vectors, self_recall, SearchStats
-from usearch.index import (
-    Index,
-    MetricKind,
-    ScalarKind,
-    Match,
-    Matches,
-    BatchMatches,
-    Clustering,
-)
+from usearch.eval import SearchStats, random_vectors, self_recall
 from usearch.index import (
     DEFAULT_CONNECTIVITY,
+    BatchMatches,
+    Clustering,
+    Index,
+    Match,
+    Matches,
+    MetricKind,
+    ScalarKind,
 )
-
 
 ndims = [3, 97, 256]
 batch_sizes = [1, 11, 77]
@@ -463,6 +460,6 @@ def test_index_copied_memory_usage():
     memory_with_copy = index_copied.memory_usage
     memory_without_copy = index_viewing.memory_usage
 
-    assert (
-        memory_with_copy > memory_without_copy
-    ), f"Expected default index addition to use more memory than copy=False ({memory_with_copy} vs {memory_without_copy})"
+    assert memory_with_copy > memory_without_copy, (
+        f"Expected default index addition to use more memory than copy=False ({memory_with_copy} vs {memory_without_copy})"
+    )

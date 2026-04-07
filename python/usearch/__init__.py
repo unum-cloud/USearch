@@ -1,10 +1,9 @@
-import os
-import sys
 import ctypes
+import os
 import platform
-import warnings
+import sys
 import urllib.request
-from typing import Optional, Tuple
+import warnings
 from urllib.error import HTTPError
 
 #! Load NumKong before the USearch compiled module
@@ -31,29 +30,30 @@ except ImportError:
 
 
 from usearch.compiled import (
-    VERSION_MAJOR,
-    VERSION_MINOR,
-    VERSION_PATCH,
     # Default values:
     DEFAULT_CONNECTIVITY,
     DEFAULT_EXPANSION_ADD,
     DEFAULT_EXPANSION_SEARCH,
+    USES_NUMKONG,
+    USES_NUMKONG_DYNAMIC_DISPATCH,
     # Dependencies:
     USES_OPENMP,
-    USES_NUMKONG,
     USES_SIMSIMD,
-    USES_NUMKONG_DYNAMIC_DISPATCH,
     USES_SIMSIMD_DYNAMIC_DISPATCH,
+    VERSION_MAJOR,
+    VERSION_MINOR,
+    VERSION_PATCH,
+    hardware_acceleration,
+    hardware_acceleration_available,
     # Hardware capabilities:
     hardware_acceleration_compiled,
-    hardware_acceleration_available,
 )
 
 __version__ = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}"
 
 
 class BinaryManager:
-    def __init__(self, version: Optional[str] = None):
+    def __init__(self, version: str | None = None):
         if version is None:
             version = __version__
         self.version = version or __version__
@@ -76,7 +76,7 @@ class BinaryManager:
         url = f"{base_url}/v{version}/{filename}"
         return url
 
-    def get_binary_name(self) -> Tuple[str, str]:
+    def get_binary_name(self) -> tuple[str, str]:
         version = self.version
         os_map = {"Linux": "linux", "Windows": "windows", "Darwin": "macos"}
         arch_map = {
@@ -94,7 +94,7 @@ class BinaryManager:
         target_filename = f"usearch_sqlite.{extension}"
         return source_filename, target_filename
 
-    def sqlite_found_or_downloaded(self) -> Optional[str]:
+    def sqlite_found_or_downloaded(self) -> str | None:
         """
         Attempts to locate the pre-installed `usearch_sqlite` binary.
         If not found, downloads it from GitHub.
@@ -108,7 +108,6 @@ class BinaryManager:
 
         # Check local development directories first
         for local_dir in local_dirs:
-
             local_path = os.path.join(local_dir, target_filename)
             if os.path.exists(local_path):
                 path_wout_extension, _, _ = local_path.rpartition(".")
@@ -124,7 +123,6 @@ class BinaryManager:
         download_dir = self.determine_download_dir()
         local_path = os.path.join(download_dir, target_filename)
         if not os.path.exists(local_path):
-
             # If not found locally, warn the user and download from GitHub
             warnings.warn("Will download `usearch_sqlite` binary from GitHub.", UserWarning)
             try:

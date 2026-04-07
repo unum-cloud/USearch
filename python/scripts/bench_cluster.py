@@ -8,25 +8,25 @@ against FAISS baseline with various datasets and configurations.
 Usage:
     uv run python/scripts/bench_cluster.py --help
     uv run python/scripts/bench_cluster.py --data datasets/wiki_1M/base.1M.fbin
-    
+
 Dependencies listed in the script header for uv to resolve automatically.
 """
+
 # /// script
 # dependencies = [
 #   "numpy",
-#   "faiss-cpu", 
+#   "faiss-cpu",
 #   "usearch",
 #   "tqdm"
 # ]
 # ///
-import os
 import argparse
+import os
 
-import numpy as np
 import faiss
+import numpy as np
 from tqdm import tqdm
 
-import usearch
 from usearch.index import kmeans
 from usearch.io import load_matrix
 

@@ -988,7 +988,7 @@ template <typename index_at> py::object get_many(index_at const& index, py::buff
         throw std::invalid_argument("Incompatible scalars in the query matrix!");
 }
 
-PYBIND11_MODULE(compiled, m) {
+PYBIND11_MODULE(compiled, m, py::mod_gil_not_used()) {
     m.doc() = "Smaller & Faster Single-File Vector Search Engine from Unum";
 
     m.attr("DEFAULT_CONNECTIVITY") = py::int_(default_connectivity());

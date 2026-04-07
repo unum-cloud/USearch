@@ -11,7 +11,7 @@ requires = [
   "setuptools>=42",
   "wheel",
   "cmake>=3.22",
-  "pybind11",
+  "pybind11>=2.13.6",
   "numpy",
   "numkong>=7.4.4",
 ]
@@ -106,8 +106,20 @@ quote-style = "double"
 
 [tool.ruff.lint]
 select = [
-  "E9",
-  "F63",
-  "F7",
-  "F82",
+  "E",     # pycodestyle errors
+  "W",     # pycodestyle warnings
+  "F",     # pyflakes
+  "I",     # isort (import ordering)
+  "UP",    # pyupgrade (modernize syntax)
 ]
+ignore = [
+  "E501",  # line too long (handled by formatter)
+  "E741",  # ambiguous variable names (l, O, I)
+  "UP007", # Union[X, Y] -> X | Y (deferred to v3, requires annotation refactor)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"python/usearch/__init__.py" = ["F401", "E402"]  # re-exports and conditional imports
+
+[tool.ruff.lint.isort]
+known-first-party = ["usearch"]

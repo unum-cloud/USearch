@@ -1,32 +1,34 @@
 from __future__ import annotations
-from time import time_ns
-from typing import Tuple, Any, Callable, Union, Optional, List
-from dataclasses import dataclass, asdict
+
 from collections import defaultdict
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
 from math import ceil
+from time import time_ns
+from typing import Any
 
 import numpy as np
 
-from usearch.io import load_matrix
 from usearch.index import (
-    Index,
     BatchMatches,
-    ScalarKind,
+    Index,
+    Key,
     MetricKind,
     MetricKindBitwise,
-    Key,
-    _normalize_metric,
+    ScalarKind,
     _normalize_dtype,
+    _normalize_metric,
     _to_numpy_dtype,
 )
+from usearch.io import load_matrix
 
 
 def random_vectors(
     count: int,
     metric: MetricKind = MetricKind.IP,
     dtype: ScalarKind = ScalarKind.F32,
-    ndim: Optional[int] = None,
-    index: Optional[Index] = None,
+    ndim: int | None = None,
+    index: Index | None = None,
 ) -> np.ndarray:
     """Produces a collection of random vectors normalized for the provided `metric`
     and matching wanted `dtype`, which can both be inferred from an existing `index`.
@@ -94,7 +96,7 @@ class SearchStats:
         return self.count_matches / self.count_queries
 
 
-def self_recall(index: Index, sample: Union[float, int] = 1.0, **kwargs) -> SearchStats:
+def self_recall(index: Index, sample: float | int = 1.0, **kwargs) -> SearchStats:
     """Simplest benchmark for a quality of search, which queries every
     existing member of the index, to make sure approximate search finds
     the point itself.
@@ -139,7 +141,7 @@ def self_recall(index: Index, sample: Union[float, int] = 1.0, **kwargs) -> Sear
     )
 
 
-def measure_seconds(f: Callable) -> Tuple[float, Any]:
+def measure_seconds(f: Callable) -> tuple[float, Any]:
     """Simple function profiling decorator.
 
     :param f: Function to be profiled
@@ -155,7 +157,7 @@ def measure_seconds(f: Callable) -> Tuple[float, Any]:
     return secs, result
 
 
-def dcg(relevances: np.ndarray, k: Optional[int] = None) -> np.ndarray:
+def dcg(relevances: np.ndarray, k: int | None = None) -> np.ndarray:
     """Calculate DCG (Discounted Cumulative Gain) up to position k.
 
     :param relevances: List of true relevance scores (in the order as they are ranked)
@@ -176,7 +178,7 @@ def dcg(relevances: np.ndarray, k: Optional[int] = None) -> np.ndarray:
     return np.sum(relevances / discounts)
 
 
-def ndcg(relevances: np.ndarray, k: Optional[int] = None) -> np.ndarray:
+def ndcg(relevances: np.ndarray, k: int | None = None) -> np.ndarray:
     """Calculate NDCG (Normalized Discounted Cumulative Gain) at position k.
 
     :param relevances: List of true relevance scores (in the order as they are ranked)
@@ -193,7 +195,7 @@ def ndcg(relevances: np.ndarray, k: Optional[int] = None) -> np.ndarray:
     return dcg(relevances, k) / best_dcg
 
 
-def relevance(expected: np.ndarray, predicted: np.ndarray, k: Optional[int] = None) -> np.ndarray:
+def relevance(expected: np.ndarray, predicted: np.ndarray, k: int | None = None) -> np.ndarray:
     """Calculate relevance scores. Binary relevance scores
 
     :param expected: ground-truth keys
@@ -222,12 +224,12 @@ class Dataset:
 
     @staticmethod
     def build(
-        vectors: Optional[str] = None,
-        queries: Optional[str] = None,
-        neighbors: Optional[str] = None,
-        count: Optional[int] = None,
-        ndim: Optional[int] = None,
-        k: Optional[int] = None,
+        vectors: str | None = None,
+        queries: str | None = None,
+        neighbors: str | None = None,
+        count: int | None = None,
+        ndim: int | None = None,
+        k: int | None = None,
     ):
         """Either loads an existing dataset from disk, or generates one on the fly.
 
@@ -284,12 +286,12 @@ class Dataset:
 
 @dataclass
 class TaskResult:
-    add_operations: Optional[int] = None
-    add_per_second: Optional[float] = None
+    add_operations: int | None = None
+    add_per_second: float | None = None
 
-    search_operations: Optional[int] = None
-    search_per_second: Optional[float] = None
-    recall_at_one: Optional[float] = None
+    search_operations: int | None = None
+    search_per_second: float | None = None
+    recall_at_one: float | None = None
 
     def __repr__(self) -> str:
         parts = []
@@ -366,7 +368,7 @@ class AddTask:
         self.keys = self.keys[new_order]
         self.vectors = self.vectors[new_order, :]
 
-    def slices(self, batch_size: int) -> List[AddTask]:
+    def slices(self, batch_size: int) -> list[AddTask]:
         """Splits this dataset into smaller chunks."""
 
         return [
@@ -377,7 +379,7 @@ class AddTask:
             for start_row in range(0, self.count, batch_size)
         ]
 
-    def clusters(self, number_of_clusters: int) -> List[AddTask]:
+    def clusters(self, number_of_clusters: int) -> list[AddTask]:
         """Splits this dataset into smaller chunks."""
 
         from sklearn.cluster import KMeans
@@ -414,7 +416,7 @@ class SearchTask:
             recall_at_one=results.mean_recall(self.neighbors[:, 0].flatten()),
         )
 
-    def slices(self, batch_size: int) -> List[SearchTask]:
+    def slices(self, batch_size: int) -> list[SearchTask]:
         """Splits this dataset into smaller chunks."""
 
         return [
@@ -428,7 +430,7 @@ class SearchTask:
 
 @dataclass
 class Evaluation:
-    tasks: List[Union[AddTask, SearchTask]]
+    tasks: list[AddTask | SearchTask]
     count: int
     ndim: int
 

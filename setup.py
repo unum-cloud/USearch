@@ -201,6 +201,7 @@ setup(
     version=__version__,
     packages=["usearch"],
     package_dir={"usearch": "python/usearch"},
+    package_data={"usearch": ["compiled.pyi", "py.typed"]},
     description="Smaller & Faster Single-File Vector Search Engine from Unum",
     author="Ash Vardanian",
     author_email="info@unum.cloud",

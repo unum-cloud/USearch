@@ -7,7 +7,7 @@ including cosine, L2, inner product, and custom distance functions.
 
 Usage:
     uv run python/scripts/test_distances.py
-    
+
 Dependencies listed in the script header for uv to resolve automatically.
 """
 # /// script
@@ -18,13 +18,10 @@ Dependencies listed in the script header for uv to resolve automatically.
 # ]
 # ///
 
-import pytest
 import numpy as np
+import pytest
 
-import usearch
 from usearch.eval import random_vectors
-from usearch.index import search
-
 from usearch.index import (
     Index,
     MetricKind,
