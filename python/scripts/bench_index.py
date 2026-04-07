@@ -39,6 +39,7 @@ from time import perf_counter
 import numpy as np
 
 import usearch
+from usearch.eval import random_vectors
 from usearch.index import (
     DEFAULT_CONNECTIVITY,
     DEFAULT_EXPANSION_ADD,
@@ -112,20 +113,6 @@ def _data_category(dtype: str, metric: str) -> str:
     if dtype in ("i8", "int8"):
         return "int8"
     return "float32"
-
-
-def _generate_vectors(count: int, dimensions: int, dtype: str, metric: str) -> np.ndarray:
-    """Generate random vectors with native dtype and distribution for the quantization type."""
-    if dtype in ("b1", "bits") or metric in BITWISE_METRICS:
-        bits = np.random.randint(2, size=(count, dimensions))
-        return np.packbits(bits, axis=1).astype(np.uint8)
-    if dtype in ("u8", "uint8"):
-        return np.random.randint(0, 256, size=(count, dimensions)).astype(np.uint8)
-    if dtype in ("i8", "int8"):
-        return np.random.randint(-128, 128, size=(count, dimensions)).astype(np.int8)
-    vectors = np.random.randn(count, dimensions).astype(np.float32)
-    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
-    return vectors
 
 
 def _recall_at_k(found_keys: np.ndarray, ground_truth: np.ndarray) -> float:
@@ -348,9 +335,11 @@ def main():
             f"Generating synthetic datasets: {args.count:,} vectors, {args.dimensions} dims, k={args.neighbors_count}"
         )
         for category in sorted(categories_needed):
-            representative_dtype = {"float32": "f32", "uint8": "u8", "int8": "i8", "bits": "b1"}[category]
-            representative_metric = "hamming" if category == "bits" else "ip"
-            vectors = _generate_vectors(args.count, args.dimensions, representative_dtype, representative_metric)
+            scalar_kind = _normalize_dtype({"float32": "f32", "uint8": "u8", "int8": "i8", "bits": "b1"}[category])
+            metric_kind = _normalize_metric("hamming" if category == "bits" else "ip")
+            vectors = random_vectors(
+                count=args.count, ndim=args.dimensions, metric=metric_kind, quantization=scalar_kind
+            )
             ground_truth_self = np.arange(queries_count, dtype=np.int64).reshape(-1, 1)
             datasets[category] = (vectors, vectors[:queries_count], ground_truth_self)
             print(f"  {category}: {vectors.shape}, {vectors.dtype}")

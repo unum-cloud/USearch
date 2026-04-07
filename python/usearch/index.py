@@ -152,8 +152,14 @@ def _to_numpy_dtype(dtype: ScalarKind):
         return None
     _normalize = {
         ScalarKind.F64: np.float64,
+        ScalarKind.F64: np.float64,
         ScalarKind.F32: np.float32,
+        ScalarKind.BF16: np.uint16,
         ScalarKind.F16: np.float16,
+        ScalarKind.E5M2: np.uint8,
+        ScalarKind.E4M3: np.uint8,
+        ScalarKind.E3M2: np.uint8,
+        ScalarKind.E2M3: np.uint8,
         ScalarKind.I8: np.int8,
         ScalarKind.U8: np.uint8,
         ScalarKind.B1: np.uint8,
@@ -1645,7 +1651,6 @@ def search(
             metric_kind=metric_kind,
             metric_signature=metric_signature,
             metric_pointer=metric_pointer,
-            dtype=scalar_kind,
             **kwargs,
         )
 
@@ -1658,6 +1663,7 @@ def search(
         count=count,
         threads=threads,
         progress=progress,
+        dtype=scalar_kind,
     )
 
 
