@@ -86,7 +86,7 @@ scalar_kind_t to_native_scalar(USearchScalar m) {
             return scalar_kind_t::u8_k;
 
         case USearchScalarB1:
-            return scalar_kind_t::b1_k;
+            return scalar_kind_t::b1x8_k;
 
         default:
             return scalar_kind_t::unknown_k;
