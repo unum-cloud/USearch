@@ -5,7 +5,7 @@ import { getFileName, getRoot } from "bindings";
 
 const compiled: Compiled = build(getBuildDir(getDirName()));
 
-type Vector = Float32Array | Float64Array | Int8Array;
+type Vector = Float32Array | Float64Array | Int8Array | Uint8Array;
 type Matrix = Vector[];
 type VectorOrMatrix = Vector | Matrix;
 
@@ -172,7 +172,8 @@ function isVector(vectors: unknown) {
   return (
     vectors instanceof Float32Array ||
     vectors instanceof Float64Array ||
-    vectors instanceof Int8Array
+    vectors instanceof Int8Array ||
+    vectors instanceof Uint8Array
   );
 }
 
@@ -546,7 +547,8 @@ export class Index {
 type NumberArrayConstructor =
   | Float64ArrayConstructor
   | Float32ArrayConstructor
-  | Int8ArrayConstructor;
+  | Int8ArrayConstructor
+  | Uint8ArrayConstructor;
 /**
  * Performs an exact search on the given dataset to find the best matching vectors for each query.
  *
@@ -611,7 +613,8 @@ export function exactSearch(
   let targetType: NumberArrayConstructor;
   if (dataset instanceof Float64Array) targetType = Float64Array;
   else if (dataset instanceof Int8Array) targetType = Int8Array;
-  else targetType = Float32Array; // default to Float32Array if dataset is not Float64Array or Int8Array
+  else if (dataset instanceof Uint8Array) targetType = Uint8Array;
+  else targetType = Float32Array; // default to Float32Array if dataset is not Float64Array, Int8Array, or Uint8Array
 
   dataset = normalizeVectors(dataset, dimensions, targetType);
   queries = normalizeVectors(queries, dimensions, targetType);

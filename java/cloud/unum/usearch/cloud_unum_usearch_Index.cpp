@@ -12,6 +12,7 @@ using namespace unum;
 using f32_span_t = unum::usearch::span_gt<float>;
 using f64_span_t = unum::usearch::span_gt<double>;
 using i8_span_t = unum::usearch::span_gt<std::int8_t>;
+using u8_span_t = unum::usearch::span_gt<std::uint8_t>;
 static_assert(sizeof(jlong) == sizeof(index_dense_t::vector_key_t));
 
 static inline jsize to_jsize(JNIEnv* env, std::size_t n) {
@@ -459,6 +460,92 @@ JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1get_1into_1i8(JNIEnv* en
     jbyte* buffer_data = (*env).GetByteArrayElements(buffer, 0);
 
     if (index->get(key, reinterpret_cast<std::int8_t*>(buffer_data)) == 0) {
+        (*env).ReleaseByteArrayElements(buffer, buffer_data, JNI_ABORT);
+        jclass jc = env->FindClass("java/lang/IllegalArgumentException");
+        if (jc) {
+            env->ThrowNew(jc, "key not found");
+        }
+        return;
+    }
+    (*env).ReleaseByteArrayElements(buffer, buffer_data, JNI_COMMIT);
+}
+
+JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1add_1u8( //
+    JNIEnv* env, jclass, jlong c_ptr, jlong key, jbyteArray vector) {
+
+    jbyte* vector_data = (*env).GetByteArrayElements(vector, 0);
+    jsize vector_length = (*env).GetArrayLength(vector);
+
+    auto index = reinterpret_cast<index_dense_t*>(c_ptr);
+    size_t dimensions = index->dimensions();
+
+    using vector_key_t = typename index_dense_t::vector_key_t;
+    using add_result_t = typename index_dense_t::add_result_t;
+
+    if (vector_length % dimensions != 0) {
+        (*env).ReleaseByteArrayElements(vector, vector_data, 0);
+        jclass jc = (*env).FindClass("java/lang/IllegalArgumentException");
+        if (jc)
+            (*env).ThrowNew(jc, "Vector length must be a multiple of dimensions");
+        return;
+    }
+
+    size_t num_vectors = vector_length / dimensions;
+    for (size_t i = 0; i < num_vectors; i++) {
+        u8_span_t vector_span = u8_span_t{reinterpret_cast<std::uint8_t*>(vector_data + i * dimensions), dimensions};
+        add_result_t result = index->add(static_cast<vector_key_t>(key + i), vector_span);
+        if (!result) {
+            (*env).ReleaseByteArrayElements(vector, vector_data, 0);
+            jclass jc = (*env).FindClass("java/lang/Error");
+            if (jc)
+                (*env).ThrowNew(jc, result.error.release());
+            return;
+        }
+    }
+
+    (*env).ReleaseByteArrayElements(vector, vector_data, 0);
+}
+
+JNIEXPORT jlongArray JNICALL Java_cloud_unum_usearch_Index_c_1search_1u8( //
+    JNIEnv* env, jclass, jlong c_ptr, jbyteArray vector, jlong wanted) {
+
+    jbyte* vector_data = (*env).GetByteArrayElements(vector, 0);
+    jsize vector_dims = (*env).GetArrayLength(vector);
+    u8_span_t vector_span =
+        u8_span_t{reinterpret_cast<std::uint8_t*>(vector_data), static_cast<std::size_t>(vector_dims)};
+
+    using vector_key_t = typename index_dense_t::vector_key_t;
+    using search_result_t = typename index_dense_t::search_result_t;
+
+    search_result_t result =
+        reinterpret_cast<index_dense_t*>(c_ptr)->search(vector_span, static_cast<std::size_t>(wanted));
+    (*env).ReleaseByteArrayElements(vector, vector_data, 0);
+
+    if (result) {
+        std::size_t found = result.count;
+        jlongArray matches = (*env).NewLongArray(to_jsize(env, found));
+        if (matches == NULL)
+            return NULL;
+
+        jlong* matches_data = (*env).GetLongArrayElements(matches, 0);
+        result.dump_to(reinterpret_cast<vector_key_t*>(matches_data));
+        (*env).ReleaseLongArrayElements(matches, matches_data, JNI_COMMIT);
+
+        return matches;
+    } else {
+        jclass jc = (*env).FindClass("java/lang/Error");
+        if (jc)
+            (*env).ThrowNew(jc, result.error.release());
+        return NULL;
+    }
+}
+
+JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1get_1into_1u8(JNIEnv* env, jclass, jlong c_ptr, jlong key,
+                                                                      jbyteArray buffer) {
+    auto index = reinterpret_cast<index_dense_t*>(c_ptr);
+    jbyte* buffer_data = (*env).GetByteArrayElements(buffer, 0);
+
+    if (index->get(key, reinterpret_cast<std::uint8_t*>(buffer_data)) == 0) {
         (*env).ReleaseByteArrayElements(buffer, buffer_data, JNI_ABORT);
         jclass jc = env->FindClass("java/lang/IllegalArgumentException");
         if (jc) {

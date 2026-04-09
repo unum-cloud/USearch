@@ -641,6 +641,48 @@ public class Index implements AutoCloseable {
     }
 
     /**
+     * Adds uint8 quantized vector to index.
+     *
+     * @param key vector identifier
+     * @param vector uint8 quantized vector data (stored as byte[])
+     */
+    public void addU8(long key, byte vector[]) {
+        if (c_ptr == 0) {
+            throw new IllegalStateException("Index already closed");
+        }
+        c_add_u8(c_ptr, key, vector);
+    }
+
+    /**
+     * Searches using uint8 quantized query vector.
+     *
+     * @param vector uint8 quantized query vector (stored as byte[])
+     * @param count number of neighbors to find
+     * @return array of neighbor keys
+     */
+    public long[] searchU8(byte vector[], long count) {
+        if (c_ptr == 0) {
+            throw new IllegalStateException("Index already closed");
+        }
+        return c_search_u8(c_ptr, vector, count);
+    }
+
+    /**
+     * Retrieves uint8 vector into provided byte buffer.
+     *
+     * @param key vector identifier
+     * @param buffer buffer to populate with vector data
+     * @throws IllegalArgumentException if key not found or buffer size
+     * incorrect
+     */
+    public void getIntoU8(long key, byte[] buffer) {
+        if (c_ptr == 0) {
+            throw new IllegalStateException("Index already closed");
+        }
+        c_get_into_u8(c_ptr, key, buffer);
+    }
+
+    /**
      * Retrieves vector into provided float buffer.
      *
      * @param key vector identifier
@@ -1128,17 +1170,23 @@ public class Index implements AutoCloseable {
 
     private static native void c_add_i8(long ptr, long key, byte vector[]);
 
+    private static native void c_add_u8(long ptr, long key, byte vector[]);
+
     private static native long[] c_search_f32(long ptr, float vector[], long count);
 
     private static native long[] c_search_f64(long ptr, double vector[], long count);
 
     private static native long[] c_search_i8(long ptr, byte vector[], long count);
 
+    private static native long[] c_search_u8(long ptr, byte vector[], long count);
+
     private static native void c_get_into_f32(long ptr, long key, float buffer[]);
 
     private static native void c_get_into_f64(long ptr, long key, double buffer[]);
 
     private static native void c_get_into_i8(long ptr, long key, byte buffer[]);
+
+    private static native void c_get_into_u8(long ptr, long key, byte buffer[]);
 
     // ByteBuffer overloads for zero-copy operations:
     private static native void c_add_f32_buffer(long ptr, long key, java.nio.FloatBuffer vector);

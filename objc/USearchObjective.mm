@@ -301,6 +301,57 @@ scalar_kind_t to_native_scalar(USearchScalar m) {
     return static_cast<UInt32>(result);
 }
 
+- (void)addU8:(USearchKey)key
+       vector:(uint8_t const *_Nonnull)vector {
+    add_result_t result = _native->add(key, (u8_t const *)vector);
+
+    if (!result) {
+        @throw [NSException exceptionWithName:@"Can't add to index"
+                                       reason:[NSString stringWithUTF8String:result.error.release()]
+                                     userInfo:nil];
+    }
+}
+
+- (UInt32)searchU8:(uint8_t const *_Nonnull)vector
+             count:(UInt32)wanted
+              keys:(USearchKey *_Nullable)keys
+         distances:(Float32 *_Nullable)distances {
+    search_result_t result = _native->search((u8_t const *)vector, static_cast<std::size_t>(wanted));
+
+    if (!result) {
+        @throw [NSException exceptionWithName:@"Can't find in index"
+                                       reason:[NSString stringWithUTF8String:result.error.release()]
+                                     userInfo:nil];
+    }
+
+    std::size_t found = result.dump_to(keys, distances);
+    return static_cast<UInt32>(found);
+}
+
+- (UInt32)getU8:(USearchKey)key
+         vector:(void *_Nonnull)vector
+          count:(UInt32)wanted {
+    std::size_t result = _native->get(key, (u8_t*)vector, static_cast<std::size_t>(wanted));
+    return static_cast<UInt32>(result);
+}
+
+- (UInt32)filteredSearchU8:(uint8_t const *_Nonnull)vector
+                     count:(UInt32)wanted
+                    filter:(USearchFilterFn)predicate
+                      keys:(USearchKey *_Nullable)keys
+                 distances:(Float32 *_Nullable)distances {
+    search_result_t result = _native->filtered_search((u8_t const *) vector, static_cast<std::size_t>(wanted), predicate);
+
+    if (!result) {
+        @throw [NSException exceptionWithName:@"Can't find in index"
+                                       reason:[NSString stringWithUTF8String:result.error.release()]
+                                     userInfo:nil];
+    }
+
+    std::size_t found = result.dump_to(keys, distances);
+    return static_cast<UInt32>(found);
+}
+
 - (void)clear {
     _native->clear();
 }

@@ -9,7 +9,7 @@
 //! ## Features
 //!
 //! - SIMD-accelerated distance calculations for various metrics.
-//! - Support for `f32`, `f64`, `i8`, custom `f16`, and binary (`b1x8`) vector types.
+//! - Support for `f32`, `f64`, `i8`, `u8`, custom `f16`, and binary (`b1x8`) vector types.
 //! - Extensible with custom distance metrics and filtering predicates.
 //! - Efficient serialization and deserialization for persistence and network transfers.
 //!
@@ -911,6 +911,73 @@ impl VectorType for i8 {
     }
 }
 
+impl VectorType for u8 {
+    fn search(index: &Index, query: &[Self], count: usize) -> Result<ffi::Matches, cxx::Exception> {
+        index.inner.search_u8(query, count)
+    }
+
+    fn exact_search(
+        index: &Index,
+        query: &[Self],
+        count: usize,
+    ) -> Result<ffi::Matches, cxx::Exception> {
+        index.inner.exact_search_u8(query, count)
+    }
+
+    fn get(index: &Index, key: Key, vector: &mut [Self]) -> Result<usize, cxx::Exception> {
+        index.inner.get_u8(key, vector)
+    }
+
+    fn add(index: &Index, key: Key, vector: &[Self]) -> Result<(), cxx::Exception> {
+        index.inner.add_u8(key, vector)
+    }
+
+    fn filtered_search<F>(
+        index: &Index,
+        query: &[Self],
+        count: usize,
+        filter: F,
+    ) -> Result<ffi::Matches, cxx::Exception>
+    where
+        Self: Sized,
+        F: Fn(Key) -> bool,
+    {
+        extern "C" fn trampoline<F: Fn(u64) -> bool>(key: u64, closure_address: usize) -> bool {
+            let closure = closure_address as *const F;
+            unsafe { (*closure)(key) }
+        }
+
+        let trampoline_fn: usize = trampoline::<F> as *const () as usize;
+        let closure_address: usize = &filter as *const F as usize;
+        index
+            .inner
+            .filtered_search_u8(query, count, trampoline_fn, closure_address)
+    }
+    fn change_metric(
+        index: &mut Index,
+        metric: std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
+    ) -> Result<(), cxx::Exception> {
+        type MetricFn = Box<dyn Fn(*const u8, *const u8) -> Distance>;
+        index.metric_fn = Some(MetricFunction::U8Metric(Box::into_raw(Box::new(metric))));
+
+        extern "C" fn trampoline(first: usize, second: usize, closure_address: usize) -> Distance {
+            let first_ptr = first as *const u8;
+            let second_ptr = second as *const u8;
+            let closure: *mut MetricFn = closure_address as *mut MetricFn;
+            unsafe { (*closure)(first_ptr, second_ptr) }
+        }
+
+        let trampoline_fn: usize = trampoline as *const () as usize;
+        let closure_address = match index.metric_fn {
+            Some(MetricFunction::U8Metric(metric)) => metric as *mut () as usize,
+            _ => panic!("Expected U8Metric"),
+        };
+        index.inner.change_metric(trampoline_fn, closure_address);
+
+        Ok(())
+    }
+}
+
 impl VectorType for f64 {
     fn search(index: &Index, query: &[Self], count: usize) -> Result<ffi::Matches, cxx::Exception> {
         index.inner.search_f64(query, count)
@@ -1590,6 +1657,14 @@ mod tests {
         })
         .unwrap();
 
+        let u8_index = Index::new(&IndexOptions {
+            dimensions: 256,
+            metric: MetricKind::Cos,
+            quantization: ScalarKind::U8,
+            ..Default::default()
+        })
+        .unwrap();
+
         let b1_index = Index::new(&IndexOptions {
             dimensions: 256,
             metric: MetricKind::Hamming,
@@ -1625,6 +1700,10 @@ mod tests {
         println!(
             "i8 hardware acceleration: {}",
             i8_index.hardware_acceleration()
+        );
+        println!(
+            "u8 hardware acceleration: {}",
+            u8_index.hardware_acceleration()
         );
         println!(
             "b1 hardware acceleration: {}",
@@ -1705,21 +1784,6 @@ mod tests {
         let mut found = [0.0f32; 6]; // This isn't a multiple of the index's dimensions.
         let result = index.get(1, &mut found);
         assert!(result.is_err());
-
-        // i8 vector type
-        let i8_index = Index::new(&IndexOptions {
-            dimensions: 5,
-            metric: MetricKind::L2sq,
-            quantization: ScalarKind::I8,
-            ..Default::default()
-        })
-        .unwrap();
-        i8_index.reserve(10).unwrap();
-        let i8_vec: [i8; 5] = [10, -20, 30, -40, 50];
-        i8_index.add(1, &i8_vec).unwrap();
-        let mut i8_found = [0i8; 5];
-        assert_eq!(i8_index.get(1, &mut i8_found).unwrap(), 1);
-        assert_eq!(i8_found, i8_vec);
     }
 
     #[test]
@@ -1901,7 +1965,10 @@ mod tests {
             .is_ok());
         assert_eq!(index.size(), deserialized_index.size());
         let results = deserialized_index.search(&first, 10).unwrap();
-        assert!(results.keys.contains(&42), "key 42 survives buffer round-trip");
+        assert!(
+            results.keys.contains(&42),
+            "key 42 survives buffer round-trip"
+        );
 
         // Borrow the buffer as a read-only view instead of deserializing
         let viewed_index = Index::new(&IndexOptions {
@@ -1912,7 +1979,10 @@ mod tests {
         assert!(unsafe { viewed_index.view_from_buffer(&serialization_buffer) }.is_ok());
         assert_eq!(viewed_index.size(), index.size());
         let results = viewed_index.search(&first, 10).unwrap();
-        assert!(results.keys.contains(&42), "key 42 visible via view_from_buffer");
+        assert!(
+            results.keys.contains(&42),
+            "key 42 visible via view_from_buffer"
+        );
 
         // After a full reset the index must be reusable from scratch
         assert_ne!(index.memory_usage(), 0);

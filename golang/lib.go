@@ -1149,6 +1149,30 @@ func (index *Index) FilteredSearchU8(query []uint8, limit uint, handler *Filtere
 	return keys, distances, nil
 }
 
+// GetU8 retrieves a uint8 vector by key from the index.
+// Returns nil if the key is not found.
+func (index *Index) GetU8(key Key, maxCount uint) (vectors []uint8, err error) {
+	if index.handle == nil {
+		panic("index is uninitialized")
+	}
+
+	if maxCount == 0 {
+		return nil, nil
+	}
+
+	vectors = make([]uint8, index.config.Dimensions*maxCount)
+	var errorMessage *C.char
+	found := uint(C.usearch_get(index.handle, (C.usearch_key_t)(key), (C.size_t)(maxCount), unsafe.Pointer(&vectors[0]), C.usearch_scalar_u8_k, (*C.usearch_error_t)(&errorMessage)))
+	runtime.KeepAlive(vectors)
+	if errorMessage != nil {
+		return nil, errors.New(C.GoString(errorMessage))
+	}
+	if found == 0 {
+		return nil, nil
+	}
+	return vectors, nil
+}
+
 // DistanceI8 computes the distance between two int8 vectors.
 //
 // Example:

@@ -222,6 +222,110 @@ extension USearchIndex {
         try filteredSearch(vector: vector[...], count: count, filter: filter)
     }
 
+    /// Adds a labeled vector to the index.
+    /// - Parameter key: Unique identifier for that object.
+    /// - Parameter vector: Uint8 vector.
+    /// - Throws: If runs out of memory.
+    public func add(key: Key, vector: ArraySlice<UInt8>) throws {
+        try vector.withContiguousStorageIfAvailable {
+            try addU8(key: key, vector: $0.baseAddress!)
+        }
+    }
+
+    /// Adds a labeled vector to the index.
+    /// - Parameter key: Unique identifier for that object.
+    /// - Parameter vector: Uint8 vector.
+    /// - Throws: If runs out of memory.
+    public func add(key: Key, vector: [UInt8]) throws {
+        try add(key: key, vector: vector[...])
+    }
+
+    /// Approximate nearest neighbors search.
+    /// - Parameter vector: Uint8 query vector.
+    /// - Parameter count: Upper limit on the number of matches to retrieve.
+    /// - Returns: Labels and distances to closest approximate matches in decreasing similarity order.
+    /// - Throws: If runs out of memory.
+    public func search(vector: ArraySlice<UInt8>, count: Int) throws -> ([Key], [Float]) {
+        var matches: [Key] = Array(repeating: 0, count: count)
+        var distances: [Float] = Array(repeating: 0, count: count)
+        let results = try vector.withContiguousStorageIfAvailable {
+            try searchU8(vector: $0.baseAddress!, count: CUnsignedInt(count), keys: &matches, distances: &distances)
+        }
+        matches.removeLast(count - Int(results!))
+        distances.removeLast(count - Int(results!))
+        return (matches, distances)
+    }
+
+    /// Approximate nearest neighbors search.
+    /// - Parameter vector: Uint8 query vector.
+    /// - Parameter count: Upper limit on the number of matches to retrieve.
+    /// - Returns: Labels and distances to closest approximate matches in decreasing similarity order.
+    /// - Throws: If runs out of memory.
+    public func search(vector: [UInt8], count: Int) throws -> ([Key], [Float]) {
+        try search(vector: vector[...], count: count)
+    }
+
+    /// Retrieve vectors for a given key.
+    /// - Parameter key: Unique identifier for that object.
+    /// - Parameter count: For multi-indexes, Number of vectors to retrieve. Defaults to 1.
+    /// - Returns: Two-dimensional array of Uint8 vectors.
+    /// - Throws: If runs out of memory.
+    public func get(key: USearchKey, count: Int = 1) throws -> [[UInt8]]? {
+        var vector: [UInt8] = try Array(repeating: 0, count: Int(self.dimensions) * count)
+        let returnedCount = try vector.withContiguousMutableStorageIfAvailable { buf in
+            guard let baseAddress = buf.baseAddress else { return UInt32(0) }
+            return try getU8(
+                key: key,
+                vector: baseAddress,
+                count: CUnsignedInt(count)
+            )
+        }
+        guard let count = returnedCount, count > 0 else { return nil }
+        return try stride(
+            from: 0,
+            to: try Int(count) * Int(self.dimensions),
+            by: try Int(self.dimensions)
+        ).map {
+            try Array(vector[$0 ..< $0 + Int(self.dimensions)])
+        }
+    }
+
+    /// Approximate nearest neighbors search with filtering.
+    /// - Parameter vector: Uint8 query vector.
+    /// - Parameter count: Upper limit on the number of matches to retrieve.
+    /// - Parameter filter: Closure used to determine whether to skip a key in the results.
+    /// - Returns: Labels and distances to closest approximate matches in decreasing similarity order.
+    /// - Throws: If runs out of memory.
+    public func filteredSearch(vector: ArraySlice<UInt8>, count: Int, filter: @escaping FilterFn) throws -> (
+        [Key], [Float]
+    ) {
+        var matches: [Key] = Array(repeating: 0, count: count)
+        var distances: [Float] = Array(repeating: 0, count: count)
+        let results = try vector.withContiguousStorageIfAvailable {
+            try filteredSearchU8(
+                vector: $0.baseAddress!,
+                count:
+                    CUnsignedInt(count),
+                filter: filter,
+                keys: &matches,
+                distances: &distances
+            )
+        }
+        matches.removeLast(count - Int(results!))
+        distances.removeLast(count - Int(results!))
+        return (matches, distances)
+    }
+
+    /// Approximate nearest neighbors search with filtering.
+    /// - Parameter vector: Uint8 query vector.
+    /// - Parameter count: Upper limit on the number of matches to retrieve.
+    /// - Parameter filter: Closure used to determine whether to skip a key in the results.
+    /// - Returns: Labels and distances to closest approximate matches in decreasing similarity order.
+    /// - Throws: If runs out of memory.
+    public func filteredSearch(vector: [UInt8], count: Int, filter: @escaping FilterFn) throws -> ([Key], [Float]) {
+        try filteredSearch(vector: vector[...], count: count, filter: filter)
+    }
+
     #if arch(arm64)
 
         /// Adds a labeled vector to the index.
