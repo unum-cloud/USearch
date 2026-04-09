@@ -598,6 +598,101 @@ template <typename allocator_at = std::allocator<byte_t>> class bitset_gt {
 using bitset_t = bitset_gt<>;
 
 /**
+ *  @brief  Cache-line-padded striped spin-lock array for concurrent graph mutations.
+ *          Maps node slots to lock stripes via Fibonacci hashing, with each stripe
+ *          occupying its own cache line to eliminate false sharing.
+ *          The number of stripes is proportional to `threads * connectivity`, not
+ *          graph size, keeping the lock array comfortably within L2/L3 cache.
+ */
+template <typename allocator_at = std::allocator<byte_t>, std::size_t cache_line_ak = 128> //
+class striped_locks_gt {
+    using allocator_t = allocator_at;
+    using byte_t = typename allocator_t::value_type;
+    static_assert(sizeof(byte_t) == 1, "Allocator must allocate separate addressable bytes");
+
+    static constexpr std::uint64_t fibonacci_k = 0x9E3779B97F4A7C15ull;
+
+    using atomic_flag_t = std::atomic<std::uint8_t>;
+    struct alignas(cache_line_ak) padded_lock_t {
+        atomic_flag_t flag{0};
+        char padding_[cache_line_ak - sizeof(atomic_flag_t)];
+    };
+    static_assert(sizeof(padded_lock_t) == cache_line_ak, "Lock stripe must be exactly one cache line");
+
+    padded_lock_t* stripes_{};
+    std::size_t count_{};
+    unsigned shift_{};
+
+    inline std::size_t stripe_for_(std::size_t slot) const noexcept {
+        return static_cast<std::size_t>((static_cast<std::uint64_t>(slot) * fibonacci_k) >> shift_);
+    }
+
+  public:
+    striped_locks_gt() noexcept {}
+    ~striped_locks_gt() noexcept { reset(); }
+
+    explicit operator bool() const noexcept { return stripes_; }
+
+    void reset() noexcept {
+        if (stripes_)
+            allocator_t{}.deallocate(reinterpret_cast<byte_t*>(stripes_), count_ * sizeof(padded_lock_t));
+        stripes_ = nullptr;
+        count_ = 0;
+        shift_ = 64;
+    }
+
+    striped_locks_gt(std::size_t threads, std::size_t connectivity) noexcept {
+        std::size_t desired = threads * connectivity * 4;
+        if (desired < 256)
+            desired = 256;
+        count_ = ceil2(desired);
+        shift_ = 64;
+        for (std::size_t n = count_; n > 1; n >>= 1)
+            shift_--;
+        byte_t* raw = allocator_t{}.allocate(count_ * sizeof(padded_lock_t));
+        if (!raw) {
+            count_ = 0;
+            shift_ = 64;
+            return;
+        }
+        stripes_ = reinterpret_cast<padded_lock_t*>(raw);
+        for (std::size_t i = 0; i < count_; i++)
+            new (&stripes_[i]) padded_lock_t();
+    }
+
+    striped_locks_gt(striped_locks_gt&& other) noexcept {
+        stripes_ = exchange(other.stripes_, nullptr);
+        count_ = exchange(other.count_, std::size_t{0});
+        shift_ = exchange(other.shift_, unsigned{64});
+    }
+
+    striped_locks_gt& operator=(striped_locks_gt&& other) noexcept {
+        std::swap(stripes_, other.stripes_);
+        std::swap(count_, other.count_);
+        std::swap(shift_, other.shift_);
+        return *this;
+    }
+
+    striped_locks_gt(striped_locks_gt const&) = delete;
+    striped_locks_gt& operator=(striped_locks_gt const&) = delete;
+
+    inline bool atomic_set(std::size_t i) noexcept {
+        return stripes_[stripe_for_(i)].flag.exchange(1, std::memory_order_acquire);
+    }
+
+    inline void atomic_reset(std::size_t i) noexcept {
+        stripes_[stripe_for_(i)].flag.store(0, std::memory_order_release);
+    }
+
+    inline void lock(std::size_t i) noexcept {
+        while (atomic_set(i))
+            std::this_thread::yield();
+    }
+
+    inline void unlock(std::size_t i) noexcept { atomic_reset(i); }
+};
+
+/**
  *  @brief  Similar to `std::priority_queue`, but allows raw access to underlying
  *          memory, in case you want to shuffle it or sort. Good for collections
  *          from 100s to 10'000s elements.
@@ -2090,7 +2185,7 @@ class index_gt {
      */
     static constexpr std::size_t node_head_bytes_() { return sizeof(vector_key_t) + sizeof(level_t); }
 
-    using nodes_mutexes_t = bitset_gt<dynamic_allocator_t>;
+    using nodes_mutexes_t = striped_locks_gt<dynamic_allocator_t>;
 
     using visits_hash_set_t = growing_hash_set_gt<compressed_slot_t, hash_gt<compressed_slot_t>, dynamic_allocator_t>;
 
@@ -2513,7 +2608,8 @@ class index_gt {
             return true;
         }
 
-        nodes_mutexes_t new_mutexes(limits.members);
+        std::size_t connectivity_max = (std::max)(config_.connectivity_base, config_.connectivity);
+        nodes_mutexes_t new_mutexes(limits.threads(), connectivity_max);
         buffer_gt<node_t, nodes_allocator_t> new_nodes(limits.members);
         buffer_gt<context_t, contexts_allocator_t> new_contexts(limits.threads());
         if (!new_nodes || !new_contexts || !new_mutexes)
@@ -2522,10 +2618,6 @@ class index_gt {
         // Move the nodes info, and deallocate previous buffers.
         if (nodes_)
             std::memcpy(new_nodes.data(), nodes_.data(), sizeof(node_t) * size());
-
-        // Pre-reserve the capacity for `top_for_refine`, which always contains at most one more
-        // element than the connectivity factors.
-        std::size_t connectivity_max = (std::max)(config_.connectivity_base, config_.connectivity);
         for (std::size_t i = 0; i != new_contexts.size(); ++i)
             if (!new_contexts[i].top_for_refine.reserve(connectivity_max + 1))
                 return false;
@@ -3814,12 +3906,11 @@ class index_gt {
     struct node_lock_t {
         nodes_mutexes_t& mutexes;
         std::size_t slot;
-        inline ~node_lock_t() noexcept { mutexes.atomic_reset(slot); }
+        inline ~node_lock_t() noexcept { mutexes.unlock(slot); }
     };
 
     inline node_lock_t node_lock_(std::size_t slot) const noexcept {
-        while (nodes_mutexes_.atomic_set(slot))
-            ;
+        nodes_mutexes_.lock(slot);
         return {nodes_mutexes_, slot};
     }
 
@@ -3828,14 +3919,13 @@ class index_gt {
         std::size_t slot;
         inline ~optional_node_lock_t() noexcept {
             if (slot != std::numeric_limits<std::size_t>::max())
-                mutexes.atomic_reset(slot);
+                mutexes.unlock(slot);
         }
     };
 
     inline optional_node_lock_t optional_node_lock_(std::size_t slot, bool condition) const noexcept {
         if (condition) {
-            while (nodes_mutexes_.atomic_set(slot))
-                ;
+            nodes_mutexes_.lock(slot);
             return {nodes_mutexes_, slot};
         } else {
             return {nodes_mutexes_, std::numeric_limits<std::size_t>::max()};
@@ -3847,7 +3937,7 @@ class index_gt {
         std::size_t slot;
         inline ~node_conditional_lock_t() noexcept {
             if (slot != std::numeric_limits<std::size_t>::max())
-                mutexes.atomic_reset(slot);
+                mutexes.unlock(slot);
         }
     };
 
