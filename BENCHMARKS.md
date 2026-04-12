@@ -170,7 +170,7 @@ Datasets below are grouped by scale; only configurations with matching ground tr
 | :----------------------------------- | :---------: | :--------: | :----: | :-------: | :---------------: |
 | [Meta BIGANN (SIFT)][bigann]         |    `u8`     |    128     |   L2   |  1.2 GB   | 10K queries, yes  |
 | [Microsoft Turing-ANNS][msft-turing] |    `f32`    |    100     |   L2   |  3.7 GB   | 100K queries, yes |
-| [Yandex Deep][yandex-deep]           |    `f32`    |     96     | 3.6 GB |    L2     |  ¹ no subset GT   |
+| [Yandex Deep][yandex-deep]           |    `f32`    |     96     |  L2  |    3.6 GB     |  ¹ no subset GT   |
 
 > ¹ Yandex only publishes ground truth computed against the full 1B dataset. A `base.10M.fbin` exists for
 > download but using 1B ground truth with a subset will produce misleadingly low recall. Use it only for
