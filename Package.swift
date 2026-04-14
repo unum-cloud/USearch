@@ -84,7 +84,7 @@ let package = Package(
     ],
     products: products,
     dependencies: [
-        .package(url: "https://github.com/ashvardanian/NumKong", from: "7.4.4"),
+        .package(url: "https://github.com/ashvardanian/NumKong", from: "7.5.0"),
     ],
     targets: targets,
     cxxLanguageStandard: CXXLanguageStandard.cxx11

@@ -9,21 +9,25 @@ from urllib.error import HTTPError
 #! Load NumKong before the USearch compiled module
 #! We can't just use the `import numkong` as on Linux and Windows (unlike MacOS),
 #! the symbols are not automatically loaded into the global namespace.
+#! NumKong v7.5+ ships as a regular package (`numkong/__init__.py` plus a
+#! `numkong/_numkong.<ext-suffix>` extension). We require v7.5+ in
+#! `pyproject.toml`, so we load the compiled submodule directly.
 try:
-    import numkong
+    from numkong import _numkong as _numkong_ext
 
-    # Cross-platform check for Windows
+    _numkong_path = _numkong_ext.__file__
+    if _numkong_path is None:
+        raise ImportError("Could not locate NumKong compiled extension")
+
     if sys.platform == "win32":
-        # Add the directory where the `.dll` is located
-        dll_directory = os.path.dirname(numkong.__file__)
-        os.add_dll_directory(dll_directory)
-
-        # Load NumKong library using `ctypes` without `RTLD_GLOBAL`
-        numkong_lib = ctypes.CDLL(numkong.__file__)
-
+        # On Windows, register the extension's directory so the OS loader finds
+        # any bundled sibling DLLs, then load without `RTLD_GLOBAL`.
+        os.add_dll_directory(os.path.dirname(_numkong_path))
+        numkong_lib = ctypes.CDLL(_numkong_path)
     else:
-        # Non-Windows: Use `RTLD_GLOBAL` for Unix-based systems (Linux/macOS)
-        numkong_lib = ctypes.CDLL(numkong.__file__, mode=ctypes.RTLD_GLOBAL)
+        # On Linux/macOS we need `RTLD_GLOBAL` so USearch's compiled module can
+        # resolve NumKong symbols at its own load time.
+        numkong_lib = ctypes.CDLL(_numkong_path, mode=ctypes.RTLD_GLOBAL)
 
 except ImportError:
     pass  # If the user doesn't want NumKong, we assume they know what they're doing
