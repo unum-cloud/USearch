@@ -12,13 +12,44 @@
  *      - 128-bit `uuid_t` keys and `enum slot64_t : std::uint64_t` make most sense for
  *        for database users, implementing portable, concurrent systems.
  */
+#include <cassert> // `assert`
+#include <cmath>   // `std::abs`
+#include <csignal> // `std::signal`, `SIGSEGV`, ...
+#include <cstdio>  // `std::fprintf`
+#include <cstdlib> // `std::_Exit`
+
 #include <algorithm>     // `std::shuffle`
-#include <cassert>       // `assert`
-#include <cmath>         // `std::abs`
 #include <random>        // `std::default_random_engine`
 #include <stdexcept>     // `std::terminate`
 #include <unordered_map> // `std::unordered_map`
 #include <vector>        // `std::vector`
+
+// Back-trace support. Prefer the C++23 `<stacktrace>` library when the
+// toolchain + stdlib expose it (`__cpp_lib_stacktrace`); otherwise fall back
+// to the OS-native facility so that unit-test crashes in CI log something
+// useful beyond a bare exit code.
+#if defined(__has_include)
+#if __has_include(<stacktrace>)
+#include <stacktrace>
+#endif
+#endif
+#if defined(__cpp_lib_stacktrace) && __cpp_lib_stacktrace >= 202011L
+#define USEARCH_HAS_STD_STACKTRACE 1
+#else
+#define USEARCH_HAS_STD_STACKTRACE 0
+#if defined(_WIN32)
+// `windows.h` must precede `dbghelp.h` — the latter uses `PSTR` and friends
+// that are only defined after `windows.h`. The blank line keeps clang-format
+// from re-sorting the two headers into a single alphabetized block.
+#include <windows.h>
+
+#include <dbghelp.h>
+#pragma comment(lib, "Dbghelp.lib")
+#else
+#include <execinfo.h>
+#include <unistd.h>
+#endif
+#endif
 
 #define SZ_USE_X86_AVX512 0            // Sanitizers hate AVX512
 #include <stringzilla/stringzilla.hpp> // Levenshtein distance implementation
@@ -1179,7 +1210,63 @@ void test_isolate() {
     }
 }
 
+static void usearch_write_backtrace(int signal_number) {
+    std::fprintf(stderr, "\n[usearch] Fatal signal %d. Back-trace:\n", signal_number);
+#if USEARCH_HAS_STD_STACKTRACE
+    // C++23 `std::stacktrace` covers every platform the library can reach.
+    auto const current_trace = std::stacktrace::current();
+    std::size_t frame_index = 0;
+    for (auto const& frame : current_trace) {
+        std::fprintf(stderr, "  #%2zu %s\n", frame_index, std::to_string(frame).c_str());
+        ++frame_index;
+    }
+#elif defined(_WIN32)
+    // Fallback for MSVC stdlibs without `<stacktrace>`: DbgHelp API.
+    constexpr USHORT backtrace_depth_limit = 64;
+    void* backtrace_frames[backtrace_depth_limit];
+    USHORT backtrace_depth = CaptureStackBackTrace(0, backtrace_depth_limit, backtrace_frames, nullptr);
+    HANDLE current_process = GetCurrentProcess();
+    SymInitialize(current_process, nullptr, TRUE);
+
+    unsigned char symbol_info_buffer[sizeof(SYMBOL_INFO) + 256 * sizeof(char)];
+    SYMBOL_INFO* symbol_info = reinterpret_cast<SYMBOL_INFO*>(symbol_info_buffer);
+    symbol_info->MaxNameLen = 255;
+    symbol_info->SizeOfStruct = sizeof(SYMBOL_INFO);
+
+    for (USHORT frame_index = 0; frame_index < backtrace_depth; ++frame_index) {
+        if (SymFromAddr(current_process, reinterpret_cast<DWORD64>(backtrace_frames[frame_index]), 0, symbol_info))
+            std::fprintf(stderr, "  #%2u %s + 0x%llx\n", static_cast<unsigned>(frame_index), symbol_info->Name,
+                         static_cast<unsigned long long>(reinterpret_cast<DWORD64>(backtrace_frames[frame_index]) -
+                                                         symbol_info->Address));
+        else
+            std::fprintf(stderr, "  #%2u %p\n", static_cast<unsigned>(frame_index), backtrace_frames[frame_index]);
+    }
+#else
+    // Fallback for POSIX stdlibs without `<stacktrace>`: `<execinfo.h>`.
+    constexpr int backtrace_depth_limit = 64;
+    void* backtrace_frames[backtrace_depth_limit];
+    int const backtrace_depth = backtrace(backtrace_frames, backtrace_depth_limit);
+    backtrace_symbols_fd(backtrace_frames, backtrace_depth, STDERR_FILENO);
+#endif
+    std::fflush(stderr);
+}
+
+static void usearch_crash_handler(int signal_number) {
+    usearch_write_backtrace(signal_number);
+    // Restore the default disposition and re-raise so the shell / CI sees the true exit status.
+    std::signal(signal_number, SIG_DFL);
+    std::raise(signal_number);
+}
+
+static void install_crash_handlers() {
+    int const fatal_signals[] = {SIGSEGV, SIGABRT, SIGILL, SIGFPE};
+    for (int signal_number : fatal_signals)
+        std::signal(signal_number, &usearch_crash_handler);
+}
+
 int main(int, char**) {
+    install_crash_handlers();
+
     std::printf("Hardware acceleration compiled: %s\n", hardware_acceleration_compiled());
     std::printf("Hardware acceleration available: %s\n", hardware_acceleration_available());
 
