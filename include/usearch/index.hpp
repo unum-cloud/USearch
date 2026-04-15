@@ -619,6 +619,13 @@ class striped_locks_gt {
     };
     static_assert(sizeof(padded_lock_t) == cache_line_ak, "Lock stripe must be exactly one cache line");
 
+    // `padded_lock_t` is `alignas(cache_line_ak)` (128 B by default) which
+    // exceeds what a plain allocator guarantees (typically 16 B on x86-64).
+    // Rather than demanding an over-aligned allocator, we over-allocate and
+    // keep a pointer to the aligned sub-region — `raw_` is what we hand back
+    // to the allocator, `stripes_` is the aligned view used for reads/writes.
+    byte_t* raw_{};
+    std::size_t raw_bytes_{};
     padded_lock_t* stripes_{};
     std::size_t count_{};
     unsigned shift_{};
@@ -635,7 +642,12 @@ class striped_locks_gt {
 
     void reset() noexcept {
         if (stripes_)
-            allocator_t{}.deallocate(reinterpret_cast<byte_t*>(stripes_), count_ * sizeof(padded_lock_t));
+            for (std::size_t i = 0; i < count_; i++)
+                stripes_[i].~padded_lock_t();
+        if (raw_)
+            allocator_t{}.deallocate(raw_, raw_bytes_);
+        raw_ = nullptr;
+        raw_bytes_ = 0;
         stripes_ = nullptr;
         count_ = 0;
         shift_ = 64;
@@ -649,24 +661,36 @@ class striped_locks_gt {
         shift_ = 64;
         for (std::size_t n = count_; n > 1; n >>= 1)
             shift_--;
-        byte_t* raw = allocator_t{}.allocate(count_ * sizeof(padded_lock_t));
-        if (!raw) {
+        // Request one extra stripe's worth of slack so we can always land on a
+        // `cache_line_ak`-aligned address inside the allocation, regardless of
+        // what the underlying allocator returns.
+        constexpr std::size_t alignment_k = alignof(padded_lock_t);
+        raw_bytes_ = count_ * sizeof(padded_lock_t) + alignment_k;
+        raw_ = allocator_t{}.allocate(raw_bytes_);
+        if (!raw_) {
+            raw_bytes_ = 0;
             count_ = 0;
             shift_ = 64;
             return;
         }
-        stripes_ = reinterpret_cast<padded_lock_t*>(raw);
+        auto raw_address = reinterpret_cast<std::uintptr_t>(raw_);
+        auto aligned_address = (raw_address + alignment_k - 1) & ~(static_cast<std::uintptr_t>(alignment_k) - 1);
+        stripes_ = reinterpret_cast<padded_lock_t*>(aligned_address);
         for (std::size_t i = 0; i < count_; i++)
             new (&stripes_[i]) padded_lock_t();
     }
 
     striped_locks_gt(striped_locks_gt&& other) noexcept {
+        raw_ = exchange(other.raw_, (byte_t*)nullptr);
+        raw_bytes_ = exchange(other.raw_bytes_, std::size_t{0});
         stripes_ = exchange(other.stripes_, nullptr);
         count_ = exchange(other.count_, std::size_t{0});
         shift_ = exchange(other.shift_, unsigned{64});
     }
 
     striped_locks_gt& operator=(striped_locks_gt&& other) noexcept {
+        std::swap(raw_, other.raw_);
+        std::swap(raw_bytes_, other.raw_bytes_);
         std::swap(stripes_, other.stripes_);
         std::swap(count_, other.count_);
         std::swap(shift_, other.shift_);
@@ -1145,7 +1169,7 @@ template <typename element_at> struct default_free_value_gt {
     template <typename sfinae_element_at = element_at,
               typename std::enable_if<std::is_integral<sfinae_element_at>::value>::type* = nullptr>
     static sfinae_element_at value() noexcept {
-        return std::numeric_limits<element_at>::max();
+        return (std::numeric_limits<element_at>::max)();
     }
     template <typename sfinae_element_at = element_at,
               typename std::enable_if<!std::is_integral<sfinae_element_at>::value>::type* = nullptr>
@@ -1155,7 +1179,7 @@ template <typename element_at> struct default_free_value_gt {
 };
 
 template <> struct default_free_value_gt<uint40_t> {
-    static uint40_t value() noexcept { return uint40_t::max(); }
+    static uint40_t value() noexcept { return (uint40_t::max)(); }
 };
 
 template <typename element_at> element_at default_free_value() { return default_free_value_gt<element_at>::value(); }
@@ -2665,7 +2689,7 @@ class index_gt {
         member_cref_t member;
         distance_t distance;
 
-        inline match_t() noexcept : member({nullptr, 0}), distance(std::numeric_limits<distance_t>::max()) {}
+        inline match_t() noexcept : member({nullptr, 0}), distance((std::numeric_limits<distance_t>::max)()) {}
 
         inline match_t(member_cref_t member, distance_t distance) noexcept : member(member), distance(distance) {}
 
@@ -2817,7 +2841,7 @@ class index_gt {
                 keys[i] = vector_key_t{};
                 distances[i] = std::numeric_limits<distance_t>::has_signaling_NaN
                                    ? std::numeric_limits<distance_t>::signaling_NaN()
-                                   : std::numeric_limits<distance_t>::max();
+                                   : (std::numeric_limits<distance_t>::max)();
             }
             return initialized_count;
         }
@@ -3918,7 +3942,7 @@ class index_gt {
         nodes_mutexes_t& mutexes;
         std::size_t slot;
         inline ~optional_node_lock_t() noexcept {
-            if (slot != std::numeric_limits<std::size_t>::max())
+            if (slot != (std::numeric_limits<std::size_t>::max)())
                 mutexes.unlock(slot);
         }
     };
@@ -3928,7 +3952,7 @@ class index_gt {
             nodes_mutexes_.lock(slot);
             return {nodes_mutexes_, slot};
         } else {
-            return {nodes_mutexes_, std::numeric_limits<std::size_t>::max()};
+            return {nodes_mutexes_, (std::numeric_limits<std::size_t>::max)()};
         }
     }
 
@@ -3936,7 +3960,7 @@ class index_gt {
         nodes_mutexes_t& mutexes;
         std::size_t slot;
         inline ~node_conditional_lock_t() noexcept {
-            if (slot != std::numeric_limits<std::size_t>::max())
+            if (slot != (std::numeric_limits<std::size_t>::max)())
                 mutexes.unlock(slot);
         }
     };
@@ -3945,10 +3969,10 @@ class index_gt {
                                                               bool& failed_to_acquire) const noexcept {
         if (!condition) {
             failed_to_acquire = false;
-            return {nodes_mutexes_, std::numeric_limits<std::size_t>::max()};
+            return {nodes_mutexes_, (std::numeric_limits<std::size_t>::max)()};
         }
         failed_to_acquire = nodes_mutexes_.atomic_set(slot);
-        return {nodes_mutexes_, failed_to_acquire ? std::numeric_limits<std::size_t>::max() : slot};
+        return {nodes_mutexes_, failed_to_acquire ? (std::numeric_limits<std::size_t>::max)() : slot};
     }
 
     template <typename metric_at, bool require_non_empty_ak = false>
@@ -4455,7 +4479,7 @@ class index_gt {
         metric_at&& metric,                                            //
         std::size_t needed, top_candidates_t& top, context_t& context, //
         std::size_t& refines_counter,                                  //
-        compressed_slot_t override_slot = (std::numeric_limits<compressed_slot_t>::max)(),
+        compressed_slot_t override_slot = ((std::numeric_limits<compressed_slot_t>::max))(),
         override_value_at override_value = {}) const noexcept {
 
         // Avoid expensive computation, if the set is already small
