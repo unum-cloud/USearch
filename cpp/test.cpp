@@ -85,7 +85,7 @@ void __expect_eq(value_at a, value_at b, char const* file, int line, char const*
 enum slot32_t : std::uint32_t {};
 template <> struct unum::usearch::hash_gt<slot32_t> : public unum::usearch::hash_gt<std::uint32_t> {};
 template <> struct unum::usearch::default_free_value_gt<slot32_t> {
-    static slot32_t value() noexcept { return static_cast<slot32_t>(std::numeric_limits<std::uint32_t>::max()); }
+    static slot32_t value() noexcept { return static_cast<slot32_t>((std::numeric_limits<std::uint32_t>::max)()); }
 };
 
 /*
@@ -197,8 +197,8 @@ void test_uint40() {
     }
 
     // Test min and max functions
-    expect_eq(uint40_t::min(), uint40_t(0u));
-    expect_eq(uint40_t::max(), uint40_t(max_uint40_k));
+    expect_eq((uint40_t::min)(), uint40_t(0u));
+    expect_eq((uint40_t::max)(), uint40_t(max_uint40_k));
 
     // Test copy and move semantics
     for (std::uint64_t input_u64 : test_numbers) {

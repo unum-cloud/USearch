@@ -1136,8 +1136,10 @@ class usearch_pack_m uint40_t {
         return result;
     }
 
-    inline static uint40_t max() noexcept { return uint40_t{}.broadcast(0xFF); }
-    inline static uint40_t min() noexcept { return uint40_t{}.broadcast(0); }
+    /* Parenthesized declarator keeps MSVC's preprocessor from expanding
+     * `max` / `min` against `<windows.h>`'s `max(a,b)` / `min(a,b)` macros. */
+    inline static uint40_t(max)() noexcept { return uint40_t{}.broadcast(0xFF); }
+    inline static uint40_t(min)() noexcept { return uint40_t{}.broadcast(0); }
 
     inline bool operator==(uint40_t const& other) const noexcept { return std::memcmp(octets, other.octets, 5) == 0; }
     inline bool operator!=(uint40_t const& other) const noexcept { return !(*this == other); }

@@ -774,8 +774,8 @@ class index_dense_gt {
         };
     }
 
-    static constexpr std::size_t any_thread() { return std::numeric_limits<std::size_t>::max(); }
-    static constexpr distance_t infinite_distance() { return std::numeric_limits<distance_t>::max(); }
+    static constexpr std::size_t any_thread() { return (std::numeric_limits<std::size_t>::max)(); }
+    static constexpr distance_t infinite_distance() { return (std::numeric_limits<distance_t>::max)(); }
 
     struct aggregated_distances_t {
         std::size_t count = 0;
@@ -893,8 +893,8 @@ class index_dense_gt {
         if (a_missing || b_missing)
             return result;
 
-        result.min = std::numeric_limits<distance_t>::max();
-        result.max = std::numeric_limits<distance_t>::min();
+        result.min = (std::numeric_limits<distance_t>::max)();
+        result.max = (std::numeric_limits<distance_t>::min)();
         result.mean = 0;
         result.count = 0;
 
@@ -1981,7 +1981,7 @@ class index_dense_gt {
 
             cluster_t& merge_source = clusters[unique_clusters - 1];
             std::size_t merge_target_idx = 0;
-            distance_t merge_distance = std::numeric_limits<distance_t>::max();
+            distance_t merge_distance = (std::numeric_limits<distance_t>::max)();
 
             for (std::size_t candidate_idx = 0; candidate_idx + 1 < unique_clusters; ++candidate_idx) {
                 distance_t distance = metric_(merge_source.vector, clusters[candidate_idx].vector);
@@ -2196,8 +2196,8 @@ class index_dense_gt {
         if (key_range.first == key_range.second)
             return result;
 
-        result.min = std::numeric_limits<distance_t>::max();
-        result.max = std::numeric_limits<distance_t>::min();
+        result.min = (std::numeric_limits<distance_t>::max)();
+        result.max = (std::numeric_limits<distance_t>::min)();
         result.mean = 0;
         result.count = 0;
 

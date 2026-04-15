@@ -3484,7 +3484,7 @@ template <typename allocator_at = std::allocator<char>> class kmeans_clustering_
             return result.failed("No memory for result outputs!");
 
         std::fill_n(point_to_centroid_index_buffer.data(), points_count, wanted_clusters);
-        std::fill_n(point_to_centroid_distance_buffer.data(), points_count, std::numeric_limits<distance_t>::max());
+        std::fill_n(point_to_centroid_distance_buffer.data(), points_count, (std::numeric_limits<distance_t>::max)());
 
         // Initialize the casting kernel for quantization and export.
         casts_punned_t casts = casts_punned_t::make(quantization_kind);
@@ -3530,7 +3530,7 @@ template <typename allocator_at = std::allocator<char>> class kmeans_clustering_
         auto start_time = std::chrono::high_resolution_clock::now();
         std::size_t iterations = 0;
         std::size_t const min_points_shifted_per_iteration = static_cast<std::size_t>(min_shifts * points_count);
-        f64_t last_aggregate_distance = std::numeric_limits<f64_t>::max();
+        f64_t last_aggregate_distance = (std::numeric_limits<f64_t>::max)();
 
         while (iterations < max_iterations) {
             iterations++;
@@ -3541,7 +3541,7 @@ template <typename allocator_at = std::allocator<char>> class kmeans_clustering_
                 byte_t const* quantized_point =
                     points_quantized_buffer.data() + points_idx * stride_per_vector_quantized;
                 byte_t const* quantized_centroids = centroids_quantized_buffer.data();
-                distance_t closest_distance_local = std::numeric_limits<distance_t>::max();
+                distance_t closest_distance_local = (std::numeric_limits<distance_t>::max)();
                 std::size_t closest_idx_local = 0;
                 for (std::size_t centroid_idx = 0; centroid_idx < wanted_clusters; centroid_idx++) {
                     byte_t const* quantized_centroid = quantized_centroids + centroid_idx * stride_per_vector_quantized;
