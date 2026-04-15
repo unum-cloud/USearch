@@ -45,6 +45,14 @@ func generateTestVectorI8(dimensions uint) []int8 {
 	return vector
 }
 
+func generateTestVectorU8(dimensions uint) []uint8 {
+	vector := make([]uint8, dimensions)
+	for i := uint(0); i < dimensions; i++ {
+		vector[i] = uint8((i % 255) + 1)
+	}
+	return vector
+}
+
 func populateIndex(t *testing.T, index *Index, vectorCount int) [][]float32 {
 	vectors := make([][]float32, vectorCount)
 	err := index.Reserve(uint(vectorCount))
@@ -655,6 +663,65 @@ func TestQuantizationTypes(t *testing.T) {
 
 		if len(keys) > 0 {
 			t.Fatalf("FilteredSearchI8 returned incorrect results")
+		}
+	})
+
+	t.Run("U8 operations", func(t *testing.T) {
+		index := createTestIndex(t, 32, U8)
+		defer func() {
+			if err := index.Destroy(); err != nil {
+				t.Errorf("Failed to destroy index: %v", err)
+			}
+		}()
+
+		if err := index.Reserve(1); err != nil {
+			t.Fatalf("Failed to reserve capacity: %v", err)
+		}
+		vector := generateTestVectorU8(32)
+		err := index.AddU8(1, vector)
+		if err != nil {
+			t.Fatalf("U8 Add failed: %v", err)
+		}
+
+		keys, _, err := index.SearchU8(vector, 1)
+		if err != nil {
+			t.Fatalf("U8 Search failed: %v", err)
+		}
+
+		if len(keys) == 0 || keys[0] != 1 {
+			t.Fatalf("U8 search results incorrect")
+		}
+
+		// Test FilteredSearchU8
+		handler := &FilteredSearchHandler{
+			Callback: func(key Key, handler *FilteredSearchHandler) int {
+				if key%2 == 0 {
+					return 1
+				}
+				return 0
+			},
+			Data: int64(1),
+		}
+
+		keys, _, err = index.FilteredSearchU8(vector, 1, handler)
+		if err != nil {
+			t.Fatalf("FilteredSearchU8 failed: %v", err)
+		}
+
+		if len(keys) > 0 {
+			t.Fatalf("FilteredSearchU8 returned incorrect results")
+		}
+
+		// Test GetU8
+		retrieved, err := index.GetU8(1, 1)
+		if err != nil {
+			t.Fatalf("U8 Get failed: %v", err)
+		}
+		if retrieved == nil {
+			t.Fatalf("U8 Get returned nil")
+		}
+		if len(retrieved) != 32 {
+			t.Fatalf("U8 Get returned wrong dimensions: got %d, expected 32", len(retrieved))
 		}
 	})
 }

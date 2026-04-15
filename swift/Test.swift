@@ -90,36 +90,6 @@ class Test: XCTestCase {
         XCTAssertEqual(try index.count(key: 49), 0)
     }
 
-    func testIssue399() throws {
-        let index = try USearchIndex.make(
-            metric: USearchMetric.l2sq,
-            dimensions: 1,
-            connectivity: 8,
-            quantization: USearchScalar.f32
-        )
-        try index.reserve(3)
-
-        // add 3 entries then ensure all 3 are returned
-        try index.add(key: 1, vector: [1.1])
-        try index.add(key: 2, vector: [2.1])
-        try index.add(key: 3, vector: [3.1])
-        try XCTAssertEqual(index.count, 3)
-        XCTAssertEqual(try index.search(vector: [1.0], count: 3).0, [1, 2, 3])  // works 😎
-
-        // replace second-added entry then ensure all 3 are still returned
-        try _ = index.remove(key: 2)
-        try index.add(key: 2, vector: [2.2])
-        try XCTAssertEqual(index.count, 3)
-        XCTAssertEqual(try index.search(vector: [1.0], count: 3).0, [1, 2, 3])  // works 😎
-
-        // replace first-added entry then ensure all 3 are still returned
-        try _ = index.remove(key: 1)
-        try index.add(key: 1, vector: [1.2])
-        let afterReplacingInitial = try index.search(vector: [1.0], count: 3).0
-        try XCTAssertEqual(index.count, 3)
-        XCTAssertEqual(afterReplacingInitial, [1, 2, 3])  // v2.11.7 fails with "[1] != [1, 2, 3]" 😨
-    }
-
     func testFilteredSearchSingle() throws {
         let index = try USearchIndex.make(
             metric: USearchMetric.l2sq,

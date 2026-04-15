@@ -1,41 +1,41 @@
 [package]
-name = "usearch"
-version = "2.24.0"
 authors = ["Ash Vardanian <1983160+ashvardanian@users.noreply.github.com>"]
 description = "Smaller & Faster Single-File Vector Search Engine from Unum"
+documentation = "https://unum-cloud.github.io/USearch"
 edition = "2021"
-license = "Apache-2.0"
-publish = true
-repository = "https://github.com/unum-cloud/usearch"
-documentation = "https://unum-cloud.github.io/usearch"
 include = [
-    "/rust/**",
-    "/include/**",
-    "/fp16/include/**",
-    "/simsimd/include/**",
-    "/simsimd/c/**",
-    "/stringzilla/include/**",
-    "/build.rs",
+  "/rust/**",
+  "/include/**",
+  "/stringzilla/include/**",
+  "/build.rs",
 ]
+license = "Apache-2.0"
+name = "usearch"
+publish = true
+repository = "https://github.com/unum-cloud/USearch"
+version = "2.24.0"
 
 [features]
-default = ["simsimd", "fp16lib"] # SimSIMD is enabled by default
-simsimd = []                     # No need to do anything to enable SimSIMD by default
-fp16lib = []                     # Without this FP16 we lose precision downcasting
-openmp = []                      # Optional: Users can enable OpenMP
+default = ["numkong"]
+numkong = ["dep:numkong"]
+openmp = []
+simsimd = ["numkong"]
 
 [lib]
 name = "usearch"
 path = "rust/lib.rs"
 
 [dependencies]
-cxx = "1.0.160"
+cxx = "1.0.194"
+# Published crates pull `numkong` from crates.io (the `path` is stripped at publish time).
+# The local `path = "numkong"` is only used during development against the git submodule.
+numkong = {version = ">=7.5.0", path = "numkong", optional = true}
 
 [build-dependencies]
-cxx-build = "1.0.160"
+cxx-build = "1.0.194"
 
 [dev-dependencies]
-fork_union = "2.1.1"  # for concurrency tests
-rand_distr = "0.5.1"  # uniform floats distribution
-rand_chacha = "0.9.0" # random number generator
-rand = "0.9.1"
+fork_union = "2.1.1" # for concurrency tests
+rand = "0.10.0" 
+rand_chacha = "0.10.0" # random number generator
+rand_distr = "0.6.0" # uniform floats distribution

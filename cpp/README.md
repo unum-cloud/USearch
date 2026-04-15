@@ -6,7 +6,7 @@ To use in a C++ project, copy the `include/usearch/*` headers into your project.
 Alternatively, fetch it with CMake:
 
 ```cmake
-FetchContent_Declare(usearch GIT_REPOSITORY https://github.com/unum-cloud/usearch.git)
+FetchContent_Declare(usearch GIT_REPOSITORY https://github.com/unum-cloud/USearch.git)
 FetchContent_MakeAvailable(usearch)
 ```
 
@@ -43,9 +43,9 @@ int main(int argc, char **argv) {
 
 Here we:
 
-- define a metric of kind [`metric_kind_t::l2sq_k`](https://unum-cloud.github.io/usearch/cpp/reference.html#_CPPv413metric_kind_t),
-- to be applied to [`scalar_kind_t::f32_k`](https://unum-cloud.github.io/usearch/cpp/reference.html#_CPPv413scalar_kind_t) floating-point vectors,
-- instantiate an [`index_dense_t`](https://unum-cloud.github.io/usearch/cpp/reference.html#_CPPv4I00EN4unum7usearch14index_dense_gtE) index.
+- define a metric of kind [`metric_kind_t::l2sq_k`](https://unum-cloud.github.io/USearch/cpp/reference.html#_CPPv413metric_kind_t),
+- to be applied to [`scalar_kind_t::f32_k`](https://unum-cloud.github.io/USearch/cpp/reference.html#_CPPv413scalar_kind_t) floating-point vectors,
+- instantiate an [`index_dense_t`](https://unum-cloud.github.io/USearch/cpp/reference.html#_CPPv4I00EN4unum7usearch14index_dense_gtE) index.
 
 The `add` is thread-safe for concurrent index construction.
 It also has an overload for different vector types, casting them under the hood.
@@ -174,7 +174,7 @@ In its high-level interface, USearch supports a variety of metrics, including th
 - `metric_haversine_gt<scalar_t>` for "Haversine" or "Great Circle" distance between coordinates used in GIS applications.
 - `metric_divergence_gt<scalar_t>` for the "Jensen Shannon" similarity between probability distributions.
 
-In reality, for most common types, one of the [SimSIMD](https://github.com/ashvardanian/SimSIMD) backends will be triggered, providing hardware-acceleration for most common CPUs.
+In reality, for most common types, one of the [NumKong](https://github.com/ashvardanian/numkong) backends will be triggered, providing hardware-acceleration for most common CPUs.
 
 If you need a different metric, you can implement it yourself and wrap it into a `metric_punned_t`, which is our alternative to the `std::function`.
 Unlike the `std::function`, it is a trivial type, which is important for performance.

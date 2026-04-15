@@ -64,9 +64,9 @@
  * management. Always use try-with-resources or explicitly call {@link #close()}
  * to free native memory.</p>
  *
- * @see <a href="https://github.com/unum-cloud/usearch">USearch GitHub
+ * @see <a href="https://github.com/unum-cloud/USearch">USearch GitHub
  * Repository</a>
- * @see <a href="https://unum-cloud.github.io/usearch/">USearch
+ * @see <a href="https://unum-cloud.github.io/USearch/">USearch
  * Documentation</a>
  */
 package cloud.unum.usearch;
@@ -140,9 +140,34 @@ public class Index implements AutoCloseable {
         public static final String FLOAT16 = "f16";
 
         /**
+         * FP8 E5M2 (IEEE 754-like, 1 sign + 5 exponent + 2 mantissa)
+         */
+        public static final String E5M2 = "e5m2";
+
+        /**
+         * FP8 E4M3 (OCP, 1 sign + 4 exponent + 3 mantissa)
+         */
+        public static final String E4M3 = "e4m3";
+
+        /**
+         * FP6 E3M2 (1 sign + 3 exponent + 2 mantissa)
+         */
+        public static final String E3M2 = "e3m2";
+
+        /**
+         * FP6 E2M3 (1 sign + 2 exponent + 3 mantissa)
+         */
+        public static final String E2M3 = "e2m3";
+
+        /**
          * 8-bit integer quantization
          */
         public static final String INT8 = "i8";
+
+        /**
+         * 8-bit unsigned integer quantization
+         */
+        public static final String UINT8 = "u8";
 
         /**
          * Binary quantization (1 bit per dimension, 8 dimensions per word)
@@ -616,6 +641,48 @@ public class Index implements AutoCloseable {
     }
 
     /**
+     * Adds uint8 quantized vector to index.
+     *
+     * @param key vector identifier
+     * @param vector uint8 quantized vector data (stored as byte[])
+     */
+    public void addU8(long key, byte vector[]) {
+        if (c_ptr == 0) {
+            throw new IllegalStateException("Index already closed");
+        }
+        c_add_u8(c_ptr, key, vector);
+    }
+
+    /**
+     * Searches using uint8 quantized query vector.
+     *
+     * @param vector uint8 quantized query vector (stored as byte[])
+     * @param count number of neighbors to find
+     * @return array of neighbor keys
+     */
+    public long[] searchU8(byte vector[], long count) {
+        if (c_ptr == 0) {
+            throw new IllegalStateException("Index already closed");
+        }
+        return c_search_u8(c_ptr, vector, count);
+    }
+
+    /**
+     * Retrieves uint8 vector into provided byte buffer.
+     *
+     * @param key vector identifier
+     * @param buffer buffer to populate with vector data
+     * @throws IllegalArgumentException if key not found or buffer size
+     * incorrect
+     */
+    public void getIntoU8(long key, byte[] buffer) {
+        if (c_ptr == 0) {
+            throw new IllegalStateException("Index already closed");
+        }
+        c_get_into_u8(c_ptr, key, buffer);
+    }
+
+    /**
      * Retrieves vector into provided float buffer.
      *
      * @param key vector identifier
@@ -772,12 +839,30 @@ public class Index implements AutoCloseable {
     }
 
     /**
+     * Returns a comma-separated list of SIMD capabilities available on the current platform at runtime.
+     *
+     * @return comma-separated string of runtime capability names (e.g., "serial, haswell, skylake")
+     */
+    public static String hardwareAccelerationAvailableString() {
+        return c_hardware_acceleration_available_string();
+    }
+
+    /**
+     * Returns a comma-separated list of SIMD capabilities compiled into this library build.
+     *
+     * @return comma-separated string of compiled capability names
+     */
+    public static String hardwareAccelerationCompiledString() {
+        return c_hardware_acceleration_compiled_string();
+    }
+
+    /**
      * Returns all SIMD capabilities available on the current platform at runtime.
      *
      * @return array of runtime capability names (e.g., ["serial", "haswell", "skylake", "neon"])
      */
     public static String[] hardwareAccelerationAvailable() {
-        return c_hardware_acceleration_available();
+        return c_hardware_acceleration_available_string().split(", ");
     }
 
     /**
@@ -786,7 +871,7 @@ public class Index implements AutoCloseable {
      * @return array of compiled capability names based on preprocessor macros
      */
     public static String[] hardwareAccelerationCompiled() {
-        return c_hardware_acceleration_compiled();
+        return c_hardware_acceleration_compiled_string().split(", ");
     }
 
     /**
@@ -1068,9 +1153,9 @@ public class Index implements AutoCloseable {
 
     private static native String c_scalar_kind(long ptr);
 
-    private static native String[] c_hardware_acceleration_available();
+    private static native String c_hardware_acceleration_available_string();
 
-    private static native String[] c_hardware_acceleration_compiled();
+    private static native String c_hardware_acceleration_compiled_string();
 
     private static native String c_library_version();
 
@@ -1085,17 +1170,23 @@ public class Index implements AutoCloseable {
 
     private static native void c_add_i8(long ptr, long key, byte vector[]);
 
+    private static native void c_add_u8(long ptr, long key, byte vector[]);
+
     private static native long[] c_search_f32(long ptr, float vector[], long count);
 
     private static native long[] c_search_f64(long ptr, double vector[], long count);
 
     private static native long[] c_search_i8(long ptr, byte vector[], long count);
 
+    private static native long[] c_search_u8(long ptr, byte vector[], long count);
+
     private static native void c_get_into_f32(long ptr, long key, float buffer[]);
 
     private static native void c_get_into_f64(long ptr, long key, double buffer[]);
 
     private static native void c_get_into_i8(long ptr, long key, byte buffer[]);
+
+    private static native void c_get_into_u8(long ptr, long key, byte buffer[]);
 
     // ByteBuffer overloads for zero-copy operations:
     private static native void c_add_f32_buffer(long ptr, long key, java.nio.FloatBuffer vector);

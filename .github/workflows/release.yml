@@ -11,7 +11,7 @@ env:
   DOTNET_VERSION: 8.0.x
   NODE_VERSION: 20
   JAVA_VERSION: 21
-  GO_VERSION: "^1.21.0"
+  GO_VERSION: "^1.22.0"
   ANDROID_NDK_VERSION: 26.3.11579264
   ANDROID_SDK_VERSION: 21
   EMSCRIPTEN_VERSION: 3.1.47
@@ -27,7 +27,7 @@ permissions:
 jobs:
   versioning:
     name: Update Version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -41,10 +41,8 @@ jobs:
           version-file: "VERSION"
           update-version-in: |
             package.json:"version": "(\d+\.\d+\.\d+)"
-            package-lock.json:"usearch",\n\s+"version": "(\d+\.\d+\.\d+)"
             CITATION.cff:^version: (\d+\.\d+\.\d+)
             Cargo.toml:^version = "(\d+\.\d+\.\d+)"
-            Cargo.lock:name = "usearch"\nversion = "(\d+\.\d+\.\d+)"
             wasmer.toml:^version = "(\d+\.\d+\.\d+)"
             conanfile.py:version = "(\d+\.\d+\.\d+)"
             java/README.md:usearchVersion = '(\d+\.\d+\.\d+)'
@@ -64,9 +62,9 @@ jobs:
           github-token: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
 
   rebase:
-    name: Rebase Dev. Branch
+    name: Rebase Dev Branch
     needs: versioning
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout the latest code
         uses: actions/checkout@v6
@@ -88,8 +86,8 @@ jobs:
           force: True
 
   create_linux_deb_package:
-    name: Create Debian Package
-    runs-on: ubuntu-22.04
+    name: Build Linux Package
+    runs-on: ubuntu-24.04
     needs: versioning
     env:
       CC: clang
@@ -171,7 +169,7 @@ jobs:
           update_latest_release: true
 
   create_windows_dll_library:
-    name: Create Dll Library for Windows
+    name: Build Windows Library
     runs-on: windows-2022
     needs: versioning
     strategy:
@@ -218,14 +216,20 @@ jobs:
         run: |
           cmake -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_SQLITE=0 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 -B ./build_release
           cmake --build ./build_release --config Release
-          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar .\build_release\libusearch_c.dll .\c\usearch.h
+          mkdir pkg
+          copy .\build_release\libusearch_c.dll pkg\
+          copy .\c\usearch.h pkg\
+          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_c.dll usearch.h
 
       - name: Build library (MSVC ARM64)
         if: matrix.arch == 'arm64'
         run: |
           cmake -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_SQLITE=0 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 -B ./build_release
           cmake --build ./build_release --config Release
-          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar .\build_release\libusearch_c.dll .\c\usearch.h
+          mkdir pkg
+          copy .\build_release\libusearch_c.dll pkg\
+          copy .\c\usearch.h pkg\
+          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_c.dll usearch.h
 
       - name: Upload native library for Java
         uses: actions/upload-artifact@v5
@@ -243,7 +247,7 @@ jobs:
           update_latest_release: true
 
   create_macos_dylib_library:
-    name: Create Library for MacOS
+    name: Build macOS Library
     runs-on: macos-15
     needs: versioning
     strategy:
@@ -279,8 +283,8 @@ jobs:
                 -DUSEARCH_BUILD_BENCH_CPP=0 \
                 -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
                 -B ./build_release
-          cmake --build ./build_release --config Release        
-          zip -r usearch_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip build_release/libusearch_c.dylib c/usearch.h
+          cmake --build ./build_release --config Release
+          zip -j usearch_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip build_release/libusearch_c.dylib c/usearch.h
           mv build_release/libusearch_sqlite.dylib usearch_sqlite_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.dylib
 
       - name: Upload native library for Java
@@ -307,8 +311,8 @@ jobs:
           update_latest_release: true
 
   create_android_library:
-    name: Create Android Libraries
-    runs-on: ubuntu-22.04
+    name: Build Android Library
+    runs-on: ubuntu-24.04
     needs: versioning
     strategy:
       fail-fast: false
@@ -356,7 +360,7 @@ jobs:
 
       - name: Package library
         run: |
-          zip -r usearch_android_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip build_artifacts/libusearch_c.so c/usearch.h
+          zip -j usearch_android_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip build_artifacts/libusearch_c.so c/usearch.h
 
       - name: Upload native library for Java
         uses: actions/upload-artifact@v5
@@ -417,23 +421,22 @@ jobs:
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0 \
             -DUSEARCH_BUILD_LIB_C=0 \
-            -DUSEARCH_USE_FP16LIB=1 \
-            -DUSEARCH_USE_SIMSIMD=1 \
-            -DSIMSIMD_TARGET_HASWELL=1 \
-            -DSIMSIMD_TARGET_SKYLAKE=1 \
-            -DSIMSIMD_TARGET_ICE=1 \
-            -DSIMSIMD_TARGET_GENOA=1 \
-            -DSIMSIMD_TARGET_SAPPHIRE=1 \
-            -DSIMSIMD_TARGET_NEON=1 \
-            -DSIMSIMD_TARGET_NEON_BF16=1 \
-            -DSIMSIMD_TARGET_NEON_F16=1 \
-            -DSIMSIMD_TARGET_NEON_I8=1 \
-            -DSIMSIMD_TARGET_SVE=1 \
-            -DSIMSIMD_TARGET_SVE_BF16=1 \
-            -DSIMSIMD_TARGET_SVE_F16=1 \
-            -DSIMSIMD_TARGET_SVE_I8=1 \
-            -DSIMSIMD_TARGET_SVE2=1 \
-            -DSIMSIMD_DYNAMIC_DISPATCH=1
+            -DUSEARCH_USE_NUMKONG=1 \
+            -DNK_TARGET_HASWELL=1 \
+            -DNK_TARGET_SKYLAKE=1 \
+            -DNK_TARGET_ICELAKE=1 \
+            -DNK_TARGET_GENOA=1 \
+            -DNK_TARGET_SAPPHIRE=1 \
+            -DNK_TARGET_NEON=1 \
+            -DNK_TARGET_NEONBFDOT=1 \
+            -DNK_TARGET_NEONHALF=1 \
+            -DNK_TARGET_NEONSDOT=1 \
+            -DNK_TARGET_SVE=1 \
+            -DNK_TARGET_SVEBFDOT=1 \
+            -DNK_TARGET_SVEHALF=1 \
+            -DNK_TARGET_SVESDOT=1 \
+            -DNK_TARGET_SVE2=1 \
+            -DNK_DYNAMIC_DISPATCH=1
 
           cmake --build build_artifacts --config Release -j
 
@@ -454,16 +457,16 @@ jobs:
         include:
           - arch: x64
             cmake_arch: x64
-            simsimd_target_x86: 1
-            simsimd_target_arm: 0
+            nk_target_x86: 1
+            nk_target_arm: 0
           - arch: x86
             cmake_arch: Win32
-            simsimd_target_x86: 1
-            simsimd_target_arm: 0
+            nk_target_x86: 1
+            nk_target_arm: 0
           - arch: arm64
             cmake_arch: ARM64
-            simsimd_target_x86: 0
-            simsimd_target_arm: 1
+            nk_target_x86: 0
+            nk_target_arm: 1
 
     steps:
       - name: Check out refreshed version
@@ -487,15 +490,14 @@ jobs:
             -DUSEARCH_BUILD_TEST_CPP=0 `
             -DUSEARCH_BUILD_BENCH_CPP=0 `
             -DUSEARCH_BUILD_LIB_C=0 `
-            -DUSEARCH_USE_FP16LIB=1 `
-            -DUSEARCH_USE_SIMSIMD=1 `
-            -DSIMSIMD_TARGET_NEON=${{ matrix.simsimd_target_arm }} `
-            -DSIMSIMD_TARGET_HASWELL=${{ matrix.simsimd_target_x86 }} `
-            -DSIMSIMD_TARGET_SKYLAKE=${{ matrix.simsimd_target_x86 }} `
-            -DSIMSIMD_TARGET_ICE=${{ matrix.simsimd_target_x86 }} `
-            -DSIMSIMD_TARGET_GENOA=0 `
-            -DSIMSIMD_TARGET_SAPPHIRE=0 `
-            -DSIMSIMD_DYNAMIC_DISPATCH=1
+            -DUSEARCH_USE_NUMKONG=1 `
+            -DNK_TARGET_NEON=${{ matrix.nk_target_arm }} `
+            -DNK_TARGET_HASWELL=${{ matrix.nk_target_x86 }} `
+            -DNK_TARGET_SKYLAKE=${{ matrix.nk_target_x86 }} `
+            -DNK_TARGET_ICELAKE=${{ matrix.nk_target_x86 }} `
+            -DNK_TARGET_GENOA=0 `
+            -DNK_TARGET_SAPPHIRE=0 `
+            -DNK_DYNAMIC_DISPATCH=1
 
           cmake --build build_artifacts --config Release
 
@@ -542,14 +544,13 @@ jobs:
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0 \
             -DUSEARCH_BUILD_LIB_C=0 \
-            -DUSEARCH_USE_FP16LIB=1 \
-            -DUSEARCH_USE_SIMSIMD=1 \
-            -DSIMSIMD_TARGET_HASWELL=1 \
-            -DSIMSIMD_TARGET_NEON=1 \
-            -DSIMSIMD_TARGET_NEON_BF16=1 \
-            -DSIMSIMD_TARGET_NEON_F16=1 \
-            -DSIMSIMD_TARGET_NEON_I8=1 \
-            -DSIMSIMD_DYNAMIC_DISPATCH=1
+            -DUSEARCH_USE_NUMKONG=1 \
+            -DNK_TARGET_HASWELL=1 \
+            -DNK_TARGET_NEON=1 \
+            -DNK_TARGET_NEONBFDOT=1 \
+            -DNK_TARGET_NEONHALF=1 \
+            -DNK_TARGET_NEONSDOT=1 \
+            -DNK_DYNAMIC_DISPATCH=1
 
           cmake --build build_artifacts --config Release
 
@@ -605,13 +606,12 @@ jobs:
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0 \
             -DUSEARCH_BUILD_LIB_C=0 \
-            -DUSEARCH_USE_FP16LIB=1 \
-            -DUSEARCH_USE_SIMSIMD=1 \
-            -DSIMSIMD_TARGET_NEON=1 \
-            -DSIMSIMD_TARGET_NEON_BF16=1 \
-            -DSIMSIMD_TARGET_NEON_F16=1 \
-            -DSIMSIMD_TARGET_NEON_I8=1 \
-            -DSIMSIMD_DYNAMIC_DISPATCH=1
+            -DUSEARCH_USE_NUMKONG=1 \
+            -DNK_TARGET_NEON=1 \
+            -DNK_TARGET_NEONBFDOT=1 \
+            -DNK_TARGET_NEONHALF=1 \
+            -DNK_TARGET_NEONSDOT=1 \
+            -DNK_DYNAMIC_DISPATCH=1
 
           cmake --build build_artifacts --config Release
 
@@ -623,8 +623,8 @@ jobs:
           retention-days: 1
 
   create_wasm_library:
-    name: Create WASM Libraries
-    runs-on: ubuntu-22.04
+    name: Build WASM Library
+    runs-on: ubuntu-24.04
     needs: versioning
     steps:
       - name: Check out refreshed version
@@ -655,14 +655,15 @@ jobs:
             -DUSEARCH_BUILD_BENCH_CPP=OFF \
             -DUSEARCH_BUILD_SQLITE=OFF \
             -DUSEARCH_USE_OPENMP=OFF \
-            -DUSEARCH_USE_SIMSIMD=ON \
+            -DUSEARCH_USE_NUMKONG=ON \
             -DUSEARCH_USE_JEMALLOC=OFF
 
           emmake cmake --build build_wasm --config Release
 
           cd build_wasm
-          tar -czf ../usearch_wasm_${{ steps.set_version.outputs.version }}.tar.gz libusearch_c.* ../c/usearch.h          
-          zip -r ../usearch_wasm_${{ steps.set_version.outputs.version }}.zip libusearch_c.* ../c/usearch.h
+          cp ../c/usearch.h .
+          tar -czf ../usearch_wasm_${{ steps.set_version.outputs.version }}.tar.gz libusearch_c.* usearch.h
+          zip -j ../usearch_wasm_${{ steps.set_version.outputs.version }}.zip libusearch_c.* usearch.h
 
       - name: Upload archives
         uses: xresloader/upload-to-github-release@v1
@@ -674,7 +675,7 @@ jobs:
 
   publish_checksums:
     name: Compute Assets Checksums
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs:
       [
         versioning,
@@ -734,7 +735,8 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
-        python-version: ["38", "39", "310", "311", "312", "313", "313t", "314", "314t"]
+        python-version:
+          ["310", "311", "312", "313", "313t", "314", "314t"]
     steps:
       - name: Check out refreshed version
         uses: actions/checkout@v6
@@ -768,7 +770,7 @@ jobs:
   publish_python:
     name: Publish Python
     needs: build_wheels
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     environment:
       name: pypi
       url: https://pypi.org/p/usearch
@@ -834,7 +836,7 @@ jobs:
         # NPM installation fails spuriously all the time
       - name: Install Dependencies
         run: |
-          npm ci --ignore-scripts || npm ci --ignore-scripts || npm ci --ignore-scripts
+          npm install --ignore-scripts
       - run: npm run prebuild-single
         if: matrix.os != 'macos-14'
       - run: npm run prebuild-darwin-x64+arm64
@@ -866,7 +868,13 @@ jobs:
   publish_javascript:
     name: Publish JavaScript
     needs: build_javascript
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    environment:
+      name: npm-usearch
+      url: https://www.npmjs.com/package/usearch
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - name: Check out refreshed version
@@ -879,7 +887,8 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
 
       - name: Download prebuilds
         uses: actions/download-artifact@v6
@@ -894,7 +903,7 @@ jobs:
         # NPM installation fails spuriously all the time
       - name: Install Dependencies
         run: |
-          npm ci --ignore-scripts || npm ci --ignore-scripts || npm ci --ignore-scripts
+          npm install --ignore-scripts
 
       - name: Build the JS from TS
         run: npm run build-js
@@ -906,10 +915,7 @@ jobs:
         run: npm publish --dry-run
 
       - name: Publish
-        uses: JS-DevTools/npm-publish@v3
-        with:
-          token: ${{ secrets.NPM_TOKEN }}
-          access: public
+        run: npm publish --provenance --access public
 
   publish_rust:
     name: Publish Rust
@@ -924,7 +930,7 @@ jobs:
         run: git submodule update --init --recursive
       - name: Hide submodule Crates
         run: |
-          mv simsimd/Cargo.toml simsimd/Cargo.toml.bak
+          mv numkong/Cargo.toml numkong/Cargo.toml.bak
           mv stringzilla/Cargo.toml stringzilla/Cargo.toml.bak
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -987,7 +993,7 @@ jobs:
           cp usearch-jni-linux-amd64/libusearch_jni.so build/libs/usearch/shared/linux-amd64/libusearch_jni.so || true
           cp usearch-jni-linux-arm64/libusearch_jni.so build/libs/usearch/shared/linux-arm64/libusearch_jni.so || true
 
-          # Windows  
+          # Windows
           cp usearch-jni-windows-x64/libusearch_jni.dll build/libs/usearch/shared/windows-amd64/libusearch_jni.dll || true
           cp usearch-jni-windows-x86/libusearch_jni.dll build/libs/usearch/shared/windows-x86/libusearch_jni.dll || true
           cp usearch-jni-windows-arm64/libusearch_jni.dll build/libs/usearch/shared/windows-arm64/libusearch_jni.dll || true
@@ -1042,7 +1048,7 @@ jobs:
           update_latest_release: true
 
   publish_swift:
-    name: Publish ObjC & Swift
+    name: Publish Objective-C & Swift
     needs: versioning
     runs-on: macos-15
     steps:
@@ -1062,7 +1068,7 @@ jobs:
   publish_docker:
     name: Publish Docker Image
     needs: versioning
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -1107,7 +1113,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-15, windows-2022]
+        os: [ubuntu-24.04, macos-15, windows-2022]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -1122,11 +1128,11 @@ jobs:
         run: git submodule update --init --recursive
 
       - name: Build C library for Linux
-        if: matrix.os == 'ubuntu-22.04'
+        if: matrix.os == 'ubuntu-24.04'
         run: |
           sudo apt update
-          sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev gcc-12 g++-12
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_SIMSIMD=1 -DUSEARCH_USE_JEMALLOC=1
+          sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev
+          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=1
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_c.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
@@ -1136,7 +1142,7 @@ jobs:
         run: |
           brew update
           brew reinstall cmake
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=0 -DUSEARCH_USE_SIMSIMD=1 -DUSEARCH_USE_JEMALLOC=0
+          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=0 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=0
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_c.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
@@ -1145,7 +1151,7 @@ jobs:
         if: matrix.os == 'windows-2022'
         run: |
           choco install cmake
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=0 -DUSEARCH_USE_SIMSIMD=0 -DUSEARCH_USE_JEMALLOC=0
+          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=0 -DUSEARCH_USE_NUMKONG=0 -DUSEARCH_USE_JEMALLOC=0
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
           cp "${{ github.workspace }}\build_artifacts\libusearch_c.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
@@ -1158,7 +1164,7 @@ jobs:
 
   publish_csharp:
     name: Publish C#
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: [build_csharp]
     env:
       SOLUTION: ${{ github.workspace }}/csharp
@@ -1203,7 +1209,7 @@ jobs:
 
   build_docs:
     name: Build Docs
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: ${{ always() }}
     needs:
       [
@@ -1224,9 +1230,9 @@ jobs:
           ref: "main"
       - name: Install dependencies
         run: |
-          sudo apt update && 
-          sudo apt install -y doxygen graphviz dia git && 
-          pip install -r docs/requirements.txt && 
+          sudo apt update &&
+          sudo apt install -y doxygen graphviz dia git &&
+          pip install -r docs/requirements.txt &&
           npm install -g jsdoc typedoc
       - name: Install USearch from PyPi
         run: pip install usearch
@@ -1234,7 +1240,7 @@ jobs:
         # NPM installation fails spuriously all the time
       - name: Build CJS JS
         run: |
-          npm ci --ignore-scripts || npm ci --ignore-scripts || npm ci --ignore-scripts
+          npm install --ignore-scripts
           npm run build-js
       - name: Build documentation
         run: cd docs && doxygen conf.dox && make html
@@ -1255,7 +1261,7 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: ${{ always() }}
     needs: build_docs
     steps:
@@ -1278,7 +1284,7 @@ jobs:
 
   deploy_docs_vercel:
     name: Deploy Vercel
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: ${{ always() }}
     needs: build_docs
     steps:

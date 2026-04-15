@@ -26,16 +26,18 @@
 
 #include <sys/stat.h> // `stat`
 
-#include <algorithm>
 #include <csignal>
 #include <cstdio>
-#include <iostream>  // `std::cerr`
-#include <numeric>   // `std::iota`
-#include <stdexcept> // `std::invalid_argument`
-#include <string>    // `std::to_string`
-#include <thread>    // `std::thread::hardware_concurrency()`
-#include <variant>   // `std::monostate`
-#include <vector>
+
+#include <algorithm>     // ?
+#include <iostream>      // `std::cerr`
+#include <numeric>       // `std::iota`
+#include <stdexcept>     // `std::invalid_argument`
+#include <string>        // `std::to_string`
+#include <thread>        // `std::thread::hardware_concurrency()`
+#include <unordered_map> // `std::unordered_map`
+#include <variant>       // `std::monostate`
+#include <vector>        // `std::vector`
 
 #include <clipp.h> // Command Line Interface
 #if USEARCH_USE_OPENMP
@@ -112,9 +114,10 @@ struct alignas(32) persisted_matrix_gt {
         if (fstat(file_descriptor, &stat_vectors) == -1)
             throw std::invalid_argument("Couldn't obtain file stats");
         raw_length = stat_vectors.st_size;
-        raw_handle = (std::uint8_t*)mmap(NULL, raw_length, PROT_READ, MAP_PRIVATE, file_descriptor, 0);
-        if (raw_handle == nullptr)
+        auto* result = mmap(NULL, raw_length, PROT_READ, MAP_PRIVATE, file_descriptor, 0);
+        if (result == MAP_FAILED)
             throw std::invalid_argument("Couldn't memory-map the file");
+        raw_handle = (std::uint8_t*)result;
         std::memcpy(&rows, raw_handle, sizeof(rows));
         std::memcpy(&cols, raw_handle + sizeof(rows), sizeof(cols));
         scalars = (scalar_t*)(raw_handle + sizeof(rows) + sizeof(cols));
@@ -201,14 +204,20 @@ struct persisted_dataset_gt {
             for (std::size_t i = 0; i < ids_matrix.rows; ++i)
                 vector_ids_[i] = static_cast<default_key_t>(*ids_matrix.row(i));
         }
+
+        // When custom IDs are loaded and self-search is active, populate
+        // neighborhoods_iota_ with the actual IDs so recall comparison works.
+        if (has_vector_ids() && !queries_.scalars && !neighborhoods_.scalars) {
+            for (std::size_t i = 0; i < neighborhoods_iota_.size(); ++i)
+                neighborhoods_iota_[i] = static_cast<compressed_slot_t>(vector_ids_[i]);
+        }
     }
 
     bool search_itself() const noexcept { return vectors_count() && !queries_.rows; }
     bool has_vector_ids() const noexcept { return !vector_ids_.empty(); }
 
     default_key_t vector_id(std::size_t i) const noexcept {
-        return has_vector_ids() ? vector_ids_[i + vectors_to_skip_]
-                                : static_cast<default_key_t>(i + vectors_to_skip_);
+        return has_vector_ids() ? vector_ids_[i + vectors_to_skip_] : static_cast<default_key_t>(i + vectors_to_skip_);
     }
 
     std::size_t dimensions() const noexcept { return vectors_.cols; }
@@ -224,9 +233,7 @@ struct persisted_dataset_gt {
     std::size_t vectors_count() const noexcept {
         return vectors_to_take_ ? vectors_to_take_ : (vectors_.rows - vectors_to_skip_);
     }
-    matrix_slice_gt<scalar_t const> vectors_view() const noexcept {
-        return {vector(vectors_to_skip_), vectors_count(), dimensions()};
-    }
+    matrix_slice_gt<scalar_t const> vectors_view() const noexcept { return {vector(0), vectors_count(), dimensions()}; }
 };
 
 template <typename scalar_at, typename vector_id_at> //
@@ -288,7 +295,7 @@ struct running_stats_printer_t {
         std::size_t count = progress.load();
         timestamp_t time = std::chrono::high_resolution_clock::now();
         std::size_t duration = std::chrono::duration_cast<std::chrono::nanoseconds>(time - start_time).count();
-        float vectors_per_second = count * 1e9 / duration;
+        float vectors_per_second = static_cast<float>(count * 1e9 / duration);
         std::printf("\r\33[2K100 %% completed, %.0f vectors/s\n", vectors_per_second);
     }
 
@@ -314,7 +321,7 @@ struct running_stats_printer_t {
         timestamp_t time_new = std::chrono::high_resolution_clock::now();
         std::size_t duration =
             std::chrono::duration_cast<std::chrono::nanoseconds>(time_new - last_printed_time).count();
-        float vectors_per_second = count_new * 1e9 / duration;
+        float vectors_per_second = static_cast<float>(count_new * 1e9 / duration);
 
         std::printf("\r%3.3f%% [%.*s%*s] %.0f vectors/s, finished %zu/%zu", percentage * 100.f, left_pad, bars_k,
                     right_pad, "", vectors_per_second, progress, total);
@@ -377,9 +384,8 @@ void search_many( //
 }
 
 template <typename dataset_at, typename index_at> //
-static void single_shot(dataset_at& dataset, index_at& index, bool construct = true) {
+static void single_shot(dataset_at& dataset, index_at& index, bool construct = true, bool bench_join = false) {
     using distance_t = typename index_at::distance_t;
-    constexpr default_key_t missing_key = std::numeric_limits<default_key_t>::max();
 
     std::printf("\n");
     std::printf("------------\n");
@@ -390,6 +396,9 @@ static void single_shot(dataset_at& dataset, index_at& index, bool construct = t
             ids[i] = static_cast<default_key_t>(dataset.vector_id(i));
         index_many(index, dataset.vectors_count(), ids.data(), dataset.vector(0), dataset.dimensions());
     }
+
+    std::size_t mem = index.memory_usage();
+    std::printf("Memory usage: %.2f GB\n", mem / (1024.0 * 1024.0 * 1024.0));
 
     // Perform search, evaluate speed
     std::vector<default_key_t> found_neighbors(dataset.queries_count() * dataset.neighborhood_size());
@@ -409,40 +418,38 @@ static void single_shot(dataset_at& dataset, index_at& index, bool construct = t
     std::printf("Recall@1 %.2f %%\n", recall_at_1 * 100.f / dataset.queries_count());
     std::printf("Recall %.2f %%\n", recall_full * 100.f / dataset.queries_count());
 
-    // Perform joins
-    std::vector<default_key_t> man_to_woman(dataset.vectors_count());
-    std::vector<default_key_t> woman_to_man(dataset.vectors_count());
-    std::size_t join_attempts = 0;
-    {
+    if (!bench_join) {
+        // Perform joins using maps to support non-contiguous IDs
+        std::unordered_map<default_key_t, default_key_t> man_to_woman;
+        std::unordered_map<default_key_t, default_key_t> woman_to_man;
+        std::size_t join_attempts = 0;
+
         index_at& men = index;
         index_at women = index.copy();
-        std::fill(man_to_woman.begin(), man_to_woman.end(), missing_key);
-        std::fill(woman_to_man.begin(), woman_to_man.end(), missing_key);
-        {
-            executor_default_t executor(index.limits().threads());
-            running_stats_printer_t printer{1, "Join"};
-            join_result_t result = join(                          //
-                men, women, index_join_config_t{executor.size()}, //
-                man_to_woman.data(), woman_to_man.data(),         //
-                executor, [&](std::size_t progress, std::size_t total) {
-                    if (progress % 1000 == 0)
-                        printer.print(progress, total);
-                    return true;
-                });
-            // Refresh once again to show 100% completion
-            printer.print();
-            join_attempts = result.visited_members;
-        }
+
+        executor_default_t executor(index.limits().threads());
+        running_stats_printer_t printer{1, "Join"};
+        join_result_t result = join(                          //
+            men, women, index_join_config_t{executor.size()}, //
+            man_to_woman, woman_to_man,                       //
+            executor, [&](std::size_t progress, std::size_t total) {
+                if (progress % 1000 == 0)
+                    printer.print(progress, total);
+                return true;
+            });
+        // Refresh once again to show 100% completion
+        printer.print();
+        join_attempts = result.visited_members;
+
+        // Evaluate join quality
+        std::size_t recall_join = 0;
+        for (auto const& [man, woman] : man_to_woman)
+            recall_join += (man == woman);
+        std::size_t unmatched_count = dataset.vectors_count() - man_to_woman.size();
+        std::printf("Recall Joins %.2f %%\n", recall_join * 100.f / index.size());
+        std::printf("Unmatched %.2f %% (%zu items)\n", unmatched_count * 100.f / index.size(), unmatched_count);
+        std::printf("Proposals %.2f / man (%zu total)\n", join_attempts * 1.f / index.size(), join_attempts);
     }
-    // Evaluate join quality
-    std::size_t recall_join = 0, unmatched_count = 0;
-    for (std::size_t i = 0; i != index.size(); ++i) {
-        recall_join += man_to_woman[i] == static_cast<default_key_t>(i);
-        unmatched_count += man_to_woman[i] == missing_key;
-    }
-    std::printf("Recall Joins %.2f %%\n", recall_join * 100.f / index.size());
-    std::printf("Unmatched %.2f %% (%zu items)\n", unmatched_count * 100.f / index.size(), unmatched_count);
-    std::printf("Proposals %.2f / man (%zu total)\n", join_attempts * 1.f / index.size(), join_attempts);
 
     std::printf("------------\n");
     std::printf("\n");
@@ -473,7 +480,7 @@ void handler(int sig) {
             name = "<unknown>";
         }
         DWORD bytes_written;
-        WriteFile(STDERR_FILENO, name, std::strlen(name), &bytes_written, NULL);
+        WriteFile(STDERR_FILENO, name, static_cast<DWORD>(std::strlen(name)), &bytes_written, NULL);
         WriteFile(STDERR_FILENO, "\n", 1, &bytes_written, NULL);
     }
     free(symbol);
@@ -508,49 +515,24 @@ struct args_t {
     bool help = false;
 
     bool big = false;
+    bool join = false;
+    bool view = false;
 
-    bool quantize_bf16 = false;
-    bool quantize_f16 = false;
-    bool quantize_i8 = false;
-    bool quantize_b1 = false;
-
-    bool metric_ip = false;
-    bool metric_l2 = false;
-    bool metric_cos = false;
-    bool metric_haversine = false;
-    bool metric_divergence = false;
-    bool metric_hamming = false;
-    bool metric_tanimoto = false;
-    bool metric_sorensen = false;
+    std::string dtype_str = "f32";
+    std::string metric_str = "ip";
 
     metric_kind_t metric() const noexcept {
-        if (metric_l2)
-            return metric_kind_t::l2sq_k;
-        if (metric_cos)
-            return metric_kind_t::cos_k;
-        if (metric_haversine)
-            return metric_kind_t::haversine_k;
-        if (metric_divergence)
-            return metric_kind_t::divergence_k;
-        if (metric_hamming)
-            return metric_kind_t::hamming_k;
-        if (metric_tanimoto)
-            return metric_kind_t::tanimoto_k;
-        if (metric_sorensen)
-            return metric_kind_t::sorensen_k;
-        return metric_kind_t::ip_k;
+        auto parsed = metric_from_name(metric_str.c_str(), metric_str.size());
+        if (!parsed)
+            return metric_kind_t::ip_k;
+        return parsed.result;
     }
 
     scalar_kind_t quantization() const noexcept {
-        if (quantize_bf16)
-            return scalar_kind_t::bf16_k;
-        if (quantize_f16)
-            return scalar_kind_t::f16_k;
-        if (quantize_i8)
-            return scalar_kind_t::i8_k;
-        if (quantize_b1)
-            return scalar_kind_t::b1x8_k;
-        return scalar_kind_t::f32_k;
+        auto parsed = scalar_kind_from_name(dtype_str.c_str(), dtype_str.size());
+        if (!parsed)
+            return scalar_kind_t::f32_k;
+        return parsed.result;
     }
 };
 
@@ -569,14 +551,16 @@ void run_punned(dataset_at& dataset, args_t const& args, index_dense_config_t co
     std::printf("-- Hardware acceleration: %s\n", index.metric().isa_name());
     std::printf("Will benchmark in-memory\n");
 
-    single_shot(dataset, index, true);
+    single_shot(dataset, index, true, args.join);
     index.save(args.path_output.c_str());
 
+    if (!args.view)
+        return;
     std::printf("Will benchmark an on-disk view\n");
 
     index_at index_view = index.fork();
     index_view.view(args.path_output.c_str());
-    single_shot(dataset, index_view, false);
+    single_shot(dataset, index_view, false, args.join);
 }
 
 template <typename index_at, typename dataset_at> //
@@ -586,14 +570,16 @@ void run_typed(dataset_at& dataset, args_t const& args, index_config_t config, i
     index.reserve(limits);
     std::printf("Will benchmark in-memory\n");
 
-    single_shot(dataset, index, true);
+    single_shot(dataset, index, true, args.join);
     index.save(args.path_output.c_str());
 
+    if (!args.view)
+        return;
     std::printf("Will benchmark an on-disk view\n");
 
     index_at index_view = index.fork();
     index_view.view(args.path_output.c_str());
-    single_shot(dataset, index_view, false);
+    single_shot(dataset, index_view, false, args.join);
 }
 
 template <typename dataset_scalar_at> void bench_with_args(args_t const& args) {
@@ -636,9 +622,9 @@ int main(int argc, char** argv) {
     auto args = args_t{};
     auto cli = ( //
         (option("--vectors") & value("path", args.path_vectors))
-            .doc(".[fhbd]bin, .i8bin, .f32bin file path to construct the index"),
+            .doc(".[fhbd]bin, .i8bin, .u8bin, .f32bin file path to construct the index"),
         (option("--queries") & value("path", args.path_queries))
-            .doc(".[fhbd]bin, .i8bin, .f32bin file path to query the index"),
+            .doc(".[fhbd]bin, .i8bin, .u8bin, .f32bin file path to query the index"),
         (option("--neighbors") & value("path", args.path_neighbors)).doc(".ibin, .i32bin file path with ground truth"),
         (option("--ids") & value("path", args.path_ids)).doc(".i32bin file path with vector IDs (optional)"),
         (option("-o", "--output") & value("path", args.path_output)).doc(".usearch output file path"),
@@ -649,20 +635,13 @@ int main(int argc, char** argv) {
         (option("--expansion-search") & value("integer", args.expansion_search)).doc("Affects search depth"),
         (option("--rows-skip") & value("integer", args.vectors_to_skip)).doc("Number of vectors to skip"),
         (option("--rows-take") & value("integer", args.vectors_to_take)).doc("Number of vectors to take"),
-        ( //
-            option("-bf16", "--bf16quant").set(args.quantize_bf16).doc("Enable `bf16_t` quantization") |
-            option("-f16", "--f16quant").set(args.quantize_f16).doc("Enable `f16_t` quantization") |
-            option("-i8", "--i8quant").set(args.quantize_i8).doc("Enable `i8_t` quantization") |
-            option("-b1", "--b1quant").set(args.quantize_b1).doc("Enable `b1x8_t` quantization")),
-        ( //
-            option("--ip").set(args.metric_ip).doc("Choose Inner Product metric") |
-            option("--l2sq").set(args.metric_l2).doc("Choose L2 Euclidean metric") |
-            option("--cos").set(args.metric_cos).doc("Choose Angular metric") |
-            option("--hamming").set(args.metric_hamming).doc("Choose Hamming metric") |
-            option("--tanimoto").set(args.metric_tanimoto).doc("Choose Tanimoto metric") |
-            option("--sorensen").set(args.metric_sorensen).doc("Choose Sorensen metric") |
-            option("--haversine").set(args.metric_haversine).doc("Choose Haversine metric")),
-        option("-h", "--help").set(args.help).doc("Print this help information on this tool and exit"));
+        (option("--dtype") & value("type", args.dtype_str))
+            .doc("Quantization type: f64, f32, bf16, f16, e5m2, e4m3, e3m2, e2m3, i8, u8, b1"),
+        (option("--metric") & value("name", args.metric_str))
+            .doc("Distance metric: ip, l2sq, cos, hamming, tanimoto, sorensen, haversine"),
+        option("-h", "--help").set(args.help).doc("Print this help information on this tool and exit"),
+        option("--join").set(args.join).doc("Also benchmark joins"),
+        option("--view").set(args.view).doc("Also benchmark on-disk view"));
 
     if (!parse(argc, argv, cli)) {
         std::cerr << make_man_page(cli, argv[0]);
@@ -678,10 +657,12 @@ int main(int argc, char** argv) {
     // to better estimate statistics between tasks batches, without having to recreate
     // the threads.
     omp_set_dynamic(true);
-    omp_set_num_threads(args.threads);
+    omp_set_num_threads(static_cast<int>(args.threads));
     std::printf("- OpenMP threads: %d\n", omp_get_max_threads());
 #endif
 
+    std::printf("- Hardware acceleration compiled: %s\n", hardware_acceleration_compiled());
+    std::printf("- Hardware acceleration available: %s\n", hardware_acceleration_available());
     std::printf("- Dataset: \n");
     std::printf("-- Base vectors path: %s\n", args.path_vectors.c_str());
     std::printf("-- Query vectors path: %s\n", args.path_queries.c_str());
@@ -693,18 +674,18 @@ int main(int argc, char** argv) {
         return stack.find(needle, stack.size() - needle.size()) != std::string_view::npos;
     };
 
-    if (ends_with(args.path_vectors, ".fbin"))
-        bench_with_args<f32_t>(args);
-    else if (ends_with(args.path_vectors, ".dbin"))
+    if (ends_with(args.path_vectors, ".dbin"))
         bench_with_args<f64_t>(args);
+    else if (ends_with(args.path_vectors, ".fbin") || ends_with(args.path_vectors, ".f32bin"))
+        bench_with_args<f32_t>(args);
     else if (ends_with(args.path_vectors, ".hbin"))
         bench_with_args<f16_t>(args);
-    else if (ends_with(args.path_vectors, ".bbin"))
-        bench_with_args<b1x8_t>(args);
     else if (ends_with(args.path_vectors, ".i8bin"))
         bench_with_args<i8_t>(args);
-    else if (ends_with(args.path_vectors, ".f32bin"))
-        bench_with_args<f32_t>(args);
+    else if (ends_with(args.path_vectors, ".u8bin"))
+        bench_with_args<u8_t>(args);
+    else if (ends_with(args.path_vectors, ".bbin"))
+        bench_with_args<b1x8_t>(args);
     else
         throw std::runtime_error("Unknown input file path");
 

@@ -4,25 +4,24 @@
     "description": "Smaller & Faster Single-File Vector Search Engine from Unum",
     "author": "Ash Vardanian (https://ashvardanian.com/)",
     "license": "Apache 2.0",
-    "homepage": "https://unum-cloud.github.io/usearch/",
+    "homepage": "https://unum-cloud.github.io/USearch/",
     "repository": {
         "type": "git",
-        "url": "https://github.com/unum-cloud/usearch.git"
+        "url": "https://github.com/unum-cloud/USearch.git"
     },
     "bugs": {
-        "url": "https://github.com/unum-cloud/usearch/issues",
+        "url": "https://github.com/unum-cloud/USearch/issues",
         "email": "info@unum.cloud"
     },
     "engines": {
-        "node": "~10 >=10.20 || >=12.17"
+        "node": ">=20"
     },
     "files": [
         "binding.gyp",
         "c",
         "cpp",
         "cmake",
-        "fp16",
-        "simsimd",
+        "numkong",
         "include",
         "javascript",
         "prebuilds"

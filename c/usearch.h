@@ -53,12 +53,17 @@ USEARCH_EXPORT typedef enum usearch_metric_kind_t {
 
 USEARCH_EXPORT typedef enum usearch_scalar_kind_t {
     usearch_scalar_unknown_k = 0,
-    usearch_scalar_f32_k = 1,
     usearch_scalar_f64_k = 2,
-    usearch_scalar_f16_k = 3,
-    usearch_scalar_i8_k = 4,
-    usearch_scalar_b1_k = 5,
+    usearch_scalar_f32_k = 1,
     usearch_scalar_bf16_k = 6,
+    usearch_scalar_f16_k = 3,
+    usearch_scalar_e5m2_k = 7,
+    usearch_scalar_e4m3_k = 8,
+    usearch_scalar_e3m2_k = 11,
+    usearch_scalar_e2m3_k = 10,
+    usearch_scalar_i8_k = 4,
+    usearch_scalar_u8_k = 9,
+    usearch_scalar_b1_k = 5,
 } usearch_scalar_kind_t;
 
 USEARCH_EXPORT typedef struct usearch_init_options_t {
@@ -109,8 +114,6 @@ USEARCH_EXPORT typedef struct usearch_init_options_t {
     bool multi;
 } usearch_init_options_t;
 
-extern int goFilteredSearchCallback(usearch_key_t, void*);
-
 USEARCH_EXPORT typedef int (*usearch_filtered_search_callback_t)(usearch_key_t, void*);
 
 /**
@@ -118,6 +121,18 @@ USEARCH_EXPORT typedef int (*usearch_filtered_search_callback_t)(usearch_key_t, 
  *  @return The version of the library.
  */
 USEARCH_EXPORT char const* usearch_version(void);
+
+/**
+ *  @brief Retrieves a list of hardware capabilities in this precompiled binary.
+ *  @return A comma-separated string with names of CPU features.
+ */
+USEARCH_EXPORT char const* usearch_hardware_acceleration_compiled(void);
+
+/**
+ *  @brief Retrieves a list of hardware capabilities supported by the current machine.
+ *  @return A comma-separated string with names of CPU features.
+ */
+USEARCH_EXPORT char const* usearch_hardware_acceleration_available(void);
 
 /**
  *  @brief Initializes a new instance of the index.
@@ -395,7 +410,7 @@ USEARCH_EXPORT size_t usearch_search(                                         //
 USEARCH_EXPORT size_t usearch_filtered_search(                                //
     usearch_index_t index,                                                    //
     void const* query_vector, usearch_scalar_kind_t query_kind, size_t count, //
-    usearch_filtered_search_callback_t filter, void* filter_state, //
+    usearch_filtered_search_callback_t filter, void* filter_state,            //
     usearch_key_t* keys, usearch_distance_t* distances, usearch_error_t* error);
 
 /**
@@ -483,6 +498,8 @@ USEARCH_EXPORT void usearch_exact_search(                            //
  *  @param[out] error Pointer to a string where the error message will be stored, if an error occurs.
  */
 USEARCH_EXPORT void usearch_clear(usearch_index_t index, usearch_error_t* error);
+
+extern int goFilteredSearchCallback(usearch_key_t, void*);
 
 #ifdef __cplusplus
 }

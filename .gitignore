@@ -26,41 +26,40 @@ cmake_install.cmake
 gmon.out
 perf.data
 
-# Python wrappers
+# Python SDK
 __pycache__
 *.egg-info
 dist/
 wheelhouse/
-
-# Python Environments
 venv/
+uv.lock
 
-# JS wrappers
+# JS SDK
 node_modules/
 javascript/dist/
 prebuilds/
-
+package-lock.json
 
 # Wasm
-
 wasi-sdk-*
 
-# Rust builds
+# Rust SDK
 Cargo.lock
 target/
 
-# Java bindings
+# Java SDK
 .gradle
 *.class
 
-# ObjC and Swift
+# ObjC and Swift SDKs
 .build
 .swiftpm
+Package.resolved
 
-# Golang builds
+# Golang SDK
 golang/usearch.h
 
-# C# builds
+# C# SDK
 csharp/**/[Bb]in/
 csharp/**/[Oo]bj/
 csharp/lib
@@ -75,11 +74,11 @@ csharp/packages
 *.o
 *.obj
 
-# Precompiled Headers
+# Precompiled headers
 *.gch
 *.pch
 
-# Compiled Dynamic libraries
+# Compiled dynamic libraries
 *.so
 *.dylib
 *.dll

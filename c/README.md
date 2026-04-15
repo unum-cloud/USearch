@@ -3,7 +3,7 @@
 ## Installation
 
 USearch vector-search engine can be integrated into your project using CMake.
-Alternatively, you can download one of the precompiled binaries from the [releases page](https://github.com/unum-cloud/usearch/releases).
+Alternatively, you can download one of the precompiled binaries from the [releases page](https://github.com/unum-cloud/USearch/releases).
 
 ## Quickstart
 
@@ -89,7 +89,7 @@ usearch_metadata_buffer(buffer, bytes, &opts, &error);
 
 ## Metrics
 
-USearch comes pre-packaged with SimSIMD, bringing over 100 SIMD-accelerated distance kernels for x86 and ARM architectures.
+USearch comes pre-packaged with NumKong, bringing over 100 SIMD-accelerated distance kernels for x86 and ARM architectures.
 That includes:
 
 - `usearch_metric_cos_k` - Cosine Similarity metric, defined as `Cos = 1 - sum(a[i] * b[i]) / (sqrt(sum(a[i]^2) * sqrt(sum(b[i]^2)))`.
@@ -107,7 +107,7 @@ That includes:
 You can also define your own metrics by implementing the `usearch_metric_t` interface:
 
 ```c
-simsimd_distance_t callback(void const* a, void const* b, void* state) {
+usearch_distance_t callback(void const* a, void const* b, void* state) {
     // Your custom metric implementation here
 }
 
@@ -183,15 +183,15 @@ Alternatively, you can benefit from faster thread-pools and priority queues for 
 size_t threads = 0;
 size_t top_k = 10;
 size_t dataset_count = 1000, queries_count = 10;
-simsimd_f16_t dataset[dataset_count][dimensions];
-simsimd_f16_t queries[queries_count][dimensions];
+nk_f16_t dataset[dataset_count][dimensions];
+nk_f16_t queries[queries_count][dimensions];
 
 usearch_key_t resulting_keys[queries_count][top_k];
 usearch_distance_t resulting_distances[queries_count][top_k];
 
 usearch_exact_search(
-    &dataset[0][0], dataset_count, dimensions * sizeof(simsimd_f16_t),
-    &queries[0][0], queries_count, dimensions * sizeof(simsimd_f16_t),
+    &dataset[0][0], dataset_count, dimensions * sizeof(nk_f16_t),
+    &queries[0][0], queries_count, dimensions * sizeof(nk_f16_t),
     usearch_scalar_f16_k, top_k, threads,
     &resulting_keys[0][0], sizeof(usearch_key_t) * top_k,
     &resulting_distances[0][0], sizeof(usearch_distance_t) * top_k,

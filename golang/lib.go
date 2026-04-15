@@ -119,18 +119,29 @@ func (m Metric) CValue() C.usearch_metric_kind_t {
 // Different quantization types offer different trade-offs between memory usage and precision.
 type Quantization uint8
 
-// Different quantization kinds supported by the USearch library.
+// Different quantization kinds supported by the USearch library,
+// ordered by descending dynamic range.
 const (
+	// F64 uses 64-bit double precision floating point
+	F64 Quantization = iota
 	// F32 uses 32-bit floating point (standard precision)
-	F32 Quantization = iota
+	F32
 	// BF16 uses brain floating-point format (16-bit)
 	BF16
 	// F16 uses half-precision floating point (16-bit)
 	F16
-	// F64 uses 64-bit double precision floating point
-	F64
+	// E5M2 uses 8-bit floating point (1 sign + 5 exponent + 2 mantissa)
+	E5M2
+	// E4M3 uses 8-bit floating point (1 sign + 4 exponent + 3 mantissa)
+	E4M3
+	// E3M2 uses 6-bit floating point (1 sign + 3 exponent + 2 mantissa)
+	E3M2
+	// E2M3 uses 6-bit floating point (1 sign + 2 exponent + 3 mantissa)
+	E2M3
 	// I8 uses 8-bit signed integers (quantized)
 	I8
+	// U8 uses 8-bit unsigned integers
+	U8
 	// B1 uses binary representation (1-bit per dimension)
 	B1
 )
@@ -138,16 +149,26 @@ const (
 // String returns the string representation of the Quantization.
 func (q Quantization) String() string {
 	switch q {
+	case F64:
+		return "F64"
+	case F32:
+		return "F32"
 	case BF16:
 		return "BF16"
 	case F16:
 		return "F16"
-	case F32:
-		return "F32"
-	case F64:
-		return "F64"
+	case E5M2:
+		return "E5M2"
+	case E4M3:
+		return "E4M3"
+	case E3M2:
+		return "E3M2"
+	case E2M3:
+		return "E2M3"
 	case I8:
 		return "I8"
+	case U8:
+		return "U8"
 	case B1:
 		return "B1"
 	default:
@@ -157,18 +178,28 @@ func (q Quantization) String() string {
 
 func (q Quantization) CValue() C.usearch_scalar_kind_t {
 	switch q {
-	case F16:
-		return C.usearch_scalar_f16_k
-	case F32:
-		return C.usearch_scalar_f32_k
 	case F64:
 		return C.usearch_scalar_f64_k
-	case I8:
-		return C.usearch_scalar_i8_k
-	case B1:
-		return C.usearch_scalar_b1_k
+	case F32:
+		return C.usearch_scalar_f32_k
 	case BF16:
 		return C.usearch_scalar_bf16_k
+	case F16:
+		return C.usearch_scalar_f16_k
+	case E5M2:
+		return C.usearch_scalar_e5m2_k
+	case E4M3:
+		return C.usearch_scalar_e4m3_k
+	case E3M2:
+		return C.usearch_scalar_e3m2_k
+	case E2M3:
+		return C.usearch_scalar_e2m3_k
+	case I8:
+		return C.usearch_scalar_i8_k
+	case U8:
+		return C.usearch_scalar_u8_k
+	case B1:
+		return C.usearch_scalar_b1_k
 	default:
 		return C.usearch_scalar_unknown_k
 	}
@@ -224,6 +255,21 @@ type Index struct {
 	config IndexConfig
 }
 
+// Version returns the USearch library version string.
+func Version() string {
+	return C.GoString(C.usearch_version())
+}
+
+// HardwareAccelerationCompiled returns a comma-separated list of ISAs compiled into the binary.
+func HardwareAccelerationCompiled() string {
+	return C.GoString(C.usearch_hardware_acceleration_compiled())
+}
+
+// HardwareAccelerationAvailable returns a comma-separated list of ISAs available at runtime.
+func HardwareAccelerationAvailable() string {
+	return C.GoString(C.usearch_hardware_acceleration_available())
+}
+
 // NewIndex creates a new approximate nearest neighbor index with the specified configuration.
 //
 // The index must be destroyed with Destroy() when no longer needed.
@@ -269,11 +315,6 @@ func NewIndex(conf IndexConfig) (index *Index, err error) {
 
 	index.handle = ptr
 	return index, nil
-}
-
-// Version returns the USearch library version string.
-func Version() string {
-	return C.GoString(C.usearch_version())
 }
 
 // GetHandle returns the C index handel.
@@ -1013,6 +1054,123 @@ func (index *Index) FilteredSearchI8(query []int8, limit uint, handler *Filtered
 	keys = keys[:resultCount]
 	distances = distances[:resultCount]
 	return keys, distances, nil
+}
+
+// AddU8 adds a uint8 vector to the index.
+// The vector must have exactly Dimensions() elements.
+//
+// This is a convenience method for indexes using U8 quantization.
+func (index *Index) AddU8(key Key, vec []uint8) error {
+	if index.handle == nil {
+		panic("index is uninitialized")
+	}
+	if len(vec) == 0 {
+		return errors.New("vector cannot be empty")
+	}
+	if uint(len(vec)) != index.config.Dimensions {
+		return fmt.Errorf("vector dimension mismatch: got %d, expected %d", len(vec), index.config.Dimensions)
+	}
+	var errorMessage *C.char
+	C.usearch_add(index.handle, (C.usearch_key_t)(key), unsafe.Pointer(&vec[0]), C.usearch_scalar_u8_k, (*C.usearch_error_t)(&errorMessage))
+	runtime.KeepAlive(vec)
+	if errorMessage != nil {
+		return errors.New(C.GoString(errorMessage))
+	}
+	return nil
+}
+
+// SearchU8 searches for nearest neighbors using a uint8 query vector.
+// The query must have exactly Dimensions() elements.
+//
+// This is a convenience method for indexes using U8 quantization.
+func (index *Index) SearchU8(query []uint8, limit uint) (keys []Key, distances []float32, err error) {
+	if index.handle == nil {
+		panic("index is uninitialized")
+	}
+	if len(query) == 0 {
+		return nil, nil, errors.New("query vector cannot be empty")
+	}
+	if uint(len(query)) != index.config.Dimensions {
+		return nil, nil, fmt.Errorf("query dimension mismatch: got %d, expected %d", len(query), index.config.Dimensions)
+	}
+	if limit == 0 {
+		return []Key{}, []float32{}, nil
+	}
+	keys = make([]Key, limit)
+	distances = make([]float32, limit)
+	var errorMessage *C.char
+	resultCount := uint(C.usearch_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_u8_k, (C.size_t)(limit), (*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
+	runtime.KeepAlive(query)
+	runtime.KeepAlive(keys)
+	runtime.KeepAlive(distances)
+	if errorMessage != nil {
+		return nil, nil, errors.New(C.GoString(errorMessage))
+	}
+	keys = keys[:resultCount]
+	distances = distances[:resultCount]
+	return keys, distances, nil
+}
+
+// FilteredSearchU8 searches for nearest neighbors using a uint8 query vector with filtering.
+func (index *Index) FilteredSearchU8(query []uint8, limit uint, handler *FilteredSearchHandler) (keys []Key, distances []float32, err error) {
+	if index.handle == nil {
+		panic("index is uninitialized")
+	}
+
+	if len(query) == 0 {
+		return nil, nil, errors.New("query vector cannot be empty")
+	}
+	if uint(len(query)) != index.config.Dimensions {
+		return nil, nil, fmt.Errorf("query dimension mismatch: got %d, expected %d", len(query), index.config.Dimensions)
+	}
+	if handler == nil {
+		return nil, nil, errors.New("filtered search handler cannot be nil")
+	}
+	if limit == 0 {
+		return []Key{}, []float32{}, nil
+	}
+
+	keys = make([]Key, limit)
+	distances = make([]float32, limit)
+	var errorMessage *C.char
+	resultCount := uint(C.usearch_filtered_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_u8_k, (C.size_t)(limit),
+		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler),
+		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
+	runtime.KeepAlive(query)
+	runtime.KeepAlive(keys)
+	runtime.KeepAlive(distances)
+	runtime.KeepAlive(handler)
+	if errorMessage != nil {
+		return nil, nil, errors.New(C.GoString(errorMessage))
+	}
+
+	keys = keys[:resultCount]
+	distances = distances[:resultCount]
+	return keys, distances, nil
+}
+
+// GetU8 retrieves a uint8 vector by key from the index.
+// Returns nil if the key is not found.
+func (index *Index) GetU8(key Key, maxCount uint) (vectors []uint8, err error) {
+	if index.handle == nil {
+		panic("index is uninitialized")
+	}
+
+	if maxCount == 0 {
+		return nil, nil
+	}
+
+	vectors = make([]uint8, index.config.Dimensions*maxCount)
+	var errorMessage *C.char
+	found := uint(C.usearch_get(index.handle, (C.usearch_key_t)(key), (C.size_t)(maxCount), unsafe.Pointer(&vectors[0]), C.usearch_scalar_u8_k, (*C.usearch_error_t)(&errorMessage)))
+	runtime.KeepAlive(vectors)
+	if errorMessage != nil {
+		return nil, errors.New(C.GoString(errorMessage))
+	}
+	if found == 0 {
+		return nil, nil
+	}
+	return vectors, nil
 }
 
 // DistanceI8 computes the distance between two int8 vectors.

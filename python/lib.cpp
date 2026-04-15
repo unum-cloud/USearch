@@ -215,7 +215,8 @@ template <typename index_at>
 static void add_many_to_index(                            //
     index_at& index, py::buffer keys, py::buffer vectors, //
     bool force_copy, std::size_t threads,                 //
-    progress_func_t const& progress) {
+    progress_func_t const& progress,                      //
+    scalar_kind_t scalar_kind = scalar_kind_t::unknown_k) {
 
     py::buffer_info keys_info = keys.request();
     py::buffer_info vectors_info = vectors.request();
@@ -247,12 +248,21 @@ static void add_many_to_index(                            //
         throw std::invalid_argument("Out of memory!");
 
     // clang-format off
-    switch (numpy_string_to_kind(vectors_info.format)) {
-    case scalar_kind_t::b1x8_k: add_typed_to_index<b1x8_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
-    case scalar_kind_t::i8_k: add_typed_to_index<i8_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
-    case scalar_kind_t::f16_k: add_typed_to_index<f16_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
-    case scalar_kind_t::f32_k: add_typed_to_index<f32_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    scalar_kind_t kind = (scalar_kind != scalar_kind_t::unknown_k)
+        ? scalar_kind
+        : numpy_string_to_kind(vectors_info.format);
+    switch (kind) {
     case scalar_kind_t::f64_k: add_typed_to_index<f64_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    case scalar_kind_t::f32_k: add_typed_to_index<f32_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    case scalar_kind_t::bf16_k: add_typed_to_index<bf16_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    case scalar_kind_t::f16_k: add_typed_to_index<f16_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    case scalar_kind_t::e5m2_k: add_typed_to_index<e5m2_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    case scalar_kind_t::e4m3_k: add_typed_to_index<e4m3_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    case scalar_kind_t::e3m2_k: add_typed_to_index<e3m2_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    case scalar_kind_t::e2m3_k: add_typed_to_index<e2m3_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    case scalar_kind_t::i8_k: add_typed_to_index<i8_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    case scalar_kind_t::u8_k: add_typed_to_index<u8_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
+    case scalar_kind_t::b1x8_k: add_typed_to_index<b1x8_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
     default: throw std::invalid_argument("Incompatible scalars in the vectors matrix: " + vectors_info.format);
     }
     // clang-format on
@@ -415,7 +425,7 @@ static void search_typed(                                       //
 template <typename index_at>
 static py::tuple search_many_in_index( //
     index_at& index, py::buffer vectors, std::size_t wanted, bool exact, std::size_t threads,
-    progress_func_t const& progress) {
+    progress_func_t const& progress, scalar_kind_t scalar_kind = scalar_kind_t::unknown_k) {
 
     if (wanted == 0)
         return py::tuple(5);
@@ -441,12 +451,21 @@ static py::tuple search_many_in_index( //
     std::atomic<std::size_t> stats_computed_distances(0);
 
     // clang-format off
-    switch (numpy_string_to_kind(vectors_info.format)) {
-    case scalar_kind_t::b1x8_k: search_typed<b1x8_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
-    case scalar_kind_t::i8_k: search_typed<i8_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
-    case scalar_kind_t::f16_k: search_typed<f16_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
-    case scalar_kind_t::f32_k: search_typed<f32_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    scalar_kind_t kind = (scalar_kind != scalar_kind_t::unknown_k)
+        ? scalar_kind
+        : numpy_string_to_kind(vectors_info.format);
+    switch (kind) {
     case scalar_kind_t::f64_k: search_typed<f64_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::f32_k: search_typed<f32_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::bf16_k: search_typed<bf16_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::f16_k: search_typed<f16_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::e5m2_k: search_typed<e5m2_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::e4m3_k: search_typed<e4m3_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::e3m2_k: search_typed<e3m2_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::e2m3_k: search_typed<e2m3_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::i8_k: search_typed<i8_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::u8_k: search_typed<u8_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
+    case scalar_kind_t::b1x8_k: search_typed<b1x8_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
     default: throw std::invalid_argument("Incompatible scalars in the query matrix: " + vectors_info.format);
     }
     // clang-format on
@@ -470,7 +489,8 @@ static py::tuple search_many_brute_force(       //
     metric_kind_t metric_kind,                  //
     metric_punned_signature_t metric_signature, //
     std::uintptr_t metric_uintptr,              //
-    progress_func_t const& progress_func) {
+    progress_func_t const& progress_func,       //
+    scalar_kind_t scalar_kind = scalar_kind_t::unknown_k) {
 
     if (wanted == 0)
         return py::tuple(5);
@@ -496,8 +516,12 @@ static py::tuple search_many_brute_force(       //
     if (wanted > dataset_count)
         throw std::invalid_argument("You can't request more matches than in the dataset!");
 
-    scalar_kind_t dataset_kind = numpy_string_to_kind(dataset_info.format);
-    scalar_kind_t queries_kind = numpy_string_to_kind(queries_info.format);
+    scalar_kind_t dataset_kind = (scalar_kind != scalar_kind_t::unknown_k)
+        ? scalar_kind
+        : numpy_string_to_kind(dataset_info.format);
+    scalar_kind_t queries_kind = (scalar_kind != scalar_kind_t::unknown_k)
+        ? scalar_kind
+        : numpy_string_to_kind(queries_info.format);
     if (dataset_kind != queries_kind)
         throw std::invalid_argument("The types of vectors don't match!");
 
@@ -661,7 +685,8 @@ template <typename scalar_at> struct rows_lookup_gt {
 template <typename index_at>
 static py::tuple cluster_vectors(        //
     index_at& index, py::buffer queries, //
-    std::size_t min_count, std::size_t max_count, std::size_t threads, progress_func_t const& progress) {
+    std::size_t min_count, std::size_t max_count, std::size_t threads, progress_func_t const& progress,
+    scalar_kind_t scalar_kind = scalar_kind_t::unknown_k) {
 
     // Clamp threads to hardware limit instead of throwing
     threads = std::min<std::size_t>(threads, std::thread::hardware_concurrency());
@@ -694,12 +719,21 @@ static py::tuple cluster_vectors(        //
     rows_lookup_gt<byte_t const> queries_end = queries_begin + queries_count;
 
     // clang-format off
-    switch (numpy_string_to_kind(queries_info.format)) {
-    case scalar_kind_t::b1x8_k: cluster_result = index.cluster(queries_begin.as<b1x8_t const>(), queries_end.as<b1x8_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
-    case scalar_kind_t::i8_k: cluster_result = index.cluster(queries_begin.as<i8_t const>(), queries_end.as<i8_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
-    case scalar_kind_t::f16_k: cluster_result = index.cluster(queries_begin.as<f16_t const>(), queries_end.as<f16_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
-    case scalar_kind_t::f32_k: cluster_result = index.cluster(queries_begin.as<f32_t const>(), queries_end.as<f32_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    scalar_kind_t kind = (scalar_kind != scalar_kind_t::unknown_k)
+        ? scalar_kind
+        : numpy_string_to_kind(queries_info.format);
+    switch (kind) {
     case scalar_kind_t::f64_k: cluster_result = index.cluster(queries_begin.as<f64_t const>(), queries_end.as<f64_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    case scalar_kind_t::f32_k: cluster_result = index.cluster(queries_begin.as<f32_t const>(), queries_end.as<f32_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    case scalar_kind_t::bf16_k: cluster_result = index.cluster(queries_begin.as<bf16_t const>(), queries_end.as<bf16_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    case scalar_kind_t::f16_k: cluster_result = index.cluster(queries_begin.as<f16_t const>(), queries_end.as<f16_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    case scalar_kind_t::e5m2_k: cluster_result = index.cluster(queries_begin.as<e5m2_t const>(), queries_end.as<e5m2_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    case scalar_kind_t::e4m3_k: cluster_result = index.cluster(queries_begin.as<e4m3_t const>(), queries_end.as<e4m3_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    case scalar_kind_t::e3m2_k: cluster_result = index.cluster(queries_begin.as<e3m2_t const>(), queries_end.as<e3m2_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    case scalar_kind_t::e2m3_k: cluster_result = index.cluster(queries_begin.as<e2m3_t const>(), queries_end.as<e2m3_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    case scalar_kind_t::i8_k: cluster_result = index.cluster(queries_begin.as<i8_t const>(), queries_end.as<i8_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    case scalar_kind_t::u8_k: cluster_result = index.cluster(queries_begin.as<u8_t const>(), queries_end.as<u8_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+    case scalar_kind_t::b1x8_k: cluster_result = index.cluster(queries_begin.as<b1x8_t const>(), queries_end.as<b1x8_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
     default: throw std::invalid_argument("Incompatible scalars in the query matrix: " + queries_info.format);
     }
     // clang-format on
@@ -969,21 +1003,33 @@ static py::object get_typed_vectors_for_keys(index_at const& index, py::buffer k
 }
 
 template <typename index_at> py::object get_many(index_at const& index, py::buffer keys, scalar_kind_t scalar_kind) {
-    if (scalar_kind == scalar_kind_t::f32_k)
-        return get_typed_vectors_for_keys<f32_t>(index, keys);
-    else if (scalar_kind == scalar_kind_t::f64_k)
+    if (scalar_kind == scalar_kind_t::f64_k)
         return get_typed_vectors_for_keys<f64_t>(index, keys);
+    else if (scalar_kind == scalar_kind_t::f32_k)
+        return get_typed_vectors_for_keys<f32_t>(index, keys);
     else if (scalar_kind == scalar_kind_t::f16_k)
         return get_typed_vectors_for_keys<f16_t, std::uint16_t>(index, keys);
     else if (scalar_kind == scalar_kind_t::i8_k)
         return get_typed_vectors_for_keys<i8_t, std::int8_t>(index, keys);
+    else if (scalar_kind == scalar_kind_t::u8_k)
+        return get_typed_vectors_for_keys<u8_t, std::uint8_t>(index, keys);
+    else if (scalar_kind == scalar_kind_t::bf16_k)
+        return get_typed_vectors_for_keys<bf16_t, std::uint16_t>(index, keys);
+    else if (scalar_kind == scalar_kind_t::e5m2_k)
+        return get_typed_vectors_for_keys<e5m2_t, std::uint8_t>(index, keys);
+    else if (scalar_kind == scalar_kind_t::e4m3_k)
+        return get_typed_vectors_for_keys<e4m3_t, std::uint8_t>(index, keys);
+    else if (scalar_kind == scalar_kind_t::e3m2_k)
+        return get_typed_vectors_for_keys<e3m2_t, std::uint8_t>(index, keys);
+    else if (scalar_kind == scalar_kind_t::e2m3_k)
+        return get_typed_vectors_for_keys<e2m3_t, std::uint8_t>(index, keys);
     else if (scalar_kind == scalar_kind_t::b1x8_k)
         return get_typed_vectors_for_keys<b1x8_t, std::uint8_t>(index, keys);
     else
         throw std::invalid_argument("Incompatible scalars in the query matrix!");
 }
 
-PYBIND11_MODULE(compiled, m) {
+PYBIND11_MODULE(compiled, m, py::mod_gil_not_used()) {
     m.doc() = "Smaller & Faster Single-File Vector Search Engine from Unum";
 
     m.attr("DEFAULT_CONNECTIVITY") = py::int_(default_connectivity());
@@ -991,12 +1037,14 @@ PYBIND11_MODULE(compiled, m) {
     m.attr("DEFAULT_EXPANSION_SEARCH") = py::int_(default_expansion_search());
 
     m.attr("USES_OPENMP") = py::int_(USEARCH_USE_OPENMP);
-    m.attr("USES_FP16LIB") = py::int_(USEARCH_USE_FP16LIB);
-    m.attr("USES_SIMSIMD") = py::int_(USEARCH_USE_SIMSIMD);
-#if USEARCH_USE_SIMSIMD
-    m.attr("USES_SIMSIMD_DYNAMIC_DISPATCH") = py::int_(simsimd_uses_dynamic_dispatch());
+    m.attr("USES_NUMKONG") = py::int_(USEARCH_USE_NUMKONG);
+    m.attr("USES_SIMSIMD") = py::int_(USEARCH_USE_NUMKONG); // backwards compatibility
+#if USEARCH_USE_NUMKONG
+    m.attr("USES_NUMKONG_DYNAMIC_DISPATCH") = py::int_(nk_uses_dynamic_dispatch());
+    m.attr("USES_SIMSIMD_DYNAMIC_DISPATCH") = py::int_(nk_uses_dynamic_dispatch()); // backwards compatibility
 #else
-    m.attr("USES_SIMSIMD_DYNAMIC_DISPATCH") = py::int_(0);
+    m.attr("USES_NUMKONG_DYNAMIC_DISPATCH") = py::int_(0);
+    m.attr("USES_SIMSIMD_DYNAMIC_DISPATCH") = py::int_(0); // backwards compatibility
 #endif
 
     m.attr("VERSION_MAJOR") = py::int_(USEARCH_VERSION_MAJOR);
@@ -1027,22 +1075,25 @@ PYBIND11_MODULE(compiled, m) {
 
     py::enum_<scalar_kind_t>(m, "ScalarKind", py::arithmetic())
         .value("Unknown", scalar_kind_t::unknown_k)
+        .value("F64", scalar_kind_t::f64_k)
+        .value("F32", scalar_kind_t::f32_k)
+        .value("BF16", scalar_kind_t::bf16_k)
+        .value("F16", scalar_kind_t::f16_k)
+        .value("E5M2", scalar_kind_t::e5m2_k)
+        .value("E4M3", scalar_kind_t::e4m3_k)
+        .value("E3M2", scalar_kind_t::e3m2_k)
+        .value("E2M3", scalar_kind_t::e2m3_k)
+        .value("I8", scalar_kind_t::i8_k)
+        .value("U8", scalar_kind_t::u8_k)
         .value("B1", scalar_kind_t::b1x8_k)
         .value("U40", scalar_kind_t::u40_k)
         .value("UUID", scalar_kind_t::uuid_k)
-        .value("BF16", scalar_kind_t::bf16_k)
-        .value("F64", scalar_kind_t::f64_k)
-        .value("F32", scalar_kind_t::f32_k)
-        .value("F16", scalar_kind_t::f16_k)
-        .value("F8", scalar_kind_t::f8_k)
         .value("U64", scalar_kind_t::u64_k)
         .value("U32", scalar_kind_t::u32_k)
         .value("U16", scalar_kind_t::u16_k)
-        .value("U8", scalar_kind_t::u8_k)
         .value("I64", scalar_kind_t::i64_k)
         .value("I32", scalar_kind_t::i32_k)
-        .value("I16", scalar_kind_t::i16_k)
-        .value("I8", scalar_kind_t::i8_k);
+        .value("I16", scalar_kind_t::i16_k);
 
     m.def("index_dense_metadata_from_path", [](std::string const& path) -> py::dict {
         index_dense_metadata_result_t meta = index_dense_metadata_from_path(path.c_str());
@@ -1066,7 +1117,8 @@ PYBIND11_MODULE(compiled, m) {
         py::arg("metric_kind") = metric_kind_t::cos_k,                          //
         py::arg("metric_signature") = metric_punned_signature_t::array_array_k, //
         py::arg("metric_pointer") = 0,                                          //
-        py::arg("progress") = nullptr                                           //
+        py::arg("progress") = nullptr,                                          //
+        py::arg("dtype") = scalar_kind_t::unknown_k                             //
     );
 
     m.def(                                                                               //
@@ -1096,6 +1148,9 @@ PYBIND11_MODULE(compiled, m) {
         py::arg("metric_kind") = metric_kind_t::cos_k //
     );
 
+    m.def("hardware_acceleration_compiled", &hardware_acceleration_compiled);
+    m.def("hardware_acceleration_available", &hardware_acceleration_available);
+
     auto i = py::class_<dense_index_py_t, std::shared_ptr<dense_index_py_t>>(m, "Index");
 
     i.def(                                                                      //
@@ -1120,7 +1175,8 @@ PYBIND11_MODULE(compiled, m) {
         py::kw_only(),                                    //
         py::arg("copy") = true,                           //
         py::arg("threads") = 0,                           //
-        py::arg("progress") = nullptr                     //
+        py::arg("progress") = nullptr,                    //
+        py::arg("dtype") = scalar_kind_t::unknown_k       //
     );
 
     i.def(                                                      //
@@ -1129,7 +1185,8 @@ PYBIND11_MODULE(compiled, m) {
         py::arg("count") = 10,                                  //
         py::arg("exact") = false,                               //
         py::arg("threads") = 0,                                 //
-        py::arg("progress") = nullptr                           //
+        py::arg("progress") = nullptr,                          //
+        py::arg("dtype") = scalar_kind_t::unknown_k             //
     );
 
     i.def(                                                     //
@@ -1138,7 +1195,8 @@ PYBIND11_MODULE(compiled, m) {
         py::arg("min_count") = 0,                              //
         py::arg("max_count") = 0,                              //
         py::arg("threads") = 0,                                //
-        py::arg("progress") = nullptr                          //
+        py::arg("progress") = nullptr,                         //
+        py::arg("dtype") = scalar_kind_t::unknown_k            //
     );
 
     i.def(                                               //
@@ -1236,7 +1294,8 @@ PYBIND11_MODULE(compiled, m) {
     i.def_property_readonly( //
         "dtype", [](dense_index_py_t const& index) -> scalar_kind_t { return index.scalar_kind(); });
 
-    i.def_property_readonly("serialized_length", &dense_index_py_t::serialized_length);
+    i.def_property_readonly("serialized_length",
+                            [](dense_index_py_t const& self) -> std::size_t { return self.serialized_length({}); });
     i.def_property_readonly("memory_usage", &dense_index_py_t::memory_usage);
 
     i.def_property("expansion_add", &dense_index_py_t::expansion_add, &dense_index_py_t::change_expansion_add);
@@ -1384,6 +1443,7 @@ PYBIND11_MODULE(compiled, m) {
         py::arg("count") = 10,                                    //
         py::arg("exact") = false,                                 //
         py::arg("threads") = 0,                                   //
-        py::arg("progress") = nullptr                             //
+        py::arg("progress") = nullptr,                            //
+        py::arg("dtype") = scalar_kind_t::unknown_k               //
     );
 }
