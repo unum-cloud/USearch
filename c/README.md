@@ -19,7 +19,7 @@ int main() {
     usearch_error_t error = NULL;
     usearch_init_options_t opts = {
         .metric_kind = usearch_metric_cos_k,
-        .scalar_kind = usearch_scalar_f16_k,
+        .scalar_kind = usearch_scalar_f16_k, // or f32_k, bf16_k, e5m2_k, e4m3_k, e3m2_k, e2m3_k, i8_k, u8_k
         .dimensions = dimensions,
         .expansion_add = 0, // for defaults
         .expansion_search = 0 // for defaults

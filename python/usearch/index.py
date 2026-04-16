@@ -718,7 +718,7 @@ class Index:
         :type vectors: VectorOrVectorsLike
         :param copy: Should the index store a copy of vectors
         :type copy: bool, defaults to True
-        :param threads: Optimal number of cores to use
+        :param threads: Optimal number of cores to use, 0 means all available cores
         :type threads: int, defaults to 0
         :param log: Whether to print the progress bar
         :type log: Union[str, bool], defaults to False
@@ -763,7 +763,7 @@ class Index:
         :type count: int, defaults to 10
             When count > index size, only available vectors will be returned.
             For BatchMatches, unused positions contain sentinel values.
-        :param threads: Optimal number of cores to use
+        :param threads: Optimal number of cores to use, 0 means all available cores
         :type threads: int, defaults to 0
         :param exact: Perform exhaustive linear-time exact search
         :type exact: bool, defaults to False

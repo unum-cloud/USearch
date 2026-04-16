@@ -448,6 +448,46 @@ void test_view(size_t const collection_size, size_t const dimensions) {
     printf("Test: View - PASSED\n");
 }
 
+void test_mini_float_quantizations(size_t const collection_size, size_t const dimensions) {
+    printf("Test: Mini-float quantizations... %zu vectors, %zu dimensions\n", collection_size, dimensions);
+    usearch_scalar_kind_t kinds[] = {
+        usearch_scalar_e5m2_k,
+        usearch_scalar_e4m3_k,
+        usearch_scalar_e3m2_k,
+        usearch_scalar_e2m3_k,
+    };
+    float* data = create_vectors(collection_size, dimensions);
+    usearch_key_t* keys = (usearch_key_t*)malloc(collection_size * sizeof(usearch_key_t));
+    float* distances = (float*)malloc(collection_size * sizeof(float));
+    expect(keys && distances, "Failed to allocate memory");
+
+    for (size_t k = 0; k < sizeof(kinds) / sizeof(kinds[0]); ++k) {
+        usearch_error_t error = NULL;
+        usearch_init_options_t opts = create_options(dimensions);
+        opts.quantization = kinds[k];
+        usearch_index_t index = usearch_init(&opts, &error);
+        expect(!error, error);
+        usearch_reserve(index, collection_size, &error);
+        expect(!error, error);
+        for (size_t i = 0; i < collection_size; ++i) {
+            usearch_add(index, (usearch_key_t)i, data + i * dimensions, usearch_scalar_f32_k, &error);
+            expect(!error, error);
+        }
+        expect_eq(usearch_size(index, &error), collection_size, error);
+        for (size_t i = 0; i < collection_size; ++i) {
+            size_t found =
+                usearch_search(index, data + i * dimensions, usearch_scalar_f32_k, 1, keys, distances, &error);
+            expect(!error, error);
+            expect(found >= 1, "Vector not found");
+        }
+        usearch_free(index, &error);
+    }
+    free(data);
+    free(keys);
+    free(distances);
+    printf("Test: Mini-float quantizations - PASSED\n");
+}
+
 int main(int argc, char const* argv[]) {
     install_crash_handlers();
     printf("Running tests...\n");
@@ -464,6 +504,7 @@ int main(int argc, char const* argv[]) {
             test_remove_vector(collection_sizes[index], dimensions[jdx]);
             test_save_load(collection_sizes[index], dimensions[jdx]);
             test_view(collection_sizes[index], dimensions[jdx]);
+            test_mini_float_quantizations(collection_sizes[index], dimensions[jdx]);
         }
     }
 

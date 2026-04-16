@@ -1787,6 +1787,51 @@ mod tests {
     }
 
     #[test]
+    fn quantized_add_search() {
+        // Metrics × quantizations: every scalar kind that accepts f32 input,
+        // tested under each distance metric. Dimensions are kept at 64 —
+        // high enough for SIMD paths to kick in, low enough to stay fast.
+        let metrics = [MetricKind::Cos, MetricKind::L2sq, MetricKind::IP];
+        let quantizations = [
+            ScalarKind::F32,
+            ScalarKind::F64,
+            ScalarKind::F16,
+            ScalarKind::BF16,
+            ScalarKind::I8,
+            ScalarKind::E5M2,
+            ScalarKind::E4M3,
+            ScalarKind::E3M2,
+            ScalarKind::E2M3,
+        ];
+        let dimensions: usize = 64;
+        let first: Vec<f32> = (0..dimensions).map(|i| (i as f32) * 0.1).collect();
+        let second: Vec<f32> = (0..dimensions)
+            .map(|i| ((dimensions - i) as f32) * 0.1)
+            .collect();
+
+        for metric in metrics {
+            for quantization in quantizations {
+                let index = Index::new(&IndexOptions {
+                    dimensions,
+                    metric,
+                    quantization,
+                    ..Default::default()
+                })
+                .unwrap();
+                assert!(index.reserve(10).is_ok());
+                assert!(index.add(1, &first).is_ok());
+                assert!(index.add(2, &second).is_ok());
+                assert_eq!(index.size(), 2, "{metric:?}/{quantization:?}: wrong size");
+                let results = index.search(&first, 2).unwrap();
+                assert_eq!(
+                    results.keys[0], 1,
+                    "self-match failed for {metric:?}/{quantization:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn search_vector() {
         let options = IndexOptions {
             dimensions: 5,

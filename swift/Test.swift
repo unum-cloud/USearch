@@ -201,4 +201,21 @@ class Test: XCTestCase {
             [2, 3]
         )  // works 😎
     }
+
+    func testMiniFloatQuantizations() throws {
+        for quantization in [USearchScalar.e5m2, .e4m3, .e3m2, .e2m3] {
+            let index = try USearchIndex.make(
+                metric: USearchMetric.cos,
+                dimensions: 64,
+                connectivity: 8,
+                quantization: quantization
+            )
+            let vector: [Float32] = (0..<64).map { Float32($0) * 0.1 }
+            try index.reserve(10)
+            try index.add(key: 1, vector: vector)
+
+            let results = try index.search(vector: vector, count: 1)
+            XCTAssertEqual(results.0[0], 1)
+        }
+    }
 }

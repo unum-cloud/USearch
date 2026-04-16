@@ -2,6 +2,7 @@ package usearch
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"runtime"
@@ -724,6 +725,32 @@ func TestQuantizationTypes(t *testing.T) {
 			t.Fatalf("U8 Get returned wrong dimensions: got %d, expected 32", len(retrieved))
 		}
 	})
+
+	for _, qt := range []Quantization{E5M2, E4M3, E3M2, E2M3} {
+		qt := qt
+		t.Run(fmt.Sprintf("%v mini-float operations", qt), func(t *testing.T) {
+			index := createTestIndex(t, 32, qt)
+			defer func() {
+				if err := index.Destroy(); err != nil {
+					t.Errorf("Failed to destroy index: %v", err)
+				}
+			}()
+			if err := index.Reserve(1); err != nil {
+				t.Fatalf("Failed to reserve: %v", err)
+			}
+			vector := generateTestVector(32)
+			if err := index.Add(1, vector); err != nil {
+				t.Fatalf("Add failed: %v", err)
+			}
+			keys, _, err := index.Search(vector, 1)
+			if err != nil {
+				t.Fatalf("Search failed: %v", err)
+			}
+			if len(keys) == 0 || keys[0] != 1 {
+				t.Fatalf("search results incorrect")
+			}
+		})
+	}
 }
 
 func TestUnsafeOperations(t *testing.T) {
@@ -1114,7 +1141,7 @@ func TestVersion(t *testing.T) {
 
 func TestClear(t *testing.T) {
 	index := createTestIndex(t, 32, F32)
-	defer index.Destroy()
+	defer func() { _ = index.Destroy() }()
 
 	if err := index.Reserve(10); err != nil {
 		t.Fatalf("Failed to reserve capacity: %v", err)
@@ -1155,7 +1182,7 @@ func TestClear(t *testing.T) {
 
 func TestCount(t *testing.T) {
 	index := createTestIndex(t, 32, F32)
-	defer index.Destroy()
+	defer func() { _ = index.Destroy() }()
 
 	if err := index.Reserve(10); err != nil {
 		t.Fatalf("Failed to reserve capacity: %v", err)
@@ -1188,7 +1215,7 @@ func TestCount(t *testing.T) {
 
 func TestRename(t *testing.T) {
 	index := createTestIndex(t, 32, F32)
-	defer index.Destroy()
+	defer func() { _ = index.Destroy() }()
 
 	if err := index.Reserve(10); err != nil {
 		t.Fatalf("Failed to reserve capacity: %v", err)

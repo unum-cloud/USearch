@@ -769,7 +769,7 @@ func (index *Index) FilteredSearch(query []float32, limit uint, handler *Filtere
 	distances = make([]float32, limit)
 	var errorMessage *C.char
 	resultCount := uint(C.usearch_filtered_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_f32_k, (C.size_t)(limit),
-		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler),
+		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler), //nolint:govet // handler is kept alive by the caller
 		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
 	runtime.KeepAlive(query)
 	runtime.KeepAlive(keys)
@@ -856,7 +856,7 @@ func (index *Index) FilteredSearchUnsafe(query unsafe.Pointer, limit uint, handl
 	distances = make([]float32, limit)
 	var errorMessage *C.char
 	resultCount := uint(C.usearch_filtered_search(index.handle, query, index.config.Quantization.CValue(), (C.size_t)(limit),
-		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler),
+		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler), //nolint:govet // handler is kept alive by the caller
 		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
 	runtime.KeepAlive(query)
 	runtime.KeepAlive(keys)
@@ -1041,7 +1041,7 @@ func (index *Index) FilteredSearchI8(query []int8, limit uint, handler *Filtered
 	distances = make([]float32, limit)
 	var errorMessage *C.char
 	resultCount := uint(C.usearch_filtered_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_i8_k, (C.size_t)(limit),
-		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler),
+		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler), //nolint:govet // handler is kept alive by the caller
 		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
 	runtime.KeepAlive(query)
 	runtime.KeepAlive(keys)
@@ -1134,7 +1134,7 @@ func (index *Index) FilteredSearchU8(query []uint8, limit uint, handler *Filtere
 	distances = make([]float32, limit)
 	var errorMessage *C.char
 	resultCount := uint(C.usearch_filtered_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_u8_k, (C.size_t)(limit),
-		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler),
+		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler), //nolint:govet // handler is kept alive by the caller
 		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
 	runtime.KeepAlive(query)
 	runtime.KeepAlive(keys)

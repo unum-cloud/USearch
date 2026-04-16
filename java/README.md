@@ -104,7 +104,7 @@ long connectivity = index.connectivity();
 
 ## Multiple Data Types and Quantization
 
-USearch supports hardware-agnostic `f64`, `f32`, and `i8` quantization for memory efficiency and performance optimization.
+USearch supports hardware-agnostic `f64`, `f32`, `bf16`, `f16`, `e5m2`, `e4m3`, `e3m2`, `e2m3`, `i8`, and `b1` quantization for memory efficiency and performance optimization.
 
 ```java
 // Double precision (f64) for highest accuracy

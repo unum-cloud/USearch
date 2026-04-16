@@ -435,6 +435,47 @@ def test_index_keys_iteration():
     assert keys_list[0] == 42
 
 
+@pytest.mark.parametrize("quantization_name", ["e5m2", "e4m3", "e3m2", "e2m3"])
+@pytest.mark.parametrize("ndim", [97, 256])
+def test_index_mini_floats_with_numkong(quantization_name, ndim):
+    """Test add/search with NumKong-downcasted float8/float6 tensors and explicit dtype."""
+    nk = pytest.importorskip("numkong")
+
+    batch_size = 50
+    vectors_f32 = random_vectors(count=batch_size, ndim=ndim, dtype=np.float32)
+    keys = np.arange(batch_size)
+
+    vectors_nk = nk.Tensor(vectors_f32).astype(quantization_name)
+    vectors_raw = np.asarray(vectors_nk)
+
+    index = Index(ndim=ndim, metric=MetricKind.Cos, dtype=quantization_name)
+    index.add(keys, vectors_raw, threads=threads, dtype=quantization_name)
+    assert len(index) == batch_size
+
+    matches = index.search(vectors_raw[:5], 10, threads=threads, dtype=quantization_name)
+    assert len(matches) == 5
+    for i in range(5):
+        assert matches[i].keys[0] == i, f"Expected self-match for vector {i}"
+
+
+@pytest.mark.parametrize("quantization", quantizations)
+@pytest.mark.parametrize("ndim", [97, 256])
+def test_index_quantized_add_search(quantization, ndim):
+    """Smoke-test every supported quantization: add f32 vectors, search, verify self-match."""
+    batch_size = 50
+    vectors_f32 = random_vectors(count=batch_size, ndim=ndim, dtype=np.float32)
+    keys = np.arange(batch_size)
+
+    index = Index(ndim=ndim, metric=MetricKind.Cos, dtype=quantization)
+    index.add(keys, vectors_f32, threads=threads)
+    assert len(index) == batch_size
+
+    matches = index.search(vectors_f32[:5], 10, threads=threads)
+    assert len(matches) == 5
+    for i in range(5):
+        assert matches[i].keys[0] == i, f"Expected self-match for vector {i} with {quantization}"
+
+
 def test_index_copied_memory_usage():
     """Test that copy=False results in lower memory usage than copy=True."""
     reset_randomness()

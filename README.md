@@ -51,7 +51,7 @@ Linux • macOS • Windows • iOS • Android • WebAssembly •
 - ✅ Simple and extensible [single C++11 header][usearch-header] __library__.
 - ✅ [Trusted](#integrations) by giants like Google and DBs like [ClickHouse][clickhouse-docs] & [DuckDB][duckdb-docs].
 - ✅ [SIMD][simd]-optimized and [user-defined metrics](#user-defined-functions) with JIT compilation.
-- ✅ Hardware-agnostic `f16` & `i8` - [half-precision & quarter-precision support](#memory-efficiency-downcasting-and-quantization).
+- ✅ Hardware-agnostic `bf16`, `e5m2`, & `i8` - [half-precision & quarter-precision support](#memory-efficiency-downcasting-and-quantization).
 - ✅ [View large indexes from disk](#serialization--serving-index-from-disk) without loading into RAM.
 - ✅ Heterogeneous lookups, renaming/relabeling, and on-the-fly deletions.
 - ✅ Binary Tanimoto and Sorensen coefficients for [Genomics and Chemistry applications](#usearch--rdkit--molecular-search).
@@ -138,7 +138,7 @@ The default storage/quantization level is hardware-dependant for efficiency, but
 index = Index(
     ndim=3, # Define the number of dimensions in input vectors
     metric='cos', # Choose 'l2sq', 'ip', 'haversine' or other metric, default = 'cos'
-    dtype='bf16', # Store as 'f64', 'f32', 'f16', 'i8', 'b1'..., default = None
+    dtype='bf16', # Store as 'f64', 'f32', 'bf16', 'f16', 'e5m2', 'e4m3', 'e3m2', 'e2m3', 'u8', 'i8', 'b1'..., default = None
     connectivity=16, # Optional: Limit number of neighbors per graph node
     expansion_add=128, # Optional: Control the recall of indexing
     expansion_search=64, # Optional: Control the quality of the search
@@ -251,7 +251,7 @@ assert!(
 Training a quantization model and dimension-reduction is a common approach to accelerate vector search.
 Those, however, are only sometimes reliable, can significantly affect the statistical properties of your data, and require regular adjustments if your distribution shifts.
 Instead, we have focused on high-precision arithmetic over low-precision downcasted vectors.
-The same index, and `add` and `search` operations will automatically down-cast or up-cast between `f64_t`, `f32_t`, `f16_t`, `i8_t`, and single-bit `b1x8_t` representations.
+The same index, and `add` and `search` operations will automatically down-cast or up-cast between `f64_t`, `f32_t`, `bf16_t`, `f16_t`, `e5m2_t`, `e4m3_t`, `e3m2_t`, `e2m3_t`, `u8_t`, `i8_t`, and single-bit `b1x8_t` representations.
 You can use the following command to check, if hardware acceleration is enabled:
 
 ```sh
@@ -261,7 +261,9 @@ $ python -c 'from usearch.index import Index; print(Index(ndim=166, metric="tani
 > ice
 ```
 
-In most cases, it's recommended to use half-precision floating-point numbers on modern hardware.
+In most cases, `bf16` is recommended for modern CPUs.
+For even smaller footprints, USearch supports IEEE & MX-compatible Float8 (`e5m2` and `e4m3`) and Float6 (`e3m2` and `e2m3`) formats.
+You can pass pre-quantized buffers from [NumKong](https://github.com/ashvardanian/numkong) with the explicit `dtype=` parameter on `add` and `search`, or let USearch handle the quantization internally from higher-precision inputs.
 When quantization is enabled, the "get"-like functions won't be able to recover the original data, so you may want to replicate the original vectors elsewhere.
 When quantizing to `i8_t` integers, note that it's only valid for cosine-like metrics.
 As part of the quantization process, the vectors are normalized to unit length and later scaled to [-127, 127] range to occupy the full 8-bit range.
@@ -479,46 +481,41 @@ The Haversine distance is available out of the box, but you can also define more
 from numba import cfunc, types, carray
 import math
 
-# Define the dimension as 2 for latitude and longitude
 ndim = 2
+semi_major, flattening = 6378137.0, 1 / 298.257223563
+semi_minor = (1 - flattening) * semi_major
 
-# Signature for the custom metric
-signature = types.float32(
-    types.CPointer(types.float32),
-    types.CPointer(types.float32))
+def vincenty_distance(first_ptr, second_ptr):
+    first, second = carray(first_ptr, ndim), carray(second_ptr, ndim)
+    lat1, lon1, lat2, lon2 = first[0], first[1], second[0], second[1]
+    diff_lon = lon2 - lon1
+    rlat1, rlat2 = math.atan((1 - flattening) * math.tan(lat1)), math.atan((1 - flattening) * math.tan(lat2))
+    sin_rlat1, cos_rlat1 = math.sin(rlat1), math.cos(rlat1)
+    sin_rlat2, cos_rlat2 = math.sin(rlat2), math.cos(rlat2)
+    lon_on_sphere = diff_lon
+    for _ in range(100):
+        sin_lon, cos_lon = math.sin(lon_on_sphere), math.cos(lon_on_sphere)
+        sin_ang = math.sqrt((cos_rlat2 * sin_lon) ** 2 + (cos_rlat1 * sin_rlat2 - sin_rlat1 * cos_rlat2 * cos_lon) ** 2)
+        if sin_ang == 0: return 0.0
+        cos_ang = sin_rlat1 * sin_rlat2 + cos_rlat1 * cos_rlat2 * cos_lon
+        ang = math.atan2(sin_ang, cos_ang)
+        sin_az = cos_rlat1 * cos_rlat2 * sin_lon / sin_ang
+        cos2_az = 1 - sin_az ** 2
+        cos2_mid = cos_ang - 2 * sin_rlat1 * sin_rlat2 / cos2_az if cos2_az != 0 else 0.0
+        corr = flattening / 16 * cos2_az * (4 + flattening * (4 - 3 * cos2_az))
+        prev = lon_on_sphere
+        lon_on_sphere = diff_lon + (1 - corr) * flattening * (
+            sin_az * (ang + corr * sin_ang * (cos2_mid + corr * cos_ang * (-1 + 2 * cos2_mid ** 2))))
+        if abs(lon_on_sphere - prev) <= 1e-12: break
+    else:
+        return float('nan')
+    u_sq = cos2_az * (semi_major ** 2 - semi_minor ** 2) / (semi_minor ** 2)
+    ca = 1 + u_sq / 16384 * (4096 + u_sq * (-768 + u_sq * (320 - 175 * u_sq)))
+    cb = u_sq / 1024 * (256 + u_sq * (-128 + u_sq * (74 - 47 * u_sq)))
+    delta = cb * sin_ang * (cos2_mid + cb / 4 * (cos_ang * (-1 + 2 * cos2_mid ** 2)
+        - cb / 6 * cos2_mid * (-3 + 4 * sin_ang ** 2) * (-3 + 4 * cos2_mid ** 2)))
+    return semi_minor * ca * (ang - delta) / 1000.0
 
-# WGS-84 ellipsoid parameters
-a = 6378137.0  # major axis in meters
-f = 1 / 298.257223563  # flattening
-b = (1 - f) * a  # minor axis
-
-def vincenty_distance(a_ptr, b_ptr):
-    a_array = carray(a_ptr, ndim)
-    b_array = carray(b_ptr, ndim)
-    lat1, lon1, lat2, lon2 = a_array[0], a_array[1], b_array[0], b_array[1]
-    L, U1, U2 = lon2 - lon1, math.atan((1 - f) * math.tan(lat1)), math.atan((1 - f) * math.tan(lat2))
-    sinU1, cosU1, sinU2, cosU2 = math.sin(U1), math.cos(U1), math.sin(U2), math.cos(U2)
-    lambda_, iterLimit = L, 100
-    while iterLimit > 0:
-        iterLimit -= 1
-        sinLambda, cosLambda = math.sin(lambda_), math.cos(lambda_)
-        sinSigma = math.sqrt((cosU2 * sinLambda) ** 2 + (cosU1 * sinU2 - sinU1 * cosU2 * cosLambda) ** 2)
-        if sinSigma == 0: return 0.0  # Co-incident points
-        cosSigma, sigma = sinU1 * sinU2 + cosU1 * cosU2 * cosLambda, math.atan2(sinSigma, cosSigma)
-        sinAlpha, cos2Alpha = cosU1 * cosU2 * sinLambda / sinSigma, 1 - (cosU1 * cosU2 * sinLambda / sinSigma) ** 2
-        cos2SigmaM = cosSigma - 2 * sinU1 * sinU2 / cos2Alpha if not math.isnan(cosSigma - 2 * sinU1 * sinU2 / cos2Alpha) else 0  # Equatorial line
-        C = f / 16 * cos2Alpha * (4 + f * (4 - 3 * cos2Alpha))
-        lambda_, lambdaP = L + (1 - C) * f * (sinAlpha * (sigma + C * sinSigma * (cos2SigmaM + C * cosSigma * (-1 + 2 * cos2SigmaM ** 2)))), lambda_
-        if abs(lambda_ - lambdaP) <= 1e-12: break
-    if iterLimit == 0: return float('nan')  # formula failed to converge
-    u2 = cos2Alpha * (a ** 2 - b ** 2) / (b ** 2)
-    A = 1 + u2 / 16384 * (4096 + u2 * (-768 + u2 * (320 - 175 * u2)))
-    B = u2 / 1024 * (256 + u2 * (-128 + u2 * (74 - 47 * u2)))
-    deltaSigma = B * sinSigma * (cos2SigmaM + B / 4 * (cosSigma * (-1 + 2 * cos2SigmaM ** 2) - B / 6 * cos2SigmaM * (-3 + 4 * sinSigma ** 2) * (-3 + 4 * cos2SigmaM ** 2)))
-    s = b * A * (sigma - deltaSigma)
-    return s / 1000.0  # Distance in kilometers
-
-# Example usage:
 index = Index(ndim=ndim, metric=CompiledMetric(
     pointer=vincenty_distance.address,
     kind=MetricKind.Haversine,
