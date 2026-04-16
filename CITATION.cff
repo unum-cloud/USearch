@@ -1,11 +1,51 @@
 cff-version: 1.2.0
+title: "USearch: Smaller & Faster Similarity Search & Clustering Engine"
 message: "If you use this software, please cite it as below."
-authors:
-  - family-names: "Vardanian"
-    given-names: "Ash"
-    orcid: "https://orcid.org/0000-0002-4882-1815"
-title: "USearch by Unum Cloud"
+type: software
+license: Apache-2.0
 version: 2.25.0
 doi: 10.5281/zenodo.7949416
-date-released: 2023-10-22
-url: "https://github.com/unum-cloud/USearch"
+repository-code: https://github.com/unum-cloud/USearch
+url: https://github.com/unum-cloud/USearch
+abstract: >-
+  Portable single-header similarity search and clustering library
+  with SIMD-optimized and user-defined metrics,
+  supporting 15+ quantization levels from f64 to f6 and single-bit,
+  with native bindings for C++, Python, Rust, JavaScript, Java, Go, Swift, C#, C, Objective-C, and Wolfram,
+  trusted by Google, Microsoft, ClickHouse, DuckDB, ScyallDB, Yugabyte, TiDB, and others.
+
+authors:
+  - family-names: Vardanian
+    given-names: Ash
+    alias: ashvardanian
+    orcid: https://orcid.org/0000-0002-4882-1815
+
+references:
+  - type: article
+    title: "Scaling Vector Search with Intel and USearch"
+    url: https://www.unum.cloud/blog/2023-11-07-scaling-vector-search-with-intel
+    date-published: 2023-11-07
+    authors:
+      - family-names: Vardanian
+        given-names: Ash
+  - type: article
+    title: "Porting a C++ Library to 10 Languages"
+    url: https://ashvardanian.com/posts/porting-cpp-library-to-ten-languages/
+    date-published: 2024-01-01
+    authors:
+      - family-names: Vardanian
+        given-names: Ash
+  - type: article
+    title: "Abusing Vector Search for Fun and Profit"
+    url: https://ashvardanian.com/posts/abusing-vector-search
+    date-published: 2023-08-01
+    authors:
+      - family-names: Vardanian
+        given-names: Ash
+  - type: article
+    title: "Combinatorial Stable Marriages for Semantic Search"
+    url: https://ashvardanian.com/posts/searching-stable-marriages
+    date-published: 2023-07-01
+    authors:
+      - family-names: Vardanian
+        given-names: Ash

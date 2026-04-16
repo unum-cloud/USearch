@@ -547,13 +547,12 @@ index = Index(ndim=ndim, metric=CompiledMetric(
 ## Citations
 
 ```bibtex
-@software{Vardanian_USearch_2023,
+@software{Vardanian_USearch,
 doi = {10.5281/zenodo.7949416},
 author = {Vardanian, Ash},
 title = {{USearch by Unum Cloud}},
 url = {https://github.com/unum-cloud/USearch},
 version = {2.25.0},
-year = {2023},
-month = oct,
+year = {2026},
 }
 ```
