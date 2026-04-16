@@ -6,7 +6,6 @@ edition = "2021"
 include = [
   "/rust/**",
   "/include/**",
-  "/stringzilla/include/**",
   "/build.rs",
 ]
 license = "Apache-2.0"
@@ -27,9 +26,9 @@ path = "rust/lib.rs"
 
 [dependencies]
 cxx = "1.0.194"
-# Published crates pull `numkong` from crates.io (the `path` is stripped at publish time).
-# The local `path = "numkong"` is only used during development against the git submodule.
-numkong = {version = ">=7.5.0", path = "numkong", optional = true}
+# For local NumKong development, add a `[patch.crates-io]` override in your
+# personal `.cargo/config.toml` rather than editing this file.
+numkong = {version = ">=7.5.0", optional = true}
 
 [build-dependencies]
 cxx-build = "1.0.194"

@@ -928,16 +928,10 @@ jobs:
           ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
-      - name: Hide submodule Crates
-        run: |
-          mv numkong/Cargo.toml numkong/Cargo.toml.bak
-          mv stringzilla/Cargo.toml stringzilla/Cargo.toml.bak
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Publish to crates.io
-        uses: katyo/publish-crates@v2
-        with:
-          registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   publish_java:
     name: Publish Java
