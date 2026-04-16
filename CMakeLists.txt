@@ -391,6 +391,10 @@ if (USEARCH_USE_NUMKONG)
         CACHE BOOL "" FORCE
     )
     add_subdirectory(numkong)
+
+    if (TARGET nk_shared)
+        set_target_properties(nk_shared PROPERTIES ENABLE_EXPORTS ON)
+    endif ()
 endif ()
 
 # Must be called before "add_subdirectory()". See
