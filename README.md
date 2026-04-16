@@ -549,7 +549,7 @@ doi = {10.5281/zenodo.7949416},
 author = {Vardanian, Ash},
 title = {{USearch by Unum Cloud}},
 url = {https://github.com/unum-cloud/USearch},
-version = {2.25.0},
+version = {2.25.1},
 year = {2026},
 }
 ```
