@@ -381,14 +381,27 @@ jobs:
     name: Build JNI for Linux
     runs-on: ubuntu-24.04
     needs: versioning
+    # `-target <triple>` is a Clang flag; without these, CMake picks the host
+    # GCC and silently drops the cross-target. Mirrors the prerelease
+    # `test_ubuntu_cross_compilation` job.
+    env:
+      CC: clang
+      CXX: clang++
+      AR: llvm-ar
+      NM: llvm-nm
+      RANLIB: llvm-ranlib
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: amd64
+            cmake_processor: x86_64
             target: x86_64-linux-gnu
+            expected_arch: x86-64
           - arch: arm64
+            cmake_processor: aarch64
             target: aarch64-linux-gnu
+            expected_arch: aarch64
 
     steps:
       - name: Check out refreshed version
@@ -416,29 +429,21 @@ jobs:
             -DCMAKE_C_COMPILER_TARGET=${{ matrix.target }} \
             -DCMAKE_CXX_COMPILER_TARGET=${{ matrix.target }} \
             -DCMAKE_SYSTEM_NAME=Linux \
-            -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.arch }} \
+            -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.cmake_processor }} \
             -DUSEARCH_BUILD_JNI=1 \
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0 \
             -DUSEARCH_BUILD_LIB_C=0 \
             -DUSEARCH_USE_NUMKONG=1 \
-            -DNK_TARGET_HASWELL=1 \
-            -DNK_TARGET_SKYLAKE=1 \
-            -DNK_TARGET_ICELAKE=1 \
-            -DNK_TARGET_GENOA=1 \
-            -DNK_TARGET_SAPPHIRE=1 \
-            -DNK_TARGET_NEON=1 \
-            -DNK_TARGET_NEONBFDOT=1 \
-            -DNK_TARGET_NEONHALF=1 \
-            -DNK_TARGET_NEONSDOT=1 \
-            -DNK_TARGET_SVE=1 \
-            -DNK_TARGET_SVEBFDOT=1 \
-            -DNK_TARGET_SVEHALF=1 \
-            -DNK_TARGET_SVESDOT=1 \
-            -DNK_TARGET_SVE2=1 \
             -DNK_DYNAMIC_DISPATCH=1
 
           cmake --build build_artifacts --config Release -j
+
+      # Guard against silent host-toolchain fallback — the binary must actually
+      # be for the target arch, otherwise packaging will ship a broken library.
+      - name: Verify target architecture
+        run: |
+          file build_artifacts/libusearch_jni.so | grep -q '${{ matrix.expected_arch }}'
 
       - name: Upload JNI library artifact
         uses: actions/upload-artifact@v5
@@ -451,22 +456,15 @@ jobs:
     name: Build JNI for Windows
     runs-on: windows-2022
     needs: versioning
+    # Only x64 is supported today. 32-bit MSVC leaves NumKong's SIMD backends
+    # undefined, and ARM64 MSVC hits a stale `<immintrin.h>` include in
+    # NumKong — both require upstream fixes.
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x64
             cmake_arch: x64
-            nk_target_x86: 1
-            nk_target_arm: 0
-          - arch: x86
-            cmake_arch: Win32
-            nk_target_x86: 1
-            nk_target_arm: 0
-          - arch: arm64
-            cmake_arch: ARM64
-            nk_target_x86: 0
-            nk_target_arm: 1
 
     steps:
       - name: Check out refreshed version
@@ -491,12 +489,6 @@ jobs:
             -DUSEARCH_BUILD_BENCH_CPP=0 `
             -DUSEARCH_BUILD_LIB_C=0 `
             -DUSEARCH_USE_NUMKONG=1 `
-            -DNK_TARGET_NEON=${{ matrix.nk_target_arm }} `
-            -DNK_TARGET_HASWELL=${{ matrix.nk_target_x86 }} `
-            -DNK_TARGET_SKYLAKE=${{ matrix.nk_target_x86 }} `
-            -DNK_TARGET_ICELAKE=${{ matrix.nk_target_x86 }} `
-            -DNK_TARGET_GENOA=0 `
-            -DNK_TARGET_SAPPHIRE=0 `
             -DNK_DYNAMIC_DISPATCH=1
 
           cmake --build build_artifacts --config Release
@@ -540,19 +532,20 @@ jobs:
           cmake -B build_artifacts \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES=${{ matrix.cmake_arch }} \
+            -DCMAKE_SYSTEM_NAME=Darwin \
+            -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.cmake_arch }} \
             -DUSEARCH_BUILD_JNI=1 \
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0 \
             -DUSEARCH_BUILD_LIB_C=0 \
             -DUSEARCH_USE_NUMKONG=1 \
-            -DNK_TARGET_HASWELL=1 \
-            -DNK_TARGET_NEON=1 \
-            -DNK_TARGET_NEONBFDOT=1 \
-            -DNK_TARGET_NEONHALF=1 \
-            -DNK_TARGET_NEONSDOT=1 \
             -DNK_DYNAMIC_DISPATCH=1
 
           cmake --build build_artifacts --config Release
+
+      - name: Verify target architecture
+        run: |
+          file build_artifacts/libusearch_jni.dylib | grep -q '${{ matrix.cmake_arch }}'
 
       - name: Upload JNI library artifact
         uses: actions/upload-artifact@v5
