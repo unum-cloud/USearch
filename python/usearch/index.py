@@ -848,7 +848,7 @@ class Index:
             keys = keys.astype(Key)
 
         results = self._compiled.get_many(keys, dtype)
-        results = cast(results) if isinstance(results, np.ndarray) else [cast(result) for result in results]
+        results = tuple(cast(result) for result in results)
         return results[0] if is_one else results
 
     def __getitem__(self, keys: KeyOrKeysLike) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
