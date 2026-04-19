@@ -213,13 +213,29 @@ jobs:
 
       - name: Build library (MinGW)
         if: matrix.arch != 'arm64'
+# `-G "MinGW Makefiles"` is required: without it, CMake on the
+        # `windows-2022` runner falls back to the Visual Studio generator
+        # (x64 by default), so the `x86` matrix entry was silently producing
+        # a 64-bit DLL and shipping it under the `windows_x86` archive name.
         run: |
-          cmake -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_SQLITE=0 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 -B ./build_release
+          cmake -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_SQLITE=0 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 -B ./build_release
           cmake --build ./build_release --config Release
           mkdir pkg
           copy .\build_release\libusearch_c.dll pkg\
           copy .\c\usearch.h pkg\
           tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_c.dll usearch.h
+# Guard against silent generator fallback — the DLL must match the
+        # advertised matrix arch, otherwise the archive ships a mislabeled binary.
+      - name: Verify Windows DLL architecture
+        if: matrix.arch != 'arm64'
+        shell: bash
+        run: |
+          case "${{ matrix.arch }}" in
+            x64)  expected='x86-64'    ;;
+            x86)  expected='80386\|Intel 80386' ;;
+          esac
+          file ./build_release/libusearch_c.dll
+          file ./build_release/libusearch_c.dll | grep -q "$expected"
 
       - name: Build library (MSVC ARM64)
         if: matrix.arch == 'arm64'
