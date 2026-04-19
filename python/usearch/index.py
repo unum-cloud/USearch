@@ -1343,7 +1343,10 @@ class Index:
         :return: Array of vectors.
         :rtype: np.ndarray
         """
-        return self.get(self.keys)
+        # `get` returns a per-key tuple (None for missing keys); `keys` lists
+        # only present keys, so vstack composes the rows back into a 2D matrix
+        # for both single-vector and multi-vector indexes.
+        return np.vstack(self.get(self.keys))
 
     @property
     def max_level(self) -> int:
