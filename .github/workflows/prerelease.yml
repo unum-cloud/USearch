@@ -68,7 +68,6 @@ jobs:
         uses: actions/checkout@v6
       - name: Pull Git submodules
         run: git submodule update --init --recursive
-
         # C/C++
       - name: Build C/C++
         run: |
@@ -80,7 +79,6 @@ jobs:
         run: build_artifacts/test_cpp
       - name: Test C
         run: build_artifacts/test_c
-
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v6
@@ -94,7 +92,6 @@ jobs:
           python -m pip install .
       - name: Test Python
         run: pytest
-
         # JavaScript
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -106,7 +103,6 @@ jobs:
         run: npm run build-js
       - name: Test JavaScript
         run: npm test
-
         # Rust
       - name: Set up Rust
         run: |
@@ -120,7 +116,6 @@ jobs:
         run: cargo build
       - name: Test Rust
         run: cargo test
-
         # Java
       - name: Setup Java
         uses: actions/setup-java@v5
@@ -133,7 +128,6 @@ jobs:
         run: gradle spotlessCheck
       - name: Test Java
         run: gradle clean build
-
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
         uses: actions/setup-dotnet@v5
@@ -146,7 +140,6 @@ jobs:
           dotnet test -c Debug --logger "console;verbosity=detailed"
         shell: bash
         working-directory: ${{ github.workspace }}/csharp
-
         # GoLang
         # With `LD_DEBUG=all` we detect the addresses of the libraries that are loaded
       - name: Test GoLang
@@ -168,7 +161,6 @@ jobs:
         uses: actions/checkout@v6
       - name: Pull Git submodules
         run: git submodule update --init --recursive
-
         # C/C++
       - name: Build C/C++
         run: |
@@ -180,7 +172,6 @@ jobs:
         run: build_artifacts/test_cpp
       - name: Test C
         run: build_artifacts/test_c
-
         # JavaScript
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -192,7 +183,6 @@ jobs:
         run: npm run build-js
       - name: Test JavaScript
         run: npm test
-
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v6
@@ -209,7 +199,6 @@ jobs:
           CC: clang++ # Override the default compiler
       - name: Test Python
         run: pytest
-
         # Rust
       - name: Set up Rust
         run: |
@@ -220,7 +209,6 @@ jobs:
         run: cargo build
       - name: Test Rust
         run: cargo test
-
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
         uses: actions/setup-dotnet@v5
@@ -243,7 +231,6 @@ jobs:
         uses: actions/checkout@v6
       - name: Pull Git submodules
         run: git submodule update --init --recursive
-
         # C/C++
       - name: Build C/C++
         run: |
@@ -255,7 +242,6 @@ jobs:
         run: build_artifacts/test_cpp
       - name: Test C
         run: build_artifacts/test_c
-
         # JavaScript
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -267,7 +253,6 @@ jobs:
         run: npm run build-js
       - name: Test JavaScript
         run: npm test
-
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v6
@@ -283,13 +268,11 @@ jobs:
           CC: clang++ # Override the default compiler
       - name: Test Python
         run: pytest
-
         # ObjC/Swift
       - name: Build ObjC/Swift
         run: swift build
       - name: Test ObjC/Swift
         run: swift test
-
         # Rust
       - name: Set up Rust
         run: |
@@ -300,7 +283,6 @@ jobs:
         run: cargo build
       - name: Test Rust
         run: cargo test
-
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
         uses: actions/setup-dotnet@v5
@@ -322,7 +304,6 @@ jobs:
         uses: actions/checkout@v6
       - name: Pull Git submodules
         run: git submodule update --init --recursive
-
         # C/C++
       - name: Build C/C++
         run: |
@@ -333,7 +314,6 @@ jobs:
         run: .\build_artifacts\test_cpp.exe
       - name: Test C
         run: .\build_artifacts\test_c.exe
-
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v6
@@ -346,7 +326,6 @@ jobs:
           python -m pip install .
       - name: Test Python
         run: pytest
-
         # JavaScript
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -358,7 +337,6 @@ jobs:
         run: npm run build-js
       - name: Test JavaScript
         run: npm test
-
         # Rust
       - name: Set up Rust
         run: |
@@ -369,7 +347,6 @@ jobs:
         run: cargo build
       - name: Test Rust
         run: cargo test
-
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
         uses: actions/setup-dotnet@v5
@@ -394,7 +371,6 @@ jobs:
 
       - name: Setup MSVC for ARM64
         uses: microsoft/setup-msbuild@v2
-
         # C/C++
       - name: Build C/C++ (ARM64)
         run: |
@@ -547,7 +523,6 @@ jobs:
         uses: actions/checkout@v6
       - name: Pull Git submodules
         run: git submodule update --init --recursive
-
         # C/C++
         # We need to install the cross-compilation toolchain for ARM64 and ARMHF
       - name: Install dependencies
@@ -570,7 +545,6 @@ jobs:
             -D USEARCH_BUILD_BENCH_CPP=0
 
           cmake --build build_artifacts --config RelWithDebInfo
-
         # We can't run the produced builds, but we can make sure they exist
       - name: Test artifacts presence
         run: |
@@ -616,11 +590,9 @@ jobs:
             -D USEARCH_BUILD_BENCH_CPP=0
 
           cmake --build build_artifacts --config RelWithDebInfo
-
         # We can't run the produced builds, but we can make sure they exist
       - name: Test artifacts presence
         run: test -e build_artifacts/libusearch_c.so
-
         # Rust
       - name: Set up Rust
         run: |
@@ -641,14 +613,12 @@ jobs:
 
       - name: Build Rust
         run: cargo build --target ${{ matrix.target }}
-
         # Java
       - name: Set up JDK 21
         uses: actions/setup-java@v5
         with:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: "adopt"
-
         # We skip native compilation with Gradle and focus just on the Java part,
         # assuming the we won't be able to tun the tests without emulation
       - name: Check Java formatting

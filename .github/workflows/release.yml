@@ -213,7 +213,7 @@ jobs:
 
       - name: Build library (MinGW)
         if: matrix.arch != 'arm64'
-# `-G "MinGW Makefiles"` is required: without it, CMake on the
+        # `-G "MinGW Makefiles"` is required: without it, CMake on the
         # `windows-2022` runner falls back to the Visual Studio generator
         # (x64 by default), so the `x86` matrix entry was silently producing
         # a 64-bit DLL and shipping it under the `windows_x86` archive name.
@@ -224,7 +224,7 @@ jobs:
           copy .\build_release\libusearch_c.dll pkg\
           copy .\c\usearch.h pkg\
           tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_c.dll usearch.h
-# Guard against silent generator fallback — the DLL must match the
+        # Guard against silent generator fallback — the DLL must match the
         # advertised matrix arch, otherwise the archive ships a mislabeled binary.
       - name: Verify Windows DLL architecture
         if: matrix.arch != 'arm64'
@@ -750,8 +750,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
-        python-version:
-          ["310", "311", "312", "313", "313t", "314", "314t"]
+        python-version: ["310", "311", "312", "313", "313t", "314", "314t"]
     steps:
       - name: Check out refreshed version
         uses: actions/checkout@v6
@@ -914,7 +913,6 @@ jobs:
 
       - name: Look for links
         run: find . -type f -links +1
-
         # NPM installation fails spuriously all the time
       - name: Install Dependencies
         run: |
@@ -950,14 +948,7 @@ jobs:
 
   publish_java:
     name: Publish Java
-    needs:
-      [
-        versioning,
-        build_jni_linux,
-        build_jni_windows,
-        build_jni_macos,
-        build_jni_android,
-      ]
+    needs: [versioning, build_jni_linux, build_jni_windows, build_jni_macos, build_jni_android]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -1208,28 +1199,22 @@ jobs:
         working-directory: ${{ github.workspace }}
 
       - name: Publish to NuGet
-        run: dotnet nuget push "${{ env.NUGET_PACKAGES }}/*.nupkg" --api-key "${{ secrets.NUGET_API }}" --source "${{ env.NUGET_SOURCE }}" --skip-duplicate
+        run: dotnet nuget push "${{ env.NUGET_PACKAGES }}/*.nupkg" --api-key "${{ secrets.NUGET_API }}" --source "${{
+          env.NUGET_SOURCE }}" --skip-duplicate
 
       - name: Prepare publish to GitHub Registry
-        run: dotnet nuget add source --username ${{ github.repository_owner }} --password ${{ secrets.GITHUB_TOKEN }} --store-password-in-clear-text --name github "${{ env.GITHUB_PACKAGES_SOURCE }}"
+        run: dotnet nuget add source --username ${{ github.repository_owner }} --password ${{ secrets.GITHUB_TOKEN }}
+          --store-password-in-clear-text --name github "${{ env.GITHUB_PACKAGES_SOURCE }}"
 
       - name: Publish to GitHub Registry
-        run: dotnet nuget push "${{ env.NUGET_PACKAGES }}/*.nupkg"  --api-key "${{ secrets.GITHUB_TOKEN }}" --source "github" --skip-duplicate
+        run: dotnet nuget push "${{ env.NUGET_PACKAGES }}/*.nupkg"  --api-key "${{ secrets.GITHUB_TOKEN }}" --source "github"
+          --skip-duplicate
 
   build_docs:
     name: Build Docs
     runs-on: ubuntu-24.04
     if: ${{ always() }}
-    needs:
-      [
-        publish_python,
-        publish_javascript,
-        publish_rust,
-        publish_java,
-        publish_swift,
-        publish_docker,
-        publish_csharp,
-      ]
+    needs: [publish_python, publish_javascript, publish_rust, publish_java, publish_swift, publish_docker, publish_csharp]
     permissions:
       contents: write
     steps:
@@ -1245,7 +1230,6 @@ jobs:
           npm install -g jsdoc typedoc
       - name: Install USearch from PyPi
         run: pip install usearch
-
         # NPM installation fails spuriously all the time
       - name: Build CJS JS
         run: |
