@@ -420,8 +420,11 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang lld make crossbuild-essential-arm64 crossbuild-essential-armhf
+          sudo apt-get install -y clang mold make crossbuild-essential-arm64 crossbuild-essential-armhf
 
+      # `-fuse-ld=mold` keeps clang LTO on while sidestepping the
+      # experimental `lld 1:18.0-59~exp2` from Noble universe that
+      # segfaults on the widened `nk_shared` LTO unit.
       - name: Build JNI library
         run: |
           cmake -B build_artifacts \
@@ -430,6 +433,9 @@ jobs:
             -DCMAKE_CXX_COMPILER_TARGET=${{ matrix.target }} \
             -DCMAKE_SYSTEM_NAME=Linux \
             -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.cmake_processor }} \
+            -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=mold \
+            -DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld=mold \
+            -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=mold \
             -DUSEARCH_BUILD_JNI=1 \
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0 \
