@@ -1649,6 +1649,22 @@ mod tests {
         })
         .unwrap();
 
+        let e3m2_index = Index::new(&IndexOptions {
+            dimensions: 256,
+            metric: MetricKind::Cos,
+            quantization: ScalarKind::E3M2,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let e2m3_index = Index::new(&IndexOptions {
+            dimensions: 256,
+            metric: MetricKind::Cos,
+            quantization: ScalarKind::E2M3,
+            ..Default::default()
+        })
+        .unwrap();
+
         let i8_index = Index::new(&IndexOptions {
             dimensions: 256,
             metric: MetricKind::Cos,
@@ -1696,6 +1712,14 @@ mod tests {
         println!(
             "e4m3 hardware acceleration: {}",
             e4m3_index.hardware_acceleration()
+        );
+        println!(
+            "e3m2 hardware acceleration: {}",
+            e3m2_index.hardware_acceleration()
+        );
+        println!(
+            "e2m3 hardware acceleration: {}",
+            e2m3_index.hardware_acceleration()
         );
         println!(
             "i8 hardware acceleration: {}",
