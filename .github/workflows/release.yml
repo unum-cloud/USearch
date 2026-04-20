@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    branches: ['main']
+    branches: ["main"]
 
 env:
   GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
@@ -11,7 +11,7 @@ env:
   DOTNET_VERSION: 8.0.x
   NODE_VERSION: 20
   JAVA_VERSION: 21
-  GO_VERSION: '^1.21.0'
+  GO_VERSION: "^1.22.0"
   ANDROID_NDK_VERSION: 26.3.11579264
   ANDROID_SDK_VERSION: 21
   EMSCRIPTEN_VERSION: 3.1.47
@@ -27,24 +27,22 @@ permissions:
 jobs:
   versioning:
     name: Update Version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Run TinySemVer
-        uses: ashvardanian/tinysemver@v2.1.1
+        uses: ashvardanian/tinysemver@v3.0.0
         with:
-          verbose: 'true'
-          version-file: 'VERSION'
+          verbose: "true"
+          version-file: "VERSION"
           update-version-in: |
             package.json:"version": "(\d+\.\d+\.\d+)"
-            package-lock.json:"usearch",\n\s+"version": "(\d+\.\d+\.\d+)"
             CITATION.cff:^version: (\d+\.\d+\.\d+)
             Cargo.toml:^version = "(\d+\.\d+\.\d+)"
-            Cargo.lock:name = "usearch"\nversion = "(\d+\.\d+\.\d+)"
             wasmer.toml:^version = "(\d+\.\d+\.\d+)"
             conanfile.py:version = "(\d+\.\d+\.\d+)"
             java/README.md:usearchVersion = '(\d+\.\d+\.\d+)'
@@ -58,18 +56,18 @@ jobs:
             include/usearch/index.hpp:^#define USEARCH_VERSION_MINOR (\d+)
           update-patch-version-in: |
             include/usearch/index.hpp:^#define USEARCH_VERSION_PATCH (\d+)
-          dry-run: 'false'
-          push: 'true'
-          create-release: 'true'
+          dry-run: "false"
+          push: "true"
+          create-release: "true"
           github-token: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
 
   rebase:
-    name: Rebase Dev. Branch
+    name: Rebase Dev Branch
     needs: versioning
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout the latest code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -88,8 +86,8 @@ jobs:
           force: True
 
   create_linux_deb_package:
-    name: Create Debian Package
-    runs-on: ubuntu-22.04
+    name: Build Linux Package
+    runs-on: ubuntu-24.04
     needs: versioning
     env:
       CC: clang
@@ -109,9 +107,9 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -156,7 +154,7 @@ jobs:
           dpkg-deb --build "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}"
 
       - name: Upload native library for Java
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: native-libs-linux-${{ matrix.arch }}
           path: build_release/libusearch_c.so
@@ -167,11 +165,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          file: '*.so;*.deb'
+          file: "*.so;*.deb"
           update_latest_release: true
 
   create_windows_dll_library:
-    name: Create Dll Library for Windows
+    name: Build Windows Library
     runs-on: windows-2022
     needs: versioning
     strategy:
@@ -180,17 +178,17 @@ jobs:
         arch: [x64, x86, arm64]
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
       - name: Setup CMake
-        uses: jwlawson/actions-setup-cmake@v2.0.2
+        uses: jwlawson/actions-setup-cmake@v2
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
@@ -218,17 +216,23 @@ jobs:
         run: |
           cmake -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_SQLITE=0 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 -B ./build_release
           cmake --build ./build_release --config Release
-          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar .\build_release\libusearch_c.dll .\c\usearch.h
+          mkdir pkg
+          copy .\build_release\libusearch_c.dll pkg\
+          copy .\c\usearch.h pkg\
+          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_c.dll usearch.h
 
       - name: Build library (MSVC ARM64)
         if: matrix.arch == 'arm64'
         run: |
           cmake -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_SQLITE=0 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 -B ./build_release
           cmake --build ./build_release --config Release
-          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar .\build_release\libusearch_c.dll .\c\usearch.h
+          mkdir pkg
+          copy .\build_release\libusearch_c.dll pkg\
+          copy .\c\usearch.h pkg\
+          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_c.dll usearch.h
 
       - name: Upload native library for Java
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: native-libs-windows-${{ matrix.arch }}
           path: build_release/libusearch_c.dll
@@ -239,11 +243,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          file: 'usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar'
+          file: "usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar"
           update_latest_release: true
 
   create_macos_dylib_library:
-    name: Create Library for MacOS
+    name: Build macOS Library
     runs-on: macos-15
     needs: versioning
     strategy:
@@ -252,14 +256,14 @@ jobs:
         arch: [arm64, x86_64]
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
@@ -279,12 +283,12 @@ jobs:
                 -DUSEARCH_BUILD_BENCH_CPP=0 \
                 -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
                 -B ./build_release
-          cmake --build ./build_release --config Release        
-          zip -r usearch_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip build_release/libusearch_c.dylib c/usearch.h
+          cmake --build ./build_release --config Release
+          zip -j usearch_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip build_release/libusearch_c.dylib c/usearch.h
           mv build_release/libusearch_sqlite.dylib usearch_sqlite_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.dylib
 
       - name: Upload native library for Java
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: native-libs-macos-${{ matrix.arch }}
           path: build_release/libusearch_c.dylib
@@ -295,7 +299,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          file: '*.dylib'
+          file: "*.dylib"
           update_latest_release: true
 
       - name: Upload archive
@@ -303,12 +307,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          file: '*.zip'
+          file: "*.zip"
           update_latest_release: true
 
   create_android_library:
-    name: Create Android Libraries
-    runs-on: ubuntu-22.04
+    name: Build Android Library
+    runs-on: ubuntu-24.04
     needs: versioning
     strategy:
       fail-fast: false
@@ -325,9 +329,9 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -356,10 +360,10 @@ jobs:
 
       - name: Package library
         run: |
-          zip -r usearch_android_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip build_artifacts/libusearch_c.so c/usearch.h
+          zip -j usearch_android_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip build_artifacts/libusearch_c.so c/usearch.h
 
       - name: Upload native library for Java
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: native-libs-android-${{ matrix.arch }}
           path: build_artifacts/libusearch_c.so
@@ -370,27 +374,40 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          file: '*.zip'
+          file: "*.zip"
           update_latest_release: true
 
   build_jni_linux:
     name: Build JNI for Linux
     runs-on: ubuntu-24.04
     needs: versioning
+    # `-target <triple>` is a Clang flag; without these, CMake picks the host
+    # GCC and silently drops the cross-target. Mirrors the prerelease
+    # `test_ubuntu_cross_compilation` job.
+    env:
+      CC: clang
+      CXX: clang++
+      AR: llvm-ar
+      NM: llvm-nm
+      RANLIB: llvm-ranlib
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: amd64
+            cmake_processor: x86_64
             target: x86_64-linux-gnu
+            expected_arch: x86-64
           - arch: arm64
+            cmake_processor: aarch64
             target: aarch64-linux-gnu
+            expected_arch: aarch64
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -398,7 +415,7 @@ jobs:
         uses: actions/setup-java@v5
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: 'adopt'
+          distribution: "adopt"
 
       - name: Install dependencies
         run: |
@@ -412,33 +429,24 @@ jobs:
             -DCMAKE_C_COMPILER_TARGET=${{ matrix.target }} \
             -DCMAKE_CXX_COMPILER_TARGET=${{ matrix.target }} \
             -DCMAKE_SYSTEM_NAME=Linux \
-            -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.arch }} \
+            -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.cmake_processor }} \
             -DUSEARCH_BUILD_JNI=1 \
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0 \
             -DUSEARCH_BUILD_LIB_C=0 \
-            -DUSEARCH_USE_FP16LIB=1 \
-            -DUSEARCH_USE_SIMSIMD=1 \
-            -DSIMSIMD_TARGET_HASWELL=1 \
-            -DSIMSIMD_TARGET_SKYLAKE=1 \
-            -DSIMSIMD_TARGET_ICE=1 \
-            -DSIMSIMD_TARGET_GENOA=1 \
-            -DSIMSIMD_TARGET_SAPPHIRE=1 \
-            -DSIMSIMD_TARGET_NEON=1 \
-            -DSIMSIMD_TARGET_NEON_BF16=1 \
-            -DSIMSIMD_TARGET_NEON_F16=1 \
-            -DSIMSIMD_TARGET_NEON_I8=1 \
-            -DSIMSIMD_TARGET_SVE=1 \
-            -DSIMSIMD_TARGET_SVE_BF16=1 \
-            -DSIMSIMD_TARGET_SVE_F16=1 \
-            -DSIMSIMD_TARGET_SVE_I8=1 \
-            -DSIMSIMD_TARGET_SVE2=1 \
-            -DSIMSIMD_DYNAMIC_DISPATCH=1
+            -DUSEARCH_USE_NUMKONG=1 \
+            -DNK_DYNAMIC_DISPATCH=1
 
           cmake --build build_artifacts --config Release -j
 
+      # Guard against silent host-toolchain fallback — the binary must actually
+      # be for the target arch, otherwise packaging will ship a broken library.
+      - name: Verify target architecture
+        run: |
+          file build_artifacts/libusearch_jni.so | grep -q '${{ matrix.expected_arch }}'
+
       - name: Upload JNI library artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: usearch-jni-linux-${{ matrix.arch }}
           path: build_artifacts/libusearch_jni.so
@@ -448,22 +456,21 @@ jobs:
     name: Build JNI for Windows
     runs-on: windows-2022
     needs: versioning
+    # Only x64 is supported today. 32-bit MSVC leaves NumKong's SIMD backends
+    # undefined, and ARM64 MSVC hits a stale `<immintrin.h>` include in
+    # NumKong — both require upstream fixes.
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x64
             cmake_arch: x64
-          - arch: x86
-            cmake_arch: Win32
-          - arch: arm64
-            cmake_arch: ARM64
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -471,7 +478,7 @@ jobs:
         uses: actions/setup-java@v5
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: 'adopt'
+          distribution: "adopt"
 
       - name: Build JNI library
         run: |
@@ -481,19 +488,13 @@ jobs:
             -DUSEARCH_BUILD_TEST_CPP=0 `
             -DUSEARCH_BUILD_BENCH_CPP=0 `
             -DUSEARCH_BUILD_LIB_C=0 `
-            -DUSEARCH_USE_FP16LIB=1 `
-            -DUSEARCH_USE_SIMSIMD=1 `
-            -DSIMSIMD_TARGET_HASWELL=1 `
-            -DSIMSIMD_TARGET_SKYLAKE=1 `
-            -DSIMSIMD_TARGET_ICE=1 `
-            -DSIMSIMD_TARGET_GENOA=0 `
-            -DSIMSIMD_TARGET_SAPPHIRE=0 `
-            -DSIMSIMD_DYNAMIC_DISPATCH=1
+            -DUSEARCH_USE_NUMKONG=1 `
+            -DNK_DYNAMIC_DISPATCH=1
 
           cmake --build build_artifacts --config Release
 
       - name: Upload JNI library artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: usearch-jni-windows-${{ matrix.arch }}
           path: build_artifacts/libusearch_jni.dll
@@ -514,9 +515,9 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -524,30 +525,30 @@ jobs:
         uses: actions/setup-java@v5
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: 'adopt'
+          distribution: "adopt"
 
       - name: Build JNI library
         run: |
           cmake -B build_artifacts \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES=${{ matrix.cmake_arch }} \
+            -DCMAKE_SYSTEM_NAME=Darwin \
+            -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.cmake_arch }} \
             -DUSEARCH_BUILD_JNI=1 \
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0 \
             -DUSEARCH_BUILD_LIB_C=0 \
-            -DUSEARCH_USE_FP16LIB=1 \
-            -DUSEARCH_USE_SIMSIMD=1 \
-            -DSIMSIMD_TARGET_HASWELL=1 \
-            -DSIMSIMD_TARGET_NEON=1 \
-            -DSIMSIMD_TARGET_NEON_BF16=1 \
-            -DSIMSIMD_TARGET_NEON_F16=1 \
-            -DSIMSIMD_TARGET_NEON_I8=1 \
-            -DSIMSIMD_DYNAMIC_DISPATCH=1
+            -DUSEARCH_USE_NUMKONG=1 \
+            -DNK_DYNAMIC_DISPATCH=1
 
           cmake --build build_artifacts --config Release
 
+      - name: Verify target architecture
+        run: |
+          file build_artifacts/libusearch_jni.dylib | grep -q '${{ matrix.cmake_arch }}'
+
       - name: Upload JNI library artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: usearch-jni-macos-${{ matrix.arch }}
           path: build_artifacts/libusearch_jni.dylib
@@ -570,9 +571,9 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -580,7 +581,7 @@ jobs:
         uses: actions/setup-java@v5
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: 'adopt'
+          distribution: "adopt"
 
       - name: Install NDK
         run: |
@@ -598,32 +599,31 @@ jobs:
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0 \
             -DUSEARCH_BUILD_LIB_C=0 \
-            -DUSEARCH_USE_FP16LIB=1 \
-            -DUSEARCH_USE_SIMSIMD=1 \
-            -DSIMSIMD_TARGET_NEON=1 \
-            -DSIMSIMD_TARGET_NEON_BF16=1 \
-            -DSIMSIMD_TARGET_NEON_F16=1 \
-            -DSIMSIMD_TARGET_NEON_I8=1 \
-            -DSIMSIMD_DYNAMIC_DISPATCH=1
+            -DUSEARCH_USE_NUMKONG=1 \
+            -DNK_TARGET_NEON=1 \
+            -DNK_TARGET_NEONBFDOT=1 \
+            -DNK_TARGET_NEONHALF=1 \
+            -DNK_TARGET_NEONSDOT=1 \
+            -DNK_DYNAMIC_DISPATCH=1
 
           cmake --build build_artifacts --config Release
 
       - name: Upload JNI library artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: usearch-jni-android-${{ matrix.arch }}
           path: build_artifacts/libusearch_jni.so
           retention-days: 1
 
   create_wasm_library:
-    name: Create WASM Libraries
-    runs-on: ubuntu-22.04
+    name: Build WASM Library
+    runs-on: ubuntu-24.04
     needs: versioning
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -648,26 +648,27 @@ jobs:
             -DUSEARCH_BUILD_BENCH_CPP=OFF \
             -DUSEARCH_BUILD_SQLITE=OFF \
             -DUSEARCH_USE_OPENMP=OFF \
-            -DUSEARCH_USE_SIMSIMD=ON \
+            -DUSEARCH_USE_NUMKONG=ON \
             -DUSEARCH_USE_JEMALLOC=OFF
 
           emmake cmake --build build_wasm --config Release
 
           cd build_wasm
-          tar -czf ../usearch_wasm_${{ steps.set_version.outputs.version }}.tar.gz libusearch_c.* ../c/usearch.h          
-          zip -r ../usearch_wasm_${{ steps.set_version.outputs.version }}.zip libusearch_c.* ../c/usearch.h
+          cp ../c/usearch.h .
+          tar -czf ../usearch_wasm_${{ steps.set_version.outputs.version }}.tar.gz libusearch_c.* usearch.h
+          zip -j ../usearch_wasm_${{ steps.set_version.outputs.version }}.zip libusearch_c.* usearch.h
 
       - name: Upload archives
         uses: xresloader/upload-to-github-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          file: 'usearch_wasm_*.tar.gz;usearch_wasm_*.zip'
+          file: "usearch_wasm_*.tar.gz;usearch_wasm_*.zip"
           update_latest_release: true
 
   publish_checksums:
     name: Compute Assets Checksums
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs:
       [
         versioning,
@@ -691,8 +692,8 @@ jobs:
         uses: robinraju/release-downloader@v1.12
         with:
           latest: true
-          fileName: '*'
-          out-file-path: 'downloads'
+          fileName: "*"
+          out-file-path: "downloads"
           tarBall: true
           zipBall: true
 
@@ -727,17 +728,18 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
-        python-version: ['38', '39', '310', '311', '312', '313', '313t']
+        python-version:
+          ["310", "311", "312", "313", "313t", "314", "314t"]
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          ref: 'main'
+          ref: "main"
       - name: Setup Docker
         if: matrix.os == 'ubuntu-24.04'
-        uses: crazy-max/ghaction-setup-docker@v1.0.0
+        uses: docker/setup-docker-action@v4
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Setup QEMU
@@ -750,9 +752,9 @@ jobs:
         env:
           CIBW_BUILD: cp${{ matrix.python-version }}-*
           CIBW_ENABLE: cpython-freethreading # No-GIL 3.13t builds
-          CIBW_TEST_SKIP: '*-win_arm64' # Too complex to emulate Windows ARM
+          CIBW_TEST_SKIP: "*-win_arm64" # Too complex to emulate Windows ARM
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: cibw-wheels-${{ matrix.os }}-${{ strategy.job-index }}
           path: ./wheelhouse/*.whl
@@ -761,7 +763,7 @@ jobs:
   publish_python:
     name: Publish Python
     needs: build_wheels
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     environment:
       name: pypi
       url: https://pypi.org/p/usearch
@@ -770,7 +772,7 @@ jobs:
 
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           # unpacks all CIBW artifacts into dist/
           pattern: cibw-*
@@ -806,14 +808,14 @@ jobs:
 
     steps:
       - name: Checkout the latest code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           architecture: ${{ matrix.arch }}
@@ -827,7 +829,7 @@ jobs:
         # NPM installation fails spuriously all the time
       - name: Install Dependencies
         run: |
-          npm ci --ignore-scripts || npm ci --ignore-scripts || npm ci --ignore-scripts
+          npm install --ignore-scripts
       - run: npm run prebuild-single
         if: matrix.os != 'macos-14'
       - run: npm run prebuild-darwin-x64+arm64
@@ -849,7 +851,8 @@ jobs:
         run: |
           npm run prebuild-arm64
           aarch64-linux-gnu-strip prebuilds/linux-arm64/*node
-      - uses: actions/upload-artifact@v4
+      - name: Upload prebuilds
+        uses: actions/upload-artifact@v5
         with:
           name: prebuilds-${{ matrix.os }}-${{ matrix.arch }}
           path: prebuilds
@@ -858,23 +861,30 @@ jobs:
   publish_javascript:
     name: Publish JavaScript
     needs: build_javascript
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    environment:
+      name: npm-usearch
+      url: https://www.npmjs.com/package/usearch
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
 
       - name: Download prebuilds
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           pattern: prebuilds-*
           merge-multiple: true
@@ -886,7 +896,7 @@ jobs:
         # NPM installation fails spuriously all the time
       - name: Install Dependencies
         run: |
-          npm ci --ignore-scripts || npm ci --ignore-scripts || npm ci --ignore-scripts
+          npm install --ignore-scripts
 
       - name: Build the JS from TS
         run: npm run build-js
@@ -898,10 +908,7 @@ jobs:
         run: npm publish --dry-run
 
       - name: Publish
-        uses: JS-DevTools/npm-publish@v3
-        with:
-          token: ${{ secrets.NPM_TOKEN }}
-          access: public
+        run: npm publish --provenance --access public
 
   publish_rust:
     name: Publish Rust
@@ -909,23 +916,15 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
-      - name: Hide submodule Crates
-        run: |
-          mv simsimd/Cargo.toml simsimd/Cargo.toml.bak
-          mv stringzilla/Cargo.toml stringzilla/Cargo.toml.bak
       - name: Set up Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-      - uses: katyo/publish-crates@v2
-        with:
-          registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        uses: dtolnay/rust-toolchain@stable
+      - name: Publish to crates.io
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   publish_java:
     name: Publish Java
@@ -950,14 +949,14 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
       - name: Download all JNI libraries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           pattern: usearch-jni-*
 
@@ -965,9 +964,9 @@ jobs:
         uses: actions/setup-java@v5
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: 'adopt'
+          distribution: "adopt"
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
       - name: Build fat JAR with all platforms
         run: |
           # First build the JAR, which will build local native lib
@@ -981,7 +980,7 @@ jobs:
           cp usearch-jni-linux-amd64/libusearch_jni.so build/libs/usearch/shared/linux-amd64/libusearch_jni.so || true
           cp usearch-jni-linux-arm64/libusearch_jni.so build/libs/usearch/shared/linux-arm64/libusearch_jni.so || true
 
-          # Windows  
+          # Windows
           cp usearch-jni-windows-x64/libusearch_jni.dll build/libs/usearch/shared/windows-amd64/libusearch_jni.dll || true
           cp usearch-jni-windows-x86/libusearch_jni.dll build/libs/usearch/shared/windows-x86/libusearch_jni.dll || true
           cp usearch-jni-windows-arm64/libusearch_jni.dll build/libs/usearch/shared/windows-arm64/libusearch_jni.dll || true
@@ -1032,18 +1031,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          file: 'build/libs/*.jar'
+          file: "build/libs/*.jar"
           update_latest_release: true
 
   publish_swift:
-    name: Publish ObjC & Swift
+    name: Publish Objective-C & Swift
     needs: versioning
     runs-on: macos-15
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
       - name: Build
@@ -1056,33 +1055,33 @@ jobs:
   publish_docker:
     name: Publish Docker Image
     needs: versioning
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
       - name: Login to Docker Hub
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Log in to GitHub Registry
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
       - name: Extract tags & labels for Docker
         id: meta
-        uses: docker/metadata-action@v4
+        uses: docker/metadata-action@v5
         with:
           images: |
             unum/usearch
@@ -1101,7 +1100,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-15, windows-2022]
+        os: [ubuntu-24.04, macos-15, windows-2022]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -1109,18 +1108,18 @@ jobs:
 
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
       - name: Build C library for Linux
-        if: matrix.os == 'ubuntu-22.04'
+        if: matrix.os == 'ubuntu-24.04'
         run: |
           sudo apt update
-          sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev gcc-12 g++-12
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_SIMSIMD=1 -DUSEARCH_USE_JEMALLOC=1
+          sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev
+          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=1
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_c.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
@@ -1130,7 +1129,7 @@ jobs:
         run: |
           brew update
           brew reinstall cmake
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=0 -DUSEARCH_USE_SIMSIMD=1 -DUSEARCH_USE_JEMALLOC=0
+          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=0 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=0
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_c.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
@@ -1139,20 +1138,20 @@ jobs:
         if: matrix.os == 'windows-2022'
         run: |
           choco install cmake
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=0 -DUSEARCH_USE_SIMSIMD=0 -DUSEARCH_USE_JEMALLOC=0
+          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=0 -DUSEARCH_USE_NUMKONG=0 -DUSEARCH_USE_JEMALLOC=0
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
           cp "${{ github.workspace }}\build_artifacts\libusearch_c.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
 
       - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: usearch-csharp-dependencies-${{ matrix.os }}
           path: ${{ github.workspace }}/csharp/lib/**/*
 
   publish_csharp:
     name: Publish C#
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: [build_csharp]
     env:
       SOLUTION: ${{ github.workspace }}/csharp
@@ -1163,21 +1162,21 @@ jobs:
       GITHUB_PACKAGES_SOURCE: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
     steps:
       - name: Check out refreshed version
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          ref: 'main'
+          ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
       - name: Download usearch libs artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           pattern: usearch-csharp-dependencies-*
           merge-multiple: true
           path: ${{ env.USEARCH_LIBS }}
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
@@ -1197,7 +1196,7 @@ jobs:
 
   build_docs:
     name: Build Docs
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: ${{ always() }}
     needs:
       [
@@ -1213,14 +1212,14 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          ref: 'main'
+          ref: "main"
       - name: Install dependencies
         run: |
-          sudo apt update && 
-          sudo apt install -y doxygen graphviz dia git && 
-          pip install -r docs/requirements.txt && 
+          sudo apt update &&
+          sudo apt install -y doxygen graphviz dia git &&
+          pip install -r docs/requirements.txt &&
           npm install -g jsdoc typedoc
       - name: Install USearch from PyPi
         run: pip install usearch
@@ -1228,7 +1227,7 @@ jobs:
         # NPM installation fails spuriously all the time
       - name: Build CJS JS
         run: |
-          npm ci --ignore-scripts || npm ci --ignore-scripts || npm ci --ignore-scripts
+          npm install --ignore-scripts
           npm run build-js
       - name: Build documentation
         run: cd docs && doxygen conf.dox && make html
@@ -1249,7 +1248,7 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: ${{ always() }}
     needs: build_docs
     steps:
@@ -1272,7 +1271,7 @@ jobs:
 
   deploy_docs_vercel:
     name: Deploy Vercel
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: ${{ always() }}
     needs: build_docs
     steps:
@@ -1280,4 +1279,4 @@ jobs:
         uses: fjogeleit/http-request-action@v1
         with:
           url: ${{ secrets.DOCS_VERCEL }}
-          method: 'POST'
+          method: "POST"

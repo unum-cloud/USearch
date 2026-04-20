@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
-import os
 import argparse
-import numpy as np
-from typing import List
+import os
 
+import numpy as np
 from ucall.rich_posix import Server
-from usearch.index import Index, Matches, Key
+
+from usearch.index import Index, Key, Matches
 
 
 def _ascii_to_vector(string: str) -> np.ndarray:
@@ -70,14 +69,14 @@ def serve(
         index.add(keys, vectors, threads=threads)
 
     @server
-    def search_one(vector: np.ndarray, count: int) -> List[dict]:
+    def search_one(vector: np.ndarray, count: int) -> list[dict]:
         print("search", vector, count)
         vectors = vector.reshape(vector.shape[0], 1)
         results: Matches = index.search(vectors, count)
         return results.to_list()
 
     @server
-    def search_many(vectors: np.ndarray, count: int) -> List[List[dict]]:
+    def search_many(vectors: np.ndarray, count: int) -> list[list[dict]]:
         results: Matches = index.search(vectors, count)
         return results.to_list()
 

@@ -10,6 +10,9 @@ using search_result_t = typename index_t::search_result_t;
 using labeling_result_t = typename index_t::labeling_result_t;
 using vector_key_t = typename index_dense_t::vector_key_t;
 
+char const* hardware_acceleration_compiled() { return unum::usearch::hardware_acceleration_compiled(); }
+char const* hardware_acceleration_available() { return unum::usearch::hardware_acceleration_available(); }
+
 metric_kind_t rust_to_cpp_metric(MetricKind value) {
     switch (value) {
     case MetricKind::IP: return metric_kind_t::ip_k;
@@ -27,11 +30,16 @@ metric_kind_t rust_to_cpp_metric(MetricKind value) {
 
 scalar_kind_t rust_to_cpp_scalar(ScalarKind value) {
     switch (value) {
-    case ScalarKind::I8: return scalar_kind_t::i8_k;
+    case ScalarKind::F64: return scalar_kind_t::f64_k;
+    case ScalarKind::F32: return scalar_kind_t::f32_k;
     case ScalarKind::BF16: return scalar_kind_t::bf16_k;
     case ScalarKind::F16: return scalar_kind_t::f16_k;
-    case ScalarKind::F32: return scalar_kind_t::f32_k;
-    case ScalarKind::F64: return scalar_kind_t::f64_k;
+    case ScalarKind::E5M2: return scalar_kind_t::e5m2_k;
+    case ScalarKind::E4M3: return scalar_kind_t::e4m3_k;
+    case ScalarKind::E3M2: return scalar_kind_t::e3m2_k;
+    case ScalarKind::E2M3: return scalar_kind_t::e2m3_k;
+    case ScalarKind::I8: return scalar_kind_t::i8_k;
+    case ScalarKind::U8: return scalar_kind_t::u8_k;
     case ScalarKind::B1: return scalar_kind_t::b1x8_k;
     default: return scalar_kind_t::unknown_k;
     }
@@ -91,38 +99,43 @@ auto make_predicate(uptr_t metric, uptr_t metric_state) {
 }
 
 // clang-format off
-void NativeIndex::add_b1x8(vector_key_t key, rust::Slice<uint8_t const> vec) const { add_(*index_, key, (b1x8_t const*)vec.data(), vec.size()); }
-void NativeIndex::add_i8(vector_key_t key, rust::Slice<int8_t const> vec) const { add_(*index_, key, vec.data(), vec.size()); }
-void NativeIndex::add_f16(vector_key_t key, rust::Slice<int16_t const> vec) const { add_(*index_, key, (f16_t const*)vec.data(), vec.size()); }
-void NativeIndex::add_f32(vector_key_t key, rust::Slice<float const> vec) const { add_(*index_, key, vec.data(), vec.size()); }
 void NativeIndex::add_f64(vector_key_t key, rust::Slice<double const> vec) const { add_(*index_, key, vec.data(), vec.size()); }
+void NativeIndex::add_f32(vector_key_t key, rust::Slice<float const> vec) const { add_(*index_, key, vec.data(), vec.size()); }
+void NativeIndex::add_f16(vector_key_t key, rust::Slice<int16_t const> vec) const { add_(*index_, key, (f16_t const*)vec.data(), vec.size()); }
+void NativeIndex::add_i8(vector_key_t key, rust::Slice<int8_t const> vec) const { add_(*index_, key, vec.data(), vec.size()); }
+void NativeIndex::add_u8(vector_key_t key, rust::Slice<uint8_t const> vec) const { add_(*index_, key, (u8_t const*)vec.data(), vec.size()); }
+void NativeIndex::add_b1x8(vector_key_t key, rust::Slice<uint8_t const> vec) const { add_(*index_, key, (b1x8_t const*)vec.data(), vec.size()); }
 
 // Regular approximate search
-Matches NativeIndex::search_b1x8(rust::Slice<uint8_t const> vec, size_t count) const { return search_(*index_, (b1x8_t const*)vec.data(), vec.size(), count, false); }
-Matches NativeIndex::search_i8(rust::Slice<int8_t const> vec, size_t count) const { return search_(*index_, vec.data(), vec.size(), count, false); }
-Matches NativeIndex::search_f16(rust::Slice<int16_t const> vec, size_t count) const { return search_(*index_, (f16_t const*)vec.data(), vec.size(), count, false); }
-Matches NativeIndex::search_f32(rust::Slice<float const> vec, size_t count) const { return search_(*index_, vec.data(), vec.size(), count, false); }
 Matches NativeIndex::search_f64(rust::Slice<double const> vec, size_t count) const { return search_(*index_, vec.data(), vec.size(), count, false); }
+Matches NativeIndex::search_f32(rust::Slice<float const> vec, size_t count) const { return search_(*index_, vec.data(), vec.size(), count, false); }
+Matches NativeIndex::search_f16(rust::Slice<int16_t const> vec, size_t count) const { return search_(*index_, (f16_t const*)vec.data(), vec.size(), count, false); }
+Matches NativeIndex::search_i8(rust::Slice<int8_t const> vec, size_t count) const { return search_(*index_, vec.data(), vec.size(), count, false); }
+Matches NativeIndex::search_u8(rust::Slice<uint8_t const> vec, size_t count) const { return search_(*index_, (u8_t const*)vec.data(), vec.size(), count, false); }
+Matches NativeIndex::search_b1x8(rust::Slice<uint8_t const> vec, size_t count) const { return search_(*index_, (b1x8_t const*)vec.data(), vec.size(), count, false); }
 
 // Exact (brute force) search
-Matches NativeIndex::exact_search_b1x8(rust::Slice<uint8_t const> vec, size_t count) const { return search_(*index_, (b1x8_t const*)vec.data(), vec.size(), count, true); }
-Matches NativeIndex::exact_search_i8(rust::Slice<int8_t const> vec, size_t count) const { return search_(*index_, vec.data(), vec.size(), count, true); }
-Matches NativeIndex::exact_search_f16(rust::Slice<int16_t const> vec, size_t count) const { return search_(*index_, (f16_t const*)vec.data(), vec.size(), count, true); }
-Matches NativeIndex::exact_search_f32(rust::Slice<float const> vec, size_t count) const { return search_(*index_, vec.data(), vec.size(), count, true); }
 Matches NativeIndex::exact_search_f64(rust::Slice<double const> vec, size_t count) const { return search_(*index_, vec.data(), vec.size(), count, true); }
+Matches NativeIndex::exact_search_f32(rust::Slice<float const> vec, size_t count) const { return search_(*index_, vec.data(), vec.size(), count, true); }
+Matches NativeIndex::exact_search_f16(rust::Slice<int16_t const> vec, size_t count) const { return search_(*index_, (f16_t const*)vec.data(), vec.size(), count, true); }
+Matches NativeIndex::exact_search_i8(rust::Slice<int8_t const> vec, size_t count) const { return search_(*index_, vec.data(), vec.size(), count, true); }
+Matches NativeIndex::exact_search_u8(rust::Slice<uint8_t const> vec, size_t count) const { return search_(*index_, (u8_t const*)vec.data(), vec.size(), count, true); }
+Matches NativeIndex::exact_search_b1x8(rust::Slice<uint8_t const> vec, size_t count) const { return search_(*index_, (b1x8_t const*)vec.data(), vec.size(), count, true); }
 
 // Filtered search (always approximate)
-Matches NativeIndex::filtered_search_b1x8(rust::Slice<uint8_t const> vec, size_t count, uptr_t metric, uptr_t metric_state) const { return filtered_search_(*index_, (b1x8_t const*)vec.data(), vec.size(), count, make_predicate(metric, metric_state)); }
-Matches NativeIndex::filtered_search_i8(rust::Slice<int8_t const> vec, size_t count, uptr_t metric, uptr_t metric_state) const { return filtered_search_(*index_, vec.data(), vec.size(), count, make_predicate(metric, metric_state)); }
-Matches NativeIndex::filtered_search_f16(rust::Slice<int16_t const> vec, size_t count, uptr_t metric, uptr_t metric_state) const { return filtered_search_(*index_, (f16_t const*)vec.data(), vec.size(), count, make_predicate(metric, metric_state)); }
-Matches NativeIndex::filtered_search_f32(rust::Slice<float const> vec, size_t count, uptr_t metric, uptr_t metric_state) const { return filtered_search_(*index_, vec.data(), vec.size(), count, make_predicate(metric, metric_state)); }
 Matches NativeIndex::filtered_search_f64(rust::Slice<double const> vec, size_t count, uptr_t metric, uptr_t metric_state) const { return filtered_search_(*index_, vec.data(), vec.size(), count, make_predicate(metric, metric_state)); }
+Matches NativeIndex::filtered_search_f32(rust::Slice<float const> vec, size_t count, uptr_t metric, uptr_t metric_state) const { return filtered_search_(*index_, vec.data(), vec.size(), count, make_predicate(metric, metric_state)); }
+Matches NativeIndex::filtered_search_f16(rust::Slice<int16_t const> vec, size_t count, uptr_t metric, uptr_t metric_state) const { return filtered_search_(*index_, (f16_t const*)vec.data(), vec.size(), count, make_predicate(metric, metric_state)); }
+Matches NativeIndex::filtered_search_i8(rust::Slice<int8_t const> vec, size_t count, uptr_t metric, uptr_t metric_state) const { return filtered_search_(*index_, vec.data(), vec.size(), count, make_predicate(metric, metric_state)); }
+Matches NativeIndex::filtered_search_u8(rust::Slice<uint8_t const> vec, size_t count, uptr_t metric, uptr_t metric_state) const { return filtered_search_(*index_, (u8_t const*)vec.data(), vec.size(), count, make_predicate(metric, metric_state)); }
+Matches NativeIndex::filtered_search_b1x8(rust::Slice<uint8_t const> vec, size_t count, uptr_t metric, uptr_t metric_state) const { return filtered_search_(*index_, (b1x8_t const*)vec.data(), vec.size(), count, make_predicate(metric, metric_state)); }
 
-size_t NativeIndex::get_b1x8(vector_key_t key, rust::Slice<uint8_t> vec) const { if (vec.size() % dimensions()) throw std::invalid_argument("Vector length must match index dimensionality"); return index_->get(key, (b1x8_t*)vec.data(), vec.size() / dimensions()); }
-size_t NativeIndex::get_i8(vector_key_t key, rust::Slice<int8_t> vec) const { if (vec.size() % dimensions()) throw std::invalid_argument("Vector length must match index dimensionality"); return index_->get(key, vec.data(), vec.size() / dimensions()); }
-size_t NativeIndex::get_f16(vector_key_t key, rust::Slice<int16_t> vec) const { if (vec.size() % dimensions()) throw std::invalid_argument("Vector length must match index dimensionality"); return index_->get(key, (f16_t*)vec.data(), vec.size() / dimensions()); }
-size_t NativeIndex::get_f32(vector_key_t key, rust::Slice<float> vec) const { if (vec.size() % dimensions()) throw std::invalid_argument("Vector length must match index dimensionality"); return index_->get(key, vec.data(), vec.size() / dimensions()); }
 size_t NativeIndex::get_f64(vector_key_t key, rust::Slice<double> vec) const { if (vec.size() % dimensions()) throw std::invalid_argument("Vector length must match index dimensionality"); return index_->get(key, vec.data(), vec.size() / dimensions()); }
+size_t NativeIndex::get_f32(vector_key_t key, rust::Slice<float> vec) const { if (vec.size() % dimensions()) throw std::invalid_argument("Vector length must match index dimensionality"); return index_->get(key, vec.data(), vec.size() / dimensions()); }
+size_t NativeIndex::get_f16(vector_key_t key, rust::Slice<int16_t> vec) const { if (vec.size() % dimensions()) throw std::invalid_argument("Vector length must match index dimensionality"); return index_->get(key, (f16_t*)vec.data(), vec.size() / dimensions()); }
+size_t NativeIndex::get_i8(vector_key_t key, rust::Slice<int8_t> vec) const { if (vec.size() % dimensions()) throw std::invalid_argument("Vector length must match index dimensionality"); return index_->get(key, vec.data(), vec.size() / dimensions()); }
+size_t NativeIndex::get_u8(vector_key_t key, rust::Slice<uint8_t> vec) const { if (vec.size() % dimensions()) throw std::invalid_argument("Vector length must match index dimensionality"); return index_->get(key, (u8_t*)vec.data(), vec.size() / dimensions()); }
+size_t NativeIndex::get_b1x8(vector_key_t key, rust::Slice<uint8_t> vec) const { if (vec.size() % dimensions()) throw std::invalid_argument("Vector length must match index dimensionality"); return index_->get(key, (b1x8_t*)vec.data(), vec.size() / dimensions()); }
 // clang-format on
 
 size_t NativeIndex::expansion_add() const { return index_->expansion_add(); }
@@ -180,6 +193,19 @@ void NativeIndex::view(rust::Str path) const {
 
 void NativeIndex::reset() const { index_->reset(); }
 size_t NativeIndex::memory_usage() const { return index_->memory_usage(); }
+
+MemoryStats NativeIndex::memory_stats() const {
+    auto stats = index_->memory_stats();
+    MemoryStats result;
+    result.graph_allocated = stats.graph_allocated;
+    result.graph_wasted = stats.graph_wasted;
+    result.graph_reserved = stats.graph_reserved;
+    result.vectors_allocated = stats.vectors_allocated;
+    result.vectors_wasted = stats.vectors_wasted;
+    result.vectors_reserved = stats.vectors_reserved;
+    return result;
+}
+
 char const* NativeIndex::hardware_acceleration() const { return index_->metric().isa_name(); }
 
 void NativeIndex::save_to_buffer(rust::Slice<uint8_t> buffer) const {
@@ -211,8 +237,10 @@ std::unique_ptr<NativeIndex> new_native_index(IndexOptions const& options) {
     index_dense_config_t config(options.connectivity, options.expansion_add, options.expansion_search);
     config.multi = options.multi;
     index_t index = index_t::make(metric, config);
-    // In Rust we have the luxury of returning a `Result` type even for the constructor.
-    // So let's pre-reserve the maximal number of threads and return the error if it fails.
-    index.reserve(index_limits_t{});
-    return wrap(std::move(index));
+
+    // Preserve constructor pre-allocation semantics (`index_limits_t{}`), but execute
+    // reserve after heap allocation to avoid move-induced pointer invalidation.
+    std::unique_ptr<NativeIndex> native = wrap(std::move(index));
+    native->reserve_capacity_and_threads(0, std::thread::hardware_concurrency());
+    return native;
 }

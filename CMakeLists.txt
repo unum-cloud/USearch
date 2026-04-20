@@ -1,26 +1,20 @@
-<<<<<<< HEAD
 # This CMake file is heavily inspired by following `usearch` CMake:
 # https://github.com/nlohmann/json/blob/develop/CMakeLists.txt
 cmake_minimum_required(VERSION 3.11 FATAL_ERROR)
 project(
     usearch
-    VERSION 2.21.0
+    VERSION 2.25.1
     LANGUAGES C CXX
     DESCRIPTION "Smaller & Faster Single-File Vector Search Engine from Unum"
-    HOMEPAGE_URL "https://github.com/unum-cloud/usearch"
+    HOMEPAGE_URL "https://github.com/unum-cloud/USearch"
 )
 
 # Determine if USearch is built as a subproject (using `add_subdirectory`) or if it is the main project
 set(USEARCH_IS_MAIN_PROJECT OFF)
 
-<<<<<<< HEAD
 if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
     set(USEARCH_IS_MAIN_PROJECT ON)
 endif ()
-=======
-option(USEARCH_USE_JEMALLOC "Use JeMalloc for Faster Memory Allocations" OFF)
-option(USEARCH_USE_OPENMP "Use OpenMP for a thread pool" OFF)
->>>>>>> 0c2b175 (Refactor: CPython without OpenMP)
 
 # Allow CMake 3.13+ to override options when using FetchContent / add_subdirectory
 if (POLICY CMP0077)
@@ -31,9 +25,8 @@ endif ()
 option(USEARCH_INSTALL "Install CMake targets" OFF)
 
 option(USEARCH_USE_OPENMP "Use OpenMP for a thread pool" OFF)
-option(USEARCH_USE_SIMSIMD "Use SimSIMD hardware-accelerated metrics" OFF)
+option(USEARCH_USE_NUMKONG "Use NumKong hardware-accelerated metrics" OFF)
 option(USEARCH_USE_JEMALLOC "Use JeMalloc for faster memory allocations" OFF)
-option(USEARCH_USE_FP16LIB "Use software emulation for half-precision types" ON)
 
 option(USEARCH_BUILD_TEST_CPP "Compile a native unit test in C++" ${USEARCH_IS_MAIN_PROJECT})
 option(USEARCH_BUILD_BENCH_CPP "Compile a native benchmark in C++" ${USEARCH_IS_MAIN_PROJECT})
@@ -78,7 +71,6 @@ main(int argc, char *argv)
     USEARCH_CAN_COMPILE_FP16
 )
 
-<<<<<<< HEAD
 # Check for `_Float16` support
 check_c_source_compiles(
     [=[
@@ -136,9 +128,7 @@ endif ()
 target_compile_definitions(${USEARCH_TARGET_NAME} INTERFACE "USEARCH_USE_OPENMP=$<BOOL:${USEARCH_USE_OPENMP}>")
 
 # Supplementary compilation settings affecting "index_plugins.hpp"
-target_compile_definitions(${USEARCH_TARGET_NAME} INTERFACE "USEARCH_USE_FP16LIB=$<BOOL:${USEARCH_USE_FP16LIB}>")
-target_compile_definitions(${USEARCH_TARGET_NAME} INTERFACE "USEARCH_USE_SIMSIMD=$<BOOL:${USEARCH_USE_SIMSIMD}>")
-<<<<<<< HEAD
+target_compile_definitions(${USEARCH_TARGET_NAME} INTERFACE "USEARCH_USE_NUMKONG=$<BOOL:${USEARCH_USE_NUMKONG}>")
 
 # Define which types can be compiled
 target_compile_definitions(
@@ -153,26 +143,17 @@ target_compile_definitions(
 target_compile_definitions(
     ${USEARCH_TARGET_NAME} INTERFACE "USEARCH_CAN_COMPILE_BFLOAT16=$<BOOL:${USEARCH_CAN_COMPILE_BFLOAT16}>"
 )
-=======
->>>>>>> 61db8e5 (Fix simd, openmp anf fp16 option value propagation to the compiler)
 
 target_include_directories(
     ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE} INTERFACE $<BUILD_INTERFACE:${USEARCH_INCLUDE_BUILD_DIR}>
                                                                $<INSTALL_INTERFACE:include>
 )
-if (USEARCH_USE_FP16LIB)
-    target_include_directories(
-        ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE} INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/fp16/include>
-                                                                   $<INSTALL_INTERFACE:fp16/include>
-    )
-endif ()
-if (USEARCH_USE_SIMSIMD)
+if (USEARCH_USE_NUMKONG)
     target_include_directories(
         ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE}
-        INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/simsimd/include> $<INSTALL_INTERFACE:simsimd/include>
+        INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/numkong/include> $<INSTALL_INTERFACE:numkong/include>
     )
 endif ()
-
 # Install a pkg-config file, so other tools can find this
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/pkg-config.pc.in" "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc")
 
@@ -208,78 +189,19 @@ endif ()
 
 # Find required packages
 if (CMAKE_HOST_SYSTEM_NAME MATCHES "Darwin")
-=======
-if(APPLE)
->>>>>>> 5461e0a (Add: Argument parser for C++ benchmarks)
-=======
-cmake_minimum_required(VERSION 3.11 FATAL_ERROR)
-project(usearch LANGUAGES CXX)
-
-set(CMAKE_CXX_STANDARD 11)
-set(CMAKE_CXX_STANDARD_REQUIRED YES)
-set(CMAKE_CXX_EXTENSIONS NO)
-
-option(USEARCH_USE_JEMALLOC "Use JeMalloc for Faster Memory Allocations" OFF)
-option(USEARCH_USE_OPENMP "Use OpenMP for a thread pool" OFF)
-
-# Make "Release" by default
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release)
-endif()
-
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0")
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
-set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -O3 -pg -g")
-
-# List of all possible compiler IDs:
-# https://cmake.org/cmake/help/latest/variable/CMAKE_LANG_COMPILER_ID.html
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=address")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wno-conversion -Wno-unknown-pragmas")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fmax-errors=1")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fopenmp")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pedantic")
-
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wfatal-errors")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fopenmp")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pedantic")
-
-elseif(CMAKE_CXX_COMPILER_ID STREQUAL "NVIDIA" OR CMAKE_CXX_COMPILER_ID STREQUAL "NVHPC")
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr --extended-lambda")
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_86,code=sm_86")
-    set_property(SOURCE src/bench.cpp PROPERTY LANGUAGE CUDA)
-    set_target_properties(bench PROPERTIES POSITION_INDEPENDENT_CODE ON)
-    set_target_properties(bench PROPERTIES CUDA_ARCHITECTURES "86")
-
-elseif(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ferror-limit=1")
-
-endif()
-
-if(APPLE)
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
     set(CMAKE_THREAD_LIBS_INIT "-lpthread")
     set(CMAKE_HAVE_THREADS_LIBRARY 1)
     set(CMAKE_USE_WIN32_THREADS_INIT 0)
     set(CMAKE_USE_PTHREADS_INIT 1)
     set(THREADS_PREFER_PTHREAD_FLAG ON)
-<<<<<<< HEAD
 endif ()
 
 find_package(Threads REQUIRED)
 
-<<<<<<< HEAD
 if (USEARCH_USE_OPENMP)
-=======
-if(${USEARCH_USE_OPENMP})
->>>>>>> 5461e0a (Add: Argument parser for C++ benchmarks)
     find_package(OpenMP REQUIRED)
 endif ()
 
-<<<<<<< HEAD
 if (USEARCH_USE_JEMALLOC)
     include(jemalloc)
 endif ()
@@ -288,34 +210,9 @@ endif ()
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif ()
-=======
-=======
-endif()
-find_package(Threads REQUIRED)
 
-if(${USEARCH_USE_OPENMP})
-    find_package(OpenMP REQUIRED)
-    include_directories(${OPENMP_INCLUDE_DIRS})
-endif()
-
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
-if(${USEARCH_USE_JEMALLOC})
-    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/jemalloc.cmake")
-endif()
-include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/clipp.cmake")
-
-include_directories("${CMAKE_CURRENT_SOURCE_DIR}/include")
-include_directories("${CMAKE_CURRENT_SOURCE_DIR}/fp16/include")
-include_directories("${CMAKE_CURRENT_SOURCE_DIR}/simsimd/include")
-<<<<<<< HEAD
->>>>>>> 5461e0a (Add: Argument parser for C++ benchmarks)
-
-<<<<<<< HEAD
-<<<<<<< HEAD
 # Include directories
-set(USEARCH_HEADER_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/fp16/include"
-                            "${CMAKE_CURRENT_SOURCE_DIR}/simsimd/include"
-)
+set(USEARCH_HEADER_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/numkong/include")
 
 # Function to setup target
 function (setup_target TARGET_NAME)
@@ -379,13 +276,6 @@ function (setup_target TARGET_NAME)
                     -fPIC
                     -pedantic
                     -Wfatal-errors
-<<<<<<< HEAD
-=======
-                    -march=native
-                    -ftree-vectorize
-                    # Don't complain if the for-loops were not vectorzied
-                    -Wpass-failed=transform-warning
->>>>>>> cf0fff3 (Add -march=native in clang compile flags to enable auto-vectorization)
                     -fcolor-diagnostics
         )
         target_link_options(
@@ -482,25 +372,30 @@ function (setup_target TARGET_NAME)
     target_compile_definitions(${TARGET_NAME} PRIVATE "USEARCH_USE_OPENMP=$<BOOL:${USEARCH_USE_OPENMP}>")
 
     # Supplementary compilation settings affecting "index_plugins.hpp"
-    target_compile_definitions(${TARGET_NAME} PRIVATE "USEARCH_USE_FP16LIB=$<BOOL:${USEARCH_USE_FP16LIB}>")
-    target_compile_definitions(${TARGET_NAME} PRIVATE "USEARCH_USE_SIMSIMD=$<BOOL:${USEARCH_USE_SIMSIMD}>")
+    target_compile_definitions(${TARGET_NAME} PRIVATE "USEARCH_USE_NUMKONG=$<BOOL:${USEARCH_USE_NUMKONG}>")
 
-<<<<<<< HEAD
-    # Pass through SIMSIMD target definitions if they're set
-    foreach(target IN ITEMS HASWELL SKYLAKE ICE GENOA SAPPHIRE TURIN SIERRA NEON NEON_I8 NEON_F16 NEON_BF16 SVE SVE_I8 SVE_F16 SVE_BF16 SVE2)
-        if(DEFINED SIMSIMD_TARGET_${target})
-            target_compile_definitions(${TARGET_NAME} PRIVATE "SIMSIMD_TARGET_${target}=${SIMSIMD_TARGET_${target}}")
-        endif()
-    endforeach()
-
-    # Pass through SIMSIMD_DYNAMIC_DISPATCH if set
-    if(DEFINED SIMSIMD_DYNAMIC_DISPATCH)
-        target_compile_definitions(${TARGET_NAME} PRIVATE "SIMSIMD_DYNAMIC_DISPATCH=${SIMSIMD_DYNAMIC_DISPATCH}")
-    endif()
-=======
->>>>>>> 61db8e5 (Fix simd, openmp anf fp16 option value propagation to the compiler)
+    # Link NumKong: the `nk_shared` target from `add_subdirectory(numkong)` carries its own include paths, compile
+    # definitions (NK_DYNAMIC_DISPATCH, NK_TARGET_*), and ISA probes.
+    if (USEARCH_USE_NUMKONG AND TARGET nk_shared)
+        target_compile_definitions(${TARGET_NAME} PRIVATE "NK_DYNAMIC_DISPATCH=1")
+        target_link_libraries(${TARGET_NAME} PRIVATE nk_shared)
+    endif ()
 
 endfunction ()
+
+# Delegate NumKong compilation to its own CMakeLists.txt — it handles ISA detection, NK_TARGET_* flags, and SIMD
+# dispatch backends internally.
+if (USEARCH_USE_NUMKONG)
+    set(NK_BUILD_SHARED
+        ON
+        CACHE BOOL "" FORCE
+    )
+    add_subdirectory(numkong)
+
+    if (TARGET nk_shared)
+        set_target_properties(nk_shared PROPERTIES ENABLE_EXPORTS ON)
+    endif ()
+endif ()
 
 # Must be called before "add_subdirectory()". See
 # https://stackoverflow.com/questions/30250494/ctest-not-detecting-tests.
@@ -529,30 +424,3 @@ endif ()
 if (${USEARCH_BUILD_SQLITE})
     add_subdirectory(sqlite)
 endif ()
-=======
-=======
-=======
-
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
-# Define our header-only library.
-add_library(usearch INTERFACE)
-target_sources(usearch INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include/usearch/usearch.hpp")
-target_include_directories(usearch INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
-
-<<<<<<< HEAD
->>>>>>> 7f6edc2 (Docs: C++ usage instructions)
-=======
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
-# Define the targets
-add_executable(bench src/bench.cpp)
-target_link_libraries(bench PRIVATE Threads::Threads)
-if(${USEARCH_USE_OPENMP})
-    target_link_libraries(bench PRIVATE ${OPENMP_LIBRARIES})
-endif()
-if(${USEARCH_USE_JEMALLOC})
-    target_link_libraries(bench PRIVATE ${JEMALLOC_LIBRARIES})
-endif()
-<<<<<<< HEAD
->>>>>>> 0c2b175 (Refactor: CPython without OpenMP)
-=======
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)

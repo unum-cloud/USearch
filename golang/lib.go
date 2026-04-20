@@ -101,6 +101,8 @@ func (m Metric) CValue() C.usearch_metric_kind_t {
 		return C.usearch_metric_cos_k
 	case Haversine:
 		return C.usearch_metric_haversine_k
+	case Divergence:
+		return C.usearch_metric_divergence_k
 	case Pearson:
 		return C.usearch_metric_pearson_k
 	case Hamming:
@@ -117,35 +119,56 @@ func (m Metric) CValue() C.usearch_metric_kind_t {
 // Different quantization types offer different trade-offs between memory usage and precision.
 type Quantization uint8
 
-// Different quantization kinds supported by the USearch library.
+// Different quantization kinds supported by the USearch library,
+// ordered by descending dynamic range.
 const (
+	// F64 uses 64-bit double precision floating point
+	F64 Quantization = iota
 	// F32 uses 32-bit floating point (standard precision)
-	F32 Quantization = iota
+	F32
 	// BF16 uses brain floating-point format (16-bit)
 	BF16
 	// F16 uses half-precision floating point (16-bit)
 	F16
-	// F64 uses 64-bit double precision floating point
-	F64
+	// E5M2 uses 8-bit floating point (1 sign + 5 exponent + 2 mantissa)
+	E5M2
+	// E4M3 uses 8-bit floating point (1 sign + 4 exponent + 3 mantissa)
+	E4M3
+	// E3M2 uses 6-bit floating point (1 sign + 3 exponent + 2 mantissa)
+	E3M2
+	// E2M3 uses 6-bit floating point (1 sign + 2 exponent + 3 mantissa)
+	E2M3
 	// I8 uses 8-bit signed integers (quantized)
 	I8
+	// U8 uses 8-bit unsigned integers
+	U8
 	// B1 uses binary representation (1-bit per dimension)
 	B1
 )
 
 // String returns the string representation of the Quantization.
-func (a Quantization) String() string {
-	switch a {
+func (q Quantization) String() string {
+	switch q {
+	case F64:
+		return "F64"
+	case F32:
+		return "F32"
 	case BF16:
 		return "BF16"
 	case F16:
 		return "F16"
-	case F32:
-		return "F32"
-	case F64:
-		return "F64"
+	case E5M2:
+		return "E5M2"
+	case E4M3:
+		return "E4M3"
+	case E3M2:
+		return "E3M2"
+	case E2M3:
+		return "E2M3"
 	case I8:
 		return "I8"
+	case U8:
+		return "U8"
 	case B1:
 		return "B1"
 	default:
@@ -153,20 +176,30 @@ func (a Quantization) String() string {
 	}
 }
 
-func (a Quantization) CValue() C.usearch_scalar_kind_t {
-	switch a {
-	case F16:
-		return C.usearch_scalar_f16_k
-	case F32:
-		return C.usearch_scalar_f32_k
+func (q Quantization) CValue() C.usearch_scalar_kind_t {
+	switch q {
 	case F64:
 		return C.usearch_scalar_f64_k
-	case I8:
-		return C.usearch_scalar_i8_k
-	case B1:
-		return C.usearch_scalar_b1_k
+	case F32:
+		return C.usearch_scalar_f32_k
 	case BF16:
 		return C.usearch_scalar_bf16_k
+	case F16:
+		return C.usearch_scalar_f16_k
+	case E5M2:
+		return C.usearch_scalar_e5m2_k
+	case E4M3:
+		return C.usearch_scalar_e4m3_k
+	case E3M2:
+		return C.usearch_scalar_e3m2_k
+	case E2M3:
+		return C.usearch_scalar_e2m3_k
+	case I8:
+		return C.usearch_scalar_i8_k
+	case U8:
+		return C.usearch_scalar_u8_k
+	case B1:
+		return C.usearch_scalar_b1_k
 	default:
 		return C.usearch_scalar_unknown_k
 	}
@@ -206,6 +239,12 @@ func DefaultConfig(dimensions uint) IndexConfig {
 	return c
 }
 
+// FilteredSearchHandler includes the callback function and user data.
+type FilteredSearchHandler struct {
+	Callback func(key Key, handler *FilteredSearchHandler) int
+	Data     any
+}
+
 // Index represents a USearch approximate nearest neighbor index.
 // It implements io.Closer for idiomatic resource cleanup.
 //
@@ -214,6 +253,21 @@ func DefaultConfig(dimensions uint) IndexConfig {
 type Index struct {
 	handle C.usearch_index_t
 	config IndexConfig
+}
+
+// Version returns the USearch library version string.
+func Version() string {
+	return C.GoString(C.usearch_version())
+}
+
+// HardwareAccelerationCompiled returns a comma-separated list of ISAs compiled into the binary.
+func HardwareAccelerationCompiled() string {
+	return C.GoString(C.usearch_hardware_acceleration_compiled())
+}
+
+// HardwareAccelerationAvailable returns a comma-separated list of ISAs available at runtime.
+func HardwareAccelerationAvailable() string {
+	return C.GoString(C.usearch_hardware_acceleration_available())
 }
 
 // NewIndex creates a new approximate nearest neighbor index with the specified configuration.
@@ -238,15 +292,15 @@ func NewIndex(conf IndexConfig) (index *Index, err error) {
 	conf = index.config
 	dimensions := C.size_t(conf.Dimensions)
 	connectivity := C.size_t(conf.Connectivity)
-	expansion_add := C.size_t(conf.ExpansionAdd)
-	expansion_search := C.size_t(conf.ExpansionSearch)
+	expansionAdd := C.size_t(conf.ExpansionAdd)
+	expansionSearch := C.size_t(conf.ExpansionSearch)
 	multi := C.bool(conf.Multi)
 
 	options := C.struct_usearch_init_options_t{}
 	options.dimensions = dimensions
 	options.connectivity = connectivity
-	options.expansion_add = expansion_add
-	options.expansion_search = expansion_search
+	options.expansion_add = expansionAdd
+	options.expansion_search = expansionSearch
 	options.multi = multi
 	options.metric_kind = conf.Metric.CValue()
 
@@ -261,6 +315,16 @@ func NewIndex(conf IndexConfig) (index *Index, err error) {
 
 	index.handle = ptr
 	return index, nil
+}
+
+// GetHandle returns the C index handel.
+func (index *Index) GetHandle() C.usearch_index_t {
+	return index.handle
+}
+
+// GetConfig returns the index config.
+func (index *Index) GetConfig() IndexConfig {
+	return index.config
 }
 
 // Len returns the number of vectors in the index.
@@ -385,13 +449,13 @@ func (index *Index) Capacity() (cap uint, err error) {
 	return cap, err
 }
 
-// HardwareAcceleration returns a string showing the SIMD capability for the index
+// HardwareAcceleration returns a string showing the SIMD capability for the index.
 func (index *Index) HardwareAcceleration() (string, error) {
 	var str *C.char
 	var errorMessage *C.char
 	str = C.usearch_hardware_acceleration(index.handle, (*C.usearch_error_t)(&errorMessage))
 	if errorMessage != nil {
-		return C.GoString(nil), errors.New(C.GoString(errorMessage))
+		return "", errors.New(C.GoString(errorMessage))
 	}
 	return C.GoString(str), nil
 }
@@ -483,6 +547,7 @@ func (index *Index) AddUnsafe(key Key, vec unsafe.Pointer) error {
 
 	var errorMessage *C.char
 	C.usearch_add(index.handle, (C.usearch_key_t)(key), vec, index.config.Quantization.CValue(), (*C.usearch_error_t)(&errorMessage))
+	runtime.KeepAlive(vec)
 	if errorMessage != nil {
 		return errors.New(C.GoString(errorMessage))
 	}
@@ -503,6 +568,20 @@ func (index *Index) Remove(key Key) error {
 	return nil
 }
 
+// Clear removes all vectors from the index while preserving its structure.
+func (index *Index) Clear() error {
+	if index.handle == nil {
+		panic("index is uninitialized")
+	}
+
+	var errorMessage *C.char
+	C.usearch_clear(index.handle, (*C.usearch_error_t)(&errorMessage))
+	if errorMessage != nil {
+		return errors.New(C.GoString(errorMessage))
+	}
+	return nil
+}
+
 // Contains checks if the index contains a vector with a specific key.
 func (index *Index) Contains(key Key) (found bool, err error) {
 	if index.handle == nil {
@@ -515,6 +594,21 @@ func (index *Index) Contains(key Key) (found bool, err error) {
 		return found, errors.New(C.GoString(errorMessage))
 	}
 	return found, nil
+}
+
+// Count returns the number of vectors stored under the given key.
+// Useful for multi-vector indexes where multiple vectors can share a key.
+func (index *Index) Count(key Key) (count uint, err error) {
+	if index.handle == nil {
+		panic("index is uninitialized")
+	}
+
+	var errorMessage *C.char
+	count = uint(C.usearch_count(index.handle, (C.usearch_key_t)(key), (*C.usearch_error_t)(&errorMessage)))
+	if errorMessage != nil {
+		return 0, errors.New(C.GoString(errorMessage))
+	}
+	return count, nil
 }
 
 // Get retrieves the vectors associated with the given key from the index.
@@ -541,7 +635,7 @@ func (index *Index) Get(key Key, maxCount uint) (vectors []float32, err error) {
 	return vectors, nil
 }
 
-// Rename the vector at key from to key to
+// Rename changes the key of a vector from one value to another.
 func (index *Index) Rename(from Key, to Key) error {
 	var errorMessage *C.char
 	C.usearch_rename(index.handle, C.usearch_key_t(from), C.usearch_key_t(to), (*C.usearch_error_t)(&errorMessage))
@@ -588,6 +682,8 @@ func DistanceUnsafe(vec1 unsafe.Pointer, vec2 unsafe.Pointer, vectorDimensions u
 
 	var errorMessage *C.char
 	dist := C.usearch_distance(vec1, vec2, quantization.CValue(), C.size_t(vectorDimensions), metric.CValue(), (*C.usearch_error_t)(&errorMessage))
+	runtime.KeepAlive(vec1)
+	runtime.KeepAlive(vec2)
 	if errorMessage != nil {
 		return 0, errors.New(C.GoString(errorMessage))
 	}
@@ -638,6 +734,56 @@ func (index *Index) Search(query []float32, limit uint) (keys []Key, distances [
 	return keys, distances, nil
 }
 
+// FilteredSearch finds the k nearest neighbors to the query vector, applying a filter.
+//
+// Parameters:
+//   - query: Must have exactly Dimensions() elements
+//   - limit: Maximum number of results to return
+//   - handler: Filter callback that returns non-zero to accept a candidate, zero to reject
+//
+// Returns:
+//   - keys: IDs of the nearest vectors that passed the filter (up to limit)
+//   - distances: Distance to each result (same length as keys)
+//   - err: Error if query is invalid, handler is nil, or search fails
+//
+// The actual number of results may be less than limit if fewer vectors pass the filter.
+func (index *Index) FilteredSearch(query []float32, limit uint, handler *FilteredSearchHandler) (keys []Key, distances []float32, err error) {
+	if index.handle == nil {
+		panic("index is uninitialized")
+	}
+
+	if len(query) == 0 {
+		return nil, nil, errors.New("query vector cannot be empty")
+	}
+	if uint(len(query)) != index.config.Dimensions {
+		return nil, nil, fmt.Errorf("query dimension mismatch: got %d, expected %d", len(query), index.config.Dimensions)
+	}
+	if handler == nil {
+		return nil, nil, errors.New("filtered search handler cannot be nil")
+	}
+	if limit == 0 {
+		return []Key{}, []float32{}, nil
+	}
+
+	keys = make([]Key, limit)
+	distances = make([]float32, limit)
+	var errorMessage *C.char
+	resultCount := uint(C.usearch_filtered_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_f32_k, (C.size_t)(limit),
+		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler), //nolint:govet // handler is kept alive by the caller
+		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
+	runtime.KeepAlive(query)
+	runtime.KeepAlive(keys)
+	runtime.KeepAlive(distances)
+	runtime.KeepAlive(handler)
+	if errorMessage != nil {
+		return nil, nil, errors.New(C.GoString(errorMessage))
+	}
+
+	keys = keys[:resultCount]
+	distances = distances[:resultCount]
+	return keys, distances, nil
+}
+
 // SearchUnsafe performs k-Approximate Nearest Neighbors Search using an unsafe pointer.
 //
 // SAFETY REQUIREMENTS:
@@ -664,8 +810,58 @@ func (index *Index) SearchUnsafe(query unsafe.Pointer, limit uint) (keys []Key, 
 	distances = make([]float32, limit)
 	var errorMessage *C.char
 	resultCount := uint(C.usearch_search(index.handle, query, index.config.Quantization.CValue(), (C.size_t)(limit), (*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
+	runtime.KeepAlive(query)
 	runtime.KeepAlive(keys)
 	runtime.KeepAlive(distances)
+	if errorMessage != nil {
+		return nil, nil, errors.New(C.GoString(errorMessage))
+	}
+
+	keys = keys[:resultCount]
+	distances = distances[:resultCount]
+	return keys, distances, nil
+}
+
+//export goFilteredSearchCallback
+func goFilteredSearchCallback(key C.usearch_key_t, ptr unsafe.Pointer) C.int {
+	handler := (*FilteredSearchHandler)(ptr)
+	return C.int(handler.Callback(Key(key), handler))
+}
+
+// FilteredSearchUnsafe performs filtered k-ANN search using an unsafe pointer.
+//
+// SAFETY REQUIREMENTS:
+//   - query must not be nil
+//   - Memory at query must contain exactly Dimensions() scalars
+//   - Scalar type must match index.config.Quantization
+//   - Memory must remain valid for the duration of the call
+func (index *Index) FilteredSearchUnsafe(query unsafe.Pointer, limit uint, handler *FilteredSearchHandler) (keys []Key, distances []float32, err error) {
+	if index.handle == nil {
+		panic("index is uninitialized")
+	}
+
+	if query == nil {
+		return nil, nil, errors.New("query pointer cannot be nil")
+	}
+
+	if handler == nil {
+		return nil, nil, errors.New("filtered search handler cannot be nil")
+	}
+
+	if limit == 0 {
+		return []Key{}, []float32{}, nil
+	}
+
+	keys = make([]Key, limit)
+	distances = make([]float32, limit)
+	var errorMessage *C.char
+	resultCount := uint(C.usearch_filtered_search(index.handle, query, index.config.Quantization.CValue(), (C.size_t)(limit),
+		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler), //nolint:govet // handler is kept alive by the caller
+		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
+	runtime.KeepAlive(query)
+	runtime.KeepAlive(keys)
+	runtime.KeepAlive(distances)
+	runtime.KeepAlive(handler)
 	if errorMessage != nil {
 		return nil, nil, errors.New(C.GoString(errorMessage))
 	}
@@ -689,7 +885,7 @@ func (index *Index) SearchUnsafe(query unsafe.Pointer, limit uint) (keys []Key, 
 //   - numThreads: Number of threads to use (0 for auto-detection)
 func ExactSearch(dataset []float32, queries []float32, datasetSize uint, queryCount uint,
 	datasetStride uint, queryStride uint, vectorDimensions uint, metric Metric,
-	maxResults uint, numThreads uint, resultKeysStride uint, resultDistancesStride uint) (keys []Key, distances []float32, err error) {
+	maxResults uint, numThreads uint) (keys []Key, distances []float32, err error) {
 
 	if len(dataset) == 0 || len(queries) == 0 {
 		return nil, nil, errors.New("dataset and queries cannot be empty")
@@ -703,9 +899,15 @@ func ExactSearch(dataset []float32, queries []float32, datasetSize uint, queryCo
 	if (len(queries) % int(vectorDimensions)) != 0 {
 		return nil, nil, errors.New("queries length must be a multiple of the dimensions")
 	}
+	if maxResults == 0 {
+		return nil, nil, errors.New("maxResults must be greater than zero")
+	}
 
-	keys = make([]Key, maxResults)
-	distances = make([]float32, maxResults)
+	keys = make([]Key, queryCount*maxResults)
+	distances = make([]float32, queryCount*maxResults)
+	resultKeysStride := uint32(maxResults * 8)      // int64 - 8 bytes
+	resultDistancesStride := uint32(maxResults * 4) // float32 - 4 bytes
+
 	var errorMessage *C.char
 	C.usearch_exact_search(unsafe.Pointer(&dataset[0]), C.size_t(datasetSize), C.size_t(datasetStride), unsafe.Pointer(&queries[0]), C.size_t(queryCount), C.size_t(queryStride),
 		C.usearch_scalar_f32_k, C.size_t(vectorDimensions), metric.CValue(), C.size_t(maxResults), C.size_t(numThreads),
@@ -718,8 +920,6 @@ func ExactSearch(dataset []float32, queries []float32, datasetSize uint, queryCo
 		return nil, nil, errors.New(C.GoString(errorMessage))
 	}
 
-	keys = keys[:maxResults]
-	distances = distances[:maxResults]
 	return keys, distances, nil
 }
 
@@ -736,17 +936,19 @@ func ExactSearch(dataset []float32, queries []float32, datasetSize uint, queryCo
 // For contiguous data, use vectorDimensions * sizeof(element_type).
 func ExactSearchUnsafe(dataset unsafe.Pointer, queries unsafe.Pointer, datasetSize uint, queryCount uint,
 	datasetStride uint, queryStride uint, vectorDimensions uint, metric Metric, quantization Quantization,
-	maxResults uint, numThreads uint, resultKeysStride uint, resultDistancesStride uint) (keys []Key, distances []float32, err error) {
+	maxResults uint, numThreads uint) (keys []Key, distances []float32, err error) {
 
 	if dataset == nil || queries == nil {
 		return nil, nil, errors.New("dataset and queries pointers cannot be nil")
 	}
-	if vectorDimensions == 0 || datasetSize == 0 || queryCount == 0 {
-		return nil, nil, errors.New("dimensions and sizes must be greater than zero")
+	if vectorDimensions == 0 || datasetSize == 0 || queryCount == 0 || maxResults == 0 {
+		return nil, nil, errors.New("dimensions, query count, max results and sizes must be greater than zero")
 	}
 
-	keys = make([]Key, maxResults)
-	distances = make([]float32, maxResults)
+	keys = make([]Key, queryCount*maxResults)
+	distances = make([]float32, queryCount*maxResults)
+	resultKeysStride := uint32(maxResults * 8)      // int64 - 8 bytes
+	resultDistancesStride := uint32(maxResults * 4) // float32 - 4 bytes
 	var errorMessage *C.char
 	C.usearch_exact_search(dataset, C.size_t(datasetSize), C.size_t(datasetStride), queries, C.size_t(queryCount), C.size_t(queryStride),
 		quantization.CValue(), C.size_t(vectorDimensions), metric.CValue(), C.size_t(maxResults), C.size_t(numThreads),
@@ -757,8 +959,6 @@ func ExactSearchUnsafe(dataset unsafe.Pointer, queries unsafe.Pointer, datasetSi
 		return nil, nil, errors.New(C.GoString(errorMessage))
 	}
 
-	keys = keys[:maxResults]
-	distances = distances[:maxResults]
 	return keys, distances, nil
 }
 
@@ -819,6 +1019,160 @@ func (index *Index) SearchI8(query []int8, limit uint) (keys []Key, distances []
 	return keys, distances, nil
 }
 
+func (index *Index) FilteredSearchI8(query []int8, limit uint, handler *FilteredSearchHandler) (keys []Key, distances []float32, err error) {
+	if index.handle == nil {
+		panic("index is uninitialized")
+	}
+
+	if len(query) == 0 {
+		return nil, nil, errors.New("query vector cannot be empty")
+	}
+	if uint(len(query)) != index.config.Dimensions {
+		return nil, nil, fmt.Errorf("query dimension mismatch: got %d, expected %d", len(query), index.config.Dimensions)
+	}
+	if handler == nil {
+		return nil, nil, errors.New("filtered search handler cannot be nil")
+	}
+	if limit == 0 {
+		return []Key{}, []float32{}, nil
+	}
+
+	keys = make([]Key, limit)
+	distances = make([]float32, limit)
+	var errorMessage *C.char
+	resultCount := uint(C.usearch_filtered_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_i8_k, (C.size_t)(limit),
+		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler), //nolint:govet // handler is kept alive by the caller
+		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
+	runtime.KeepAlive(query)
+	runtime.KeepAlive(keys)
+	runtime.KeepAlive(distances)
+	runtime.KeepAlive(handler)
+	if errorMessage != nil {
+		return nil, nil, errors.New(C.GoString(errorMessage))
+	}
+
+	keys = keys[:resultCount]
+	distances = distances[:resultCount]
+	return keys, distances, nil
+}
+
+// AddU8 adds a uint8 vector to the index.
+// The vector must have exactly Dimensions() elements.
+//
+// This is a convenience method for indexes using U8 quantization.
+func (index *Index) AddU8(key Key, vec []uint8) error {
+	if index.handle == nil {
+		panic("index is uninitialized")
+	}
+	if len(vec) == 0 {
+		return errors.New("vector cannot be empty")
+	}
+	if uint(len(vec)) != index.config.Dimensions {
+		return fmt.Errorf("vector dimension mismatch: got %d, expected %d", len(vec), index.config.Dimensions)
+	}
+	var errorMessage *C.char
+	C.usearch_add(index.handle, (C.usearch_key_t)(key), unsafe.Pointer(&vec[0]), C.usearch_scalar_u8_k, (*C.usearch_error_t)(&errorMessage))
+	runtime.KeepAlive(vec)
+	if errorMessage != nil {
+		return errors.New(C.GoString(errorMessage))
+	}
+	return nil
+}
+
+// SearchU8 searches for nearest neighbors using a uint8 query vector.
+// The query must have exactly Dimensions() elements.
+//
+// This is a convenience method for indexes using U8 quantization.
+func (index *Index) SearchU8(query []uint8, limit uint) (keys []Key, distances []float32, err error) {
+	if index.handle == nil {
+		panic("index is uninitialized")
+	}
+	if len(query) == 0 {
+		return nil, nil, errors.New("query vector cannot be empty")
+	}
+	if uint(len(query)) != index.config.Dimensions {
+		return nil, nil, fmt.Errorf("query dimension mismatch: got %d, expected %d", len(query), index.config.Dimensions)
+	}
+	if limit == 0 {
+		return []Key{}, []float32{}, nil
+	}
+	keys = make([]Key, limit)
+	distances = make([]float32, limit)
+	var errorMessage *C.char
+	resultCount := uint(C.usearch_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_u8_k, (C.size_t)(limit), (*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
+	runtime.KeepAlive(query)
+	runtime.KeepAlive(keys)
+	runtime.KeepAlive(distances)
+	if errorMessage != nil {
+		return nil, nil, errors.New(C.GoString(errorMessage))
+	}
+	keys = keys[:resultCount]
+	distances = distances[:resultCount]
+	return keys, distances, nil
+}
+
+// FilteredSearchU8 searches for nearest neighbors using a uint8 query vector with filtering.
+func (index *Index) FilteredSearchU8(query []uint8, limit uint, handler *FilteredSearchHandler) (keys []Key, distances []float32, err error) {
+	if index.handle == nil {
+		panic("index is uninitialized")
+	}
+
+	if len(query) == 0 {
+		return nil, nil, errors.New("query vector cannot be empty")
+	}
+	if uint(len(query)) != index.config.Dimensions {
+		return nil, nil, fmt.Errorf("query dimension mismatch: got %d, expected %d", len(query), index.config.Dimensions)
+	}
+	if handler == nil {
+		return nil, nil, errors.New("filtered search handler cannot be nil")
+	}
+	if limit == 0 {
+		return []Key{}, []float32{}, nil
+	}
+
+	keys = make([]Key, limit)
+	distances = make([]float32, limit)
+	var errorMessage *C.char
+	resultCount := uint(C.usearch_filtered_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_u8_k, (C.size_t)(limit),
+		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler), //nolint:govet // handler is kept alive by the caller
+		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
+	runtime.KeepAlive(query)
+	runtime.KeepAlive(keys)
+	runtime.KeepAlive(distances)
+	runtime.KeepAlive(handler)
+	if errorMessage != nil {
+		return nil, nil, errors.New(C.GoString(errorMessage))
+	}
+
+	keys = keys[:resultCount]
+	distances = distances[:resultCount]
+	return keys, distances, nil
+}
+
+// GetU8 retrieves a uint8 vector by key from the index.
+// Returns nil if the key is not found.
+func (index *Index) GetU8(key Key, maxCount uint) (vectors []uint8, err error) {
+	if index.handle == nil {
+		panic("index is uninitialized")
+	}
+
+	if maxCount == 0 {
+		return nil, nil
+	}
+
+	vectors = make([]uint8, index.config.Dimensions*maxCount)
+	var errorMessage *C.char
+	found := uint(C.usearch_get(index.handle, (C.usearch_key_t)(key), (C.size_t)(maxCount), unsafe.Pointer(&vectors[0]), C.usearch_scalar_u8_k, (*C.usearch_error_t)(&errorMessage)))
+	runtime.KeepAlive(vectors)
+	if errorMessage != nil {
+		return nil, errors.New(C.GoString(errorMessage))
+	}
+	if found == 0 {
+		return nil, nil
+	}
+	return vectors, nil
+}
+
 // DistanceI8 computes the distance between two int8 vectors.
 //
 // Example:
@@ -850,7 +1204,7 @@ func DistanceI8(vec1 []int8, vec2 []int8, vectorDimensions uint, metric Metric) 
 // For contiguous int8 data, use vectorDimensions * 1 byte.
 func ExactSearchI8(dataset []int8, queries []int8, datasetSize uint, queryCount uint,
 	datasetStride uint, queryStride uint, vectorDimensions uint, metric Metric,
-	maxResults uint, numThreads uint, resultKeysStride uint, resultDistancesStride uint) (keys []Key, distances []float32, err error) {
+	maxResults uint, numThreads uint) (keys []Key, distances []float32, err error) {
 
 	if len(dataset) == 0 || len(queries) == 0 {
 		return nil, nil, errors.New("dataset and queries cannot be empty")
@@ -858,9 +1212,13 @@ func ExactSearchI8(dataset []int8, queries []int8, datasetSize uint, queryCount 
 	if vectorDimensions == 0 {
 		return nil, nil, errors.New("dimensions must be greater than zero")
 	}
-
-	keys = make([]Key, maxResults)
-	distances = make([]float32, maxResults)
+	if maxResults == 0 {
+		return nil, nil, errors.New("maxResults must be greater than zero")
+	}
+	keys = make([]Key, queryCount*maxResults)
+	distances = make([]float32, queryCount*maxResults)
+	resultKeysStride := uint32(maxResults * 8)      // int64 - 8 bytes
+	resultDistancesStride := uint32(maxResults * 4) // float32 - 4 bytes
 	var errorMessage *C.char
 	C.usearch_exact_search(unsafe.Pointer(&dataset[0]), C.size_t(datasetSize), C.size_t(datasetStride), unsafe.Pointer(&queries[0]), C.size_t(queryCount), C.size_t(queryStride),
 		C.usearch_scalar_i8_k, C.size_t(vectorDimensions), metric.CValue(), C.size_t(maxResults), C.size_t(numThreads),
@@ -872,15 +1230,13 @@ func ExactSearchI8(dataset []int8, queries []int8, datasetSize uint, queryCount 
 	if errorMessage != nil {
 		return nil, nil, errors.New(C.GoString(errorMessage))
 	}
-	keys = keys[:maxResults]
-	distances = distances[:maxResults]
 	return keys, distances, nil
 }
 
 // SaveBuffer serializes the index into a byte buffer.
 // The buffer must be large enough to hold the serialized index.
 // Use SerializedLength() to determine the required buffer size.
-func (index *Index) SaveBuffer(buf []byte, buffer_size uint) error {
+func (index *Index) SaveBuffer(buf []byte, bufferSize uint) error {
 	if index.handle == nil {
 		panic("index is uninitialized")
 	}
@@ -888,12 +1244,12 @@ func (index *Index) SaveBuffer(buf []byte, buffer_size uint) error {
 	if len(buf) == 0 {
 		return errors.New("buffer cannot be empty")
 	}
-	if uint(len(buf)) < buffer_size {
-		return fmt.Errorf("buffer too small: has %d bytes, need %d", len(buf), buffer_size)
+	if uint(len(buf)) < bufferSize {
+		return fmt.Errorf("buffer too small: has %d bytes, need %d", len(buf), bufferSize)
 	}
 
 	var errorMessage *C.char
-	C.usearch_save_buffer(index.handle, unsafe.Pointer(&buf[0]), C.size_t(buffer_size), (*C.usearch_error_t)(&errorMessage))
+	C.usearch_save_buffer(index.handle, unsafe.Pointer(&buf[0]), C.size_t(bufferSize), (*C.usearch_error_t)(&errorMessage))
 	runtime.KeepAlive(buf)
 	if errorMessage != nil {
 		return errors.New(C.GoString(errorMessage))
@@ -903,7 +1259,7 @@ func (index *Index) SaveBuffer(buf []byte, buffer_size uint) error {
 
 // LoadBuffer loads a serialized index from a byte buffer.
 // The buffer must contain a valid serialized index.
-func (index *Index) LoadBuffer(buf []byte, buffer_size uint) error {
+func (index *Index) LoadBuffer(buf []byte, bufferSize uint) error {
 	if index.handle == nil {
 		panic("index is uninitialized")
 	}
@@ -911,12 +1267,12 @@ func (index *Index) LoadBuffer(buf []byte, buffer_size uint) error {
 	if len(buf) == 0 {
 		return errors.New("buffer cannot be empty")
 	}
-	if uint(len(buf)) < buffer_size {
-		return fmt.Errorf("buffer too small: has %d bytes, need %d", len(buf), buffer_size)
+	if uint(len(buf)) < bufferSize {
+		return fmt.Errorf("buffer too small: has %d bytes, need %d", len(buf), bufferSize)
 	}
 
 	var errorMessage *C.char
-	C.usearch_load_buffer(index.handle, unsafe.Pointer(&buf[0]), C.size_t(buffer_size), (*C.usearch_error_t)(&errorMessage))
+	C.usearch_load_buffer(index.handle, unsafe.Pointer(&buf[0]), C.size_t(bufferSize), (*C.usearch_error_t)(&errorMessage))
 	runtime.KeepAlive(buf)
 	if errorMessage != nil {
 		return errors.New(C.GoString(errorMessage))
@@ -927,7 +1283,7 @@ func (index *Index) LoadBuffer(buf []byte, buffer_size uint) error {
 // ViewBuffer creates a view of a serialized index without copying the data.
 // The buffer must remain valid for the lifetime of the index.
 // Changes to the buffer will affect the index.
-func (index *Index) ViewBuffer(buf []byte, buffer_size uint) error {
+func (index *Index) ViewBuffer(buf []byte, bufferSize uint) error {
 	if index.handle == nil {
 		panic("index is uninitialized")
 	}
@@ -935,12 +1291,12 @@ func (index *Index) ViewBuffer(buf []byte, buffer_size uint) error {
 	if len(buf) == 0 {
 		return errors.New("buffer cannot be empty")
 	}
-	if uint(len(buf)) < buffer_size {
-		return fmt.Errorf("buffer too small: has %d bytes, need %d", len(buf), buffer_size)
+	if uint(len(buf)) < bufferSize {
+		return fmt.Errorf("buffer too small: has %d bytes, need %d", len(buf), bufferSize)
 	}
 
 	var errorMessage *C.char
-	C.usearch_view_buffer(index.handle, unsafe.Pointer(&buf[0]), C.size_t(buffer_size), (*C.usearch_error_t)(&errorMessage))
+	C.usearch_view_buffer(index.handle, unsafe.Pointer(&buf[0]), C.size_t(bufferSize), (*C.usearch_error_t)(&errorMessage))
 	runtime.KeepAlive(buf)
 	if errorMessage != nil {
 		return errors.New(C.GoString(errorMessage))
@@ -950,19 +1306,19 @@ func (index *Index) ViewBuffer(buf []byte, buffer_size uint) error {
 
 // MetadataBuffer extracts index configuration metadata from a serialized buffer.
 // This can be used to inspect an index before loading it.
-func MetadataBuffer(buf []byte, buffer_size uint) (c IndexConfig, err error) {
+func MetadataBuffer(buf []byte, bufferSize uint) (c IndexConfig, err error) {
 	if len(buf) == 0 {
 		return c, errors.New("buffer cannot be empty")
 	}
-	if uint(len(buf)) < buffer_size {
-		return c, fmt.Errorf("buffer too small: has %d bytes, need %d", len(buf), buffer_size)
+	if uint(len(buf)) < bufferSize {
+		return c, fmt.Errorf("buffer too small: has %d bytes, need %d", len(buf), bufferSize)
 	}
 	c = IndexConfig{}
 
 	options := C.struct_usearch_init_options_t{}
 
 	var errorMessage *C.char
-	C.usearch_metadata_buffer(unsafe.Pointer(&buf[0]), C.size_t(buffer_size), &options, (*C.usearch_error_t)(&errorMessage))
+	C.usearch_metadata_buffer(unsafe.Pointer(&buf[0]), C.size_t(bufferSize), &options, (*C.usearch_error_t)(&errorMessage))
 	runtime.KeepAlive(buf)
 	if errorMessage != nil {
 		return c, errors.New(C.GoString(errorMessage))
@@ -1006,6 +1362,8 @@ func MetadataBuffer(buf []byte, buffer_size uint) (c IndexConfig, err error) {
 		c.Quantization = I8
 	case C.usearch_scalar_b1_k:
 		c.Quantization = B1
+	case C.usearch_scalar_bf16_k:
+		c.Quantization = BF16
 	}
 
 	return c, nil
@@ -1018,13 +1376,13 @@ func Metadata(path string) (c IndexConfig, err error) {
 		return c, errors.New("path cannot be empty")
 	}
 
-	c_path := C.CString(path)
-	defer C.free(unsafe.Pointer(c_path))
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
 
 	options := C.struct_usearch_init_options_t{}
 
 	var errorMessage *C.char
-	C.usearch_metadata(c_path, &options, (*C.usearch_error_t)(&errorMessage))
+	C.usearch_metadata(cPath, &options, (*C.usearch_error_t)(&errorMessage))
 	if errorMessage != nil {
 		return c, errors.New(C.GoString(errorMessage))
 	}
@@ -1067,6 +1425,8 @@ func Metadata(path string) (c IndexConfig, err error) {
 		c.Quantization = I8
 	case C.usearch_scalar_b1_k:
 		c.Quantization = B1
+	case C.usearch_scalar_bf16_k:
+		c.Quantization = BF16
 	}
 
 	return c, nil
@@ -1078,11 +1438,11 @@ func (index *Index) Save(path string) error {
 		panic("index is uninitialized")
 	}
 
-	c_path := C.CString(path)
-	defer C.free(unsafe.Pointer(c_path))
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
 
 	var errorMessage *C.char
-	C.usearch_save((C.usearch_index_t)(unsafe.Pointer(index.handle)), c_path, (*C.usearch_error_t)(&errorMessage))
+	C.usearch_save(index.handle, cPath, (*C.usearch_error_t)(&errorMessage))
 	if errorMessage != nil {
 		return errors.New(C.GoString(errorMessage))
 	}
@@ -1095,11 +1455,11 @@ func (index *Index) Load(path string) error {
 		panic("index is uninitialized")
 	}
 
-	c_path := C.CString(path)
-	defer C.free(unsafe.Pointer(c_path))
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
 
 	var errorMessage *C.char
-	C.usearch_load((C.usearch_index_t)(unsafe.Pointer(index.handle)), c_path, (*C.usearch_error_t)(&errorMessage))
+	C.usearch_load(index.handle, cPath, (*C.usearch_error_t)(&errorMessage))
 	if errorMessage != nil {
 		return errors.New(C.GoString(errorMessage))
 	}
@@ -1112,11 +1472,11 @@ func (index *Index) View(path string) error {
 		panic("index is uninitialized")
 	}
 
-	c_path := C.CString(path)
-	defer C.free(unsafe.Pointer(c_path))
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
 
 	var errorMessage *C.char
-	C.usearch_view((C.usearch_index_t)(unsafe.Pointer(index.handle)), c_path, (*C.usearch_error_t)(&errorMessage))
+	C.usearch_view(index.handle, cPath, (*C.usearch_error_t)(&errorMessage))
 	if errorMessage != nil {
 		return errors.New(C.GoString(errorMessage))
 	}

@@ -4,6 +4,7 @@
 // We don't have to forward declare all of those:
 struct Matches;
 struct IndexOptions;
+struct MemoryStats;
 enum class MetricKind;
 enum class ScalarKind;
 
@@ -29,18 +30,21 @@ class NativeIndex {
 
     void add_b1x8(vector_key_t key, rust::Slice<uint8_t const> vector) const;
     void add_i8(vector_key_t key, rust::Slice<int8_t const> vector) const;
+    void add_u8(vector_key_t key, rust::Slice<uint8_t const> vector) const;
     void add_f16(vector_key_t key, rust::Slice<int16_t const> vector) const;
     void add_f32(vector_key_t key, rust::Slice<float const> vector) const;
     void add_f64(vector_key_t key, rust::Slice<double const> vector) const;
 
     Matches search_b1x8(rust::Slice<uint8_t const> query, size_t count) const;
     Matches search_i8(rust::Slice<int8_t const> query, size_t count) const;
+    Matches search_u8(rust::Slice<uint8_t const> query, size_t count) const;
     Matches search_f16(rust::Slice<int16_t const> query, size_t count) const;
     Matches search_f32(rust::Slice<float const> query, size_t count) const;
     Matches search_f64(rust::Slice<double const> query, size_t count) const;
 
     Matches exact_search_b1x8(rust::Slice<uint8_t const> query, size_t count) const;
     Matches exact_search_i8(rust::Slice<int8_t const> query, size_t count) const;
+    Matches exact_search_u8(rust::Slice<uint8_t const> query, size_t count) const;
     Matches exact_search_f16(rust::Slice<int16_t const> query, size_t count) const;
     Matches exact_search_f32(rust::Slice<float const> query, size_t count) const;
     Matches exact_search_f64(rust::Slice<double const> query, size_t count) const;
@@ -48,6 +52,7 @@ class NativeIndex {
     // clang-format off
     Matches filtered_search_b1x8(rust::Slice<uint8_t const> query, size_t count, uptr_t filter_function, uptr_t filter_state) const;
     Matches filtered_search_i8(rust::Slice<int8_t const> query, size_t count, uptr_t filter_function, uptr_t filter_state) const;
+    Matches filtered_search_u8(rust::Slice<uint8_t const> query, size_t count, uptr_t filter_function, uptr_t filter_state) const;
     Matches filtered_search_f16(rust::Slice<int16_t const> query, size_t count, uptr_t filter_function, uptr_t filter_state) const;
     Matches filtered_search_f32(rust::Slice<float const> query, size_t count, uptr_t filter_function, uptr_t filter_state) const;
     Matches filtered_search_f64(rust::Slice<double const> query, size_t count, uptr_t filter_function, uptr_t filter_state) const;
@@ -55,6 +60,7 @@ class NativeIndex {
 
     size_t get_b1x8(vector_key_t key, rust::Slice<uint8_t> vector) const;
     size_t get_i8(vector_key_t key, rust::Slice<int8_t> vector) const;
+    size_t get_u8(vector_key_t key, rust::Slice<uint8_t> vector) const;
     size_t get_f16(vector_key_t key, rust::Slice<int16_t> vector) const;
     size_t get_f32(vector_key_t key, rust::Slice<float> vector) const;
     size_t get_f64(vector_key_t key, rust::Slice<double> vector) const;
@@ -83,6 +89,7 @@ class NativeIndex {
     void view(rust::Str path) const;
     void reset() const;
     size_t memory_usage() const;
+    MemoryStats memory_stats() const;
     char const* hardware_acceleration() const;
 
     void save_to_buffer(rust::Slice<uint8_t> buffer) const;
@@ -94,3 +101,6 @@ class NativeIndex {
 };
 
 std::unique_ptr<NativeIndex> new_native_index(IndexOptions const& options);
+
+char const* hardware_acceleration_compiled();
+char const* hardware_acceleration_available();

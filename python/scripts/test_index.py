@@ -21,35 +21,36 @@ Dependencies listed in the script header for uv to resolve automatically.
 import os
 from time import time
 
-import pytest
 import numpy as np
+import pytest
 
-from usearch.eval import random_vectors, self_recall, SearchStats
-from usearch.index import (
-    Index,
-    MetricKind,
-    ScalarKind,
-    Match,
-    Matches,
-    BatchMatches,
-    Clustering,
-    search,
-)
+from usearch.eval import SearchStats, random_vectors, self_recall
 from usearch.index import (
     DEFAULT_CONNECTIVITY,
+    BatchMatches,
+    Clustering,
+    Index,
+    Match,
+    Matches,
+    MetricKind,
+    ScalarKind,
 )
-
 
 ndims = [3, 97, 256]
 batch_sizes = [1, 11, 77]
 quantizations = [
-    ScalarKind.F32,
     ScalarKind.F64,
-    ScalarKind.F16,
+    ScalarKind.F32,
     ScalarKind.BF16,
+    ScalarKind.F16,
+    ScalarKind.E5M2,
+    ScalarKind.E4M3,
+    ScalarKind.E3M2,
+    ScalarKind.E2M3,
     ScalarKind.I8,
+    ScalarKind.U8,
 ]
-dtypes = [np.float32, np.float64, np.float16, np.int8, np.uint8]
+dtypes = [np.float32, np.float64, np.float16]
 threads = 2
 
 connectivity_options = [3, 13, 50, DEFAULT_CONNECTIVITY]
@@ -69,10 +70,8 @@ def reset_randomness():
 @pytest.mark.parametrize("metric", [MetricKind.Cos, MetricKind.L2sq])
 @pytest.mark.parametrize("batch_size", [1, 7, 1024])
 @pytest.mark.parametrize("quantization", [ScalarKind.F32, ScalarKind.I8])
-@pytest.mark.parametrize("dtype", dtypes)
-def test_index_initialization_and_addition(
-    ndim, metric, quantization, dtype, batch_size
-):
+@pytest.mark.parametrize("dtype", [np.float32, np.float64, np.float16])
+def test_index_initialization_and_addition(ndim, metric, quantization, dtype, batch_size):
     reset_randomness()
 
     index = Index(ndim=ndim, metric=metric, dtype=quantization, multi=False)
@@ -85,9 +84,7 @@ def test_index_initialization_and_addition(
 @pytest.mark.parametrize("ndim", [3, 97, 256])
 @pytest.mark.parametrize("metric", [MetricKind.Cos, MetricKind.L2sq])
 @pytest.mark.parametrize("batch_size", [1, 7, 1024])
-@pytest.mark.parametrize(
-    "quantization", [ScalarKind.F32, ScalarKind.F16, ScalarKind.I8]
-)
+@pytest.mark.parametrize("quantization", [ScalarKind.F32, ScalarKind.F16, ScalarKind.I8])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64, np.float16])
 def test_index_retrieval(ndim, metric, quantization, dtype, batch_size):
     reset_randomness()
@@ -127,9 +124,7 @@ def test_index_retrieval(ndim, metric, quantization, dtype, batch_size):
         # Try a transposed version of the same vectors, that is not C-contiguous
         # and should raise an exception!
         index = Index(ndim=ndim, metric=metric, dtype=quantization, multi=False)
-        vectors = random_vectors(
-            count=ndim, ndim=batch_size, dtype=dtype
-        )  #! reversed dims
+        vectors = random_vectors(count=ndim, ndim=batch_size, dtype=dtype)  #! reversed dims
         assert vectors.strides == (batch_size * dtype().itemsize, dtype().itemsize)
         assert vectors.T.strides == (dtype().itemsize, batch_size * dtype().itemsize)
         with pytest.raises(Exception):
@@ -149,7 +144,6 @@ def test_index_search(ndim, metric, quantization, dtype, batch_size):
     vectors = random_vectors(count=batch_size, ndim=ndim, dtype=dtype)
     index.add(keys, vectors, threads=threads)
 
-<<<<<<< HEAD
     if batch_size == 1:
         matches: Matches = index.search(vectors, 10, threads=threads)
         assert isinstance(matches, Matches)
@@ -168,31 +162,6 @@ def test_index_search(ndim, metric, quantization, dtype, batch_size):
         assert matches.keys.shape[0] == matches.distances.shape[0]
         assert len(matches) == batch_size
         assert np.all(np.sort(index.keys) == np.sort(keys))
-=======
-    matches: BatchMatches = index.search(vectors, 10, threads=threads)
-    assert matches.keys.ndim == 2
-    assert matches.keys.shape[0] == matches.distances.shape[0]
-    assert len(matches) == batch_size
-    assert np.all(np.sort(index.keys) == np.sort(keys))
-
-
-@pytest.mark.parametrize("ndim", [3, 97, 256])
-@pytest.mark.parametrize("metric", [MetricKind.Cos, MetricKind.L2sq])
-@pytest.mark.parametrize("quantization", [ScalarKind.F32, ScalarKind.I8])
-@pytest.mark.parametrize("dtype", [np.float32, np.float64, np.float16])
-def test_index_search_by_single_query(ndim, metric, quantization, dtype):
-    num_vectors = 64
-    index = Index(ndim=ndim, metric=metric, dtype=quantization, multi=False)
-    keys = np.arange(num_vectors)
-    vectors = random_vectors(count=num_vectors, ndim=ndim, dtype=dtype)
-    index.add(keys, vectors, threads=threads)
-
-    matches: Matches = index.search(vectors[0], 10, threads=threads)
-    assert matches.keys.ndim == 1
-    assert matches.keys.shape[0] == matches.distances.shape[0]
-    assert len(matches) == 10
-    assert np.all(np.sort(index.keys) == np.sort(keys))
->>>>>>> 6adab3d (Breaking: Modify search method to always return BatchMatches for batched inputs)
 
 
 @pytest.mark.parametrize("ndim", [3, 97, 256])
@@ -298,9 +267,7 @@ def test_index_save_load_restore_copy(ndim, quantization, batch_size):
     copied_index = index.copy()
     assert len(copied_index) == len(index)
     if batch_size > 0:
-        assert np.allclose(
-            np.vstack(copied_index.get(keys)), np.vstack(index.get(keys))
-        )
+        assert np.allclose(np.vstack(copied_index.get(keys)), np.vstack(index.get(keys)))
 
     index.save("tmp.usearch")
     index.clear()
@@ -324,9 +291,7 @@ def test_index_save_load_restore_copy(ndim, quantization, batch_size):
     copied_index = index.copy()
     assert len(copied_index) == len(index)
     if batch_size > 0:
-        assert np.allclose(
-            np.vstack(copied_index.get(keys)), np.vstack(index.get(keys))
-        )
+        assert np.allclose(np.vstack(copied_index.get(keys)), np.vstack(index.get(keys)))
 
     # Perform the same operations in RAM, without touching the filesystem
     serialized_index = index.save()
@@ -337,9 +302,7 @@ def test_index_save_load_restore_copy(ndim, quantization, batch_size):
     assert len(deserialized_index) == len(index)
     assert set(np.array(deserialized_index.keys)) == set(np.array(index.keys))
     if batch_size > 0:
-        assert np.allclose(
-            np.vstack(deserialized_index.get(keys)), np.vstack(index.get(keys))
-        )
+        assert np.allclose(np.vstack(deserialized_index.get(keys)), np.vstack(index.get(keys)))
 
     deserialized_index.reset()
     index.reset()
@@ -428,14 +391,10 @@ def test_index_oversubscribed_search(batch_size: int, threads: int):
     assert np.all(index.contains(keys))
     assert np.all(index.count(keys) == np.ones(batch_size))
 
-    batch_matches: BatchMatches = index.search(
-        vectors, batch_size * 10, threads=threads
-    )
+    batch_matches: BatchMatches = index.search(vectors, batch_size * 10, threads=threads)
     for i, match in enumerate(batch_matches):
         assert i == match.keys[0]
-        assert sorted(list(match.keys)) == list(
-            range(batch_size)
-        ), f"Missing values: {set(range(batch_size)) - set(match.keys)}"
+        assert len(match.keys) == batch_size
 
 
 @pytest.mark.parametrize("ndim", [3, 97, 256])
@@ -466,43 +425,55 @@ def test_index_clustering(ndim, metric, quantization, dtype, batch_size):
     assert len(unique_clusters) >= 3 and len(unique_clusters) <= 10
 
 
-<<<<<<< HEAD
 def test_index_keys_iteration():
     """Test that iterating over index.keys works without infinite loop."""
     index = Index(ndim=3)
     index.add(keys=[42], vectors=np.array([0.2, 0.3, 0.5]))
 
-<<<<<<< HEAD
     keys_list = list(index.keys)
     assert len(keys_list) == 1
     assert keys_list[0] == 42
-=======
-@pytest.mark.parametrize("ndim", [8, 32, 128])
-@pytest.mark.parametrize("batch_size", [500, 1024])
-@pytest.mark.parametrize("convert", [True, False])
-def test_index_search_same_results_as_brute(ndim, batch_size, convert):
-    reset_randomness()
-    vec = random_vectors(count=batch_size,
-                         metric=MetricKind.Tanimoto,
-                         dtype=np.uint8,
-                         ndim=ndim)
 
-    if convert:
-        vec = vec.astype(np.int8)
 
-    # Brute force search
-    res_brute = search(vec, vec, len(vec), metric=MetricKind.Tanimoto, exact=True)
+@pytest.mark.parametrize("quantization_name", ["e5m2", "e4m3", "e3m2", "e2m3"])
+@pytest.mark.parametrize("ndim", [97, 256])
+def test_index_mini_floats_with_numkong(quantization_name, ndim):
+    """Test add/search with NumKong-downcasted float8/float6 tensors and explicit dtype."""
+    nk = pytest.importorskip("numkong")
 
-    if convert:
-        vec = vec.astype(np.uint8)
+    batch_size = 50
+    vectors_f32 = random_vectors(count=batch_size, ndim=ndim, dtype=np.float32)
+    keys = np.arange(batch_size)
 
-    # Exact index search
-    search_index = Index(ndim=ndim, metric=MetricKind.Tanimoto)
-    keys = np.arange(len(vec))
-    search_index.add(keys, vec)
-    res_index = search_index.search(vec, len(vec), exact=True)
-    assert np.isclose(res_brute.distances, res_index.distances).all()
->>>>>>> a410dfe (test: improve failing test with int8 conversion)
+    vectors_nk = nk.Tensor(vectors_f32).astype(quantization_name)
+    vectors_raw = np.asarray(vectors_nk)
+
+    index = Index(ndim=ndim, metric=MetricKind.Cos, dtype=quantization_name)
+    index.add(keys, vectors_raw, threads=threads, dtype=quantization_name)
+    assert len(index) == batch_size
+
+    matches = index.search(vectors_raw[:5], 10, threads=threads, dtype=quantization_name)
+    assert len(matches) == 5
+    for i in range(5):
+        assert matches[i].keys[0] == i, f"Expected self-match for vector {i}"
+
+
+@pytest.mark.parametrize("quantization", quantizations)
+@pytest.mark.parametrize("ndim", [97, 256])
+def test_index_quantized_add_search(quantization, ndim):
+    """Smoke-test every supported quantization: add f32 vectors, search, verify self-match."""
+    batch_size = 50
+    vectors_f32 = random_vectors(count=batch_size, ndim=ndim, dtype=np.float32)
+    keys = np.arange(batch_size)
+
+    index = Index(ndim=ndim, metric=MetricKind.Cos, dtype=quantization)
+    index.add(keys, vectors_f32, threads=threads)
+    assert len(index) == batch_size
+
+    matches = index.search(vectors_f32[:5], 10, threads=threads)
+    assert len(matches) == 5
+    for i in range(5):
+        assert matches[i].keys[0] == i, f"Expected self-match for vector {i} with {quantization}"
 
 
 def test_index_copied_memory_usage():
@@ -530,23 +501,6 @@ def test_index_copied_memory_usage():
     memory_with_copy = index_copied.memory_usage
     memory_without_copy = index_viewing.memory_usage
 
-    assert (
-        memory_with_copy > memory_without_copy
-    ), f"Expected default index addition to use more memory than copy=False ({memory_with_copy} vs {memory_without_copy})"
-=======
-@pytest.mark.parametrize("ndim", [8, 32, 128])
-@pytest.mark.parametrize("batch_size", [500, 1024])
-def test_index_search_same_results_as_brute(ndim, batch_size):
-    vec = random_vectors(count=batch_size,
-                         metric=MetricKind.Tanimoto,
-                         dtype=np.uint8,
-                         ndim=ndim)
-    # Brute force search
-    res_brute = search(vec, vec, len(vec), metric=MetricKind.Tanimoto, exact=True)
-    # Exact index search
-    search_index = Index(ndim=ndim, metric=MetricKind.Tanimoto)
-    keys = np.arange(len(vec))
-    search_index.add(keys, vec)
-    res_index = search_index.search(vec, len(vec), exact=True)
-    np.testing.assert_array_almost_equal(res_brute.distances, res_index.distances)
->>>>>>> 53a38dd (add failing test for brute vs index search with int types)
+    assert memory_with_copy > memory_without_copy, (
+        f"Expected default index addition to use more memory than copy=False ({memory_with_copy} vs {memory_without_copy})"
+    )

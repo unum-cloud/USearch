@@ -7,7 +7,7 @@ including I/O operations, matrix handling, and helper functions.
 
 Usage:
     uv run python/scripts/test_tooling.py
-    
+
 Dependencies listed in the script header for uv to resolve automatically.
 """
 # /// script
@@ -20,16 +20,12 @@ Dependencies listed in the script header for uv to resolve automatically.
 
 import os
 
-import pytest
 import numpy as np
+import pytest
 
-import usearch
-from usearch.io import load_matrix, save_matrix
-from usearch.index import search
 from usearch.eval import random_vectors
-
-from usearch.index import Match, Matches, BatchMatches, Index, Indexes, kmeans
-
+from usearch.index import BatchMatches, Index, Indexes, Match, Matches, kmeans, search
+from usearch.io import load_matrix, save_matrix
 
 dimensions = [3, 97, 256]
 batch_sizes = [1, 77, 100]
@@ -91,17 +87,7 @@ def test_exact_search(rows: int, cols: int, k: int, reordered: bool):
         reordered_keys = keys
 
     matches: BatchMatches = search(original, original[reordered_keys], k, exact=True)
-<<<<<<< HEAD
-<<<<<<< HEAD
     top_matches = [int(m.keys[0]) for m in matches] if rows > 1 else [int(matches.keys[0])]
-=======
-    top_matches = (
-        [int(m.keys[0]) for m in matches] if rows > 1 else [int(matches.keys[0][0])]
-    )
->>>>>>> 6adab3d (Breaking: Modify search method to always return BatchMatches for batched inputs)
-=======
-    top_matches = [int(m.keys[0]) for m in matches]
->>>>>>> 52a6e44 (Refactor: Align with updated search method behavior)
     assert top_matches == list(reordered_keys)
 
     matches: Matches = search(original, original[-1], k, exact=True)

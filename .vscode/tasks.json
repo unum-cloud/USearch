@@ -2,13 +2,8 @@
     "version": "2.0.0",
     "tasks": [
         {
-<<<<<<< HEAD
             "label": "Linux Build Debug",
-            "command": "cmake -DCMAKE_CXX_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12 -DUSEARCH_BUILD_TEST_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=0 -DUSEARCH_USE_SIMSIMD=1 -DUSEARCH_USE_JEMALLOC=1 -DCMAKE_BUILD_TYPE=Debug -B ./build_debug && cmake --build ./build_debug --config Debug",
-=======
-            "label": "Linux Build C++ Bench Debug",
-            "command": "cmake -DCMAKE_CXX_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12 -DCMAKE_BUILD_TYPE=Debug -B ./build_debug && make bench -C ./build_debug",
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
+            "command": "cmake -DCMAKE_CXX_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12 -DUSEARCH_BUILD_TEST_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=1 -DCMAKE_BUILD_TYPE=Debug -B ./build_debug && cmake --build ./build_debug --config Debug",
             "args": [],
             "type": "shell",
             "problemMatcher": [
@@ -16,13 +11,8 @@
             ]
         },
         {
-<<<<<<< HEAD
             "label": "Linux Build Release",
-            "command": "cmake -DCMAKE_CXX_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12 -DUSEARCH_BUILD_TEST_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=0 -DUSEARCH_USE_SIMSIMD=1 -DUSEARCH_USE_JEMALLOC=1 -DCMAKE_BUILD_TYPE=Release -B ./build_release && cmake --build ./build_release --config RelWithDebInfo",
-=======
-            "label": "Linux Build C++ Bench Release",
-            "command": "cmake -DCMAKE_CXX_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12 -DCMAKE_BUILD_TYPE=RelWithDebInfo -B ./build_release && make bench -C ./build_release",
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
+            "command": "cmake -DCMAKE_CXX_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12 -DUSEARCH_BUILD_TEST_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=1 -DCMAKE_BUILD_TYPE=Release -B ./build_release && cmake --build ./build_release --config RelWithDebInfo",
             "args": [],
             "type": "shell",
             "problemMatcher": [
@@ -30,26 +20,20 @@
             ]
         },
         {
-<<<<<<< HEAD
             "label": "MacOS Build Debug",
-            "command": "cmake -DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++ -DUSEARCH_BUILD_TEST_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_SIMSIMD=1 -DUSEARCH_USE_JEMALLOC=0 -DCMAKE_BUILD_TYPE=Debug -B ./build_debug && cmake --build ./build_debug --config Debug",
-=======
-            "label": "MacOS Build C++ Bench Debug",
-            "command": "cmake -DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++ -DCMAKE_BUILD_TYPE=Debug -B ./build_debug && make bench -C ./build_debug",
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
+            "command": "cmake -DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++ -DUSEARCH_BUILD_TEST_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=0 -DCMAKE_BUILD_TYPE=Debug -B ./build_debug && cmake --build ./build_debug --config Debug",
             "args": [],
-            "type": "shell",
+            "type": "shell"
         },
         {
-<<<<<<< HEAD
             "label": "MacOS Build Release",
-            "command": "cmake -DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++ -DUSEARCH_BUILD_TEST_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_SIMSIMD=1 -DUSEARCH_USE_JEMALLOC=0 -DCMAKE_BUILD_TYPE=Release -B ./build_release && cmake --build ./build_release --config RelWithDebInfo",
+            "command": "cmake -DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++ -DUSEARCH_BUILD_TEST_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=0 -DCMAKE_BUILD_TYPE=Release -B ./build_release && cmake --build ./build_release --config RelWithDebInfo",
             "args": [],
             "type": "shell"
         },
         {
             "label": "Windows Build Debug",
-            "command": "cmake -DUSEARCH_BUILD_TEST_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_SIMSIMD=1 -DUSEARCH_USE_JEMALLOC=0 -DCMAKE_BUILD_TYPE=Debug -B ./build_debug && cmake --build ./build_debug --config Debug",
+            "command": "cmake -DUSEARCH_BUILD_TEST_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=0 -DCMAKE_BUILD_TYPE=Debug -B ./build_debug && cmake --build ./build_debug --config Debug",
             "args": [],
             "type": "shell",
             "problemMatcher": [
@@ -67,7 +51,7 @@
         },
         {
             "label": "Windows Build Release",
-            "command": "cmake -DUSEARCH_BUILD_TEST_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_SIMSIMD=1 -DUSEARCH_USE_JEMALLOC=0 -DCMAKE_BUILD_TYPE=Release -B ./build_release && cmake --build ./build_release --config RelWithDebInfo",
+            "command": "cmake -DUSEARCH_BUILD_TEST_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=0 -DCMAKE_BUILD_TYPE=Release -B ./build_release && cmake --build ./build_release --config RelWithDebInfo",
             "args": [],
             "type": "shell",
             "problemMatcher": [
@@ -88,17 +72,11 @@
             "type": "swift",
             "args": [
                 "build",
-                "--build-tests",
+                "--build-tests"
             ],
             "env": {},
             "cwd": "${workspaceFolder}",
             "group": "build"
-=======
-            "label": "MacOS Build C++ Bench Release",
-            "command": "cmake -DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++ -DCMAKE_BUILD_TYPE=RelWithDebInfo -B ./build_release && make bench -C ./build_release",
-            "args": [],
-            "type": "shell"
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
         }
     ]
 }

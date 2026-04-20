@@ -2,18 +2,19 @@ name: Pre-Release
 
 on:
   push:
-    branches: ['main-dev']
+    branches: ["main-dev"]
   pull_request:
-    branches: ['main-dev']
+    branches: ["main-dev"]
 
 env:
   GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
   PYTHONUTF8: 1
+  PYTHONFAULTHANDLER: 1
   PYTHON_VERSION: 3.11
   DOTNET_VERSION: 8.0.x
   NODE_VERSION: 20
   JAVA_VERSION: 21
-  GO_VERSION: '^1.21.0'
+  GO_VERSION: "^1.22.0"
   ANDROID_NDK_VERSION: 26.3.11579264
   ANDROID_SDK_VERSION: 21
 
@@ -27,21 +28,19 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Run TinySemVer
-        uses: ashvardanian/tinysemver@v2.1.1
+        uses: ashvardanian/tinysemver@v3.0.0
         with:
-          verbose: 'true'
-          version-file: 'VERSION'
+          verbose: "true"
+          version-file: "VERSION"
           update-version-in: |
             package.json:"version": "(\d+\.\d+\.\d+)"
-            package-lock.json:"usearch",\n\s+"version": "(\d+\.\d+\.\d+)"
             CITATION.cff:^version: (\d+\.\d+\.\d+)
             Cargo.toml:^version = "(\d+\.\d+\.\d+)"
-            Cargo.lock:name = "usearch"\nversion = "(\d+\.\d+\.\d+)"
             wasmer.toml:^version = "(\d+\.\d+\.\d+)"
             conanfile.py:version = "(\d+\.\d+\.\d+)"
             java/README.md:usearchVersion = '(\d+\.\d+\.\d+)'
@@ -55,7 +54,7 @@ jobs:
             include/usearch/index.hpp:^#define USEARCH_VERSION_MINOR (\d+)
           update-patch-version-in: |
             include/usearch/index.hpp:^#define USEARCH_VERSION_PATCH (\d+)
-          dry-run: 'true'
+          dry-run: "true"
 
   test_ubuntu_gcc:
     name: Ubuntu (GCC 14)
@@ -65,7 +64,8 @@ jobs:
       CXX: g++
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -73,8 +73,8 @@ jobs:
       - name: Build C/C++
         run: |
           sudo apt update
-          sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev gcc-12 g++-12
-          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=1 -D USEARCH_USE_OPENMP=1 -D USEARCH_USE_SIMSIMD=1 -D USEARCH_USE_JEMALLOC=1
+          sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev
+          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=1 -D USEARCH_USE_OPENMP=1 -D USEARCH_USE_NUMKONG=1 -D USEARCH_USE_JEMALLOC=1
           cmake --build build_artifacts --config RelWithDebInfo
       - name: Test C++
         run: build_artifacts/test_cpp
@@ -83,25 +83,25 @@ jobs:
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
         run: |
           python -m pip install --upgrade pip
           pip install pytest pytest-repeat numpy numba cppyy
-          pip install --upgrade git+https://github.com/Maratyszcza/PeachPy
+
           python -m pip install .
       - name: Test Python
         run: pytest
 
         # JavaScript
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
-        run: npm ci --skip-scripts
+        run: npm install --skip-scripts
       - name: Build JavaScript
         run: npm run build-js
       - name: Test JavaScript
@@ -112,7 +112,10 @@ jobs:
         run: |
           rustup update stable
           rustup default stable
+          rustup component add clippy
           rustc -vV
+      - name: Lint Rust
+        run: cargo clippy --all-targets -- -D warnings
       - name: Build Rust
         run: cargo build
       - name: Test Rust
@@ -123,9 +126,9 @@ jobs:
         uses: actions/setup-java@v5
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: 'adopt'
+          distribution: "adopt"
       - name: Setup Gradle
-        uses: gradle/gradle-build-action@v2.4.2
+        uses: gradle/actions/setup-gradle@v5
       - name: Check Java formatting
         run: gradle spotlessCheck
       - name: Test Java
@@ -133,7 +136,7 @@ jobs:
 
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
@@ -154,24 +157,24 @@ jobs:
         working-directory: ${{ github.workspace }}/golang/
 
   test_ubuntu_clang:
-    name: Ubuntu (Clang 18)
+    name: Ubuntu (Clang 20)
     runs-on: ubuntu-24.04
     env:
-      CC: clang
-      CXX: clang++
+      CC: clang-20
+      CXX: clang++-20
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
         # C/C++
-        # Clang 16 isn't available from default repos on Ubuntu 22.04, so we have to install it manually
       - name: Build C/C++
         run: |
           sudo apt update
-          sudo apt install -y cmake build-essential libjemalloc-dev clang
-          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=1 -D USEARCH_USE_OPENMP=0 -D USEARCH_USE_SIMSIMD=1 -D USEARCH_USE_JEMALLOC=1
+          sudo apt install -y cmake build-essential libjemalloc-dev clang-20
+          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=1 -D USEARCH_USE_OPENMP=0 -D USEARCH_USE_NUMKONG=1 -D USEARCH_USE_JEMALLOC=1
           cmake --build build_artifacts --config RelWithDebInfo
       - name: Test C++
         run: build_artifacts/test_cpp
@@ -180,11 +183,11 @@ jobs:
 
         # JavaScript
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
-        run: npm ci --skip-scripts
+        run: npm install --skip-scripts
       - name: Build JavaScript
         run: npm run build-js
       - name: Test JavaScript
@@ -192,14 +195,14 @@ jobs:
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
         run: |
           python -m pip install --upgrade pip
           pip install pytest pytest-repeat numpy numba cppyy
-          pip install --upgrade git+https://github.com/Maratyszcza/PeachPy
+
           python -m pip install .
         env:
           CXX: clang++
@@ -220,7 +223,7 @@ jobs:
 
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
@@ -232,11 +235,12 @@ jobs:
         working-directory: ${{ github.workspace }}/csharp
 
   test_macos:
-    name: MacOS
+    name: macOS
     runs-on: macos-15
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -254,11 +258,11 @@ jobs:
 
         # JavaScript
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
-        run: npm ci --skip-scripts
+        run: npm install --skip-scripts
       - name: Build JavaScript
         run: npm run build-js
       - name: Test JavaScript
@@ -266,7 +270,7 @@ jobs:
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
@@ -299,24 +303,23 @@ jobs:
 
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
         run: |
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_c.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
-          dotnet test -c Debug --logger "console;verbosity=detailed" --filter "FullyQualifiedName!=Cloud.Unum.USearch.Tests.UsearchIndexTests.PersistAndRestore"
+          dotnet test -c Debug --logger "console;verbosity=minimal" --filter "FullyQualifiedName!=Cloud.Unum.USearch.Tests.UsearchIndexTests.PersistAndRestore"
         shell: bash
         working-directory: ${{ github.workspace }}/csharp
-        env:
-          DYLD_PRINT_LIBRARIES: 1
 
   test_windows_x86:
-    name: Windows (x86)
+    name: Windows (X86)
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -333,7 +336,7 @@ jobs:
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
@@ -346,11 +349,11 @@ jobs:
 
         # JavaScript
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
-        run: npm ci --skip-scripts
+        run: npm install --skip-scripts
       - name: Build JavaScript
         run: npm run build-js
       - name: Test JavaScript
@@ -369,7 +372,7 @@ jobs:
 
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
@@ -381,10 +384,11 @@ jobs:
         working-directory: ${{ github.workspace }}/csharp
 
   test_windows_arm:
-    name: Windows (Arm)
+    name: Windows (ARM)
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -404,10 +408,11 @@ jobs:
           Write-Host "ARM64 DLL built successfully"
 
   build_docker:
-    name: Docker
-    runs-on: ubuntu-22.04
+    name: Build Docker
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
       - name: Pull Git submodules
         run: git submodule update --init --recursive
       - name: Build
@@ -417,43 +422,110 @@ jobs:
           load: true
           push: false
 
-  build_wheels:
-    name: Build Python Wheels
-    runs-on: ${{ matrix.os }}
-    needs:
-      [
-        test_ubuntu_gcc,
-        test_ubuntu_clang,
-        test_macos,
-        test_windows_x86,
-        test_windows_arm,
-      ]
+  build_wheels_linux:
+    name: Build Python Wheels (Linux)
+    runs-on: ubuntu-24.04
+    needs: [test_ubuntu_gcc, test_ubuntu_clang]
     strategy:
       matrix:
-        os: [ubuntu-24.04, macos-14, windows-2022]
-        python-version: ['38', '39', '310', '311', '312', '313', '313t']
+        python-version: ["310", "311", "312", "313", "313t", "314", "314t"]
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: 3.x
-
-        # We only need QEMU for Linux builds
+          python-version: "3.13"
       - name: Setup QEMU
-        if: matrix.os == 'ubuntu-24.04'
         uses: docker/setup-qemu-action@v3
       - name: Install cibuildwheel
-        run: python -m pip install cibuildwheel
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 3
+          retry_wait_seconds: 10
+          timeout_minutes: 180
+          command: python -m pip install cibuildwheel
       - name: Build wheels
-        run: cibuildwheel --output-dir wheelhouse
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 2
+          retry_wait_seconds: 30
+          timeout_minutes: 180
+          command: cibuildwheel --output-dir wheelhouse
         env:
           CIBW_BUILD: cp${{ matrix.python-version }}-*
-          CIBW_ENABLE: cpython-freethreading # No-GIL 3.13t builds
+          CIBW_ENABLE: cpython-freethreading
+          CIBW_PLATFORM: linux
+
+  build_wheels_macos:
+    name: Build Python Wheels (macOS)
+    runs-on: macos-14
+    needs: [test_macos]
+    strategy:
+      matrix:
+        python-version: ["310", "311", "312", "313", "313t", "314", "314t"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install cibuildwheel
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 3
+          retry_wait_seconds: 10
+          timeout_minutes: 180
+          command: python -m pip install cibuildwheel
+      - name: Build wheels
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 2
+          retry_wait_seconds: 30
+          timeout_minutes: 180
+          command: cibuildwheel --output-dir wheelhouse
+        env:
+          CIBW_BUILD: cp${{ matrix.python-version }}-*
+          CIBW_ENABLE: cpython-freethreading
+          CIBW_PLATFORM: macos
+
+  build_wheels_windows:
+    name: Build Python Wheels (Windows)
+    runs-on: windows-2022
+    needs: [test_windows_x86]
+    strategy:
+      matrix:
+        python-version: ["310", "311", "312", "313", "313t", "314", "314t"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install cibuildwheel
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 3
+          retry_wait_seconds: 10
+          timeout_minutes: 180
+          command: python -m pip install cibuildwheel
+      - name: Build wheels
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 2
+          retry_wait_seconds: 30
+          timeout_minutes: 180
+          command: cibuildwheel --output-dir wheelhouse
+        env:
+          CIBW_BUILD: cp${{ matrix.python-version }}-*
+          CIBW_ENABLE: cpython-freethreading
+          CIBW_PLATFORM: windows
 
   test_ubuntu_cross_compilation:
-    name: Cross Compilation
-    runs-on: ubuntu-22.04
+    name: Cross-Compile Linux
+    runs-on: ubuntu-24.04
     env:
       CC: clang
       CXX: clang++
@@ -471,7 +543,8 @@ jobs:
             target: aarch64-linux-gnu
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -506,7 +579,7 @@ jobs:
 
   test_android:
     name: Android
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -520,7 +593,8 @@ jobs:
             target: aarch64-linux-android
             arch: arm64
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -573,7 +647,7 @@ jobs:
         uses: actions/setup-java@v5
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: 'adopt'
+          distribution: "adopt"
 
         # We skip native compilation with Gradle and focus just on the Java part,
         # assuming the we won't be able to tun the tests without emulation
@@ -592,7 +666,7 @@ jobs:
           zip -r usearch_android_${{ matrix.arch }}_${version}.zip build_artifacts/libusearch_c.so c/usearch.h
 
       - name: Upload Android libraries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: android-${{ matrix.abi }}-libraries
           path: usearch_android_*.zip

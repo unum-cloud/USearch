@@ -7,7 +7,7 @@ To install it, simply add the following line to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/unum-cloud/usearch", .upToNextMajor(from: "2.0.0"))
+    .package(url: "https://github.com/unum-cloud/USearch", .upToNextMajor(from: "2.0.0"))
 ]
 ```
 
@@ -38,7 +38,7 @@ import USearch
 struct USearchMobileApp: App {
     var body: some Scene {
         WindowGroup {
-            let index = USearchIndex.make(metric: .IP, dimensions: 2, connectivity: 16, quantization: .F32)
+            let index = USearchIndex.make(metric: .IP, dimensions: 2, connectivity: 16, quantization: .F32) // or .bf16, .f16, .e5m2, .e4m3, .e3m2, .e2m3, .u8, .i8
             let _ = index.reserve(10)
             let coordinates: Array<Float32> = [40.177200, 44.503490]
             let _ = index.add(key: 10, vector: coordinates)            

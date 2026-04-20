@@ -1,18 +1,10 @@
-<<<<<<< HEAD
-<<<<<<< HEAD
 # Ignore all files without an extension
 
-=======
->>>>>>> 73a88b7 (Add: Initial Rust version)
-=======
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
 # Temporary files
 .DS_Store
 *.fbin
 *.ibin
 datasets
-<<<<<<< HEAD
-<<<<<<< HEAD
 bin
 *.usearch
 .cache
@@ -34,83 +26,44 @@ cmake_install.cmake
 gmon.out
 perf.data
 
-# Python wrappers
+# Python SDK
 __pycache__
 *.egg-info
-package-lock.json
 dist/
-<<<<<<< HEAD
 wheelhouse/
-=======
-datasets
-node_modules/
-*.usearch
->>>>>>> e41c574 (Add: Submodules for simpler bindings builds)
-
-# Python Environments
 venv/
+uv.lock
 
-# JS wrappers
+# JS SDK
 node_modules/
 javascript/dist/
 prebuilds/
-
+package-lock.json
 
 # Wasm
-
 wasi-sdk-*
 
-# Rust builds
+# Rust SDK
 Cargo.lock
 target/
 
-# Java bindings
+# Java SDK
 .gradle
 *.class
 
-# ObjC and Swift
+# ObjC and Swift SDKs
 .build
 .swiftpm
+Package.resolved
 
-# Golang builds
+# Golang SDK
 golang/usearch.h
 
-# C# builds
+# C# SDK
 csharp/**/[Bb]in/
 csharp/**/[Oo]bj/
 csharp/lib
 csharp/packages
-=======
-=======
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
-*.usearch
-
-# C++ builds
-build
-build_release
-build_debug
-
-# Profiling with GProf and `perf` on Linux
-gmon.out 
-perf.data
-
-# Python wrappers
-__pycache__
-*.egg-info
-dist/
-
-# JS wrappers
-package-lock.json
-node_modules/
-
-# Rust builds
-Cargo.lock
-target/ 
-
-<<<<<<< HEAD
->>>>>>> 73a88b7 (Add: Initial Rust version)
-=======
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
 
 # Prerequisites
 *.d
@@ -121,11 +74,11 @@ target/
 *.o
 *.obj
 
-# Precompiled Headers
+# Precompiled headers
 *.gch
 *.pch
 
-# Compiled Dynamic libraries
+# Compiled dynamic libraries
 *.so
 *.dylib
 *.dll
@@ -134,12 +87,9 @@ target/
 *.mod
 *.smod
 
-<<<<<<< HEAD
 # Allow golang go.mod
 !go.mod
 
-=======
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
 # Compiled Static libraries
 *.lai
 *.la
@@ -150,7 +100,4 @@ target/
 *.exe
 *.out
 *.app
-<<<<<<< HEAD
 
-=======
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)

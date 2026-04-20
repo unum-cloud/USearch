@@ -1,9 +1,90 @@
+/**
+ *  @file       test.c
+ *  @author     Ash Vardanian
+ *  @brief      Unit tests for the pure-C ABI of USearch (`usearch.h`).
+ *  @date       June 25, 2023
+ *
+ *  Exercises the lifecycle of `usearch_index_t` through the public C surface:
+ *  index creation with every supported metric and scalar kind, `add` / `get` /
+ *  `find` / `remove`, on-disk `save` / `load` / `view`, and error propagation
+ *  via `usearch_error_t`. The harness is intentionally dependency-free so it
+ *  can run in the same matrix as the C++ tests and on cross-compilation
+ *  targets where only the C runtime is available.
+ *
+ *  On startup we install a signal handler (see `install_crash_handlers`) that
+ *  prints a native back-trace before re-raising, so CI logs pinpoint the
+ *  faulting frame instead of stopping at a bare exit code.
+ */
 #include <errno.h>
-#include <stdio.h> // `remove`
+#include <signal.h> // `signal`, `raise`, `SIGSEGV`
+#include <stdio.h>  // `remove`
 #include <stdlib.h>
+#include <string.h> // `memset`
 #include <sys/stat.h>
 
+/* Back-trace support for the C test harness. The `signal` API is standard C;
+ * the back-trace itself is taken via an OS-specific facility since C has no
+ * standard stack-introspection API. On Windows, `dbghelp.h` references types
+ * (e.g. `PSTR`) that are only defined after `windows.h`, so the two headers
+ * are separated by a blank line to keep clang-format from re-sorting them
+ * into a single alphabetized block. */
+#if defined(_WIN32)
+#include <windows.h>
+
+#include <dbghelp.h>
+#pragma comment(lib, "Dbghelp.lib")
+#elif defined(__unix__) || defined(__APPLE__)
+#include <execinfo.h>
+#include <unistd.h>
+#endif
+
 #include "usearch.h"
+
+static void usearch_write_backtrace(int signal_number) {
+    fprintf(stderr, "\n[usearch] Fatal signal %d. Back-trace:\n", signal_number);
+#if defined(_WIN32)
+    enum { backtrace_depth_limit = 64 };
+    void* backtrace_frames[backtrace_depth_limit];
+    USHORT backtrace_depth = CaptureStackBackTrace(0, backtrace_depth_limit, backtrace_frames, NULL);
+    HANDLE current_process = GetCurrentProcess();
+    SymInitialize(current_process, NULL, TRUE);
+
+    unsigned char symbol_info_buffer[sizeof(SYMBOL_INFO) + 256 * sizeof(char)];
+    SYMBOL_INFO* symbol_info = (SYMBOL_INFO*)symbol_info_buffer;
+    symbol_info->MaxNameLen = 255;
+    symbol_info->SizeOfStruct = sizeof(SYMBOL_INFO);
+
+    for (USHORT frame_index = 0; frame_index < backtrace_depth; ++frame_index) {
+        if (SymFromAddr(current_process, (DWORD64)backtrace_frames[frame_index], 0, symbol_info))
+            fprintf(stderr, "  #%2u %s + 0x%llx\n", (unsigned)frame_index, symbol_info->Name,
+                    (unsigned long long)((DWORD64)backtrace_frames[frame_index] - symbol_info->Address));
+        else
+            fprintf(stderr, "  #%2u %p\n", (unsigned)frame_index, backtrace_frames[frame_index]);
+    }
+#elif defined(__unix__) || defined(__APPLE__)
+    enum { backtrace_depth_limit = 64 };
+    void* backtrace_frames[backtrace_depth_limit];
+    int backtrace_depth = backtrace(backtrace_frames, backtrace_depth_limit);
+    backtrace_symbols_fd(backtrace_frames, backtrace_depth, STDERR_FILENO);
+#else
+    (void)signal_number;
+    fprintf(stderr, "  <back-trace unavailable on this platform>\n");
+#endif
+    fflush(stderr);
+}
+
+static void usearch_crash_handler(int signal_number) {
+    usearch_write_backtrace(signal_number);
+    /* Restore the default disposition and re-raise so the shell / CI sees the true exit status. */
+    signal(signal_number, SIG_DFL);
+    raise(signal_number);
+}
+
+static void install_crash_handlers(void) {
+    int const fatal_signals[] = {SIGSEGV, SIGABRT, SIGILL, SIGFPE};
+    for (unsigned signal_index = 0; signal_index < sizeof(fatal_signals) / sizeof(fatal_signals[0]); ++signal_index)
+        signal(fatal_signals[signal_index], &usearch_crash_handler);
+}
 
 void expect(bool must_be_true, char const* message) {
     if (must_be_true)
@@ -367,7 +448,48 @@ void test_view(size_t const collection_size, size_t const dimensions) {
     printf("Test: View - PASSED\n");
 }
 
+void test_mini_float_quantizations(size_t const collection_size, size_t const dimensions) {
+    printf("Test: Mini-float quantizations... %zu vectors, %zu dimensions\n", collection_size, dimensions);
+    usearch_scalar_kind_t kinds[] = {
+        usearch_scalar_e5m2_k,
+        usearch_scalar_e4m3_k,
+        usearch_scalar_e3m2_k,
+        usearch_scalar_e2m3_k,
+    };
+    float* data = create_vectors(collection_size, dimensions);
+    usearch_key_t* keys = (usearch_key_t*)malloc(collection_size * sizeof(usearch_key_t));
+    float* distances = (float*)malloc(collection_size * sizeof(float));
+    expect(keys && distances, "Failed to allocate memory");
+
+    for (size_t k = 0; k < sizeof(kinds) / sizeof(kinds[0]); ++k) {
+        usearch_error_t error = NULL;
+        usearch_init_options_t opts = create_options(dimensions);
+        opts.quantization = kinds[k];
+        usearch_index_t index = usearch_init(&opts, &error);
+        expect(!error, error);
+        usearch_reserve(index, collection_size, &error);
+        expect(!error, error);
+        for (size_t i = 0; i < collection_size; ++i) {
+            usearch_add(index, (usearch_key_t)i, data + i * dimensions, usearch_scalar_f32_k, &error);
+            expect(!error, error);
+        }
+        expect_eq(usearch_size(index, &error), collection_size, error);
+        for (size_t i = 0; i < collection_size; ++i) {
+            size_t found =
+                usearch_search(index, data + i * dimensions, usearch_scalar_f32_k, 1, keys, distances, &error);
+            expect(!error, error);
+            expect(found >= 1, "Vector not found");
+        }
+        usearch_free(index, &error);
+    }
+    free(data);
+    free(keys);
+    free(distances);
+    printf("Test: Mini-float quantizations - PASSED\n");
+}
+
 int main(int argc, char const* argv[]) {
+    install_crash_handlers();
     printf("Running tests...\n");
     printf("USearch version: %s\n", usearch_version());
 
@@ -382,6 +504,7 @@ int main(int argc, char const* argv[]) {
             test_remove_vector(collection_sizes[index], dimensions[jdx]);
             test_save_load(collection_sizes[index], dimensions[jdx]);
             test_view(collection_sizes[index], dimensions[jdx]);
+            test_mini_float_quantizations(collection_sizes[index], dimensions[jdx]);
         }
     }
 

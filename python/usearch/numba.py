@@ -4,7 +4,7 @@
 # into the primary `Index` class, connecting USearch with Numba.
 from math import sqrt
 
-from usearch.index import MetricKind, ScalarKind, MetricSignature, CompiledMetric
+from usearch.index import CompiledMetric, MetricKind, MetricSignature, ScalarKind
 
 
 def jit(
@@ -25,7 +25,7 @@ def jit(
     assert isinstance(metric, MetricKind)
     assert isinstance(dtype, ScalarKind)
 
-    from numba import cfunc, types, carray
+    from numba import carray, cfunc, types
 
     signature_i8args = types.float32(types.CPointer(types.int8), types.CPointer(types.int8))
     signature_f16args = types.float32(types.CPointer(types.float16), types.CPointer(types.float16))

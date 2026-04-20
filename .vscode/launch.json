@@ -1,5 +1,4 @@
 {
-<<<<<<< HEAD
     "version": "0.2.0",
     "configurations": [
         {
@@ -7,32 +6,9 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build_debug/test_cpp",
-=======
-    // Use IntelliSense to learn about possible attributes.
-    // Hover to view descriptions of existing attributes.
-    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
-    "version": "0.2.0",
-    "configurations": [
-        {
-            "name": "Debug C++ Bench on Wiki 1M @Cos",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build_debug/bench",
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
             "cwd": "${workspaceFolder}",
-            "args": [
-                "--vectors",
-                "datasets/wiki_1M/base.1M.fbin",
-                "--queries",
-                "datasets/wiki_1M/query.public.100K.fbin",
-                "--neighbors",
-                "datasets/wiki_1M/groundtruth.public.100K.ibin",
-                "--ip"
-            ],
             "environment": [
                 {
-<<<<<<< HEAD
-<<<<<<< HEAD
                     "name": "ASAN_OPTIONS",
                     "value": "detect_leaks=0:atexit=1:strict_init_order=1:strict_string_checks=1:abort_on_error=0"
                 },
@@ -104,17 +80,12 @@
             ],
             "environment": [
                 {
-=======
->>>>>>> 5461e0a (Add: Argument parser for C++ benchmarks)
-=======
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
                     "name": "ASAN_OPTIONS",
                     "value": "detect_leaks=0:atexit=1:strict_init_order=1:strict_string_checks=1"
                 }
             ],
             "stopAtEntry": false,
             "linux": {
-<<<<<<< HEAD
                 "preLaunchTask": "Linux Build Debug",
                 "MIMode": "gdb",
                 "environment": [
@@ -126,18 +97,10 @@
             },
             "osx": {
                 "preLaunchTask": "MacOS Build Debug",
-=======
-                "preLaunchTask": "Linux Build C++ Bench Debug",
-                "MIMode": "gdb"
-            },
-            "osx": {
-                "preLaunchTask": "MacOS Build C++ Bench Debug",
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
                 "MIMode": "lldb"
             }
         },
         {
-<<<<<<< HEAD
             "name": "Debug C++ on Text-to-Image 1B @Cos",
             "type": "cppdbg",
             "request": "launch",
@@ -145,32 +108,12 @@
             "cwd": "${workspaceFolder}",
             "args": [
                 "--vectors",
-<<<<<<< HEAD
                 "datasets/t2i_1B/base.1B.fbin",
                 "--queries",
                 "datasets/t2i_1B/query.public.100K.fbin",
                 "--neighbors",
                 "datasets/t2i_1B/groundtruth.public.100K.ibin",
                 "--cos"
-=======
-=======
-            "name": "Debug C++ Bench on Text-to-Image 1M @Cos",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build_debug/bench",
-            "cwd": "${workspaceFolder}",
-            "args": [
-                "--vectors",
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
-                "datasets/t2i_1M/base.1M.fbin",
-                "--queries",
-                "datasets/t2i_1M/query.public.100K.fbin",
-                "--neighbors",
-                "datasets/t2i_1M/groundtruth.public.100K.ibin",
-<<<<<<< HEAD
->>>>>>> 5461e0a (Add: Argument parser for C++ benchmarks)
-=======
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
             ],
             "environment": [
                 {
@@ -180,34 +123,19 @@
             ],
             "stopAtEntry": false,
             "linux": {
-<<<<<<< HEAD
                 "preLaunchTask": "Linux Build Debug",
                 "MIMode": "gdb"
             },
             "osx": {
                 "preLaunchTask": "MacOS Build Debug",
-=======
-                "preLaunchTask": "Linux Build C++ Bench Debug",
-                "MIMode": "gdb"
-            },
-            "osx": {
-                "preLaunchTask": "MacOS Build C++ Bench Debug",
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
                 "MIMode": "lldb"
             }
         },
         {
-<<<<<<< HEAD
             "name": "Run C++ on Text-to-Image 1M @Cos",
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build_release/bench_cpp",
-=======
-            "name": "Run C++ Bench on Text-to-Image 1M @Cos",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build_release/bench",
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
             "cwd": "${workspaceFolder}",
             "args": [
                 "--vectors",
@@ -218,12 +146,10 @@
                 "datasets/t2i_1M/groundtruth.public.100K.ibin",
             ],
             "stopAtEntry": false,
-<<<<<<< HEAD
             "preLaunchTask": "Linux Build Release",
             "MIMode": "gdb"
         },
         {
-<<<<<<< HEAD
             "name": "Debug PyTest",
             "type": "python",
             "request": "launch",
@@ -275,44 +201,6 @@
             "cwd": "${workspaceFolder}",
             "program": "${workspaceFolder}/.build/debug/USearchTestsSwift",
             "preLaunchTask": "Swift Build"
-=======
-=======
-            "preLaunchTask": "Linux Build C++ Bench Release",
-            "MIMode": "gdb"
-        },
-        {
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
-            "name": "Debug PyBind11 Test",
-            "type": "pythoncpp",
-            "request": "launch",
-            "pythonLaunchName": "Python: Current File",
-            "cppAttachName": "Debug PyBind11: Attach with GDB"
-        },
-        {
-            "name": "Debug PyBind11: Attach with GDB",
-            "type": "cppdbg",
-            "request": "attach",
-            "program": "/Users/av/miniconda3/bin/python",
-            "processId": "",
-            "MIMode": "lldb",
-            "setupCommands": [
-                {
-                    "description": "Enable pretty-printing for gdb",
-                    "text": "-enable-pretty-printing",
-                    "ignoreFailures": true
-                }
-            ]
-        },
-        {
-            "name": "Python: Current File",
-            "type": "python",
-            "request": "launch",
-            "program": "${file}",
-            "console": "integratedTerminal"
-<<<<<<< HEAD
->>>>>>> 2f02aa7 (Refactor: GDB, C-style function pointers in Py)
-=======
->>>>>>> 8e74662 (Merge pull request #3 from ashvardanian/main)
         }
     ]
 }
