@@ -330,7 +330,7 @@ function (setup_target TARGET_NAME)
     endif ()
 
     target_include_directories(${TARGET_NAME} PRIVATE ${USEARCH_HEADER_INCLUDES})
-    set_target_properties(${TARGET_NAME} PROPERTIES CXX_STANDARD 17)
+    set_target_properties(${TARGET_NAME} PROPERTIES CXX_STANDARD 20)
 
     # On Windows, when using multi-configuration CMake builds, the paths will be nested, resulting in
     # "build_debug\Debug" on Windows instead of "build_debug". That's why we override all the configs to use the same

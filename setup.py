@@ -99,7 +99,7 @@ macros_args.extend(
 )
 
 if is_linux:
-    compile_args.append("-std=c++17")
+    compile_args.append("-std=c++20")
     compile_args.append("-O3")  # Maximize performance
     compile_args.append("-ffast-math")  # Maximize floating-point performance
     compile_args.append("-Wno-unknown-pragmas")
@@ -120,7 +120,7 @@ if is_macos:
     # MacOS 10.15 or higher is needed for `aligned_alloc` support.
     # https://github.com/unum-cloud/USearch/actions/runs/4975434891/jobs/8902603392
     compile_args.append("-mmacosx-version-min=10.15")
-    compile_args.append("-std=c++17")
+    compile_args.append("-std=c++20")
     compile_args.append("-O3")  # Maximize performance
     compile_args.append("-ffast-math")  # Maximize floating-point performance
     compile_args.append("-fcolor-diagnostics")
@@ -145,7 +145,7 @@ if is_macos:
     #     macros_args.append(("USEARCH_USE_OPENMP", "1"))
 
 if is_windows:
-    compile_args.append("/std:c++17")
+    compile_args.append("/std:c++20")
     compile_args.append("/O2")
     compile_args.append("/fp:fast")  # Enable fast math for MSVC
     compile_args.append("/W1")  # Reduce warnings verbosity

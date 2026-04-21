@@ -20,7 +20,7 @@
                 "-fexceptions",
                 "-Wno-unknown-pragmas",
                 "-Wno-maybe-uninitialized",
-                "-std=c++17",
+                "-std=c++20",
             ],
             "include_dirs": [
                 "<!@(node -p \"require('node-addon-api').include\")",
@@ -40,7 +40,7 @@
             "msvs_settings": {
                 "VCCLCompilerTool": {
                     "ExceptionHandling": 1,
-                    "AdditionalOptions": ["-std:c++17", "/Zc:preprocessor"],
+                    "AdditionalOptions": ["-std:c++20", "/Zc:preprocessor"],
                 }
             },
             "conditions": [
