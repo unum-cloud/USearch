@@ -61,7 +61,7 @@
 using namespace unum::usearch;
 using namespace unum;
 
-void __expect(bool must_be_true, char const* file, int line, char const* message = nullptr) {
+void expect_(bool must_be_true, char const* file, int line, char const* message = nullptr) {
     if (must_be_true)
         return;
     message = message ? message : "C++ unit test failed";
@@ -71,12 +71,12 @@ void __expect(bool must_be_true, char const* file, int line, char const* message
 }
 
 template <typename value_at>
-void __expect_eq(value_at a, value_at b, char const* file, int line, char const* message = nullptr) {
-    __expect(a == b, file, line, message);
+void expect_eq_(value_at a, value_at b, char const* file, int line, char const* message = nullptr) {
+    expect_(a == b, file, line, message);
 }
 
-#define expect(cond) __expect((bool)(cond), __FILE__, __LINE__)
-#define expect_eq(a, b) __expect_eq<decltype(a)>((a), (b), __FILE__, __LINE__)
+#define expect(cond) expect_((bool)(cond), __FILE__, __LINE__)
+#define expect_eq(a, b) expect_eq_<decltype(a)>((a), (b), __FILE__, __LINE__)
 
 /**
  *  Less error-prone type definition to differentiate `std::uint32_t` and other native
