@@ -1,7 +1,10 @@
 /**
  *  @brief Smoke tests for `inner_metric` 1-to-1 and 1-to-4 kernels against NumKong's
- *         monolithic 1-to-1 reference (`nk::dot` / `nk::angular` / `nk::sqeuclidean`).
+ *      monolithic 1-to-1 reference (`nk::dot` / `nk::angular` / `nk::sqeuclidean`).
+ *
+ *  @author Ash Vardanian
  *  @file test/inner_metric.cpp
+ *  @date April 21, 2026
  *
  *  USearch's @c distance and @c distances entry points compose a kit (per scalar +
  *  capability) with a metric overlay (per kernel) and route through a single trampoline.
@@ -32,6 +35,7 @@
 #include <fmt/format.h>
 
 #include <numkong/dot.hpp>
+#include <numkong/set.hpp>
 #include <numkong/spatial.hpp>
 #include <numkong/vector.hpp>
 
@@ -65,7 +69,7 @@ auto make_scalar(unsigned value) noexcept {
  *  supported datatype from Float64 to E2M1 nibble-sized floats, but at a different cyclic rotation.
  */
 template <typename scalar_>
-void populate(nk::vector<scalar_>& vec, std::size_t rotation) noexcept {
+void populate(nk::vector_span<scalar_> vec, std::size_t rotation) noexcept {
     constexpr std::array<unsigned, 8> universally_representable_values = {0, 1, 2, 3, 4, 5, 6, 7};
     for (std::size_t dimension_index = 0; dimension_index < vec.size(); ++dimension_index)
         vec[dimension_index] = make_scalar<scalar_>(
@@ -94,6 +98,16 @@ f32_t reference_distance(nk::vector_view<scalar_> first_vector, nk::vector_view<
         nk::euclidean(first_vector, second_vector, first_vector.size(), &euclidean_value);
         return static_cast<f32_t>(euclidean_value);
     }
+    else if constexpr (kernel_ == nk_kernel_hamming_k) {
+        typename scalar_::hamming_result_t hamming_value {};
+        nk::hamming(first_vector, second_vector, first_vector.size(), &hamming_value);
+        return static_cast<f32_t>(hamming_value);
+    }
+    else if constexpr (kernel_ == nk_kernel_jaccard_k) {
+        typename scalar_::jaccard_result_t jaccard_value {};
+        nk::jaccard(first_vector, second_vector, first_vector.size(), &jaccard_value);
+        return static_cast<f32_t>(jaccard_value);
+    }
 }
 
 bool close_enough(f32_t actual, f32_t expected) noexcept {
@@ -108,7 +122,7 @@ bool close_enough(f32_t actual, f32_t expected) noexcept {
  */
 int check_close(f32_t actual, f32_t expected, std::string_view label) noexcept {
     if (close_enough(actual, expected)) return 0;
-    fmt::print(stderr, "FAIL {}: actual={} expected={} diff={}\n", label, actual, expected,
+    fmt::print(stderr, "FAIL {:<22}  actual={:>14.6g}  expected={:>14.6g}  diff={:>12.4g}\n", label, actual, expected,
                std::fabs(actual - expected));
     return 1;
 }
@@ -135,11 +149,11 @@ int check_one(std::size_t dim) noexcept {
     auto second_candidate = nk::vector<scalar_>::try_zeros(dim);
     auto third_candidate = nk::vector<scalar_>::try_zeros(dim);
     auto fourth_candidate = nk::vector<scalar_>::try_zeros(dim);
-    populate(query, 0);
-    populate(first_candidate, 1);
-    populate(second_candidate, 2);
-    populate(third_candidate, 3);
-    populate(fourth_candidate, 4);
+    populate(query.span(), 0);
+    populate(first_candidate.span(), 1);
+    populate(second_candidate.span(), 2);
+    populate(third_candidate.span(), 3);
+    populate(fourth_candidate.span(), 4);
 
     auto query_view = query.view();
     auto first_candidate_view = first_candidate.view();
@@ -201,6 +215,14 @@ int check_metrics_for_type() noexcept {
     return check_metric_for_type<nk_kernel_dot_k, scalar_>() +     //
            check_metric_for_type<nk_kernel_angular_k, scalar_>() + //
            check_metric_for_type<nk_kernel_euclidean_k, scalar_>();
+}
+
+/** @brief Binary inputs run dot/hamming/jaccard instead of dot/angular/euclidean. */
+template <>
+int check_metrics_for_type<nk::u1x8_t>() noexcept {
+    return check_metric_for_type<nk_kernel_dot_k, nk::u1x8_t>() +     //
+           check_metric_for_type<nk_kernel_hamming_k, nk::u1x8_t>() + //
+           check_metric_for_type<nk_kernel_jaccard_k, nk::u1x8_t>();
 }
 
 int main(void) {
