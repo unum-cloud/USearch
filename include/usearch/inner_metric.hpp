@@ -91,6 +91,28 @@
 
 #include "memory_hints.hpp"
 
+/**
+ *  @brief Per-step cache-hint feature gates for the @c invoke_distances_ trampoline.
+ *
+ *  Both default to off. With the gates off the kit's hint type aliases still resolve, but
+ *  the call sites are elided via @c if @c constexpr - no PREFETCHT* or CLDEMOTE micro-ops
+ *  reach the hot loop.
+ *
+ *  Defaults were picked from a @b synthetic single-threaded microbench. On SPR / Zen 4
+ *  silicon per-step CLDEMOTE costs 30-50% throughput, and per-step PREFETCHT0/T2 is
+ *  neutral versus the HW stream detector. The bottleneck is uop pressure, not memory
+ *  latency. Real HNSW workloads can differ; flip @c USEARCH_USE_PREFETCH=1 on cores with
+ *  weak HW prefetchers (Atom, in-order), and @c USEARCH_USE_DEMOTE=1 for multi-threaded
+ *  search where a sibling thread on another core re-reads consumed candidate lines
+ *  (CLDEMOTE's designed-for use case).
+ */
+#if !defined(USEARCH_USE_PREFETCH)
+#define USEARCH_USE_PREFETCH 0
+#endif
+#if !defined(USEARCH_USE_DEMOTE)
+#define USEARCH_USE_DEMOTE 0
+#endif
+
 namespace unum {
 namespace usearch {
 
@@ -840,9 +862,9 @@ template <std::size_t fan_out_, inner_kit kit_>
     using distance_lane_t = typename kit_::distance_lane_t;
     constexpr std::size_t dims_per_value = nk::dimensions_per_value<scalar_t>();
 
-    typename kit_::prefetch_query_t prefetch_query;
-    typename kit_::prefetch_candidate_t prefetch_candidate;
-    typename kit_::demote_candidate_t demote_candidate;
+    [[maybe_unused]] typename kit_::prefetch_query_t prefetch_query;
+    [[maybe_unused]] typename kit_::prefetch_candidate_t prefetch_candidate;
+    [[maybe_unused]] typename kit_::demote_candidate_t demote_candidate;
 
     // Always allocate 4 state slots - NumKong's `reduce_accumulators` is hardcoded
     // fan-out-4. For 1-to-1 the bottom three slots are left as register noise; finalize
@@ -860,10 +882,12 @@ template <std::size_t fan_out_, inner_kit kit_>
         return std::array<decltype(query.data()), fan_out_> {candidates[lane_index].data()...};
     }(std::make_index_sequence<fan_out_> {});
 
-    prefetch_query(query_base);
-    [&]<std::size_t... lane_index>(std::index_sequence<lane_index...>) {
-        (prefetch_candidate(candidate_bases[lane_index]), ...);
-    }(std::make_index_sequence<fan_out_> {});
+    if constexpr (USEARCH_USE_PREFETCH) {
+        prefetch_query(query_base);
+        [&]<std::size_t... lane_index>(std::index_sequence<lane_index...>) {
+            (prefetch_candidate(candidate_bases[lane_index]), ...);
+        }(std::make_index_sequence<fan_out_> {});
+    }
 
     std::size_t const total_dimensions = query.size();
     std::size_t const tail_dimensions = total_dimensions % kit_::step_dimensions;
@@ -885,11 +909,17 @@ template <std::size_t fan_out_, inner_kit kit_>
              ...);
         }(std::make_index_sequence<fan_out_> {});
 
-        prefetch_query(query_base + next_value_offset);
-        [&]<std::size_t... lane_index>(std::index_sequence<lane_index...>) {
-            (prefetch_candidate(candidate_bases[lane_index] + next_value_offset), ...);
-            (demote_candidate(candidate_bases[lane_index] + value_offset), ...);
-        }(std::make_index_sequence<fan_out_> {});
+        if constexpr (USEARCH_USE_PREFETCH) {
+            prefetch_query(query_base + next_value_offset);
+            [&]<std::size_t... lane_index>(std::index_sequence<lane_index...>) {
+                (prefetch_candidate(candidate_bases[lane_index] + next_value_offset), ...);
+            }(std::make_index_sequence<fan_out_> {});
+        }
+        if constexpr (USEARCH_USE_DEMOTE) {
+            [&]<std::size_t... lane_index>(std::index_sequence<lane_index...>) {
+                (demote_candidate(candidate_bases[lane_index] + value_offset), ...);
+            }(std::make_index_sequence<fan_out_> {});
+        }
     }
 
     if (tail_dimensions) {
@@ -905,8 +935,12 @@ template <std::size_t fan_out_, inner_kit kit_>
             (kit_::update_accumulator(&accumulators[lane_index], query_step_vec, candidate_step_vecs[lane_index],
                                       passed_dimensions, tail_dimensions),
              ...);
-            (demote_candidate(candidate_bases[lane_index] + value_offset), ...);
         }(std::make_index_sequence<fan_out_> {});
+        if constexpr (USEARCH_USE_DEMOTE) {
+            [&]<std::size_t... lane_index>(std::index_sequence<lane_index...>) {
+                (demote_candidate(candidate_bases[lane_index] + value_offset), ...);
+            }(std::make_index_sequence<fan_out_> {});
+        }
     }
 
     // u8/i8 finalize takes 8 args (DPBUSD bias correction); float-path takes 6. Detected
