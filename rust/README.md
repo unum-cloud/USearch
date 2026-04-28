@@ -89,6 +89,19 @@ assert!(index.load_from_buffer(&serialization_buffer).is_ok());
 assert!(index.view_from_buffer(&serialization_buffer).is_ok());
 ```
 
+To reopen an index without already knowing how it was built, read its header with `Index::metadata` or use the one-shot `Index::restore`:
+
+```rust
+let meta = Index::metadata("index.usearch").unwrap();
+println!("dim={}, metric={:?}, dtype={:?}", meta.dimensions, meta.metric, meta.quantization);
+
+let index = Index::restore("index.usearch").unwrap();
+assert_eq!(index.metric_kind(), meta.metric);
+assert_eq!(index.scalar_kind(), meta.quantization);
+```
+
+`Index::restore_view` and `Index::restore_from_buffer` are the memory-mapping and in-memory counterparts.
+
 ## Metrics
 
 USearch comes pre-packaged with NumKong, bringing over 100 SIMD-accelerated distance kernels for x86 and ARM architectures.

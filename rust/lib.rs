@@ -363,6 +363,31 @@ pub mod ffi {
         multi: bool,
     }
 
+    /// Metadata read from a serialized index header without loading the full index.
+    /// Mirrors the on-disk `index_dense_head_t` layout — sufficient to reconstruct
+    /// an `IndexOptions` for `Index::new` before calling `load`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct IndexMetadata {
+        /// Number of dimensions per vector, as stored in the file header.
+        dimensions: u64,
+        /// The metric used to build the index.
+        metric: MetricKind,
+        /// The scalar quantization used for stored vectors.
+        quantization: ScalarKind,
+        /// `true` if the index was built with multiple vectors per key allowed.
+        multi: bool,
+        /// Number of currently-present vectors.
+        count_present: u64,
+        /// Number of soft-deleted vectors still occupying slots.
+        count_deleted: u64,
+        /// USearch major version that wrote the file.
+        version_major: u16,
+        /// USearch minor version that wrote the file.
+        version_minor: u16,
+        /// USearch patch version that wrote the file.
+        version_patch: u16,
+    }
+
     // C++ types and signatures exposed to Rust.
     unsafe extern "C++" {
         include!("lib.hpp");
@@ -377,6 +402,8 @@ pub mod ffi {
         pub fn expansion_search(self: &NativeIndex) -> usize;
         pub fn change_expansion_add(self: &NativeIndex, n: usize);
         pub fn change_expansion_search(self: &NativeIndex, n: usize);
+
+        pub fn metric_kind(self: &NativeIndex) -> MetricKind;
         pub fn change_metric_kind(self: &NativeIndex, metric: MetricKind);
 
         /// Changes the metric function used to calculate the distance between vectors.
@@ -387,6 +414,14 @@ pub mod ffi {
         pub fn change_metric(self: &NativeIndex, metric: usize, metric_state: usize);
 
         pub fn new_native_index(options: &IndexOptions) -> Result<UniquePtr<NativeIndex>>;
+
+        /// Reads only the index header from a serialized file, returning enough
+        /// metadata to reconstruct an `IndexOptions` without loading the full index.
+        pub fn read_metadata(path: &str) -> Result<IndexMetadata>;
+
+        /// Reads only the index header from an in-memory serialized buffer.
+        pub fn read_metadata_from_buffer(buffer: &[u8]) -> Result<IndexMetadata>;
+
         pub fn reserve(self: &NativeIndex, capacity: usize) -> Result<()>;
         pub fn reserve_capacity_and_threads(
             self: &NativeIndex,
@@ -396,6 +431,8 @@ pub mod ffi {
 
         pub fn dimensions(self: &NativeIndex) -> usize;
         pub fn connectivity(self: &NativeIndex) -> usize;
+        pub fn scalar_kind(self: &NativeIndex) -> ScalarKind;
+        pub fn multi(self: &NativeIndex) -> bool;
         pub fn size(self: &NativeIndex) -> usize;
         pub fn capacity(self: &NativeIndex) -> usize;
         pub fn serialized_length(self: &NativeIndex) -> usize;
@@ -495,7 +532,7 @@ pub mod ffi {
 }
 
 // Re-export the FFI structs and enums at the crate root for easy access
-pub use ffi::{IndexOptions, MemoryStats, MetricKind, ScalarKind};
+pub use ffi::{IndexMetadata, IndexOptions, MemoryStats, MetricKind, ScalarKind};
 
 /// Represents custom metric functions for calculating distances between vectors in various formats.
 ///
@@ -635,6 +672,23 @@ impl Default for ffi::IndexOptions {
             expansion_add: 0,
             expansion_search: 0,
             multi: false,
+        }
+    }
+}
+
+impl From<ffi::IndexMetadata> for ffi::IndexOptions {
+    /// Builds an `IndexOptions` that matches a serialized index's header.
+    /// `connectivity` and `expansion_*` are left at zero — they are not stored
+    /// in the header and will be repopulated by `load` / `view`.
+    fn from(meta: ffi::IndexMetadata) -> Self {
+        Self {
+            dimensions: meta.dimensions as usize,
+            metric: meta.metric,
+            quantization: meta.quantization,
+            connectivity: 0,
+            expansion_add: 0,
+            expansion_search: 0,
+            multi: meta.multi,
         }
     }
 }
@@ -1213,6 +1267,48 @@ impl Index {
         }
     }
 
+    /// Reads the index header from `path` and returns its metadata without
+    /// loading the full index into memory. Useful for inspecting an on-disk
+    /// index before deciding how to construct one.
+    pub fn metadata(path: &str) -> Result<ffi::IndexMetadata, cxx::Exception> {
+        ffi::read_metadata(path)
+    }
+
+    /// Reads the index header from a serialized in-memory buffer.
+    pub fn metadata_from_buffer(buffer: &[u8]) -> Result<ffi::IndexMetadata, cxx::Exception> {
+        ffi::read_metadata_from_buffer(buffer)
+    }
+
+    /// Reopens an existing on-disk index in one call: reads its metadata,
+    /// constructs an `Index` with matching `dimensions` / `metric` / `quantization` /
+    /// `multi`, then `load`s the file. Mirrors Python's `Index.restore`.
+    ///
+    /// `connectivity` and `expansion_*` are not stored in the file header; the
+    /// loader will repopulate them from the serialized index. Use `Index::new`
+    /// followed by `load` if you need to override those.
+    pub fn restore(path: &str) -> Result<Self, cxx::Exception> {
+        let meta = Self::metadata(path)?;
+        let index = Self::new(&meta.into())?;
+        index.load(path)?;
+        Ok(index)
+    }
+
+    /// Like `restore`, but mmap-views the file rather than copying it in.
+    pub fn restore_view(path: &str) -> Result<Self, cxx::Exception> {
+        let meta = Self::metadata(path)?;
+        let index = Self::new(&meta.into())?;
+        index.view(path)?;
+        Ok(index)
+    }
+
+    /// Buffer counterpart to `restore`.
+    pub fn restore_from_buffer(buffer: &[u8]) -> Result<Self, cxx::Exception> {
+        let meta = Self::metadata_from_buffer(buffer)?;
+        let index = Self::new(&meta.into())?;
+        index.load_from_buffer(buffer)?;
+        Ok(index)
+    }
+
     /// Retrieves the expansion value used during index creation.
     pub fn expansion_add(self: &Index) -> usize {
         self.inner.expansion_add()
@@ -1231,6 +1327,11 @@ impl Index {
     /// Updates the expansion value used during search operations.
     pub fn change_expansion_search(self: &Index, n: usize) {
         self.inner.change_expansion_search(n)
+    }
+
+    /// Returns the metric kind currently used by the index.
+    pub fn metric_kind(self: &Index) -> ffi::MetricKind {
+        self.inner.metric_kind()
     }
 
     /// Changes the metric kind used to calculate the distance between vectors.
@@ -1397,6 +1498,16 @@ impl Index {
     /// Retrieves the connectivity parameter that limits connections-per-node in the graph.
     pub fn connectivity(self: &Index) -> usize {
         self.inner.connectivity()
+    }
+
+    /// Returns the per-vector scalar quantization used by the index.
+    pub fn scalar_kind(self: &Index) -> ffi::ScalarKind {
+        self.inner.scalar_kind()
+    }
+
+    /// Returns `true` if the index allows multiple vectors per key.
+    pub fn multi(self: &Index) -> bool {
+        self.inner.multi()
     }
 
     /// Retrieves the current number of vectors in the index.
@@ -1959,6 +2070,9 @@ mod tests {
         assert!(index.connectivity() != 0);
         assert_eq!(index.dimensions(), 5);
         assert_eq!(index.size(), 0);
+        assert_eq!(index.metric_kind(), options.metric);
+        assert_eq!(index.scalar_kind(), options.quantization);
+        assert!(!index.multi());
 
         let first: [f32; 5] = [0.2, 0.1, 0.2, 0.1, 0.3];
         let second: [f32; 5] = [0.3, 0.2, 0.4, 0.0, 0.1];
@@ -2012,6 +2126,20 @@ mod tests {
         let results = index.search(&first, 10).unwrap();
         assert!(results.keys.contains(&42), "key 42 survives save/load");
         assert!(index.view("index.rust.usearch").is_ok());
+
+        // Header-only metadata read recovers the configuration without loading.
+        let meta = Index::metadata("index.rust.usearch").unwrap();
+        assert_eq!(meta.dimensions, index.dimensions() as u64);
+        assert_eq!(meta.metric, index.metric_kind());
+        assert_eq!(meta.quantization, index.scalar_kind());
+        assert_eq!(meta.multi, index.multi());
+        assert_eq!(meta.count_present, index.size() as u64);
+
+        // `restore` reopens an index with no prior knowledge of its config.
+        let restored = Index::restore("index.rust.usearch").unwrap();
+        assert_eq!(restored.metric_kind(), index.metric_kind());
+        assert_eq!(restored.scalar_kind(), index.scalar_kind());
+        assert!(restored.search(&first, 10).unwrap().keys.contains(&42));
 
         // Make sure every function is called at least once
         assert!(new_index(&options).is_ok());
@@ -2286,6 +2414,7 @@ mod tests {
             ..Default::default()
         };
         let index = Index::new(&options).unwrap();
+        assert!(index.multi());
         index.reserve(10).unwrap();
 
         let vec_a: [f32; 4] = [1.0, 0.0, 0.0, 0.0];

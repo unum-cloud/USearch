@@ -4,6 +4,7 @@
 // We don't have to forward declare all of those:
 struct Matches;
 struct IndexOptions;
+struct IndexMetadata;
 struct MemoryStats;
 enum class MetricKind;
 enum class ScalarKind;
@@ -70,19 +71,22 @@ class NativeIndex {
     void change_expansion_add(size_t n) const;
     void change_expansion_search(size_t n) const;
 
-    void change_metric(uptr_t metric, uptr_t state) const;
+    MetricKind metric_kind() const;
     void change_metric_kind(MetricKind metric) const;
+    void change_metric(uptr_t metric, uptr_t state) const;
+
+    size_t dimensions() const;
+    size_t connectivity() const;
+    ScalarKind scalar_kind() const;
+    bool multi() const;
+    size_t size() const;
+    size_t capacity() const;
+    size_t serialized_length() const;
 
     size_t count(vector_key_t key) const;
     size_t remove(vector_key_t key) const;
     size_t rename(vector_key_t from, vector_key_t to) const;
     bool contains(vector_key_t key) const;
-
-    size_t dimensions() const;
-    size_t connectivity() const;
-    size_t size() const;
-    size_t capacity() const;
-    size_t serialized_length() const;
 
     void save(rust::Str path) const;
     void load(rust::Str path) const;
@@ -101,6 +105,9 @@ class NativeIndex {
 };
 
 std::unique_ptr<NativeIndex> new_native_index(IndexOptions const& options);
+
+IndexMetadata read_metadata(rust::Str path);
+IndexMetadata read_metadata_from_buffer(rust::Slice<uint8_t const> buffer);
 
 char const* hardware_acceleration_compiled();
 char const* hardware_acceleration_available();
