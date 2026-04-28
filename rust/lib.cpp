@@ -209,6 +209,31 @@ size_t NativeIndex::serialized_length() const { return index_->serialized_length
 size_t NativeIndex::count(vector_key_t key) const { return index_->count(key); }
 bool NativeIndex::contains(vector_key_t key) const { return index_->contains(key); }
 
+size_t NativeIndex::level_of_key(vector_key_t key) const { return index_->level_of(key); }
+
+std::size_t NeighborsCursor::size() const noexcept { return view_.size(); }
+std::size_t NeighborsCursor::remaining() const noexcept { return view_.size() - position_; }
+bool NeighborsCursor::has_next() const noexcept { return position_ < view_.size(); }
+
+NeighborsCursor::vector_key_t NeighborsCursor::next_key() noexcept {
+    auto key = static_cast<vector_key_t>(view_[position_].key);
+    ++position_;
+    return key;
+}
+
+std::size_t NeighborsCursor::drain_into(rust::Slice<vector_key_t> output) noexcept {
+    std::size_t available = view_.size() - position_;
+    std::size_t copied = (std::min)(available, output.size());
+    for (std::size_t offset = 0; offset != copied; ++offset)
+        output[offset] = static_cast<vector_key_t>(view_[position_ + offset].key);
+    position_ += copied;
+    return copied;
+}
+
+std::unique_ptr<NeighborsCursor> NativeIndex::neighbors(vector_key_t key, size_t level) const {
+    return std::unique_ptr<NeighborsCursor>(new NeighborsCursor(index_->neighbors(key, level)));
+}
+
 size_t NativeIndex::remove(vector_key_t key) const {
     labeling_result_t result = index_->remove(key);
     result.error.raise();

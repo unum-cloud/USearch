@@ -11,9 +11,33 @@ enum class ScalarKind;
 
 #include <usearch/index_dense.hpp> // `unum::usearch::index_dense_t`
 
-#include <memory> // `std::unique_ptr`
+#include <cstddef> // `std::size_t`
+#include <memory>  // `std::unique_ptr`
 
 using uptr_t = size_t;
+
+/// @brief Streaming, zero-copy iterator over the keys of an HNSW node's neighbors
+///        at one graph level. Holds an `index_dense_t::neighbors_view_t` and a
+///        running cursor; the view aliases the node tape so callers must keep the
+///        index immutable for the cursor's lifetime.
+class NeighborsCursor {
+  public:
+    using vector_key_t = unum::usearch::index_dense_t::vector_key_t;
+    using neighbors_view_t = unum::usearch::index_dense_t::neighbors_view_t;
+
+    NeighborsCursor() noexcept = default;
+    explicit NeighborsCursor(neighbors_view_t view) noexcept : view_(view) {}
+
+    std::size_t size() const noexcept;
+    std::size_t remaining() const noexcept;
+    bool has_next() const noexcept;
+    vector_key_t next_key() noexcept;
+    std::size_t drain_into(rust::Slice<vector_key_t> output) noexcept;
+
+  private:
+    neighbors_view_t view_{};
+    std::size_t position_{};
+};
 
 class NativeIndex {
   public:
@@ -87,6 +111,9 @@ class NativeIndex {
     size_t remove(vector_key_t key) const;
     size_t rename(vector_key_t from, vector_key_t to) const;
     bool contains(vector_key_t key) const;
+
+    size_t level_of_key(vector_key_t key) const;
+    std::unique_ptr<NeighborsCursor> neighbors(vector_key_t key, size_t level) const;
 
     void save(rust::Str path) const;
     void load(rust::Str path) const;

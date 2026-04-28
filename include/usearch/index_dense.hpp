@@ -729,6 +729,45 @@ class index_dense_gt {
         return typed_->stats(stats_per_level, max_level);
     }
 
+    using neighbors_view_t = typename index_t::neighbors_view_t;
+
+    /**
+     *  @brief  Returns a read-only range over the neighbors of @p key at the given
+     *          graph @p level.
+     *
+     *          For multi-key indexes, returns the neighbors of the first matching
+     *          slot; iterate through `cbegin()`/`cend()` and call the underlying
+     *          `index_gt::neighbors(member_citerator_t, std::size_t)` overload to
+     *          inspect every copy of a duplicated key.
+     *
+     *  @return An empty view if the key is not present, or if @p level exceeds
+     *          the node's level.
+     *  @warning The view aliases the node's adjacency tape. Hold no concurrent
+     *           `add`/`update`/`remove` for the lifetime of the view.
+     */
+    neighbors_view_t neighbors(vector_key_t key, std::size_t level) const {
+        usearch_assert_m(config().enable_key_lookups, "Key lookups are disabled");
+        shared_lock_t lookup_lock(slot_lookup_mutex_);
+        auto matching_slots = slot_lookup_.equal_range(key_and_slot_t::any_slot(key));
+        if (matching_slots.first == matching_slots.second)
+            return {};
+        compressed_slot_t slot = (*matching_slots.first).slot;
+        return typed_->neighbors(slot, level);
+    }
+
+    /**
+     *  @brief  Returns the top graph level at which @p key is present, or zero
+     *          if the key is not in the index.
+     */
+    std::size_t level_of(vector_key_t key) const {
+        usearch_assert_m(config().enable_key_lookups, "Key lookups are disabled");
+        shared_lock_t lookup_lock(slot_lookup_mutex_);
+        auto matching_slots = slot_lookup_.equal_range(key_and_slot_t::any_slot(key));
+        if (matching_slots.first == matching_slots.second)
+            return 0;
+        return typed_->level_of((*matching_slots.first).slot);
+    }
+
     dynamic_allocator_t const& allocator() const { return typed_->dynamic_allocator(); }
     vector_key_t const& free_key() const { return free_key_; }
 

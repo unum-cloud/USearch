@@ -2547,6 +2547,114 @@ class index_gt {
     member_iterator_t iterator_at(compressed_slot_t slot) noexcept { return {this, slot}; }
     member_citerator_t citerator_at(compressed_slot_t slot) const noexcept { return {this, slot}; }
 
+    /**
+     *  @brief  A read-only random-access range over the neighbors of a single
+     *          node at a single graph level. Dereferencing yields a `member_cref_t`,
+     *          so callers can chain traversals without touching internal slots.
+     *
+     *  @warning The range aliases the node's adjacency tape. It is only valid
+     *           while the index is not being mutated. Prefer immutable indexes
+     *           (see `is_immutable()`) or guarantee no concurrent `add`/`update`/
+     *           `remove` while the view is alive.
+     */
+    class neighbors_view_t {
+        index_gt const* index_{};
+        neighbors_ref_t neighbors_{nullptr};
+
+      public:
+        class const_iterator {
+            index_gt const* index_{};
+            misaligned_ptr_gt<compressed_slot_t const> position_{nullptr};
+
+          public:
+            using iterator_category = std::random_access_iterator_tag;
+            using value_type = member_cref_t;
+            using difference_type = std::ptrdiff_t;
+            using pointer = void;
+            using reference = member_cref_t;
+
+            const_iterator() noexcept = default;
+            const_iterator(index_gt const* index, misaligned_ptr_gt<compressed_slot_t const> position) noexcept
+                : index_(index), position_(position) {}
+
+            reference operator*() const noexcept {
+                compressed_slot_t slot = static_cast<compressed_slot_t>(*position_);
+                return {index_->node_at_(slot).ckey(), slot};
+            }
+            compressed_slot_t slot() const noexcept { return static_cast<compressed_slot_t>(*position_); }
+
+            // clang-format off
+            const_iterator& operator++() noexcept { ++position_; return *this; }
+            const_iterator operator++(int) noexcept { const_iterator old = *this; ++position_; return old; }
+            const_iterator& operator--() noexcept { --position_; return *this; }
+            const_iterator operator--(int) noexcept { const_iterator old = *this; --position_; return old; }
+            const_iterator& operator+=(difference_type d) noexcept { position_ = position_ + d; return *this; }
+            const_iterator& operator-=(difference_type d) noexcept { position_ = position_ - d; return *this; }
+            const_iterator operator+(difference_type d) const noexcept { return {index_, position_ + d}; }
+            const_iterator operator-(difference_type d) const noexcept { return {index_, position_ - d}; }
+            difference_type operator-(const_iterator const& other) const noexcept { return position_ - other.position_; }
+            bool operator==(const_iterator const& other) const noexcept { return position_ == other.position_; }
+            bool operator!=(const_iterator const& other) const noexcept { return position_ != other.position_; }
+            // clang-format on
+        };
+
+        using iterator = const_iterator;
+        using value_type = member_cref_t;
+        using size_type = std::size_t;
+
+        neighbors_view_t() noexcept = default;
+        neighbors_view_t(index_gt const* index, neighbors_ref_t neighbors) noexcept
+            : index_(index), neighbors_(neighbors) {}
+
+        std::size_t size() const noexcept { return index_ ? neighbors_.size() : 0; }
+        bool empty() const noexcept { return size() == 0; }
+        member_cref_t operator[](std::size_t offset) const noexcept {
+            compressed_slot_t slot = neighbors_[offset];
+            return {index_->node_at_(slot).ckey(), slot};
+        }
+        const_iterator begin() const noexcept {
+            return index_ ? const_iterator{index_, neighbors_.begin()} : const_iterator{};
+        }
+        const_iterator end() const noexcept {
+            return index_ ? const_iterator{index_, neighbors_.end()} : const_iterator{};
+        }
+        const_iterator cbegin() const noexcept { return begin(); }
+        const_iterator cend() const noexcept { return end(); }
+    };
+
+    /**
+     *  @brief  Returns a read-only range over the neighbors of the node at @p slot
+     *          in the graph @p level. Returned view is empty when @p level exceeds
+     *          the node's level.
+     */
+    neighbors_view_t neighbors(compressed_slot_t slot, std::size_t level) const noexcept {
+        node_t node = node_at_(slot);
+        if (static_cast<level_t>(level) > node.level())
+            return {};
+        return {this, neighbors_(node, static_cast<level_t>(level))};
+    }
+
+    /**
+     *  @brief  Returns a read-only range over the neighbors of the node referenced
+     *          by @p member at the graph @p level.
+     */
+    neighbors_view_t neighbors(member_citerator_t member, std::size_t level) const noexcept {
+        return neighbors(get_slot(member), level);
+    }
+
+    /**
+     *  @brief  Returns the top graph level at which the node at @p slot is present.
+     */
+    std::size_t level_of(compressed_slot_t slot) const noexcept {
+        return static_cast<std::size_t>(static_cast<level_t>(node_at_(slot).level()));
+    }
+
+    /**
+     *  @brief  Returns the top graph level at which the node referenced by @p member
+     *          is present.
+     */
+    std::size_t level_of(member_citerator_t member) const noexcept { return level_of(get_slot(member)); }
+
     dynamic_allocator_t const& dynamic_allocator() const noexcept { return dynamic_allocator_; }
     tape_allocator_t const& tape_allocator() const noexcept { return tape_allocator_; }
 

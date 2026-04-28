@@ -517,6 +517,26 @@ pub mod ffi {
         pub fn contains(self: &NativeIndex, key: u64) -> bool;
         pub fn count(self: &NativeIndex, key: u64) -> usize;
 
+        pub fn level_of_key(self: &NativeIndex, key: u64) -> usize;
+
+        /// Streaming, zero-copy iterator over the keys of an HNSW node's
+        /// neighbors at one graph level. Aliases the node tape — caller must
+        /// keep the index immutable for the cursor's lifetime.
+        type NeighborsCursor;
+
+        #[cxx_name = "neighbors"]
+        pub fn neighbors_cursor(
+            self: &NativeIndex,
+            key: u64,
+            level: usize,
+        ) -> UniquePtr<NeighborsCursor>;
+
+        pub fn size(self: &NeighborsCursor) -> usize;
+        pub fn remaining(self: &NeighborsCursor) -> usize;
+        pub fn has_next(self: &NeighborsCursor) -> bool;
+        pub fn next_key(self: Pin<&mut NeighborsCursor>) -> u64;
+        pub fn drain_into(self: Pin<&mut NeighborsCursor>, output: &mut [u64]) -> usize;
+
         pub fn save(self: &NativeIndex, path: &str) -> Result<()>;
         pub fn load(self: &NativeIndex, path: &str) -> Result<()>;
         pub fn view(self: &NativeIndex, path: &str) -> Result<()>;
@@ -1256,6 +1276,60 @@ impl VectorType for b1x8 {
     }
 }
 
+/// A streaming iterator over the keys of a single HNSW node's neighbors
+/// at one graph level.
+///
+/// Backed by a C++ `NeighborsCursor` that aliases the node tape — no keys are
+/// copied into Rust until the iterator is advanced. The `'index` lifetime
+/// borrow keeps the underlying [`Index`] alive for the iterator's duration.
+///
+/// **Concurrency:** the cursor reads the index's adjacency tape directly, so
+/// callers must not run `add` / `remove` / `update` against the same index
+/// while the iterator is live. Iteration over an immutable index is always
+/// safe.
+pub struct Neighbors<'index> {
+    cursor: cxx::UniquePtr<ffi::NeighborsCursor>,
+    _index: std::marker::PhantomData<&'index Index>,
+}
+
+impl<'index> Neighbors<'index> {
+    /// Returns the total number of neighbors at this `(key, level)` pair,
+    /// including any already consumed by [`Iterator::next`].
+    pub fn total(&self) -> usize {
+        self.cursor.as_ref().map(|c| c.size()).unwrap_or(0)
+    }
+
+    /// Drains the remaining neighbors into `output` in one FFI call and
+    /// returns the number of keys written. Faster than `.collect::<Vec<_>>()`
+    /// for callers that already hold a buffer.
+    pub fn drain_into(&mut self, output: &mut [Key]) -> usize {
+        match self.cursor.as_mut() {
+            Some(cursor) => cursor.drain_into(output),
+            None => 0,
+        }
+    }
+}
+
+impl<'index> Iterator for Neighbors<'index> {
+    type Item = Key;
+
+    fn next(&mut self) -> Option<Key> {
+        let cursor = self.cursor.as_mut()?;
+        if cursor.has_next() {
+            Some(cursor.next_key())
+        } else {
+            None
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.cursor.as_ref().map(|c| c.remaining()).unwrap_or(0);
+        (remaining, Some(remaining))
+    }
+}
+
+impl<'index> ExactSizeIterator for Neighbors<'index> {}
+
 impl Index {
     pub fn new(options: &ffi::IndexOptions) -> Result<Self, cxx::Exception> {
         match ffi::new_native_index(options) {
@@ -1588,6 +1662,42 @@ impl Index {
     /// * `key` - The key to look up.
     pub fn count(self: &Index, key: Key) -> usize {
         self.inner.count(key)
+    }
+
+    /// Returns the top graph level at which the given `key` is present, or
+    /// zero if the key is not in the index.
+    ///
+    /// Combined with [`Index::neighbors`], this lets you walk a node from its
+    /// top level down to the base level.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to look up.
+    pub fn level_of_key(self: &Index, key: Key) -> usize {
+        self.inner.level_of_key(key)
+    }
+
+    /// Returns a streaming iterator over the keys of the neighbors of `key`
+    /// at the given HNSW graph `level`.
+    ///
+    /// Returns an empty iterator if the key is not present, or if `level`
+    /// exceeds the node's top level. For multi-key indexes, the neighbors of
+    /// the first matching slot are returned.
+    ///
+    /// The returned [`Neighbors`] aliases the index's adjacency tape directly,
+    /// so no keys are copied until the iterator is advanced. The borrow keeps
+    /// the index alive for the iterator's lifetime; callers must not mutate
+    /// the index while the iterator is live (see [`Neighbors`] for details).
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key whose neighbors to enumerate.
+    /// * `level` - The graph level (0 is the base level).
+    pub fn neighbors(&self, key: Key, level: usize) -> Neighbors<'_> {
+        Neighbors {
+            cursor: self.inner.neighbors_cursor(key, level),
+            _index: std::marker::PhantomData,
+        }
     }
 
     /// Saves the index to a specified file.
@@ -2554,5 +2664,64 @@ mod tests {
             search_results.iter().all(|&x| x),
             "All searches should find exact matches"
         );
+    }
+
+    #[test]
+    fn neighbors_iter_round_trip() {
+        let options = IndexOptions {
+            dimensions: 4,
+            connectivity: 8,
+            quantization: ScalarKind::F32,
+            ..Default::default()
+        };
+        let index = Index::new(&options).unwrap();
+        index.reserve(64).unwrap();
+        for i in 0..32u64 {
+            let vector: [f32; 4] = [i as f32, (i * 2) as f32, (i * 3) as f32, (i * 5) as f32];
+            index.add(i, &vector).unwrap();
+        }
+
+        // The base level holds every node, so its neighbor list must be
+        // bounded by the doubled `connectivity` of the base graph.
+        let connectivity_base = options.connectivity * 2;
+        let neighbors: Vec<Key> = index.neighbors(0, 0).collect();
+        assert!(neighbors.len() <= connectivity_base);
+        for neighbor in &neighbors {
+            assert!(index.contains(*neighbor));
+            assert_ne!(*neighbor, 0, "Self-loops are not expected");
+        }
+
+        // The level reported for an inserted key must agree with the
+        // neighbors API: every level up to and including `level_of_key`
+        // has at least one neighbor, and one level higher has none.
+        let top_level = index.level_of_key(0);
+        for level in 0..=top_level {
+            assert!(index.neighbors(0, level).next().is_some());
+        }
+        assert!(index.neighbors(0, top_level + 1).next().is_none());
+
+        // Levels above the node's level give an empty range.
+        let above_top: Vec<Key> = index.neighbors(0, 999).collect();
+        assert!(above_top.is_empty());
+
+        // Missing keys give an empty range, not an error.
+        let missing: Vec<Key> = index.neighbors(99_999, 0).collect();
+        assert!(missing.is_empty());
+        assert_eq!(index.level_of_key(99_999), 0);
+
+        // `ExactSizeIterator::len` matches both the materialized vector and
+        // the cursor's reported `total()`.
+        let neighbors_iter = index.neighbors(0, 0);
+        assert_eq!(neighbors_iter.total(), neighbors.len());
+        assert_eq!(neighbors_iter.len(), neighbors.len());
+
+        // `drain_into` fills a caller buffer in one FFI call and matches the
+        // streaming iteration order.
+        let mut buffer = vec![0 as Key; 64];
+        let mut cursor = index.neighbors(0, 0);
+        let written = cursor.drain_into(&mut buffer);
+        assert_eq!(written, neighbors.len());
+        assert_eq!(&buffer[..written], neighbors.as_slice());
+        assert_eq!(cursor.next(), None);
     }
 }
