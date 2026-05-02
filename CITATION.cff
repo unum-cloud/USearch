@@ -3,7 +3,7 @@ title: "USearch: Smaller & Faster Similarity Search & Clustering Engine"
 message: "If you use this software, please cite it as below."
 type: software
 license: Apache-2.0
-version: 2.25.1
+version: 2.25.2
 doi: 10.5281/zenodo.7949416
 repository-code: https://github.com/unum-cloud/USearch
 url: https://github.com/unum-cloud/USearch
