@@ -131,6 +131,40 @@ def test_index_retrieval(ndim, metric, quantization, dtype, batch_size):
             index.add(keys, vectors.T, threads=threads)
 
 
+@pytest.mark.parametrize("multi", [False, True])
+def test_index_get_missing_keys(multi):
+    """Pin the docstring contract on `Index.get` for missing keys (#663).
+
+    Single missing key must yield `None` (the bug was returning a row of
+    uninitialized memory). Mixed batches must yield a tuple with `None` in
+    the slots of missing keys.
+    """
+    reset_randomness()
+    ndim = 8
+    index = Index(ndim=ndim, multi=multi)
+    vector = random_vectors(count=1, ndim=ndim)[0]
+    index.add(1, vector)
+
+    # Single missing key → None (the #663 reproducer).
+    assert index.get(999) is None
+
+    # Single present key → ndarray (multi or not).
+    present = index.get(1)
+    assert present is not None
+    assert isinstance(present, np.ndarray)
+
+    # Mixed batch → tuple, one entry per key, None for missing.
+    mixed = index.get([1, 999])
+    assert isinstance(mixed, tuple)
+    assert len(mixed) == 2
+    assert isinstance(mixed[0], np.ndarray)
+    assert mixed[1] is None
+
+    # After remove, get() returns None.
+    index.remove(1)
+    assert index.get(1) is None
+
+
 @pytest.mark.parametrize("ndim", [3, 97, 256])
 @pytest.mark.parametrize("metric", [MetricKind.Cos, MetricKind.L2sq])
 @pytest.mark.parametrize("batch_size", [1, 7, 1024])

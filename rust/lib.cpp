@@ -45,6 +45,38 @@ scalar_kind_t rust_to_cpp_scalar(ScalarKind value) {
     }
 }
 
+MetricKind cpp_to_rust_metric(metric_kind_t value) {
+    switch (value) {
+    case metric_kind_t::ip_k: return MetricKind::IP;
+    case metric_kind_t::l2sq_k: return MetricKind::L2sq;
+    case metric_kind_t::cos_k: return MetricKind::Cos;
+    case metric_kind_t::pearson_k: return MetricKind::Pearson;
+    case metric_kind_t::haversine_k: return MetricKind::Haversine;
+    case metric_kind_t::divergence_k: return MetricKind::Divergence;
+    case metric_kind_t::hamming_k: return MetricKind::Hamming;
+    case metric_kind_t::tanimoto_k: return MetricKind::Tanimoto;
+    case metric_kind_t::sorensen_k: return MetricKind::Sorensen;
+    default: return MetricKind::Unknown;
+    }
+}
+
+ScalarKind cpp_to_rust_scalar(scalar_kind_t value) {
+    switch (value) {
+    case scalar_kind_t::f64_k: return ScalarKind::F64;
+    case scalar_kind_t::f32_k: return ScalarKind::F32;
+    case scalar_kind_t::bf16_k: return ScalarKind::BF16;
+    case scalar_kind_t::f16_k: return ScalarKind::F16;
+    case scalar_kind_t::e5m2_k: return ScalarKind::E5M2;
+    case scalar_kind_t::e4m3_k: return ScalarKind::E4M3;
+    case scalar_kind_t::e3m2_k: return ScalarKind::E3M2;
+    case scalar_kind_t::e2m3_k: return ScalarKind::E2M3;
+    case scalar_kind_t::i8_k: return ScalarKind::I8;
+    case scalar_kind_t::u8_k: return ScalarKind::U8;
+    case scalar_kind_t::b1x8_k: return ScalarKind::B1;
+    default: return ScalarKind::Unknown;
+    }
+}
+
 template <typename scalar_at>
 Matches search_(index_dense_t& index, scalar_at const* vec, size_t vec_dims, size_t count, bool exact = false) {
     if (vec_dims != index.scalar_words())
@@ -138,10 +170,24 @@ size_t NativeIndex::get_u8(vector_key_t key, rust::Slice<uint8_t> vec) const { i
 size_t NativeIndex::get_b1x8(vector_key_t key, rust::Slice<uint8_t> vec) const { if (vec.size() % dimensions()) throw std::invalid_argument("Vector length must match index dimensionality"); return index_->get(key, (b1x8_t*)vec.data(), vec.size() / dimensions()); }
 // clang-format on
 
+void NativeIndex::reserve(size_t capacity) const { index_->reserve(capacity); }
+void NativeIndex::reserve_capacity_and_threads(size_t capacity, size_t threads) const {
+    index_->reserve({capacity, threads});
+}
+
 size_t NativeIndex::expansion_add() const { return index_->expansion_add(); }
 size_t NativeIndex::expansion_search() const { return index_->expansion_search(); }
 void NativeIndex::change_expansion_add(size_t n) const { index_->change_expansion_add(n); }
 void NativeIndex::change_expansion_search(size_t n) const { index_->change_expansion_search(n); }
+
+MetricKind NativeIndex::metric_kind() const { return cpp_to_rust_metric(index_->metric_kind()); }
+
+void NativeIndex::change_metric_kind(MetricKind metric) const {
+    index_->change_metric(metric_punned_t::builtin( //
+        index_->dimensions(),                       //
+        rust_to_cpp_metric(metric),                 //
+        index_->scalar_kind()));
+}
 
 void NativeIndex::change_metric(uptr_t metric, uptr_t state) const {
     index_->change_metric(metric_punned_t::stateful( //
@@ -152,11 +198,40 @@ void NativeIndex::change_metric(uptr_t metric, uptr_t state) const {
         index_->scalar_kind()));
 }
 
-void NativeIndex::change_metric_kind(MetricKind metric) const {
-    index_->change_metric(metric_punned_t::builtin( //
-        index_->dimensions(),                       //
-        rust_to_cpp_metric(metric),                 //
-        index_->scalar_kind()));
+size_t NativeIndex::dimensions() const { return index_->dimensions(); }
+size_t NativeIndex::connectivity() const { return index_->connectivity(); }
+ScalarKind NativeIndex::scalar_kind() const { return cpp_to_rust_scalar(index_->scalar_kind()); }
+bool NativeIndex::multi() const { return index_->multi(); }
+size_t NativeIndex::size() const { return index_->size(); }
+size_t NativeIndex::capacity() const { return index_->capacity(); }
+size_t NativeIndex::serialized_length() const { return index_->serialized_length(); }
+
+size_t NativeIndex::count(vector_key_t key) const { return index_->count(key); }
+bool NativeIndex::contains(vector_key_t key) const { return index_->contains(key); }
+
+size_t NativeIndex::level_of_key(vector_key_t key) const { return index_->level_of(key); }
+
+std::size_t NeighborsCursor::size() const noexcept { return view_.size(); }
+std::size_t NeighborsCursor::remaining() const noexcept { return view_.size() - position_; }
+bool NeighborsCursor::has_next() const noexcept { return position_ < view_.size(); }
+
+NeighborsCursor::vector_key_t NeighborsCursor::next_key() noexcept {
+    auto key = static_cast<vector_key_t>(view_[position_].key);
+    ++position_;
+    return key;
+}
+
+std::size_t NeighborsCursor::drain_into(rust::Slice<vector_key_t> output) noexcept {
+    std::size_t available = view_.size() - position_;
+    std::size_t copied = (std::min)(available, output.size());
+    for (std::size_t offset = 0; offset != copied; ++offset)
+        output[offset] = static_cast<vector_key_t>(view_[position_ + offset].key);
+    position_ += copied;
+    return copied;
+}
+
+std::unique_ptr<NeighborsCursor> NativeIndex::neighbors(vector_key_t key, size_t level) const {
+    return std::unique_ptr<NeighborsCursor>(new NeighborsCursor(index_->neighbors(key, level)));
 }
 
 size_t NativeIndex::remove(vector_key_t key) const {
@@ -170,20 +245,6 @@ size_t NativeIndex::rename(vector_key_t from, vector_key_t to) const {
     result.error.raise();
     return result.completed;
 }
-
-size_t NativeIndex::count(vector_key_t key) const { return index_->count(key); }
-bool NativeIndex::contains(vector_key_t key) const { return index_->contains(key); }
-
-void NativeIndex::reserve(size_t capacity) const { index_->reserve(capacity); }
-void NativeIndex::reserve_capacity_and_threads(size_t capacity, size_t threads) const {
-    index_->reserve({capacity, threads});
-}
-
-size_t NativeIndex::dimensions() const { return index_->dimensions(); }
-size_t NativeIndex::connectivity() const { return index_->connectivity(); }
-size_t NativeIndex::size() const { return index_->size(); }
-size_t NativeIndex::capacity() const { return index_->capacity(); }
-size_t NativeIndex::serialized_length() const { return index_->serialized_length(); }
 
 void NativeIndex::save(rust::Str path) const { index_->save(output_file_t(std::string(path).c_str())).error.raise(); }
 void NativeIndex::load(rust::Str path) const { index_->load(input_file_t(std::string(path).c_str())).error.raise(); }
@@ -243,4 +304,33 @@ std::unique_ptr<NativeIndex> new_native_index(IndexOptions const& options) {
     std::unique_ptr<NativeIndex> native = wrap(std::move(index));
     native->reserve_capacity_and_threads(0, std::thread::hardware_concurrency());
     return native;
+}
+
+IndexMetadata head_to_metadata(index_dense_head_t const& head) {
+    IndexMetadata meta;
+    meta.dimensions = static_cast<std::uint64_t>(head.dimensions);
+    meta.metric = cpp_to_rust_metric(static_cast<metric_kind_t>(head.kind_metric));
+    meta.quantization = cpp_to_rust_scalar(static_cast<scalar_kind_t>(head.kind_scalar));
+    meta.multi = static_cast<bool>(head.multi);
+    meta.count_present = static_cast<std::uint64_t>(head.count_present);
+    meta.count_deleted = static_cast<std::uint64_t>(head.count_deleted);
+    meta.version_major = static_cast<std::uint16_t>(head.version_major);
+    meta.version_minor = static_cast<std::uint16_t>(head.version_minor);
+    meta.version_patch = static_cast<std::uint16_t>(head.version_patch);
+    return meta;
+}
+
+IndexMetadata read_metadata(rust::Str path) {
+    index_dense_metadata_result_t result = index_dense_metadata_from_path(std::string(path).c_str());
+    if (!result)
+        result.error.raise();
+    return head_to_metadata(result.head);
+}
+
+IndexMetadata read_metadata_from_buffer(rust::Slice<uint8_t const> buffer) {
+    index_dense_metadata_result_t result =
+        index_dense_metadata_from_buffer(memory_mapped_file_t((byte_t*)buffer.data(), buffer.size()));
+    if (!result)
+        result.error.raise();
+    return head_to_metadata(result.head);
 }

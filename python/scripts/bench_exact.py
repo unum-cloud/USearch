@@ -38,7 +38,7 @@ from usearch.index import (
     search,
 )
 
-SUPPORTED_DTYPES = {"b1", "bits", "i8", "u8", "f16", "bf16", "f32", "f64", "e4m3", "e3m2", "e2m3"}
+SUPPORTED_DTYPES = {"b1", "bits", "i8", "u8", "f16", "bf16", "f32", "f64", "e5m2", "e4m3", "e3m2", "e2m3"}
 SUPPORTED_METRICS = {"ip", "cos", "l2sq"}
 SUPPORTED_BACKENDS = {"usearch", "faiss", "numkong"}
 

@@ -1,5 +1,8 @@
 # Benchmarking USearch
 
+For reproducible recall-vs-throughput sweeps against alternative search engines across the full quantization matrix, use the [RetriEval](https://github.com/ashvardanian/RetriEval) suite.
+The in-tree scripts described below are kept for internal R&D and fine-grained profiling.
+
 ## Hyper-parameters
 
 All major HNSW implementation share an identical list of hyper-parameters:
@@ -150,6 +153,12 @@ python/scripts/bench_exact.py --help
 python/scripts/bench_cluster.py --help
 ```
 
+These are intended as smoke tests and ad-hoc profiling helpers.
+Published recall-vs-throughput numbers should be reproduced with
+[RetriEval](https://github.com/ashvardanian/RetriEval), which covers
+the full `b1` / `i8` / `u8` / `e2m3` / `e3m2` / `e4m3` / `e5m2` / `f16`
+/ `bf16` / `f32` / `f64` matrix on standard datasets.
+
 ## Datasets
 
 BigANN benchmark is a good starting point, if you are searching for large collections of high-dimensional vectors.
@@ -170,7 +179,7 @@ Datasets below are grouped by scale; only configurations with matching ground tr
 | :----------------------------------- | :---------: | :--------: | :----: | :-------: | :---------------: |
 | [Meta BIGANN (SIFT)][bigann]         |    `u8`     |    128     |   L2   |  1.2 GB   | 10K queries, yes  |
 | [Microsoft Turing-ANNS][msft-turing] |    `f32`    |    100     |   L2   |  3.7 GB   | 100K queries, yes |
-| [Yandex Deep][yandex-deep]           |    `f32`    |     96     |  L2  |    3.6 GB     |  ¹ no subset GT   |
+| [Yandex Deep][yandex-deep]           |    `f32`    |     96     |   L2   |  3.6 GB   |  ¹ no subset GT   |
 
 > ¹ Yandex only publishes ground truth computed against the full 1B dataset. A `base.10M.fbin` exists for
 > download but using 1B ground truth with a subset will produce misleadingly low recall. Use it only for

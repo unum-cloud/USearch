@@ -191,7 +191,9 @@ def self_recall(index: Index, sample: float | int = 1.0, **kwargs) -> SearchStat
     if "vectors" in kwargs:
         vectors = kwargs.pop("vectors")
     else:
-        vectors = index.get(keys)
+        # `get` returns a per-key tuple after the `Index.get` contract change;
+        # `search` expects a 2D matrix of query vectors.
+        vectors = np.vstack(index.get(keys))
 
     matches = index.search(vectors, **kwargs)
     count_matches: int = (

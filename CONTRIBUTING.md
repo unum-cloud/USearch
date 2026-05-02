@@ -5,11 +5,11 @@ It's always nice to have third-party contributors 🤗
 
 ---
 
-To keep the quality of the code high, we have a set of guidelines common to [all Unum projects](https://github.com/unum-cloud).
+To keep the quality of the code high, please follow the conventions used across [Unum projects](https://github.com/unum-cloud):
 
-- [What's the procedure?](https://github.com/unum-cloud/awesome/blob/main/Workflow.md#organizing-software-development)
-- [How to organize branches?](https://github.com/unum-cloud/awesome/blob/main/Workflow.md#branches)
-- [How to style commits?](https://github.com/unum-cloud/awesome/blob/main/Workflow.md#commits)
+- Branch off `main-dev` and open the PR against `main-dev`. The `main` branch follows tagged releases.
+- Each commit subject starts with verbs like `Fix:`, `Make:`, `Improve:`, `Add:`, `Docs:`, `Chore:`.
+- Reference closed issues with `Closes #N` in the body, and credit collaborators with `Co-Authored-By:` trailers.
 
 ## Before you start
 
@@ -287,7 +287,7 @@ ENV NK_TARGET_NEON 1
 ENV NK_TARGET_SVE 0
 
 # For specific PR:
-# RUN npm install --build-from-source unum-cloud/usearch#pull/302/head
+# RUN npm install --build-from-source unum-cloud/USearch#pull/302/head
 # For specific version:
 # RUN npm install --build-from-source usearch@2.8.8
 RUN npm install --build-from-source usearch
@@ -343,7 +343,7 @@ mv stringzilla/Cargo.toml.bak stringzilla/Cargo.toml
 
 ## Objective-C and Swift
 
-USearch provides both Objective-C and Swift bindings through the [Swift Package Manager](https://swiftpackageindex.com/unum-cloud/usearch).
+USearch provides both Objective-C and Swift bindings through the [Swift Package Manager](https://swiftpackageindex.com/unum-cloud/USearch).
 The compilation settings are controlled by the `Package.swift` and are independent from CMake used for C/C++ builds.
 
 ```sh

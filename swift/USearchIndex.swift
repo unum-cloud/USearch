@@ -525,7 +525,7 @@ public class USearchIndex: NSObject {
 
     // Float16 is only available on arm64 Apple platforms. The @available annotation
     // alone is insufficient because Float16 is a type-level absence on x86_64,
-    // not a runtime availability issue. See: https://github.com/unum-cloud/usearch/issues/589
+    // not a runtime availability issue. See: https://github.com/unum-cloud/USearch/issues/589
     #if arch(arm64)
 
     /**

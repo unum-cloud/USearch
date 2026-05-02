@@ -516,12 +516,10 @@ static py::tuple search_many_brute_force(       //
     if (wanted > dataset_count)
         throw std::invalid_argument("You can't request more matches than in the dataset!");
 
-    scalar_kind_t dataset_kind = (scalar_kind != scalar_kind_t::unknown_k)
-        ? scalar_kind
-        : numpy_string_to_kind(dataset_info.format);
-    scalar_kind_t queries_kind = (scalar_kind != scalar_kind_t::unknown_k)
-        ? scalar_kind
-        : numpy_string_to_kind(queries_info.format);
+    scalar_kind_t dataset_kind =
+        (scalar_kind != scalar_kind_t::unknown_k) ? scalar_kind : numpy_string_to_kind(dataset_info.format);
+    scalar_kind_t queries_kind =
+        (scalar_kind != scalar_kind_t::unknown_k) ? scalar_kind : numpy_string_to_kind(queries_info.format);
     if (dataset_kind != queries_kind)
         throw std::invalid_argument("The types of vectors don't match!");
 
@@ -992,13 +990,24 @@ static py::object get_typed_vectors_for_keys(index_at const& index, py::buffer k
         }
         return results;
     } else {
-        py::array_t<external_at> result_py({keys_count, static_cast<Py_ssize_t>(index.scalar_words())});
-        auto result_py2d = result_py.template mutable_unchecked<2>();
+        // One backing 2D allocation, then per-key 1D views into its rows so the
+        // tuple shape matches `Index.get`'s docstring: `If multiple keys are
+        // requested, composes many such responses into a tuple`. Missing keys
+        // yield `py::none()` instead of leaking the uninitialized row. Views
+        // share storage with `backing` via the `base` argument, so the data
+        // path stays a single allocation regardless of which keys are present.
+        Py_ssize_t const dims = static_cast<Py_ssize_t>(index.scalar_words());
+        py::array_t<external_at> backing({keys_count, dims});
+        auto backing2d = backing.template mutable_unchecked<2>();
+        py::tuple results(keys_count);
         for (Py_ssize_t task_idx = 0; task_idx != keys_count; ++task_idx) {
             dense_key_t key = *reinterpret_cast<dense_key_t const*>(keys_data + task_idx * keys_info.strides[0]);
-            index.get(key, (internal_at*)&result_py2d(task_idx, 0), 1);
+            if (index.get(key, (internal_at*)&backing2d(task_idx, 0), 1) == 0)
+                results[task_idx] = py::none();
+            else
+                results[task_idx] = py::array_t<external_at>({dims}, &backing2d(task_idx, 0), backing);
         }
-        return result_py;
+        return results;
     }
 }
 

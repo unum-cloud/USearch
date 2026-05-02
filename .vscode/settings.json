@@ -1,8 +1,4 @@
 {
-  "[python]": {
-    "editor.defaultFormatter": "charliermarsh.ruff",
-    "editor.formatOnSave": true
-  },
   "[go]": {
     "editor.defaultFormatter": "golang.go",
     "editor.formatOnSave": true
@@ -16,13 +12,12 @@
     "editor.insertSpaces": true,
     "editor.tabSize": 4
   },
-  "[js]": {
-    "editor.defaultFormatter": "esbenp.prettier-vscode",
-    "editor.tabSize": 4
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true
   },
   "[yaml]": {
-    "editor.defaultFormatter": "esbenp.prettier-vscode",
-    "editor.tabSize": 2
+    "editor.defaultFormatter": "redhat.vscode-yaml"
   },
   "autoDocstring.docstringFormat": "sphinx",
   "cSpell.words": [
@@ -32,7 +27,6 @@
     "ashvardanian",
     "astype",
     "autovec",
-    "Availible",
     "BFLOAT",
     "bidict",
     "BLAS",
@@ -80,6 +74,7 @@
     "ndim",
     "nlevels",
     "Numba",
+    "numkong",
     "numpy",
     "NVME",
     "objc",
@@ -94,7 +89,6 @@
     "rtype",
     "SIMD",
     "simsimd",
-    "numkong",
     "SLOC",
     "Sonatype",
     "sorensen",
@@ -263,6 +257,8 @@
   },
   "java.configuration.updateBuildConfiguration": "automatic",
   "java.format.enabled": false,
+  "prettier.bracketSpacing": false,
+  "prettier.printWidth": 120,
   "prettier.singleQuote": true,
   "prettier.useTabs": false,
   "python.analysis.diagnosticSeverityOverrides": {
@@ -281,5 +277,8 @@
     "**/numkong/**": true,
     "**/stringzilla/**": true,
     "**/target/**": true
-  }
+  },
+  "yaml.format.bracketSpacing": false,
+  "yaml.format.printWidth": 120,
+  "yaml.format.singleQuote": false
 }

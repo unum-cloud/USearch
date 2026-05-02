@@ -848,7 +848,7 @@ class Index:
             keys = keys.astype(Key)
 
         results = self._compiled.get_many(keys, dtype)
-        results = cast(results) if isinstance(results, np.ndarray) else [cast(result) for result in results]
+        results = tuple(cast(result) for result in results)
         return results[0] if is_one else results
 
     def __getitem__(self, keys: KeyOrKeysLike) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
@@ -1343,7 +1343,10 @@ class Index:
         :return: Array of vectors.
         :rtype: np.ndarray
         """
-        return self.get(self.keys)
+        # `get` returns a per-key tuple (None for missing keys); `keys` lists
+        # only present keys, so vstack composes the rows back into a 2D matrix
+        # for both single-vector and multi-vector indexes.
+        return np.vstack(self.get(self.keys))
 
     @property
     def max_level(self) -> int:
