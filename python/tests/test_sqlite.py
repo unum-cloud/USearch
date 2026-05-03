@@ -7,13 +7,13 @@ testing database operations and vector search within SQLite.
 
 Usage:
     uv run python/scripts/test_sqlite.py
-    
+
 Dependencies listed in the script header for uv to resolve automatically.
 """
 # /// script
 # dependencies = [
 #   "pytest",
-#   "numpy", 
+#   "numpy",
 #   "usearch"
 # ]
 # ///

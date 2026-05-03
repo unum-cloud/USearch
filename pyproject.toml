@@ -18,7 +18,7 @@ requires = [
 ]
 
 [tool.pytest.ini_options]
-addopts = "-ra --showlocals --strict-markers --strict-config -s -x -p no:warnings"
+addopts = "-ra --showlocals --strict-markers --strict-config -s -x -p no:warnings --cov=usearch --cov-report=term-missing"
 filterwarnings = ["error"]
 minversion = "6.0"
 xfail_strict = true
@@ -95,6 +95,7 @@ lint = [
 tests = [
   "numpy>=1.21",
   "pytest>=9.0.2",
+  "pytest-cov>=7.1.0",
   "pytest-repeat>=0.9.4",
 ]
 

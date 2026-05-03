@@ -221,9 +221,7 @@ def test_index_cppyy(ndim: int, batch_size: int):
             result += a[i] * b[i];
         return 1 - result;
     }
-    """.replace(
-            "ndim", str(ndim)
-        )
+    """.replace("ndim", str(ndim))
     )
 
     functions = [

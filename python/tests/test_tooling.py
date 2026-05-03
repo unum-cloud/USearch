@@ -7,7 +7,7 @@ including I/O operations, matrix handling, and helper functions.
 
 Usage:
     uv run python/scripts/test_tooling.py
-    
+
 Dependencies listed in the script header for uv to resolve automatically.
 """
 # /// script

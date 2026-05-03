@@ -7,7 +7,7 @@ including cosine, L2, inner product, and custom distance functions.
 
 Usage:
     uv run python/scripts/test_distances.py
-    
+
 Dependencies listed in the script header for uv to resolve automatically.
 """
 # /// script
