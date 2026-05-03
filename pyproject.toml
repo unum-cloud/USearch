@@ -3,18 +3,17 @@
 #   - `macos` wheels for x86_64, arm64, and universal2;
 #   - `windows` wheels for AMD64, and ARM64. But not x86.
 #   - `manylinux` and `musllinux` wheels for Linux on x86_64, aarch64. But not i686, ppc64le, s390x;
-#   * for CPython versions from 3.7 to 3.14.
-#   * for PyPy versions from 3.7 to 3.10.
-#   = meaning 7 platforms * 11 Python versions = 77 builds.
+#   * for CPython versions from 3.10 to 3.14 (including free-threaded 3.13t and 3.14t).
+#   = meaning 7 platforms * 7 Python versions = 49 builds.
 [build-system]
 build-backend = "setuptools.build_meta"
 requires = [
   "setuptools>=42",
   "wheel",
   "cmake>=3.22",
-  "pybind11",
+  "pybind11>=2.13.6",
   "numpy",
-  "numkong>=7.4.3",
+  "numkong>=7.5.0",
 ]
 
 [tool.pytest.ini_options]
@@ -61,7 +60,9 @@ musllinux-x86_64-image = "musllinux_1_2"
 
 # On CentOS we have to use `yum`.
 # The healthy version would be: `apt-get update && apt-get install -y libc6-dev wget python3-dev`.
-before-all = ["yum update -y && yum install -y glibc-devel wget python3-devel"]
+before-all = [
+  "yum update -y --disablerepo=extras --setopt=install_weak_deps=0 && yum install -y --disablerepo=extras glibc-devel wget python3-devel",
+]
 
 # With `musl` builds, we obviously don't need the `glibc` and can't use `yum`.
 # This may also be handy for using custom dependencies for different Python versions:
@@ -108,8 +109,20 @@ quote-style = "double"
 
 [tool.ruff.lint]
 select = [
-  "E9",
-  "F63",
-  "F7",
-  "F82",
+  "E",     # pycodestyle errors
+  "W",     # pycodestyle warnings
+  "F",     # pyflakes
+  "I",     # isort (import ordering)
+  "UP",    # pyupgrade (modernize syntax)
 ]
+ignore = [
+  "E501",  # line too long (handled by formatter)
+  "E741",  # ambiguous variable names (l, O, I)
+  "UP007", # Union[X, Y] -> X | Y (deferred to v3, requires annotation refactor)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"python/usearch/__init__.py" = ["F401", "E402"]  # re-exports and conditional imports
+
+[tool.ruff.lint.isort]
+known-first-party = ["usearch"]

@@ -729,6 +729,45 @@ class index_dense_gt {
         return typed_->stats(stats_per_level, max_level);
     }
 
+    using neighbors_view_t = typename index_t::neighbors_view_t;
+
+    /**
+     *  @brief  Returns a read-only range over the neighbors of @p key at the given
+     *          graph @p level.
+     *
+     *          For multi-key indexes, returns the neighbors of the first matching
+     *          slot; iterate through `cbegin()`/`cend()` and call the underlying
+     *          `index_gt::neighbors(member_citerator_t, std::size_t)` overload to
+     *          inspect every copy of a duplicated key.
+     *
+     *  @return An empty view if the key is not present, or if @p level exceeds
+     *          the node's level.
+     *  @warning The view aliases the node's adjacency tape. Hold no concurrent
+     *           `add`/`update`/`remove` for the lifetime of the view.
+     */
+    neighbors_view_t neighbors(vector_key_t key, std::size_t level) const {
+        usearch_assert_m(config().enable_key_lookups, "Key lookups are disabled");
+        shared_lock_t lookup_lock(slot_lookup_mutex_);
+        auto matching_slots = slot_lookup_.equal_range(key_and_slot_t::any_slot(key));
+        if (matching_slots.first == matching_slots.second)
+            return {};
+        compressed_slot_t slot = (*matching_slots.first).slot;
+        return typed_->neighbors(slot, level);
+    }
+
+    /**
+     *  @brief  Returns the top graph level at which @p key is present, or zero
+     *          if the key is not in the index.
+     */
+    std::size_t level_of(vector_key_t key) const {
+        usearch_assert_m(config().enable_key_lookups, "Key lookups are disabled");
+        shared_lock_t lookup_lock(slot_lookup_mutex_);
+        auto matching_slots = slot_lookup_.equal_range(key_and_slot_t::any_slot(key));
+        if (matching_slots.first == matching_slots.second)
+            return 0;
+        return typed_->level_of((*matching_slots.first).slot);
+    }
+
     dynamic_allocator_t const& allocator() const { return typed_->dynamic_allocator(); }
     vector_key_t const& free_key() const { return free_key_; }
 
@@ -774,8 +813,8 @@ class index_dense_gt {
         };
     }
 
-    static constexpr std::size_t any_thread() { return std::numeric_limits<std::size_t>::max(); }
-    static constexpr distance_t infinite_distance() { return std::numeric_limits<distance_t>::max(); }
+    static constexpr std::size_t any_thread() { return (std::numeric_limits<std::size_t>::max)(); }
+    static constexpr distance_t infinite_distance() { return (std::numeric_limits<distance_t>::max)(); }
 
     struct aggregated_distances_t {
         std::size_t count = 0;
@@ -791,7 +830,10 @@ class index_dense_gt {
     add_result_t add(vector_key_t key, f16_t const* vector, std::size_t thread = any_thread(), bool copy_vector = true) { return add_(key, vector, thread, copy_vector, casts_.from.f16); }
     add_result_t add(vector_key_t key, e5m2_t const* vector, std::size_t thread = any_thread(), bool copy_vector = true) { return add_(key, vector, thread, copy_vector, casts_.from.e5m2); }
     add_result_t add(vector_key_t key, e4m3_t const* vector, std::size_t thread = any_thread(), bool copy_vector = true) { return add_(key, vector, thread, copy_vector, casts_.from.e4m3); }
+    add_result_t add(vector_key_t key, e3m2_t const* vector, std::size_t thread = any_thread(), bool copy_vector = true) { return add_(key, vector, thread, copy_vector, casts_.from.e3m2); }
+    add_result_t add(vector_key_t key, e2m3_t const* vector, std::size_t thread = any_thread(), bool copy_vector = true) { return add_(key, vector, thread, copy_vector, casts_.from.e2m3); }
     add_result_t add(vector_key_t key, i8_t const* vector, std::size_t thread = any_thread(), bool copy_vector = true) { return add_(key, vector, thread, copy_vector, casts_.from.i8); }
+    add_result_t add(vector_key_t key, u8_t const* vector, std::size_t thread = any_thread(), bool copy_vector = true) { return add_(key, vector, thread, copy_vector, casts_.from.u8); }
     add_result_t add(vector_key_t key, b1x8_t const* vector, std::size_t thread = any_thread(), bool copy_vector = true) { return add_(key, vector, thread, copy_vector, casts_.from.b1x8); }
 
     search_result_t search(f64_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.f64); }
@@ -800,7 +842,10 @@ class index_dense_gt {
     search_result_t search(f16_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.f16); }
     search_result_t search(e5m2_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.e5m2); }
     search_result_t search(e4m3_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.e4m3); }
+    search_result_t search(e3m2_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.e3m2); }
+    search_result_t search(e2m3_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.e2m3); }
     search_result_t search(i8_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.i8); }
+    search_result_t search(u8_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.u8); }
     search_result_t search(b1x8_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.b1x8); }
 
     template <typename predicate_at> search_result_t filtered_search(f64_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.f64); }
@@ -809,7 +854,10 @@ class index_dense_gt {
     template <typename predicate_at> search_result_t filtered_search(f16_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.f16); }
     template <typename predicate_at> search_result_t filtered_search(e5m2_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.e5m2); }
     template <typename predicate_at> search_result_t filtered_search(e4m3_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.e4m3); }
+    template <typename predicate_at> search_result_t filtered_search(e3m2_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.e3m2); }
+    template <typename predicate_at> search_result_t filtered_search(e2m3_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.e2m3); }
     template <typename predicate_at> search_result_t filtered_search(i8_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.i8); }
+    template <typename predicate_at> search_result_t filtered_search(u8_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.u8); }
     template <typename predicate_at> search_result_t filtered_search(b1x8_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.b1x8); }
 
     std::size_t get(vector_key_t key, f64_t* vector, std::size_t vectors_count = 1) const { return get_(key, vector, vectors_count, casts_.to.f64); }
@@ -818,7 +866,10 @@ class index_dense_gt {
     std::size_t get(vector_key_t key, f16_t* vector, std::size_t vectors_count = 1) const { return get_(key, vector, vectors_count, casts_.to.f16); }
     std::size_t get(vector_key_t key, e5m2_t* vector, std::size_t vectors_count = 1) const { return get_(key, vector, vectors_count, casts_.to.e5m2); }
     std::size_t get(vector_key_t key, e4m3_t* vector, std::size_t vectors_count = 1) const { return get_(key, vector, vectors_count, casts_.to.e4m3); }
+    std::size_t get(vector_key_t key, e3m2_t* vector, std::size_t vectors_count = 1) const { return get_(key, vector, vectors_count, casts_.to.e3m2); }
+    std::size_t get(vector_key_t key, e2m3_t* vector, std::size_t vectors_count = 1) const { return get_(key, vector, vectors_count, casts_.to.e2m3); }
     std::size_t get(vector_key_t key, i8_t* vector, std::size_t vectors_count = 1) const { return get_(key, vector, vectors_count, casts_.to.i8); }
+    std::size_t get(vector_key_t key, u8_t* vector, std::size_t vectors_count = 1) const { return get_(key, vector, vectors_count, casts_.to.u8); }
     std::size_t get(vector_key_t key, b1x8_t* vector, std::size_t vectors_count = 1) const { return get_(key, vector, vectors_count, casts_.to.b1x8); }
 
     cluster_result_t cluster(f64_t const* vector, std::size_t level, std::size_t thread = any_thread()) const { return cluster_(vector, level, thread, casts_.from.f64); }
@@ -827,7 +878,10 @@ class index_dense_gt {
     cluster_result_t cluster(f16_t const* vector, std::size_t level, std::size_t thread = any_thread()) const { return cluster_(vector, level, thread, casts_.from.f16); }
     cluster_result_t cluster(e5m2_t const* vector, std::size_t level, std::size_t thread = any_thread()) const { return cluster_(vector, level, thread, casts_.from.e5m2); }
     cluster_result_t cluster(e4m3_t const* vector, std::size_t level, std::size_t thread = any_thread()) const { return cluster_(vector, level, thread, casts_.from.e4m3); }
+    cluster_result_t cluster(e3m2_t const* vector, std::size_t level, std::size_t thread = any_thread()) const { return cluster_(vector, level, thread, casts_.from.e3m2); }
+    cluster_result_t cluster(e2m3_t const* vector, std::size_t level, std::size_t thread = any_thread()) const { return cluster_(vector, level, thread, casts_.from.e2m3); }
     cluster_result_t cluster(i8_t const* vector, std::size_t level, std::size_t thread = any_thread()) const { return cluster_(vector, level, thread, casts_.from.i8); }
+    cluster_result_t cluster(u8_t const* vector, std::size_t level, std::size_t thread = any_thread()) const { return cluster_(vector, level, thread, casts_.from.u8); }
     cluster_result_t cluster(b1x8_t const* vector, std::size_t level, std::size_t thread = any_thread()) const { return cluster_(vector, level, thread, casts_.from.b1x8); }
 
     aggregated_distances_t distance_between(vector_key_t key, f64_t const* vector, std::size_t thread = any_thread()) const { return distance_between_(key, vector, thread, casts_.to.f64); }
@@ -836,7 +890,10 @@ class index_dense_gt {
     aggregated_distances_t distance_between(vector_key_t key, f16_t const* vector, std::size_t thread = any_thread()) const { return distance_between_(key, vector, thread, casts_.to.f16); }
     aggregated_distances_t distance_between(vector_key_t key, e5m2_t const* vector, std::size_t thread = any_thread()) const { return distance_between_(key, vector, thread, casts_.to.e5m2); }
     aggregated_distances_t distance_between(vector_key_t key, e4m3_t const* vector, std::size_t thread = any_thread()) const { return distance_between_(key, vector, thread, casts_.to.e4m3); }
+    aggregated_distances_t distance_between(vector_key_t key, e3m2_t const* vector, std::size_t thread = any_thread()) const { return distance_between_(key, vector, thread, casts_.to.e3m2); }
+    aggregated_distances_t distance_between(vector_key_t key, e2m3_t const* vector, std::size_t thread = any_thread()) const { return distance_between_(key, vector, thread, casts_.to.e2m3); }
     aggregated_distances_t distance_between(vector_key_t key, i8_t const* vector, std::size_t thread = any_thread()) const { return distance_between_(key, vector, thread, casts_.to.i8); }
+    aggregated_distances_t distance_between(vector_key_t key, u8_t const* vector, std::size_t thread = any_thread()) const { return distance_between_(key, vector, thread, casts_.to.u8); }
     aggregated_distances_t distance_between(vector_key_t key, b1x8_t const* vector, std::size_t thread = any_thread()) const { return distance_between_(key, vector, thread, casts_.to.b1x8); }
     // clang-format on
 
@@ -875,8 +932,8 @@ class index_dense_gt {
         if (a_missing || b_missing)
             return result;
 
-        result.min = std::numeric_limits<distance_t>::max();
-        result.max = std::numeric_limits<distance_t>::min();
+        result.min = (std::numeric_limits<distance_t>::max)();
+        result.max = (std::numeric_limits<distance_t>::min)();
         result.mean = 0;
         result.count = 0;
 
@@ -1963,7 +2020,7 @@ class index_dense_gt {
 
             cluster_t& merge_source = clusters[unique_clusters - 1];
             std::size_t merge_target_idx = 0;
-            distance_t merge_distance = std::numeric_limits<distance_t>::max();
+            distance_t merge_distance = (std::numeric_limits<distance_t>::max)();
 
             for (std::size_t candidate_idx = 0; candidate_idx + 1 < unique_clusters; ++candidate_idx) {
                 distance_t distance = metric_(merge_source.vector, clusters[candidate_idx].vector);
@@ -2178,8 +2235,8 @@ class index_dense_gt {
         if (key_range.first == key_range.second)
             return result;
 
-        result.min = std::numeric_limits<distance_t>::max();
-        result.max = std::numeric_limits<distance_t>::min();
+        result.min = (std::numeric_limits<distance_t>::max)();
+        result.max = (std::numeric_limits<distance_t>::min)();
         result.mean = 0;
         result.count = 0;
 

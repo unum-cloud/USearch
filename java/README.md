@@ -19,7 +19,7 @@ repositories {
 // Task to download USearch JAR from GitHub releases
 task downloadUSearchJar {
     doLast {
-        def usearchVersion = '2.24.0'
+        def usearchVersion = '2.25.2'
         def usearchUrl = "https://github.com/unum-cloud/USearch/releases/download/v${usearchVersion}/usearch-${usearchVersion}.jar"
         def usearchFile = file("lib/usearch-${usearchVersion}.jar")
         
@@ -38,7 +38,7 @@ compileJava.dependsOn downloadUSearchJar
 
 dependencies {
     // USearch JAR from local lib directory (downloaded automatically)
-    implementation name: 'usearch', version: '2.24.0', ext: 'jar'
+    implementation name: 'usearch', version: '2.25.2', ext: 'jar'
 }
 ```
 
@@ -104,7 +104,7 @@ long connectivity = index.connectivity();
 
 ## Multiple Data Types and Quantization
 
-USearch supports hardware-agnostic `f64`, `f32`, and `i8` quantization for memory efficiency and performance optimization.
+USearch supports hardware-agnostic `f64`, `f32`, `bf16`, `f16`, `e5m2`, `e4m3`, `e3m2`, `e2m3`, `i8`, and `b1` quantization for memory efficiency and performance optimization.
 
 ```java
 // Double precision (f64) for highest accuracy

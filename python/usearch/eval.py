@@ -1,36 +1,78 @@
 from __future__ import annotations
-from time import time_ns
-from typing import Tuple, Any, Callable, Union, Optional, List
-from dataclasses import dataclass, asdict
+
 from collections import defaultdict
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
 from math import ceil
+from time import time_ns
+from typing import Any
 
 import numpy as np
 
-from usearch.io import load_matrix
 from usearch.index import (
-    Index,
     BatchMatches,
-    ScalarKind,
+    Index,
+    Key,
     MetricKind,
     MetricKindBitwise,
-    Key,
-    _normalize_metric,
+    ScalarKind,
     _normalize_dtype,
-    _to_numpy_dtype,
+    _normalize_metric,
 )
+from usearch.io import load_matrix
+
+# Actual representable value range for each USearch scalar type.
+_SCALAR_RANGE: dict[ScalarKind, tuple[float, float]] = {
+    ScalarKind.F64: (-1e308, 1e308),
+    ScalarKind.F32: (-3.4e38, 3.4e38),
+    ScalarKind.BF16: (-3.39e38, 3.39e38),
+    ScalarKind.F16: (-65504.0, 65504.0),
+    ScalarKind.E5M2: (-57344.0, 57344.0),
+    ScalarKind.E4M3: (-448.0, 448.0),
+    ScalarKind.E3M2: (-28.0, 28.0),
+    ScalarKind.E2M3: (-7.5, 7.5),
+    ScalarKind.I8: (-127.0, 127.0),
+    ScalarKind.U8: (0.0, 255.0),
+}
+
+# Actual representable value range for numpy input types.
+_INPUT_DTYPE_RANGE: dict[type, tuple[float, float]] = {
+    np.float64: (-1e308, 1e308),
+    np.float32: (-3.4e38, 3.4e38),
+    np.float16: (-65504.0, 65504.0),
+    np.int8: (-127.0, 127.0),
+    np.uint8: (0.0, 255.0),
+}
+
+# Generation ceiling: we never need components larger than this.
+_MAX_GENERATION_RANGE = 1000.0
 
 
 def random_vectors(
     count: int,
     metric: MetricKind = MetricKind.IP,
-    dtype: ScalarKind = ScalarKind.F32,
-    ndim: Optional[int] = None,
-    index: Optional[Index] = None,
+    quantization: ScalarKind = ScalarKind.F32,
+    ndim: int | None = None,
+    index: Index | None = None,
+    input_dtype: type | None = None,
+    # Deprecated alias for `quantization` — will be removed in v3.
+    dtype: ScalarKind | None = None,
 ) -> np.ndarray:
-    """Produces a collection of random vectors normalized for the provided `metric`
-    and matching wanted `dtype`, which can both be inferred from an existing `index`.
+    """Produces a collection of random vectors for the provided `metric` and `quantization`.
+
+    For bitwise metrics: generates random packed bit vectors.
+    For spatial metrics: generates gaussian vectors scaled to fill the quantization
+    type's full dynamic range. For IP metric, additionally normalizes to unit sphere.
+
+    :param quantization: USearch scalar type that determines the value range.
+    :param input_dtype: Numpy dtype for the output array. The value range is
+        intersected with the quantization range so values survive the cast without
+        collapsing. Useful when testing different input dtypes with the same index.
+    :param dtype: Deprecated alias for `quantization`.
     """
+    # Handle deprecated `dtype` alias
+    if dtype is not None:
+        quantization = dtype
 
     # Infer default parameters from the `index`, if passed
     if index is not None:
@@ -38,28 +80,53 @@ def random_vectors(
             raise ValueError("Unsupported `index` type")
 
         ndim = index.ndim
-        dtype = index.numpy_dtype
+        quantization = index.numpy_dtype
         metric = index.metric
 
     else:
         metric: MetricKind = _normalize_metric(metric)
-        dtype: ScalarKind = _normalize_dtype(dtype, ndim=ndim, metric=metric)
+        quantization: ScalarKind = _normalize_dtype(quantization, ndim=ndim, metric=metric)
 
     # Produce data
-    if metric in MetricKindBitwise or dtype == ScalarKind.B1:
+    if metric in MetricKindBitwise or quantization == ScalarKind.B1:
         bit_vectors = np.random.randint(2, size=(count, ndim))
-        bit_vectors = np.packbits(bit_vectors, axis=1)
-        return bit_vectors
+        return np.packbits(bit_vectors, axis=1)
 
-    else:
-        x = np.random.rand(count, ndim)
-        if _to_numpy_dtype(dtype) == np.int8:
-            x = (x * 100).astype(np.int8)
-        else:
-            x = x.astype(_to_numpy_dtype(dtype))
-            if metric == MetricKind.IP:
-                return x / np.linalg.norm(x, axis=1, keepdims=True)
-        return x
+    # Compute effective value range: start with quantization range,
+    # intersect with input dtype range if specified, then clamp to
+    # a sensible generation ceiling (we never need components of 1e38).
+    low, high = _SCALAR_RANGE.get(quantization, (-1.0, 1.0))
+    if input_dtype is not None:
+        input_low, input_high = _INPUT_DTYPE_RANGE.get(input_dtype, (low, high))
+        low = max(low, input_low)
+        high = min(high, input_high)
+    low = max(low, -_MAX_GENERATION_RANGE)
+    high = min(high, _MAX_GENERATION_RANGE)
+
+    # Gaussian: mean = midpoint of range, stddev = range / 6 (99.7% within bounds).
+    mean = (low + high) / 2.0
+    stddev = max((high - low) / 6.0, 1e-6)
+
+    # Output numpy dtype: use input_dtype if specified, otherwise infer from
+    # the quantization type. Types without native numpy equivalents (bf16, FP8, FP6)
+    # stay as float32 — USearch handles quantization internally.
+    _QUANT_TO_NUMPY: dict[ScalarKind, type] = {
+        ScalarKind.F64: np.float64,
+        ScalarKind.F32: np.float32,
+        ScalarKind.F16: np.float16,
+        ScalarKind.I8: np.int8,
+        ScalarKind.U8: np.uint8,
+    }
+    numpy_dtype = input_dtype if input_dtype is not None else _QUANT_TO_NUMPY.get(quantization, np.float32)
+    x = (np.random.randn(count, ndim) * stddev + mean).astype(numpy_dtype)
+
+    # For IP metric, normalize to unit sphere
+    if metric == MetricKind.IP:
+        norms = np.linalg.norm(x.astype(np.float64), axis=1, keepdims=True)
+        norms = np.maximum(norms, 1e-10)
+        x = (x.astype(np.float64) / norms).astype(numpy_dtype)
+
+    return x
 
 
 @dataclass
@@ -94,7 +161,7 @@ class SearchStats:
         return self.count_matches / self.count_queries
 
 
-def self_recall(index: Index, sample: Union[float, int] = 1.0, **kwargs) -> SearchStats:
+def self_recall(index: Index, sample: float | int = 1.0, **kwargs) -> SearchStats:
     """Simplest benchmark for a quality of search, which queries every
     existing member of the index, to make sure approximate search finds
     the point itself.
@@ -124,7 +191,9 @@ def self_recall(index: Index, sample: Union[float, int] = 1.0, **kwargs) -> Sear
     if "vectors" in kwargs:
         vectors = kwargs.pop("vectors")
     else:
-        vectors = index.get(keys)
+        # `get` returns a per-key tuple after the `Index.get` contract change;
+        # `search` expects a 2D matrix of query vectors.
+        vectors = np.vstack(index.get(keys))
 
     matches = index.search(vectors, **kwargs)
     count_matches: int = (
@@ -139,7 +208,7 @@ def self_recall(index: Index, sample: Union[float, int] = 1.0, **kwargs) -> Sear
     )
 
 
-def measure_seconds(f: Callable) -> Tuple[float, Any]:
+def measure_seconds(f: Callable) -> tuple[float, Any]:
     """Simple function profiling decorator.
 
     :param f: Function to be profiled
@@ -155,7 +224,7 @@ def measure_seconds(f: Callable) -> Tuple[float, Any]:
     return secs, result
 
 
-def dcg(relevances: np.ndarray, k: Optional[int] = None) -> np.ndarray:
+def dcg(relevances: np.ndarray, k: int | None = None) -> np.ndarray:
     """Calculate DCG (Discounted Cumulative Gain) up to position k.
 
     :param relevances: List of true relevance scores (in the order as they are ranked)
@@ -176,7 +245,7 @@ def dcg(relevances: np.ndarray, k: Optional[int] = None) -> np.ndarray:
     return np.sum(relevances / discounts)
 
 
-def ndcg(relevances: np.ndarray, k: Optional[int] = None) -> np.ndarray:
+def ndcg(relevances: np.ndarray, k: int | None = None) -> np.ndarray:
     """Calculate NDCG (Normalized Discounted Cumulative Gain) at position k.
 
     :param relevances: List of true relevance scores (in the order as they are ranked)
@@ -193,7 +262,7 @@ def ndcg(relevances: np.ndarray, k: Optional[int] = None) -> np.ndarray:
     return dcg(relevances, k) / best_dcg
 
 
-def relevance(expected: np.ndarray, predicted: np.ndarray, k: Optional[int] = None) -> np.ndarray:
+def relevance(expected: np.ndarray, predicted: np.ndarray, k: int | None = None) -> np.ndarray:
     """Calculate relevance scores. Binary relevance scores
 
     :param expected: ground-truth keys
@@ -222,12 +291,12 @@ class Dataset:
 
     @staticmethod
     def build(
-        vectors: Optional[str] = None,
-        queries: Optional[str] = None,
-        neighbors: Optional[str] = None,
-        count: Optional[int] = None,
-        ndim: Optional[int] = None,
-        k: Optional[int] = None,
+        vectors: str | None = None,
+        queries: str | None = None,
+        neighbors: str | None = None,
+        count: int | None = None,
+        ndim: int | None = None,
+        k: int | None = None,
     ):
         """Either loads an existing dataset from disk, or generates one on the fly.
 
@@ -284,12 +353,12 @@ class Dataset:
 
 @dataclass
 class TaskResult:
-    add_operations: Optional[int] = None
-    add_per_second: Optional[float] = None
+    add_operations: int | None = None
+    add_per_second: float | None = None
 
-    search_operations: Optional[int] = None
-    search_per_second: Optional[float] = None
-    recall_at_one: Optional[float] = None
+    search_operations: int | None = None
+    search_per_second: float | None = None
+    recall_at_one: float | None = None
 
     def __repr__(self) -> str:
         parts = []
@@ -366,7 +435,7 @@ class AddTask:
         self.keys = self.keys[new_order]
         self.vectors = self.vectors[new_order, :]
 
-    def slices(self, batch_size: int) -> List[AddTask]:
+    def slices(self, batch_size: int) -> list[AddTask]:
         """Splits this dataset into smaller chunks."""
 
         return [
@@ -377,7 +446,7 @@ class AddTask:
             for start_row in range(0, self.count, batch_size)
         ]
 
-    def clusters(self, number_of_clusters: int) -> List[AddTask]:
+    def clusters(self, number_of_clusters: int) -> list[AddTask]:
         """Splits this dataset into smaller chunks."""
 
         from sklearn.cluster import KMeans
@@ -414,7 +483,7 @@ class SearchTask:
             recall_at_one=results.mean_recall(self.neighbors[:, 0].flatten()),
         )
 
-    def slices(self, batch_size: int) -> List[SearchTask]:
+    def slices(self, batch_size: int) -> list[SearchTask]:
         """Splits this dataset into smaller chunks."""
 
         return [
@@ -428,7 +497,7 @@ class SearchTask:
 
 @dataclass
 class Evaluation:
-    tasks: List[Union[AddTask, SearchTask]]
+    tasks: list[AddTask | SearchTask]
     count: int
     ndim: int
 

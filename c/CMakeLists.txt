@@ -6,6 +6,10 @@ if (USEARCH_BUILD_TEST_C)
     include(CTest)
     enable_testing()
     add_test(NAME test_c COMMAND test_c)
+
+    # Export the dynamic symbol table so `backtrace_symbols_fd` can resolve
+    # function names when the in-test crash handler fires.
+    set_target_properties(test_c PROPERTIES ENABLE_EXPORTS ON)
 endif ()
 
 # This article discusses a better way to allow building either static or shared libraries:

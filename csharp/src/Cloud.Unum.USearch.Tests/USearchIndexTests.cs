@@ -166,6 +166,31 @@ public class UsearchIndexTests
     }
 
     [Fact]
+    public void Add_FloatVector_MiniFloatQuantizations()
+    {
+        ScalarKind[] kinds = { ScalarKind.E5M2, ScalarKind.E4M3, ScalarKind.E3M2, ScalarKind.E2M3 };
+        foreach (var kind in kinds)
+        {
+            var indexOptions = new IndexOptions(
+                metricKind: MetricKind.Cos,
+                quantization: kind,
+                dimensions: 64
+            );
+            var vector = GenerateFloatVector(64);
+            using (var index = new USearchIndex(indexOptions))
+            {
+                index.Add(1, vector);
+                Assert.True(index.Contains(1));
+                Assert.Equal(1u, index.Size());
+
+                int found = index.Search(vector, 1, out ulong[] keys, out float[] distances);
+                Assert.Equal(1, found);
+                Assert.Equal(1UL, keys[0]);
+            }
+        }
+    }
+
+    [Fact]
     public void Add_ByteVector_UpdatesIndexOptions()
     {
         // Arrange

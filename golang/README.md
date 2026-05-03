@@ -58,6 +58,7 @@ func main() {
    	vectorSize := 3
    	vectorsCount := 100
    	conf := usearch.DefaultConfig(uint(vectorSize))
+   	conf.Quantization = usearch.F32 // or BF16, F16, E5M2, E4M3, E3M2, E2M3, I8, U8
    	index, err := usearch.NewIndex(conf)
    	if err != nil {
    		panic("Failed to create Index")

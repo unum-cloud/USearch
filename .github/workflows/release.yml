@@ -11,7 +11,7 @@ env:
   DOTNET_VERSION: 8.0.x
   NODE_VERSION: 20
   JAVA_VERSION: 21
-  GO_VERSION: "^1.21.0"
+  GO_VERSION: "^1.22.0"
   ANDROID_NDK_VERSION: 26.3.11579264
   ANDROID_SDK_VERSION: 21
   EMSCRIPTEN_VERSION: 3.1.47
@@ -27,7 +27,7 @@ permissions:
 jobs:
   versioning:
     name: Update Version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -62,9 +62,9 @@ jobs:
           github-token: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
 
   rebase:
-    name: Rebase Dev. Branch
+    name: Rebase Dev Branch
     needs: versioning
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout the latest code
         uses: actions/checkout@v6
@@ -86,8 +86,8 @@ jobs:
           force: True
 
   create_linux_deb_package:
-    name: Create Debian Package
-    runs-on: ubuntu-22.04
+    name: Build Linux Package
+    runs-on: ubuntu-24.04
     needs: versioning
     env:
       CC: clang
@@ -169,7 +169,7 @@ jobs:
           update_latest_release: true
 
   create_windows_dll_library:
-    name: Create Dll Library for Windows
+    name: Build Windows Library
     runs-on: windows-2022
     needs: versioning
     strategy:
@@ -213,13 +213,29 @@ jobs:
 
       - name: Build library (MinGW)
         if: matrix.arch != 'arm64'
+        # `-G "MinGW Makefiles"` is required: without it, CMake on the
+        # `windows-2022` runner falls back to the Visual Studio generator
+        # (x64 by default), so the `x86` matrix entry was silently producing
+        # a 64-bit DLL and shipping it under the `windows_x86` archive name.
         run: |
-          cmake -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_SQLITE=0 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 -B ./build_release
+          cmake -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_SQLITE=0 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 -B ./build_release
           cmake --build ./build_release --config Release
           mkdir pkg
           copy .\build_release\libusearch_c.dll pkg\
           copy .\c\usearch.h pkg\
           tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_c.dll usearch.h
+        # Guard against silent generator fallback — the DLL must match the
+        # advertised matrix arch, otherwise the archive ships a mislabeled binary.
+      - name: Verify Windows DLL architecture
+        if: matrix.arch != 'arm64'
+        shell: bash
+        run: |
+          case "${{ matrix.arch }}" in
+            x64)  expected='x86-64'    ;;
+            x86)  expected='80386\|Intel 80386' ;;
+          esac
+          file ./build_release/libusearch_c.dll
+          file ./build_release/libusearch_c.dll | grep -q "$expected"
 
       - name: Build library (MSVC ARM64)
         if: matrix.arch == 'arm64'
@@ -247,7 +263,7 @@ jobs:
           update_latest_release: true
 
   create_macos_dylib_library:
-    name: Create Library for MacOS
+    name: Build macOS Library
     runs-on: macos-15
     needs: versioning
     strategy:
@@ -311,8 +327,8 @@ jobs:
           update_latest_release: true
 
   create_android_library:
-    name: Create Android Libraries
-    runs-on: ubuntu-22.04
+    name: Build Android Library
+    runs-on: ubuntu-24.04
     needs: versioning
     strategy:
       fail-fast: false
@@ -381,14 +397,27 @@ jobs:
     name: Build JNI for Linux
     runs-on: ubuntu-24.04
     needs: versioning
+    # `-target <triple>` is a Clang flag; without these, CMake picks the host
+    # GCC and silently drops the cross-target. Mirrors the prerelease
+    # `test_ubuntu_cross_compilation` job.
+    env:
+      CC: clang
+      CXX: clang++
+      AR: llvm-ar
+      NM: llvm-nm
+      RANLIB: llvm-ranlib
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: amd64
+            cmake_processor: x86_64
             target: x86_64-linux-gnu
+            expected_arch: x86-64
           - arch: arm64
+            cmake_processor: aarch64
             target: aarch64-linux-gnu
+            expected_arch: aarch64
 
     steps:
       - name: Check out refreshed version
@@ -407,8 +436,11 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang lld make crossbuild-essential-arm64 crossbuild-essential-armhf
+          sudo apt-get install -y clang mold make crossbuild-essential-arm64 crossbuild-essential-armhf
 
+      # `-fuse-ld=mold` keeps clang LTO on while sidestepping the
+      # experimental `lld 1:18.0-59~exp2` from Noble universe that
+      # segfaults on the widened `nk_shared` LTO unit.
       - name: Build JNI library
         run: |
           cmake -B build_artifacts \
@@ -416,29 +448,24 @@ jobs:
             -DCMAKE_C_COMPILER_TARGET=${{ matrix.target }} \
             -DCMAKE_CXX_COMPILER_TARGET=${{ matrix.target }} \
             -DCMAKE_SYSTEM_NAME=Linux \
-            -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.arch }} \
+            -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.cmake_processor }} \
+            -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=mold \
+            -DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld=mold \
+            -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=mold \
             -DUSEARCH_BUILD_JNI=1 \
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0 \
             -DUSEARCH_BUILD_LIB_C=0 \
             -DUSEARCH_USE_NUMKONG=1 \
-            -DNK_TARGET_HASWELL=1 \
-            -DNK_TARGET_SKYLAKE=1 \
-            -DNK_TARGET_ICELAKE=1 \
-            -DNK_TARGET_GENOA=1 \
-            -DNK_TARGET_SAPPHIRE=1 \
-            -DNK_TARGET_NEON=1 \
-            -DNK_TARGET_NEONBFDOT=1 \
-            -DNK_TARGET_NEONHALF=1 \
-            -DNK_TARGET_NEONSDOT=1 \
-            -DNK_TARGET_SVE=1 \
-            -DNK_TARGET_SVEBFDOT=1 \
-            -DNK_TARGET_SVEHALF=1 \
-            -DNK_TARGET_SVESDOT=1 \
-            -DNK_TARGET_SVE2=1 \
             -DNK_DYNAMIC_DISPATCH=1
 
           cmake --build build_artifacts --config Release -j
+
+      # Guard against silent host-toolchain fallback — the binary must actually
+      # be for the target arch, otherwise packaging will ship a broken library.
+      - name: Verify target architecture
+        run: |
+          file build_artifacts/libusearch_jni.so | grep -q '${{ matrix.expected_arch }}'
 
       - name: Upload JNI library artifact
         uses: actions/upload-artifact@v5
@@ -451,22 +478,15 @@ jobs:
     name: Build JNI for Windows
     runs-on: windows-2022
     needs: versioning
+    # Only x64 is supported today. 32-bit MSVC leaves NumKong's SIMD backends
+    # undefined, and ARM64 MSVC hits a stale `<immintrin.h>` include in
+    # NumKong — both require upstream fixes.
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x64
             cmake_arch: x64
-            nk_target_x86: 1
-            nk_target_arm: 0
-          - arch: x86
-            cmake_arch: Win32
-            nk_target_x86: 1
-            nk_target_arm: 0
-          - arch: arm64
-            cmake_arch: ARM64
-            nk_target_x86: 0
-            nk_target_arm: 1
 
     steps:
       - name: Check out refreshed version
@@ -491,12 +511,6 @@ jobs:
             -DUSEARCH_BUILD_BENCH_CPP=0 `
             -DUSEARCH_BUILD_LIB_C=0 `
             -DUSEARCH_USE_NUMKONG=1 `
-            -DNK_TARGET_NEON=${{ matrix.nk_target_arm }} `
-            -DNK_TARGET_HASWELL=${{ matrix.nk_target_x86 }} `
-            -DNK_TARGET_SKYLAKE=${{ matrix.nk_target_x86 }} `
-            -DNK_TARGET_ICELAKE=${{ matrix.nk_target_x86 }} `
-            -DNK_TARGET_GENOA=0 `
-            -DNK_TARGET_SAPPHIRE=0 `
             -DNK_DYNAMIC_DISPATCH=1
 
           cmake --build build_artifacts --config Release
@@ -540,19 +554,20 @@ jobs:
           cmake -B build_artifacts \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES=${{ matrix.cmake_arch }} \
+            -DCMAKE_SYSTEM_NAME=Darwin \
+            -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.cmake_arch }} \
             -DUSEARCH_BUILD_JNI=1 \
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0 \
             -DUSEARCH_BUILD_LIB_C=0 \
             -DUSEARCH_USE_NUMKONG=1 \
-            -DNK_TARGET_HASWELL=1 \
-            -DNK_TARGET_NEON=1 \
-            -DNK_TARGET_NEONBFDOT=1 \
-            -DNK_TARGET_NEONHALF=1 \
-            -DNK_TARGET_NEONSDOT=1 \
             -DNK_DYNAMIC_DISPATCH=1
 
           cmake --build build_artifacts --config Release
+
+      - name: Verify target architecture
+        run: |
+          file build_artifacts/libusearch_jni.dylib | grep -q '${{ matrix.cmake_arch }}'
 
       - name: Upload JNI library artifact
         uses: actions/upload-artifact@v5
@@ -623,8 +638,8 @@ jobs:
           retention-days: 1
 
   create_wasm_library:
-    name: Create WASM Libraries
-    runs-on: ubuntu-22.04
+    name: Build WASM Library
+    runs-on: ubuntu-24.04
     needs: versioning
     steps:
       - name: Check out refreshed version
@@ -675,7 +690,7 @@ jobs:
 
   publish_checksums:
     name: Compute Assets Checksums
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs:
       [
         versioning,
@@ -735,8 +750,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
-        python-version:
-          ["38", "39", "310", "311", "312", "313", "313t", "314", "314t"]
+        python-version: ["310", "311", "312", "313", "313t", "314", "314t"]
     steps:
       - name: Check out refreshed version
         uses: actions/checkout@v6
@@ -770,7 +784,7 @@ jobs:
   publish_python:
     name: Publish Python
     needs: build_wheels
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     environment:
       name: pypi
       url: https://pypi.org/p/usearch
@@ -899,7 +913,6 @@ jobs:
 
       - name: Look for links
         run: find . -type f -links +1
-
         # NPM installation fails spuriously all the time
       - name: Install Dependencies
         run: |
@@ -928,27 +941,14 @@ jobs:
           ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
-      - name: Hide submodule Crates
-        run: |
-          mv numkong/Cargo.toml numkong/Cargo.toml.bak
-          mv stringzilla/Cargo.toml stringzilla/Cargo.toml.bak
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Publish to crates.io
-        uses: katyo/publish-crates@v2
-        with:
-          registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   publish_java:
     name: Publish Java
-    needs:
-      [
-        versioning,
-        build_jni_linux,
-        build_jni_windows,
-        build_jni_macos,
-        build_jni_android,
-      ]
+    needs: [versioning, build_jni_linux, build_jni_windows, build_jni_macos, build_jni_android]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -1048,7 +1048,7 @@ jobs:
           update_latest_release: true
 
   publish_swift:
-    name: Publish ObjC & Swift
+    name: Publish Objective-C & Swift
     needs: versioning
     runs-on: macos-15
     steps:
@@ -1068,7 +1068,7 @@ jobs:
   publish_docker:
     name: Publish Docker Image
     needs: versioning
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -1113,7 +1113,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-15, windows-2022]
+        os: [ubuntu-24.04, macos-15, windows-2022]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -1128,11 +1128,11 @@ jobs:
         run: git submodule update --init --recursive
 
       - name: Build C library for Linux
-        if: matrix.os == 'ubuntu-22.04'
+        if: matrix.os == 'ubuntu-24.04'
         run: |
           sudo apt update
-          sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev gcc-12 g++-12
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=1
+          sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev
+          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=1
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_c.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
@@ -1164,7 +1164,7 @@ jobs:
 
   publish_csharp:
     name: Publish C#
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: [build_csharp]
     env:
       SOLUTION: ${{ github.workspace }}/csharp
@@ -1199,28 +1199,22 @@ jobs:
         working-directory: ${{ github.workspace }}
 
       - name: Publish to NuGet
-        run: dotnet nuget push "${{ env.NUGET_PACKAGES }}/*.nupkg" --api-key "${{ secrets.NUGET_API }}" --source "${{ env.NUGET_SOURCE }}" --skip-duplicate
+        run: dotnet nuget push "${{ env.NUGET_PACKAGES }}/*.nupkg" --api-key "${{ secrets.NUGET_API }}" --source "${{
+          env.NUGET_SOURCE }}" --skip-duplicate
 
       - name: Prepare publish to GitHub Registry
-        run: dotnet nuget add source --username ${{ github.repository_owner }} --password ${{ secrets.GITHUB_TOKEN }} --store-password-in-clear-text --name github "${{ env.GITHUB_PACKAGES_SOURCE }}"
+        run: dotnet nuget add source --username ${{ github.repository_owner }} --password ${{ secrets.GITHUB_TOKEN }}
+          --store-password-in-clear-text --name github "${{ env.GITHUB_PACKAGES_SOURCE }}"
 
       - name: Publish to GitHub Registry
-        run: dotnet nuget push "${{ env.NUGET_PACKAGES }}/*.nupkg"  --api-key "${{ secrets.GITHUB_TOKEN }}" --source "github" --skip-duplicate
+        run: dotnet nuget push "${{ env.NUGET_PACKAGES }}/*.nupkg"  --api-key "${{ secrets.GITHUB_TOKEN }}" --source "github"
+          --skip-duplicate
 
   build_docs:
     name: Build Docs
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: ${{ always() }}
-    needs:
-      [
-        publish_python,
-        publish_javascript,
-        publish_rust,
-        publish_java,
-        publish_swift,
-        publish_docker,
-        publish_csharp,
-      ]
+    needs: [publish_python, publish_javascript, publish_rust, publish_java, publish_swift, publish_docker, publish_csharp]
     permissions:
       contents: write
     steps:
@@ -1236,7 +1230,6 @@ jobs:
           npm install -g jsdoc typedoc
       - name: Install USearch from PyPi
         run: pip install usearch
-
         # NPM installation fails spuriously all the time
       - name: Build CJS JS
         run: |
@@ -1261,7 +1254,7 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: ${{ always() }}
     needs: build_docs
     steps:
@@ -1284,7 +1277,7 @@ jobs:
 
   deploy_docs_vercel:
     name: Deploy Vercel
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: ${{ always() }}
     needs: build_docs
     steps:

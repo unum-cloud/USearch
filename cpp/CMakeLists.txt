@@ -7,6 +7,10 @@ if (USEARCH_BUILD_TEST_CPP)
 
     target_include_directories(test_cpp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../stringzilla/include)
 
+    # Export the dynamic symbol table so `backtrace_symbols` / `std::stacktrace`
+    # can resolve function names when the in-test crash handler fires.
+    set_target_properties(test_cpp PROPERTIES ENABLE_EXPORTS ON)
+
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         target_compile_options(test_cpp PRIVATE -Wno-vla -Wno-unused-function -Wno-cast-function-type)
     endif ()

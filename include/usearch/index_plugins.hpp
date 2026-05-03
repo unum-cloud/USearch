@@ -73,15 +73,19 @@ struct uuid_t {
     std::uint8_t octets[16];
 };
 
-class f16_bits_t;
 class bf16_bits_t;
+class f16_bits_t;
 class e5m2_bits_t;
 class e4m3_bits_t;
+class e3m2_bits_t;
+class e2m3_bits_t;
 
-using f16_t = f16_bits_t;
 using bf16_t = bf16_bits_t;
+using f16_t = f16_bits_t;
 using e5m2_t = e5m2_bits_t;
 using e4m3_t = e4m3_bits_t;
+using e3m2_t = e3m2_bits_t;
+using e2m3_t = e2m3_bits_t;
 
 using f64_t = double;
 using f32_t = float;
@@ -95,6 +99,14 @@ using i64_t = std::int64_t;
 using i32_t = std::int32_t;
 using i16_t = std::int16_t;
 using i8_t = std::int8_t;
+
+/**
+ *  @brief  Reinterpret-cast between float and uint32 without UB on most compilers.
+ */
+union fu32_t {
+    float f;
+    std::uint32_t u;
+};
 
 /**
  *  @brief  Enumerates the most commonly used distance metrics, mostly for dense vector representations.
@@ -134,6 +146,8 @@ enum class scalar_kind_t : std::uint8_t {
     // Mini-floats:
     e5m2_k = 5, ///< FP8 IEEE 754: 1 sign + 5 exponent + 2 mantissa, range +/-57344
     e4m3_k = 6, ///< FP8 OCP: 1 sign + 4 exponent + 3 mantissa, range +/-448
+    e3m2_k = 8, ///< FP6: 1 sign + 3 exponent + 2 mantissa, range +/-28
+    e2m3_k = 7, ///< FP6: 1 sign + 2 exponent + 3 mantissa, range +/-7.5
     // Common:
     f64_k = 10,
     f32_k = 11,
@@ -171,6 +185,10 @@ template <typename scalar_at> scalar_kind_t scalar_kind() noexcept {
         return scalar_kind_t::e5m2_k;
     if (std::is_same<scalar_at, e4m3_t>())
         return scalar_kind_t::e4m3_k;
+    if (std::is_same<scalar_at, e3m2_t>())
+        return scalar_kind_t::e3m2_k;
+    if (std::is_same<scalar_at, e2m3_t>())
+        return scalar_kind_t::e2m3_k;
     if (std::is_same<scalar_at, i8_t>())
         return scalar_kind_t::i8_k;
     if (std::is_same<scalar_at, u64_t>())
@@ -248,6 +266,8 @@ inline std::size_t bits_per_scalar(scalar_kind_t scalar_kind) noexcept {
     case scalar_kind_t::i8_k: return 8;
     case scalar_kind_t::e5m2_k: return 8;
     case scalar_kind_t::e4m3_k: return 8;
+    case scalar_kind_t::e2m3_k: return 8;
+    case scalar_kind_t::e3m2_k: return 8;
     default: return 0;
     }
 }
@@ -275,6 +295,8 @@ inline std::size_t bits_per_scalar_word(scalar_kind_t scalar_kind) noexcept {
     case scalar_kind_t::i8_k: return 8;
     case scalar_kind_t::e5m2_k: return 8;
     case scalar_kind_t::e4m3_k: return 8;
+    case scalar_kind_t::e2m3_k: return 8;
+    case scalar_kind_t::e3m2_k: return 8;
     default: return 0;
     }
 }
@@ -301,6 +323,8 @@ inline char const* scalar_kind_name(scalar_kind_t scalar_kind) noexcept {
     case scalar_kind_t::i8_k: return "i8";
     case scalar_kind_t::e5m2_k: return "e5m2";
     case scalar_kind_t::e4m3_k: return "e4m3";
+    case scalar_kind_t::e2m3_k: return "e2m3";
+    case scalar_kind_t::e3m2_k: return "e3m2";
     default: return "";
     }
 }
@@ -330,24 +354,30 @@ inline char const* metric_kind_name(metric_kind_t metric) noexcept {
  */
 inline expected_gt<scalar_kind_t> scalar_kind_from_name(char const* name, std::size_t len) {
     expected_gt<scalar_kind_t> parsed;
-    if (str_equals(name, len, "f32"))
-        parsed.result = scalar_kind_t::f32_k;
-    else if (str_equals(name, len, "f64"))
+    if (str_equals(name, len, "f64"))
         parsed.result = scalar_kind_t::f64_k;
-    else if (str_equals(name, len, "f16"))
-        parsed.result = scalar_kind_t::f16_k;
+    else if (str_equals(name, len, "f32"))
+        parsed.result = scalar_kind_t::f32_k;
     else if (str_equals(name, len, "bf16"))
         parsed.result = scalar_kind_t::bf16_k;
-    else if (str_equals(name, len, "i8"))
-        parsed.result = scalar_kind_t::i8_k;
-    else if (str_equals(name, len, "b1"))
-        parsed.result = scalar_kind_t::b1x8_k;
+    else if (str_equals(name, len, "f16"))
+        parsed.result = scalar_kind_t::f16_k;
     else if (str_equals(name, len, "e5m2"))
         parsed.result = scalar_kind_t::e5m2_k;
     else if (str_equals(name, len, "e4m3"))
         parsed.result = scalar_kind_t::e4m3_k;
+    else if (str_equals(name, len, "e3m2"))
+        parsed.result = scalar_kind_t::e3m2_k;
+    else if (str_equals(name, len, "e2m3"))
+        parsed.result = scalar_kind_t::e2m3_k;
+    else if (str_equals(name, len, "i8"))
+        parsed.result = scalar_kind_t::i8_k;
+    else if (str_equals(name, len, "u8"))
+        parsed.result = scalar_kind_t::u8_k;
+    else if (str_equals(name, len, "b1"))
+        parsed.result = scalar_kind_t::b1x8_k;
     else
-        parsed.failed("Unknown type, choose: f64, f32, f16, bf16, i8, b1, e5m2, e4m3");
+        parsed.failed("Unknown type, choose: f64, f32, bf16, f16, e5m2, e4m3, e3m2, e2m3, i8, u8, b1");
     return parsed;
 }
 
@@ -406,19 +436,13 @@ inline float f16_to_f32(std::uint16_t u16) noexcept {
     std::uint32_t sign = (u16 >> 15) & 1;
     std::uint32_t exponent = (u16 >> 10) & 0x1F;
     std::uint32_t mantissa = u16 & 0x03FF;
-    union {
-        float f;
-        std::uint32_t u;
-    } conv;
+    fu32_t conv;
     if (exponent == 0) {
         if (mantissa == 0) {
             conv.u = sign << 31;
         } else {
             // Denormal: use FPU normalization trick
-            union {
-                float f;
-                std::uint32_t u;
-            } temp;
+            fu32_t temp;
             temp.f = (float)mantissa;
             conv.u = (sign << 31) | (temp.u - 0x0C000000u);
         }
@@ -442,10 +466,7 @@ inline std::uint16_t f32_to_f16(float f32) noexcept {
     std::memcpy(&u16, &result, sizeof(u16));
     return u16;
 #else
-    union {
-        float f;
-        std::uint32_t u;
-    } conv;
+    fu32_t conv;
     conv.f = f32;
     std::uint32_t sign = (conv.u >> 31) & 1;
     std::uint32_t exponent = (conv.u >> 23) & 0xFF;
@@ -719,10 +740,7 @@ inline float e5m2_to_f32(std::uint8_t u8) noexcept {
         0x7F800000, 0x7FC00000, 0x7FC00000, 0x7FC00000, // inf, nan
     };
     std::uint32_t sign = (std::uint32_t)(u8 & 0x80) << 24;
-    union {
-        float f;
-        std::uint32_t u;
-    } conv;
+    fu32_t conv;
     conv.u = sign | lut[u8 & 0x7F];
     return conv.f;
 #endif
@@ -738,10 +756,7 @@ inline std::uint8_t f32_to_e5m2(float f32) noexcept {
     nk_f32_to_e5m2_serial((nk_f32_t const*)&f32, &result);
     return result;
 #else
-    union {
-        float f;
-        std::uint32_t u;
-    } conv;
+    fu32_t conv;
     conv.f = f32;
     std::uint32_t sign_bit = conv.u >> 31;
     std::uint32_t abs_bits = conv.u & 0x7FFFFFFFu;
@@ -812,31 +827,27 @@ inline float e4m3_to_f32(std::uint8_t u8) noexcept {
     nk_e4m3_to_f32_serial((nk_e4m3_t const*)&u8, &result);
     return result;
 #else
+    static std::uint32_t const lut[128] = {
+        0x00000000, 0x3B000000, 0x3B800000, 0x3BC00000, 0x3C000000, 0x3C200000, 0x3C400000, 0x3C600000, // exp=0 sub
+        0x3C800000, 0x3C900000, 0x3CA00000, 0x3CB00000, 0x3CC00000, 0x3CD00000, 0x3CE00000, 0x3CF00000, // exp=1
+        0x3D000000, 0x3D100000, 0x3D200000, 0x3D300000, 0x3D400000, 0x3D500000, 0x3D600000, 0x3D700000, // exp=2
+        0x3D800000, 0x3D900000, 0x3DA00000, 0x3DB00000, 0x3DC00000, 0x3DD00000, 0x3DE00000, 0x3DF00000, // exp=3
+        0x3E000000, 0x3E100000, 0x3E200000, 0x3E300000, 0x3E400000, 0x3E500000, 0x3E600000, 0x3E700000, // exp=4
+        0x3E800000, 0x3E900000, 0x3EA00000, 0x3EB00000, 0x3EC00000, 0x3ED00000, 0x3EE00000, 0x3EF00000, // exp=5
+        0x3F000000, 0x3F100000, 0x3F200000, 0x3F300000, 0x3F400000, 0x3F500000, 0x3F600000, 0x3F700000, // exp=6
+        0x3F800000, 0x3F900000, 0x3FA00000, 0x3FB00000, 0x3FC00000, 0x3FD00000, 0x3FE00000, 0x3FF00000, // exp=7
+        0x40000000, 0x40100000, 0x40200000, 0x40300000, 0x40400000, 0x40500000, 0x40600000, 0x40700000, // exp=8
+        0x40800000, 0x40900000, 0x40A00000, 0x40B00000, 0x40C00000, 0x40D00000, 0x40E00000, 0x40F00000, // exp=9
+        0x41000000, 0x41100000, 0x41200000, 0x41300000, 0x41400000, 0x41500000, 0x41600000, 0x41700000, // exp=10
+        0x41800000, 0x41900000, 0x41A00000, 0x41B00000, 0x41C00000, 0x41D00000, 0x41E00000, 0x41F00000, // exp=11
+        0x42000000, 0x42100000, 0x42200000, 0x42300000, 0x42400000, 0x42500000, 0x42600000, 0x42700000, // exp=12
+        0x42800000, 0x42900000, 0x42A00000, 0x42B00000, 0x42C00000, 0x42D00000, 0x42E00000, 0x42F00000, // exp=13
+        0x43000000, 0x43100000, 0x43200000, 0x43300000, 0x43400000, 0x43500000, 0x43600000, 0x43700000, // exp=14
+        0x43800000, 0x43900000, 0x43A00000, 0x43B00000, 0x43C00000, 0x43D00000, 0x43E00000, 0x7FC00000, // exp=15
+    };
     std::uint32_t sign = (std::uint32_t)(u8 & 0x80) << 24;
-    std::uint32_t exponent = (u8 >> 3) & 0x0Fu;
-    std::uint32_t mantissa = u8 & 0x07u;
-    union {
-        float f;
-        std::uint32_t u;
-    } conv;
-
-    if (exponent == 0) {
-        if (mantissa == 0) {
-            conv.u = sign;
-            return conv.f;
-        }
-        float value = (float)mantissa * (1.0f / 512.0f);
-        return sign ? -value : value;
-    }
-    // E4M3FN: exp=15 && mant=7 is NaN, everything else is normal
-    if (exponent == 0x0Fu && mantissa == 7) {
-        conv.u = sign | 0x7FC00000u; // quiet NaN
-        return conv.f;
-    }
-
-    std::uint32_t f32_exponent = (exponent + 120u) << 23;
-    std::uint32_t f32_mantissa = mantissa << 20;
-    conv.u = sign | f32_exponent | f32_mantissa;
+    fu32_t conv;
+    conv.u = sign | lut[u8 & 0x7F];
     return conv.f;
 #endif
 }
@@ -851,10 +862,7 @@ inline std::uint8_t f32_to_e4m3(float f32) noexcept {
     nk_f32_to_e4m3_serial((nk_f32_t const*)&f32, &result);
     return result;
 #else
-    union {
-        float f;
-        std::uint32_t u;
-    } conv;
+    fu32_t conv;
     conv.f = f32;
     std::uint32_t sign_bit = conv.u >> 31;
     std::uint32_t abs_bits = conv.u & 0x7FFFFFFFu;
@@ -1038,11 +1046,302 @@ class e4m3_bits_t {
     }
 };
 
+/**
+ *  @brief Convenience function to upcast an FP6 E2M3 value to single-precision.
+ *         E2M3: 1 sign + 2 exponent (bias=1) + 3 mantissa, stored as 0b00SEEMMM, range +/-7.5.
+ */
+inline float e2m3_to_f32(std::uint8_t u8) noexcept {
+#if USEARCH_USE_NUMKONG
+    nk_f32_t result;
+    nk_e2m3_to_f32_serial((nk_e2m3_t const*)&u8, &result);
+    return result;
+#else
+    static std::uint32_t const lut[64] = {
+        0x00000000, 0x3E000000, 0x3E800000, 0x3EC00000, 0x3F000000, 0x3F200000, 0x3F400000, 0x3F600000, // positive
+        0x3F800000, 0x3F900000, 0x3FA00000, 0x3FB00000, 0x3FC00000, 0x3FD00000, 0x3FE00000, 0x3FF00000, // positive
+        0x40000000, 0x40100000, 0x40200000, 0x40300000, 0x40400000, 0x40500000, 0x40600000, 0x40700000, // positive
+        0x40800000, 0x40900000, 0x40A00000, 0x40B00000, 0x40C00000, 0x40D00000, 0x40E00000, 0x40F00000, // positive
+        0x80000000, 0xBE000000, 0xBE800000, 0xBEC00000, 0xBF000000, 0xBF200000, 0xBF400000, 0xBF600000, // negative
+        0xBF800000, 0xBF900000, 0xBFA00000, 0xBFB00000, 0xBFC00000, 0xBFD00000, 0xBFE00000, 0xBFF00000, // negative
+        0xC0000000, 0xC0100000, 0xC0200000, 0xC0300000, 0xC0400000, 0xC0500000, 0xC0600000, 0xC0700000, // negative
+        0xC0800000, 0xC0900000, 0xC0A00000, 0xC0B00000, 0xC0C00000, 0xC0D00000, 0xC0E00000, 0xC0F00000, // negative
+    };
+    fu32_t conv;
+    conv.u = lut[u8 & 0x3F];
+    return conv.f;
+#endif
+}
+
+/**
+ *  @brief Convenience function to downcast a single-precision value to FP6 E2M3.
+ */
+inline std::uint8_t f32_to_e2m3(float f32) noexcept {
+#if USEARCH_USE_NUMKONG
+    nk_e2m3_t result;
+    nk_f32_to_e2m3_serial((nk_f32_t const*)&f32, &result);
+    return result;
+#else
+    fu32_t conv;
+    conv.f = f32;
+    std::uint32_t sign_bit = conv.u >> 31;
+    std::uint32_t abs_bits = conv.u & 0x7FFFFFFFu;
+    std::uint8_t sign = (std::uint8_t)(sign_bit << 5);
+    if (abs_bits == 0)
+        return sign;
+    float abs_x = sign_bit ? -f32 : f32;
+    // E2M3: bias=1, 2 exp bits, 3 mant bits, max normal = 7.5, min subnormal = 0.125
+    if (abs_x >= 7.5f)
+        return (std::uint8_t)(sign | 0x1Fu); // saturate to max
+    if (abs_x < 0.0625f)
+        return sign; // underflow to zero
+    // Subnormal range: abs_x < 1.0 (min normal = 2^(1-1) = 1.0)
+    if (abs_x < 1.0f) {
+        // Subnormals: value = mant * 2^(-3) = mant/8, so mant = round(abs_x * 8)
+        std::uint32_t mant = (std::uint32_t)(abs_x * 8.0f + 0.5f);
+        if (mant > 7)
+            mant = 7;
+        if (mant == 0)
+            return sign;
+        return (std::uint8_t)(sign | mant);
+    }
+    // Normal range: value = (1 + mant/8) * 2^(exp-1)
+    // Find exponent: exp-1 = floor(log2(abs_x)), so exp = floor(log2(abs_x)) + 1
+    int exp_val;
+    float frac = std::frexp(abs_x, &exp_val); // abs_x = frac * 2^exp_val, frac in [0.5, 1)
+    // frexp returns frac in [0.5, 1), but we want significand in [1, 2)
+    // so significand = frac * 2, and true_exp = exp_val - 1
+    float significand = frac * 2.0f; // [1.0, 2.0)
+    int biased_exp = exp_val;        // exp_val - 1 + bias(1) = exp_val
+    if (biased_exp < 1) {
+        // Fell into subnormal, handled above
+        std::uint32_t mant = (std::uint32_t)(abs_x * 8.0f + 0.5f);
+        if (mant > 7)
+            mant = 7;
+        return (std::uint8_t)(sign | mant);
+    }
+    if (biased_exp > 3)
+        biased_exp = 3; // clamp to max exp
+    // Round mantissa: 3 mant bits, significand in [1, 2)
+    std::uint32_t mant = (std::uint32_t)((significand - 1.0f) * 8.0f + 0.5f);
+    if (mant > 7) {
+        mant = 0;
+        biased_exp++;
+    }
+    if (biased_exp > 3)
+        return (std::uint8_t)(sign | 0x1Fu); // overflow
+    return (std::uint8_t)(sign | (biased_exp << 3) | mant);
+#endif
+}
+
+/**
+ *  @brief Convenience function to upcast an FP6 E3M2 value to single-precision.
+ *         E3M2: 1 sign + 3 exponent (bias=3) + 2 mantissa, stored as 0b00SEEEMM, range +/-28.
+ */
+inline float e3m2_to_f32(std::uint8_t u8) noexcept {
+#if USEARCH_USE_NUMKONG
+    nk_f32_t result;
+    nk_e3m2_to_f32_serial((nk_e3m2_t const*)&u8, &result);
+    return result;
+#else
+    static std::uint32_t const lut[64] = {
+        0x00000000, 0x3D800000, 0x3E000000, 0x3E400000, 0x3E800000, 0x3EA00000, 0x3EC00000, 0x3EE00000, // positive
+        0x3F000000, 0x3F200000, 0x3F400000, 0x3F600000, 0x3F800000, 0x3FA00000, 0x3FC00000, 0x3FE00000, // positive
+        0x40000000, 0x40200000, 0x40400000, 0x40600000, 0x40800000, 0x40A00000, 0x40C00000, 0x40E00000, // positive
+        0x41000000, 0x41200000, 0x41400000, 0x41600000, 0x41800000, 0x41A00000, 0x41C00000, 0x41E00000, // positive
+        0x80000000, 0xBD800000, 0xBE000000, 0xBE400000, 0xBE800000, 0xBEA00000, 0xBEC00000, 0xBEE00000, // negative
+        0xBF000000, 0xBF200000, 0xBF400000, 0xBF600000, 0xBF800000, 0xBFA00000, 0xBFC00000, 0xBFE00000, // negative
+        0xC0000000, 0xC0200000, 0xC0400000, 0xC0600000, 0xC0800000, 0xC0A00000, 0xC0C00000, 0xC0E00000, // negative
+        0xC1000000, 0xC1200000, 0xC1400000, 0xC1600000, 0xC1800000, 0xC1A00000, 0xC1C00000, 0xC1E00000, // negative
+    };
+    fu32_t conv;
+    conv.u = lut[u8 & 0x3F];
+    return conv.f;
+#endif
+}
+
+/**
+ *  @brief Convenience function to downcast a single-precision value to FP6 E3M2.
+ */
+inline std::uint8_t f32_to_e3m2(float f32) noexcept {
+#if USEARCH_USE_NUMKONG
+    nk_e3m2_t result;
+    nk_f32_to_e3m2_serial((nk_f32_t const*)&f32, &result);
+    return result;
+#else
+    fu32_t conv;
+    conv.f = f32;
+    std::uint32_t sign_bit = conv.u >> 31;
+    std::uint32_t abs_bits = conv.u & 0x7FFFFFFFu;
+    std::uint8_t sign = (std::uint8_t)(sign_bit << 5);
+    if (abs_bits == 0)
+        return sign;
+    float abs_x = sign_bit ? -f32 : f32;
+    // E3M2: bias=3, 3 exp bits, 2 mant bits, max normal = 28.0, min subnormal = 0.0625
+    if (abs_x >= 28.0f)
+        return (std::uint8_t)(sign | 0x1Fu); // saturate to max
+    if (abs_x < 0.03125f)
+        return sign; // underflow to zero
+    // Subnormal range: abs_x < 0.25 (min normal = 2^(1-3) = 0.25)
+    if (abs_x < 0.25f) {
+        // Subnormals: value = mant * 2^(-4) = mant/16, so mant = round(abs_x * 16)
+        std::uint32_t mant = (std::uint32_t)(abs_x * 16.0f + 0.5f);
+        if (mant > 3)
+            mant = 3;
+        if (mant == 0)
+            return sign;
+        return (std::uint8_t)(sign | mant);
+    }
+    // Normal range: value = (1 + mant/4) * 2^(exp-3)
+    int exp_val;
+    float frac = std::frexp(abs_x, &exp_val);
+    float significand = frac * 2.0f;
+    int biased_exp = exp_val - 1 + 3; // true_exp = exp_val - 1, biased = true_exp + 3
+    if (biased_exp < 1) {
+        std::uint32_t mant = (std::uint32_t)(abs_x * 16.0f + 0.5f);
+        if (mant > 3)
+            mant = 3;
+        return (std::uint8_t)(sign | mant);
+    }
+    if (biased_exp > 7)
+        biased_exp = 7;
+    std::uint32_t mant = (std::uint32_t)((significand - 1.0f) * 4.0f + 0.5f);
+    if (mant > 3) {
+        mant = 0;
+        biased_exp++;
+    }
+    if (biased_exp > 7)
+        return (std::uint8_t)(sign | 0x1Fu);
+    return (std::uint8_t)(sign | (biased_exp << 2) | mant);
+#endif
+}
+
+/**
+ *  @brief  Numeric type for FP6 E2M3 floating point.
+ *          1 sign + 2 exponent + 3 mantissa bits, stored as 0b00SEEMMM, range +/-7.5.
+ */
+class e2m3_bits_t {
+    std::uint8_t uint8_{};
+
+  public:
+    inline e2m3_bits_t() noexcept : uint8_(0) {}
+    inline e2m3_bits_t(e2m3_bits_t&&) = default;
+    inline e2m3_bits_t& operator=(e2m3_bits_t&&) = default;
+    inline e2m3_bits_t(e2m3_bits_t const&) = default;
+    inline e2m3_bits_t& operator=(e2m3_bits_t const&) = default;
+
+    inline operator float() const noexcept { return e2m3_to_f32(uint8_); }
+    inline explicit operator bool() const noexcept { return e2m3_to_f32(uint8_) > 0.5f; }
+
+    inline e2m3_bits_t(int v) noexcept : uint8_(f32_to_e2m3(static_cast<float>(v))) {}
+    inline e2m3_bits_t(bool v) noexcept : uint8_(f32_to_e2m3(static_cast<float>(v))) {}
+    inline e2m3_bits_t(float v) noexcept : uint8_(f32_to_e2m3(v)) {}
+    inline e2m3_bits_t(double v) noexcept : uint8_(f32_to_e2m3(static_cast<float>(v))) {}
+
+    inline bool operator<(e2m3_bits_t const& other) const noexcept { return float(*this) < float(other); }
+
+    inline e2m3_bits_t operator+(e2m3_bits_t other) const noexcept { return {float(*this) + float(other)}; }
+    inline e2m3_bits_t operator-(e2m3_bits_t other) const noexcept { return {float(*this) - float(other)}; }
+    inline e2m3_bits_t operator*(e2m3_bits_t other) const noexcept { return {float(*this) * float(other)}; }
+    inline e2m3_bits_t operator/(e2m3_bits_t other) const noexcept { return {float(*this) / float(other)}; }
+    inline float operator+(float other) const noexcept { return float(*this) + other; }
+    inline float operator-(float other) const noexcept { return float(*this) - other; }
+    inline float operator*(float other) const noexcept { return float(*this) * other; }
+    inline float operator/(float other) const noexcept { return float(*this) / other; }
+    inline double operator+(double other) const noexcept { return float(*this) + other; }
+    inline double operator-(double other) const noexcept { return float(*this) - other; }
+    inline double operator*(double other) const noexcept { return float(*this) * other; }
+    inline double operator/(double other) const noexcept { return float(*this) / other; }
+
+    inline e2m3_bits_t& operator+=(float v) noexcept {
+        uint8_ = f32_to_e2m3(v + e2m3_to_f32(uint8_));
+        return *this;
+    }
+    inline e2m3_bits_t& operator-=(float v) noexcept {
+        uint8_ = f32_to_e2m3(v - e2m3_to_f32(uint8_));
+        return *this;
+    }
+    inline e2m3_bits_t& operator*=(float v) noexcept {
+        uint8_ = f32_to_e2m3(v * e2m3_to_f32(uint8_));
+        return *this;
+    }
+    inline e2m3_bits_t& operator/=(float v) noexcept {
+        uint8_ = f32_to_e2m3(v / e2m3_to_f32(uint8_));
+        return *this;
+    }
+    inline e2m3_bits_t& operator=(float v) noexcept {
+        uint8_ = f32_to_e2m3(v);
+        return *this;
+    }
+};
+
+/**
+ *  @brief  Numeric type for FP6 E3M2 floating point.
+ *          1 sign + 3 exponent + 2 mantissa bits, stored as 0b00SEEEMM, range +/-28.
+ */
+class e3m2_bits_t {
+    std::uint8_t uint8_{};
+
+  public:
+    inline e3m2_bits_t() noexcept : uint8_(0) {}
+    inline e3m2_bits_t(e3m2_bits_t&&) = default;
+    inline e3m2_bits_t& operator=(e3m2_bits_t&&) = default;
+    inline e3m2_bits_t(e3m2_bits_t const&) = default;
+    inline e3m2_bits_t& operator=(e3m2_bits_t const&) = default;
+
+    inline operator float() const noexcept { return e3m2_to_f32(uint8_); }
+    inline explicit operator bool() const noexcept { return e3m2_to_f32(uint8_) > 0.5f; }
+
+    inline e3m2_bits_t(int v) noexcept : uint8_(f32_to_e3m2(static_cast<float>(v))) {}
+    inline e3m2_bits_t(bool v) noexcept : uint8_(f32_to_e3m2(static_cast<float>(v))) {}
+    inline e3m2_bits_t(float v) noexcept : uint8_(f32_to_e3m2(v)) {}
+    inline e3m2_bits_t(double v) noexcept : uint8_(f32_to_e3m2(static_cast<float>(v))) {}
+
+    inline bool operator<(e3m2_bits_t const& other) const noexcept { return float(*this) < float(other); }
+
+    inline e3m2_bits_t operator+(e3m2_bits_t other) const noexcept { return {float(*this) + float(other)}; }
+    inline e3m2_bits_t operator-(e3m2_bits_t other) const noexcept { return {float(*this) - float(other)}; }
+    inline e3m2_bits_t operator*(e3m2_bits_t other) const noexcept { return {float(*this) * float(other)}; }
+    inline e3m2_bits_t operator/(e3m2_bits_t other) const noexcept { return {float(*this) / float(other)}; }
+    inline float operator+(float other) const noexcept { return float(*this) + other; }
+    inline float operator-(float other) const noexcept { return float(*this) - other; }
+    inline float operator*(float other) const noexcept { return float(*this) * other; }
+    inline float operator/(float other) const noexcept { return float(*this) / other; }
+    inline double operator+(double other) const noexcept { return float(*this) + other; }
+    inline double operator-(double other) const noexcept { return float(*this) - other; }
+    inline double operator*(double other) const noexcept { return float(*this) * other; }
+    inline double operator/(double other) const noexcept { return float(*this) / other; }
+
+    inline e3m2_bits_t& operator+=(float v) noexcept {
+        uint8_ = f32_to_e3m2(v + e3m2_to_f32(uint8_));
+        return *this;
+    }
+    inline e3m2_bits_t& operator-=(float v) noexcept {
+        uint8_ = f32_to_e3m2(v - e3m2_to_f32(uint8_));
+        return *this;
+    }
+    inline e3m2_bits_t& operator*=(float v) noexcept {
+        uint8_ = f32_to_e3m2(v * e3m2_to_f32(uint8_));
+        return *this;
+    }
+    inline e3m2_bits_t& operator/=(float v) noexcept {
+        uint8_ = f32_to_e3m2(v / e3m2_to_f32(uint8_));
+        return *this;
+    }
+    inline e3m2_bits_t& operator=(float v) noexcept {
+        uint8_ = f32_to_e3m2(v);
+        return *this;
+    }
+};
+
 #if USEARCH_USE_OPENMP
 #pragma omp declare reduction(+ : unum::usearch::e5m2_bits_t : omp_out = omp_out + omp_in)                             \
     initializer(omp_priv = unum::usearch::e5m2_bits_t())
 #pragma omp declare reduction(+ : unum::usearch::e4m3_bits_t : omp_out = omp_out + omp_in)                             \
     initializer(omp_priv = unum::usearch::e4m3_bits_t())
+#pragma omp declare reduction(+ : unum::usearch::e2m3_bits_t : omp_out = omp_out + omp_in)                             \
+    initializer(omp_priv = unum::usearch::e2m3_bits_t())
+#pragma omp declare reduction(+ : unum::usearch::e3m2_bits_t : omp_out = omp_out + omp_in)                             \
+    initializer(omp_priv = unum::usearch::e3m2_bits_t())
 #endif
 
 /**
@@ -1594,6 +1893,10 @@ template <> struct cast_gt<i8_t, i8_t> {
     static bool try_(byte_t const*, std::size_t, byte_t*) noexcept { return false; }
 };
 
+template <> struct cast_gt<u8_t, u8_t> {
+    static bool try_(byte_t const*, std::size_t, byte_t*) noexcept { return false; }
+};
+
 template <> struct cast_gt<b1x8_t, b1x8_t> {
     static bool try_(byte_t const*, std::size_t, byte_t*) noexcept { return false; }
 };
@@ -1658,6 +1961,31 @@ template <typename to_scalar_at> struct cast_from_i8_gt {
         to_scalar_at* typed_output = reinterpret_cast<to_scalar_at*>(output);
         for (std::size_t i = 0; i != dim; ++i)
             typed_output[i] = static_cast<to_scalar_at>(typed_input[i]) / 127.f;
+        return true;
+    }
+};
+
+template <typename from_scalar_at> struct cast_to_u8_gt {
+    inline static bool try_(byte_t const* input, std::size_t dim, byte_t* output) noexcept {
+        from_scalar_at const* typed_input = reinterpret_cast<from_scalar_at const*>(input);
+        std::uint8_t* typed_output = reinterpret_cast<std::uint8_t*>(output);
+        double magnitude = 0.0;
+        for (std::size_t i = 0; i != dim; ++i)
+            magnitude += (double)typed_input[i] * (double)typed_input[i];
+        magnitude = std::sqrt(magnitude);
+        for (std::size_t i = 0; i != dim; ++i)
+            typed_output[i] =
+                static_cast<std::uint8_t>(usearch::clamp<double>(typed_input[i] * 255.0 / magnitude, 0.0, 255.0));
+        return true;
+    }
+};
+
+template <typename to_scalar_at> struct cast_from_u8_gt {
+    static bool try_(byte_t const* input, std::size_t dim, byte_t* output) noexcept {
+        std::uint8_t const* typed_input = reinterpret_cast<std::uint8_t const*>(input);
+        to_scalar_at* typed_output = reinterpret_cast<to_scalar_at*>(output);
+        for (std::size_t i = 0; i != dim; ++i)
+            typed_output[i] = static_cast<to_scalar_at>(typed_input[i]) / 255.f;
         return true;
     }
 };
@@ -1727,6 +2055,59 @@ template <> struct cast_gt<i8_t, e4m3_bits_t> : public cast_from_i8_gt<e4m3_t> {
 template <> struct cast_gt<e4m3_bits_t, b1x8_t> : public cast_to_b1x8_gt<e4m3_t> {};
 template <> struct cast_gt<b1x8_t, e4m3_bits_t> : public cast_from_b1x8_gt<e4m3_t> {};
 
+template <> struct cast_gt<e2m3_bits_t, e2m3_bits_t> {
+    static bool try_(byte_t const*, std::size_t, byte_t*) noexcept { return false; }
+};
+template <> struct cast_gt<e2m3_bits_t, f32_t> : public cast_through_f32_gt<e2m3_t, f32_t> {};
+template <> struct cast_gt<f32_t, e2m3_bits_t> : public cast_through_f32_gt<f32_t, e2m3_t> {};
+template <> struct cast_gt<e2m3_bits_t, f64_t> : public cast_through_f32_gt<e2m3_t, f64_t> {};
+template <> struct cast_gt<f64_t, e2m3_bits_t> : public cast_through_f32_gt<f64_t, e2m3_t> {};
+template <> struct cast_gt<e2m3_bits_t, f16_bits_t> : public cast_through_f32_gt<e2m3_t, f16_t> {};
+template <> struct cast_gt<f16_bits_t, e2m3_bits_t> : public cast_through_f32_gt<f16_t, e2m3_t> {};
+template <> struct cast_gt<e2m3_bits_t, bf16_bits_t> : public cast_through_f32_gt<e2m3_t, bf16_t> {};
+template <> struct cast_gt<bf16_bits_t, e2m3_bits_t> : public cast_through_f32_gt<bf16_t, e2m3_t> {};
+template <> struct cast_gt<e2m3_bits_t, i8_t> : public cast_to_i8_gt<e2m3_t> {};
+template <> struct cast_gt<i8_t, e2m3_bits_t> : public cast_from_i8_gt<e2m3_t> {};
+template <> struct cast_gt<e2m3_bits_t, b1x8_t> : public cast_to_b1x8_gt<e2m3_t> {};
+template <> struct cast_gt<b1x8_t, e2m3_bits_t> : public cast_from_b1x8_gt<e2m3_t> {};
+
+template <> struct cast_gt<e3m2_bits_t, e3m2_bits_t> {
+    static bool try_(byte_t const*, std::size_t, byte_t*) noexcept { return false; }
+};
+template <> struct cast_gt<e3m2_bits_t, f32_t> : public cast_through_f32_gt<e3m2_t, f32_t> {};
+template <> struct cast_gt<f32_t, e3m2_bits_t> : public cast_through_f32_gt<f32_t, e3m2_t> {};
+template <> struct cast_gt<e3m2_bits_t, f64_t> : public cast_through_f32_gt<e3m2_t, f64_t> {};
+template <> struct cast_gt<f64_t, e3m2_bits_t> : public cast_through_f32_gt<f64_t, e3m2_t> {};
+template <> struct cast_gt<e3m2_bits_t, f16_bits_t> : public cast_through_f32_gt<e3m2_t, f16_t> {};
+template <> struct cast_gt<f16_bits_t, e3m2_bits_t> : public cast_through_f32_gt<f16_t, e3m2_t> {};
+template <> struct cast_gt<e3m2_bits_t, bf16_bits_t> : public cast_through_f32_gt<e3m2_t, bf16_t> {};
+template <> struct cast_gt<bf16_bits_t, e3m2_bits_t> : public cast_through_f32_gt<bf16_t, e3m2_t> {};
+template <> struct cast_gt<e3m2_bits_t, i8_t> : public cast_to_i8_gt<e3m2_t> {};
+template <> struct cast_gt<i8_t, e3m2_bits_t> : public cast_from_i8_gt<e3m2_t> {};
+template <> struct cast_gt<e3m2_bits_t, b1x8_t> : public cast_to_b1x8_gt<e3m2_t> {};
+template <> struct cast_gt<b1x8_t, e3m2_bits_t> : public cast_from_b1x8_gt<e3m2_t> {};
+
+template <> struct cast_gt<u8_t, f16_bits_t> : public cast_from_u8_gt<f16_t> {};
+template <> struct cast_gt<u8_t, bf16_bits_t> : public cast_from_u8_gt<bf16_t> {};
+template <> struct cast_gt<u8_t, f32_t> : public cast_from_u8_gt<f32_t> {};
+template <> struct cast_gt<u8_t, f64_t> : public cast_from_u8_gt<f64_t> {};
+template <> struct cast_gt<f16_bits_t, u8_t> : public cast_to_u8_gt<f16_t> {};
+template <> struct cast_gt<bf16_bits_t, u8_t> : public cast_to_u8_gt<bf16_t> {};
+template <> struct cast_gt<f32_t, u8_t> : public cast_to_u8_gt<f32_t> {};
+template <> struct cast_gt<f64_t, u8_t> : public cast_to_u8_gt<f64_t> {};
+template <> struct cast_gt<b1x8_t, u8_t> : public cast_from_b1x8_gt<u8_t> {};
+template <> struct cast_gt<u8_t, b1x8_t> : public cast_to_b1x8_gt<u8_t> {};
+template <> struct cast_gt<e5m2_bits_t, u8_t> : public cast_to_u8_gt<e5m2_t> {};
+template <> struct cast_gt<u8_t, e5m2_bits_t> : public cast_from_u8_gt<e5m2_t> {};
+template <> struct cast_gt<e4m3_bits_t, u8_t> : public cast_to_u8_gt<e4m3_t> {};
+template <> struct cast_gt<u8_t, e4m3_bits_t> : public cast_from_u8_gt<e4m3_t> {};
+template <> struct cast_gt<e2m3_bits_t, u8_t> : public cast_to_u8_gt<e2m3_t> {};
+template <> struct cast_gt<u8_t, e2m3_bits_t> : public cast_from_u8_gt<e2m3_t> {};
+template <> struct cast_gt<e3m2_bits_t, u8_t> : public cast_to_u8_gt<e3m2_t> {};
+template <> struct cast_gt<u8_t, e3m2_bits_t> : public cast_from_u8_gt<e3m2_t> {};
+template <> struct cast_gt<i8_t, u8_t> : public cast_to_u8_gt<i8_t> {};
+template <> struct cast_gt<u8_t, i8_t> : public cast_from_u8_gt<i8_t> {};
+
 /**
  *  @brief  Type-punned array casting function.
  *          Arguments: input buffer, bytes in input buffer, output buffer.
@@ -1741,25 +2122,31 @@ using cast_punned_t = bool (*)(byte_t const*, std::size_t, byte_t*);
  */
 struct casts_punned_t {
     struct group_t {
-        cast_punned_t b1x8{};
-        cast_punned_t i8{};
-        cast_punned_t f16{};
-        cast_punned_t bf16{};
-        cast_punned_t f32{};
         cast_punned_t f64{};
+        cast_punned_t f32{};
+        cast_punned_t bf16{};
+        cast_punned_t f16{};
         cast_punned_t e5m2{};
         cast_punned_t e4m3{};
+        cast_punned_t e3m2{};
+        cast_punned_t e2m3{};
+        cast_punned_t i8{};
+        cast_punned_t u8{};
+        cast_punned_t b1x8{};
 
         cast_punned_t operator[](scalar_kind_t scalar_kind) const noexcept {
             switch (scalar_kind) {
             case scalar_kind_t::f64_k: return f64;
             case scalar_kind_t::f32_k: return f32;
-            case scalar_kind_t::f16_k: return f16;
             case scalar_kind_t::bf16_k: return bf16;
-            case scalar_kind_t::i8_k: return i8;
-            case scalar_kind_t::b1x8_k: return b1x8;
+            case scalar_kind_t::f16_k: return f16;
             case scalar_kind_t::e5m2_k: return e5m2;
             case scalar_kind_t::e4m3_k: return e4m3;
+            case scalar_kind_t::e3m2_k: return e3m2;
+            case scalar_kind_t::e2m3_k: return e2m3;
+            case scalar_kind_t::i8_k: return i8;
+            case scalar_kind_t::u8_k: return u8;
+            case scalar_kind_t::b1x8_k: return b1x8;
             default: return nullptr;
             }
         }
@@ -1769,24 +2156,29 @@ struct casts_punned_t {
     template <typename scalar_at> static casts_punned_t make() noexcept {
         casts_punned_t result;
 
-        result.from.b1x8 = &cast_gt<b1x8_t, scalar_at>::try_;
-        result.from.i8 = &cast_gt<i8_t, scalar_at>::try_;
-        result.from.f16 = &cast_gt<f16_t, scalar_at>::try_;
-        result.from.bf16 = &cast_gt<bf16_t, scalar_at>::try_;
-        result.from.f32 = &cast_gt<f32_t, scalar_at>::try_;
         result.from.f64 = &cast_gt<f64_t, scalar_at>::try_;
-
-        result.to.b1x8 = &cast_gt<scalar_at, b1x8_t>::try_;
-        result.to.i8 = &cast_gt<scalar_at, i8_t>::try_;
-        result.to.f16 = &cast_gt<scalar_at, f16_t>::try_;
-        result.to.bf16 = &cast_gt<scalar_at, bf16_t>::try_;
-        result.to.f32 = &cast_gt<scalar_at, f32_t>::try_;
-        result.to.f64 = &cast_gt<scalar_at, f64_t>::try_;
-
+        result.from.f32 = &cast_gt<f32_t, scalar_at>::try_;
+        result.from.bf16 = &cast_gt<bf16_t, scalar_at>::try_;
+        result.from.f16 = &cast_gt<f16_t, scalar_at>::try_;
         result.from.e5m2 = &cast_gt<e5m2_t, scalar_at>::try_;
         result.from.e4m3 = &cast_gt<e4m3_t, scalar_at>::try_;
+        result.from.e3m2 = &cast_gt<e3m2_t, scalar_at>::try_;
+        result.from.e2m3 = &cast_gt<e2m3_t, scalar_at>::try_;
+        result.from.i8 = &cast_gt<i8_t, scalar_at>::try_;
+        result.from.u8 = &cast_gt<u8_t, scalar_at>::try_;
+        result.from.b1x8 = &cast_gt<b1x8_t, scalar_at>::try_;
+
+        result.to.f64 = &cast_gt<scalar_at, f64_t>::try_;
+        result.to.f32 = &cast_gt<scalar_at, f32_t>::try_;
+        result.to.bf16 = &cast_gt<scalar_at, bf16_t>::try_;
+        result.to.f16 = &cast_gt<scalar_at, f16_t>::try_;
         result.to.e5m2 = &cast_gt<scalar_at, e5m2_t>::try_;
         result.to.e4m3 = &cast_gt<scalar_at, e4m3_t>::try_;
+        result.to.e3m2 = &cast_gt<scalar_at, e3m2_t>::try_;
+        result.to.e2m3 = &cast_gt<scalar_at, e2m3_t>::try_;
+        result.to.i8 = &cast_gt<scalar_at, i8_t>::try_;
+        result.to.u8 = &cast_gt<scalar_at, u8_t>::try_;
+        result.to.b1x8 = &cast_gt<scalar_at, b1x8_t>::try_;
 
         return result;
     }
@@ -1795,12 +2187,15 @@ struct casts_punned_t {
         switch (scalar_kind) {
         case scalar_kind_t::f64_k: return casts_punned_t::make<f64_t>();
         case scalar_kind_t::f32_k: return casts_punned_t::make<f32_t>();
-        case scalar_kind_t::f16_k: return casts_punned_t::make<f16_t>();
         case scalar_kind_t::bf16_k: return casts_punned_t::make<bf16_t>();
-        case scalar_kind_t::i8_k: return casts_punned_t::make<i8_t>();
-        case scalar_kind_t::b1x8_k: return casts_punned_t::make<b1x8_t>();
+        case scalar_kind_t::f16_k: return casts_punned_t::make<f16_t>();
         case scalar_kind_t::e5m2_k: return casts_punned_t::make<e5m2_t>();
         case scalar_kind_t::e4m3_k: return casts_punned_t::make<e4m3_t>();
+        case scalar_kind_t::e3m2_k: return casts_punned_t::make<e3m2_t>();
+        case scalar_kind_t::e2m3_k: return casts_punned_t::make<e2m3_t>();
+        case scalar_kind_t::i8_k: return casts_punned_t::make<i8_t>();
+        case scalar_kind_t::u8_k: return casts_punned_t::make<u8_t>();
+        case scalar_kind_t::b1x8_k: return casts_punned_t::make<b1x8_t>();
         default: return {};
         }
     }
@@ -2146,6 +2541,57 @@ struct metric_l2sq_i8_t {
 };
 
 /**
+ *  @brief  Cosine (Angular) distance for unsigned 8-bit integers using 32-bit intermediates.
+ */
+struct metric_cos_u8_t {
+    using scalar_t = u8_t;
+    using result_t = f32_t;
+
+    inline result_t operator()(u8_t const* a, u8_t const* b, std::size_t dim) const noexcept {
+        std::int64_t ab{}, a2{}, b2{};
+#if USEARCH_USE_OPENMP
+#pragma omp simd reduction(+ : ab, a2, b2)
+#elif defined(USEARCH_DEFINED_CLANG)
+#pragma clang loop vectorize(enable)
+#elif defined(USEARCH_DEFINED_GCC)
+#pragma GCC ivdep
+#endif
+        for (std::size_t i = 0; i != dim; i++) {
+            std::int32_t ai{a[i]};
+            std::int32_t bi{b[i]};
+            ab += ai * bi;
+            a2 += square(ai);
+            b2 += square(bi);
+        }
+        result_t a2f = std::sqrt(static_cast<result_t>(a2));
+        result_t b2f = std::sqrt(static_cast<result_t>(b2));
+        return (ab != 0) ? (1.f - ab / (a2f * b2f)) : 0;
+    }
+};
+
+/**
+ *  @brief  Squared Euclidean (L2) distance for unsigned 8-bit integers using 32-bit intermediates.
+ */
+struct metric_l2sq_u8_t {
+    using scalar_t = u8_t;
+    using result_t = f32_t;
+
+    inline result_t operator()(u8_t const* a, u8_t const* b, std::size_t dim) const noexcept {
+        std::int32_t ab_deltas_sq{};
+#if USEARCH_USE_OPENMP
+#pragma omp simd reduction(+ : ab_deltas_sq)
+#elif defined(USEARCH_DEFINED_CLANG)
+#pragma clang loop vectorize(enable)
+#elif defined(USEARCH_DEFINED_GCC)
+#pragma GCC ivdep
+#endif
+        for (std::size_t i = 0; i != dim; i++)
+            ab_deltas_sq += square(std::int32_t(a[i]) - std::int32_t(b[i]));
+        return static_cast<result_t>(ab_deltas_sq);
+    }
+};
+
+/**
  *  @brief  Haversine distance for the shortest distance between two nodes on
  *          the surface of a 3D sphere, defined with latitude and longitude.
  */
@@ -2208,12 +2654,14 @@ inline nk_capability_t nk_cached_capabilities() noexcept {
  */
 inline nk_dtype_t scalar_kind_to_nk_dtype(scalar_kind_t sk) noexcept {
     switch (sk) {
-    case scalar_kind_t::f32_k: return (nk_dtype_t)nk_f32_k;
     case scalar_kind_t::f64_k: return (nk_dtype_t)nk_f64_k;
+    case scalar_kind_t::f32_k: return (nk_dtype_t)nk_f32_k;
     case scalar_kind_t::bf16_k: return (nk_dtype_t)nk_bf16_k;
     case scalar_kind_t::f16_k: return (nk_dtype_t)nk_f16_k;
     case scalar_kind_t::e5m2_k: return (nk_dtype_t)nk_e5m2_k;
     case scalar_kind_t::e4m3_k: return (nk_dtype_t)nk_e4m3_k;
+    case scalar_kind_t::e3m2_k: return (nk_dtype_t)nk_e3m2_k;
+    case scalar_kind_t::e2m3_k: return (nk_dtype_t)nk_e2m3_k;
     case scalar_kind_t::i8_k: return (nk_dtype_t)nk_i8_k;
     case scalar_kind_t::u8_k: return (nk_dtype_t)nk_u8_k;
     case scalar_kind_t::b1x8_k: return (nk_dtype_t)nk_u1_k;
@@ -2634,7 +3082,10 @@ class metric_punned_t {
             case scalar_kind_t::f16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<f16_t, f32_t>>; break;
             case scalar_kind_t::e5m2_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<e5m2_t, f32_t>>; break;
             case scalar_kind_t::e4m3_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<e4m3_t, f32_t>>; break;
+            case scalar_kind_t::e3m2_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<e3m2_t, f32_t>>; break;
+            case scalar_kind_t::e2m3_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<e2m3_t, f32_t>>; break;
             case scalar_kind_t::i8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<i8_t, f32_t>>; break;
+            case scalar_kind_t::u8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<u8_t, f32_t>>; break;
             default: metric_ptr_ = 0; break;
             }
             break;
@@ -2647,7 +3098,10 @@ class metric_punned_t {
             case scalar_kind_t::f16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_gt<f16_t, f32_t>>; break;
             case scalar_kind_t::e5m2_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_gt<e5m2_t, f32_t>>; break;
             case scalar_kind_t::e4m3_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_gt<e4m3_t, f32_t>>; break;
+            case scalar_kind_t::e3m2_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_gt<e3m2_t, f32_t>>; break;
+            case scalar_kind_t::e2m3_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_gt<e2m3_t, f32_t>>; break;
             case scalar_kind_t::i8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_i8_t>; break;
+            case scalar_kind_t::u8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_u8_t>; break;
             default: metric_ptr_ = 0; break;
             }
             break;
@@ -2660,7 +3114,10 @@ class metric_punned_t {
             case scalar_kind_t::f16_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_gt<f16_t, f32_t>>; break;
             case scalar_kind_t::e5m2_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_gt<e5m2_t, f32_t>>; break;
             case scalar_kind_t::e4m3_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_gt<e4m3_t, f32_t>>; break;
+            case scalar_kind_t::e3m2_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_gt<e3m2_t, f32_t>>; break;
+            case scalar_kind_t::e2m3_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_gt<e2m3_t, f32_t>>; break;
             case scalar_kind_t::i8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_i8_t>; break;
+            case scalar_kind_t::u8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_u8_t>; break;
             default: metric_ptr_ = 0; break;
             }
             break;
@@ -2679,7 +3136,14 @@ class metric_punned_t {
             case scalar_kind_t::e4m3_k:
                 metric_ptr_ = (uptr_t)&equidimensional_<metric_pearson_gt<e4m3_t, f32_t>>;
                 break;
+            case scalar_kind_t::e3m2_k:
+                metric_ptr_ = (uptr_t)&equidimensional_<metric_pearson_gt<e3m2_t, f32_t>>;
+                break;
+            case scalar_kind_t::e2m3_k:
+                metric_ptr_ = (uptr_t)&equidimensional_<metric_pearson_gt<e2m3_t, f32_t>>;
+                break;
             case scalar_kind_t::i8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_pearson_gt<i8_t, f32_t>>; break;
+            case scalar_kind_t::u8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_pearson_gt<u8_t, f32_t>>; break;
             default: metric_ptr_ = 0; break;
             }
             break;
@@ -2707,6 +3171,12 @@ class metric_punned_t {
                 break;
             case scalar_kind_t::e4m3_k:
                 metric_ptr_ = (uptr_t)&equidimensional_<metric_divergence_gt<e4m3_t, f32_t>>;
+                break;
+            case scalar_kind_t::e3m2_k:
+                metric_ptr_ = (uptr_t)&equidimensional_<metric_divergence_gt<e3m2_t, f32_t>>;
+                break;
+            case scalar_kind_t::e2m3_k:
+                metric_ptr_ = (uptr_t)&equidimensional_<metric_divergence_gt<e2m3_t, f32_t>>;
                 break;
             default: metric_ptr_ = 0; break;
             }
@@ -3014,7 +3484,7 @@ template <typename allocator_at = std::allocator<char>> class kmeans_clustering_
             return result.failed("No memory for result outputs!");
 
         std::fill_n(point_to_centroid_index_buffer.data(), points_count, wanted_clusters);
-        std::fill_n(point_to_centroid_distance_buffer.data(), points_count, std::numeric_limits<distance_t>::max());
+        std::fill_n(point_to_centroid_distance_buffer.data(), points_count, (std::numeric_limits<distance_t>::max)());
 
         // Initialize the casting kernel for quantization and export.
         casts_punned_t casts = casts_punned_t::make(quantization_kind);
@@ -3060,7 +3530,7 @@ template <typename allocator_at = std::allocator<char>> class kmeans_clustering_
         auto start_time = std::chrono::high_resolution_clock::now();
         std::size_t iterations = 0;
         std::size_t const min_points_shifted_per_iteration = static_cast<std::size_t>(min_shifts * points_count);
-        f64_t last_aggregate_distance = std::numeric_limits<f64_t>::max();
+        f64_t last_aggregate_distance = (std::numeric_limits<f64_t>::max)();
 
         while (iterations < max_iterations) {
             iterations++;
@@ -3071,7 +3541,7 @@ template <typename allocator_at = std::allocator<char>> class kmeans_clustering_
                 byte_t const* quantized_point =
                     points_quantized_buffer.data() + points_idx * stride_per_vector_quantized;
                 byte_t const* quantized_centroids = centroids_quantized_buffer.data();
-                distance_t closest_distance_local = std::numeric_limits<distance_t>::max();
+                distance_t closest_distance_local = (std::numeric_limits<distance_t>::max)();
                 std::size_t closest_idx_local = 0;
                 for (std::size_t centroid_idx = 0; centroid_idx < wanted_clusters; centroid_idx++) {
                     byte_t const* quantized_centroid = quantized_centroids + centroid_idx * stride_per_vector_quantized;

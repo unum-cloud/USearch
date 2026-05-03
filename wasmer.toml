@@ -5,7 +5,7 @@ license = "Apache-2.0"
 name = "unum/usearch"
 readme = "README.md"
 repository = "https://github.com/unum-cloud/USearch"
-version = "2.24.0"
+version = "2.25.2"
 
 [[module]]
 name = "index"

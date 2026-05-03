@@ -43,7 +43,7 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind, new_index};
 let options = IndexOptions {
     dimensions: 3, // necessary for most metric kinds
     metric: MetricKind::IP, // or ::L2sq, ::Cos ...
-    quantization: ScalarKind::BF16, // or ::F32, ::F16, ::I8, ::B1x8 ...
+    quantization: ScalarKind::BF16, // or ::F32, ::F16, ::E5M2, ::E4M3, ::E3M2, ::E2M3, ::U8, ::I8, ::B1x8 ...
     connectivity: 0, // zero for auto
     expansion_add: 0, // zero for auto
     expansion_search: 0, // zero for auto
@@ -88,6 +88,19 @@ assert!(index.save_to_buffer(&mut serialization_buffer).is_ok());
 assert!(index.load_from_buffer(&serialization_buffer).is_ok());
 assert!(index.view_from_buffer(&serialization_buffer).is_ok());
 ```
+
+To reopen an index without already knowing how it was built, read its header with `Index::metadata` or use the one-shot `Index::restore`:
+
+```rust
+let meta = Index::metadata("index.usearch").unwrap();
+println!("dim={}, metric={:?}, dtype={:?}", meta.dimensions, meta.metric, meta.quantization);
+
+let index = Index::restore("index.usearch").unwrap();
+assert_eq!(index.metric_kind(), meta.metric);
+assert_eq!(index.scalar_kind(), meta.quantization);
+```
+
+`Index::restore_view` and `Index::restore_from_buffer` are the memory-mapping and in-memory counterparts.
 
 ## Metrics
 

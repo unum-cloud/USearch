@@ -18,15 +18,14 @@ Dependencies listed in the script header for uv to resolve automatically.
 # ]
 # ///
 
-import sqlite3
 import json
 import math
+import sqlite3
 
 import numpy as np
 import pytest
 
 import usearch
-
 
 try:
     found_sqlite_path = usearch.sqlite_path()
@@ -64,7 +63,7 @@ def test_sqlite_minimal_json_cosine_vector_search():
             vector JSON NOT NULL
         );
         INSERT INTO vectors_table (id, vector)
-        VALUES 
+        VALUES
             (42, '[1.0, 2.0, 3.0]'),
             (43, '[4.0, 5.0, 6.0]');
     """
@@ -73,7 +72,7 @@ def test_sqlite_minimal_json_cosine_vector_search():
     # the `distance_cosine_f32` extension function
     cursor.execute(
         """
-        SELECT  vt.id, 
+        SELECT  vt.id,
                 distance_cosine_f32(vt.vector, '[7.0, 8.0, 9.0]') AS distance
         FROM vectors_table AS vt;
     """
@@ -112,14 +111,14 @@ def test_sqlite_minimal_text_search():
             word TEXT NOT NULL
         );
         INSERT INTO strings_table (id, word)
-        VALUES 
+        VALUES
             (42, '{str42}'),
             (43, '{str43}');
     """
     )
     cursor.execute(
         f"""
-        SELECT  st.id, 
+        SELECT  st.id,
 
                 distance_levenshtein_bytes(st.word, '{str44}') AS levenshtein_bytes,
                 distance_levenshtein_unicode(st.word, '{str44}') AS levenshtein_unicode,
@@ -162,7 +161,7 @@ def test_sqlite_blob_bits_vector_search():
             vector BLOB NOT NULL
         );
         INSERT INTO binary_vectors (id, vector)
-        VALUES 
+        VALUES
             (42, X'FFFFFF'), -- 111111111111111111111111 in binary
             (43, X'000000'); -- 000000000000000000000000 in binary
         """
@@ -172,7 +171,7 @@ def test_sqlite_blob_bits_vector_search():
     # the `distance_hamming_binary` and `distance_jaccard_binary` extension functions
     cursor.execute(
         """
-        SELECT  bv.id, 
+        SELECT  bv.id,
                 distance_hamming_binary(bv.vector, X'FFFF00') AS hamming_distance,
                 distance_jaccard_binary(bv.vector, X'FFFF00') AS jaccard_distance
         FROM binary_vectors AS bv;
@@ -253,16 +252,16 @@ def test_sqlite_distances_in_high_dimensions(num_vectors: int, ndim: int):
     conn.commit()
 
     similarities = """
-    SELECT 
+    SELECT
         a.id AS id1,
         b.id AS id2,
         distance_cosine_f32(a.vector_json, b.vector_json) AS cosine_similarity_json,
         distance_cosine_f32(a.vector_f32, b.vector_f32) AS cosine_similarity_f32,
         distance_cosine_f16(a.vector_f16, b.vector_f16) AS cosine_similarity_f16
-    FROM 
+    FROM
         vector_table AS a,
         vector_table AS b
-    WHERE 
+    WHERE
         a.id < b.id;
     """
     cursor.execute(similarities)
@@ -322,16 +321,16 @@ def test_sqlite_distances_in_low_dimensions(num_vectors: int):
     # Query to calculate pairwise distances between vectors
     cursor.execute(
         """
-        SELECT 
+        SELECT
             a.id AS id1,
             b.id AS id2,
             distance_cosine_f32(a.vector_d0, a.vector_d1, a.vector_d2, a.vector_d3, b.vector_d0, b.vector_d1, b.vector_d2, b.vector_d3) AS cosine_similarity_f32,
             distance_cosine_f16(a.vector_d0, a.vector_d1, a.vector_d2, a.vector_d3, b.vector_d0, b.vector_d1, b.vector_d2, b.vector_d3) AS cosine_similarity_f16,
             distance_haversine_meters(a.vector_d0, a.vector_d1, b.vector_d0, b.vector_d1) AS haversine_meters
-        FROM 
+        FROM
             vector_table AS a,
             vector_table AS b
-        WHERE 
+        WHERE
             a.id < b.id
         """
     )

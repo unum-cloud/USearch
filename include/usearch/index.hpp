@@ -8,8 +8,8 @@
 #define UNUM_USEARCH_HPP
 
 #define USEARCH_VERSION_MAJOR 2
-#define USEARCH_VERSION_MINOR 24
-#define USEARCH_VERSION_PATCH 0
+#define USEARCH_VERSION_MINOR 25
+#define USEARCH_VERSION_PATCH 2
 
 // Inferring C++ version
 // https://stackoverflow.com/a/61552074
@@ -598,6 +598,125 @@ template <typename allocator_at = std::allocator<byte_t>> class bitset_gt {
 using bitset_t = bitset_gt<>;
 
 /**
+ *  @brief  Cache-line-padded striped spin-lock array for concurrent graph mutations.
+ *          Maps node slots to lock stripes via Fibonacci hashing, with each stripe
+ *          occupying its own cache line to eliminate false sharing.
+ *          The number of stripes is proportional to `threads * connectivity`, not
+ *          graph size, keeping the lock array comfortably within L2/L3 cache.
+ */
+template <typename allocator_at = std::allocator<byte_t>, std::size_t cache_line_ak = 128> //
+class striped_locks_gt {
+    using allocator_t = allocator_at;
+    using byte_t = typename allocator_t::value_type;
+    static_assert(sizeof(byte_t) == 1, "Allocator must allocate separate addressable bytes");
+
+    static constexpr std::uint64_t fibonacci_k = 0x9E3779B97F4A7C15ull;
+
+    using atomic_flag_t = std::atomic<std::uint8_t>;
+    struct alignas(cache_line_ak) padded_lock_t {
+        atomic_flag_t flag{0};
+        char padding_[cache_line_ak - sizeof(atomic_flag_t)];
+    };
+    static_assert(sizeof(padded_lock_t) == cache_line_ak, "Lock stripe must be exactly one cache line");
+
+    // `padded_lock_t` is `alignas(cache_line_ak)` (128 B by default) which
+    // exceeds what a plain allocator guarantees (typically 16 B on x86-64).
+    // Rather than demanding an over-aligned allocator, we over-allocate and
+    // keep a pointer to the aligned sub-region — `raw_` is what we hand back
+    // to the allocator, `stripes_` is the aligned view used for reads/writes.
+    byte_t* raw_{};
+    std::size_t raw_bytes_{};
+    padded_lock_t* stripes_{};
+    std::size_t count_{};
+    unsigned shift_{};
+
+    inline std::size_t stripe_for_(std::size_t slot) const noexcept {
+        return static_cast<std::size_t>((static_cast<std::uint64_t>(slot) * fibonacci_k) >> shift_);
+    }
+
+  public:
+    striped_locks_gt() noexcept {}
+    ~striped_locks_gt() noexcept { reset(); }
+
+    explicit operator bool() const noexcept { return stripes_; }
+
+    void reset() noexcept {
+        if (stripes_)
+            for (std::size_t i = 0; i < count_; i++)
+                stripes_[i].~padded_lock_t();
+        if (raw_)
+            allocator_t{}.deallocate(raw_, raw_bytes_);
+        raw_ = nullptr;
+        raw_bytes_ = 0;
+        stripes_ = nullptr;
+        count_ = 0;
+        shift_ = 64;
+    }
+
+    striped_locks_gt(std::size_t threads, std::size_t connectivity) noexcept {
+        std::size_t desired = threads * connectivity * 4;
+        if (desired < 256)
+            desired = 256;
+        count_ = ceil2(desired);
+        shift_ = 64;
+        for (std::size_t n = count_; n > 1; n >>= 1)
+            shift_--;
+        // Request one extra stripe's worth of slack so we can always land on a
+        // `cache_line_ak`-aligned address inside the allocation, regardless of
+        // what the underlying allocator returns.
+        constexpr std::size_t alignment_k = alignof(padded_lock_t);
+        raw_bytes_ = count_ * sizeof(padded_lock_t) + alignment_k;
+        raw_ = allocator_t{}.allocate(raw_bytes_);
+        if (!raw_) {
+            raw_bytes_ = 0;
+            count_ = 0;
+            shift_ = 64;
+            return;
+        }
+        auto raw_address = reinterpret_cast<std::uintptr_t>(raw_);
+        auto aligned_address = (raw_address + alignment_k - 1) & ~(static_cast<std::uintptr_t>(alignment_k) - 1);
+        stripes_ = reinterpret_cast<padded_lock_t*>(aligned_address);
+        for (std::size_t i = 0; i < count_; i++)
+            new (&stripes_[i]) padded_lock_t();
+    }
+
+    striped_locks_gt(striped_locks_gt&& other) noexcept {
+        raw_ = exchange(other.raw_, (byte_t*)nullptr);
+        raw_bytes_ = exchange(other.raw_bytes_, std::size_t{0});
+        stripes_ = exchange(other.stripes_, nullptr);
+        count_ = exchange(other.count_, std::size_t{0});
+        shift_ = exchange(other.shift_, unsigned{64});
+    }
+
+    striped_locks_gt& operator=(striped_locks_gt&& other) noexcept {
+        std::swap(raw_, other.raw_);
+        std::swap(raw_bytes_, other.raw_bytes_);
+        std::swap(stripes_, other.stripes_);
+        std::swap(count_, other.count_);
+        std::swap(shift_, other.shift_);
+        return *this;
+    }
+
+    striped_locks_gt(striped_locks_gt const&) = delete;
+    striped_locks_gt& operator=(striped_locks_gt const&) = delete;
+
+    inline bool atomic_set(std::size_t i) noexcept {
+        return stripes_[stripe_for_(i)].flag.exchange(1, std::memory_order_acquire);
+    }
+
+    inline void atomic_reset(std::size_t i) noexcept {
+        stripes_[stripe_for_(i)].flag.store(0, std::memory_order_release);
+    }
+
+    inline void lock(std::size_t i) noexcept {
+        while (atomic_set(i))
+            std::this_thread::yield();
+    }
+
+    inline void unlock(std::size_t i) noexcept { atomic_reset(i); }
+};
+
+/**
  *  @brief  Similar to `std::priority_queue`, but allows raw access to underlying
  *          memory, in case you want to shuffle it or sort. Good for collections
  *          from 100s to 10'000s elements.
@@ -1017,8 +1136,10 @@ class usearch_pack_m uint40_t {
         return result;
     }
 
-    inline static uint40_t max() noexcept { return uint40_t{}.broadcast(0xFF); }
-    inline static uint40_t min() noexcept { return uint40_t{}.broadcast(0); }
+    /* Parenthesized declarator keeps MSVC's preprocessor from expanding
+     * `max` / `min` against `<windows.h>`'s `max(a,b)` / `min(a,b)` macros. */
+    inline static uint40_t(max)() noexcept { return uint40_t{}.broadcast(0xFF); }
+    inline static uint40_t(min)() noexcept { return uint40_t{}.broadcast(0); }
 
     inline bool operator==(uint40_t const& other) const noexcept { return std::memcmp(octets, other.octets, 5) == 0; }
     inline bool operator!=(uint40_t const& other) const noexcept { return !(*this == other); }
@@ -1050,7 +1171,7 @@ template <typename element_at> struct default_free_value_gt {
     template <typename sfinae_element_at = element_at,
               typename std::enable_if<std::is_integral<sfinae_element_at>::value>::type* = nullptr>
     static sfinae_element_at value() noexcept {
-        return std::numeric_limits<element_at>::max();
+        return (std::numeric_limits<element_at>::max)();
     }
     template <typename sfinae_element_at = element_at,
               typename std::enable_if<!std::is_integral<sfinae_element_at>::value>::type* = nullptr>
@@ -1060,7 +1181,7 @@ template <typename element_at> struct default_free_value_gt {
 };
 
 template <> struct default_free_value_gt<uint40_t> {
-    static uint40_t value() noexcept { return uint40_t::max(); }
+    static uint40_t value() noexcept { return (uint40_t::max)(); }
 };
 
 template <typename element_at> element_at default_free_value() { return default_free_value_gt<element_at>::value(); }
@@ -2090,7 +2211,7 @@ class index_gt {
      */
     static constexpr std::size_t node_head_bytes_() { return sizeof(vector_key_t) + sizeof(level_t); }
 
-    using nodes_mutexes_t = bitset_gt<dynamic_allocator_t>;
+    using nodes_mutexes_t = striped_locks_gt<dynamic_allocator_t>;
 
     using visits_hash_set_t = growing_hash_set_gt<compressed_slot_t, hash_gt<compressed_slot_t>, dynamic_allocator_t>;
 
@@ -2426,6 +2547,114 @@ class index_gt {
     member_iterator_t iterator_at(compressed_slot_t slot) noexcept { return {this, slot}; }
     member_citerator_t citerator_at(compressed_slot_t slot) const noexcept { return {this, slot}; }
 
+    /**
+     *  @brief  A read-only random-access range over the neighbors of a single
+     *          node at a single graph level. Dereferencing yields a `member_cref_t`,
+     *          so callers can chain traversals without touching internal slots.
+     *
+     *  @warning The range aliases the node's adjacency tape. It is only valid
+     *           while the index is not being mutated. Prefer immutable indexes
+     *           (see `is_immutable()`) or guarantee no concurrent `add`/`update`/
+     *           `remove` while the view is alive.
+     */
+    class neighbors_view_t {
+        index_gt const* index_{};
+        neighbors_ref_t neighbors_{nullptr};
+
+      public:
+        class const_iterator {
+            index_gt const* index_{};
+            misaligned_ptr_gt<compressed_slot_t const> position_{nullptr};
+
+          public:
+            using iterator_category = std::random_access_iterator_tag;
+            using value_type = member_cref_t;
+            using difference_type = std::ptrdiff_t;
+            using pointer = void;
+            using reference = member_cref_t;
+
+            const_iterator() noexcept = default;
+            const_iterator(index_gt const* index, misaligned_ptr_gt<compressed_slot_t const> position) noexcept
+                : index_(index), position_(position) {}
+
+            reference operator*() const noexcept {
+                compressed_slot_t slot = static_cast<compressed_slot_t>(*position_);
+                return {index_->node_at_(slot).ckey(), slot};
+            }
+            compressed_slot_t slot() const noexcept { return static_cast<compressed_slot_t>(*position_); }
+
+            // clang-format off
+            const_iterator& operator++() noexcept { ++position_; return *this; }
+            const_iterator operator++(int) noexcept { const_iterator old = *this; ++position_; return old; }
+            const_iterator& operator--() noexcept { --position_; return *this; }
+            const_iterator operator--(int) noexcept { const_iterator old = *this; --position_; return old; }
+            const_iterator& operator+=(difference_type d) noexcept { position_ = position_ + d; return *this; }
+            const_iterator& operator-=(difference_type d) noexcept { position_ = position_ - d; return *this; }
+            const_iterator operator+(difference_type d) const noexcept { return {index_, position_ + d}; }
+            const_iterator operator-(difference_type d) const noexcept { return {index_, position_ - d}; }
+            difference_type operator-(const_iterator const& other) const noexcept { return position_ - other.position_; }
+            bool operator==(const_iterator const& other) const noexcept { return position_ == other.position_; }
+            bool operator!=(const_iterator const& other) const noexcept { return position_ != other.position_; }
+            // clang-format on
+        };
+
+        using iterator = const_iterator;
+        using value_type = member_cref_t;
+        using size_type = std::size_t;
+
+        neighbors_view_t() noexcept = default;
+        neighbors_view_t(index_gt const* index, neighbors_ref_t neighbors) noexcept
+            : index_(index), neighbors_(neighbors) {}
+
+        std::size_t size() const noexcept { return index_ ? neighbors_.size() : 0; }
+        bool empty() const noexcept { return size() == 0; }
+        member_cref_t operator[](std::size_t offset) const noexcept {
+            compressed_slot_t slot = neighbors_[offset];
+            return {index_->node_at_(slot).ckey(), slot};
+        }
+        const_iterator begin() const noexcept {
+            return index_ ? const_iterator{index_, neighbors_.begin()} : const_iterator{};
+        }
+        const_iterator end() const noexcept {
+            return index_ ? const_iterator{index_, neighbors_.end()} : const_iterator{};
+        }
+        const_iterator cbegin() const noexcept { return begin(); }
+        const_iterator cend() const noexcept { return end(); }
+    };
+
+    /**
+     *  @brief  Returns a read-only range over the neighbors of the node at @p slot
+     *          in the graph @p level. Returned view is empty when @p level exceeds
+     *          the node's level.
+     */
+    neighbors_view_t neighbors(compressed_slot_t slot, std::size_t level) const noexcept {
+        node_t node = node_at_(slot);
+        if (static_cast<level_t>(level) > node.level())
+            return {};
+        return {this, neighbors_(node, static_cast<level_t>(level))};
+    }
+
+    /**
+     *  @brief  Returns a read-only range over the neighbors of the node referenced
+     *          by @p member at the graph @p level.
+     */
+    neighbors_view_t neighbors(member_citerator_t member, std::size_t level) const noexcept {
+        return neighbors(get_slot(member), level);
+    }
+
+    /**
+     *  @brief  Returns the top graph level at which the node at @p slot is present.
+     */
+    std::size_t level_of(compressed_slot_t slot) const noexcept {
+        return static_cast<std::size_t>(static_cast<level_t>(node_at_(slot).level()));
+    }
+
+    /**
+     *  @brief  Returns the top graph level at which the node referenced by @p member
+     *          is present.
+     */
+    std::size_t level_of(member_citerator_t member) const noexcept { return level_of(get_slot(member)); }
+
     dynamic_allocator_t const& dynamic_allocator() const noexcept { return dynamic_allocator_; }
     tape_allocator_t const& tape_allocator() const noexcept { return tape_allocator_; }
 
@@ -2513,7 +2742,8 @@ class index_gt {
             return true;
         }
 
-        nodes_mutexes_t new_mutexes(limits.members);
+        std::size_t connectivity_max = (std::max)(config_.connectivity_base, config_.connectivity);
+        nodes_mutexes_t new_mutexes(limits.threads(), connectivity_max);
         buffer_gt<node_t, nodes_allocator_t> new_nodes(limits.members);
         buffer_gt<context_t, contexts_allocator_t> new_contexts(limits.threads());
         if (!new_nodes || !new_contexts || !new_mutexes)
@@ -2522,10 +2752,6 @@ class index_gt {
         // Move the nodes info, and deallocate previous buffers.
         if (nodes_)
             std::memcpy(new_nodes.data(), nodes_.data(), sizeof(node_t) * size());
-
-        // Pre-reserve the capacity for `top_for_refine`, which always contains at most one more
-        // element than the connectivity factors.
-        std::size_t connectivity_max = (std::max)(config_.connectivity_base, config_.connectivity);
         for (std::size_t i = 0; i != new_contexts.size(); ++i)
             if (!new_contexts[i].top_for_refine.reserve(connectivity_max + 1))
                 return false;
@@ -2573,7 +2799,7 @@ class index_gt {
         member_cref_t member;
         distance_t distance;
 
-        inline match_t() noexcept : member({nullptr, 0}), distance(std::numeric_limits<distance_t>::max()) {}
+        inline match_t() noexcept : member({nullptr, 0}), distance((std::numeric_limits<distance_t>::max)()) {}
 
         inline match_t(member_cref_t member, distance_t distance) noexcept : member(member), distance(distance) {}
 
@@ -2725,7 +2951,7 @@ class index_gt {
                 keys[i] = vector_key_t{};
                 distances[i] = std::numeric_limits<distance_t>::has_signaling_NaN
                                    ? std::numeric_limits<distance_t>::signaling_NaN()
-                                   : std::numeric_limits<distance_t>::max();
+                                   : (std::numeric_limits<distance_t>::max)();
             }
             return initialized_count;
         }
@@ -3814,12 +4040,11 @@ class index_gt {
     struct node_lock_t {
         nodes_mutexes_t& mutexes;
         std::size_t slot;
-        inline ~node_lock_t() noexcept { mutexes.atomic_reset(slot); }
+        inline ~node_lock_t() noexcept { mutexes.unlock(slot); }
     };
 
     inline node_lock_t node_lock_(std::size_t slot) const noexcept {
-        while (nodes_mutexes_.atomic_set(slot))
-            ;
+        nodes_mutexes_.lock(slot);
         return {nodes_mutexes_, slot};
     }
 
@@ -3827,18 +4052,17 @@ class index_gt {
         nodes_mutexes_t& mutexes;
         std::size_t slot;
         inline ~optional_node_lock_t() noexcept {
-            if (slot != std::numeric_limits<std::size_t>::max())
-                mutexes.atomic_reset(slot);
+            if (slot != (std::numeric_limits<std::size_t>::max)())
+                mutexes.unlock(slot);
         }
     };
 
     inline optional_node_lock_t optional_node_lock_(std::size_t slot, bool condition) const noexcept {
         if (condition) {
-            while (nodes_mutexes_.atomic_set(slot))
-                ;
+            nodes_mutexes_.lock(slot);
             return {nodes_mutexes_, slot};
         } else {
-            return {nodes_mutexes_, std::numeric_limits<std::size_t>::max()};
+            return {nodes_mutexes_, (std::numeric_limits<std::size_t>::max)()};
         }
     }
 
@@ -3846,8 +4070,8 @@ class index_gt {
         nodes_mutexes_t& mutexes;
         std::size_t slot;
         inline ~node_conditional_lock_t() noexcept {
-            if (slot != std::numeric_limits<std::size_t>::max())
-                mutexes.atomic_reset(slot);
+            if (slot != (std::numeric_limits<std::size_t>::max)())
+                mutexes.unlock(slot);
         }
     };
 
@@ -3855,10 +4079,10 @@ class index_gt {
                                                               bool& failed_to_acquire) const noexcept {
         if (!condition) {
             failed_to_acquire = false;
-            return {nodes_mutexes_, std::numeric_limits<std::size_t>::max()};
+            return {nodes_mutexes_, (std::numeric_limits<std::size_t>::max)()};
         }
         failed_to_acquire = nodes_mutexes_.atomic_set(slot);
-        return {nodes_mutexes_, failed_to_acquire ? std::numeric_limits<std::size_t>::max() : slot};
+        return {nodes_mutexes_, failed_to_acquire ? (std::numeric_limits<std::size_t>::max)() : slot};
     }
 
     template <typename metric_at, bool require_non_empty_ak = false>
@@ -4365,7 +4589,7 @@ class index_gt {
         metric_at&& metric,                                            //
         std::size_t needed, top_candidates_t& top, context_t& context, //
         std::size_t& refines_counter,                                  //
-        compressed_slot_t override_slot = (std::numeric_limits<compressed_slot_t>::max)(),
+        compressed_slot_t override_slot = ((std::numeric_limits<compressed_slot_t>::max))(),
         override_value_at override_value = {}) const noexcept {
 
         // Avoid expensive computation, if the set is already small

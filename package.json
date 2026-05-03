@@ -1,6 +1,6 @@
 {
     "name": "usearch",
-    "version": "2.24.0",
+    "version": "2.25.2",
     "description": "Smaller & Faster Single-File Vector Search Engine from Unum",
     "author": "Ash Vardanian (https://ashvardanian.com/)",
     "license": "Apache 2.0",
@@ -14,7 +14,7 @@
         "email": "info@unum.cloud"
     },
     "engines": {
-        "node": "~10 >=10.20 || >=12.17"
+        "node": ">=20"
     },
     "files": [
         "binding.gyp",

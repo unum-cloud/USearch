@@ -62,7 +62,10 @@ scalar_kind_t scalar_kind_to_cpp(usearch_scalar_kind_t kind) {
     case usearch_scalar_f16_k: return scalar_kind_t::f16_k;
     case usearch_scalar_e5m2_k: return scalar_kind_t::e5m2_k;
     case usearch_scalar_e4m3_k: return scalar_kind_t::e4m3_k;
+    case usearch_scalar_e3m2_k: return scalar_kind_t::e3m2_k;
+    case usearch_scalar_e2m3_k: return scalar_kind_t::e2m3_k;
     case usearch_scalar_i8_k: return scalar_kind_t::i8_k;
+    case usearch_scalar_u8_k: return scalar_kind_t::u8_k;
     case usearch_scalar_b1_k: return scalar_kind_t::b1x8_k;
     default: return scalar_kind_t::unknown_k;
     }
@@ -76,7 +79,10 @@ usearch_scalar_kind_t scalar_kind_to_c(scalar_kind_t kind) {
     case scalar_kind_t::f16_k: return usearch_scalar_f16_k;
     case scalar_kind_t::e5m2_k: return usearch_scalar_e5m2_k;
     case scalar_kind_t::e4m3_k: return usearch_scalar_e4m3_k;
+    case scalar_kind_t::e3m2_k: return usearch_scalar_e3m2_k;
+    case scalar_kind_t::e2m3_k: return usearch_scalar_e2m3_k;
     case scalar_kind_t::i8_k: return usearch_scalar_i8_k;
+    case scalar_kind_t::u8_k: return usearch_scalar_u8_k;
     case scalar_kind_t::b1x8_k: return usearch_scalar_b1_k;
     default: return usearch_scalar_unknown_k;
     }
@@ -84,11 +90,12 @@ usearch_scalar_kind_t scalar_kind_to_c(scalar_kind_t kind) {
 
 add_result_t add_(index_dense_t* index, usearch_key_t key, void const* vector, scalar_kind_t kind) {
     switch (kind) {
-    case scalar_kind_t::f32_k: return index->add(key, (f32_t const*)vector);
     case scalar_kind_t::f64_k: return index->add(key, (f64_t const*)vector);
-    case scalar_kind_t::f16_k: return index->add(key, (f16_t const*)vector);
+    case scalar_kind_t::f32_k: return index->add(key, (f32_t const*)vector);
     case scalar_kind_t::bf16_k: return index->add(key, (bf16_t const*)vector);
+    case scalar_kind_t::f16_k: return index->add(key, (f16_t const*)vector);
     case scalar_kind_t::i8_k: return index->add(key, (i8_t const*)vector);
+    case scalar_kind_t::u8_k: return index->add(key, (u8_t const*)vector);
     case scalar_kind_t::b1x8_k: return index->add(key, (b1x8_t const*)vector);
     default: return add_result_t{}.failed("Unknown scalar kind!");
     }
@@ -96,11 +103,12 @@ add_result_t add_(index_dense_t* index, usearch_key_t key, void const* vector, s
 
 std::size_t get_(index_dense_t* index, usearch_key_t key, size_t count, void* vector, scalar_kind_t kind) {
     switch (kind) {
-    case scalar_kind_t::f32_k: return index->get(key, (f32_t*)vector, count);
     case scalar_kind_t::f64_k: return index->get(key, (f64_t*)vector, count);
-    case scalar_kind_t::f16_k: return index->get(key, (f16_t*)vector, count);
+    case scalar_kind_t::f32_k: return index->get(key, (f32_t*)vector, count);
     case scalar_kind_t::bf16_k: return index->get(key, (bf16_t*)vector, count);
+    case scalar_kind_t::f16_k: return index->get(key, (f16_t*)vector, count);
     case scalar_kind_t::i8_k: return index->get(key, (i8_t*)vector, count);
+    case scalar_kind_t::u8_k: return index->get(key, (u8_t*)vector, count);
     case scalar_kind_t::b1x8_k: return index->get(key, (b1x8_t*)vector, count);
     default: return search_result_t(*index).failed("Unknown scalar kind!");
     }
@@ -110,16 +118,18 @@ template <typename predicate_at = dummy_predicate_t>
 search_result_t search_(index_dense_t* index, void const* vector, scalar_kind_t kind, size_t n,
                         predicate_at&& predicate = predicate_at{}) {
     switch (kind) {
-    case scalar_kind_t::f32_k:
-        return index->filtered_search((f32_t const*)vector, n, std::forward<predicate_at>(predicate));
     case scalar_kind_t::f64_k:
         return index->filtered_search((f64_t const*)vector, n, std::forward<predicate_at>(predicate));
-    case scalar_kind_t::f16_k:
-        return index->filtered_search((f16_t const*)vector, n, std::forward<predicate_at>(predicate));
+    case scalar_kind_t::f32_k:
+        return index->filtered_search((f32_t const*)vector, n, std::forward<predicate_at>(predicate));
     case scalar_kind_t::bf16_k:
         return index->filtered_search((bf16_t const*)vector, n, std::forward<predicate_at>(predicate));
+    case scalar_kind_t::f16_k:
+        return index->filtered_search((f16_t const*)vector, n, std::forward<predicate_at>(predicate));
     case scalar_kind_t::i8_k:
         return index->filtered_search((i8_t const*)vector, n, std::forward<predicate_at>(predicate));
+    case scalar_kind_t::u8_k:
+        return index->filtered_search((u8_t const*)vector, n, std::forward<predicate_at>(predicate));
     case scalar_kind_t::b1x8_k:
         return index->filtered_search((b1x8_t const*)vector, n, std::forward<predicate_at>(predicate));
     default: return search_result_t(*index).failed("Unknown scalar kind!");

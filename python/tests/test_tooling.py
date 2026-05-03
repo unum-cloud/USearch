@@ -20,16 +20,12 @@ Dependencies listed in the script header for uv to resolve automatically.
 
 import os
 
-import pytest
 import numpy as np
+import pytest
 
-import usearch
-from usearch.io import load_matrix, save_matrix
-from usearch.index import search
 from usearch.eval import random_vectors
-
-from usearch.index import Match, Matches, BatchMatches, Index, Indexes, kmeans
-
+from usearch.index import BatchMatches, Index, Indexes, Match, Matches, kmeans, search
+from usearch.io import load_matrix, save_matrix
 
 dimensions = [3, 97, 256]
 batch_sizes = [1, 77, 100]

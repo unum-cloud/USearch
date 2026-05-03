@@ -13,8 +13,8 @@ group = "cloud.unum"
 version = file("VERSION").text.trim()
 
 java {
-    sourceCompatibility = JavaVersion.VERSION_18
-    targetCompatibility = JavaVersion.VERSION_18
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
 }
 
 repositories {
@@ -290,7 +290,7 @@ publishing {
             pom {
                 name = "USearch"
                 description = "Smaller & Faster Single-File Vector Search Engine from Unum"
-                url = "https://github.com/unum-cloud/usearch"
+                url = "https://github.com/unum-cloud/USearch"
 
                 licenses {
                     license {
@@ -300,9 +300,9 @@ publishing {
                 }
 
                 scm {
-                    connection = 'scm:git:git://github.com/unum-cloud/usearch.git'
-                    developerConnection = 'scm:git:ssh://github.com/unum-cloud/usearch.git'
-                    url = 'https://github.com/unum-cloud/usearch'
+                    connection = 'scm:git:git://github.com/unum-cloud/USearch.git'
+                    developerConnection = 'scm:git:ssh://github.com/unum-cloud/USearch.git'
+                    url = 'https://github.com/unum-cloud/USearch'
                 }
 
                 developers {
@@ -338,7 +338,7 @@ publishing {
     repositories {
         maven {
             name = "GitHubPackages"
-            url = "https://maven.pkg.github.com/unum-cloud/usearch"
+            url = "https://maven.pkg.github.com/unum-cloud/USearch"
             credentials {
                 username = System.getenv("GITHUB_ACTOR")
                 password = System.getenv("GITHUB_TOKEN")

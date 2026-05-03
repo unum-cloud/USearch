@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.11 FATAL_ERROR)
 project(
     usearch
-    VERSION 2.24.0
+    VERSION 2.25.2
     LANGUAGES C CXX
     DESCRIPTION "Smaller & Faster Single-File Vector Search Engine from Unum"
     HOMEPAGE_URL "https://github.com/unum-cloud/USearch"
@@ -391,6 +391,10 @@ if (USEARCH_USE_NUMKONG)
         CACHE BOOL "" FORCE
     )
     add_subdirectory(numkong)
+
+    if (TARGET nk_shared)
+        set_target_properties(nk_shared PROPERTIES ENABLE_EXPORTS ON)
+    endif ()
 endif ()
 
 # Must be called before "add_subdirectory()". See

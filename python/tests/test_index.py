@@ -21,23 +21,20 @@ Dependencies listed in the script header for uv to resolve automatically.
 import os
 from time import time
 
-import pytest
 import numpy as np
+import pytest
 
-from usearch.eval import random_vectors, self_recall, SearchStats
-from usearch.index import (
-    Index,
-    MetricKind,
-    ScalarKind,
-    Match,
-    Matches,
-    BatchMatches,
-    Clustering,
-)
+from usearch.eval import SearchStats, random_vectors, self_recall
 from usearch.index import (
     DEFAULT_CONNECTIVITY,
+    BatchMatches,
+    Clustering,
+    Index,
+    Match,
+    Matches,
+    MetricKind,
+    ScalarKind,
 )
-
 
 ndims = [3, 97, 256]
 batch_sizes = [1, 11, 77]
@@ -48,7 +45,10 @@ quantizations = [
     ScalarKind.F16,
     ScalarKind.E5M2,
     ScalarKind.E4M3,
+    ScalarKind.E3M2,
+    ScalarKind.E2M3,
     ScalarKind.I8,
+    ScalarKind.U8,
 ]
 dtypes = [np.float32, np.float64, np.float16]
 threads = 2
@@ -129,6 +129,40 @@ def test_index_retrieval(ndim, metric, quantization, dtype, batch_size):
         assert vectors.T.strides == (dtype().itemsize, batch_size * dtype().itemsize)
         with pytest.raises(Exception):
             index.add(keys, vectors.T, threads=threads)
+
+
+@pytest.mark.parametrize("multi", [False, True])
+def test_index_get_missing_keys(multi):
+    """Pin the docstring contract on `Index.get` for missing keys (#663).
+
+    Single missing key must yield `None` (the bug was returning a row of
+    uninitialized memory). Mixed batches must yield a tuple with `None` in
+    the slots of missing keys.
+    """
+    reset_randomness()
+    ndim = 8
+    index = Index(ndim=ndim, multi=multi)
+    vector = random_vectors(count=1, ndim=ndim)[0]
+    index.add(1, vector)
+
+    # Single missing key → None (the #663 reproducer).
+    assert index.get(999) is None
+
+    # Single present key → ndarray (multi or not).
+    present = index.get(1)
+    assert present is not None
+    assert isinstance(present, np.ndarray)
+
+    # Mixed batch → tuple, one entry per key, None for missing.
+    mixed = index.get([1, 999])
+    assert isinstance(mixed, tuple)
+    assert len(mixed) == 2
+    assert isinstance(mixed[0], np.ndarray)
+    assert mixed[1] is None
+
+    # After remove, get() returns None.
+    index.remove(1)
+    assert index.get(1) is None
 
 
 @pytest.mark.parametrize("ndim", [3, 97, 256])
@@ -435,29 +469,45 @@ def test_index_keys_iteration():
     assert keys_list[0] == 42
 
 
-@pytest.mark.parametrize("ndim", [16, 64])
-@pytest.mark.parametrize("batch_size", [10, 50])
-def test_index_join(ndim, batch_size):
-    """Semantic join should return a 1-to-1 mapping between two indexes."""
-    index_a = Index(ndim=ndim, metric=MetricKind.Cos)
-    index_b = Index(ndim=ndim, metric=MetricKind.Cos)
+@pytest.mark.parametrize("quantization_name", ["e5m2", "e4m3", "e3m2", "e2m3"])
+@pytest.mark.parametrize("ndim", [97, 256])
+def test_index_mini_floats_with_numkong(quantization_name, ndim):
+    """Test add/search with NumKong-downcasted float8/float6 tensors and explicit dtype."""
+    nk = pytest.importorskip("numkong")
 
-    vectors_a = random_vectors(count=batch_size, ndim=ndim)
-    vectors_b = random_vectors(count=batch_size, ndim=ndim)
-    keys_a = np.arange(batch_size)
-    keys_b = np.arange(batch_size, 2 * batch_size)
+    batch_size = 50
+    vectors_f32 = random_vectors(count=batch_size, ndim=ndim, dtype=np.float32)
+    keys = np.arange(batch_size)
 
-    index_a.add(keys_a, vectors_a)
-    index_b.add(keys_b, vectors_b)
+    vectors_nk = nk.Tensor(vectors_f32).astype(quantization_name)
+    vectors_raw = np.asarray(vectors_nk)
 
-    mapping = index_a.join(index_b, exact=True)
-    assert isinstance(mapping, dict)
-    assert len(mapping) > 0
-    # All returned keys must be valid
-    assert all(k in keys_a for k in mapping.keys())
-    assert all(v in keys_b for v in mapping.values())
-    # No two a-keys should map to the same b-key (stable marriage property)
-    assert len(set(mapping.values())) == len(mapping)
+    index = Index(ndim=ndim, metric=MetricKind.Cos, dtype=quantization_name)
+    index.add(keys, vectors_raw, threads=threads, dtype=quantization_name)
+    assert len(index) == batch_size
+
+    matches = index.search(vectors_raw[:5], 10, threads=threads, dtype=quantization_name)
+    assert len(matches) == 5
+    for i in range(5):
+        assert matches[i].keys[0] == i, f"Expected self-match for vector {i}"
+
+
+@pytest.mark.parametrize("quantization", quantizations)
+@pytest.mark.parametrize("ndim", [97, 256])
+def test_index_quantized_add_search(quantization, ndim):
+    """Smoke-test every supported quantization: add f32 vectors, search, verify self-match."""
+    batch_size = 50
+    vectors_f32 = random_vectors(count=batch_size, ndim=ndim, dtype=np.float32)
+    keys = np.arange(batch_size)
+
+    index = Index(ndim=ndim, metric=MetricKind.Cos, dtype=quantization)
+    index.add(keys, vectors_f32, threads=threads)
+    assert len(index) == batch_size
+
+    matches = index.search(vectors_f32[:5], 10, threads=threads)
+    assert len(matches) == 5
+    for i in range(5):
+        assert matches[i].keys[0] == i, f"Expected self-match for vector {i} with {quantization}"
 
 
 def test_index_ip_metric():

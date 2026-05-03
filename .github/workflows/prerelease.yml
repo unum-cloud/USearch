@@ -9,11 +9,12 @@ on:
 env:
   GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
   PYTHONUTF8: 1
+  PYTHONFAULTHANDLER: 1
   PYTHON_VERSION: 3.11
   DOTNET_VERSION: 8.0.x
   NODE_VERSION: 20
   JAVA_VERSION: 21
-  GO_VERSION: "^1.21.0"
+  GO_VERSION: "^1.22.0"
   ANDROID_NDK_VERSION: 26.3.11579264
   ANDROID_SDK_VERSION: 21
 
@@ -67,19 +68,17 @@ jobs:
         uses: actions/checkout@v6
       - name: Pull Git submodules
         run: git submodule update --init --recursive
-
         # C/C++
       - name: Build C/C++
         run: |
           sudo apt update
-          sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev gcc-12 g++-12
+          sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev
           cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=1 -D USEARCH_USE_OPENMP=1 -D USEARCH_USE_NUMKONG=1 -D USEARCH_USE_JEMALLOC=1
           cmake --build build_artifacts --config RelWithDebInfo
       - name: Test C++
         run: build_artifacts/test_cpp
       - name: Test C
         run: build_artifacts/test_c
-
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v6
@@ -93,7 +92,6 @@ jobs:
           python -m pip install .
       - name: Test Python
         run: pytest
-
         # JavaScript
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -105,7 +103,6 @@ jobs:
         run: npm run build-js
       - name: Test JavaScript
         run: npm test
-
         # Rust
       - name: Set up Rust
         run: |
@@ -119,7 +116,6 @@ jobs:
         run: cargo build
       - name: Test Rust
         run: cargo test
-
         # Java
       - name: Setup Java
         uses: actions/setup-java@v5
@@ -132,7 +128,6 @@ jobs:
         run: gradle spotlessCheck
       - name: Test Java
         run: gradle clean build
-
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
         uses: actions/setup-dotnet@v5
@@ -145,7 +140,6 @@ jobs:
           dotnet test -c Debug --logger "console;verbosity=detailed"
         shell: bash
         working-directory: ${{ github.workspace }}/csharp
-
         # GoLang
         # With `LD_DEBUG=all` we detect the addresses of the libraries that are loaded
       - name: Test GoLang
@@ -167,7 +161,6 @@ jobs:
         uses: actions/checkout@v6
       - name: Pull Git submodules
         run: git submodule update --init --recursive
-
         # C/C++
       - name: Build C/C++
         run: |
@@ -179,7 +172,6 @@ jobs:
         run: build_artifacts/test_cpp
       - name: Test C
         run: build_artifacts/test_c
-
         # JavaScript
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -191,7 +183,6 @@ jobs:
         run: npm run build-js
       - name: Test JavaScript
         run: npm test
-
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v6
@@ -208,7 +199,6 @@ jobs:
           CC: clang++ # Override the default compiler
       - name: Test Python
         run: pytest
-
         # Rust
       - name: Set up Rust
         run: |
@@ -219,7 +209,6 @@ jobs:
         run: cargo build
       - name: Test Rust
         run: cargo test
-
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
         uses: actions/setup-dotnet@v5
@@ -234,7 +223,7 @@ jobs:
         working-directory: ${{ github.workspace }}/csharp
 
   test_macos:
-    name: MacOS
+    name: macOS
     runs-on: macos-15
 
     steps:
@@ -242,7 +231,6 @@ jobs:
         uses: actions/checkout@v6
       - name: Pull Git submodules
         run: git submodule update --init --recursive
-
         # C/C++
       - name: Build C/C++
         run: |
@@ -254,7 +242,6 @@ jobs:
         run: build_artifacts/test_cpp
       - name: Test C
         run: build_artifacts/test_c
-
         # JavaScript
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -266,7 +253,6 @@ jobs:
         run: npm run build-js
       - name: Test JavaScript
         run: npm test
-
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v6
@@ -282,13 +268,11 @@ jobs:
           CC: clang++ # Override the default compiler
       - name: Test Python
         run: pytest
-
         # ObjC/Swift
       - name: Build ObjC/Swift
         run: swift build
       - name: Test ObjC/Swift
         run: swift test
-
         # Rust
       - name: Set up Rust
         run: |
@@ -299,7 +283,6 @@ jobs:
         run: cargo build
       - name: Test Rust
         run: cargo test
-
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
         uses: actions/setup-dotnet@v5
@@ -314,14 +297,13 @@ jobs:
         working-directory: ${{ github.workspace }}/csharp
 
   test_windows_x86:
-    name: Windows (x86)
+    name: Windows (X86)
     runs-on: windows-2022
     steps:
       - name: Checkout
         uses: actions/checkout@v6
       - name: Pull Git submodules
         run: git submodule update --init --recursive
-
         # C/C++
       - name: Build C/C++
         run: |
@@ -332,7 +314,6 @@ jobs:
         run: .\build_artifacts\test_cpp.exe
       - name: Test C
         run: .\build_artifacts\test_c.exe
-
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v6
@@ -345,7 +326,6 @@ jobs:
           python -m pip install .
       - name: Test Python
         run: pytest
-
         # JavaScript
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -357,7 +337,6 @@ jobs:
         run: npm run build-js
       - name: Test JavaScript
         run: npm test
-
         # Rust
       - name: Set up Rust
         run: |
@@ -368,7 +347,6 @@ jobs:
         run: cargo build
       - name: Test Rust
         run: cargo test
-
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
         uses: actions/setup-dotnet@v5
@@ -383,7 +361,7 @@ jobs:
         working-directory: ${{ github.workspace }}/csharp
 
   test_windows_arm:
-    name: Windows (Arm)
+    name: Windows (ARM)
     runs-on: windows-2022
     steps:
       - name: Checkout
@@ -393,7 +371,6 @@ jobs:
 
       - name: Setup MSVC for ARM64
         uses: microsoft/setup-msbuild@v2
-
         # C/C++
       - name: Build C/C++ (ARM64)
         run: |
@@ -407,8 +384,8 @@ jobs:
           Write-Host "ARM64 DLL built successfully"
 
   build_docker:
-    name: Docker
-    runs-on: ubuntu-22.04
+    name: Build Docker
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -421,45 +398,110 @@ jobs:
           load: true
           push: false
 
-  build_wheels:
-    name: Build Python Wheels
-    runs-on: ${{ matrix.os }}
-    needs:
-      [
-        test_ubuntu_gcc,
-        test_ubuntu_clang,
-        test_macos,
-        test_windows_x86,
-        test_windows_arm,
-      ]
+  build_wheels_linux:
+    name: Build Python Wheels (Linux)
+    runs-on: ubuntu-24.04
+    needs: [test_ubuntu_gcc, test_ubuntu_clang]
     strategy:
       matrix:
-        os: [ubuntu-24.04, macos-14, windows-2022]
-        python-version:
-          ["38", "39", "310", "311", "312", "313", "313t", "314", "314t"]
+        python-version: ["310", "311", "312", "313", "313t", "314", "314t"]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: 3.x
-
-        # We only need QEMU for Linux builds
+          python-version: "3.13"
       - name: Setup QEMU
-        if: matrix.os == 'ubuntu-24.04'
         uses: docker/setup-qemu-action@v3
       - name: Install cibuildwheel
-        run: python -m pip install cibuildwheel
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 3
+          retry_wait_seconds: 10
+          timeout_minutes: 180
+          command: python -m pip install cibuildwheel
       - name: Build wheels
-        run: cibuildwheel --output-dir wheelhouse
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 2
+          retry_wait_seconds: 30
+          timeout_minutes: 180
+          command: cibuildwheel --output-dir wheelhouse
         env:
           CIBW_BUILD: cp${{ matrix.python-version }}-*
-          CIBW_ENABLE: cpython-freethreading # No-GIL 3.13t builds
+          CIBW_ENABLE: cpython-freethreading
+          CIBW_PLATFORM: linux
+
+  build_wheels_macos:
+    name: Build Python Wheels (macOS)
+    runs-on: macos-14
+    needs: [test_macos]
+    strategy:
+      matrix:
+        python-version: ["310", "311", "312", "313", "313t", "314", "314t"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install cibuildwheel
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 3
+          retry_wait_seconds: 10
+          timeout_minutes: 180
+          command: python -m pip install cibuildwheel
+      - name: Build wheels
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 2
+          retry_wait_seconds: 30
+          timeout_minutes: 180
+          command: cibuildwheel --output-dir wheelhouse
+        env:
+          CIBW_BUILD: cp${{ matrix.python-version }}-*
+          CIBW_ENABLE: cpython-freethreading
+          CIBW_PLATFORM: macos
+
+  build_wheels_windows:
+    name: Build Python Wheels (Windows)
+    runs-on: windows-2022
+    needs: [test_windows_x86]
+    strategy:
+      matrix:
+        python-version: ["310", "311", "312", "313", "313t", "314", "314t"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install cibuildwheel
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 3
+          retry_wait_seconds: 10
+          timeout_minutes: 180
+          command: python -m pip install cibuildwheel
+      - name: Build wheels
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 2
+          retry_wait_seconds: 30
+          timeout_minutes: 180
+          command: cibuildwheel --output-dir wheelhouse
+        env:
+          CIBW_BUILD: cp${{ matrix.python-version }}-*
+          CIBW_ENABLE: cpython-freethreading
+          CIBW_PLATFORM: windows
 
   test_ubuntu_cross_compilation:
-    name: Cross Compilation
-    runs-on: ubuntu-22.04
+    name: Cross-Compile Linux
+    runs-on: ubuntu-24.04
     env:
       CC: clang
       CXX: clang++
@@ -481,7 +523,6 @@ jobs:
         uses: actions/checkout@v6
       - name: Pull Git submodules
         run: git submodule update --init --recursive
-
         # C/C++
         # We need to install the cross-compilation toolchain for ARM64 and ARMHF
       - name: Install dependencies
@@ -504,7 +545,6 @@ jobs:
             -D USEARCH_BUILD_BENCH_CPP=0
 
           cmake --build build_artifacts --config RelWithDebInfo
-
         # We can't run the produced builds, but we can make sure they exist
       - name: Test artifacts presence
         run: |
@@ -513,7 +553,7 @@ jobs:
 
   test_android:
     name: Android
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -550,11 +590,9 @@ jobs:
             -D USEARCH_BUILD_BENCH_CPP=0
 
           cmake --build build_artifacts --config RelWithDebInfo
-
         # We can't run the produced builds, but we can make sure they exist
       - name: Test artifacts presence
         run: test -e build_artifacts/libusearch_c.so
-
         # Rust
       - name: Set up Rust
         run: |
@@ -575,14 +613,12 @@ jobs:
 
       - name: Build Rust
         run: cargo build --target ${{ matrix.target }}
-
         # Java
       - name: Set up JDK 21
         uses: actions/setup-java@v5
         with:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: "adopt"
-
         # We skip native compilation with Gradle and focus just on the Java part,
         # assuming the we won't be able to tun the tests without emulation
       - name: Check Java formatting

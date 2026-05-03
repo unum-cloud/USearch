@@ -1,53 +1,62 @@
 from __future__ import annotations
-from inspect import signature
-from collections.abc import Sequence
+
+import math
 
 # The purpose of this file is to provide Pythonic wrapper on top
 # the native precompiled CPython module. It improves compatibility
 # Python tooling, linters, and static analyzers. It also embeds JIT
 # into the primary `Index` class, connecting USearch with Numba.
 import os
-import sys
-import math
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from inspect import signature
 from typing import (
     Any,
-    Optional,
-    Union,
     NamedTuple,
-    List,
-    Iterable,
-    Tuple,
-    Dict,
-    Callable,
+    TypeAlias,
+    Union,
 )
 
 import numpy as np
 from tqdm import tqdm
 
-# Precompiled symbols that won't be exposed directly:
-from usearch.compiled import (
-    Index as _CompiledIndex,
-    Indexes as _CompiledIndexes,
-    IndexStats as _CompiledIndexStats,
-    index_dense_metadata_from_path as _index_dense_metadata_from_path,
-    index_dense_metadata_from_buffer as _index_dense_metadata_from_buffer,
-    exact_search as _exact_search,
-    hardware_acceleration as _hardware_acceleration,
-    kmeans as _kmeans,
-)
-
 # Precompiled symbols that will be exposed
 from usearch.compiled import (
-    MetricKind,
-    ScalarKind,
-    MetricSignature,
     DEFAULT_CONNECTIVITY,
     DEFAULT_EXPANSION_ADD,
     DEFAULT_EXPANSION_SEARCH,
-    USES_OPENMP,
     USES_NUMKONG,
+    USES_OPENMP,
     USES_SIMSIMD,
+    MetricKind,
+    MetricSignature,
+    ScalarKind,
+)
+
+# Precompiled symbols that won't be exposed directly:
+from usearch.compiled import (
+    Index as _CompiledIndex,
+)
+from usearch.compiled import (
+    Indexes as _CompiledIndexes,
+)
+from usearch.compiled import (
+    IndexStats as _CompiledIndexStats,
+)
+from usearch.compiled import (
+    exact_search as _exact_search,
+)
+from usearch.compiled import (
+    hardware_acceleration as _hardware_acceleration,
+)
+from usearch.compiled import (
+    index_dense_metadata_from_buffer as _index_dense_metadata_from_buffer,
+)
+from usearch.compiled import (
+    index_dense_metadata_from_path as _index_dense_metadata_from_path,
+)
+from usearch.compiled import (
+    kmeans as _kmeans,
 )
 
 MetricKindBitwise = (
@@ -62,12 +71,6 @@ class CompiledMetric(NamedTuple):
     kind: MetricKind
     signature: MetricSignature
 
-
-# Define TypeAlias for older Python versions
-if sys.version_info >= (3, 10):
-    from typing import TypeAlias
-else:
-    TypeAlias = object  # Fallback for older Python versions
 
 Key: TypeAlias = np.uint64
 
@@ -88,7 +91,7 @@ PathOrBuffer = Union[str, os.PathLike, BytesLike]
 ProgressCallback = Callable[[int, int], bool]
 
 
-def _match_signature(func: Callable[[Any], Any], arg_types: List[type], ret_type: type) -> bool:
+def _match_signature(func: Callable[[Any], Any], arg_types: list[type], ret_type: type) -> bool:
     assert callable(func), "Not callable"
     sig = signature(func)
     param_types = [param.annotation for param in sig.parameters.values()]
@@ -122,7 +125,11 @@ def _normalize_dtype(
         "f16": ScalarKind.F16,
         "e5m2": ScalarKind.E5M2,
         "e4m3": ScalarKind.E4M3,
+        "e3m2": ScalarKind.E3M2,
+        "e2m3": ScalarKind.E2M3,
         "i8": ScalarKind.I8,
+        "u8": ScalarKind.U8,
+        "uint8": ScalarKind.U8,
         "b1": ScalarKind.B1,
         "b1x8": ScalarKind.B1,
         "bits": ScalarKind.B1,
@@ -145,9 +152,16 @@ def _to_numpy_dtype(dtype: ScalarKind):
         return None
     _normalize = {
         ScalarKind.F64: np.float64,
+        ScalarKind.F64: np.float64,
         ScalarKind.F32: np.float32,
+        ScalarKind.BF16: np.uint16,
         ScalarKind.F16: np.float16,
+        ScalarKind.E5M2: np.uint8,
+        ScalarKind.E4M3: np.uint8,
+        ScalarKind.E3M2: np.uint8,
+        ScalarKind.E2M3: np.uint8,
         ScalarKind.I8: np.int8,
+        ScalarKind.U8: np.uint8,
         ScalarKind.B1: np.uint8,
     }
     if dtype in _normalize.values():
@@ -194,10 +208,11 @@ def _search_in_compiled(
     compiled_callable: Callable,
     vectors: np.ndarray,
     *,
-    log: Union[str, bool],
-    progress: Optional[ProgressCallback],
+    log: str | bool,
+    progress: ProgressCallback | None,
+    dtype: ScalarKind | None = None,
     **kwargs,
-) -> Union[Matches, BatchMatches]:
+) -> Matches | BatchMatches:
     #
     assert isinstance(vectors, np.ndarray), "Expects a NumPy array"
     assert vectors.ndim == 1 or vectors.ndim == 2, "Expects a matrix or vector"
@@ -209,7 +224,7 @@ def _search_in_compiled(
 
     def distill_batch(
         batch_matches: BatchMatches,
-    ) -> Union[BatchMatches, Matches]:
+    ) -> BatchMatches | Matches:
         return batch_matches[0] if count_vectors == 1 else batch_matches
 
     progress_callback = progress
@@ -234,9 +249,11 @@ def _search_in_compiled(
         progress_callback = update_progress_bar
 
     if progress_callback:
-        tuple_ = compiled_callable(vectors, progress=progress_callback, **kwargs)
+        tuple_ = compiled_callable(
+            vectors, progress=progress_callback, dtype=dtype if dtype is not None else ScalarKind.Unknown, **kwargs
+        )
     else:
-        tuple_ = compiled_callable(vectors, **kwargs)
+        tuple_ = compiled_callable(vectors, dtype=dtype if dtype is not None else ScalarKind.Unknown, **kwargs)
 
     if log:
         progress_bar.close()
@@ -251,9 +268,10 @@ def _add_to_compiled(
     vectors,
     copy: bool,
     threads: int,
-    log: Union[str, bool],
-    progress: Optional[ProgressCallback],
-) -> Union[int, np.ndarray]:
+    log: str | bool,
+    progress: ProgressCallback | None,
+    dtype: ScalarKind | None = None,
+) -> int | np.ndarray:
     #
     assert isinstance(vectors, np.ndarray), "Expects a NumPy array"
     assert not progress or _match_signature(progress, [int, int], bool), "Invalid callback"
@@ -294,10 +312,18 @@ def _add_to_compiled(
             copy=copy,
             threads=threads,
             progress=update_progress_bar,
+            dtype=dtype if dtype is not None else ScalarKind.Unknown,
         )
         progress_bar.close()
     else:
-        compiled.add_many(keys, vectors, copy=copy, threads=threads, progress=progress)
+        compiled.add_many(
+            keys,
+            vectors,
+            copy=copy,
+            threads=threads,
+            progress=progress,
+            dtype=dtype if dtype is not None else ScalarKind.Unknown,
+        )
 
     return keys
 
@@ -335,7 +361,7 @@ class Matches:
         else:
             raise IndexError(f"`index` must be an integer under {len(self)}")
 
-    def to_list(self) -> List[tuple]:
+    def to_list(self) -> list[tuple]:
         """Convert to list of (key, distance) tuples."""
         return [(int(key), float(distance)) for key, distance in zip(self.keys, self.distances)]
 
@@ -352,7 +378,7 @@ class BatchMatches(Sequence):
 
     Attributes:
         keys: 2D array of shape (n_queries, k) containing match keys
-        distances: 2D array of shape (n_queries, k) containing distances  
+        distances: 2D array of shape (n_queries, k) containing distances
         counts: 1D array of shape (n_queries,) with actual number of matches per query
         visited_members: Total graph nodes visited during search
         computed_distances: Total distance computations performed
@@ -379,17 +405,17 @@ class BatchMatches(Sequence):
         else:
             raise IndexError(f"`index` must be an integer under {len(self)}")
 
-    def to_list(self) -> List[List[tuple]]:
+    def to_list(self) -> list[list[tuple]]:
         """Flatten matches for all queries into a list of `(key, distance)` tuples."""
         list_of_matches = [self.__getitem__(row) for row in range(self.__len__())]
         return [match.to_tuple() for matches in list_of_matches for match in matches]
 
-    def mean_recall(self, expected: np.ndarray, count: Optional[int] = None) -> float:
+    def mean_recall(self, expected: np.ndarray, count: int | None = None) -> float:
         """Measures recall [0, 1] as of `Matches` that contain the corresponding
         `expected` entry anywhere among results."""
         return self.count_matches(expected, count=count) / len(expected)
 
-    def count_matches(self, expected: np.ndarray, count: Optional[int] = None) -> int:
+    def count_matches(self, expected: np.ndarray, count: int | None = None) -> int:
         """Measures recall [0, len(expected)] as of `Matches` that contain the corresponding
         `expected` entry anywhere among results.
         """
@@ -415,7 +441,7 @@ class Clustering:
         self,
         index: Index,
         matches: BatchMatches,
-        queries: Optional[np.ndarray] = None,
+        queries: np.ndarray | None = None,
     ) -> None:
         if queries is None:
             queries = index._compiled.get_keys_in_slice()
@@ -427,7 +453,7 @@ class Clustering:
         return f"usearch.Clustering(for {len(self.queries)} queries)"
 
     @property
-    def centroids_popularity(self) -> Tuple[np.ndarray, np.ndarray]:
+    def centroids_popularity(self) -> tuple[np.ndarray, np.ndarray]:
         return np.unique(self.matches.keys, return_counts=True)
 
     def members_of(self, centroid: Key) -> np.ndarray:
@@ -474,8 +500,8 @@ class IndexedKeys(Sequence):
 
     def __getitem__(
         self,
-        offset_offsets_or_slice: Union[int, np.ndarray, slice],
-    ) -> Union[Key, np.ndarray]:
+        offset_offsets_or_slice: int | np.ndarray | slice,
+    ) -> Key | np.ndarray:
         if isinstance(offset_offsets_or_slice, slice):
             start, stop, step = offset_offsets_or_slice.indices(len(self))
             if step != 1:
@@ -503,7 +529,7 @@ class IndexedKeys(Sequence):
 class Index:
     """Fast approximate nearest neighbor search for dense vectors.
 
-    Supports various distance metrics (cosine, euclidean, inner product, etc.) 
+    Supports various distance metrics (cosine, euclidean, inner product, etc.)
     and automatic precision optimization. Vector keys must be integers.
     All vectors must have the same dimensionality.
 
@@ -518,12 +544,12 @@ class Index:
         *,  # All arguments must be named
         ndim: int = 0,
         metric: MetricLike = MetricKind.Cos,
-        dtype: Optional[DTypeLike] = None,
-        connectivity: Optional[int] = None,
-        expansion_add: Optional[int] = None,
-        expansion_search: Optional[int] = None,
+        dtype: DTypeLike | None = None,
+        connectivity: int | None = None,
+        expansion_add: int | None = None,
+        expansion_search: int | None = None,
         multi: bool = False,
-        path: Optional[os.PathLike] = None,
+        path: os.PathLike | None = None,
         view: bool = False,
         enable_key_lookups: bool = True,
     ) -> None:
@@ -627,7 +653,7 @@ class Index:
                 self.load(path)
 
     @staticmethod
-    def metadata(path_or_buffer: PathOrBuffer) -> Optional[dict]:
+    def metadata(path_or_buffer: PathOrBuffer) -> dict | None:
         try:
             if _is_buffer(path_or_buffer):
                 return _index_dense_metadata_from_buffer(path_or_buffer)
@@ -640,7 +666,7 @@ class Index:
             raise e
 
     @staticmethod
-    def restore(path_or_buffer: PathOrBuffer, view: bool = False, **kwargs) -> Optional[Index]:
+    def restore(path_or_buffer: PathOrBuffer, view: bool = False, **kwargs) -> Index | None:
         meta = Index.metadata(path_or_buffer)
         if not meta:
             return None
@@ -668,9 +694,10 @@ class Index:
         *,
         copy: bool = True,
         threads: int = 0,
-        log: Union[str, bool] = False,
-        progress: Optional[ProgressCallback] = None,
-    ) -> Union[int, np.ndarray]:
+        log: str | bool = False,
+        progress: ProgressCallback | None = None,
+        dtype: DTypeLike | None = None,
+    ) -> int | np.ndarray:
         """Inserts one or move vectors into the index.
 
         For maximal performance the `keys` and `vectors`
@@ -691,7 +718,7 @@ class Index:
         :type vectors: VectorOrVectorsLike
         :param copy: Should the index store a copy of vectors
         :type copy: bool, defaults to True
-        :param threads: Optimal number of cores to use
+        :param threads: Optimal number of cores to use, 0 means all available cores
         :type threads: int, defaults to 0
         :param log: Whether to print the progress bar
         :type log: Union[str, bool], defaults to False
@@ -708,6 +735,7 @@ class Index:
             threads=threads,
             log=log,
             progress=progress,
+            dtype=_normalize_dtype(dtype) if dtype is not None else None,
         )
 
     def search(
@@ -718,23 +746,24 @@ class Index:
         *,
         threads: int = 0,
         exact: bool = False,
-        log: Union[str, bool] = False,
-        progress: Optional[ProgressCallback] = None,
-    ) -> Union[Matches, BatchMatches]:
+        log: str | bool = False,
+        progress: ProgressCallback | None = None,
+        dtype: DTypeLike | None = None,
+    ) -> Matches | BatchMatches:
         """Performs approximate nearest neighbors search for one or more queries.
-        
+
         When searching with batch queries, returns BatchMatches that pre-allocates arrays
         for the requested `count` size. If fewer matches exist than requested (e.g., when
         count > index size), use individual query access via batch_matches[i] to get only
         valid results, or check batch_matches.counts to see actual result counts per query.
-        
+
         :param vectors: Query vector or vectors.
         :type vectors: VectorOrVectorsLike
         :param count: Upper count on the number of matches to find
         :type count: int, defaults to 10
             When count > index size, only available vectors will be returned.
             For BatchMatches, unused positions contain sentinel values.
-        :param threads: Optimal number of cores to use
+        :param threads: Optimal number of cores to use, 0 means all available cores
         :type threads: int, defaults to 0
         :param exact: Perform exhaustive linear-time exact search
         :type exact: bool, defaults to False
@@ -758,18 +787,19 @@ class Index:
             exact=exact,
             threads=threads,
             progress=progress,
+            dtype=_normalize_dtype(dtype) if dtype is not None else None,
         )
 
-    def contains(self, keys: KeyOrKeysLike) -> Union[bool, np.ndarray]:
+    def contains(self, keys: KeyOrKeysLike) -> bool | np.ndarray:
         if isinstance(keys, Iterable):
             return self._compiled.contains_many(np.array(keys, dtype=Key))
         else:
             return self._compiled.contains_one(int(keys))
 
-    def __contains__(self, keys: KeyOrKeysLike) -> Union[bool, np.ndarray]:
+    def __contains__(self, keys: KeyOrKeysLike) -> bool | np.ndarray:
         return self.contains(keys)
 
-    def count(self, keys: KeyOrKeysLike) -> Union[int, np.ndarray]:
+    def count(self, keys: KeyOrKeysLike) -> int | np.ndarray:
         if isinstance(keys, Iterable):
             return self._compiled.count_many(np.array(keys, dtype=Key))
         else:
@@ -778,8 +808,8 @@ class Index:
     def get(
         self,
         keys: KeyOrKeysLike,
-        dtype: Optional[DTypeLike] = None,
-    ) -> Union[Optional[np.ndarray], Tuple[Optional[np.ndarray]]]:
+        dtype: DTypeLike | None = None,
+    ) -> np.ndarray | None | tuple[np.ndarray | None]:
         """Looks up one or more keys from the `Index`, retrieving corresponding vectors.
 
         Returns `None`, if one key is requested, and its not present.
@@ -818,10 +848,10 @@ class Index:
             keys = keys.astype(Key)
 
         results = self._compiled.get_many(keys, dtype)
-        results = cast(results) if isinstance(results, np.ndarray) else [cast(result) for result in results]
+        results = tuple(cast(result) for result in results)
         return results[0] if is_one else results
 
-    def __getitem__(self, keys: KeyOrKeysLike) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+    def __getitem__(self, keys: KeyOrKeysLike) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
         """Looks up one or more keys from the `Index`, retrieving corresponding vectors.
 
         Returns `None`, if one key is requested, and its not present.
@@ -842,7 +872,7 @@ class Index:
         *,
         compact: bool = False,
         threads: int = 0,
-    ) -> Union[int, np.ndarray]:
+    ) -> int | np.ndarray:
         """Removes one or move vectors from the index.
 
         When working with extremely large indexes, you may want to
@@ -864,14 +894,14 @@ class Index:
             keys = np.array(keys, dtype=Key)
             return self._compiled.remove_many(keys, compact=compact, threads=threads)
 
-    def __delitem__(self, keys: KeyOrKeysLike) -> Union[int, np.ndarray]:
+    def __delitem__(self, keys: KeyOrKeysLike) -> int | np.ndarray:
         return self.remove(keys)
 
     def rename(
         self,
         from_: KeyOrKeysLike,
         to: KeyOrKeysLike,
-    ) -> Union[int, np.ndarray]:
+    ) -> int | np.ndarray:
         """Rename existing member vector or vectors.
 
         May be used in iterative clustering procedures, where one would iteratively
@@ -946,7 +976,7 @@ class Index:
         return self._compiled.serialized_length
 
     @property
-    def metric_kind(self) -> Union[MetricKind, CompiledMetric]:
+    def metric_kind(self) -> MetricKind | CompiledMetric:
         """Returns the type of metric used for distance calculations.
 
         :return: The metric kind used in the index.
@@ -955,7 +985,7 @@ class Index:
         return self._metric_jit.kind if self._metric_jit else self._metric_kind
 
     @property
-    def metric(self) -> Union[MetricKind, CompiledMetric]:
+    def metric(self) -> MetricKind | CompiledMetric:
         """Returns the metric object used for distance calculations.
 
         :return: The metric used in the index.
@@ -1071,9 +1101,9 @@ class Index:
 
     def save(
         self,
-        path_or_buffer: Union[str, os.PathLike, NoneType] = None,
-        progress: Optional[ProgressCallback] = None,
-    ) -> Optional[bytes]:
+        path_or_buffer: str | os.PathLike | NoneType = None,
+        progress: ProgressCallback | None = None,
+    ) -> bytes | None:
         """Saves the index to a file or buffer.
 
         If `path_or_buffer` is not provided, it defaults to the path stored in `self.path`.
@@ -1095,8 +1125,8 @@ class Index:
 
     def load(
         self,
-        path_or_buffer: Union[PathOrBuffer, NoneType] = None,
-        progress: Optional[ProgressCallback] = None,
+        path_or_buffer: PathOrBuffer | NoneType = None,
+        progress: ProgressCallback | None = None,
     ):
         """Loads the index from a file or buffer.
 
@@ -1125,8 +1155,8 @@ class Index:
 
     def view(
         self,
-        path_or_buffer: Union[PathOrBuffer, NoneType] = None,
-        progress: Optional[ProgressCallback] = None,
+        path_or_buffer: PathOrBuffer | NoneType = None,
+        progress: ProgressCallback | None = None,
     ):
         """Maps the index from a file or buffer without loading it into memory.
 
@@ -1185,8 +1215,8 @@ class Index:
         other: Index,
         max_proposals: int = 0,
         exact: bool = False,
-        progress: Optional[ProgressCallback] = None,
-    ) -> Dict[Key, Key]:
+        progress: ProgressCallback | None = None,
+    ) -> dict[Key, Key]:
         """Performs "Semantic Join" or pairwise matching between `self` & `other` index.
         Is different from `search`, as no collisions are allowed in resulting pairs.
         Uses the concept of "Stable Marriages" from Combinatorics, famous for the 2012
@@ -1215,13 +1245,14 @@ class Index:
     def cluster(
         self,
         *,
-        vectors: Optional[np.ndarray] = None,
-        keys: Optional[np.ndarray] = None,
-        min_count: Optional[int] = None,
-        max_count: Optional[int] = None,
+        vectors: np.ndarray | None = None,
+        keys: np.ndarray | None = None,
+        min_count: int | None = None,
+        max_count: int | None = None,
         threads: int = 0,
-        log: Union[str, bool] = False,
-        progress: Optional[ProgressCallback] = None,
+        log: str | bool = False,
+        progress: ProgressCallback | None = None,
+        dtype: DTypeLike | None = None,
     ) -> Clustering:
         """
         Clusters already indexed or provided `vectors`, mapping them to various centroids.
@@ -1255,6 +1286,7 @@ class Index:
                 max_count=max_count,
                 threads=threads,
                 progress=progress,
+                dtype=_normalize_dtype(dtype) if dtype is not None else ScalarKind.Unknown,
             )
         else:
             if keys is None:
@@ -1273,7 +1305,7 @@ class Index:
         batch_matches = BatchMatches(*results)
         return Clustering(self, batch_matches, keys)
 
-    def pairwise_distance(self, left: KeyOrKeysLike, right: KeyOrKeysLike) -> Union[np.ndarray, float]:
+    def pairwise_distance(self, left: KeyOrKeysLike, right: KeyOrKeysLike) -> np.ndarray | float:
         """Computes the pairwise distance between keys or key arrays.
 
         If `left` and `right` are single keys, returns the distance between them.
@@ -1311,7 +1343,10 @@ class Index:
         :return: Array of vectors.
         :rtype: np.ndarray
         """
-        return self.get(self.keys)
+        # `get` returns a per-key tuple (None for missing keys); `keys` lists
+        # only present keys, so vstack composes the rows back into a 2D matrix
+        # for both single-vector and multi-vector indexes.
+        return np.vstack(self.get(self.keys))
 
     @property
     def max_level(self) -> int:
@@ -1356,7 +1391,7 @@ class Index:
         return self._compiled.stats
 
     @property
-    def levels_stats(self) -> List[_CompiledIndexStats]:
+    def levels_stats(self) -> list[_CompiledIndexStats]:
         """Get the accumulated statistics for each level of the graph.
 
         :return: List of statistics for each level of the graph.
@@ -1387,7 +1422,7 @@ class Index:
         return self._compiled.level_stats(level)
 
     @property
-    def specs(self) -> Dict[str, Union[str, int, bool]]:
+    def specs(self) -> dict[str, str | int | bool]:
         """Returns the specifications of the index.
 
         :return: Dictionary of index specifications.
@@ -1511,7 +1546,8 @@ class Indexes:
         *,
         threads: int = 0,
         exact: bool = False,
-        progress: Optional[ProgressCallback] = None,
+        progress: ProgressCallback | None = None,
+        dtype: DTypeLike | None = None,
     ):
         return _search_in_compiled(
             self._compiled.search_many,
@@ -1523,6 +1559,7 @@ class Indexes:
             exact=exact,
             threads=threads,
             progress=progress,
+            dtype=_normalize_dtype(dtype) if dtype is not None else None,
         )
 
 
@@ -1534,9 +1571,10 @@ def search(
     *,
     exact: bool = False,
     threads: int = 0,
-    log: Union[str, bool] = False,
-    progress: Optional[ProgressCallback] = None,
-) -> Union[Matches, BatchMatches]:
+    log: str | bool = False,
+    progress: ProgressCallback | None = None,
+    dtype: DTypeLike | None = None,
+) -> Matches | BatchMatches:
     """Shortcut for search, that can avoid index construction. Particularly useful for
     tiny datasets, where brute-force exact search works fast enough.
 
@@ -1568,6 +1606,8 @@ def search(
     assert not progress or _match_signature(progress, [int, int], bool), "Invalid callback signature"
     assert dataset.ndim == 2, "Dataset must be a matrix, with a vector in each row"
 
+    scalar_kind = _normalize_dtype(dtype) if dtype is not None else ScalarKind.Unknown
+
     if not exact:
         index = Index(
             ndim=dataset.shape[1],
@@ -1580,6 +1620,7 @@ def search(
             threads=threads,
             log=log,
             progress=progress,
+            dtype=scalar_kind,
         )
         return index.search(
             query,
@@ -1587,6 +1628,7 @@ def search(
             threads=threads,
             log=log,
             progress=progress,
+            dtype=scalar_kind,
         )
 
     metric = _normalize_metric(metric)
@@ -1624,6 +1666,7 @@ def search(
         count=count,
         threads=threads,
         progress=progress,
+        dtype=scalar_kind,
     )
 
 
@@ -1636,8 +1679,8 @@ def kmeans(
     inertia_threshold: float = 1e-4,
     max_seconds: float = 60.0,
     min_shifts: float = 0.01,
-    seed: Optional[int] = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    seed: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Performs KMeans clustering on a dataset using the USearch library with mixed-precision support.
 

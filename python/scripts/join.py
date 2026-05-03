@@ -1,19 +1,16 @@
 #!/usr/bin/env -S uv run --quiet --script
 """
-USearch Index Joining Utility
+USearch Index Joining Benchmark
 
-Script for joining and benchmarking multimodal datasets (images and texts)
-using different embedding models and distance metrics. Includes support for
-cross-modal search and evaluation.
+Benchmarks cross-modal join and search on multimodal datasets (e.g., images
+and texts). Evaluates self-recall, cross-recall, and bipartite join quality.
 
 Usage:
-    uv run python/scripts/join.py
-
-To download the required datasets, run:
-wget -nc https://huggingface.co/datasets/unum-cloud/ann-cc-3m/resolve/main/clip_images.fbin -P datasets/cc_3M/
-wget -nc https://huggingface.co/datasets/unum-cloud/ann-cc-3m/resolve/main/clip_texts.fbin -P datasets/cc_3M/
-wget -nc https://huggingface.co/datasets/unum-cloud/ann-cc-3m/resolve/main/images.fbin -P datasets/cc_3M/
-wget -nc https://huggingface.co/datasets/unum-cloud/ann-cc-3m/resolve/main/texts.fbin -P datasets/cc_3M/
+    uv run python/scripts/join.py --help
+    uv run python/scripts/join.py \\
+        --vectors-a datasets/cc_3M/texts.fbin \\
+        --vectors-b datasets/cc_3M/images.fbin \\
+        --metric cos -n 100000
 
 Dependencies listed in the script header for uv to resolve automatically.
 """
@@ -26,125 +23,115 @@ Dependencies listed in the script header for uv to resolve automatically.
 # ]
 # ///
 
+import argparse
+from time import perf_counter
+
+import numpy as np
 from numpy import dot
 from numpy.linalg import norm
 from tqdm import tqdm
-from numkong import pointer_to_angular
 
-import usearch
-from usearch.index import Index, MetricKind, CompiledMetric, MetricSignature
+from usearch.eval import measure_seconds, random_vectors
+from usearch.index import CompiledMetric, Index, MetricKind, MetricSignature
 from usearch.io import load_matrix
-from usearch.eval import measure_seconds
-
-count = 10
-exact = False
-batch_size = 1024 * 4
-max_elements = 1000000
-
-a_name = "cc_3M/texts"
-b_name = "cc_3M/images"
-
-a_mat = load_matrix(f"datasets/{a_name}.fbin", view=True)
-b_mat = load_matrix(f"datasets/{b_name}.fbin", view=True)
-
-a_mat = a_mat[:max_elements]
-b_mat = b_mat[:max_elements]
-
-print(f"Loaded two datasets of shape: {a_mat.shape}, {b_mat.shape}")
-print("--------------------------------------")
-print("---------------Indexing---------------")
-print("--------------------------------------")
-
-metric = CompiledMetric(
-    pointer=pointer_to_angular("f32"),
-    kind=MetricKind.Cos,
-    signature=MetricSignature.ArrayArraySize,
-)
-
-a = Index(
-    a_mat.shape[1],
-    metric=metric,
-    path=f"datasets/{a_name}-{max_elements}.f32.usearch",
-    dtype="f32",
-)
-b = Index(
-    b_mat.shape[1],
-    metric=metric,
-    path=f"datasets/{b_name}-{max_elements}.f32.usearch",
-    dtype="f32",
-)
-
-if len(a) != a_mat.shape[0]:
-    a.clear()
-    a.add(None, a_mat, log=True, batch_size=batch_size)
-    a.save()
-
-if len(b) != b_mat.shape[0]:
-    b.clear()
-    b.add(None, b_mat, log=True, batch_size=batch_size)
-    b.save()
 
 
-print(f"Loaded two indexes of size: {len(a):,} for {a_name} and {len(b):,} for {b_name}")
-min_elements = min(len(a), len(b))
-
-run_diagnostics = input("Would you like to run diagnostics? [Y/n]: ")
-if len(run_diagnostics) == 0 or run_diagnostics.lower() == "y":
-    print("--------------------------------------")
-    print("-------------Diagnostics--------------")
-    print("--------------------------------------")
-
-    mean_similarity = 0.0
-    mean_recovered_similarity = 0.0
-
-    for i in tqdm(range(min_elements), desc="Pairwise Similarity"):
-        a_vec = a_mat[i]
-        b_vec = b_mat[i]
-        cos_similarity = dot(a_vec, b_vec) / (norm(a_vec) * norm(b_vec))
-        mean_similarity += cos_similarity
-
-        a_vec = a[i]
-        b_vec = b[i]
-        cos_similarity = dot(a_vec, b_vec) / (norm(a_vec) * norm(b_vec))
-        mean_recovered_similarity += cos_similarity
-
-    mean_similarity /= min_elements
-    mean_recovered_similarity /= min_elements
-    print(
-        f"Average vector similarity is {mean_similarity:.4f} in original dataset, "
-        f"and {mean_recovered_similarity:.4f} in recovered state in index"
+def main():
+    parser = argparse.ArgumentParser(
+        description="Benchmark cross-modal index joining and search",
+        epilog="If --vectors-a/--vectors-b not provided, generates synthetic data.",
     )
+    parser.add_argument("--vectors-a", type=str, help="Path to first dataset (.fbin)")
+    parser.add_argument("--vectors-b", type=str, help="Path to second dataset (.fbin)")
+    parser.add_argument("--metric", type=str, choices=["ip", "cos", "l2sq"], default="cos", help="Distance metric")
+    parser.add_argument("-n", "--count", type=int, default=100_000, help="Max vectors per dataset (default: 100000)")
+    parser.add_argument("--ndim", type=int, default=256, help="Dimensions for synthetic data (default: 256)")
+    parser.add_argument("-k", type=int, default=10, help="Number of neighbors for recall evaluation (default: 10)")
+    parser.add_argument("--dtype", type=str, default="f32", help="Quantization type (default: f32)")
+    parser.add_argument("--diagnostics", action="store_true", help="Run self-recall and cross-recall diagnostics")
 
-    dt = measure_seconds
-    args = dict(
-        count=count,
-        batch_size=batch_size,
-        log=True,
-        exact=exact,
-    )
+    args = parser.parse_args()
 
-    secs, a_self_recall = dt(lambda: a.search(a.vectors, **args).recall(a.keys))
-    print("Self-recall @{} of {} index: {:.2f}%, took {:.2f}s".format(count, a_name, a_self_recall * 100, secs))
+    # Load or generate data
+    if args.vectors_a and args.vectors_b:
+        vectors_a = load_matrix(args.vectors_a, count_rows=args.count)
+        vectors_b = load_matrix(args.vectors_b, count_rows=args.count)
+        print(f"Loaded datasets: A={vectors_a.shape}, B={vectors_b.shape}")
+    else:
+        print(f"Generating synthetic data: {args.count:,} x {args.ndim}")
+        vectors_a = random_vectors(args.count, ndim=args.ndim).astype(np.float32)
+        vectors_b = random_vectors(args.count, ndim=args.ndim).astype(np.float32)
 
-    secs, b_self_recall = dt(lambda: b.search(b.vectors, **args).recall(b.keys))
-    print("Self-recall @{} of {} index: {:.2f}%, took {:.2f}s".format(count, b_name, b_self_recall * 100, secs))
+    ndim = vectors_a.shape[1]
+    min_elements = min(vectors_a.shape[0], vectors_b.shape[0])
 
-    secs, ab_recall = dt(lambda: b.search(a.vectors, **args).recall(b.keys))
-    print("Cross-recall @{} of {} in {}: {:.2f}%, took {:.2f}s".format(count, a_name, b_name, ab_recall * 100, secs))
+    # Build metric
+    try:
+        from numkong import pointer_to_angular
 
-    secs, ba_recall = dt(lambda: a.search(b.vectors, **args).recall(a.keys))
-    print("Cross-recall @{} of {} in {}: {:.2f}%, took {:.2f}s".format(count, b_name, a_name, ba_recall * 100, secs))
+        metric = CompiledMetric(
+            pointer=pointer_to_angular("f32"),
+            kind=MetricKind.Cos,
+            signature=MetricSignature.ArrayArraySize,
+        )
+    except ImportError:
+        metric = MetricKind.Cos
+
+    # Build indexes
+    print("--- Indexing ---")
+    index_a = Index(ndim, metric=metric, dtype=args.dtype)
+    index_b = Index(ndim, metric=metric, dtype=args.dtype)
+
+    index_a.add(None, vectors_a, log=True)
+    index_b.add(None, vectors_b, log=True)
+    print(f"Indexed: A={len(index_a):,}, B={len(index_b):,}")
+
+    # Diagnostics
+    if args.diagnostics:
+        print("\n--- Diagnostics ---")
+
+        # Pairwise similarity
+        mean_sim = 0.0
+        for i in tqdm(range(min_elements), desc="Pairwise Similarity"):
+            a_vec, b_vec = vectors_a[i], vectors_b[i]
+            a_norm, b_norm = norm(a_vec), norm(b_vec)
+            if a_norm > 0 and b_norm > 0:
+                mean_sim += dot(a_vec, b_vec) / (a_norm * b_norm)
+        mean_sim /= min_elements
+        print(f"Average pairwise cosine similarity: {mean_sim:.4f}")
+
+        search_kwargs = dict(count=args.k, log=True)
+
+        secs, recall_a = measure_seconds(
+            lambda: index_a.search(vectors_a, **search_kwargs).recall(np.arange(len(index_a)))
+        )
+        print(f"Self-recall @{args.k} of A: {recall_a * 100:.2f}% ({secs:.2f}s)")
+
+        secs, recall_b = measure_seconds(
+            lambda: index_b.search(vectors_b, **search_kwargs).recall(np.arange(len(index_b)))
+        )
+        print(f"Self-recall @{args.k} of B: {recall_b * 100:.2f}% ({secs:.2f}s)")
+
+        secs, recall_ab = measure_seconds(
+            lambda: index_b.search(vectors_a, **search_kwargs).recall(np.arange(min_elements))
+        )
+        print(f"Cross-recall @{args.k} A->B: {recall_ab * 100:.2f}% ({secs:.2f}s)")
+
+        secs, recall_ba = measure_seconds(
+            lambda: index_a.search(vectors_b, **search_kwargs).recall(np.arange(min_elements))
+        )
+        print(f"Cross-recall @{args.k} B->A: {recall_ba * 100:.2f}% ({secs:.2f}s)")
+
+    # Join
+    print("\n--- Join ---")
+    start_time = perf_counter()
+    bimapping = index_a.join(index_b, max_proposals=100)
+    join_elapsed = perf_counter() - start_time
+
+    recall = sum(1 for i, j in bimapping.items() if i == j)
+    recall_pct = recall * 100.0 / min_elements
+    print(f"Found {len(bimapping):,} pairings in {join_elapsed:.2f}s, {recall_pct:.2f}% exact matches")
 
 
-print("--------------------------------------")
-print("-----------------Join-----------------")
-print("--------------------------------------")
-
-secs, bimapping = measure_seconds(lambda: a.join(b, max_proposals=100))
-mapping_size = len(bimapping)
-recall = 0
-for i, j in bimapping.items():
-    recall += i == j
-
-recall *= 100.0 / min_elements
-print(f"Took {secs:.2f}s to find {mapping_size:,} pairings with {recall:.2f}% being exact")
+if __name__ == "__main__":
+    main()

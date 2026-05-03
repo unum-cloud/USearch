@@ -129,6 +129,10 @@ if is_macos:
     # Simplify debugging, but the normal `-g` may make builds much longer!
     compile_args.append("-g1")
 
+    # NumKong symbols are resolved at runtime via ctypes.CDLL in __init__.py
+    link_args.append("-undefined")
+    link_args.append("dynamic_lookup")
+
     # Linking OpenMP requires additional preparation in CIBuildWheel.
     # We must install `brew install llvm` ahead of time.
     # import subprocess as cli
@@ -148,11 +152,7 @@ if is_windows:
     link_args.append("/FORCE")  # Force linking with missing NumKong symbols
 
 
-import glob
-
 sources = ["python/lib.cpp"]
-if use_numkong:
-    sources.extend(glob.glob("numkong/c/*.c"))
 
 ext_modules = [
     Pybind11Extension(
@@ -201,19 +201,21 @@ setup(
     version=__version__,
     packages=["usearch"],
     package_dir={"usearch": "python/usearch"},
+    package_data={"usearch": ["compiled.pyi", "py.typed"]},
     description="Smaller & Faster Single-File Vector Search Engine from Unum",
     author="Ash Vardanian",
     author_email="info@unum.cloud",
+    python_requires=">=3.10",
     url="https://github.com/unum-cloud/USearch",
     long_description=long_description,
     long_description_content_type="text/markdown",
     license="Apache-2.0",
+    license_files=["LICENSE"],
     classifiers=[
         "Development Status :: 5 - Production/Stable",
         "Natural Language :: English",
         "Intended Audience :: Developers",
         "Intended Audience :: Information Technology",
-        "License :: OSI Approved :: Apache Software License",
         "Programming Language :: C++",
         "Programming Language :: Python :: 3 :: Only",
         "Programming Language :: Python :: Implementation :: CPython",

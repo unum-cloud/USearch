@@ -15,7 +15,10 @@ public enum USearchScalar: UInt {
     case f16
     case e5m2
     case e4m3
+    case e3m2
+    case e2m3
     case i8
+    case u8
     case b1
 }
 
@@ -77,8 +80,14 @@ extension USearchScalar {
             return usearch_scalar_e5m2_k
         case .e4m3:
             return usearch_scalar_e4m3_k
+        case .e3m2:
+            return usearch_scalar_e3m2_k
+        case .e2m3:
+            return usearch_scalar_e2m3_k
         case .i8:
             return usearch_scalar_i8_k
+        case .u8:
+            return usearch_scalar_u8_k
         case .b1:
             return usearch_scalar_b1_k
         }
@@ -446,9 +455,77 @@ public class USearchIndex: NSObject {
         )
     }
 
+    /**
+     * @brief Adds a labeled vector to the index.
+     * @param vector Uint8 vector.
+     */
+    public func addU8(key: USearchKey, vector: UnsafePointer<UInt8>) throws {
+        try throwing { usearch_add(nativeIndex, key, vector, USearchScalar.u8.toNative(), $0) }
+    }
+
+    /**
+     * @brief Approximate nearest neighbors search.
+     * @param vector Uint8 query vector.
+     * @param count Upper limit on the number of matches to retrieve.
+     * @param keys Optional output buffer for keys of approximate neighbors.
+     * @param distances Optional output buffer for (increasing) distances to approximate neighbors.
+     * @return Number of matches exported to `keys` and `distances`.
+     */
+    public func searchU8(
+        vector: UnsafePointer<UInt8>,
+        count: UInt32,
+        keys: UnsafeMutablePointer<USearchKey>?,
+        distances: UnsafeMutablePointer<Float32>?
+    ) throws -> UInt32 {
+        let found = try throwing {
+            usearch_search(nativeIndex, vector, USearchScalar.u8.toNative(), Int(count), keys, distances, $0)
+        }
+        return UInt32(found)
+    }
+
+    /**
+     * @brief Retrieves a labeled uint8 vector from the index.
+     * @param vector A buffer to store the vector.
+     * @param count For multi-indexes, the number of vectors to retrieve.
+     * @return Number of vectors exported to `vector`.
+     */
+    public func getU8(key: USearchKey, vector: UnsafeMutablePointer<UInt8>, count: UInt32) throws -> UInt32 {
+        let result = try throwing {
+            usearch_get(nativeIndex, key, Int(count), vector, USearchScalar.u8.toNative(), $0)
+        }
+        return UInt32(result)
+    }
+
+    /**
+     * @brief Approximate nearest neighbors search with filtering.
+     * @param vector Uint8 query vector.
+     * @param count Upper limit on the number of matches to retrieve.
+     * @param filter Closure called for each key, determining whether to include or skip key in the results.
+     * @param keys Optional output buffer for keys of approximate neighbors.
+     * @param distances Optional output buffer for (increasing) distances to approximate neighbors.
+     * @return Number of matches exported to `keys` and `distances`.
+     */
+    public func filteredSearchU8(
+        vector: UnsafePointer<UInt8>,
+        count: UInt32,
+        filter: @escaping USearchFilterFn,
+        keys: UnsafeMutablePointer<USearchKey>?,
+        distances: UnsafeMutablePointer<Float32>?
+    ) throws -> UInt32 {
+        return try filteredSearchGeneric(
+            nativeIndex,
+            vector: vector,
+            count: count,
+            quantization: .u8,
+            filter: filter,
+            keys: keys,
+            distances: distances
+        )
+    }
+
     // Float16 is only available on arm64 Apple platforms. The @available annotation
     // alone is insufficient because Float16 is a type-level absence on x86_64,
-    // not a runtime availability issue. See: https://github.com/unum-cloud/usearch/issues/589
+    // not a runtime availability issue. See: https://github.com/unum-cloud/USearch/issues/589
     #if arch(arm64)
 
     /**

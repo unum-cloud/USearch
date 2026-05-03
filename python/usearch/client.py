@@ -1,12 +1,10 @@
-from typing import Union, Optional, List
-
 import numpy as np
 from ucall.client import Client
 
 from usearch.index import Matches
 
 
-def _vector_to_ascii(vector: np.ndarray) -> Optional[str]:
+def _vector_to_ascii(vector: np.ndarray) -> str | None:
     if vector.dtype != np.int8 and vector.dtype != np.uint8 and vector.dtype != np.byte:
         return None
     if not np.all((vector >= 0) | (vector <= 100)):
@@ -41,14 +39,14 @@ class IndexClient:
         assert keys.shape[0] == vectors.shape[0]
         self.client.add_many(keys=keys, vectors=vectors)
 
-    def add(self, keys: Union[np.ndarray, int], vectors: np.ndarray):
+    def add(self, keys: np.ndarray | int, vectors: np.ndarray):
         if isinstance(keys, int) or len(keys) == 1:
             return self.add_one(keys, vectors)
         else:
             return self.add_many(keys, vectors)
 
     def search_one(self, vector: np.ndarray, count: int) -> Matches:
-        matches: List[dict] = []
+        matches: list[dict] = []
         vector = vector.flatten()
         ascii_vector = _vector_to_ascii(vector)
         if ascii_vector:
@@ -71,7 +69,7 @@ class IndexClient:
 
     def search_many(self, vectors: np.ndarray, count: int) -> Matches:
         batch_size: int = vectors.shape[0]
-        list_of_matches: List[List[dict]] = self.client.search_many(vectors=vectors, count=count)
+        list_of_matches: list[list[dict]] = self.client.search_many(vectors=vectors, count=count)
 
         keys = np.array((batch_size, count), dtype=np.uint32)
         distances = np.array((batch_size, count), dtype=np.float32)
