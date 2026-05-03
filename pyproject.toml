@@ -20,8 +20,10 @@ requires = [
 addopts = "-ra --showlocals --strict-markers --strict-config -s -x -p no:warnings"
 filterwarnings = ["error"]
 minversion = "6.0"
-testpaths = ["python/scripts"]
 xfail_strict = true
+testpaths = [
+    "python/tests",
+]
 
 # Avoid running tests, as everything is happening in a super slow container
 # We have already run all the relavent Python tests in `prerelease.yml`
@@ -94,6 +96,7 @@ lint = [
 tests = [
   "numpy>=1.21",
   "pytest>=9.0.2",
+  "pytest-cov>=7.1.0",
   "pytest-repeat>=0.9.4",
 ]
 

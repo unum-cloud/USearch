@@ -510,6 +510,94 @@ def test_index_quantized_add_search(quantization, ndim):
         assert matches[i].keys[0] == i, f"Expected self-match for vector {i} with {quantization}"
 
 
+def test_index_ip_metric():
+    """Inner product metric should be usable and produce valid searches."""
+    ndim = 32
+    count = 20
+    index = Index(ndim=ndim, metric=MetricKind.IP)
+    keys = np.arange(count)
+    vectors = random_vectors(count=count, ndim=ndim, metric=MetricKind.IP)
+    index.add(keys, vectors)
+
+    matches = index.search(vectors[0], 5)
+    assert isinstance(matches, Matches)
+    assert len(matches) == 5
+
+
+def test_index_specs():
+    """specs property should return a dict with expected keys."""
+    ndim = 16
+    index = Index(ndim=ndim, metric=MetricKind.L2sq, dtype=ScalarKind.F32)
+    s = index.specs
+    assert isinstance(s, dict)
+    for key in ("ndim", "multi", "connectivity", "expansion_add", "expansion_search", "dtype"):
+        assert key in s
+    assert s["ndim"] == ndim
+
+
+@pytest.mark.parametrize("ndim", [16, 64])
+@pytest.mark.parametrize("batch_size", [10, 50])
+def test_index_exact_search(ndim, batch_size):
+    """Exact search must return the query vector itself as the top match."""
+    index = Index(ndim=ndim, metric=MetricKind.L2sq)
+    keys = np.arange(batch_size)
+    vectors = random_vectors(count=batch_size, ndim=ndim)
+    index.add(keys, vectors)
+
+    if batch_size == 1:
+        matches = index.search(vectors, 1, exact=True)
+        assert int(matches.keys[0]) == keys[0]
+    else:
+        matches: BatchMatches = index.search(vectors, 1, exact=True)
+        top_keys = [int(m.keys[0]) for m in matches]
+        assert top_keys == list(keys)
+
+
+@pytest.mark.parametrize("batch_size", [6, 20])
+def test_index_pairwise_distance_array(batch_size):
+    """pairwise_distance with equal-length key arrays returns element-wise distances."""
+    ndim = 16
+    index = Index(ndim=ndim, metric=MetricKind.L2sq)
+    keys = np.arange(batch_size)
+    vectors = random_vectors(count=batch_size, ndim=ndim)
+    index.add(keys, vectors)
+
+    half = batch_size // 2
+    left_keys = keys[:half]
+    right_keys = keys[half : 2 * half]
+    distances = index.pairwise_distance(left_keys, right_keys)
+    assert distances.shape == (half,)
+    assert np.all(distances >= 0)
+
+
+def test_index_pairwise_distance_scalar():
+    """pairwise_distance with scalar keys returns a scalar distance."""
+    ndim = 16
+    index = Index(ndim=ndim, metric=MetricKind.L2sq)
+    keys = np.arange(4)
+    vectors = random_vectors(count=4, ndim=ndim)
+    index.add(keys, vectors)
+
+    dist = index.pairwise_distance(0, 1)
+    assert isinstance(dist, float)
+    assert dist >= 0
+    # Distance from a vector to itself should be ~0
+    assert index.pairwise_distance(0, 0) == pytest.approx(0.0, abs=1e-3)
+
+
+def test_index_memory_usage_grows():
+    """Memory usage should increase as vectors are added."""
+    ndim = 32
+    index = Index(ndim=ndim)
+    mem_empty = index.memory_usage
+
+    keys = np.arange(100)
+    vectors = random_vectors(count=100, ndim=ndim)
+    index.add(keys, vectors)
+
+    assert index.memory_usage > mem_empty
+
+
 def test_index_copied_memory_usage():
     """Test that copy=False results in lower memory usage than copy=True."""
     reset_randomness()
