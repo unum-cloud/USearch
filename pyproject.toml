@@ -16,6 +16,14 @@ requires = [
   "numkong>=7.5.0",
 ]
 
+[dependency-groups]
+tests = [
+    "pytest",
+    "pytest-repeat",
+    "numpy",
+    "pytest-cov",
+]
+
 [tool.pytest.ini_options]
 addopts = "-ra --showlocals --strict-markers --strict-config -s -x -p no:warnings --cov=usearch --cov-report=term-missing"
 filterwarnings = ["error"]
