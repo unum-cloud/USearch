@@ -1382,6 +1382,29 @@ void test_global_rebuild() {
     rebuild_t rebuild(primary, 128);
     char const* path = "tmp_global_rebuild.usearch";
 
+    // Pre-place a sentinel file at the destination. A crash-safe rebuild must
+    // leave it byte-for-byte intact until the very end - it streams into a
+    // temporary file and publishes only via an atomic rename - so a process
+    // kill mid-rebuild can never corrupt the previous index.
+    std::vector<char> const sentinel(96, '\x7e');
+    {
+        std::FILE* sentinel_file = std::fopen(path, "wb");
+        expect(sentinel_file != nullptr);
+        std::fwrite(sentinel.data(), 1, sentinel.size(), sentinel_file);
+        std::fclose(sentinel_file);
+    }
+    auto read_path = [&]() {
+        std::vector<char> bytes;
+        std::FILE* file = std::fopen(path, "rb");
+        if (!file)
+            return bytes;
+        char buffer[256];
+        for (std::size_t n; (n = std::fread(buffer, 1, sizeof(buffer), file)) > 0;)
+            bytes.insert(bytes.end(), buffer, buffer + n);
+        std::fclose(file);
+        return bytes;
+    };
+
     // Watch the process RSS across the rebuild: with the shadow sharing the
     // primary's vectors it must not balloon by a whole vector-set.
     std::size_t const primary_vectors_bytes = primary.memory_stats().vectors_allocated;
@@ -1412,6 +1435,10 @@ void test_global_rebuild() {
             std::printf("- shadow memory: graph %zu, vectors %zu (primary vectors %zu)\n",
                         shadow_memory.graph_allocated, shadow_memory.vectors_allocated,
                         primary.memory_stats().vectors_allocated);
+            // Mid-rebuild, with the shadow already being streamed, the
+            // destination still holds the untouched sentinel - the bytes go
+            // to `<path>.tmp`, not to `path`.
+            expect(read_path() == sentinel);
             shadow_checked = true;
         }
         if (!side_ops_done) {
@@ -1429,6 +1456,8 @@ void test_global_rebuild() {
     expect(side_ops_done);
     expect(shadow_checked);
     expect(rebuild.shadow() == nullptr); // released at completion
+    // Completion atomically replaced the sentinel with the real index.
+    expect(read_path() != sentinel);
 
     // RSS must not double during the rebuild. The shadow shares the primary's
     // vectors and only rebuilds the graph, so its peak overhead is one graph -
