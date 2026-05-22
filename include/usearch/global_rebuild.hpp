@@ -26,7 +26,8 @@
  *      2. `phase_saving` - the now-complete, structurally @b frozen shadow is
  *         streamed to disk through the resumable `save_to_stream`, a bounded
  *         chunk per step.
- *      3. `phase_done` - the file is closed and tombstoned removals replayed.
+ *      3. `phase_done` - the temp file is atomically renamed onto the
+ *         destination, the shadow released, tombstoned removals replayed.
  *
  *  Routing of concurrent mutations, matching the design agreed for this work:
  *
@@ -42,6 +43,20 @@
  *  Because the file is only ever streamed from the shadow - which stops
  *  receiving writes before `phase_saving` begins - the resumable
  *  `save_to_stream` always sees a structurally frozen target, as it requires.
+ *
+ *  @section Crash safety
+ *
+ *  The rebuild streams into a @b temporary file (`<path>.tmp`) and only
+ *  `rename`s it onto the destination once the whole file is complete. Until
+ *  that final rename - atomic on POSIX - the destination still holds the
+ *  previous index untouched. So a process kill at @b any point during a
+ *  rebuild never corrupts the on-disk index: you are left with either the
+ *  previous complete file or the new complete file, never a truncated one.
+ *  An abandoned rebuild's temp file is discarded by the destructor.
+ *
+ *  Note this is crash safety for the @b destination file, not resumability
+ *  across a restart: the continuation cursor lives in RAM, so a killed
+ *  rebuild must be restarted from `begin`, not continued.
  *
  *  @section Memory
  *
@@ -60,8 +75,10 @@
 #define UNUM_USEARCH_GLOBAL_REBUILD_HPP
 
 #include <cstddef> // `std::size_t`
+#include <cstdio>  // `std::rename`, `std::remove`
 #include <memory>  // `std::unique_ptr`
 #include <new>     // `std::nothrow`
+#include <string>  // `std::string`
 #include <utility> // `std::move`, `std::forward`
 #include <vector>  // `std::vector`
 
@@ -121,6 +138,10 @@ class global_rebuild_gt {
     std::vector<vector_key_t> migration_keys_;
     std::size_t migration_cursor_ = 0;
 
+    /// @brief  Caller's destination path, and the `<path>.tmp` actually
+    ///         written - renamed onto the destination only on completion.
+    std::string final_path_;
+    std::string temp_path_;
     output_file_t file_{nullptr};
     index_dense_serialized_state_t save_state_;
 
@@ -139,6 +160,15 @@ class global_rebuild_gt {
 
     global_rebuild_gt(global_rebuild_gt const&) = delete;
     global_rebuild_gt& operator=(global_rebuild_gt const&) = delete;
+
+    ~global_rebuild_gt() {
+        // A rebuild abandoned before completion leaves a partial temp file;
+        // the destination was never touched, so just discard the temp file.
+        if (active()) {
+            file_.close();
+            std::remove(temp_path_.c_str());
+        }
+    }
 
     phase_t phase() const noexcept { return phase_; }
     bool active() const noexcept { return phase_ == phase_migrating_k || phase_ == phase_saving_k; }
@@ -219,7 +249,11 @@ class global_rebuild_gt {
         if (live && !shadow_->try_reserve(live))
             return result.failed("Failed to reserve the shadow index");
 
-        file_ = output_file_t(path);
+        // Stream into a temp file; the destination keeps the previous index
+        // until the completed file is atomically renamed into place.
+        final_path_ = path;
+        temp_path_ = final_path_ + ".tmp";
+        file_ = output_file_t(temp_path_.c_str());
         serialization_result_t io = file_.open_if_not();
         if (!io)
             return result.failed(std::move(io.error));
@@ -279,6 +313,16 @@ class global_rebuild_gt {
                 return result.failed(std::move(saved.error));
             if (save_state_.done()) {
                 file_.close();
+                // Atomically publish the finished snapshot. On POSIX `rename`
+                // replaces the destination in one step, so a crash anywhere
+                // before this point leaves the previous file fully intact.
+                // (Windows `rename` cannot overwrite - the fallback there has
+                // a tiny non-atomic window.)
+                if (std::rename(temp_path_.c_str(), final_path_.c_str()) != 0) {
+                    std::remove(final_path_.c_str());
+                    if (std::rename(temp_path_.c_str(), final_path_.c_str()) != 0)
+                        return result.failed("Failed to publish the rebuilt index file");
+                }
                 // Replay the tombstoned removals on the live primary now that
                 // the snapshot is safely on disk.
                 for (std::size_t i = 0; i != deferred_removes_.size(); ++i)
