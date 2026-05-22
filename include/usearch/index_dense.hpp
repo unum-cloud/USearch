@@ -369,6 +369,44 @@ inline index_dense_metadata_result_t index_dense_metadata_from_buffer(memory_map
 }
 
 /**
+ *  @brief  Resumable cursor for @b incremental, interruptible serialization of
+ *          an `index_dense_gt`.
+ *
+ *  Mirrors ::index_serialized_state_t but covers all three sections of a dense
+ *  index file: the vector matrix, the dense metadata header, and the embedded
+ *  HNSW graph. The resumable `save_to_stream` overload writes a bounded chunk
+ *  per call and updates this cursor; loop until `done()` is true.
+ *
+ *  The vector count and the live/deleted tallies are @b frozen on the first
+ *  call so that the matrix, the header, and the graph all agree even if the
+ *  index keeps accepting brand-new keys (in higher slots) meanwhile.
+ */
+struct index_dense_serialized_state_t {
+    enum stage_t : std::uint8_t {
+        stage_dimensions_k = 0,
+        stage_vectors_k = 1,
+        stage_head_k = 2,
+        stage_graph_k = 3,
+        stage_done_k = 4,
+    };
+    /// @brief  Which section of the file is being written next.
+    stage_t stage = stage_dimensions_k;
+    /// @brief  Index of the next vector row to emit during ::stage_vectors_k.
+    std::uint64_t cursor = 0;
+    /// @brief  Vector / node count frozen when the save began.
+    std::uint64_t total = 0;
+    /// @brief  Live (non-deleted) vector count frozen when the save began.
+    std::uint64_t count_present = 0;
+    /// @brief  Bytes per stored vector, frozen when the save began.
+    std::uint64_t bytes_per_vector = 0;
+    /// @brief  Resumable cursor for the embedded HNSW graph.
+    index_serialized_state_t graph;
+
+    bool begun() const noexcept { return stage != stage_dimensions_k; }
+    bool done() const noexcept { return stage == stage_done_k; }
+};
+
+/**
  *  @brief  Oversimplified type-punned index for equidimensional vectors
  *          with automatic @b down-casting, hardware-specific @b SIMD metrics,
  *          and ability to @b remove existing vectors, common in Semantic Caching
@@ -768,6 +806,27 @@ class index_dense_gt {
         return typed_->level_of((*matching_slots.first).slot);
     }
 
+    /**
+     *  @brief  Returns a pointer to the @b stored vector bytes for @p key, or
+     *          `nullptr` if the key is absent.
+     *
+     *  The pointer aliases the index's own vector tape: it stays valid only
+     *  until that entry is removed, the index is compacted, or the index is
+     *  destroyed, and the bytes are in the index's native scalar layout
+     *  (see `scalar_kind`). Useful for a @b zero-copy migration into a peer
+     *  index of the same configuration - the peer can reference these bytes
+     *  via `add(..., copy_vector = false)` instead of duplicating them. For a
+     *  multi-index the first matching entry is returned.
+     */
+    byte_t const* vector_data(vector_key_t key) const {
+        usearch_assert_m(config().enable_key_lookups, "Key lookups are disabled");
+        shared_lock_t lookup_lock(slot_lookup_mutex_);
+        auto matching_slots = slot_lookup_.equal_range(key_and_slot_t::any_slot(key));
+        if (matching_slots.first == matching_slots.second)
+            return nullptr;
+        return vectors_lookup_[(*matching_slots.first).slot];
+    }
+
     dynamic_allocator_t const& allocator() const { return typed_->dynamic_allocator(); }
     vector_key_t const& free_key() const { return free_key_; }
 
@@ -1159,6 +1218,111 @@ class index_dense_gt {
     }
 
     /**
+     *  @brief  Resumable, interruptible variant of `save_to_stream`.
+     *
+     *  Writes the dense index to @p output in bounded chunks: each call emits
+     *  at most @p budget vectors (during the matrix stage) or nodes (during the
+     *  graph stage), then returns while updating @p state. Keep calling with
+     *  the same @p state until `state.done()` is true. The byte layout matches
+     *  the blocking `save_to_stream`, so the file loads with the regular
+     *  `load_from_stream` / `load`.
+     *
+     *  The index must not be @b structurally mutated between calls: no removed
+     *  slot may be recycled and no node level may change. Appending brand-new
+     *  keys is fine - they land in higher slots and are excluded from the
+     *  frozen snapshot. The ::global_rebuild_gt adapter enforces this for the
+     *  shadow index it persists.
+     */
+    template <typename output_callback_at>
+    serialization_result_t save_to_stream(output_callback_at&& output,        //
+                                          index_dense_serialized_state_t& state, //
+                                          std::size_t budget,                 //
+                                          serialization_config_t config = {}) const {
+
+        serialization_result_t result;
+
+        // Stage 1: the matrix dimensions. Freezes the snapshot's vector count,
+        // live tally, and per-vector stride for every later stage.
+        if (state.stage == index_dense_serialized_state_t::stage_dimensions_k) {
+            state.total = typed_->size();
+            state.count_present = size();
+            state.bytes_per_vector = metric_.bytes_per_vector();
+            state.cursor = 0;
+            if (!config.exclude_vectors) {
+                if (!config.use_64_bit_dimensions) {
+                    std::uint32_t dimensions[2];
+                    dimensions[0] = static_cast<std::uint32_t>(state.total);
+                    dimensions[1] = static_cast<std::uint32_t>(state.bytes_per_vector);
+                    if (!output(&dimensions, sizeof(dimensions)))
+                        return result.failed("Failed to serialize into stream");
+                } else {
+                    std::uint64_t dimensions[2];
+                    dimensions[0] = state.total;
+                    dimensions[1] = state.bytes_per_vector;
+                    if (!output(&dimensions, sizeof(dimensions)))
+                        return result.failed("Failed to serialize into stream");
+                }
+                state.stage = index_dense_serialized_state_t::stage_vectors_k;
+            } else
+                state.stage = index_dense_serialized_state_t::stage_head_k;
+        }
+
+        // Stage 2: the vector matrix, one frozen row at a time.
+        while (state.stage == index_dense_serialized_state_t::stage_vectors_k) {
+            if (state.cursor == state.total) {
+                state.stage = index_dense_serialized_state_t::stage_head_k;
+                continue;
+            }
+            if (!budget)
+                return result;
+            byte_t* vector = vectors_lookup_[state.cursor];
+            if (!output(vector, state.bytes_per_vector))
+                return result.failed("Failed to serialize into stream");
+            ++state.cursor, --budget;
+        }
+
+        // Stage 3: the dense metadata header, using the frozen tallies.
+        if (state.stage == index_dense_serialized_state_t::stage_head_k) {
+            index_dense_head_buffer_t buffer;
+            std::memset(buffer, 0, sizeof(buffer));
+            index_dense_head_t head{buffer};
+            std::memcpy(buffer, default_magic(), std::strlen(default_magic()));
+
+            using version_t = index_dense_head_t::version_t;
+            head.version_major = static_cast<version_t>(USEARCH_VERSION_MAJOR);
+            head.version_minor = static_cast<version_t>(USEARCH_VERSION_MINOR);
+            head.version_patch = static_cast<version_t>(USEARCH_VERSION_PATCH);
+
+            head.kind_metric = metric_.metric_kind();
+            head.kind_scalar = metric_.scalar_kind();
+            head.kind_key = unum::usearch::scalar_kind<vector_key_t>();
+            head.kind_compressed_slot = unum::usearch::scalar_kind<compressed_slot_t>();
+
+            head.count_present = state.count_present;
+            head.count_deleted = state.total - state.count_present;
+            head.dimensions = dimensions();
+            head.multi = multi();
+
+            if (!output(&buffer, sizeof(buffer)))
+                return result.failed("Failed to serialize into stream");
+            state.stage = index_dense_serialized_state_t::stage_graph_k;
+        }
+
+        // Stage 4: the embedded HNSW graph, delegated to the resumable
+        // `index_gt::save_to_stream`, which carries its own sub-cursor.
+        if (state.stage == index_dense_serialized_state_t::stage_graph_k) {
+            serialization_result_t graph_result =
+                typed_->save_to_stream(std::forward<output_callback_at>(output), state.graph, budget);
+            if (!graph_result)
+                return graph_result;
+            if (state.graph.done())
+                state.stage = index_dense_serialized_state_t::stage_done_k;
+        }
+
+        return result;
+    }
+
+    /**
      *  @brief  Estimate the binary length (in bytes) of the serialized index.
      */
     std::size_t serialized_length(serialization_config_t config = {}) const {
@@ -1185,6 +1349,13 @@ class index_dense_gt {
 
         // Discard all previous memory allocations of `vectors_tape_allocator_`
         index_limits_t old_limits = typed_ ? typed_->limits() : index_limits_t{};
+        // An index built via `make(metric, config)` but never `reserve`d carries
+        // `index_gt`'s default limits of {0, 0} - zero worker threads. Loading
+        // into it would leave `available_threads_` empty and make the very
+        // first `search` / `add` throw "No available threads to lock". Floor
+        // the counts to a usable minimum, mirroring `index_gt::load_from_stream`.
+        old_limits.threads_add = (std::max<std::size_t>)(1, old_limits.threads_add);
+        old_limits.threads_search = (std::max<std::size_t>)(1, old_limits.threads_search);
         reset();
 
         // Infer the new index size
@@ -1299,6 +1470,13 @@ class index_dense_gt {
 
         // Discard all previous memory allocations of `vectors_tape_allocator_`
         index_limits_t old_limits = typed_ ? typed_->limits() : index_limits_t{};
+        // An index built via `make(metric, config)` but never `reserve`d carries
+        // `index_gt`'s default limits of {0, 0} - zero worker threads. Loading
+        // into it would leave `available_threads_` empty and make the very
+        // first `search` / `add` throw "No available threads to lock". Floor
+        // the counts to a usable minimum, mirroring `index_gt::load_from_stream`.
+        old_limits.threads_add = (std::max<std::size_t>)(1, old_limits.threads_add);
+        old_limits.threads_search = (std::max<std::size_t>)(1, old_limits.threads_search);
         reset();
 
         serialization_result_t result = file.open_if_not();

@@ -1995,6 +1995,38 @@ struct index_serialized_header_t {
     std::uint64_t entry_slot = 0;
 };
 
+/**
+ *  @brief  Resumable cursor for @b incremental, interruptible serialization.
+ *
+ *  The plain `save_to_stream` writes the whole index in one blocking call. To
+ *  persist a large graph to disk without a stop-the-world pause, the resumable
+ *  `save_to_stream` overload writes the graph in bounded chunks: each call
+ *  emits up to a caller-provided budget of nodes and then returns, leaving this
+ *  cursor pointing at the next node. Feed the same cursor back in to continue.
+ *
+ *  The node count is @b frozen into `total` on the first call - the caller is
+ *  responsible for not structurally mutating the graph (adding nodes, changing
+ *  node levels) while a save is in flight. Appending brand-new nodes past
+ *  `total` is harmless: they are simply not part of this snapshot.
+ */
+struct index_serialized_state_t {
+    enum stage_t : std::uint8_t {
+        stage_header_k = 0,
+        stage_levels_k = 1,
+        stage_nodes_k = 2,
+        stage_done_k = 3,
+    };
+    /// @brief  Which section of the file is being written next.
+    stage_t stage = stage_header_k;
+    /// @brief  Index of the next node to emit within the current stage.
+    std::uint64_t cursor = 0;
+    /// @brief  Node count captured when the save began; frozen for its lifetime.
+    std::uint64_t total = 0;
+
+    bool begun() const noexcept { return stage != stage_header_k; }
+    bool done() const noexcept { return stage == stage_done_k; }
+};
+
 using default_key_t = std::uint64_t;
 using default_slot_t = std::uint32_t;
 using default_distance_t = float;
@@ -3557,6 +3589,75 @@ class index_gt {
         }
 
         return {};
+    }
+
+    /**
+     *  @brief  Resumable, interruptible variant of `save_to_stream`.
+     *
+     *  Writes at most @p node_budget nodes worth of data per call, then returns
+     *  while updating @p state. Keep calling with the same @p state until
+     *  `state.done()` becomes true. The output layout is byte-identical to the
+     *  blocking `save_to_stream`, so the resulting file loads with the regular
+     *  `load_from_stream`.
+     *
+     *  The graph must @b not be structurally mutated between calls (see
+     *  ::index_serialized_state_t). Appending new nodes past the frozen count
+     *  is allowed and simply excluded from this snapshot.
+     */
+    template <typename output_callback_at>
+    serialization_result_t save_to_stream(output_callback_at&& output, index_serialized_state_t& state,
+                                          std::size_t node_budget) const noexcept {
+
+        serialization_result_t result;
+        std::size_t budget = node_budget;
+
+        // Stage 1: the fixed-size header. Freezes the node count for the
+        // remainder of the save.
+        if (state.stage == index_serialized_state_t::stage_header_k) {
+            index_serialized_header_t header;
+            header.size = nodes_count_;
+            header.connectivity = config_.connectivity;
+            header.connectivity_base = config_.connectivity_base;
+            header.max_level = max_level_;
+            header.entry_slot = entry_slot_;
+            if (!output(&header, sizeof(header)))
+                return result.failed("Failed to serialize the header into stream");
+            state.total = header.size;
+            state.cursor = 0;
+            state.stage = index_serialized_state_t::stage_levels_k;
+        }
+
+        // Stage 2: one `level_t` per node, enough to size every node on load.
+        while (state.stage == index_serialized_state_t::stage_levels_k) {
+            if (state.cursor == state.total) {
+                state.cursor = 0;
+                state.stage = index_serialized_state_t::stage_nodes_k;
+                continue;
+            }
+            if (!budget)
+                return result;
+            node_t node = node_at_(static_cast<std::size_t>(state.cursor));
+            level_t level = node.level();
+            if (!output(&level, sizeof(level)))
+                return result.failed("Failed to serialize into stream");
+            ++state.cursor, --budget;
+        }
+
+        // Stage 3: the node tapes themselves.
+        while (state.stage == index_serialized_state_t::stage_nodes_k) {
+            if (state.cursor == state.total) {
+                state.stage = index_serialized_state_t::stage_done_k;
+                continue;
+            }
+            if (!budget)
+                return result;
+            span_bytes_t node_bytes = node_bytes_(node_at_(static_cast<std::size_t>(state.cursor)));
+            if (!output(node_bytes.data(), node_bytes.size()))
+                return result.failed("Failed to serialize into stream");
+            ++state.cursor, --budget;
+        }
+
+        return result;
     }
 
     /**
