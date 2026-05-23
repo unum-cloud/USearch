@@ -642,8 +642,7 @@ class index_dense_gt {
     static state_result_t make(           //
         metric_t metric = {},             //
         index_dense_config_t config = {}, //
-        vector_key_t free_key = default_free_value<vector_key_t>(),
-        index_limits_t limits = {}) {
+        vector_key_t free_key = default_free_value<vector_key_t>(), index_limits_t limits = {}) {
 
         if (metric.missing())
             return state_result_t{}.failed("Metric won't be initialized!");
@@ -702,7 +701,32 @@ class index_dense_gt {
 
     // The metric and its properties
     metric_t const& metric() const { return metric_; }
-    void change_metric(metric_t metric) { metric_ = std::move(metric); }
+
+    /**
+     *  @brief Replaces the active distance metric, resizing the per-thread cast
+     *         buffer and rebuilding the cast dispatch table if the new metric
+     *         changes @c bytes_per_vector() or @c scalar_kind().
+     *  @return @c false if the cast buffer can't be re-allocated; the metric is
+     *          left untouched in that case so the index stays consistent.
+     */
+    bool try_change_metric(metric_t metric) noexcept {
+        std::size_t needed_bytes = limits().threads() * metric.bytes_per_vector();
+        if (needed_bytes > cast_buffer_.size()) {
+            cast_buffer_t new_buffer(needed_bytes);
+            if (!new_buffer)
+                return false;
+            cast_buffer_ = std::move(new_buffer);
+        }
+        casts_ = casts_punned_t::make(metric.scalar_kind());
+        metric_ = std::move(metric);
+        return true;
+    }
+
+    /// @brief Throwing counterpart of @ref try_change_metric.
+    void change_metric(metric_t metric) {
+        if (!try_change_metric(std::move(metric)))
+            usearch_raise_runtime_error("failed to grow cast buffer for the new metric");
+    }
 
     scalar_kind_t scalar_kind() const { return metric_.scalar_kind(); }
     metric_kind_t metric_kind() const { return metric_.metric_kind(); }
@@ -1183,8 +1207,7 @@ class index_dense_gt {
 
         // Preserve any explicit thread counts from the prior index state; fall
         // back to library defaults when they were never set (e.g. `unreserved`).
-        index_limits_t new_limits =
-            typed_ ? typed_->limits().with_thread_defaults() : index_limits_t{};
+        index_limits_t new_limits = typed_ ? typed_->limits().with_thread_defaults() : index_limits_t{};
         reset();
 
         // Infer the new index size
@@ -1296,8 +1319,7 @@ class index_dense_gt {
 
         // Preserve any explicit thread counts from the prior index state; fall
         // back to library defaults when they were never set (e.g. `unreserved`).
-        index_limits_t new_limits =
-            typed_ ? typed_->limits().with_thread_defaults() : index_limits_t{};
+        index_limits_t new_limits = typed_ ? typed_->limits().with_thread_defaults() : index_limits_t{};
         reset();
 
         serialization_result_t result = file.open_if_not();
