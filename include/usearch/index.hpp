@@ -1443,8 +1443,7 @@ class ring_gt {
     bool try_push(element_t const& value) noexcept {
         if (head_ == tail_ && !empty_)
             return false; // `elements_` is full
-
-        return push(value);
+        push(value);
         return true;
     }
 
