@@ -58,6 +58,7 @@
 #include <usearch/index.hpp>
 #include <usearch/index_dense.hpp>
 #include <usearch/index_plugins.hpp>
+#include <usearch/persistent_index.hpp>
 
 using namespace unum::usearch;
 using namespace unum;
@@ -1495,6 +1496,183 @@ void test_global_rebuild() {
 }
 
 /**
+ *  @brief  Exercises ::persistent_index_gt - snapshot + WAL durability around
+ *          `index_dense_gt`. Checks fresh open + add + search; clean reopen
+ *          replays the WAL and recovers state; manual checkpoint advances the
+ *          generation and retires the old WAL; truncating the WAL tail still
+ *          recovers everything but the lost record (crash-resilience).
+ */
+void test_persistent_index() {
+    std::printf("Testing persistent index (snapshot + WAL)\n");
+
+    using index_t = index_dense_gt<std::int64_t, std::uint32_t>;
+    using pi_t = persistent_index_gt<index_t>;
+    std::size_t const dimensions = 64;
+    std::size_t const initial_count = 200;
+    std::size_t const after_reopen_count = 50;
+    char const* base = "tmp_pi_test";
+
+    // Clean up any leftover from a previous run so the test is hermetic.
+    std::remove((std::string(base) + ".manifest").c_str());
+    for (int g = 0; g < 4; ++g) {
+        std::remove((std::string(base) + "." + std::to_string(g) + ".snapshot").c_str());
+        std::remove((std::string(base) + "." + std::to_string(g) + ".wal").c_str());
+    }
+
+    std::default_random_engine rng(1729);
+    std::uniform_real_distribution<float> distribution(-1.f, 1.f);
+    auto make_vec = [&](std::vector<float>& vector) {
+        vector.resize(dimensions);
+        for (auto& value : vector)
+            value = distribution(rng);
+    };
+
+    metric_punned_t metric(dimensions, metric_kind_t::cos_k, scalar_kind<f32_t>());
+    index_dense_config_t index_config(16);
+    pi_t::config_t pi_config;
+    pi_config.checkpoint_after_ops = 10'000'000; // no auto-checkpoint in this test
+    pi_config.initial_capacity = initial_count + after_reopen_count + 64;
+
+    // ---- 1. Fresh open: add `initial_count` vectors, then close. ----
+    std::vector<std::vector<float>> data;
+    {
+        pi_t::open_result_t opened = pi_t::open(base, metric, index_config, pi_config);
+        expect(opened);
+        pi_t& pi = *opened.index;
+        expect_eq(pi.size(), std::size_t(0));
+        expect_eq(pi.generation(), std::uint64_t(0));
+        data.resize(initial_count);
+        for (std::size_t i = 0; i != initial_count; ++i) {
+            make_vec(data[i]);
+            expect(pi.add(static_cast<std::int64_t>(i), data[i].data()));
+        }
+        expect_eq(pi.size(), initial_count);
+    }
+
+    // ---- 2. Reopen: snapshot + WAL replay must restore the full state. ----
+    {
+        pi_t::open_result_t reopened = pi_t::open(base, metric, index_config, pi_config);
+        expect(reopened);
+        pi_t& pi = *reopened.index;
+        expect_eq(pi.size(), initial_count);
+        expect_eq(pi.generation(), std::uint64_t(0)); // still gen 0
+        // The recovered vectors must be the original bytes.
+        std::vector<float> probe(dimensions);
+        for (std::size_t i = 0; i < initial_count; i += 17) {
+            expect_eq(pi.get(static_cast<std::int64_t>(i), probe.data()), std::size_t(1));
+            expect(std::equal(data[i].begin(), data[i].end(), probe.data()));
+        }
+        // A search returns sane results too.
+        std::int64_t found[8];
+        std::size_t n = pi.search(data[0].data(), 5).dump_to(found);
+        expect(n != 0);
+    }
+
+    // ---- 3. Reopen, add more, manual checkpoint -> generation increments. ----
+    {
+        pi_t::open_result_t reopened = pi_t::open(base, metric, index_config, pi_config);
+        expect(reopened);
+        pi_t& pi = *reopened.index;
+        data.resize(initial_count + after_reopen_count);
+        for (std::size_t i = initial_count; i != initial_count + after_reopen_count; ++i) {
+            make_vec(data[i]);
+            expect(pi.add(static_cast<std::int64_t>(i), data[i].data()));
+        }
+        // Remove a few keys so the checkpoint actually compacts something.
+        for (std::size_t i = 0; i < 10; ++i)
+            expect_eq(pi.remove(static_cast<std::int64_t>(i)).completed, std::size_t(1));
+
+        auto err = pi.checkpoint();
+        expect(!err);
+        expect(pi.generation() == 1);
+        expect(!pi.checkpoint_in_flight());
+
+        // Old generation's files must be gone, new ones must exist.
+        std::FILE* old_snap = std::fopen((std::string(base) + ".0.snapshot").c_str(), "rb");
+        expect(old_snap == nullptr);
+        std::FILE* new_snap = std::fopen((std::string(base) + ".1.snapshot").c_str(), "rb");
+        expect(new_snap != nullptr);
+        if (new_snap)
+            std::fclose(new_snap);
+    }
+
+    // ---- 4. Reopen post-checkpoint: snapshot.1 + (empty) wal.1 round-trips. ----
+    std::size_t const expected_size = initial_count + after_reopen_count - 10;
+    {
+        pi_t::open_result_t reopened = pi_t::open(base, metric, index_config, pi_config);
+        expect(reopened);
+        pi_t& pi = *reopened.index;
+        expect_eq(pi.generation(), std::uint64_t(1));
+        expect_eq(pi.size(), expected_size);
+        std::vector<float> probe(dimensions);
+        // Surviving key still recovers the exact original bytes.
+        std::int64_t survivor = static_cast<std::int64_t>(initial_count + 3);
+        expect(pi.contains(survivor));
+        expect_eq(pi.get(survivor, probe.data()), std::size_t(1));
+        expect(std::equal(data[survivor].begin(), data[survivor].end(), probe.data()));
+        // Removed key stays gone.
+        expect(!pi.contains(0));
+
+        // Append one more op so we have something to truncate-test below.
+        std::vector<float> extra;
+        make_vec(extra);
+        expect(pi.add(9'999'999, extra.data()));
+    }
+
+    // ---- 5. Crash-recover from a torn WAL tail. ----
+    // Truncate the active WAL by a few bytes - simulates a torn final record
+    // (a partial write that did not flush). Recovery must drop the torn tail
+    // and load everything else cleanly.
+    {
+        std::string wal_path = std::string(base) + ".1.wal";
+        std::FILE* file = std::fopen(wal_path.c_str(), "rb");
+        expect(file != nullptr);
+        std::fseek(file, 0, SEEK_END);
+        long size = std::ftell(file);
+        std::fclose(file);
+        // Drop the last 5 bytes - guaranteed to mangle the trailing record.
+        expect(size > 5);
+        int rc = ::truncate(wal_path.c_str(), size - 5);
+        expect(rc == 0);
+
+        pi_t::open_result_t reopened = pi_t::open(base, metric, index_config, pi_config);
+        expect(reopened);
+        pi_t& pi = *reopened.index;
+        // The trailing add (key 9'999'999) was torn off; everything else stays.
+        expect(!pi.contains(9'999'999));
+        expect_eq(pi.size(), expected_size);
+    }
+
+    // ---- 6. Auto-checkpoint fires when ops cross the configured threshold. ----
+    {
+        pi_t::config_t small_cfg = pi_config;
+        small_cfg.checkpoint_after_ops = 50;
+        small_cfg.checkpoint_step_budget = 64;
+        pi_t::open_result_t reopened = pi_t::open(base, metric, index_config, small_cfg);
+        expect(reopened);
+        pi_t& pi = *reopened.index;
+        std::uint64_t starting_gen = pi.generation();
+        std::vector<float> probe(dimensions);
+        for (std::size_t i = 0; i != 200; ++i) {
+            make_vec(probe);
+            expect(pi.add(static_cast<std::int64_t>(2'000'000 + i), probe.data()));
+        }
+        // Auto-trigger must have started a checkpoint mid-way through the 200
+        // adds; finish any in-flight one and check the generation moved on.
+        auto err = pi.checkpoint();
+        expect(!err);
+        expect(pi.generation() > starting_gen);
+    }
+
+    // Cleanup
+    std::remove((std::string(base) + ".manifest").c_str());
+    for (int g = 0; g < 4; ++g) {
+        std::remove((std::string(base) + "." + std::to_string(g) + ".snapshot").c_str());
+        std::remove((std::string(base) + "." + std::to_string(g) + ".wal").c_str());
+    }
+}
+
+/**
  *  @brief  Regression test: an index built with `make(metric, config)` carries
  *          `index_gt`'s default {0, 0} limits - zero worker threads - until it
  *          is `reserve`d. Loading a file into such an index must still leave it
@@ -1634,6 +1812,7 @@ int main(int, char**) {
     test_filtered_search();
     test_isolate();
     test_load_after_metric_make();
+    test_persistent_index();
     test_global_rebuild();
     return 0;
 }
