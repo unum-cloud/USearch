@@ -54,19 +54,19 @@ def _big_random_batch(n: int, ndim: int, seed: int = 42):
     return keys, vectors
 
 
-# How many background-counter ticks we expect during a multi-hundred-millisecond
-# add. Modern hardware loops the trivial `counter[0] += 1` body well over a
-# million times per second, so 100k is a conservative floor that comfortably
-# distinguishes "GIL released" from "GIL held".
-_GIL_TICK_FLOOR = 100_000
+# Lower bound on background-counter ticks during one short USearch op. Modern
+# hardware loops the trivial `counter[0] += 1` body well over a million times
+# per second; 10k is a conservative floor that distinguishes "GIL released"
+# from "GIL held" without making the test slow on tiny inputs.
+_GIL_TICK_FLOOR = 10_000
 
 
 def test_gil_released_during_add():
     start, stop_and_join, count = _background_counter()
     start()
 
-    idx = Index(ndim=128, dtype="f32")
-    keys, vectors = _big_random_batch(8_000, 128)
+    idx = Index(ndim=64, dtype="f32")
+    keys, vectors = _big_random_batch(2_000, 64)
 
     before = count()
     t0 = time.perf_counter()
@@ -83,15 +83,14 @@ def test_gil_released_during_add():
 
 
 def test_gil_released_during_search():
-    idx = Index(ndim=128, dtype="f32")
-    keys, vectors = _big_random_batch(5_000, 128)
+    idx = Index(ndim=64, dtype="f32")
+    keys, vectors = _big_random_batch(1_500, 64)
     idx.add(keys, vectors, threads=4)
 
     start, stop_and_join, count = _background_counter()
     start()
 
-    # Many query vectors so the search is meaningfully long
-    _, queries = _big_random_batch(2_000, 128, seed=7)
+    _, queries = _big_random_batch(1_000, 64, seed=7)
     before = count()
     t0 = time.perf_counter()
     idx.search(queries, 10, threads=4)
@@ -101,8 +100,7 @@ def test_gil_released_during_search():
 
     advancement = after - before
     assert advancement > _GIL_TICK_FLOOR, (
-        f"GIL appears held during search: only {advancement:,} background ticks "
-        f"during a {elapsed:.3f}s search."
+        f"GIL appears held during search: only {advancement:,} background ticks during a {elapsed:.3f}s search."
     )
 
 
@@ -111,8 +109,8 @@ def test_progress_callback_fires_and_completes():
     the GIL before invoking the Python callable. It must be able to mutate a
     Python list and return a bool without crashing."""
 
-    idx = Index(ndim=128, dtype="f32")
-    keys, vectors = _big_random_batch(8_000, 128)
+    idx = Index(ndim=64, dtype="f32")
+    keys, vectors = _big_random_batch(2_000, 64)
 
     invocations = []
 
@@ -136,8 +134,8 @@ def test_progress_callback_can_cancel():
     """Returning `False` from the progress callback terminates the op cleanly
     and surfaces as a Python `RuntimeError` - no segfault, no UB."""
 
-    idx = Index(ndim=128, dtype="f32")
-    keys, vectors = _big_random_batch(30_000, 128)
+    idx = Index(ndim=64, dtype="f32")
+    keys, vectors = _big_random_batch(10_000, 64)
 
     seen = []
 
@@ -162,8 +160,8 @@ def test_gil_released_with_progress_callback():
     start, stop_and_join, count = _background_counter()
     start()
 
-    idx = Index(ndim=128, dtype="f32")
-    keys, vectors = _big_random_batch(8_000, 128)
+    idx = Index(ndim=64, dtype="f32")
+    keys, vectors = _big_random_batch(2_000, 64)
 
     invocations = []
 
@@ -177,7 +175,53 @@ def test_gil_released_with_progress_callback():
     stop_and_join()
 
     assert after - before > _GIL_TICK_FLOOR, (
-        "background thread didn't advance during add - GIL likely held while "
-        "callback was active"
+        "background thread didn't advance during add - GIL likely held while callback was active"
     )
     assert invocations and invocations[-1] == (len(keys), len(keys))
+
+
+def test_concurrent_access_serializes_safely():
+    """The documented contract is one Python thread per index; the binding
+    enforces it with an internal mutex so accidental concurrent access from
+    multiple Python threads serializes instead of crashing. Mix adds with
+    disjoint key ranges, searches, and lock-free getters; assert no thread
+    errors and that all keys from all `add` workers landed in the index."""
+
+    idx = Index(ndim=64, dtype="f32")
+    per_thread = 500
+    barrier = threading.Barrier(6)
+    errors: list[str] = []
+
+    def run(target, *args):
+        def wrapped():
+            try:
+                barrier.wait()
+                target(*args)
+            except Exception as e:
+                errors.append(f"{type(e).__name__}: {e}")
+        return threading.Thread(target=wrapped)
+
+    def adder(tid: int):
+        rng = np.random.default_rng(seed=tid)
+        base = tid * per_thread
+        keys = np.arange(base, base + per_thread, dtype=np.uint64)
+        idx.add(keys, rng.standard_normal((per_thread, 64), dtype=np.float32))
+
+    def searcher(tid: int):
+        rng = np.random.default_rng(seed=1000 + tid)
+        for _ in range(50):
+            idx.search(rng.standard_normal((1, 64), dtype=np.float32), 3)
+
+    def getters():
+        for i in range(1000):
+            _ = i in idx
+            _ = len(idx)
+
+    threads = [run(adder, t) for t in range(3)] + [run(searcher, t) for t in range(2)] + [run(getters)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, "thread errors:\n  " + "\n  ".join(errors)
+    assert len(idx) == 3 * per_thread

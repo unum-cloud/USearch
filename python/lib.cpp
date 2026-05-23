@@ -75,11 +75,24 @@ struct dense_index_py_t : public index_dense_t {
     using native_t::search;
     using native_t::size;
 
+    // Serializes Python-thread access to the underlying C++ index. The native
+    // `index_dense_t` assumes a single owning Python thread (it carries
+    // per-worker `cast_buffer_` slots indexed by an executor-local `thread_idx`
+    // that the binding picks for each call). Multiple Python threads calling
+    // a heavy op on the same index would otherwise collide on those slots.
+    // Locked around every binding entry point that releases the GIL.
+    //
+    // Held via `unique_ptr` so that the wrapper remains move-constructible -
+    // `std::mutex` itself is neither copyable nor movable, and pybind11's
+    // return-by-value factories require movability.
+    mutable std::unique_ptr<std::mutex> mutex_ptr_ = std::make_unique<std::mutex>();
+
     dense_index_py_t(native_t&& base) : index_dense_t(std::move(base)) {}
 };
 
 struct dense_indexes_py_t {
     std::vector<std::shared_ptr<dense_index_py_t>> shards_;
+    mutable std::unique_ptr<std::mutex> mutex_ptr_ = std::make_unique<std::mutex>();
 
     void merge(std::shared_ptr<dense_index_py_t> shard) { shards_.push_back(shard); }
     std::size_t bytes_per_vector() const noexcept { return shards_.empty() ? 0 : shards_[0]->bytes_per_vector(); }
@@ -92,7 +105,12 @@ struct dense_indexes_py_t {
 
         shards_.reserve(shards_.size() + paths.size());
         std::mutex shards_mutex;
+        // Release the GIL *before* taking the per-index mutex so a Python
+        // thread waiting on the mutex doesn't hold the GIL - otherwise a
+        // worker thread in the current owner would block forever in
+        // `gil_scoped_acquire`.
         py::gil_scoped_release release;
+        std::unique_lock<std::mutex> lock(*mutex_ptr_);
         executor_default_t{threads}.dynamic(paths.size(), [&](std::size_t, std::size_t task_idx) {
             index_dense_t index = index_dense_t::make(paths[task_idx].c_str(), view);
             if (!index)
@@ -192,6 +210,9 @@ static void add_typed_to_index(                                            //
 
     {
         py::gil_scoped_release release;
+        std::unique_lock<std::mutex> lock(*index.mutex_ptr_);
+        if (!index.try_reserve(index_limits_t(ceil2(index.size() + vectors_count), threads)))
+            throw std::invalid_argument("Out of memory!");
         executor_default_t{threads}.dynamic(vectors_count, [&](std::size_t thread_idx, std::size_t task_idx) {
             dense_key_t key = *reinterpret_cast<dense_key_t const*>(keys_data + task_idx * keys_info.strides[0]);
             scalar_at const* vector =
@@ -259,8 +280,10 @@ static void add_many_to_index(                            //
 
     if (!threads)
         threads = std::thread::hardware_concurrency();
-    if (!index.try_reserve(index_limits_t(ceil2(index.size() + vectors_count), threads)))
-        throw std::invalid_argument("Out of memory!");
+
+    // `add_typed_to_index` does the `try_reserve` + executor work inside its
+    // own GIL-released, mutex-locked region; we just dispatch on the scalar
+    // kind here.
 
     // clang-format off
     scalar_kind_t kind = (scalar_kind != scalar_kind_t::unknown_k)
@@ -300,8 +323,6 @@ static void search_typed(                                   //
 
     if (!threads)
         threads = std::thread::hardware_concurrency();
-    if (!index.try_reserve(index_limits_t(index.size(), threads)))
-        throw std::invalid_argument("Out of memory!");
 
     // Progress status
     progress_t progress_{progress};
@@ -310,6 +331,9 @@ static void search_typed(                                   //
     atomic_error_t atomic_error{nullptr};
     {
         py::gil_scoped_release release;
+        std::unique_lock<std::mutex> lock(*index.mutex_ptr_);
+        if (!index.try_reserve(index_limits_t(index.size(), threads)))
+            throw std::invalid_argument("Out of memory!");
         executor_default_t{threads}.dynamic(vectors_count, [&](std::size_t thread_idx, std::size_t task_idx) {
             scalar_at const* vector = (scalar_at const*)(vectors_data + task_idx * vectors_info.strides[0]);
             dense_search_result_t result = index.search(vector, wanted, thread_idx, exact);
@@ -379,6 +403,7 @@ static void search_typed(                                       //
     atomic_error_t atomic_error{nullptr};
     {
         py::gil_scoped_release release;
+        std::unique_lock<std::mutex> lock(*indexes.mutex_ptr_);
         executor_default_t{threads}.dynamic(indexes.shards_.size(), [&](std::size_t thread_idx, std::size_t task_idx) {
             dense_index_py_t& index = *indexes.shards_[task_idx].get();
 
@@ -760,6 +785,7 @@ static py::tuple cluster_vectors(        //
         : numpy_string_to_kind(queries_info.format);
     {
         py::gil_scoped_release release;
+        std::unique_lock<std::mutex> lock(*index.mutex_ptr_);
         switch (kind) {
         case scalar_kind_t::f64_k: cluster_result = index.cluster(queries_begin.as<f64_t const>(), queries_end.as<f64_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
         case scalar_kind_t::f32_k: cluster_result = index.cluster(queries_begin.as<f32_t const>(), queries_end.as<f32_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
@@ -834,6 +860,7 @@ static py::tuple cluster_keys(                            //
     dense_clustering_result_t cluster_result;
     {
         py::gil_scoped_release release;
+        std::unique_lock<std::mutex> lock(*index.mutex_ptr_);
         cluster_result =
             index.cluster(queries_begin, queries_end, config, keys_ptr, distances_ptr, executor, progress_t{progress});
     }
@@ -871,7 +898,11 @@ static std::unordered_map<dense_key_t, dense_key_t> join_index( //
     executor_default_t executor{threads};
     join_result_t result;
     {
+        // Lock the receiver `a`; `b` is read-only from this side. Concurrent
+        // bidirectional `join(a, b)` and `join(b, a)` from two Python threads
+        // is unsupported.
         py::gil_scoped_release release;
+        std::unique_lock<std::mutex> lock(*a.mutex_ptr_);
         result = a.join(b, config, a_to_b, b_to_a, executor, progress_t{progress});
     }
     forward_error(result);
@@ -893,10 +924,11 @@ static void compact_index(dense_index_py_t& index, std::size_t threads, progress
 
     if (!threads)
         threads = std::thread::hardware_concurrency();
-    if (!index.try_reserve(index_limits_t(index.size(), threads)))
-        throw std::invalid_argument("Out of memory!");
 
     py::gil_scoped_release release;
+    std::unique_lock<std::mutex> lock(*index.mutex_ptr_);
+    if (!index.try_reserve(index_limits_t(index.size(), threads)))
+        throw std::invalid_argument("Out of memory!");
     index.compact(executor_default_t{threads}, progress_t{progress});
 }
 
@@ -1316,10 +1348,11 @@ PYBIND11_MODULE(compiled, m, py::mod_gil_not_used()) {
 
             if (!threads)
                 threads = std::thread::hardware_concurrency();
-            if (!index.try_reserve(index_limits_t(index.size(), threads)))
-                throw std::invalid_argument("Out of memory!");
 
             py::gil_scoped_release release;
+            std::unique_lock<std::mutex> lock(*index.mutex_ptr_);
+            if (!index.try_reserve(index_limits_t(index.size(), threads)))
+                throw std::invalid_argument("Out of memory!");
             index.isolate(executor_default_t{threads});
             return result.completed;
         },
@@ -1336,10 +1369,11 @@ PYBIND11_MODULE(compiled, m, py::mod_gil_not_used()) {
 
             if (!threads)
                 threads = std::thread::hardware_concurrency();
-            if (!index.try_reserve(index_limits_t(index.size(), threads)))
-                throw std::invalid_argument("Out of memory!");
 
             py::gil_scoped_release release;
+            std::unique_lock<std::mutex> lock(*index.mutex_ptr_);
+            if (!index.try_reserve(index_limits_t(index.size(), threads)))
+                throw std::invalid_argument("Out of memory!");
             index.isolate(executor_default_t{threads});
             return result.completed;
         },
