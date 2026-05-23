@@ -3913,13 +3913,21 @@ class flat_hash_multi_set_gt {
 
         equal_iterator_gt(std::size_t index, flat_hash_multi_set_gt* parent, query_at const& query,
                           equals_t const& equals)
-            : index_(index), parent_(parent), query_(query), equals_(equals) {}
+            : index_(index), parent_(parent), query_(query), equals_(equals), total_steps_(0) {}
 
-        // Pre-increment: advance past tombstones and non-matching entries,
-        // stopping at the next matching live entry or an empty slot.
+        // After many add/remove cycles every slot can end up populated
+        // (some with the `deleted` flag), so the iterator would cycle
+        // forever. Bail to the `cap` sentinel after a full pass.
         equal_iterator_gt& operator++() {
+            std::size_t const cap = parent_->capacity_slots_;
+            if (cap == 0 || index_ >= cap)
+                return *this;
             do {
-                index_ = (index_ + 1) & (parent_->capacity_slots_ - 1);
+                index_ = (index_ + 1) & (cap - 1);
+                if (++total_steps_ > cap) {
+                    index_ = cap;
+                    break;
+                }
                 auto slot = parent_->slot_ref(index_);
                 bool is_empty = ~slot.header.populated & slot.mask;
                 bool is_match = !(slot.header.deleted & slot.mask) && equals_(slot.element, query_);
@@ -3939,7 +3947,16 @@ class flat_hash_multi_set_gt {
         pointer operator->() { return &parent_->slot_ref(index_).element; }
         bool operator!=(equal_iterator_gt const& other) const { return !(*this == other); }
         bool operator==(equal_iterator_gt const& other) const {
-            return index_ == other.index_ && parent_ == other.parent_;
+            if (parent_ != other.parent_)
+                return false;
+            // Past-the-end iterators (index >= capacity_slots_) compare
+            // equal regardless of the exact `index_`, so a `++` that pinned
+            // us to the `cap` sentinel still terminates loops that compare
+            // against an end with a different past-the-end value.
+            std::size_t const cap = parent_ ? parent_->capacity_slots_ : 0;
+            if (index_ >= cap && other.index_ >= cap)
+                return true;
+            return index_ == other.index_;
         }
 
       private:
@@ -3947,6 +3964,7 @@ class flat_hash_multi_set_gt {
         flat_hash_multi_set_gt* parent_;
         query_at query_;  // Store the query object
         equals_t equals_; // Store the equals functor
+        std::size_t total_steps_;
     };
 
     /**
