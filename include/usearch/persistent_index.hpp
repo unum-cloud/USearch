@@ -66,6 +66,16 @@ enum persistent_op_t : std::uint8_t {
     persistent_op_remove_k = 2,
 };
 
+/// @brief  RAII wrapper over a C `FILE*`: closes on scope exit, drops every
+///         `std::fclose(file); return error_t(...)` paired cleanup.
+struct file_closer_t {
+    void operator()(std::FILE* f) const noexcept {
+        if (f)
+            std::fclose(f);
+    }
+};
+using file_t = std::unique_ptr<std::FILE, file_closer_t>;
+
 /// @brief  Self-describing header at the start of every WAL file.
 struct persistent_wal_header_t {
     char magic[4]; // "uwal"
@@ -125,7 +135,7 @@ class persistent_index_gt {
 
     // WAL state. All file writes happen under `wal_mutex_`.
     std::mutex wal_mutex_;
-    std::FILE* wal_file_ = nullptr;
+    file_t wal_file_;
     std::string wal_path_;
     std::uint64_t wal_bytes_ = 0;
     std::vector<char> record_buffer_;
@@ -146,15 +156,12 @@ class persistent_index_gt {
     persistent_index_gt& operator=(persistent_index_gt const&) = delete;
 
     ~persistent_index_gt() {
-        // Best-effort flush; OS will write the rest of the page cache out.
+        // Best-effort flush; the OS will write the rest of the page cache out.
         // An in-flight checkpoint is just dropped - its temp file is cleaned
         // by `rebuild_`'s dtor; the manifest still points at the previous
-        // generation and recovery is consistent.
-        if (wal_file_) {
-            std::fflush(wal_file_);
-            std::fclose(wal_file_);
-            wal_file_ = nullptr;
-        }
+        // generation and recovery is consistent. `wal_file_` closes itself.
+        if (wal_file_)
+            std::fflush(wal_file_.get());
     }
 
     /// @brief  Open (or recover) a persistent index at @p path.
@@ -245,11 +252,13 @@ class persistent_index_gt {
         manifest.generation = generation;
         std::string path = manifest_path_();
         std::string tmp = path + ".tmp";
-        std::FILE* file = std::fopen(tmp.c_str(), "wb");
-        if (!file)
-            return error_t("Failed to create manifest temp file");
-        std::size_t written = std::fwrite(&manifest, 1, sizeof(manifest), file);
-        std::fclose(file);
+        std::size_t written;
+        {
+            file_t file{std::fopen(tmp.c_str(), "wb")};
+            if (!file)
+                return error_t("Failed to create manifest temp file");
+            written = std::fwrite(&manifest, 1, sizeof(manifest), file.get());
+        }
         if (written != sizeof(manifest)) {
             std::remove(tmp.c_str());
             return error_t("Short write on manifest temp file");
@@ -282,22 +291,17 @@ class persistent_index_gt {
 
     /// @brief  Open @p path in append mode, learning its current size.
     error_t open_wal_for_append_(std::string const& path) {
-        std::FILE* file = std::fopen(path.c_str(), "ab");
+        file_t file{std::fopen(path.c_str(), "ab")};
         if (!file)
             return error_t("Failed to open WAL for append");
-        std::FILE* probe = std::fopen(path.c_str(), "rb");
-        if (!probe) {
-            std::fclose(file);
-            return error_t("Failed to stat WAL file");
+        long size = -1;
+        if (file_t probe{std::fopen(path.c_str(), "rb")}) {
+            std::fseek(probe.get(), 0, SEEK_END);
+            size = std::ftell(probe.get());
         }
-        std::fseek(probe, 0, SEEK_END);
-        long size = std::ftell(probe);
-        std::fclose(probe);
-        if (size < 0) {
-            std::fclose(file);
+        if (size < 0)
             return error_t("Failed to stat WAL file");
-        }
-        wal_file_ = file;
+        wal_file_ = std::move(file);
         wal_path_ = path;
         wal_bytes_ = static_cast<std::uint64_t>(size);
         record_buffer_.reserve(1 + sizeof(vector_key_t) + vector_bytes_);
@@ -314,9 +318,10 @@ class persistent_index_gt {
         if (vector_or_null)
             std::memcpy(&record_buffer_[1 + sizeof(vector_key_t)], vector_or_null, vector_bytes_);
         std::uint32_t crc = crc32_ieee(record_buffer_.data(), payload_len);
-        std::fwrite(&payload_len, sizeof(payload_len), 1, wal_file_);
-        std::fwrite(&crc, sizeof(crc), 1, wal_file_);
-        std::fwrite(record_buffer_.data(), 1, payload_len, wal_file_);
+        std::FILE* out = wal_file_.get();
+        std::fwrite(&payload_len, sizeof(payload_len), 1, out);
+        std::fwrite(&crc, sizeof(crc), 1, out);
+        std::fwrite(record_buffer_.data(), 1, payload_len, out);
         wal_bytes_ += sizeof(payload_len) + sizeof(crc) + payload_len;
     }
 
@@ -325,11 +330,9 @@ class persistent_index_gt {
         // Probe for an existing manifest. Absence = fresh open.
         std::uint64_t generation = 0;
         bool manifest_exists = false;
-        if (std::FILE* file = std::fopen(manifest_path_().c_str(), "rb")) {
+        if (file_t file{std::fopen(manifest_path_().c_str(), "rb")}) {
             persistent_manifest_t manifest{};
-            std::size_t got = std::fread(&manifest, 1, sizeof(manifest), file);
-            std::fclose(file);
-            if (got != sizeof(manifest))
+            if (std::fread(&manifest, 1, sizeof(manifest), file.get()) != sizeof(manifest))
                 return error_t("Manifest is truncated");
             if (std::memcmp(manifest.magic, persistent_manifest_magic_k, 4) != 0)
                 return error_t("Manifest magic mismatch");
@@ -353,13 +356,14 @@ class persistent_index_gt {
                 return std::move(saved.error);
 
             std::string wal_path = gen_path_(".wal", 0);
-            std::FILE* file = std::fopen(wal_path.c_str(), "wb");
-            if (!file)
-                return error_t("Failed to create WAL file");
-            persistent_wal_header_t header = make_wal_header_();
-            std::fwrite(&header, sizeof(header), 1, file);
-            std::fflush(file);
-            std::fclose(file);
+            {
+                file_t file{std::fopen(wal_path.c_str(), "wb")};
+                if (!file)
+                    return error_t("Failed to create WAL file");
+                persistent_wal_header_t header = make_wal_header_();
+                std::fwrite(&header, sizeof(header), 1, file.get());
+                std::fflush(file.get());
+            }
 
             if (error_t err = open_wal_for_append_(wal_path))
                 return err;
@@ -377,10 +381,9 @@ class persistent_index_gt {
 
         std::string wal_path = gen_path_(".wal", generation_);
         std::uint64_t wal_size = 0;
-        if (std::FILE* probe = std::fopen(wal_path.c_str(), "rb")) {
-            std::fseek(probe, 0, SEEK_END);
-            long s = std::ftell(probe);
-            std::fclose(probe);
+        if (file_t probe{std::fopen(wal_path.c_str(), "rb")}) {
+            std::fseek(probe.get(), 0, SEEK_END);
+            long s = std::ftell(probe.get());
             if (s > 0)
                 wal_size = static_cast<std::uint64_t>(s);
         }
@@ -395,37 +398,31 @@ class persistent_index_gt {
         // Replay every well-framed WAL record onto `index_`, stopping at the
         // first incomplete or crc-mismatched one. The header is validated
         // against the loaded snapshot's metadata.
-        std::FILE* wal = std::fopen(wal_path.c_str(), "rb");
+        file_t wal{std::fopen(wal_path.c_str(), "rb")};
         if (!wal)
             return error_t("Failed to open WAL for replay");
         persistent_wal_header_t header{};
-        if (std::fread(&header, 1, sizeof(header), wal) != sizeof(header)) {
-            std::fclose(wal);
+        if (std::fread(&header, 1, sizeof(header), wal.get()) != sizeof(header))
             return error_t("WAL header truncated");
-        }
-        if (std::memcmp(header.magic, persistent_wal_magic_k, 4) != 0) {
-            std::fclose(wal);
+        if (std::memcmp(header.magic, persistent_wal_magic_k, 4) != 0)
             return error_t("WAL magic mismatch");
-        }
         if (header.dimensions != dimensions_ || header.scalar_kind != scalar_kind_ ||
-            header.metric_kind != metric_kind_) {
-            std::fclose(wal);
+            header.metric_kind != metric_kind_)
             return error_t("WAL metadata does not match the snapshot");
-        }
 
         std::uint32_t const max_payload = static_cast<std::uint32_t>(1 + sizeof(vector_key_t) + vector_bytes_);
         std::vector<char> buffer;
         buffer.reserve(max_payload);
         while (true) {
             std::uint32_t len = 0, crc = 0;
-            if (std::fread(&len, 1, sizeof(len), wal) != sizeof(len))
+            if (std::fread(&len, 1, sizeof(len), wal.get()) != sizeof(len))
                 break;
-            if (std::fread(&crc, 1, sizeof(crc), wal) != sizeof(crc))
+            if (std::fread(&crc, 1, sizeof(crc), wal.get()) != sizeof(crc))
                 break;
             if (len < 1 + sizeof(vector_key_t) || len > max_payload)
                 break;
             buffer.resize(len);
-            if (std::fread(buffer.data(), 1, len, wal) != len)
+            if (std::fread(buffer.data(), 1, len, wal.get()) != len)
                 break;
             if (crc32_ieee(buffer.data(), len) != crc)
                 break;
@@ -438,17 +435,14 @@ class persistent_index_gt {
                 if (!index_.contains(key)) {
                     scalar_t const* vector = reinterpret_cast<scalar_t const*>(&buffer[1 + sizeof(vector_key_t)]);
                     auto r = index_.add(key, vector);
-                    if (!r) {
-                        std::fclose(wal);
+                    if (!r)
                         return std::move(r.error);
-                    }
                 }
             } else if (op == persistent_op_remove_k)
                 index_.remove(key); // tolerant of an absent key
             else
                 break; // unknown op
         }
-        std::fclose(wal);
         return open_wal_for_append_(wal_path);
     }
 
@@ -507,50 +501,49 @@ class persistent_index_gt {
         // commit the manifest atomically, retire the old files.
         std::unique_lock<std::mutex> wal_lock(wal_mutex_);
         if (wal_file_)
-            std::fflush(wal_file_);
+            std::fflush(wal_file_.get());
 
         std::string old_wal = wal_path_;
         std::uint64_t suffix_start = checkpoint_watermark_;
         std::uint64_t suffix_end = wal_bytes_;
         std::string new_wal = gen_path_(".wal", checkpoint_gen_);
 
-        std::FILE* dst = std::fopen(new_wal.c_str(), "wb");
-        if (!dst) {
-            checkpoint_error_ = error_t("Failed to create new-gen WAL");
-            return;
-        }
-        persistent_wal_header_t header = make_wal_header_();
-        std::fwrite(&header, sizeof(header), 1, dst);
-
-        if (suffix_end > suffix_start) {
-            std::FILE* src = std::fopen(old_wal.c_str(), "rb");
-            if (!src) {
-                std::fclose(dst);
-                std::remove(new_wal.c_str());
-                checkpoint_error_ = error_t("Failed to open old WAL for suffix copy");
+        {
+            file_t dst{std::fopen(new_wal.c_str(), "wb")};
+            if (!dst) {
+                checkpoint_error_ = error_t("Failed to create new-gen WAL");
                 return;
             }
-            std::fseek(src, static_cast<long>(suffix_start), SEEK_SET);
-            char buffer[64 * 1024];
-            std::uint64_t remaining = suffix_end - suffix_start;
-            while (remaining > 0) {
-                std::size_t want = remaining < sizeof(buffer) ? static_cast<std::size_t>(remaining) : sizeof(buffer);
-                std::size_t got = std::fread(buffer, 1, want, src);
-                if (got == 0)
-                    break;
-                std::fwrite(buffer, 1, got, dst);
-                remaining -= got;
+            persistent_wal_header_t header = make_wal_header_();
+            std::fwrite(&header, sizeof(header), 1, dst.get());
+
+            if (suffix_end > suffix_start) {
+                file_t src{std::fopen(old_wal.c_str(), "rb")};
+                if (!src) {
+                    std::remove(new_wal.c_str());
+                    checkpoint_error_ = error_t("Failed to open old WAL for suffix copy");
+                    return;
+                }
+                std::fseek(src.get(), static_cast<long>(suffix_start), SEEK_SET);
+                char buffer[64 * 1024];
+                std::uint64_t remaining = suffix_end - suffix_start;
+                while (remaining > 0) {
+                    std::size_t want =
+                        remaining < sizeof(buffer) ? static_cast<std::size_t>(remaining) : sizeof(buffer);
+                    std::size_t got = std::fread(buffer, 1, want, src.get());
+                    if (got == 0)
+                        break;
+                    std::fwrite(buffer, 1, got, dst.get());
+                    remaining -= got;
+                }
             }
-            std::fclose(src);
+            std::fflush(dst.get());
         }
-        std::fflush(dst);
-        std::fclose(dst);
 
         // Swap the active WAL handle BEFORE the manifest commit: a crash here
         // still leaves the manifest pointing at the old generation and the
         // old WAL intact for recovery.
-        std::fclose(wal_file_);
-        wal_file_ = std::fopen(new_wal.c_str(), "ab");
+        wal_file_ = file_t{std::fopen(new_wal.c_str(), "ab")};
         if (!wal_file_) {
             checkpoint_error_ = error_t("Failed to reopen new WAL for append");
             return;
