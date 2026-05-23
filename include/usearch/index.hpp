@@ -1521,24 +1521,47 @@ struct index_config_t {
 };
 
 /**
+ *  @brief  Tag type selecting the "no upfront reservation" overload of
+ *          @ref index_limits_t.  Modeled after @c std::defer_lock: the
+ *          resulting limits are all-zero and produce no allocations when
+ *          handed to @ref index_dense_gt::try_reserve.
+ */
+struct unreserved_t {};
+constexpr unreserved_t unreserved{};
+
+/**
  *  @brief  Growth settings for the index container.
  *          Includes the upper bound for `::members` capacity,
  *          and the number of read/write threads expected to work with the index.
  */
 struct index_limits_t {
     /// @brief Maximum number of entries in the index.
-    std::size_t members = 0;
+    std::size_t members;
     /// @brief Max number of threads simultaneously updating entries.
-    std::size_t threads_add = std::thread::hardware_concurrency();
+    std::size_t threads_add;
     /// @brief Max number of threads simultaneously searching entries.
-    std::size_t threads_search = std::thread::hardware_concurrency();
+    std::size_t threads_search;
 
     inline index_limits_t(std::size_t n, std::size_t t) noexcept : members(n), threads_add(t), threads_search(t) {}
-    inline index_limits_t(std::size_t n = 0) noexcept : index_limits_t(n, std::thread::hardware_concurrency()) {}
+    inline index_limits_t(std::size_t n = 0) noexcept
+        : index_limits_t(n, (std::max<std::size_t>)(1, std::thread::hardware_concurrency())) {}
+    inline index_limits_t(unreserved_t) noexcept : members(0), threads_add(0), threads_search(0) {}
     /// @brief Returns the upper limit for the number of threads.
     inline std::size_t threads() const noexcept { return (std::max)(threads_add, threads_search); }
     /// @brief Returns the concurrency-level of the index - the minimum of thread counts.
     inline std::size_t concurrency() const noexcept { return (std::min)(threads_add, threads_search); }
+    /// @brief Returns a copy with zero thread counts replaced by the library default.
+    ///        Use when carrying limits forward across operations that may have left
+    ///        @c threads_add / @c threads_search unset (e.g. @c unreserved construction).
+    inline index_limits_t with_thread_defaults() const noexcept {
+        index_limits_t result = *this;
+        index_limits_t const defaults;
+        if (!result.threads_add)
+            result.threads_add = defaults.threads_add;
+        if (!result.threads_search)
+            result.threads_search = defaults.threads_search;
+        return result;
+    }
 };
 
 struct index_update_config_t {
