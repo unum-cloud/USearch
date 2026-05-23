@@ -3916,16 +3916,20 @@ class flat_hash_multi_set_gt {
             : index_(index), parent_(parent), query_(query), equals_(equals) {}
 
         // Pre-increment: advance past tombstones and non-matching entries,
-        // stopping at the next matching live entry or an empty slot.
+        // stopping at the next matching live entry or an empty slot. When every
+        // slot is either live or tombstoned (no empty slot exists), the probe
+        // saturates after `capacity_slots_` steps and the iterator becomes
+        // `end()` - otherwise the loop would spin forever.
         equal_iterator_gt& operator++() {
-            do {
+            for (std::size_t remaining = parent_->capacity_slots_; remaining; --remaining) {
                 index_ = (index_ + 1) & (parent_->capacity_slots_ - 1);
                 auto slot = parent_->slot_ref(index_);
                 bool is_empty = ~slot.header.populated & slot.mask;
                 bool is_match = !(slot.header.deleted & slot.mask) && equals_(slot.element, query_);
                 if (is_empty || is_match)
-                    break;
-            } while (true);
+                    return *this;
+            }
+            index_ = parent_->capacity_slots_; // saturated probe -> end()
             return *this;
         }
 
