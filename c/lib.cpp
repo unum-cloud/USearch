@@ -350,7 +350,8 @@ USEARCH_EXPORT void usearch_change_threads_add(usearch_index_t index, size_t thr
     auto& index_dense = *reinterpret_cast<index_dense_t*>(index);
     index_limits_t limits = index_dense.limits();
     limits.threads_add = threads;
-    index_dense.try_reserve(limits);
+    if (!index_dense.try_reserve(limits))
+        *error = "Out of memory!";
 }
 
 USEARCH_EXPORT void usearch_change_threads_search(usearch_index_t index, size_t threads, usearch_error_t* error) {
@@ -358,7 +359,8 @@ USEARCH_EXPORT void usearch_change_threads_search(usearch_index_t index, size_t 
     auto& index_dense = *reinterpret_cast<index_dense_t*>(index);
     index_limits_t limits = index_dense.limits();
     limits.threads_search = threads;
-    index_dense.try_reserve(limits);
+    if (!index_dense.try_reserve(limits))
+        *error = "Out of memory!";
 }
 
 USEARCH_EXPORT void usearch_change_metric_kind(usearch_index_t index, usearch_metric_kind_t kind,
