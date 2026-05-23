@@ -186,9 +186,11 @@ USEARCH_EXPORT usearch_index_t usearch_init(usearch_init_options_t* options, use
 
     using state_result_t = typename index_dense_t::state_result_t;
     state_result_t state = index_dense_t::make(metric, config);
-    if (!state)
+    if (!state) {
         *error = state.error.release();
-    index_dense_t* result_ptr = new index_dense_t(std::move(state.index));
+        return NULL;
+    }
+    index_dense_t* result_ptr = new (std::nothrow) index_dense_t(std::move(state.index));
     if (!result_ptr)
         *error = "Out of memory!";
 
