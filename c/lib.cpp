@@ -232,8 +232,10 @@ USEARCH_EXPORT void usearch_metadata(char const* path, usearch_init_options_t* o
 
     USEARCH_ASSERT(path && options && error && "Missing arguments");
     index_dense_metadata_result_t result = index_dense_metadata_from_path(path);
-    if (!result)
+    if (!result) {
         *error = result.error.release();
+        return;
+    }
 
     options->metric_kind = metric_kind_to_c(result.head.kind_metric);
     options->quantization = scalar_kind_to_c(result.head.kind_scalar);
@@ -281,8 +283,10 @@ USEARCH_EXPORT void usearch_metadata_buffer(void const* buffer, size_t length, u
     USEARCH_ASSERT(buffer && length && options && error && "Missing arguments");
     index_dense_metadata_result_t result =
         index_dense_metadata_from_buffer(memory_mapped_file_t((byte_t*)(buffer), length));
-    if (!result)
+    if (!result) {
         *error = result.error.release();
+        return;
+    }
 
     options->metric_kind = metric_kind_to_c(result.head.kind_metric);
     options->quantization = scalar_kind_to_c(result.head.kind_scalar);
