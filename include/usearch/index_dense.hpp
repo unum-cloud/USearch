@@ -635,16 +635,15 @@ class index_dense_gt {
      *  @param[in] metric One of the provided or an @b ad-hoc metric, type-punned.
      *  @param[in] config The index configuration (optional).
      *  @param[in] free_key The key used for freed vectors (optional).
+     *  @param[in] limits Initial reservation. Default sizes the thread pool to
+     *                    @c hardware_concurrency(); pass @c {unreserved} to skip.
      *  @return An instance of ::index_dense_gt or error, wrapped in a `state_result_t`.
-     *
-     *  ! If the `metric` isn't provided in this method, it has to be set with
-     *  ! the `change_metric` method before the index can be used. Alternatively,
-     *  ! if you are loading an existing index, the metric will be set automatically.
      */
     static state_result_t make(           //
         metric_t metric = {},             //
         index_dense_config_t config = {}, //
-        vector_key_t free_key = default_free_value<vector_key_t>()) {
+        vector_key_t free_key = default_free_value<vector_key_t>(),
+        index_limits_t limits = {}) {
 
         if (metric.missing())
             return state_result_t{}.failed("Metric won't be initialized!");
@@ -659,16 +658,15 @@ class index_dense_gt {
         index_dense_gt& index = result.index;
         index.config_ = config;
         index.free_key_ = free_key;
-
-        // In some cases the metric is not provided, and will be set later.
-        if (metric) {
-            scalar_kind_t scalar_kind = metric.scalar_kind();
-            index.casts_ = casts_punned_t::make(scalar_kind);
-            index.metric_ = metric;
-        }
+        index.casts_ = casts_punned_t::make(metric.scalar_kind());
+        index.metric_ = metric;
 
         new (raw) index_t(config);
         index.typed_ = raw;
+
+        if (!index.try_reserve(limits))
+            return state_result_t{}.failed("Failed to reserve memory for the index!");
+
         return result;
     }
 
@@ -1183,8 +1181,10 @@ class index_dense_gt {
                                             serialization_config_t config = {}, //
                                             progress_at&& progress = {}) {
 
-        // Discard all previous memory allocations of `vectors_tape_allocator_`
-        index_limits_t old_limits = typed_ ? typed_->limits() : index_limits_t{};
+        // Preserve any explicit thread counts from the prior index state; fall
+        // back to library defaults when they were never set (e.g. `unreserved`).
+        index_limits_t new_limits =
+            typed_ ? typed_->limits().with_thread_defaults() : index_limits_t{};
         reset();
 
         // Infer the new index size
@@ -1245,9 +1245,7 @@ class index_dense_gt {
 
             config_.multi = head.multi;
             metric_ = metric_t::builtin(head.dimensions, head.kind_metric, head.kind_scalar);
-            // available_threads_.size() will be updated to old_limits.threads() later in this
-            // method, so use that as the number of threads to prepare for.
-            cast_buffer_ = cast_buffer_t(old_limits.threads() * metric_.bytes_per_vector());
+            cast_buffer_ = cast_buffer_t(new_limits.threads() * metric_.bytes_per_vector());
             if (!cast_buffer_)
                 return result.failed("Failed to allocate memory for the casts");
             casts_ = casts_punned_t::make(head.kind_scalar);
@@ -1266,14 +1264,13 @@ class index_dense_gt {
             return result;
         if (typed_->size() != static_cast<std::size_t>(matrix_rows))
             return result.failed("Index size and the number of vectors doesn't match");
-        old_limits.members = static_cast<std::size_t>(matrix_rows);
-        if (!typed_->try_reserve(old_limits))
+        new_limits.members = static_cast<std::size_t>(matrix_rows);
+        if (!typed_->try_reserve(new_limits))
             return result.failed("Failed to reserve memory for the index");
 
-        // After the index is loaded, we may have to resize the `available_threads_` to
-        // match the limits of the underlying engine.
+        // After the index is loaded, resize `available_threads_` to match the new limits.
         available_threads_t available_threads;
-        std::size_t max_threads = old_limits.threads();
+        std::size_t max_threads = new_limits.threads();
         if (!available_threads.reserve(max_threads))
             return result.failed("Failed to allocate memory for the available threads!");
         for (std::size_t i = 0; i < max_threads; i++)
@@ -1297,8 +1294,10 @@ class index_dense_gt {
                                 std::size_t offset = 0, serialization_config_t config = {}, //
                                 progress_at&& progress = {}) {
 
-        // Discard all previous memory allocations of `vectors_tape_allocator_`
-        index_limits_t old_limits = typed_ ? typed_->limits() : index_limits_t{};
+        // Preserve any explicit thread counts from the prior index state; fall
+        // back to library defaults when they were never set (e.g. `unreserved`).
+        index_limits_t new_limits =
+            typed_ ? typed_->limits().with_thread_defaults() : index_limits_t{};
         reset();
 
         serialization_result_t result = file.open_if_not();
@@ -1362,8 +1361,7 @@ class index_dense_gt {
             config_.multi = head.multi;
             metric_ = metric_t::builtin(head.dimensions, head.kind_metric, head.kind_scalar);
             // available_threads_.size() will be updated to old_limits.threads() later in this
-            // method, so use that as the number of threads to prepare for.
-            cast_buffer_ = cast_buffer_t(old_limits.threads() * metric_.bytes_per_vector());
+            cast_buffer_ = cast_buffer_t(new_limits.threads() * metric_.bytes_per_vector());
             if (!cast_buffer_)
                 return result.failed("Failed to allocate memory for the casts");
             casts_ = casts_punned_t::make(head.kind_scalar);
@@ -1383,8 +1381,8 @@ class index_dense_gt {
             return result;
         if (typed_->size() != static_cast<std::size_t>(matrix_rows))
             return result.failed("Index size and the number of vectors doesn't match");
-        old_limits.members = static_cast<std::size_t>(matrix_rows);
-        if (!typed_->try_reserve(old_limits))
+        new_limits.members = static_cast<std::size_t>(matrix_rows);
+        if (!typed_->try_reserve(new_limits))
             return result.failed("Failed to reserve memory for the index");
 
         // Address the vectors
@@ -1395,10 +1393,9 @@ class index_dense_gt {
             for (std::uint64_t slot = 0; slot != matrix_rows; ++slot)
                 vectors_lookup_[slot] = (byte_t*)vectors_buffer.data() + matrix_cols * slot;
 
-        // After the index is loaded, we may have to resize the `available_threads_` to
-        // match the limits of the underlying engine.
+        // After the index is viewed, resize `available_threads_` to match the new limits.
         available_threads_t available_threads;
-        std::size_t max_threads = old_limits.threads();
+        std::size_t max_threads = new_limits.threads();
         if (!available_threads.reserve(max_threads))
             return result.failed("Failed to allocate memory for the available threads!");
         for (std::size_t i = 0; i < max_threads; i++)

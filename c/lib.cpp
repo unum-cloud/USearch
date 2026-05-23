@@ -192,10 +192,6 @@ USEARCH_EXPORT usearch_index_t usearch_init(usearch_init_options_t* options, use
     if (!result_ptr)
         *error = "Out of memory!";
 
-    // Let's immediately make it usable by reserving enough threads for this machine:
-    if (!result_ptr->try_reserve(index_limits_t()))
-        *error = "Out of memory when preparing contexts!";
-
     return result_ptr;
 }
 
