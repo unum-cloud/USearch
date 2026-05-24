@@ -176,12 +176,61 @@ namespace usearch {
 
 using byte_t = char;
 
+struct checked_size_result_t {
+    std::size_t value;
+    bool overflow;
+    constexpr checked_size_result_t(std::size_t value = 0, bool overflow = false) noexcept
+        : value(value), overflow(overflow) {}
+    constexpr explicit operator bool() const noexcept { return !overflow; }
+};
+
+constexpr checked_size_result_t checked_size_overflow() noexcept { return {0, true}; }
+
+constexpr checked_size_result_t checked_size_from_u64(std::uint64_t value) noexcept {
+    return value > static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)())
+               ? checked_size_overflow()
+               : checked_size_result_t{static_cast<std::size_t>(value), false};
+}
+
+constexpr checked_size_result_t checked_add(std::size_t a, std::size_t b) noexcept {
+    return (std::numeric_limits<std::size_t>::max)() - a < b ? checked_size_overflow()
+                                                             : checked_size_result_t{a + b, false};
+}
+
+constexpr checked_size_result_t checked_mul(std::size_t a, std::size_t b) noexcept {
+    return a && b > (std::numeric_limits<std::size_t>::max)() / a ? checked_size_overflow()
+                                                                  : checked_size_result_t{a * b, false};
+}
+
+constexpr checked_size_result_t checked_mul_add_(checked_size_result_t product, std::size_t c) noexcept {
+    return product ? checked_add(product.value, c) : product;
+}
+
+constexpr checked_size_result_t checked_mul_add(std::size_t a, std::size_t b, std::size_t c) noexcept {
+    return checked_mul_add_(checked_mul(a, b), c);
+}
+
 template <std::size_t multiple_ak> std::size_t divide_round_up(std::size_t num) noexcept {
     return (num + multiple_ak - 1) / multiple_ak;
 }
 
 inline std::size_t divide_round_up(std::size_t num, std::size_t denominator) noexcept {
     return (num + denominator - 1) / denominator;
+}
+
+constexpr checked_size_result_t checked_divide_round_up(std::size_t num, std::size_t denominator) noexcept {
+    return !denominator ? checked_size_overflow()
+           : (std::numeric_limits<std::size_t>::max)() - num < denominator - 1
+               ? checked_size_overflow()
+               : checked_size_result_t{(num + denominator - 1) / denominator, false};
+}
+
+constexpr checked_size_result_t checked_round_up_(checked_size_result_t quotient, std::size_t multiple) noexcept {
+    return quotient ? checked_mul(quotient.value, multiple) : quotient;
+}
+
+constexpr checked_size_result_t checked_round_up(std::size_t num, std::size_t multiple) noexcept {
+    return checked_round_up_(checked_divide_round_up(num, multiple), multiple);
 }
 
 inline std::size_t ceil2(std::size_t v) noexcept {
@@ -196,6 +245,14 @@ inline std::size_t ceil2(std::size_t v) noexcept {
 #endif
     v++;
     return v;
+}
+
+inline checked_size_result_t checked_ceil2(std::size_t v) noexcept {
+    if (!v)
+        return checked_size_result_t{0, false};
+    if (v > (std::size_t{1} << ((sizeof(std::size_t) * CHAR_BIT) - 1)))
+        return checked_size_overflow();
+    return checked_size_result_t{ceil2(v), false};
 }
 
 /// @brief  Simply dereferencing misaligned pointers can be dangerous.
@@ -525,9 +582,12 @@ template <typename allocator_at = std::allocator<byte_t>> class bitset_gt {
         count_ = 0;
     }
 
-    bitset_gt(std::size_t capacity) noexcept
-        : slots_((compressed_slot_t*)allocator_t{}.allocate(bits_slots(capacity) * sizeof(compressed_slot_t))),
-          count_(slots_ ? bits_slots(capacity) : 0u) {
+    bitset_gt(std::size_t capacity) noexcept {
+        checked_size_result_t slots_count = checked_divide_round_up(capacity, bits_per_slot());
+        checked_size_result_t bytes =
+            slots_count ? checked_mul(slots_count.value, sizeof(compressed_slot_t)) : slots_count;
+        slots_ = bytes ? (compressed_slot_t*)allocator_t{}.allocate(bytes.value) : nullptr;
+        count_ = slots_ ? slots_count.value : 0u;
         clear();
     }
 
@@ -654,10 +714,19 @@ class striped_locks_gt {
     }
 
     striped_locks_gt(std::size_t threads, std::size_t connectivity) noexcept {
-        std::size_t desired = threads * connectivity * 4;
-        if (desired < 256)
-            desired = 256;
-        count_ = ceil2(desired);
+        checked_size_result_t desired = checked_mul(threads, connectivity);
+        desired = desired ? checked_mul(desired.value, std::size_t{4}) : desired;
+        if (!desired) {
+            shift_ = 64;
+            return;
+        }
+
+        checked_size_result_t count = checked_ceil2((std::max<std::size_t>)(desired.value, 256));
+        if (!count) {
+            shift_ = 64;
+            return;
+        }
+        count_ = count.value;
         shift_ = 64;
         for (std::size_t n = count_; n > 1; n >>= 1)
             shift_--;
@@ -665,7 +734,13 @@ class striped_locks_gt {
         // `cache_line_ak`-aligned address inside the allocation, regardless of
         // what the underlying allocator returns.
         constexpr std::size_t alignment_k = alignof(padded_lock_t);
-        raw_bytes_ = count_ * sizeof(padded_lock_t) + alignment_k;
+        checked_size_result_t raw_bytes = checked_mul_add(count_, sizeof(padded_lock_t), alignment_k);
+        if (!raw_bytes) {
+            count_ = 0;
+            shift_ = 64;
+            return;
+        }
+        raw_bytes_ = raw_bytes.value;
         raw_ = allocator_t{}.allocate(raw_bytes_);
         if (!raw_) {
             raw_bytes_ = 0;
@@ -850,10 +925,14 @@ class max_heap_gt {
         if (new_capacity <= capacity_)
             return true;
 
-        new_capacity = ceil2(new_capacity);
-        if (new_capacity == 0)
+        checked_size_result_t rounded_capacity = checked_ceil2(new_capacity);
+        if (!rounded_capacity)
             return false;
-        new_capacity = (std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u));
+        checked_size_result_t doubled_capacity = checked_mul(capacity_, std::size_t{2});
+        if (!doubled_capacity)
+            return false;
+        new_capacity =
+            (std::max<std::size_t>)(rounded_capacity.value, (std::max<std::size_t>)(doubled_capacity.value, 16u));
         auto allocator = allocator_t{};
         auto new_elements = allocator.allocate(new_capacity);
         if (!new_elements)
@@ -1018,10 +1097,14 @@ class sorted_buffer_gt {
         if (new_capacity <= capacity_)
             return true;
 
-        new_capacity = ceil2(new_capacity);
-        if (new_capacity == 0)
+        checked_size_result_t rounded_capacity = checked_ceil2(new_capacity);
+        if (!rounded_capacity)
             return false;
-        new_capacity = (std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u));
+        checked_size_result_t doubled_capacity = checked_mul(capacity_, std::size_t{2});
+        if (!doubled_capacity)
+            return false;
+        new_capacity =
+            (std::max<std::size_t>)(rounded_capacity.value, (std::max<std::size_t>)(doubled_capacity.value, 16u));
         auto allocator = allocator_t{};
         auto new_elements = allocator.allocate(new_capacity);
         if (!new_elements)
@@ -1246,9 +1329,11 @@ class growing_hash_set_gt {
         count_ = 0;
     }
 
-    growing_hash_set_gt(std::size_t capacity) noexcept
-        : slots_((element_t*)allocator_t{}.allocate(ceil2(capacity) * sizeof(element_t))),
-          capacity_(slots_ ? ceil2(capacity) : 0u), count_(0u) {
+    growing_hash_set_gt(std::size_t capacity) noexcept : count_(0u) {
+        checked_size_result_t slots_count = checked_ceil2(capacity);
+        checked_size_result_t bytes = slots_count ? checked_mul(slots_count.value, sizeof(element_t)) : slots_count;
+        slots_ = bytes ? (element_t*)allocator_t{}.allocate(bytes.value) : nullptr;
+        capacity_ = slots_ ? slots_count.value : 0u;
         clear();
     }
 
@@ -1306,12 +1391,21 @@ class growing_hash_set_gt {
      *  @return `true` if enough capacity is available, `false` if memory allocation failed.
      */
     bool reserve(std::size_t new_capacity) noexcept {
-        new_capacity = (new_capacity * 5u) / 3u;
+        checked_size_result_t scaled_capacity = checked_mul(new_capacity, std::size_t{5});
+        if (!scaled_capacity)
+            return false;
+        new_capacity = scaled_capacity.value / 3u;
         if (new_capacity <= capacity_)
             return true;
 
-        new_capacity = ceil2(new_capacity);
-        element_t* new_slots = (element_t*)allocator_t{}.allocate(new_capacity * sizeof(element_t));
+        checked_size_result_t rounded_capacity = checked_ceil2(new_capacity);
+        if (!rounded_capacity)
+            return false;
+        new_capacity = rounded_capacity.value;
+        checked_size_result_t new_bytes = checked_mul(new_capacity, sizeof(element_t));
+        if (!new_bytes)
+            return false;
+        element_t* new_slots = (element_t*)allocator_t{}.allocate(new_bytes.value);
         if (!new_slots)
             return false;
 
@@ -1414,7 +1508,10 @@ class ring_gt {
             return false; // prevent data loss
         if (n <= capacity())
             return true;
-        n = (std::max<std::size_t>)(ceil2(n), 64u);
+        checked_size_result_t rounded_capacity = checked_ceil2(n);
+        if (!rounded_capacity)
+            return false;
+        n = (std::max<std::size_t>)(rounded_capacity.value, 64u);
         element_t* elements = allocator_.allocate(n);
         if (!elements)
             return false;
@@ -1503,12 +1600,22 @@ struct index_config_t {
     inline error_t validate() noexcept {
         if (connectivity == 0)
             connectivity = default_connectivity();
-        if (connectivity_base == 0)
-            connectivity_base = connectivity * 2;
+        if (connectivity_base == 0) {
+            checked_size_result_t default_base = checked_mul(connectivity, std::size_t{2});
+            if (!default_base)
+                return "Connectivity is too large";
+            connectivity_base = default_base.value;
+        }
         if (connectivity < 2)
             return "Connectivity must be at least 2, otherwise the index degenerates into ropes";
         if (connectivity_base < connectivity)
             return "Base layer should be at least as connected as the rest of the graph";
+        checked_size_result_t neighbors_bytes =
+            checked_mul_add(connectivity, sizeof(std::uint64_t), sizeof(std::uint32_t));
+        checked_size_result_t neighbors_base_bytes =
+            checked_mul_add(connectivity_base, sizeof(std::uint64_t), sizeof(std::uint32_t));
+        if (!neighbors_bytes || !neighbors_base_bytes)
+            return "Connectivity is too large";
         return {};
     }
 
@@ -3555,26 +3662,31 @@ class index_gt {
 
         // Progress status
         std::size_t processed = 0;
-        std::size_t const total = 2 * header.size;
+        checked_size_result_t header_size = checked_size_from_u64(header.size);
+        if (!header_size)
+            return result.failed("Index is too large to serialize");
+        checked_size_result_t total = checked_mul(std::size_t{2}, header_size.value);
+        if (!total)
+            return result.failed("Index is too large to serialize");
 
         // Export the number of levels per node
         // That is both enough to estimate the overall memory consumption,
         // and to be able to estimate the offsets of every entry in the file.
-        for (std::size_t i = 0; i != header.size; ++i) {
+        for (std::size_t i = 0; i != header_size.value; ++i) {
             node_t node = node_at_(i);
             level_t level = node.level();
             if (!output(&level, sizeof(level)))
                 return result.failed("Failed to serialize into stream");
-            if (!progress(++processed, total))
+            if (!progress(++processed, total.value))
                 return result.failed("Terminated by user");
         }
 
         // After that dump the nodes themselves
-        for (std::size_t i = 0; i != header.size; ++i) {
+        for (std::size_t i = 0; i != header_size.value; ++i) {
             span_bytes_t node_bytes = node_bytes_(node_at_(i));
             if (!output(node_bytes.data(), node_bytes.size()))
                 return result.failed("Failed to serialize into stream");
-            if (!progress(++processed, total))
+            if (!progress(++processed, total.value))
                 return result.failed("Terminated by user");
         }
 
@@ -3606,10 +3718,16 @@ class index_gt {
 
         // Allocate some dynamic memory to read all the levels
         using levels_allocator_t = typename dynamic_allocator_traits_t::template rebind_alloc<level_t>;
-        buffer_gt<level_t, levels_allocator_t> levels(header.size);
+        checked_size_result_t header_size = checked_size_from_u64(header.size);
+        if (!header_size)
+            return result.failed("Index is too large");
+        buffer_gt<level_t, levels_allocator_t> levels(header_size.value);
         if (!levels)
             return result.failed("Out of memory");
-        if (!input(levels, header.size * sizeof(level_t)))
+        checked_size_result_t levels_bytes = checked_mul(header_size.value, sizeof(level_t));
+        if (!levels_bytes)
+            return result.failed("Index is too large");
+        if (!input(levels, levels_bytes.value))
             return result.failed("Failed to pull nodes levels from the stream");
 
         // Submit metadata
@@ -3621,26 +3739,26 @@ class index_gt {
 
         pre_ = precompute_(config_);
         index_limits_t limits;
-        limits.members = header.size;
+        limits.members = header_size.value;
         limits.threads_add = (std::max<std::size_t>)(1, old_limits.threads_add);
         limits.threads_search = (std::max<std::size_t>)(1, old_limits.threads_search);
         if (!reserve(limits)) {
             reset();
             return result.failed("Out of memory");
         }
-        nodes_count_ = header.size;
+        nodes_count_ = header_size.value;
         max_level_ = static_cast<level_t>(header.max_level);
         entry_slot_ = static_cast<compressed_slot_t>(header.entry_slot);
 
         // Load the nodes
-        for (std::size_t i = 0; i != header.size; ++i) {
+        for (std::size_t i = 0; i != header_size.value; ++i) {
             span_bytes_t node_bytes = node_malloc_(levels[i]);
             if (!input(node_bytes.data(), node_bytes.size())) {
                 reset();
                 return result.failed("Failed to pull nodes from the stream");
             }
             nodes_[i] = node_t{node_bytes.data()};
-            if (!progress(i + 1, header.size))
+            if (!progress(i + 1, header_size.value))
                 return result.failed("Terminated by user");
         }
         return {};
@@ -3787,11 +3905,14 @@ class index_gt {
             reset();
             return result;
         }
+        checked_size_result_t header_size = checked_size_from_u64(header.size);
+        if (!header_size)
+            return result.failed("Index is too large");
 
         // Precompute offsets of every node, but before that we need to update the configs
         // This could have been done with `std::exclusive_scan`, but it's only available from C++17.
         using offsets_allocator_t = typename dynamic_allocator_traits_t::template rebind_alloc<std::size_t>;
-        buffer_gt<std::size_t, offsets_allocator_t> offsets(header.size);
+        buffer_gt<std::size_t, offsets_allocator_t> offsets(header_size.value);
         if (!offsets)
             return result.failed("Out of memory");
 
@@ -3803,33 +3924,47 @@ class index_gt {
 
         pre_ = precompute_(config_);
         misaligned_ptr_gt<level_t> levels{(byte_t*)file.data() + offset + sizeof(header)};
-        offsets[0u] = offset + sizeof(header) + sizeof(level_t) * header.size;
-        for (std::size_t i = 1; i < header.size; ++i)
-            offsets[i] = offsets[i - 1] + node_bytes_(levels[i - 1]);
+        checked_size_result_t levels_bytes = checked_mul(sizeof(level_t), header_size.value);
+        checked_size_result_t offset_after_header = checked_add(offset, sizeof(header));
+        checked_size_result_t first_offset = levels_bytes && offset_after_header
+                                                 ? checked_add(offset_after_header.value, levels_bytes.value)
+                                                 : checked_size_overflow();
+        if (!first_offset)
+            return result.failed("Index is too large");
+        offsets[0u] = first_offset.value;
+        for (std::size_t i = 1; i < header_size.value; ++i) {
+            checked_size_result_t next_offset = checked_add(offsets[i - 1], node_bytes_(levels[i - 1]));
+            if (!next_offset)
+                return result.failed("Index is too large");
+            offsets[i] = next_offset.value;
+        }
 
-        std::size_t total_bytes = offsets[header.size - 1] + node_bytes_(levels[header.size - 1]);
-        if (file.size() < total_bytes) {
+        checked_size_result_t total_bytes =
+            checked_add(offsets[header_size.value - 1], node_bytes_(levels[header_size.value - 1]));
+        if (!total_bytes)
+            return result.failed("Index is too large");
+        if (file.size() < total_bytes.value) {
             reset();
             return result.failed("File is corrupted and can't fit all the nodes");
         }
 
         // Submit metadata and reserve memory
         index_limits_t limits;
-        limits.members = header.size;
+        limits.members = header_size.value;
         limits.threads_add = (std::max<std::size_t>)(1, old_limits.threads_add);
         limits.threads_search = (std::max<std::size_t>)(1, old_limits.threads_search);
         if (!reserve(limits)) {
             reset();
             return result.failed("Out of memory");
         }
-        nodes_count_ = header.size;
+        nodes_count_ = header_size.value;
         max_level_ = static_cast<level_t>(header.max_level);
         entry_slot_ = static_cast<compressed_slot_t>(header.entry_slot);
 
         // Rapidly address all the nodes
-        for (std::size_t i = 0; i != header.size; ++i) {
+        for (std::size_t i = 0; i != header_size.value; ++i) {
             nodes_[i] = node_t{(byte_t*)file.data() + offsets[i]};
-            if (!progress(i + 1, header.size))
+            if (!progress(i + 1, header_size.value))
                 return result.failed("Terminated by user");
         }
         viewed_file_ = std::move(file);
@@ -3881,7 +4016,9 @@ class index_gt {
         // Progress status
         std::atomic<bool> do_tasks{true};
         std::atomic<std::size_t> processed{0};
-        std::size_t const total = 3 * slots_and_levels.size();
+        checked_size_result_t total = checked_mul(std::size_t{3}, slots_and_levels.size());
+        if (!total)
+            return;
 
         // For every bottom level node, determine its parent cluster
         executor.dynamic(slots_and_levels.size(), [&](std::size_t thread_idx, std::size_t old_slot_as_uint) {
@@ -3894,7 +4031,7 @@ class index_gt {
             slots_and_levels[old_slot] = {old_slot, cluster, node_at_(old_slot).level()};
             ++processed;
             if (thread_idx == 0)
-                do_tasks = progress(processed.load(), total);
+                do_tasks = progress(processed.load(), total.value);
             return do_tasks.load();
         });
         if (!do_tasks.load())
@@ -3928,7 +4065,7 @@ class index_gt {
                     neighbor = static_cast<compressed_slot_t>(old_slot_to_new[compressed_slot_t(neighbor)]);
 
             reordered_nodes[new_slot] = new_node;
-            if (!progress(++processed, total))
+            if (!progress(++processed, total.value))
                 return;
         }
 
@@ -3937,7 +4074,7 @@ class index_gt {
             slot_transition(node_at_(old_slot).ckey(),                //
                             static_cast<compressed_slot_t>(old_slot), //
                             static_cast<compressed_slot_t>(new_slot));
-            if (!progress(++processed, total))
+            if (!progress(++processed, total.value))
                 return;
         }
 
