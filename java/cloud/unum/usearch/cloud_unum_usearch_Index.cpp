@@ -146,19 +146,13 @@ JNIEXPORT jlong JNICALL Java_cloud_unum_usearch_Index_c_1capacity(JNIEnv*, jclas
 
 JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1reserve(JNIEnv* env, jclass, jlong c_ptr, jlong capacity,
                                                                 jlong threads_add, jlong threads_search) {
-    std::size_t t_add = static_cast<std::size_t>(threads_add);
-    std::size_t t_search = static_cast<std::size_t>(threads_search);
-    if (t_add == 0 || t_search == 0) {
-        std::size_t hc = std::thread::hardware_concurrency();
-        if (hc == 0)
-            hc = 1; // fallback to 1 if the runtime can't  report
-        if (t_add == 0)
-            t_add = hc;
-        if (t_search == 0)
-            t_search = hc;
-    }
-    index_limits_t limits(static_cast<std::size_t>(capacity), t_add);
-    limits.threads_search = t_search;
+    // A zero from the caller means "use the library default", which is centrally
+    // floored at `max(1, hardware_concurrency())` inside `index_limits_t`.
+    index_limits_t limits = threads_add ? index_limits_t(static_cast<std::size_t>(capacity),
+                                                         static_cast<std::size_t>(threads_add))
+                                        : index_limits_t(static_cast<std::size_t>(capacity));
+    if (threads_search)
+        limits.threads_search = static_cast<std::size_t>(threads_search);
     if (!reinterpret_cast<index_dense_t*>(c_ptr)->try_reserve(limits)) {
         jclass jc = (*env).FindClass("java/lang/Error");
         if (jc)

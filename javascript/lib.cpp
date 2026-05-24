@@ -320,8 +320,10 @@ Napi::Value CompiledIndex::Remove(Napi::CallbackInfo const& ctx) {
     Napi::Array results = Napi::Array::New(env, length);
     for (std::size_t i = 0; i < length; ++i) {
         auto result = native_->remove(static_cast<default_key_t>(keys[i]));
-        if (!result)
-            Napi::Error::New(ctx.Env(), result.error.release()).ThrowAsJavaScriptException();
+        if (!result) {
+            Napi::Error::New(env, result.error.release()).ThrowAsJavaScriptException();
+            return env.Null();
+        }
         results[i] = Napi::Number::New(env, result.completed);
     }
     return results;

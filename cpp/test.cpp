@@ -17,6 +17,7 @@
 #include <csignal> // `std::signal`, `SIGSEGV`, ...
 #include <cstdio>  // `std::fprintf`
 #include <cstdlib> // `std::_Exit`
+#include <limits>  // `std::numeric_limits`
 
 #include <algorithm>     // `std::shuffle`
 #include <random>        // `std::default_random_engine`
@@ -214,6 +215,47 @@ void test_uint40() {
     // Test default constructor (zero initialization)
     uint40_t u40_default;
     expect_eq(u40_default, uint40_t(0u));
+}
+
+void test_checked_size_arithmetic() {
+
+    std::printf("Testing checked size arithmetic\n");
+    std::size_t max = (std::numeric_limits<std::size_t>::max)();
+
+    checked_size_result_t cast = checked_size_from_u64(42);
+    expect(cast);
+    expect_eq(cast.value, static_cast<std::size_t>(42));
+    if (sizeof(std::size_t) < sizeof(std::uint64_t))
+        expect(!checked_size_from_u64((std::numeric_limits<std::uint64_t>::max)()));
+
+    checked_size_result_t sum = checked_add(max - 1, 1);
+    expect(sum);
+    expect_eq(sum.value, max);
+    expect(!checked_add(max, 1));
+
+    checked_size_result_t product = checked_mul(max / 2, 2);
+    expect(product);
+    expect_eq(product.value, max - 1);
+    expect(!checked_mul(max / 2 + 1, 2));
+
+    checked_size_result_t fused = checked_mul_add(10, 20, 30);
+    expect(fused);
+    expect_eq(fused.value, static_cast<std::size_t>(230));
+    expect(!checked_mul_add(max / 2 + 1, 2, 0));
+    expect(!checked_mul_add(max / 2, 2, 2));
+
+    checked_size_result_t rounded = checked_round_up(17, 8);
+    expect(rounded);
+    expect_eq(rounded.value, static_cast<std::size_t>(24));
+    expect(!checked_round_up(max, 8));
+
+    checked_size_result_t power = checked_ceil2(17);
+    expect(power);
+    expect_eq(power.value, static_cast<std::size_t>(32));
+    checked_size_result_t zero_power = checked_ceil2(0);
+    expect(zero_power);
+    expect_eq(zero_power.value, static_cast<std::size_t>(0));
+    expect(!checked_ceil2(max));
 }
 
 /**
@@ -1264,6 +1306,61 @@ static void install_crash_handlers() {
         std::signal(signal_number, &usearch_crash_handler);
 }
 
+/**
+ *  @brief  Regression test: `make(metric, config)` must return an index that is
+ *          immediately usable - no explicit `reserve` required before `load` /
+ *          `view` / `search`. Previously the typed graph's `{0, 0}` thread
+ *          limits leaked into `load_from_stream`, leaving `available_threads_`
+ *          empty and making the first `search` throw "No available threads to
+ *          lock".
+ */
+void test_load_after_metric_make() {
+    std::printf("Testing load and view into a metric-made index\n");
+
+    using index_t = index_dense_gt<std::int64_t, std::uint32_t>;
+    std::size_t const dimensions = 32;
+    std::size_t const collection = 64;
+
+    std::default_random_engine rng(7);
+    std::uniform_real_distribution<float> distribution(-1.f, 1.f);
+    std::vector<std::vector<float>> data(collection);
+    for (auto& vector : data) {
+        vector.resize(dimensions);
+        for (auto& value : vector)
+            value = distribution(rng);
+    }
+
+    metric_punned_t metric(dimensions, metric_kind_t::cos_k, scalar_kind<f32_t>());
+    index_dense_config_t config(16);
+
+    // Build an index and persist it to disk.
+    index_t::state_result_t built = index_t::make(metric, config);
+    expect(built);
+    expect(built.index.try_reserve(collection));
+    for (std::size_t i = 0; i != collection; ++i)
+        expect(built.index.add(static_cast<std::int64_t>(i), data[i].data()));
+    char const* path = "tmp_metric_make.usearch";
+    expect(built.index.save(path));
+
+    // Load into a fresh, metric-made index that was never explicitly reserved.
+    // The first `search` must not throw "No available threads to lock".
+    index_t::state_result_t loaded = index_t::make(metric, config);
+    expect(loaded);
+    expect(loaded.index.load(path));
+    expect_eq(loaded.index.size(), collection);
+    std::int64_t found[8];
+    expect(loaded.index.search(data[0].data(), 5).dump_to(found) != 0);
+
+    // Same check for the memory-mapped `view` path.
+    index_t::state_result_t viewed = index_t::make(metric, config);
+    expect(viewed);
+    expect(viewed.index.view(path));
+    expect_eq(viewed.index.size(), collection);
+    expect(viewed.index.search(data[0].data(), 5).dump_to(found) != 0);
+
+    std::remove(path);
+}
+
 int main(int, char**) {
     install_crash_handlers();
 
@@ -1272,6 +1369,7 @@ int main(int, char**) {
 
     // Non-default floating-point types may result in many compilation & rounding issues.
     test_uint40();
+    test_checked_size_arithmetic();
     test_cosine<f32_t, std::int64_t, uint40_t>(10, 10);
     test_cosine<bf16_t, std::int64_t, uint40_t>(10, 10);
     test_cosine<f16_t, std::int64_t, uint40_t>(10, 10);
@@ -1354,5 +1452,6 @@ int main(int, char**) {
 
     test_filtered_search();
     test_isolate();
+    test_load_after_metric_make();
     return 0;
 }
