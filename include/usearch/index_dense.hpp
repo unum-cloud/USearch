@@ -1683,6 +1683,11 @@ class index_dense_gt {
      */
     labeling_result_t rename(vector_key_t from, vector_key_t to) {
         labeling_result_t result;
+        if (from == to) {
+            result.completed = count(from);
+            return result;
+        }
+
         unique_lock_t lookup_lock(slot_lookup_mutex_);
 
         if (!multi() && slot_lookup_.contains(key_and_slot_t::any_slot(to)))
