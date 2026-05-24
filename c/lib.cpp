@@ -373,8 +373,13 @@ USEARCH_EXPORT void usearch_change_metric_kind(usearch_index_t index, usearch_me
                                                usearch_error_t* error) {
     USEARCH_ASSERT(index && error && "Missing arguments");
     auto& index_dense = *reinterpret_cast<index_dense_t*>(index);
-    if (!index_dense.try_change_metric(
-            metric_punned_t::builtin(index_dense.dimensions(), metric_kind_to_cpp(kind), index_dense.scalar_kind())))
+    auto metric_punned =
+        metric_punned_t::builtin(index_dense.dimensions(), metric_kind_to_cpp(kind), index_dense.scalar_kind());
+    if (metric_punned.missing()) {
+        *error = "Unsupported metric for this index's dimensions and scalar kind!";
+        return;
+    }
+    if (!index_dense.try_change_metric(std::move(metric_punned)))
         *error = "Failed to grow cast buffer for the new metric!";
 }
 
@@ -389,6 +394,10 @@ USEARCH_EXPORT void usearch_change_metric(usearch_index_t index, usearch_metric_
               : metric_punned_t::stateless(index_dense.dimensions(), reinterpret_cast<std::uintptr_t>(metric),
                                            metric_punned_signature_t::array_array_k, metric_kind_to_cpp(kind),
                                            index_dense.scalar_kind());
+    if (metric_punned.missing()) {
+        *error = "Unsupported metric for this index's dimensions and scalar kind!";
+        return;
+    }
     if (!index_dense.try_change_metric(std::move(metric_punned)))
         *error = "Failed to grow cast buffer for the new metric!";
 }
