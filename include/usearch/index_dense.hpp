@@ -550,6 +550,9 @@ class index_dense_gt {
             : parent(other.parent), thread_id(other.thread_id), engaged(other.engaged) {
             other.engaged = false;
         }
+        explicit operator bool() const noexcept {
+            return parent.typed_ && thread_id != any_thread() && thread_id < parent.typed_->limits().threads();
+        }
     };
 
   public:
@@ -1016,6 +1019,8 @@ class index_dense_gt {
 
         index_cluster_config_t cluster_config;
         thread_lock_t lock = thread_lock_(thread);
+        if (!lock)
+            return cluster_result_t{}.failed("Reserve capacity ahead of searches!");
         cluster_config.thread = lock.thread_id;
         cluster_config.expansion = config_.expansion_search;
         metric_proxy_t metric{*this};
@@ -2136,10 +2141,9 @@ class index_dense_gt {
         if (thread_id != any_thread())
             return {*this, thread_id, false};
 
-        available_threads_mutex_.lock();
-        usearch_assert_m(available_threads_.size(), "No available threads to lock");
-        available_threads_.try_pop(thread_id);
-        available_threads_mutex_.unlock();
+        std::unique_lock<std::mutex> lock(available_threads_mutex_);
+        if (!available_threads_.try_pop(thread_id))
+            return {*this, any_thread(), false};
         return {*this, thread_id, true};
     }
 
@@ -2160,6 +2164,8 @@ class index_dense_gt {
 
         // Cast the vector, if needed for compatibility with `metric_`
         thread_lock_t lock = thread_lock_(thread);
+        if (!lock)
+            return add_result_t{}.failed("Reserve capacity ahead of insertions!");
         byte_t const* vector_data = reinterpret_cast<byte_t const*>(vector);
         {
             byte_t* casted_data = cast_buffer_.data() + metric_.bytes_per_vector() * lock.thread_id;
@@ -2213,6 +2219,8 @@ class index_dense_gt {
 
         // Cast the vector, if needed for compatibility with `metric_`
         thread_lock_t lock = thread_lock_(thread);
+        if (!lock)
+            return search_result_t{*this}.failed("Reserve capacity ahead of searches!");
         byte_t const* vector_data = reinterpret_cast<byte_t const*>(vector);
         {
             byte_t* casted_data = cast_buffer_.data() + metric_.bytes_per_vector() * lock.thread_id;
@@ -2249,6 +2257,8 @@ class index_dense_gt {
 
         // Cast the vector, if needed for compatibility with `metric_`
         thread_lock_t lock = thread_lock_(thread);
+        if (!lock)
+            return cluster_result_t{}.failed("Reserve capacity ahead of searches!");
         byte_t const* vector_data = reinterpret_cast<byte_t const*>(vector);
         {
             byte_t* casted_data = cast_buffer_.data() + metric_.bytes_per_vector() * lock.thread_id;
@@ -2273,6 +2283,8 @@ class index_dense_gt {
 
         // Cast the vector, if needed for compatibility with `metric_`
         thread_lock_t lock = thread_lock_(thread);
+        if (!lock)
+            return {};
         byte_t const* vector_data = reinterpret_cast<byte_t const*>(vector);
         {
             byte_t* casted_data = cast_buffer_.data() + metric_.bytes_per_vector() * lock.thread_id;

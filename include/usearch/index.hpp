@@ -2543,6 +2543,14 @@ class index_gt {
     /// @brief  Array of thread-specific buffers for temporary data.
     mutable buffer_gt<context_t, contexts_allocator_t> contexts_{};
 
+    context_t* context_or_null_(std::size_t thread) noexcept {
+        return thread < contexts_.size() ? contexts_.data() + thread : nullptr;
+    }
+
+    context_t const* context_or_null_(std::size_t thread) const noexcept {
+        return thread < contexts_.size() ? contexts_.data() + thread : nullptr;
+    }
+
   public:
     std::size_t connectivity() const noexcept { return config_.connectivity; }
     std::size_t capacity() const noexcept { return nodes_capacity_; }
@@ -3156,7 +3164,10 @@ class index_gt {
             return result.failed("Can't add to an immutable index");
 
         // Make sure we have enough local memory to perform this request
-        context_t& context = contexts_[config.thread];
+        context_t* context_ptr = context_or_null_(config.thread);
+        if (!context_ptr)
+            return result.failed("Reserve capacity ahead of insertions!");
+        context_t& context = *context_ptr;
         top_candidates_t& top = context.top_candidates;
         next_candidates_t& next = context.next_candidates;
         top.clear();
@@ -3294,7 +3305,10 @@ class index_gt {
         compressed_slot_t updated_slot = iterator.slot_;
 
         // Make sure we have enough local memory to perform this request
-        context_t& context = contexts_[config.thread];
+        context_t* context_ptr = context_or_null_(config.thread);
+        if (!context_ptr)
+            return result.failed("Reserve capacity ahead of updates!");
+        context_t& context = *context_ptr;
         top_candidates_t& top = context.top_candidates;
         next_candidates_t& next = context.next_candidates;
         top.clear();
