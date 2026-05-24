@@ -17,6 +17,7 @@
 #include <csignal> // `std::signal`, `SIGSEGV`, ...
 #include <cstdio>  // `std::fprintf`
 #include <cstdlib> // `std::_Exit`
+#include <limits>  // `std::numeric_limits`
 
 #include <algorithm>     // `std::shuffle`
 #include <random>        // `std::default_random_engine`
@@ -214,6 +215,47 @@ void test_uint40() {
     // Test default constructor (zero initialization)
     uint40_t u40_default;
     expect_eq(u40_default, uint40_t(0u));
+}
+
+void test_checked_size_arithmetic() {
+
+    std::printf("Testing checked size arithmetic\n");
+    std::size_t max = (std::numeric_limits<std::size_t>::max)();
+
+    checked_size_result_t cast = checked_size_from_u64(42);
+    expect(cast);
+    expect_eq(cast.value, static_cast<std::size_t>(42));
+    if (sizeof(std::size_t) < sizeof(std::uint64_t))
+        expect(!checked_size_from_u64((std::numeric_limits<std::uint64_t>::max)()));
+
+    checked_size_result_t sum = checked_add(max - 1, 1);
+    expect(sum);
+    expect_eq(sum.value, max);
+    expect(!checked_add(max, 1));
+
+    checked_size_result_t product = checked_mul(max / 2, 2);
+    expect(product);
+    expect_eq(product.value, max - 1);
+    expect(!checked_mul(max / 2 + 1, 2));
+
+    checked_size_result_t fused = checked_mul_add(10, 20, 30);
+    expect(fused);
+    expect_eq(fused.value, static_cast<std::size_t>(230));
+    expect(!checked_mul_add(max / 2 + 1, 2, 0));
+    expect(!checked_mul_add(max / 2, 2, 2));
+
+    checked_size_result_t rounded = checked_round_up(17, 8);
+    expect(rounded);
+    expect_eq(rounded.value, static_cast<std::size_t>(24));
+    expect(!checked_round_up(max, 8));
+
+    checked_size_result_t power = checked_ceil2(17);
+    expect(power);
+    expect_eq(power.value, static_cast<std::size_t>(32));
+    checked_size_result_t zero_power = checked_ceil2(0);
+    expect(zero_power);
+    expect_eq(zero_power.value, static_cast<std::size_t>(0));
+    expect(!checked_ceil2(max));
 }
 
 /**
@@ -1327,6 +1369,7 @@ int main(int, char**) {
 
     // Non-default floating-point types may result in many compilation & rounding issues.
     test_uint40();
+    test_checked_size_arithmetic();
     test_cosine<f32_t, std::int64_t, uint40_t>(10, 10);
     test_cosine<bf16_t, std::int64_t, uint40_t>(10, 10);
     test_cosine<f16_t, std::int64_t, uint40_t>(10, 10);

@@ -276,15 +276,22 @@ inline index_dense_metadata_result_t index_dense_metadata_from_path(char const* 
 
     std::uint32_t dimensions_u32[2]{0};
     std::memcpy(dimensions_u32, result.head_buffer, sizeof(dimensions_u32));
-    std::size_t offset_if_u32 = std::size_t(dimensions_u32[0]) * dimensions_u32[1] + sizeof(dimensions_u32);
+    checked_size_result_t offset_if_u32 =
+        checked_mul_add(std::size_t(dimensions_u32[0]), std::size_t(dimensions_u32[1]), sizeof(dimensions_u32));
 
     std::uint64_t dimensions_u64[2]{0};
     std::memcpy(dimensions_u64, result.head_buffer, sizeof(dimensions_u64));
-    std::size_t offset_if_u64 = std::size_t(dimensions_u64[0]) * dimensions_u64[1] + sizeof(dimensions_u64);
+    checked_size_result_t rows_if_u64 = checked_size_from_u64(dimensions_u64[0]);
+    checked_size_result_t columns_if_u64 = checked_size_from_u64(dimensions_u64[1]);
+    checked_size_result_t offset_if_u64 =
+        rows_if_u64 && columns_if_u64 ? checked_mul_add(rows_if_u64.value, columns_if_u64.value, sizeof(dimensions_u64))
+                                      : checked_size_overflow();
 
     // Check if it starts with 32-bit
-    if (offset_if_u32 + sizeof(index_dense_head_buffer_t) < file_size) {
-        if (std::fseek(file.get(), static_cast<long>(offset_if_u32), SEEK_SET) != 0)
+    checked_size_result_t head_offset_if_u32 =
+        offset_if_u32 ? checked_add(offset_if_u32.value, sizeof(index_dense_head_buffer_t)) : offset_if_u32;
+    if (head_offset_if_u32 && head_offset_if_u32.value < file_size) {
+        if (std::fseek(file.get(), static_cast<long>(offset_if_u32.value), SEEK_SET) != 0)
             return result.failed(std::strerror(errno));
         read = std::fread(result.head_buffer, sizeof(index_dense_head_buffer_t), 1, file.get());
         if (!read)
@@ -299,8 +306,10 @@ inline index_dense_metadata_result_t index_dense_metadata_from_path(char const* 
     }
 
     // Check if it starts with 64-bit
-    if (offset_if_u64 + sizeof(index_dense_head_buffer_t) < file_size) {
-        if (std::fseek(file.get(), static_cast<long>(offset_if_u64), SEEK_SET) != 0)
+    checked_size_result_t head_offset_if_u64 =
+        offset_if_u64 ? checked_add(offset_if_u64.value, sizeof(index_dense_head_buffer_t)) : offset_if_u64;
+    if (head_offset_if_u64 && head_offset_if_u64.value < file_size) {
+        if (std::fseek(file.get(), static_cast<long>(offset_if_u64.value), SEEK_SET) != 0)
             return result.failed(std::strerror(errno));
         read = std::fread(result.head_buffer, sizeof(index_dense_head_buffer_t), 1, file.get());
         if (!read)
@@ -341,15 +350,22 @@ inline index_dense_metadata_result_t index_dense_metadata_from_buffer(memory_map
     // Check if it starts with 32-bit
     std::uint32_t dimensions_u32[2]{0};
     std::memcpy(dimensions_u32, result.head_buffer, sizeof(dimensions_u32));
-    std::size_t offset_if_u32 = std::size_t(dimensions_u32[0]) * dimensions_u32[1] + sizeof(dimensions_u32);
+    checked_size_result_t offset_if_u32 =
+        checked_mul_add(std::size_t(dimensions_u32[0]), std::size_t(dimensions_u32[1]), sizeof(dimensions_u32));
 
     std::uint64_t dimensions_u64[2]{0};
     std::memcpy(dimensions_u64, result.head_buffer, sizeof(dimensions_u64));
-    std::size_t offset_if_u64 = std::size_t(dimensions_u64[0]) * dimensions_u64[1] + sizeof(dimensions_u64);
+    checked_size_result_t rows_if_u64 = checked_size_from_u64(dimensions_u64[0]);
+    checked_size_result_t columns_if_u64 = checked_size_from_u64(dimensions_u64[1]);
+    checked_size_result_t offset_if_u64 =
+        rows_if_u64 && columns_if_u64 ? checked_mul_add(rows_if_u64.value, columns_if_u64.value, sizeof(dimensions_u64))
+                                      : checked_size_overflow();
 
     // Check if it starts with 32-bit
-    if (offset_if_u32 + sizeof(index_dense_head_buffer_t) < file_size) {
-        std::memcpy(&result.head_buffer, file_data + offset_if_u32, sizeof(index_dense_head_buffer_t));
+    checked_size_result_t head_offset_if_u32 =
+        offset_if_u32 ? checked_add(offset_if_u32.value, sizeof(index_dense_head_buffer_t)) : offset_if_u32;
+    if (head_offset_if_u32 && head_offset_if_u32.value < file_size) {
+        std::memcpy(&result.head_buffer, file_data + offset_if_u32.value, sizeof(index_dense_head_buffer_t));
         result.config.exclude_vectors = false;
         result.config.use_64_bit_dimensions = false;
         if (std::memcmp(result.head_buffer, default_magic(), std::strlen(default_magic())) == 0)
@@ -357,8 +373,10 @@ inline index_dense_metadata_result_t index_dense_metadata_from_buffer(memory_map
     }
 
     // Check if it starts with 64-bit
-    if (offset_if_u64 + sizeof(index_dense_head_buffer_t) < file_size) {
-        std::memcpy(&result.head_buffer, file_data + offset_if_u64, sizeof(index_dense_head_buffer_t));
+    checked_size_result_t head_offset_if_u64 =
+        offset_if_u64 ? checked_add(offset_if_u64.value, sizeof(index_dense_head_buffer_t)) : offset_if_u64;
+    if (head_offset_if_u64 && head_offset_if_u64.value < file_size) {
+        std::memcpy(&result.head_buffer, file_data + offset_if_u64.value, sizeof(index_dense_head_buffer_t));
         result.config.exclude_vectors = false;
         result.config.use_64_bit_dimensions = true;
         if (std::memcmp(result.head_buffer, default_magic(), std::strlen(default_magic())) == 0)
@@ -710,9 +728,11 @@ class index_dense_gt {
      *          left untouched in that case so the index stays consistent.
      */
     bool try_change_metric(metric_t metric) noexcept {
-        std::size_t needed_bytes = limits().threads() * metric.bytes_per_vector();
-        if (needed_bytes > cast_buffer_.size()) {
-            cast_buffer_t new_buffer(needed_bytes);
+        checked_size_result_t needed_bytes = checked_mul(limits().threads(), metric.bytes_per_vector());
+        if (!needed_bytes)
+            return false;
+        if (needed_bytes.value > cast_buffer_.size()) {
+            cast_buffer_t new_buffer(needed_bytes.value);
             if (!new_buffer)
                 return false;
             cast_buffer_ = std::move(new_buffer);
@@ -1055,7 +1075,10 @@ class index_dense_gt {
             available_threads_.push(i);
 
         // Allocate a buffer for the casted vectors.
-        cast_buffer_t cast_buffer(limits.threads() * metric_.bytes_per_vector());
+        checked_size_result_t cast_buffer_bytes = checked_mul(limits.threads(), metric_.bytes_per_vector());
+        if (!cast_buffer_bytes)
+            return false;
+        cast_buffer_t cast_buffer(cast_buffer_bytes.value);
         if (!cast_buffer)
             return false;
         cast_buffer_ = std::move(cast_buffer);
@@ -1269,7 +1292,10 @@ class index_dense_gt {
 
             config_.multi = head.multi;
             metric_ = metric_t::builtin(head.dimensions, head.kind_metric, head.kind_scalar);
-            cast_buffer_ = cast_buffer_t(new_limits.threads() * metric_.bytes_per_vector());
+            checked_size_result_t cast_buffer_bytes = checked_mul(new_limits.threads(), metric_.bytes_per_vector());
+            if (!cast_buffer_bytes)
+                return result.failed("Failed to allocate memory for the casts");
+            cast_buffer_ = cast_buffer_t(cast_buffer_bytes.value);
             if (!cast_buffer_)
                 return result.failed("Failed to allocate memory for the casts");
             casts_ = casts_punned_t::make(head.kind_scalar);
@@ -1384,7 +1410,10 @@ class index_dense_gt {
             config_.multi = head.multi;
             metric_ = metric_t::builtin(head.dimensions, head.kind_metric, head.kind_scalar);
             // available_threads_.size() will be updated to old_limits.threads() later in this
-            cast_buffer_ = cast_buffer_t(new_limits.threads() * metric_.bytes_per_vector());
+            checked_size_result_t cast_buffer_bytes = checked_mul(new_limits.threads(), metric_.bytes_per_vector());
+            if (!cast_buffer_bytes)
+                return result.failed("Failed to allocate memory for the casts");
+            cast_buffer_ = cast_buffer_t(cast_buffer_bytes.value);
             if (!cast_buffer_)
                 return result.failed("Failed to allocate memory for the casts");
             casts_ = casts_punned_t::make(head.kind_scalar);

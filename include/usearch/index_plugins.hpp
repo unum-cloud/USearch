@@ -1572,21 +1572,24 @@ class aligned_allocator_gt {
     constexpr std::size_t alignment() const { return alignment_ak; }
 
     pointer allocate(size_type length) const {
-        std::size_t length_bytes = alignment_ak * divide_round_up<alignment_ak>(length * sizeof(value_type));
-        // Avoid overflow
-        if (length > length_bytes)
+        checked_size_result_t bytes = checked_mul(length, sizeof(value_type));
+        if (!bytes)
             return nullptr;
+        checked_size_result_t length_bytes = checked_round_up(bytes.value, alignment_ak);
+        if (!length_bytes)
+            return nullptr;
+
         std::size_t alignment = alignment_ak;
 #if defined(USEARCH_DEFINED_WINDOWS)
-        return (pointer)_aligned_malloc(length_bytes, alignment);
+        return (pointer)_aligned_malloc(length_bytes.value, alignment);
 #elif defined(USEARCH_DEFINED_APPLE) || defined(USEARCH_DEFINED_ANDROID)
         // Apple Clang keeps complaining that `aligned_alloc` is only available
         // with macOS 10.15 and newer or Android API >= 28, so let's use `posix_memalign` there.
         void* result = nullptr;
-        int status = posix_memalign(&result, alignment, length_bytes);
+        int status = posix_memalign(&result, alignment, length_bytes.value);
         return status == 0 ? (pointer)result : nullptr;
 #else
-        return (pointer)aligned_alloc(alignment, length_bytes);
+        return (pointer)aligned_alloc(alignment, length_bytes.value);
 #endif
     }
 
@@ -1615,7 +1618,10 @@ class page_allocator_t {
      *  @return A pointer to the allocated memory block, or `nullptr` if allocation fails.
      */
     byte_t* allocate(std::size_t count_bytes) const noexcept {
-        count_bytes = divide_round_up(count_bytes, page_size()) * page_size();
+        checked_size_result_t rounded_bytes = checked_round_up(count_bytes, page_size());
+        if (!rounded_bytes)
+            return nullptr;
+        count_bytes = rounded_bytes.value;
 #if defined(USEARCH_DEFINED_WINDOWS)
         return (byte_t*)(::VirtualAlloc(NULL, count_bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
 #else
@@ -1628,7 +1634,10 @@ class page_allocator_t {
 #if defined(USEARCH_DEFINED_WINDOWS)
         ::VirtualFree(page_pointer, 0, MEM_RELEASE);
 #else
-        count_bytes = divide_round_up(count_bytes, page_size()) * page_size();
+        checked_size_result_t rounded_bytes = checked_round_up(count_bytes, page_size());
+        if (!rounded_bytes)
+            return;
+        count_bytes = rounded_bytes.value;
         munmap(page_pointer, count_bytes);
 #endif
     }
@@ -1724,25 +1733,39 @@ template <std::size_t alignment_ak = 1> class memory_mapping_allocator_gt {
      *  @return A pointer to the allocated memory block, or `nullptr` if allocation fails.
      */
     inline byte_t* allocate(std::size_t count_bytes) noexcept {
-        std::size_t extended_bytes = divide_round_up<alignment_ak>(count_bytes) * alignment_ak;
+        checked_size_result_t extended_bytes = checked_round_up(count_bytes, alignment_ak);
+        if (!extended_bytes)
+            return nullptr;
         std::unique_lock<std::mutex> lock(mutex_);
-        if (!last_arena_ || (last_usage_ + extended_bytes >= last_capacity_)) {
-            std::size_t new_cap = (std::max)(last_capacity_, ceil2(extended_bytes)) * capacity_multiplier();
-            byte_t* new_arena = page_allocator_t{}.allocate(new_cap);
+        checked_size_result_t next_usage = checked_add(last_usage_, extended_bytes.value);
+        if (!next_usage)
+            return nullptr;
+        if (!last_arena_ || (next_usage.value >= last_capacity_)) {
+            checked_size_result_t rounded_bytes = checked_ceil2(extended_bytes.value);
+            if (!rounded_bytes)
+                return nullptr;
+            checked_size_result_t new_cap =
+                checked_mul((std::max)(last_capacity_, rounded_bytes.value), capacity_multiplier());
+            if (!new_cap)
+                return nullptr;
+            checked_size_result_t new_total_allocated = checked_add(total_allocated_, new_cap.value);
+            if (!new_total_allocated)
+                return nullptr;
+            byte_t* new_arena = page_allocator_t{}.allocate(new_cap.value);
             if (!new_arena)
                 return nullptr;
             std::memcpy(new_arena, &last_arena_, sizeof(byte_t*));
-            std::memcpy(new_arena + sizeof(byte_t*), &new_cap, sizeof(std::size_t));
+            std::memcpy(new_arena + sizeof(byte_t*), &new_cap.value, sizeof(std::size_t));
 
             wasted_space_ += total_reserved();
             last_arena_ = new_arena;
-            last_capacity_ = new_cap;
+            last_capacity_ = new_cap.value;
             last_usage_ = head_size();
-            total_allocated_ += new_cap;
+            total_allocated_ = new_total_allocated.value;
         }
 
-        wasted_space_ += extended_bytes - count_bytes;
-        return last_arena_ + exchange(last_usage_, last_usage_ + extended_bytes);
+        wasted_space_ += extended_bytes.value - count_bytes;
+        return last_arena_ + exchange(last_usage_, last_usage_ + extended_bytes.value);
     }
 
     /**
@@ -3774,7 +3797,10 @@ class flat_hash_multi_set_gt {
         }
 
         // Allocate new memory
-        data_ = (char*)allocator_t{}.allocate(other.buckets_ * bytes_per_bucket());
+        checked_size_result_t bytes = checked_mul(other.buckets_, bytes_per_bucket());
+        if (!bytes)
+            usearch_raise_runtime_error("failed memory allocation");
+        data_ = (char*)allocator_t{}.allocate(bytes.value);
         if (!data_)
             usearch_raise_runtime_error("failed memory allocation");
 
@@ -3814,7 +3840,10 @@ class flat_hash_multi_set_gt {
             allocator_t{}.deallocate(data_, buckets_ * bytes_per_bucket());
 
         // Allocate new memory
-        data_ = (char*)allocator_t{}.allocate(other.buckets_ * bytes_per_bucket());
+        checked_size_result_t bytes = checked_mul(other.buckets_, bytes_per_bucket());
+        if (!bytes)
+            usearch_raise_runtime_error("failed memory allocation");
+        data_ = (char*)allocator_t{}.allocate(bytes.value);
         if (!data_)
             usearch_raise_runtime_error("failed memory allocation");
 
@@ -3863,22 +3892,37 @@ class flat_hash_multi_set_gt {
     }
 
     bool try_reserve(std::size_t capacity) noexcept {
-        if (capacity * 3u <= capacity_slots_ * 2u)
+        if (capacity <= (capacity_slots_ / 3u) * 2u)
             return true;
 
         // Calculate new sizes
-        std::size_t new_slots = ceil2((capacity * 3ul) / 2ul);
-        std::size_t new_buckets = divide_round_up<slots_per_bucket()>(new_slots);
-        new_slots = new_buckets * slots_per_bucket(); // This must be a power of two!
-        std::size_t new_bytes = new_buckets * bytes_per_bucket();
+        checked_size_result_t scaled_capacity = checked_mul(capacity, std::size_t{3});
+        if (!scaled_capacity)
+            return false;
+        checked_size_result_t slots_needed = checked_divide_round_up(scaled_capacity.value, std::size_t{2});
+        if (!slots_needed)
+            return false;
+        checked_size_result_t new_slots_checked = checked_ceil2(slots_needed.value);
+        if (!new_slots_checked)
+            return false;
+        checked_size_result_t new_buckets_checked =
+            checked_divide_round_up(new_slots_checked.value, slots_per_bucket());
+        if (!new_buckets_checked)
+            return false;
+        checked_size_result_t new_slots = checked_mul(new_buckets_checked.value, slots_per_bucket());
+        if (!new_slots)
+            return false;
+        checked_size_result_t new_bytes = checked_mul(new_buckets_checked.value, bytes_per_bucket());
+        if (!new_bytes)
+            return false;
 
         // Allocate new memory
-        char* new_data = (char*)allocator_t{}.allocate(new_bytes);
+        char* new_data = (char*)allocator_t{}.allocate(new_bytes.value);
         if (!new_data)
             return false;
 
         // Initialize new buckets to empty
-        std::memset(new_data, 0, new_bytes);
+        std::memset(new_data, 0, new_bytes.value);
 
         // Rehash and copy existing elements to new_data
         hash_t hasher;
@@ -3889,7 +3933,7 @@ class flat_hash_multi_set_gt {
 
             // Rehash
             std::size_t hash_value = hasher(old_slot.element);
-            std::size_t new_slot_index = hash_value & (new_slots - 1);
+            std::size_t new_slot_index = hash_value & (new_slots.value - 1);
 
             // Linear probing to find an empty slot in new_data
             while (true) {
@@ -3899,7 +3943,7 @@ class flat_hash_multi_set_gt {
                     new_slot.header.populated |= new_slot.mask;
                     break;
                 }
-                new_slot_index = (new_slot_index + 1) & (new_slots - 1);
+                new_slot_index = (new_slot_index + 1) & (new_slots.value - 1);
             }
         }
 
@@ -3907,8 +3951,8 @@ class flat_hash_multi_set_gt {
         if (data_)
             allocator_t{}.deallocate(data_, buckets_ * bytes_per_bucket());
         data_ = new_data;
-        buckets_ = new_buckets;
-        capacity_slots_ = new_slots;
+        buckets_ = new_buckets_checked.value;
+        capacity_slots_ = new_slots.value;
 
         return true;
     }
