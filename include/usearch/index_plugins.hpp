@@ -1948,6 +1948,11 @@ template <typename from_scalar_at> struct cast_to_i8_gt {
         for (std::size_t i = 0; i != dim; ++i)
             magnitude += (double)typed_input[i] * (double)typed_input[i];
         magnitude = std::sqrt(magnitude);
+        // `!(x > 0)` also catches NaN; cast-to-int of NaN is UB.
+        if (!(magnitude > 0.0)) {
+            std::fill_n(typed_output, dim, std::int8_t{0});
+            return true;
+        }
         for (std::size_t i = 0; i != dim; ++i)
             typed_output[i] =
                 static_cast<std::int8_t>(usearch::clamp<double>(typed_input[i] * 127.0 / magnitude, -127.0, 127.0));
@@ -1973,6 +1978,11 @@ template <typename from_scalar_at> struct cast_to_u8_gt {
         for (std::size_t i = 0; i != dim; ++i)
             magnitude += (double)typed_input[i] * (double)typed_input[i];
         magnitude = std::sqrt(magnitude);
+        // `!(x > 0)` also catches NaN; cast-to-int of NaN is UB.
+        if (!(magnitude > 0.0)) {
+            std::fill_n(typed_output, dim, std::uint8_t{0});
+            return true;
+        }
         for (std::size_t i = 0; i != dim; ++i)
             typed_output[i] =
                 static_cast<std::uint8_t>(usearch::clamp<double>(typed_input[i] * 255.0 / magnitude, 0.0, 255.0));
