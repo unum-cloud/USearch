@@ -137,6 +137,7 @@ jobs:
         run: |
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_c.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
+          cp "${{ github.workspace }}/build_artifacts/numkong/libnumkong.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
           dotnet test -c Debug --logger "console;verbosity=detailed"
         shell: bash
         working-directory: ${{ github.workspace }}/csharp
@@ -218,6 +219,7 @@ jobs:
         run: |
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_c.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
+          cp "${{ github.workspace }}/build_artifacts/numkong/libnumkong.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
           dotnet test -c Debug --logger "console;verbosity=detailed"
         shell: bash
         working-directory: ${{ github.workspace }}/csharp
@@ -307,8 +309,8 @@ jobs:
         # C/C++
       - name: Build C/C++
         run: |
-          choco install cmake
-          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=0
+          choco install cmake -y
+          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=0 -D USEARCH_USE_NUMKONG=1
           cmake --build build_artifacts --config RelWithDebInfo
       - name: Test C++
         run: .\build_artifacts\test_cpp.exe
@@ -353,11 +355,13 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
+        shell: pwsh
         run: |
-          mkdir -p "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
-          cp "${{ github.workspace }}\build_artifacts\libusearch_c.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
+          $nativeDir = "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
+          New-Item -ItemType Directory -Force -Path $nativeDir | Out-Null
+          Copy-Item "${{ github.workspace }}\build_artifacts\libusearch_c.dll" -Destination $nativeDir
+          Copy-Item "${{ github.workspace }}\build_artifacts\numkong.dll" -Destination $nativeDir
           dotnet test -c Debug --logger "console;verbosity=detailed"
-        shell: bash
         working-directory: ${{ github.workspace }}/csharp
 
   test_windows_arm:

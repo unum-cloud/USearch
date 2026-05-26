@@ -379,6 +379,21 @@ function (setup_target TARGET_NAME)
     if (USEARCH_USE_NUMKONG AND TARGET nk_shared)
         target_compile_definitions(${TARGET_NAME} PRIVATE "NK_DYNAMIC_DISPATCH=1")
         target_link_libraries(${TARGET_NAME} PRIVATE nk_shared)
+
+        # Keep NumKong discoverable both in the build tree (`build/numkong`) and
+        # after packaging it next to `libusearch_c` in language bindings.
+        if (APPLE)
+            set(_USEARCH_NUMKONG_RPATH "@loader_path;@loader_path/numkong")
+        elseif (UNIX AND NOT CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
+            set(_USEARCH_NUMKONG_RPATH "$ORIGIN;$ORIGIN/numkong")
+        endif ()
+
+        if (DEFINED _USEARCH_NUMKONG_RPATH)
+            set_target_properties(
+                ${TARGET_NAME} PROPERTIES BUILD_RPATH "${_USEARCH_NUMKONG_RPATH}"
+                                          INSTALL_RPATH "${_USEARCH_NUMKONG_RPATH}"
+            )
+        endif ()
     endif ()
 
 endfunction ()
@@ -394,6 +409,19 @@ if (USEARCH_USE_NUMKONG)
 
     if (TARGET nk_shared)
         set_target_properties(nk_shared PROPERTIES ENABLE_EXPORTS ON)
+
+        # Windows has no RPATH equivalent, so the dynamic loader only finds
+        # NumKong reliably when it sits next to the binaries that link it.
+        if (WIN32)
+            set_target_properties(
+                nk_shared
+                PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+                           RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}"
+                           RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}"
+                           RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}"
+                           RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}"
+            )
+        endif ()
     endif ()
 endif ()
 
