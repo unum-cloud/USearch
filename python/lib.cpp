@@ -52,7 +52,14 @@ using progress_func_t = std::function<bool(std::size_t /*processed*/, std::size_
 struct progress_t {
     inline progress_t(std::nullptr_t = nullptr) : func_(&dummy_progress) {}
     inline progress_t(progress_func_t const& func) : func_(func ? func : &dummy_progress) {}
-    inline bool operator()(std::size_t processed, std::size_t total) const noexcept { return func_(processed, total); }
+    // The callback may be invoked from a worker thread while the main thread
+    // has released the GIL around a long-running C++ call. `gil_scoped_acquire`
+    // is reference-counted and a no-op when the GIL is already held, so this
+    // is safe in every context.
+    inline bool operator()(std::size_t processed, std::size_t total) const noexcept {
+        py::gil_scoped_acquire acquire;
+        return func_(processed, total);
+    }
 
   private:
     static inline bool dummy_progress(std::size_t /*processed*/, std::size_t /*total*/) { return true; }
@@ -68,11 +75,24 @@ struct dense_index_py_t : public index_dense_t {
     using native_t::search;
     using native_t::size;
 
+    // Serializes Python-thread access to the underlying C++ index. The native
+    // `index_dense_t` assumes a single owning Python thread (it carries
+    // per-worker `cast_buffer_` slots indexed by an executor-local `thread_idx`
+    // that the binding picks for each call). Multiple Python threads calling
+    // a heavy op on the same index would otherwise collide on those slots.
+    // Locked around every binding entry point that releases the GIL.
+    //
+    // Held via `unique_ptr` so that the wrapper remains move-constructible -
+    // `std::mutex` itself is neither copyable nor movable, and pybind11's
+    // return-by-value factories require movability.
+    mutable std::unique_ptr<std::mutex> mutex_ptr_ = std::make_unique<std::mutex>();
+
     dense_index_py_t(native_t&& base) : index_dense_t(std::move(base)) {}
 };
 
 struct dense_indexes_py_t {
     std::vector<std::shared_ptr<dense_index_py_t>> shards_;
+    mutable std::unique_ptr<std::mutex> mutex_ptr_ = std::make_unique<std::mutex>();
 
     void merge(std::shared_ptr<dense_index_py_t> shard) { shards_.push_back(shard); }
     std::size_t bytes_per_vector() const noexcept { return shards_.empty() ? 0 : shards_[0]->bytes_per_vector(); }
@@ -85,6 +105,12 @@ struct dense_indexes_py_t {
 
         shards_.reserve(shards_.size() + paths.size());
         std::mutex shards_mutex;
+        // Release the GIL *before* taking the per-index mutex so a Python
+        // thread waiting on the mutex doesn't hold the GIL - otherwise a
+        // worker thread in the current owner would block forever in
+        // `gil_scoped_acquire`.
+        py::gil_scoped_release release;
+        std::unique_lock<std::mutex> lock(*mutex_ptr_);
         executor_default_t{threads}.dynamic(paths.size(), [&](std::size_t, std::size_t task_idx) {
             index_dense_t index = index_dense_t::make(paths[task_idx].c_str(), view);
             if (!index)
@@ -92,6 +118,7 @@ struct dense_indexes_py_t {
             auto shared_index = std::make_shared<dense_index_py_t>(std::move(index));
             std::unique_lock<std::mutex> lock(shards_mutex);
             shards_.push_back(shared_index);
+            py::gil_scoped_acquire acquire;
             if (PyErr_CheckSignals() != 0)
                 throw py::error_already_set();
             return true;
@@ -181,24 +208,33 @@ static void add_typed_to_index(                                            //
     progress_t progress_{progress};
     std::atomic<std::size_t> processed{0};
 
-    executor_default_t{threads}.dynamic(vectors_count, [&](std::size_t thread_idx, std::size_t task_idx) {
-        dense_key_t key = *reinterpret_cast<dense_key_t const*>(keys_data + task_idx * keys_info.strides[0]);
-        scalar_at const* vector = reinterpret_cast<scalar_at const*>(vectors_data + task_idx * vectors_info.strides[0]);
-        dense_add_result_t result = index.add(key, vector, thread_idx, force_copy);
-        if (!result) {
-            atomic_error = result.error.release();
-            return false;
-        }
-
-        // We don't want to check for signals from multiple threads
-        ++processed;
-        if (thread_idx == 0)
-            if (PyErr_CheckSignals() != 0 || !progress_(processed.load(), vectors_count)) {
-                atomic_error.store("Operation has been terminated");
+    {
+        py::gil_scoped_release release;
+        std::unique_lock<std::mutex> lock(*index.mutex_ptr_);
+        if (!index.try_reserve(index_limits_t(ceil2(index.size() + vectors_count), threads)))
+            throw std::invalid_argument("Out of memory!");
+        executor_default_t{threads}.dynamic(vectors_count, [&](std::size_t thread_idx, std::size_t task_idx) {
+            dense_key_t key = *reinterpret_cast<dense_key_t const*>(keys_data + task_idx * keys_info.strides[0]);
+            scalar_at const* vector =
+                reinterpret_cast<scalar_at const*>(vectors_data + task_idx * vectors_info.strides[0]);
+            dense_add_result_t result = index.add(key, vector, thread_idx, force_copy);
+            if (!result) {
+                atomic_error = result.error.release();
                 return false;
             }
-        return true;
-    });
+
+            // We don't want to check for signals from multiple threads
+            ++processed;
+            if (thread_idx == 0) {
+                py::gil_scoped_acquire acquire;
+                if (PyErr_CheckSignals() != 0 || !progress_(processed.load(), vectors_count)) {
+                    atomic_error.store("Operation has been terminated");
+                    return false;
+                }
+            }
+            return true;
+        });
+    }
 
     // At the end report the latest numbers, because the reporter thread may be finished earlier
     progress_(processed.load(), vectors_count);
@@ -244,8 +280,10 @@ static void add_many_to_index(                            //
 
     if (!threads)
         threads = std::thread::hardware_concurrency();
-    if (!index.try_reserve(index_limits_t(ceil2(index.size() + vectors_count), threads)))
-        throw std::invalid_argument("Out of memory!");
+
+    // `add_typed_to_index` does the `try_reserve` + executor work inside its
+    // own GIL-released, mutex-locked region; we just dispatch on the scalar
+    // kind here.
 
     // clang-format off
     scalar_kind_t kind = (scalar_kind != scalar_kind_t::unknown_k)
@@ -285,37 +323,43 @@ static void search_typed(                                   //
 
     if (!threads)
         threads = std::thread::hardware_concurrency();
-    if (!index.try_reserve(index_limits_t(index.size(), threads)))
-        throw std::invalid_argument("Out of memory!");
 
     // Progress status
     progress_t progress_{progress};
     std::atomic<std::size_t> processed{0};
 
     atomic_error_t atomic_error{nullptr};
-    executor_default_t{threads}.dynamic(vectors_count, [&](std::size_t thread_idx, std::size_t task_idx) {
-        scalar_at const* vector = (scalar_at const*)(vectors_data + task_idx * vectors_info.strides[0]);
-        dense_search_result_t result = index.search(vector, wanted, thread_idx, exact);
-        if (!result) {
-            atomic_error = result.error.release();
-            return false;
-        }
-
-        counts_py1d(task_idx) =
-            static_cast<Py_ssize_t>(result.dump_to(&keys_py2d(task_idx, 0), &distances_py2d(task_idx, 0), wanted));
-
-        stats_visited_members += result.visited_members;
-        stats_computed_distances += result.computed_distances;
-
-        // We don't want to check for signals from multiple threads
-        ++processed;
-        if (thread_idx == 0)
-            if (PyErr_CheckSignals() != 0 || !progress_(processed.load(), vectors_count)) {
-                atomic_error.store("Operation has been terminated");
+    {
+        py::gil_scoped_release release;
+        std::unique_lock<std::mutex> lock(*index.mutex_ptr_);
+        if (!index.try_reserve(index_limits_t(index.size(), threads)))
+            throw std::invalid_argument("Out of memory!");
+        executor_default_t{threads}.dynamic(vectors_count, [&](std::size_t thread_idx, std::size_t task_idx) {
+            scalar_at const* vector = (scalar_at const*)(vectors_data + task_idx * vectors_info.strides[0]);
+            dense_search_result_t result = index.search(vector, wanted, thread_idx, exact);
+            if (!result) {
+                atomic_error = result.error.release();
                 return false;
             }
-        return true;
-    });
+
+            counts_py1d(task_idx) =
+                static_cast<Py_ssize_t>(result.dump_to(&keys_py2d(task_idx, 0), &distances_py2d(task_idx, 0), wanted));
+
+            stats_visited_members += result.visited_members;
+            stats_computed_distances += result.computed_distances;
+
+            // We don't want to check for signals from multiple threads
+            ++processed;
+            if (thread_idx == 0) {
+                py::gil_scoped_acquire acquire;
+                if (PyErr_CheckSignals() != 0 || !progress_(processed.load(), vectors_count)) {
+                    atomic_error.store("Operation has been terminated");
+                    return false;
+                }
+            }
+            return true;
+        });
+    }
 
     // At the end report the latest numbers, because the reporter thread may be finished earlier
     progress_(processed.load(), vectors_count);
@@ -357,48 +401,54 @@ static void search_typed(                                       //
     std::atomic<std::size_t> processed{0};
 
     atomic_error_t atomic_error{nullptr};
-    executor_default_t{threads}.dynamic(indexes.shards_.size(), [&](std::size_t thread_idx, std::size_t task_idx) {
-        dense_index_py_t& index = *indexes.shards_[task_idx].get();
+    {
+        py::gil_scoped_release release;
+        std::unique_lock<std::mutex> lock(*indexes.mutex_ptr_);
+        executor_default_t{threads}.dynamic(indexes.shards_.size(), [&](std::size_t thread_idx, std::size_t task_idx) {
+            dense_index_py_t& index = *indexes.shards_[task_idx].get();
 
-        index_limits_t limits;
-        limits.members = index.size();
-        limits.threads_add = 0;
-        limits.threads_search = 1;
-        if (!index.try_reserve(limits)) {
-            atomic_error = "Out of memory!";
-            return false;
-        }
-
-        for (std::size_t vector_idx = 0; vector_idx != static_cast<std::size_t>(vectors_count); ++vector_idx) {
-            scalar_at const* vector = (scalar_at const*)(vectors_data + vector_idx * vectors_info.strides[0]);
-            dense_search_result_t result = index.search(vector, wanted, 0, exact);
-            if (!result) {
-                atomic_error = result.error.release();
+            index_limits_t limits;
+            limits.members = index.size();
+            limits.threads_add = 0;
+            limits.threads_search = 1;
+            if (!index.try_reserve(limits)) {
+                atomic_error = "Out of memory!";
                 return false;
             }
 
-            {
-                auto lock = query_mutexes.lock(vector_idx);
-                counts_py1d(vector_idx) = static_cast<Py_ssize_t>(result.merge_into( //
-                    &keys_py2d(vector_idx, 0),                                       //
-                    &distances_py2d(vector_idx, 0),                                  //
-                    static_cast<std::size_t>(counts_py1d(vector_idx)),               //
-                    wanted));
-            }
-
-            stats_visited_members += result.visited_members;
-            stats_computed_distances += result.computed_distances;
-
-            // We don't want to check for signals from multiple threads
-            ++processed;
-            if (thread_idx == 0)
-                if (PyErr_CheckSignals() != 0 || !progress_(processed.load(), indexes.shards_.size())) {
-                    atomic_error.store("Operation has been terminated");
+            for (std::size_t vector_idx = 0; vector_idx != static_cast<std::size_t>(vectors_count); ++vector_idx) {
+                scalar_at const* vector = (scalar_at const*)(vectors_data + vector_idx * vectors_info.strides[0]);
+                dense_search_result_t result = index.search(vector, wanted, 0, exact);
+                if (!result) {
+                    atomic_error = result.error.release();
                     return false;
                 }
-        }
-        return true;
-    });
+
+                {
+                    auto lock = query_mutexes.lock(vector_idx);
+                    counts_py1d(vector_idx) = static_cast<Py_ssize_t>(result.merge_into( //
+                        &keys_py2d(vector_idx, 0),                                       //
+                        &distances_py2d(vector_idx, 0),                                  //
+                        static_cast<std::size_t>(counts_py1d(vector_idx)),               //
+                        wanted));
+                }
+
+                stats_visited_members += result.visited_members;
+                stats_computed_distances += result.computed_distances;
+
+                // We don't want to check for signals from multiple threads
+                ++processed;
+                if (thread_idx == 0) {
+                    py::gil_scoped_acquire acquire;
+                    if (PyErr_CheckSignals() != 0 || !progress_(processed.load(), indexes.shards_.size())) {
+                        atomic_error.store("Operation has been terminated");
+                        return false;
+                    }
+                }
+            }
+            return true;
+        });
+    }
 
     // At the end report the latest numbers, because the reporter thread may be finished earlier
     progress_(processed.load(), indexes.shards_.size());
@@ -552,11 +602,17 @@ static py::tuple search_many_brute_force(       //
     executor_default_t executor{threads};
     exact_search_t search;
 
-    exact_search_results_t offsets_and_distances = search( //
-        dataset_data, dataset_count, dataset_stride,       //
-        queries_data, queries_count, queries_stride,       //
-        wanted, metric, executor,
-        [&](std::size_t passed, std::size_t total) { return PyErr_CheckSignals() == 0 && progress(passed, total); });
+    exact_search_results_t offsets_and_distances;
+    {
+        py::gil_scoped_release release;
+        offsets_and_distances = search(                  //
+            dataset_data, dataset_count, dataset_stride, //
+            queries_data, queries_count, queries_stride, //
+            wanted, metric, executor, [&](std::size_t passed, std::size_t total) {
+                py::gil_scoped_acquire acquire;
+                return PyErr_CheckSignals() == 0 && progress(passed, total);
+            });
+    }
 
     if (!offsets_and_distances)
         throw std::bad_alloc();
@@ -628,11 +684,18 @@ static py::tuple cluster_many_brute_force( //
     engine.max_seconds = max_seconds;
     engine.inertia_threshold = inertia_threshold;
 
-    kmeans_clustering_result_t result = engine(                                           //
-        reinterpret_cast<byte_t const*>(dataset_info.ptr), dataset_count, dataset_stride, //
-        centroids.data(), wanted, dataset_dimensions * bytes_per_scalar,                  //
-        point_to_centroid_index.data(), point_to_centroid_distance.data(), dataset_kind, dataset_dimensions, executor,
-        [&](std::size_t passed, std::size_t total) { return PyErr_CheckSignals() == 0 && progress(passed, total); });
+    kmeans_clustering_result_t result;
+    {
+        py::gil_scoped_release release;
+        result = engine(                                                                      //
+            reinterpret_cast<byte_t const*>(dataset_info.ptr), dataset_count, dataset_stride, //
+            centroids.data(), wanted, dataset_dimensions * bytes_per_scalar,                  //
+            point_to_centroid_index.data(), point_to_centroid_distance.data(), dataset_kind, dataset_dimensions,
+            executor, [&](std::size_t passed, std::size_t total) {
+                py::gil_scoped_acquire acquire;
+                return PyErr_CheckSignals() == 0 && progress(passed, total);
+            });
+    }
 
     if (!result)
         throw std::runtime_error(result.error.release());
@@ -720,19 +783,23 @@ static py::tuple cluster_vectors(        //
     scalar_kind_t kind = (scalar_kind != scalar_kind_t::unknown_k)
         ? scalar_kind
         : numpy_string_to_kind(queries_info.format);
-    switch (kind) {
-    case scalar_kind_t::f64_k: cluster_result = index.cluster(queries_begin.as<f64_t const>(), queries_end.as<f64_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
-    case scalar_kind_t::f32_k: cluster_result = index.cluster(queries_begin.as<f32_t const>(), queries_end.as<f32_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
-    case scalar_kind_t::bf16_k: cluster_result = index.cluster(queries_begin.as<bf16_t const>(), queries_end.as<bf16_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
-    case scalar_kind_t::f16_k: cluster_result = index.cluster(queries_begin.as<f16_t const>(), queries_end.as<f16_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
-    case scalar_kind_t::e5m2_k: cluster_result = index.cluster(queries_begin.as<e5m2_t const>(), queries_end.as<e5m2_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
-    case scalar_kind_t::e4m3_k: cluster_result = index.cluster(queries_begin.as<e4m3_t const>(), queries_end.as<e4m3_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
-    case scalar_kind_t::e3m2_k: cluster_result = index.cluster(queries_begin.as<e3m2_t const>(), queries_end.as<e3m2_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
-    case scalar_kind_t::e2m3_k: cluster_result = index.cluster(queries_begin.as<e2m3_t const>(), queries_end.as<e2m3_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
-    case scalar_kind_t::i8_k: cluster_result = index.cluster(queries_begin.as<i8_t const>(), queries_end.as<i8_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
-    case scalar_kind_t::u8_k: cluster_result = index.cluster(queries_begin.as<u8_t const>(), queries_end.as<u8_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
-    case scalar_kind_t::b1x8_k: cluster_result = index.cluster(queries_begin.as<b1x8_t const>(), queries_end.as<b1x8_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
-    default: throw std::invalid_argument("Incompatible scalars in the query matrix: " + queries_info.format);
+    {
+        py::gil_scoped_release release;
+        std::unique_lock<std::mutex> lock(*index.mutex_ptr_);
+        switch (kind) {
+        case scalar_kind_t::f64_k: cluster_result = index.cluster(queries_begin.as<f64_t const>(), queries_end.as<f64_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+        case scalar_kind_t::f32_k: cluster_result = index.cluster(queries_begin.as<f32_t const>(), queries_end.as<f32_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+        case scalar_kind_t::bf16_k: cluster_result = index.cluster(queries_begin.as<bf16_t const>(), queries_end.as<bf16_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+        case scalar_kind_t::f16_k: cluster_result = index.cluster(queries_begin.as<f16_t const>(), queries_end.as<f16_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+        case scalar_kind_t::e5m2_k: cluster_result = index.cluster(queries_begin.as<e5m2_t const>(), queries_end.as<e5m2_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+        case scalar_kind_t::e4m3_k: cluster_result = index.cluster(queries_begin.as<e4m3_t const>(), queries_end.as<e4m3_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+        case scalar_kind_t::e3m2_k: cluster_result = index.cluster(queries_begin.as<e3m2_t const>(), queries_end.as<e3m2_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+        case scalar_kind_t::e2m3_k: cluster_result = index.cluster(queries_begin.as<e2m3_t const>(), queries_end.as<e2m3_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+        case scalar_kind_t::i8_k: cluster_result = index.cluster(queries_begin.as<i8_t const>(), queries_end.as<i8_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+        case scalar_kind_t::u8_k: cluster_result = index.cluster(queries_begin.as<u8_t const>(), queries_end.as<u8_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+        case scalar_kind_t::b1x8_k: cluster_result = index.cluster(queries_begin.as<b1x8_t const>(), queries_end.as<b1x8_t const>(), config, keys_ptr, distances_ptr, executor, progress_t{progress}); break;
+        default: throw std::invalid_argument("Incompatible scalars in the query matrix: " + queries_info.format);
+        }
     }
     // clang-format on
 
@@ -790,8 +857,13 @@ static py::tuple cluster_keys(                            //
     config.min_clusters = min_count;
     config.max_clusters = max_count;
 
-    dense_clustering_result_t cluster_result =
-        index.cluster(queries_begin, queries_end, config, keys_ptr, distances_ptr, executor, progress_t{progress});
+    dense_clustering_result_t cluster_result;
+    {
+        py::gil_scoped_release release;
+        std::unique_lock<std::mutex> lock(*index.mutex_ptr_);
+        cluster_result =
+            index.cluster(queries_begin, queries_end, config, keys_ptr, distances_ptr, executor, progress_t{progress});
+    }
     cluster_result.error.raise();
 
     // Those would be set to 1 for all entries, in case of success
@@ -824,7 +896,15 @@ static std::unordered_map<dense_key_t, dense_key_t> join_index( //
     config.expansion = (std::max)(a.expansion_search(), b.expansion_search());
     std::size_t threads = (std::min)(a.limits().threads(), b.limits().threads());
     executor_default_t executor{threads};
-    join_result_t result = a.join(b, config, a_to_b, b_to_a, executor, progress_t{progress});
+    join_result_t result;
+    {
+        // Lock the receiver `a`; `b` is read-only from this side. Concurrent
+        // bidirectional `join(a, b)` and `join(b, a)` from two Python threads
+        // is unsupported.
+        py::gil_scoped_release release;
+        std::unique_lock<std::mutex> lock(*a.mutex_ptr_);
+        result = a.join(b, config, a_to_b, b_to_a, executor, progress_t{progress});
+    }
     forward_error(result);
 
     return a_to_b;
@@ -844,9 +924,11 @@ static void compact_index(dense_index_py_t& index, std::size_t threads, progress
 
     if (!threads)
         threads = std::thread::hardware_concurrency();
+
+    py::gil_scoped_release release;
+    std::unique_lock<std::mutex> lock(*index.mutex_ptr_);
     if (!index.try_reserve(index_limits_t(index.size(), threads)))
         throw std::invalid_argument("Out of memory!");
-
     index.compact(executor_default_t{threads}, progress_t{progress});
 }
 
@@ -1266,9 +1348,11 @@ PYBIND11_MODULE(compiled, m, py::mod_gil_not_used()) {
 
             if (!threads)
                 threads = std::thread::hardware_concurrency();
+
+            py::gil_scoped_release release;
+            std::unique_lock<std::mutex> lock(*index.mutex_ptr_);
             if (!index.try_reserve(index_limits_t(index.size(), threads)))
                 throw std::invalid_argument("Out of memory!");
-
             index.isolate(executor_default_t{threads});
             return result.completed;
         },
@@ -1285,9 +1369,11 @@ PYBIND11_MODULE(compiled, m, py::mod_gil_not_used()) {
 
             if (!threads)
                 threads = std::thread::hardware_concurrency();
+
+            py::gil_scoped_release release;
+            std::unique_lock<std::mutex> lock(*index.mutex_ptr_);
             if (!index.try_reserve(index_limits_t(index.size(), threads)))
                 throw std::invalid_argument("Out of memory!");
-
             index.isolate(executor_default_t{threads});
             return result.completed;
         },

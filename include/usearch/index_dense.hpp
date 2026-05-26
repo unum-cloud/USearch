@@ -276,15 +276,22 @@ inline index_dense_metadata_result_t index_dense_metadata_from_path(char const* 
 
     std::uint32_t dimensions_u32[2]{0};
     std::memcpy(dimensions_u32, result.head_buffer, sizeof(dimensions_u32));
-    std::size_t offset_if_u32 = std::size_t(dimensions_u32[0]) * dimensions_u32[1] + sizeof(dimensions_u32);
+    checked_size_result_t offset_if_u32 =
+        checked_mul_add(std::size_t(dimensions_u32[0]), std::size_t(dimensions_u32[1]), sizeof(dimensions_u32));
 
     std::uint64_t dimensions_u64[2]{0};
     std::memcpy(dimensions_u64, result.head_buffer, sizeof(dimensions_u64));
-    std::size_t offset_if_u64 = std::size_t(dimensions_u64[0]) * dimensions_u64[1] + sizeof(dimensions_u64);
+    checked_size_result_t rows_if_u64 = checked_size_from_u64(dimensions_u64[0]);
+    checked_size_result_t columns_if_u64 = checked_size_from_u64(dimensions_u64[1]);
+    checked_size_result_t offset_if_u64 =
+        rows_if_u64 && columns_if_u64 ? checked_mul_add(rows_if_u64.value, columns_if_u64.value, sizeof(dimensions_u64))
+                                      : checked_size_overflow();
 
     // Check if it starts with 32-bit
-    if (offset_if_u32 + sizeof(index_dense_head_buffer_t) < file_size) {
-        if (std::fseek(file.get(), static_cast<long>(offset_if_u32), SEEK_SET) != 0)
+    checked_size_result_t head_offset_if_u32 =
+        offset_if_u32 ? checked_add(offset_if_u32.value, sizeof(index_dense_head_buffer_t)) : offset_if_u32;
+    if (head_offset_if_u32 && head_offset_if_u32.value < file_size) {
+        if (std::fseek(file.get(), static_cast<long>(offset_if_u32.value), SEEK_SET) != 0)
             return result.failed(std::strerror(errno));
         read = std::fread(result.head_buffer, sizeof(index_dense_head_buffer_t), 1, file.get());
         if (!read)
@@ -299,8 +306,10 @@ inline index_dense_metadata_result_t index_dense_metadata_from_path(char const* 
     }
 
     // Check if it starts with 64-bit
-    if (offset_if_u64 + sizeof(index_dense_head_buffer_t) < file_size) {
-        if (std::fseek(file.get(), static_cast<long>(offset_if_u64), SEEK_SET) != 0)
+    checked_size_result_t head_offset_if_u64 =
+        offset_if_u64 ? checked_add(offset_if_u64.value, sizeof(index_dense_head_buffer_t)) : offset_if_u64;
+    if (head_offset_if_u64 && head_offset_if_u64.value < file_size) {
+        if (std::fseek(file.get(), static_cast<long>(offset_if_u64.value), SEEK_SET) != 0)
             return result.failed(std::strerror(errno));
         read = std::fread(result.head_buffer, sizeof(index_dense_head_buffer_t), 1, file.get());
         if (!read)
@@ -341,15 +350,22 @@ inline index_dense_metadata_result_t index_dense_metadata_from_buffer(memory_map
     // Check if it starts with 32-bit
     std::uint32_t dimensions_u32[2]{0};
     std::memcpy(dimensions_u32, result.head_buffer, sizeof(dimensions_u32));
-    std::size_t offset_if_u32 = std::size_t(dimensions_u32[0]) * dimensions_u32[1] + sizeof(dimensions_u32);
+    checked_size_result_t offset_if_u32 =
+        checked_mul_add(std::size_t(dimensions_u32[0]), std::size_t(dimensions_u32[1]), sizeof(dimensions_u32));
 
     std::uint64_t dimensions_u64[2]{0};
     std::memcpy(dimensions_u64, result.head_buffer, sizeof(dimensions_u64));
-    std::size_t offset_if_u64 = std::size_t(dimensions_u64[0]) * dimensions_u64[1] + sizeof(dimensions_u64);
+    checked_size_result_t rows_if_u64 = checked_size_from_u64(dimensions_u64[0]);
+    checked_size_result_t columns_if_u64 = checked_size_from_u64(dimensions_u64[1]);
+    checked_size_result_t offset_if_u64 =
+        rows_if_u64 && columns_if_u64 ? checked_mul_add(rows_if_u64.value, columns_if_u64.value, sizeof(dimensions_u64))
+                                      : checked_size_overflow();
 
     // Check if it starts with 32-bit
-    if (offset_if_u32 + sizeof(index_dense_head_buffer_t) < file_size) {
-        std::memcpy(&result.head_buffer, file_data + offset_if_u32, sizeof(index_dense_head_buffer_t));
+    checked_size_result_t head_offset_if_u32 =
+        offset_if_u32 ? checked_add(offset_if_u32.value, sizeof(index_dense_head_buffer_t)) : offset_if_u32;
+    if (head_offset_if_u32 && head_offset_if_u32.value < file_size) {
+        std::memcpy(&result.head_buffer, file_data + offset_if_u32.value, sizeof(index_dense_head_buffer_t));
         result.config.exclude_vectors = false;
         result.config.use_64_bit_dimensions = false;
         if (std::memcmp(result.head_buffer, default_magic(), std::strlen(default_magic())) == 0)
@@ -357,8 +373,10 @@ inline index_dense_metadata_result_t index_dense_metadata_from_buffer(memory_map
     }
 
     // Check if it starts with 64-bit
-    if (offset_if_u64 + sizeof(index_dense_head_buffer_t) < file_size) {
-        std::memcpy(&result.head_buffer, file_data + offset_if_u64, sizeof(index_dense_head_buffer_t));
+    checked_size_result_t head_offset_if_u64 =
+        offset_if_u64 ? checked_add(offset_if_u64.value, sizeof(index_dense_head_buffer_t)) : offset_if_u64;
+    if (head_offset_if_u64 && head_offset_if_u64.value < file_size) {
+        std::memcpy(&result.head_buffer, file_data + offset_if_u64.value, sizeof(index_dense_head_buffer_t));
         result.config.exclude_vectors = false;
         result.config.use_64_bit_dimensions = true;
         if (std::memcmp(result.head_buffer, default_magic(), std::strlen(default_magic())) == 0)
@@ -570,6 +588,9 @@ class index_dense_gt {
             : parent(other.parent), thread_id(other.thread_id), engaged(other.engaged) {
             other.engaged = false;
         }
+        explicit operator bool() const noexcept {
+            return parent.typed_ && thread_id != any_thread() && thread_id < parent.typed_->limits().threads();
+        }
     };
 
   public:
@@ -673,16 +694,14 @@ class index_dense_gt {
      *  @param[in] metric One of the provided or an @b ad-hoc metric, type-punned.
      *  @param[in] config The index configuration (optional).
      *  @param[in] free_key The key used for freed vectors (optional).
+     *  @param[in] limits Initial reservation. Default sizes the thread pool to
+     *                    @c hardware_concurrency(); pass @c {unreserved} to skip.
      *  @return An instance of ::index_dense_gt or error, wrapped in a `state_result_t`.
-     *
-     *  ! If the `metric` isn't provided in this method, it has to be set with
-     *  ! the `change_metric` method before the index can be used. Alternatively,
-     *  ! if you are loading an existing index, the metric will be set automatically.
      */
     static state_result_t make(           //
         metric_t metric = {},             //
         index_dense_config_t config = {}, //
-        vector_key_t free_key = default_free_value<vector_key_t>()) {
+        vector_key_t free_key = default_free_value<vector_key_t>(), index_limits_t limits = {}) {
 
         if (metric.missing())
             return state_result_t{}.failed("Metric won't be initialized!");
@@ -697,16 +716,15 @@ class index_dense_gt {
         index_dense_gt& index = result.index;
         index.config_ = config;
         index.free_key_ = free_key;
-
-        // In some cases the metric is not provided, and will be set later.
-        if (metric) {
-            scalar_kind_t scalar_kind = metric.scalar_kind();
-            index.casts_ = casts_punned_t::make(scalar_kind);
-            index.metric_ = metric;
-        }
+        index.casts_ = casts_punned_t::make(metric.scalar_kind());
+        index.metric_ = metric;
 
         new (raw) index_t(config);
         index.typed_ = raw;
+
+        if (!index.try_reserve(limits))
+            return state_result_t{}.failed("Failed to reserve memory for the index!");
+
         return result;
     }
 
@@ -742,7 +760,34 @@ class index_dense_gt {
 
     // The metric and its properties
     metric_t const& metric() const { return metric_; }
-    void change_metric(metric_t metric) { metric_ = std::move(metric); }
+
+    /**
+     *  @brief Replaces the active distance metric, resizing the per-thread cast
+     *         buffer and rebuilding the cast dispatch table if the new metric
+     *         changes @c bytes_per_vector() or @c scalar_kind().
+     *  @return @c false if the cast buffer can't be re-allocated; the metric is
+     *          left untouched in that case so the index stays consistent.
+     */
+    bool try_change_metric(metric_t metric) noexcept {
+        checked_size_result_t needed_bytes = checked_mul(limits().threads(), metric.bytes_per_vector());
+        if (!needed_bytes)
+            return false;
+        if (needed_bytes.value > cast_buffer_.size()) {
+            cast_buffer_t new_buffer(needed_bytes.value);
+            if (!new_buffer)
+                return false;
+            cast_buffer_ = std::move(new_buffer);
+        }
+        casts_ = casts_punned_t::make(metric.scalar_kind());
+        metric_ = std::move(metric);
+        return true;
+    }
+
+    /// @brief Throwing counterpart of @ref try_change_metric.
+    void change_metric(metric_t metric) {
+        if (!try_change_metric(std::move(metric)))
+            usearch_raise_runtime_error("failed to grow cast buffer for the new metric");
+    }
 
     scalar_kind_t scalar_kind() const { return metric_.scalar_kind(); }
     metric_kind_t metric_kind() const { return metric_.metric_kind(); }
@@ -1033,6 +1078,8 @@ class index_dense_gt {
 
         index_cluster_config_t cluster_config;
         thread_lock_t lock = thread_lock_(thread);
+        if (!lock)
+            return cluster_result_t{}.failed("Reserve capacity ahead of searches!");
         cluster_config.thread = lock.thread_id;
         cluster_config.expansion = config_.expansion_search;
         metric_proxy_t metric{*this};
@@ -1092,7 +1139,10 @@ class index_dense_gt {
             available_threads_.push(i);
 
         // Allocate a buffer for the casted vectors.
-        cast_buffer_t cast_buffer(limits.threads() * metric_.bytes_per_vector());
+        checked_size_result_t cast_buffer_bytes = checked_mul(limits.threads(), metric_.bytes_per_vector());
+        if (!cast_buffer_bytes)
+            return false;
+        cast_buffer_t cast_buffer(cast_buffer_bytes.value);
         if (!cast_buffer)
             return false;
         cast_buffer_ = std::move(cast_buffer);
@@ -1117,7 +1167,8 @@ class index_dense_gt {
         std::unique_lock<std::mutex> free_lock(free_keys_mutex_);
         typed_->clear();
         slot_lookup_.clear();
-        vectors_lookup_.reset();
+        // Tape pointers are about to be invalidated by the reset below.
+        std::fill(vectors_lookup_.begin(), vectors_lookup_.end(), nullptr);
         free_keys_.clear();
         vectors_tape_allocator_.reset();
     }
@@ -1347,15 +1398,9 @@ class index_dense_gt {
                                             serialization_config_t config = {}, //
                                             progress_at&& progress = {}) {
 
-        // Discard all previous memory allocations of `vectors_tape_allocator_`
-        index_limits_t old_limits = typed_ ? typed_->limits() : index_limits_t{};
-        // An index built via `make(metric, config)` but never `reserve`d carries
-        // `index_gt`'s default limits of {0, 0} - zero worker threads. Loading
-        // into it would leave `available_threads_` empty and make the very
-        // first `search` / `add` throw "No available threads to lock". Floor
-        // the counts to a usable minimum, mirroring `index_gt::load_from_stream`.
-        old_limits.threads_add = (std::max<std::size_t>)(1, old_limits.threads_add);
-        old_limits.threads_search = (std::max<std::size_t>)(1, old_limits.threads_search);
+        // Preserve any explicit thread counts from the prior index state; fall
+        // back to library defaults when they were never set (e.g. `unreserved`).
+        index_limits_t new_limits = typed_ ? typed_->limits().with_thread_defaults() : index_limits_t{};
         reset();
 
         // Infer the new index size
@@ -1416,9 +1461,10 @@ class index_dense_gt {
 
             config_.multi = head.multi;
             metric_ = metric_t::builtin(head.dimensions, head.kind_metric, head.kind_scalar);
-            // available_threads_.size() will be updated to old_limits.threads() later in this
-            // method, so use that as the number of threads to prepare for.
-            cast_buffer_ = cast_buffer_t(old_limits.threads() * metric_.bytes_per_vector());
+            checked_size_result_t cast_buffer_bytes = checked_mul(new_limits.threads(), metric_.bytes_per_vector());
+            if (!cast_buffer_bytes)
+                return result.failed("Failed to allocate memory for the casts");
+            cast_buffer_ = cast_buffer_t(cast_buffer_bytes.value);
             if (!cast_buffer_)
                 return result.failed("Failed to allocate memory for the casts");
             casts_ = casts_punned_t::make(head.kind_scalar);
@@ -1437,14 +1483,13 @@ class index_dense_gt {
             return result;
         if (typed_->size() != static_cast<std::size_t>(matrix_rows))
             return result.failed("Index size and the number of vectors doesn't match");
-        old_limits.members = static_cast<std::size_t>(matrix_rows);
-        if (!typed_->try_reserve(old_limits))
+        new_limits.members = static_cast<std::size_t>(matrix_rows);
+        if (!typed_->try_reserve(new_limits))
             return result.failed("Failed to reserve memory for the index");
 
-        // After the index is loaded, we may have to resize the `available_threads_` to
-        // match the limits of the underlying engine.
+        // After the index is loaded, resize `available_threads_` to match the new limits.
         available_threads_t available_threads;
-        std::size_t max_threads = old_limits.threads();
+        std::size_t max_threads = new_limits.threads();
         if (!available_threads.reserve(max_threads))
             return result.failed("Failed to allocate memory for the available threads!");
         for (std::size_t i = 0; i < max_threads; i++)
@@ -1468,15 +1513,9 @@ class index_dense_gt {
                                 std::size_t offset = 0, serialization_config_t config = {}, //
                                 progress_at&& progress = {}) {
 
-        // Discard all previous memory allocations of `vectors_tape_allocator_`
-        index_limits_t old_limits = typed_ ? typed_->limits() : index_limits_t{};
-        // An index built via `make(metric, config)` but never `reserve`d carries
-        // `index_gt`'s default limits of {0, 0} - zero worker threads. Loading
-        // into it would leave `available_threads_` empty and make the very
-        // first `search` / `add` throw "No available threads to lock". Floor
-        // the counts to a usable minimum, mirroring `index_gt::load_from_stream`.
-        old_limits.threads_add = (std::max<std::size_t>)(1, old_limits.threads_add);
-        old_limits.threads_search = (std::max<std::size_t>)(1, old_limits.threads_search);
+        // Preserve any explicit thread counts from the prior index state; fall
+        // back to library defaults when they were never set (e.g. `unreserved`).
+        index_limits_t new_limits = typed_ ? typed_->limits().with_thread_defaults() : index_limits_t{};
         reset();
 
         serialization_result_t result = file.open_if_not();
@@ -1540,8 +1579,10 @@ class index_dense_gt {
             config_.multi = head.multi;
             metric_ = metric_t::builtin(head.dimensions, head.kind_metric, head.kind_scalar);
             // available_threads_.size() will be updated to old_limits.threads() later in this
-            // method, so use that as the number of threads to prepare for.
-            cast_buffer_ = cast_buffer_t(old_limits.threads() * metric_.bytes_per_vector());
+            checked_size_result_t cast_buffer_bytes = checked_mul(new_limits.threads(), metric_.bytes_per_vector());
+            if (!cast_buffer_bytes)
+                return result.failed("Failed to allocate memory for the casts");
+            cast_buffer_ = cast_buffer_t(cast_buffer_bytes.value);
             if (!cast_buffer_)
                 return result.failed("Failed to allocate memory for the casts");
             casts_ = casts_punned_t::make(head.kind_scalar);
@@ -1561,8 +1602,8 @@ class index_dense_gt {
             return result;
         if (typed_->size() != static_cast<std::size_t>(matrix_rows))
             return result.failed("Index size and the number of vectors doesn't match");
-        old_limits.members = static_cast<std::size_t>(matrix_rows);
-        if (!typed_->try_reserve(old_limits))
+        new_limits.members = static_cast<std::size_t>(matrix_rows);
+        if (!typed_->try_reserve(new_limits))
             return result.failed("Failed to reserve memory for the index");
 
         // Address the vectors
@@ -1573,10 +1614,9 @@ class index_dense_gt {
             for (std::uint64_t slot = 0; slot != matrix_rows; ++slot)
                 vectors_lookup_[slot] = (byte_t*)vectors_buffer.data() + matrix_cols * slot;
 
-        // After the index is loaded, we may have to resize the `available_threads_` to
-        // match the limits of the underlying engine.
+        // After the index is viewed, resize `available_threads_` to match the new limits.
         available_threads_t available_threads;
-        std::size_t max_threads = old_limits.threads();
+        std::size_t max_threads = new_limits.threads();
         if (!available_threads.reserve(max_threads))
             return result.failed("Failed to allocate memory for the available threads!");
         for (std::size_t i = 0; i < max_threads; i++)
@@ -1841,6 +1881,11 @@ class index_dense_gt {
      */
     labeling_result_t rename(vector_key_t from, vector_key_t to) {
         labeling_result_t result;
+        if (from == to) {
+            result.completed = count(from);
+            return result;
+        }
+
         unique_lock_t lookup_lock(slot_lookup_mutex_);
 
         if (!multi() && slot_lookup_.contains(key_and_slot_t::any_slot(to)))
@@ -2260,10 +2305,9 @@ class index_dense_gt {
         if (thread_id != any_thread())
             return {*this, thread_id, false};
 
-        available_threads_mutex_.lock();
-        usearch_assert_m(available_threads_.size(), "No available threads to lock");
-        available_threads_.try_pop(thread_id);
-        available_threads_mutex_.unlock();
+        std::unique_lock<std::mutex> lock(available_threads_mutex_);
+        if (!available_threads_.try_pop(thread_id))
+            return {*this, any_thread(), false};
         return {*this, thread_id, true};
     }
 
@@ -2284,6 +2328,8 @@ class index_dense_gt {
 
         // Cast the vector, if needed for compatibility with `metric_`
         thread_lock_t lock = thread_lock_(thread);
+        if (!lock)
+            return add_result_t{}.failed("Reserve capacity ahead of insertions!");
         byte_t const* vector_data = reinterpret_cast<byte_t const*>(vector);
         {
             byte_t* casted_data = cast_buffer_.data() + metric_.bytes_per_vector() * lock.thread_id;
@@ -2337,6 +2383,8 @@ class index_dense_gt {
 
         // Cast the vector, if needed for compatibility with `metric_`
         thread_lock_t lock = thread_lock_(thread);
+        if (!lock)
+            return search_result_t{*this}.failed("Reserve capacity ahead of searches!");
         byte_t const* vector_data = reinterpret_cast<byte_t const*>(vector);
         {
             byte_t* casted_data = cast_buffer_.data() + metric_.bytes_per_vector() * lock.thread_id;
@@ -2373,6 +2421,8 @@ class index_dense_gt {
 
         // Cast the vector, if needed for compatibility with `metric_`
         thread_lock_t lock = thread_lock_(thread);
+        if (!lock)
+            return cluster_result_t{}.failed("Reserve capacity ahead of searches!");
         byte_t const* vector_data = reinterpret_cast<byte_t const*>(vector);
         {
             byte_t* casted_data = cast_buffer_.data() + metric_.bytes_per_vector() * lock.thread_id;
@@ -2397,6 +2447,8 @@ class index_dense_gt {
 
         // Cast the vector, if needed for compatibility with `metric_`
         thread_lock_t lock = thread_lock_(thread);
+        if (!lock)
+            return {};
         byte_t const* vector_data = reinterpret_cast<byte_t const*>(vector);
         {
             byte_t* casted_data = cast_buffer_.data() + metric_.bytes_per_vector() * lock.thread_id;

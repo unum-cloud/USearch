@@ -404,14 +404,14 @@ pub mod ffi {
         pub fn change_expansion_search(self: &NativeIndex, n: usize);
 
         pub fn metric_kind(self: &NativeIndex) -> MetricKind;
-        pub fn change_metric_kind(self: &NativeIndex, metric: MetricKind);
+        pub fn change_metric_kind(self: &NativeIndex, metric: MetricKind) -> Result<()>;
 
         /// Changes the metric function used to calculate the distance between vectors.
         /// Avoids the `std::ffi::c_void` type and the `StatefulMetric` type, that the FFI
         /// does not support, replacing them with basic pointer-sized integer types.
         /// The first two arguments are the pointers to the vectors to compare, and the third
         /// argument is the `metric_state` propagated from the Rust layer.
-        pub fn change_metric(self: &NativeIndex, metric: usize, metric_state: usize);
+        pub fn change_metric(self: &NativeIndex, metric: usize, metric_state: usize) -> Result<()>;
 
         pub fn new_native_index(options: &IndexOptions) -> Result<UniquePtr<NativeIndex>>;
 
@@ -905,9 +905,7 @@ impl VectorType for f32 {
             Some(MetricFunction::F32Metric(metric)) => metric as *mut () as usize,
             _ => panic!("Expected F32Metric"),
         };
-        index.inner.change_metric(trampoline_fn, closure_address);
-
-        Ok(())
+        index.inner.change_metric(trampoline_fn, closure_address)
     }
 }
 
@@ -979,9 +977,7 @@ impl VectorType for i8 {
             Some(MetricFunction::I8Metric(metric)) => metric as *mut () as usize,
             _ => panic!("Expected I8Metric"),
         };
-        index.inner.change_metric(trampoline_fn, closure_address);
-
-        Ok(())
+        index.inner.change_metric(trampoline_fn, closure_address)
     }
 }
 
@@ -1046,9 +1042,7 @@ impl VectorType for u8 {
             Some(MetricFunction::U8Metric(metric)) => metric as *mut () as usize,
             _ => panic!("Expected U8Metric"),
         };
-        index.inner.change_metric(trampoline_fn, closure_address);
-
-        Ok(())
+        index.inner.change_metric(trampoline_fn, closure_address)
     }
 }
 
@@ -1120,9 +1114,7 @@ impl VectorType for f64 {
             Some(MetricFunction::F64Metric(metric)) => metric as *mut () as usize,
             _ => panic!("Expected F64Metric"),
         };
-        index.inner.change_metric(trampoline_fn, closure_address);
-
-        Ok(())
+        index.inner.change_metric(trampoline_fn, closure_address)
     }
 }
 
@@ -1195,9 +1187,7 @@ impl VectorType for f16 {
             Some(MetricFunction::F16Metric(metric)) => metric as *mut () as usize,
             _ => panic!("Expected F16Metric"),
         };
-        index.inner.change_metric(trampoline_fn, closure_address);
-
-        Ok(())
+        index.inner.change_metric(trampoline_fn, closure_address)
     }
 }
 
@@ -1270,9 +1260,7 @@ impl VectorType for b1x8 {
             Some(MetricFunction::B1X8Metric(metric)) => metric as *mut () as usize,
             _ => panic!("Expected F1X8Metric"),
         };
-        index.inner.change_metric(trampoline_fn, closure_address);
-
-        Ok(())
+        index.inner.change_metric(trampoline_fn, closure_address)
     }
 }
 
@@ -1409,7 +1397,7 @@ impl Index {
     }
 
     /// Changes the metric kind used to calculate the distance between vectors.
-    pub fn change_metric_kind(self: &Index, metric: ffi::MetricKind) {
+    pub fn change_metric_kind(self: &Index, metric: ffi::MetricKind) -> Result<(), cxx::Exception> {
         self.inner.change_metric_kind(metric)
     }
 

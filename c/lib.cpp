@@ -186,15 +186,13 @@ USEARCH_EXPORT usearch_index_t usearch_init(usearch_init_options_t* options, use
 
     using state_result_t = typename index_dense_t::state_result_t;
     state_result_t state = index_dense_t::make(metric, config);
-    if (!state)
+    if (!state) {
         *error = state.error.release();
-    index_dense_t* result_ptr = new index_dense_t(std::move(state.index));
+        return NULL;
+    }
+    index_dense_t* result_ptr = new (std::nothrow) index_dense_t(std::move(state.index));
     if (!result_ptr)
         *error = "Out of memory!";
-
-    // Let's immediately make it usable by reserving enough threads for this machine:
-    if (!result_ptr->try_reserve(index_limits_t()))
-        *error = "Out of memory when preparing contexts!";
 
     return result_ptr;
 }
@@ -236,8 +234,10 @@ USEARCH_EXPORT void usearch_metadata(char const* path, usearch_init_options_t* o
 
     USEARCH_ASSERT(path && options && error && "Missing arguments");
     index_dense_metadata_result_t result = index_dense_metadata_from_path(path);
-    if (!result)
+    if (!result) {
         *error = result.error.release();
+        return;
+    }
 
     options->metric_kind = metric_kind_to_c(result.head.kind_metric);
     options->quantization = scalar_kind_to_c(result.head.kind_scalar);
@@ -285,8 +285,10 @@ USEARCH_EXPORT void usearch_metadata_buffer(void const* buffer, size_t length, u
     USEARCH_ASSERT(buffer && length && options && error && "Missing arguments");
     index_dense_metadata_result_t result =
         index_dense_metadata_from_buffer(memory_mapped_file_t((byte_t*)(buffer), length));
-    if (!result)
+    if (!result) {
         *error = result.error.release();
+        return;
+    }
 
     options->metric_kind = metric_kind_to_c(result.head.kind_metric);
     options->quantization = scalar_kind_to_c(result.head.kind_scalar);
@@ -354,7 +356,8 @@ USEARCH_EXPORT void usearch_change_threads_add(usearch_index_t index, size_t thr
     auto& index_dense = *reinterpret_cast<index_dense_t*>(index);
     index_limits_t limits = index_dense.limits();
     limits.threads_add = threads;
-    index_dense.try_reserve(limits);
+    if (!index_dense.try_reserve(limits))
+        *error = "Out of memory!";
 }
 
 USEARCH_EXPORT void usearch_change_threads_search(usearch_index_t index, size_t threads, usearch_error_t* error) {
@@ -362,15 +365,22 @@ USEARCH_EXPORT void usearch_change_threads_search(usearch_index_t index, size_t 
     auto& index_dense = *reinterpret_cast<index_dense_t*>(index);
     index_limits_t limits = index_dense.limits();
     limits.threads_search = threads;
-    index_dense.try_reserve(limits);
+    if (!index_dense.try_reserve(limits))
+        *error = "Out of memory!";
 }
 
 USEARCH_EXPORT void usearch_change_metric_kind(usearch_index_t index, usearch_metric_kind_t kind,
                                                usearch_error_t* error) {
     USEARCH_ASSERT(index && error && "Missing arguments");
     auto& index_dense = *reinterpret_cast<index_dense_t*>(index);
-    index_dense.change_metric(
-        metric_punned_t::builtin(index_dense.dimensions(), metric_kind_to_cpp(kind), index_dense.scalar_kind()));
+    auto metric_punned =
+        metric_punned_t::builtin(index_dense.dimensions(), metric_kind_to_cpp(kind), index_dense.scalar_kind());
+    if (metric_punned.missing()) {
+        *error = "Unsupported metric for this index's dimensions and scalar kind!";
+        return;
+    }
+    if (!index_dense.try_change_metric(std::move(metric_punned)))
+        *error = "Failed to grow cast buffer for the new metric!";
 }
 
 USEARCH_EXPORT void usearch_change_metric(usearch_index_t index, usearch_metric_t metric, void* state,
@@ -384,7 +394,12 @@ USEARCH_EXPORT void usearch_change_metric(usearch_index_t index, usearch_metric_
               : metric_punned_t::stateless(index_dense.dimensions(), reinterpret_cast<std::uintptr_t>(metric),
                                            metric_punned_signature_t::array_array_k, metric_kind_to_cpp(kind),
                                            index_dense.scalar_kind());
-    index_dense.change_metric(std::move(metric_punned));
+    if (metric_punned.missing()) {
+        *error = "Unsupported metric for this index's dimensions and scalar kind!";
+        return;
+    }
+    if (!index_dense.try_change_metric(std::move(metric_punned)))
+        *error = "Failed to grow cast buffer for the new metric!";
 }
 
 USEARCH_EXPORT void usearch_reserve(usearch_index_t index, size_t capacity, usearch_error_t* error) {
