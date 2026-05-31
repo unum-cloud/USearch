@@ -349,6 +349,20 @@ pub mod ffi {
         vectors_reserved: usize,
     }
 
+    /// Graph statistics aggregated across all levels of the HNSW index:
+    /// node and edge counts together with the memory used by the graph structure.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    struct IndexStats {
+        /// Number of nodes (members) present in the graph.
+        nodes: usize,
+        /// Total number of edges (neighbor links) across all levels.
+        edges: usize,
+        /// Theoretical maximum number of edges given the connectivity, i.e. the edge capacity.
+        max_edges: usize,
+        /// Memory allocated for the graph structure (node tapes), in bytes.
+        allocated_bytes: usize,
+    }
+
     /// The index options used to configure the dense index during creation.
     /// It contains the number of dimensions, the metric kind, the scalar kind,
     /// the connectivity, the expansion values, and the multi-flag.
@@ -543,6 +557,9 @@ pub mod ffi {
         pub fn reset(self: &NativeIndex) -> Result<()>;
         pub fn memory_usage(self: &NativeIndex) -> usize;
         pub fn memory_stats(self: &NativeIndex) -> MemoryStats;
+        pub fn stats(self: &NativeIndex) -> IndexStats;
+        pub fn stats_for_level(self: &NativeIndex, level: usize) -> IndexStats;
+        pub fn stats_per_level(self: &NativeIndex, stats_per_level: &mut [IndexStats], max_level: usize) -> IndexStats;
         pub fn hardware_acceleration(self: &NativeIndex) -> *const c_char;
 
         pub fn save_to_buffer(self: &NativeIndex, buffer: &mut [u8]) -> Result<()>;
@@ -552,7 +569,7 @@ pub mod ffi {
 }
 
 // Re-export the FFI structs and enums at the crate root for easy access
-pub use ffi::{IndexMetadata, IndexOptions, MemoryStats, MetricKind, ScalarKind};
+pub use ffi::{IndexMetadata, IndexOptions, MemoryStats, IndexStats, MetricKind, ScalarKind};
 
 /// Represents custom metric functions for calculating distances between vectors in various formats.
 ///
@@ -1732,6 +1749,27 @@ impl Index {
         self.inner.memory_stats()
     }
 
+    /// Returns graph statistics aggregated across all levels: node and edge
+    /// counts together with the memory used by the graph structure.
+    pub fn stats(self: &Index) -> ffi::IndexStats {
+        self.inner.stats()
+    }
+
+    /// Returns graph statistics for the nodes present at the given zero-based
+    /// `level`, where `0` is the base level.
+    pub fn stats_for_level(self: &Index, level: usize) -> ffi::IndexStats {
+        self.inner.stats_for_level(level)
+    }
+
+    /// Returns per-level graph statistics for levels `0..=max_level`, where `0`
+    /// is the base level. The returned vector has `max_level + 1` entries, one
+    /// per level.
+    pub fn stats_per_level(self: &Index, max_level: usize) -> Vec<ffi::IndexStats> {
+        let mut per_level = vec![ffi::IndexStats::default(); max_level + 1];
+        self.inner.stats_per_level(&mut per_level, max_level);
+        per_level
+    }
+
     /// Saves the index to a specified file.
     ///
     /// # Arguments
@@ -2149,6 +2187,38 @@ mod tests {
         assert!(index.remove(id4).is_ok());
 
         assert_eq!(index.size(), 0);
+    }
+
+    #[test]
+    fn stats_variants() {
+        let options = IndexOptions {
+            dimensions: 4,
+            ..Default::default()
+        };
+        let index = Index::new(&options).unwrap();
+        index.reserve(10).unwrap();
+        index.add(1, &[0.1, 0.2, 0.3, 0.4]).unwrap();
+        index.add(2, &[0.2, 0.1, 0.4, 0.3]).unwrap();
+        index.add(3, &[0.3, 0.4, 0.1, 0.2]).unwrap();
+
+        // Aggregate statistics across all levels.
+        let all = index.stats();
+        assert_eq!(all.nodes, 3, "three members were added");
+        assert!(all.edges > 0, "connected members should have edges");
+        assert!(all.edges <= all.max_edges, "edges never exceed the capacity");
+        assert!(all.allocated_bytes > 0, "graph should occupy memory");
+
+        // Every member always lives on the base level (0).
+        let base = index.stats_for_level(0);
+        assert_eq!(base.nodes, 3, "every member lives on the base level");
+
+        // Per-level breakdown for levels 0..=2 has `max_level + 1` entries.
+        let per_level = index.stats_per_level(2);
+        assert_eq!(per_level.len(), 3, "max_level + 1 entries");
+        assert_eq!(per_level[0].nodes, 3, "base level holds all members");
+        // Higher levels are subsets, so node counts are non-increasing.
+        assert!(per_level[0].nodes >= per_level[1].nodes);
+        assert!(per_level[1].nodes >= per_level[2].nodes);
     }
 
     #[test]

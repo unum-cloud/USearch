@@ -267,6 +267,28 @@ MemoryStats NativeIndex::memory_stats() const {
     return result;
 }
 
+static IndexStats to_index_stats(index_dense_t::stats_t const& stats) {
+    IndexStats result;
+    result.nodes = stats.nodes;
+    result.edges = stats.edges;
+    result.max_edges = stats.max_edges;
+    result.allocated_bytes = stats.allocated_bytes;
+    return result;
+}
+
+IndexStats NativeIndex::stats() const { return to_index_stats(index_->stats()); }
+
+IndexStats NativeIndex::stats_for_level(size_t level) const { return to_index_stats(index_->stats(level)); }
+
+IndexStats NativeIndex::stats_per_level(rust::Slice<IndexStats> stats_per_level, size_t max_level) const {
+    std::vector<index_dense_t::stats_t> per_level(max_level + 1);
+    index_dense_t::stats_t aggregate = index_->stats(per_level.data(), max_level);
+    size_t exported = std::min(stats_per_level.size(), per_level.size());
+    for (size_t i = 0; i != exported; ++i)
+        stats_per_level[i] = to_index_stats(per_level[i]);
+    return to_index_stats(aggregate);
+}
+
 char const* NativeIndex::hardware_acceleration() const { return index_->metric().isa_name(); }
 
 void NativeIndex::save_to_buffer(rust::Slice<uint8_t> buffer) const {
