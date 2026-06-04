@@ -25,6 +25,14 @@
     "editor.tabSize": 2
   },
   "autoDocstring.docstringFormat": "sphinx",
+  "C_Cpp.default.cppStandard": "c++20",
+  "C_Cpp.default.cStandard": "c17",
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
+  "C_Cpp.default.includePath": [
+    "${workspaceFolder}/include",
+    "${workspaceFolder}/numkong/include",
+    "${workspaceFolder}/stringzilla/include"
+  ],
   "cSpell.words": [
     "allclose",
     "arange",

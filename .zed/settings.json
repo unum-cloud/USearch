@@ -1,0 +1,239 @@
+// Zed workspace settings for USearch.
+// JSONC: comments are allowed.  Project-level overrides of your user settings,
+// porting the supported logic from .vscode/settings.json + the repo's own
+// .clang-format / .cmake-format.py / pyproject.toml / .swift-format configs.
+{
+    // Zed auto-installs these on first open.  Unlike the CUDA projects there are
+    // NO .cu/.cuh files here, so no C++ file-type remap is needed — Zed's
+    // built-ins already cover C/C++, Python, Rust, Go, JS/TS, YAML, Markdown.
+    // These extensions add the languages Zed doesn't ship: CMake (also gives
+    // cmake-format its tree), TOML (Cargo.toml / pyproject.toml), plus the
+    // Swift / C# / Java toolchains this polyglot repo carries.
+    "auto_install_extensions": {
+        "cmake": true,
+        "toml": true,
+        "swift": true,
+        "csharp": true,
+        "java": true
+    },
+
+    // Keep Zed's project panel, search, and file-watcher out of the heavy dirs.
+    // Mirrors the .vscode search.exclude / files.watcherExclude set plus the
+    // build_* / _deps / .build trees from .gitignore.  IMPORTANT: numkong and
+    // stringzilla are git submodules whose include/ dirs clangd needs — clangd
+    // reads them straight off disk via build/compile_commands.json, so hiding
+    // them here only trims Zed's own indexing (search / file-finder) and does
+    // NOT break C++ navigation.
+    "file_scan_exclusions": [
+        "**/.git",
+        "**/build",
+        "**/build_*",
+        "**/_deps",
+        "**/.build",
+        "**/prebuilds",
+        "**/target",
+        "**/obj",
+        "**/node_modules",
+        "**/datasets",
+        "**/numkong",
+        "**/stringzilla",
+        "**/__pycache__",
+        "**/.venv",
+        "**/venv",
+        "**/.cache",
+        "**/.pytest_cache",
+        "**/.ruff_cache",
+        "**/.mypy_cache",
+        "**/Testing",
+        "**/tmp",
+        "**/*.log"
+    ],
+
+    // Editor defaults, applied everywhere unless a language overrides them.
+    // tab_size 4 / spaces matches .editorconfig + .clang-format (IndentWidth 4,
+    // UseTab: Never); the final-newline rule matches .clang-format
+    // `InsertNewlineAtEOF: true`.
+    "format_on_save": "on",
+    "tab_size": 4,
+    "hard_tabs": false,
+    "ensure_final_newline_on_save": true,
+    "remove_trailing_whitespace_on_save": true,
+
+    // Keep file tree, Git panel, and outline all on the left dock (Git/outline
+    // default to the right).
+    "project_panel": { "dock": "left" },
+    "git_panel": { "dock": "left" },
+    "outline_panel": { "dock": "left" },
+
+    // Language-server configuration.
+    "lsp": {
+        // clangd isn't on PATH; Zed's C extension auto-downloads it.  Point it
+        // at the out-of-tree compile DB (.vscode used build/compile_commands.json)
+        // and let --clang-tidy pick up the repo .clang-tidy.  --query-driver
+        // (globs) teaches it about the gcc-12 / homebrew-llvm drivers used in
+        // .vscode/tasks.json so system headers resolve.
+        "clangd": {
+            "arguments": [
+                "--compile-commands-dir=build",
+                "--background-index",
+                "--clang-tidy",
+                "--header-insertion=never",
+                "--query-driver=/usr/bin/g++*,/usr/bin/gcc*,/usr/bin/clang*,/opt/homebrew/opt/llvm/bin/clang*"
+            ]
+        },
+
+        // Replicates .vscode `python.analysis.diagnosticSeverityOverrides`:
+        // optional native deps (numkong, simsimd, …) aren't always importable
+        // in the editor, so silence the missing-import noise.
+        "pyright": {
+            "settings": {
+                "python": {
+                    "analysis": {
+                        "diagnosticSeverityOverrides": {
+                            "reportMissingImports": "none"
+                        }
+                    }
+                }
+            }
+        }
+    },
+
+    "languages": {
+        // Run the PyPI clang-format build via uvx so the version floats with
+        // upstream.  Floor at 22 because this repo's .clang-format uses
+        // BinPackLongBracedList / BreakBeforeCloseBracketBracedList /
+        // InsertNewlineAtEOF (22+ keys) — older clang-format errors and emits
+        // nothing.  --style=file picks up the root .clang-format;
+        // --assume-filename forces C++ parsing.
+        "C": {
+            "formatter": {
+                "external": {
+                    "command": "uvx",
+                    "arguments": [
+                        "clang-format>=22",
+                        "--style=file",
+                        "--assume-filename=a.cpp"
+                    ]
+                }
+            }
+        },
+        "C++": {
+            "formatter": {
+                "external": {
+                    "command": "uvx",
+                    "arguments": [
+                        "clang-format>=22",
+                        "--style=file",
+                        "--assume-filename=a.cpp"
+                    ]
+                }
+            }
+        },
+
+        // cmake-format via cmakelang; -c points it at the repo's Python-format
+        // config (.cmake-format.py: line_width 120, tab_size 4, dangle_parens).
+        "CMake": {
+            "formatter": {
+                "external": {
+                    "command": "uvx",
+                    "arguments": [
+                        "--from",
+                        "cmakelang",
+                        "cmake-format",
+                        "-c",
+                        ".cmake-format.py",
+                        "-"
+                    ]
+                }
+            }
+        },
+
+        // Lint + format + import-sort through ruff (config in pyproject.toml:
+        // line-length 120, py310, E/W/F/I/UP, double quotes).  pyright adds
+        // type-aware completion.  Matches .vscode using charliermarsh.ruff as
+        // the Python formatter with organize-imports.
+        "Python": {
+            "language_servers": ["pyright", "ruff"],
+            "format_on_save": "on",
+            "formatter": [
+                { "code_actions": { "source.organizeImports.ruff": true } },
+                { "language_server": { "name": "ruff" } }
+            ]
+        },
+
+        // Go: built-in gopls/gofmt on save (.vscode used golang.go + formatOnSave).
+        "Go": { "format_on_save": "on" },
+
+        // Java formatting is intentionally OFF — .vscode set
+        // `java.format.enabled: false` and `formatOnSave: false`.
+        "Java": { "format_on_save": "off", "tab_size": 4 },
+
+        // JS/TS via Zed's bundled Prettier, replicating the .vscode prettier
+        // settings (singleQuote true, useTabs false, tabSize 4).
+        "JavaScript": {
+            "tab_size": 4,
+            "prettier": {
+                "single_quote": true,
+                "use_tabs": false,
+                "tab_width": 4
+            }
+        },
+        "TypeScript": {
+            "tab_size": 4,
+            "prettier": {
+                "single_quote": true,
+                "use_tabs": false,
+                "tab_width": 4
+            }
+        },
+
+        // YAML at 2 spaces per .editorconfig ([*.yml] indent_size = 2).
+        "YAML": {
+            "tab_size": 2,
+            "prettier": { "single_quote": true, "tab_width": 2 }
+        },
+
+        // Swift via apple/swift-format using the repo .swift-format config
+        // (lineLength 120, 4-space indent).  Requires `swift-format` on PATH —
+        // if it isn't installed yet, either `brew install swift-format` / build
+        // it, or comment this block out so saves don't error.
+        "Swift": {
+            "formatter": {
+                "external": {
+                    "command": "swift-format",
+                    "arguments": [
+                        "format",
+                        "--configuration",
+                        ".swift-format",
+                        "-"
+                    ]
+                }
+            }
+        },
+
+        // remark does sentence-per-line + underscore emphasis and remark-math
+        // keeps the $...$ LaTeX in README.md / v3.md / blackwell.md intact
+        // (plain remark escapes subscript underscores, silently breaking
+        // equations on save).  --no-install pins to repo-local node_modules:
+        // run `npm install -D remark-cli remark-gfm remark-math` once per clone
+        // (this repo's package.json does NOT ship them yet) or comment this out.
+        "Markdown": {
+            "formatter": {
+                "external": {
+                    "command": "npx",
+                    "arguments": [
+                        "--no-install",
+                        "remark",
+                        "--quiet",
+                        "--use",
+                        "remark-gfm",
+                        "--use",
+                        "remark-math",
+                        "-s",
+                        "emphasis:'_',strong:'_',bullet:'-'"
+                    ]
+                }
+            }
+        }
+    }
+}
