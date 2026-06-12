@@ -252,6 +252,11 @@ void NativeIndex::view(rust::Str path) const {
     index_->view(memory_mapped_file_t(std::string(path).c_str())).error.raise();
 }
 
+void NativeIndex::compact() const {
+    auto result = index_->compact();
+    result.error.raise();
+}
+
 void NativeIndex::reset() const { index_->reset(); }
 size_t NativeIndex::memory_usage() const { return index_->memory_usage(); }
 
