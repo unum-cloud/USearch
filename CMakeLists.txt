@@ -30,7 +30,6 @@ option(USEARCH_USE_JEMALLOC "Use JeMalloc for faster memory allocations" OFF)
 
 option(USEARCH_BUILD_TEST_CPP "Compile a native unit test in C++" ${USEARCH_IS_MAIN_PROJECT})
 option(USEARCH_BUILD_BENCH_CPP "Compile a native benchmark in C++" ${USEARCH_IS_MAIN_PROJECT})
-option(USEARCH_BUILD_BENCH_INNER_METRIC "Compile bench/inner_metric.cpp microbench (needs NumKong + fmt + benchmark)" OFF)
 option(USEARCH_BUILD_LIB_C "Compile a native library for the C 99 interface" OFF)
 option(USEARCH_BUILD_TEST_C "Compile a test for the C 99 interface" OFF)
 option(USEARCH_BUILD_JNI "Compile JNI library for Java bindings" OFF)
@@ -413,12 +412,6 @@ enable_testing()
 
 if (${USEARCH_BUILD_TEST_CPP} OR ${USEARCH_BUILD_BENCH_CPP})
     add_subdirectory(cpp)
-endif ()
-
-if (${USEARCH_BUILD_BENCH_INNER_METRIC})
-    # Pulls google/benchmark via numkong's NK_BUILD_BENCH; force it on if it isn't already.
-    set(NK_BUILD_BENCH ON CACHE BOOL "" FORCE)
-    add_subdirectory(bench)
 endif ()
 
 if (${USEARCH_BUILD_WOLFRAM})

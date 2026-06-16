@@ -103,7 +103,7 @@ struct adjacency_simulator_t {
     std::vector<node_id_t> pool;
 
     adjacency_simulator_t() : pool(node_count_k * ids_per_node_k, 0) {
-        std::minstd_rand seed_rng {0xABCDEF01u};
+        std::mt19937 seed_rng {0xABCDEF01u};
         for (auto& id : pool) id = static_cast<node_id_t>(seed_rng());
     }
 
@@ -177,7 +177,7 @@ void bench_distance_1to1(benchmark::State& state) {
     auto query_norms = inner_norms<caps_>(query_view);
 
     std::size_t const row_index_mask = pool.matrix.extent(0) - 1;
-    std::minstd_rand random_generator {0xDEADBEEFu};
+    std::mt19937 random_generator {0xDEADBEEFu};
     adjacency_simulator_t adjacency;
     for (auto _ : state) {
         std::size_t const row = random_generator() & row_index_mask;
@@ -200,7 +200,7 @@ void bench_distances_1to4(benchmark::State& state) {
     auto query_norms = inner_norms<caps_>(query_view);
 
     std::size_t const row_index_mask = pool.matrix.extent(0) - 1;
-    std::minstd_rand random_generator {0xDEADBEEFu};
+    std::mt19937 random_generator {0xDEADBEEFu};
     adjacency_simulator_t adjacency;
     for (auto _ : state) {
         std::size_t const row0 = random_generator() & row_index_mask;
@@ -232,7 +232,7 @@ void bench_baseline(benchmark::State& state) {
     auto query_view = query.view();
 
     std::size_t const row_index_mask = pool.matrix.extent(0) - 1;
-    std::minstd_rand random_generator {0xDEADBEEFu};
+    std::mt19937 random_generator {0xDEADBEEFu};
     adjacency_simulator_t adjacency;
     for (auto _ : state) {
         std::size_t const row = random_generator() & row_index_mask;
@@ -328,6 +328,10 @@ void register_metrics_for_type<nk::u1x8_t>(std::string_view scalar_name) noexcep
 }
 
 int main(int argc, char** argv) {
+
+    benchmark::Initialize(&argc, argv);
+    if (benchmark::ReportUnrecognizedArguments(argc, argv)) return 1;
+
     register_metrics_for_type<nk::f64_t>("f64");
     register_metrics_for_type<nk::f32_t>("f32");
     register_metrics_for_type<nk::bf16_t>("bf16");
@@ -336,14 +340,14 @@ int main(int argc, char** argv) {
     register_metrics_for_type<nk::e4m3_t>("e4m3");
     register_metrics_for_type<nk::e3m2_t>("e3m2");
     register_metrics_for_type<nk::e2m3_t>("e2m3");
+
     register_metrics_for_type<nk::i8_t>("i8");
     register_metrics_for_type<nk::i4x2_t>("i4x2");
+
     register_metrics_for_type<nk::u8_t>("u8");
     register_metrics_for_type<nk::u4x2_t>("u4x2");
     register_metrics_for_type<nk::u1x8_t>("u1x8");
 
-    benchmark::Initialize(&argc, argv);
-    if (benchmark::ReportUnrecognizedArguments(argc, argv)) return 1;
     benchmark::RunSpecifiedBenchmarks();
     benchmark::Shutdown();
     return 0;

@@ -227,6 +227,7 @@ int check_metrics_for_type<nk::u1x8_t>() noexcept {
 
 int main(void) {
     int failures = 0;
+
     failures += check_metrics_for_type<nk::f64_t>();
     failures += check_metrics_for_type<nk::f32_t>();
     failures += check_metrics_for_type<nk::bf16_t>();
@@ -235,11 +236,14 @@ int main(void) {
     failures += check_metrics_for_type<nk::e4m3_t>();
     failures += check_metrics_for_type<nk::e3m2_t>();
     failures += check_metrics_for_type<nk::e2m3_t>();
+
     failures += check_metrics_for_type<nk::i8_t>();
     failures += check_metrics_for_type<nk::i4x2_t>();
+
     failures += check_metrics_for_type<nk::u8_t>();
     failures += check_metrics_for_type<nk::u4x2_t>();
     failures += check_metrics_for_type<nk::u1x8_t>();
+
     if (failures != 0) fmt::print(stderr, "{} failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

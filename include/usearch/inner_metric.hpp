@@ -992,7 +992,7 @@ template <std::size_t fan_out_, inner_kit kit_>
 }
 
 /**
- *  @brief Compute @c (sum, sumsq) of @p vec via the kit's @c compute_norms.
+ *  @brief Compute @c (sum,sumsq) of @p vec via the kit's @c compute_norms.
  *
  *  The capability cascade is the existing @c kernel_chain - the dot kernel's kit always
  *  exists when any kernel is wired up for the scalar, so we resolve through @c

@@ -13,8 +13,9 @@
 #pragma once
 
 #include <algorithm>   // `std::lower_bound`, `std::sort_heap`, `std::min`, `std::max`
+#include <array>       // `std::array` - batch-of-four overloads
 #include <cstddef>     // `std::size_t`
-#include <cstdint>     // `SIZE_MAX`
+#include <cstdint>     // `SIZE_MAX`, `std::uint8_t`
 #include <cstring>     // `std::memcpy`, `std::memset`
 #include <functional>  // `std::less`, `std::hash`
 #include <limits>      // `std::numeric_limits`
@@ -255,17 +256,42 @@ class max_heap {
     }
 
     /**
-     *  @brief Inserts multiple elements into the heap.
-     *  @param elements Pointer to the elements to be inserted.
-     *  @return True if the elements were successfully inserted, false otherwise.
+     *  @brief Inserts @p count elements into the heap.
+     *  @return @c true if the elements were successfully inserted, @c false if allocation failed.
+     *
+     *  Appends the batch at the tail, then heapifies. Picks between two strategies based on
+     *  the ratio of new elements to existing size:
+     *
+     *  - `Floyd bulk heapify` when @p count ≥ size_ / 2: re-heapify the full array from the
+     *    last parent down. `O(size_ + count)` compare-swaps, ≈ `2(size_ + count)` total.
+     *  - `Incremental shift_up` when @p count is small relative to the heap: only the
+     *    appended suffix needs work. `O(count · log(size_ + count))` compare-swaps.
+     *
+     *  Crossover is at `count ≈ (size_ + count) / log(size_ + count)`. In the HNSW hot
+     *  path (batch of ~32, heap of ~128) incremental shift_up wins; for bulk init from
+     *  empty (size_ == 0) Floyd wins trivially.
      */
-    inline bool insert_many(element_t const* elements) noexcept {
-        // Wikipedia describes a procedure, due to Floyd, which constructs a heap from an array in linear time.
-        // It also mentions a procedure for merging two heaps, of sizes 𝑛 and 𝑘, in time 𝑂(𝑘+log𝑘log𝑛).
-        // Altogether, we can add 𝑘 elements to a heap of length 𝑛 in time 𝑂(𝑘+log𝑘log𝑛): first build a heap containing
-        // 𝑘 elements to be inserted (takes 𝑂(𝑘) time), then merge that with the heap of size 𝑛 (takes 𝑂(𝑘+log𝑘log𝑛)
-        // time). Compare this to repeated insertion, which would run in time 𝑂(𝑘log𝑛).
-        return false;
+    bool insert_many(element_t const* new_elements, std::size_t count) noexcept {
+        if (count == 0) return true;
+        if (!reserve(size_ + count)) return false;
+        std::memcpy(&elements_[size_], new_elements, count * sizeof(element_t));
+        size_ += count;
+
+        bool const use_floyd_rebuild = count >= (size_ - count) / 2 || size_ - count == 0;
+        if (use_floyd_rebuild) {
+            if (size_ > 1)
+                for (std::size_t parent_index = size_ / 2; parent_index-- > 0;) shift_down(parent_index);
+        }
+        else {
+            for (std::size_t appended_index = size_ - count; appended_index < size_; ++appended_index)
+                shift_up(appended_index);
+        }
+        return true;
+    }
+
+    template <std::size_t batch_size_>
+    inline bool insert_many(std::array<element_t, batch_size_> const& batch) noexcept {
+        return insert_many(batch.data(), batch_size_);
     }
 
     element_t pop() noexcept {
@@ -275,6 +301,22 @@ class max_heap {
         elements_[size_].~element_t();
         shift_down(0);
         return result;
+    }
+
+    /**
+     *  @brief Pops the @c batch_size_ largest elements into a @c std::array, descending.
+     *
+     *  Straightforward @c batch_size_ sequential @ref pop calls. There is no algorithmic
+     *  savings over the loop - each pop still costs `O(log size_)` - but a single call
+     *  amortizes function-call overhead and matches the batch API shape of the rest of
+     *  this header. Useful at HNSW search finalization when a top-k result list is
+     *  extracted from the frontier.
+     */
+    template <std::size_t batch_size_>
+    inline std::array<element_t, batch_size_> pop_many() noexcept {
+        std::array<element_t, batch_size_> out;
+        for (std::size_t i = 0; i < batch_size_; ++i) out[i] = pop();
+        return out;
     }
 
   private:
@@ -314,6 +356,188 @@ class max_heap {
         if (i != max_idx) {
             std::swap(elements_[i], elements_[max_idx]);
             shift_down(max_idx);
+        }
+    }
+};
+
+/**
+ *  @brief D-ary max-heap with implicit array layout - parent at @c i, children at
+ *      @c d·i+1 .. @c d·i+d. Same flat-buffer storage and same public API as @ref max_heap;
+ *      the difference is the tree-fan-out @p arity_ controlling per-level work and depth.
+ *
+ *  Insert (`shift_up`) walks a single path from leaf to root with `log_d(n)` compare-swaps
+ *  - shallower than the binary heap's `log_2(n)` by a factor of `log_2(d)`. Pop (`shift_down`)
+ *  scans up to @p arity_ children per level over `log_d(n)` levels, so total compares per
+ *  pop are roughly the same as binary, just rearranged.
+ *
+ *  HNSW frontier inserts dominate pops (~M·2 pushes per pop), so the insert-side win
+ *  carries the workload. Sweet spot is `arity_ ∈ {4, 8, 16}` - d=2 falls back to binary
+ *  (and serves as a parity-check oracle), d=64+ blows up the pop sweep.
+ *
+ *  @note `sort_ascending` uses `std::sort` here (not `std::sort_heap`) because the
+ *      latter assumes a binary heap layout.
+ */
+template <std::size_t arity_,                          //
+          typename element_type_,                      //
+          typename comparator_type_ = std::less<void>, //
+          typename allocator_type_ = std::allocator<element_type_>>
+class max_heap_dary {
+    static_assert(arity_ >= 2, "Heap arity must be at least 2");
+
+  public:
+    using element_t = element_type_;
+    using comparator_t = comparator_type_;
+    using allocator_t = allocator_type_;
+    using value_type = element_t;
+    static constexpr std::size_t arity = arity_;
+
+    static_assert(std::is_trivially_destructible<element_t>(), "This heap is designed for trivial structs");
+    static_assert(std::is_trivially_copy_constructible<element_t>(), "This heap is designed for trivial structs");
+
+  private:
+    element_t* elements_;
+    std::size_t size_;
+    std::size_t capacity_;
+
+  public:
+    max_heap_dary() noexcept : elements_(nullptr), size_(0), capacity_(0) {}
+
+    max_heap_dary(max_heap_dary&& other) noexcept
+        : elements_(exchange(other.elements_, nullptr)), size_(exchange(other.size_, 0)),
+          capacity_(exchange(other.capacity_, 0)) {}
+
+    max_heap_dary& operator=(max_heap_dary&& other) noexcept {
+        std::swap(elements_, other.elements_);
+        std::swap(size_, other.size_);
+        std::swap(capacity_, other.capacity_);
+        return *this;
+    }
+
+    max_heap_dary(max_heap_dary const&) = delete;
+    max_heap_dary& operator=(max_heap_dary const&) = delete;
+
+    ~max_heap_dary() noexcept { reset(); }
+
+    void reset() noexcept {
+        if (elements_) allocator_t {}.deallocate(elements_, capacity_);
+        elements_ = nullptr;
+        capacity_ = 0;
+        size_ = 0;
+    }
+
+    inline bool empty() const noexcept { return !size_; }
+    inline std::size_t size() const noexcept { return size_; }
+    inline std::size_t capacity() const noexcept { return capacity_; }
+    inline element_t* data() noexcept { return elements_; }
+    inline element_t const* data() const noexcept { return elements_; }
+    inline void clear() noexcept { size_ = 0; }
+    inline void shrink(std::size_t n) noexcept { size_ = (std::min<std::size_t>)(n, size_); }
+    inline element_t const& top() const noexcept { return elements_[0]; }
+
+    /** @brief Sorts the underlying array ascending. Uses `std::sort` because @c std::sort_heap
+     *  assumes binary-heap layout. */
+    inline void sort_ascending() noexcept { std::sort(elements_, elements_ + size_, &less); }
+
+    bool reserve(std::size_t new_capacity) noexcept {
+        if (new_capacity <= capacity_) return true;
+        new_capacity = ceil2(new_capacity);
+        if (new_capacity == 0) return false;
+        new_capacity = (std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u));
+        auto allocator = allocator_t {};
+        auto new_elements = allocator.allocate(new_capacity);
+        if (!new_elements) return false;
+        if (elements_) {
+            std::memcpy(new_elements, elements_, size_ * sizeof(element_t));
+            allocator.deallocate(elements_, capacity_);
+        }
+        elements_ = new_elements;
+        capacity_ = new_capacity;
+        return new_elements;
+    }
+
+    bool insert(element_t&& element) noexcept {
+        if (!reserve(size_ + 1)) return false;
+        insert_reserved(std::move(element));
+        return true;
+    }
+
+    void insert_reserved(element_t&& element) noexcept {
+        new (&elements_[size_]) element_t(element);
+        size_++;
+        shift_up(size_ - 1);
+    }
+
+    /**
+     *  @brief Inserts @p count elements via append-then-heapify, picking between
+     *      `Floyd` bulk rebuild (for batches >= half the existing size) and
+     *      incremental @c shift_up (for smaller batches).
+     */
+    bool insert_many(element_t const* new_elements, std::size_t count) noexcept {
+        if (count == 0) return true;
+        if (!reserve(size_ + count)) return false;
+        std::memcpy(&elements_[size_], new_elements, count * sizeof(element_t));
+        size_ += count;
+        bool const use_floyd_rebuild = count >= (size_ - count) / 2 || size_ - count == 0;
+        if (use_floyd_rebuild) {
+            if (size_ > 1) {
+                std::size_t const last_parent = (size_ - 2) / arity_;
+                for (std::size_t parent = last_parent + 1; parent-- > 0;) shift_down(parent);
+            }
+        }
+        else {
+            for (std::size_t appended = size_ - count; appended < size_; ++appended) shift_up(appended);
+        }
+        return true;
+    }
+
+    template <std::size_t batch_size_>
+    inline bool insert_many(std::array<element_t, batch_size_> const& batch) noexcept {
+        return insert_many(batch.data(), batch_size_);
+    }
+
+    element_t pop() noexcept {
+        element_t result = top();
+        std::swap(elements_[0], elements_[size_ - 1]);
+        size_--;
+        elements_[size_].~element_t();
+        shift_down(0);
+        return result;
+    }
+
+    template <std::size_t batch_size_>
+    inline std::array<element_t, batch_size_> pop_many() noexcept {
+        std::array<element_t, batch_size_> out;
+        for (std::size_t i = 0; i < batch_size_; ++i) out[i] = pop();
+        return out;
+    }
+
+  private:
+    static std::size_t parent_idx(std::size_t i) noexcept { return (i - 1u) / arity_; }
+    static std::size_t first_child_idx(std::size_t i) noexcept { return arity_ * i + 1u; }
+    static bool less(element_t const& a, element_t const& b) noexcept { return comparator_t {}(a, b); }
+
+    void shift_up(std::size_t i) noexcept {
+        for (; i && less(elements_[parent_idx(i)], elements_[i]); i = parent_idx(i))
+            std::swap(elements_[parent_idx(i)], elements_[i]);
+    }
+
+    /**
+     *  @brief Iterative shift-down. Loads up to @p arity_ children per level, finds the
+     *      max via a scalar linear scan (well-predicted for small @p arity_), swaps with
+     *      parent if needed, descends. No recursion - the loop terminates when the heap
+     *      property is restored.
+     */
+    void shift_down(std::size_t i) noexcept {
+        while (true) {
+            std::size_t const first = first_child_idx(i);
+            if (first >= size_) return;
+            std::size_t const last = (first + arity_ < size_) ? (first + arity_) : size_;
+            std::size_t max_idx = i;
+            for (std::size_t c = first; c < last; ++c)
+                if (less(elements_[max_idx], elements_[c])) max_idx = c;
+            if (max_idx == i) return;
+            std::swap(elements_[i], elements_[max_idx]);
+            i = max_idx;
         }
     }
 };
@@ -404,16 +628,169 @@ class sorted_buffer {
 
     /**
      *  @retval `true` if the entry was added, `false` if it wasn't relevant enough.
+     *
+     *  Fast-reject path (`size_ == limit && element >= top`) returns without the
+     *  `std::lower_bound` walk - O(1) rather than O(log limit). That's the common case
+     *  on the HNSW hot path once the top-k buffer warms up and most successors lose.
      */
     inline bool insert(element_t&& element, std::size_t limit) noexcept {
+        if (size_ == limit && !less(element, elements_[size_ - 1])) return false;
         std::size_t slot = size_ ? std::lower_bound(elements_, elements_ + size_, element, &less) - elements_ : 0;
-        if (slot == limit) return false;
         std::size_t to_move = size_ - slot - (size_ == limit);
         element_t* source = elements_ + size_ - 1 - (size_ == limit);
         for (; to_move; --to_move, --source) source[1] = source[0];
         elements_[slot] = element;
         size_ += size_ != limit;
         return true;
+    }
+
+    /**
+     *  @brief Merge a batch of @c batch_size_ candidates into the buffer in a single pass.
+     *  @return 64-bit mask - bit @c i is set iff @c batch[i] ended up in the buffer.
+     *
+     *  Semantically "take the top-@c limit of (existing ∪ batch)" - the HNSW top-k
+     *  semantic, which can keep candidates that @c batch_size_ cascading single-element
+     *  inserts would reject due to intermediate buffer-top shrinkage.
+     *
+     *  When the buffer is full a partition step first scans the batch against the current
+     *  top and discards entries that can't beat it - exactly the same `O(1)` reject the
+     *  single-element @ref insert benefits from, applied to all @c batch_size_ lanes in
+     *  one `O(N)` sweep. If every entry loses we return immediately without sorting or
+     *  shifting anything. When some entries survive we presort and merge only those
+     *  `s ≤ N` survivors, dropping the sort cost from `O(N log N)` to `O(s log s)` and
+     *  the merge work to `O(s + size_)`. For all-reject HNSW steady state this collapses
+     *  to a fixed cost per batch independent of the buffer's contents.
+     *
+     *  Callers that can supply a pre-sorted batch (distances already sorted out of a
+     *  SIMD kernel) should reach for @ref insert_sorted - it bypasses both the
+     *  partition and the presort.
+     */
+    template <std::size_t batch_size_>
+    inline std::uint64_t insert(std::array<element_t, batch_size_> const& batch_in, std::size_t limit) noexcept {
+        static_assert(batch_size_ > 0 && batch_size_ <= 64, "Batch size must fit the uint64 return mask");
+        struct indexed_element_t {
+            element_t value;
+            std::uint8_t lane;
+        };
+        std::array<indexed_element_t, batch_size_> survivors;
+        std::size_t survivor_count = 0;
+
+        if (size_ == limit) {
+            // Partition: keep only batch entries that beat the current top.
+            element_t const& current_top = elements_[size_ - 1];
+            for (std::size_t lane = 0; lane < batch_size_; ++lane)
+                if (less(batch_in[lane], current_top)) {
+                    survivors[survivor_count].value = batch_in[lane];
+                    survivors[survivor_count].lane = static_cast<std::uint8_t>(lane);
+                    ++survivor_count;
+                }
+            if (survivor_count == 0) return 0; // O(N) all-reject return - no sort, no shift
+        }
+        else {
+            // Buffer not yet full - every batch entry is a candidate.
+            for (std::size_t lane = 0; lane < batch_size_; ++lane) {
+                survivors[lane].value = batch_in[lane];
+                survivors[lane].lane = static_cast<std::uint8_t>(lane);
+            }
+            survivor_count = batch_size_;
+        }
+
+        std::sort(survivors.begin(), survivors.begin() + survivor_count,
+                  [](indexed_element_t const& first, indexed_element_t const& second) noexcept {
+                      return less(first.value, second.value);
+                  });
+
+        std::size_t const total = size_ + survivor_count;
+        std::size_t const new_size = (total < limit) ? total : limit;
+        std::size_t const drop = total - new_size;
+        std::size_t existing_tail = size_;
+        std::size_t batch_tail = survivor_count;
+        std::uint64_t accepted_sorted = (survivor_count == 64) //
+                                            ? static_cast<std::uint64_t>(~std::uint64_t {0})
+                                            : ((std::uint64_t {1} << survivor_count) - 1);
+
+        // Drop phase - evict the `drop` largest elements from (existing ∪ survivors).
+        for (std::size_t iteration = 0; iteration < drop; ++iteration) {
+            bool const pop_batch = (existing_tail == 0) || (batch_tail > 0 && less(elements_[existing_tail - 1],
+                                                                                   survivors[batch_tail - 1].value));
+            if (pop_batch) {
+                accepted_sorted &= ~(std::uint64_t {1} << (batch_tail - 1));
+                --batch_tail;
+            }
+            else { --existing_tail; }
+        }
+        // Merge phase - write the remaining `new_size` entries from back to front.
+        std::size_t write_index = new_size;
+        while (write_index > 0 && batch_tail > 0) {
+            bool const pick_batch = (existing_tail == 0) ||
+                                    less(elements_[existing_tail - 1], survivors[batch_tail - 1].value);
+            --write_index;
+            if (pick_batch) {
+                elements_[write_index] = survivors[batch_tail - 1].value;
+                --batch_tail;
+            }
+            else {
+                elements_[write_index] = elements_[existing_tail - 1];
+                --existing_tail;
+            }
+            if (batch_tail == 0 && existing_tail == write_index) break;
+        }
+        size_ = new_size;
+
+        // Remap sorted-survivors acceptance bits back to caller's original lane positions.
+        std::uint64_t out = 0;
+        for (std::size_t sorted_index = 0; sorted_index < survivor_count; ++sorted_index)
+            if (accepted_sorted & (std::uint64_t {1} << sorted_index))
+                out |= std::uint64_t {1} << survivors[sorted_index].lane;
+        return out;
+    }
+
+    /**
+     *  @brief Merge a pre-sorted (ascending) batch into the buffer in a single pass.
+     *  @return 64-bit mask - bit @c i is set iff @c batch[i] ended up in the buffer.
+     *
+     *  Identical to @ref insert(std::array, limit) but assumes the caller has already
+     *  sorted @p batch ascending by @c comparator_t. Skips the presort entirely, saving
+     *  `O(N log N)` comparisons. No permutation tracking is needed since the caller's
+     *  lane @c i corresponds directly to the batch's @c i-th ascending position.
+     */
+    template <std::size_t batch_size_>
+    inline std::uint64_t insert_sorted(std::array<element_t, batch_size_> const& batch, std::size_t limit) noexcept {
+        static_assert(batch_size_ > 0 && batch_size_ <= 64, "Batch size must fit the uint64 return mask");
+        std::size_t const total = size_ + batch_size_;
+        std::size_t const new_size = (total < limit) ? total : limit;
+        std::size_t const drop = total - new_size;
+        std::size_t existing_tail = size_;
+        std::size_t batch_tail = batch_size_;
+        std::uint64_t accepted = (batch_size_ == 64)                                  //
+                                     ? static_cast<std::uint64_t>(~std::uint64_t {0}) //
+                                     : ((std::uint64_t {1} << batch_size_) - 1);
+
+        for (std::size_t iteration = 0; iteration < drop; ++iteration) {
+            bool const pop_batch = (existing_tail == 0) ||
+                                   (batch_tail > 0 && less(elements_[existing_tail - 1], batch[batch_tail - 1]));
+            if (pop_batch) {
+                accepted &= ~(std::uint64_t {1} << (batch_tail - 1));
+                --batch_tail;
+            }
+            else { --existing_tail; }
+        }
+        std::size_t write_index = new_size;
+        while (write_index > 0 && batch_tail > 0) {
+            bool const pick_batch = (existing_tail == 0) || less(elements_[existing_tail - 1], batch[batch_tail - 1]);
+            --write_index;
+            if (pick_batch) {
+                elements_[write_index] = batch[batch_tail - 1];
+                --batch_tail;
+            }
+            else {
+                elements_[write_index] = elements_[existing_tail - 1];
+                --existing_tail;
+            }
+            if (batch_tail == 0 && existing_tail == write_index) break;
+        }
+        size_ = new_size;
+        return accepted;
     }
 
     inline element_t pop() noexcept {
@@ -533,6 +910,25 @@ class growing_hash_set {
         slots_[index] = elem;
         ++count_;
         return false;
+    }
+
+    /**
+     *  @brief Inserts up to @c batch_size_ elements sequentially.
+     *  @return 64-bit mask - bit @c i is set iff @c batch[i] was newly inserted (matching
+     *      the single-element `set` convention where a newly-inserted element returns @c false).
+     *
+     *  Scalar baseline just calls @ref set in a loop; the measured win over single-element
+     *  inserts (~1.6× on the microbench) comes from the compiler interleaving independent
+     *  load-use chains through two load ports. Future SIMD variants can overlap wider
+     *  bucket compares without changing the call shape.
+     */
+    template <std::size_t batch_size_>
+    inline std::uint64_t set(std::array<element_t, batch_size_> const& batch) noexcept {
+        static_assert(batch_size_ > 0 && batch_size_ <= 64, "Batch size must fit the uint64 return mask");
+        std::uint64_t out = 0;
+        for (std::size_t i = 0; i < batch_size_; ++i)
+            if (!set(batch[i])) out |= std::uint64_t {1} << i;
+        return out;
     }
 
     /**
