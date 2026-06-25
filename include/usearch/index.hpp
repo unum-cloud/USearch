@@ -2460,6 +2460,9 @@ class index_gt {
         top_candidates_t top_for_refine{};
         next_candidates_t next_candidates{};
         visits_hash_set_t visits{};
+        /// @brief Reused snapshot of a new node's forward neighbors for the
+        /// reverse-link pass in `add_` (#735), so it needs no per-add allocation.
+        buffer_gt<candidate_t, candidates_allocator_t> reverse_neighbors{};
         std::default_random_engine level_generator{};
         std::size_t iteration_cycles{};
         std::size_t computed_distances{};
@@ -3228,18 +3231,55 @@ class index_gt {
             value, metric, prefetch,                      //
             entry_slot_copy, max_level_copy, new_target_level, context);
 
-        // From `new_target_level` down - perform proper extensive search
-        for (level_t level = (std::min)(new_target_level, max_level_copy); level >= 0; --level) {
+        // #735: Form ALL of this node's forward links (every level) BEFORE adding
+        // any reverse links. Reverse links are what make a node discoverable by
+        // concurrent searches; deferring them to a second pass guarantees this node
+        // is never reachable as a greedy-descent seed while one of its lower levels
+        // still has an empty neighbor list. Otherwise a concurrent inserter could
+        // descend onto this half-linked node, dead-end its level search with a single
+        // candidate, attach by one fragile edge, and be evicted into a permanently
+        // unreachable node — the root of #735.
+        level_t const top_level = (std::min)(new_target_level, max_level_copy);
+
+        // Pass 1: forward links, top-down (each level seeds the next from its closest).
+        for (level_t level = top_level; level >= 0; --level) {
             // TODO: Handle out of memory conditions
             search_to_insert_(value, metric, prefetch, closest_slot, level, config.expansion, context);
-            candidates_view_t closest_view;
+            node_lock_t new_lock = node_lock_(new_slot);
+            // Do NOT clear() the list — concurrent inserters may already have appended
+            // valid reverse links here; form_links_to_closest_ preserves and extends them.
+            candidates_view_t closest_view = form_links_to_closest_(metric, new_slot, level, context);
+            if (closest_view.size())
+                closest_slot = closest_view[0].slot;
+        }
+
+        // Pass 2: reverse links, for every level. Snapshot this node's forward
+        // neighbors under its lock, release, then link each neighbor back to it.
+        // (form_reverse_links_ locks the *neighbor* nodes, so we must not hold this
+        // node's lock across it — see the consistent lock ordering in CLAUDE.md.)
+        //
+        // The snapshot lives in a per-thread context buffer (reused across adds, not
+        // a per-add heap allocation), and is sized via the null-returning allocator
+        // so OOM yields `result.failed("Out of memory!")` instead of throwing — add_
+        // is noexcept in release builds (NDEBUG), where a throw would std::terminate.
+        std::size_t const max_neighbors = (std::max)(config_.connectivity, config_.connectivity_base);
+        if (context.reverse_neighbors.size() < max_neighbors) {
+            buffer_gt<candidate_t, candidates_allocator_t> grown(max_neighbors);
+            if (!grown)
+                return result.failed("Out of memory!");
+            context.reverse_neighbors = std::move(grown);
+        }
+        for (level_t level = top_level; level >= 0; --level) {
+            std::size_t n = 0;
             {
                 node_lock_t new_lock = node_lock_(new_slot);
-                neighbors_(new_node, level).clear();
-                closest_view = form_links_to_closest_(metric, new_slot, level, context);
-                closest_slot = closest_view[0].slot;
+                neighbors_ref_t new_neighbors = neighbors_(new_node, level);
+                n = new_neighbors.size(); // <= per-level capacity <= max_neighbors
+                for (std::size_t i = 0; i != n; ++i)
+                    context.reverse_neighbors[i] = candidate_t{distance_t{}, new_neighbors[i]};
             }
-            form_reverse_links_(metric, new_slot, closest_view, value, level, context);
+            form_reverse_links_(metric, new_slot, candidates_view_t{context.reverse_neighbors.data(), n}, value, level,
+                                context);
         }
 
         // Normalize stats
@@ -4269,13 +4309,32 @@ class index_gt {
             refine_(metric, config_.connectivity, top, context, context.computed_distances_in_refines);
         usearch_assert_m(top_view.size() || !require_non_empty_ak, "This would lead to isolated nodes");
 
-        // Outgoing links from `new_slot`:
+        // Outgoing links from `new_slot`.
+        //
+        // #735: the list is NOT necessarily blank here. Between forming this node's
+        // upper-level links and this level's links, the node's per-level lock is
+        // released (the level loop re-acquires `node_lock_(new_slot)` each level).
+        // A concurrent inserter that picked this node as its greedy-descent seed
+        // (`search_for_one_` returns it from an upper level) can append reverse
+        // links into this still-empty lower-level list. Clearing it — as the old
+        // code did at the call site — would silently drop those edges and strand
+        // that inserter as a permanently unreachable node. So we PRESERVE whatever
+        // is already here and append our forward links, deduped, bounded by the
+        // level's capacity. Single-threaded the list is empty and this is identical
+        // to the previous behavior.
         neighbors_ref_t new_neighbors = neighbors_(new_node, level);
-        usearch_assert_m(!new_neighbors.size(), "The newly inserted element should have blank link list");
+        std::size_t const connectivity_max = level ? config_.connectivity : config_.connectivity_base;
         for (std::size_t idx = 0; idx != top_view.size(); idx++) {
-            usearch_assert_m(!new_neighbors[idx], "Possible memory corruption");
-            usearch_assert_m(level <= node_at_(top_view[idx].slot).level(), "Linking to missing level");
-            new_neighbors.push_back(top_view[idx].slot);
+            compressed_slot_t forward_slot = top_view[idx].slot;
+            usearch_assert_m(level <= node_at_(forward_slot).level(), "Linking to missing level");
+            if (new_neighbors.size() >= connectivity_max)
+                break;
+            // Skip a forward candidate already present as a concurrently-added reverse link.
+            if (std::find_if(new_neighbors.begin(), new_neighbors.end(), [forward_slot](compressed_slot_t slot) {
+                    return slot == forward_slot;
+                }) != new_neighbors.end())
+                continue;
+            new_neighbors.push_back(forward_slot);
         }
 
         return top_view;
