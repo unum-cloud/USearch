@@ -9,7 +9,7 @@
 //! ## Features
 //!
 //! - SIMD-accelerated distance calculations for various metrics.
-//! - Support for `f32`, `f64`, `i8`, custom `f16`, and binary (`b1x8`) vector types.
+//! - Support for `f32`, `f64`, `i8`, `u8`, custom `f16`, and binary (`b1x8`) vector types.
 //! - Extensible with custom distance metrics and filtering predicates.
 //! - Efficient serialization and deserialization for persistence and network transfers.
 //!
@@ -20,6 +20,26 @@
 /// Returns the version of the USearch crate.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+/// Returns a comma-separated list of ISAs compiled into this binary.
+pub fn hardware_acceleration_compiled() -> String {
+    use core::ffi::CStr;
+    unsafe {
+        CStr::from_ptr(ffi::hardware_acceleration_compiled())
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+/// Returns a comma-separated list of ISAs available at runtime (compiled AND supported by CPU).
+pub fn hardware_acceleration_available() -> String {
+    use core::ffi::CStr;
+    unsafe {
+        CStr::from_ptr(ffi::hardware_acceleration_available())
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 /// The key type used to identify vectors in the index.
@@ -258,7 +278,7 @@ pub mod ffi {
         IP,
         /// The squared Euclidean Distance metric, defined as `L2 = sum((a[i] - b[i])^2)`.
         L2sq,
-        /// The Cosine Similarity metric, defined as `Cos = 1 - sum(a[i] * b[i]) / (sqrt(sum(a[i]^2) * sqrt(sum(b[i]^2)))`.
+        /// The Cosine Distance metric, defined as `Cos = 1 - sum(a[i] * b[i]) / (sqrt(sum(a[i]^2)) * sqrt(sum(b[i]^2)))`.
         Cos,
         /// The Pearson Correlation metric.
         Pearson,
@@ -283,12 +303,22 @@ pub mod ffi {
         F64,
         /// 32-bit single-precision IEEE 754 floating-point number.
         F32,
-        /// 16-bit half-precision IEEE 754 floating-point number (different from `bf16`).
-        F16,
         /// 16-bit brain floating-point number.
         BF16,
+        /// 16-bit half-precision IEEE 754 floating-point number (different from `bf16`).
+        F16,
+        /// 8-bit floating point: 1 sign + 5 exponent + 2 mantissa.
+        E5M2,
+        /// 8-bit floating point: 1 sign + 4 exponent + 3 mantissa.
+        E4M3,
+        /// 8-bit floating point: 1 sign + 3 exponent + 2 mantissa, range +/-28.
+        E3M2,
+        /// 8-bit floating point: 1 sign + 2 exponent + 3 mantissa, range +/-7.5.
+        E2M3,
         /// 8-bit signed integer.
         I8,
+        /// 8-bit unsigned integer.
+        U8,
         /// 1-bit binary value, packed 8 per byte.
         B1,
     }
@@ -299,6 +329,24 @@ pub mod ffi {
     struct Matches {
         keys: Vec<u64>,
         distances: Vec<f32>,
+    }
+
+    /// Detailed memory statistics with separate breakdowns for the graph
+    /// and vectors allocator tapes.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct MemoryStats {
+        /// Total memory allocated by the graph structure allocator, in bytes.
+        graph_allocated: usize,
+        /// Memory wasted due to alignment in the graph allocator, in bytes.
+        graph_wasted: usize,
+        /// Reserved but unused memory in the graph allocator, in bytes.
+        graph_reserved: usize,
+        /// Total memory allocated by the vectors data allocator, in bytes.
+        vectors_allocated: usize,
+        /// Memory wasted due to alignment in the vectors allocator, in bytes.
+        vectors_wasted: usize,
+        /// Reserved but unused memory in the vectors allocator, in bytes.
+        vectors_reserved: usize,
     }
 
     /// The index options used to configure the dense index during creation.
@@ -315,9 +363,37 @@ pub mod ffi {
         multi: bool,
     }
 
+    /// Metadata read from a serialized index header without loading the full index.
+    /// Mirrors the on-disk `index_dense_head_t` layout — sufficient to reconstruct
+    /// an `IndexOptions` for `Index::new` before calling `load`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct IndexMetadata {
+        /// Number of dimensions per vector, as stored in the file header.
+        dimensions: u64,
+        /// The metric used to build the index.
+        metric: MetricKind,
+        /// The scalar quantization used for stored vectors.
+        quantization: ScalarKind,
+        /// `true` if the index was built with multiple vectors per key allowed.
+        multi: bool,
+        /// Number of currently-present vectors.
+        count_present: u64,
+        /// Number of soft-deleted vectors still occupying slots.
+        count_deleted: u64,
+        /// USearch major version that wrote the file.
+        version_major: u16,
+        /// USearch minor version that wrote the file.
+        version_minor: u16,
+        /// USearch patch version that wrote the file.
+        version_patch: u16,
+    }
+
     // C++ types and signatures exposed to Rust.
     unsafe extern "C++" {
         include!("lib.hpp");
+
+        pub fn hardware_acceleration_compiled() -> *const c_char;
+        pub fn hardware_acceleration_available() -> *const c_char;
 
         /// Low-level C++ interface that is further wrapped into the high-level `Index`
         type NativeIndex;
@@ -326,16 +402,26 @@ pub mod ffi {
         pub fn expansion_search(self: &NativeIndex) -> usize;
         pub fn change_expansion_add(self: &NativeIndex, n: usize);
         pub fn change_expansion_search(self: &NativeIndex, n: usize);
-        pub fn change_metric_kind(self: &NativeIndex, metric: MetricKind);
+
+        pub fn metric_kind(self: &NativeIndex) -> MetricKind;
+        pub fn change_metric_kind(self: &NativeIndex, metric: MetricKind) -> Result<()>;
 
         /// Changes the metric function used to calculate the distance between vectors.
         /// Avoids the `std::ffi::c_void` type and the `StatefulMetric` type, that the FFI
         /// does not support, replacing them with basic pointer-sized integer types.
         /// The first two arguments are the pointers to the vectors to compare, and the third
         /// argument is the `metric_state` propagated from the Rust layer.
-        pub fn change_metric(self: &NativeIndex, metric: usize, metric_state: usize);
+        pub fn change_metric(self: &NativeIndex, metric: usize, metric_state: usize) -> Result<()>;
 
         pub fn new_native_index(options: &IndexOptions) -> Result<UniquePtr<NativeIndex>>;
+
+        /// Reads only the index header from a serialized file, returning enough
+        /// metadata to reconstruct an `IndexOptions` without loading the full index.
+        pub fn read_metadata(path: &str) -> Result<IndexMetadata>;
+
+        /// Reads only the index header from an in-memory serialized buffer.
+        pub fn read_metadata_from_buffer(buffer: &[u8]) -> Result<IndexMetadata>;
+
         pub fn reserve(self: &NativeIndex, capacity: usize) -> Result<()>;
         pub fn reserve_capacity_and_threads(
             self: &NativeIndex,
@@ -345,49 +431,40 @@ pub mod ffi {
 
         pub fn dimensions(self: &NativeIndex) -> usize;
         pub fn connectivity(self: &NativeIndex) -> usize;
+        pub fn scalar_kind(self: &NativeIndex) -> ScalarKind;
+        pub fn multi(self: &NativeIndex) -> bool;
         pub fn size(self: &NativeIndex) -> usize;
         pub fn capacity(self: &NativeIndex) -> usize;
         pub fn serialized_length(self: &NativeIndex) -> usize;
 
-        pub fn add_b1x8(self: &NativeIndex, key: u64, vector: &[u8]) -> Result<()>;
-        pub fn add_i8(self: &NativeIndex, key: u64, vector: &[i8]) -> Result<()>;
-        pub fn add_f16(self: &NativeIndex, key: u64, vector: &[i16]) -> Result<()>;
-        pub fn add_f32(self: &NativeIndex, key: u64, vector: &[f32]) -> Result<()>;
         pub fn add_f64(self: &NativeIndex, key: u64, vector: &[f64]) -> Result<()>;
+        pub fn add_f32(self: &NativeIndex, key: u64, vector: &[f32]) -> Result<()>;
+        pub fn add_f16(self: &NativeIndex, key: u64, vector: &[i16]) -> Result<()>;
+        pub fn add_i8(self: &NativeIndex, key: u64, vector: &[i8]) -> Result<()>;
+        pub fn add_u8(self: &NativeIndex, key: u64, vector: &[u8]) -> Result<()>;
+        pub fn add_b1x8(self: &NativeIndex, key: u64, vector: &[u8]) -> Result<()>;
 
-        pub fn search_b1x8(self: &NativeIndex, query: &[u8], count: usize) -> Result<Matches>;
-        pub fn search_i8(self: &NativeIndex, query: &[i8], count: usize) -> Result<Matches>;
-        pub fn search_f16(self: &NativeIndex, query: &[i16], count: usize) -> Result<Matches>;
-        pub fn search_f32(self: &NativeIndex, query: &[f32], count: usize) -> Result<Matches>;
         pub fn search_f64(self: &NativeIndex, query: &[f64], count: usize) -> Result<Matches>;
+        pub fn search_f32(self: &NativeIndex, query: &[f32], count: usize) -> Result<Matches>;
+        pub fn search_f16(self: &NativeIndex, query: &[i16], count: usize) -> Result<Matches>;
+        pub fn search_i8(self: &NativeIndex, query: &[i8], count: usize) -> Result<Matches>;
+        pub fn search_u8(self: &NativeIndex, query: &[u8], count: usize) -> Result<Matches>;
+        pub fn search_b1x8(self: &NativeIndex, query: &[u8], count: usize) -> Result<Matches>;
 
-        pub fn exact_search_b1x8(self: &NativeIndex, query: &[u8], count: usize)
-            -> Result<Matches>;
-        pub fn exact_search_i8(self: &NativeIndex, query: &[i8], count: usize) -> Result<Matches>;
-        pub fn exact_search_f16(self: &NativeIndex, query: &[i16], count: usize)
+        pub fn exact_search_f64(self: &NativeIndex, query: &[f64], count: usize)
             -> Result<Matches>;
         pub fn exact_search_f32(self: &NativeIndex, query: &[f32], count: usize)
             -> Result<Matches>;
-        pub fn exact_search_f64(self: &NativeIndex, query: &[f64], count: usize)
+        pub fn exact_search_f16(self: &NativeIndex, query: &[i16], count: usize)
+            -> Result<Matches>;
+        pub fn exact_search_i8(self: &NativeIndex, query: &[i8], count: usize) -> Result<Matches>;
+        pub fn exact_search_u8(self: &NativeIndex, query: &[u8], count: usize) -> Result<Matches>;
+        pub fn exact_search_b1x8(self: &NativeIndex, query: &[u8], count: usize)
             -> Result<Matches>;
 
-        pub fn filtered_search_b1x8(
+        pub fn filtered_search_f64(
             self: &NativeIndex,
-            query: &[u8],
-            count: usize,
-            filter: usize,
-            filter_state: usize,
-        ) -> Result<Matches>;
-        pub fn filtered_search_i8(
-            self: &NativeIndex,
-            query: &[i8],
-            count: usize,
-            filter: usize,
-            filter_state: usize,
-        ) -> Result<Matches>;
-        pub fn filtered_search_f16(
-            self: &NativeIndex,
-            query: &[i16],
+            query: &[f64],
             count: usize,
             filter: usize,
             filter_state: usize,
@@ -399,30 +476,73 @@ pub mod ffi {
             filter: usize,
             filter_state: usize,
         ) -> Result<Matches>;
-        pub fn filtered_search_f64(
+        pub fn filtered_search_f16(
             self: &NativeIndex,
-            query: &[f64],
+            query: &[i16],
+            count: usize,
+            filter: usize,
+            filter_state: usize,
+        ) -> Result<Matches>;
+        pub fn filtered_search_i8(
+            self: &NativeIndex,
+            query: &[i8],
+            count: usize,
+            filter: usize,
+            filter_state: usize,
+        ) -> Result<Matches>;
+        pub fn filtered_search_u8(
+            self: &NativeIndex,
+            query: &[u8],
+            count: usize,
+            filter: usize,
+            filter_state: usize,
+        ) -> Result<Matches>;
+        pub fn filtered_search_b1x8(
+            self: &NativeIndex,
+            query: &[u8],
             count: usize,
             filter: usize,
             filter_state: usize,
         ) -> Result<Matches>;
 
-        pub fn get_b1x8(self: &NativeIndex, key: u64, buffer: &mut [u8]) -> Result<usize>;
-        pub fn get_i8(self: &NativeIndex, key: u64, buffer: &mut [i8]) -> Result<usize>;
-        pub fn get_f16(self: &NativeIndex, key: u64, buffer: &mut [i16]) -> Result<usize>;
-        pub fn get_f32(self: &NativeIndex, key: u64, buffer: &mut [f32]) -> Result<usize>;
         pub fn get_f64(self: &NativeIndex, key: u64, buffer: &mut [f64]) -> Result<usize>;
+        pub fn get_f32(self: &NativeIndex, key: u64, buffer: &mut [f32]) -> Result<usize>;
+        pub fn get_f16(self: &NativeIndex, key: u64, buffer: &mut [i16]) -> Result<usize>;
+        pub fn get_i8(self: &NativeIndex, key: u64, buffer: &mut [i8]) -> Result<usize>;
+        pub fn get_u8(self: &NativeIndex, key: u64, buffer: &mut [u8]) -> Result<usize>;
+        pub fn get_b1x8(self: &NativeIndex, key: u64, buffer: &mut [u8]) -> Result<usize>;
 
         pub fn remove(self: &NativeIndex, key: u64) -> Result<usize>;
         pub fn rename(self: &NativeIndex, from: u64, to: u64) -> Result<usize>;
         pub fn contains(self: &NativeIndex, key: u64) -> bool;
         pub fn count(self: &NativeIndex, key: u64) -> usize;
 
+        pub fn level_of_key(self: &NativeIndex, key: u64) -> usize;
+
+        /// Streaming, zero-copy iterator over the keys of an HNSW node's
+        /// neighbors at one graph level. Aliases the node tape — caller must
+        /// keep the index immutable for the cursor's lifetime.
+        type NeighborsCursor;
+
+        #[cxx_name = "neighbors"]
+        pub fn neighbors_cursor(
+            self: &NativeIndex,
+            key: u64,
+            level: usize,
+        ) -> UniquePtr<NeighborsCursor>;
+
+        pub fn size(self: &NeighborsCursor) -> usize;
+        pub fn remaining(self: &NeighborsCursor) -> usize;
+        pub fn has_next(self: &NeighborsCursor) -> bool;
+        pub fn next_key(self: Pin<&mut NeighborsCursor>) -> u64;
+        pub fn drain_into(self: Pin<&mut NeighborsCursor>, output: &mut [u64]) -> usize;
+
         pub fn save(self: &NativeIndex, path: &str) -> Result<()>;
         pub fn load(self: &NativeIndex, path: &str) -> Result<()>;
         pub fn view(self: &NativeIndex, path: &str) -> Result<()>;
         pub fn reset(self: &NativeIndex) -> Result<()>;
         pub fn memory_usage(self: &NativeIndex) -> usize;
+        pub fn memory_stats(self: &NativeIndex) -> MemoryStats;
         pub fn hardware_acceleration(self: &NativeIndex) -> *const c_char;
 
         pub fn save_to_buffer(self: &NativeIndex, buffer: &mut [u8]) -> Result<()>;
@@ -432,7 +552,7 @@ pub mod ffi {
 }
 
 // Re-export the FFI structs and enums at the crate root for easy access
-pub use ffi::{IndexOptions, MetricKind, ScalarKind};
+pub use ffi::{IndexMetadata, IndexOptions, MemoryStats, MetricKind, ScalarKind};
 
 /// Represents custom metric functions for calculating distances between vectors in various formats.
 ///
@@ -446,6 +566,7 @@ pub use ffi::{IndexOptions, MetricKind, ScalarKind};
 ///
 /// - `B1X8Metric`: A metric function for binary vectors packed in `u8` containers, represented here by `b1x8`.
 /// - `I8Metric`: A metric function for vectors of 8-bit signed integers (`i8`).
+/// - `U8Metric`: A metric function for vectors of 8-bit unsigned integers (`u8`).
 /// - `F16Metric`: A metric function for vectors of 16-bit half-precision floating-point numbers (`f16`).
 /// - `F32Metric`: A metric function for vectors of 32-bit floating-point numbers (`f32`).
 /// - `F64Metric`: A metric function for vectors of 64-bit floating-point numbers (`f64`).
@@ -484,6 +605,7 @@ pub use ffi::{IndexOptions, MetricKind, ScalarKind};
 pub enum MetricFunction {
     B1X8Metric(*mut std::boxed::Box<dyn Fn(*const b1x8, *const b1x8) -> Distance + Send + Sync>),
     I8Metric(*mut std::boxed::Box<dyn Fn(*const i8, *const i8) -> Distance + Send + Sync>),
+    U8Metric(*mut std::boxed::Box<dyn Fn(*const u8, *const u8) -> Distance + Send + Sync>),
     F16Metric(*mut std::boxed::Box<dyn Fn(*const f16, *const f16) -> Distance + Send + Sync>),
     F32Metric(*mut std::boxed::Box<dyn Fn(*const f32, *const f32) -> Distance + Send + Sync>),
     F64Metric(*mut std::boxed::Box<dyn Fn(*const f64, *const f64) -> Distance + Send + Sync>),
@@ -543,6 +665,9 @@ impl Drop for Index {
                 MetricFunction::I8Metric(pointer) => unsafe {
                     drop(Box::from_raw(*pointer));
                 },
+                MetricFunction::U8Metric(pointer) => unsafe {
+                    drop(Box::from_raw(*pointer));
+                },
                 MetricFunction::F16Metric(pointer) => unsafe {
                     drop(Box::from_raw(*pointer));
                 },
@@ -567,6 +692,23 @@ impl Default for ffi::IndexOptions {
             expansion_add: 0,
             expansion_search: 0,
             multi: false,
+        }
+    }
+}
+
+impl From<ffi::IndexMetadata> for ffi::IndexOptions {
+    /// Builds an `IndexOptions` that matches a serialized index's header.
+    /// `connectivity` and `expansion_*` are left at zero — they are not stored
+    /// in the header and will be repopulated by `load` / `view`.
+    fn from(meta: ffi::IndexMetadata) -> Self {
+        Self {
+            dimensions: meta.dimensions as usize,
+            metric: meta.metric,
+            quantization: meta.quantization,
+            connectivity: 0,
+            expansion_add: 0,
+            expansion_search: 0,
+            multi: meta.multi,
         }
     }
 }
@@ -763,9 +905,7 @@ impl VectorType for f32 {
             Some(MetricFunction::F32Metric(metric)) => metric as *mut () as usize,
             _ => panic!("Expected F32Metric"),
         };
-        index.inner.change_metric(trampoline_fn, closure_address);
-
-        Ok(())
+        index.inner.change_metric(trampoline_fn, closure_address)
     }
 }
 
@@ -837,9 +977,72 @@ impl VectorType for i8 {
             Some(MetricFunction::I8Metric(metric)) => metric as *mut () as usize,
             _ => panic!("Expected I8Metric"),
         };
-        index.inner.change_metric(trampoline_fn, closure_address);
+        index.inner.change_metric(trampoline_fn, closure_address)
+    }
+}
 
-        Ok(())
+impl VectorType for u8 {
+    fn search(index: &Index, query: &[Self], count: usize) -> Result<ffi::Matches, cxx::Exception> {
+        index.inner.search_u8(query, count)
+    }
+
+    fn exact_search(
+        index: &Index,
+        query: &[Self],
+        count: usize,
+    ) -> Result<ffi::Matches, cxx::Exception> {
+        index.inner.exact_search_u8(query, count)
+    }
+
+    fn get(index: &Index, key: Key, vector: &mut [Self]) -> Result<usize, cxx::Exception> {
+        index.inner.get_u8(key, vector)
+    }
+
+    fn add(index: &Index, key: Key, vector: &[Self]) -> Result<(), cxx::Exception> {
+        index.inner.add_u8(key, vector)
+    }
+
+    fn filtered_search<F>(
+        index: &Index,
+        query: &[Self],
+        count: usize,
+        filter: F,
+    ) -> Result<ffi::Matches, cxx::Exception>
+    where
+        Self: Sized,
+        F: Fn(Key) -> bool,
+    {
+        extern "C" fn trampoline<F: Fn(u64) -> bool>(key: u64, closure_address: usize) -> bool {
+            let closure = closure_address as *const F;
+            unsafe { (*closure)(key) }
+        }
+
+        let trampoline_fn: usize = trampoline::<F> as *const () as usize;
+        let closure_address: usize = &filter as *const F as usize;
+        index
+            .inner
+            .filtered_search_u8(query, count, trampoline_fn, closure_address)
+    }
+    fn change_metric(
+        index: &mut Index,
+        metric: std::boxed::Box<dyn Fn(*const Self, *const Self) -> Distance + Send + Sync>,
+    ) -> Result<(), cxx::Exception> {
+        type MetricFn = Box<dyn Fn(*const u8, *const u8) -> Distance>;
+        index.metric_fn = Some(MetricFunction::U8Metric(Box::into_raw(Box::new(metric))));
+
+        extern "C" fn trampoline(first: usize, second: usize, closure_address: usize) -> Distance {
+            let first_ptr = first as *const u8;
+            let second_ptr = second as *const u8;
+            let closure: *mut MetricFn = closure_address as *mut MetricFn;
+            unsafe { (*closure)(first_ptr, second_ptr) }
+        }
+
+        let trampoline_fn: usize = trampoline as *const () as usize;
+        let closure_address = match index.metric_fn {
+            Some(MetricFunction::U8Metric(metric)) => metric as *mut () as usize,
+            _ => panic!("Expected U8Metric"),
+        };
+        index.inner.change_metric(trampoline_fn, closure_address)
     }
 }
 
@@ -911,9 +1114,7 @@ impl VectorType for f64 {
             Some(MetricFunction::F64Metric(metric)) => metric as *mut () as usize,
             _ => panic!("Expected F64Metric"),
         };
-        index.inner.change_metric(trampoline_fn, closure_address);
-
-        Ok(())
+        index.inner.change_metric(trampoline_fn, closure_address)
     }
 }
 
@@ -957,12 +1158,9 @@ impl VectorType for f16 {
         // Temporarily cast the closure to a raw pointer for passing.
         let trampoline_fn: usize = trampoline::<F> as *const () as usize;
         let closure_address: usize = &filter as *const F as usize;
-        index.inner.filtered_search_f16(
-            f16::to_i16s(query),
-            count,
-            trampoline_fn,
-            closure_address,
-        )
+        index
+            .inner
+            .filtered_search_f16(f16::to_i16s(query), count, trampoline_fn, closure_address)
     }
 
     fn change_metric(
@@ -989,9 +1187,7 @@ impl VectorType for f16 {
             Some(MetricFunction::F16Metric(metric)) => metric as *mut () as usize,
             _ => panic!("Expected F16Metric"),
         };
-        index.inner.change_metric(trampoline_fn, closure_address);
-
-        Ok(())
+        index.inner.change_metric(trampoline_fn, closure_address)
     }
 }
 
@@ -1035,12 +1231,9 @@ impl VectorType for b1x8 {
         // Temporarily cast the closure to a raw pointer for passing.
         let trampoline_fn: usize = trampoline::<F> as *const () as usize;
         let closure_address: usize = &filter as *const F as usize;
-        index.inner.filtered_search_b1x8(
-            b1x8::to_u8s(query),
-            count,
-            trampoline_fn,
-            closure_address,
-        )
+        index
+            .inner
+            .filtered_search_b1x8(b1x8::to_u8s(query), count, trampoline_fn, closure_address)
     }
 
     fn change_metric(
@@ -1067,11 +1260,63 @@ impl VectorType for b1x8 {
             Some(MetricFunction::B1X8Metric(metric)) => metric as *mut () as usize,
             _ => panic!("Expected F1X8Metric"),
         };
-        index.inner.change_metric(trampoline_fn, closure_address);
-
-        Ok(())
+        index.inner.change_metric(trampoline_fn, closure_address)
     }
 }
+
+/// A streaming iterator over the keys of a single HNSW node's neighbors
+/// at one graph level.
+///
+/// Backed by a C++ `NeighborsCursor` that aliases the node tape — no keys are
+/// copied into Rust until the iterator is advanced. The `'index` lifetime
+/// borrow keeps the underlying [`Index`] alive for the iterator's duration.
+///
+/// **Concurrency:** the cursor reads the index's adjacency tape directly, so
+/// callers must not run `add` / `remove` / `update` against the same index
+/// while the iterator is live. Iteration over an immutable index is always
+/// safe.
+pub struct Neighbors<'index> {
+    cursor: cxx::UniquePtr<ffi::NeighborsCursor>,
+    _index: std::marker::PhantomData<&'index Index>,
+}
+
+impl<'index> Neighbors<'index> {
+    /// Returns the total number of neighbors at this `(key, level)` pair,
+    /// including any already consumed by [`Iterator::next`].
+    pub fn total(&self) -> usize {
+        self.cursor.as_ref().map(|c| c.size()).unwrap_or(0)
+    }
+
+    /// Drains the remaining neighbors into `output` in one FFI call and
+    /// returns the number of keys written. Faster than `.collect::<Vec<_>>()`
+    /// for callers that already hold a buffer.
+    pub fn drain_into(&mut self, output: &mut [Key]) -> usize {
+        match self.cursor.as_mut() {
+            Some(cursor) => cursor.drain_into(output),
+            None => 0,
+        }
+    }
+}
+
+impl<'index> Iterator for Neighbors<'index> {
+    type Item = Key;
+
+    fn next(&mut self) -> Option<Key> {
+        let cursor = self.cursor.as_mut()?;
+        if cursor.has_next() {
+            Some(cursor.next_key())
+        } else {
+            None
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.cursor.as_ref().map(|c| c.remaining()).unwrap_or(0);
+        (remaining, Some(remaining))
+    }
+}
+
+impl<'index> ExactSizeIterator for Neighbors<'index> {}
 
 impl Index {
     pub fn new(options: &ffi::IndexOptions) -> Result<Self, cxx::Exception> {
@@ -1082,6 +1327,48 @@ impl Index {
             }),
             Err(err) => Err(err),
         }
+    }
+
+    /// Reads the index header from `path` and returns its metadata without
+    /// loading the full index into memory. Useful for inspecting an on-disk
+    /// index before deciding how to construct one.
+    pub fn metadata(path: &str) -> Result<ffi::IndexMetadata, cxx::Exception> {
+        ffi::read_metadata(path)
+    }
+
+    /// Reads the index header from a serialized in-memory buffer.
+    pub fn metadata_from_buffer(buffer: &[u8]) -> Result<ffi::IndexMetadata, cxx::Exception> {
+        ffi::read_metadata_from_buffer(buffer)
+    }
+
+    /// Reopens an existing on-disk index in one call: reads its metadata,
+    /// constructs an `Index` with matching `dimensions` / `metric` / `quantization` /
+    /// `multi`, then `load`s the file. Mirrors Python's `Index.restore`.
+    ///
+    /// `connectivity` and `expansion_*` are not stored in the file header; the
+    /// loader will repopulate them from the serialized index. Use `Index::new`
+    /// followed by `load` if you need to override those.
+    pub fn restore(path: &str) -> Result<Self, cxx::Exception> {
+        let meta = Self::metadata(path)?;
+        let index = Self::new(&meta.into())?;
+        index.load(path)?;
+        Ok(index)
+    }
+
+    /// Like `restore`, but mmap-views the file rather than copying it in.
+    pub fn restore_view(path: &str) -> Result<Self, cxx::Exception> {
+        let meta = Self::metadata(path)?;
+        let index = Self::new(&meta.into())?;
+        index.view(path)?;
+        Ok(index)
+    }
+
+    /// Buffer counterpart to `restore`.
+    pub fn restore_from_buffer(buffer: &[u8]) -> Result<Self, cxx::Exception> {
+        let meta = Self::metadata_from_buffer(buffer)?;
+        let index = Self::new(&meta.into())?;
+        index.load_from_buffer(buffer)?;
+        Ok(index)
     }
 
     /// Retrieves the expansion value used during index creation.
@@ -1104,8 +1391,13 @@ impl Index {
         self.inner.change_expansion_search(n)
     }
 
+    /// Returns the metric kind currently used by the index.
+    pub fn metric_kind(self: &Index) -> ffi::MetricKind {
+        self.inner.metric_kind()
+    }
+
     /// Changes the metric kind used to calculate the distance between vectors.
-    pub fn change_metric_kind(self: &Index, metric: ffi::MetricKind) {
+    pub fn change_metric_kind(self: &Index, metric: ffi::MetricKind) -> Result<(), cxx::Exception> {
         self.inner.change_metric_kind(metric)
     }
 
@@ -1270,6 +1562,16 @@ impl Index {
         self.inner.connectivity()
     }
 
+    /// Returns the per-vector scalar quantization used by the index.
+    pub fn scalar_kind(self: &Index) -> ffi::ScalarKind {
+        self.inner.scalar_kind()
+    }
+
+    /// Returns `true` if the index allows multiple vectors per key.
+    pub fn multi(self: &Index) -> bool {
+        self.inner.multi()
+    }
+
     /// Retrieves the current number of vectors in the index.
     pub fn size(self: &Index) -> usize {
         self.inner.size()
@@ -1285,57 +1587,105 @@ impl Index {
         self.inner.serialized_length()
     }
 
-    /// Removes the vector associated with the given key from the index.
+    /// Removes all vectors associated with the given key from the index.
+    /// In a multi-index, a single key may map to several vectors; this removes all of them.
     ///
     /// # Arguments
     ///
-    /// * `key` - The key of the vector to be removed.
+    /// * `key` - The key of the vector(s) to be removed.
     ///
     /// # Returns
     ///
-    /// `true` if the vector is successfully removed, `false` otherwise.
+    /// The number of vectors that were removed. Zero when the key is absent.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// index.add(42, &vec)?;
+    /// assert_eq!(index.remove(42)?, 1);
+    /// assert_eq!(index.remove(42)?, 0); // already gone
+    /// ```
     pub fn remove(self: &Index, key: Key) -> Result<usize, cxx::Exception> {
         self.inner.remove(key)
     }
 
-    /// Renames the vector under a specific key.
+    /// Reassigns every vector stored under `from` to the new key `to`.
+    /// The original key is freed and subsequent lookups should use `to`.
     ///
     /// # Arguments
     ///
-    /// * `from` - The key of the vector to be renamed.
-    /// * `to` - The new name.
+    /// * `from` - The current key.
+    /// * `to`   - The key that will replace it.
     ///
     /// # Returns
     ///
-    /// `true` if the vector is renamed, `false` otherwise.
+    /// The number of vectors that were reassigned. Zero when `from` is absent.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// index.add(1, &vec)?;
+    /// assert_eq!(index.rename(1, 2)?, 1);
+    /// assert!(!index.contains(1));
+    /// assert!(index.contains(2));
+    /// ```
     pub fn rename(self: &Index, from: Key, to: Key) -> Result<usize, cxx::Exception> {
         self.inner.rename(from, to)
     }
 
-    /// Checks if the index contains a vector with a specified key.
+    /// Checks whether at least one vector with the given key exists in the index.
     ///
     /// # Arguments
     ///
-    /// * `key` - The key to be checked.
-    ///
-    /// # Returns
-    ///
-    /// `true` if the index contains the vector with the given key, `false` otherwise.
+    /// * `key` - The key to look up.
     pub fn contains(self: &Index, key: Key) -> bool {
         self.inner.contains(key)
     }
 
-    /// Count the count of vectors with the same specified key.
+    /// Returns the number of vectors stored under the given key.
+    /// Always 0 or 1 for a unique index; may be greater than 1 when `multi` is enabled.
     ///
     /// # Arguments
     ///
-    /// * `key` - The key to be checked.
-    ///
-    /// # Returns
-    ///
-    /// Number of vectors found.
+    /// * `key` - The key to look up.
     pub fn count(self: &Index, key: Key) -> usize {
         self.inner.count(key)
+    }
+
+    /// Returns the top graph level at which the given `key` is present, or
+    /// zero if the key is not in the index.
+    ///
+    /// Combined with [`Index::neighbors`], this lets you walk a node from its
+    /// top level down to the base level.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to look up.
+    pub fn level_of_key(self: &Index, key: Key) -> usize {
+        self.inner.level_of_key(key)
+    }
+
+    /// Returns a streaming iterator over the keys of the neighbors of `key`
+    /// at the given HNSW graph `level`.
+    ///
+    /// Returns an empty iterator if the key is not present, or if `level`
+    /// exceeds the node's top level. For multi-key indexes, the neighbors of
+    /// the first matching slot are returned.
+    ///
+    /// The returned [`Neighbors`] aliases the index's adjacency tape directly,
+    /// so no keys are copied until the iterator is advanced. The borrow keeps
+    /// the index alive for the iterator's lifetime; callers must not mutate
+    /// the index while the iterator is live (see [`Neighbors`] for details).
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key whose neighbors to enumerate.
+    /// * `level` - The graph level (0 is the base level).
+    pub fn neighbors(&self, key: Key, level: usize) -> Neighbors<'_> {
+        Neighbors {
+            cursor: self.inner.neighbors_cursor(key, level),
+            _index: std::marker::PhantomData,
+        }
     }
 
     /// Saves the index to a specified file.
@@ -1374,6 +1724,12 @@ impl Index {
     /// In practice, its error will be below 10%.
     pub fn memory_usage(self: &Index) -> usize {
         self.inner.memory_usage()
+    }
+
+    /// Returns detailed memory statistics with separate breakdowns for the graph
+    /// and vectors allocator tapes.
+    pub fn memory_stats(self: &Index) -> ffi::MemoryStats {
+        self.inner.memory_stats()
     }
 
     /// Saves the index to a specified file.
@@ -1453,7 +1809,7 @@ mod tests {
             env::var("RUST_VERSION").unwrap_or_else(|_| "unknown".into())
         );
 
-        // Create indexes with different configurations
+        // Create indexes with different configurations, ordered by descending dynamic range
         let f64_index = Index::new(&IndexOptions {
             dimensions: 256,
             metric: MetricKind::Cos,
@@ -1470,6 +1826,14 @@ mod tests {
         })
         .unwrap();
 
+        let bf16_index = Index::new(&IndexOptions {
+            dimensions: 256,
+            metric: MetricKind::Cos,
+            quantization: ScalarKind::BF16,
+            ..Default::default()
+        })
+        .unwrap();
+
         let f16_index = Index::new(&IndexOptions {
             dimensions: 256,
             metric: MetricKind::Cos,
@@ -1478,10 +1842,50 @@ mod tests {
         })
         .unwrap();
 
+        let e5m2_index = Index::new(&IndexOptions {
+            dimensions: 256,
+            metric: MetricKind::Cos,
+            quantization: ScalarKind::E5M2,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let e4m3_index = Index::new(&IndexOptions {
+            dimensions: 256,
+            metric: MetricKind::Cos,
+            quantization: ScalarKind::E4M3,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let e3m2_index = Index::new(&IndexOptions {
+            dimensions: 256,
+            metric: MetricKind::Cos,
+            quantization: ScalarKind::E3M2,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let e2m3_index = Index::new(&IndexOptions {
+            dimensions: 256,
+            metric: MetricKind::Cos,
+            quantization: ScalarKind::E2M3,
+            ..Default::default()
+        })
+        .unwrap();
+
         let i8_index = Index::new(&IndexOptions {
             dimensions: 256,
             metric: MetricKind::Cos,
             quantization: ScalarKind::I8,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let u8_index = Index::new(&IndexOptions {
+            dimensions: 256,
+            metric: MetricKind::Cos,
+            quantization: ScalarKind::U8,
             ..Default::default()
         })
         .unwrap();
@@ -1503,12 +1907,36 @@ mod tests {
             f32_index.hardware_acceleration()
         );
         println!(
+            "bf16 hardware acceleration: {}",
+            bf16_index.hardware_acceleration()
+        );
+        println!(
             "f16 hardware acceleration: {}",
             f16_index.hardware_acceleration()
         );
         println!(
+            "e5m2 hardware acceleration: {}",
+            e5m2_index.hardware_acceleration()
+        );
+        println!(
+            "e4m3 hardware acceleration: {}",
+            e4m3_index.hardware_acceleration()
+        );
+        println!(
+            "e3m2 hardware acceleration: {}",
+            e3m2_index.hardware_acceleration()
+        );
+        println!(
+            "e2m3 hardware acceleration: {}",
+            e2m3_index.hardware_acceleration()
+        );
+        println!(
             "i8 hardware acceleration: {}",
             i8_index.hardware_acceleration()
+        );
+        println!(
+            "u8 hardware acceleration: {}",
+            u8_index.hardware_acceleration()
         );
         println!(
             "b1 hardware acceleration: {}",
@@ -1518,7 +1946,44 @@ mod tests {
     }
 
     #[test]
-    fn test_add_get_vector() {
+    fn new_index_does_not_preallocate_members() {
+        let options = IndexOptions {
+            dimensions: 8,
+            quantization: ScalarKind::F32,
+            ..Default::default()
+        };
+        let index = Index::new(&options).unwrap();
+
+        // Regression check: constructor should preserve `index_limits_t{}` behavior
+        // and avoid reserving member slots up front.
+        assert_eq!(index.capacity(), 0);
+    }
+
+    #[test]
+    fn index_survives_box_and_arc_moves_after_construction() {
+        let options = IndexOptions {
+            dimensions: 4,
+            quantization: ScalarKind::F32,
+            ..Default::default()
+        };
+        let vector = [0.25f32, 0.5, 0.75, 1.0];
+
+        let boxed = Box::new(Index::new(&options).unwrap());
+        boxed.reserve(8).unwrap();
+        boxed.add(7, &vector).unwrap();
+        let boxed_matches = boxed.search(&vector, 1).unwrap();
+        assert_eq!(boxed_matches.keys.first().copied(), Some(7));
+
+        let arc = std::sync::Arc::new(Index::new(&options).unwrap());
+        let moved_arc = std::sync::Arc::clone(&arc);
+        moved_arc.reserve_capacity_and_threads(8, 2).unwrap();
+        moved_arc.add(9, &vector).unwrap();
+        let arc_matches = arc.search(&vector, 1).unwrap();
+        assert_eq!(arc_matches.keys.first().copied(), Some(9));
+    }
+
+    #[test]
+    fn add_get_vector() {
         let options = IndexOptions {
             dimensions: 5,
             quantization: ScalarKind::F32,
@@ -1553,8 +2018,54 @@ mod tests {
         let result = index.get(1, &mut found);
         assert!(result.is_err());
     }
+
     #[test]
-    fn test_search_vector() {
+    fn quantized_add_search() {
+        // Metrics × quantizations: every scalar kind that accepts f32 input,
+        // tested under each distance metric. Dimensions are kept at 64 —
+        // high enough for SIMD paths to kick in, low enough to stay fast.
+        let metrics = [MetricKind::Cos, MetricKind::L2sq, MetricKind::IP];
+        let quantizations = [
+            ScalarKind::F32,
+            ScalarKind::F64,
+            ScalarKind::F16,
+            ScalarKind::BF16,
+            ScalarKind::I8,
+            ScalarKind::E5M2,
+            ScalarKind::E4M3,
+            ScalarKind::E3M2,
+            ScalarKind::E2M3,
+        ];
+        let dimensions: usize = 64;
+        let first: Vec<f32> = (0..dimensions).map(|i| (i as f32) * 0.1).collect();
+        let second: Vec<f32> = (0..dimensions)
+            .map(|i| ((dimensions - i) as f32) * 0.1)
+            .collect();
+
+        for metric in metrics {
+            for quantization in quantizations {
+                let index = Index::new(&IndexOptions {
+                    dimensions,
+                    metric,
+                    quantization,
+                    ..Default::default()
+                })
+                .unwrap();
+                assert!(index.reserve(10).is_ok());
+                assert!(index.add(1, &first).is_ok());
+                assert!(index.add(2, &second).is_ok());
+                assert_eq!(index.size(), 2, "{metric:?}/{quantization:?}: wrong size");
+                let results = index.search(&first, 2).unwrap();
+                assert_eq!(
+                    results.keys[0], 1,
+                    "self-match failed for {metric:?}/{quantization:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn search_vector() {
         let options = IndexOptions {
             dimensions: 5,
             quantization: ScalarKind::F32,
@@ -1567,18 +2078,24 @@ mod tests {
         let second: [f32; 5] = [0.3, 0.2, 0.4, 0.0, 0.1];
         let too_long: [f32; 6] = [0.3, 0.2, 0.4, 0.0, 0.1, 0.1];
         let too_short: [f32; 4] = [0.3, 0.2, 0.4, 0.0];
+
+        // Search on empty index should return zero results
+        let empty_results = index.search(&first, 10).unwrap();
+        assert_eq!(empty_results.keys.len(), 0);
+
         assert!(index.add(1, &first).is_ok());
         assert!(index.add(2, &second).is_ok());
         assert_eq!(index.size(), 2);
-        //assert!(index.add(3, &too_long).is_err());
-        //assert!(index.add(4, &too_short).is_err());
 
+        // Vectors that were not added - shouldn't be visible!
+        // assert!(index.add(3, &too_long).is_err());
+        // assert!(index.add(4, &too_short).is_err());
         assert!(index.search(&too_long, 1).is_err());
         assert!(index.search(&too_short, 1).is_err());
     }
 
     #[test]
-    fn test_add_remove_vector() {
+    fn add_remove_vector() {
         let options = IndexOptions {
             dimensions: 4,
             metric: MetricKind::IP,
@@ -1601,15 +2118,25 @@ mod tests {
         let id3 = 483367403120624232;
         let id4 = 483367403120624233;
 
+        // Add and verify contains/count
+        assert!(!index.contains(id1));
+        assert_eq!(index.count(id1), 0);
         assert!(index.add(id1, &first).is_ok());
-        let mut found_slice = [0.0f32; 4];
-        assert_eq!(index.get(id1, &mut found_slice).unwrap(), 1);
-        assert!(index.remove(id1).is_ok());
+        assert!(index.contains(id1));
+        assert_eq!(index.count(id1), 1);
 
-        assert!(index.add(id2, &second).is_ok());
+        // Rename id1 → id2 and verify the move
+        assert_eq!(index.rename(id1, id2).unwrap(), 1);
+        assert!(!index.contains(id1));
+        assert!(index.contains(id2));
         let mut found_slice = [0.0f32; 4];
         assert_eq!(index.get(id2, &mut found_slice).unwrap(), 1);
+        assert_eq!(found_slice, first);
+
+        // Remove and verify
         assert!(index.remove(id2).is_ok());
+        assert!(!index.contains(id2));
+        assert_eq!(index.count(id2), 0);
 
         assert!(index.add(id3, &second).is_ok());
         let mut found_slice = [0.0f32; 4];
@@ -1641,6 +2168,9 @@ mod tests {
         assert!(index.connectivity() != 0);
         assert_eq!(index.dimensions(), 5);
         assert_eq!(index.size(), 0);
+        assert_eq!(index.metric_kind(), options.metric);
+        assert_eq!(index.scalar_kind(), options.quantization);
+        assert!(!index.multi());
 
         let first: [f32; 5] = [0.2, 0.1, 0.2, 0.1, 0.3];
         let second: [f32; 5] = [0.3, 0.2, 0.4, 0.0, 0.1];
@@ -1682,10 +2212,32 @@ mod tests {
         assert_eq!(results.keys.len(), 2);
         println!("--------------------------------------------------");
 
-        // Validate serialization
+        let stats = index.memory_stats();
+        assert!(
+            stats.vectors_allocated > 0,
+            "vectors should have allocated memory"
+        );
+
+        // Validate serialization with round-trip content checks
         assert!(index.save("index.rust.usearch").is_ok());
         assert!(index.load("index.rust.usearch").is_ok());
+        let results = index.search(&first, 10).unwrap();
+        assert!(results.keys.contains(&42), "key 42 survives save/load");
         assert!(index.view("index.rust.usearch").is_ok());
+
+        // Header-only metadata read recovers the configuration without loading.
+        let meta = Index::metadata("index.rust.usearch").unwrap();
+        assert_eq!(meta.dimensions, index.dimensions() as u64);
+        assert_eq!(meta.metric, index.metric_kind());
+        assert_eq!(meta.quantization, index.scalar_kind());
+        assert_eq!(meta.multi, index.multi());
+        assert_eq!(meta.count_present, index.size() as u64);
+
+        // `restore` reopens an index with no prior knowledge of its config.
+        let restored = Index::restore("index.rust.usearch").unwrap();
+        assert_eq!(restored.metric_kind(), index.metric_kind());
+        assert_eq!(restored.scalar_kind(), index.scalar_kind());
+        assert!(restored.search(&first, 10).unwrap().keys.contains(&42));
 
         // Make sure every function is called at least once
         assert!(new_index(&options).is_ok());
@@ -1698,6 +2250,7 @@ mod tests {
         options.dimensions = 2;
         assert!(new_index(&options).is_ok());
 
+        // Buffer serialization with round-trip content checks
         let mut serialization_buffer = vec![0; index.serialized_length()];
         assert!(index.save_to_buffer(&mut serialization_buffer).is_ok());
 
@@ -1706,14 +2259,40 @@ mod tests {
             .load_from_buffer(&serialization_buffer)
             .is_ok());
         assert_eq!(index.size(), deserialized_index.size());
+        let results = deserialized_index.search(&first, 10).unwrap();
+        assert!(
+            results.keys.contains(&42),
+            "key 42 survives buffer round-trip"
+        );
 
-        // reset
+        // Borrow the buffer as a read-only view instead of deserializing
+        let viewed_index = Index::new(&IndexOptions {
+            dimensions: 5,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(unsafe { viewed_index.view_from_buffer(&serialization_buffer) }.is_ok());
+        assert_eq!(viewed_index.size(), index.size());
+        let results = viewed_index.search(&first, 10).unwrap();
+        assert!(
+            results.keys.contains(&42),
+            "key 42 visible via view_from_buffer"
+        );
+
+        // After a full reset the index must be reusable from scratch
         assert_ne!(index.memory_usage(), 0);
         assert!(index.reset().is_ok());
         assert_eq!(index.size(), 0);
         assert_eq!(index.memory_usage(), 0);
 
-        // clone
+        assert!(index.reserve(10).is_ok());
+        assert!(index.add(100, &first).is_ok());
+        assert!(index.add(101, &second).is_ok());
+        assert_eq!(index.size(), 2);
+        let results = index.search(&first, 10).unwrap();
+        assert_eq!(results.keys.len(), 2);
+
+        // Clone
         options.metric = MetricKind::Haversine;
         let mut opts = options.clone();
         assert_eq!(opts.metric, options.metric);
@@ -1725,7 +2304,7 @@ mod tests {
     }
 
     #[test]
-    fn test_search_with_stateless_filter() {
+    fn search_with_stateless_filter() {
         let options = IndexOptions {
             dimensions: 5,
             ..Default::default()
@@ -1750,7 +2329,7 @@ mod tests {
     }
 
     #[test]
-    fn test_search_with_stateful_filter() {
+    fn search_with_stateful_filter() {
         use std::collections::HashSet;
 
         let options = IndexOptions {
@@ -1781,7 +2360,7 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_distances() {
+    fn zero_distances() {
         let options = IndexOptions {
             dimensions: 8,
             metric: MetricKind::L2sq,
@@ -1811,7 +2390,7 @@ mod tests {
     }
 
     #[test]
-    fn test_exact_search() {
+    fn exact_search() {
         use std::collections::HashSet;
 
         // Create an index with many vectors
@@ -1866,7 +2445,7 @@ mod tests {
     }
 
     #[test]
-    fn test_change_distance_function() {
+    fn change_distance_function() {
         let options = IndexOptions {
             dimensions: 2, // Adjusted for simplicity in creating test vectors
             ..Default::default()
@@ -1894,7 +2473,7 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_vectors_and_hamming_distance() {
+    fn binary_vectors_and_hamming_distance() {
         let index = Index::new(&IndexOptions {
             dimensions: 8,
             metric: MetricKind::Hamming,
@@ -1924,9 +2503,48 @@ mod tests {
     }
 
     #[test]
-    fn test_concurrency() {
+    fn multi_index() {
+        let options = IndexOptions {
+            dimensions: 4,
+            metric: MetricKind::L2sq,
+            quantization: ScalarKind::F32,
+            multi: true,
+            ..Default::default()
+        };
+        let index = Index::new(&options).unwrap();
+        assert!(index.multi());
+        index.reserve(10).unwrap();
+
+        let vec_a: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
+        let vec_b: [f32; 4] = [0.0, 1.0, 0.0, 0.0];
+        let key: Key = 42;
+
+        // Two vectors under the same key
+        index.add(key, &vec_a).unwrap();
+        index.add(key, &vec_b).unwrap();
+        assert_eq!(index.size(), 2);
+        assert_eq!(index.count(key), 2);
+        assert!(index.contains(key));
+
+        // Retrieve both vectors
+        let mut buf = [0.0f32; 8]; // 2 * dims
+        let found = index.get(key, &mut buf).unwrap();
+        assert_eq!(found, 2);
+
+        // Export convenience
+        let mut exported: Vec<f32> = Vec::new();
+        assert_eq!(index.export(key, &mut exported).unwrap(), 2);
+        assert_eq!(exported.len(), 8);
+
+        // Search should find the key
+        let results = index.search(&vec_a, 5).unwrap();
+        assert!(results.keys.contains(&key));
+    }
+
+    #[test]
+    fn concurrency() {
         use fork_union as fu;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
         use rand_chacha::ChaCha8Rng;
         use rand_distr::Uniform;
         use std::sync::Arc;
@@ -2034,5 +2652,64 @@ mod tests {
             search_results.iter().all(|&x| x),
             "All searches should find exact matches"
         );
+    }
+
+    #[test]
+    fn neighbors_iter_round_trip() {
+        let options = IndexOptions {
+            dimensions: 4,
+            connectivity: 8,
+            quantization: ScalarKind::F32,
+            ..Default::default()
+        };
+        let index = Index::new(&options).unwrap();
+        index.reserve(64).unwrap();
+        for i in 0..32u64 {
+            let vector: [f32; 4] = [i as f32, (i * 2) as f32, (i * 3) as f32, (i * 5) as f32];
+            index.add(i, &vector).unwrap();
+        }
+
+        // The base level holds every node, so its neighbor list must be
+        // bounded by the doubled `connectivity` of the base graph.
+        let connectivity_base = options.connectivity * 2;
+        let neighbors: Vec<Key> = index.neighbors(0, 0).collect();
+        assert!(neighbors.len() <= connectivity_base);
+        for neighbor in &neighbors {
+            assert!(index.contains(*neighbor));
+            assert_ne!(*neighbor, 0, "Self-loops are not expected");
+        }
+
+        // The level reported for an inserted key must agree with the
+        // neighbors API: every level up to and including `level_of_key`
+        // has at least one neighbor, and one level higher has none.
+        let top_level = index.level_of_key(0);
+        for level in 0..=top_level {
+            assert!(index.neighbors(0, level).next().is_some());
+        }
+        assert!(index.neighbors(0, top_level + 1).next().is_none());
+
+        // Levels above the node's level give an empty range.
+        let above_top: Vec<Key> = index.neighbors(0, 999).collect();
+        assert!(above_top.is_empty());
+
+        // Missing keys give an empty range, not an error.
+        let missing: Vec<Key> = index.neighbors(99_999, 0).collect();
+        assert!(missing.is_empty());
+        assert_eq!(index.level_of_key(99_999), 0);
+
+        // `ExactSizeIterator::len` matches both the materialized vector and
+        // the cursor's reported `total()`.
+        let neighbors_iter = index.neighbors(0, 0);
+        assert_eq!(neighbors_iter.total(), neighbors.len());
+        assert_eq!(neighbors_iter.len(), neighbors.len());
+
+        // `drain_into` fills a caller buffer in one FFI call and matches the
+        // streaming iteration order.
+        let mut buffer = vec![0 as Key; 64];
+        let mut cursor = index.neighbors(0, 0);
+        let written = cursor.drain_into(&mut buffer);
+        assert_eq!(written, neighbors.len());
+        assert_eq!(&buffer[..written], neighbors.as_slice());
+        assert_eq!(cursor.next(), None);
     }
 }

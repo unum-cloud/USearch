@@ -18,16 +18,15 @@ Dependencies listed in the script header for uv to resolve automatically.
 # ]
 # ///
 
-import pytest
 import numpy as np
+import pytest
 
-import usearch
 from usearch.eval import random_vectors
 from usearch.index import (
+    CompiledMetric,
     Index,
     MetricKind,
     MetricSignature,
-    CompiledMetric,
 )
 
 dimensions = [3, 97, 256]
@@ -44,7 +43,7 @@ def test_index_numba(ndim: int, batch_size: int):
     ! Requires the `numba` package to work.
     """
     try:
-        from numba import cfunc, types, carray
+        from numba import carray, cfunc, types
     except ImportError:
         pytest.skip("Numba is not installed.")
         return
@@ -118,7 +117,7 @@ def test_index_numba_negative(ndim: int, batch_size: int):
     ! Requires the `numba` package to work.
     """
     try:
-        from numba import cfunc, types, carray
+        from numba import carray, cfunc, types
     except ImportError:
         pytest.skip("Numba is not installed.")
         return
@@ -181,8 +180,10 @@ def test_index_numba_negative(ndim: int, batch_size: int):
     translated_matches = translated_index.search(vectors, count_queries, exact=False)
 
     for query in keys.tolist():
-        normal_keys = [normal_matches[query][i].key for i in range(count_queries)]
-        translated_keys = [translated_matches[query][i].key for i in range(count_queries)]
+        # Use set equality because without a deterministic seed, ties in distance
+        # can be broken differently, causing ordering differences for equally-distant results
+        normal_keys = set(normal_matches[query][i].key for i in range(count_queries))
+        translated_keys = set(translated_matches[query][i].key for i in range(count_queries))
         assert normal_keys == translated_keys, f"Expected {normal_keys} == {translated_keys} for key {query}"
 
 
@@ -212,16 +213,14 @@ def test_index_cppyy(ndim: int, batch_size: int):
             result += a[i] * b[i];
         return 1 - result;
     }
-    
+
     float inner_product_three_args(float *a, float *b, size_t n) {
         float result = 0;
         for (size_t i = 0; i != n; ++i)
             result += a[i] * b[i];
         return 1 - result;
     }
-    """.replace(
-            "ndim", str(ndim)
-        )
+    """.replace("ndim", str(ndim))
     )
 
     functions = [
@@ -284,26 +283,26 @@ def test_index_peachpy(ndim: int, batch_size: int):
     try:
         from peachpy import (
             Argument,
-            ptr,
-            float_,
             const_float_,
+            float_,
+            ptr,
         )
         from peachpy.x86_64 import (
-            abi,
-            Function,
-            uarch,
-            isa,
-            GeneralPurposeRegister64,
             LOAD,
-            YMMRegister,
-            VSUBPS,
+            RETURN,
             VADDPS,
+            VFMADD231PS,
             VHADDPS,
             VMOVUPS,
-            VFMADD231PS,
             VPERM2F128,
+            VSUBPS,
             VXORPS,
-            RETURN,
+            Function,
+            GeneralPurposeRegister64,
+            YMMRegister,
+            abi,
+            isa,
+            uarch,
         )
     except ImportError:
         pytest.skip("PeachPy is not installed.")

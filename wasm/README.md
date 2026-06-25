@@ -3,7 +3,7 @@
 ## Installation
 
 ```txt
-https://github.com/unum-cloud/usearch
+https://github.com/unum-cloud/USearch
 ```
 
 ## Quickstart

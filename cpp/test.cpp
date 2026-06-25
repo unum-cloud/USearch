@@ -12,13 +12,45 @@
  *      - 128-bit `uuid_t` keys and `enum slot64_t : std::uint64_t` make most sense for
  *        for database users, implementing portable, concurrent systems.
  */
+#include <cassert> // `assert`
+#include <cmath>   // `std::abs`
+#include <csignal> // `std::signal`, `SIGSEGV`, ...
+#include <cstdio>  // `std::fprintf`
+#include <cstdlib> // `std::_Exit`
+#include <limits>  // `std::numeric_limits`
+
 #include <algorithm>     // `std::shuffle`
-#include <cassert>       // `assert`
-#include <cmath>         // `std::abs`
 #include <random>        // `std::default_random_engine`
 #include <stdexcept>     // `std::terminate`
 #include <unordered_map> // `std::unordered_map`
 #include <vector>        // `std::vector`
+
+// Back-trace support. Prefer the C++23 `<stacktrace>` library when the
+// toolchain + stdlib expose it (`__cpp_lib_stacktrace`); otherwise fall back
+// to the OS-native facility so that unit-test crashes in CI log something
+// useful beyond a bare exit code.
+#if defined(__has_include)
+#if __has_include(<stacktrace>)
+#include <stacktrace>
+#endif
+#endif
+#if defined(__cpp_lib_stacktrace) && __cpp_lib_stacktrace >= 202011L
+#define USEARCH_HAS_STD_STACKTRACE 1
+#else
+#define USEARCH_HAS_STD_STACKTRACE 0
+#if defined(_WIN32)
+// `windows.h` must precede `dbghelp.h` — the latter uses `PSTR` and friends
+// that are only defined after `windows.h`. The blank line keeps clang-format
+// from re-sorting the two headers into a single alphabetized block.
+#include <windows.h>
+
+#include <dbghelp.h>
+#pragma comment(lib, "Dbghelp.lib")
+#else
+#include <execinfo.h>
+#include <unistd.h>
+#endif
+#endif
 
 #define SZ_USE_X86_AVX512 0            // Sanitizers hate AVX512
 #include <stringzilla/stringzilla.hpp> // Levenshtein distance implementation
@@ -54,7 +86,7 @@ void __expect_eq(value_at a, value_at b, char const* file, int line, char const*
 enum slot32_t : std::uint32_t {};
 template <> struct unum::usearch::hash_gt<slot32_t> : public unum::usearch::hash_gt<std::uint32_t> {};
 template <> struct unum::usearch::default_free_value_gt<slot32_t> {
-    static slot32_t value() noexcept { return static_cast<slot32_t>(std::numeric_limits<std::uint32_t>::max()); }
+    static slot32_t value() noexcept { return static_cast<slot32_t>((std::numeric_limits<std::uint32_t>::max)()); }
 };
 
 /*
@@ -166,8 +198,8 @@ void test_uint40() {
     }
 
     // Test min and max functions
-    expect_eq(uint40_t::min(), uint40_t(0u));
-    expect_eq(uint40_t::max(), uint40_t(max_uint40_k));
+    expect_eq((uint40_t::min)(), uint40_t(0u));
+    expect_eq((uint40_t::max)(), uint40_t(max_uint40_k));
 
     // Test copy and move semantics
     for (std::uint64_t input_u64 : test_numbers) {
@@ -183,6 +215,47 @@ void test_uint40() {
     // Test default constructor (zero initialization)
     uint40_t u40_default;
     expect_eq(u40_default, uint40_t(0u));
+}
+
+void test_checked_size_arithmetic() {
+
+    std::printf("Testing checked size arithmetic\n");
+    std::size_t max = (std::numeric_limits<std::size_t>::max)();
+
+    checked_size_result_t cast = checked_size_from_u64(42);
+    expect(cast);
+    expect_eq(cast.value, static_cast<std::size_t>(42));
+    if (sizeof(std::size_t) < sizeof(std::uint64_t))
+        expect(!checked_size_from_u64((std::numeric_limits<std::uint64_t>::max)()));
+
+    checked_size_result_t sum = checked_add(max - 1, 1);
+    expect(sum);
+    expect_eq(sum.value, max);
+    expect(!checked_add(max, 1));
+
+    checked_size_result_t product = checked_mul(max / 2, 2);
+    expect(product);
+    expect_eq(product.value, max - 1);
+    expect(!checked_mul(max / 2 + 1, 2));
+
+    checked_size_result_t fused = checked_mul_add(10, 20, 30);
+    expect(fused);
+    expect_eq(fused.value, static_cast<std::size_t>(230));
+    expect(!checked_mul_add(max / 2 + 1, 2, 0));
+    expect(!checked_mul_add(max / 2, 2, 2));
+
+    checked_size_result_t rounded = checked_round_up(17, 8);
+    expect(rounded);
+    expect_eq(rounded.value, static_cast<std::size_t>(24));
+    expect(!checked_round_up(max, 8));
+
+    checked_size_result_t power = checked_ceil2(17);
+    expect(power);
+    expect_eq(power.value, static_cast<std::size_t>(32));
+    checked_size_result_t zero_power = checked_ceil2(0);
+    expect(zero_power);
+    expect_eq(zero_power.value, static_cast<std::size_t>(0));
+    expect(!checked_ceil2(max));
 }
 
 /**
@@ -664,7 +737,7 @@ void test_cosine(std::size_t collection_size, std::size_t dimensions) {
     vector_of_vectors_t vector_of_vectors(collection_size);
     for (auto& vector : vector_of_vectors) {
         vector.resize(dimensions);
-        std::generate(vector.begin(), vector.end(), [=] { return float(std::rand()) / float(INT_MAX); });
+        std::generate(vector.begin(), vector.end(), [=] { return float(std::rand()) / float(RAND_MAX); });
     }
 
     struct metric_t {
@@ -1127,20 +1200,20 @@ void test_filtered_search() {
     {
         auto predicate = [](index_dense_t::key_t key) { return key != 0; };
         auto results = index.filtered_search(vector_of_vectors[0].data(), 10, predicate);
-        expect_eq(10, results.size()); // ! Should not contain 0
+        expect_eq(10u, results.size()); // ! Should not contain 0
         for (std::size_t i = 0; i != results.size(); ++i)
             expect(0 != results[i].member.key);
     }
     {
         auto predicate = [](index_dense_t::key_t) { return false; };
         auto results = index.filtered_search(vector_of_vectors[0].data(), 10, predicate);
-        expect_eq(0, results.size()); // ! Should not contain 0
+        expect_eq(0u, results.size()); // ! Should not contain 0
     }
     {
         auto predicate = [](index_dense_t::key_t key) { return key == 10; };
         auto results = index.filtered_search(vector_of_vectors[0].data(), 10, predicate);
-        expect_eq(1, results.size()); // ! Should not contain 0
-        expect_eq(10, results[0].member.key);
+        expect_eq(1u, results.size()); // ! Should not contain 0
+        expect_eq(index_dense_t::key_t(10), results[0].member.key);
     }
 }
 
@@ -1179,13 +1252,129 @@ void test_isolate() {
     }
 }
 
+static void usearch_write_backtrace(int signal_number) {
+    std::fprintf(stderr, "\n[usearch] Fatal signal %d. Back-trace:\n", signal_number);
+#if USEARCH_HAS_STD_STACKTRACE
+    // C++23 `std::stacktrace` covers every platform the library can reach.
+    auto const current_trace = std::stacktrace::current();
+    std::size_t frame_index = 0;
+    for (auto const& frame : current_trace) {
+        std::fprintf(stderr, "  #%2zu %s\n", frame_index, std::to_string(frame).c_str());
+        ++frame_index;
+    }
+#elif defined(_WIN32)
+    // Fallback for MSVC stdlibs without `<stacktrace>`: DbgHelp API.
+    constexpr USHORT backtrace_depth_limit = 64;
+    void* backtrace_frames[backtrace_depth_limit];
+    USHORT backtrace_depth = CaptureStackBackTrace(0, backtrace_depth_limit, backtrace_frames, nullptr);
+    HANDLE current_process = GetCurrentProcess();
+    SymInitialize(current_process, nullptr, TRUE);
+
+    unsigned char symbol_info_buffer[sizeof(SYMBOL_INFO) + 256 * sizeof(char)];
+    SYMBOL_INFO* symbol_info = reinterpret_cast<SYMBOL_INFO*>(symbol_info_buffer);
+    symbol_info->MaxNameLen = 255;
+    symbol_info->SizeOfStruct = sizeof(SYMBOL_INFO);
+
+    for (USHORT frame_index = 0; frame_index < backtrace_depth; ++frame_index) {
+        if (SymFromAddr(current_process, reinterpret_cast<DWORD64>(backtrace_frames[frame_index]), 0, symbol_info))
+            std::fprintf(stderr, "  #%2u %s + 0x%llx\n", static_cast<unsigned>(frame_index), symbol_info->Name,
+                         static_cast<unsigned long long>(reinterpret_cast<DWORD64>(backtrace_frames[frame_index]) -
+                                                         symbol_info->Address));
+        else
+            std::fprintf(stderr, "  #%2u %p\n", static_cast<unsigned>(frame_index), backtrace_frames[frame_index]);
+    }
+#else
+    // Fallback for POSIX stdlibs without `<stacktrace>`: `<execinfo.h>`.
+    constexpr int backtrace_depth_limit = 64;
+    void* backtrace_frames[backtrace_depth_limit];
+    int const backtrace_depth = backtrace(backtrace_frames, backtrace_depth_limit);
+    backtrace_symbols_fd(backtrace_frames, backtrace_depth, STDERR_FILENO);
+#endif
+    std::fflush(stderr);
+}
+
+static void usearch_crash_handler(int signal_number) {
+    usearch_write_backtrace(signal_number);
+    // Restore the default disposition and re-raise so the shell / CI sees the true exit status.
+    std::signal(signal_number, SIG_DFL);
+    std::raise(signal_number);
+}
+
+static void install_crash_handlers() {
+    int const fatal_signals[] = {SIGSEGV, SIGABRT, SIGILL, SIGFPE};
+    for (int signal_number : fatal_signals)
+        std::signal(signal_number, &usearch_crash_handler);
+}
+
+/**
+ *  @brief  Regression test: `make(metric, config)` must return an index that is
+ *          immediately usable - no explicit `reserve` required before `load` /
+ *          `view` / `search`. Previously the typed graph's `{0, 0}` thread
+ *          limits leaked into `load_from_stream`, leaving `available_threads_`
+ *          empty and making the first `search` throw "No available threads to
+ *          lock".
+ */
+void test_load_after_metric_make() {
+    std::printf("Testing load and view into a metric-made index\n");
+
+    using index_t = index_dense_gt<std::int64_t, std::uint32_t>;
+    std::size_t const dimensions = 32;
+    std::size_t const collection = 64;
+
+    std::default_random_engine rng(7);
+    std::uniform_real_distribution<float> distribution(-1.f, 1.f);
+    std::vector<std::vector<float>> data(collection);
+    for (auto& vector : data) {
+        vector.resize(dimensions);
+        for (auto& value : vector)
+            value = distribution(rng);
+    }
+
+    metric_punned_t metric(dimensions, metric_kind_t::cos_k, scalar_kind<f32_t>());
+    index_dense_config_t config(16);
+
+    // Build an index and persist it to disk.
+    index_t::state_result_t built = index_t::make(metric, config);
+    expect(built);
+    expect(built.index.try_reserve(collection));
+    for (std::size_t i = 0; i != collection; ++i)
+        expect(built.index.add(static_cast<std::int64_t>(i), data[i].data()));
+    char const* path = "tmp_metric_make.usearch";
+    expect(built.index.save(path));
+
+    // Load into a fresh, metric-made index that was never explicitly reserved.
+    // The first `search` must not throw "No available threads to lock".
+    index_t::state_result_t loaded = index_t::make(metric, config);
+    expect(loaded);
+    expect(loaded.index.load(path));
+    expect_eq(loaded.index.size(), collection);
+    std::int64_t found[8];
+    expect(loaded.index.search(data[0].data(), 5).dump_to(found) != 0);
+
+    // Same check for the memory-mapped `view` path.
+    index_t::state_result_t viewed = index_t::make(metric, config);
+    expect(viewed);
+    expect(viewed.index.view(path));
+    expect_eq(viewed.index.size(), collection);
+    expect(viewed.index.search(data[0].data(), 5).dump_to(found) != 0);
+
+    std::remove(path);
+}
+
 int main(int, char**) {
-    test_uint40();
-    test_cosine<float, std::int64_t, uint40_t>(10, 10);
+    install_crash_handlers();
+
+    std::printf("Hardware acceleration compiled: %s\n", hardware_acceleration_compiled());
+    std::printf("Hardware acceleration available: %s\n", hardware_acceleration_available());
 
     // Non-default floating-point types may result in many compilation & rounding issues.
-    test_cosine<f16_t, std::int64_t, uint40_t>(10, 10);
+    test_uint40();
+    test_checked_size_arithmetic();
+    test_cosine<f32_t, std::int64_t, uint40_t>(10, 10);
     test_cosine<bf16_t, std::int64_t, uint40_t>(10, 10);
+    test_cosine<f16_t, std::int64_t, uint40_t>(10, 10);
+    test_cosine<e5m2_t, std::int64_t, uint40_t>(10, 10);
+    test_cosine<e4m3_t, std::int64_t, uint40_t>(10, 10);
 
     // Test plugins, like K-Means clustering.
     {
@@ -1195,7 +1384,7 @@ int main(int, char**) {
         std::vector<float> vectors(vectors_count * dimensions), centroids(centroids_count * dimensions);
         matrix_slice_gt<float const> vectors_slice(vectors.data(), dimensions, vectors_count);
         matrix_slice_gt<float> centroids_slice(centroids.data(), dimensions, centroids_count);
-        std::generate(vectors.begin(), vectors.end(), [] { return float(std::rand()) / float(INT_MAX); });
+        std::generate(vectors.begin(), vectors.end(), [] { return float(std::rand()) / float(RAND_MAX); });
         std::vector<std::size_t> assignments(vectors_count);
         std::vector<distance_punned_t> distances(vectors_count);
         auto clustering_result = clustering(vectors_slice, centroids_slice, {assignments.data(), assignments.size()},
@@ -1209,9 +1398,11 @@ int main(int, char**) {
     for (std::size_t dataset_count : {10, 100})
         for (std::size_t queries_count : {1, 10})
             for (std::size_t wanted_count : {1, 5}) {
-                test_exact_search<float>(dataset_count, queries_count, wanted_count);
-                test_exact_search<f16_t>(dataset_count, queries_count, wanted_count);
+                test_exact_search<f32_t>(dataset_count, queries_count, wanted_count);
                 test_exact_search<bf16_t>(dataset_count, queries_count, wanted_count);
+                test_exact_search<f16_t>(dataset_count, queries_count, wanted_count);
+                test_exact_search<e5m2_t>(dataset_count, queries_count, wanted_count);
+                test_exact_search<e4m3_t>(dataset_count, queries_count, wanted_count);
             }
 
     // Make sure the initializers and the algorithms can work with inadequately small values.
@@ -1235,12 +1426,16 @@ int main(int, char**) {
     std::printf("Testing common cases\n");
     for (std::size_t collection_size : {10, 500})
         for (std::size_t dimensions : {97, 256}) {
-            std::printf("- Indexing %zu vectors with cos: <float, std::int64_t, slot32_t> \n", collection_size);
-            test_cosine<float, std::int64_t, slot32_t>(collection_size, dimensions);
-            std::printf("- Indexing %zu vectors with cos: <float, std::int64_t, uint40_t> \n", collection_size);
-            test_cosine<float, std::int64_t, uint40_t>(collection_size, dimensions);
+            std::printf("- Indexing %zu vectors with cos: <f32_t, std::int64_t, slot32_t> \n", collection_size);
+            test_cosine<f32_t, std::int64_t, slot32_t>(collection_size, dimensions);
+            std::printf("- Indexing %zu vectors with cos: <f32_t, std::int64_t, uint40_t> \n", collection_size);
+            test_cosine<f32_t, std::int64_t, uint40_t>(collection_size, dimensions);
             std::printf("- Indexing %zu vectors with cos: <bf16, std::int64_t, uint40_t> \n", collection_size);
             test_cosine<bf16_t, std::int64_t, uint40_t>(collection_size, dimensions);
+            std::printf("- Indexing %zu vectors with cos: <e5m2, std::int64_t, uint40_t> \n", collection_size);
+            test_cosine<e5m2_t, std::int64_t, uint40_t>(collection_size, dimensions);
+            std::printf("- Indexing %zu vectors with cos: <e4m3, std::int64_t, uint40_t> \n", collection_size);
+            test_cosine<e4m3_t, std::int64_t, uint40_t>(collection_size, dimensions);
         }
 
     // Test with binary vectors
@@ -1257,5 +1452,6 @@ int main(int, char**) {
 
     test_filtered_search();
     test_isolate();
+    test_load_after_metric_make();
     return 0;
 }

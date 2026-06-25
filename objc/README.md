@@ -10,7 +10,7 @@ To install it, simply add the following line to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/unum-cloud/usearch", .upToNextMajor(from: "2.0.0"))
+    .package(url: "https://github.com/unum-cloud/USearch", .upToNextMajor(from: "2.0.0"))
 ]
 ```
 
@@ -108,4 +108,4 @@ UInt32 count = [index count:42];
 
 Tune the `connectivity`, `quantization`, and other parameters according to the size and dimensionality of your dataset.
 These settings can significantly affect both the performance and accuracy of your searches.
-The choice of metric and scalar type (e.g., `USearchScalarF32`, `USearchScalarF16`, `USearchScalarI8`) also influences the memory usage and computation speed.
+The choice of metric and scalar type (e.g., `USearchScalarF32`, `USearchScalarBF16`, `USearchScalarF16`, `USearchScalarE5M2`, `USearchScalarE4M3`, `USearchScalarI8`) also influences the memory usage and computation speed.

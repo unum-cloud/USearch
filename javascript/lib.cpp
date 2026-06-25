@@ -320,8 +320,10 @@ Napi::Value CompiledIndex::Remove(Napi::CallbackInfo const& ctx) {
     Napi::Array results = Napi::Array::New(env, length);
     for (std::size_t i = 0; i < length; ++i) {
         auto result = native_->remove(static_cast<default_key_t>(keys[i]));
-        if (!result)
-            Napi::Error::New(ctx.Env(), result.error.release()).ThrowAsJavaScriptException();
+        if (!result) {
+            Napi::Error::New(env, result.error.release()).ThrowAsJavaScriptException();
+            return env.Null();
+        }
         results[i] = Napi::Number::New(env, result.completed);
     }
     return results;
@@ -432,7 +434,24 @@ Napi::Value exactSearch(Napi::CallbackInfo const& ctx) {
     return result_js;
 }
 
+Napi::Value version(Napi::CallbackInfo const& info) {
+    static char buf[32];
+    std::snprintf(buf, sizeof(buf), "%d.%d.%d", USEARCH_VERSION_MAJOR, USEARCH_VERSION_MINOR, USEARCH_VERSION_PATCH);
+    return Napi::String::New(info.Env(), buf);
+}
+
+Napi::Value hardwareAccelerationCompiled(Napi::CallbackInfo const& info) {
+    return Napi::String::New(info.Env(), unum::usearch::hardware_acceleration_compiled());
+}
+
+Napi::Value hardwareAccelerationAvailable(Napi::CallbackInfo const& info) {
+    return Napi::String::New(info.Env(), unum::usearch::hardware_acceleration_available());
+}
+
 Napi::Object InitAll(Napi::Env env, Napi::Object exports) {
+    exports.Set("version", Napi::Function::New(env, version));
+    exports.Set("hardwareAccelerationCompiled", Napi::Function::New(env, hardwareAccelerationCompiled));
+    exports.Set("hardwareAccelerationAvailable", Napi::Function::New(env, hardwareAccelerationAvailable));
     exports.Set("exactSearch", Napi::Function::New(env, exactSearch));
     return CompiledIndex::Init(env, exports);
 }

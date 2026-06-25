@@ -5,12 +5,17 @@
 NS_ASSUME_NONNULL_BEGIN
 
 typedef NS_ENUM(NSUInteger, USearchScalar) {
-    USearchScalarF32,
-    USearchScalarF16,
     USearchScalarF64,
-    USearchScalarI8,
-    USearchScalarB1,
+    USearchScalarF32,
     USearchScalarBF16,
+    USearchScalarF16,
+    USearchScalarE5M2,
+    USearchScalarE4M3,
+    USearchScalarE3M2,
+    USearchScalarE2M3,
+    USearchScalarI8,
+    USearchScalarU8,
+    USearchScalarB1,
 };
 
 typedef NS_ENUM(NSUInteger, USearchMetric) {
@@ -196,6 +201,51 @@ API_AVAILABLE(ios(13.0), macos(10.15), tvos(13.0), watchos(6.0))
 - (UInt32)getHalf:(USearchKey)key
         vector:(void *_Nonnull)vector
         count:(UInt32)count NS_SWIFT_NAME(getHalf(key:vector:count:));
+
+/**
+ * @brief Adds a labeled vector to the index.
+ * @param vector Uint8 vector.
+ */
+- (void)addU8:(USearchKey)key
+       vector:(uint8_t const *_Nonnull)vector NS_SWIFT_NAME(addU8(key:vector:));
+
+/**
+ * @brief Approximate nearest neighbors search.
+ * @param vector Uint8 query vector.
+ * @param count Upper limit on the number of matches to retrieve.
+ * @param keys Optional output buffer for keys of approximate neighbors.
+ * @param distances Optional output buffer for (increasing) distances to approximate neighbors.
+ * @return Number of matches exported to `keys` and `distances`.
+ */
+- (UInt32)searchU8:(uint8_t const *_Nonnull)vector
+             count:(UInt32)count
+              keys:(USearchKey *_Nullable)keys
+         distances:(Float32 *_Nullable)distances NS_SWIFT_NAME(searchU8(vector:count:keys:distances:));
+
+/**
+ * @brief Retrieves a labeled uint8 vector from the index.
+ * @param vector A buffer to store the vector.
+ * @param count For multi-indexes, the number of vectors to retrieve.
+ * @return Number of vectors exported to `vector`.
+ */
+- (UInt32)getU8:(USearchKey)key
+         vector:(void *_Nonnull)vector
+          count:(UInt32)count NS_SWIFT_NAME(getU8(key:vector:count:));
+
+/**
+ * @brief Approximate nearest neighbors search with filtering.
+ * @param vector Uint8 query vector.
+ * @param count Upper limit on the number of matches to retrieve.
+ * @param filter Closure called for each key, determining whether to include or skip key in the results.
+ * @param keys Optional output buffer for keys of approximate neighbors.
+ * @param distances Optional output buffer for (increasing) distances to approximate neighbors.
+ * @return Number of matches exported to `keys` and `distances`.
+ */
+- (UInt32)filteredSearchU8:(uint8_t const *_Nonnull)vector
+                     count:(UInt32)wanted
+                    filter:(USearchFilterFn)predicate
+                      keys:(USearchKey *_Nullable)keys
+                 distances:(Float32 *_Nullable)distances NS_SWIFT_NAME(filteredSearchU8(vector:count:filter:keys:distances:));
 
 - (Boolean)contains:(USearchKey)key NS_SWIFT_NAME(contains(key:));
 

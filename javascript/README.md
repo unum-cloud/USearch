@@ -48,7 +48,7 @@ Customize your index with additional configuration options:
 const index = new usearch.Index({
   dimensions: 128,
   metric: 'ip',
-  quantization: 'f32',
+  quantization: 'f32', // or 'bf16', 'f16', 'e5m2', 'e4m3', 'e3m2', 'e2m3', 'u8', 'i8', 'b1'
   connectivity: 10,
   expansion_add: 5,
   expansion_search: 3,

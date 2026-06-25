@@ -230,6 +230,22 @@ public class IndexTest {
     }
 
     @Test
+    public void testMiniFloatQuantizations() {
+        for (String quantization : new String[]{"e5m2", "e4m3", "e3m2", "e2m3"}) {
+            try (Index index = new Index.Config()
+                    .metric("cos").dimensions(64).quantization(quantization).build()) {
+                float[] vec = new float[64];
+                for (int i = 0; i < 64; i++) vec[i] = (float) i * 0.1f;
+                index.reserve(10);
+                index.add(42, vec);
+
+                long[] keys = index.search(vec, 1);
+                assertEquals("Self-match failed for " + quantization, 42L, keys[0]);
+            }
+        }
+    }
+
+    @Test
     public void testGetIntoBufferMethods() {
         try (Index index = new Index.Config().metric("cos").dimensions(3).build()) {
             float[] vecF32 = {1.0f, 2.0f, 3.0f};

@@ -15,7 +15,7 @@ This will add a USearch dependency to your `Cargo.toml` file.
 usearch = "..."
 ```
 
-By default, [SimSIMD](https://github.com/ashvardanian/simsimd) is used to provide dynamic dispatch for SIMD operations.
+By default, [NumKong](https://github.com/ashvardanian/numkong) is used to provide dynamic dispatch for SIMD operations.
 You can, however, override that by specifying custom features in your `Cargo.toml` file.
 To disable all features, use the following configuration:
 
@@ -28,7 +28,7 @@ To enable specific features, use the following configuration:
 
 ```toml
 [dependencies]
-usearch = { version = "...", features = ["simsimd", "openmp", "fp16lib"] }
+usearch = { version = "...", features = ["numkong", "openmp", "fp16lib"] }
 ```
 
 OpenMP (`openmp`) will use the OpenMP runtime for parallelism.
@@ -43,7 +43,7 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind, new_index};
 let options = IndexOptions {
     dimensions: 3, // necessary for most metric kinds
     metric: MetricKind::IP, // or ::L2sq, ::Cos ...
-    quantization: ScalarKind::BF16, // or ::F32, ::F16, ::I8, ::B1x8 ...
+    quantization: ScalarKind::BF16, // or ::F32, ::F16, ::E5M2, ::E4M3, ::E3M2, ::E2M3, ::U8, ::I8, ::B1x8 ...
     connectivity: 0, // zero for auto
     expansion_add: 0, // zero for auto
     expansion_search: 0, // zero for auto
@@ -89,9 +89,22 @@ assert!(index.load_from_buffer(&serialization_buffer).is_ok());
 assert!(index.view_from_buffer(&serialization_buffer).is_ok());
 ```
 
+To reopen an index without already knowing how it was built, read its header with `Index::metadata` or use the one-shot `Index::restore`:
+
+```rust
+let meta = Index::metadata("index.usearch").unwrap();
+println!("dim={}, metric={:?}, dtype={:?}", meta.dimensions, meta.metric, meta.quantization);
+
+let index = Index::restore("index.usearch").unwrap();
+assert_eq!(index.metric_kind(), meta.metric);
+assert_eq!(index.scalar_kind(), meta.quantization);
+```
+
+`Index::restore_view` and `Index::restore_from_buffer` are the memory-mapping and in-memory counterparts.
+
 ## Metrics
 
-USearch comes pre-packaged with SimSIMD, bringing over 100 SIMD-accelerated distance kernels for x86 and ARM architectures.
+USearch comes pre-packaged with NumKong, bringing over 100 SIMD-accelerated distance kernels for x86 and ARM architectures.
 That includes:
 
 - `MetricKind::IP` - Inner Product metric, defined as `IP = 1 - sum(a[i] * b[i])`.
@@ -111,7 +124,7 @@ To use a custom metric with USearch, define a function that matches the expected
 Let's say you are implementing a weighted distance function to search through joint embeddings of images and textual descriptions of some products in a catalog, taking some [UForm](https://github.com/unum-cloud/uform) or CLIP-like models.
 
 ```rust
-use simsimd::SpatialSimilarity;
+use numkong::SpatialSimilarity;
 
 let image_dimensions: usize = 768;
 let text_dimensions: usize = 512;

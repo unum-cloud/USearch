@@ -1,9 +1,8 @@
-[submodule "simsimd"]
-	path = simsimd
-	url = https://github.com/ashvardanian/simsimd
-[submodule "fp16"]
-	path = fp16
-	url = https://github.com/maratyszcza/fp16
+[submodule "numkong"]
+	path = numkong
+	url = https://github.com/ashvardanian/NumKong
+	branch = main-dev
 [submodule "stringzilla"]
 	path = stringzilla
 	url = https://github.com/ashvardanian/stringzilla
+	branch = v3.10.10

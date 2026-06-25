@@ -21,32 +21,34 @@ Dependencies listed in the script header for uv to resolve automatically.
 import os
 from time import time
 
-import pytest
 import numpy as np
+import pytest
 
-from usearch.eval import random_vectors, self_recall, SearchStats
-from usearch.index import (
-    Index,
-    MetricKind,
-    ScalarKind,
-    Match,
-    Matches,
-    BatchMatches,
-    Clustering,
-)
+from usearch.eval import SearchStats, random_vectors, self_recall
 from usearch.index import (
     DEFAULT_CONNECTIVITY,
+    BatchMatches,
+    Clustering,
+    Index,
+    Match,
+    Matches,
+    MetricKind,
+    ScalarKind,
 )
-
 
 ndims = [3, 97, 256]
 batch_sizes = [1, 11, 77]
 quantizations = [
-    ScalarKind.F32,
     ScalarKind.F64,
-    ScalarKind.F16,
+    ScalarKind.F32,
     ScalarKind.BF16,
+    ScalarKind.F16,
+    ScalarKind.E5M2,
+    ScalarKind.E4M3,
+    ScalarKind.E3M2,
+    ScalarKind.E2M3,
     ScalarKind.I8,
+    ScalarKind.U8,
 ]
 dtypes = [np.float32, np.float64, np.float16]
 threads = 2
@@ -127,6 +129,40 @@ def test_index_retrieval(ndim, metric, quantization, dtype, batch_size):
         assert vectors.T.strides == (dtype().itemsize, batch_size * dtype().itemsize)
         with pytest.raises(Exception):
             index.add(keys, vectors.T, threads=threads)
+
+
+@pytest.mark.parametrize("multi", [False, True])
+def test_index_get_missing_keys(multi):
+    """Pin the docstring contract on `Index.get` for missing keys (#663).
+
+    Single missing key must yield `None` (the bug was returning a row of
+    uninitialized memory). Mixed batches must yield a tuple with `None` in
+    the slots of missing keys.
+    """
+    reset_randomness()
+    ndim = 8
+    index = Index(ndim=ndim, multi=multi)
+    vector = random_vectors(count=1, ndim=ndim)[0]
+    index.add(1, vector)
+
+    # Single missing key → None (the #663 reproducer).
+    assert index.get(999) is None
+
+    # Single present key → ndarray (multi or not).
+    present = index.get(1)
+    assert present is not None
+    assert isinstance(present, np.ndarray)
+
+    # Mixed batch → tuple, one entry per key, None for missing.
+    mixed = index.get([1, 999])
+    assert isinstance(mixed, tuple)
+    assert len(mixed) == 2
+    assert isinstance(mixed[0], np.ndarray)
+    assert mixed[1] is None
+
+    # After remove, get() returns None.
+    index.remove(1)
+    assert index.get(1) is None
 
 
 @pytest.mark.parametrize("ndim", [3, 97, 256])
@@ -433,6 +469,47 @@ def test_index_keys_iteration():
     assert keys_list[0] == 42
 
 
+@pytest.mark.parametrize("quantization_name", ["e5m2", "e4m3", "e3m2", "e2m3"])
+@pytest.mark.parametrize("ndim", [97, 256])
+def test_index_mini_floats_with_numkong(quantization_name, ndim):
+    """Test add/search with NumKong-downcasted float8/float6 tensors and explicit dtype."""
+    nk = pytest.importorskip("numkong")
+
+    batch_size = 50
+    vectors_f32 = random_vectors(count=batch_size, ndim=ndim, dtype=np.float32)
+    keys = np.arange(batch_size)
+
+    vectors_nk = nk.Tensor(vectors_f32).astype(quantization_name)
+    vectors_raw = np.asarray(vectors_nk)
+
+    index = Index(ndim=ndim, metric=MetricKind.Cos, dtype=quantization_name)
+    index.add(keys, vectors_raw, threads=threads, dtype=quantization_name)
+    assert len(index) == batch_size
+
+    matches = index.search(vectors_raw[:5], 10, threads=threads, dtype=quantization_name)
+    assert len(matches) == 5
+    for i in range(5):
+        assert matches[i].keys[0] == i, f"Expected self-match for vector {i}"
+
+
+@pytest.mark.parametrize("quantization", quantizations)
+@pytest.mark.parametrize("ndim", [97, 256])
+def test_index_quantized_add_search(quantization, ndim):
+    """Smoke-test every supported quantization: add f32 vectors, search, verify self-match."""
+    batch_size = 50
+    vectors_f32 = random_vectors(count=batch_size, ndim=ndim, dtype=np.float32)
+    keys = np.arange(batch_size)
+
+    index = Index(ndim=ndim, metric=MetricKind.Cos, dtype=quantization)
+    index.add(keys, vectors_f32, threads=threads)
+    assert len(index) == batch_size
+
+    matches = index.search(vectors_f32[:5], 10, threads=threads)
+    assert len(matches) == 5
+    for i in range(5):
+        assert matches[i].keys[0] == i, f"Expected self-match for vector {i} with {quantization}"
+
+
 def test_index_copied_memory_usage():
     """Test that copy=False results in lower memory usage than copy=True."""
     reset_randomness()
@@ -458,6 +535,6 @@ def test_index_copied_memory_usage():
     memory_with_copy = index_copied.memory_usage
     memory_without_copy = index_viewing.memory_usage
 
-    assert (
-        memory_with_copy > memory_without_copy
-    ), f"Expected default index addition to use more memory than copy=False ({memory_with_copy} vs {memory_without_copy})"
+    assert memory_with_copy > memory_without_copy, (
+        f"Expected default index addition to use more memory than copy=False ({memory_with_copy} vs {memory_without_copy})"
+    )

@@ -1,6 +1,5 @@
 import os
 import struct
-import typing
 
 import numpy as np
 
@@ -21,7 +20,7 @@ def numpy_scalar_size(dtype) -> int:
     }[dtype]
 
 
-def guess_numpy_dtype_from_filename(filename) -> typing.Optional[type]:
+def guess_numpy_dtype_from_filename(filename) -> type | None:
     if filename.endswith(".fbin"):
         return np.float32
     elif filename.endswith(".dbin"):
@@ -47,8 +46,8 @@ def load_matrix(
     start_row: int = 0,
     count_rows: int = None,
     view: bool = False,
-    dtype: typing.Optional[type] = None,
-) -> typing.Optional[np.ndarray]:
+    dtype: type | None = None,
+) -> np.ndarray | None:
     """Read *.ibin, *.bbib, *.hbin, *.fbin, *.dbin, *.i8bin, *.i32bin files with matrices.
 
     :param filename: path to the matrix file
@@ -70,18 +69,22 @@ def load_matrix(
 
     with open(filename, "rb") as f:
         rows, cols = np.fromfile(f, count=2, dtype=np.int32).astype(np.uint64)
-        
+
         # Validate file size matches expected data size
         f.seek(0, 2)  # Go to end
         file_size = f.tell()
         expected_size = 8 + (rows * cols * scalar_size)  # Header + data
-        
+
         if file_size != expected_size:
             if file_size < expected_size:
-                raise ValueError(f"File {filename} is truncated. Expected {expected_size:,} bytes, got {file_size:,} bytes")
+                raise ValueError(
+                    f"File {filename} is truncated. Expected {expected_size:,} bytes, got {file_size:,} bytes"
+                )
             else:
-                raise ValueError(f"File {filename} is larger than expected. Expected {expected_size:,} bytes, got {file_size:,} bytes")
-        
+                raise ValueError(
+                    f"File {filename} is larger than expected. Expected {expected_size:,} bytes, got {file_size:,} bytes"
+                )
+
         f.seek(8)  # Back to start of data
         rows = (rows - start_row) if count_rows is None else count_rows
         row_offset = start_row * scalar_size * cols

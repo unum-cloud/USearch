@@ -18,10 +18,9 @@ Dependencies listed in the script header for uv to resolve automatically.
 # ]
 # ///
 
-import pytest
 import numpy as np
+import pytest
 
-import usearch
 from usearch.index import (
     Index,
     MetricKind,

@@ -145,18 +145,18 @@ JNIEXPORT jstring JNICALL Java_cloud_unum_usearch_Index_c_1scalar_1kind
 
 /*
  * Class:     cloud_unum_usearch_Index
- * Method:    c_hardware_acceleration_available
- * Signature: ()[Ljava/lang/String;
+ * Method:    c_hardware_acceleration_available_string
+ * Signature: ()Ljava/lang/String;
  */
-JNIEXPORT jobjectArray JNICALL Java_cloud_unum_usearch_Index_c_1hardware_1acceleration_1available
+JNIEXPORT jstring JNICALL Java_cloud_unum_usearch_Index_c_1hardware_1acceleration_1available_1string
   (JNIEnv *, jclass);
 
 /*
  * Class:     cloud_unum_usearch_Index
- * Method:    c_hardware_acceleration_compiled
- * Signature: ()[Ljava/lang/String;
+ * Method:    c_hardware_acceleration_compiled_string
+ * Signature: ()Ljava/lang/String;
  */
-JNIEXPORT jobjectArray JNICALL Java_cloud_unum_usearch_Index_c_1hardware_1acceleration_1compiled
+JNIEXPORT jstring JNICALL Java_cloud_unum_usearch_Index_c_1hardware_1acceleration_1compiled_1string
   (JNIEnv *, jclass);
 
 /*
@@ -209,6 +209,14 @@ JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1add_1i8
 
 /*
  * Class:     cloud_unum_usearch_Index
+ * Method:    c_add_u8
+ * Signature: (JJ[B)V
+ */
+JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1add_1u8
+  (JNIEnv *, jclass, jlong, jlong, jbyteArray);
+
+/*
+ * Class:     cloud_unum_usearch_Index
  * Method:    c_search_f32
  * Signature: (J[FJ)[J
  */
@@ -233,6 +241,14 @@ JNIEXPORT jlongArray JNICALL Java_cloud_unum_usearch_Index_c_1search_1i8
 
 /*
  * Class:     cloud_unum_usearch_Index
+ * Method:    c_search_u8
+ * Signature: (J[BJ)[J
+ */
+JNIEXPORT jlongArray JNICALL Java_cloud_unum_usearch_Index_c_1search_1u8
+  (JNIEnv *, jclass, jlong, jbyteArray, jlong);
+
+/*
+ * Class:     cloud_unum_usearch_Index
  * Method:    c_get_into_f32
  * Signature: (JJ[F)V
  */
@@ -253,6 +269,14 @@ JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1get_1into_1f64
  * Signature: (JJ[B)V
  */
 JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1get_1into_1i8
+  (JNIEnv *, jclass, jlong, jlong, jbyteArray);
+
+/*
+ * Class:     cloud_unum_usearch_Index
+ * Method:    c_get_into_u8
+ * Signature: (JJ[B)V
+ */
+JNIEXPORT void JNICALL Java_cloud_unum_usearch_Index_c_1get_1into_1u8
   (JNIEnv *, jclass, jlong, jlong, jbyteArray);
 
 /*

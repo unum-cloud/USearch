@@ -9,7 +9,7 @@ This includes:
 - [x] Haversine distance for geographical coordinates.
 
 The SIMD-acceleration covers AVX2, most subsets of AVX512, ARM NEON, and Arm SVE instruction sets, more than most BLAS libraries.
-The implementations are coming from [SimSIMD](https://github.com/ashvardanian/simsimd) and [StringZilla](https://github.com/ashvardanian/stringzilla).
+The implementations are coming from [NumKong](https://github.com/ashvardanian/numkong) and [StringZilla](https://github.com/ashvardanian/stringzilla).
 They are most efficient when vectors are stored as BLOBs, but for broader compatibility can also handle JSONs, and even separate columns containing vector elements.
 
 ## Installation

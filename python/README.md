@@ -14,8 +14,8 @@ from usearch.index import Index, Matches
 
 index = Index(
     ndim=3, # Define the number of dimensions in input vectors
-    metric='cos', # Choose 'l2sq', 'haversine' or other metric, default = 'ip'
-    dtype='f32', # Quantize to 'f16' or 'i8' if needed, default = 'f32'
+    metric='cos', # Choose 'l2sq', 'ip', 'haversine' or other metric, default = 'cos'
+    dtype='bf16', # Quantize to 'f16', 'e5m2', 'e4m3', 'e3m2', 'e2m3', 'u8', 'i8', 'b1'..., default = None
     connectivity=16, # How frequent should the connections in the graph be, optional
     expansion_add=128, # Control the recall of indexing, optional
     expansion_search=64, # Control the quality of search, optional
@@ -72,12 +72,52 @@ assert len(matches[0]) <= 10
 ```
 
 You can also override the default `threads` and `copy` arguments in bulk workloads.
-The first controls the number of threads spawned for the task.
+The first controls the number of threads spawned for the task, where `threads=0` (the default) uses all available cores.
 The second controls whether the vector itself will be persisted inside the index.
 If you can preserve the lifetime of the vector somewhere else, you can avoid the copy.
 
 > When using `BatchMatches`, be aware that unused positions in the results arrays will be filled with sentinel values, like the signaling `NaN` for floating-point distances.
 > Don't forget to check for `matches.counts` if you are using the recommended batch interfaces.
+
+## Scalar Quantization & NumKong Interop
+
+USearch indexes can store vectors in a variety of quantized formats, trading precision for memory and speed.
+The `add` and `search` operations automatically cast between the input type and the index storage type.
+
+| `dtype` |           Bits | Best For                           |
+| :------ | -------------: | :--------------------------------- |
+| `f64`   |             64 | Maximum precision                  |
+| `f32`   |             32 | Default NumPy type                 |
+| `bf16`  |             16 | Recommended default on modern CPUs |
+| `f16`   |             16 | Widely supported half-precision    |
+| `e5m2`  |              8 | Float8, wider range (±57344)       |
+| `e4m3`  |              8 | Float8, higher precision (±448)    |
+| `e3m2`  | 6, padded to 8 | Float6, MX-compatible (±28)        |
+| `e2m3`  | 6, padded to 8 | Float6, MX-compatible (±7.5)       |
+| `i8`    |              8 | Cosine-like metrics                |
+| `u8`    |              8 | Cosine-like metrics                |
+| `b1`    |              1 | Binary metrics                     |
+
+For types not natively representable in NumPy (`bf16`, `e5m2`, `e4m3`, `e3m2`, `e2m3`), you can pre-quantize with [NumKong](https://github.com/ashvardanian/numkong) and pass the raw buffers with an explicit `dtype=` parameter:
+
+```python
+import numkong as nk
+import numpy as np
+from usearch.index import Index
+
+vectors_f32 = np.random.rand(1000, 256).astype(np.float32)
+keys = np.arange(1000)
+
+# Option 1: let USearch quantize internally
+index = Index(ndim=256, metric='cos', dtype='e4m3')
+index.add(keys, vectors_f32)
+
+# Option 2: pre-quantize with NumKong and pass raw buffers
+vectors_e4m3 = np.asarray(nk.Tensor(vectors_f32).astype('e4m3'))
+index2 = Index(ndim=256, metric='cos', dtype='e4m3')
+index2.add(keys, vectors_e4m3, dtype='e4m3')
+matches = index2.search(vectors_e4m3[:5], 10, dtype='e4m3')
+```
 
 ## User-Defined Metrics and JIT in Python
 

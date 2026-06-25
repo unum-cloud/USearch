@@ -1,7 +1,7 @@
 <h1 align="center">USearch</h1>
 <h3 align="center">
 Smaller & <a href="https://www.unum.cloud/blog/2023-11-07-scaling-vector-search-with-intel">Faster</a> Single-File<br/>
-Similarity Search & Clustering Engine for <a href="https://github.com/ashvardanian/simsimd">Vectors</a> & 🔜 <a href="https://github.com/ashvardanian/stringzilla">Texts</a>
+Similarity Search & Clustering Engine for <a href="https://github.com/ashvardanian/numkong">Vectors</a> & 🔜 <a href="https://github.com/ashvardanian/stringzilla">Texts</a>
 </h3>
 <br/>
 
@@ -14,26 +14,26 @@ Similarity Search & Clustering Engine for <a href="https://github.com/ashvardani
 &nbsp;&nbsp;&nbsp;
 <a href="https://unum.cloud/post"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/blog.svg" alt="Blog"></a>
 &nbsp;&nbsp;&nbsp;
-<a href="https://github.com/unum-cloud/usearch"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/github.svg" alt="GitHub"></a>
+<a href="https://github.com/unum-cloud/USearch"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/github.svg" alt="GitHub"></a>
 </p>
 
 <p align="center">
 Spatial • Binary • Probabilistic • User-Defined Metrics
 <br/>
-<a href="https://unum-cloud.github.io/usearch/cpp">C++11</a> •
-<a href="https://unum-cloud.github.io/usearch/python">Python 3</a> •
-<a href="https://unum-cloud.github.io/usearch/javascript">JavaScript</a> •
-<a href="https://unum-cloud.github.io/usearch/java">Java</a> •
-<a href="https://unum-cloud.github.io/usearch/rust">Rust</a> •
-<a href="https://unum-cloud.github.io/usearch/c">C99</a> •
-<a href="https://unum-cloud.github.io/usearch/objective-c">Objective-C</a> •
-<a href="https://unum-cloud.github.io/usearch/swift">Swift</a> •
-<a href="https://unum-cloud.github.io/usearch/csharp">C#</a> •
-<a href="https://unum-cloud.github.io/usearch/golang">Go</a> •
-<a href="https://unum-cloud.github.io/usearch/wolfram">Wolfram</a>
+<a href="https://unum-cloud.github.io/USearch/cpp">C++11</a> •
+<a href="https://unum-cloud.github.io/USearch/python">Python 3</a> •
+<a href="https://unum-cloud.github.io/USearch/javascript">JavaScript</a> •
+<a href="https://unum-cloud.github.io/USearch/java">Java</a> •
+<a href="https://unum-cloud.github.io/USearch/rust">Rust</a> •
+<a href="https://unum-cloud.github.io/USearch/c">C99</a> •
+<a href="https://unum-cloud.github.io/USearch/objective-c">Objective-C</a> •
+<a href="https://unum-cloud.github.io/USearch/swift">Swift</a> •
+<a href="https://unum-cloud.github.io/USearch/csharp">C#</a> •
+<a href="https://unum-cloud.github.io/USearch/golang">Go</a> •
+<a href="https://unum-cloud.github.io/USearch/wolfram">Wolfram</a>
 <br/>
 Linux • macOS • Windows • iOS • Android • WebAssembly •
-<a href="https://unum-cloud.github.io/usearch/sqlite">SQLite</a>
+<a href="https://unum-cloud.github.io/USearch/sqlite">SQLite</a>
 </p>
 
 <div align="center">
@@ -42,7 +42,7 @@ Linux • macOS • Windows • iOS • Android • WebAssembly •
 <a href="https://crates.io/crates/usearch"> <img alt="Crate" src="https://img.shields.io/crates/d/usearch?label=Rust%20Crate%20installs"> </a>
 <a href="https://www.nuget.org/packages/Cloud.Unum.USearch"> <img alt="NuGet" src="https://img.shields.io/nuget/dt/Cloud.Unum.USearch?label=CSharp%20NuGet%20installs"> </a>
 <!-- Maven Central publishing is deprecated for now; fat-JAR download is the supported path. -->
-<img alt="GitHub code size in bytes" src="https://img.shields.io/github/languages/code-size/unum-cloud/usearch?label=Repo%20size">
+<img alt="GitHub code size in bytes" src="https://img.shields.io/github/languages/code-size/unum-cloud/USearch?label=Repo%20size">
 </div>
 
 ---
@@ -51,17 +51,17 @@ Linux • macOS • Windows • iOS • Android • WebAssembly •
 - ✅ Simple and extensible [single C++11 header][usearch-header] __library__.
 - ✅ [Trusted](#integrations) by giants like Google and DBs like [ClickHouse][clickhouse-docs] & [DuckDB][duckdb-docs].
 - ✅ [SIMD][simd]-optimized and [user-defined metrics](#user-defined-functions) with JIT compilation.
-- ✅ Hardware-agnostic `f16` & `i8` - [half-precision & quarter-precision support](#memory-efficiency-downcasting-and-quantization).
+- ✅ Hardware-agnostic `bf16`, `e5m2`, & `i8` - [half-precision & quarter-precision support](#memory-efficiency-downcasting-and-quantization).
 - ✅ [View large indexes from disk](#serialization--serving-index-from-disk) without loading into RAM.
 - ✅ Heterogeneous lookups, renaming/relabeling, and on-the-fly deletions.
 - ✅ Binary Tanimoto and Sorensen coefficients for [Genomics and Chemistry applications](#usearch--rdkit--molecular-search).
 - ✅ Space-efficient point-clouds with `uint40_t`, accommodating 4B+ size.
 - ✅ Compatible with OpenMP and custom "executors" for fine-grained parallelism.
-- ✅ [Semantic Search](#usearch--ai--multi-modal-semantic-search) and [Joins](#joins-one-to-one-one-to-many-and-many-to-many-mappings).
+- ✅ [Semantic Search](#usearch--uform--ucall--multimodal-semantic-search) and [Joins](#joins-one-to-one-one-to-many-and-many-to-many-mappings).
 - 🔄 Near-real-time [clustering and sub-clustering](#clustering) for Tens or Millions of clusters.
 
 [faiss]: https://github.com/facebookresearch/faiss
-[usearch-header]: https://github.com/unum-cloud/usearch/blob/main/include/usearch/index.hpp
+[usearch-header]: https://github.com/unum-cloud/USearch/blob/main/include/usearch/index.hpp
 [obscure-use-cases]: https://ashvardanian.com/posts/abusing-vector-search
 [hnsw-algorithm]: https://arxiv.org/abs/1603.09320
 [simd]: https://en.wikipedia.org/wiki/Single_instruction,_multiple_data
@@ -138,7 +138,7 @@ The default storage/quantization level is hardware-dependant for efficiency, but
 index = Index(
     ndim=3, # Define the number of dimensions in input vectors
     metric='cos', # Choose 'l2sq', 'ip', 'haversine' or other metric, default = 'cos'
-    dtype='bf16', # Store as 'f64', 'f32', 'f16', 'i8', 'b1'..., default = None
+    dtype='bf16', # Store as 'f64', 'f32', 'bf16', 'f16', 'e5m2', 'e4m3', 'e3m2', 'e2m3', 'u8', 'i8', 'b1'..., default = None
     connectivity=16, # Optional: Limit number of neighbors per graph node
     expansion_add=128, # Optional: Control the recall of indexing
     expansion_search=64, # Optional: Control the quality of the search
@@ -185,8 +185,8 @@ one_in_many: Matches = search(vectors, vector, 50, MetricKind.L2sq, exact=True)
 many_in_many: BatchMatches = search(vectors, vectors, 50, MetricKind.L2sq, exact=True)
 ```
 
-If you pass the `exact=True` argument, the system bypasses indexing altogether and performs a brute-force search through the entire dataset using SIMD-optimized similarity metrics from [SimSIMD](https://github.com/ashvardanian/simsimd).
-When compared to FAISS's `IndexFlatL2` in Google Colab, __[USearch may offer up to a 20x performance improvement](https://github.com/unum-cloud/usearch/issues/176#issuecomment-1666650778)__:
+If you pass the `exact=True` argument, the system bypasses indexing altogether and performs a brute-force search through the entire dataset using SIMD-optimized similarity metrics from [NumKong](https://github.com/ashvardanian/numkong).
+When compared to FAISS's `IndexFlatL2` in Google Colab, __[USearch may offer up to a 20x performance improvement](https://github.com/unum-cloud/USearch/issues/176#issuecomment-1666650778)__:
 
 - `faiss.IndexFlatL2`: __55.3 ms__.
 - `usearch.index.search`: __2.54 ms__.
@@ -195,7 +195,7 @@ When compared to FAISS's `IndexFlatL2` in Google Colab, __[USearch may offer up 
 
 While most vector search packages concentrate on just two metrics, "Inner Product distance" and "Euclidean distance", USearch allows arbitrary user-defined metrics.
 This flexibility allows you to customize your search for various applications, from computing geospatial coordinates with the rare [Haversine][haversine] distance to creating custom metrics for composite embeddings from multiple AI models, like joint image-text embeddings.
-You can use [Numba][numba], [Cppyy][cppyy], or [PeachPy][peachpy] to define your [custom metric even in Python](https://unum-cloud.github.io/usearch/python#user-defined-metrics-and-jit-in-python):
+You can use [Numba][numba], [Cppyy][cppyy], or [PeachPy][peachpy] to define your [custom metric even in Python](https://unum-cloud.github.io/USearch/python#user-defined-metrics-and-jit-in-python):
 
 ```py
 from numba import cfunc, types, carray
@@ -251,7 +251,7 @@ assert!(
 Training a quantization model and dimension-reduction is a common approach to accelerate vector search.
 Those, however, are only sometimes reliable, can significantly affect the statistical properties of your data, and require regular adjustments if your distribution shifts.
 Instead, we have focused on high-precision arithmetic over low-precision downcasted vectors.
-The same index, and `add` and `search` operations will automatically down-cast or up-cast between `f64_t`, `f32_t`, `f16_t`, `i8_t`, and single-bit `b1x8_t` representations.
+The same index, and `add` and `search` operations will automatically down-cast or up-cast between `f64_t`, `f32_t`, `bf16_t`, `f16_t`, `e5m2_t`, `e4m3_t`, `e3m2_t`, `e2m3_t`, `u8_t`, `i8_t`, and single-bit `b1x8_t` representations.
 You can use the following command to check, if hardware acceleration is enabled:
 
 ```sh
@@ -261,14 +261,16 @@ $ python -c 'from usearch.index import Index; print(Index(ndim=166, metric="tani
 > ice
 ```
 
-In most cases, it's recommended to use half-precision floating-point numbers on modern hardware.
+In most cases, `bf16` is recommended for modern CPUs.
+For even smaller footprints, USearch supports IEEE & MX-compatible Float8 (`e5m2` and `e4m3`) and Float6 (`e3m2` and `e2m3`) formats.
+You can pass pre-quantized buffers from [NumKong](https://github.com/ashvardanian/numkong) with the explicit `dtype=` parameter on `add` and `search`, or let USearch handle the quantization internally from higher-precision inputs.
 When quantization is enabled, the "get"-like functions won't be able to recover the original data, so you may want to replicate the original vectors elsewhere.
 When quantizing to `i8_t` integers, note that it's only valid for cosine-like metrics.
 As part of the quantization process, the vectors are normalized to unit length and later scaled to [-127, 127] range to occupy the full 8-bit range.
 When quantizing to `b1x8_t` single-bit representations, note that it's only valid for binary metrics like Jaccard, Hamming, etc.
 As part of the quantization process, the scalar components greater than zero are set to `true`, and the rest to `false`.
 
-![USearch uint40_t support](https://github.com/unum-cloud/usearch/blob/main/assets/usearch-neighbor-types.png?raw=true)
+![USearch uint40_t support](https://github.com/unum-cloud/USearch/blob/main/assets/usearch-neighbor-types.png?raw=true)
 
 Using smaller numeric types will save you RAM needed to store the vectors, but you can also compress the neighbors lists forming our proximity graphs.
 By default, 32-bit `uint32_t` is used to enumerate those, which is not enough if you need to address over 4 Billion entries.
@@ -479,46 +481,41 @@ The Haversine distance is available out of the box, but you can also define more
 from numba import cfunc, types, carray
 import math
 
-# Define the dimension as 2 for latitude and longitude
 ndim = 2
+semi_major, flattening = 6378137.0, 1 / 298.257223563
+semi_minor = (1 - flattening) * semi_major
 
-# Signature for the custom metric
-signature = types.float32(
-    types.CPointer(types.float32),
-    types.CPointer(types.float32))
+def vincenty_distance(first_ptr, second_ptr):
+    first, second = carray(first_ptr, ndim), carray(second_ptr, ndim)
+    lat1, lon1, lat2, lon2 = first[0], first[1], second[0], second[1]
+    diff_lon = lon2 - lon1
+    rlat1, rlat2 = math.atan((1 - flattening) * math.tan(lat1)), math.atan((1 - flattening) * math.tan(lat2))
+    sin_rlat1, cos_rlat1 = math.sin(rlat1), math.cos(rlat1)
+    sin_rlat2, cos_rlat2 = math.sin(rlat2), math.cos(rlat2)
+    lon_on_sphere = diff_lon
+    for _ in range(100):
+        sin_lon, cos_lon = math.sin(lon_on_sphere), math.cos(lon_on_sphere)
+        sin_ang = math.sqrt((cos_rlat2 * sin_lon) ** 2 + (cos_rlat1 * sin_rlat2 - sin_rlat1 * cos_rlat2 * cos_lon) ** 2)
+        if sin_ang == 0: return 0.0
+        cos_ang = sin_rlat1 * sin_rlat2 + cos_rlat1 * cos_rlat2 * cos_lon
+        ang = math.atan2(sin_ang, cos_ang)
+        sin_az = cos_rlat1 * cos_rlat2 * sin_lon / sin_ang
+        cos2_az = 1 - sin_az ** 2
+        cos2_mid = cos_ang - 2 * sin_rlat1 * sin_rlat2 / cos2_az if cos2_az != 0 else 0.0
+        corr = flattening / 16 * cos2_az * (4 + flattening * (4 - 3 * cos2_az))
+        prev = lon_on_sphere
+        lon_on_sphere = diff_lon + (1 - corr) * flattening * (
+            sin_az * (ang + corr * sin_ang * (cos2_mid + corr * cos_ang * (-1 + 2 * cos2_mid ** 2))))
+        if abs(lon_on_sphere - prev) <= 1e-12: break
+    else:
+        return float('nan')
+    u_sq = cos2_az * (semi_major ** 2 - semi_minor ** 2) / (semi_minor ** 2)
+    ca = 1 + u_sq / 16384 * (4096 + u_sq * (-768 + u_sq * (320 - 175 * u_sq)))
+    cb = u_sq / 1024 * (256 + u_sq * (-128 + u_sq * (74 - 47 * u_sq)))
+    delta = cb * sin_ang * (cos2_mid + cb / 4 * (cos_ang * (-1 + 2 * cos2_mid ** 2)
+        - cb / 6 * cos2_mid * (-3 + 4 * sin_ang ** 2) * (-3 + 4 * cos2_mid ** 2)))
+    return semi_minor * ca * (ang - delta) / 1000.0
 
-# WGS-84 ellipsoid parameters
-a = 6378137.0  # major axis in meters
-f = 1 / 298.257223563  # flattening
-b = (1 - f) * a  # minor axis
-
-def vincenty_distance(a_ptr, b_ptr):
-    a_array = carray(a_ptr, ndim)
-    b_array = carray(b_ptr, ndim)
-    lat1, lon1, lat2, lon2 = a_array[0], a_array[1], b_array[0], b_array[1]
-    L, U1, U2 = lon2 - lon1, math.atan((1 - f) * math.tan(lat1)), math.atan((1 - f) * math.tan(lat2))
-    sinU1, cosU1, sinU2, cosU2 = math.sin(U1), math.cos(U1), math.sin(U2), math.cos(U2)
-    lambda_, iterLimit = L, 100
-    while iterLimit > 0:
-        iterLimit -= 1
-        sinLambda, cosLambda = math.sin(lambda_), math.cos(lambda_)
-        sinSigma = math.sqrt((cosU2 * sinLambda) ** 2 + (cosU1 * sinU2 - sinU1 * cosU2 * cosLambda) ** 2)
-        if sinSigma == 0: return 0.0  # Co-incident points
-        cosSigma, sigma = sinU1 * sinU2 + cosU1 * cosU2 * cosLambda, math.atan2(sinSigma, cosSigma)
-        sinAlpha, cos2Alpha = cosU1 * cosU2 * sinLambda / sinSigma, 1 - (cosU1 * cosU2 * sinLambda / sinSigma) ** 2
-        cos2SigmaM = cosSigma - 2 * sinU1 * sinU2 / cos2Alpha if not math.isnan(cosSigma - 2 * sinU1 * sinU2 / cos2Alpha) else 0  # Equatorial line
-        C = f / 16 * cos2Alpha * (4 + f * (4 - 3 * cos2Alpha))
-        lambda_, lambdaP = L + (1 - C) * f * (sinAlpha * (sigma + C * sinSigma * (cos2SigmaM + C * cosSigma * (-1 + 2 * cos2SigmaM ** 2)))), lambda_
-        if abs(lambda_ - lambdaP) <= 1e-12: break
-    if iterLimit == 0: return float('nan')  # formula failed to converge
-    u2 = cos2Alpha * (a ** 2 - b ** 2) / (b ** 2)
-    A = 1 + u2 / 16384 * (4096 + u2 * (-768 + u2 * (320 - 175 * u2)))
-    B = u2 / 1024 * (256 + u2 * (-128 + u2 * (74 - 47 * u2)))
-    deltaSigma = B * sinSigma * (cos2SigmaM + B / 4 * (cosSigma * (-1 + 2 * cos2SigmaM ** 2) - B / 6 * cos2SigmaM * (-3 + 4 * sinSigma ** 2) * (-3 + 4 * cos2SigmaM ** 2)))
-    s = b * A * (sigma - deltaSigma)
-    return s / 1000.0  # Distance in kilometers
-
-# Example usage:
 index = Index(ndim=ndim, metric=CompiledMetric(
     pointer=vincenty_distance.address,
     kind=MetricKind.Haversine,
@@ -533,27 +530,26 @@ index = Index(ndim=ndim, metric=CompiledMetric(
 - [x] ScyllaDB: [Rust](https://github.com/scylladb/vector-store), [presentation](https://www.slideshare.net/slideshow/vector-search-with-scylladb-by-szymon-wasik/276571548).
 - [x] TiDB & TiFlash: [C++](https://github.com/pingcap/tiflash), [announcement](https://www.pingcap.com/article/introduce-vector-search-indexes-in-tidb/).
 - [x] YugaByte: [C++](https://github.com/yugabyte/yugabyte-db/blob/366b9f5e3c4df3a1a17d553db41d6dc50146f488/src/yb/vector_index/usearch_wrapper.cc).
-- [x] Google: [UniSim](https://github.com/google/unisim), [RetSim](https://arxiv.org/abs/2311.17264) paper.
 - [x] MemGraph: [C++](https://github.com/memgraph/memgraph/blob/784dd8520f65050d033aea8b29446e84e487d091/src/storage/v2/indices/vector_index.cpp), [announcement](https://memgraph.com/blog/simplify-data-retrieval-memgraph-vector-search).
-- [x] LanternDB: [C++](https://github.com/lanterndata/lantern), [Rust](https://github.com/lanterndata/lantern_extras), [docs](https://lantern.dev/blog/hnsw-index-creation).
+- [x] Google: [UniSim](https://github.com/google/unisim), [RetSim](https://arxiv.org/abs/2311.17264) paper.
 - [x] LangChain: [Python](https://github.com/langchain-ai/langchain/releases/tag/v0.0.257) and [JavaScript](https://github.com/hwchase17/langchainjs/releases/tag/0.0.125).
 - [x] Microsoft Semantic Kernel: [Python](https://github.com/microsoft/semantic-kernel/releases/tag/python-0.3.9.dev) and C#.
 - [x] GPTCache: [Python](https://github.com/zilliztech/GPTCache/releases/tag/0.1.29).
 - [x] Sentence-Transformers: Python [docs](https://www.sbert.net/docs/package_reference/quantization.html#sentence_transformers.quantization.semantic_search_usearch).
 - [x] Pathway: [Rust](https://github.com/pathwaycom/pathway).
 - [x] Vald: [GoLang](https://github.com/vdaas/vald).
+- [x] MatrixOne: [GoLang](https://github.com/matrixorigin/matrixone).
   
 
 ## Citations
 
 ```bibtex
-@software{Vardanian_USearch_2023,
+@software{Vardanian_USearch,
 doi = {10.5281/zenodo.7949416},
 author = {Vardanian, Ash},
 title = {{USearch by Unum Cloud}},
-url = {https://github.com/unum-cloud/usearch},
-version = {2.23.0},
-year = {2023},
-month = oct,
+url = {https://github.com/unum-cloud/USearch},
+version = {2.25.3},
+year = {2026},
 }
 ```

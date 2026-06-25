@@ -56,11 +56,16 @@ usearch_metric_kind_t metric_kind_to_c(metric_kind_t kind) {
 }
 scalar_kind_t scalar_kind_to_cpp(usearch_scalar_kind_t kind) {
     switch (kind) {
-    case usearch_scalar_f32_k: return scalar_kind_t::f32_k;
     case usearch_scalar_f64_k: return scalar_kind_t::f64_k;
-    case usearch_scalar_f16_k: return scalar_kind_t::f16_k;
+    case usearch_scalar_f32_k: return scalar_kind_t::f32_k;
     case usearch_scalar_bf16_k: return scalar_kind_t::bf16_k;
+    case usearch_scalar_f16_k: return scalar_kind_t::f16_k;
+    case usearch_scalar_e5m2_k: return scalar_kind_t::e5m2_k;
+    case usearch_scalar_e4m3_k: return scalar_kind_t::e4m3_k;
+    case usearch_scalar_e3m2_k: return scalar_kind_t::e3m2_k;
+    case usearch_scalar_e2m3_k: return scalar_kind_t::e2m3_k;
     case usearch_scalar_i8_k: return scalar_kind_t::i8_k;
+    case usearch_scalar_u8_k: return scalar_kind_t::u8_k;
     case usearch_scalar_b1_k: return scalar_kind_t::b1x8_k;
     default: return scalar_kind_t::unknown_k;
     }
@@ -68,11 +73,16 @@ scalar_kind_t scalar_kind_to_cpp(usearch_scalar_kind_t kind) {
 
 usearch_scalar_kind_t scalar_kind_to_c(scalar_kind_t kind) {
     switch (kind) {
-    case scalar_kind_t::f32_k: return usearch_scalar_f32_k;
     case scalar_kind_t::f64_k: return usearch_scalar_f64_k;
-    case scalar_kind_t::f16_k: return usearch_scalar_f16_k;
+    case scalar_kind_t::f32_k: return usearch_scalar_f32_k;
     case scalar_kind_t::bf16_k: return usearch_scalar_bf16_k;
+    case scalar_kind_t::f16_k: return usearch_scalar_f16_k;
+    case scalar_kind_t::e5m2_k: return usearch_scalar_e5m2_k;
+    case scalar_kind_t::e4m3_k: return usearch_scalar_e4m3_k;
+    case scalar_kind_t::e3m2_k: return usearch_scalar_e3m2_k;
+    case scalar_kind_t::e2m3_k: return usearch_scalar_e2m3_k;
     case scalar_kind_t::i8_k: return usearch_scalar_i8_k;
+    case scalar_kind_t::u8_k: return usearch_scalar_u8_k;
     case scalar_kind_t::b1x8_k: return usearch_scalar_b1_k;
     default: return usearch_scalar_unknown_k;
     }
@@ -80,11 +90,12 @@ usearch_scalar_kind_t scalar_kind_to_c(scalar_kind_t kind) {
 
 add_result_t add_(index_dense_t* index, usearch_key_t key, void const* vector, scalar_kind_t kind) {
     switch (kind) {
-    case scalar_kind_t::f32_k: return index->add(key, (f32_t const*)vector);
     case scalar_kind_t::f64_k: return index->add(key, (f64_t const*)vector);
-    case scalar_kind_t::f16_k: return index->add(key, (f16_t const*)vector);
+    case scalar_kind_t::f32_k: return index->add(key, (f32_t const*)vector);
     case scalar_kind_t::bf16_k: return index->add(key, (bf16_t const*)vector);
+    case scalar_kind_t::f16_k: return index->add(key, (f16_t const*)vector);
     case scalar_kind_t::i8_k: return index->add(key, (i8_t const*)vector);
+    case scalar_kind_t::u8_k: return index->add(key, (u8_t const*)vector);
     case scalar_kind_t::b1x8_k: return index->add(key, (b1x8_t const*)vector);
     default: return add_result_t{}.failed("Unknown scalar kind!");
     }
@@ -92,11 +103,12 @@ add_result_t add_(index_dense_t* index, usearch_key_t key, void const* vector, s
 
 std::size_t get_(index_dense_t* index, usearch_key_t key, size_t count, void* vector, scalar_kind_t kind) {
     switch (kind) {
-    case scalar_kind_t::f32_k: return index->get(key, (f32_t*)vector, count);
     case scalar_kind_t::f64_k: return index->get(key, (f64_t*)vector, count);
-    case scalar_kind_t::f16_k: return index->get(key, (f16_t*)vector, count);
+    case scalar_kind_t::f32_k: return index->get(key, (f32_t*)vector, count);
     case scalar_kind_t::bf16_k: return index->get(key, (bf16_t*)vector, count);
+    case scalar_kind_t::f16_k: return index->get(key, (f16_t*)vector, count);
     case scalar_kind_t::i8_k: return index->get(key, (i8_t*)vector, count);
+    case scalar_kind_t::u8_k: return index->get(key, (u8_t*)vector, count);
     case scalar_kind_t::b1x8_k: return index->get(key, (b1x8_t*)vector, count);
     default: return search_result_t(*index).failed("Unknown scalar kind!");
     }
@@ -106,16 +118,18 @@ template <typename predicate_at = dummy_predicate_t>
 search_result_t search_(index_dense_t* index, void const* vector, scalar_kind_t kind, size_t n,
                         predicate_at&& predicate = predicate_at{}) {
     switch (kind) {
-    case scalar_kind_t::f32_k:
-        return index->filtered_search((f32_t const*)vector, n, std::forward<predicate_at>(predicate));
     case scalar_kind_t::f64_k:
         return index->filtered_search((f64_t const*)vector, n, std::forward<predicate_at>(predicate));
-    case scalar_kind_t::f16_k:
-        return index->filtered_search((f16_t const*)vector, n, std::forward<predicate_at>(predicate));
+    case scalar_kind_t::f32_k:
+        return index->filtered_search((f32_t const*)vector, n, std::forward<predicate_at>(predicate));
     case scalar_kind_t::bf16_k:
         return index->filtered_search((bf16_t const*)vector, n, std::forward<predicate_at>(predicate));
+    case scalar_kind_t::f16_k:
+        return index->filtered_search((f16_t const*)vector, n, std::forward<predicate_at>(predicate));
     case scalar_kind_t::i8_k:
         return index->filtered_search((i8_t const*)vector, n, std::forward<predicate_at>(predicate));
+    case scalar_kind_t::u8_k:
+        return index->filtered_search((u8_t const*)vector, n, std::forward<predicate_at>(predicate));
     case scalar_kind_t::b1x8_k:
         return index->filtered_search((b1x8_t const*)vector, n, std::forward<predicate_at>(predicate));
     default: return search_result_t(*index).failed("Unknown scalar kind!");
@@ -132,6 +146,10 @@ USEARCH_EXPORT char const* usearch_version(void) {
     std::snprintf(version, sizeof(version), "%d.%d.%d", major, minor, patch);
     return version;
 }
+
+USEARCH_EXPORT char const* usearch_hardware_acceleration_compiled(void) { return hardware_acceleration_compiled(); }
+
+USEARCH_EXPORT char const* usearch_hardware_acceleration_available(void) { return hardware_acceleration_available(); }
 
 USEARCH_EXPORT usearch_index_t usearch_init(usearch_init_options_t* options, usearch_error_t* error) {
 
@@ -168,15 +186,13 @@ USEARCH_EXPORT usearch_index_t usearch_init(usearch_init_options_t* options, use
 
     using state_result_t = typename index_dense_t::state_result_t;
     state_result_t state = index_dense_t::make(metric, config);
-    if (!state)
+    if (!state) {
         *error = state.error.release();
-    index_dense_t* result_ptr = new index_dense_t(std::move(state.index));
+        return NULL;
+    }
+    index_dense_t* result_ptr = new (std::nothrow) index_dense_t(std::move(state.index));
     if (!result_ptr)
         *error = "Out of memory!";
-
-    // Let's immediately make it usable by reserving enough threads for this machine:
-    if (!result_ptr->try_reserve(index_limits_t()))
-        *error = "Out of memory when preparing contexts!";
 
     return result_ptr;
 }
@@ -218,8 +234,10 @@ USEARCH_EXPORT void usearch_metadata(char const* path, usearch_init_options_t* o
 
     USEARCH_ASSERT(path && options && error && "Missing arguments");
     index_dense_metadata_result_t result = index_dense_metadata_from_path(path);
-    if (!result)
+    if (!result) {
         *error = result.error.release();
+        return;
+    }
 
     options->metric_kind = metric_kind_to_c(result.head.kind_metric);
     options->quantization = scalar_kind_to_c(result.head.kind_scalar);
@@ -267,8 +285,10 @@ USEARCH_EXPORT void usearch_metadata_buffer(void const* buffer, size_t length, u
     USEARCH_ASSERT(buffer && length && options && error && "Missing arguments");
     index_dense_metadata_result_t result =
         index_dense_metadata_from_buffer(memory_mapped_file_t((byte_t*)(buffer), length));
-    if (!result)
+    if (!result) {
         *error = result.error.release();
+        return;
+    }
 
     options->metric_kind = metric_kind_to_c(result.head.kind_metric);
     options->quantization = scalar_kind_to_c(result.head.kind_scalar);
@@ -336,7 +356,8 @@ USEARCH_EXPORT void usearch_change_threads_add(usearch_index_t index, size_t thr
     auto& index_dense = *reinterpret_cast<index_dense_t*>(index);
     index_limits_t limits = index_dense.limits();
     limits.threads_add = threads;
-    index_dense.try_reserve(limits);
+    if (!index_dense.try_reserve(limits))
+        *error = "Out of memory!";
 }
 
 USEARCH_EXPORT void usearch_change_threads_search(usearch_index_t index, size_t threads, usearch_error_t* error) {
@@ -344,15 +365,22 @@ USEARCH_EXPORT void usearch_change_threads_search(usearch_index_t index, size_t 
     auto& index_dense = *reinterpret_cast<index_dense_t*>(index);
     index_limits_t limits = index_dense.limits();
     limits.threads_search = threads;
-    index_dense.try_reserve(limits);
+    if (!index_dense.try_reserve(limits))
+        *error = "Out of memory!";
 }
 
 USEARCH_EXPORT void usearch_change_metric_kind(usearch_index_t index, usearch_metric_kind_t kind,
                                                usearch_error_t* error) {
     USEARCH_ASSERT(index && error && "Missing arguments");
     auto& index_dense = *reinterpret_cast<index_dense_t*>(index);
-    index_dense.change_metric(
-        metric_punned_t::builtin(index_dense.dimensions(), metric_kind_to_cpp(kind), index_dense.scalar_kind()));
+    auto metric_punned =
+        metric_punned_t::builtin(index_dense.dimensions(), metric_kind_to_cpp(kind), index_dense.scalar_kind());
+    if (metric_punned.missing()) {
+        *error = "Unsupported metric for this index's dimensions and scalar kind!";
+        return;
+    }
+    if (!index_dense.try_change_metric(std::move(metric_punned)))
+        *error = "Failed to grow cast buffer for the new metric!";
 }
 
 USEARCH_EXPORT void usearch_change_metric(usearch_index_t index, usearch_metric_t metric, void* state,
@@ -366,7 +394,12 @@ USEARCH_EXPORT void usearch_change_metric(usearch_index_t index, usearch_metric_
               : metric_punned_t::stateless(index_dense.dimensions(), reinterpret_cast<std::uintptr_t>(metric),
                                            metric_punned_signature_t::array_array_k, metric_kind_to_cpp(kind),
                                            index_dense.scalar_kind());
-    index_dense.change_metric(std::move(metric_punned));
+    if (metric_punned.missing()) {
+        *error = "Unsupported metric for this index's dimensions and scalar kind!";
+        return;
+    }
+    if (!index_dense.try_change_metric(std::move(metric_punned)))
+        *error = "Failed to grow cast buffer for the new metric!";
 }
 
 USEARCH_EXPORT void usearch_reserve(usearch_index_t index, size_t capacity, usearch_error_t* error) {
@@ -413,7 +446,7 @@ USEARCH_EXPORT size_t usearch_search(                                           
 USEARCH_EXPORT size_t usearch_filtered_search(                                 //
     usearch_index_t index,                                                     //
     void const* query, usearch_scalar_kind_t query_kind, size_t results_limit, //
-    usearch_filtered_search_callback_t filter, void* filter_state,  //
+    usearch_filtered_search_callback_t filter, void* filter_state,             //
     usearch_key_t* found_keys, usearch_distance_t* found_distances, usearch_error_t* error) {
 
     USEARCH_ASSERT(index && query && filter && error && "Missing arguments");
