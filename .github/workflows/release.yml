@@ -813,15 +813,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, x86]
-        # Windows pre-build is not working
-        # - windows-latest
-        os: [macos-14, ubuntu-24.04]
-        exclude:
-          - arch: x86
-            os: macos-14
-          - arch: x86
-            os: ubuntu-24.04
+        arch: [x64]
+        os: [macos-14, ubuntu-24.04, windows-2022]
     runs-on: ${{ matrix.os }}
     env:
       CC: gcc
