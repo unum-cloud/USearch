@@ -3746,6 +3746,8 @@ class flat_hash_multi_set_gt {
     char* data_ = nullptr;
     std::size_t buckets_ = 0;
     std::size_t populated_slots_ = 0;
+    /// @brief  Number of tombstones (slots marked deleted but not yet reclaimed)
+    std::size_t deleted_slots_ = 0;
     /// @brief  Number of slots
     std::size_t capacity_slots_ = 0;
 
@@ -3781,6 +3783,34 @@ class flat_hash_multi_set_gt {
         }
     }
 
+    /**
+     *  @brief  Copies every live entry of @p source into the freshly zeroed @p target.
+     *
+     *  Tombstones are never carried over, so probe chains must be rebuilt from the hash
+     *  rather than reproduced slot-for-slot: a live entry displaced past a tombstone by
+     *  linear probing would otherwise become unreachable once that tombstone reads empty.
+     *  The target holds no tombstones, so an unpopulated slot is always a free slot.
+     */
+    void rehash_into(char* source, std::size_t source_slots, char* target, std::size_t target_slots) const noexcept {
+        hash_t hasher;
+        for (std::size_t i = 0; i != source_slots; ++i) {
+            slot_ref_t source_slot = slot_ref(source, i);
+            if (!(source_slot.header.populated & source_slot.mask) || (source_slot.header.deleted & source_slot.mask))
+                continue;
+
+            std::size_t target_index = hasher(source_slot.element) & (target_slots - 1);
+            while (true) {
+                slot_ref_t target_slot = slot_ref(target, target_index);
+                if (!(target_slot.header.populated & target_slot.mask)) {
+                    new (&target_slot.element) element_t(source_slot.element);
+                    target_slot.header.populated |= target_slot.mask;
+                    break;
+                }
+                target_index = (target_index + 1) & (target_slots - 1);
+            }
+        }
+    }
+
   public:
     std::size_t size() const noexcept { return populated_slots_; }
     std::size_t capacity() const noexcept { return capacity_slots_ * 2u / 3u; }
@@ -3805,22 +3835,15 @@ class flat_hash_multi_set_gt {
         if (!data_)
             usearch_raise_runtime_error("failed memory allocation");
 
-        // Copy metadata
+        // Copy metadata. Only live entries are rehashed below, so the copy has no tombstones.
         buckets_ = other.buckets_;
         populated_slots_ = other.populated_slots_;
+        deleted_slots_ = 0;
         capacity_slots_ = other.capacity_slots_;
 
         // Initialize new buckets to empty
         std::memset(data_, 0, buckets_ * bytes_per_bucket());
-
-        // Copy elements and bucket headers
-        for (std::size_t i = 0; i < capacity_slots_; ++i) {
-            slot_ref_t old_slot = other.slot_ref(i);
-            if ((old_slot.header.populated & old_slot.mask) && !(old_slot.header.deleted & old_slot.mask)) {
-                slot_ref_t new_slot = slot_ref(i);
-                populate_slot(new_slot, old_slot.element);
-            }
-        }
+        rehash_into(other.data_, other.capacity_slots_, data_, capacity_slots_);
     }
 
     flat_hash_multi_set_gt& operator=(flat_hash_multi_set_gt const& other) {
@@ -3848,22 +3871,15 @@ class flat_hash_multi_set_gt {
         if (!data_)
             usearch_raise_runtime_error("failed memory allocation");
 
-        // Copy metadata
+        // Copy metadata. Only live entries are rehashed below, so the copy has no tombstones.
         buckets_ = other.buckets_;
         populated_slots_ = other.populated_slots_;
+        deleted_slots_ = 0;
         capacity_slots_ = other.capacity_slots_;
 
         // Initialize new buckets to empty
         std::memset(data_, 0, buckets_ * bytes_per_bucket());
-
-        // Copy elements and bucket headers
-        for (std::size_t i = 0; i < capacity_slots_; ++i) {
-            slot_ref_t old_slot = other.slot_ref(i);
-            if ((old_slot.header.populated & old_slot.mask) && !(old_slot.header.deleted & old_slot.mask)) {
-                slot_ref_t new_slot = slot_ref(i);
-                populate_slot(new_slot, old_slot.element);
-            }
-        }
+        rehash_into(other.data_, other.capacity_slots_, data_, capacity_slots_);
 
         return *this;
     }
@@ -3880,6 +3896,7 @@ class flat_hash_multi_set_gt {
         if (data_)
             std::memset(data_, 0, buckets_ * bytes_per_bucket());
         populated_slots_ = 0;
+        deleted_slots_ = 0;
     }
 
     void reset() noexcept {
@@ -3889,11 +3906,19 @@ class flat_hash_multi_set_gt {
         data_ = nullptr;
         buckets_ = 0;
         populated_slots_ = 0;
+        deleted_slots_ = 0;
         capacity_slots_ = 0;
     }
 
+    /**
+     *  @brief  Grows the table to fit @p capacity live entries, reclaiming tombstones.
+     *
+     *  Tombstones are reclaimed even when no growth is requested. They only ever stop
+     *  being created once reclaimed, and a table with no empty slot left cannot
+     *  terminate a probe, silently stranding live entries.
+     */
     bool try_reserve(std::size_t capacity) noexcept {
-        if (capacity <= this->capacity())
+        if (capacity <= this->capacity() && deleted_slots_ == 0)
             return true;
 
         // Calculate new sizes
@@ -3913,7 +3938,15 @@ class flat_hash_multi_set_gt {
         checked_size_result_t new_slots = checked_mul(new_buckets_checked.value, slots_per_bucket());
         if (!new_slots)
             return false;
-        checked_size_result_t new_bytes = checked_mul(new_buckets_checked.value, bytes_per_bucket());
+
+        // Never shrink: reclaiming tombstones alone needs no more than the current capacity
+        std::size_t target_buckets = new_buckets_checked.value;
+        std::size_t target_slots = new_slots.value;
+        if (target_slots < capacity_slots_) {
+            target_buckets = buckets_;
+            target_slots = capacity_slots_;
+        }
+        checked_size_result_t new_bytes = checked_mul(target_buckets, bytes_per_bucket());
         if (!new_bytes)
             return false;
 
@@ -3924,36 +3957,15 @@ class flat_hash_multi_set_gt {
 
         // Initialize new buckets to empty
         std::memset(new_data, 0, new_bytes.value);
-
-        // Rehash and copy existing elements to new_data
-        hash_t hasher;
-        for (std::size_t i = 0; i < capacity_slots_; ++i) {
-            slot_ref_t old_slot = slot_ref(i);
-            if ((~old_slot.header.populated & old_slot.mask) | (old_slot.header.deleted & old_slot.mask))
-                continue;
-
-            // Rehash
-            std::size_t hash_value = hasher(old_slot.element);
-            std::size_t new_slot_index = hash_value & (new_slots.value - 1);
-
-            // Linear probing to find an empty slot in new_data
-            while (true) {
-                slot_ref_t new_slot = slot_ref(new_data, new_slot_index);
-                if (!(new_slot.header.populated & new_slot.mask) || (new_slot.header.deleted & new_slot.mask)) {
-                    populate_slot(new_slot, std::move(old_slot.element));
-                    new_slot.header.populated |= new_slot.mask;
-                    break;
-                }
-                new_slot_index = (new_slot_index + 1) & (new_slots.value - 1);
-            }
-        }
+        rehash_into(data_, capacity_slots_, new_data, target_slots);
 
         // Deallocate old data and update pointers and sizes
         if (data_)
             allocator_t{}.deallocate(data_, buckets_ * bytes_per_bucket());
         data_ = new_data;
-        buckets_ = new_buckets_checked.value;
-        capacity_slots_ = new_slots.value;
+        buckets_ = target_buckets;
+        capacity_slots_ = target_slots;
+        deleted_slots_ = 0;
 
         return true;
     }
@@ -4082,6 +4094,7 @@ class flat_hash_multi_set_gt {
                     // Found a match, mark as deleted
                     slot.header.deleted |= slot.mask;
                     --populated_slots_;
+                    ++deleted_slots_;
                     popped_value = slot.element;
                     return true; // Successfully removed
                 }
@@ -4117,6 +4130,7 @@ class flat_hash_multi_set_gt {
                     // Found a match, mark as deleted
                     slot.header.deleted |= slot.mask;
                     --populated_slots_;
+                    ++deleted_slots_;
                     ++count; // Increment count of elements removed
                 }
             } else {
@@ -4247,8 +4261,10 @@ class flat_hash_multi_set_gt {
     }
 
     bool try_emplace(element_t const& element) noexcept {
-        // Check if we need to resize
-        if (populated_slots_ * 3u >= capacity_slots_ * 2u)
+        // Both live entries and tombstones consume slots a probe must walk past, so the
+        // load factor counts them together. Under churn the live count alone stays flat
+        // and would never trigger the rehash that reclaims the tombstones.
+        if ((populated_slots_ + deleted_slots_) * 3u >= capacity_slots_ * 2u)
             if (!try_reserve(populated_slots_ + 1))
                 return false;
 
@@ -4260,7 +4276,9 @@ class flat_hash_multi_set_gt {
         while (true) {
             slot_ref_t slot = slot_ref(slot_index);
             if ((~slot.header.populated & slot.mask) | (slot.header.deleted & slot.mask)) {
-                // Found an empty or deleted slot
+                // Found an empty or deleted slot; reusing a tombstone reclaims it.
+                // Read the tombstone bit before `populate_slot` clears it.
+                deleted_slots_ -= (slot.header.deleted & slot.mask) != 0;
                 populate_slot(slot, element);
                 ++populated_slots_;
                 return true;
