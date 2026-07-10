@@ -1115,6 +1115,72 @@ template <typename key_at, typename slot_at> void test_strings() {
 /**
  * @brief Tests replacing and updating entries in index_dense_gt to ensure consistency after modifications.
  */
+/**
+ *  @brief  Churns a tightly-reserved index, so `slot_lookup_` accumulates tombstones.
+ *
+ *  Removals leave tombstones that probes must walk past. If they are never reclaimed the
+ *  table runs out of empty slots, probes can no longer terminate, and live keys go missing:
+ *  `remove` reports nothing removed while `contains` still finds the key. Copying such a
+ *  table must rebuild the probe chains, not reproduce the slot layout.
+ */
+template <typename key_at, typename slot_at> void test_slot_lookup_churn() {
+    constexpr std::size_t live_count = 128;
+    constexpr std::size_t churn_count = live_count * 8;
+    constexpr std::size_t dimensions = 4;
+
+    using index_punned_t = index_dense_gt<key_at, slot_at>;
+    metric_punned_t metric(dimensions, metric_kind_t::cos_k);
+
+    std::random_device seed_source;
+    std::mt19937 generator(seed_source());
+    std::uniform_real_distribution<float> distribution(0.0, 1.0);
+    using vector_of_vectors_t = std::vector<std::vector<float>>;
+
+    vector_of_vectors_t vector_of_vectors(live_count + churn_count);
+    for (auto& vector : vector_of_vectors) {
+        vector.resize(dimensions);
+        std::generate(vector.begin(), vector.end(), [&] { return distribution(generator); });
+    }
+
+    index_punned_t index = index_punned_t::make(metric);
+
+    // Reserve tightly, so the churn below exhausts the empty slots
+    index.reserve(live_count * 3);
+
+    std::vector<key_at> live_keys;
+    std::size_t added = 0;
+    for (; added < live_count; ++added) {
+        index.add(static_cast<key_at>(added), vector_of_vectors[added].data());
+        live_keys.push_back(static_cast<key_at>(added));
+    }
+
+    // Every iteration frees one slot and immediately reuses it
+    for (std::size_t idx = 0; idx < churn_count; ++idx, ++added) {
+        key_at victim = live_keys[idx % live_count];
+        expect(index.contains(victim));
+        expect_eq(index.remove(victim).completed, 1);
+        expect(!index.contains(victim));
+        index.add(static_cast<key_at>(added), vector_of_vectors[added].data());
+        live_keys[idx % live_count] = static_cast<key_at>(added);
+    }
+
+    // Every live key stays reachable and the size never drifts
+    expect_eq(index.size(), live_count);
+    for (key_at key : live_keys)
+        expect(index.contains(key));
+
+    // Copying a table that still holds tombstones must not strand live keys
+    expect_eq(index.remove(live_keys.back()).completed, 1);
+    live_keys.pop_back();
+
+    auto copy_result = index.copy();
+    expect(copy_result);
+    index_punned_t& copy = copy_result.index;
+    expect_eq(copy.size(), live_keys.size());
+    for (key_at key : live_keys)
+        expect(copy.contains(key));
+}
+
 template <typename key_at, typename slot_at> void test_replacing_update() {
 
     using vector_key_t = key_at;
@@ -1449,6 +1515,10 @@ int main(int, char**) {
     for (std::size_t set_size : {1, 100, 1000})
         test_sets<std::int64_t, slot32_t>(set_size, 20, 30);
     test_strings<std::int64_t, slot32_t>();
+
+    std::printf("Testing key lookups under churn\n");
+    test_slot_lookup_churn<std::int64_t, std::uint32_t>();
+    test_slot_lookup_churn<std::int64_t, uint40_t>();
 
     test_filtered_search();
     test_isolate();
