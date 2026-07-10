@@ -816,9 +816,6 @@ jobs:
         arch: [x64]
         os: [macos-14, ubuntu-24.04, windows-2022]
     runs-on: ${{ matrix.os }}
-    env:
-      CC: gcc
-      CXX: g++
 
     steps:
       - name: Checkout the latest code
@@ -845,7 +842,16 @@ jobs:
         run: |
           npm install --ignore-scripts
       - run: npm run prebuild-single
-        if: matrix.os != 'macos-14'
+        env:
+          CC: gcc
+          CXX: g++
+        if: matrix.os == 'ubuntu-24.04'
+        # Leave CC/CXX unset on Windows. node-gyp builds with MSVC regardless,
+        # but NumKong's ISA probe takes the compiler from $CC while still
+        # passing MSVC flag syntax, so a `gcc` here fails every probe and
+        # silently yields a scalar-only binary with no SIMD kernels.
+      - run: npm run prebuild-single
+        if: matrix.os == 'windows-2022'
       - run: npm run prebuild-darwin-x64+arm64
         env:
           CC: clang
