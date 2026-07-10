@@ -2,7 +2,7 @@
 <Project>
 
   <PropertyGroup>
-    <LangVersion>10</LangVersion>
+    <LangVersion>13</LangVersion>
   </PropertyGroup>
 
   <PropertyGroup>

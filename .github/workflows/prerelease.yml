@@ -11,11 +11,11 @@ env:
   PYTHONUTF8: 1
   PYTHONFAULTHANDLER: 1
   PYTHON_VERSION: 3.11
-  DOTNET_VERSION: 8.0.x
-  NODE_VERSION: 20
+  DOTNET_VERSION: 10.0.x
+  NODE_VERSION: 24
   JAVA_VERSION: 21
-  GO_VERSION: "^1.22.0"
-  ANDROID_NDK_VERSION: 26.3.11579264
+  GO_VERSION: "^1.25.0"
+  ANDROID_NDK_VERSION: 27.2.12479018
   ANDROID_SDK_VERSION: 21
 
 # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
@@ -408,7 +408,7 @@ jobs:
     needs: [test_ubuntu_gcc, test_ubuntu_clang]
     strategy:
       matrix:
-        python-version: ["310", "311", "312", "313", "313t", "314", "314t"]
+        python-version: ["310", "311", "312", "313", "314", "314t"]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -424,7 +424,7 @@ jobs:
           max_attempts: 3
           retry_wait_seconds: 10
           timeout_minutes: 180
-          command: python -m pip install cibuildwheel
+          command: python -m pip install "cibuildwheel~=4.1"
       - name: Build wheels
         uses: nick-fields/retry@v4
         with:
@@ -434,7 +434,6 @@ jobs:
           command: cibuildwheel --output-dir wheelhouse
         env:
           CIBW_BUILD: cp${{ matrix.python-version }}-*
-          CIBW_ENABLE: cpython-freethreading
           CIBW_PLATFORM: linux
 
   build_wheels_macos:
@@ -443,7 +442,7 @@ jobs:
     needs: [test_macos]
     strategy:
       matrix:
-        python-version: ["310", "311", "312", "313", "313t", "314", "314t"]
+        python-version: ["310", "311", "312", "313", "314", "314t"]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -457,7 +456,7 @@ jobs:
           max_attempts: 3
           retry_wait_seconds: 10
           timeout_minutes: 180
-          command: python -m pip install cibuildwheel
+          command: python -m pip install "cibuildwheel~=4.1"
       - name: Build wheels
         uses: nick-fields/retry@v4
         with:
@@ -467,7 +466,6 @@ jobs:
           command: cibuildwheel --output-dir wheelhouse
         env:
           CIBW_BUILD: cp${{ matrix.python-version }}-*
-          CIBW_ENABLE: cpython-freethreading
           CIBW_PLATFORM: macos
 
   build_wheels_windows:
@@ -476,7 +474,7 @@ jobs:
     needs: [test_windows_x86]
     strategy:
       matrix:
-        python-version: ["310", "311", "312", "313", "313t", "314", "314t"]
+        python-version: ["310", "311", "312", "313", "314", "314t"]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -490,7 +488,7 @@ jobs:
           max_attempts: 3
           retry_wait_seconds: 10
           timeout_minutes: 180
-          command: python -m pip install cibuildwheel
+          command: python -m pip install "cibuildwheel~=4.1"
       - name: Build wheels
         uses: nick-fields/retry@v4
         with:
@@ -500,7 +498,6 @@ jobs:
           command: cibuildwheel --output-dir wheelhouse
         env:
           CIBW_BUILD: cp${{ matrix.python-version }}-*
-          CIBW_ENABLE: cpython-freethreading
           CIBW_PLATFORM: windows
 
   test_ubuntu_cross_compilation:

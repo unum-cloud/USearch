@@ -14,7 +14,7 @@
         "email": "info@unum.cloud"
     },
     "engines": {
-        "node": ">=20"
+        "node": ">=22"
     },
     "files": [
         "binding.gyp",

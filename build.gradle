@@ -6,7 +6,7 @@ plugins {
     id 'cpp'
     id 'maven-publish'
     id 'signing'
-    id 'com.diffplug.spotless' version '6.25.0'
+    id 'com.diffplug.spotless' version '8.8.0'
 }
 
 group = "cloud.unum"
@@ -57,14 +57,15 @@ task javadocJar(type: Jar, dependsOn: javadoc) {
 }
 
 dependencies {
-    testImplementation('junit:junit:4.13.2')
+    testImplementation('org.junit.jupiter:junit-jupiter:5.12.2')
+    testRuntimeOnly('org.junit.platform:junit-platform-launcher')
 }
 
 spotless {
     format 'gradle', {
         target '*.gradle'
         trimTrailingWhitespace()
-        indentWithSpaces(4)
+        leadingTabsToSpaces(4)
         endWithNewline()
     }
 
@@ -196,6 +197,7 @@ model {
 }
 
 test {
+    useJUnitPlatform()
     forkEvery = 1
 
     dependsOn jar

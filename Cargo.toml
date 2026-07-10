@@ -2,7 +2,7 @@
 authors = ["Ash Vardanian <1983160+ashvardanian@users.noreply.github.com>"]
 description = "Smaller & Faster Single-File Vector Search Engine from Unum"
 documentation = "https://unum-cloud.github.io/USearch"
-edition = "2021"
+edition = "2024"
 include = [
   "/rust/**",
   "/include/**",
