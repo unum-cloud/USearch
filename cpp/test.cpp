@@ -710,6 +710,74 @@ void test_punned_concurrent_updates(index_at& index, typename index_at::vector_k
 }
 
 /**
+ * Regression test for USearch #735: concurrent `add()` must never leave a node
+ * stored-but-unreachable. The bug: while a node was building links top-down, its
+ * per-level lock was released between levels, so a concurrent inserter could
+ * descend onto it before its lower level had any links, dead-end the level search,
+ * and end up attached by a single fragile edge that was then evicted — leaving a
+ * node for which `contains()` is true but `search()` can never reach it.
+ *
+ * This builds an index from many threads, then asserts every inserted vector finds
+ * itself in an exhaustive search. A single orphaned node fails the test. Before the
+ * fix this reproduced a handful of unreachable nodes per run at a few thousand
+ * vectors; with serialized (single-thread) builds it always passed — so the test is
+ * only meaningful with `threads_count > 1`.
+ *
+ * @param dimensions Number of dimensions per vector.
+ * @param vectors_per_thread Vectors inserted by each worker thread.
+ * @param threads_count Number of concurrent insertion threads (must be > 1 to bite).
+ * @param connectivity Graph connectivity (M) for the index.
+ */
+template <typename key_at, typename slot_at>
+void test_concurrent_add_reachability(std::size_t dimensions, std::size_t vectors_per_thread,
+                                      std::size_t threads_count, std::size_t connectivity) {
+
+    using index_t = index_dense_gt<key_at, slot_at>;
+    std::size_t const total = vectors_per_thread * threads_count;
+
+    // Deterministic pseudo-random vectors, so a failure is reproducible.
+    std::vector<std::vector<float>> vectors(total);
+    std::default_random_engine generator(42);
+    std::uniform_real_distribution<float> distribution(-1.0f, 1.0f);
+    for (auto& vector : vectors) {
+        vector.resize(dimensions);
+        for (auto& component : vector)
+            component = distribution(generator);
+    }
+
+    metric_punned_t metric(dimensions, metric_kind_t::cos_k, scalar_kind_t::f32_k);
+    index_dense_config_t config(connectivity);
+    typename index_t::state_result_t make_result = index_t::make(metric, config);
+    expect(make_result);
+    index_t& index = make_result.index;
+
+    // Concurrent build — the condition that triggers #735.
+    executor_default_t executor(threads_count);
+    expect(index.try_reserve({total, executor.size()}));
+    executor.fixed(total, [&](std::size_t thread, std::size_t task) {
+        typename index_t::add_result_t result = index.add(static_cast<key_at>(task), vectors[task].data(), thread);
+        expect(result);
+    });
+    expect_eq(index.size(), total);
+
+    // Every stored vector must be reachable: searching for it (requesting every
+    // result) must return itself. An orphaned node is contained but unreachable.
+    std::size_t unreachable = 0;
+    std::vector<key_at> keys(total);
+    std::vector<distance_punned_t> distances(total);
+    for (std::size_t i = 0; i != total; ++i) {
+        typename index_t::search_result_t search_result = index.search(vectors[i].data(), total);
+        expect(search_result);
+        std::size_t found = search_result.dump_to(keys.data(), distances.data());
+        bool found_self = false;
+        for (std::size_t r = 0; r != found && !found_self; ++r)
+            found_self = keys[r] == static_cast<key_at>(i);
+        unreachable += !found_self;
+    }
+    expect_eq(unreachable, static_cast<std::size_t>(0));
+}
+
+/**
  * Overloaded function to test cosine similarity index functionality using specific scalar, key, and slot types.
  *
  * This function initializes vectors and an index instance to test cosine similarity calculations and index operations.
@@ -1523,5 +1591,17 @@ int main(int, char**) {
     test_filtered_search();
     test_isolate();
     test_load_after_metric_make();
+
+    // Regression for USearch #735: concurrent builds must not strand nodes as
+    // contained-but-unreachable. Only meaningful with more than one thread, and at
+    // a realistic connectivity — at a degenerate connectivity (<= 3) HNSW orphans
+    // nodes even single-threaded, which is an algorithmic property, not this race.
+    std::printf("Testing concurrent-add reachability (#735)\n");
+    if (std::thread::hardware_concurrency() > 1)
+        for (std::size_t threads : {static_cast<std::size_t>(4),
+                                    static_cast<std::size_t>(std::thread::hardware_concurrency())}) {
+            test_concurrent_add_reachability<std::int64_t, slot32_t>(64, 250, threads, 16);
+            test_concurrent_add_reachability<std::int64_t, uint40_t>(64, 250, threads, 16);
+        }
     return 0;
 }
