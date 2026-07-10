@@ -8,14 +8,13 @@ env:
   GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
   PYTHONUTF8: 1
   PYTHON_VERSION: 3.11
-  DOTNET_VERSION: 8.0.x
-  NODE_VERSION: 20
+  DOTNET_VERSION: 10.0.x
+  NODE_VERSION: 24
   JAVA_VERSION: 21
-  GO_VERSION: "^1.22.0"
-  ANDROID_NDK_VERSION: 26.3.11579264
+  GO_VERSION: "^1.25.0"
+  ANDROID_NDK_VERSION: 27.2.12479018
   ANDROID_SDK_VERSION: 21
-  EMSCRIPTEN_VERSION: 3.1.47
-  MINGW_VERSION: 12.2.0
+  EMSCRIPTEN_VERSION: 6.0.2
 
 # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
@@ -195,10 +194,9 @@ jobs:
 
       - name: Setup MinGW
         if: matrix.arch != 'arm64'
-        uses: egor-tensin/setup-mingw@v2
+        uses: egor-tensin/setup-mingw@v3
         with:
           platform: ${{ matrix.arch }}
-          version: ${{ env.MINGW_VERSION }}
 
       - name: Setup MSVC for ARM64
         if: matrix.arch == 'arm64'
@@ -750,7 +748,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
-        python-version: ["310", "311", "312", "313", "313t", "314", "314t"]
+        python-version: ["310", "311", "312", "313", "314", "314t"]
     steps:
       - name: Check out refreshed version
         uses: actions/checkout@v6
@@ -767,12 +765,11 @@ jobs:
         if: matrix.os == 'ubuntu-24.04' # We only need QEMU for Linux builds
         uses: docker/setup-qemu-action@v3
       - name: Install cibuildwheel
-        run: python -m pip install cibuildwheel
+        run: python -m pip install "cibuildwheel~=4.1"
       - name: Build wheels
         run: cibuildwheel --output-dir wheelhouse
         env:
           CIBW_BUILD: cp${{ matrix.python-version }}-*
-          CIBW_ENABLE: cpython-freethreading # No-GIL 3.13t builds
           CIBW_TEST_SKIP: "*-win_arm64" # Too complex to emulate Windows ARM
       - name: Upload wheels
         uses: actions/upload-artifact@v5
@@ -813,19 +810,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, x86]
-        # Windows pre-build is not working
-        # - windows-latest
-        os: [macos-14, ubuntu-24.04]
-        exclude:
-          - arch: x86
-            os: macos-14
-          - arch: x86
-            os: ubuntu-24.04
+        arch: [x64]
+        os: [macos-14, ubuntu-24.04, windows-2022]
     runs-on: ${{ matrix.os }}
-    env:
-      CC: gcc
-      CXX: g++
 
     steps:
       - name: Checkout the latest code
@@ -852,7 +839,16 @@ jobs:
         run: |
           npm install --ignore-scripts
       - run: npm run prebuild-single
-        if: matrix.os != 'macos-14'
+        env:
+          CC: gcc
+          CXX: g++
+        if: matrix.os == 'ubuntu-24.04'
+        # Leave CC/CXX unset on Windows. node-gyp builds with MSVC regardless,
+        # but NumKong's ISA probe takes the compiler from $CC while still
+        # passing MSVC flag syntax, so a `gcc` here fails every probe and
+        # silently yields a scalar-only binary with no SIMD kernels.
+      - run: npm run prebuild-single
+        if: matrix.os == 'windows-2022'
       - run: npm run prebuild-darwin-x64+arm64
         env:
           CC: clang
@@ -1136,6 +1132,7 @@ jobs:
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_c.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
+          cp "${{ github.workspace }}/build_artifacts/numkong/libnumkong.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
 
       - name: Build C library for MacOS
         if: matrix.os == 'macos-15'
@@ -1146,15 +1143,19 @@ jobs:
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_c.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
+          cp "${{ github.workspace }}/build_artifacts/numkong/libnumkong.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
 
       - name: Build C library for Windows
         if: matrix.os == 'windows-2022'
+        shell: pwsh
         run: |
-          choco install cmake
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=0 -DUSEARCH_USE_NUMKONG=0 -DUSEARCH_USE_JEMALLOC=0
+          choco install cmake -y
+          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=0 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=0
           cmake --build build_artifacts --config Release
-          mkdir -p "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
-          cp "${{ github.workspace }}\build_artifacts\libusearch_c.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
+          $nativeDir = "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
+          New-Item -ItemType Directory -Force -Path $nativeDir | Out-Null
+          Copy-Item "${{ github.workspace }}\build_artifacts\libusearch_c.dll" -Destination $nativeDir
+          Copy-Item "${{ github.workspace }}\build_artifacts\numkong.dll" -Destination $nativeDir
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v5
@@ -1187,6 +1188,15 @@ jobs:
           pattern: usearch-csharp-dependencies-*
           merge-multiple: true
           path: ${{ env.USEARCH_LIBS }}
+
+      - name: Verify native package inputs
+        run: |
+          test -f "${{ env.USEARCH_LIBS }}/runtimes/linux-x64/native/libusearch_c.so"
+          test -f "${{ env.USEARCH_LIBS }}/runtimes/linux-x64/native/libnumkong.so"
+          test -f "${{ env.USEARCH_LIBS }}/runtimes/osx-arm64/native/libusearch_c.dylib"
+          test -f "${{ env.USEARCH_LIBS }}/runtimes/osx-arm64/native/libnumkong.dylib"
+          test -f "${{ env.USEARCH_LIBS }}/runtimes/win-x64/native/libusearch_c.dll"
+          test -f "${{ env.USEARCH_LIBS }}/runtimes/win-x64/native/numkong.dll"
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v5

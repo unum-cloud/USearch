@@ -1277,6 +1277,31 @@ template <typename element_at> struct hash_gt {
     std::size_t operator()(element_at const& element) const noexcept { return std::hash<element_at>{}(element); }
 };
 
+/**
+ *  @brief  SplitMix64 finalizer, used to scatter integer keys before masking.
+ *
+ *  On libstdc++ and libc++ `std::hash` is the identity for integers. Our open-addressing
+ *  tables mask that hash into a power-of-2 slot count and probe linearly until an @b empty
+ *  slot, so consecutive keys land in adjacent slots and merge into one contiguous run.
+ *  Both insertions and lookups then scan that run end-to-end, which is quadratic overall:
+ *  a dense ascending key range collapses insertion throughput by three orders of magnitude.
+ *  Mixing costs ~20ns per key and is dwarfed by the graph traversal in `add`.
+ */
+template <> struct hash_gt<std::uint64_t> {
+    std::size_t operator()(std::uint64_t const& element) const noexcept {
+        std::uint64_t x = element;
+        x = (x ^ (x >> 30u)) * 0xBF58476D1CE4E5B9ULL;
+        x = (x ^ (x >> 27u)) * 0x94D049BB133111EBULL;
+        return static_cast<std::size_t>(x ^ (x >> 31u));
+    }
+};
+
+template <> struct hash_gt<std::int64_t> {
+    std::size_t operator()(std::int64_t const& element) const noexcept {
+        return hash_gt<std::uint64_t>{}(static_cast<std::uint64_t>(element));
+    }
+};
+
 template <> struct hash_gt<uint40_t> {
     std::size_t operator()(uint40_t const& element) const noexcept { return std::hash<std::size_t>{}(element); }
 };
