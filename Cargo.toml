@@ -12,7 +12,7 @@ license = "Apache-2.0"
 name = "usearch"
 publish = true
 repository = "https://github.com/unum-cloud/USearch"
-version = "2.25.3"
+version = "2.26.0"
 
 [features]
 default = ["numkong"]
