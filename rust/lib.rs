@@ -541,6 +541,7 @@ pub mod ffi {
         pub fn load(self: &NativeIndex, path: &str) -> Result<()>;
         pub fn view(self: &NativeIndex, path: &str) -> Result<()>;
         pub fn reset(self: &NativeIndex) -> Result<()>;
+        pub fn compact(self: &NativeIndex) -> Result<()>;
         pub fn memory_usage(self: &NativeIndex) -> usize;
         pub fn memory_stats(self: &NativeIndex) -> MemoryStats;
         pub fn hardware_acceleration(self: &NativeIndex) -> *const c_char;
@@ -1713,6 +1714,16 @@ impl Index {
     /// * `path` - The file path from where the view will be created.
     pub fn view(self: &Index, path: &str) -> Result<(), cxx::Exception> {
         self.inner.view(path)
+    }
+
+    /// Compacts the index by removing links to deleted entries and rebuilding
+    /// the internal vector storage layout.
+    ///
+    /// This is useful after removals when you want to prune stale graph edges
+    /// and reduce wasted memory. Compaction is an expensive mutating operation,
+    /// so avoid running it concurrently with searches or updates on the same index.
+    pub fn compact(self: &Index) -> Result<(), cxx::Exception> {
+        self.inner.compact()
     }
 
     /// Erases all members from the index, closes files, and returns RAM to OS.

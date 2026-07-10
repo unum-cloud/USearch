@@ -118,6 +118,7 @@ class NativeIndex {
     void save(rust::Str path) const;
     void load(rust::Str path) const;
     void view(rust::Str path) const;
+    void compact() const;
     void reset() const;
     size_t memory_usage() const;
     MemoryStats memory_stats() const;
