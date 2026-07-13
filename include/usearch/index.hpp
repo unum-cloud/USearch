@@ -3468,7 +3468,8 @@ class index_gt {
                 query, metric, prefetch, static_cast<compressed_slot_t>(entry_slot_), max_level_, 0, context);
 
             // For bottom layer we need a more optimized procedure
-            if (!search_to_find_in_base_(query, metric, predicate, prefetch, closest_slot, expansion, context))
+            if (!search_to_find_in_base_(query, metric, predicate, prefetch, closest_slot, expansion, wanted,
+                                         context))
                 return result.failed("Out of memory!");
         }
 
@@ -4653,7 +4654,8 @@ class index_gt {
     template <typename value_at, typename metric_at, typename predicate_at, typename prefetch_at>
     bool search_to_find_in_base_(                                                               //
         value_at&& query, metric_at&& metric, predicate_at&& predicate, prefetch_at&& prefetch, //
-        compressed_slot_t start_slot, std::size_t expansion, context_t& context) const usearch_noexcept_m {
+        compressed_slot_t start_slot, std::size_t expansion, std::size_t wanted,
+        context_t& context) const usearch_noexcept_m {
 
         visits_hash_set_t& visits = context.visits;
         next_candidates_t& next = context.next_candidates; // pop min, push
@@ -4682,6 +4684,26 @@ class index_gt {
             top.insert_reserved({radius, start_slot});
         }
 
+        // ACORN-1 dispatch. The 2-hop "bridge" expansion below lets a filtered search hop over
+        // filtered-out members — a large win when the filter is SELECTIVE, but pure overhead when
+        // it is PERMISSIVE (there a plain traverse-through-all is both faster and higher recall).
+        // So estimate the filter's pass-rate from the entry point's base-layer neighborhood: a
+        // graph-LOCAL sample that reflects the filter density near the query (better than a uniform
+        // global sample for filters correlated with the vector space) and only re-checks members
+        // we are about to examine. Unfiltered searches always take the plain path. The `wanted`-
+        // gated fallback below is the safety net when this estimate is wrong or too noisy.
+        constexpr std::size_t acorn_selective_percent_k = 25; // ACORN when < 25% of local members pass
+        bool use_acorn = false;
+        if (!is_dummy<predicate_at>()) {
+            std::size_t passed = 0, sampled = 0;
+            neighbors_ref_t probe = neighbors_base_(node_at_(start_slot));
+            for (compressed_slot_t s : probe) {
+                passed += predicate(member_cref_t{node_at_(s).ckey(), s}) ? 1u : 0u;
+                ++sampled;
+            }
+            use_acorn = sampled != 0 && passed * 100u < acorn_selective_percent_k * sampled;
+        }
+
         while (!next.empty()) {
 
             candidate_t candidate = next.top();
@@ -4703,18 +4725,115 @@ class index_gt {
             if (!visits.reserve(visits.size() + candidate_neighbors.size()))
                 return false;
 
+            if (!use_acorn) {
+                // Plain HNSW base-layer expansion: traverse through every neighbor (filtered or
+                // not), keeping only filter-passing members in the result list. Best when the
+                // filter is permissive or absent.
+                for (compressed_slot_t successor_slot : candidate_neighbors) {
+                    if (visits.set(successor_slot))
+                        continue;
+
+                    distance_t successor_dist = context.measure(query, citerator_at(successor_slot), metric);
+                    if (top.size() < top_limit || successor_dist < radius) {
+                        next.insert({-successor_dist, successor_slot});
+                        if (is_dummy<predicate_at>() ||
+                            predicate(member_cref_t{node_at_(successor_slot).ckey(), successor_slot})) {
+                            top.insert({successor_dist, successor_slot}, top_limit);
+                            radius = top.top().distance;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // ACORN-1 (selective filter). Only filter-passing members enter the frontier — we
+            // never traverse through (or even measure distances to) filtered-out members. To
+            // keep the filter-passing subgraph connected we then expand ONE extra hop through the
+            // (mostly filtered-out) 1-hop neighbors, which also pre-explores the neighborhoods of
+            // the good members so recall survives early termination.
             for (compressed_slot_t successor_slot : candidate_neighbors) {
                 if (visits.set(successor_slot))
+                    continue;
+                if (!predicate(member_cref_t{node_at_(successor_slot).ckey(), successor_slot}))
                     continue;
 
                 distance_t successor_dist = context.measure(query, citerator_at(successor_slot), metric);
                 if (top.size() < top_limit || successor_dist < radius) {
-                    // This can substantially grow our priority queue:
                     next.insert({-successor_dist, successor_slot});
-                    if (is_dummy<predicate_at>() ||
-                        predicate(member_cref_t{node_at_(successor_slot).ckey(), successor_slot})) {
-                        top.insert({successor_dist, successor_slot}, top_limit);
+                    top.insert({successor_dist, successor_slot}, top_limit);
+                    radius = top.top().distance;
+                }
+            }
+
+            for (compressed_slot_t successor_slot : candidate_neighbors) {
+                neighbors_ref_t hop2_neighbors = neighbors_base_(node_at_(successor_slot));
+
+                if (!is_dummy<prefetch_at>()) {
+                    candidates_range_t missing_candidates{*this, hop2_neighbors, visits};
+                    prefetch(missing_candidates.begin(), missing_candidates.end());
+                }
+                if (!visits.reserve(visits.size() + hop2_neighbors.size()))
+                    return false;
+
+                for (compressed_slot_t hop2_slot : hop2_neighbors) {
+                    if (visits.set(hop2_slot))
+                        continue;
+                    if (!predicate(member_cref_t{node_at_(hop2_slot).ckey(), hop2_slot}))
+                        continue; // filtered-out 2-hop member: ACORN-1 expands exactly one extra hop
+
+                    distance_t hop2_dist = context.measure(query, citerator_at(hop2_slot), metric);
+                    if (top.size() < top_limit || hop2_dist < radius) {
+                        next.insert({-hop2_dist, hop2_slot});
+                        top.insert({hop2_dist, hop2_slot}, top_limit);
                         radius = top.top().distance;
+                    }
+                }
+            }
+        }
+
+        // Fallback: a STARVED ACORN pass — one that returned fewer than the `wanted` results
+        // because the filter is so selective that 2-hop bridging cannot reach the passing members
+        // (e.g. a predicate matching a single key) — is redone once with an exhaustive baseline
+        // walk, so we never silently drop reachable filter-passing members. Gated on `wanted`
+        // (not `expansion`): a selective filter legitimately has fewer than `ef` passing nodes, so
+        // gating on `ef` would fall back on every query and erase ACORN's speedup at large `ef`.
+        if (use_acorn && top.size() < wanted) {
+            visits.clear();
+            next.clear();
+            top.clear();
+
+            radius = context.measure(query, citerator_at(start_slot), metric);
+            next.insert_reserved({-radius, start_slot});
+            visits.set(start_slot);
+            if (predicate(member_cref_t{node_at_(start_slot).ckey(), start_slot}))
+                top.insert_reserved({radius, start_slot});
+
+            while (!next.empty()) {
+                candidate_t candidate = next.top();
+                if ((-candidate.distance) > radius && top.size() == top_limit)
+                    break;
+
+                next.pop();
+                context.iteration_cycles++;
+
+                neighbors_ref_t candidate_neighbors = neighbors_base_(node_at_(candidate.slot));
+                if (!is_dummy<prefetch_at>()) {
+                    candidates_range_t missing_candidates{*this, candidate_neighbors, visits};
+                    prefetch(missing_candidates.begin(), missing_candidates.end());
+                }
+                if (!visits.reserve(visits.size() + candidate_neighbors.size()))
+                    return false;
+
+                for (compressed_slot_t successor_slot : candidate_neighbors) {
+                    if (visits.set(successor_slot))
+                        continue;
+                    distance_t successor_dist = context.measure(query, citerator_at(successor_slot), metric);
+                    if (top.size() < top_limit || successor_dist < radius) {
+                        next.insert({-successor_dist, successor_slot});
+                        if (predicate(member_cref_t{node_at_(successor_slot).ckey(), successor_slot})) {
+                            top.insert({successor_dist, successor_slot}, top_limit);
+                            radius = top.top().distance;
+                        }
                     }
                 }
             }
