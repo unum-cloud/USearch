@@ -24,6 +24,10 @@ try:
         # any bundled sibling DLLs, then load without `RTLD_GLOBAL`.
         os.add_dll_directory(os.path.dirname(_numkong_path))
         numkong_lib = ctypes.CDLL(_numkong_path)
+    elif sys.platform == "android":
+        # On Android, NumKong is statically bundled into the USearch extension
+        # because the Bionic linker does not support `RTLD_GLOBAL`.
+        pass
     else:
         # On Linux/macOS we need `RTLD_GLOBAL` so USearch's compiled module can
         # resolve NumKong symbols at its own load time.
