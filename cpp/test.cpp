@@ -55,9 +55,11 @@
 #define SZ_USE_X86_AVX512 0            // Sanitizers hate AVX512
 #include <stringzilla/stringzilla.hpp> // Levenshtein distance implementation
 
+#include <usearch/global_rebuild.hpp>
 #include <usearch/index.hpp>
 #include <usearch/index_dense.hpp>
 #include <usearch/index_plugins.hpp>
+#include <usearch/persistent_index.hpp>
 
 using namespace unum::usearch;
 using namespace unum;
@@ -1373,6 +1375,412 @@ static void install_crash_handlers() {
 }
 
 /**
+ *  @brief  Resident-set size of the current process in bytes, or 0 if it
+ *          cannot be read (non-Linux). Reads `/proc/self/statm`, whose second
+ *          field is the resident page count.
+ */
+std::size_t current_rss_bytes() {
+#if defined(__linux__)
+    std::FILE* file = std::fopen("/proc/self/statm", "r");
+    if (!file)
+        return 0;
+    unsigned long total_pages = 0, resident_pages = 0;
+    int scanned = std::fscanf(file, "%lu %lu", &total_pages, &resident_pages);
+    std::fclose(file);
+    return scanned == 2 ? static_cast<std::size_t>(resident_pages) * 4096u : 0;
+#else
+    return 0;
+#endif
+}
+
+/**
+ *  @brief  Exercises ::global_rebuild_gt: a non-blocking, interruptible global
+ *          rebuild of an HNSW index that persists the result to disk. Checks
+ *          that the reconstructed graph keeps recall close to the original,
+ *          and that the rebuild does @b not double the process RSS - the
+ *          shadow shares vectors with the primary and only rebuilds the graph.
+ */
+void test_global_rebuild() {
+    std::printf("Testing global rebuild\n");
+
+    using index_t = index_dense_gt<std::int64_t, std::uint32_t>;
+    std::size_t const dimensions = 256;    // large enough that vector RAM is a
+    std::size_t const collection = 12000;  // clear, measurable share of the RSS
+    std::size_t const queries = 200;
+    std::size_t const wanted = 10;
+
+    std::default_random_engine rng(42);
+    std::uniform_real_distribution<float> distribution(-1.f, 1.f);
+    auto make_vector = [&](std::vector<float>& vector) {
+        vector.resize(dimensions);
+        for (auto& value : vector)
+            value = distribution(rng);
+    };
+
+    // Clustered dataset: uniformly random vectors in a high dimension all look
+    // equidistant (curse of dimensionality), so nearest-neighbor search has no
+    // signal. Drawing vectors as a centroid plus small noise gives genuine
+    // neighborhood structure - and thus a meaningful recall to compare.
+    std::size_t const clusters = 64;
+    std::vector<std::vector<float>> centroids(clusters);
+    for (auto& centroid : centroids)
+        make_vector(centroid);
+    auto make_clustered = [&](std::vector<float>& vector, std::size_t cluster) {
+        vector.resize(dimensions);
+        for (std::size_t d = 0; d != dimensions; ++d)
+            vector[d] = centroids[cluster][d] + 0.15f * distribution(rng);
+    };
+
+    std::vector<std::vector<float>> data(collection), query(queries);
+    for (std::size_t i = 0; i != collection; ++i)
+        make_clustered(data[i], i % clusters);
+    for (std::size_t i = 0; i != queries; ++i)
+        make_clustered(query[i], i % clusters);
+
+    // Brute-force cosine ground truth: the top-`wanted` keys per query.
+    auto cosine_distance = [&](float const* a, float const* b) {
+        double dot = 0, norm_a = 0, norm_b = 0;
+        for (std::size_t i = 0; i != dimensions; ++i)
+            dot += a[i] * b[i], norm_a += a[i] * a[i], norm_b += b[i] * b[i];
+        double denominator = std::sqrt(norm_a) * std::sqrt(norm_b);
+        return denominator > 0 ? 1.0 - dot / denominator : 1.0;
+    };
+    std::vector<std::vector<std::int64_t>> truth(queries);
+    for (std::size_t q = 0; q != queries; ++q) {
+        std::vector<std::pair<double, std::int64_t>> ranked(collection);
+        for (std::size_t i = 0; i != collection; ++i)
+            ranked[i] = {cosine_distance(query[q].data(), data[i].data()), static_cast<std::int64_t>(i)};
+        std::partial_sort(ranked.begin(), ranked.begin() + wanted, ranked.end());
+        for (std::size_t k = 0; k != wanted; ++k)
+            truth[q].push_back(ranked[k].second);
+    }
+
+    // Recall@`wanted` of an index against the brute-force ground truth.
+    auto recall_of = [&](index_t& index) {
+        std::size_t hits = 0;
+        for (std::size_t q = 0; q != queries; ++q) {
+            std::int64_t found[32];
+            std::size_t count = index.search(query[q].data(), wanted).dump_to(found);
+            for (std::size_t k = 0; k != count; ++k)
+                for (std::size_t t = 0; t != wanted; ++t)
+                    if (found[k] == truth[q][t]) {
+                        ++hits;
+                        break;
+                    }
+        }
+        return double(hits) / double(queries * wanted);
+    };
+
+    // Build the live primary index.
+    metric_punned_t metric(dimensions, metric_kind_t::cos_k, scalar_kind<f32_t>());
+    index_dense_config_t config(16);
+    index_t::state_result_t primary_result = index_t::make(metric, config);
+    expect(primary_result);
+    index_t& primary = primary_result.index;
+    expect(primary.try_reserve(collection + 64));
+    for (std::size_t i = 0; i != collection; ++i)
+        expect(primary.add(static_cast<std::int64_t>(i), data[i].data()));
+
+    double recall_baseline = recall_of(primary);
+    std::printf("- baseline recall@%zu: %.3f\n", wanted, recall_baseline);
+    expect(recall_baseline > 0.5);
+
+    // Drive a non-blocking global rebuild, interleaving live mutations between
+    // the budgeted steps.
+    using rebuild_t = global_rebuild_gt<index_t>;
+    rebuild_t rebuild(primary, 128);
+    char const* path = "tmp_global_rebuild.usearch";
+
+    // Pre-place a sentinel file at the destination. A crash-safe rebuild must
+    // leave it byte-for-byte intact until the very end - it streams into a
+    // temporary file and publishes only via an atomic rename - so a process
+    // kill mid-rebuild can never corrupt the previous index.
+    std::vector<char> const sentinel(96, '\x7e');
+    {
+        std::FILE* sentinel_file = std::fopen(path, "wb");
+        expect(sentinel_file != nullptr);
+        std::fwrite(sentinel.data(), 1, sentinel.size(), sentinel_file);
+        std::fclose(sentinel_file);
+    }
+    auto read_path = [&]() {
+        std::vector<char> bytes;
+        std::FILE* file = std::fopen(path, "rb");
+        if (!file)
+            return bytes;
+        char buffer[256];
+        for (std::size_t n; (n = std::fread(buffer, 1, sizeof(buffer), file)) > 0;)
+            bytes.insert(bytes.end(), buffer, buffer + n);
+        std::fclose(file);
+        return bytes;
+    };
+
+    // Watch the process RSS across the rebuild: with the shadow sharing the
+    // primary's vectors it must not balloon by a whole vector-set.
+    std::size_t const primary_vectors_bytes = primary.memory_stats().vectors_allocated;
+    std::size_t const rss_before = current_rss_bytes();
+    std::size_t rss_peak = rss_before;
+
+    expect(rebuild.begin(path));
+
+    std::vector<float> extra_a, extra_b;
+    make_vector(extra_a);
+    make_vector(extra_b);
+    std::int64_t const new_key_a = static_cast<std::int64_t>(collection) + 1;
+    std::int64_t const new_key_b = static_cast<std::int64_t>(collection) + 2;
+    std::int64_t const removed_key = 7;
+    bool side_ops_done = false;
+    bool shadow_checked = false;
+    while (rebuild.active()) {
+        expect(rebuild.step());
+        rss_peak = (std::max)(rss_peak, current_rss_bytes());
+        if (rebuild.phase() == rebuild_t::phase_saving_k && !shadow_checked) {
+            // Migration is complete: the shadow holds a fully rebuilt graph,
+            // but - thanks to the zero-copy migration - not one duplicated
+            // vector. Its nodes alias the primary's vector storage.
+            expect(rebuild.shadow() != nullptr);
+            index_t::memory_stats_t shadow_memory = rebuild.shadow()->memory_stats();
+            expect_eq(shadow_memory.vectors_allocated, std::size_t(0));
+            expect(shadow_memory.graph_allocated > 0);
+            std::printf("- shadow memory: graph %zu, vectors %zu (primary vectors %zu)\n",
+                        shadow_memory.graph_allocated, shadow_memory.vectors_allocated,
+                        primary.memory_stats().vectors_allocated);
+            // Mid-rebuild, with the shadow already being streamed, the
+            // destination still holds the untouched sentinel - the bytes go
+            // to `<path>.tmp`, not to `path`.
+            expect(read_path() == sentinel);
+            shadow_checked = true;
+        }
+        if (!side_ops_done) {
+            // Adds hit the primary right away; the remove is tombstoned until
+            // the rebuild finishes, so the on-disk snapshot stays untouched.
+            expect(rebuild.add(new_key_a, extra_a.data()));
+            expect(rebuild.add(new_key_b, extra_b.data()));
+            expect(rebuild.remove(removed_key));
+            expect_eq(rebuild.deferred_remove_count(), 1ul);
+            expect(primary.contains(removed_key)); // Still deferred.
+            side_ops_done = true;
+        }
+    }
+    expect(rebuild.finished());
+    expect(side_ops_done);
+    expect(shadow_checked);
+    expect(rebuild.shadow() == nullptr); // released at completion
+    // Completion atomically replaced the sentinel with the real index.
+    expect(read_path() != sentinel);
+
+    // RSS must not double during the rebuild. The shadow shares the primary's
+    // vectors and only rebuilds the graph, so its peak overhead is one graph -
+    // comfortably under a full vector-set duplicate, which is what a naive
+    // clone-everything rebuild would have added.
+    if (rss_before) {
+        std::printf("- RSS: before %zu, peak %zu (primary vectors %zu)\n", //
+                    rss_before, rss_peak, primary_vectors_bytes);
+        expect(rss_peak < rss_before * 3 / 2);                 // grew by well under 50%
+        expect(rss_peak - rss_before < primary_vectors_bytes); // vectors not duplicated
+    }
+
+    // The tombstoned removal is applied now; the mid-rebuild adds are live.
+    expect(!primary.contains(removed_key));
+    expect(primary.contains(new_key_a));
+    expect(primary.contains(new_key_b));
+
+    // Load the persisted snapshot and confirm the rebuilt graph's accuracy.
+    index_t::state_result_t loaded_result = index_t::make(path);
+    expect(loaded_result);
+    index_t& loaded = loaded_result.index;
+    // The snapshot is the `begin()` generation: every original vector, and
+    // none of the keys added once the rebuild was already in flight.
+    expect_eq(loaded.size(), collection);
+    expect(loaded.contains(removed_key));
+    expect(!loaded.contains(new_key_a));
+
+    double recall_rebuilt = recall_of(loaded);
+    std::printf("- rebuilt recall@%zu:  %.3f\n", wanted, recall_rebuilt);
+    // A global rebuild reconstructs the graph from scratch, so recall shifts
+    // slightly; it must not drop materially below the original.
+    expect(recall_rebuilt > recall_baseline - 0.05);
+
+    std::remove(path);
+}
+
+/**
+ *  @brief  Exercises ::persistent_index_gt - snapshot + WAL durability around
+ *          `index_dense_gt`. Checks fresh open + add + search; clean reopen
+ *          replays the WAL and recovers state; manual checkpoint advances the
+ *          generation and retires the old WAL; truncating the WAL tail still
+ *          recovers everything but the lost record (crash-resilience).
+ */
+void test_persistent_index() {
+    std::printf("Testing persistent index (snapshot + WAL)\n");
+
+    using index_t = index_dense_gt<std::int64_t, std::uint32_t>;
+    using pi_t = persistent_index_gt<index_t>;
+    std::size_t const dimensions = 64;
+    std::size_t const initial_count = 200;
+    std::size_t const after_reopen_count = 50;
+    char const* base = "tmp_pi_test";
+
+    // Clean up any leftover from a previous run so the test is hermetic.
+    std::remove((std::string(base) + ".manifest").c_str());
+    for (int g = 0; g < 4; ++g) {
+        std::remove((std::string(base) + "." + std::to_string(g) + ".snapshot").c_str());
+        std::remove((std::string(base) + "." + std::to_string(g) + ".wal").c_str());
+    }
+
+    std::default_random_engine rng(1729);
+    std::uniform_real_distribution<float> distribution(-1.f, 1.f);
+    auto make_vec = [&](std::vector<float>& vector) {
+        vector.resize(dimensions);
+        for (auto& value : vector)
+            value = distribution(rng);
+    };
+
+    metric_punned_t metric(dimensions, metric_kind_t::cos_k, scalar_kind<f32_t>());
+    index_dense_config_t index_config(16);
+    pi_t::config_t pi_config;
+    pi_config.checkpoint_after_ops = 10'000'000; // no auto-checkpoint in this test
+    pi_config.initial_capacity = initial_count + after_reopen_count + 64;
+
+    // ---- 1. Fresh open: add `initial_count` vectors, then close. ----
+    std::vector<std::vector<float>> data;
+    {
+        pi_t::open_result_t opened = pi_t::open(base, metric, index_config, pi_config);
+        expect(opened);
+        pi_t& pi = *opened.index;
+        expect_eq(pi.size(), std::size_t(0));
+        expect_eq(pi.generation(), std::uint64_t(0));
+        data.resize(initial_count);
+        for (std::size_t i = 0; i != initial_count; ++i) {
+            make_vec(data[i]);
+            expect(pi.add(static_cast<std::int64_t>(i), data[i].data()));
+        }
+        expect_eq(pi.size(), initial_count);
+    }
+
+    // ---- 2. Reopen: snapshot + WAL replay must restore the full state. ----
+    {
+        pi_t::open_result_t reopened = pi_t::open(base, metric, index_config, pi_config);
+        expect(reopened);
+        pi_t& pi = *reopened.index;
+        expect_eq(pi.size(), initial_count);
+        expect_eq(pi.generation(), std::uint64_t(0)); // still gen 0
+        // The recovered vectors must be the original bytes.
+        std::vector<float> probe(dimensions);
+        for (std::size_t i = 0; i < initial_count; i += 17) {
+            expect_eq(pi.get(static_cast<std::int64_t>(i), probe.data()), std::size_t(1));
+            expect(std::equal(data[i].begin(), data[i].end(), probe.data()));
+        }
+        // A search returns sane results too.
+        std::int64_t found[8];
+        std::size_t n = pi.search(data[0].data(), 5).dump_to(found);
+        expect(n != 0);
+    }
+
+    // ---- 3. Reopen, add more, manual checkpoint -> generation increments. ----
+    {
+        pi_t::open_result_t reopened = pi_t::open(base, metric, index_config, pi_config);
+        expect(reopened);
+        pi_t& pi = *reopened.index;
+        data.resize(initial_count + after_reopen_count);
+        for (std::size_t i = initial_count; i != initial_count + after_reopen_count; ++i) {
+            make_vec(data[i]);
+            expect(pi.add(static_cast<std::int64_t>(i), data[i].data()));
+        }
+        // Remove a few keys so the checkpoint actually compacts something.
+        for (std::size_t i = 0; i < 10; ++i)
+            expect_eq(pi.remove(static_cast<std::int64_t>(i)).completed, std::size_t(1));
+
+        auto err = pi.checkpoint();
+        expect(!err);
+        expect(pi.generation() == 1);
+        expect(!pi.checkpoint_in_flight());
+
+        // Old generation's files must be gone, new ones must exist.
+        std::FILE* old_snap = std::fopen((std::string(base) + ".0.snapshot").c_str(), "rb");
+        expect(old_snap == nullptr);
+        std::FILE* new_snap = std::fopen((std::string(base) + ".1.snapshot").c_str(), "rb");
+        expect(new_snap != nullptr);
+        if (new_snap)
+            std::fclose(new_snap);
+    }
+
+    // ---- 4. Reopen post-checkpoint: snapshot.1 + (empty) wal.1 round-trips. ----
+    std::size_t const expected_size = initial_count + after_reopen_count - 10;
+    {
+        pi_t::open_result_t reopened = pi_t::open(base, metric, index_config, pi_config);
+        expect(reopened);
+        pi_t& pi = *reopened.index;
+        expect_eq(pi.generation(), std::uint64_t(1));
+        expect_eq(pi.size(), expected_size);
+        std::vector<float> probe(dimensions);
+        // Surviving key still recovers the exact original bytes.
+        std::int64_t survivor = static_cast<std::int64_t>(initial_count + 3);
+        expect(pi.contains(survivor));
+        expect_eq(pi.get(survivor, probe.data()), std::size_t(1));
+        expect(std::equal(data[survivor].begin(), data[survivor].end(), probe.data()));
+        // Removed key stays gone.
+        expect(!pi.contains(0));
+
+        // Append one more op so we have something to truncate-test below.
+        std::vector<float> extra;
+        make_vec(extra);
+        expect(pi.add(9'999'999, extra.data()));
+    }
+
+    // ---- 5. Crash-recover from a torn WAL tail. ----
+    // Truncate the active WAL by a few bytes - simulates a torn final record
+    // (a partial write that did not flush). Recovery must drop the torn tail
+    // and load everything else cleanly.
+    {
+        std::string wal_path = std::string(base) + ".1.wal";
+        std::FILE* file = std::fopen(wal_path.c_str(), "rb");
+        expect(file != nullptr);
+        std::fseek(file, 0, SEEK_END);
+        long size = std::ftell(file);
+        std::fclose(file);
+        // Drop the last 5 bytes - guaranteed to mangle the trailing record.
+        expect(size > 5);
+        int rc = ::truncate(wal_path.c_str(), size - 5);
+        expect(rc == 0);
+
+        pi_t::open_result_t reopened = pi_t::open(base, metric, index_config, pi_config);
+        expect(reopened);
+        pi_t& pi = *reopened.index;
+        // The trailing add (key 9'999'999) was torn off; everything else stays.
+        expect(!pi.contains(9'999'999));
+        expect_eq(pi.size(), expected_size);
+    }
+
+    // ---- 6. Auto-checkpoint fires when ops cross the configured threshold. ----
+    {
+        pi_t::config_t small_cfg = pi_config;
+        small_cfg.checkpoint_after_ops = 50;
+        small_cfg.checkpoint_step_budget = 64;
+        pi_t::open_result_t reopened = pi_t::open(base, metric, index_config, small_cfg);
+        expect(reopened);
+        pi_t& pi = *reopened.index;
+        std::uint64_t starting_gen = pi.generation();
+        std::vector<float> probe(dimensions);
+        for (std::size_t i = 0; i != 200; ++i) {
+            make_vec(probe);
+            expect(pi.add(static_cast<std::int64_t>(2'000'000 + i), probe.data()));
+        }
+        // Auto-trigger must have started a checkpoint mid-way through the 200
+        // adds; finish any in-flight one and check the generation moved on.
+        auto err = pi.checkpoint();
+        expect(!err);
+        expect(pi.generation() > starting_gen);
+    }
+
+    // Cleanup
+    std::remove((std::string(base) + ".manifest").c_str());
+    for (int g = 0; g < 4; ++g) {
+        std::remove((std::string(base) + "." + std::to_string(g) + ".snapshot").c_str());
+        std::remove((std::string(base) + "." + std::to_string(g) + ".wal").c_str());
+    }
+}
+
+/**
  *  @brief  Regression test: `make(metric, config)` must return an index that is
  *          immediately usable - no explicit `reserve` required before `load` /
  *          `view` / `search`. Previously the typed graph's `{0, 0}` thread
@@ -1523,5 +1931,7 @@ int main(int, char**) {
     test_filtered_search();
     test_isolate();
     test_load_after_metric_make();
+    test_persistent_index();
+    test_global_rebuild();
     return 0;
 }
