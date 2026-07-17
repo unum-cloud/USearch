@@ -223,39 +223,42 @@ inline vector_norms<typename scalar_type_::dot_result_t> invoke_inner_norms_( //
  *  so @c kernel_chain backend resolution chains name-resolve on every build.
  */
 struct bf16_serial_inner_kit_t;
-struct bf16_haswell_inner_kit_t;
-struct bf16_skylake_inner_kit_t;
-struct bf16_genoa_inner_kit_t;
 struct bf16_serial_angular_kit_t;
-struct bf16_haswell_angular_kit_t;
-struct bf16_skylake_angular_kit_t;
-struct bf16_genoa_angular_kit_t;
 struct bf16_serial_euclidean_kit_t;
+struct bf16_haswell_inner_kit_t;
+struct bf16_haswell_angular_kit_t;
 struct bf16_haswell_euclidean_kit_t;
+struct bf16_skylake_inner_kit_t;
+struct bf16_skylake_angular_kit_t;
 struct bf16_skylake_euclidean_kit_t;
+struct bf16_genoa_inner_kit_t;
+struct bf16_genoa_angular_kit_t;
 struct bf16_genoa_euclidean_kit_t;
 struct i8_serial_inner_kit_t;
-struct i8_haswell_inner_kit_t;
-struct i8_icelake_inner_kit_t;
 struct i8_serial_angular_kit_t;
-struct i8_haswell_angular_kit_t;
-struct i8_icelake_angular_kit_t;
 struct i8_serial_euclidean_kit_t;
+struct i8_haswell_inner_kit_t;
+struct i8_haswell_angular_kit_t;
 struct i8_haswell_euclidean_kit_t;
+struct i8_icelake_inner_kit_t;
+struct i8_icelake_angular_kit_t;
 struct i8_icelake_euclidean_kit_t;
 struct u8_serial_inner_kit_t;
+struct u8_serial_angular_kit_t;
+struct u8_serial_euclidean_kit_t;
 struct u8_icelake_inner_kit_t;
 struct i4x2_serial_inner_kit_t;
-struct i4x2_haswell_inner_kit_t;
+struct i4x2_serial_angular_kit_t;
 struct i4x2_serial_euclidean_kit_t;
+struct i4x2_haswell_inner_kit_t;
 struct i4x2_haswell_euclidean_kit_t;
 struct u1x8_serial_inner_kit_t;
-struct u1x8_haswell_inner_kit_t;
-struct u1x8_icelake_inner_kit_t;
 struct u1x8_serial_hamming_kit_t;
-struct u1x8_haswell_hamming_kit_t;
-struct u1x8_icelake_hamming_kit_t;
 struct u1x8_serial_jaccard_kit_t;
+struct u1x8_haswell_inner_kit_t;
+struct u1x8_haswell_hamming_kit_t;
+struct u1x8_icelake_inner_kit_t;
+struct u1x8_icelake_hamming_kit_t;
 struct u1x8_haswell_jaccard_kit_t;
 struct u1x8_icelake_jaccard_kit_t;
 
@@ -405,6 +408,18 @@ struct u8_serial_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
+/** @brief u8 angular distance kit - serial reference. Through writes f32. */
+struct u8_serial_angular_kit_t : public u8_serial_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_serial_;
+};
+
+/** @brief u8 Euclidean (L2) distance kit - serial reference. Through writes f32. */
+struct u8_serial_euclidean_kit_t : public u8_serial_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
+};
+
 #if NK_TARGET_ICELAKE
 /** @brief u8 inner-product distance kit - Intel Ice Lake AVX-512 + VNNI VPDPBUSD. */
 struct u8_icelake_inner_kit_t {
@@ -545,6 +560,12 @@ struct i4x2_serial_inner_kit_t {
     static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
     static constexpr auto compute_norms = nk_reduce_moments_i4_serial;
     static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief i4x2 angular distance kit - serial reference. Through writes f32. */
+struct i4x2_serial_angular_kit_t : public i4x2_serial_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_serial_;
 };
 
 /**
@@ -793,11 +814,26 @@ struct kernel_chain<nk_kernel_dot_k, nk::u8_t, caps_> {
 };
 
 template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_angular_k, nk::u8_t, caps_> {
+    using kit_t = typename first_available_kit<u8_serial_angular_kit_t>::type;
+};
+
+template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_euclidean_k, nk::u8_t, caps_> {
+    using kit_t = typename first_available_kit<u8_serial_euclidean_kit_t>::type;
+};
+
+template <nk_capability_t caps_>
 struct kernel_chain<nk_kernel_dot_k, nk::i4x2_t, caps_> {
     using kit_t = typename first_available_kit<                                                     //
         i4x2_serial_inner_kit_t,                                                                    //
         chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i4x2_haswell_inner_kit_t> //
         >::type;
+};
+
+template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_angular_k, nk::i4x2_t, caps_> {
+    using kit_t = typename first_available_kit<i4x2_serial_angular_kit_t>::type;
 };
 
 template <nk_capability_t caps_>
