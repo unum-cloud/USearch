@@ -39,6 +39,7 @@
 #include <numkong/spatial.hpp>
 #include <numkong/vector.hpp>
 
+#include "test_utilities.hpp"
 #include "usearch/inner_metric.hpp"
 
 namespace nk = ashvardanian::numkong;
@@ -52,17 +53,6 @@ constexpr std::array<std::size_t, 7> dimensions_to_test = {7, 8, 32, 64, 128, 25
  */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
 concept kernel_supported = requires { typename kernel_chain<kernel_, scalar_, caps_>::kit_t; };
-
-/**
- *  @brief Build a scalar from a small unsigned - sub-byte goes through the @c sub_byte_ref
- *  proxy as raw @c int8_t, float wrappers via @c from_f32, byte-or-larger ints via the integral ctor.
- */
-template <typename scalar_>
-auto make_scalar(unsigned value) noexcept {
-    if constexpr (nk::dimensions_per_value<scalar_>() > 1) return static_cast<std::int8_t>(value);
-    else if constexpr (requires { scalar_::from_f32(0.0f); }) return scalar_::from_f32(static_cast<float>(value));
-    else return scalar_(value);
-}
 
 /**
  *  @brief Populates the input @p vec with small scalars - universally representable in any

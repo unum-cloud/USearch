@@ -22,17 +22,26 @@ namespace usearch {
 using inner_node_id_t = u32_t;
 using inner_distance_t = f32_t;
 
+/** @brief Reserved all-ones value, never a valid node id within a sub-index. Doubles as the
+ *      lock & empty-slot sentinel in neighbor lists. @ref inner_volatile_index_concurrency */
+inline constexpr inner_node_id_t inner_node_id_unknown_k = 0xFFFFFFFFu;
+
+/** @brief One traversal candidate: a node id paired with its distance to the query. */
 struct inner_scored_node_t {
+    /** @brief Identifier of the scored node within its sub-index. */
     inner_node_id_t node_id;
+    /** @brief Distance to the query, in the instantiated kernel's metric. */
     inner_distance_t distance;
 };
 
+/** @brief Orders scored nodes nearest-first; the comparator of the sorted results pool. */
 struct inner_closer_scored_node_t {
     inline bool operator()(inner_scored_node_t a, inner_scored_node_t b) const noexcept {
         return a.distance < b.distance;
     }
 };
 
+/** @brief Orders scored nodes furthest-first; the comparator of the max-heap frontier. */
 struct inner_further_scored_node_t {
     inline bool operator()(inner_scored_node_t a, inner_scored_node_t b) const noexcept {
         return a.distance > b.distance;
@@ -61,8 +70,12 @@ struct splitmix_u32_t {
     }
 
     /** @brief Index in `[0, bound)` via Lemire's multiply-shift - one multiply, no division.
-     *      Bias is ~`bound / 2^32`, negligible for entry-point selection. */
-    inline u32_t bounded(u32_t bound) noexcept { return static_cast<u32_t>(unbounded() * bound >> 32); }
+     *      Bias is ~`bound / 2^32`, negligible for entry-point selection. The random operand
+     *      must be narrowed to 32 bits @b before widening: multiplying the full 64-bit state
+     *      would let its high bits survive the shift and escape the bound. */
+    inline u32_t bounded(u32_t bound) noexcept {
+        return static_cast<u32_t>(static_cast<u64_t>(static_cast<u32_t>(unbounded())) * bound >> 32);
+    }
 };
 
 /**
@@ -109,6 +122,7 @@ template <                                                          //
     nk_dtype_t vector_dtype_ = nk_bf16_k,                           //
     nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k,            //
     nk_capability_t capability_ = nk_cap_icelake_k,                 //
+    typename wait_type_ = dummy_waiter_t,                           //
     typename vectors_allocator_type_ = std::allocator<std::byte>,   //
     typename neighbors_allocator_type_ = std::allocator<std::byte>, //
     typename traversals_allocator_type_ = std::allocator<std::byte> //
@@ -130,11 +144,12 @@ struct inner_traversal_context {
     using allocator_t = allocator_type_;
     using candidates_allocator_t =
         typename std::allocator_traits<allocator_t>::template rebind_alloc<inner_scored_node_t>;
-    using visits_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<inner_node_id_t>;
+    /** @brief The hash-set allocates raw bytes and places ids itself, so it demands a byte allocator. */
+    using visits_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<std::byte>;
 
     using results_array_t = sorted_buffer<inner_scored_node_t, inner_closer_scored_node_t, candidates_allocator_t>;
     using frontier_queue_t = max_heap<inner_scored_node_t, inner_further_scored_node_t, candidates_allocator_t>;
-    using visited_set_t = growing_hash_set<inner_node_id_t, std::less<inner_node_id_t>, visits_allocator_t>;
+    using visited_set_t = growing_hash_set<inner_node_id_t, std::hash<inner_node_id_t>, visits_allocator_t>;
 
     /** @brief Nodes we've already seen, forming a heap of best results so far. */
     results_array_t results;
@@ -147,18 +162,35 @@ struct inner_traversal_context {
     /** @brief Pseudo-random generator for picking traversal starting points. */
     splitmix_u32_t random_generator;
 
+    /** @brief Total one-to-one distance computations, padding lanes excluded. Like all the
+     *      telemetry below, it's a running counter: operations snapshot it on entry and report
+     *      the difference, so nested and repeated calls compose without resets. */
+    std::size_t computed_distances = 0;
+    /** @brief Subset of @p computed_distances spent in insertion-side diversity selection. */
+    std::size_t computed_distances_in_refines = 0;
+    /** @brief Subset of @p computed_distances spent re-selecting full lists while back-linking. */
+    std::size_t computed_distances_in_reverse_refines = 0;
+    /** @brief Frontier candidates whose neighbor lists were expanded during traversals. */
+    std::size_t visited_members = 0;
+    /** @brief Starvation restarts: re-seedings after the frontier drained prematurely -
+     *      a graph-connectivity health signal unique to the flat NSW design. */
+    std::size_t restarts = 0;
+
     inner_traversal_context() noexcept = delete;
     inner_traversal_context(inner_traversal_context const&) noexcept = delete;
     inner_traversal_context& operator=(inner_traversal_context const&) noexcept = delete;
 
-    inner_traversal_context(allocator_t alloc) noexcept
-        : results(alloc), refining_candidates(alloc), frontier(alloc), visited(alloc), random_generator() {}
+    // TODO: The traversal containers are WIP and do not yet accept allocator instances - they
+    // default-construct allocators internally. Propagate @p alloc once the D-ary rewrite lands.
+    inner_traversal_context(allocator_t) noexcept
+        : results(), refining_candidates(), frontier(), visited(), random_generator() {}
     inner_traversal_context(inner_traversal_context&&) = default;
     inner_traversal_context& operator=(inner_traversal_context&&) = default;
 };
 
 template <                                                                                //
     nk_dtype_t vector_dtype_, nk_kernel_kind_t kernel_kind_, nk_capability_t capability_, //
+    typename wait_type_,                                                                  //
     typename vectors_allocator_type_, typename neighbors_allocator_type_,
     typename traversals_allocator_type_> //
 struct inner_volatile_index {
@@ -169,10 +201,12 @@ struct inner_volatile_index {
     using vector_product_result_t = typename scalar_t::dot_result_t;
     using distance_t = f32_t;
     using candidate_t = inner_scored_node_t;
-    using key_t = std::uint64_t;
 
     /** Default integer type to use for loops and indexing at sub-index scale. */
     using small_size_t = std::uint32_t;
+
+    /** Node identifier within this sub-index - the class-local spelling of @c inner_node_id_t. */
+    using node_id_t = inner_node_id_t;
 
     using vectors_allocator_t =
         typename std::allocator_traits<vectors_allocator_type_>::template rebind_alloc<scalar_t>;
@@ -185,7 +219,6 @@ struct inner_volatile_index {
     using vector_span_t = nk::vector_span<scalar_t>;
     using vector_norms_t = vector_norms<vector_product_result_t>;
 
-    using keys_view_t = nk::vector_view<key_t>;
     using vectors_view_t = nk::matrix_view<scalar_t>;
     using node_ids_span_t = nk::vector_span<node_id_t>;
     using node_ids_view_t = nk::vector_view<node_id_t>;
@@ -224,6 +257,11 @@ struct inner_volatile_index {
     inline static constexpr small_size_t max_chunks_k =
         doubling_phase_chunks_k +
         static_cast<small_size_t>(((u64_t(1) << 32) - doubling_phase_capacity_k) >> slab_rows_log2_k);
+
+    /** @brief Ceiling on dispensable node ids: the all-ones id is the sentinel and must never be
+     *      claimed, so at most 2^32 - 1 rows are ever accounted - the final chunk physically holds
+     *      one extra row that stays forever unclaimed. @ref inner_volatile_index_growth */
+    inline static constexpr std::size_t max_node_count_k = (u64_t(1) << 32) - 1u;
 
     /**
      *  @brief Separately allocated matrix slabs, where each row is one vector entry. Slot indexes are global,
@@ -277,13 +315,32 @@ struct inner_volatile_index {
      */
     std::atomic<node_id_t> last_visible_id_ {0};
 
-    /** @brief Scalar dimensions per vector row; frozen by @c reserve() before the first insertion. */
-    small_size_t dimensions_ = 0;
+    /** @brief Packed geometry representation: vector dimensions in the high 32 bits, neighbor-list
+     *      connectivity in the low ones; zero means "not reserved yet". */
+    using packed_geometry_id_t = u64_t;
 
-    /** @brief Neighbor ids per node's list - a power of two, tiling whole cache lines exactly.
-     *      The leading slot doubles as the lock @b without sacrificing a neighbor slot.
-     *      Frozen by @c reserve() before the first insertion. */
-    connectivity_t connectivity_ = connectivity_unknown_k;
+    /**
+     *  @brief Once-frozen geometry of the index. Set exactly once by the first successful
+     *      @c reserve() via a single cold-path compare-exchange - the only CAS in the whole
+     *      index - so concurrent reservations, insertions & searches never race on it.
+     *      Connectivity stays a power of two, tiling whole cache lines, with the leading slot
+     *      of every neighbor list doubling as the lock without sacrificing a slot.
+     */
+    std::atomic<packed_geometry_id_t> geometry_ {0};
+
+    /** @brief Packs @p dimensions & @p connectivity into the @c geometry_ representation. */
+    inline static constexpr packed_geometry_id_t pack_geometry(std::size_t dimensions,
+                                                               connectivity_t connectivity) noexcept {
+        return (static_cast<packed_geometry_id_t>(dimensions) << 32u) | static_cast<packed_geometry_id_t>(connectivity);
+    }
+    /** @brief Extracts the vector dimensions from a packed @p geometry value. */
+    inline static constexpr small_size_t geometry_dimensions(packed_geometry_id_t geometry) noexcept {
+        return static_cast<small_size_t>(geometry >> 32u);
+    }
+    /** @brief Extracts the neighbor-list connectivity from a packed @p geometry value. */
+    inline static constexpr small_size_t geometry_connectivity(packed_geometry_id_t geometry) noexcept {
+        return static_cast<small_size_t>(geometry);
+    }
 
     /** @brief Constructed chunks per directory. Deliberately non-atomic: only the one "responsible"
      *      grower thread mutates it, and successive growers are ordered by the acquire/release pair
@@ -377,6 +434,63 @@ struct inner_volatile_index {
                (static_cast<std::size_t>(chunks_count - doubling_phase_chunks_k) << slab_rows_log2_k);
     }
 
+    /**
+     *  @brief Typed view over one node's neighbor row - the only legal way to touch a list that
+     *      concurrent scanners may be reading. Copyable value type with reference semantics.
+     *
+     *  Slot 0 is the combined lock & first-neighbor word: the all-ones @c inner_node_id_unknown_k
+     *  sentinel while unpublished, empty, or locked for editing - otherwise the plain id of the
+     *  first neighbor. Ids are stored raw and no row bytes are spent on bookkeeping, so the
+     *  neighbor capacity stays a power of two, tiling whole cache lines. Slots 1.. are accessed
+     *  as relaxed atomics on both sides, making the "stale-but-valid mix" a scanner can observe
+     *  during a concurrent re-link defined behavior instead of a data race - resolving finding
+     *  F5 of concurrency.md. @ref inner_volatile_index_concurrency
+     */
+    struct neighbors_list_ref_t {
+        node_ids_span_t row_;
+
+        /** @brief Total slots in the row, every one usable for a neighbor id. */
+        inline small_size_t capacity() const noexcept { return static_cast<small_size_t>(row_.size()); }
+
+        /** @brief Relaxed atomic read of slot @p index; slot 0 belongs to @c peek_first / @c lock. */
+        inline node_id_t load_slot(small_size_t index) const noexcept {
+            return std::atomic_ref<node_id_t>(row_[index]).load(std::memory_order_relaxed);
+        }
+        /** @brief Relaxed atomic write of slot @p index - only for the unpublished owner or the
+         *      current lock holder. */
+        inline void store_slot(small_size_t index, node_id_t value) const noexcept {
+            std::atomic_ref<node_id_t>(row_[index]).store(value, std::memory_order_relaxed);
+        }
+        /** @brief Acquire-load of the lock word: the sentinel means unpublished, empty, or locked;
+         *      any other value is the first neighbor id, with everything its last (un)locker wrote
+         *      now visible to us. */
+        inline node_id_t peek_first() const noexcept {
+            return std::atomic_ref<node_id_t>(row_[0]).load(std::memory_order_acquire);
+        }
+        /** @brief Spins until the lock is ours; returns the displaced first-neighbor value.
+         *      An exchange that receives the sentinel back did @b not acquire the lock - that rule
+         *      (F12) lives here, in one place, instead of at every call site. Only meaningful on
+         *      published nodes: locking an unpublished row would spin until its owner publishes. */
+        inline node_id_t lock() const noexcept {
+            node_id_t first_value = std::atomic_ref<node_id_t>(row_[0]).exchange( //
+                inner_node_id_unknown_k, std::memory_order_acq_rel);
+            while (first_value == inner_node_id_unknown_k) {
+                // Monitored capped wait on the lock word itself: the holder's unlock store wakes
+                // us; the cap guards the arming race. The address form exists precisely for such
+                // in-place words that are not `std::atomic` objects.
+                wait_type_ {}(row_.data(), inner_node_id_unknown_k, 0u, fu::wait_capped_t {});
+                first_value = std::atomic_ref<node_id_t>(row_[0]).exchange( //
+                    inner_node_id_unknown_k, std::memory_order_acq_rel);
+            }
+            return first_value;
+        }
+        /** @brief Release-stores @p first_value into slot 0 - unlocking and simultaneously
+         *      (re)publishing the edited list to every future acquiring reader. */
+        inline void unlock(node_id_t first_value) const noexcept {
+            std::atomic_ref<node_id_t>(row_[0]).store(first_value, std::memory_order_release);
+        }
+    };
+
     /** @brief Immutable view of the vector stored at @p location. */
     inline vector_view_t vector_for(chunked_location_t const& location) const noexcept {
         return vectors_chunks_[location.chunk_index].row(location.index_in_chunk).as_vector();
@@ -397,10 +511,10 @@ struct inner_volatile_index {
         return norms_chunks_[location.chunk_index][location.index_in_chunk];
     }
 
-    /** @brief Mutable span over the fixed-capacity neighbors list at @p location, whose leading
-     *      slot doubles as the lock sentinel. @ref inner_volatile_index_concurrency */
-    inline node_ids_span_t neighbors_for(chunked_location_t const& location) noexcept {
-        return neighbors_chunks_[location.chunk_index].row(location.index_in_chunk).as_vector();
+    /** @brief Typed atomic view over the fixed-capacity neighbors list at @p location.
+     *      @ref inner_volatile_index_concurrency */
+    inline neighbors_list_ref_t neighbors_for(chunked_location_t const& location) noexcept {
+        return {neighbors_chunks_[location.chunk_index].row(location.index_in_chunk).as_vector()};
     }
     /** @brief Immutable view of the fixed-capacity neighbors list at @p location. */
     inline node_ids_view_t neighbors_for(chunked_location_t const& location) const noexcept {
@@ -420,9 +534,18 @@ struct inner_volatile_index {
      *  inside it becomes visible, and that visibility chains through the same atomics.
      */
     expected<std::size_t> create_next_chunk(std::size_t minimal_capacity) noexcept {
-        // The never-reallocating chunk directories are sized once, by `reserve()`;
-        // inserting without a prior successful reservation is a usage error, not an allocation failure.
-        if (!vectors_chunks_.size()) return {0, status_t::uninitialized_k};
+        // Growing before the geometry is frozen is a usage error, not an allocation failure.
+        packed_geometry_id_t const geometry = geometry_.load(std::memory_order_acquire);
+        if (!geometry) return {0, status_t::uninitialized_k};
+        std::size_t const chunk_dimensions = geometry_dimensions(geometry);
+        std::size_t const chunk_connectivity = geometry_connectivity(geometry);
+
+        // Size the never-reallocating chunk directories ahead of the very first chunk - safe
+        // without any locks, because growth is provably single-threaded via the grower election.
+        if (!vectors_chunks_.size() &&
+            (!vectors_chunks_.try_resize(max_chunks_k) || !norms_chunks_.try_resize(max_chunks_k) ||
+             !neighbors_chunks_.try_resize(max_chunks_k)))
+            return {0, status_t::bad_alloc_k};
 
         std::size_t added_capacity = 0;
         while (added_capacity < minimal_capacity) {
@@ -437,14 +560,14 @@ struct inner_volatile_index {
             std::size_t const chunk_rows = power_of_two<std::size_t>(chunk_rows_log2);
 
             vectors_chunk_t vectors_chunk = vectors_chunk_t::try_zeros( //
-                {chunk_rows, dimensions_}, vectors_allocator_);
+                {chunk_rows, chunk_dimensions}, vectors_allocator_);
             norms_chunk_t norms_chunk = norms_chunk_t::try_zeros( //
                 {chunk_rows}, norms_allocator_t(vectors_allocator_));
             // Filling the neighbors with the all-ones sentinel is load-bearing: a sentinel leading
             // slot reads as "unpublished" to every traversal, and sentinel tails terminate shorter
             // lists - so no explicit neighbor counts are stored anywhere.
             neighbors_chunk_t neighbors_chunk = neighbors_chunk_t::try_full( //
-                {chunk_rows, static_cast<std::size_t>(connectivity_)}, inner_node_id_unknown_k, neighbors_allocator_);
+                {chunk_rows, chunk_connectivity}, inner_node_id_unknown_k, neighbors_allocator_);
             if (vectors_chunk.empty() || norms_chunk.empty() || neighbors_chunk.empty())
                 return {added_capacity, status_t::bad_alloc_k};
 
@@ -453,17 +576,367 @@ struct inner_volatile_index {
             neighbors_chunks_[chunks_count_] = std::move(neighbors_chunk);
             ++chunks_count_;
             added_capacity += chunk_rows;
+            // The final chunk closes the id space at 2^32 rows, but the all-ones id is the sentinel:
+            // account one row less, so no claim can ever dispense it and the dispenser never wraps.
+            if (chunks_count_ == max_chunks_k) added_capacity -= 1;
         }
         return {added_capacity, status_t::success_k};
     }
 
-    /** @brief Atomic reference to the leading slot of a node's @p neighbors list - its combined
-     *      lifecycle indicator & lock: zero while unpublished or locked for editing, otherwise the
-     *      neighbors count plus one. The slot sits at the start of the row, so on chunk row widths
-     *      matching @ref connectivity_t it lands on its own cache-line boundary.
-     *      @ref inner_volatile_index_concurrency */
-    inline static std::atomic_ref<node_id_t> neighbors_lock_ref(node_ids_span_t neighbors) noexcept {
-        return std::atomic_ref<node_id_t>(*neighbors.data());
+    /**
+     *  @brief Claims storage capacity for @p count new nodes, growing chunks when needed.
+     *
+     *  Spins while other threads are mid-growth, covering all interleavings of the capacity state
+     *  machine. Claims @b storage only, never identity: node ids are dispensed one-by-one from
+     *  @p next_visible_id_ at wiring time. On success, enough sentinel-filled rows exist for
+     *  @p count dispenses, and the caller must roll forward to wiring & publishing them all -
+     *  claimed capacity cannot be handed back once ids are dispensed against it, or the
+     *  visibility watermark would stall forever. @ref inner_volatile_index_concurrency
+     */
+    expected<node_id_t> claim_capacity(std::size_t count) noexcept {
+        // A batch beyond the id-space ceiling can never succeed: reject it before the counter
+        // dance, so it neither grows the index to its maximum in vain nor overflows the signed
+        // capacity arithmetic below.
+        if (count > max_node_count_k) return {inner_node_id_unknown_k, status_t::overflow_k};
+        while (true) {
+            std::ptrdiff_t const old_remaining_capacity = remaining_capacity_.fetch_sub( //
+                count, std::memory_order_acquire);
+            std::ptrdiff_t const new_remaining_capacity = old_remaining_capacity - static_cast<std::ptrdiff_t>(count);
+
+            // The thread that moved the counter from non-negative to negative is responsible for
+            // the next allocation; the counter can't recover until this thread credits it, so
+            // growth stays single-threaded. Accepting `old == 0` is load-bearing: capacity may
+            // rest at exactly zero, and `old > 0` would then elect nobody - a proven livelock,
+            // finding F1 in concurrency.md.
+            if (old_remaining_capacity >= 0 && new_remaining_capacity < 0) {
+                auto [added_capacity, chunk_status] = create_next_chunk(count);
+                if (chunk_status != status_t::success_k) {
+                    // Revert our claim - crediting any partially added chunks along the way -
+                    // so that a smaller insertion may succeed later.
+                    remaining_capacity_.fetch_add(count + added_capacity, std::memory_order_release);
+                    return {inner_node_id_unknown_k, chunk_status};
+                }
+                node_id_t const first_id = last_allocated_id_.fetch_add(count, std::memory_order_acquire);
+                remaining_capacity_.fetch_add(added_capacity, std::memory_order_release);
+                return {first_id, status_t::success_k};
+            }
+            // We may be lucky and the space is already reserved for the whole batch.
+            else if (new_remaining_capacity >= 0) {
+                return {last_allocated_id_.fetch_add(count, std::memory_order_acquire), status_t::success_k};
+            }
+            // Corner case: the index has 10 free slots, thread Y is growing it for its 20 entries,
+            // and we want a 100 - even freshly added capacity may not be enough for us.
+            else {
+                // Revert the counter, then wait for it to move - any credit or claim wakes the
+                // capped monitored wait, and we re-poll regardless once the cap expires.
+                std::ptrdiff_t const reverted_capacity = remaining_capacity_.fetch_add(count,
+                                                                                       std::memory_order_release) +
+                                                         static_cast<std::ptrdiff_t>(count);
+                wait_type_ {}(remaining_capacity_, reverted_capacity, 0u, fu::wait_capped_t {});
+            }
+        }
+    }
+
+    /**
+     *  @brief Samples one 4-way batch of distinct, unvisited, published landmarks, scores them
+     *      against the @p query, and queues them into the frontier & the result pool.
+     *  @return `true` if at least one fresh landmark was queued; `false` when every published
+     *      node is already visited or the scratch structures can't grow.
+     *
+     *  Uniform draws that collide with `visited` fall back to cyclic linear probing over the id
+     *  space, so every call makes strict progress without retry budgets - the sampler is exact,
+     *  not heuristic. Only transiently locked nodes are re-rolled, mirroring the traversal policy.
+     */
+    bool sample_landmarks(vector_view_t query, vector_norms_t query_norms, node_id_t first_invisible_id,
+                          std::size_t expansion_factor, inner_traversal_context_t& context) noexcept {
+
+        results_array_t& results = context.results;
+        frontier_queue_t& frontier = context.frontier;
+        visited_set_t& visited = context.visited;
+
+        std::array<node_id_t, 4> landmarks_ids;
+        std::array<vector_view_t, 4> landmarks_vectors;
+        std::array<vector_norms_t, 4> landmarks_norms;
+        small_size_t landmarks_in_batch = 0;
+
+        if (!visited.reserve(visited.size() + landmarks_ids.size())) return false;
+        // `visited` may also hold above-watermark ids discovered through fresh back-links, so the
+        // size check is conservative: it can only under-sample, never let the probe loop spin.
+        while (landmarks_in_batch != landmarks_ids.size() && visited.size() < first_invisible_id) {
+            // Draw uniformly; on collision with an already-visited id, probe forward cyclically -
+            // deterministic progress even when the published set is almost fully explored.
+            node_id_t landmark_node_id = context.random_generator.bounded(first_invisible_id);
+            while (visited.test(landmark_node_id))
+                landmark_node_id = landmark_node_id + 1 == first_invisible_id ? 0 : landmark_node_id + 1;
+
+            chunked_location_t const landmark_location = chunked_location(landmark_node_id);
+            neighbors_list_ref_t const landmark_neighbors = neighbors_for(landmark_location);
+            // Published nodes may be transiently locked for re-linking - re-roll those.
+            if (landmark_neighbors.peek_first() == inner_node_id_unknown_k) continue;
+
+            visited.set(landmark_node_id);
+            landmarks_ids[landmarks_in_batch] = landmark_node_id;
+            landmarks_vectors[landmarks_in_batch] = vector_for(landmark_location);
+            landmarks_norms[landmarks_in_batch] = norm_for(landmark_location);
+            ++landmarks_in_batch;
+        }
+        if (!landmarks_in_batch) return false;
+
+        // Pad the tail lanes with lane zero, so the 4-way kernel streams valid memory;
+        // the padded outputs are simply never consumed.
+        for (small_size_t lane = landmarks_in_batch; lane != landmarks_ids.size(); ++lane) {
+            landmarks_ids[lane] = landmarks_ids[0];
+            landmarks_vectors[lane] = landmarks_vectors[0];
+            landmarks_norms[lane] = landmarks_norms[0];
+        }
+        std::array<distance_t, 4> const landmark_distances = distances( //
+            query, query_norms, landmarks_vectors, landmarks_norms);
+        context.computed_distances += landmarks_in_batch;
+        for (small_size_t lane = 0; lane != landmarks_in_batch; ++lane) {
+            inner_scored_node_t const scored(landmarks_ids[lane], landmark_distances[lane]);
+            if (!frontier.insert(inner_scored_node_t(scored))) return false;
+            results.insert(inner_scored_node_t(scored), expansion_factor);
+        }
+        return true;
+    }
+
+    /**
+     *  @brief Greedy best-first NSW walk from random published landmarks toward the @p query.
+     *
+     *  Read-only on the graph: takes no locks, writes nothing, retries transiently locked nodes.
+     *  Owns nothing but the caller's scratch @p context, which must arrive pre-reserved & pre-cleared;
+     *  fills `context.results` with up to @p expansion_factor nearest published candidates.
+     *  Scratch allocation failures degrade the walk - keeping the best candidates found so far -
+     *  rather than fail it: callers may already own claimed node ids and must roll forward regardless.
+     */
+    void search_around(vector_view_t query, vector_norms_t query_norms, node_id_t first_invisible_id,
+                       std::size_t expansion_factor, inner_traversal_context_t& context) noexcept {
+
+        results_array_t& results = context.results;
+        frontier_queue_t& frontier = context.frontier;
+        visited_set_t& visited = context.visited;
+        std::size_t const node_connectivity = connectivity();
+
+        // Seed with about as many landmarks as the graph connectivity - a stochastic multi-start,
+        // gathered in 4-way batches to amortize the loop overhead over unrolled "gathers".
+        small_size_t const landmark_batches = divide_round_up<small_size_t>(node_connectivity, 4);
+        for (small_size_t landmarks_batch = 0; landmarks_batch != landmark_batches; ++landmarks_batch)
+            if (!sample_landmarks(query, query_norms, first_invisible_id, expansion_factor, context)) break;
+
+        // Greedily walk the frontier nearest-first, keeping the best `expansion_factor` in `results`.
+        while (true) {
+            // Starvation restart, knob-free: a drained frontier before a full result pool means
+            // the walk exhausted everything reachable from its seeds - a sparse early graph or a
+            // disconnected component - so re-seed and continue, like restarting a stochastic
+            // descent. Termination needs no budget: every successful batch strictly grows both
+            // `visited` (bounded by the published set) and `results` (bounded by the expansion
+            // factor), so restarts are self-limiting by construction.
+            if (frontier.empty()) {
+                if (results.size() >= expansion_factor) break;
+                if (!sample_landmarks(query, query_norms, first_invisible_id, expansion_factor, context)) break;
+                ++context.restarts;
+                continue;
+            }
+
+            // Peek - don't pop yet: the chosen node's neighbor list may be locked, in which case
+            // we retry the selection rather than dropping it from the frontier.
+            inner_scored_node_t const candidate = frontier.top();
+            // `results` stays sorted ascending, so its back is the furthest kept - our search radius.
+            distance_t const radius = results.top().distance;
+            // Once the nearest unexpanded node is past that radius and `results` is full,
+            // nothing deeper can improve the answer.
+            if (candidate.distance > radius && results.size() == expansion_factor) break;
+
+            chunked_location_t const candidate_location = chunked_location(candidate.node_id);
+            neighbors_list_ref_t const candidate_neighbors = neighbors_for(candidate_location);
+
+            // Slot 0 holds either the lock sentinel or the first neighbor's id. If the node is
+            // locked for re-linking, spin: it will either free up, or we keep re-evaluating the
+            // same nearest candidate until it does - dropping it would silently degrade recall.
+            node_id_t const first_neighbor_id = candidate_neighbors.peek_first();
+            if (first_neighbor_id == inner_node_id_unknown_k) continue;
+
+            // The node is live and readable - commit to it and drop it from the frontier.
+            frontier.pop();
+            ++context.visited_members;
+
+            // Scan the fixed-capacity sentinel-terminated list. Slot 0 comes from the acquiring load
+            // above - never re-read it, a writer may have locked the node since. The remaining
+            // slots are relaxed atomic reads that may interleave with a concurrent re-linker, so
+            // the worst case is a stale-but-valid mix of neighbors - defined behavior by F5.
+            small_size_t const slots_count = candidate_neighbors.capacity();
+            small_size_t neighbor_slot = 0;
+            bool list_ended = false;
+            while (!list_ended && neighbor_slot != slots_count) {
+
+                // Gather the unvisited neighbors in 4-way batches, score them against the query,
+                // and push the promising ones into the frontier & result pool.
+                std::array<node_id_t, 4> gathered_ids;
+                std::array<vector_view_t, 4> gathered_vectors;
+                std::array<vector_norms_t, 4> gathered_norms;
+                small_size_t gathered_count = 0;
+                for (; gathered_count != gathered_ids.size() && neighbor_slot != slots_count; ++neighbor_slot) {
+                    node_id_t const neighbor_id = neighbor_slot ? candidate_neighbors.load_slot(neighbor_slot) //
+                                                                : first_neighbor_id;
+                    if (neighbor_id == inner_node_id_unknown_k) {
+                        list_ended = true;
+                        break;
+                    }
+                    // Translation-frontier invariant: only ids below our acquire-fenced watermark
+                    // snapshot may be located. A fresher id read from a concurrently re-linked slot
+                    // has no happens-before edge to its hosting chunk yet - finding F6 - so skip
+                    // it; a later traversal with a fresher snapshot will meet it safely.
+                    if (neighbor_id >= first_invisible_id) continue;
+                    if (visited.test(neighbor_id)) continue;
+                    chunked_location_t const neighbor_location = chunked_location(neighbor_id);
+                    gathered_ids[gathered_count] = neighbor_id;
+                    gathered_vectors[gathered_count] = vector_for(neighbor_location);
+                    gathered_norms[gathered_count] = norm_for(neighbor_location);
+                    ++gathered_count;
+                }
+                if (!gathered_count) continue;
+
+                // Pad the tail lanes with lane zero, so the 4-way kernel streams valid memory;
+                // the padded outputs are simply never consumed.
+                for (small_size_t lane = gathered_count; lane != gathered_ids.size(); ++lane) {
+                    gathered_ids[lane] = gathered_ids[0];
+                    gathered_vectors[lane] = gathered_vectors[0];
+                    gathered_norms[lane] = gathered_norms[0];
+                }
+                std::array<distance_t, 4> const gathered_distances = distances( //
+                    query, query_norms, gathered_vectors, gathered_norms);
+                context.computed_distances += gathered_count;
+
+                // Grow the visited set ahead of the marks - `set()` itself never rehashes.
+                if (!visited.reserve(visited.size() + gathered_count)) return;
+                for (small_size_t lane = 0; lane != gathered_count; ++lane) {
+                    visited.set(gathered_ids[lane]);
+                    inner_scored_node_t const scored(gathered_ids[lane], gathered_distances[lane]);
+                    // Skip candidates that can't improve a full result pool - the classic bound.
+                    if (results.size() == expansion_factor && scored.distance >= results.top().distance) continue;
+                    if (!frontier.insert(inner_scored_node_t(scored))) return;
+                    results.insert(inner_scored_node_t(scored), expansion_factor);
+                }
+            }
+        }
+    }
+
+    /** @brief Scratch for one node's chosen links: ids plus cached views & norms, so diversity
+     *      checks and back-linking never re-derive locations. Sized for the largest supported
+     *      connectivity; the live prefix is `count`. */
+    struct selected_links_t {
+        std::array<node_id_t, connectivity_128_k> ids;
+        std::array<vector_view_t, connectivity_128_k> vectors;
+        std::array<vector_norms_t, connectivity_128_k> norms;
+        small_size_t count = 0;
+    };
+
+    /**
+     *  @brief Greedy diversity selection over the ascending @p candidates buffer - the classic
+     *      NSW/HNSW pruning heuristic. Walking nearest-first, a candidate is kept only when it is
+     *      closer to the query than to every already-kept link, so the links spread across
+     *      directions instead of clustering on one side of the query.
+     *
+     *  Reads the graph without locks and fills at most @p limit entries of @p out.
+     *  Cost is O(kept * considered) one-to-one distances; 4-way batching is a known follow-up.
+     *  @return The number of distance computations performed, for the caller's telemetry.
+     */
+    std::size_t select_diverse(results_array_t const& candidates, std::size_t limit,
+                               selected_links_t& out) const noexcept {
+        out.count = 0;
+        std::size_t computed_distances = 0;
+        inner_scored_node_t const* candidates_data = candidates.data();
+        for (std::size_t index = 0; index != candidates.size() && out.count != limit; ++index) {
+            inner_scored_node_t const candidate = candidates_data[index];
+            chunked_location_t const candidate_location = chunked_location(candidate.node_id);
+            vector_view_t const candidate_vector = vector_for(candidate_location);
+            vector_norms_t const candidate_norms = norm_for(candidate_location);
+            bool diverse = true;
+            for (small_size_t kept = 0; kept != out.count && diverse; ++kept, ++computed_distances)
+                diverse = distance(candidate_vector, candidate_norms, out.vectors[kept], out.norms[kept]) >=
+                          candidate.distance;
+            if (!diverse) continue;
+            out.ids[out.count] = candidate.node_id;
+            out.vectors[out.count] = candidate_vector;
+            out.norms[out.count] = candidate_norms;
+            ++out.count;
+        }
+        return computed_distances;
+    }
+
+    /**
+     *  @brief Wires the reverse edges: for every selected link, locks that neighbor's list via the
+     *      slot-0 sentinel exchange and inserts the fresh node - appending when there is room,
+     *      otherwise re-selecting the diverse best among the existing links plus the newcomer.
+     *
+     *  Locking discipline (F12 in concurrency.md): at most one neighbor lock is held at any
+     *  moment, and never while spinning on the watermark - callers invoke this only after their
+     *  publication turn. An exchange that returns the sentinel did @b not acquire the lock -
+     *  another writer owns it - so we politely retry. All slot writes happen under the lock, and
+     *  the unlocking release-store of slot 0 is what republishes the edited list.
+     */
+    void back_link_neighbors(node_id_t new_node_id, vector_view_t new_vector, vector_norms_t new_norms,
+                             selected_links_t const& selected, inner_traversal_context_t& context) noexcept {
+
+        results_array_t& refining_candidates = context.refining_candidates;
+        std::size_t const node_connectivity = connectivity();
+
+        for (small_size_t link = 0; link != selected.count; ++link) {
+            node_id_t const neighbor_id = selected.ids[link];
+            chunked_location_t const neighbor_location = chunked_location(neighbor_id);
+            neighbors_list_ref_t const neighbor_list = neighbors_for(neighbor_location);
+
+            // Lock by exchanging the sentinel in; the displaced slot-0 value is ours to restore.
+            node_id_t const first_slot_value = neighbor_list.lock();
+
+            // An empty list is encoded as a self-loop: the fresh node becomes the only neighbor.
+            if (first_slot_value == neighbor_id) {
+                neighbor_list.unlock(new_node_id);
+                continue;
+            }
+
+            // Fast path: room to append - no distance math at all.
+            small_size_t const slots_count = neighbor_list.capacity();
+            small_size_t existing_count = 1;
+            while (existing_count != slots_count && neighbor_list.load_slot(existing_count) != inner_node_id_unknown_k)
+                ++existing_count;
+            if (existing_count != slots_count) {
+                neighbor_list.store_slot(existing_count, new_node_id);
+                neighbor_list.unlock(first_slot_value);
+                continue;
+            }
+
+            // Slow path: the list is full. Score the existing links & the newcomer by distance to
+            // the neighbor itself, and re-run the diversity heuristic to keep the best spread.
+            // Distances are computed under the lock for now; an optimistic precompute-and-revalidate
+            // scheme shortening this critical section is a known follow-up.
+            vector_view_t const neighbor_vector = selected.vectors[link];
+            vector_norms_t const neighbor_norms = selected.norms[link];
+            refining_candidates.clear();
+            refining_candidates.insert( //
+                inner_scored_node_t(new_node_id, distance(neighbor_vector, neighbor_norms, new_vector, new_norms)),
+                slots_count + 1);
+            for (small_size_t slot = 0; slot != slots_count; ++slot) {
+                node_id_t const existing_id = slot ? neighbor_list.load_slot(slot) : first_slot_value;
+                chunked_location_t const existing_location = chunked_location(existing_id);
+                refining_candidates.insert( //
+                    inner_scored_node_t(existing_id,
+                                        distance(neighbor_vector, neighbor_norms, vector_for(existing_location),
+                                                 norm_for(existing_location))),
+                    slots_count + 1);
+            }
+            selected_links_t refined;
+            std::size_t const refine_distances = select_diverse(refining_candidates, node_connectivity, refined);
+            context.computed_distances += refine_distances + slots_count + 1;
+            context.computed_distances_in_reverse_refines += refine_distances + slots_count + 1;
+
+            // Rewrite the tail slots, sentinel-terminate any shrink, and unlock with the new head.
+            // `refined.count >= 1` always: the heuristic never rejects the nearest candidate.
+            for (small_size_t slot = 1; slot < refined.count; ++slot) neighbor_list.store_slot(slot, refined.ids[slot]);
+            for (small_size_t slot = refined.count; slot < slots_count; ++slot)
+                neighbor_list.store_slot(slot, inner_node_id_unknown_k);
+            neighbor_list.unlock(refined.ids[0]);
+        }
     }
 
   public:
@@ -472,211 +945,323 @@ struct inner_volatile_index {
      */
     std::size_t size() const noexcept { return last_visible_id_.load(); }
 
-    /** @brief Slots per neighbors list, including the leading lock/indicator slot. */
-    std::size_t connectivity() const noexcept { return static_cast<std::size_t>(connectivity_); }
+    /** @brief Neighbor ids per node's list - its full fixed capacity, none lost to bookkeeping. */
+    std::size_t connectivity() const noexcept {
+        return geometry_connectivity(geometry_.load(std::memory_order_acquire));
+    }
 
+    /** @brief Outcome of a @c reserve() call: the capacity & connectivity actually in effect. */
     struct reserve_result_t {
+        /** @brief Total rows the index can now host without growing again. */
         std::size_t new_capacity = 0;
+        /** @brief The frozen neighbors-list width - echoed back even on a geometry mismatch. */
         connectivity_t connectivity = connectivity_unknown_k;
+        /** @brief @c success_k, or why the reservation failed. */
         status_t status = status_t::success_k;
     };
 
+    /** @brief Requested geometry & capacity for a @c reserve() call; frozen by the first success. */
     struct reserve_capacity_t {
+        /** @brief Minimal number of entries the index must be able to host. */
         std::size_t capacity = 0;
+        /** @brief Neighbors-list width per node; a power of two tiling whole cache lines. */
         connectivity_t connectivity = connectivity_32_k;
         /** @brief Scalar dimensions per vector; required before the first insertion. */
         std::size_t dimensions = 0;
     };
 
     /**
-     *  @brief Pre-allocates the chunk directories & enough chunks to fit @p config.capacity entries.
+     *  @brief Ensures the index can host at least @p config.capacity entries, growing when needed.
+     *
+     *  Safe to call concurrently with insertions, searches, and other reservations: capacity
+     *  growth is a thin wrapper over the very same grower-election protocol that powers @c insert,
+     *  and the geometry (vector dimensions & neighbor connectivity) freezes exactly once through
+     *  a single cold-path compare-exchange. Later calls must pass a matching geometry, or they
+     *  receive @c status_t::config_mismatch_k with the frozen connectivity echoed back.
      *
      *  Constructors deliberately allocate nothing, matching the design of ForkUnion's dynamic
-     *  structures - this is the only entry point that creates directory storage, and it reports
-     *  failures in the returned @c reserve_result_t instead of leaving half-built state behind.
-     *
-     *  Unlike the rest of the interface, this call is @b not safe to run concurrently with
-     *  insertions or searches - invoke it once, right after construction. The first successful
-     *  call freezes the vector @p dimensions and @p connectivity; later calls can only grow
-     *  capacity and echo the frozen connectivity back in the result.
+     *  structures - every storage failure surfaces right here, in the returned @c reserve_result_t.
      */
     reserve_result_t reserve(reserve_capacity_t config) noexcept {
-        // The very first reservation freezes the geometry and sizes the never-reallocating
-        // directories to their lifetime maximum - one allocation each, ~4'105 padded headers.
-        if (chunks_count_ == 0) {
-            connectivity_ = config.connectivity;
-            dimensions_ = static_cast<small_size_t>(config.dimensions);
-            if (!vectors_chunks_.size() &&
-                (!vectors_chunks_.try_resize(max_chunks_k) || !norms_chunks_.try_resize(max_chunks_k) ||
-                 !neighbors_chunks_.try_resize(max_chunks_k)))
-                return {0, connectivity_, status_t::bad_alloc_k};
+
+        // Freeze the geometry exactly once; competing first-reservations are decided by one CAS.
+        packed_geometry_id_t const desired_geometry = pack_geometry(config.dimensions, config.connectivity);
+        packed_geometry_id_t expected_geometry = 0;
+        bool const froze_now = geometry_.compare_exchange_strong( //
+            expected_geometry, desired_geometry, std::memory_order_acq_rel, std::memory_order_acquire);
+        packed_geometry_id_t const frozen_geometry = froze_now ? desired_geometry : expected_geometry;
+        connectivity_t const frozen_connectivity = static_cast<connectivity_t>(geometry_connectivity(frozen_geometry));
+        if (frozen_geometry != desired_geometry) return {0, frozen_connectivity, status_t::config_mismatch_k};
+
+        while (true) {
+            // Physical rows = claimed + unclaimed - the invariant tying the two counters together.
+            // Transient dips while a grower is mid-flight only make this estimate conservative.
+            std::size_t const claimed_rows = last_allocated_id_.load(std::memory_order_acquire);
+            std::ptrdiff_t const unclaimed_rows = remaining_capacity_.load(std::memory_order_acquire);
+            std::size_t const total_rows = claimed_rows +
+                                           static_cast<std::size_t>(unclaimed_rows > 0 ? unclaimed_rows : 0);
+            if (total_rows >= config.capacity) return {total_rows, frozen_connectivity, status_t::success_k};
+
+            // Grow through the same grower-election protocol that powers `insert`: claim the
+            // missing rows, then hand the whole claim back. The revert order is load-bearing -
+            // deflating `last_allocated_id_` before re-crediting `remaining_capacity_` keeps the
+            // physical-rows sum conservative for concurrent observers, so a racing reservation
+            // can only over-grow, never report capacity that does not exist.
+            std::size_t const deficit_rows = config.capacity - total_rows;
+            expected<node_id_t> const claimed = claim_capacity(deficit_rows);
+            if (claimed.status != status_t::success_k) return {total_rows, frozen_connectivity, claimed.status};
+            last_allocated_id_.fetch_sub(static_cast<node_id_t>(deficit_rows), std::memory_order_relaxed);
+            remaining_capacity_.fetch_add(static_cast<std::ptrdiff_t>(deficit_rows), std::memory_order_release);
         }
-        std::size_t const current_capacity = capacity_of_chunks(chunks_count_);
-        if (config.capacity <= current_capacity) return {current_capacity, connectivity_, status_t::success_k};
-        auto [added_capacity, chunks_status] = create_next_chunk(config.capacity - current_capacity);
-        remaining_capacity_.fetch_add(added_capacity, std::memory_order_release);
-        return {current_capacity + added_capacity, connectivity_, chunks_status};
     }
 
+    /** @brief Outcome & telemetry of one @c insert() batch. */
     struct insert_result_t {
+        /** @brief @c success_k, or why the whole batch was rejected before claiming ids. */
         status_t status = status_t::success_k;
+        /** @brief Index size visible after this batch fully published - the watermark. */
+        std::size_t new_size = 0;
+        /** @brief Frontier candidates expanded across all per-node walks of the batch. */
+        std::size_t visited_members = 0;
+        /** @brief Total distance computations, with padding lanes of 4-way kernels excluded. */
+        std::size_t computed_distances = 0;
+        /** @brief Subset of @p computed_distances spent in insertion-side diversity selection. */
+        std::size_t computed_distances_in_refines = 0;
+        /** @brief Subset of @p computed_distances spent re-selecting full lists while back-linking. */
+        std::size_t computed_distances_in_reverse_refines = 0;
+        /** @brief Starvation restarts across the batch - a graph-connectivity health signal. */
+        std::size_t restarts = 0;
+
+        explicit operator bool() const noexcept { return status == status_t::success_k; }
     };
 
+    /** @brief Optional tuning knobs for @c insert(); zeros mean "derive from connectivity". */
     struct insert_config_t {
+        /** @brief Breadth of the candidate pool during wiring; defaults to twice the connectivity. */
         small_size_t expansion_factor;
     };
 
     /**
-     *  @brief Inserts a batch of @p new_keys mapping to @p new_values.
+     *  @brief Inserts a batch of @p new_vectors, reporting each one's assigned node id.
+     *
+     *  Per claimed node the flow is: land the payload, walk the graph for candidates, wire & publish.
+     *  All fallible scratch allocations happen before the id claim - once ids are claimed, this
+     *  thread must roll forward to publication. @ref inner_volatile_index_concurrency
+     *
+     *  @param[out] assigned_ids Caller-owned output: either empty, or exactly one slot per incoming
+     *      vector, receiving that vector's dispensed node id. The index stores no keys - ids are
+     *      dense, so callers park keys in a flat id-indexed array of the outer layer. One batch's
+     *      ids are generally @b not contiguous: identity is dispensed per node, interleaved
+     *      across concurrently inserting threads.
      */
-    status_t insert(keys_view_t new_keys, vectors_view_t new_vectors, inner_traversal_context_t& context,
-                    insert_config_t config = {}) noexcept {
+    insert_result_t insert(vectors_view_t new_vectors, node_ids_span_t assigned_ids, inner_traversal_context_t& context,
+                           insert_config_t config = {}) noexcept {
 
-        std::size_t const incoming_vectors_count = new_vectors.size();
-        if (!incoming_vectors_count) return success_k;
-        std::size_t const node_connectivity = connectivity();
+        std::size_t const incoming_vectors_count = new_vectors.extent(0); // rows, not scalars
+        if (!incoming_vectors_count) return {status_t::success_k, size()};
+        bool const report_assigned_ids = assigned_ids.size() != 0;
+        if (report_assigned_ids && assigned_ids.size() != incoming_vectors_count) return {status_t::config_mismatch_k};
+
+        // Snapshot the context's running telemetry, to report this batch's share on return.
+        std::size_t const visited_members_before = context.visited_members;
+        std::size_t const computed_distances_before = context.computed_distances;
+        std::size_t const refines_before = context.computed_distances_in_refines;
+        std::size_t const reverse_refines_before = context.computed_distances_in_reverse_refines;
+        std::size_t const restarts_before = context.restarts;
 
         // NSW and HNSW use an "ef" expansion factor controlling the breadth of the candidate pool,
         // tunable independently at insertion and search time. Default it to twice the connectivity -
         // enough slack for the neighbor-selection heuristic to prune - unless the caller overrides it.
+        // Geometry is frozen by the first successful `reserve()` - a hard prerequisite here:
+        // without it, neither the copy width nor the neighbor-list width is defined.
+        packed_geometry_id_t const geometry = geometry_.load(std::memory_order_acquire);
+        if (!geometry) return {status_t::uninitialized_k};
+        std::size_t const node_connectivity = geometry_connectivity(geometry);
         std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
                                                                      : node_connectivity * 2;
 
-        // Check if we need to perform new memory allocations.
-        // Keep in mind, another thread may be also inserting, searching, or deleting entries,
-        // so we need a "polling" loop to cover all of the state machine corner cases.
-        node_id_t incoming_first_id = node_id_unknown_k;
-        while (true) {
-            std::ptrdiff_t const old_remaining_capacity = remaining_capacity_.fetch_sub( //
-                incoming_vectors_count, std::memory_order_acquire);
-            std::ptrdiff_t const new_remaining_capacity = old_remaining_capacity -
-                                                          static_cast<std::ptrdiff_t>(incoming_vectors_count);
-            // If this is the thread that moved the counter under the watermark,
-            // it's responsible for the next allocation
-            if (old_remaining_capacity > 0 && new_remaining_capacity < 0) {
-                auto [added_capacity, chunk_status] = create_next_chunk(incoming_vectors_count);
-                // Check if the chunk allocation has failed
-                if (chunk_status != status_t::success_k) {
-                    // Revert our decrement - crediting any partially added chunks along the way -
-                    // so that a smaller insertion may succeed later
-                    remaining_capacity_.fetch_add(incoming_vectors_count + added_capacity, std::memory_order_release);
-                    return chunk_status;
-                }
-                // Chunk allocation succeeded!
-                else {
-                    incoming_first_id = last_allocated_id_.fetch_add(incoming_vectors_count, std::memory_order_acquire);
-                    remaining_capacity_.fetch_add(added_capacity, std::memory_order_release);
-                }
-                // Break out of the capacity "polling" loop.
-                break;
-            }
-            // We may be lucky and already have enough space reserved for all of those vector
-            else if (new_remaining_capacity >= 0) {
-                incoming_first_id = last_allocated_id_.fetch_add(incoming_vectors_count, std::memory_order_acquire);
-                // Break out of the capacity "polling" loop.
-                break;
-            }
-            // We may face a corner case, when index has 10 slots, another thread Y tries to insert 20 entries,
-            // and this thread X - is looking to insert a 100. So even if Y has just allocated some memory,
-            // it may not be enough for us.
-            else {
-                // Let's revert the counter and "poll" again!
-                remaining_capacity_.fetch_add(incoming_vectors_count, std::memory_order_release);
-                std::this_thread::yield();
-                continue;
-            }
-        }
+        // Size the reusable scratch structures before claiming any capacity, while failing is still free.
+        // `sorted_buffer::insert(.., limit)` never grows on its own, and `growing_hash_set::set` never
+        // rehashes, so these reservations are load-bearing, not a fast-path optimization.
+        // `refining_candidates` must fit a full neighbor list plus the newcomer during back-linking.
+        if (!context.results.reserve(expansion_factor) ||                  //
+            !context.refining_candidates.reserve(node_connectivity + 1) || //
+            !context.frontier.reserve(expansion_factor * 4u) ||            //
+            !context.visited.reserve(expansion_factor * 4u))
+            return {status_t::bad_alloc_k};
 
-        // At the very beginning, when the index is empty, we only need to wire the incoming points with each other
-        if (incoming_first_id == 0) {}
+        // Claim storage for the whole batch: from here on enough sentinel-filled rows exist for
+        // all our nodes, and this thread must roll forward to publishing every id it dispenses.
+        expected<node_id_t> const claimed = claim_capacity(incoming_vectors_count);
+        if (claimed.status != status_t::success_k) return {claimed.status};
+
+        // All slots share one contiguous packed row layout, so the copy width is loop-invariant.
+        // Sub-byte types pack several dimensions per storage value - count storage bytes, not dimensions.
+        std::size_t const vector_bytes = divide_round_up<std::size_t>(geometry_dimensions(geometry),
+                                                                      nk::dimensions_per_value<scalar_t>()) *
+                                         sizeof(scalar_t);
 
         // Go through the vectors and inject them one-by-one.
         for (small_size_t incoming_index = 0; incoming_index != incoming_vectors_count; ++incoming_index) {
-            node_id_t const new_node_id = next_visible_id_.fetch_add(1);
-            vector_view_t const new_vector = new_vectors.row(incoming_index);
-            vector_norms_t const new_norms = inner_norms(new_vector);
-            top_candidates_array_t& results = context.results;
-            top_candidates_array_t& refining_candidates = context.refining_candidates;
-            frontier_queue_t& frontier = context.frontier;
-            visited_set_t& visited = context.visited;
+            // Identity is dispensed per node, never derived from the batched capacity claim: the
+            // claim only proves rows exist. One-by-one dispensing assigns ids in global
+            // wiring-start order, so each thread holds at most one unpublished id and the
+            // publication gap stays bounded by the thread count rather than the batch size.
+            // The `acq_rel` order chains a happens-before edge from the growth of the hosting
+            // chunk through the all-RMW dispenser to this thread - finding F2 in concurrency.md.
+            node_id_t const new_node_id = next_visible_id_.fetch_add(1, std::memory_order_acq_rel);
+            chunked_location_t const new_location = chunked_location(new_node_id);
+            if (report_assigned_ids) assigned_ids[incoming_index] = new_node_id;
 
-            // Let's first copy the `new_vector` into the owned buffers, so we
+            // The scratch structures persist across iterations and calls - reset them for this node.
+            context.results.clear();
+            context.refining_candidates.clear();
+            context.frontier.clear();
+            context.visited.clear();
 
-            // Let's random-sample a few "landmark" points in our graph to traverse from there onwards.
-            // We want at least as many landmarks as the connectivity of our graph and prefer to unroll
-            // those "gathers" into 4-way batches.
-            for (small_size_t landmarks_batch = 0; landmarks_batch != node_connectivity; ++landmarks_batch) {
+            // Copy the incoming vector into its owned slot first, and derive the norms from the owned
+            // representation - the exact bytes that all future distance computations will stream.
+            // Both sides share `scalar_t`, so this is a raw copy of packed storage bytes,
+            // not a numeric conversion - `nk::cast` is reserved for genuine dtype changes.
+            vector_view_t const incoming_vector = new_vectors.row(incoming_index).as_vector();
+            vector_span_t const owned_vector = vector_span_for(new_location);
+            std::memcpy(owned_vector.byte_data(), incoming_vector.byte_data(), vector_bytes);
+            vector_norms_t const new_norms = inner_norms(owned_vector);
+            norm_ref_for(new_location) = new_norms;
 
-                std::array<node_id_t, 4> landmarks_ids;
-                std::array<vector_view_t, 4> landmarks_vectors;
-                std::array<vector_norms_t, 4> landmarks_norms;
-                small_size_t landmarks_in_batch = 0;
+            // Snapshot the contiguous visibility watermark: every id strictly below it is published,
+            // making it the safe bound for random landmark sampling. On a virgin index there is
+            // nothing to traverse - the node publishes with an empty neighbors list, and the
+            // following entries wire back to it as soon as the watermark advances.
+            node_id_t const first_invisible_id = last_visible_id_.load(std::memory_order_acquire);
+            if (first_invisible_id != 0)
+                search_around(owned_vector, new_norms, first_invisible_id, expansion_factor, context);
 
-                // It's possible, that the node ID has been allocated, but the node hasn't been filled yet.
-                while (landmarks_in_batch != landmarks_ids.capacity()) {
-                    node_id_t const landmark_node_id = context.random_generator.bounded(incoming_first_id);
-                    chunked_location_t const landmark_location = chunked_location(landmark_node_id);
-                    node_ids_span_t landmark_neighbors = neighbors_for(landmark_location);
-                    std::atomic_ref<node_id_t> landmark_indicator = neighbors_lock_ref(landmark_neighbors);
+            // Select up to `connectivity()` diverse links from the search results and write them
+            // into our own still-unpublished list. No locks are needed: no reader can arrive
+            // before slot 0 turns non-sentinel, so relaxed stores into slots 1.. suffice, and the
+            // untouched tail keeps its sentinel termination.
+            selected_links_t selected;
+            std::size_t const refine_distances = select_diverse(context.results, node_connectivity, selected);
+            context.computed_distances += refine_distances;
+            context.computed_distances_in_refines += refine_distances;
+            neighbors_list_ref_t const new_neighbors = neighbors_for(new_location);
+            for (small_size_t link = 1; link < selected.count; ++link)
+                new_neighbors.store_slot(link, selected.ids[link]);
 
-                    // If the node is currently uninitialized or locked, loop again, until we end up with
-                    // a randomly chosen landmark that's not yet booked
-                    if (landmark_indicator.load(std::memory_order_acquire) == 0) continue;
-                    landmarks_ids[landmarks_in_batch] = landmark_node_id;
-                    landmarks_vectors[landmarks_in_batch] = vector_for(landmark_location);
-                    landmarks_norms[landmarks_in_batch] = norm_for(landmark_location);
-                    ++landmarks_in_batch;
-                }
+            // Publish the node: slot 0 receives its nearest diverse neighbor, or the node's own id
+            // when the graph offered no candidates - the "published, zero neighbors" self-loop
+            // encoding, finding F3 in concurrency.md, distinguishable from the all-ones
+            // "unpublished or locked" sentinel. The release store is what makes the payload
+            // visible to any thread that later discovers this node.
+            node_id_t const first_link_id = selected.count ? selected.ids[0] : new_node_id;
+            new_neighbors.unlock(first_link_id);
 
-                // Compute the distances and export them into our queues
-                std::array<distance_t, 4> const landmark_distances = distances( //
-                    new_vector, new_norms, landmarks_vectors, landmarks_norms);
-                visited.insert(landmarks_ids);
+            // Take our watermark turn, strictly in dispensed order, keeping the visible prefix
+            // hole-free. Each thread holds at most one unpublished id, so this wait is bounded by
+            // one wiring per other in-flight thread - the "publication convoy" is the accepted
+            // cost of the CAS-free design; helping advancement (F4) is the documented alternative.
+            for (node_id_t watermark = last_visible_id_.load(std::memory_order_acquire); watermark != new_node_id;
+                 watermark = last_visible_id_.load(std::memory_order_acquire))
+                // Uncapped monitored wait: the watermark is the only word we wait on, and every
+                // predecessor's publication store wakes us to re-check.
+                wait_type_ {}(last_visible_id_, watermark, 0u, fu::wait_uncapped_t {});
+            last_visible_id_.store(new_node_id + 1, std::memory_order_release);
 
-                std::array<inner_scored_node_t, 4> landmarks_scored = {
-                    inner_scored_node_t(landmarks_ids[0], landmark_distances[0]),
-                    inner_scored_node_t(landmarks_ids[1], landmark_distances[1]),
-                    inner_scored_node_t(landmarks_ids[2], landmark_distances[2]),
-                    inner_scored_node_t(landmarks_ids[3], landmark_distances[3]),
-                };
-                frontier.insert(landmarks_scored);
-                results.insert(landmarks_scored);
-            }
-
-            // Greedily walk the frontier nearest-first, keeping the best `expansion_factor` in `results`.
-            while (!frontier.empty()) {
-                // Peek - don't pop yet: the chosen node's neighbor list may be locked, in which case
-                // we retry the selection rather than dropping it from the frontier.
-                inner_scored_node_t const candidate = frontier.top();
-                // `results` stays sorted ascending, so its back is the furthest kept - our search radius.
-                distance_t const radius = results.top().distance;
-                // Once the nearest unexpanded node is past that radius and `results` is full,
-                // nothing deeper can improve the answer.
-                if (candidate.distance > radius && results.size() == expansion_factor) break;
-
-                chunked_location_t const candidate_location = chunked_location(candidate.node_id);
-                node_ids_span_t candidate_neighbors = neighbors_for(candidate_location);
-                std::atomic_ref<node_id_t> candidate_indicator = neighbors_lock_ref(candidate_neighbors);
-
-                // If the node is currently uninitialized or locked, loop again. It will either free up by that
-                // time or the probabilitic rank-weighted will pick a different `candidate` that's available.
-                if (candidate_indicator.load(std::memory_order_acquire) == 0) continue;
-
-                // The node is live and readable - commit to it and drop it from the frontier.
-                frontier.pop();
-
-                // Let's gather the neighbors of our candidate
-                for (small_size_t next_batch = 0; next_batch != node_connectivity; ++next_batch) {}
-            }
+            // Only now - published, watermark turn behind us, no locks held - wire the reverse
+            // edges. Back-linking after publication keeps every lock acquisition off the
+            // serialized publication chain; readers may briefly see one-directional edges,
+            // which approximate search tolerates by construction.
+            back_link_neighbors(new_node_id, owned_vector, new_norms, selected, context);
         }
+
+        insert_result_t result;
+        result.new_size = size();
+        result.visited_members = context.visited_members - visited_members_before;
+        result.computed_distances = context.computed_distances - computed_distances_before;
+        result.computed_distances_in_refines = context.computed_distances_in_refines - refines_before;
+        result.computed_distances_in_reverse_refines = context.computed_distances_in_reverse_refines -
+                                                       reverse_refines_before;
+        result.restarts = context.restarts - restarts_before;
+        return result;
     }
 
     /**
      *  @brief Entry removals are explicitly banned to simplify concurrency management.
      */
-    status_t remove(keys_view_t, inner_traversal_context_t&) noexcept = delete;
+    status_t remove(node_ids_view_t, inner_traversal_context_t&) noexcept = delete;
 
-    status_t search(vectors_view_t query_vectors, inner_traversal_context_t& context) noexcept {}
+    /** @brief Optional tuning knobs for @c search(); zeros mean "derive from connectivity". */
+    struct search_config_t {
+        /** @brief Breadth of the candidate pool; defaults to twice the connectivity.
+         *      Raise it to trade latency for recall - the caller reranks anyway. */
+        small_size_t expansion_factor = 0;
+    };
+
+    /** @brief Outcome & telemetry of one @c search() call; matches stay in the caller's context. */
+    struct search_result_t {
+        /** @brief @c success_k, or why the search could not run at all. */
+        status_t status = status_t::success_k;
+        /** @brief Matches left in `context.results`, ascending by distance to the query. */
+        std::size_t count = 0;
+        /** @brief Frontier candidates expanded during the walk. */
+        std::size_t visited_members = 0;
+        /** @brief Total distance computations, with padding lanes of 4-way kernels excluded. */
+        std::size_t computed_distances = 0;
+        /** @brief Starvation restarts - a graph-connectivity health signal. */
+        std::size_t restarts = 0;
+
+        explicit operator bool() const noexcept { return status == status_t::success_k; }
+    };
+
+    /**
+     *  @brief Finds the nearest published neighbors of @p query_vector, filling `context.results`
+     *      with up to `expansion_factor` candidates, ascending by distance - the nearest at
+     *      `results.data()[0]`. The caller reranks or trims the prefix it needs.
+     *
+     *  Safe to call concurrently with insertions and other searches: the traversal reads only
+     *  nodes below the visibility watermark, acquire-loads every slot-0 lock before scanning a
+     *  list, retries transiently locked nodes, and never writes to the graph. Freshly inserted
+     *  nodes become reachable the moment their publisher advances the watermark; reverse-edge ids
+     *  above this query's watermark snapshot are skipped by the translation-frontier invariant,
+     *  and picked up by any later query with a fresher snapshot. @ref inner_volatile_index_concurrency
+     */
+    search_result_t search(vector_view_t query_vector, inner_traversal_context_t& context,
+                           search_config_t config = {}) noexcept {
+
+        std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
+                                                                     : connectivity() * 2;
+
+        // Same load-bearing reservations as in `insert`: the scratch structures never grow on
+        // their own mid-traversal.
+        if (!context.results.reserve(expansion_factor) ||       //
+            !context.frontier.reserve(expansion_factor * 4u) || //
+            !context.visited.reserve(expansion_factor * 4u))
+            return {status_t::bad_alloc_k};
+        context.results.clear();
+        context.frontier.clear();
+        context.visited.clear();
+
+        // Snapshot the watermark once: everything strictly below it is published and readable.
+        // An empty index legitimately yields an empty result set.
+        node_id_t const first_invisible_id = last_visible_id_.load(std::memory_order_acquire);
+        if (first_invisible_id == 0) return {status_t::success_k};
+
+        // Snapshot the context's running telemetry, to report this query's share on return.
+        std::size_t const visited_members_before = context.visited_members;
+        std::size_t const computed_distances_before = context.computed_distances;
+        std::size_t const restarts_before = context.restarts;
+
+        vector_norms_t const query_norms = inner_norms(query_vector);
+        search_around(query_vector, query_norms, first_invisible_id, expansion_factor, context);
+
+        search_result_t result;
+        result.count = context.results.size();
+        result.visited_members = context.visited_members - visited_members_before;
+        result.computed_distances = context.computed_distances - computed_distances_before;
+        result.restarts = context.restarts - restarts_before;
+        return result;
+    }
 };
 
 } // namespace usearch
