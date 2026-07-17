@@ -1,6 +1,6 @@
 # This CMake file is heavily inspired by following `usearch` CMake:
 # https://github.com/nlohmann/json/blob/develop/CMakeLists.txt
-cmake_minimum_required(VERSION 3.11 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.21 FATAL_ERROR)
 project(
     usearch
     VERSION 2.25.1
@@ -35,6 +35,22 @@ option(USEARCH_BUILD_TEST_C "Compile a test for the C 99 interface" OFF)
 option(USEARCH_BUILD_JNI "Compile JNI library for Java bindings" OFF)
 option(USEARCH_BUILD_WOLFRAM "Compile Wolfram Language bindings" OFF)
 option(USEARCH_BUILD_SQLITE "Compile separate SQLite extension" OFF)
+option(USEARCH_BUILD_WASM "Compile WebAssembly bindings" OFF)
+
+# Enable the in-repo Git hooks. Git will not auto-run hooks shipped inside a clone (that would let any cloned repo
+# execute code), so point `core.hooksPath` at `.githooks` here - configuring the build arms the `pre-commit` checks.
+# Skipped when built as a subproject or without `.git` (tarball / export builds).
+if (USEARCH_IS_MAIN_PROJECT AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+    execute_process(
+        COMMAND git config core.hooksPath .githooks
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        RESULT_VARIABLE _usearch_hooks_status
+        OUTPUT_QUIET ERROR_QUIET
+    )
+    if (_usearch_hooks_status EQUAL 0)
+        message(STATUS "usearch: Git hooks enabled (core.hooksPath -> .githooks)")
+    endif ()
+endif ()
 
 # Includes
 set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake ${CMAKE_MODULE_PATH})
@@ -118,11 +134,9 @@ add_library(${USEARCH_TARGET_NAME} INTERFACE)
 add_library(${PROJECT_NAME}::${USEARCH_TARGET_NAME} ALIAS ${USEARCH_TARGET_NAME})
 set(USEARCH_INCLUDE_BUILD_DIR "${PROJECT_SOURCE_DIR}/include/")
 
-if (${CMAKE_VERSION} VERSION_LESS "3.8.0")
-    target_compile_features(${USEARCH_TARGET_NAME} INTERFACE cxx_range_for)
-else ()
-    target_compile_features(${USEARCH_TARGET_NAME} INTERFACE cxx_std_11)
-endif ()
+# Concepts are the main reason C++20 is the base language level, with `std::atomic_ref` and the `<bit>` helpers close
+# behind - and the interface target must say so, or external consumers get an unbuildable contract.
+target_compile_features(${USEARCH_TARGET_NAME} INTERFACE cxx_std_20)
 
 # Core compilation settings affecting "index.hpp"
 target_compile_definitions(${USEARCH_TARGET_NAME} INTERFACE "USEARCH_USE_OPENMP=$<BOOL:${USEARCH_USE_OPENMP}>")
@@ -148,19 +162,30 @@ target_include_directories(
     ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE} INTERFACE $<BUILD_INTERFACE:${USEARCH_INCLUDE_BUILD_DIR}>
                                                                $<INSTALL_INTERFACE:include>
 )
+# Dependency headers ride the build tree only: an `INSTALL_INTERFACE` here would point at prefix-relative directories
+# that nothing installs, breaking the installed package. Once `find_package(numkong)` / `find_package(forkunion)`
+# configs ship in the pinned submodules, these become plain target links resolved through `find_dependency`.
 if (USEARCH_USE_NUMKONG)
     target_include_directories(
         ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE}
-        INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/numkong/include> $<INSTALL_INTERFACE:numkong/include>
+        INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/numkong/include>
     )
 endif ()
+target_include_directories(
+    ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE}
+    INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/forkunion/include>
+)
 # Install a pkg-config file, so other tools can find this
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/pkg-config.pc.in" "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc")
 
-# Install a custom package version config file instead of write_basic_package_version_file to ensure that it's
-# architecture-independent https://github.com/nlohmann/json/issues/1697
+# A header-only package fits any architecture, and `ARCH_INDEPENDENT` declares exactly that - no hand-written version
+# template needed.
 include(CMakePackageConfigHelpers)
-configure_file("cmake/usearchConfigVersion.cmake.in" ${USEARCH_CMAKE_VERSION_CONFIG_FILE} @ONLY)
+write_basic_package_version_file(
+    ${USEARCH_CMAKE_VERSION_CONFIG_FILE}
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY AnyNewerVersion ARCH_INDEPENDENT
+)
 configure_file(${USEARCH_CMAKE_CONFIG_TEMPLATE} ${USEARCH_CMAKE_PROJECT_CONFIG_FILE} @ONLY)
 
 if (USEARCH_INSTALL)
@@ -210,9 +235,6 @@ endif ()
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif ()
-
-# Include directories
-set(USEARCH_HEADER_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/numkong/include")
 
 # Function to setup target
 function (setup_target TARGET_NAME)
@@ -329,7 +351,11 @@ function (setup_target TARGET_NAME)
         )
     endif ()
 
-    target_include_directories(${TARGET_NAME} PRIVATE ${USEARCH_HEADER_INCLUDES})
+    # One source of truth for header paths: whatever the interface target advertises, including the dependency includes,
+    # without inheriting its compile features onto pure-C targets.
+    target_include_directories(
+        ${TARGET_NAME} PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
+    )
     set_target_properties(${TARGET_NAME} PROPERTIES CXX_STANDARD 20)
 
     # On Windows, when using multi-configuration CMake builds, the paths will be nested, resulting in
@@ -397,18 +423,25 @@ if (USEARCH_USE_NUMKONG)
     endif ()
 endif ()
 
-# {fmt} for the C++ smoke tests (libstdc++ doesn't ship `std::print` yet on our toolchain).
-include(FetchContent)
-FetchContent_Declare(
-    fmt
-    GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-    GIT_TAG 12.0.0
-)
-FetchContent_MakeAvailable(fmt)
+# {fmt} for the C++ smoke tests (libstdc++ doesn't ship `std::print` yet on our toolchain). Fetched only when something
+# actually links it, and `FIND_PACKAGE_ARGS` lets a system-provided package satisfy the dependency without touching the
+# network.
+if (USEARCH_BUILD_TEST_CPP OR USEARCH_BUILD_BENCH_CPP)
+    include(FetchContent)
+    FetchContent_Declare(
+        fmt
+        GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+        GIT_TAG 12.0.0
+        FIND_PACKAGE_ARGS
+    )
+    FetchContent_MakeAvailable(fmt)
+endif ()
 
-# Must be called before "add_subdirectory()". See
-# https://stackoverflow.com/questions/30250494/ctest-not-detecting-tests.
-enable_testing()
+# Must be called before "add_subdirectory()", and only when USearch runs the show - a parent project decides its own
+# testing story. See https://stackoverflow.com/questions/30250494/ctest-not-detecting-tests.
+if (USEARCH_IS_MAIN_PROJECT)
+    enable_testing()
+endif ()
 
 if (${USEARCH_BUILD_TEST_CPP} OR ${USEARCH_BUILD_BENCH_CPP})
     add_subdirectory(cpp)

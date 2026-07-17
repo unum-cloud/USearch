@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# USearch commit-msg: enforce the commit-message contract.
+#
+#   1. The subject starts with an approved verb prefix - Add / Break / Build / Chore / Docs / Fix /
+#      Improve / Make / Release - followed by a capitalized summary, so the history reads as a
+#      consistent changelog. Merge commits are exempt (Git writes their subject).
+#   2. No AI-assistant attribution: no `Co-authored-by` bot trailer, no "Generated with/by <assistant>",
+#      no assistant name / vendor URL, no robot emoji. Authorship is the human who committed.
+#
+# Bypass knowingly (you almost never should) with: git commit --no-verify
+
+set -u
+
+message_file="$1"
+
+# Comment lines (git's `#` scissors and helptext) never reach the final message - ignore them.
+payload=$(grep -v '^#' "$message_file")
+# The subject is the first non-blank line of what remains.
+subject=$(printf '%s\n' "$payload" | grep -vE '^[[:space:]]*$' | head -1)
+
+failed=0
+
+# 1. Verb prefix. Merge commits carry Git's own subject and are the only exemption.
+case "$subject" in
+Merge*) ;;
+*)
+    if ! printf '%s\n' "$subject" |
+        grep -qE '^(Add|Break|Build|Chore|Docs|Fix|Improve|Make|Release): [A-Z]'; then
+        echo "commit-msg: the subject must be '<Verb>: <Capitalized summary>' with an approved verb -"
+        echo "            Add Break Build Chore Docs Fix Improve Make Release."
+        echo "            Got: ${subject:-<empty>}"
+        failed=1
+    fi
+    ;;
+esac
+
+# 2. AI-assistant attribution - matched generically across assistants and vendors, not one product.
+offenders=$(printf '%s\n' "$payload" | grep -inE \
+    'co-authored-by:.*(\[bot\]|\bbot\b|claude|chatgpt|gpt-[0-9]|openai|copilot|gemini|\bbard\b|cursor|codeium|devin)|generated (with|by).*\b(ai|llm|claude|chatgpt|gpt|copilot|gemini|cursor|anthropic|openai)\b|\b(anthropic|openai)\.com|claude\.ai|chatgpt\.com|claude-session|🤖' || true)
+if [ -n "$offenders" ]; then
+    echo "commit-msg: this message carries AI-assistant attribution - USearch history stays human-authored."
+    echo "            Offending lines:"
+    printf '%s\n' "$offenders" | head -8
+    failed=1
+fi
+
+if [ "$failed" -ne 0 ]; then
+    echo ""
+    echo "Fix the subject / trailer and commit again. Bypass knowingly with: git commit --no-verify"
+    exit 1
+fi
+exit 0

@@ -1,0 +1,246 @@
+#!/usr/bin/env bash
+#
+# USearch pre-commit: enforce the house style on staged changes before they land.
+#
+# Each check inspects only the ADDED lines of a staged file, so legacy code migrates on its own
+# schedule while no new violation sneaks in, and each prints the specific reason when it fires.
+# The dispatch loop at the bottom diffs every staged file exactly once and hands the added lines
+# to each check through the `file` / `added` globals - the checks themselves are grep one-liners.
+# Configuring the CMake build arms these hooks; see the `core.hooksPath` block in CMakeLists.txt.
+#
+# Bypass knowingly (you almost never should) with: git commit --no-verify
+
+set -u
+LC_ALL=C # ? Byte-wise regexes, immune to the committer's locale
+
+failed=0
+
+# Prints the reason and the first offending lines, and marks the commit rejected.
+fail() { # fail <matches> <message-line>...
+    local matches=$1
+    shift
+    local line
+    for line in "$@"; do echo "pre-commit: $line"; done
+    printf '%s\n' "$matches" | head -5
+    failed=1
+}
+
+# ASCII "->" arrows inside comments & docstrings - prose uses the Unicode arrow (→). The pattern
+# targets " -> " with surrounding spaces on comment-looking lines, so real member access like
+# `pointer->field` in code never trips it.
+check_ascii_arrows() {
+    local arrows
+    arrows=$(printf '%s\n' "$added" | grep -E '((//|/\*|^\+[[:space:]]*\*).* -> )' || true)
+    [ -z "$arrows" ] || fail "$arrows" \
+        "$file uses the ASCII '->' arrow in a comment - prose arrows are the Unicode →:"
+}
+
+# The same arrow rule for Markdown prose, where every added line is prose.
+check_ascii_arrows_prose() {
+    local arrows
+    arrows=$(printf '%s\n' "$added" | grep -E ' -> ' || true)
+    [ -z "$arrows" ] || fail "$arrows" \
+        "$file uses the ASCII '->' arrow - prose arrows are the Unicode →:"
+}
+
+# C stdio printing in C++ sources - tests & headers print through fmt::. The C bindings under c/
+# keep their stdio; the dispatch below only routes C++ translation units here.
+check_printf() {
+    local prints
+    prints=$(printf '%s\n' "$added" | grep -E '\b(std::)?(f|s)?printf[[:space:]]*\(|\bputs[[:space:]]*\(' || true)
+    [ -z "$prints" ] || fail "$prints" \
+        "$file prints through the C stdio family - C++ sources print through fmt:::"
+}
+
+# Backward-looking prose in comments - "v2", "v3", "the previous implementation" - rots the moment
+# the rewrite ships and reads as changelog noise. Docstrings describe behavior on its own terms,
+# forward-looking; history belongs in commit messages and design documents.
+check_backward_references() {
+    local backrefs
+    # Case-sensitive on purpose: lowercase `v2` is a version reference, while uppercase `V2` names
+    # real hardware, like the Arm Neoverse cores.
+    backrefs=$(printf '%s\n' "$added" | grep -E '(//|/\*|^\+[[:space:]]*\*)' |
+        grep -E '\bv[0-9]+\b|[Tt]he (previous|old|legacy) (design|implementation|version|draft|approach|convention|code)|\bused to (be|do|work)\b' || true)
+    [ -z "$backrefs" ] || fail "$backrefs" \
+        "$file cites a past version in a comment - describe the behavior on its own terms;" \
+        "            history belongs in commit messages and design docs:"
+}
+
+# Decorative comment separators - runs of three or more `-` or `=` used purely as visual dividers
+# inside a comment. Sections are named by `#pragma region`, and a paragraph that needs a heading gets
+# a sentence. A ruler carries no information that the sentence beneath it does not already carry.
+check_rulers() {
+    local rulers
+    rulers=$(printf '%s\n' "$added" | grep -E '^\+(.*(//|/\*)|[[:space:]]*\*).*[-=]{3,}' || true)
+    [ -z "$rulers" ] || fail "$rulers" \
+        "$file adds a decorative comment separator (--- / ===) - name the section with" \
+        "            a #pragma region, or write a plain sentence:"
+}
+
+# Every @param declares its direction - [in]/[out]/[inout] - so a reader knows whether the callee
+# reads, writes, or mutates the argument. A bare @param and the comma form @param[in,out] are both
+# rejected; the one spelling for a mutated argument is @param[inout].
+check_param_directions() {
+    local bare
+    bare=$(printf '%s\n' "$added" | grep -E '@param' | grep -vE '@param\[(in|out|inout)\]' || true)
+    [ -z "$bare" ] || fail "$bare" \
+        "$file has a @param without an [in]/[out]/[inout] direction - never a bare @param" \
+        "            nor the comma form @param[in,out] (write @param[inout]):"
+}
+
+# Doxygen renders @b / @c, not Markdown: `__bold__` / `**bold**` in a `/** */` or `//` comment print
+# literally. Use @b for a one/two-token emphasis and plain prose for anything longer. C `__keyword__`
+# spellings are exempt; Markdown files never route here.
+check_markdown_doxygen() {
+    local emphasis
+    emphasis=$(printf '%s\n' "$added" | grep -E '^\+[[:space:]]*(\*|//)' |
+        grep -oE '\*\*[^*]+\*\*|__[^_]+__' |
+        grep -vE '^__(restrict|inline|volatile|asm|attribute|builtin[A-Za-z0-9_]*|STDC)__$' || true)
+    [ -z "$emphasis" ] || fail "$emphasis" \
+        "$file uses Markdown emphasis in a Doxygen comment (it prints literally) - use @b" \
+        "            for a 1-2 token emphasis, plain prose otherwise:"
+}
+
+# Member documentation is Doxygen: a bare `//` line directly above a declaration (a member or a type)
+# is the banned doc style - those entities get `/** @brief ... */`. Scoped to headers, and bounded to
+# at most 4 spaces of indentation: class members live there, while the same `Type name = ...;` shape
+# deeper inside a function body is a local variable, and a `//` note above it is a legal
+# implementation note - this library is header-only, so headers carry function bodies too.
+check_bare_member_docs() {
+    local member_docs
+    member_docs=$(printf '%s\n' "$added" |
+        awk '/^\+? {0,4}\/\/[^\/]/ { pending=$0; next } \
+             /^\+? {0,4}[A-Za-z_][A-Za-z0-9_:<>,* ]* [A-Za-z_][A-Za-z0-9_]* *([={;]|$)/ && pending { print pending; pending="" ; next } \
+             { pending="" }' || true)
+    [ -z "$member_docs" ] || fail "$member_docs" \
+        "$file documents a declaration with a bare \`//\` comment - docs are" \
+        "            /** @brief ... */ blocks; \`//\` is for implementation notes inside bodies:"
+}
+
+# A hand-rolled ceiling division - `(value + divisor - 1) / divisor` - re-derives what the shared
+# vocabulary already names. Use `divide_round_up` from usearch/types.hpp.
+check_hand_ceils() {
+    local ceils
+    ceils=$(printf '%s\n' "$added" | grep -vE 'divide_round_up|round_up_to_multiple' |
+        grep -E '\([^()]+\+[^()]+-[[:space:]]*1[[:space:]]*\)[[:space:]]*/' || true)
+    [ -z "$ceils" ] || fail "$ceils" \
+        "$file hand-rolls a ceiling division - use divide_round_up from usearch/types.hpp:"
+}
+
+# A `#pragma region` label must carry no dash. clang-format mis-tokenises `#pragma region - Name`
+# (it reflows around the `-`), so the region markers drift out of place on the next format run. Keep
+# the label a plain phrase: `#pragma region Name`.
+check_region_dashes() {
+    local dashed
+    dashed=$(printf '%s\n' "$added" | grep -E '^\+[[:space:]]*#pragma[[:space:]]+(end)?region\b[^-]*-' || true)
+    [ -z "$dashed" ] || fail "$dashed" \
+        "$file has a dash in a #pragma region label - clang-format mishandles it, drop the dash:"
+}
+
+# The `&*iterator` antipattern - laundering an iterator through a reference into a pointer. Take the
+# container's `data()`, or address the element itself.
+check_iterator_laundering() {
+    local laundered
+    laundered=$(printf '%s\n' "$added" | grep -E '&\*[A-Za-z_]' || true)
+    [ -z "$laundered" ] || fail "$laundered" \
+        "$file launders an iterator through &* - use the container's data() or address the element:"
+}
+
+# CI workflows - every job and every step carries a `name:`. An unnamed step renders as its raw
+# command in the Actions UI, and job names are what branch protection's required checks reference,
+# so an anonymous one can't be pinned. Names are structure, not lines, so unlike the checks above
+# this validates the whole staged file - the workflows are small and already conform.
+check_workflow_names() {
+    local nameless
+    nameless=$(
+        git show ":$file" | awk '
+            # Jobs: two-space keys under the top-level `jobs:` section, named by a four-space `name:`.
+            /^jobs:[[:space:]]*$/ { in_jobs = 1; next }
+            in_jobs && /^[^ #]/ { in_jobs = 0 }
+            in_jobs && /^  [A-Za-z_][A-Za-z0-9_-]*:[[:space:]]*$/ {
+                if (job != "" && !job_named) printf "line %d: job `%s` has no name\n", job_line, job
+                job = substr($1, 1, length($1) - 1); job_line = NR; job_named = 0
+            }
+            in_jobs && /^    name:/ { job_named = 1 }
+            # Steps: list items two deeper than their `steps:`, named inline or by a key two deeper.
+            /^[[:space:]]*steps:[[:space:]]*$/ { steps_at = index($0, "steps:") - 1; item_at = steps_at + 2; pending = 0; next }
+            steps_at {
+                indent = match($0, /[^ ]/) - 1
+                if ($0 ~ /^[[:space:]]*(#|$)/) next
+                if (indent <= steps_at) { if (pending) printf "line %d: unnamed step\n", pending; steps_at = 0; next }
+                if (indent == item_at && substr($0, item_at + 1, 2) == "- ") {
+                    if (pending) printf "line %d: unnamed step\n", pending
+                    pending = ($0 ~ /^[[:space:]]*- name:/) ? 0 : NR
+                } else if (pending && indent == item_at + 2 && $0 ~ /^[[:space:]]*name:/) pending = 0
+            }
+            END {
+                if (job != "" && !job_named) printf "line %d: job `%s` has no name\n", job_line, job
+                if (pending) printf "line %d: unnamed step\n", pending
+            }
+        '
+    )
+    [ -z "$nameless" ] || fail "$nameless" \
+        "$file has CI jobs or steps without a name - the Actions UI and required" \
+        "            checks reference them by it, so every job and step must carry one:"
+}
+
+# One pass: enumerate the staged files once, diff each once, and dispatch by extension. The list is
+# NUL-delimited so a filename with spaces can never split.
+while IFS= read -r -d '' file; do
+    added=$(git diff --cached --unified=0 -- "$file" | grep '^+' | grep -v '^+++' || true)
+    case "$file" in
+    *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.cu)
+        check_ascii_arrows
+        check_backward_references
+        check_rulers
+        check_param_directions
+        check_markdown_doxygen
+        check_hand_ceils
+        check_region_dashes
+        check_iterator_laundering
+        ;;&
+    include/*.hpp | *.h)
+        check_bare_member_docs
+        ;;&
+    cpp/*.cpp | include/*.hpp)
+        check_printf
+        ;;
+    *.md) check_ascii_arrows_prose ;;
+    .github/workflows/*.yml | .github/workflows/*.yaml) check_workflow_names ;;
+    esac
+done < <(git diff --cached --name-only --diff-filter=ACM -z)
+
+# Formatter gates run whole-file, the way the formatters work - this is what catches an accidental
+# whole-file reformat. Each gate only runs when its tool and profile are actually present.
+if command -v clang-format > /dev/null 2>&1 && [ -f .clang-format ]; then
+    while IFS= read -r -d '' file; do
+        case "$file" in
+        *.c | *.h | *.hpp | *.cpp | *.cc | *.cu) ;;
+        *) continue ;;
+        esac
+        if ! clang-format --dry-run -Werror "$file" > /dev/null 2>&1; then
+            echo "pre-commit: $file is not clang-format clean - run \`clang-format -i\` (the pip-installed 22.x)"
+            failed=1
+        fi
+    done < <(git diff --cached --name-only --diff-filter=ACM -z)
+fi
+
+if command -v cmake-format > /dev/null 2>&1 && [ -f .cmake-format.py ]; then
+    while IFS= read -r -d '' file; do
+        case "$file" in
+        CMakeLists.txt | *.cmake) ;;
+        *) continue ;;
+        esac
+        if ! cmake-format --check "$file" > /dev/null 2>&1; then
+            echo "pre-commit: $file is not cmake-format clean - run \`cmake-format -i\` with the repo profile"
+            failed=1
+        fi
+    done < <(git diff --cached --name-only --diff-filter=ACM -z)
+fi
+
+if [ "$failed" -ne 0 ]; then
+    echo ""
+    echo "Fix the staged changes and commit again. Bypass knowingly with: git commit --no-verify"
+    exit 1
+fi
+exit 0
