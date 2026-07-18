@@ -1,13 +1,13 @@
 /**
- *  @brief Smoke tests for `traversal_queue.hpp` containers - @c max_heap,
+ *  @brief Smoke tests for @c traversal_queue.hpp containers - @c max_heap,
  *      @c sorted_buffer, and @c growing_hash_set - including their four-wide and
  *      larger-N batch overloads plus @c insert_many / @c pop_many on the heap.
  *
  *  @author Ash Vardanian
- *  @file test/traversal_queue.cpp
+ *  @file cpp/traversal_queue_test.cpp
  *  @date April 24, 2026
  *
- *  Mirrors the structure of `test/inner_metric.cpp`:
+ *  Mirrors the structure of @c cpp/inner_metric_test.cpp:
  *
  *  1. One monolithic TU, no test framework. Each check returns a failure count;
  *     counts roll up to @c main without any global mutable state. A non-zero exit
@@ -69,9 +69,9 @@ int check_sorted_buffer_single_element() noexcept {
 }
 
 /**
- *  @brief Parity of `insert(std::array, limit)` against `std::sort(existing ∪ batch)[0..limit)`.
- *      Tested at batch sizes 4 and 16 to exercise both the hand-friendly case and the
- *      generic-template case.
+ *  @brief Parity of the batched @c insert(std::array,limit) against a full @c std::sort
+ *      of (existing ∪ batch) truncated to the limit. Tested at batch sizes 4 and 16 to
+ *      exercise both the hand-friendly case and the generic-template case.
  */
 template <std::size_t batch_size_>
 int check_sorted_buffer_batch_parity(unsigned seed) noexcept {
@@ -110,7 +110,7 @@ int check_sorted_buffer_batch_parity(unsigned seed) noexcept {
     return failures;
 }
 
-/** @brief `insert_sorted` on a pre-sorted batch must match `insert` on the same unsorted batch. */
+/** @brief @c insert_sorted on a pre-sorted batch must match @c insert on the same unsorted batch. */
 template <std::size_t batch_size_>
 int check_sorted_buffer_insert_sorted_parity(unsigned seed) noexcept {
     constexpr std::size_t limit_k = 64;
@@ -269,7 +269,7 @@ int check_max_heap_dary_parity_with_binary(unsigned seed, std::size_t element_co
     return failures;
 }
 
-/** @brief D-ary `insert_many` (Floyd vs shift_up paths) must match descending-pop order from individual inserts. */
+/** @brief D-ary @c insert_many (Floyd vs @c shift_up paths) must match descending-pop order from individual inserts. */
 template <std::size_t arity_>
 int check_max_heap_dary_insert_many(unsigned seed, std::size_t initial_count, std::size_t batch_count) noexcept {
     max_heap_dary<arity_, std::uint32_t> bulk;
@@ -300,7 +300,7 @@ int check_max_heap_dary_insert_many(unsigned seed, std::size_t initial_count, st
     return failures;
 }
 
-/** @brief Bulk `insert_many(std::array)` must pop in the same descending order as single inserts. */
+/** @brief Bulk @c insert_many(std::array) must pop in the same descending order as single inserts. */
 template <std::size_t batch_size_>
 int check_max_heap_insert_many(unsigned seed, std::size_t initial_size) noexcept {
     max_heap<std::uint32_t> bulk;
@@ -337,7 +337,7 @@ int check_max_heap_insert_many(unsigned seed, std::size_t initial_size) noexcept
     return failures;
 }
 
-/** @brief `pop_many<N>` must return the same sequence as N sequential @c pop calls. */
+/** @brief @c pop_many<N> must return the same sequence as N sequential @c pop calls. */
 template <std::size_t batch_size_>
 int check_max_heap_pop_many() noexcept {
     max_heap<std::uint32_t> heap;

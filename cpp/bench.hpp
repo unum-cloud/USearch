@@ -60,6 +60,7 @@ inline std::string humanize(double value) {
     return fmt::format("{:.0f}", value);
 }
 
+/** @brief Names the benchmarked dtype subset; NumKong exposes no C-level name table yet. */
 inline char const* dtype_name(nk_dtype_t dtype) noexcept {
     switch (dtype) {
     case nk_f32_k: return "f32";
@@ -72,6 +73,7 @@ inline char const* dtype_name(nk_dtype_t dtype) noexcept {
     }
 }
 
+/** @brief Names the benchmarked kernel subset; NumKong exposes no C-level name table yet. */
 inline char const* kernel_name(nk_kernel_kind_t kernel) noexcept {
     switch (kernel) {
     case nk_kernel_dot_k: return "dot";
@@ -81,10 +83,14 @@ inline char const* kernel_name(nk_kernel_kind_t kernel) noexcept {
     }
 }
 
-/** @brief Position discounts and their prefix sums, shared by every query's judgment:
- *      `discounts[i]` pays a hit at returned position i, and `ideal[i]` is the gain of a
- *      perfect ranking of length i + 1 - so per-query normalization is one lookup instead
- *      of a chain of `log2` calls. */
+/**
+ *  @brief Precomputes the position-discount tables shared by every query's judgment, so
+ *      per-query normalization is one lookup instead of a chain of @c log2 calls.
+ *
+ *  @param[out] discounts Per-position pay-offs: @c discounts[i] rewards a hit returned at position i.
+ *  @param[out] ideal Prefix sums of @p discounts: @c ideal[i] is the gain of a perfect ranking
+ *      of length i + 1.
+ */
 inline void fill_discounts(std::span<double> discounts, std::span<double> ideal) noexcept {
     double running = 0;
     for (std::size_t position = 0; position != discounts.size(); ++position) {
@@ -97,7 +103,7 @@ inline void fill_discounts(std::span<double> discounts, std::span<double> ideal)
 /** @brief The verdicts of one query's judgment, produced together by @c judge_ranking. */
 struct ranking_verdict_t {
     /** @brief 1 when the true nearest neighbor appears among the returned keys. Averaged
-     *      over queries this is the production Recall@K - the probability of finding THE
+     *      over queries this is the production Recall@K - the probability of finding @b the
      *      nearest neighbor within the top K - monotone in K, so Recall@1 never exceeds
      *      Recall@10. */
     std::size_t found_nearest = 0;
@@ -110,10 +116,18 @@ struct ranking_verdict_t {
     double gain = 0;
 };
 
-/** @brief All ranking verdicts for one query in one sweep: the expected keys are copied
- *      into @p scratch and binary-insertion-sorted once, then every returned position pays
- *      one binary search - O(k·log k) where the naive nested probes go O(k²), which
- *      matters from top-100 recalls up. */
+/**
+ *  @brief All ranking verdicts for one query in one sweep: the expected keys are sorted once,
+ *      then every returned position pays one binary search - O(k·log k) where the naive
+ *      nested probes go O(k²), which matters from top-100 recalls up.
+ *
+ *  @param[in] returned Keys the index produced, best first.
+ *  @param[in] expected Ground-truth keys, ascending by true distance - @c expected[0] is the
+ *      true nearest neighbor.
+ *  @param[inout] scratch Clobbered workspace for sorting the expected keys; its length caps
+ *      how many of them are judged.
+ *  @param[in] discounts Position pay-offs from @c fill_discounts.
+ */
 template <typename key_type_>
 ranking_verdict_t judge_ranking(std::span<key_type_ const> returned, std::span<key_type_ const> expected,
                                 std::span<key_type_> scratch, std::span<double const> discounts) noexcept {
@@ -141,7 +155,7 @@ ranking_verdict_t judge_ranking(std::span<key_type_ const> returned, std::span<k
     return verdict;
 }
 
-/** @brief Peak resident set size from `/proc/self/status` in bytes, or zero when unknown. */
+/** @brief Peak resident set size from @c /proc/self/status in bytes, or zero when unknown. */
 inline std::size_t peak_resident_bytes() noexcept {
     std::FILE* status = std::fopen("/proc/self/status", "r");
     if (!status) return 0;

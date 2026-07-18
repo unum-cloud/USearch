@@ -1,9 +1,9 @@
 /**
- *  @brief Throughput benchmarks for `inner_metric` distance functions for 1-to-1 and 1-to-4
+ *  @brief Throughput benchmarks for @c inner_metric distance functions for 1-to-1 and 1-to-4
  *      kernels against NumKong's monolithic 1-to-1 reference.
  *
  *  @author Ash Vardanian
- *  @file bench/inner_metric.cpp
+ *  @file cpp/inner_metric_bench.cpp
  *  @date April 23, 2026
  *
  *  Mirrors the structure of test/inner_metric.cpp - the @c kernel_supported concept

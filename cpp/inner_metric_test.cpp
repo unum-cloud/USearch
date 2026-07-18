@@ -1,9 +1,9 @@
 /**
- *  @brief Smoke tests for `inner_metric` 1-to-1 and 1-to-4 kernels against NumKong's
- *      monolithic 1-to-1 reference (`nk::dot` / `nk::angular` / `nk::sqeuclidean`).
+ *  @brief Smoke tests for @c inner_metric 1-to-1 and 1-to-4 kernels against NumKong's
+ *      monolithic 1-to-1 reference (@c nk::dot / @c nk::angular / @c nk::sqeuclidean).
  *
  *  @author Ash Vardanian
- *  @file test/inner_metric.cpp
+ *  @file cpp/inner_metric_test.cpp
  *  @date April 21, 2026
  *
  *  USearch's @c distance and @c distances entry points compose a kit (per scalar +

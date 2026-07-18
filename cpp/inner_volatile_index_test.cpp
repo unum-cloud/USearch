@@ -1,5 +1,5 @@
 /**
- *  @brief Smoke & concurrency tests for `inner_volatile_index` over a curated set of
+ *  @brief Smoke & concurrency tests for @c inner_volatile_index over a curated set of
  *      (dtype, kernel) instantiations - not the whole combinatorial space.
  *
  *  @author Ash Vardanian
@@ -8,12 +8,12 @@
  *
  *  The covered matrix is: f32+dot, f32+angular, f32+euclidean, u8+euclidean, u8+angular,
  *  i4+angular - each gated by a compile-time concept, so combinations whose serial kernels
- *  are not yet adapted in `inner_metric.hpp` report as skipped and light up automatically
+ *  are not yet adapted in @c inner_metric.hpp report as skipped and light up automatically
  *  once the kits land. Two already-adapted stand-ins (bf16+angular, i8+euclidean) keep the
  *  index machinery genuinely exercised in the meantime, and repeat with a deliberately
  *  flaky waiter that oversleeps at random, widening the interleaving windows around locks
  *  and watermark turns far beyond hardware timing. Only the serial capability is
- *  instantiated - the metrics themselves are tested in `inner_metric_test.cpp`.
+ *  instantiated - the metrics themselves are tested in @c inner_metric_test.cpp.
  *
  *  Allocators are tested separately too, but a counting allocator flows through the vectors
  *  & neighbors parameters to prove propagation: it tallies live bytes into a ledger that

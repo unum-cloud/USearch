@@ -1,11 +1,12 @@
 /**
  *  @brief Vector Search helper structures and types
  *  @author Ash Vardanian
- *  @file include/usearch/inner_volatile_index.hpp
- *  @date July 26, 2023
+ *  @file include/usearch/types.hpp
+ *  @date July 17, 2026
  */
 #pragma once
 #include <atomic>      // `std::atomic`
+#include <cassert>     // `assert` on the `to_span` contiguity contract
 #include <cstdint>     // `std::uint32_t`, `std::uint64_t`
 #include <cstring>     // `std::memmove`
 #include <span>        // `std::span`
@@ -24,13 +25,15 @@ enum class status_t {
     bad_alloc_k,
     /** @brief The structure reached a hard design ceiling, like the 2^32 id space; retrying can't help. */
     overflow_k,
-    /** @brief The operation requires a prior successful `reserve()`-like initialization call. */
+    /** @brief The operation requires a prior successful @c reserve() -like initialization call. */
     uninitialized_k,
     /** @brief The requested configuration contradicts an already-frozen one, like re-reserving
      *      with a different geometry; pass matching parameters or start a fresh structure. */
     config_mismatch_k,
 };
 
+/** @brief A result paired with the @c status_t explaining it; the value is only meaningful
+ *      on @c success_k. */
 template <typename value_type_>
 struct expected {
     value_type_ value;
@@ -78,7 +81,7 @@ constexpr value_type_ divide_round_up(value_type_ value, value_type_ divisor) no
 /**
  *  @brief The first position in the ascending @p values not ordered before @p value -
  *      @c std::lower_bound re-spelled in ten lines, so headers don't drag in
- *      `<algorithm>`, one of the heaviest includes on the compile-health charts.
+ *      @c <algorithm>, one of the heaviest includes on the compile-health charts.
  *  @see https://artificial-mind.net/projects/compile-health/
  */
 template <typename value_type_>
@@ -96,6 +99,34 @@ constexpr value_type_* lower_bound(std::span<value_type_> values,
     return first;
 }
 
+/**
+ *  @brief Converts any contiguous vector-like container - NumKong views & spans included -
+ *      into the STL hand-off shape, preserving the element's constness.
+ *
+ *  Two NumKong properties make a blind conversion unsafe, so both are guarded without this
+ *  header ever including NumKong: packed sub-byte scalars report their @b logical dimension
+ *  count through @c size(), exceeding their storage count, and are rejected at compile time
+ *  through their own @c component_t reflection; strided views violate the contiguity that
+ *  @c std::span assumes, and are rejected by the assertion.
+ */
+template <typename vector_type_>
+    requires requires(vector_type_ const& vector) {
+        vector.data();
+        vector.size();
+    }
+constexpr auto to_span(vector_type_ const& vector) noexcept {
+    using value_t = std::remove_pointer_t<decltype(vector.data())>;
+    using scalar_t = std::remove_const_t<value_t>;
+    if constexpr (requires { typename scalar_t::component_t; })
+        static_assert(                                                //
+            std::is_same_v<scalar_t, typename scalar_t::component_t>, //
+            "Packed sub-byte scalars size themselves in logical "     //
+            "dimensions, not storage values, so they cannot form a span");
+    if constexpr (requires { vector.stride_bytes(); })
+        assert(static_cast<std::size_t>(vector.stride_bytes()) == sizeof(value_t));
+    return std::span<value_t> {vector.data(), vector.size()};
+}
+
 /** @brief Any entry pairing a graph-local @c node_id with a @c distance - the shape that
  *      search results share across index designs. */
 template <typename entry_type_>
@@ -105,14 +136,19 @@ concept scored_node = requires(entry_type_ entry) {
 };
 
 /**
- *  @brief Merges the ascending @p results of one search into the caller's bounded ranking -
- *      the parallel @p keys & @p distances spans, already holding @p old_count hits from
- *      other indexes - keeping both ascending by distance.
+ *  @brief Merges the ascending @p results of one search into the caller's bounded ranking,
+ *      keeping it ascending by distance.
  *
- *  Indexes store no keys, so @p keys_of_ids translates each dense node id into the caller's
- *  key space through `operator[]` - a flat array, a raw pointer, or any custom mapping type -
+ *  Indexes store no keys, so ids are translated into the caller's key space on the way in -
  *  letting several sub-indexes with colliding id spaces, like one per memory domain, gather
- *  into one shared buffer. The spans' common length is the ranking's capacity.
+ *  into one shared buffer. The parallel spans' common length is the ranking's capacity.
+ *
+ *  @param[in] results One index's search results, ascending by distance.
+ *  @param[in] keys_of_ids Any id-to-key mapping with @c operator[] - a flat array, a raw
+ *      pointer, or a custom type.
+ *  @param[inout] keys Keys of the ranking, already holding @p old_count hits from other indexes.
+ *  @param[inout] distances Distances of the same ranking, parallel to @p keys.
+ *  @param[in] old_count Hits already in the ranking before this merge.
  *  @return The merged hit count, never exceeding the capacity.
  */
 template <scored_node entry_type_, typename keys_of_ids_type_, typename key_type_, typename distance_type_>

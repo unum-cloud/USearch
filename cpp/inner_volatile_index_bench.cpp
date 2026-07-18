@@ -297,20 +297,21 @@ struct bench_context {
     /** @brief One index per engaged memory domain; the indirection buys address stability,
      *      as an index holds atomics and never moves. */
     std::vector<std::unique_ptr<index_t>> indexes;
-    /** @brief Per index: dense node id → global dataset row, the recall bookkeeping. */
+    /** @brief The @b [indexes,rows] recall bookkeeping: dense node id → global dataset row. */
     std::vector<std::vector<std::uint32_t>> id_to_row;
     /** @brief Routes every prong to the index local to its compute domain. */
     std::vector<std::size_t> index_of_compute_domain;
-    /** @brief Expected neighbors; empty when absent or truncated by `--max-vectors`. */
+    /** @brief The @b [queries,depth] expected neighbors; empty when absent or truncated
+     *      by `--max-vectors`. */
     nk::matrix_view<std::uint32_t> ground_truth;
     /** @brief One graph-walking context per pool thread, built by that thread itself with
      *      its local memory domain's allocator. */
     std::vector<std::unique_ptr<traversal_t>> traversals;
     /** @brief Per-thread telemetry sums, padded apart to stay contention-free. */
     std::vector<telemetry_lane_t> lanes;
-    /** @brief `[queries, top_k]` merged global rows of every query's gathered hits. */
+    /** @brief The @b [queries,top_k] merged global rows of every query's gathered hits. */
     nk::matrix<std::uint32_t> hit_rows;
-    /** @brief `[queries, top_k]` distances matching @c hit_rows entry-for-entry. */
+    /** @brief The @b [queries,top_k] distances matching @c hit_rows entry-for-entry. */
     nk::matrix<distance_t> hit_distances;
     /** @brief Merged hits per query, sizing each row for the post-clock judgment. */
     std::vector<std::uint32_t> hit_counts;
@@ -351,13 +352,14 @@ struct streamed_dataset {
 
     /** @brief The index-side state both phases feed - punned through the pool callbacks. */
     bench_context_type_& bench;
-    /** @brief The mapped source rows to ingest, in the file's own scalar. */
+    /** @brief The @b [rows,dimensions] mapped source rows, in the file's own scalar. */
     nk::matrix_view<dataset_scalar_type_> vectors;
-    /** @brief The mapped query rows - or a prefix of @c vectors as self-queries. */
+    /** @brief The @b [queries,dimensions] mapped query rows - or a prefix of @c vectors. */
     nk::matrix_view<dataset_scalar_type_> queries;
-    /** @brief The `[threads, rows-per-thread, dimensions]` staging trampoline planes. */
+    /** @brief The @b [threads,rows_per_thread,dimensions] staging trampoline planes. */
     nk::tensor_span<scalar_t, 3> staging;
-    /** @brief `f32` rescaling planes sized like @c staging; only set when @c scaled_k. */
+    /** @brief The @b [threads,rows_per_thread,dimensions] `f32` rescaling planes; only
+     *      set when @c scaled_k. */
     nk::tensor_span<nk::f32_t, 3> rescaling;
     /** @brief The global symmetric factor applied before integer downcasts. */
     float scale = 1.0f;
@@ -380,7 +382,7 @@ struct streamed_dataset {
                 nk::cast(source, rescaled);
                 nk::scale(rescaled.data(), dimensions, &alpha, &beta, rescaled.data());
             }
-            nk::cast(nk::vector_view<nk::f32_t> {rescaled.data(), dimensions}, landing);
+            nk::cast(rescaled.data(), dimensions, landing.data());
         }
         else { nk::cast(source, landing); }
         return vector_view_t {landing.data(), dimensions};
@@ -474,7 +476,7 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
     bench.hit_rows = nk::matrix<std::uint32_t>::try_zeros({streamed.queries.extent(0), bench.options.top_k});
     bench.hit_distances = nk::matrix<typename bench_t::distance_t>::try_zeros(
         {streamed.queries.extent(0), bench.options.top_k});
-    if (!bench.hit_rows.data() || !bench.hit_distances.data()) {
+    if (bench.hit_rows.empty() || bench.hit_distances.empty()) {
         fmt::print("Failed to allocate the per-query hit matrices\n");
         return false;
     }
@@ -605,10 +607,9 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
         lane.computed_distances += found.computed_distances;
         lane.restarts += found.restarts;
         auto const& results = bench.traversals[thread]->results;
-        merged_count = merge_search_results(
-            std::span<inner_scored_node_t const> {results.data(), results.size()}, bench.id_to_row[slot].data(),
-            std::span<std::uint32_t> {merged_rows, bench.options.top_k},
-            std::span<typename bench_t::distance_t> {merged_distances, bench.options.top_k}, merged_count);
+        merged_count = merge_search_results(to_span(results), bench.id_to_row[slot],
+                                            std::span {merged_rows, bench.options.top_k},
+                                            std::span {merged_distances, bench.options.top_k}, merged_count);
     }
     bench.latencies_us[query] = std::chrono::duration<float, std::micro>(clock_t::now() - started).count();
     bench.hit_counts[query] = static_cast<std::uint32_t>(merged_count);
@@ -649,21 +650,21 @@ bool run_search(streamed_dataset_type_& streamed, fu_pool_t pool) {
     fmt::print("  restarts: {}\n", sums.restarts);
     // Judgment runs after the clock stopped, so QPS never depends on how much we measure.
     // One sweep per query produces every verdict; the discount tables are built once.
-    if (bench.ground_truth.data()) {
+    if (!bench.ground_truth.empty()) {
         std::size_t const judged_depth = std::min(bench.options.top_k, bench.ground_truth.extent(1));
         std::vector<std::uint32_t> scratch(judged_depth);
         std::vector<double> discounts(bench.options.top_k), ideal(bench.options.top_k);
-        fill_discounts({discounts.data(), discounts.size()}, {ideal.data(), ideal.size()});
+        fill_discounts(discounts, ideal);
 
         std::size_t found_at_1 = 0, found_at_k = 0, shared = 0;
         double gain = 0;
         for (std::size_t query = 0; query != query_count; ++query) {
             auto expected = bench.ground_truth.row(query).as_vector();
-            std::span<std::uint32_t const> const returned {bench.hit_rows.row(query).data(), bench.hit_counts[query]};
+            auto const returned = to_span(bench.hit_rows.row(query).as_vector()).first(bench.hit_counts[query]);
             found_at_1 += !returned.empty() && returned.front() == expected[0];
-            auto verdict = judge_ranking(returned, std::span<std::uint32_t const> {expected.data(), judged_depth},
-                                         std::span<std::uint32_t> {scratch.data(), scratch.size()},
-                                         std::span<double const> {discounts.data(), discounts.size()});
+            auto verdict = judge_ranking(std::span<std::uint32_t const> {returned},
+                                         to_span(expected).first(judged_depth), std::span<std::uint32_t> {scratch},
+                                         std::span<double const> {discounts});
             found_at_k += verdict.found_nearest;
             shared += verdict.overlap;
             gain += verdict.gain;
@@ -737,7 +738,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
         std::size_t const batch_rows = launch.options.batch ? std::max(launch.options.batch, threads) : 4 * threads;
         std::size_t const rows_per_thread = divide_round_up(batch_rows, threads);
         staging = nk::tensor<scalar_t, std::allocator<scalar_t>, 3>::try_zeros({threads, rows_per_thread, dimensions});
-        if (!staging.data()) {
+        if (staging.empty()) {
             fmt::print("Failed to allocate {} staging rows of {}d {}\n", batch_rows, dimensions,
                        scalar_t::dtype_name());
             return 1;
@@ -747,7 +748,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
         if constexpr (streamed_t::scaled_k) {
             rescaling_planes = nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3>::try_zeros(
                 {threads, rows_per_thread, dimensions});
-            if (!rescaling_planes.data()) {
+            if (rescaling_planes.empty()) {
                 fmt::print("Failed to allocate {} rescaling rows of {}d f32\n", batch_rows, dimensions);
                 return 1;
             }

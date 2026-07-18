@@ -6,8 +6,8 @@
  *  @file cpp/test.hpp
  *  @date July 17, 2026
  *
- *  Checks return their own failure counts and roll up to `main` without global mutable
- *  state. `expect` reports the location alone; `expect_eq` also prints both values, for
+ *  Checks return their own failure counts and roll up to @c main without global mutable
+ *  state. @c expect reports the location alone; @c expect_eq also prints both values, for
  *  the places where diagnosis needs data - ledger balances, sizes, recall ratios.
  */
 #pragma once
@@ -40,11 +40,11 @@ inline std::size_t expect_eq_(actual_type_ const& actual, wanted_type_ const& wa
     return 1;
 }
 
-/** @brief Shared tally of live bytes & allocation counts, mutated by every `counting_allocator`. */
+/** @brief Shared tally of live bytes & allocation counts, mutated by every @c counting_allocator. */
 struct allocation_ledger_t {
     /** @brief Bytes allocated minus bytes freed; must balance to zero at scope exit. */
     std::atomic<std::ptrdiff_t> live_bytes {0};
-    /** @brief Lifetime number of `allocate` calls, for coarse allocation-pressure checks. */
+    /** @brief Lifetime number of @c allocate calls, for coarse allocation-pressure checks. */
     std::atomic<std::size_t> total_allocations {0};
 };
 
@@ -52,8 +52,8 @@ struct allocation_ledger_t {
  *  @brief Byte-counting allocator proving propagation through a container: every allocation and
  *      deallocation lands in the shared ledger, which must balance to zero at scope exit.
  *
- *  The default constructor exists only because `nk::tensor`'s default constructor requires a
- *  default-constructible allocator for empty instances; a defaulted copy aborts on any real
+ *  The default constructor exists only because @c nk::tensor requires a default-constructible
+ *  allocator for its empty instances; a defaulted copy aborts on any real
  *  allocation, so all live memory provably flows through ledgered instances.
  */
 template <typename value_type_>
@@ -109,6 +109,8 @@ struct test_random_t {
     u64_t state_;
 
     explicit test_random_t(u64_t seed) noexcept : state_(seed) {}
+
+    /** @brief The next pseudo-random value in [0, @p bound). */
     unsigned below(unsigned bound) noexcept {
         u64_t mixed = (state_ += 0x9E3779B97F4A7C15ull);
         mixed = (mixed ^ (mixed >> 30)) * 0xBF58476D1CE4E5B9ull;

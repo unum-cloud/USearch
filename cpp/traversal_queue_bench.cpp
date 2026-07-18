@@ -1,9 +1,9 @@
 /**
- *  @brief Throughput benchmarks for `traversal_queue.hpp` containers - @c max_heap,
+ *  @brief Throughput benchmarks for @c traversal_queue.hpp containers - @c max_heap,
  *      @c sorted_buffer, and @c growing_hash_set - including their multi-element overloads.
  *
  *  @author Ash Vardanian
- *  @file bench/traversal_queue.cpp
+ *  @file cpp/traversal_queue_bench.cpp
  *  @date April 25, 2026
  *
  *  Pure data-structure microbenches. No L1-noise simulator, no HNSW context. Each cell

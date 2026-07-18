@@ -19,7 +19,9 @@ namespace fu = ashvardanian::forkunion;
 namespace unum {
 namespace usearch {
 
+/** @brief Dense node identifier within one sub-index - 32 bits, matching the 4-billion ceiling. */
 using inner_node_id_t = u32_t;
+/** @brief Distance representation shared by all metrics, regardless of the stored dtype. */
 using inner_distance_t = f32_t;
 
 /** @brief Reserved all-ones value, never a valid node id within a sub-index. Doubles as the
@@ -51,7 +53,7 @@ struct inner_further_scored_node_t {
 /**
  *  @brief Minimal 8-byte SplitMix64 PRNG for stochastic NSW start-point selection.
  *
- *  Picked over `std::mt19937` (5 KB of per-thread state on libstdc++) and `std::minstd_rand`
+ *  Picked over @c std::mt19937 (5 KB of per-thread state on libstdc++) and @c std::minstd_rand
  *  (a per-call 64-bit modulo). Quality is ample for spreading entry points; each traversal
  *  context owns one, seeded distinctly per thread so the streams decorrelate.
  */
@@ -69,8 +71,8 @@ struct splitmix_u32_t {
         return z ^ (z >> 31);
     }
 
-    /** @brief Index in `[0, bound)` via Lemire's multiply-shift - one multiply, no division.
-     *      Bias is ~`bound / 2^32`, negligible for entry-point selection. The random operand
+    /** @brief Index in [0, @p bound) via Lemire's multiply-shift - one multiply, no division.
+     *      Bias is about @p bound / 2^32, negligible for entry-point selection. The random operand
      *      must be narrowed to 32 bits @b before widening: multiplying the full 64-bit state
      *      would let its high bits survive the shift and escape the bound. */
     inline u32_t bounded(u32_t bound) noexcept {
@@ -81,7 +83,7 @@ struct splitmix_u32_t {
 /**
  *  @brief Vector Search index for a single uniform latency memory space.
  *
- *  @section Supported Metrics: Only "Inner Product class"
+ *  @section inner_volatile_index_metrics Supported Metrics
  *
  *  This template is designed exclusively for dense representations in the most common metric spaces:
  *  @b Inner-Product, Angular (Cosine), Euclidean (L2), Hamming (Manhattan), and Jaccard (Tanimoto).
@@ -97,11 +99,11 @@ struct splitmix_u32_t {
  *
  *  @section inner_volatile_index_concurrency Concurrency & Transactions
  *
- *  This class is designed to allow simutanous construction and traversal in heavily multi-threaded environments.
+ *  This class is designed to allow simultaneous construction and traversal in heavily multi-threaded environments.
  *  One design previously considered is to have a small number of locks proportional to the CPU core count and
  *  graph connectivity, and hash the node IDs to pick the target lock.
  *
- *  Instead, we reuse the per-node neigbors lists to also contain per-node locks. This conveniently places them
+ *  Instead, we reuse the per-node neighbors lists to also contain per-node locks. This conveniently places them
  *  at the start of independent cache lines. Besides those, we use a minimal number of "atomics" for book-keeping,
  *  avoiding expensive Compare-And-Swap exchange operations.
  *
@@ -113,10 +115,8 @@ struct splitmix_u32_t {
  *
  *  Instead of re-allocating one huge matrix and paying the padding memory costs right after the growth phase,
  *  we implement a custom memory allocation strategy. On small-ish indexes we progressively grow through power-of-two
- *  sizes, until we reach a threashold that easily amortizes memory allocations between insertions.
- *  Aiming for @b ~4GB/allocation slabs and compatibility with CXL-backed memory allcoators.
- *
- *
+ *  sizes, until we reach a threshold that easily amortizes memory allocations between insertions.
+ *  Aiming for @b ~4GB/allocation slabs and compatibility with CXL-backed memory allocators.
  */
 template <                                                          //
     nk_dtype_t vector_dtype_ = nk_bf16_k,                           //
@@ -129,9 +129,8 @@ template <                                                          //
     >
 struct inner_volatile_index;
 
-/**
- *  @brief Separate class for handling queues and other dynamic memory structures.
- */
+/** @brief Per-thread traversal scratch: the candidate queues, the visited set, and the
+ *      running telemetry counters - one instance per scanning thread. */
 template <                                               //
     nk_capability_t capability_ = nk_cap_icelake_k,      //
     typename allocator_type_ = std::allocator<std::byte> //
@@ -151,7 +150,7 @@ struct inner_traversal_context {
     using frontier_queue_t = max_heap<inner_scored_node_t, inner_further_scored_node_t, candidates_allocator_t>;
     using visited_set_t = growing_hash_set<inner_node_id_t, std::hash<inner_node_id_t>, visits_allocator_t>;
 
-    /** @brief Nodes we've already seen, forming a heap of best results so far. */
+    /** @brief Nodes we've already scored, kept ascending as the best results so far. */
     results_array_t results;
     /** @brief Nodes we've already re-evaluated for post-insertion refinement. */
     results_array_t refining_candidates;
@@ -166,9 +165,9 @@ struct inner_traversal_context {
      *      telemetry below, it's a running counter: operations snapshot it on entry and report
      *      the difference, so nested and repeated calls compose without resets. */
     std::size_t computed_distances = 0;
-    /** @brief Subset of @p computed_distances spent in insertion-side diversity selection. */
+    /** @brief Subset of @c computed_distances spent in insertion-side diversity selection. */
     std::size_t computed_distances_in_refines = 0;
-    /** @brief Subset of @p computed_distances spent re-selecting full lists while back-linking. */
+    /** @brief Subset of @c computed_distances spent re-selecting full lists while back-linking. */
     std::size_t computed_distances_in_reverse_refines = 0;
     /** @brief Frontier candidates whose neighbor lists were expanded during traversals. */
     std::size_t visited_members = 0;
@@ -204,10 +203,10 @@ struct inner_volatile_index {
     using distance_t = f32_t;
     using candidate_t = inner_scored_node_t;
 
-    /** Default integer type to use for loops and indexing at sub-index scale. */
+    /** @brief Default integer type to use for loops and indexing at sub-index scale. */
     using small_size_t = std::uint32_t;
 
-    /** Node identifier within this sub-index - the class-local spelling of @c inner_node_id_t. */
+    /** @brief Node identifier within this sub-index - the class-local spelling of @c inner_node_id_t. */
     using node_id_t = inner_node_id_t;
 
     using vectors_allocator_t =
@@ -274,7 +273,7 @@ struct inner_volatile_index {
      *  @brief Separately allocated matrix slabs, where each row is one vector entry. Slot indexes are global,
      *      monotonically transparently growing across individual matrices.
      *
-     *  Each directory is sized once to @p max_chunks_k entries in @c reserve() and never reallocates
+     *  Each directory is sized once to @c max_chunks_k entries in @c reserve() and never reallocates
      *  after that, so readers can dereference chunk headers with zero synchronization while a single
      *  writer default-constructs the next one in place. The stride pads every header to
      *  @c fu::default_alignment_k, keeping the writer's half-built entry off the readers' cache lines.
@@ -304,21 +303,21 @@ struct inner_volatile_index {
 
     /**
      *  @brief Unsigned integer containing the identifier of the last "allocated" node. It defines the lower
-     *      bound for the number of initialized or empty rows across @p vectors_chunks_ and @p neighbors_chunks_
+     *      bound for the number of initialized or empty rows across @c vectors_chunks_ and @c neighbors_chunks_
      *      chunks. It's typically incremented in batches.
      */
     std::atomic<node_id_t> last_allocated_id_ {0};
 
     /**
-     *  @brief Unsigned integer containing the identifier of the last "filled" node. It defines the lower
-     *      bound for the number of initialized non-empty rows across in @p vectors_chunks_ chunks, that can
-     *      be used for randomly picked landmarks. It's typically incremented one by one.
+     *  @brief The id dispenser: the identifier the next wired node receives. Incremented one-by-one
+     *      at wiring time, so ids follow the global wiring-start order and each thread holds at most
+     *      one unpublished id. @ref inner_volatile_index_concurrency
      */
     std::atomic<node_id_t> next_visible_id_ {0};
     /**
-     *  @brief Unsigned integer containing the identifier of the last "filled" node. It defines the lower
-     *      bound for the number of initialized non-empty rows across in @p vectors_chunks_ chunks, that can
-     *      be used for randomly picked landmarks. It's typically incremented one by one.
+     *  @brief The visibility watermark: every id strictly below it is published, its vector, norms &
+     *      neighbors readable - the safe bound for random landmark sampling. Advanced strictly in
+     *      dispensed order by each publisher taking its turn. @ref inner_volatile_index_concurrency
      */
     std::atomic<node_id_t> last_visible_id_ {0};
 
@@ -351,7 +350,7 @@ struct inner_volatile_index {
 
     /** @brief Constructed chunks per directory. Deliberately non-atomic: only the one "responsible"
      *      grower thread mutates it, and successive growers are ordered by the acquire/release pair
-     *      on @p remaining_capacity_. @ref create_next_chunk */
+     *      on @c remaining_capacity_. @ref create_next_chunk */
     small_size_t chunks_count_ = 0;
 
     /** @brief Allocator instance handed to every vectors & norms chunk. */
@@ -412,9 +411,9 @@ struct inner_volatile_index {
      *      analytical solution - O(1) time and memory, no per-chunk metadata to walk or binary-search.
      *
      *  Chunk sizes follow the growth schedule from @ref inner_volatile_index_malloc: the first chunk
-     *  holds 2^ @p first_chunk_rows_log2_k rows, every next chunk doubles, until reaching the slab
-     *  size of 2^ @p slab_rows_log2_k rows - all chunks after that keep that fixed slab size.
-     *  Doubling gives closed-form prefix sums, so the lookup is one `lzcnt` plus a few adds -
+     *  holds 2^ @c first_chunk_rows_log2_k rows, every next chunk doubles, until reaching the slab
+     *  size of 2^ @c slab_rows_log2_k rows - all chunks after that keep that fixed slab size.
+     *  Doubling gives closed-form prefix sums, so the lookup is one @c lzcnt plus a few adds -
      *  cheap enough to call on every traversal hop without caching locations.
      */
     inline chunked_location_t chunked_location(node_id_t node_id) const noexcept {
@@ -532,12 +531,12 @@ struct inner_volatile_index {
      *  @brief Allocates & publishes chunks until at least @p minimal_capacity fresh rows are added,
      *      following the growth schedule of @ref inner_volatile_index_malloc.
      *  @return The number of added rows - possibly non-zero even when the status is a failure,
-     *      in which case the caller must still credit them back to @p remaining_capacity_.
+     *      in which case the caller must still credit them back to @c remaining_capacity_.
      *
      *  Only one thread may run this at a time: the "responsible" one that dropped
-     *  @p remaining_capacity_ below zero. Successive responsible threads are ordered by the
+     *  @c remaining_capacity_ below zero. Successive responsible threads are ordered by the
      *  acquire/release pair on that counter, which is also what publishes the non-atomic
-     *  @p chunks_count_ and the directory writes. Readers never touch a chunk before some node
+     *  @c chunks_count_ and the directory writes. Readers never touch a chunk before some node
      *  inside it becomes visible, and that visibility chains through the same atomics.
      */
     expected<std::size_t> create_next_chunk(std::size_t minimal_capacity) noexcept {
@@ -592,10 +591,12 @@ struct inner_volatile_index {
 
     /**
      *  @brief Claims storage capacity for @p count new nodes, growing chunks when needed.
+     *  @return The first row of the claim - only meaningful on @c success_k, and rarely needed:
+     *      identity is dispensed separately at wiring time.
      *
      *  Spins while other threads are mid-growth, covering all interleavings of the capacity state
      *  machine. Claims @b storage only, never identity: node ids are dispensed one-by-one from
-     *  @p next_visible_id_ at wiring time. On success, enough sentinel-filled rows exist for
+     *  @c next_visible_id_ at wiring time. On success, enough sentinel-filled rows exist for
      *  @p count dispenses, and the caller must roll forward to wiring & publishing them all -
      *  claimed capacity cannot be handed back once ids are dispensed against it, or the
      *  visibility watermark would stall forever. @ref inner_volatile_index_concurrency
@@ -647,10 +648,10 @@ struct inner_volatile_index {
     /**
      *  @brief Samples one 4-way batch of distinct, unvisited, published landmarks, scores them
      *      against the @p query, and queues them into the frontier & the result pool.
-     *  @return `true` if at least one fresh landmark was queued; `false` when every published
+     *  @return @c true if at least one fresh landmark was queued; @c false when every published
      *      node is already visited or the scratch structures can't grow.
      *
-     *  Uniform draws that collide with `visited` fall back to cyclic linear probing over the id
+     *  Uniform draws that collide with @c visited fall back to cyclic linear probing over the id
      *  space, so every call makes strict progress without retry budgets - the sampler is exact,
      *  not heuristic. Only transiently locked nodes are re-rolled, mirroring the traversal policy.
      */
@@ -711,10 +712,13 @@ struct inner_volatile_index {
      *  @brief Greedy best-first NSW walk from random published landmarks toward the @p query.
      *
      *  Read-only on the graph: takes no locks, writes nothing, retries transiently locked nodes.
-     *  Owns nothing but the caller's scratch @p context, which must arrive pre-reserved & pre-cleared;
-     *  fills `context.results` with up to @p expansion_factor nearest published candidates.
      *  Scratch allocation failures degrade the walk - keeping the best candidates found so far -
      *  rather than fail it: callers may already own claimed node ids and must roll forward regardless.
+     *
+     *  @param[in] first_invisible_id The caller's watermark snapshot, bounding the readable id space.
+     *  @param[in] expansion_factor Breadth of the candidate pool - the walk's stopping radius.
+     *  @param[inout] context Scratch & telemetry; must arrive pre-reserved & pre-cleared, and ends
+     *      with up to @p expansion_factor nearest published candidates in @c context.results.
      */
     void search_around(vector_view_t query, vector_norms_t query_norms, node_id_t first_invisible_id,
                        std::size_t expansion_factor, inner_traversal_context_t& context) noexcept {
@@ -839,13 +843,16 @@ struct inner_volatile_index {
     };
 
     /**
-     *  @brief Greedy diversity selection over the ascending @p candidates buffer - the classic
-     *      NSW/HNSW pruning heuristic. Walking nearest-first, a candidate is kept only when it is
-     *      closer to the query than to every already-kept link, so the links spread across
-     *      directions instead of clustering on one side of the query.
+     *  @brief Greedy diversity selection over the ascending candidates - the classic NSW/HNSW
+     *      pruning heuristic: walking nearest-first, a candidate is kept only when it is closer
+     *      to the query than to every already-kept link, so links spread across directions.
      *
-     *  Reads the graph without locks and fills at most @p limit entries of @p out.
-     *  Cost is O(kept * considered) one-to-one distances; 4-way batching is a known follow-up.
+     *  Reads the graph without locks. Cost is O(kept · considered) one-to-one distances;
+     *  4-way batching is a known follow-up.
+     *
+     *  @param[in] candidates Search results, ascending by distance to the query.
+     *  @param[in] limit Ceiling on the kept links - typically the connectivity.
+     *  @param[out] out Receives the kept ids with their cached views & norms; sets @c out.count.
      *  @return The number of distance computations performed, for the caller's telemetry.
      */
     std::size_t select_diverse(results_array_t const& candidates, std::size_t limit,
@@ -881,6 +888,10 @@ struct inner_volatile_index {
      *  publication turn. An exchange that returns the sentinel did @b not acquire the lock -
      *  another writer owns it - so we politely retry. All slot writes happen under the lock, and
      *  the unlocking release-store of slot 0 is what republishes the edited list.
+     *
+     *  @param[in] selected The fresh node's chosen links, whose cached views & norms serve as the
+     *      "distance to the neighbor itself" reference without re-deriving locations.
+     *  @param[inout] context Scratch for the re-selection, plus the telemetry counters.
      */
     void back_link_neighbors(node_id_t new_node_id, vector_view_t new_vector, vector_norms_t new_norms,
                              selected_links_t const& selected, inner_traversal_context_t& context) noexcept {
@@ -947,9 +958,7 @@ struct inner_volatile_index {
     }
 
   public:
-    /**
-     *  @brief Returns the number of keys & vectors in the index.
-     */
+    /** @brief Number of published vectors - the visibility watermark; the index itself stores no keys. */
     std::size_t size() const noexcept { return last_visible_id_.load(); }
 
     /** @brief Neighbor ids per node's list - its full fixed capacity, none lost to bookkeeping. */
@@ -1032,9 +1041,9 @@ struct inner_volatile_index {
         std::size_t visited_members = 0;
         /** @brief Total distance computations, with padding lanes of 4-way kernels excluded. */
         std::size_t computed_distances = 0;
-        /** @brief Subset of @p computed_distances spent in insertion-side diversity selection. */
+        /** @brief Subset of @c computed_distances spent in insertion-side diversity selection. */
         std::size_t computed_distances_in_refines = 0;
-        /** @brief Subset of @p computed_distances spent re-selecting full lists while back-linking. */
+        /** @brief Subset of @c computed_distances spent re-selecting full lists while back-linking. */
         std::size_t computed_distances_in_reverse_refines = 0;
         /** @brief Starvation restarts across the batch - a graph-connectivity health signal. */
         std::size_t restarts = 0;
@@ -1045,7 +1054,7 @@ struct inner_volatile_index {
     /** @brief Optional tuning knobs for @c insert(); zeros mean "derive from connectivity". */
     struct insert_config_t {
         /** @brief Breadth of the candidate pool during wiring; defaults to twice the connectivity. */
-        small_size_t expansion_factor;
+        small_size_t expansion_factor = 0;
     };
 
     /**
@@ -1055,11 +1064,14 @@ struct inner_volatile_index {
      *  All fallible scratch allocations happen before the id claim - once ids are claimed, this
      *  thread must roll forward to publication. @ref inner_volatile_index_concurrency
      *
+     *  @param[in] new_vectors The batch to insert, one row per vector, in the frozen geometry.
      *  @param[out] assigned_ids Caller-owned output: either empty, or exactly one slot per incoming
      *      vector, receiving that vector's dispensed node id. The index stores no keys - ids are
      *      dense, so callers park keys in a flat id-indexed array of the outer layer. One batch's
      *      ids are generally @b not contiguous: identity is dispensed per node, interleaved
      *      across concurrently inserting threads.
+     *  @param[inout] context The calling thread's scratch & telemetry, reused across batches.
+     *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      */
     insert_result_t insert(vectors_view_t new_vectors, node_ids_span_t assigned_ids, inner_traversal_context_t& context,
                            insert_config_t config = {}) noexcept {
@@ -1222,9 +1234,8 @@ struct inner_volatile_index {
     };
 
     /**
-     *  @brief Finds the nearest published neighbors of @p query_vector, filling `context.results`
-     *      with up to `expansion_factor` candidates, ascending by distance - the nearest at
-     *      `results.data()[0]`. The caller reranks or trims the prefix it needs.
+     *  @brief Finds the nearest published neighbors of @p query_vector - the caller reranks or
+     *      trims the prefix it needs.
      *
      *  Safe to call concurrently with insertions and other searches: the traversal reads only
      *  nodes below the visibility watermark, acquire-loads every slot-0 lock before scanning a
@@ -1232,6 +1243,11 @@ struct inner_volatile_index {
      *  nodes become reachable the moment their publisher advances the watermark; reverse-edge ids
      *  above this query's watermark snapshot are skipped by the translation-frontier invariant,
      *  and picked up by any later query with a fresher snapshot. @ref inner_volatile_index_concurrency
+     *
+     *  @param[in] query_vector The query, in the index's own dtype & frozen dimensionality.
+     *  @param[inout] context The calling thread's scratch & telemetry: the matches end up in
+     *      @c context.results, ascending by distance - the nearest first.
+     *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      */
     search_result_t search(vector_view_t query_vector, inner_traversal_context_t& context,
                            search_config_t config = {}) noexcept {
