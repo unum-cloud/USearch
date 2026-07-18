@@ -85,12 +85,12 @@ struct capability_choice {
  *      architecture, named by NumKong's microarchitecture vocabulary and split by its own
  *      target macros. The implicit floor the table never lists is the serial kernels. */
 inline constexpr capability_choice<nk_capability_t> compute_choices_k[] = {
-#if NK_TARGET_X8664
+#if NK_TARGET_X8664_
     {"haswell", nk_cap_haswell_k},
     {"skylake", nk_cap_skylake_k},
     {"icelake", nk_cap_icelake_k},
     {"genoa", nk_cap_genoa_k},
-#elif NK_TARGET_ARM64
+#elif NK_TARGET_ARM64_
     {"neon", nk_cap_neon_k},
     {"neonsdot", nk_cap_neonsdot_k},
     {"neonbfdot", nk_cap_neonbfdot_k},

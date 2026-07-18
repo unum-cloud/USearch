@@ -18,6 +18,24 @@ namespace usearch {
 
 using u32_t = std::uint32_t;
 using u64_t = std::uint64_t;
+using f32_t = float;
+
+/** @brief Dense node identifier within one sub-index - 32 bits, matching the 4-billion ceiling. */
+using inner_node_id_t = u32_t;
+/** @brief Distance representation shared by all metrics, regardless of the stored dtype. */
+using inner_distance_t = f32_t;
+
+/** @brief Reserved all-ones value, never a valid node id within a sub-index. Doubles as the
+ *      lock & empty-slot sentinel in neighbor lists of every index design. */
+inline constexpr inner_node_id_t inner_node_id_unknown_k = 0xFFFFFFFFu;
+
+/** @brief One traversal candidate: a node id paired with its distance to the query. */
+struct inner_scored_node_t {
+    /** @brief Identifier of the scored node within its sub-index. */
+    inner_node_id_t node_id;
+    /** @brief Distance to the query, in the instantiated kernel's metric. */
+    inner_distance_t distance;
+};
 
 enum class status_t {
     success_k,
@@ -76,6 +94,13 @@ constexpr result_type_ power_of_two_mask(u32_t exponent) noexcept {
 template <typename value_type_>
 constexpr value_type_ divide_round_up(value_type_ value, value_type_ divisor) noexcept {
     return (value + divisor - value_type_(1)) / divisor;
+}
+
+/** @brief The smaller of @p first & @p second - @c std::min without the <algorithm> tax,
+ *      named to also dodge the @c min macro of Windows headers. */
+template <typename value_type_>
+constexpr value_type_ min_of(value_type_ first, value_type_ second) noexcept {
+    return second < first ? second : first;
 }
 
 /**
