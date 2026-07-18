@@ -5,9 +5,12 @@
  *  @date July 26, 2023
  */
 #pragma once
-#include <atomic>  // `std::atomic`
-#include <cstdint> // `std::uint32_t`, `std::uint64_t`
-#include <thread>  // `std::this_thread::yield`
+#include <atomic>      // `std::atomic`
+#include <cstdint>     // `std::uint32_t`, `std::uint64_t`
+#include <cstring>     // `std::memmove`
+#include <span>        // `std::span`
+#include <type_traits> // `std::type_identity_t`
+#include <thread>      // `std::this_thread::yield`
 
 namespace unum {
 namespace usearch {
@@ -73,19 +76,84 @@ constexpr value_type_ divide_round_up(value_type_ value, value_type_ divisor) no
 }
 
 /**
+ *  @brief The first position in the ascending @p values not ordered before @p value -
+ *      @c std::lower_bound re-spelled in ten lines, so headers don't drag in
+ *      `<algorithm>`, one of the heaviest includes on the compile-health charts.
+ *  @see https://artificial-mind.net/projects/compile-health/
+ */
+template <typename value_type_>
+constexpr value_type_* lower_bound(std::span<value_type_> values,
+                                   std::type_identity_t<value_type_> const& value) noexcept {
+    value_type_* first = values.data();
+    std::size_t count = values.size();
+    while (count) {
+        std::size_t const half = count / 2;
+        value_type_* const middle = first + half;
+        bool const is_before = *middle < value;
+        first = is_before ? middle + 1 : first;
+        count = is_before ? count - half - 1 : half;
+    }
+    return first;
+}
+
+/** @brief Any entry pairing a graph-local @c node_id with a @c distance - the shape that
+ *      search results share across index designs. */
+template <typename entry_type_>
+concept scored_node = requires(entry_type_ entry) {
+    entry.node_id;
+    entry.distance;
+};
+
+/**
+ *  @brief Merges the ascending @p results of one search into the caller's bounded ranking -
+ *      the parallel @p keys & @p distances spans, already holding @p old_count hits from
+ *      other indexes - keeping both ascending by distance.
+ *
+ *  Indexes store no keys, so @p keys_of_ids translates each dense node id into the caller's
+ *  key space through `operator[]` - a flat array, a raw pointer, or any custom mapping type -
+ *  letting several sub-indexes with colliding id spaces, like one per memory domain, gather
+ *  into one shared buffer. The spans' common length is the ranking's capacity.
+ *  @return The merged hit count, never exceeding the capacity.
+ */
+template <scored_node entry_type_, typename keys_of_ids_type_, typename key_type_, typename distance_type_>
+std::size_t merge_search_results(std::span<entry_type_ const> results, keys_of_ids_type_ const& keys_of_ids,
+                                 std::span<key_type_> keys, std::span<distance_type_> distances,
+                                 std::size_t old_count) noexcept {
+    static_assert(std::is_trivially_copyable_v<key_type_> && std::is_trivially_copyable_v<distance_type_>,
+                  "The ranking is shifted with `memmove`, so both spans must hold trivial types");
+    std::size_t const max_count = keys.size() < distances.size() ? keys.size() : distances.size();
+    std::size_t merged_count = old_count;
+    for (std::size_t hit = 0; hit != results.size(); ++hit) {
+        entry_type_ const& scored = results[hit];
+        distance_type_ const distance = static_cast<distance_type_>(scored.distance);
+        std::size_t const offset = lower_bound(distances.subspan(0, merged_count), distance) - distances.data();
+        if (offset == max_count) break; // Results are ascending - every later hit is worse.
+
+        std::size_t const count_worse = merged_count - offset - (max_count == merged_count);
+        std::memmove(keys.data() + offset + 1, keys.data() + offset, count_worse * sizeof(key_type_));
+        std::memmove(distances.data() + offset + 1, distances.data() + offset, count_worse * sizeof(distance_type_));
+        keys[offset] = keys_of_ids[scored.node_id];
+        distances[offset] = distance;
+        merged_count += merged_count != max_count;
+    }
+    return merged_count;
+}
+
+/**
  *  @brief Portable spin-wait baseline with the same call shape as ForkUnion's hardware wait
- *      monitors, like `fu::x86_tpause_t`, `fu::arm64_wfet_t`, and `fu::risc5_wrs_t`.
+ *      monitors, like @c fu::x86_tpause_t, @c fu::arm64_wfet_t, and @c fu::risc5_wrs_t.
  *
  *  Ignores the watched word and simply yields the timeslice - correctness never depends on the
- *  waiter, only latency and power do. The first overload watches a `std::atomic` object; the
- *  second watches an in-place word owned through `std::atomic_ref`, like the slot-0 locks living
+ *  waiter, only latency and power do. The first overload watches a @c std::atomic object; the
+ *  second watches an in-place word owned through @c std::atomic_ref, like the slot-0 locks living
  *  inside neighbor rows. The waiting bound (capped or uncapped) arrives as an arbitrary tag type,
  *  so this header stays independent of ForkUnion.
  *
- *  The pointer overload exists because of pre-C++26 STL limitations: `std::atomic_ref` cannot
- *  bind const-qualified objects until P3323, `std::atomic<T>::wait` offers no timed variant, and
- *  neither API exposes the address-armed hardware waits (`UMWAIT`, `WFET`, `WRS`) that ForkUnion
- *  reaches directly - so the raw address plus the observed bit pattern is the portable currency.
+ *  The pointer overload exists because of pre-C++26 STL limitations: @c std::atomic_ref cannot
+ *  bind const-qualified objects until P3323, @c std::atomic::wait offers no timed variant, and
+ *  neither API exposes the address-armed hardware waits - @c UMWAIT, @c WFET, @c WRS - that
+ *  ForkUnion reaches directly, so the raw address plus the observed bit pattern is the portable
+ *  currency.
  */
 struct dummy_waiter_t {
     template <typename value_type_, typename thread_index_type_, typename bound_type_>

@@ -83,6 +83,16 @@ struct counting_allocator {
     bool operator==(counting_allocator const& other) const noexcept { return ledger_ == other.ledger_; }
 };
 
+/** @brief The largest magnitude one stored dimension can carry - per component for the
+ *      packed types, the finite maximum for the plain ones. The conditional papers over a
+ *      NumKong asymmetry: plain scalars name their @c component_t but only the packed ones
+ *      expose @c component_max. */
+template <typename scalar_>
+constexpr float dimension_amplitude() noexcept {
+    if constexpr (requires { scalar_::component_max(); }) return float(scalar_::component_max());
+    else return float(scalar_::finite_max());
+}
+
 /** @brief Builds a scalar from a small unsigned - sub-byte types go through the raw nibble path,
  *      float wrappers via @c from_f32, byte-or-larger integers via the integral constructor. */
 template <typename scalar_>

@@ -29,4 +29,11 @@ if (USEARCH_BUILD_BENCH_CPP)
     add_executable(bench_cpp bench.cpp)
     setup_target(bench_cpp)
     target_link_libraries(bench_cpp PRIVATE clipp)
+
+    add_executable(inner_volatile_index_bench_cpp inner_volatile_index_bench.cpp)
+    setup_target(inner_volatile_index_bench_cpp)
+    target_include_directories(
+        inner_volatile_index_bench_cpp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../stringzilla/include
+    )
+    target_link_libraries(inner_volatile_index_bench_cpp PRIVATE clipp fmt::fmt forkunion::static)
 endif ()

@@ -180,10 +180,12 @@ struct inner_traversal_context {
     inner_traversal_context(inner_traversal_context const&) noexcept = delete;
     inner_traversal_context& operator=(inner_traversal_context const&) noexcept = delete;
 
-    // TODO: The traversal containers are WIP and do not yet accept allocator instances - they
-    // default-construct allocators internally. Propagate @p alloc once the D-ary rewrite lands.
-    inner_traversal_context(allocator_t) noexcept
-        : results(), refining_candidates(), frontier(), visited(), random_generator() {}
+    /** @brief Constructs every traversal container with a rebound copy of @p alloc, so all
+     *      scratch - results, refinement, frontier, and the visited set - lands wherever the
+     *      caller's allocator places it, like a NUMA domain local to the owning thread. */
+    inner_traversal_context(allocator_t alloc) noexcept
+        : results(candidates_allocator_t(alloc)), refining_candidates(candidates_allocator_t(alloc)),
+          frontier(candidates_allocator_t(alloc)), visited(visits_allocator_t(alloc)), random_generator() {}
     inner_traversal_context(inner_traversal_context&&) = default;
     inner_traversal_context& operator=(inner_traversal_context&&) = default;
 };
