@@ -163,18 +163,21 @@ class max_heap {
     element_t* elements_;
     std::size_t size_;
     std::size_t capacity_;
+    allocator_t allocator_;
 
   public:
-    max_heap() noexcept : elements_(nullptr), size_(0), capacity_(0) {}
+    max_heap(allocator_t allocator = {}) noexcept
+        : elements_(nullptr), size_(0), capacity_(0), allocator_(std::move(allocator)) {}
 
     max_heap(max_heap&& other) noexcept
         : elements_(exchange(other.elements_, nullptr)), size_(exchange(other.size_, 0)),
-          capacity_(exchange(other.capacity_, 0)) {}
+          capacity_(exchange(other.capacity_, 0)), allocator_(std::move(other.allocator_)) {}
 
     max_heap& operator=(max_heap&& other) noexcept {
         std::swap(elements_, other.elements_);
         std::swap(size_, other.size_);
         std::swap(capacity_, other.capacity_);
+        std::swap(allocator_, other.allocator_);
         return *this;
     }
 
@@ -184,7 +187,7 @@ class max_heap {
     ~max_heap() noexcept { reset(); }
 
     void reset() noexcept {
-        if (elements_) allocator_t {}.deallocate(elements_, capacity_);
+        if (elements_) allocator_.deallocate(elements_, capacity_);
         elements_ = nullptr;
         capacity_ = 0;
         size_ = 0;
@@ -220,13 +223,12 @@ class max_heap {
         new_capacity = ceil2(new_capacity);
         if (new_capacity == 0) return false;
         new_capacity = (std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u));
-        auto allocator = allocator_t {};
-        auto new_elements = allocator.allocate(new_capacity);
+        auto new_elements = allocator_.allocate(new_capacity);
         if (!new_elements) return false;
 
         if (elements_) {
             std::memcpy(new_elements, elements_, size_ * sizeof(element_t));
-            allocator.deallocate(elements_, capacity_);
+            allocator_.deallocate(elements_, capacity_);
         }
         elements_ = new_elements;
         capacity_ = new_capacity;
@@ -398,18 +400,21 @@ class max_heap_dary {
     element_t* elements_;
     std::size_t size_;
     std::size_t capacity_;
+    allocator_t allocator_;
 
   public:
-    max_heap_dary() noexcept : elements_(nullptr), size_(0), capacity_(0) {}
+    max_heap_dary(allocator_t allocator = {}) noexcept
+        : elements_(nullptr), size_(0), capacity_(0), allocator_(std::move(allocator)) {}
 
     max_heap_dary(max_heap_dary&& other) noexcept
         : elements_(exchange(other.elements_, nullptr)), size_(exchange(other.size_, 0)),
-          capacity_(exchange(other.capacity_, 0)) {}
+          capacity_(exchange(other.capacity_, 0)), allocator_(std::move(other.allocator_)) {}
 
     max_heap_dary& operator=(max_heap_dary&& other) noexcept {
         std::swap(elements_, other.elements_);
         std::swap(size_, other.size_);
         std::swap(capacity_, other.capacity_);
+        std::swap(allocator_, other.allocator_);
         return *this;
     }
 
@@ -419,7 +424,7 @@ class max_heap_dary {
     ~max_heap_dary() noexcept { reset(); }
 
     void reset() noexcept {
-        if (elements_) allocator_t {}.deallocate(elements_, capacity_);
+        if (elements_) allocator_.deallocate(elements_, capacity_);
         elements_ = nullptr;
         capacity_ = 0;
         size_ = 0;
@@ -443,12 +448,11 @@ class max_heap_dary {
         new_capacity = ceil2(new_capacity);
         if (new_capacity == 0) return false;
         new_capacity = (std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u));
-        auto allocator = allocator_t {};
-        auto new_elements = allocator.allocate(new_capacity);
+        auto new_elements = allocator_.allocate(new_capacity);
         if (!new_elements) return false;
         if (elements_) {
             std::memcpy(new_elements, elements_, size_ * sizeof(element_t));
-            allocator.deallocate(elements_, capacity_);
+            allocator_.deallocate(elements_, capacity_);
         }
         elements_ = new_elements;
         capacity_ = new_capacity;
@@ -566,18 +570,21 @@ class sorted_buffer {
     element_t* elements_;
     std::size_t size_;
     std::size_t capacity_;
+    allocator_t allocator_;
 
   public:
-    sorted_buffer() noexcept : elements_(nullptr), size_(0), capacity_(0) {}
+    sorted_buffer(allocator_t allocator = {}) noexcept
+        : elements_(nullptr), size_(0), capacity_(0), allocator_(std::move(allocator)) {}
 
     sorted_buffer(sorted_buffer&& other) noexcept
         : elements_(exchange(other.elements_, nullptr)), size_(exchange(other.size_, 0)),
-          capacity_(exchange(other.capacity_, 0)) {}
+          capacity_(exchange(other.capacity_, 0)), allocator_(std::move(other.allocator_)) {}
 
     sorted_buffer& operator=(sorted_buffer&& other) noexcept {
         std::swap(elements_, other.elements_);
         std::swap(size_, other.size_);
         std::swap(capacity_, other.capacity_);
+        std::swap(allocator_, other.allocator_);
         return *this;
     }
 
@@ -587,7 +594,7 @@ class sorted_buffer {
     ~sorted_buffer() noexcept { reset(); }
 
     void reset() noexcept {
-        if (elements_) allocator_t {}.deallocate(elements_, capacity_);
+        if (elements_) allocator_.deallocate(elements_, capacity_);
         elements_ = nullptr;
         capacity_ = 0;
         size_ = 0;
@@ -605,12 +612,11 @@ class sorted_buffer {
         new_capacity = ceil2(new_capacity);
         if (new_capacity == 0) return false;
         new_capacity = (std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u));
-        auto allocator = allocator_t {};
-        auto new_elements = allocator.allocate(new_capacity);
+        auto new_elements = allocator_.allocate(new_capacity);
         if (!new_elements) return false;
 
         if (size_) std::memcpy(new_elements, elements_, size_ * sizeof(element_t));
-        if (elements_) allocator.deallocate(elements_, capacity_);
+        if (elements_) allocator_.deallocate(elements_, capacity_);
 
         elements_ = new_elements;
         capacity_ = new_capacity;
@@ -839,9 +845,10 @@ class growing_hash_set {
     /// @brief Number of populated.
     std::size_t count_ {};
     hasher_t hasher_ {};
+    allocator_t allocator_ {};
 
   public:
-    growing_hash_set() noexcept {}
+    growing_hash_set(allocator_t allocator = {}) noexcept : allocator_(std::move(allocator)) {}
     ~growing_hash_set() noexcept { reset(); }
 
     explicit operator bool() const noexcept { return slots_; }
@@ -853,15 +860,16 @@ class growing_hash_set {
     }
 
     void reset() noexcept {
-        if (slots_) allocator_t {}.deallocate((byte_t*)slots_, capacity_ * sizeof(element_t));
+        if (slots_) allocator_.deallocate((byte_t*)slots_, capacity_ * sizeof(element_t));
         slots_ = nullptr;
         capacity_ = 0;
         count_ = 0;
     }
 
-    growing_hash_set(std::size_t capacity) noexcept
-        : slots_((element_t*)allocator_t {}.allocate(ceil2(capacity) * sizeof(element_t))),
-          capacity_(slots_ ? ceil2(capacity) : 0u), count_(0u) {
+    growing_hash_set(std::size_t capacity, allocator_t allocator = {}) noexcept : allocator_(std::move(allocator)) {
+        slots_ = (element_t*)allocator_.allocate(ceil2(capacity) * sizeof(element_t));
+        capacity_ = slots_ ? ceil2(capacity) : 0u;
+        count_ = 0u;
         clear();
     }
 
@@ -869,12 +877,14 @@ class growing_hash_set {
         slots_ = exchange(other.slots_, nullptr);
         capacity_ = exchange(other.capacity_, 0);
         count_ = exchange(other.count_, 0);
+        allocator_ = std::move(other.allocator_);
     }
 
     growing_hash_set& operator=(growing_hash_set&& other) noexcept {
         std::swap(slots_, other.slots_);
         std::swap(capacity_, other.capacity_);
         std::swap(count_, other.count_);
+        std::swap(allocator_, other.allocator_);
         return *this;
     }
 
@@ -940,7 +950,7 @@ class growing_hash_set {
         if (new_capacity <= capacity_) return true;
 
         new_capacity = ceil2(new_capacity);
-        element_t* new_slots = (element_t*)allocator_t {}.allocate(new_capacity * sizeof(element_t));
+        element_t* new_slots = (element_t*)allocator_.allocate(new_capacity * sizeof(element_t));
         if (!new_slots) return false;
 
         std::memset((void*)new_slots, 0xFF, new_capacity * sizeof(element_t));
