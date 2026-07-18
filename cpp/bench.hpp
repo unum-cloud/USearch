@@ -11,11 +11,13 @@
  */
 #pragma once
 
+#include <cmath>   // `std::log2` for ranking gains
 #include <cstddef> // `std::size_t`
 #include <cstdio>  // `std::fopen` for `/proc/self/status`, `stdout` for the TTY probe
 #include <cstdlib> // `std::strtoull`
 #include <cstring> // `std::strncmp`
 
+#include <span>   // `std::span`
 #include <string> // `std::string`
 
 #if !defined(_WIN32)
@@ -26,6 +28,8 @@
 #include <fmt/format.h>
 
 #include <numkong/types.h>
+
+#include "usearch/types.hpp"
 
 namespace unum::usearch {
 
@@ -75,6 +79,66 @@ inline char const* kernel_name(nk_kernel_kind_t kernel) noexcept {
     case nk_kernel_euclidean_k: return "euclidean";
     default: return "unknown";
     }
+}
+
+/** @brief Position discounts and their prefix sums, shared by every query's judgment:
+ *      `discounts[i]` pays a hit at returned position i, and `ideal[i]` is the gain of a
+ *      perfect ranking of length i + 1 - so per-query normalization is one lookup instead
+ *      of a chain of `log2` calls. */
+inline void fill_discounts(std::span<double> discounts, std::span<double> ideal) noexcept {
+    double running = 0;
+    for (std::size_t position = 0; position != discounts.size(); ++position) {
+        discounts[position] = 1.0 / std::log2(double(position) + 2.0);
+        running += discounts[position];
+        if (position < ideal.size()) ideal[position] = running;
+    }
+}
+
+/** @brief The verdicts of one query's judgment, produced together by @c judge_ranking. */
+struct ranking_verdict_t {
+    /** @brief 1 when the true nearest neighbor appears among the returned keys. Averaged
+     *      over queries this is the production Recall@K - the probability of finding THE
+     *      nearest neighbor within the top K - monotone in K, so Recall@1 never exceeds
+     *      Recall@10. */
+    std::size_t found_nearest = 0;
+    /** @brief The intersection size between the returned and expected sets - "overlap",
+     *      the set-coverage metric big-ANN leaderboards report. Stricter than Recall@K and
+     *      not monotone against it. */
+    std::size_t overlap = 0;
+    /** @brief Unnormalized discounted cumulative gain: every returned key present in the
+     *      expected set earns its position's discount, so early hits weigh more. */
+    double gain = 0;
+};
+
+/** @brief All ranking verdicts for one query in one sweep: the expected keys are copied
+ *      into @p scratch and binary-insertion-sorted once, then every returned position pays
+ *      one binary search - O(k·log k) where the naive nested probes go O(k²), which
+ *      matters from top-100 recalls up. */
+template <typename key_type_>
+ranking_verdict_t judge_ranking(std::span<key_type_ const> returned, std::span<key_type_ const> expected,
+                                std::span<key_type_> scratch, std::span<double const> discounts) noexcept {
+    std::size_t const expected_count = expected.size() < scratch.size() ? expected.size() : scratch.size();
+    for (std::size_t sorted = 0; sorted != expected_count; ++sorted) {
+        key_type_ const key = expected[sorted];
+        key_type_* const slot = lower_bound(scratch.subspan(0, sorted), key);
+        std::memmove(slot + 1, slot, (scratch.data() + sorted - slot) * sizeof(key_type_));
+        *slot = key;
+    }
+
+    ranking_verdict_t verdict;
+    if (!expected_count) return verdict;
+    key_type_ const expected_nearest = expected.front();
+    std::span<key_type_ const> const sorted {scratch.data(), expected_count};
+    for (std::size_t position = 0; position != returned.size(); ++position) {
+        key_type_ const key = returned[position];
+        verdict.found_nearest |= static_cast<std::size_t>(key == expected_nearest);
+        key_type_ const* const slot = lower_bound(sorted, key);
+        if (slot != sorted.data() + sorted.size() && *slot == key) {
+            verdict.overlap += 1;
+            if (position < discounts.size()) verdict.gain += discounts[position];
+        }
+    }
+    return verdict;
 }
 
 /** @brief Peak resident set size from `/proc/self/status` in bytes, or zero when unknown. */
