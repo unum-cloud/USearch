@@ -1383,14 +1383,19 @@ class index_dense_gt {
                 matrix_cols = dimensions[1];
                 offset += sizeof(dimensions);
             }
-            vectors_buffer = {file.data() + offset, static_cast<std::size_t>(matrix_rows * matrix_cols)};
+            // bound the vectors matrix span against the file (overflow-safe; offset <= file.size() holds here)
+            checked_size_result_t vectors_bytes =
+                checked_mul(static_cast<std::size_t>(matrix_rows), static_cast<std::size_t>(matrix_cols));
+            if (!vectors_bytes || file.size() - offset < vectors_bytes.value)
+                return result.failed("File is corrupted: vectors matrix exceeds file size");
+            vectors_buffer = {file.data() + offset, vectors_bytes.value};
             offset += vectors_buffer.size();
         }
 
         // Load metadata and choose the right metric
         {
             index_dense_head_buffer_t buffer;
-            if (file.size() - offset < sizeof(buffer))
+            if (offset > file.size() || file.size() - offset < sizeof(buffer))
                 return result.failed("File is corrupted and lacks a header");
 
             std::memcpy(buffer, file.data() + offset, sizeof(buffer));
