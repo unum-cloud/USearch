@@ -224,6 +224,11 @@ struct inner_volatile_index {
     using node_ids_view_t = nk::vector_view<node_id_t>;
 
     inline static constexpr nk_kernel_kind_t kernel_kind_k = kernel_kind_;
+
+    /** @brief The capability bit of the distance kit the chain actually picked - lower than
+     *      @c capability_ when no SIMD kit is adapted for this dtype & metric pair yet. */
+    inline static constexpr nk_capability_t picked_capability_k =
+        kernel_chain<kernel_kind_, scalar_t, capability_>::picked_k;
     static_assert( //
         kernel_kind_k == nk_kernel_dot_k || kernel_kind_k == nk_kernel_angular_k ||
         kernel_kind_k == nk_kernel_euclidean_k || kernel_kind_k == nk_kernel_sqeuclidean_k ||

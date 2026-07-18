@@ -39,7 +39,7 @@
 #include <numkong/spatial.hpp>
 #include <numkong/vector.hpp>
 
-#include "test_utilities.hpp"
+#include "test.hpp"
 #include "usearch/inner_metric.hpp"
 
 namespace nk = ashvardanian::numkong;

@@ -3,7 +3,7 @@
  *      and universally-representable synthetic data generation.
  *
  *  @author Ash Vardanian
- *  @file cpp/test_utilities.hpp
+ *  @file cpp/test.hpp
  *  @date July 17, 2026
  *
  *  Checks return their own failure counts and roll up to `main` without global mutable

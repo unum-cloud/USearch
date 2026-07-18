@@ -36,7 +36,7 @@
 #include <forkunion.hpp>
 #include <numkong/numkong.hpp>
 
-#include "test_utilities.hpp"
+#include "test.hpp"
 #include "usearch/inner_volatile_index.hpp"
 
 namespace nk = ashvardanian::numkong;

@@ -264,6 +264,7 @@ struct u1x8_icelake_jaccard_kit_t;
 
 /** @brief bf16 inner-product distance kit - serial reference. */
 struct bf16_serial_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x8_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -295,6 +296,7 @@ struct bf16_serial_euclidean_kit_t : public bf16_serial_inner_kit_t {
 #if NK_TARGET_HASWELL
 /** @brief bf16 inner-product distance kit - Intel Haswell AVX2. */
 struct bf16_haswell_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x16_state_haswell_t;
     using step_vec_t = nk_b256_vec_t;
@@ -327,6 +329,7 @@ struct bf16_haswell_euclidean_kit_t : public bf16_haswell_inner_kit_t {
 #if NK_TARGET_SKYLAKE
 /** @brief bf16 inner-product distance kit - Intel Skylake-X AVX-512 Foundation. */
 struct bf16_skylake_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x32_state_skylake_t;
     using step_vec_t = nk_b512_vec_t;
@@ -359,6 +362,7 @@ struct bf16_skylake_euclidean_kit_t : public bf16_skylake_inner_kit_t {
 #if NK_TARGET_GENOA
 /** @brief bf16 inner-product distance kit - AMD Genoa AVX-512 + VNNI BF16. */
 struct bf16_genoa_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_genoa_k;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x32_state_genoa_t;
     using step_vec_t = nk_b512_vec_t;
@@ -390,6 +394,7 @@ struct bf16_genoa_euclidean_kit_t : public bf16_genoa_inner_kit_t {
 
 /** @brief u8 inner-product distance kit - serial reference. */
 struct u8_serial_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x16_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -423,6 +428,7 @@ struct u8_serial_euclidean_kit_t : public u8_serial_inner_kit_t {
 #if NK_TARGET_ICELAKE
 /** @brief u8 inner-product distance kit - Intel Ice Lake AVX-512 + VNNI VPDPBUSD. */
 struct u8_icelake_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x64_state_icelake_t;
     using step_vec_t = nk_b512_vec_t;
@@ -444,6 +450,7 @@ struct u8_icelake_inner_kit_t {
 
 /** @brief i8 inner-product distance kit - serial reference. */
 struct i8_serial_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x16_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -477,6 +484,7 @@ struct i8_serial_euclidean_kit_t : public i8_serial_inner_kit_t {
 #if NK_TARGET_HASWELL
 /** @brief i8 inner-product distance kit - Intel Haswell AVX2. */
 struct i8_haswell_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x16_state_haswell_t;
     using step_vec_t = nk_b128_vec_t;
@@ -511,6 +519,7 @@ struct i8_haswell_euclidean_kit_t : public i8_haswell_inner_kit_t {
 #if NK_TARGET_ICELAKE
 /** @brief i8 inner-product distance kit - Intel Ice Lake AVX-512 + VNNI VPDPBUSD compensation. */
 struct i8_icelake_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x64_state_icelake_t;
     using step_vec_t = nk_b512_vec_t;
@@ -544,6 +553,7 @@ struct i8_icelake_euclidean_kit_t : public i8_icelake_inner_kit_t {
 
 /** @brief i4x2 inner-product distance kit - serial reference. */
 struct i4x2_serial_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
     using scalar_t = nk::i4x2_t;
     using accumulator_t = nk_dot_i4x16_state_serial_t;
     using step_vec_t = nk_b64_vec_t;
@@ -582,6 +592,7 @@ struct i4x2_serial_euclidean_kit_t : public i4x2_serial_inner_kit_t {
  *  @brief i4x2 inner-product distance kit - Haswell AVX2.
  */
 struct i4x2_haswell_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
     using scalar_t = nk::i4x2_t;
     using accumulator_t = nk_dot_i4x32_state_haswell_t;
     using step_vec_t = nk_b128_vec_t;
@@ -612,6 +623,7 @@ struct i4x2_haswell_euclidean_kit_t : public i4x2_haswell_inner_kit_t {
 
 /** @brief u1x8 inner-product distance kit - serial reference (binary AND-popcount). */
 struct u1x8_serial_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
     using scalar_t = nk::u1x8_t;
     using accumulator_t = nk_dot_u1x128_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -645,6 +657,7 @@ struct u1x8_serial_jaccard_kit_t : public u1x8_serial_inner_kit_t {
 #if NK_TARGET_HASWELL
 /** @brief u1x8 inner-product distance kit - Intel Haswell AVX2 + POPCNT. */
 struct u1x8_haswell_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
     using scalar_t = nk::u1x8_t;
     using accumulator_t = nk_dot_u1x128_state_haswell_t;
     using step_vec_t = nk_b128_vec_t;
@@ -679,6 +692,7 @@ struct u1x8_haswell_jaccard_kit_t : public u1x8_haswell_inner_kit_t {
 #if NK_TARGET_ICELAKE
 /** @brief u1x8 inner-product distance kit - Intel Ice Lake AVX-512 + VPOPCNTQ. */
 struct u1x8_icelake_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
     using scalar_t = nk::u1x8_t;
     using accumulator_t = nk_dot_u1x512_state_icelake_t;
     using step_vec_t = nk_b512_vec_t;
@@ -756,6 +770,7 @@ struct kernel_chain<nk_kernel_dot_k, nk::bf16_t, caps_> {
         chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, bf16_skylake_inner_kit_t>, //
         chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, bf16_haswell_inner_kit_t>  //
         >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -766,6 +781,7 @@ struct kernel_chain<nk_kernel_angular_k, nk::bf16_t, caps_> {
         chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, bf16_skylake_angular_kit_t>, //
         chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, bf16_haswell_angular_kit_t>  //
         >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -776,6 +792,7 @@ struct kernel_chain<nk_kernel_euclidean_k, nk::bf16_t, caps_> {
         chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, bf16_skylake_euclidean_kit_t>, //
         chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, bf16_haswell_euclidean_kit_t>  //
         >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -785,6 +802,7 @@ struct kernel_chain<nk_kernel_dot_k, nk::i8_t, caps_> {
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i8_icelake_inner_kit_t>, //
         chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i8_haswell_inner_kit_t>  //
         >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -794,6 +812,7 @@ struct kernel_chain<nk_kernel_angular_k, nk::i8_t, caps_> {
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i8_icelake_angular_kit_t>, //
         chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i8_haswell_angular_kit_t>  //
         >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -803,6 +822,7 @@ struct kernel_chain<nk_kernel_euclidean_k, nk::i8_t, caps_> {
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i8_icelake_euclidean_kit_t>, //
         chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i8_haswell_euclidean_kit_t>  //
         >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -811,16 +831,19 @@ struct kernel_chain<nk_kernel_dot_k, nk::u8_t, caps_> {
         u8_serial_inner_kit_t,                                                                    //
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u8_icelake_inner_kit_t> //
         >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct kernel_chain<nk_kernel_angular_k, nk::u8_t, caps_> {
     using kit_t = typename first_available_kit<u8_serial_angular_kit_t>::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct kernel_chain<nk_kernel_euclidean_k, nk::u8_t, caps_> {
     using kit_t = typename first_available_kit<u8_serial_euclidean_kit_t>::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -829,11 +852,13 @@ struct kernel_chain<nk_kernel_dot_k, nk::i4x2_t, caps_> {
         i4x2_serial_inner_kit_t,                                                                    //
         chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i4x2_haswell_inner_kit_t> //
         >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct kernel_chain<nk_kernel_angular_k, nk::i4x2_t, caps_> {
     using kit_t = typename first_available_kit<i4x2_serial_angular_kit_t>::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -842,6 +867,7 @@ struct kernel_chain<nk_kernel_euclidean_k, nk::i4x2_t, caps_> {
         i4x2_serial_euclidean_kit_t,                                                                    //
         chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i4x2_haswell_euclidean_kit_t> //
         >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -851,6 +877,7 @@ struct kernel_chain<nk_kernel_dot_k, nk::u1x8_t, caps_> {
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_inner_kit_t>, //
         chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_inner_kit_t>  //
         >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -860,6 +887,7 @@ struct kernel_chain<nk_kernel_hamming_k, nk::u1x8_t, caps_> {
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_hamming_kit_t>, //
         chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_hamming_kit_t>  //
         >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
@@ -869,6 +897,7 @@ struct kernel_chain<nk_kernel_jaccard_k, nk::u1x8_t, caps_> {
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_jaccard_kit_t>, //
         chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_jaccard_kit_t>  //
         >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 /**
@@ -902,16 +931,16 @@ template <std::size_t fan_out_, inner_kit kit_>
     [[maybe_unused]] typename kit_::prefetch_candidate_t prefetch_candidate;
     [[maybe_unused]] typename kit_::demote_candidate_t demote_candidate;
 
-    // Always allocate 4 state slots - NumKong's `reduce_accumulators` is hardcoded
-    // fan-out-4. For 1-to-1 the bottom three slots are left as register noise; finalize
-    // still reads them, but the resulting lanes 1-3 are dropped at extract time.
+    // Always allocate & initialize all 4 state slots. The 4-way shape of NumKong's
+    // `reduce_accumulators` is the deliberate ABI - one batch primitive per kernel, no
+    // scalar variants - and its caller contract is that every slot it reads is initialized,
+    // even when the 1-to-1 instantiation only extracts lane 0. Three zero-stores buy a
+    // well-defined finalize on every path.
     NK_ALIGN64 accumulator_t accumulators[4];
     kit_::init_accumulator(&accumulators[0]);
-    if constexpr (fan_out_ == 4) {
-        kit_::init_accumulator(&accumulators[1]);
-        kit_::init_accumulator(&accumulators[2]);
-        kit_::init_accumulator(&accumulators[3]);
-    }
+    kit_::init_accumulator(&accumulators[1]);
+    kit_::init_accumulator(&accumulators[2]);
+    kit_::init_accumulator(&accumulators[3]);
 
     auto const* query_base = query.data();
     auto candidate_bases = [&]<std::size_t... lane_index>(std::index_sequence<lane_index...>) {
