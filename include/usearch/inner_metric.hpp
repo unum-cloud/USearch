@@ -234,6 +234,129 @@ struct bf16_skylake_euclidean_kit_t;
 struct bf16_genoa_inner_kit_t;
 struct bf16_genoa_angular_kit_t;
 struct bf16_genoa_euclidean_kit_t;
+struct bf16_neon_inner_kit_t;
+struct bf16_neon_angular_kit_t;
+struct bf16_neon_euclidean_kit_t;
+struct bf16_neonbfdot_inner_kit_t;
+struct bf16_neonbfdot_angular_kit_t;
+struct bf16_neonbfdot_euclidean_kit_t;
+struct bf16_v128relaxed_inner_kit_t;
+struct bf16_v128relaxed_angular_kit_t;
+struct bf16_v128relaxed_euclidean_kit_t;
+struct bf16_powervsx_inner_kit_t;
+struct bf16_powervsx_angular_kit_t;
+struct bf16_powervsx_euclidean_kit_t;
+struct f16_serial_inner_kit_t;
+struct f16_serial_angular_kit_t;
+struct f16_serial_euclidean_kit_t;
+struct f16_haswell_inner_kit_t;
+struct f16_haswell_angular_kit_t;
+struct f16_haswell_euclidean_kit_t;
+struct f16_skylake_inner_kit_t;
+struct f16_skylake_angular_kit_t;
+struct f16_skylake_euclidean_kit_t;
+struct f16_neon_inner_kit_t;
+struct f16_neon_angular_kit_t;
+struct f16_neon_euclidean_kit_t;
+struct f16_neonfhm_inner_kit_t;
+struct f16_neonfhm_angular_kit_t;
+struct f16_neonfhm_euclidean_kit_t;
+struct f16_v128relaxed_inner_kit_t;
+struct f16_v128relaxed_angular_kit_t;
+struct f16_v128relaxed_euclidean_kit_t;
+struct f16_powervsx_inner_kit_t;
+struct f16_powervsx_angular_kit_t;
+struct f16_powervsx_euclidean_kit_t;
+struct e5m2_serial_inner_kit_t;
+struct e5m2_serial_angular_kit_t;
+struct e5m2_serial_euclidean_kit_t;
+struct e5m2_diamond_inner_kit_t;
+struct e5m2_diamond_angular_kit_t;
+struct e5m2_diamond_euclidean_kit_t;
+struct e5m2_haswell_inner_kit_t;
+struct e5m2_haswell_angular_kit_t;
+struct e5m2_haswell_euclidean_kit_t;
+struct e5m2_skylake_inner_kit_t;
+struct e5m2_skylake_angular_kit_t;
+struct e5m2_skylake_euclidean_kit_t;
+struct e5m2_genoa_inner_kit_t;
+struct e5m2_genoa_angular_kit_t;
+struct e5m2_genoa_euclidean_kit_t;
+struct e5m2_neonfhm_inner_kit_t;
+struct e5m2_neonfhm_angular_kit_t;
+struct e5m2_neonfhm_euclidean_kit_t;
+struct e5m2_neonfp8_inner_kit_t;
+struct e5m2_neonfp8_angular_kit_t;
+struct e5m2_neonfp8_euclidean_kit_t;
+struct e5m2_v128relaxed_inner_kit_t;
+struct e5m2_v128relaxed_angular_kit_t;
+struct e5m2_v128relaxed_euclidean_kit_t;
+struct e4m3_serial_inner_kit_t;
+struct e4m3_serial_angular_kit_t;
+struct e4m3_serial_euclidean_kit_t;
+struct e4m3_diamond_inner_kit_t;
+struct e4m3_diamond_angular_kit_t;
+struct e4m3_diamond_euclidean_kit_t;
+struct e4m3_haswell_inner_kit_t;
+struct e4m3_haswell_angular_kit_t;
+struct e4m3_haswell_euclidean_kit_t;
+struct e4m3_skylake_inner_kit_t;
+struct e4m3_skylake_angular_kit_t;
+struct e4m3_skylake_euclidean_kit_t;
+struct e4m3_genoa_inner_kit_t;
+struct e4m3_genoa_angular_kit_t;
+struct e4m3_genoa_euclidean_kit_t;
+struct e4m3_neonfhm_inner_kit_t;
+struct e4m3_neonfhm_angular_kit_t;
+struct e4m3_neonfhm_euclidean_kit_t;
+struct e4m3_neonfp8_inner_kit_t;
+struct e4m3_neonfp8_angular_kit_t;
+struct e4m3_neonfp8_euclidean_kit_t;
+struct e4m3_v128relaxed_inner_kit_t;
+struct e4m3_v128relaxed_angular_kit_t;
+struct e4m3_v128relaxed_euclidean_kit_t;
+struct e3m2_serial_inner_kit_t;
+struct e3m2_serial_angular_kit_t;
+struct e3m2_serial_euclidean_kit_t;
+struct e3m2_haswell_inner_kit_t;
+struct e3m2_haswell_angular_kit_t;
+struct e3m2_haswell_euclidean_kit_t;
+struct e3m2_skylake_inner_kit_t;
+struct e3m2_skylake_angular_kit_t;
+struct e3m2_skylake_euclidean_kit_t;
+struct e3m2_neonsdot_inner_kit_t;
+struct e3m2_neonsdot_angular_kit_t;
+struct e3m2_neonsdot_euclidean_kit_t;
+struct e3m2_neonfp8_inner_kit_t;
+struct e3m2_neonfp8_angular_kit_t;
+struct e3m2_neonfp8_euclidean_kit_t;
+struct e3m2_v128relaxed_inner_kit_t;
+struct e3m2_v128relaxed_angular_kit_t;
+struct e3m2_v128relaxed_euclidean_kit_t;
+struct e2m3_serial_inner_kit_t;
+struct e2m3_serial_angular_kit_t;
+struct e2m3_serial_euclidean_kit_t;
+struct e2m3_haswell_inner_kit_t;
+struct e2m3_haswell_angular_kit_t;
+struct e2m3_haswell_euclidean_kit_t;
+struct e2m3_skylake_inner_kit_t;
+struct e2m3_skylake_angular_kit_t;
+struct e2m3_skylake_euclidean_kit_t;
+struct e2m3_alder_inner_kit_t;
+struct e2m3_alder_angular_kit_t;
+struct e2m3_alder_euclidean_kit_t;
+struct e2m3_sierra_inner_kit_t;
+struct e2m3_sierra_angular_kit_t;
+struct e2m3_sierra_euclidean_kit_t;
+struct e2m3_neonsdot_inner_kit_t;
+struct e2m3_neonsdot_angular_kit_t;
+struct e2m3_neonsdot_euclidean_kit_t;
+struct e2m3_neonfp8_inner_kit_t;
+struct e2m3_neonfp8_angular_kit_t;
+struct e2m3_neonfp8_euclidean_kit_t;
+struct e2m3_v128relaxed_inner_kit_t;
+struct e2m3_v128relaxed_angular_kit_t;
+struct e2m3_v128relaxed_euclidean_kit_t;
 struct i8_serial_inner_kit_t;
 struct i8_serial_angular_kit_t;
 struct i8_serial_euclidean_kit_t;
@@ -243,15 +366,75 @@ struct i8_haswell_euclidean_kit_t;
 struct i8_icelake_inner_kit_t;
 struct i8_icelake_angular_kit_t;
 struct i8_icelake_euclidean_kit_t;
+struct i8_alder_inner_kit_t;
+struct i8_alder_angular_kit_t;
+struct i8_alder_euclidean_kit_t;
+struct i8_sierra_inner_kit_t;
+struct i8_sierra_angular_kit_t;
+struct i8_sierra_euclidean_kit_t;
+struct i8_neonsdot_inner_kit_t;
+struct i8_neonsdot_angular_kit_t;
+struct i8_neonsdot_euclidean_kit_t;
+struct i8_v128relaxed_inner_kit_t;
+struct i8_v128relaxed_angular_kit_t;
+struct i8_v128relaxed_euclidean_kit_t;
+struct i8_powervsx_inner_kit_t;
+struct i8_powervsx_angular_kit_t;
+struct i8_powervsx_euclidean_kit_t;
 struct u8_serial_inner_kit_t;
 struct u8_serial_angular_kit_t;
 struct u8_serial_euclidean_kit_t;
 struct u8_icelake_inner_kit_t;
+struct u8_icelake_angular_kit_t;
+struct u8_icelake_euclidean_kit_t;
+struct u8_haswell_inner_kit_t;
+struct u8_haswell_angular_kit_t;
+struct u8_haswell_euclidean_kit_t;
+struct u8_alder_inner_kit_t;
+struct u8_alder_angular_kit_t;
+struct u8_alder_euclidean_kit_t;
+struct u8_sierra_inner_kit_t;
+struct u8_sierra_angular_kit_t;
+struct u8_sierra_euclidean_kit_t;
+struct u8_neonsdot_inner_kit_t;
+struct u8_neonsdot_angular_kit_t;
+struct u8_neonsdot_euclidean_kit_t;
+struct u8_v128relaxed_inner_kit_t;
+struct u8_v128relaxed_angular_kit_t;
+struct u8_v128relaxed_euclidean_kit_t;
+struct u8_powervsx_inner_kit_t;
+struct u8_powervsx_angular_kit_t;
+struct u8_powervsx_euclidean_kit_t;
+struct u4x2_serial_inner_kit_t;
+struct u4x2_serial_angular_kit_t;
+struct u4x2_serial_euclidean_kit_t;
+struct u4x2_haswell_inner_kit_t;
+struct u4x2_haswell_angular_kit_t;
+struct u4x2_haswell_euclidean_kit_t;
+struct u4x2_icelake_inner_kit_t;
+struct u4x2_icelake_angular_kit_t;
+struct u4x2_icelake_euclidean_kit_t;
+struct u4x2_neonsdot_inner_kit_t;
+struct u4x2_neonsdot_angular_kit_t;
+struct u4x2_neonsdot_euclidean_kit_t;
+struct u4x2_v128relaxed_inner_kit_t;
+struct u4x2_v128relaxed_angular_kit_t;
+struct u4x2_v128relaxed_euclidean_kit_t;
 struct i4x2_serial_inner_kit_t;
 struct i4x2_serial_angular_kit_t;
 struct i4x2_serial_euclidean_kit_t;
 struct i4x2_haswell_inner_kit_t;
 struct i4x2_haswell_euclidean_kit_t;
+struct i4x2_haswell_angular_kit_t;
+struct i4x2_icelake_inner_kit_t;
+struct i4x2_icelake_angular_kit_t;
+struct i4x2_icelake_euclidean_kit_t;
+struct i4x2_neonsdot_inner_kit_t;
+struct i4x2_neonsdot_angular_kit_t;
+struct i4x2_neonsdot_euclidean_kit_t;
+struct i4x2_v128relaxed_inner_kit_t;
+struct i4x2_v128relaxed_angular_kit_t;
+struct i4x2_v128relaxed_euclidean_kit_t;
 struct u1x8_serial_inner_kit_t;
 struct u1x8_serial_hamming_kit_t;
 struct u1x8_serial_jaccard_kit_t;
@@ -261,6 +444,15 @@ struct u1x8_icelake_inner_kit_t;
 struct u1x8_icelake_hamming_kit_t;
 struct u1x8_haswell_jaccard_kit_t;
 struct u1x8_icelake_jaccard_kit_t;
+struct u1x8_neon_inner_kit_t;
+struct u1x8_neon_hamming_kit_t;
+struct u1x8_neon_jaccard_kit_t;
+struct u1x8_v128relaxed_inner_kit_t;
+struct u1x8_v128relaxed_hamming_kit_t;
+struct u1x8_v128relaxed_jaccard_kit_t;
+struct u1x8_powervsx_inner_kit_t;
+struct u1x8_powervsx_hamming_kit_t;
+struct u1x8_powervsx_jaccard_kit_t;
 
 /** @brief bf16 inner-product distance kit - serial reference. */
 struct bf16_serial_inner_kit_t {
@@ -392,6 +584,1419 @@ struct bf16_genoa_euclidean_kit_t : public bf16_genoa_inner_kit_t {
 };
 #endif // NK_TARGET_GENOA
 
+#if NK_TARGET_NEON
+
+/** @brief bf16 inner-product distance kit - Arm NEON. */
+struct bf16_neon_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    using scalar_t = nk::bf16_t;
+    using accumulator_t = nk_dot_bf16x8_state_neon_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_bf16x8_init_neon;
+    static constexpr auto update_accumulator = nk_dot_bf16x8_update_neon;
+    static constexpr auto load_step = nk_load_b128_neon_;
+    static constexpr auto load_tail = nk_partial_load_b16x8_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_bf16x8_finalize_neon;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_bf16_serial;
+    static constexpr std::size_t step_dimensions = 8;
+};
+
+/** @brief bf16 angular distance kit - Arm NEON. */
+struct bf16_neon_angular_kit_t : public bf16_neon_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
+};
+
+/** @brief bf16 Euclidean (L2) distance kit - Arm NEON. */
+struct bf16_neon_euclidean_kit_t : public bf16_neon_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
+};
+#endif // NK_TARGET_NEON
+
+#if NK_TARGET_NEONBFDOT
+
+/** @brief bf16 inner-product distance kit - Arm BFDOT. */
+struct bf16_neonbfdot_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonbfdot_k;
+    using scalar_t = nk::bf16_t;
+    using accumulator_t = nk_dot_bf16x8_state_neonbfdot_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_bf16x8_init_neonbfdot;
+    static constexpr auto update_accumulator = nk_dot_bf16x8_update_neonbfdot;
+    static constexpr auto load_step = nk_load_b128_neon_;
+    static constexpr auto load_tail = nk_partial_load_b16x8_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_bf16x8_finalize_neonbfdot;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_bf16_neonbfdot;
+    static constexpr std::size_t step_dimensions = 8;
+};
+
+/** @brief bf16 angular distance kit - Arm BFDOT. */
+struct bf16_neonbfdot_angular_kit_t : public bf16_neonbfdot_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
+};
+
+/** @brief bf16 Euclidean (L2) distance kit - Arm BFDOT. */
+struct bf16_neonbfdot_euclidean_kit_t : public bf16_neonbfdot_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
+};
+#endif // NK_TARGET_NEONBFDOT
+
+#if NK_TARGET_V128RELAXED
+/** @brief bf16 inner-product distance kit - WebAssembly relaxed SIMD. */
+struct bf16_v128relaxed_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    using scalar_t = nk::bf16_t;
+    using accumulator_t = nk_dot_bf16x8_state_v128relaxed_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_bf16x8_init_v128relaxed;
+    static constexpr auto update_accumulator = nk_dot_bf16x8_update_v128relaxed;
+    static constexpr auto load_step = nk_load_b128_v128relaxed_;
+    static constexpr auto load_tail = nk_partial_load_b16x8_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_bf16x8_finalize_v128relaxed;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_bf16_v128relaxed;
+    static constexpr std::size_t step_dimensions = 8;
+};
+
+/** @brief bf16 angular distance kit - WebAssembly relaxed SIMD. */
+struct bf16_v128relaxed_angular_kit_t : public bf16_v128relaxed_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128relaxed_;
+};
+
+/** @brief bf16 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
+struct bf16_v128relaxed_euclidean_kit_t : public bf16_v128relaxed_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128relaxed_;
+};
+#endif // NK_TARGET_V128RELAXED
+
+#if NK_TARGET_POWERVSX
+/**
+ *  @brief bf16 inner-product distance kit - IBM POWER VSX. NumKong has no bf16 moments
+ *         kernel for this tier, so the norms come from the serial one.
+ */
+struct bf16_powervsx_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    using scalar_t = nk::bf16_t;
+    using accumulator_t = nk_dot_bf16x8_state_powervsx_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_bf16x8_init_powervsx;
+    static constexpr auto update_accumulator = nk_dot_bf16x8_update_powervsx;
+    static constexpr auto load_step = nk_load_b128_powervsx_;
+    static constexpr auto load_tail = nk_partial_load_b16x8_powervsx_;
+    static constexpr auto reduce_accumulators = nk_dot_bf16x8_finalize_powervsx;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_bf16_serial;
+    static constexpr std::size_t step_dimensions = 8;
+};
+
+/** @brief bf16 angular distance kit - IBM POWER VSX. */
+struct bf16_powervsx_angular_kit_t : public bf16_powervsx_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_powervsx_;
+};
+
+/** @brief bf16 Euclidean (L2) distance kit - IBM POWER VSX. */
+struct bf16_powervsx_euclidean_kit_t : public bf16_powervsx_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_powervsx_;
+};
+#endif // NK_TARGET_POWERVSX
+
+/** @brief f16 inner-product distance kit - serial reference. */
+struct f16_serial_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    using scalar_t = nk::f16_t;
+    using accumulator_t = nk_dot_f16x8_state_serial_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_f16x8_init_serial;
+    static constexpr auto update_accumulator = nk_dot_f16x8_update_serial;
+    static constexpr auto load_step = nk_load_b128_serial_;
+    static constexpr auto load_tail = nk_partial_load_b16x8_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_f16x8_finalize_serial;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_f16_serial;
+    static constexpr std::size_t step_dimensions = 8;
+};
+
+/** @brief f16 angular distance kit - serial reference. */
+struct f16_serial_angular_kit_t : public f16_serial_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
+};
+
+/** @brief f16 Euclidean (L2) distance kit - serial reference. */
+struct f16_serial_euclidean_kit_t : public f16_serial_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
+};
+
+#if NK_TARGET_HASWELL
+/**
+ *  @brief f16 inner-product distance kit - Intel Haswell AVX2 + F16C.
+ *
+ *  There is no native f16 accumulator at this tier, so the loaders widen each step to
+ *  f32 up front and the generic through-f32 accumulator does the arithmetic. That makes
+ *  @c step_vec_t twice as wide as the eight f16 it holds - the trampoline addresses off
+ *  @c scalar_t, so the narrower source stride is handled correctly.
+ */
+struct f16_haswell_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    using scalar_t = nk::f16_t;
+    using accumulator_t = nk_dot_through_f32_state_haswell_t_;
+    using step_vec_t = nk_b256_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_through_f32_init_haswell_;
+    static constexpr auto update_accumulator = nk_dot_through_f32_update_haswell_;
+    static constexpr auto load_step = nk_load_f16x8_to_f32x8_haswell_;
+    static constexpr auto load_tail = nk_partial_load_f16x8_to_f32x8_haswell_;
+    static constexpr auto reduce_accumulators = nk_dot_through_f32_finalize_haswell_;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_f16_haswell;
+    static constexpr std::size_t step_dimensions = 8;
+};
+
+/** @brief f16 angular distance kit - Intel Haswell AVX2 + F16C. */
+struct f16_haswell_angular_kit_t : public f16_haswell_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
+};
+
+/** @brief f16 Euclidean (L2) distance kit - Intel Haswell AVX2 + F16C. */
+struct f16_haswell_euclidean_kit_t : public f16_haswell_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
+};
+#endif // NK_TARGET_HASWELL
+
+#if NK_TARGET_SKYLAKE
+/** @brief f16 inner-product distance kit - Intel Skylake-X AVX-512, widening on load. */
+struct f16_skylake_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    using scalar_t = nk::f16_t;
+    using accumulator_t = nk_dot_through_f32_state_skylake_t_;
+    using step_vec_t = nk_b512_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_through_f32_init_skylake_;
+    static constexpr auto update_accumulator = nk_dot_through_f32_update_skylake_;
+    static constexpr auto load_step = nk_load_f16x16_to_f32x16_skylake_;
+    static constexpr auto load_tail = nk_partial_load_f16x16_to_f32x16_skylake_;
+    static constexpr auto reduce_accumulators = nk_dot_through_f32_finalize_skylake_;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_f16_skylake;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief f16 angular distance kit - Skylake-X inner + Haswell through. */
+struct f16_skylake_angular_kit_t : public f16_skylake_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
+};
+
+/** @brief f16 Euclidean (L2) distance kit - Skylake-X inner + Haswell through. */
+struct f16_skylake_euclidean_kit_t : public f16_skylake_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
+};
+#endif // NK_TARGET_SKYLAKE
+
+#if NK_TARGET_NEON
+/** @brief f16 inner-product distance kit - Arm NEON. */
+struct f16_neon_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    using scalar_t = nk::f16_t;
+    using accumulator_t = nk_dot_f16x8_state_neon_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_f16x8_init_neon;
+    static constexpr auto update_accumulator = nk_dot_f16x8_update_neon;
+    static constexpr auto load_step = nk_load_b128_neon_;
+    static constexpr auto load_tail = nk_partial_load_b16x8_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_f16x8_finalize_neon;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_f16_neon;
+    static constexpr std::size_t step_dimensions = 8;
+};
+
+/** @brief f16 angular distance kit - Arm NEON. */
+struct f16_neon_angular_kit_t : public f16_neon_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_neon_;
+};
+
+/** @brief f16 Euclidean (L2) distance kit - Arm NEON. */
+struct f16_neon_euclidean_kit_t : public f16_neon_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_neon_;
+};
+#endif // NK_TARGET_NEON
+
+#if NK_TARGET_NEONFHM
+/**
+ *  @brief f16 inner-product distance kit - Arm FP16 FML. NumKong has no f16 moments
+ *         kernel for this tier, so the norms come from the serial one.
+ */
+struct f16_neonfhm_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
+    using scalar_t = nk::f16_t;
+    using accumulator_t = nk_dot_f16x8_state_neonfhm_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_f16x8_init_neonfhm;
+    static constexpr auto update_accumulator = nk_dot_f16x8_update_neonfhm;
+    static constexpr auto load_step = nk_load_b128_neon_;
+    static constexpr auto load_tail = nk_partial_load_b16x8_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_f16x8_finalize_neonfhm;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_f16_serial;
+    static constexpr std::size_t step_dimensions = 8;
+};
+
+/** @brief f16 angular distance kit - Arm FP16 FML. */
+struct f16_neonfhm_angular_kit_t : public f16_neonfhm_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
+};
+
+/** @brief f16 Euclidean (L2) distance kit - Arm FP16 FML. */
+struct f16_neonfhm_euclidean_kit_t : public f16_neonfhm_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
+};
+#endif // NK_TARGET_NEONFHM
+
+#if NK_TARGET_V128RELAXED
+/**
+ *  @brief f16 inner-product distance kit - WebAssembly relaxed SIMD, widening on load.
+ *         Four dimensions per step, since the widened f32 quad fills the 128-bit vec.
+ */
+struct f16_v128relaxed_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    using scalar_t = nk::f16_t;
+    using accumulator_t = nk_dot_through_f32x4_state_v128relaxed_t_;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_through_f32x4_init_v128relaxed_;
+    static constexpr auto update_accumulator = nk_dot_through_f32x4_update_v128relaxed_;
+    static constexpr auto load_step = nk_load_f16x4_to_f32x4_v128relaxed_;
+    static constexpr auto load_tail = nk_partial_load_f16x4_to_f32x4_v128relaxed_;
+    static constexpr auto reduce_accumulators = nk_dot_through_f32x4_finalize_v128relaxed_;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_f16_v128relaxed;
+    static constexpr std::size_t step_dimensions = 4;
+};
+
+/** @brief f16 angular distance kit - WebAssembly relaxed SIMD. */
+struct f16_v128relaxed_angular_kit_t : public f16_v128relaxed_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128relaxed_;
+};
+
+/** @brief f16 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
+struct f16_v128relaxed_euclidean_kit_t : public f16_v128relaxed_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128relaxed_;
+};
+#endif // NK_TARGET_V128RELAXED
+
+#if NK_TARGET_POWERVSX
+/**
+ *  @brief f16 inner-product distance kit - IBM POWER VSX. NumKong has no f16 moments
+ *         kernel for this tier, so the norms come from the serial one.
+ */
+struct f16_powervsx_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    using scalar_t = nk::f16_t;
+    using accumulator_t = nk_dot_f16x8_state_powervsx_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_f16x8_init_powervsx;
+    static constexpr auto update_accumulator = nk_dot_f16x8_update_powervsx;
+    static constexpr auto load_step = nk_load_b128_powervsx_;
+    static constexpr auto load_tail = nk_partial_load_b16x8_powervsx_;
+    static constexpr auto reduce_accumulators = nk_dot_f16x8_finalize_powervsx;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_f16_serial;
+    static constexpr std::size_t step_dimensions = 8;
+};
+
+/** @brief f16 angular distance kit - IBM POWER VSX. */
+struct f16_powervsx_angular_kit_t : public f16_powervsx_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_powervsx_;
+};
+
+/** @brief f16 Euclidean (L2) distance kit - IBM POWER VSX. */
+struct f16_powervsx_euclidean_kit_t : public f16_powervsx_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_powervsx_;
+};
+#endif // NK_TARGET_POWERVSX
+
+/** @brief e5m2 inner-product distance kit - serial reference. */
+struct e5m2_serial_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    using scalar_t = nk::e5m2_t;
+    using accumulator_t = nk_dot_e5m2x16_state_serial_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_e5m2x16_init_serial;
+    static constexpr auto update_accumulator = nk_dot_e5m2x16_update_serial;
+    static constexpr auto load_step = nk_load_b128_serial_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_e5m2x16_finalize_serial;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e5m2_serial;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief e5m2 angular distance kit - serial reference. */
+struct e5m2_serial_angular_kit_t : public e5m2_serial_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
+};
+
+/** @brief e5m2 Euclidean (L2) distance kit - serial reference. */
+struct e5m2_serial_euclidean_kit_t : public e5m2_serial_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
+};
+
+#if NK_TARGET_HASWELL
+/**
+ *  @brief e5m2 inner-product distance kit - Intel Haswell AVX2.
+ *
+ *  The step loads raw bytes and the specialised update widens them internally, so this
+ *  pairs a byte-batched update with the generic through-f32 accumulator.
+ */
+struct e5m2_haswell_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    using scalar_t = nk::e5m2_t;
+    using accumulator_t = nk_dot_through_f32_state_haswell_t_;
+    using step_vec_t = nk_b256_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_through_f32_init_haswell_;
+    static constexpr auto update_accumulator = nk_dot_e5m2x32_update_haswell_;
+    static constexpr auto load_step = nk_load_b256_haswell_;
+    static constexpr auto load_tail = nk_partial_load_b8x32_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_through_f32_finalize_haswell_;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e5m2_haswell;
+    static constexpr std::size_t step_dimensions = 32;
+};
+
+/** @brief e5m2 angular distance kit - Intel Haswell AVX2. */
+struct e5m2_haswell_angular_kit_t : public e5m2_haswell_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
+};
+
+/** @brief e5m2 Euclidean (L2) distance kit - Intel Haswell AVX2. */
+struct e5m2_haswell_euclidean_kit_t : public e5m2_haswell_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
+};
+#endif // NK_TARGET_HASWELL
+
+#if NK_TARGET_SKYLAKE
+/** @brief e5m2 inner-product distance kit - Intel Skylake-X AVX-512, widening in the update. */
+struct e5m2_skylake_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    using scalar_t = nk::e5m2_t;
+    using accumulator_t = nk_dot_through_f32_state_skylake_t_;
+    using step_vec_t = nk_b512_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_through_f32_init_skylake_;
+    static constexpr auto update_accumulator = nk_dot_e5m2x64_update_skylake_;
+    static constexpr auto load_step = nk_load_b512_skylake_;
+    static constexpr auto load_tail = nk_partial_load_b8x64_skylake_;
+    static constexpr auto reduce_accumulators = nk_dot_through_f32_finalize_skylake_;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e5m2_skylake;
+    static constexpr std::size_t step_dimensions = 64;
+};
+
+/** @brief e5m2 angular distance kit - Skylake-X inner + Haswell through. */
+struct e5m2_skylake_angular_kit_t : public e5m2_skylake_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
+};
+
+/** @brief e5m2 Euclidean (L2) distance kit - Skylake-X inner + Haswell through. */
+struct e5m2_skylake_euclidean_kit_t : public e5m2_skylake_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
+};
+#endif // NK_TARGET_SKYLAKE
+
+#if NK_TARGET_DIAMOND
+/**
+ *  @brief e5m2 inner-product distance kit - Intel Diamond Rapids AVX10.2. The loaders
+ *         widen each step to f16 with a native FP8 convert, so the dot rides the FP16
+ *         accumulator. NumKong has no e5m2 moments kernel for this tier, so the norms
+ *         come from the AVX-512 one.
+ */
+struct e5m2_diamond_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_diamond_k;
+    using scalar_t = nk::e5m2_t;
+    using accumulator_t = nk_dot_through_f16_state_diamond_t_;
+    using step_vec_t = nk_b512_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_through_f16_init_diamond_;
+    static constexpr auto update_accumulator = nk_dot_through_f16_update_diamond_;
+    static constexpr auto load_step = nk_load_e5m2x32_to_f16x32_diamond_;
+    static constexpr auto load_tail = nk_partial_load_e5m2x32_to_f16x32_diamond_;
+    static constexpr auto reduce_accumulators = nk_dot_through_f16_finalize_diamond_;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e5m2_skylake;
+    static constexpr std::size_t step_dimensions = 32;
+};
+
+/** @brief e5m2 angular distance kit - Diamond Rapids inner + Haswell through. */
+struct e5m2_diamond_angular_kit_t : public e5m2_diamond_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
+};
+
+/** @brief e5m2 Euclidean (L2) distance kit - Diamond Rapids inner + Haswell through. */
+struct e5m2_diamond_euclidean_kit_t : public e5m2_diamond_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
+};
+#endif // NK_TARGET_DIAMOND
+
+#if NK_TARGET_GENOA
+/**
+ *  @brief e5m2 inner-product distance kit - AMD Genoa AVX-512 + VNNI BF16. The loaders
+ *         widen each step to bf16 so the dot rides the BF16 accumulator.
+ */
+struct e5m2_genoa_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_genoa_k;
+    using scalar_t = nk::e5m2_t;
+    using accumulator_t = nk_dot_through_bf16_state_genoa_t_;
+    using step_vec_t = nk_b512_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_through_bf16_init_genoa_;
+    static constexpr auto update_accumulator = nk_dot_through_bf16_update_genoa_;
+    static constexpr auto load_step = nk_load_e5m2x32_to_bf16x32_icelake_;
+    static constexpr auto load_tail = nk_partial_load_e5m2x32_to_bf16x32_icelake_;
+    static constexpr auto reduce_accumulators = nk_dot_through_bf16_finalize_genoa_;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e5m2_genoa;
+    static constexpr std::size_t step_dimensions = 32;
+};
+
+/** @brief e5m2 angular distance kit - Genoa inner + Haswell through. */
+struct e5m2_genoa_angular_kit_t : public e5m2_genoa_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
+};
+
+/** @brief e5m2 Euclidean (L2) distance kit - Genoa inner + Haswell through. */
+struct e5m2_genoa_euclidean_kit_t : public e5m2_genoa_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
+};
+#endif // NK_TARGET_GENOA
+
+#if NK_TARGET_NEONFHM
+/** @brief e5m2 inner-product distance kit - Arm FP16 FML. */
+struct e5m2_neonfhm_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
+    using scalar_t = nk::e5m2_t;
+    using accumulator_t = nk_dot_e5m2x16_state_neonfhm_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_e5m2x16_init_neonfhm;
+    static constexpr auto update_accumulator = nk_dot_e5m2x16_update_neonfhm;
+    static constexpr auto load_step = nk_load_b128_neon_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_e5m2x16_finalize_neonfhm;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e5m2_neonfhm;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief e5m2 angular distance kit - Arm FP16 FML. */
+struct e5m2_neonfhm_angular_kit_t : public e5m2_neonfhm_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
+};
+
+/** @brief e5m2 Euclidean (L2) distance kit - Arm FP16 FML. */
+struct e5m2_neonfhm_euclidean_kit_t : public e5m2_neonfhm_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
+};
+#endif // NK_TARGET_NEONFHM
+
+#if NK_TARGET_NEONFP8
+/**
+ *  @brief e5m2 inner-product distance kit - Arm FP8 DOT. NumKong has no e5m2 moments
+ *         kernel for this tier, so the norms come from the serial one.
+ */
+struct e5m2_neonfp8_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
+    using scalar_t = nk::e5m2_t;
+    using accumulator_t = nk_dot_e5m2x16_state_neonfp8_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_e5m2x16_init_neonfp8;
+    static constexpr auto update_accumulator = nk_dot_e5m2x16_update_neonfp8;
+    static constexpr auto load_step = nk_load_b128_neon_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_e5m2x16_finalize_neonfp8;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e5m2_serial;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief e5m2 angular distance kit - Arm FP8 DOT. */
+struct e5m2_neonfp8_angular_kit_t : public e5m2_neonfp8_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
+};
+
+/** @brief e5m2 Euclidean (L2) distance kit - Arm FP8 DOT. */
+struct e5m2_neonfp8_euclidean_kit_t : public e5m2_neonfp8_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
+};
+#endif // NK_TARGET_NEONFP8
+
+#if NK_TARGET_V128RELAXED
+/**
+ *  @brief e5m2 inner-product distance kit - WebAssembly relaxed SIMD, widening on load.
+ *         Four dimensions per step, since the widened f32 quad fills the 128-bit vec.
+ */
+struct e5m2_v128relaxed_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    using scalar_t = nk::e5m2_t;
+    using accumulator_t = nk_dot_e5m2x4_state_v128relaxed_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_through_f32x4_init_v128relaxed_;
+    static constexpr auto update_accumulator = nk_dot_through_f32x4_update_v128relaxed_;
+    static constexpr auto load_step = nk_load_e5m2x4_to_f32x4_v128relaxed_;
+    static constexpr auto load_tail = nk_partial_load_e5m2x4_to_f32x4_v128relaxed_;
+    static constexpr auto reduce_accumulators = nk_dot_through_f32x4_finalize_v128relaxed_;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e5m2_v128relaxed;
+    static constexpr std::size_t step_dimensions = 4;
+};
+
+/** @brief e5m2 angular distance kit - WebAssembly relaxed SIMD. */
+struct e5m2_v128relaxed_angular_kit_t : public e5m2_v128relaxed_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128relaxed_;
+};
+
+/** @brief e5m2 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
+struct e5m2_v128relaxed_euclidean_kit_t : public e5m2_v128relaxed_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128relaxed_;
+};
+#endif // NK_TARGET_V128RELAXED
+
+/** @brief e4m3 inner-product distance kit - serial reference. */
+struct e4m3_serial_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    using scalar_t = nk::e4m3_t;
+    using accumulator_t = nk_dot_e4m3x16_state_serial_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_e4m3x16_init_serial;
+    static constexpr auto update_accumulator = nk_dot_e4m3x16_update_serial;
+    static constexpr auto load_step = nk_load_b128_serial_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_e4m3x16_finalize_serial;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e4m3_serial;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief e4m3 angular distance kit - serial reference. */
+struct e4m3_serial_angular_kit_t : public e4m3_serial_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
+};
+
+/** @brief e4m3 Euclidean (L2) distance kit - serial reference. */
+struct e4m3_serial_euclidean_kit_t : public e4m3_serial_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
+};
+
+#if NK_TARGET_HASWELL
+/** @brief e4m3 inner-product distance kit - Intel Haswell AVX2, widening in the update. */
+struct e4m3_haswell_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    using scalar_t = nk::e4m3_t;
+    using accumulator_t = nk_dot_through_f32_state_haswell_t_;
+    using step_vec_t = nk_b256_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_through_f32_init_haswell_;
+    static constexpr auto update_accumulator = nk_dot_e4m3x32_update_haswell_;
+    static constexpr auto load_step = nk_load_b256_haswell_;
+    static constexpr auto load_tail = nk_partial_load_b8x32_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_through_f32_finalize_haswell_;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e4m3_haswell;
+    static constexpr std::size_t step_dimensions = 32;
+};
+
+/** @brief e4m3 angular distance kit - Intel Haswell AVX2. */
+struct e4m3_haswell_angular_kit_t : public e4m3_haswell_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
+};
+
+/** @brief e4m3 Euclidean (L2) distance kit - Intel Haswell AVX2. */
+struct e4m3_haswell_euclidean_kit_t : public e4m3_haswell_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
+};
+#endif // NK_TARGET_HASWELL
+
+#if NK_TARGET_SKYLAKE
+/** @brief e4m3 inner-product distance kit - Intel Skylake-X AVX-512, widening on load. */
+struct e4m3_skylake_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    using scalar_t = nk::e4m3_t;
+    using accumulator_t = nk_dot_through_f32_state_skylake_t_;
+    using step_vec_t = nk_b512_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_through_f32_init_skylake_;
+    static constexpr auto update_accumulator = nk_dot_through_f32_update_skylake_;
+    static constexpr auto load_step = nk_load_e4m3x16_to_f32x16_skylake_;
+    static constexpr auto load_tail = nk_partial_load_e4m3x16_to_f32x16_skylake_;
+    static constexpr auto reduce_accumulators = nk_dot_through_f32_finalize_skylake_;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e4m3_skylake;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief e4m3 angular distance kit - Skylake-X inner + Haswell through. */
+struct e4m3_skylake_angular_kit_t : public e4m3_skylake_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
+};
+
+/** @brief e4m3 Euclidean (L2) distance kit - Skylake-X inner + Haswell through. */
+struct e4m3_skylake_euclidean_kit_t : public e4m3_skylake_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
+};
+#endif // NK_TARGET_SKYLAKE
+
+#if NK_TARGET_DIAMOND
+/**
+ *  @brief e4m3 inner-product distance kit - Intel Diamond Rapids AVX10.2. The loaders
+ *         widen each step to f16 with a native FP8 convert, so the dot rides the FP16
+ *         accumulator. NumKong has no e4m3 moments kernel for this tier, so the norms
+ *         come from the AVX-512 one.
+ */
+struct e4m3_diamond_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_diamond_k;
+    using scalar_t = nk::e4m3_t;
+    using accumulator_t = nk_dot_through_f16_state_diamond_t_;
+    using step_vec_t = nk_b512_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_through_f16_init_diamond_;
+    static constexpr auto update_accumulator = nk_dot_through_f16_update_diamond_;
+    static constexpr auto load_step = nk_load_e4m3x32_to_f16x32_diamond_;
+    static constexpr auto load_tail = nk_partial_load_e4m3x32_to_f16x32_diamond_;
+    static constexpr auto reduce_accumulators = nk_dot_through_f16_finalize_diamond_;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e4m3_skylake;
+    static constexpr std::size_t step_dimensions = 32;
+};
+
+/** @brief e4m3 angular distance kit - Diamond Rapids inner + Haswell through. */
+struct e4m3_diamond_angular_kit_t : public e4m3_diamond_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
+};
+
+/** @brief e4m3 Euclidean (L2) distance kit - Diamond Rapids inner + Haswell through. */
+struct e4m3_diamond_euclidean_kit_t : public e4m3_diamond_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
+};
+#endif // NK_TARGET_DIAMOND
+
+#if NK_TARGET_GENOA
+/**
+ *  @brief e4m3 inner-product distance kit - AMD Genoa AVX-512 + VNNI BF16. The loaders
+ *         widen each step to bf16 so the dot rides the BF16 accumulator.
+ */
+struct e4m3_genoa_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_genoa_k;
+    using scalar_t = nk::e4m3_t;
+    using accumulator_t = nk_dot_through_bf16_state_genoa_t_;
+    using step_vec_t = nk_b512_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_through_bf16_init_genoa_;
+    static constexpr auto update_accumulator = nk_dot_through_bf16_update_genoa_;
+    static constexpr auto load_step = nk_load_e4m3x32_to_bf16x32_icelake_;
+    static constexpr auto load_tail = nk_partial_load_e4m3x32_to_bf16x32_icelake_;
+    static constexpr auto reduce_accumulators = nk_dot_through_bf16_finalize_genoa_;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e4m3_genoa;
+    static constexpr std::size_t step_dimensions = 32;
+};
+
+/** @brief e4m3 angular distance kit - Genoa inner + Haswell through. */
+struct e4m3_genoa_angular_kit_t : public e4m3_genoa_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
+};
+
+/** @brief e4m3 Euclidean (L2) distance kit - Genoa inner + Haswell through. */
+struct e4m3_genoa_euclidean_kit_t : public e4m3_genoa_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
+};
+#endif // NK_TARGET_GENOA
+
+#if NK_TARGET_NEONFHM
+/** @brief e4m3 inner-product distance kit - Arm FP16 FML. */
+struct e4m3_neonfhm_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
+    using scalar_t = nk::e4m3_t;
+    using accumulator_t = nk_dot_e4m3x16_state_neonfhm_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_e4m3x16_init_neonfhm;
+    static constexpr auto update_accumulator = nk_dot_e4m3x16_update_neonfhm;
+    static constexpr auto load_step = nk_load_b128_neon_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_e4m3x16_finalize_neonfhm;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e4m3_neonfhm;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief e4m3 angular distance kit - Arm FP16 FML. */
+struct e4m3_neonfhm_angular_kit_t : public e4m3_neonfhm_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
+};
+
+/** @brief e4m3 Euclidean (L2) distance kit - Arm FP16 FML. */
+struct e4m3_neonfhm_euclidean_kit_t : public e4m3_neonfhm_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
+};
+#endif // NK_TARGET_NEONFHM
+
+#if NK_TARGET_NEONFP8
+/**
+ *  @brief e4m3 inner-product distance kit - Arm FP8 DOT. NumKong has no e4m3 moments
+ *         kernel for this tier, so the norms come from the serial one.
+ */
+struct e4m3_neonfp8_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
+    using scalar_t = nk::e4m3_t;
+    using accumulator_t = nk_dot_e4m3x16_state_neonfp8_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_e4m3x16_init_neonfp8;
+    static constexpr auto update_accumulator = nk_dot_e4m3x16_update_neonfp8;
+    static constexpr auto load_step = nk_load_b128_neon_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_e4m3x16_finalize_neonfp8;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e4m3_serial;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief e4m3 angular distance kit - Arm FP8 DOT. */
+struct e4m3_neonfp8_angular_kit_t : public e4m3_neonfp8_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
+};
+
+/** @brief e4m3 Euclidean (L2) distance kit - Arm FP8 DOT. */
+struct e4m3_neonfp8_euclidean_kit_t : public e4m3_neonfp8_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
+};
+#endif // NK_TARGET_NEONFP8
+
+#if NK_TARGET_V128RELAXED
+/**
+ *  @brief e4m3 inner-product distance kit - WebAssembly relaxed SIMD, widening on load.
+ *         Four dimensions per step, since the widened f32 quad fills the 128-bit vec.
+ */
+struct e4m3_v128relaxed_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    using scalar_t = nk::e4m3_t;
+    using accumulator_t = nk_dot_e4m3x4_state_v128relaxed_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_through_f32x4_init_v128relaxed_;
+    static constexpr auto update_accumulator = nk_dot_through_f32x4_update_v128relaxed_;
+    static constexpr auto load_step = nk_load_e4m3x4_to_f32x4_v128relaxed_;
+    static constexpr auto load_tail = nk_partial_load_e4m3x4_to_f32x4_v128relaxed_;
+    static constexpr auto reduce_accumulators = nk_dot_through_f32x4_finalize_v128relaxed_;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e4m3_v128relaxed;
+    static constexpr std::size_t step_dimensions = 4;
+};
+
+/** @brief e4m3 angular distance kit - WebAssembly relaxed SIMD. */
+struct e4m3_v128relaxed_angular_kit_t : public e4m3_v128relaxed_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128relaxed_;
+};
+
+/** @brief e4m3 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
+struct e4m3_v128relaxed_euclidean_kit_t : public e4m3_v128relaxed_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128relaxed_;
+};
+#endif // NK_TARGET_V128RELAXED
+
+/**
+ *  @brief e3m2 inner-product distance kit - serial reference.
+ *
+ *  The six significant bits occupy a whole byte in memory, so the step vec is sized by
+ *  @c step_dimensions bytes rather than by the format's bit budget - the tail loader is
+ *  @c b8 wide, exactly as for @c i8 and @c u8.
+ */
+struct e3m2_serial_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    using scalar_t = nk::e3m2_t;
+    using accumulator_t = nk_dot_e3m2x16_state_serial_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_e3m2x16_init_serial;
+    static constexpr auto update_accumulator = nk_dot_e3m2x16_update_serial;
+    static constexpr auto load_step = nk_load_b128_serial_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_e3m2x16_finalize_serial;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e3m2_serial;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief e3m2 angular distance kit - serial reference. */
+struct e3m2_serial_angular_kit_t : public e3m2_serial_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
+};
+
+/** @brief e3m2 Euclidean (L2) distance kit - serial reference. */
+struct e3m2_serial_euclidean_kit_t : public e3m2_serial_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
+};
+
+#if NK_TARGET_HASWELL
+/** @brief e3m2 inner-product distance kit - Intel Haswell AVX2. */
+struct e3m2_haswell_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    using scalar_t = nk::e3m2_t;
+    using accumulator_t = nk_dot_e3m2x32_state_haswell_t;
+    using step_vec_t = nk_b256_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_e3m2x32_init_haswell;
+    static constexpr auto update_accumulator = nk_dot_e3m2x32_update_haswell;
+    static constexpr auto load_step = nk_load_b256_haswell_;
+    static constexpr auto load_tail = nk_partial_load_b8x32_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_e3m2x32_finalize_haswell;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e3m2_haswell;
+    static constexpr std::size_t step_dimensions = 32;
+};
+
+/** @brief e3m2 angular distance kit - Intel Haswell AVX2. */
+struct e3m2_haswell_angular_kit_t : public e3m2_haswell_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
+};
+
+/** @brief e3m2 Euclidean (L2) distance kit - Intel Haswell AVX2. */
+struct e3m2_haswell_euclidean_kit_t : public e3m2_haswell_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
+};
+#endif // NK_TARGET_HASWELL
+
+#if NK_TARGET_SKYLAKE
+/** @brief e3m2 inner-product distance kit - Intel Skylake-X AVX-512 Foundation. */
+struct e3m2_skylake_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    using scalar_t = nk::e3m2_t;
+    using accumulator_t = nk_dot_e3m2x64_state_skylake_t;
+    using step_vec_t = nk_b512_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_e3m2x64_init_skylake;
+    static constexpr auto update_accumulator = nk_dot_e3m2x64_update_skylake;
+    static constexpr auto load_step = nk_load_b512_skylake_;
+    static constexpr auto load_tail = nk_partial_load_b8x64_skylake_;
+    static constexpr auto reduce_accumulators = nk_dot_e3m2x64_finalize_skylake;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e3m2_skylake;
+    static constexpr std::size_t step_dimensions = 64;
+};
+
+/** @brief e3m2 angular distance kit - Skylake-X inner + Haswell through. */
+struct e3m2_skylake_angular_kit_t : public e3m2_skylake_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
+};
+
+/** @brief e3m2 Euclidean (L2) distance kit - Skylake-X inner + Haswell through. */
+struct e3m2_skylake_euclidean_kit_t : public e3m2_skylake_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
+};
+#endif // NK_TARGET_SKYLAKE
+
+#if NK_TARGET_NEONSDOT
+/**
+ *  @brief e3m2 inner-product distance kit - Arm SDOT. NumKong has no e3m2 moments kernel
+ *         for this tier, so the norms come from the serial one.
+ */
+struct e3m2_neonsdot_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
+    using scalar_t = nk::e3m2_t;
+    using accumulator_t = nk_dot_e3m2x16_state_neonsdot_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_e3m2x16_init_neonsdot;
+    static constexpr auto update_accumulator = nk_dot_e3m2x16_update_neonsdot;
+    static constexpr auto load_step = nk_load_b128_neon_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_e3m2x16_finalize_neonsdot;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e3m2_serial;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief e3m2 angular distance kit - Arm SDOT. */
+struct e3m2_neonsdot_angular_kit_t : public e3m2_neonsdot_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
+};
+
+/** @brief e3m2 Euclidean (L2) distance kit - Arm SDOT. */
+struct e3m2_neonsdot_euclidean_kit_t : public e3m2_neonsdot_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
+};
+#endif // NK_TARGET_NEONSDOT
+
+#if NK_TARGET_NEONFP8
+/**
+ *  @brief e3m2 inner-product distance kit - Arm FP8 DOT. NumKong has no e3m2 moments
+ *         kernel for this tier, so the norms come from the serial one.
+ */
+struct e3m2_neonfp8_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
+    using scalar_t = nk::e3m2_t;
+    using accumulator_t = nk_dot_e3m2x16_state_neonfp8_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_e3m2x16_init_neonfp8;
+    static constexpr auto update_accumulator = nk_dot_e3m2x16_update_neonfp8;
+    static constexpr auto load_step = nk_load_b128_neon_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_e3m2x16_finalize_neonfp8;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e3m2_serial;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief e3m2 angular distance kit - Arm FP8 DOT. */
+struct e3m2_neonfp8_angular_kit_t : public e3m2_neonfp8_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
+};
+
+/** @brief e3m2 Euclidean (L2) distance kit - Arm FP8 DOT. */
+struct e3m2_neonfp8_euclidean_kit_t : public e3m2_neonfp8_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
+};
+#endif // NK_TARGET_NEONFP8
+
+#if NK_TARGET_V128RELAXED
+/** @brief e3m2 inner-product distance kit - WebAssembly relaxed SIMD. */
+struct e3m2_v128relaxed_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    using scalar_t = nk::e3m2_t;
+    using accumulator_t = nk_dot_e3m2x16_state_v128relaxed_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_e3m2x16_init_v128relaxed;
+    static constexpr auto update_accumulator = nk_dot_e3m2x16_update_v128relaxed;
+    static constexpr auto load_step = nk_load_b128_v128relaxed_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_e3m2x16_finalize_v128relaxed;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e3m2_v128relaxed;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief e3m2 angular distance kit - WebAssembly relaxed SIMD. */
+struct e3m2_v128relaxed_angular_kit_t : public e3m2_v128relaxed_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128relaxed_;
+};
+
+/** @brief e3m2 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
+struct e3m2_v128relaxed_euclidean_kit_t : public e3m2_v128relaxed_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128relaxed_;
+};
+#endif // NK_TARGET_V128RELAXED
+
+/** @brief e2m3 inner-product distance kit - serial reference. One element per byte. */
+struct e2m3_serial_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    using scalar_t = nk::e2m3_t;
+    using accumulator_t = nk_dot_e2m3x16_state_serial_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_e2m3x16_init_serial;
+    static constexpr auto update_accumulator = nk_dot_e2m3x16_update_serial;
+    static constexpr auto load_step = nk_load_b128_serial_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_e2m3x16_finalize_serial;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e2m3_serial;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief e2m3 angular distance kit - serial reference. */
+struct e2m3_serial_angular_kit_t : public e2m3_serial_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
+};
+
+/** @brief e2m3 Euclidean (L2) distance kit - serial reference. */
+struct e2m3_serial_euclidean_kit_t : public e2m3_serial_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
+};
+
+#if NK_TARGET_HASWELL
+/** @brief e2m3 inner-product distance kit - Intel Haswell AVX2. */
+struct e2m3_haswell_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    using scalar_t = nk::e2m3_t;
+    using accumulator_t = nk_dot_e2m3x32_state_haswell_t;
+    using step_vec_t = nk_b256_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_e2m3x32_init_haswell;
+    static constexpr auto update_accumulator = nk_dot_e2m3x32_update_haswell;
+    static constexpr auto load_step = nk_load_b256_haswell_;
+    static constexpr auto load_tail = nk_partial_load_b8x32_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_e2m3x32_finalize_haswell;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e2m3_haswell;
+    static constexpr std::size_t step_dimensions = 32;
+};
+
+/** @brief e2m3 angular distance kit - Intel Haswell AVX2. */
+struct e2m3_haswell_angular_kit_t : public e2m3_haswell_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
+};
+
+/** @brief e2m3 Euclidean (L2) distance kit - Intel Haswell AVX2. */
+struct e2m3_haswell_euclidean_kit_t : public e2m3_haswell_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
+};
+#endif // NK_TARGET_HASWELL
+
+#if NK_TARGET_SKYLAKE
+/** @brief e2m3 inner-product distance kit - Intel Skylake-X AVX-512 Foundation. */
+struct e2m3_skylake_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    using scalar_t = nk::e2m3_t;
+    using accumulator_t = nk_dot_e2m3x64_state_skylake_t;
+    using step_vec_t = nk_b512_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_e2m3x64_init_skylake;
+    static constexpr auto update_accumulator = nk_dot_e2m3x64_update_skylake;
+    static constexpr auto load_step = nk_load_b512_skylake_;
+    static constexpr auto load_tail = nk_partial_load_b8x64_skylake_;
+    static constexpr auto reduce_accumulators = nk_dot_e2m3x64_finalize_skylake;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e2m3_skylake;
+    static constexpr std::size_t step_dimensions = 64;
+};
+
+/** @brief e2m3 angular distance kit - Skylake-X inner + Haswell through. */
+struct e2m3_skylake_angular_kit_t : public e2m3_skylake_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
+};
+
+/** @brief e2m3 Euclidean (L2) distance kit - Skylake-X inner + Haswell through. */
+struct e2m3_skylake_euclidean_kit_t : public e2m3_skylake_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
+};
+#endif // NK_TARGET_SKYLAKE
+
+#if NK_TARGET_ALDER
+/** @brief e2m3 inner-product distance kit - Intel Alder Lake AVX-VNNI. */
+struct e2m3_alder_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_alder_k;
+    using scalar_t = nk::e2m3_t;
+    using accumulator_t = nk_dot_e2m3x32_state_alder_t;
+    using step_vec_t = nk_b256_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_e2m3x32_init_alder;
+    static constexpr auto update_accumulator = nk_dot_e2m3x32_update_alder;
+    static constexpr auto load_step = nk_load_b256_haswell_;
+    static constexpr auto load_tail = nk_partial_load_b8x32_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_e2m3x32_finalize_alder;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e2m3_alder;
+    static constexpr std::size_t step_dimensions = 32;
+};
+
+/** @brief e2m3 angular distance kit - Alder Lake inner + Haswell through. */
+struct e2m3_alder_angular_kit_t : public e2m3_alder_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
+};
+
+/** @brief e2m3 Euclidean (L2) distance kit - Alder Lake inner + Haswell through. */
+struct e2m3_alder_euclidean_kit_t : public e2m3_alder_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
+};
+#endif // NK_TARGET_ALDER
+
+#if NK_TARGET_SIERRA
+/** @brief e2m3 inner-product distance kit - Intel Sierra Forest AVX-VNNI. */
+struct e2m3_sierra_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sierra_k;
+    using scalar_t = nk::e2m3_t;
+    using accumulator_t = nk_dot_e2m3x32_state_sierra_t;
+    using step_vec_t = nk_b256_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_e2m3x32_init_sierra;
+    static constexpr auto update_accumulator = nk_dot_e2m3x32_update_sierra;
+    static constexpr auto load_step = nk_load_b256_haswell_;
+    static constexpr auto load_tail = nk_partial_load_b8x32_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_e2m3x32_finalize_sierra;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e2m3_sierra;
+    static constexpr std::size_t step_dimensions = 32;
+};
+
+/** @brief e2m3 angular distance kit - Sierra Forest inner + Haswell through. */
+struct e2m3_sierra_angular_kit_t : public e2m3_sierra_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
+};
+
+/** @brief e2m3 Euclidean (L2) distance kit - Sierra Forest inner + Haswell through. */
+struct e2m3_sierra_euclidean_kit_t : public e2m3_sierra_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
+};
+#endif // NK_TARGET_SIERRA
+
+#if NK_TARGET_NEONSDOT
+/** @brief e2m3 inner-product distance kit - Arm SDOT. */
+struct e2m3_neonsdot_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
+    using scalar_t = nk::e2m3_t;
+    using accumulator_t = nk_dot_e2m3x16_state_neonsdot_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_e2m3x16_init_neonsdot;
+    static constexpr auto update_accumulator = nk_dot_e2m3x16_update_neonsdot;
+    static constexpr auto load_step = nk_load_b128_neon_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_e2m3x16_finalize_neonsdot;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e2m3_neonsdot;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief e2m3 angular distance kit - Arm SDOT. */
+struct e2m3_neonsdot_angular_kit_t : public e2m3_neonsdot_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
+};
+
+/** @brief e2m3 Euclidean (L2) distance kit - Arm SDOT. */
+struct e2m3_neonsdot_euclidean_kit_t : public e2m3_neonsdot_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
+};
+#endif // NK_TARGET_NEONSDOT
+
+#if NK_TARGET_NEONFP8
+/** @brief e2m3 inner-product distance kit - Arm FP8 DOT. */
+struct e2m3_neonfp8_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
+    using scalar_t = nk::e2m3_t;
+    using accumulator_t = nk_dot_e2m3x16_state_neonfp8_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_e2m3x16_init_neonfp8;
+    static constexpr auto update_accumulator = nk_dot_e2m3x16_update_neonfp8;
+    static constexpr auto load_step = nk_load_b128_neon_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_e2m3x16_finalize_neonfp8;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e2m3_neonsdot;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief e2m3 angular distance kit - Arm FP8 DOT. */
+struct e2m3_neonfp8_angular_kit_t : public e2m3_neonfp8_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
+};
+
+/** @brief e2m3 Euclidean (L2) distance kit - Arm FP8 DOT. */
+struct e2m3_neonfp8_euclidean_kit_t : public e2m3_neonfp8_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
+};
+#endif // NK_TARGET_NEONFP8
+
+#if NK_TARGET_V128RELAXED
+/** @brief e2m3 inner-product distance kit - WebAssembly relaxed SIMD. */
+struct e2m3_v128relaxed_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    using scalar_t = nk::e2m3_t;
+    using accumulator_t = nk_dot_e2m3x16_state_v128relaxed_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_e2m3x16_init_v128relaxed;
+    static constexpr auto update_accumulator = nk_dot_e2m3x16_update_v128relaxed;
+    static constexpr auto load_step = nk_load_b128_v128relaxed_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_e2m3x16_finalize_v128relaxed;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_e2m3_v128relaxed;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief e2m3 angular distance kit - WebAssembly relaxed SIMD. */
+struct e2m3_v128relaxed_angular_kit_t : public e2m3_v128relaxed_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128relaxed_;
+};
+
+/** @brief e2m3 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
+struct e2m3_v128relaxed_euclidean_kit_t : public e2m3_v128relaxed_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128relaxed_;
+};
+#endif // NK_TARGET_V128RELAXED
+
 /** @brief u8 inner-product distance kit - serial reference. */
 struct u8_serial_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
@@ -425,6 +2030,42 @@ struct u8_serial_euclidean_kit_t : public u8_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
 };
 
+#if NK_TARGET_HASWELL
+
+/** @brief u8 inner-product distance kit - Haswell AVX2. */
+struct u8_haswell_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    using scalar_t = nk::u8_t;
+    using accumulator_t = nk_dot_u8x16_state_haswell_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_u8x16_init_haswell;
+    static constexpr auto update_accumulator = nk_dot_u8x16_update_haswell;
+    static constexpr auto load_step = nk_load_b128_haswell_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_u8x16_finalize_haswell;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_u8_haswell;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief u8 angular distance kit - Haswell AVX2. */
+struct u8_haswell_angular_kit_t : public u8_haswell_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
+};
+
+/** @brief u8 Euclidean (L2) distance kit - Haswell AVX2. */
+struct u8_haswell_euclidean_kit_t : public u8_haswell_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
+};
+#endif // NK_TARGET_HASWELL
+
 #if NK_TARGET_ICELAKE
 /** @brief u8 inner-product distance kit - Intel Ice Lake AVX-512 + VNNI VPDPBUSD. */
 struct u8_icelake_inner_kit_t {
@@ -446,7 +2087,195 @@ struct u8_icelake_inner_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_u8_icelake;
     static constexpr std::size_t step_dimensions = 64;
 };
+
+/** @brief u8 angular distance kit - Ice Lake VNNI. */
+struct u8_icelake_angular_kit_t : public u8_icelake_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
+};
+
+/** @brief u8 Euclidean (L2) distance kit - Ice Lake VNNI. */
+struct u8_icelake_euclidean_kit_t : public u8_icelake_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
+};
 #endif // NK_TARGET_ICELAKE
+
+#if NK_TARGET_ALDER
+/** @brief u8 inner-product distance kit - Intel Alder Lake AVX-VNNI. */
+struct u8_alder_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_alder_k;
+    using scalar_t = nk::u8_t;
+    using accumulator_t = nk_dot_u8x32_state_alder_t;
+    using step_vec_t = nk_b256_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_u8x32_init_alder;
+    static constexpr auto update_accumulator = nk_dot_u8x32_update_alder;
+    static constexpr auto load_step = nk_load_b256_haswell_;
+    static constexpr auto load_tail = nk_partial_load_b8x32_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_u8x32_finalize_alder;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_u8_alder;
+    static constexpr std::size_t step_dimensions = 32;
+};
+
+/** @brief u8 angular distance kit - Alder Lake inner + Haswell through. */
+struct u8_alder_angular_kit_t : public u8_alder_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
+};
+
+/** @brief u8 Euclidean (L2) distance kit - Alder Lake inner + Haswell through. */
+struct u8_alder_euclidean_kit_t : public u8_alder_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
+};
+#endif // NK_TARGET_ALDER
+
+#if NK_TARGET_SIERRA
+/** @brief u8 inner-product distance kit - Intel Sierra Forest AVX-VNNI. */
+struct u8_sierra_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sierra_k;
+    using scalar_t = nk::u8_t;
+    using accumulator_t = nk_dot_u8x32_state_sierra_t;
+    using step_vec_t = nk_b256_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_u8x32_init_sierra;
+    static constexpr auto update_accumulator = nk_dot_u8x32_update_sierra;
+    static constexpr auto load_step = nk_load_b256_haswell_;
+    static constexpr auto load_tail = nk_partial_load_b8x32_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_u8x32_finalize_sierra;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_u8_sierra;
+    static constexpr std::size_t step_dimensions = 32;
+};
+
+/** @brief u8 angular distance kit - Sierra Forest inner + Haswell through. */
+struct u8_sierra_angular_kit_t : public u8_sierra_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
+};
+
+/** @brief u8 Euclidean (L2) distance kit - Sierra Forest inner + Haswell through. */
+struct u8_sierra_euclidean_kit_t : public u8_sierra_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
+};
+#endif // NK_TARGET_SIERRA
+
+#if NK_TARGET_NEONSDOT
+
+/** @brief u8 inner-product distance kit - Arm UDOT. */
+struct u8_neonsdot_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
+    using scalar_t = nk::u8_t;
+    using accumulator_t = nk_dot_u8x16_state_neonsdot_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_u8x16_init_neonsdot;
+    static constexpr auto update_accumulator = nk_dot_u8x16_update_neonsdot;
+    static constexpr auto load_step = nk_load_b128_neon_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_u8x16_finalize_neonsdot;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_u8_neonsdot;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief u8 angular distance kit - Arm UDOT. */
+struct u8_neonsdot_angular_kit_t : public u8_neonsdot_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_serial_;
+};
+
+/** @brief u8 Euclidean (L2) distance kit - Arm UDOT. */
+struct u8_neonsdot_euclidean_kit_t : public u8_neonsdot_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
+};
+#endif // NK_TARGET_NEONSDOT
+
+#if NK_TARGET_V128RELAXED
+/** @brief u8 inner-product distance kit - WebAssembly relaxed SIMD. */
+struct u8_v128relaxed_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    using scalar_t = nk::u8_t;
+    using accumulator_t = nk_dot_u8x16_state_v128relaxed_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_u8x16_init_v128relaxed;
+    static constexpr auto update_accumulator = nk_dot_u8x16_update_v128relaxed;
+    static constexpr auto load_step = nk_load_b128_v128relaxed_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_u8x16_finalize_v128relaxed;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_u8_v128relaxed;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief u8 angular distance kit - WebAssembly relaxed SIMD. */
+struct u8_v128relaxed_angular_kit_t : public u8_v128relaxed_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_v128relaxed_;
+};
+
+/** @brief u8 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
+struct u8_v128relaxed_euclidean_kit_t : public u8_v128relaxed_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128relaxed_;
+};
+#endif // NK_TARGET_V128RELAXED
+
+#if NK_TARGET_POWERVSX
+/** @brief u8 inner-product distance kit - IBM POWER VSX. */
+struct u8_powervsx_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    using scalar_t = nk::u8_t;
+    using accumulator_t = nk_dot_u8x16_state_powervsx_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_u8x16_init_powervsx;
+    static constexpr auto update_accumulator = nk_dot_u8x16_update_powervsx;
+    static constexpr auto load_step = nk_load_b128_powervsx_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_powervsx_;
+    static constexpr auto reduce_accumulators = nk_dot_u8x16_finalize_powervsx;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_u8_serial;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief u8 angular distance kit - IBM POWER VSX. */
+struct u8_powervsx_angular_kit_t : public u8_powervsx_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_powervsx_;
+};
+
+/** @brief u8 Euclidean (L2) distance kit - IBM POWER VSX. */
+struct u8_powervsx_euclidean_kit_t : public u8_powervsx_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_powervsx_;
+};
+#endif // NK_TARGET_POWERVSX
 
 /** @brief i8 inner-product distance kit - serial reference. */
 struct i8_serial_inner_kit_t {
@@ -551,6 +2380,363 @@ struct i8_icelake_euclidean_kit_t : public i8_icelake_inner_kit_t {
 };
 #endif // NK_TARGET_ICELAKE
 
+#if NK_TARGET_ALDER
+/**
+ *  @brief i8 inner-product distance kit - Intel Alder Lake AVX-VNNI. NumKong has no
+ *         signed-i8 moments kernel for this tier, so the norms come from the AVX2 one,
+ *         which Alder Lake also implements.
+ */
+struct i8_alder_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_alder_k;
+    using scalar_t = nk::i8_t;
+    using accumulator_t = nk_dot_i8x32_state_alder_t;
+    using step_vec_t = nk_b256_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_i8x32_init_alder;
+    static constexpr auto update_accumulator = nk_dot_i8x32_update_alder;
+    static constexpr auto load_step = nk_load_b256_haswell_;
+    static constexpr auto load_tail = nk_partial_load_b8x32_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_i8x32_finalize_alder;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_i8_haswell;
+    static constexpr std::size_t step_dimensions = 32;
+};
+
+/** @brief i8 angular distance kit - Alder Lake inner + Haswell through. */
+struct i8_alder_angular_kit_t : public i8_alder_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
+};
+
+/** @brief i8 Euclidean (L2) distance kit - Alder Lake inner + Haswell through. */
+struct i8_alder_euclidean_kit_t : public i8_alder_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
+};
+#endif // NK_TARGET_ALDER
+
+#if NK_TARGET_SIERRA
+/** @brief i8 inner-product distance kit - Intel Sierra Forest AVX-VNNI. */
+struct i8_sierra_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sierra_k;
+    using scalar_t = nk::i8_t;
+    using accumulator_t = nk_dot_i8x32_state_sierra_t;
+    using step_vec_t = nk_b256_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_i8x32_init_sierra;
+    static constexpr auto update_accumulator = nk_dot_i8x32_update_sierra;
+    static constexpr auto load_step = nk_load_b256_haswell_;
+    static constexpr auto load_tail = nk_partial_load_b8x32_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_i8x32_finalize_sierra;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_i8_sierra;
+    static constexpr std::size_t step_dimensions = 32;
+};
+
+/** @brief i8 angular distance kit - Sierra Forest inner + Haswell through. */
+struct i8_sierra_angular_kit_t : public i8_sierra_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
+};
+
+/** @brief i8 Euclidean (L2) distance kit - Sierra Forest inner + Haswell through. */
+struct i8_sierra_euclidean_kit_t : public i8_sierra_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
+};
+#endif // NK_TARGET_SIERRA
+
+#if NK_TARGET_NEONSDOT
+
+/** @brief i8 inner-product distance kit - Arm SDOT. */
+struct i8_neonsdot_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
+    using scalar_t = nk::i8_t;
+    using accumulator_t = nk_dot_i8x16_state_neonsdot_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_i8x16_init_neonsdot;
+    static constexpr auto update_accumulator = nk_dot_i8x16_update_neonsdot;
+    static constexpr auto load_step = nk_load_b128_neon_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_i8x16_finalize_neonsdot;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_i8_neonsdot;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief i8 angular distance kit - Arm SDOT. */
+struct i8_neonsdot_angular_kit_t : public i8_neonsdot_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_serial_;
+};
+
+/** @brief i8 Euclidean (L2) distance kit - Arm SDOT. */
+struct i8_neonsdot_euclidean_kit_t : public i8_neonsdot_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
+};
+#endif // NK_TARGET_NEONSDOT
+
+#if NK_TARGET_V128RELAXED
+/** @brief i8 inner-product distance kit - WebAssembly relaxed SIMD. */
+struct i8_v128relaxed_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    using scalar_t = nk::i8_t;
+    using accumulator_t = nk_dot_i8x16_state_v128relaxed_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_i8x16_init_v128relaxed;
+    static constexpr auto update_accumulator = nk_dot_i8x16_update_v128relaxed;
+    static constexpr auto load_step = nk_load_b128_v128relaxed_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_i8x16_finalize_v128relaxed;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_i8_v128relaxed;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief i8 angular distance kit - WebAssembly relaxed SIMD. */
+struct i8_v128relaxed_angular_kit_t : public i8_v128relaxed_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_v128relaxed_;
+};
+
+/** @brief i8 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
+struct i8_v128relaxed_euclidean_kit_t : public i8_v128relaxed_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128relaxed_;
+};
+#endif // NK_TARGET_V128RELAXED
+
+#if NK_TARGET_POWERVSX
+/** @brief i8 inner-product distance kit - IBM POWER VSX. */
+struct i8_powervsx_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    using scalar_t = nk::i8_t;
+    using accumulator_t = nk_dot_i8x16_state_powervsx_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_i8x16_init_powervsx;
+    static constexpr auto update_accumulator = nk_dot_i8x16_update_powervsx;
+    static constexpr auto load_step = nk_load_b128_powervsx_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_powervsx_;
+    static constexpr auto reduce_accumulators = nk_dot_i8x16_finalize_powervsx;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_i8_serial;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief i8 angular distance kit - IBM POWER VSX. */
+struct i8_powervsx_angular_kit_t : public i8_powervsx_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_powervsx_;
+};
+
+/** @brief i8 Euclidean (L2) distance kit - IBM POWER VSX. */
+struct i8_powervsx_euclidean_kit_t : public i8_powervsx_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_powervsx_;
+};
+#endif // NK_TARGET_POWERVSX
+
+/**
+ *  @brief u4x2 inner-product distance kit - serial reference. Two unsigned nibbles per
+ *         byte, so a step of 16 dimensions rides in a 64-bit vec. The dot lanes land in
+ *         @c i32 like every other integral kit, even though @c dot_result_t is unsigned.
+ */
+struct u4x2_serial_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    using scalar_t = nk::u4x2_t;
+    using accumulator_t = nk_dot_u4x16_state_serial_t;
+    using step_vec_t = nk_b64_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_u4x16_init_serial;
+    static constexpr auto update_accumulator = nk_dot_u4x16_update_serial;
+    static constexpr auto load_step = nk_load_b64_serial_;
+    static constexpr auto load_tail = nk_partial_load_b4x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_u4x16_finalize_serial;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_u4_serial;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief u4x2 angular distance kit - serial reference. Through writes f32. */
+struct u4x2_serial_angular_kit_t : public u4x2_serial_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_serial_;
+};
+
+/** @brief u4x2 Euclidean (L2) distance kit - serial reference. Through writes f32. */
+struct u4x2_serial_euclidean_kit_t : public u4x2_serial_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
+};
+
+#if NK_TARGET_HASWELL
+/** @brief u4x2 inner-product distance kit - Intel Haswell AVX2. */
+struct u4x2_haswell_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    using scalar_t = nk::u4x2_t;
+    using accumulator_t = nk_dot_u4x32_state_haswell_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_u4x32_init_haswell;
+    static constexpr auto update_accumulator = nk_dot_u4x32_update_haswell;
+    static constexpr auto load_step = nk_load_b128_haswell_;
+    static constexpr auto load_tail = nk_partial_load_b4x32_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_u4x32_finalize_haswell;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_u4_haswell;
+    static constexpr std::size_t step_dimensions = 32;
+};
+
+/** @brief u4x2 angular distance kit - Intel Haswell AVX2. */
+struct u4x2_haswell_angular_kit_t : public u4x2_haswell_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
+};
+
+/** @brief u4x2 Euclidean (L2) distance kit - Intel Haswell AVX2. */
+struct u4x2_haswell_euclidean_kit_t : public u4x2_haswell_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
+};
+#endif // NK_TARGET_HASWELL
+
+#if NK_TARGET_ICELAKE
+/** @brief u4x2 inner-product distance kit - Ice Lake VNNI. */
+struct u4x2_icelake_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
+    using scalar_t = nk::u4x2_t;
+    using accumulator_t = nk_dot_u4x128_state_icelake_t;
+    using step_vec_t = nk_b512_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_u4x128_init_icelake;
+    static constexpr auto update_accumulator = nk_dot_u4x128_update_icelake;
+    static constexpr auto load_step = nk_load_b512_skylake_;
+    static constexpr auto load_tail = nk_partial_load_b4x128_skylake_;
+    static constexpr auto reduce_accumulators = nk_dot_u4x128_finalize_icelake;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_u4_skylake;
+    static constexpr std::size_t step_dimensions = 128;
+};
+
+/** @brief u4x2 angular distance kit - Icelake inner + Haswell through. */
+struct u4x2_icelake_angular_kit_t : public u4x2_icelake_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
+};
+
+/** @brief u4x2 Euclidean (L2) distance kit - Icelake inner + Haswell through. */
+struct u4x2_icelake_euclidean_kit_t : public u4x2_icelake_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
+};
+#endif // NK_TARGET_ICELAKE
+
+#if NK_TARGET_NEONSDOT
+/** @brief u4x2 inner-product distance kit - Arm UDOT. */
+struct u4x2_neonsdot_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
+    using scalar_t = nk::u4x2_t;
+    using accumulator_t = nk_dot_u4x32_state_neonsdot_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_u4x32_init_neonsdot;
+    static constexpr auto update_accumulator = nk_dot_u4x32_update_neonsdot;
+    static constexpr auto load_step = nk_load_b128_neon_;
+    static constexpr auto load_tail = nk_partial_load_b4x32_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_u4x32_finalize_neonsdot;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_u4_serial;
+    static constexpr std::size_t step_dimensions = 32;
+};
+
+/** @brief u4x2 angular distance kit - Arm UDOT. */
+struct u4x2_neonsdot_angular_kit_t : public u4x2_neonsdot_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_serial_;
+};
+
+/** @brief u4x2 Euclidean (L2) distance kit - Arm UDOT. */
+struct u4x2_neonsdot_euclidean_kit_t : public u4x2_neonsdot_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
+};
+#endif // NK_TARGET_NEONSDOT
+
+#if NK_TARGET_V128RELAXED
+/** @brief u4x2 inner-product distance kit - WebAssembly relaxed SIMD. */
+struct u4x2_v128relaxed_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    using scalar_t = nk::u4x2_t;
+    using accumulator_t = nk_dot_u4x32_state_v128relaxed_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_u4x32_init_v128relaxed;
+    static constexpr auto update_accumulator = nk_dot_u4x32_update_v128relaxed;
+    static constexpr auto load_step = nk_load_b128_v128relaxed_;
+    static constexpr auto load_tail = nk_partial_load_b4x32_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_u4x32_finalize_v128relaxed;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_u4_serial;
+    static constexpr std::size_t step_dimensions = 32;
+};
+
+/** @brief u4x2 angular distance kit - WebAssembly relaxed SIMD. */
+struct u4x2_v128relaxed_angular_kit_t : public u4x2_v128relaxed_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_v128relaxed_;
+};
+
+/** @brief u4x2 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
+struct u4x2_v128relaxed_euclidean_kit_t : public u4x2_v128relaxed_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128relaxed_;
+};
+#endif // NK_TARGET_V128RELAXED
+
 /** @brief i4x2 inner-product distance kit - serial reference. */
 struct i4x2_serial_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
@@ -619,7 +2805,124 @@ struct i4x2_haswell_euclidean_kit_t : public i4x2_haswell_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
 };
+
+/** @brief i4 angular distance kit - Haswell AVX2. */
+struct i4x2_haswell_angular_kit_t : public i4x2_haswell_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
+};
+
 #endif // NK_TARGET_HASWELL
+
+#if NK_TARGET_ICELAKE
+
+/** @brief i4 inner-product distance kit - Ice Lake VNNI. */
+struct i4x2_icelake_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
+    using scalar_t = nk::i4x2_t;
+    using accumulator_t = nk_dot_i4x128_state_icelake_t;
+    using step_vec_t = nk_b512_vec_t;
+    using prefetch_query_t = prefetch_query_sse_t;
+    using prefetch_candidate_t = prefetch_candidate_sse_t;
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_i4x128_init_icelake;
+    static constexpr auto update_accumulator = nk_dot_i4x128_update_icelake;
+    static constexpr auto load_step = nk_load_b512_skylake_;
+    static constexpr auto load_tail = nk_partial_load_b4x128_skylake_;
+    static constexpr auto reduce_accumulators = nk_dot_i4x128_finalize_icelake;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_i4_skylake;
+    static constexpr std::size_t step_dimensions = 128;
+};
+
+/** @brief i4 angular distance kit - Ice Lake VNNI. */
+struct i4x2_icelake_angular_kit_t : public i4x2_icelake_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
+};
+
+/** @brief i4 Euclidean (L2) distance kit - Ice Lake VNNI. */
+struct i4x2_icelake_euclidean_kit_t : public i4x2_icelake_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
+};
+#endif // NK_TARGET_ICELAKE
+
+#if NK_TARGET_NEONSDOT
+
+/** @brief i4 inner-product distance kit - Arm SDOT. */
+struct i4x2_neonsdot_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
+    using scalar_t = nk::i4x2_t;
+    using accumulator_t = nk_dot_i4x32_state_neonsdot_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_i4x32_init_neonsdot;
+    static constexpr auto update_accumulator = nk_dot_i4x32_update_neonsdot;
+    static constexpr auto load_step = nk_load_b128_neon_;
+    static constexpr auto load_tail = nk_partial_load_b4x32_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_i4x32_finalize_neonsdot;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_i4_serial;
+    static constexpr std::size_t step_dimensions = 32;
+};
+
+/** @brief i4 angular distance kit - Arm SDOT. */
+struct i4x2_neonsdot_angular_kit_t : public i4x2_neonsdot_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_serial_;
+};
+
+/** @brief i4 Euclidean (L2) distance kit - Arm SDOT. */
+struct i4x2_neonsdot_euclidean_kit_t : public i4x2_neonsdot_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
+};
+#endif // NK_TARGET_NEONSDOT
+
+#if NK_TARGET_V128RELAXED
+/**
+ *  @brief i4x2 inner-product distance kit - WebAssembly relaxed SIMD. NumKong has no
+ *         4-bit moments kernel for this tier, so the norms come from the serial one.
+ */
+struct i4x2_v128relaxed_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    using scalar_t = nk::i4x2_t;
+    using accumulator_t = nk_dot_i4x32_state_v128relaxed_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_i4x32_init_v128relaxed;
+    static constexpr auto update_accumulator = nk_dot_i4x32_update_v128relaxed;
+    static constexpr auto load_step = nk_load_b128_v128relaxed_;
+    static constexpr auto load_tail = nk_partial_load_b4x32_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_i4x32_finalize_v128relaxed;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_i4_serial;
+    static constexpr std::size_t step_dimensions = 32;
+};
+
+/** @brief i4x2 angular distance kit - WebAssembly relaxed SIMD. */
+struct i4x2_v128relaxed_angular_kit_t : public i4x2_v128relaxed_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_v128relaxed_;
+};
+
+/** @brief i4x2 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
+struct i4x2_v128relaxed_euclidean_kit_t : public i4x2_v128relaxed_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128relaxed_;
+};
+#endif // NK_TARGET_V128RELAXED
 
 /** @brief u1x8 inner-product distance kit - serial reference (binary AND-popcount). */
 struct u1x8_serial_inner_kit_t {
@@ -724,6 +3027,117 @@ struct u1x8_icelake_jaccard_kit_t : public u1x8_icelake_inner_kit_t {
 };
 #endif // NK_TARGET_ICELAKE
 
+#if NK_TARGET_NEON
+/** @brief u1x8 inner-product distance kit - Arm NEON (binary AND-popcount). */
+struct u1x8_neon_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    using scalar_t = nk::u1x8_t;
+    using accumulator_t = nk_dot_u1x128_state_neon_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_u1x128_init_neon;
+    static constexpr auto update_accumulator = nk_dot_u1x128_update_neon;
+    static constexpr auto load_step = nk_load_b128_neon_;
+    static constexpr auto load_tail = nk_partial_load_b1x128_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_u1x128_finalize_neon;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_u1_neon;
+    static constexpr std::size_t step_dimensions = 128;
+};
+
+/** @brief u1x8 Hamming distance kit - Arm NEON. */
+struct u1x8_neon_hamming_kit_t : public u1x8_neon_inner_kit_t {
+    using distance_lane_t = nk_u32_t;
+    static constexpr auto convert_to_distances = nk_hamming_u32x4_from_dot_neon_;
+};
+
+/** @brief u1x8 Jaccard distance kit - Arm NEON. */
+struct u1x8_neon_jaccard_kit_t : public u1x8_neon_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_jaccard_f32x4_from_dot_neon_;
+};
+#endif // NK_TARGET_NEON
+
+#if NK_TARGET_V128RELAXED
+/**
+ *  @brief u1x8 inner-product distance kit - WebAssembly relaxed SIMD. NumKong has no
+ *         binary moments kernel for this tier, so the norms come from the serial one.
+ */
+struct u1x8_v128relaxed_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    using scalar_t = nk::u1x8_t;
+    using accumulator_t = nk_dot_u1x128_state_v128relaxed_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_u1x128_init_v128relaxed;
+    static constexpr auto update_accumulator = nk_dot_u1x128_update_v128relaxed;
+    static constexpr auto load_step = nk_load_b128_v128relaxed_;
+    static constexpr auto load_tail = nk_partial_load_b1x128_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_u1x128_finalize_v128relaxed;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_u1_serial;
+    static constexpr std::size_t step_dimensions = 128;
+};
+
+/** @brief u1x8 Hamming distance kit - WebAssembly relaxed SIMD. */
+struct u1x8_v128relaxed_hamming_kit_t : public u1x8_v128relaxed_inner_kit_t {
+    using distance_lane_t = nk_u32_t;
+    static constexpr auto convert_to_distances = nk_hamming_u32x4_from_dot_v128relaxed_;
+};
+
+/** @brief u1x8 Jaccard distance kit - WebAssembly relaxed SIMD. */
+struct u1x8_v128relaxed_jaccard_kit_t : public u1x8_v128relaxed_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_jaccard_f32x4_from_dot_v128relaxed_;
+};
+#endif // NK_TARGET_V128RELAXED
+
+#if NK_TARGET_POWERVSX
+/**
+ *  @brief u1x8 inner-product distance kit - IBM POWER VSX. NumKong has no binary moments
+ *         kernel for this tier, so the norms come from the serial one.
+ */
+struct u1x8_powervsx_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    using scalar_t = nk::u1x8_t;
+    using accumulator_t = nk_dot_u1x128_state_powervsx_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = memory_hint_t;
+    using prefetch_candidate_t = memory_hint_t;
+    using demote_candidate_t = memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_u1x128_init_powervsx;
+    static constexpr auto update_accumulator = nk_dot_u1x128_update_powervsx;
+    static constexpr auto load_step = nk_load_b128_powervsx_;
+    static constexpr auto load_tail = nk_partial_load_b1x128_powervsx_;
+    static constexpr auto reduce_accumulators = nk_dot_u1x128_finalize_powervsx;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_u1_serial;
+    static constexpr std::size_t step_dimensions = 128;
+};
+
+/** @brief u1x8 Hamming distance kit - IBM POWER VSX. */
+struct u1x8_powervsx_hamming_kit_t : public u1x8_powervsx_inner_kit_t {
+    using distance_lane_t = nk_u32_t;
+    static constexpr auto convert_to_distances = nk_hamming_u32x4_from_dot_powervsx_;
+};
+
+/** @brief u1x8 Jaccard distance kit - IBM POWER VSX. */
+struct u1x8_powervsx_jaccard_kit_t : public u1x8_powervsx_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_jaccard_f32x4_from_dot_powervsx_;
+};
+#endif // NK_TARGET_POWERVSX
+
 /**
  *  @brief One row in a capability cascade - pairs an availability flag with a candidate kit.
  *
@@ -764,138 +3178,492 @@ struct kernel_chain;
 
 template <nk_capability_t caps_>
 struct kernel_chain<nk_kernel_dot_k, nk::bf16_t, caps_> {
-    using kit_t = typename first_available_kit<                                                      //
-        bf16_serial_inner_kit_t,                                                                     //
-        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, bf16_genoa_inner_kit_t>,       //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, bf16_skylake_inner_kit_t>, //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, bf16_haswell_inner_kit_t>  //
+    using kit_t = typename first_available_kit<                                                                  //
+        bf16_serial_inner_kit_t,                                                                                 //
+        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, bf16_genoa_inner_kit_t>,                   //
+        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, bf16_skylake_inner_kit_t>,             //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, bf16_haswell_inner_kit_t>,             //
+        chain_layer<NK_TARGET_NEONBFDOT && (caps_ & nk_cap_neonbfdot_k) != 0, bf16_neonbfdot_inner_kit_t>,       //
+        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, bf16_neon_inner_kit_t>,                      //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, bf16_v128relaxed_inner_kit_t>, //
+        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, bf16_powervsx_inner_kit_t>           //
         >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct kernel_chain<nk_kernel_angular_k, nk::bf16_t, caps_> {
-    using kit_t = typename first_available_kit<                                                        //
-        bf16_serial_angular_kit_t,                                                                     //
-        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, bf16_genoa_angular_kit_t>,       //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, bf16_skylake_angular_kit_t>, //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, bf16_haswell_angular_kit_t>  //
+    using kit_t = typename first_available_kit<                                                                    //
+        bf16_serial_angular_kit_t,                                                                                 //
+        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, bf16_genoa_angular_kit_t>,                   //
+        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, bf16_skylake_angular_kit_t>,             //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, bf16_haswell_angular_kit_t>,             //
+        chain_layer<NK_TARGET_NEONBFDOT && (caps_ & nk_cap_neonbfdot_k) != 0, bf16_neonbfdot_angular_kit_t>,       //
+        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, bf16_neon_angular_kit_t>,                      //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, bf16_v128relaxed_angular_kit_t>, //
+        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, bf16_powervsx_angular_kit_t>           //
         >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct kernel_chain<nk_kernel_euclidean_k, nk::bf16_t, caps_> {
-    using kit_t = typename first_available_kit<                                                          //
-        bf16_serial_euclidean_kit_t,                                                                     //
-        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, bf16_genoa_euclidean_kit_t>,       //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, bf16_skylake_euclidean_kit_t>, //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, bf16_haswell_euclidean_kit_t>  //
+    using kit_t = typename first_available_kit<                                                                      //
+        bf16_serial_euclidean_kit_t,                                                                                 //
+        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, bf16_genoa_euclidean_kit_t>,                   //
+        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, bf16_skylake_euclidean_kit_t>,             //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, bf16_haswell_euclidean_kit_t>,             //
+        chain_layer<NK_TARGET_NEONBFDOT && (caps_ & nk_cap_neonbfdot_k) != 0, bf16_neonbfdot_euclidean_kit_t>,       //
+        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, bf16_neon_euclidean_kit_t>,                      //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, bf16_v128relaxed_euclidean_kit_t>, //
+        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, bf16_powervsx_euclidean_kit_t>           //
         >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_dot_k, nk::f16_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                 //
+        f16_serial_inner_kit_t,                                                                                 //
+        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, f16_skylake_inner_kit_t>,             //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, f16_haswell_inner_kit_t>,             //
+        chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, f16_neonfhm_inner_kit_t>,             //
+        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, f16_neon_inner_kit_t>,                      //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, f16_v128relaxed_inner_kit_t>, //
+        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, f16_powervsx_inner_kit_t>           //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_angular_k, nk::f16_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                   //
+        f16_serial_angular_kit_t,                                                                                 //
+        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, f16_skylake_angular_kit_t>,             //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, f16_haswell_angular_kit_t>,             //
+        chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, f16_neonfhm_angular_kit_t>,             //
+        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, f16_neon_angular_kit_t>,                      //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, f16_v128relaxed_angular_kit_t>, //
+        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, f16_powervsx_angular_kit_t>           //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_euclidean_k, nk::f16_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                     //
+        f16_serial_euclidean_kit_t,                                                                                 //
+        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, f16_skylake_euclidean_kit_t>,             //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, f16_haswell_euclidean_kit_t>,             //
+        chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, f16_neonfhm_euclidean_kit_t>,             //
+        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, f16_neon_euclidean_kit_t>,                      //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, f16_v128relaxed_euclidean_kit_t>, //
+        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, f16_powervsx_euclidean_kit_t>           //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_dot_k, nk::e5m2_t, caps_> {
+    using kit_t = typename first_available_kit< //
+        e5m2_serial_inner_kit_t,                //
+        chain_layer<NK_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e5m2_diamond_inner_kit_t>,
+        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, e5m2_genoa_inner_kit_t>,                  //
+        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e5m2_skylake_inner_kit_t>,            //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e5m2_haswell_inner_kit_t>,            //
+        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e5m2_neonfp8_inner_kit_t>,            //
+        chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e5m2_neonfhm_inner_kit_t>,            //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e5m2_v128relaxed_inner_kit_t> //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_angular_k, nk::e5m2_t, caps_> {
+    using kit_t = typename first_available_kit< //
+        e5m2_serial_angular_kit_t,              //
+        chain_layer<NK_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e5m2_diamond_angular_kit_t>,
+        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, e5m2_genoa_angular_kit_t>,                  //
+        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e5m2_skylake_angular_kit_t>,            //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e5m2_haswell_angular_kit_t>,            //
+        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e5m2_neonfp8_angular_kit_t>,            //
+        chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e5m2_neonfhm_angular_kit_t>,            //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e5m2_v128relaxed_angular_kit_t> //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_euclidean_k, nk::e5m2_t, caps_> {
+    using kit_t = typename first_available_kit< //
+        e5m2_serial_euclidean_kit_t,            //
+        chain_layer<NK_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e5m2_diamond_euclidean_kit_t>,
+        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, e5m2_genoa_euclidean_kit_t>,                  //
+        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e5m2_skylake_euclidean_kit_t>,            //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e5m2_haswell_euclidean_kit_t>,            //
+        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e5m2_neonfp8_euclidean_kit_t>,            //
+        chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e5m2_neonfhm_euclidean_kit_t>,            //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e5m2_v128relaxed_euclidean_kit_t> //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_dot_k, nk::e4m3_t, caps_> {
+    using kit_t = typename first_available_kit< //
+        e4m3_serial_inner_kit_t,                //
+        chain_layer<NK_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e4m3_diamond_inner_kit_t>,
+        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, e4m3_genoa_inner_kit_t>,                  //
+        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e4m3_skylake_inner_kit_t>,            //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e4m3_haswell_inner_kit_t>,            //
+        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e4m3_neonfp8_inner_kit_t>,            //
+        chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e4m3_neonfhm_inner_kit_t>,            //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e4m3_v128relaxed_inner_kit_t> //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_angular_k, nk::e4m3_t, caps_> {
+    using kit_t = typename first_available_kit< //
+        e4m3_serial_angular_kit_t,              //
+        chain_layer<NK_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e4m3_diamond_angular_kit_t>,
+        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, e4m3_genoa_angular_kit_t>,                  //
+        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e4m3_skylake_angular_kit_t>,            //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e4m3_haswell_angular_kit_t>,            //
+        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e4m3_neonfp8_angular_kit_t>,            //
+        chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e4m3_neonfhm_angular_kit_t>,            //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e4m3_v128relaxed_angular_kit_t> //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_euclidean_k, nk::e4m3_t, caps_> {
+    using kit_t = typename first_available_kit< //
+        e4m3_serial_euclidean_kit_t,            //
+        chain_layer<NK_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e4m3_diamond_euclidean_kit_t>,
+        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, e4m3_genoa_euclidean_kit_t>,                  //
+        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e4m3_skylake_euclidean_kit_t>,            //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e4m3_haswell_euclidean_kit_t>,            //
+        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e4m3_neonfp8_euclidean_kit_t>,            //
+        chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e4m3_neonfhm_euclidean_kit_t>,            //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e4m3_v128relaxed_euclidean_kit_t> //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_dot_k, nk::e3m2_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                 //
+        e3m2_serial_inner_kit_t,                                                                                //
+        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e3m2_skylake_inner_kit_t>,            //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e3m2_haswell_inner_kit_t>,            //
+        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e3m2_neonfp8_inner_kit_t>,            //
+        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e3m2_neonsdot_inner_kit_t>,         //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e3m2_v128relaxed_inner_kit_t> //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_angular_k, nk::e3m2_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                   //
+        e3m2_serial_angular_kit_t,                                                                                //
+        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e3m2_skylake_angular_kit_t>,            //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e3m2_haswell_angular_kit_t>,            //
+        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e3m2_neonfp8_angular_kit_t>,            //
+        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e3m2_neonsdot_angular_kit_t>,         //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e3m2_v128relaxed_angular_kit_t> //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_euclidean_k, nk::e3m2_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                     //
+        e3m2_serial_euclidean_kit_t,                                                                                //
+        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e3m2_skylake_euclidean_kit_t>,            //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e3m2_haswell_euclidean_kit_t>,            //
+        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e3m2_neonfp8_euclidean_kit_t>,            //
+        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e3m2_neonsdot_euclidean_kit_t>,         //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e3m2_v128relaxed_euclidean_kit_t> //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_dot_k, nk::e2m3_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                 //
+        e2m3_serial_inner_kit_t,                                                                                //
+        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e2m3_skylake_inner_kit_t>,            //
+        chain_layer<NK_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, e2m3_sierra_inner_kit_t>,               //
+        chain_layer<NK_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, e2m3_alder_inner_kit_t>,                  //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e2m3_haswell_inner_kit_t>,            //
+        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e2m3_neonfp8_inner_kit_t>,            //
+        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e2m3_neonsdot_inner_kit_t>,         //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e2m3_v128relaxed_inner_kit_t> //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_angular_k, nk::e2m3_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                   //
+        e2m3_serial_angular_kit_t,                                                                                //
+        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e2m3_skylake_angular_kit_t>,            //
+        chain_layer<NK_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, e2m3_sierra_angular_kit_t>,               //
+        chain_layer<NK_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, e2m3_alder_angular_kit_t>,                  //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e2m3_haswell_angular_kit_t>,            //
+        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e2m3_neonfp8_angular_kit_t>,            //
+        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e2m3_neonsdot_angular_kit_t>,         //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e2m3_v128relaxed_angular_kit_t> //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_euclidean_k, nk::e2m3_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                     //
+        e2m3_serial_euclidean_kit_t,                                                                                //
+        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e2m3_skylake_euclidean_kit_t>,            //
+        chain_layer<NK_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, e2m3_sierra_euclidean_kit_t>,               //
+        chain_layer<NK_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, e2m3_alder_euclidean_kit_t>,                  //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e2m3_haswell_euclidean_kit_t>,            //
+        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e2m3_neonfp8_euclidean_kit_t>,            //
+        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e2m3_neonsdot_euclidean_kit_t>,         //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e2m3_v128relaxed_euclidean_kit_t> //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct kernel_chain<nk_kernel_dot_k, nk::i8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                    //
-        i8_serial_inner_kit_t,                                                                     //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i8_icelake_inner_kit_t>, //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i8_haswell_inner_kit_t>  //
+    using kit_t = typename first_available_kit<                                                                //
+        i8_serial_inner_kit_t,                                                                                 //
+        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i8_icelake_inner_kit_t>,             //
+        chain_layer<NK_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, i8_sierra_inner_kit_t>,                //
+        chain_layer<NK_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, i8_alder_inner_kit_t>,                   //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i8_haswell_inner_kit_t>,             //
+        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i8_neonsdot_inner_kit_t>,          //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i8_v128relaxed_inner_kit_t>, //
+        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, i8_powervsx_inner_kit_t>           //
         >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct kernel_chain<nk_kernel_angular_k, nk::i8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                      //
-        i8_serial_angular_kit_t,                                                                     //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i8_icelake_angular_kit_t>, //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i8_haswell_angular_kit_t>  //
+    using kit_t = typename first_available_kit<                                                                  //
+        i8_serial_angular_kit_t,                                                                                 //
+        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i8_icelake_angular_kit_t>,             //
+        chain_layer<NK_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, i8_sierra_angular_kit_t>,                //
+        chain_layer<NK_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, i8_alder_angular_kit_t>,                   //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i8_haswell_angular_kit_t>,             //
+        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i8_neonsdot_angular_kit_t>,          //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i8_v128relaxed_angular_kit_t>, //
+        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, i8_powervsx_angular_kit_t>           //
         >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct kernel_chain<nk_kernel_euclidean_k, nk::i8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                        //
-        i8_serial_euclidean_kit_t,                                                                     //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i8_icelake_euclidean_kit_t>, //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i8_haswell_euclidean_kit_t>  //
+    using kit_t = typename first_available_kit<                                                                    //
+        i8_serial_euclidean_kit_t,                                                                                 //
+        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i8_icelake_euclidean_kit_t>,             //
+        chain_layer<NK_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, i8_sierra_euclidean_kit_t>,                //
+        chain_layer<NK_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, i8_alder_euclidean_kit_t>,                   //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i8_haswell_euclidean_kit_t>,             //
+        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i8_neonsdot_euclidean_kit_t>,          //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i8_v128relaxed_euclidean_kit_t>, //
+        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, i8_powervsx_euclidean_kit_t>           //
         >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct kernel_chain<nk_kernel_dot_k, nk::u8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                   //
-        u8_serial_inner_kit_t,                                                                    //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u8_icelake_inner_kit_t> //
+    using kit_t = typename first_available_kit<                                                                //
+        u8_serial_inner_kit_t,                                                                                 //
+        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u8_icelake_inner_kit_t>,             //
+        chain_layer<NK_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, u8_sierra_inner_kit_t>,                //
+        chain_layer<NK_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, u8_alder_inner_kit_t>,                   //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u8_haswell_inner_kit_t>,             //
+        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u8_neonsdot_inner_kit_t>,          //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u8_v128relaxed_inner_kit_t>, //
+        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u8_powervsx_inner_kit_t>           //
         >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct kernel_chain<nk_kernel_angular_k, nk::u8_t, caps_> {
-    using kit_t = typename first_available_kit<u8_serial_angular_kit_t>::type;
+    using kit_t = typename first_available_kit<                                                                  //
+        u8_serial_angular_kit_t,                                                                                 //
+        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u8_icelake_angular_kit_t>,             //
+        chain_layer<NK_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, u8_sierra_angular_kit_t>,                //
+        chain_layer<NK_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, u8_alder_angular_kit_t>,                   //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u8_haswell_angular_kit_t>,             //
+        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u8_neonsdot_angular_kit_t>,          //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u8_v128relaxed_angular_kit_t>, //
+        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u8_powervsx_angular_kit_t>           //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct kernel_chain<nk_kernel_euclidean_k, nk::u8_t, caps_> {
-    using kit_t = typename first_available_kit<u8_serial_euclidean_kit_t>::type;
+    using kit_t = typename first_available_kit<                                                                    //
+        u8_serial_euclidean_kit_t,                                                                                 //
+        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u8_icelake_euclidean_kit_t>,             //
+        chain_layer<NK_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, u8_sierra_euclidean_kit_t>,                //
+        chain_layer<NK_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, u8_alder_euclidean_kit_t>,                   //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u8_haswell_euclidean_kit_t>,             //
+        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u8_neonsdot_euclidean_kit_t>,          //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u8_v128relaxed_euclidean_kit_t>, //
+        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u8_powervsx_euclidean_kit_t>           //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_dot_k, nk::u4x2_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                 //
+        u4x2_serial_inner_kit_t,                                                                                //
+        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u4x2_icelake_inner_kit_t>,            //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u4x2_haswell_inner_kit_t>,            //
+        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u4x2_neonsdot_inner_kit_t>,         //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u4x2_v128relaxed_inner_kit_t> //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_angular_k, nk::u4x2_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                   //
+        u4x2_serial_angular_kit_t,                                                                                //
+        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u4x2_icelake_angular_kit_t>,            //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u4x2_haswell_angular_kit_t>,            //
+        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u4x2_neonsdot_angular_kit_t>,         //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u4x2_v128relaxed_angular_kit_t> //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct kernel_chain<nk_kernel_euclidean_k, nk::u4x2_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                     //
+        u4x2_serial_euclidean_kit_t,                                                                                //
+        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u4x2_icelake_euclidean_kit_t>,            //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u4x2_haswell_euclidean_kit_t>,            //
+        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u4x2_neonsdot_euclidean_kit_t>,         //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u4x2_v128relaxed_euclidean_kit_t> //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct kernel_chain<nk_kernel_dot_k, nk::i4x2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                     //
-        i4x2_serial_inner_kit_t,                                                                    //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i4x2_haswell_inner_kit_t> //
+    using kit_t = typename first_available_kit<                                                                 //
+        i4x2_serial_inner_kit_t,                                                                                //
+        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i4x2_icelake_inner_kit_t>,            //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i4x2_haswell_inner_kit_t>,            //
+        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i4x2_neonsdot_inner_kit_t>,         //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i4x2_v128relaxed_inner_kit_t> //
         >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct kernel_chain<nk_kernel_angular_k, nk::i4x2_t, caps_> {
-    using kit_t = typename first_available_kit<i4x2_serial_angular_kit_t>::type;
+    using kit_t = typename first_available_kit<                                                                   //
+        i4x2_serial_angular_kit_t,                                                                                //
+        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i4x2_icelake_angular_kit_t>,            //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i4x2_haswell_angular_kit_t>,            //
+        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i4x2_neonsdot_angular_kit_t>,         //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i4x2_v128relaxed_angular_kit_t> //
+        >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct kernel_chain<nk_kernel_euclidean_k, nk::i4x2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                         //
-        i4x2_serial_euclidean_kit_t,                                                                    //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i4x2_haswell_euclidean_kit_t> //
+    using kit_t = typename first_available_kit<                                                                     //
+        i4x2_serial_euclidean_kit_t,                                                                                //
+        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i4x2_icelake_euclidean_kit_t>,            //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i4x2_haswell_euclidean_kit_t>,            //
+        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i4x2_neonsdot_euclidean_kit_t>,         //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i4x2_v128relaxed_euclidean_kit_t> //
         >::type;
+    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct kernel_chain<nk_kernel_dot_k, nk::u1x8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                      //
-        u1x8_serial_inner_kit_t,                                                                     //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_inner_kit_t>, //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_inner_kit_t>  //
+    using kit_t = typename first_available_kit<                                                                  //
+        u1x8_serial_inner_kit_t,                                                                                 //
+        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_inner_kit_t>,             //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_inner_kit_t>,             //
+        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, u1x8_neon_inner_kit_t>,                      //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u1x8_v128relaxed_inner_kit_t>, //
+        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u1x8_powervsx_inner_kit_t>           //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct kernel_chain<nk_kernel_hamming_k, nk::u1x8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                        //
-        u1x8_serial_hamming_kit_t,                                                                     //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_hamming_kit_t>, //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_hamming_kit_t>  //
+    using kit_t = typename first_available_kit<                                                                    //
+        u1x8_serial_hamming_kit_t,                                                                                 //
+        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_hamming_kit_t>,             //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_hamming_kit_t>,             //
+        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, u1x8_neon_hamming_kit_t>,                      //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u1x8_v128relaxed_hamming_kit_t>, //
+        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u1x8_powervsx_hamming_kit_t>           //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct kernel_chain<nk_kernel_jaccard_k, nk::u1x8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                        //
-        u1x8_serial_jaccard_kit_t,                                                                     //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_jaccard_kit_t>, //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_jaccard_kit_t>  //
+    using kit_t = typename first_available_kit<                                                                    //
+        u1x8_serial_jaccard_kit_t,                                                                                 //
+        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_jaccard_kit_t>,             //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_jaccard_kit_t>,             //
+        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, u1x8_neon_jaccard_kit_t>,                      //
+        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u1x8_v128relaxed_jaccard_kit_t>, //
+        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u1x8_powervsx_jaccard_kit_t>           //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };

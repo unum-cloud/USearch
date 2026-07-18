@@ -134,6 +134,13 @@ int check_one(std::size_t /*dim*/) noexcept {
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
     requires kernel_supported<kernel_, scalar_, caps_>
 int check_one(std::size_t dim) noexcept {
+    // With a single capability bit requested, exactly one cascade row can match, so the
+    // winner is either that tier or the serial fallback. Anything else means a row names
+    // a kit from another backend - numerically indistinguishable, hence the static check.
+    static_assert(kernel_chain<kernel_, scalar_, caps_>::picked_k == caps_ ||
+                      kernel_chain<kernel_, scalar_, caps_>::picked_k == nk_cap_serial_k,
+                  "Capability cascade selected a tier that was never requested");
+
     auto query = nk::vector<scalar_>::try_zeros(dim);
     auto first_candidate = nk::vector<scalar_>::try_zeros(dim);
     auto second_candidate = nk::vector<scalar_>::try_zeros(dim);
@@ -191,10 +198,22 @@ template <nk_kernel_kind_t kernel_, typename scalar_>
 int check_metric_for_type() noexcept {
     int failures = 0;
     for (std::size_t dim : dimensions_to_test) {
+        // Newest silicon first, so a reader sees the strongest tier at the top. x86 by
+        // generation, then Arm by extension, then the remaining architectures.
+        failures += check_one<kernel_, scalar_, nk_cap_diamond_k>(dim);
+        failures += check_one<kernel_, scalar_, nk_cap_sierra_k>(dim);
         failures += check_one<kernel_, scalar_, nk_cap_genoa_k>(dim);
+        failures += check_one<kernel_, scalar_, nk_cap_alder_k>(dim);
         failures += check_one<kernel_, scalar_, nk_cap_icelake_k>(dim);
         failures += check_one<kernel_, scalar_, nk_cap_skylake_k>(dim);
         failures += check_one<kernel_, scalar_, nk_cap_haswell_k>(dim);
+        failures += check_one<kernel_, scalar_, nk_cap_neonfp8_k>(dim);
+        failures += check_one<kernel_, scalar_, nk_cap_neonfhm_k>(dim);
+        failures += check_one<kernel_, scalar_, nk_cap_neonbfdot_k>(dim);
+        failures += check_one<kernel_, scalar_, nk_cap_neonsdot_k>(dim);
+        failures += check_one<kernel_, scalar_, nk_cap_neon_k>(dim);
+        failures += check_one<kernel_, scalar_, nk_cap_v128relaxed_k>(dim);
+        failures += check_one<kernel_, scalar_, nk_cap_powervsx_k>(dim);
         failures += check_one<kernel_, scalar_, nk_cap_serial_k>(dim);
     }
     return failures;
@@ -214,6 +233,26 @@ int check_metrics_for_type<nk::u1x8_t>() noexcept {
            check_metric_for_type<nk_kernel_hamming_k, nk::u1x8_t>() + //
            check_metric_for_type<nk_kernel_jaccard_k, nk::u1x8_t>();
 }
+
+/**
+ *  @brief Every scalar below must resolve at least at the serial tier. Without this the
+ *  no-op overload would swallow a dtype whose chain specialization went missing, and the
+ *  suite would stay green while covering nothing.
+ */
+template <typename scalar_>
+concept scalar_wired = kernel_supported<nk_kernel_dot_k, scalar_, nk_cap_serial_k>;
+
+static_assert(scalar_wired<nk::bf16_t>);
+static_assert(scalar_wired<nk::f16_t>);
+static_assert(scalar_wired<nk::e5m2_t>);
+static_assert(scalar_wired<nk::e4m3_t>);
+static_assert(scalar_wired<nk::e3m2_t>);
+static_assert(scalar_wired<nk::e2m3_t>);
+static_assert(scalar_wired<nk::u8_t>);
+static_assert(scalar_wired<nk::i8_t>);
+static_assert(scalar_wired<nk::u4x2_t>);
+static_assert(scalar_wired<nk::i4x2_t>);
+static_assert(scalar_wired<nk::u1x8_t>);
 
 int main(void) {
     int failures = 0;

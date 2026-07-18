@@ -17,6 +17,11 @@ if (USEARCH_BUILD_TEST_CPP)
     setup_target(inner_volatile_index_test_cpp)
     target_link_libraries(inner_volatile_index_test_cpp PRIVATE fmt::fmt)
     add_test(NAME inner_volatile_index_test_cpp COMMAND inner_volatile_index_test_cpp)
+
+    add_executable(inner_metric_test_cpp inner_metric_test.cpp)
+    setup_target(inner_metric_test_cpp)
+    target_link_libraries(inner_metric_test_cpp PRIVATE fmt::fmt)
+    add_test(NAME inner_metric_test_cpp COMMAND inner_metric_test_cpp)
 endif ()
 
 if (USEARCH_BUILD_BENCH_CPP)
