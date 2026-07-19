@@ -311,7 +311,7 @@ static void add_many_to_index(                            //
 template <typename scalar_at>
 static void search_typed(                                   //
     dense_index_py_t& index, py::buffer_info& vectors_info, //
-    std::size_t wanted, bool exact, std::size_t threads,    //
+    std::size_t wanted, std::size_t exact, std::size_t threads,    //
     py::array_t<dense_key_t>& keys_py, py::array_t<distance_t>& distances_py, py::array_t<Py_ssize_t>& counts_py,
     std::atomic<std::size_t>& stats_visited_members, std::atomic<std::size_t>& stats_computed_distances,
     progress_func_t const& progress) {
@@ -377,7 +377,7 @@ static void search_typed(                                   //
 template <typename scalar_at>
 static void search_typed(                                       //
     dense_indexes_py_t& indexes, py::buffer_info& vectors_info, //
-    std::size_t wanted, bool exact, std::size_t threads,        //
+    std::size_t wanted, std::size_t exact, std::size_t threads,        //
     py::array_t<dense_key_t>& keys_py, py::array_t<distance_t>& distances_py, py::array_t<Py_ssize_t>& counts_py,
     std::atomic<std::size_t>& stats_visited_members, std::atomic<std::size_t>& stats_computed_distances,
     progress_func_t const& progress) {
@@ -476,7 +476,7 @@ static void search_typed(                                       //
  */
 template <typename index_at>
 static py::tuple search_many_in_index( //
-    index_at& index, py::buffer vectors, std::size_t wanted, bool exact, std::size_t threads,
+    index_at& index, py::buffer vectors, std::size_t wanted, std::size_t exact, std::size_t threads,
     progress_func_t const& progress, scalar_kind_t scalar_kind = scalar_kind_t::unknown_k) {
 
     if (wanted == 0)
@@ -923,6 +923,14 @@ static dense_index_py_t copy_index(dense_index_py_t const& index, bool force_cop
     return std::move(result.index);
 }
 
+static dense_index_py_t repack_index(dense_index_py_t const& index, scalar_kind_t new_scalar) {
+
+    using copy_result_t = typename dense_index_py_t::copy_result_t;
+    copy_result_t result = index.repack(new_scalar);
+    forward_error(result);
+    return std::move(result.index);
+}
+
 static void compact_index(dense_index_py_t& index, std::size_t threads, progress_func_t const& progress) {
 
     if (!threads)
@@ -933,6 +941,46 @@ static void compact_index(dense_index_py_t& index, std::size_t threads, progress
     if (!index.try_reserve(index_limits_t(index.size(), threads)))
         throw std::invalid_argument("Out of memory!");
     index.compact(executor_default_t{threads}, progress_t{progress});
+}
+
+template <typename index_at>
+static void view_exact_vectors(index_at& index, py::buffer vectors, std::optional<py::buffer> keys, scalar_kind_t scalar_kind = scalar_kind_t::unknown_k) {
+    py::buffer_info vectors_info = vectors.request();
+    if (vectors_info.ndim != 2)
+        throw std::invalid_argument("Expects a matrix of exact vectors!");
+
+    Py_ssize_t vectors_count = vectors_info.shape[0];
+    Py_ssize_t vectors_dimensions = vectors_info.shape[1];
+    if (vectors_info.strides[1] != static_cast<Py_ssize_t>(vectors_info.itemsize))
+        throw std::invalid_argument("Matrix rows must be contiguous, try `ascontiguousarray`.");
+
+    if (scalar_kind == scalar_kind_t::unknown_k) {
+        if (vectors_info.format == py::format_descriptor<float>::format())
+            scalar_kind = scalar_kind_t::f32_k;
+        else if (vectors_info.format == py::format_descriptor<double>::format())
+            scalar_kind = scalar_kind_t::f64_k;
+        else if (vectors_info.format == py::format_descriptor<std::int8_t>::format() || vectors_info.format == "b")
+            scalar_kind = scalar_kind_t::i8_k;
+        else if (vectors_info.format == "e")
+            scalar_kind = scalar_kind_t::f16_k;
+        else
+            throw std::invalid_argument("Unrecognized exact vector type. Try explicitly passing `dtype`.");
+    }
+    metric_kind_t metric_kind = index.metric().metric_kind();
+    metric_punned_t exact_metric(vectors_dimensions, metric_kind, scalar_kind);
+
+    dense_key_t const* keys_data = nullptr;
+    if (keys.has_value()) {
+        py::buffer_info keys_info = keys->request();
+        if (keys_info.itemsize != sizeof(dense_key_t))
+            throw std::invalid_argument("Incompatible key type!");
+        if (keys_info.shape[0] != vectors_count)
+            throw std::invalid_argument("Number of keys and exact vectors must match!");
+        keys_data = reinterpret_cast<dense_key_t const*>(keys_info.ptr);
+    }
+
+    std::size_t stride = vectors_info.strides[0];
+    index.view_exact_vectors(std::move(exact_metric), reinterpret_cast<byte_t const*>(vectors_info.ptr), stride, keys_data, vectors_count);
 }
 
 static py::dict index_metadata(index_dense_metadata_result_t const& meta) {
@@ -1279,10 +1327,17 @@ PYBIND11_MODULE(compiled, m, py::mod_gil_not_used()) {
         "search_many", &search_many_in_index<dense_index_py_t>, //
         py::arg("queries"),                                     //
         py::arg("count") = 10,                                  //
-        py::arg("exact") = false,                               //
+        py::arg("exact") = 0,                               //
         py::arg("threads") = 0,                                 //
         py::arg("progress") = nullptr,                          //
         py::arg("dtype") = scalar_kind_t::unknown_k             //
+    );
+
+    i.def(
+        "view_exact_vectors", &view_exact_vectors<dense_index_py_t>, //
+        py::arg("vectors"),                                         //
+        py::arg("keys") = py::none(),                                //
+        py::arg("dtype") = scalar_kind_t::unknown_k                  //
     );
 
     i.def(                                                     //
@@ -1515,6 +1570,7 @@ PYBIND11_MODULE(compiled, m, py::mod_gil_not_used()) {
     i.def("reset", &reset_index<dense_index_py_t>);
     i.def("clear", &clear_index<dense_index_py_t>);
     i.def("copy", &copy_index, py::kw_only(), py::arg("copy") = true);
+    i.def("repack", &repack_index, py::arg("new_scalar"));
     i.def("compact", &compact_index, py::arg("threads"), py::arg("progress") = nullptr);
     i.def("join", &join_index, py::arg("other"), py::arg("max_proposals") = 0, py::arg("exact") = false,
           py::arg("progress") = nullptr);

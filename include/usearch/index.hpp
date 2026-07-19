@@ -1716,6 +1716,10 @@ struct index_search_config_t {
 
     /// @brief Brute-forces exhaustive search over all entries in the index.
     bool exact = false;
+
+    /// @brief If > 0, performs a 2-stage search, fetching this many candidates using the index metric,
+    /// then exactly re-ranking them using the exact_metric and exact_vectors (if attached).
+    std::size_t exact_candidate_count = 0;
 };
 
 struct index_cluster_config_t {
@@ -2266,6 +2270,7 @@ template <typename distance_at = default_distance_t,              //
           typename tape_allocator_at = dynamic_allocator_at>      //
 class index_gt {
   public:
+    template <typename, typename> friend class index_dense_gt;
     using distance_t = distance_at;
     using vector_key_t = key_at;
     using key_t = vector_key_t;

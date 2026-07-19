@@ -1212,6 +1212,29 @@ class Index:
         result._compiled = self._compiled.copy()
         return result
 
+    def repack(self, dtype: Union[str, ScalarKind]) -> "Index":
+        """Creates a copy of the index but re-encodes the vector storage to a new scalar type.
+
+        :param dtype: The new scalar type to re-encode the vectors into (e.g., 'tq4', 'tq2').
+        :type dtype: Union[str, ScalarKind]
+        :return: A new instance of the Index class with the same graph but re-encoded vectors.
+        :rtype: Index
+        """
+        from usearch.index import _normalize_dtype
+        dtype = _normalize_dtype(dtype)
+
+        result = Index(
+            ndim=self.ndim,
+            metric=self.metric,
+            dtype=dtype,
+            connectivity=self.connectivity,
+            expansion_add=self.expansion_add,
+            expansion_search=self.expansion_search,
+        )
+        result._compiled = self._compiled.repack(dtype)
+        return result
+
+
     def join(
         self,
         other: Index,
@@ -1422,6 +1445,22 @@ class Index:
             - `allocated_bytes` (int): Memory allocated for the level.
         """
         return self._compiled.level_stats(level)
+
+    def view_exact_vectors(self, vectors: VectorOrVectorsLike, keys: KeyOrKeysLike | None = None, dtype: DTypeLike | None = None):
+        """Supplies the exact uncompressed vectors for 2-stage reranking search.
+
+        :param vectors: The dataset containing uncompressed/exact vectors.
+        :type vectors: VectorOrVectorsLike
+        :param keys: Optional keys matching the vectors to their corresponding index slots.
+        :type keys: Optional[KeyOrKeysLike]
+        :param dtype: The numeric type of the provided vectors (defaults to the index type).
+        :type dtype: Optional[DTypeLike]
+        """
+        if dtype is None:
+            dtype = ScalarKind.Unknown
+        elif isinstance(dtype, str):
+            dtype = ScalarKind[dtype.upper()]
+        return self._compiled.view_exact_vectors(vectors, keys, dtype)
 
     @property
     def specs(self) -> dict[str, str | int | bool]:

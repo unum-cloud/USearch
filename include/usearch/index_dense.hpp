@@ -478,6 +478,15 @@ class index_dense_gt {
     /// @brief For every managed `compressed_slot_t` stores a pointer to the allocated vector copy.
     mutable vectors_lookup_t vectors_lookup_;
 
+    using exact_vectors_lookup_allocator_t = aligned_allocator_gt<byte_t const*, 64>;
+    using exact_vectors_lookup_t = buffer_gt<byte_t const*, exact_vectors_lookup_allocator_t>;
+
+    /// @brief Optional F32/High-Precision metric for two-stage reranking.
+    metric_t exact_metric_;
+
+    /// @brief Optional pointers to exact vectors for 2-stage reranking, indexed by slot.
+    mutable exact_vectors_lookup_t exact_vectors_lookup_;
+
     /// @brief TurboQuant HD³ rotation (shared by all vectors in the index).
     turboquant_rotation_t tq_rotation_;
     /// @brief Per-thread scratch buffer for TurboQuant encoding (padded_dim floats).
@@ -601,6 +610,8 @@ class index_dense_gt {
 
           vectors_tape_allocator_(std::move(other.vectors_tape_allocator_)), //
           vectors_lookup_(std::move(other.vectors_lookup_)),                 //
+          exact_metric_(std::move(other.exact_metric_)),                     //
+          exact_vectors_lookup_(std::move(other.exact_vectors_lookup_)),     //
           tq_rotation_(std::move(other.tq_rotation_)),                       //
           tq_scratch_(std::move(other.tq_scratch_)),                         //
 
@@ -628,6 +639,8 @@ class index_dense_gt {
 
         std::swap(vectors_tape_allocator_, other.vectors_tape_allocator_);
         std::swap(vectors_lookup_, other.vectors_lookup_);
+        std::swap(exact_metric_, other.exact_metric_);
+        std::swap(exact_vectors_lookup_, other.exact_vectors_lookup_);
         std::swap(tq_rotation_, other.tq_rotation_);
         std::swap(tq_scratch_, other.tq_scratch_);
 
@@ -768,6 +781,45 @@ class index_dense_gt {
         return true;
     }
 
+    /**
+     *  @brief Attaches an external dataset of exact vectors for 2-stage reranking.
+     *  @param metric The exact metric to use (e.g. F32 inner product).
+     *  @param vectors Base pointer to the exact vectors dataset.
+     *  @param stride Distance between consecutive vectors in the dataset in bytes.
+     *  @param keys Array of vector keys corresponding to the rows of the dataset. If null, assumes key == row index.
+     *  @param count Number of vectors in the dataset.
+     */
+    void view_exact_vectors(metric_t metric, byte_t const* vectors, std::size_t stride, vector_key_t const* keys, std::size_t count) {
+        exact_metric_ = std::move(metric);
+        if (!exact_vectors_lookup_.size() && capacity() > 0) {
+            exact_vectors_lookup_t new_exact_vectors_lookup(capacity());
+            std::memset(new_exact_vectors_lookup.data(), 0, capacity() * sizeof(byte_t const*));
+            exact_vectors_lookup_ = std::move(new_exact_vectors_lookup);
+        } else if (exact_vectors_lookup_.size() > 0) {
+            std::memset(exact_vectors_lookup_.data(), 0, exact_vectors_lookup_.size() * sizeof(byte_t const*));
+        }
+
+        if (keys) {
+            shared_lock_t lock(slot_lookup_mutex_);
+            for (std::size_t i = 0; i < count; ++i) {
+                auto it = slot_lookup_.find(keys[i]);
+                if (it != slot_lookup_.end()) {
+                    compressed_slot_t slot = it->slot;
+                    if (slot != default_free_value<compressed_slot_t>() && slot < exact_vectors_lookup_.size()) {
+                        exact_vectors_lookup_[slot] = vectors + i * stride;
+                    }
+                }
+            }
+        } else {
+            shared_lock_t lock(slot_lookup_mutex_);
+            slot_lookup_.for_each([&](key_and_slot_t const& key_and_slot) {
+                if (key_and_slot.key < count && key_and_slot.slot < exact_vectors_lookup_.size()) {
+                    exact_vectors_lookup_[key_and_slot.slot] = vectors + key_and_slot.key * stride;
+                }
+            });
+        }
+    }
+
     /// @brief Throwing counterpart of @ref try_change_metric.
     void change_metric(metric_t metric) {
         if (!try_change_metric(std::move(metric)))
@@ -904,29 +956,29 @@ class index_dense_gt {
     add_result_t add(vector_key_t key, u8_t const* vector, std::size_t thread = any_thread(), bool copy_vector = true) { return add_(key, vector, thread, copy_vector, casts_.from.u8); }
     add_result_t add(vector_key_t key, b1x8_t const* vector, std::size_t thread = any_thread(), bool copy_vector = true) { return add_(key, vector, thread, copy_vector, casts_.from.b1x8); }
 
-    search_result_t search(f64_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.f64); }
-    search_result_t search(f32_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.f32); }
-    search_result_t search(bf16_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.bf16); }
-    search_result_t search(f16_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.f16); }
-    search_result_t search(e5m2_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.e5m2); }
-    search_result_t search(e4m3_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.e4m3); }
-    search_result_t search(e3m2_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.e3m2); }
-    search_result_t search(e2m3_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.e2m3); }
-    search_result_t search(i8_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.i8); }
-    search_result_t search(u8_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.u8); }
-    search_result_t search(b1x8_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.b1x8); }
+    search_result_t search(f64_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.f64); }
+    search_result_t search(f32_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.f32); }
+    search_result_t search(bf16_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.bf16); }
+    search_result_t search(f16_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.f16); }
+    search_result_t search(e5m2_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.e5m2); }
+    search_result_t search(e4m3_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.e4m3); }
+    search_result_t search(e3m2_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.e3m2); }
+    search_result_t search(e2m3_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.e2m3); }
+    search_result_t search(i8_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.i8); }
+    search_result_t search(u8_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.u8); }
+    search_result_t search(b1x8_t const* vector, std::size_t wanted, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, dummy_predicate_t {}, thread, exact, casts_.from.b1x8); }
 
-    template <typename predicate_at> search_result_t filtered_search(f64_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.f64); }
-    template <typename predicate_at> search_result_t filtered_search(f32_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.f32); }
-    template <typename predicate_at> search_result_t filtered_search(bf16_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.bf16); }
-    template <typename predicate_at> search_result_t filtered_search(f16_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.f16); }
-    template <typename predicate_at> search_result_t filtered_search(e5m2_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.e5m2); }
-    template <typename predicate_at> search_result_t filtered_search(e4m3_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.e4m3); }
-    template <typename predicate_at> search_result_t filtered_search(e3m2_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.e3m2); }
-    template <typename predicate_at> search_result_t filtered_search(e2m3_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.e2m3); }
-    template <typename predicate_at> search_result_t filtered_search(i8_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.i8); }
-    template <typename predicate_at> search_result_t filtered_search(u8_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.u8); }
-    template <typename predicate_at> search_result_t filtered_search(b1x8_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), bool exact = false) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.b1x8); }
+    template <typename predicate_at> search_result_t filtered_search(f64_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.f64); }
+    template <typename predicate_at> search_result_t filtered_search(f32_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.f32); }
+    template <typename predicate_at> search_result_t filtered_search(bf16_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.bf16); }
+    template <typename predicate_at> search_result_t filtered_search(f16_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.f16); }
+    template <typename predicate_at> search_result_t filtered_search(e5m2_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.e5m2); }
+    template <typename predicate_at> search_result_t filtered_search(e4m3_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.e4m3); }
+    template <typename predicate_at> search_result_t filtered_search(e3m2_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.e3m2); }
+    template <typename predicate_at> search_result_t filtered_search(e2m3_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.e2m3); }
+    template <typename predicate_at> search_result_t filtered_search(i8_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.i8); }
+    template <typename predicate_at> search_result_t filtered_search(u8_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.u8); }
+    template <typename predicate_at> search_result_t filtered_search(b1x8_t const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread = any_thread(), std::size_t exact = 0) const { return search_(vector, wanted, std::forward<predicate_at>(predicate), thread, exact, casts_.from.b1x8); }
 
     std::size_t get(vector_key_t key, f64_t* vector, std::size_t vectors_count = 1) const { return get_(key, vector, vectors_count, casts_.to.f64); }
     std::size_t get(vector_key_t key, f32_t* vector, std::size_t vectors_count = 1) const { return get_(key, vector, vectors_count, casts_.to.f32); }
@@ -1092,6 +1144,17 @@ class index_dense_gt {
                 std::memcpy(new_vectors_lookup.data(), vectors_lookup_.data(),
                             vectors_lookup_.size() * sizeof(byte_t*));
             vectors_lookup_ = std::move(new_vectors_lookup);
+        }
+
+        if (exact_vectors_lookup_.size() > 0 && limits.members != exact_vectors_lookup_.size()) {
+            exact_vectors_lookup_t new_exact_vectors_lookup(limits.members);
+            if (!new_exact_vectors_lookup)
+                return false;
+            std::memset(new_exact_vectors_lookup.data(), 0, limits.members * sizeof(byte_t const*));
+            if (exact_vectors_lookup_.size() > 0)
+                std::memcpy(new_exact_vectors_lookup.data(), exact_vectors_lookup_.data(),
+                            exact_vectors_lookup_.size() * sizeof(byte_t const*));
+            exact_vectors_lookup_ = std::move(new_exact_vectors_lookup);
         }
 
         // During reserve, no insertions may be happening, so we can safely overwrite the whole collection.
@@ -1456,7 +1519,7 @@ class index_dense_gt {
             cast_buffer_ = cast_buffer_t(cast_buffer_bytes.value);
             if (!cast_buffer_)
                 return result.failed("Failed to allocate memory for the casts");
-            
+
             if (metric_.is_turboquant()) {
                 if (!tq_rotation_.initialized()) {
                     if (!tq_rotation_.initialize(metric_.dimensions()))
@@ -1854,6 +1917,82 @@ class index_dense_gt {
     }
 
     /**
+     *  @brief Creates a copy of the index but re-encodes the vector storage to a new scalar type.
+     *  @param new_scalar The new scalar kind to re-encode the vectors into (e.g. tq4_k).
+     *  @return A new ::index_dense_gt instance sharing the same graph but with re-encoded vectors.
+     */
+    copy_result_t repack(scalar_kind_t new_scalar) const {
+        copy_result_t result = fork();
+        if (!result) return result;
+
+        index_dense_gt& copy = result.index;
+
+        // Setup new metric and casts
+        copy.metric_ = metric_punned_t(metric_.dimensions(), metric_.metric_kind(), new_scalar);
+        copy.casts_ = casts_punned_t::make(new_scalar);
+
+        // If the new scalar is TQ, we must initialize its rotation matrix!
+        if (copy.metric_.is_turboquant()) {
+            if (!copy.tq_rotation_.initialize(copy.metric_.dimensions()))
+                return result.failed("Failed to initialize TurboQuant rotation for repacked index!");
+
+            std::size_t scratch_bytes = limits().threads() * copy.tq_rotation_.padded_dim() * sizeof(float);
+            buffer_gt<byte_t, dynamic_allocator_t> tq_scratch(scratch_bytes);
+            if (!tq_scratch)
+                return result.failed("Failed to allocate memory for TurboQuant scratch!");
+            copy.tq_scratch_ = std::move(tq_scratch);
+        }
+
+        auto typed_result = typed_->copy({});
+        if (!typed_result) return result.failed(std::move(typed_result.error));
+
+        if (!copy.free_keys_.reserve(free_keys_.size())) return result.failed("Out of memory!");
+        for (std::size_t i = 0; i != free_keys_.size(); ++i) copy.free_keys_.push(free_keys_[i]);
+
+        copy.vectors_lookup_ = vectors_lookup_t(vectors_lookup_.size());
+        if (!copy.vectors_lookup_) return result.failed("Out of memory!");
+
+        std::size_t slots_count = typed_result.index.size();
+        for (std::size_t slot = 0; slot != slots_count; ++slot) {
+            copy.vectors_lookup_[slot] = copy.vectors_tape_allocator_.allocate(copy.metric_.bytes_per_vector());
+        }
+        if (std::count(copy.vectors_lookup_.begin(), copy.vectors_lookup_.begin() + slots_count, nullptr))
+            return result.failed("Out of memory!");
+
+        if (exact_vectors_lookup_.size() > 0) {
+            copy.exact_metric_ = exact_metric_;
+            copy.exact_vectors_lookup_ = exact_vectors_lookup_t(exact_vectors_lookup_.size());
+            if (!copy.exact_vectors_lookup_) return result.failed("Out of memory!");
+            std::memcpy(copy.exact_vectors_lookup_.data(), exact_vectors_lookup_.data(), exact_vectors_lookup_.size() * sizeof(byte_t const*));
+        }
+
+        // Now, we must copy AND quantize the vectors.
+        // For this specific experiment, we assume current metric is F32 and new is TQ4/TQ2.
+        if (metric_.scalar_kind() == scalar_kind_t::f32_k && copy.metric_.is_turboquant()) {
+            std::size_t dim = metric_.dimensions();
+            float* scratch = (float*)std::malloc(copy.tq_rotation_.padded_dim() * sizeof(float));
+            if (!scratch) return result.failed("Out of memory!");
+
+            for (std::size_t slot = 0; slot != slots_count; ++slot) {
+                float const* f32_vec = (float const*)vectors_lookup_[slot];
+                byte_t* tq_vec = (byte_t*)copy.vectors_lookup_[slot];
+
+                if (new_scalar == scalar_kind_t::tq4_k)
+                    tq_encode_4bit(f32_vec, copy.tq_rotation_, tq_vec, scratch);
+                else if (new_scalar == scalar_kind_t::tq2_k)
+                    tq_encode_2bit(f32_vec, copy.tq_rotation_, tq_vec, scratch);
+            }
+            std::free(scratch);
+        } else {
+            return result.failed("repack() currently only supports F32 -> TQ4/TQ2 conversions!");
+        }
+
+        copy.slot_lookup_ = slot_lookup_;
+        *copy.typed_ = std::move(typed_result.index);
+        return result;
+    }
+
+    /**
      *  @brief Copies the ::index_dense_gt model @b without any data.
      *  @return A similarly configured ::index_dense_gt instance.
      */
@@ -1879,16 +2018,16 @@ class index_dense_gt {
         other.config_ = config_;
         other.cast_buffer_ = std::move(cast_buffer);
         other.casts_ = casts_;
-        
+
         if (metric_.is_turboquant()) {
             if (!other.tq_rotation_.initialize(metric_.dimensions()))
                 return state_result_t{}.failed("Failed to initialize TurboQuant rotation!");
-            
+
             std::size_t scratch_bytes = limits().threads() * other.tq_rotation_.padded_dim() * sizeof(float);
             buffer_gt<byte_t, dynamic_allocator_t> tq_scratch(scratch_bytes);
             if (!tq_scratch)
                 return state_result_t{}.failed("Failed to allocate memory for TurboQuant scratch!");
-            
+
             other.tq_scratch_ = std::move(tq_scratch);
         }
 
@@ -2287,7 +2426,7 @@ class index_dense_gt {
 
     template <typename scalar_at, typename predicate_at>
     search_result_t search_(scalar_at const* vector, std::size_t wanted, predicate_at&& predicate, std::size_t thread,
-                            bool exact, cast_punned_t const& cast) const {
+                            std::size_t exact, cast_punned_t const& cast) const {
 
         // Cast the vector, if needed for compatibility with `metric_`
         thread_lock_t lock = thread_lock_(thread);
@@ -2316,20 +2455,59 @@ class index_dense_gt {
         index_search_config_t search_config;
         search_config.thread = lock.thread_id;
         search_config.expansion = config_.expansion_search;
-        search_config.exact = exact;
+        search_config.exact = (exact == 1);
+        search_config.exact_candidate_count = exact;
+
+        std::size_t candidates_to_fetch = (exact > wanted && exact_vectors_lookup_.size() > 0 && exact_metric_) ? exact : wanted;
+
+        auto rerank = [&](typename index_t::search_result_t& typed_result) {
+            if (exact > wanted && exact_vectors_lookup_.size() > 0 && exact_metric_) {
+                auto context_ptr = typed_->context_or_null_(lock.thread_id);
+                if (context_ptr && context_ptr->top_candidates.size() > 0) {
+                    auto& top = context_ptr->top_candidates;
+                    std::size_t extracted_count = top.size();
+                    usearch::buffer_gt<typename index_t::candidate_t, typename index_t::candidates_allocator_t> rerank_buffer(extracted_count);
+                    if (rerank_buffer) {
+                        for (std::size_t i = 0; i < extracted_count; ++i) {
+                            rerank_buffer[i] = top.pop();
+                        }
+                        top.clear();
+
+                        // Use the ORIGINAL exact query vector, not the TQ4 compressed vector_data
+                        byte_t const* query_exact = reinterpret_cast<byte_t const*>(vector);
+
+                        for (std::size_t i = 0; i < extracted_count; ++i) {
+                            auto& candidate = rerank_buffer[i];
+                            if (candidate.slot != default_free_value<compressed_slot_t>() && candidate.slot < exact_vectors_lookup_.size()) {
+                                byte_t const* exact_vec = exact_vectors_lookup_[candidate.slot];
+                                if (exact_vec) {
+                                    candidate.distance = exact_metric_(query_exact, exact_vec);
+                                } else {
+                                    candidate.distance = infinite_distance();
+                                }
+                            }
+                            top.insert(std::move(candidate), wanted);
+                        }
+                        typed_result.count = top.size();
+                    }
+                }
+            }
+        };
 
         vector_key_t free_key_copy = free_key_;
         if (std::is_same<typename std::decay<predicate_at>::type, dummy_predicate_t>::value) {
             auto allow = [free_key_copy](member_cref_t const& member) noexcept {
                 return (vector_key_t)member.key != free_key_copy;
             };
-            auto typed_result = typed_->search(vector_data, wanted, metric_proxy_t{*this}, search_config, allow);
+            auto typed_result = typed_->search(vector_data, candidates_to_fetch, metric_proxy_t{*this}, search_config, allow);
+            rerank(typed_result);
             return search_result_t{std::move(typed_result), std::move(lock)};
         } else {
             auto allow = [free_key_copy, &predicate](member_cref_t const& member) noexcept {
                 return (vector_key_t)member.key != free_key_copy && predicate(member.key);
             };
-            auto typed_result = typed_->search(vector_data, wanted, metric_proxy_t{*this}, search_config, allow);
+            auto typed_result = typed_->search(vector_data, candidates_to_fetch, metric_proxy_t{*this}, search_config, allow);
+            rerank(typed_result);
             return search_result_t{std::move(typed_result), std::move(lock)};
         }
     }
