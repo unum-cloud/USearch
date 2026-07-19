@@ -1,6 +1,6 @@
 /**
- *  @brief Smoke tests for @c inner_metric 1-to-1 and 1-to-4 kernels against NumKong's
- *      monolithic 1-to-1 reference (@c nk::dot / @c nk::angular / @c nk::sqeuclidean).
+ *  @brief Smoke tests for @c inner_metric 1-to-1, 1-to-4, and tiled kernels against
+ *      NumKong's monolithic 1-to-1 reference - @c nk::dot / @c nk::angular / @c nk::sqeuclidean.
  *
  *  @author Ash Vardanian
  *  @file cpp/inner_metric_test.cpp
@@ -11,15 +11,19 @@
  *  The test:
  *
  *  1. Enumerates every NumKong scalar in @c main and every @c (kernel, scalar, capability)
- *     tuple inside @c check_metrics_for_type. The @c kernel_supported concept gates each
+ *     tuple inside @c check_scalar. The @c quads_supported concept gates each
  *     call so combinations not yet adapted are no-ops at compile time without breaking
  *     the build - new kits and chains light up the matching cells automatically.
  *  2. For each supported tuple and a range of dimensions, computes a baseline distance
- *     with NumKong's monolithic API (@c nk::dot returns the raw inner product, so we
+ *     with NumKong's monolithic API - @c nk::dot returns the raw inner product, so we
  *     wrap to @c 1 - dot for the dot kernel; @c nk::sqeuclidean is compared to USearch's
  *     squared euclidean), then calls @c distance (1-to-1) and @c distances (1-to-4) and
  *     compares with a relative tolerance.
- *  3. Returns non-zero exit code if any comparison fails. Each check returns its own
+ *  3. For tuples with an adapted tile engine, @c check_tiles builds one full 16×16 tile
+ *     of distances - a streaming gather → pack → update walk over the depth, then a
+ *     finalize - and compares every cell against the @c distance oracle, skipping
+ *     silently when the machine lacks the engine at runtime.
+ *  4. Returns non-zero exit code if any comparison fails. Each check returns its own
  *     failure count; counts roll up to @c main without any global mutable state.
  *
  *  The input vectors are populated with cyclic values from {0..7} - representable
@@ -48,18 +52,24 @@ using namespace unum::usearch;
 constexpr std::array<std::size_t, 7> dimensions_to_test = {7, 8, 32, 64, 128, 257, 1024};
 
 /**
- *  @brief Checks whether @c kernel_chain has a specialization with a @c kit_t alias for
+ *  @brief Checks whether @c inner_quads_chain has a specialization with a @c kit_t alias for
  *  this @c (kernel,scalar,caps) tuple - unadapted tuples are skipped at compile time.
  */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-concept kernel_supported = requires { typename kernel_chain<kernel_, scalar_, caps_>::kit_t; };
+concept quads_supported = requires { typename inner_quads_chain<kernel_, scalar_, caps_>::kit_t; };
+
+/** @brief True iff a tile engine is compiled for this tuple. The tiles chain always names a
+ *      kit - @c no_tiles_kit_t at minimum - so the gate is its @c has_tiles_k verdict, never
+ *      the alias's existence. */
+template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
+concept tiles_supported = inner_tiles_chain<kernel_, scalar_, caps_>::has_tiles_k;
 
 /**
  *  @brief Populates the input @p vec with small scalars - universally representable in any
  *  supported datatype from Float64 to E2M1 nibble-sized floats, but at a different cyclic rotation.
  */
 template <typename scalar_>
-void populate(nk::vector_span<scalar_> vec, std::size_t rotation) noexcept {
+static void fill_cyclic(nk::vector_span<scalar_> vec, std::size_t rotation) noexcept {
     constexpr std::array<unsigned, 8> universally_representable_values = {0, 1, 2, 3, 4, 5, 6, 7};
     for (std::size_t dimension_index = 0; dimension_index < vec.size(); ++dimension_index)
         vec[dimension_index] = make_scalar<scalar_>(
@@ -72,7 +82,8 @@ void populate(nk::vector_span<scalar_> vec, std::size_t rotation) noexcept {
  *  clamped to [0,2], euclidean is sqrt'd via @c nk::euclidean.
  */
 template <nk_kernel_kind_t kernel_, typename scalar_>
-f32_t reference_distance(nk::vector_view<scalar_> first_vector, nk::vector_view<scalar_> second_vector) noexcept {
+static f32_t reference_distance(nk::vector_view<scalar_> first_vector,
+                                nk::vector_view<scalar_> second_vector) noexcept {
     if constexpr (kernel_ == nk_kernel_dot_k) {
         typename scalar_::dot_result_t inner_product {};
         nk::dot(first_vector, second_vector, first_vector.size(), &inner_product);
@@ -100,7 +111,7 @@ f32_t reference_distance(nk::vector_view<scalar_> first_vector, nk::vector_view<
     }
 }
 
-bool close_enough(f32_t actual, f32_t expected) noexcept {
+static bool close_enough(f32_t actual, f32_t expected) noexcept {
     f32_t const absolute_difference = std::fabs(actual - expected);
     f32_t const scale = std::fmax(std::fmax(std::fabs(actual), std::fabs(expected)), 1.0f);
     return absolute_difference <= 1e-3f * scale;
@@ -110,7 +121,7 @@ bool close_enough(f32_t actual, f32_t expected) noexcept {
  *  @brief Compares one (actual, expected) pair - prints a structured failure line and
  *  returns 1 on mismatch, 0 on match. Caller accumulates the count.
  */
-int check_close(f32_t actual, f32_t expected, std::string_view label) noexcept {
+static int check_close(f32_t actual, f32_t expected, std::string_view label) noexcept {
     if (close_enough(actual, expected)) return 0;
     fmt::print(stderr, "FAIL {:<22}  actual={:>14.6g}  expected={:>14.6g}  diff={:>12.4g}\n", label, actual, expected,
                std::fabs(actual - expected));
@@ -122,8 +133,8 @@ int check_close(f32_t actual, f32_t expected, std::string_view label) noexcept {
  *  lets the caller enumerate the full capability list without if-constexpr gates inline.
  */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-    requires(!kernel_supported<kernel_, scalar_, caps_>)
-int check_one(std::size_t /*dim*/) noexcept {
+    requires(!quads_supported<kernel_, scalar_, caps_>)
+static int check_quads(std::size_t /*dim*/) noexcept {
     return 0;
 }
 
@@ -132,13 +143,13 @@ int check_one(std::size_t /*dim*/) noexcept {
  *  across both the 1-to-1 and 1-to-4 paths. Body instantiates only for adapted tuples.
  */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-    requires kernel_supported<kernel_, scalar_, caps_>
-int check_one(std::size_t dim) noexcept {
+    requires quads_supported<kernel_, scalar_, caps_>
+static int check_quads(std::size_t dim) noexcept {
     // With a single capability bit requested, exactly one cascade row can match, so the
     // winner is either that tier or the serial fallback. Anything else means a row names
     // a kit from another backend - numerically indistinguishable, hence the static check.
-    static_assert(kernel_chain<kernel_, scalar_, caps_>::picked_k == caps_ ||
-                      kernel_chain<kernel_, scalar_, caps_>::picked_k == nk_cap_serial_k,
+    static_assert(inner_quads_chain<kernel_, scalar_, caps_>::picked_k == caps_ ||
+                      inner_quads_chain<kernel_, scalar_, caps_>::picked_k == nk_cap_serial_k,
                   "Capability cascade selected a tier that was never requested");
 
     auto query = nk::vector<scalar_>::try_zeros(dim);
@@ -146,11 +157,11 @@ int check_one(std::size_t dim) noexcept {
     auto second_candidate = nk::vector<scalar_>::try_zeros(dim);
     auto third_candidate = nk::vector<scalar_>::try_zeros(dim);
     auto fourth_candidate = nk::vector<scalar_>::try_zeros(dim);
-    populate(query.span(), 0);
-    populate(first_candidate.span(), 1);
-    populate(second_candidate.span(), 2);
-    populate(third_candidate.span(), 3);
-    populate(fourth_candidate.span(), 4);
+    fill_cyclic(query.span(), 0);
+    fill_cyclic(first_candidate.span(), 1);
+    fill_cyclic(second_candidate.span(), 2);
+    fill_cyclic(third_candidate.span(), 3);
+    fill_cyclic(fourth_candidate.span(), 4);
 
     auto query_view = query.view();
     auto first_candidate_view = first_candidate.view();
@@ -194,44 +205,102 @@ int check_one(std::size_t dim) noexcept {
     return failures;
 }
 
-template <nk_kernel_kind_t kernel_, typename scalar_>
-int check_metric_for_type() noexcept {
+/** @brief No-op sibling picked when no tile engine exists for the tuple. */
+template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
+    requires(!tiles_supported<kernel_, scalar_, caps_>)
+static int check_tiles() noexcept {
+    return 0;
+}
+
+/**
+ *  @brief One full 16×16 tile of distances - a streaming gather → pack → update depth walk, then a finalize -
+ *      against the quads path as the oracle, cell by cell. Both engines finalize through
+ *      the same kit the chain picked at @p caps_, so euclidean cells must match exactly and
+ *      the shared tolerance covers the rest. Skips silently when the machine lacks the
+ *      engine at runtime.
+ */
+template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
+    requires tiles_supported<kernel_, scalar_, caps_>
+static int check_tiles() noexcept {
+    if ((nk_capabilities_available() & caps_) != caps_) return 0;
+    nk_configure_thread(nk_capabilities_available());
+
+    using tiles_kit_t = typename inner_tiles_chain<kernel_, scalar_, caps_>::kit_t;
+    constexpr std::size_t rows_k = tiles_kit_t::tile_rows_k;
+    constexpr std::size_t dimensions_k = 128; // Two full depth tiles - the shape the index runs.
+    constexpr std::size_t depth_tiles_k = dimensions_k / tiles_kit_t::tile_depth_k;
+
+    auto storage = nk::matrix<scalar_>::try_zeros({rows_k, dimensions_k});
+    auto const vectors = storage.view();
+    std::array<nk::vector_view<scalar_>, rows_k> views;
+    std::array<vector_norms<typename scalar_::dot_result_t>, rows_k> norms;
+    for (std::size_t row = 0; row != rows_k; ++row) {
+        fill_cyclic(storage.row(row).as_vector(), row);
+        views[row] = vectors.row(row).as_vector();
+        norms[row] = inner_norms<caps_>(views[row]);
+    }
+
+    typename tiles_kit_t::a_tile_t a_tile;
+    typename tiles_kit_t::b_tile_t b_tile;
+    typename tiles_kit_t::accumulator_tile_t accumulator;
+    tiles_kit_t::configure_tiles();
+    tiles_kit_t::init_tile(accumulator);
+    for (std::size_t depth_tile = 0; depth_tile != depth_tiles_k; ++depth_tile) {
+        tiles_kit_t::gather_a_tile(a_tile, views, depth_tile * tiles_kit_t::tile_depth_k);
+        tiles_kit_t::pack_b_tile(a_tile, b_tile);
+        tiles_kit_t::update_tile(accumulator, a_tile, b_tile);
+    }
+    auto tiled = nk::matrix<f32_t>::try_zeros({rows_k, rows_k});
+    tiles_kit_t::finalize_tile(accumulator, norms, norms, tiled.data(), rows_k);
+
     int failures = 0;
-    for (std::size_t dim : dimensions_to_test) {
+    for (std::size_t row = 0; row != rows_k; ++row)
+        for (std::size_t column = 0; column != rows_k; ++column)
+            failures += check_close(tiled.row(row)[column],
+                                    distance<kernel_, caps_>(views[row], norms[row], views[column], norms[column]),
+                                    "tiles 16×16 cell");
+    return failures;
+}
+
+template <nk_kernel_kind_t kernel_, typename scalar_>
+static int check_kernel() noexcept {
+    int failures = 0;
+    for (std::size_t const dim : dimensions_to_test) {
         // Newest silicon first, so a reader sees the strongest tier at the top. x86 by
         // generation, then Arm by extension, then the remaining architectures.
-        failures += check_one<kernel_, scalar_, nk_cap_diamond_k>(dim);
-        failures += check_one<kernel_, scalar_, nk_cap_sierra_k>(dim);
-        failures += check_one<kernel_, scalar_, nk_cap_genoa_k>(dim);
-        failures += check_one<kernel_, scalar_, nk_cap_alder_k>(dim);
-        failures += check_one<kernel_, scalar_, nk_cap_icelake_k>(dim);
-        failures += check_one<kernel_, scalar_, nk_cap_skylake_k>(dim);
-        failures += check_one<kernel_, scalar_, nk_cap_haswell_k>(dim);
-        failures += check_one<kernel_, scalar_, nk_cap_neonfp8_k>(dim);
-        failures += check_one<kernel_, scalar_, nk_cap_neonfhm_k>(dim);
-        failures += check_one<kernel_, scalar_, nk_cap_neonbfdot_k>(dim);
-        failures += check_one<kernel_, scalar_, nk_cap_neonsdot_k>(dim);
-        failures += check_one<kernel_, scalar_, nk_cap_neon_k>(dim);
-        failures += check_one<kernel_, scalar_, nk_cap_v128relaxed_k>(dim);
-        failures += check_one<kernel_, scalar_, nk_cap_powervsx_k>(dim);
-        failures += check_one<kernel_, scalar_, nk_cap_serial_k>(dim);
+        failures += check_quads<kernel_, scalar_, nk_cap_diamond_k>(dim);
+        failures += check_quads<kernel_, scalar_, nk_cap_sierra_k>(dim);
+        failures += check_quads<kernel_, scalar_, nk_cap_genoa_k>(dim);
+        failures += check_quads<kernel_, scalar_, nk_cap_alder_k>(dim);
+        failures += check_quads<kernel_, scalar_, nk_cap_icelake_k>(dim);
+        failures += check_quads<kernel_, scalar_, nk_cap_skylake_k>(dim);
+        failures += check_quads<kernel_, scalar_, nk_cap_haswell_k>(dim);
+        failures += check_quads<kernel_, scalar_, nk_cap_neonfp8_k>(dim);
+        failures += check_quads<kernel_, scalar_, nk_cap_neonfhm_k>(dim);
+        failures += check_quads<kernel_, scalar_, nk_cap_neonbfdot_k>(dim);
+        failures += check_quads<kernel_, scalar_, nk_cap_neonsdot_k>(dim);
+        failures += check_quads<kernel_, scalar_, nk_cap_neon_k>(dim);
+        failures += check_quads<kernel_, scalar_, nk_cap_v128relaxed_k>(dim);
+        failures += check_quads<kernel_, scalar_, nk_cap_powervsx_k>(dim);
+        failures += check_quads<kernel_, scalar_, nk_cap_serial_k>(dim);
     }
+    failures += check_tiles<kernel_, scalar_, nk_cap_sapphireamx_k>();
     return failures;
 }
 
 template <typename scalar_>
-int check_metrics_for_type() noexcept {
-    return check_metric_for_type<nk_kernel_dot_k, scalar_>() +     //
-           check_metric_for_type<nk_kernel_angular_k, scalar_>() + //
-           check_metric_for_type<nk_kernel_euclidean_k, scalar_>();
+static int check_scalar() noexcept {
+    return check_kernel<nk_kernel_dot_k, scalar_>() +     //
+           check_kernel<nk_kernel_angular_k, scalar_>() + //
+           check_kernel<nk_kernel_euclidean_k, scalar_>();
 }
 
 /** @brief Binary inputs run dot/hamming/jaccard instead of dot/angular/euclidean. */
 template <>
-int check_metrics_for_type<nk::u1x8_t>() noexcept {
-    return check_metric_for_type<nk_kernel_dot_k, nk::u1x8_t>() +     //
-           check_metric_for_type<nk_kernel_hamming_k, nk::u1x8_t>() + //
-           check_metric_for_type<nk_kernel_jaccard_k, nk::u1x8_t>();
+int check_scalar<nk::u1x8_t>() noexcept {
+    return check_kernel<nk_kernel_dot_k, nk::u1x8_t>() +     //
+           check_kernel<nk_kernel_hamming_k, nk::u1x8_t>() + //
+           check_kernel<nk_kernel_jaccard_k, nk::u1x8_t>();
 }
 
 /**
@@ -240,7 +309,7 @@ int check_metrics_for_type<nk::u1x8_t>() noexcept {
  *  suite would stay green while covering nothing.
  */
 template <typename scalar_>
-concept scalar_wired = kernel_supported<nk_kernel_dot_k, scalar_, nk_cap_serial_k>;
+concept scalar_wired = quads_supported<nk_kernel_dot_k, scalar_, nk_cap_serial_k>;
 
 static_assert(scalar_wired<nk::bf16_t>);
 static_assert(scalar_wired<nk::f16_t>);
@@ -257,21 +326,21 @@ static_assert(scalar_wired<nk::u1x8_t>);
 int main(void) {
     int failures = 0;
 
-    failures += check_metrics_for_type<nk::f64_t>();
-    failures += check_metrics_for_type<nk::f32_t>();
-    failures += check_metrics_for_type<nk::bf16_t>();
-    failures += check_metrics_for_type<nk::f16_t>();
-    failures += check_metrics_for_type<nk::e5m2_t>();
-    failures += check_metrics_for_type<nk::e4m3_t>();
-    failures += check_metrics_for_type<nk::e3m2_t>();
-    failures += check_metrics_for_type<nk::e2m3_t>();
+    failures += check_scalar<nk::f64_t>();
+    failures += check_scalar<nk::f32_t>();
+    failures += check_scalar<nk::bf16_t>();
+    failures += check_scalar<nk::f16_t>();
+    failures += check_scalar<nk::e5m2_t>();
+    failures += check_scalar<nk::e4m3_t>();
+    failures += check_scalar<nk::e3m2_t>();
+    failures += check_scalar<nk::e2m3_t>();
 
-    failures += check_metrics_for_type<nk::i8_t>();
-    failures += check_metrics_for_type<nk::i4x2_t>();
+    failures += check_scalar<nk::i8_t>();
+    failures += check_scalar<nk::i4x2_t>();
 
-    failures += check_metrics_for_type<nk::u8_t>();
-    failures += check_metrics_for_type<nk::u4x2_t>();
-    failures += check_metrics_for_type<nk::u1x8_t>();
+    failures += check_scalar<nk::u8_t>();
+    failures += check_scalar<nk::u4x2_t>();
+    failures += check_scalar<nk::u1x8_t>();
 
     if (failures != 0) fmt::print(stderr, "{} failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

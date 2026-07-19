@@ -1,18 +1,21 @@
 /**
- *  @brief Throughput benchmarks for @c inner_metric distance functions for 1-to-1 and 1-to-4
- *      kernels against NumKong's monolithic 1-to-1 reference.
+ *  @brief Throughput benchmarks for @c inner_metric distance functions for 1-to-1, 1-to-4,
+ *      and tiled kernels against NumKong's monolithic 1-to-1 reference.
  *
  *  @author Ash Vardanian
  *  @file cpp/inner_metric_bench.cpp
  *  @date April 23, 2026
  *
- *  Mirrors the structure of test/inner_metric.cpp - the @c kernel_supported concept
+ *  Mirrors the structure of @c cpp/inner_metric_test.cpp - the @c quads_supported concept
  *  gates each cell so unadapted (kernel, scalar, caps) tuples don't get registered, and
  *  new kits or chains light up matching benchmark cells automatically. Three flavors per
  *  supported tuple: USearch's @c distance (1-to-1), USearch's @c distances (1-to-4 fan-out),
  *  and NumKong's @c nk::dot / @c nk::angular / @c nk::euclidean / @c nk::hamming /
  *  @c nk::jaccard monolithic baseline using the default @c prefer_simd_k compile-time
  *  dispatch (registered once per kernel-scalar, since the baseline isn't caps-parameterized).
+ *  Where a tile engine is adapted and the machine offers it, a fourth cell measures one
+ *  16×16 tile of distances per iteration - gather, pack, and the depth walk - so the tile
+ *  engine's primitive throughput reads next to 256 quads-path distances.
  */
 #include <algorithm>
 #include <array>
@@ -39,25 +42,25 @@ using namespace unum::usearch;
 constexpr std::array<std::size_t, 3> dimensions_to_bench = {256, 768, 1536};
 
 /**
- *  @brief True iff @c kernel_chain has a specialization for this (kernel, scalar, caps)
+ *  @brief True iff @c inner_quads_chain has a specialization for this (kernel, scalar, caps)
  *  tuple - unadapted tuples are skipped at registration time.
  */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-concept kernel_supported = requires { typename kernel_chain<kernel_, scalar_, caps_>::kit_t; };
+concept quads_supported = requires { typename inner_quads_chain<kernel_, scalar_, caps_>::kit_t; };
 
 /**
  *  @brief True iff USearch has any kit for this (kernel, scalar) pair across capability
  *  tiers - serial is the always-available floor, so checking it covers the matrix.
  */
 template <nk_kernel_kind_t kernel_, typename scalar_>
-concept kernel_in_scope = kernel_supported<kernel_, scalar_, nk_cap_serial_k>;
+concept quads_in_scope = quads_supported<kernel_, scalar_, nk_cap_serial_k>;
 
 /**
  *  @brief Build a scalar from a small unsigned - sub-byte goes through @c sub_byte_ref as
  *  raw @c int8_t, float wrappers via @c from_f32, byte-or-larger ints via the integral ctor.
  */
 template <typename scalar_>
-auto make_scalar(unsigned value) noexcept {
+static auto make_scalar(unsigned value) noexcept {
     if constexpr (nk::dimensions_per_value<scalar_>() > 1) return static_cast<std::int8_t>(value);
     else if constexpr (requires { scalar_::from_f32(0.0f); }) return scalar_::from_f32(static_cast<float>(value));
     else return scalar_(value);
@@ -65,7 +68,7 @@ auto make_scalar(unsigned value) noexcept {
 
 /** @brief Populates @p vec with cyclic small representable values at @p rotation. */
 template <typename scalar_>
-void populate(nk::vector_span<scalar_> vec, std::size_t rotation) noexcept {
+static void fill_cyclic(nk::vector_span<scalar_> vec, std::size_t rotation) noexcept {
     constexpr std::array<unsigned, 8> universally_representable_values = {0, 1, 2, 3, 4, 5, 6, 7};
     for (std::size_t dimension_index = 0; dimension_index < vec.size(); ++dimension_index)
         vec[dimension_index] = make_scalar<scalar_>(
@@ -76,7 +79,7 @@ void populate(nk::vector_span<scalar_> vec, std::size_t rotation) noexcept {
  *  @brief Round up to the next power of two so we can use a bitmask for cyclic indexing
  *  instead of a slow modulo on every loop iteration.
  */
-inline std::size_t round_up_pow2(std::size_t value) noexcept {
+static std::size_t round_up_pow2(std::size_t value) noexcept {
     std::size_t result = 1;
     while (result < value) result <<= 1;
     return result;
@@ -130,7 +133,7 @@ struct candidate_pool {
  *  shortcut on identical content; correctness isn't tested here.
  */
 template <typename scalar_>
-candidate_pool<scalar_> make_candidate_pool(std::size_t dim) {
+static candidate_pool<scalar_> make_candidate_pool(std::size_t dim) {
     constexpr std::size_t dims_per_value = nk::dimensions_per_value<scalar_>();
     std::size_t const row_bytes = (dim / dims_per_value) * sizeof(scalar_);
     std::size_t const target_rows = std::max<std::size_t>(8, candidate_pool_target_bytes_k / row_bytes);
@@ -139,7 +142,7 @@ candidate_pool<scalar_> make_candidate_pool(std::size_t dim) {
     candidate_pool<scalar_> pool {
         nk::tensor<scalar_, nk::aligned_allocator<scalar_, 64>, 2>::try_zeros({row_count, dim}),
         {}};
-    for (std::size_t row = 0; row < row_count; ++row) populate(pool.matrix.span().row(row).as_vector(), row);
+    for (std::size_t row = 0; row < row_count; ++row) fill_cyclic(pool.matrix.span().row(row).as_vector(), row);
     pool.norms.reserve(row_count);
     for (std::size_t row = 0; row < row_count; ++row)
         pool.norms.push_back(inner_norms<nk_cap_serial_k>(pool.matrix.view().row(row).as_vector()));
@@ -151,7 +154,7 @@ candidate_pool<scalar_> make_candidate_pool(std::size_t dim) {
  *  traffic; query is reused), and gso/s (giga scalar-operations per second; one distance
  *  is approximated as 2*dim multiply-add or bit-op pairs across all five kernels).
  */
-inline void set_counters(benchmark::State& state, std::size_t dim, std::size_t distances_per_iter,
+static void set_counters(benchmark::State& state, std::size_t dim, std::size_t distances_per_iter,
                          std::size_t bytes_loaded_per_iter) noexcept {
     state.SetItemsProcessed(state.iterations() * distances_per_iter);
     state.SetBytesProcessed(state.iterations() * bytes_loaded_per_iter);
@@ -162,16 +165,16 @@ inline void set_counters(benchmark::State& state, std::size_t dim, std::size_t d
 
 /** @brief Computes a row's contiguous byte width once per cell (used for bytes_processed). */
 template <typename scalar_>
-constexpr std::size_t row_bytes_of(std::size_t dim) noexcept {
+static constexpr std::size_t row_bytes_of(std::size_t dim) noexcept {
     return (dim / nk::dimensions_per_value<scalar_>()) * sizeof(scalar_);
 }
 
 /** @brief USearch 1-to-1 cell - random row pick per iter so candidates stream from RAM. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-void bench_distance_1to1(benchmark::State& state) {
+static void bench_distance(benchmark::State& state) {
     auto const dim = static_cast<std::size_t>(state.range(0));
     auto query = nk::vector<scalar_>::try_zeros(dim);
-    populate(query.span(), 0);
+    fill_cyclic(query.span(), 0);
     auto pool = make_candidate_pool<scalar_>(dim);
     auto query_view = query.view();
     auto query_norms = inner_norms<caps_>(query_view);
@@ -186,15 +189,15 @@ void bench_distance_1to1(benchmark::State& state) {
         auto distance_value = distance<kernel_, caps_>(query_view, query_norms, candidate_view, pool.norms[row]);
         benchmark::DoNotOptimize(distance_value);
     }
-    set_counters(state, dim, /*distances=*/1, /*bytes=*/row_bytes_of<scalar_>(dim));
+    set_counters(state, dim, /*distances_per_iter=*/1, /*bytes_loaded_per_iter=*/row_bytes_of<scalar_>(dim));
 }
 
 /** @brief USearch 1-to-4 cell - four random rows per iter; query is amortized 4x. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-void bench_distances_1to4(benchmark::State& state) {
+static void bench_distances_quad(benchmark::State& state) {
     auto const dim = static_cast<std::size_t>(state.range(0));
     auto query = nk::vector<scalar_>::try_zeros(dim);
-    populate(query.span(), 0);
+    fill_cyclic(query.span(), 0);
     auto pool = make_candidate_pool<scalar_>(dim);
     auto query_view = query.view();
     auto query_norms = inner_norms<caps_>(query_view);
@@ -208,15 +211,15 @@ void bench_distances_1to4(benchmark::State& state) {
         std::size_t const row2 = random_generator() & row_index_mask;
         std::size_t const row3 = random_generator() & row_index_mask;
         adjacency.touch(random_generator());
-        std::array<nk::vector_view<scalar_>, 4> candidate_views {
+        std::array<nk::vector_view<scalar_>, 4> const candidate_views {
             pool.matrix.view().row(row0).as_vector(), pool.matrix.view().row(row1).as_vector(),
             pool.matrix.view().row(row2).as_vector(), pool.matrix.view().row(row3).as_vector()};
-        std::array<vector_norms<typename scalar_::dot_result_t>, 4> candidate_norms {
+        std::array<vector_norms<typename scalar_::dot_result_t>, 4> const candidate_norms {
             pool.norms[row0], pool.norms[row1], pool.norms[row2], pool.norms[row3]};
         auto distance_values = distances<kernel_, caps_>(query_view, query_norms, candidate_views, candidate_norms);
         benchmark::DoNotOptimize(distance_values);
     }
-    set_counters(state, dim, /*distances=*/4, /*bytes=*/4 * row_bytes_of<scalar_>(dim));
+    set_counters(state, dim, /*distances_per_iter=*/4, /*bytes_loaded_per_iter=*/4 * row_bytes_of<scalar_>(dim));
 }
 
 /**
@@ -224,10 +227,10 @@ void bench_distances_1to4(benchmark::State& state) {
  *  candidate per loop iter, randomly picked from the same overflowed pool as the USearch cells.
  */
 template <nk_kernel_kind_t kernel_, typename scalar_>
-void bench_baseline(benchmark::State& state) {
+static void bench_baseline(benchmark::State& state) {
     auto const dim = static_cast<std::size_t>(state.range(0));
     auto query = nk::vector<scalar_>::try_zeros(dim);
-    populate(query.span(), 0);
+    fill_cyclic(query.span(), 0);
     auto pool = make_candidate_pool<scalar_>(dim);
     auto query_view = query.view();
 
@@ -264,67 +267,148 @@ void bench_baseline(benchmark::State& state) {
             benchmark::DoNotOptimize(result);
         }
     }
-    set_counters(state, dim, /*distances=*/1, /*bytes=*/row_bytes_of<scalar_>(dim));
+    set_counters(state, dim, /*distances_per_iter=*/1, /*bytes_loaded_per_iter=*/row_bytes_of<scalar_>(dim));
 }
 
 /** @brief No-op overload picked when the (kernel, scalar, caps) tuple isn't wired up. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-    requires(!kernel_supported<kernel_, scalar_, caps_>)
-void register_one(std::string_view, std::string_view, std::string_view) noexcept {}
+    requires(!quads_supported<kernel_, scalar_, caps_>)
+static void register_quads(std::string_view, std::string_view, std::string_view) noexcept {}
 
 /** @brief Registers the 1-to-1 and 1-to-4 USearch cells for one supported tuple. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-    requires kernel_supported<kernel_, scalar_, caps_>
-void register_one(std::string_view kernel_name, std::string_view scalar_name, std::string_view caps_name) noexcept {
+    requires quads_supported<kernel_, scalar_, caps_>
+static void register_quads(std::string_view kernel_name, std::string_view scalar_name,
+                           std::string_view caps_name) noexcept {
     auto register_with = [&](auto* function, std::string_view shape) {
         std::string const label = fmt::format("{}/{}/{}/{}", kernel_name, scalar_name, caps_name, shape);
         auto* registered = benchmark::RegisterBenchmark(label.c_str(), function);
-        for (std::size_t dim : dimensions_to_bench) registered->Arg(static_cast<std::int64_t>(dim));
+        for (std::size_t const dim : dimensions_to_bench) registered->Arg(static_cast<std::int64_t>(dim));
     };
-    register_with(&bench_distance_1to1<kernel_, scalar_, caps_>, "1to1");
-    register_with(&bench_distances_1to4<kernel_, scalar_, caps_>, "1to4");
+    register_with(&bench_distance<kernel_, scalar_, caps_>, "1to1");
+    register_with(&bench_distances_quad<kernel_, scalar_, caps_>, "1to4");
 }
 
 /** @brief No-op overload picked when this (kernel, scalar) pair isn't wired up by USearch. */
 template <nk_kernel_kind_t kernel_, typename scalar_>
-    requires(!kernel_in_scope<kernel_, scalar_>)
-void register_baseline(std::string_view, std::string_view) noexcept {}
+    requires(!quads_in_scope<kernel_, scalar_>)
+static void register_baseline(std::string_view, std::string_view) noexcept {}
 
 /**
  *  @brief Registers the NumKong baseline cell for one (kernel, scalar) pair. Caps-agnostic
  *  - NumKong's default @c prefer_simd_k template arg picks the best backend at compile time.
  */
 template <nk_kernel_kind_t kernel_, typename scalar_>
-    requires kernel_in_scope<kernel_, scalar_>
-void register_baseline(std::string_view kernel_name, std::string_view scalar_name) noexcept {
+    requires quads_in_scope<kernel_, scalar_>
+static void register_baseline(std::string_view kernel_name, std::string_view scalar_name) noexcept {
     std::string const label = fmt::format("{}/{}/baseline", kernel_name, scalar_name);
     auto* registered = benchmark::RegisterBenchmark(label.c_str(), &bench_baseline<kernel_, scalar_>);
-    for (std::size_t dim : dimensions_to_bench) registered->Arg(static_cast<std::int64_t>(dim));
+    for (std::size_t const dim : dimensions_to_bench) registered->Arg(static_cast<std::int64_t>(dim));
+}
+
+/** @brief True iff a tile engine is compiled for this tuple - the tiles chain always names
+ *      a kit, so the gate is its @c has_tiles_k verdict, never the alias's existence. */
+template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
+concept tiles_supported = inner_tiles_chain<kernel_, scalar_, caps_>::has_tiles_k;
+
+/** @brief One 16×16 tile of distances per iteration - gather, pack, and the depth walk - the tile
+ *      engine's primitive throughput, comparable against 256 quads-path distances. */
+template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
+    requires tiles_supported<kernel_, scalar_, caps_>
+static void bench_distances_tile(benchmark::State& state) {
+    nk_configure_thread(nk_capabilities_available());
+    using tiles_kit_t = typename inner_tiles_chain<kernel_, scalar_, caps_>::kit_t;
+    constexpr std::size_t rows_k = tiles_kit_t::tile_rows_k;
+    std::size_t const dim = static_cast<std::size_t>(state.range(0));
+    std::size_t const depth_tiles = dim / tiles_kit_t::tile_depth_k;
+
+    auto storage = nk::matrix<scalar_>::try_zeros({rows_k, dim});
+    auto const vectors = storage.view();
+    std::array<nk::vector_view<scalar_>, rows_k> views;
+    std::array<vector_norms<typename scalar_::dot_result_t>, rows_k> norms;
+    for (std::size_t row = 0; row != rows_k; ++row) {
+        fill_cyclic(storage.row(row).as_vector(), row);
+        views[row] = vectors.row(row).as_vector();
+        norms[row] = inner_norms<caps_>(views[row]);
+    }
+    typename tiles_kit_t::a_tile_t a_tile;
+    typename tiles_kit_t::b_tile_t b_tile;
+    auto tiled = nk::matrix<f32_t>::try_zeros({rows_k, rows_k});
+    tiles_kit_t::configure_tiles();
+
+    for (auto _ : state) {
+        typename tiles_kit_t::accumulator_tile_t accumulator;
+        tiles_kit_t::init_tile(accumulator);
+        for (std::size_t depth_tile = 0; depth_tile != depth_tiles; ++depth_tile) {
+            tiles_kit_t::gather_a_tile(a_tile, views, depth_tile * tiles_kit_t::tile_depth_k);
+            tiles_kit_t::pack_b_tile(a_tile, b_tile);
+            tiles_kit_t::update_tile(accumulator, a_tile, b_tile);
+        }
+        tiles_kit_t::finalize_tile(accumulator, norms, norms, tiled.data(), rows_k);
+        benchmark::DoNotOptimize(tiled);
+    }
+    set_counters(state, dim, /*distances_per_iter=*/rows_k * rows_k,
+                 /*bytes_loaded_per_iter=*/rows_k * row_bytes_of<scalar_>(dim));
+}
+
+/** @brief No-op sibling when no tile engine exists for the tuple. */
+template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
+    requires(!tiles_supported<kernel_, scalar_, caps_>)
+static void register_tiles(std::string_view, std::string_view, std::string_view) noexcept {}
+
+/** @brief Registers the tile-engine Gram cell for one supported tuple, only where the
+ *      machine actually offers the engine - a registered-but-crashing cell helps nobody. */
+template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
+    requires tiles_supported<kernel_, scalar_, caps_>
+static void register_tiles(std::string_view kernel_name, std::string_view scalar_name,
+                           std::string_view caps_name) noexcept {
+    if ((nk_capabilities_available() & caps_) != caps_) return;
+    std::string const label = fmt::format("{}/{}/{}/16x16", kernel_name, scalar_name, caps_name);
+    auto* registered = benchmark::RegisterBenchmark(label.c_str(), &bench_distances_tile<kernel_, scalar_, caps_>);
+    for (std::size_t const dim : dimensions_to_bench) registered->Arg(static_cast<std::int64_t>(dim));
 }
 
 template <nk_kernel_kind_t kernel_, typename scalar_>
-void register_metric_for_type(std::string_view kernel_name, std::string_view scalar_name) noexcept {
+static void register_kernel(std::string_view kernel_name, std::string_view scalar_name) noexcept {
     register_baseline<kernel_, scalar_>(kernel_name, scalar_name);
-    register_one<kernel_, scalar_, nk_cap_genoa_k>(kernel_name, scalar_name, "genoa");
-    register_one<kernel_, scalar_, nk_cap_icelake_k>(kernel_name, scalar_name, "icelake");
-    register_one<kernel_, scalar_, nk_cap_skylake_k>(kernel_name, scalar_name, "skylake");
-    register_one<kernel_, scalar_, nk_cap_haswell_k>(kernel_name, scalar_name, "haswell");
-    register_one<kernel_, scalar_, nk_cap_serial_k>(kernel_name, scalar_name, "serial");
+    // Newest silicon first, split by the architecture-family macros like the test's tier
+    // sweep - the concept-gated no-ops silently absorb any tier without a kit.
+#if NK_TARGET_X8664_
+    register_quads<kernel_, scalar_, nk_cap_diamond_k>(kernel_name, scalar_name, "diamond");
+    register_quads<kernel_, scalar_, nk_cap_sierra_k>(kernel_name, scalar_name, "sierra");
+    register_quads<kernel_, scalar_, nk_cap_genoa_k>(kernel_name, scalar_name, "genoa");
+    register_quads<kernel_, scalar_, nk_cap_alder_k>(kernel_name, scalar_name, "alder");
+    register_quads<kernel_, scalar_, nk_cap_icelake_k>(kernel_name, scalar_name, "icelake");
+    register_quads<kernel_, scalar_, nk_cap_skylake_k>(kernel_name, scalar_name, "skylake");
+    register_quads<kernel_, scalar_, nk_cap_haswell_k>(kernel_name, scalar_name, "haswell");
+    register_tiles<kernel_, scalar_, nk_cap_sapphireamx_k>(kernel_name, scalar_name, "sapphireamx");
+#elif NK_TARGET_ARM64_
+    register_quads<kernel_, scalar_, nk_cap_neonfp8_k>(kernel_name, scalar_name, "neonfp8");
+    register_quads<kernel_, scalar_, nk_cap_neonfhm_k>(kernel_name, scalar_name, "neonfhm");
+    register_quads<kernel_, scalar_, nk_cap_neonbfdot_k>(kernel_name, scalar_name, "neonbfdot");
+    register_quads<kernel_, scalar_, nk_cap_neonsdot_k>(kernel_name, scalar_name, "neonsdot");
+    register_quads<kernel_, scalar_, nk_cap_neon_k>(kernel_name, scalar_name, "neon");
+#elif NK_TARGET_WASM_
+    register_quads<kernel_, scalar_, nk_cap_v128relaxed_k>(kernel_name, scalar_name, "v128relaxed");
+#elif NK_TARGET_POWER64_
+    register_quads<kernel_, scalar_, nk_cap_powervsx_k>(kernel_name, scalar_name, "powervsx");
+#endif
+    register_quads<kernel_, scalar_, nk_cap_serial_k>(kernel_name, scalar_name, "serial");
 }
 
 template <typename scalar_>
-void register_metrics_for_type(std::string_view scalar_name) noexcept {
-    register_metric_for_type<nk_kernel_dot_k, scalar_>("dot", scalar_name);
-    register_metric_for_type<nk_kernel_angular_k, scalar_>("angular", scalar_name);
-    register_metric_for_type<nk_kernel_euclidean_k, scalar_>("euclidean", scalar_name);
+static void register_scalar(std::string_view scalar_name) noexcept {
+    register_kernel<nk_kernel_dot_k, scalar_>("dot", scalar_name);
+    register_kernel<nk_kernel_angular_k, scalar_>("angular", scalar_name);
+    register_kernel<nk_kernel_euclidean_k, scalar_>("euclidean", scalar_name);
 }
 
 /** @brief Binary inputs run dot/hamming/jaccard instead of dot/angular/euclidean. */
 template <>
-void register_metrics_for_type<nk::u1x8_t>(std::string_view scalar_name) noexcept {
-    register_metric_for_type<nk_kernel_dot_k, nk::u1x8_t>("dot", scalar_name);
-    register_metric_for_type<nk_kernel_hamming_k, nk::u1x8_t>("hamming", scalar_name);
-    register_metric_for_type<nk_kernel_jaccard_k, nk::u1x8_t>("jaccard", scalar_name);
+void register_scalar<nk::u1x8_t>(std::string_view scalar_name) noexcept {
+    register_kernel<nk_kernel_dot_k, nk::u1x8_t>("dot", scalar_name);
+    register_kernel<nk_kernel_hamming_k, nk::u1x8_t>("hamming", scalar_name);
+    register_kernel<nk_kernel_jaccard_k, nk::u1x8_t>("jaccard", scalar_name);
 }
 
 int main(int argc, char** argv) {
@@ -332,21 +416,21 @@ int main(int argc, char** argv) {
     benchmark::Initialize(&argc, argv);
     if (benchmark::ReportUnrecognizedArguments(argc, argv)) return 1;
 
-    register_metrics_for_type<nk::f64_t>("f64");
-    register_metrics_for_type<nk::f32_t>("f32");
-    register_metrics_for_type<nk::bf16_t>("bf16");
-    register_metrics_for_type<nk::f16_t>("f16");
-    register_metrics_for_type<nk::e5m2_t>("e5m2");
-    register_metrics_for_type<nk::e4m3_t>("e4m3");
-    register_metrics_for_type<nk::e3m2_t>("e3m2");
-    register_metrics_for_type<nk::e2m3_t>("e2m3");
+    register_scalar<nk::f64_t>("f64");
+    register_scalar<nk::f32_t>("f32");
+    register_scalar<nk::bf16_t>("bf16");
+    register_scalar<nk::f16_t>("f16");
+    register_scalar<nk::e5m2_t>("e5m2");
+    register_scalar<nk::e4m3_t>("e4m3");
+    register_scalar<nk::e3m2_t>("e3m2");
+    register_scalar<nk::e2m3_t>("e2m3");
 
-    register_metrics_for_type<nk::i8_t>("i8");
-    register_metrics_for_type<nk::i4x2_t>("i4x2");
+    register_scalar<nk::i8_t>("i8");
+    register_scalar<nk::i4x2_t>("i4x2");
 
-    register_metrics_for_type<nk::u8_t>("u8");
-    register_metrics_for_type<nk::u4x2_t>("u4x2");
-    register_metrics_for_type<nk::u1x8_t>("u1x8");
+    register_scalar<nk::u8_t>("u8");
+    register_scalar<nk::u4x2_t>("u4x2");
+    register_scalar<nk::u1x8_t>("u1x8");
 
     benchmark::RunSpecifiedBenchmarks();
     benchmark::Shutdown();

@@ -1,5 +1,6 @@
 /**
- *  @brief Compile-time-dispatched 1-to-1 and 1-to-4 distance kernels backed by NumKong.
+ *  @brief Compile-time-dispatched 1-to-1, 1-to-4, and 16×16 tiled distance kernels
+ *      backed by NumKong.
  *
  *  @author Ash Vardanian
  *  @file inner_metric.hpp
@@ -22,17 +23,17 @@
  *  type, cache-management hint policies, load/update/finalize/through function pointers,
  *  step-dimensions count. Per-metric variants (e.g. @c bf16_genoa_angular_kit_t) inherit
  *  the base and override only @c convert_to_distances (and @c distance_lane_t when the
- *  through narrows or widens). The shape is uniform - the @c inner_kit concept enforces it.
+ *  through narrows or widens). The shape is uniform - the @c inner_quads_kit concept enforces it.
  *
- *  @b Chains - one @c kernel_chain<kernel,scalar,caps> per supported tuple. A linear
+ *  @b Chains - one @c inner_quads_chain<kernel,scalar,caps> per supported tuple. A linear
  *  list of @c chain_layer rows fed to @c first_available_kit picks the first kit whose
  *  @c NK_TARGET_* is on AND whose runtime-caps bit is set, else falls back to serial.
  *  Unsupported @c (kernel,scalar) pairs simply have no specialization. Adding an ISA
  *  tier is one row and zero preprocessor lines.
  *
  *  @b Trampoline - @c invoke_distances_<fan_out,kit> is the one place the load, update,
- *  finalize, through, prefetch, demote choreography lives. Reads everything it needs
- *  (@c scalar_t, @c distance_lane_t, @c convert_to_distances, ...) off the kit. Lane fan-out
+ *  finalize, through, prefetch, demote choreography lives. Reads everything it needs -
+ *  @c scalar_t, @c distance_lane_t, @c convert_to_distances, ... - off the kit. Lane fan-out
  *  is unrolled via @c std::index_sequence so the same body emits clean code for both
  *  @b 1-to-1 and @b 1-to-4. The state array is always sized 4 (NumKong's finalize is
  *  hardcoded fan-out-4); for 1-to-1 the bottom three slots are left as register noise
@@ -41,6 +42,17 @@
  *  @b Entry-points - free function templates @c distance<kernel,caps> and
  *  @c distances<kernel,caps>, with @c scalar deduced from the @c nk::vector_view inputs.
  *  Call sites read @c distance<nk_kernel_angular_k,caps> - no per-spec method, no per-spec class.
+ *
+ *  @b Tiles - a second, independent engine axis over the same capability bitmask. Each
+ *  @c inner_tiles_chain<kernel,scalar,caps> names a tile kit - @c no_tiles_kit_t unless a
+ *  matrix engine is adapted for the tuple - and its @c has_tiles_k verdict gates every
+ *  caller. A tile kit (e.g. @c u8_sapphireamx_tiles_kit) exposes the primitive walk:
+ *  @c configure_tiles once per thread, @c gather_a_tile straight from vector views,
+ *  @c pack_b_tile into the engine's interleaved operand layout, @c init_tile and
+ *  @c update_tile over the depth, and @c finalize_tile - plus @c scratch_bytes so callers
+ *  size scratch without naming tile shapes. All engines share the 16-row @c tile_span_k
+ *  geometry, and finalization routes through the same quads kit the chain picked, so a
+ *  tiled Gram of distances matches the 1-to-4 path bit for bit.
  *
  *  @section Design Goals & Decisions
  *
@@ -90,6 +102,7 @@
 #include <numkong/vector.hpp>
 
 #include "memory_hints.hpp"
+#include "types.hpp"
 
 /**
  *  @brief Per-step cache-hint feature gates for the @c invoke_distances_ trampoline.
@@ -172,7 +185,7 @@ inline void inner_product_distance_(finalized_inners_type_ const* dots_vec, norm
  *  so substitution errors land at the call site as a one-line constraint-not-satisfied.
  */
 template <typename kit_>
-concept inner_kit = requires {
+concept inner_quads_kit = requires {
     typename kit_::scalar_t;
     typename kit_::accumulator_t;
     typename kit_::step_vec_t;
@@ -220,7 +233,7 @@ inline vector_norms<typename scalar_type_::dot_result_t> invoke_inner_norms_( //
 
 /**
  *  @brief Forward declarations for every "kit" regardless of @c NK_TARGET_* availability,
- *  so @c kernel_chain backend resolution chains name-resolve on every build.
+ *  so @c inner_quads_chain backend resolution chains name-resolve on every build.
  */
 struct bf16_serial_inner_kit_t;
 struct bf16_serial_angular_kit_t;
@@ -3174,10 +3187,10 @@ struct first_available_kit<fallback_, head_, tail_...> {
  *  Most Eucldiean and Angular distances derive from the same "dot" parent kit.
  */
 template <nk_kernel_kind_t kernel_, nk::numeric_dtype scalar_, nk_capability_t caps_>
-struct kernel_chain;
+struct inner_quads_chain;
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_dot_k, nk::bf16_t, caps_> {
+struct inner_quads_chain<nk_kernel_dot_k, nk::bf16_t, caps_> {
     using kit_t = typename first_available_kit<                                                                  //
         bf16_serial_inner_kit_t,                                                                                 //
         chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, bf16_genoa_inner_kit_t>,                   //
@@ -3193,7 +3206,7 @@ struct kernel_chain<nk_kernel_dot_k, nk::bf16_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_angular_k, nk::bf16_t, caps_> {
+struct inner_quads_chain<nk_kernel_angular_k, nk::bf16_t, caps_> {
     using kit_t = typename first_available_kit<                                                                    //
         bf16_serial_angular_kit_t,                                                                                 //
         chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, bf16_genoa_angular_kit_t>,                   //
@@ -3209,7 +3222,7 @@ struct kernel_chain<nk_kernel_angular_k, nk::bf16_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_euclidean_k, nk::bf16_t, caps_> {
+struct inner_quads_chain<nk_kernel_euclidean_k, nk::bf16_t, caps_> {
     using kit_t = typename first_available_kit<                                                                      //
         bf16_serial_euclidean_kit_t,                                                                                 //
         chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, bf16_genoa_euclidean_kit_t>,                   //
@@ -3225,7 +3238,7 @@ struct kernel_chain<nk_kernel_euclidean_k, nk::bf16_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_dot_k, nk::f16_t, caps_> {
+struct inner_quads_chain<nk_kernel_dot_k, nk::f16_t, caps_> {
     using kit_t = typename first_available_kit<                                                                 //
         f16_serial_inner_kit_t,                                                                                 //
         chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, f16_skylake_inner_kit_t>,             //
@@ -3240,7 +3253,7 @@ struct kernel_chain<nk_kernel_dot_k, nk::f16_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_angular_k, nk::f16_t, caps_> {
+struct inner_quads_chain<nk_kernel_angular_k, nk::f16_t, caps_> {
     using kit_t = typename first_available_kit<                                                                   //
         f16_serial_angular_kit_t,                                                                                 //
         chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, f16_skylake_angular_kit_t>,             //
@@ -3255,7 +3268,7 @@ struct kernel_chain<nk_kernel_angular_k, nk::f16_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_euclidean_k, nk::f16_t, caps_> {
+struct inner_quads_chain<nk_kernel_euclidean_k, nk::f16_t, caps_> {
     using kit_t = typename first_available_kit<                                                                     //
         f16_serial_euclidean_kit_t,                                                                                 //
         chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, f16_skylake_euclidean_kit_t>,             //
@@ -3270,7 +3283,7 @@ struct kernel_chain<nk_kernel_euclidean_k, nk::f16_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_dot_k, nk::e5m2_t, caps_> {
+struct inner_quads_chain<nk_kernel_dot_k, nk::e5m2_t, caps_> {
     using kit_t = typename first_available_kit< //
         e5m2_serial_inner_kit_t,                //
         chain_layer<NK_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e5m2_diamond_inner_kit_t>,
@@ -3286,7 +3299,7 @@ struct kernel_chain<nk_kernel_dot_k, nk::e5m2_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_angular_k, nk::e5m2_t, caps_> {
+struct inner_quads_chain<nk_kernel_angular_k, nk::e5m2_t, caps_> {
     using kit_t = typename first_available_kit< //
         e5m2_serial_angular_kit_t,              //
         chain_layer<NK_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e5m2_diamond_angular_kit_t>,
@@ -3302,7 +3315,7 @@ struct kernel_chain<nk_kernel_angular_k, nk::e5m2_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_euclidean_k, nk::e5m2_t, caps_> {
+struct inner_quads_chain<nk_kernel_euclidean_k, nk::e5m2_t, caps_> {
     using kit_t = typename first_available_kit< //
         e5m2_serial_euclidean_kit_t,            //
         chain_layer<NK_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e5m2_diamond_euclidean_kit_t>,
@@ -3318,7 +3331,7 @@ struct kernel_chain<nk_kernel_euclidean_k, nk::e5m2_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_dot_k, nk::e4m3_t, caps_> {
+struct inner_quads_chain<nk_kernel_dot_k, nk::e4m3_t, caps_> {
     using kit_t = typename first_available_kit< //
         e4m3_serial_inner_kit_t,                //
         chain_layer<NK_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e4m3_diamond_inner_kit_t>,
@@ -3334,7 +3347,7 @@ struct kernel_chain<nk_kernel_dot_k, nk::e4m3_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_angular_k, nk::e4m3_t, caps_> {
+struct inner_quads_chain<nk_kernel_angular_k, nk::e4m3_t, caps_> {
     using kit_t = typename first_available_kit< //
         e4m3_serial_angular_kit_t,              //
         chain_layer<NK_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e4m3_diamond_angular_kit_t>,
@@ -3350,7 +3363,7 @@ struct kernel_chain<nk_kernel_angular_k, nk::e4m3_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_euclidean_k, nk::e4m3_t, caps_> {
+struct inner_quads_chain<nk_kernel_euclidean_k, nk::e4m3_t, caps_> {
     using kit_t = typename first_available_kit< //
         e4m3_serial_euclidean_kit_t,            //
         chain_layer<NK_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e4m3_diamond_euclidean_kit_t>,
@@ -3366,7 +3379,7 @@ struct kernel_chain<nk_kernel_euclidean_k, nk::e4m3_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_dot_k, nk::e3m2_t, caps_> {
+struct inner_quads_chain<nk_kernel_dot_k, nk::e3m2_t, caps_> {
     using kit_t = typename first_available_kit<                                                                 //
         e3m2_serial_inner_kit_t,                                                                                //
         chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e3m2_skylake_inner_kit_t>,            //
@@ -3380,7 +3393,7 @@ struct kernel_chain<nk_kernel_dot_k, nk::e3m2_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_angular_k, nk::e3m2_t, caps_> {
+struct inner_quads_chain<nk_kernel_angular_k, nk::e3m2_t, caps_> {
     using kit_t = typename first_available_kit<                                                                   //
         e3m2_serial_angular_kit_t,                                                                                //
         chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e3m2_skylake_angular_kit_t>,            //
@@ -3394,7 +3407,7 @@ struct kernel_chain<nk_kernel_angular_k, nk::e3m2_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_euclidean_k, nk::e3m2_t, caps_> {
+struct inner_quads_chain<nk_kernel_euclidean_k, nk::e3m2_t, caps_> {
     using kit_t = typename first_available_kit<                                                                     //
         e3m2_serial_euclidean_kit_t,                                                                                //
         chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e3m2_skylake_euclidean_kit_t>,            //
@@ -3408,7 +3421,7 @@ struct kernel_chain<nk_kernel_euclidean_k, nk::e3m2_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_dot_k, nk::e2m3_t, caps_> {
+struct inner_quads_chain<nk_kernel_dot_k, nk::e2m3_t, caps_> {
     using kit_t = typename first_available_kit<                                                                 //
         e2m3_serial_inner_kit_t,                                                                                //
         chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e2m3_skylake_inner_kit_t>,            //
@@ -3424,7 +3437,7 @@ struct kernel_chain<nk_kernel_dot_k, nk::e2m3_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_angular_k, nk::e2m3_t, caps_> {
+struct inner_quads_chain<nk_kernel_angular_k, nk::e2m3_t, caps_> {
     using kit_t = typename first_available_kit<                                                                   //
         e2m3_serial_angular_kit_t,                                                                                //
         chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e2m3_skylake_angular_kit_t>,            //
@@ -3440,7 +3453,7 @@ struct kernel_chain<nk_kernel_angular_k, nk::e2m3_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_euclidean_k, nk::e2m3_t, caps_> {
+struct inner_quads_chain<nk_kernel_euclidean_k, nk::e2m3_t, caps_> {
     using kit_t = typename first_available_kit<                                                                     //
         e2m3_serial_euclidean_kit_t,                                                                                //
         chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e2m3_skylake_euclidean_kit_t>,            //
@@ -3456,7 +3469,7 @@ struct kernel_chain<nk_kernel_euclidean_k, nk::e2m3_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_dot_k, nk::i8_t, caps_> {
+struct inner_quads_chain<nk_kernel_dot_k, nk::i8_t, caps_> {
     using kit_t = typename first_available_kit<                                                                //
         i8_serial_inner_kit_t,                                                                                 //
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i8_icelake_inner_kit_t>,             //
@@ -3472,7 +3485,7 @@ struct kernel_chain<nk_kernel_dot_k, nk::i8_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_angular_k, nk::i8_t, caps_> {
+struct inner_quads_chain<nk_kernel_angular_k, nk::i8_t, caps_> {
     using kit_t = typename first_available_kit<                                                                  //
         i8_serial_angular_kit_t,                                                                                 //
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i8_icelake_angular_kit_t>,             //
@@ -3488,7 +3501,7 @@ struct kernel_chain<nk_kernel_angular_k, nk::i8_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_euclidean_k, nk::i8_t, caps_> {
+struct inner_quads_chain<nk_kernel_euclidean_k, nk::i8_t, caps_> {
     using kit_t = typename first_available_kit<                                                                    //
         i8_serial_euclidean_kit_t,                                                                                 //
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i8_icelake_euclidean_kit_t>,             //
@@ -3504,7 +3517,7 @@ struct kernel_chain<nk_kernel_euclidean_k, nk::i8_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_dot_k, nk::u8_t, caps_> {
+struct inner_quads_chain<nk_kernel_dot_k, nk::u8_t, caps_> {
     using kit_t = typename first_available_kit<                                                                //
         u8_serial_inner_kit_t,                                                                                 //
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u8_icelake_inner_kit_t>,             //
@@ -3520,7 +3533,7 @@ struct kernel_chain<nk_kernel_dot_k, nk::u8_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_angular_k, nk::u8_t, caps_> {
+struct inner_quads_chain<nk_kernel_angular_k, nk::u8_t, caps_> {
     using kit_t = typename first_available_kit<                                                                  //
         u8_serial_angular_kit_t,                                                                                 //
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u8_icelake_angular_kit_t>,             //
@@ -3536,7 +3549,7 @@ struct kernel_chain<nk_kernel_angular_k, nk::u8_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_euclidean_k, nk::u8_t, caps_> {
+struct inner_quads_chain<nk_kernel_euclidean_k, nk::u8_t, caps_> {
     using kit_t = typename first_available_kit<                                                                    //
         u8_serial_euclidean_kit_t,                                                                                 //
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u8_icelake_euclidean_kit_t>,             //
@@ -3552,7 +3565,7 @@ struct kernel_chain<nk_kernel_euclidean_k, nk::u8_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_dot_k, nk::u4x2_t, caps_> {
+struct inner_quads_chain<nk_kernel_dot_k, nk::u4x2_t, caps_> {
     using kit_t = typename first_available_kit<                                                                 //
         u4x2_serial_inner_kit_t,                                                                                //
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u4x2_icelake_inner_kit_t>,            //
@@ -3565,7 +3578,7 @@ struct kernel_chain<nk_kernel_dot_k, nk::u4x2_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_angular_k, nk::u4x2_t, caps_> {
+struct inner_quads_chain<nk_kernel_angular_k, nk::u4x2_t, caps_> {
     using kit_t = typename first_available_kit<                                                                   //
         u4x2_serial_angular_kit_t,                                                                                //
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u4x2_icelake_angular_kit_t>,            //
@@ -3578,7 +3591,7 @@ struct kernel_chain<nk_kernel_angular_k, nk::u4x2_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_euclidean_k, nk::u4x2_t, caps_> {
+struct inner_quads_chain<nk_kernel_euclidean_k, nk::u4x2_t, caps_> {
     using kit_t = typename first_available_kit<                                                                     //
         u4x2_serial_euclidean_kit_t,                                                                                //
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u4x2_icelake_euclidean_kit_t>,            //
@@ -3591,7 +3604,7 @@ struct kernel_chain<nk_kernel_euclidean_k, nk::u4x2_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_dot_k, nk::i4x2_t, caps_> {
+struct inner_quads_chain<nk_kernel_dot_k, nk::i4x2_t, caps_> {
     using kit_t = typename first_available_kit<                                                                 //
         i4x2_serial_inner_kit_t,                                                                                //
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i4x2_icelake_inner_kit_t>,            //
@@ -3604,7 +3617,7 @@ struct kernel_chain<nk_kernel_dot_k, nk::i4x2_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_angular_k, nk::i4x2_t, caps_> {
+struct inner_quads_chain<nk_kernel_angular_k, nk::i4x2_t, caps_> {
     using kit_t = typename first_available_kit<                                                                   //
         i4x2_serial_angular_kit_t,                                                                                //
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i4x2_icelake_angular_kit_t>,            //
@@ -3617,7 +3630,7 @@ struct kernel_chain<nk_kernel_angular_k, nk::i4x2_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_euclidean_k, nk::i4x2_t, caps_> {
+struct inner_quads_chain<nk_kernel_euclidean_k, nk::i4x2_t, caps_> {
     using kit_t = typename first_available_kit<                                                                     //
         i4x2_serial_euclidean_kit_t,                                                                                //
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i4x2_icelake_euclidean_kit_t>,            //
@@ -3630,7 +3643,7 @@ struct kernel_chain<nk_kernel_euclidean_k, nk::i4x2_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_dot_k, nk::u1x8_t, caps_> {
+struct inner_quads_chain<nk_kernel_dot_k, nk::u1x8_t, caps_> {
     using kit_t = typename first_available_kit<                                                                  //
         u1x8_serial_inner_kit_t,                                                                                 //
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_inner_kit_t>,             //
@@ -3643,7 +3656,7 @@ struct kernel_chain<nk_kernel_dot_k, nk::u1x8_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_hamming_k, nk::u1x8_t, caps_> {
+struct inner_quads_chain<nk_kernel_hamming_k, nk::u1x8_t, caps_> {
     using kit_t = typename first_available_kit<                                                                    //
         u1x8_serial_hamming_kit_t,                                                                                 //
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_hamming_kit_t>,             //
@@ -3656,7 +3669,7 @@ struct kernel_chain<nk_kernel_hamming_k, nk::u1x8_t, caps_> {
 };
 
 template <nk_capability_t caps_>
-struct kernel_chain<nk_kernel_jaccard_k, nk::u1x8_t, caps_> {
+struct inner_quads_chain<nk_kernel_jaccard_k, nk::u1x8_t, caps_> {
     using kit_t = typename first_available_kit<                                                                    //
         u1x8_serial_jaccard_kit_t,                                                                                 //
         chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_jaccard_kit_t>,             //
@@ -3680,7 +3693,7 @@ struct kernel_chain<nk_kernel_jaccard_k, nk::u1x8_t, caps_> {
  *  via @c std::is_invocable_v on the kit's raw function pointer, so each kit can keep
  *  exposing @c reduce_accumulators as a direct @c nk_* alias rather than a wrapper.
  */
-template <std::size_t fan_out_, inner_kit kit_>
+template <std::size_t fan_out_, inner_quads_kit kit_>
 [[gnu::always_inline]] inline std::array<f32_t, fan_out_> invoke_distances_(   //
     nk::vector_view<typename kit_::scalar_t> query,                            //
     vector_norms<typename kit_::scalar_t::dot_result_t> query_norms,           //
@@ -3695,9 +3708,9 @@ template <std::size_t fan_out_, inner_kit kit_>
     using distance_lane_t = typename kit_::distance_lane_t;
     constexpr std::size_t dims_per_value = nk::dimensions_per_value<scalar_t>();
 
-    [[maybe_unused]] typename kit_::prefetch_query_t prefetch_query;
-    [[maybe_unused]] typename kit_::prefetch_candidate_t prefetch_candidate;
-    [[maybe_unused]] typename kit_::demote_candidate_t demote_candidate;
+    [[maybe_unused]] typename kit_::prefetch_query_t const prefetch_query {};
+    [[maybe_unused]] typename kit_::prefetch_candidate_t const prefetch_candidate {};
+    [[maybe_unused]] typename kit_::demote_candidate_t const demote_candidate {};
 
     // Always allocate & initialize all 4 state slots. The 4-way shape of NumKong's
     // `reduce_accumulators` is the deliberate ABI - one batch primitive per kernel, no
@@ -3827,15 +3840,15 @@ template <std::size_t fan_out_, inner_kit kit_>
 /**
  *  @brief Compute @c (sum,sumsq) of @p vec via the kit's @c compute_norms.
  *
- *  The capability cascade is the existing @c kernel_chain - the dot kernel's kit always
+ *  The capability cascade is the existing @c inner_quads_chain - the dot kernel's kit always
  *  exists when any kernel is wired up for the scalar, so we resolve through @c
- *  kernel_chain<nk_kernel_dot_k, scalar, caps>. Replaces the old @c struct @c inner_norms
+ *  inner_quads_chain<nk_kernel_dot_k, scalar, caps>. Replaces the old @c struct @c inner_norms
  *  partial-specialization cascade with a single source of truth (the kit).
  */
 template <nk_capability_t caps_, nk::numeric_dtype scalar_>
 [[gnu::always_inline]] inline vector_norms<typename scalar_::dot_result_t> inner_norms(
     nk::vector_view<scalar_> vec) noexcept {
-    using kit_t = typename kernel_chain<nk_kernel_dot_k, scalar_, caps_>::kit_t;
+    using kit_t = typename inner_quads_chain<nk_kernel_dot_k, scalar_, caps_>::kit_t;
     return invoke_inner_norms_(kit_t::compute_norms, vec);
 }
 
@@ -3851,7 +3864,7 @@ template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype sca
     vector_norms<typename scalar_::dot_result_t> query_norms, //
     nk::vector_view<scalar_> candidate,                       //
     vector_norms<typename scalar_::dot_result_t> candidate_norms) noexcept {
-    using kit_t = typename kernel_chain<kernel_, scalar_, caps_>::kit_t;
+    using kit_t = typename inner_quads_chain<kernel_, scalar_, caps_>::kit_t;
     auto results = invoke_distances_<1, kit_t>(
         query, query_norms, std::array<nk::vector_view<scalar_>, 1> {candidate},
         std::array<vector_norms<typename scalar_::dot_result_t>, 1> {candidate_norms});
@@ -3867,9 +3880,154 @@ template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype sca
     vector_norms<typename scalar_::dot_result_t> query_norms, //
     std::array<nk::vector_view<scalar_>, 4> candidates,       //
     std::array<vector_norms<typename scalar_::dot_result_t>, 4> candidates_norms) noexcept {
-    using kit_t = typename kernel_chain<kernel_, scalar_, caps_>::kit_t;
+    using kit_t = typename inner_quads_chain<kernel_, scalar_, caps_>::kit_t;
     return invoke_distances_<4, kit_t>(query, query_norms, candidates, candidates_norms);
 }
+
+/** @brief Empty tile kit: the (kernel, scalar) pair has no matrix-engine backend on this
+ *      target, so eager refinement stays unavailable and callers keep the lazy 4-way loops. */
+struct no_tiles_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+};
+
+template <typename finalize_kit_type_>
+struct u8_sapphireamx_tiles_kit;
+
+#if NK_TARGET_SAPPHIREAMX
+
+/**
+ *  @brief u8 tile kit for Sapphire Rapids AMX - the 4-way trio one power-of-two wider:
+ *      @c init_tile / @c update_tile / @c finalize_tile over 16×16 accumulator tiles, plus
+ *      the gather & pack that feed them. Finalizes through @p finalize_kit_type_ - the very
+ *      kit the lazy path picked - so eager & lazy distances agree bit-for-bit. An SME twin
+ *      fills the same slots with @c svmopa over ZA tiles, a CUDA twin with @c mma fragments.
+ */
+template <typename finalize_kit_type_>
+struct u8_sapphireamx_tiles_kit {
+    inline static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    using finalize_kit_t = finalize_kit_type_;
+    using scalar_t = nk::u8_t;
+    using norms_t = vector_norms<typename scalar_t::dot_result_t>;
+    using a_tile_t = nk_dots_u8_a16x64_sapphireamx_t;
+    using b_tile_t = nk_dots_u8_b64x16_sapphireamx_t;
+    using accumulator_tile_t = nk_dots_u8_state_sapphireamx_t;
+    inline static constexpr std::size_t tile_rows_k = 16;
+    inline static constexpr std::size_t tile_columns_k = 16;
+    inline static constexpr std::size_t tile_depth_k = 64;
+
+    /** @brief Bytes of tile scratch one Gram over @p count rows of @p dimensions needs -
+     *      the packed B-tiles plus one row-tile of A-strips - derived from this kit's own
+     *      tile types, so every dtype & engine sizes itself. Includes one alignment margin:
+     *      generic byte allocators promise 16, the tile loads demand 64, and the consumer
+     *      aligns the base up before carving. */
+    static constexpr std::size_t scratch_bytes(std::size_t count, std::size_t dimensions) noexcept {
+        std::size_t const row_tiles = divide_round_up<std::size_t>(count, tile_rows_k);
+        std::size_t const depth_tiles = divide_round_up<std::size_t>(dimensions, tile_depth_k);
+        return row_tiles * depth_tiles * sizeof(b_tile_t) + depth_tiles * sizeof(a_tile_t) + alignof(a_tile_t);
+    }
+
+    /** @brief One palette programming per eager refinement - never per tile. */
+    static void configure_tiles() noexcept { nk_amx_tile_configure_sapphireamx_(); }
+
+    /** @brief Gathers one @c tile_depth_k -deep strip of all 16 @p rows - scattered views,
+     *      each touched once per depth sweep: the tile @b is the staging, no contiguous
+     *      matrix ever exists. Row pads repeat valid views, like the 4-way tails; the
+     *      depth tail zero-fills, adding nothing to any dot. */
+    static void gather_a_tile(a_tile_t& a_tile, std::array<nk::vector_view<nk::u8_t>, tile_rows_k> const& rows,
+                              std::size_t depth_offset) noexcept {
+        std::size_t const remaining = rows[0].size() - depth_offset;
+        __mmask64 const depth_mask = remaining >= tile_depth_k ? ~__mmask64 {0} : (__mmask64 {1} << remaining) - 1u;
+        for (std::size_t row = 0; row != tile_rows_k; ++row) {
+            __m512i const strip = _mm512_maskz_loadu_epi8(
+                depth_mask, reinterpret_cast<nk_u8_t const*>(rows[row].data()) + depth_offset);
+            _mm512_store_si512(a_tile.data[row], strip);
+        }
+    }
+
+    /** @brief The transpose network NumKong packs with: a gathered A-tile becomes its own
+     *      quad-interleaved B-tile - the Gram symmetry in one call. */
+    static void pack_b_tile(a_tile_t const& a_tile, b_tile_t& b_tile) noexcept {
+        nk_dots_pack_u8_transposed_sapphireamx_(&a_tile, &b_tile);
+    }
+
+    /** @brief Zeroes the accumulator ahead of a depth walk. */
+    static void init_tile(accumulator_tile_t& tile) noexcept { nk_dots_u8_init_sapphireamx_(&tile); }
+
+    /** @brief tile += A × B for one depth step - @c TDPBUUD here. The accumulator
+     *      round-trips through memory per step, a couple of tile moves; keeping it
+     *      register-resident across the walk is a known follow-up. */
+    static void update_tile(accumulator_tile_t& tile, a_tile_t const& a_tile, b_tile_t const& b_tile) noexcept {
+        nk_compiler_barrier_sapphireamx_();
+        _tile_loadd(0, tile.data, 64);
+        _tile_loadd(1, a_tile.data, 64);
+        _tile_loadd(2, b_tile.data, 64);
+        _tile_dpbuud(0, 1, 2);
+        _tile_stored(0, tile.data, 64);
+        nk_compiler_barrier_sapphireamx_();
+    }
+
+    /** @brief Distances through the stored norms for all 16×16 lanes: 4-lane groups through
+     *      the finalize kit's own @c convert_to_distances - the epilogue of
+     *      @c invoke_distances_, tiled. Pad lanes finalize too and are simply never read. */
+    static void finalize_tile(accumulator_tile_t const& tile, std::array<norms_t, tile_rows_k> const& a_norms,
+                              std::array<norms_t, tile_columns_k> const& b_norms, f32_t* distances,
+                              std::size_t stride) noexcept {
+        using finalized_vec_t = typename finalize_kit_t::finalized_vec_t;
+        using dot_result_t = typename scalar_t::dot_result_t;
+        alignas(64) dot_result_t column_sumsqs[tile_columns_k];
+        for (std::size_t column = 0; column != tile_columns_k; ++column) column_sumsqs[column] = b_norms[column].sumsq;
+        for (std::size_t row = 0; row != tile_rows_k; ++row) {
+            f32_t* const distances_row = distances + row * stride;
+            for (std::size_t group = 0; group != tile_columns_k / 4; ++group) {
+                finalized_vec_t dots_vec, sumsqs_vec, distances_vec;
+                dots_vec.xmm = _mm_load_si128(reinterpret_cast<__m128i const*>(&tile.data[row][group * 4]));
+                sumsqs_vec.xmm = _mm_load_si128(reinterpret_cast<__m128i const*>(&column_sumsqs[group * 4]));
+                finalize_kit_t::convert_to_distances(&dots_vec, a_norms[row].sumsq, &sumsqs_vec, &distances_vec);
+                _mm_storeu_ps(reinterpret_cast<float*>(distances_row + group * 4), distances_vec.xmm_ps);
+            }
+        }
+    }
+};
+
+#endif // NK_TARGET_SAPPHIREAMX
+
+/**
+ *  @brief Tile-kernel capability cascade - a second, independent axis over the same
+ *      @p caps_ bitmask as @c inner_quads_chain, so one machine picks icelake for 1-to-1
+ *      kernels and sapphireamx for tiles simultaneously. The primary template resolves
+ *      to @c no_tiles_kit_t, and only the specialized (kernel, scalar) pairs ever offer
+ *      a matrix-engine backend - callers keep their lazy loops everywhere else.
+ */
+template <nk_kernel_kind_t kernel_, nk::numeric_dtype scalar_, nk_capability_t caps_>
+struct inner_tiles_chain {
+    using kit_t = no_tiles_kit_t;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+    static constexpr bool has_tiles_k = false;
+};
+
+template <nk_capability_t caps_>
+struct inner_tiles_chain<nk_kernel_euclidean_k, nk::u8_t, caps_> {
+    using kit_t = typename first_available_kit< //
+        no_tiles_kit_t,                         //
+        chain_layer<
+            NK_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
+            u8_sapphireamx_tiles_kit<typename inner_quads_chain<nk_kernel_euclidean_k, nk::u8_t, caps_>::kit_t>>> //
+        ::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+    static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
+};
+
+template <nk_capability_t caps_>
+struct inner_tiles_chain<nk_kernel_angular_k, nk::u8_t, caps_> {
+    using kit_t = typename first_available_kit< //
+        no_tiles_kit_t,                         //
+        chain_layer<
+            NK_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
+            u8_sapphireamx_tiles_kit<typename inner_quads_chain<nk_kernel_angular_k, nk::u8_t, caps_>::kit_t>>> //
+        ::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+    static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
+};
 
 } // namespace usearch
 } // namespace unum
