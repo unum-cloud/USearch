@@ -19,14 +19,44 @@ namespace fu = ashvardanian::forkunion;
 namespace unum {
 namespace usearch {
 
-/** @brief Reader synchronization contract of one @c search() call. */
-enum class search_synchronization_t : u32_t {
-    /** @brief Default: tolerates concurrent inserters via acquire loads & lock retries. */
-    synchronized_k,
-    /** @brief The caller guarantees no concurrent mutations: neighbor lists are read as plain
-     *      memory - no fences - and the locked-node retry branches compile out entirely. */
-    exclusive_k,
+/** @brief External reader's cursor over one @c inner_volatile_index - declared here, defined
+ *      after the index it befriends. The allocator defaults to the index's own traversals-side
+ *      family, so staging inherits the same NUMA-aware placement as the traversal contexts;
+ *      external readers pinned elsewhere override it. */
+template <typename index_type_,                                                 //
+          synchronization_t synchronization_ = synchronization_t::concurrent_k, //
+          typename allocator_type_ = typename index_type_::candidates_allocator_t>
+struct inner_volatile_cursor;
+
+/**
+ *  @brief Fixed self-describing prefix of a saved @c inner_volatile_index - deliberately
+ *      independent of any template parameters, so any instantiation can sniff a payload
+ *      before committing to a matching one. The three payload sections - vectors, norms &
+ *      neighbors - follow it chunk-by-chunk in node id order.
+ */
+struct inner_volatile_index_header_t {
+    /** @brief The expected @c magic contents: "usearch3" read as a little-endian word. */
+    inline static constexpr u64_t magic_k = 0x3368637261657375ull;
+    /** @brief The layout revision this implementation writes and understands. */
+    inline static constexpr u32_t version_k = 1;
+
+    /** @brief Identifies USearch inner volatile payloads; must equal @c magic_k. */
+    u64_t magic;
+    /** @brief Layout revision of the sections that follow. */
+    u32_t version;
+    /** @brief The stored @c nk_dtype_t; must match the loading instantiation. */
+    u32_t dtype;
+    /** @brief The @c nk_kernel_kind_t metric; must match the loading instantiation. */
+    u32_t kernel;
+    /** @brief Scalar dimensions per vector - one half of the frozen geometry. */
+    u32_t dimensions;
+    /** @brief Neighbor ids per node - the other half of the frozen geometry. */
+    u32_t connectivity;
+    /** @brief Published nodes in the payload; the chunk layout re-derives from it. */
+    u32_t node_count;
 };
+static_assert(sizeof(inner_volatile_index_header_t) == 32 &&
+              std::is_trivially_copyable_v<inner_volatile_index_header_t>);
 
 /** @brief Orders scored nodes nearest-first; the comparator of the sorted results pool. */
 struct inner_closer_scored_node_t {
@@ -39,36 +69,6 @@ struct inner_closer_scored_node_t {
 struct inner_further_scored_node_t {
     inline bool operator()(inner_scored_node_t a, inner_scored_node_t b) const noexcept {
         return a.distance > b.distance;
-    }
-};
-
-/**
- *  @brief Minimal 8-byte SplitMix64 PRNG for stochastic NSW start-point selection.
- *
- *  Picked over @c std::mt19937 (5 KB of per-thread state on libstdc++) and @c std::minstd_rand
- *  (a per-call 64-bit modulo). Quality is ample for spreading entry points; each traversal
- *  context owns one, seeded distinctly per thread so the streams decorrelate.
- */
-struct splitmix_u32_t {
-    using seed_t = u64_t;
-    seed_t state_;
-
-    inline explicit splitmix_u32_t(seed_t seed = 0) noexcept : state_(seed) {}
-
-    /** @brief One SplitMix64 step. */
-    inline seed_t unbounded() noexcept {
-        seed_t z = (state_ += 0x9E3779B97F4A7C15ull);
-        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
-        return z ^ (z >> 31);
-    }
-
-    /** @brief Index in [0, @p bound) via Lemire's multiply-shift - one multiply, no division.
-     *      Bias is about @p bound / 2^32, negligible for entry-point selection. The random operand
-     *      must be narrowed to 32 bits @b before widening: multiplying the full 64-bit state
-     *      would let its high bits survive the shift and escape the bound. */
-    inline u32_t bounded(u32_t bound) noexcept {
-        return static_cast<u32_t>(static_cast<u64_t>(static_cast<u32_t>(unbounded())) * bound >> 32);
     }
 };
 
@@ -274,6 +274,13 @@ struct inner_volatile_index {
     using vectors_view_t = nk::matrix_view<scalar_t>;
     using node_ids_span_t = nk::vector_span<node_id_t>;
     using node_ids_view_t = nk::vector_view<node_id_t>;
+
+    /** @brief The hardware wait monitor engaged on contended words - the class-local spelling of
+     *      @c wait_type_, reused by external readers waiting out transient lock sentinels. */
+    using wait_t = wait_type_;
+
+    template <typename, synchronization_t, typename>
+    friend struct inner_volatile_cursor;
 
     inline static constexpr nk_kernel_kind_t kernel_kind_k = kernel_kind_;
 
@@ -509,6 +516,56 @@ struct inner_volatile_index {
                (static_cast<std::size_t>(chunks_count - doubling_phase_chunks_k) << slab_rows_log2_k);
     }
 
+    /** @brief Serialized bytes of one node under @p geometry: its vector, norms & neighbors. */
+    inline static constexpr std::size_t node_bytes_of_(packed_geometry_id_t geometry) noexcept {
+        std::size_t const vector_bytes = divide_round_up<std::size_t>(geometry_dimensions(geometry),
+                                                                      nk::dimensions_per_value<scalar_t>()) *
+                                         sizeof(scalar_t);
+        return vector_bytes + sizeof(vector_norms_t) + geometry_connectivity(geometry) * sizeof(node_id_t);
+    }
+
+    /** @brief Copies the first @p count rows of every chunk in @p chunks - @p row_bytes each -
+     *      into @p output, returning its remaining tail. Templated because the three chunk
+     *      directories are distinct @c fu::dynamic_padded_array instantiations. */
+    template <typename chunks_type_>
+    static std::span<std::byte> save_rows_(std::span<std::byte> output, chunks_type_ const& chunks, std::size_t count,
+                                           std::size_t row_bytes) noexcept {
+        for (small_size_t chunk = 0; count; ++chunk) {
+            std::size_t const chunk_rows = capacity_of_chunks(chunk + 1) - capacity_of_chunks(chunk);
+            std::size_t const rows = min_of(chunk_rows, count);
+            std::size_t const bytes = rows * row_bytes;
+            // The bulk copy leans on NumKong's dense strides - rows pack without padding - and
+            // the span carries the remaining budget, so an overrun trips here, not in memory.
+            assert(static_cast<std::size_t>(chunks[chunk].view().stride_bytes(0)) == row_bytes);
+            assert(bytes <= output.size());
+            std::memcpy(output.data(), chunks[chunk].data(), bytes);
+            output = output.subspan(bytes);
+            count -= rows;
+        }
+        return output;
+    }
+
+    /** @brief Fills the first @p count rows of every chunk in @p chunks - @p row_bytes each -
+     *      from @p input, returning its remaining tail. Templated for the same reason as
+     *      @ref save_rows_. */
+    template <typename chunks_type_>
+    static std::span<std::byte const> load_rows_(std::span<std::byte const> input, chunks_type_& chunks,
+                                                 std::size_t count, std::size_t row_bytes) noexcept {
+        for (small_size_t chunk = 0; count; ++chunk) {
+            std::size_t const chunk_rows = capacity_of_chunks(chunk + 1) - capacity_of_chunks(chunk);
+            std::size_t const rows = min_of(chunk_rows, count);
+            std::size_t const bytes = rows * row_bytes;
+            // The bulk copy leans on NumKong's dense strides - rows pack without padding - and
+            // the span carries the remaining budget, so an overrun trips here, not in memory.
+            assert(static_cast<std::size_t>(chunks[chunk].view().stride_bytes(0)) == row_bytes);
+            assert(bytes <= input.size());
+            std::memcpy(chunks[chunk].data(), input.data(), bytes);
+            input = input.subspan(bytes);
+            count -= rows;
+        }
+        return input;
+    }
+
     /**
      *  @brief Typed view over one node's neighbor row - the only legal way to touch a list that
      *      concurrent scanners may be reading. Copyable value type with reference semantics.
@@ -521,11 +578,12 @@ struct inner_volatile_index {
      *  during a concurrent re-link defined behavior instead of a data race.
      *  @ref inner_volatile_index_concurrency
      *
-     *  Under the @c exclusive_k reader contract every atomic degrades to a plain load: with no
-     *  writers alive there is nothing to order, and plain reads free the compiler to unroll &
-     *  prefetch the row scan. Mutating members belong to the fully synchronized form alone.
+     *  Under a mutation-free contract - @c immutable_k or stronger - every atomic degrades to a
+     *  plain load: with no writers alive there is nothing to order, and plain reads free the
+     *  compiler to unroll & prefetch the row scan. Mutating members belong to the fully
+     *  concurrent form alone.
      */
-    template <search_synchronization_t synchronization_ = search_synchronization_t::synchronized_k>
+    template <synchronization_t synchronization_ = synchronization_t::concurrent_k>
     struct neighbors_list_ref {
         node_ids_span_t row_;
 
@@ -534,7 +592,7 @@ struct inner_volatile_index {
 
         /** @brief Relaxed atomic read of slot @p index; slot 0 belongs to @c peek_first / @c lock. */
         inline node_id_t load_slot(small_size_t index) const noexcept {
-            if constexpr (synchronization_ == search_synchronization_t::synchronized_k)
+            if constexpr (synchronization_ == synchronization_t::concurrent_k)
                 return std::atomic_ref<node_id_t>(row_[index]).load(std::memory_order_relaxed);
             else return row_[index];
         }
@@ -547,7 +605,7 @@ struct inner_volatile_index {
          *      any other value is the first neighbor id, with everything its last (un)locker wrote
          *      now visible to us. */
         inline node_id_t peek_first() const noexcept {
-            if constexpr (synchronization_ == search_synchronization_t::synchronized_k)
+            if constexpr (synchronization_ == synchronization_t::concurrent_k)
                 return std::atomic_ref<node_id_t>(row_[0]).load(std::memory_order_acquire);
             else return row_[0];
         }
@@ -576,7 +634,7 @@ struct inner_volatile_index {
     };
 
     /** @brief The writer-side spelling: mutating paths are always fully synchronized. */
-    using neighbors_list_ref_t = neighbors_list_ref<search_synchronization_t::synchronized_k>;
+    using neighbors_list_ref_t = neighbors_list_ref<synchronization_t::concurrent_k>;
 
     /** @brief Immutable view of the vector stored at @p location. */
     inline vector_view_t vector_for(chunked_location_t const& location) const noexcept {
@@ -599,8 +657,8 @@ struct inner_volatile_index {
     }
 
     /** @brief Typed view over the fixed-capacity neighbors list at @p location - atomic by
-     *      default, plain under the @c exclusive_k contract. @ref inner_volatile_index_concurrency */
-    template <search_synchronization_t synchronization_ = search_synchronization_t::synchronized_k>
+     *      default, plain under a mutation-free contract. @ref inner_volatile_index_concurrency */
+    template <synchronization_t synchronization_ = synchronization_t::concurrent_k>
     inline neighbors_list_ref<synchronization_> neighbors_for(chunked_location_t const& location) noexcept {
         return {neighbors_chunks_[location.chunk_index].row(location.index_in_chunk).as_vector()};
     }
@@ -736,7 +794,7 @@ struct inner_volatile_index {
      *  space, so every call makes strict progress without retry budgets - the sampler is exact,
      *  not heuristic. Only transiently locked nodes are re-rolled, mirroring the traversal policy.
      */
-    template <search_synchronization_t synchronization_ = search_synchronization_t::synchronized_k>
+    template <synchronization_t synchronization_ = synchronization_t::concurrent_k>
     bool sample_landmarks(vector_view_t query, vector_norms_t query_norms, node_id_t first_invisible_id,
                           std::size_t expansion_factor, inner_traversal_context_t& context) noexcept {
 
@@ -760,9 +818,9 @@ struct inner_volatile_index {
                 landmark_node_id = landmark_node_id + 1 == first_invisible_id ? 0 : landmark_node_id + 1;
 
             chunked_location_t const landmark_location = chunked_location(landmark_node_id);
-            // Published nodes may be transiently locked for re-linking - re-roll those. Under the
-            // exclusive contract every sampled node is published & unlocked, so no probe is needed.
-            if constexpr (synchronization_ == search_synchronization_t::synchronized_k)
+            // Published nodes may be transiently locked for re-linking - re-roll those. Under a
+            // mutation-free contract every sampled node is published & unlocked - no probe needed.
+            if constexpr (synchronization_ == synchronization_t::concurrent_k)
                 if (neighbors_for(landmark_location).peek_first() == inner_node_id_unknown_k) continue;
 
             visited.set(landmark_node_id);
@@ -803,7 +861,7 @@ struct inner_volatile_index {
      *  @param[inout] context Scratch & telemetry; must arrive pre-reserved & pre-cleared, and ends
      *      with up to @p expansion_factor nearest published candidates in @c context.results.
      */
-    template <search_synchronization_t synchronization_ = search_synchronization_t::synchronized_k>
+    template <synchronization_t synchronization_ = synchronization_t::concurrent_k>
     void search_around(vector_view_t query, vector_norms_t query_norms, node_id_t first_invisible_id,
                        std::size_t expansion_factor, inner_traversal_context_t& context) noexcept {
 
@@ -853,7 +911,7 @@ struct inner_volatile_index {
             // locked for re-linking, spin: it will either free up, or we keep re-evaluating the
             // same nearest candidate until it does - dropping it would silently degrade recall.
             node_id_t const first_neighbor_id = candidate_neighbors.peek_first();
-            if constexpr (synchronization_ == search_synchronization_t::synchronized_k)
+            if constexpr (synchronization_ == synchronization_t::concurrent_k)
                 if (first_neighbor_id == inner_node_id_unknown_k) continue;
 
             // The node is live and readable - commit to it and drop it from the frontier.
@@ -1334,9 +1392,9 @@ struct inner_volatile_index {
         /** @brief Breadth of the candidate pool; defaults to twice the connectivity.
          *      Raise it to trade latency for recall - the caller reranks anyway. */
         small_size_t expansion_factor = 0;
-        /** @brief Reader contract; @c exclusive_k drops every atomic in the traversal when the
-         *      caller guarantees no concurrent mutating operations. */
-        search_synchronization_t synchronization = search_synchronization_t::synchronized_k;
+        /** @brief Reader contract; @c immutable_k - or stronger - drops every atomic in the
+         *      traversal when the caller certifies no concurrent mutators. */
+        synchronization_t synchronization = synchronization_t::concurrent_k;
     };
 
     /** @brief Outcome & telemetry of one @c search() call; matches stay in the caller's context. */
@@ -1357,7 +1415,7 @@ struct inner_volatile_index {
 
     /** @brief The compile-time form of @c search(): one whole-traversal instantiation per
      *      @p synchronization_ contract, so the exclusive form carries no atomics at all. */
-    template <search_synchronization_t synchronization_>
+    template <synchronization_t synchronization_>
     search_result_t search_typed(vector_view_t query_vector, inner_traversal_context_t& context,
                                  search_config_t config = {}) noexcept {
 
@@ -1375,9 +1433,9 @@ struct inner_volatile_index {
         context.visited.clear();
 
         // Snapshot the watermark once: everything strictly below it is published and readable.
-        // An empty index legitimately yields an empty result set. The exclusive contract needs
+        // An empty index legitimately yields an empty result set. A mutation-free contract needs
         // no acquire - the caller's own synchronization already ordered every publication first.
-        constexpr std::memory_order watermark_order_k = synchronization_ == search_synchronization_t::synchronized_k
+        constexpr std::memory_order watermark_order_k = synchronization_ == synchronization_t::concurrent_k
                                                             ? std::memory_order_acquire
                                                             : std::memory_order_relaxed;
         node_id_t const first_invisible_id = last_visible_id_.load(watermark_order_k);
@@ -1403,14 +1461,14 @@ struct inner_volatile_index {
      *  @brief Finds the nearest published neighbors of @p query_vector - the caller reranks or
      *      trims the prefix it needs.
      *
-     *  Under the default @c synchronized_k contract it is safe to call concurrently with
+     *  Under the default @c concurrent_k contract it is safe to call concurrently with
      *  insertions and other searches: the traversal reads only nodes below the visibility
      *  watermark, acquire-loads every slot-0 lock before scanning a list, retries transiently
      *  locked nodes, and never writes to the graph. Freshly inserted nodes become reachable the
      *  moment their publisher advances the watermark; reverse-edge ids above this query's
      *  watermark snapshot are skipped by the translation-frontier invariant, and picked up by
-     *  any later query with a fresher snapshot. Under @c exclusive_k the caller promises
-     *  quiescence and the traversal runs atomics-free. @ref inner_volatile_index_concurrency
+     *  any later query with a fresher snapshot. Under @c immutable_k - or stronger - the caller
+     *  certifies no mutators and the traversal runs atomics-free. @ref inner_volatile_index_concurrency
      *
      *  @param[in] query_vector The query, in the index's own dtype & frozen dimensionality.
      *  @param[inout] context The calling thread's scratch & telemetry: the matches end up in
@@ -1419,9 +1477,268 @@ struct inner_volatile_index {
      */
     search_result_t search(vector_view_t query_vector, inner_traversal_context_t& context,
                            search_config_t config = {}) noexcept {
-        if (config.synchronization == search_synchronization_t::exclusive_k)
-            return search_typed<search_synchronization_t::exclusive_k>(query_vector, context, config);
-        return search_typed<search_synchronization_t::synchronized_k>(query_vector, context, config);
+        if (config.synchronization != synchronization_t::concurrent_k)
+            return search_typed<synchronization_t::immutable_k>(query_vector, context, config);
+        return search_typed<synchronization_t::concurrent_k>(query_vector, context, config);
+    }
+
+    /** @brief The saved-payload prefix - the class-local spelling of the shared,
+     *      template-independent @c inner_volatile_index_header_t. */
+    using header_t = inner_volatile_index_header_t;
+
+    /** @brief Bytes @c save() will emit for the current contents - size the mapping first.
+     *      Monotone counters make the two loads safe in this order under any contract. */
+    std::size_t saved_size() const noexcept {
+        packed_geometry_id_t const geometry = geometry_.load(std::memory_order_acquire);
+        std::size_t const count = last_visible_id_.load(std::memory_order_acquire);
+        return sizeof(header_t) + count * node_bytes_of_(geometry);
+    }
+
+    /**
+     *  @brief Copies the whole index - header, vectors, norms & neighbor lists - into @p output.
+     *
+     *  A checkpointing reader, not a mutator: concurrent searches keep running, but the caller
+     *  must certify a mutation-free environment - @c immutable_k or @c exclusive_k - since
+     *  back-linking rewrites published rows. The counters are re-checked after the copy, so a
+     *  violated contract surfaces as @c contended_k instead of a silently torn snapshot.
+     *
+     *  @param[out] output Destination bytes; at least @c saved_size() of them.
+     *  @param[in] synchronization The caller's certified environment; never @c concurrent_k.
+     *  @return @c success_k, or why the snapshot was not produced.
+     */
+    status_t save(std::span<std::byte> output, synchronization_t synchronization) const noexcept {
+        if (synchronization == synchronization_t::concurrent_k) return status_t::config_mismatch_k;
+
+        // The seqlock-style guard: snapshot the counters, copy, and re-check. Ordering the
+        // watermark before the dispenser makes the equality below prove a settled past.
+        node_id_t const visible_before = last_visible_id_.load(std::memory_order_acquire);
+        node_id_t const dispensed_before = next_visible_id_.load(std::memory_order_acquire);
+        node_id_t const allocated_before = last_allocated_id_.load(std::memory_order_acquire);
+        if (visible_before != dispensed_before) return status_t::contended_k;
+
+        packed_geometry_id_t const geometry = geometry_.load(std::memory_order_acquire);
+        std::size_t const count = visible_before;
+        if (output.size() < sizeof(header_t) + count * node_bytes_of_(geometry)) return status_t::config_mismatch_k;
+
+        header_t header;
+        header.magic = header_t::magic_k;
+        header.version = header_t::version_k;
+        header.dtype = static_cast<u32_t>(vector_dtype_k);
+        header.kernel = static_cast<u32_t>(kernel_kind_k);
+        header.dimensions = geometry_dimensions(geometry);
+        header.connectivity = geometry_connectivity(geometry);
+        header.node_count = static_cast<u32_t>(count);
+        std::memcpy(output.data(), &header, sizeof(header));
+
+        std::size_t const vector_bytes =
+            divide_round_up<std::size_t>(header.dimensions, nk::dimensions_per_value<scalar_t>()) * sizeof(scalar_t);
+        std::span<std::byte> tail = output.subspan(sizeof(header));
+        tail = save_rows_(tail, vectors_chunks_, count, vector_bytes);
+        tail = save_rows_(tail, norms_chunks_, count, sizeof(vector_norms_t));
+        tail = save_rows_(tail, neighbors_chunks_, count, header.connectivity * sizeof(node_id_t));
+
+        // Re-check in the same order: any movement means the contract was violated mid-copy.
+        bool const settled = last_visible_id_.load(std::memory_order_acquire) == visible_before &&
+                             next_visible_id_.load(std::memory_order_acquire) == dispensed_before &&
+                             last_allocated_id_.load(std::memory_order_acquire) == allocated_before;
+        return settled ? status_t::success_k : status_t::contended_k;
+    }
+
+    /**
+     *  @brief Restores an index previously written by @c save() from @p input.
+     *
+     *  Demands a virgin index & sole ownership: the geometry freezes through the same one-CAS
+     *  path as @c reserve(), chunks allocate through the index's own allocators, and the
+     *  counters publish last. A failed load leaves the structure unusable - destroy it.
+     *
+     *  @param[in] input The saved bytes; content beyond the recorded sections is ignored.
+     *  @param[in] synchronization The caller's certified environment; only @c exclusive_k loads.
+     *  @return @c success_k, or why nothing was restored.
+     */
+    status_t load(std::span<std::byte const> input, synchronization_t synchronization) noexcept {
+        if (synchronization != synchronization_t::exclusive_k) return status_t::config_mismatch_k;
+        if (input.size() < sizeof(header_t)) return status_t::malformed_k;
+
+        header_t header;
+        std::memcpy(&header, input.data(), sizeof(header));
+        if (header.magic != header_t::magic_k || header.version != header_t::version_k) return status_t::malformed_k;
+        if (header.dtype != static_cast<u32_t>(vector_dtype_k) || header.kernel != static_cast<u32_t>(kernel_kind_k))
+            return status_t::config_mismatch_k;
+
+        // A virgin snapshot - saved before any reserve() - restores to a virgin index.
+        if (!header.dimensions && !header.connectivity && !header.node_count) return status_t::success_k;
+        // Geometry sanity for untrusted bytes: both halves must be present, and the connectivity
+        // must be a power of two - the cache-line tiling & the slot-0 lock design depend on it.
+        if (!header.dimensions || !header.connectivity || (header.connectivity & (header.connectivity - 1u)) != 0)
+            return status_t::malformed_k;
+
+        packed_geometry_id_t const geometry = pack_geometry(header.dimensions,
+                                                            static_cast<connectivity_t>(header.connectivity));
+        std::size_t const count = header.node_count;
+        // Divide instead of multiplying: a hostile header's count × node bytes can overflow
+        // 64 bits and slip past a product-form bound; the quotient form cannot.
+        if (count && (input.size() - sizeof(header_t)) / node_bytes_of_(geometry) < count) return status_t::malformed_k;
+
+        packed_geometry_id_t expected_geometry = 0;
+        if (!geometry_.compare_exchange_strong(expected_geometry, geometry, std::memory_order_acq_rel,
+                                               std::memory_order_acquire))
+            return status_t::config_mismatch_k;
+        if (!count) return status_t::success_k;
+
+        expected<std::size_t> const grown = create_next_chunk(count);
+        if (grown.status != status_t::success_k) return grown.status;
+
+        std::size_t const vector_bytes =
+            divide_round_up<std::size_t>(header.dimensions, nk::dimensions_per_value<scalar_t>()) * sizeof(scalar_t);
+        std::span<std::byte const> tail = input.subspan(sizeof(header));
+        tail = load_rows_(tail, vectors_chunks_, count, vector_bytes);
+        tail = load_rows_(tail, norms_chunks_, count, sizeof(vector_norms_t));
+        tail = load_rows_(tail, neighbors_chunks_, count, header.connectivity * sizeof(node_id_t));
+
+        // Publish: identity first, then the capacity credit, and the watermark last with a
+        // release - the same order every publication in this design follows.
+        last_allocated_id_.fetch_add(static_cast<node_id_t>(count), std::memory_order_relaxed);
+        next_visible_id_.fetch_add(static_cast<node_id_t>(count), std::memory_order_relaxed);
+        remaining_capacity_.fetch_add(static_cast<std::ptrdiff_t>(grown.value - count), std::memory_order_release);
+        last_visible_id_.store(static_cast<node_id_t>(count), std::memory_order_release);
+        return status_t::success_k;
+    }
+};
+
+/**
+ *  @brief External reader's cursor over the published prefix of one @c inner_volatile_index:
+ *      random access & id-order iteration over nodes, plus edge-following through a privately
+ *      staged copy of the current node's neighbor list.
+ *
+ *  Strictly read-only under every contract - the index is never written through, so readers
+ *  can never stall writers or convoy behind them. The watermark acquire behind the cursor's
+ *  snapshot already orders every sub-snapshot publication, so the staging copy needs no fences
+ *  of its own: under @c concurrent_k a re-linker may interleave with the copy, and each
+ *  naturally-aligned id loads whole, so the worst case is the same stale-but-valid mix the
+ *  traversal itself tolerates; exact lists come from the @c immutable_k contract, not locks.
+ *  The cursor captures the frozen geometry once at construction, starts past the end, and
+ *  @c seek(0) enters the graph.
+ *
+ *  The staged list may contain ids at or above this cursor's watermark snapshot, discovered
+ *  through fresh back-links; @c seek & @c follow reject those, and @c refresh widens the
+ *  snapshot to admit them.
+ */
+template <typename index_type_, synchronization_t synchronization_, typename allocator_type_>
+struct inner_volatile_cursor {
+
+    using index_t = index_type_;
+    using allocator_t = allocator_type_;
+    using scalar_t = typename index_t::scalar_t;
+    using vector_view_t = typename index_t::vector_view_t;
+    using vector_norms_t = typename index_t::vector_norms_t;
+    using node_id_t = typename index_t::node_id_t;
+    using small_size_t = typename index_t::small_size_t;
+    using node_ids_view_t = typename index_t::node_ids_view_t;
+    using location_t = typename index_t::chunked_location_t;
+
+    using ids_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<node_id_t>;
+    using ids_tensor_t = nk::tensor<node_id_t, ids_allocator_t, 1>;
+
+    /** @brief The watermark ordering behind this cursor's snapshots: acquiring while writers
+     *      may be live, plain when the caller certified a mutation-free environment. */
+    inline static constexpr std::memory_order watermark_order_k = synchronization_ == synchronization_t::concurrent_k
+                                                                      ? std::memory_order_acquire
+                                                                      : std::memory_order_relaxed;
+
+    /** @brief The traversed index - never written through, under any contract. */
+    index_t const* index_;
+    /** @brief The staged @b [connectivity] neighbor copy of the current node. */
+    ids_tensor_t staged_neighbors_;
+    /** @brief Chunk & row of the current node, derived once per @c seek. */
+    location_t location_ {};
+    /** @brief Decoded live prefix of @c staged_neighbors_ - self-loops & sentinels stripped. */
+    small_size_t staged_count_ = 0;
+    /** @brief This cursor's watermark snapshot: ids strictly below it are readable. */
+    node_id_t visible_count_;
+    /** @brief The current node id, or the watermark snapshot when past the end. */
+    node_id_t current_;
+    /** @brief The frozen neighbors-list width, captured once at construction. */
+    small_size_t connectivity_;
+
+    /** @brief Binds the cursor & captures its snapshots; allocates nothing - call @c reserve(). */
+    explicit inner_volatile_cursor(index_t const& index) noexcept
+        : index_(&index), visible_count_(index.last_visible_id_.load(watermark_order_k)), current_(visible_count_),
+          connectivity_(static_cast<small_size_t>(index.connectivity())) {}
+
+    inner_volatile_cursor(inner_volatile_cursor const&) = delete;
+    inner_volatile_cursor& operator=(inner_volatile_cursor const&) = delete;
+    inner_volatile_cursor(inner_volatile_cursor&&) = default;
+    inner_volatile_cursor& operator=(inner_volatile_cursor&&) = default;
+
+    /** @brief Sizes the staging for the frozen connectivity through @p allocator - the index's
+     *      traversals-side family by default; call once before any @c seek. */
+    bool reserve(allocator_t allocator = {}) noexcept {
+        if (staged_neighbors_.size() >= connectivity_) return true;
+        staged_neighbors_ = ids_tensor_t::try_zeros({connectivity_}, ids_allocator_t(allocator));
+        return !staged_neighbors_.empty();
+    }
+
+    /** @brief Nodes visible to this cursor; ids strictly below are readable. */
+    node_id_t visible_count() const noexcept { return visible_count_; }
+    /** @brief Re-snapshots the watermark, admitting nodes published since construction. */
+    void refresh() noexcept { visible_count_ = index_->last_visible_id_.load(watermark_order_k); }
+
+    /** @brief The current node's id; equals @c visible_count() past the end. */
+    node_id_t id() const noexcept { return current_; }
+    /** @brief @c true while the cursor points at a readable node. */
+    explicit operator bool() const noexcept { return current_ < visible_count_; }
+    /** @brief Immutable view of the current node's vector; meaningless past the end. */
+    vector_view_t vector() const noexcept { return index_->vector_for(location_); }
+    /** @brief The current node's pre-computed norms; meaningless past the end. */
+    vector_norms_t norms() const noexcept { return index_->norm_for(location_); }
+    /** @brief The staged neighbor ids of the current node - decoded, stable until the next move. */
+    std::span<node_id_t const> neighbors() const noexcept { return to_span(staged_neighbors_).first(staged_count_); }
+
+    /** @brief Positions on @p node & stages a copy of its neighbor list; @c false above the
+     *      snapshot. Read-only under every contract - see the class docstring for why the
+     *      copy needs neither locks nor fences. */
+    bool seek(node_id_t node) noexcept {
+        if (node >= visible_count_) return false;
+        current_ = node;
+        location_ = index_->chunked_location(node);
+        node_ids_view_t const row = index_->neighbors_for(location_);
+        // Slot 0 transiently holds the lock sentinel while a writer re-links. Wait it out
+        // through the index's own monitor - its const-pointer API is ForkUnion's documented
+        // pre-P3323 currency for observing atomics in const memory, and the opaque call keeps
+        // the compiler from hoisting the re-check out of the loop.
+        if constexpr (synchronization_ == synchronization_t::concurrent_k)
+            while (row[0] == inner_node_id_unknown_k)
+                typename index_t::wait_t {}(row.data(), inner_node_id_unknown_k, small_size_t(0), fu::wait_capped_t {});
+        for (small_size_t slot = 0; slot != connectivity_; ++slot) staged_neighbors_[slot] = row[slot];
+        // Decode the row's encodings: a self-loop is "published, zero neighbors", and the
+        // all-ones sentinel terminates shorter lists.
+        if (staged_neighbors_[0] == node) { staged_count_ = 0; }
+        else {
+            small_size_t live = 0;
+            while (live != connectivity_ && staged_neighbors_[live] != inner_node_id_unknown_k) ++live;
+            staged_count_ = live;
+        }
+        return true;
+    }
+
+    /** @brief Moves to the next id below the snapshot, or past the end. */
+    inner_volatile_cursor& operator++() noexcept {
+        if (current_ + 1 < visible_count_) { seek(current_ + 1); }
+        else {
+            current_ = visible_count_;
+            staged_count_ = 0;
+        }
+        return *this;
+    }
+    /** @brief Deleted: it would copy the staging tensor - an allocation in disguise. */
+    inner_volatile_cursor operator++(int) = delete;
+
+    /** @brief Follows edge @p slot of the staged list; @c false when the slot is beyond the
+     *      live prefix or its target is above this cursor's snapshot. */
+    bool follow(small_size_t slot) noexcept {
+        if (slot >= staged_count_) return false;
+        node_id_t const target = staged_neighbors_[slot];
+        return seek(target);
     }
 };
 

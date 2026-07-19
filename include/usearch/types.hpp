@@ -37,6 +37,38 @@ struct inner_scored_node_t {
     inner_distance_t distance;
 };
 
+/**
+ *  @brief Minimal 8-byte SplitMix64 PRNG for stochastic NSW start-point selection.
+ *
+ *  Picked over @c std::mt19937 (5 KB of per-thread state on libstdc++) and @c std::minstd_rand
+ *  (a per-call 64-bit modulo). Quality is ample for spreading entry points; each traversal
+ *  context owns one, seeded distinctly per thread or warp lane so the streams decorrelate.
+ *  Every member is @c constexpr, so CUDA toolchains compiling with relaxed-constexpr call
+ *  it from device code through this one definition.
+ */
+struct splitmix_u32_t {
+    using seed_t = u64_t;
+    seed_t state_;
+
+    constexpr explicit splitmix_u32_t(seed_t seed = 0) noexcept : state_(seed) {}
+
+    /** @brief One SplitMix64 step. */
+    constexpr seed_t unbounded() noexcept {
+        seed_t z = (state_ += 0x9E3779B97F4A7C15ull);
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        return z ^ (z >> 31);
+    }
+
+    /** @brief Index in [0, @p bound) via Lemire's multiply-shift - one multiply, no division.
+     *      Bias is about @p bound / 2^32, negligible for entry-point selection. The random operand
+     *      must be narrowed to 32 bits @b before widening: multiplying the full 64-bit state
+     *      would let its high bits survive the shift and escape the bound. */
+    constexpr u32_t bounded(u32_t bound) noexcept {
+        return static_cast<u32_t>(static_cast<u64_t>(static_cast<u32_t>(unbounded())) * bound >> 32);
+    }
+};
+
 enum class status_t {
     success_k,
     /** @brief The underlying allocator failed to provide memory; retrying a smaller batch may succeed. */
@@ -48,6 +80,14 @@ enum class status_t {
     /** @brief The requested configuration contradicts an already-frozen one, like re-reserving
      *      with a different geometry; pass matching parameters or start a fresh structure. */
     config_mismatch_k,
+    /** @brief An accelerator runtime call failed - the device state should be treated as
+     *      poisoned and the structure rebuilt. */
+    device_error_k,
+    /** @brief A certified synchronization contract was violated by a concurrent operation;
+     *      discard any produced output and retry in a quieter phase. */
+    contended_k,
+    /** @brief The serialized payload is truncated or does not describe this structure. */
+    malformed_k,
 };
 
 /** @brief A result paired with the @c status_t explaining it; the value is only meaningful
@@ -56,6 +96,17 @@ template <typename value_type_>
 struct expected {
     value_type_ value;
     status_t status;
+};
+
+/** @brief The concurrency environment a caller certifies for one operation. */
+enum class synchronization_t : u32_t {
+    /** @brief Arbitrary readers & writers may be live - the safe default everywhere. */
+    concurrent_k,
+    /** @brief Readers may be live, but no mutators: neighbor lists are read as plain memory -
+     *      no fences - and the locked-node retry branches compile out entirely. */
+    immutable_k,
+    /** @brief Sole ownership - nothing else touches the index, readers included. */
+    exclusive_k,
 };
 
 enum connectivity_t : std::uint32_t {
@@ -101,6 +152,12 @@ constexpr value_type_ divide_round_up(value_type_ value, value_type_ divisor) no
 template <typename value_type_>
 constexpr value_type_ min_of(value_type_ first, value_type_ second) noexcept {
     return second < first ? second : first;
+}
+
+/** @brief The larger of @p first & @p second - the @c max twin of @ref min_of. */
+template <typename value_type_>
+constexpr value_type_ max_of(value_type_ first, value_type_ second) noexcept {
+    return first < second ? second : first;
 }
 
 /**
