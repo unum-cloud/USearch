@@ -2201,6 +2201,28 @@ mod tests {
     }
 
     #[test]
+    fn reserve_uses_requested_member_capacity_and_never_shrinks() {
+        let options = IndexOptions {
+            dimensions: 4,
+            metric: MetricKind::IP,
+            quantization: ScalarKind::F32,
+            ..Default::default()
+        };
+        let index = Index::new(&options).unwrap();
+
+        index.reserve(10).unwrap();
+        assert_eq!(index.capacity(), 10);
+
+        index.reserve(4).unwrap();
+        assert_eq!(index.capacity(), 10);
+
+        for key in 0..10 {
+            index.add(key, &[key as f32, 0.0, 0.0, 0.0]).unwrap();
+        }
+        assert_eq!(index.size(), 10);
+    }
+
+    #[test]
     fn stats_variants() {
         let options = IndexOptions {
             dimensions: 4,
