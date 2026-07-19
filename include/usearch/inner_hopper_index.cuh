@@ -12,7 +12,8 @@
 #include <cuda.h>         // Driver API: `cuMemAddressReserve`, `cuMemCreate`, `cuMemMap`
 #include <cuda_runtime.h> // Runtime API: streams, events, `cudaMemcpyAsync`
 #if defined(__CUDACC__)
-#include <cuda/atomic> // `cuda::atomic_ref` - the device twin of `std::atomic_ref`
+#include <cuda/atomic>     // `cuda::atomic_ref` - the device twin of `std::atomic_ref`
+#include <cuda_pipeline.h> // `__pipeline_memcpy_async` - register-free global-to-shared copies
 #endif
 
 #include <forkunion/types.hpp> // `fu::round_up_to_multiple` & friends
@@ -33,6 +34,12 @@ namespace usearch {
 /** @brief Warps per thread block across every kernel of this design - four schedulers per
  *      Hopper SM, one warp each. */
 inline constexpr u32_t inner_hopper_warps_per_block_k = 4;
+/** @brief Resident blocks per SM - a residency contract shared by the launch grids and the
+ *      kernels' launch bounds, so the register allocator sizes to it instead of trading
+ *      spills for occupancy the launches never ask for. Search kernels with small pools fit
+ *      a four-block contract spill-free and earn a third more resident warps; the wider
+ *      pool ladder and every insert kernel stay at three. */
+inline constexpr u32_t inner_hopper_resident_blocks_per_sm_k = 3;
 /** @brief Rows of the per-warp shared candidate cache; also bounds the diversity-selection
  *      pool prefix and the staging arrays. */
 inline constexpr u32_t inner_hopper_cache_rows_k = 64;
@@ -214,7 +221,7 @@ struct inner_hopper_sorted_pool {
 
     /**
      *  @brief Kills every staged entry whose id already resides in the pool. The visited
-     *      tags yield false negatives on eviction, and a re-admitted duplicate would
+     *      set yields false negatives on eviction, and a re-admitted duplicate would
      *      silently displace genuine tail candidates - ruining diversity selection while
      *      leaving top-10 metrics intact - so this exact probe runs before every merge.
      */
@@ -245,22 +252,23 @@ struct inner_hopper_sorted_pool {
 };
 
 /**
- *  @brief Per-warp direct-mapped visited filter over caller-provided shared memory.
+ *  @brief Per-warp @b lossy visited set over a dynamic-shared-memory span, with a
+ *      runtime capacity frozen at launch - direct-mapped, overwriting on collision.
  *
- *  Yields false @b negatives only: an evicted tag costs a re-gather, never a skipped
+ *  Yields false @b negatives only: an evicted entry costs a re-gather, never a skipped
  *  candidate, so the error polarity is bandwidth-loss, not recall-loss. The compensating
  *  exact check is @c inner_hopper_sorted_pool::deduplicate - together they play the role
  *  of the host-side visited hash-set.
  */
-template <u32_t tags_count_>
-struct inner_hopper_visited_tags {
-    u32_t (&tags_)[tags_count_];
-
-    static_assert((tags_count_ & (tags_count_ - 1)) == 0, "Tags are indexed by a hash prefix");
-    inline static constexpr u32_t tag_shift_k = 32 - std::bit_width(tags_count_ - 1);
+struct inner_hopper_visited_set {
+    /** @brief One slot per hashed id, all-ones when free - the host sizes it to a power
+     *      of two and precomputes @p hash_shift_ as 32 minus its bit width. */
+    u32_t* slots_;
+    u32_t capacity_;
+    u32_t hash_shift_;
 
     __device__ __forceinline__ void reset(int lane) noexcept {
-        for (u32_t tag = lane; tag < tags_count_; tag += 32) tags_[tag] = inner_node_id_unknown_k;
+        for (u32_t slot = lane; slot < capacity_; slot += 32) slots_[slot] = inner_node_id_unknown_k;
     }
 
     /**
@@ -271,38 +279,26 @@ struct inner_hopper_visited_tags {
     __device__ __forceinline__ bool test_and_set(inner_node_id_t node_id, int lane, bool active) noexcept {
         unsigned const peers = __match_any_sync(0xFFFFFFFFu, active ? node_id : 0xFFFFFFFFu ^ lane);
         bool fresh = active && (peers & ((1u << lane) - 1)) == 0;
-        u32_t const tag_slot = (node_id * 0x9E3779B9u) >> tag_shift_k;
-        if (fresh) fresh = tags_[tag_slot] != node_id;
+        u32_t const slot = (node_id * 0x9E3779B9u) >> hash_shift_;
+        if (fresh) fresh = slots_[slot] != node_id;
         __syncwarp();
-        if (fresh) tags_[tag_slot] = node_id;
+        if (fresh) slots_[slot] = node_id;
         __syncwarp();
         return fresh;
     }
 };
 
 /**
- *  @brief One warp's shared-memory scratch with two disjoint lifetimes, made type-visible:
- *      the visited tags during traversal, the candidate-vector cache during diversity
- *      selection & back-linking. The union is the hand-off - @c search_around receives the
- *      tags arm, @c select_diverse and @c back_link_neighbors the cache arm.
- */
-template <u32_t tags_count_, typename fragment_type_, u32_t cache_rows_, u32_t row_fragments_>
-union inner_hopper_scratch {
-    u32_t tags[tags_count_];
-    fragment_type_ cache[cache_rows_][row_fragments_];
-    static_assert(sizeof(cache) <= sizeof(tags),
-                  "The candidate cache lives inside the tag arm - wider rows need a larger tag count");
-};
-
-/**
+ *
  *  @section inner_hopper_kits Math Kits
  *
- *  A kit binds one storage dtype to one metric with warp-shaped geometry, mirroring the
- *  CPU metric kits: fragments are per-lane register tiles, @c lanes_per_row_k lanes span
- *  one vector, and metrics with precomputable norms finalize "through the dot". The
- *  cross-lane reduction is deliberately not a kit member - one shuffle tree of width
- *  @c lanes_per_row_k serves every kit. Symmetric candidate-to-candidate distances reuse
- *  @c distance(dot, make_query_state(norms_a), norms_b).
+ *  A kit binds one storage dtype to one metric, mirroring the CPU metric kits: fragments
+ *  are 16-byte register tiles, and metrics with precomputable norms finalize "through the
+ *  dot". Row geometry - how many fragments span one vector, how many lanes cooperate on a
+ *  row - is runtime state of the planes view, not the kit: dimensions are frozen by the
+ *  first @c reserve, never by a type. The cross-lane reduction is deliberately not a kit
+ *  member - one shuffle tree serves every kit. Symmetric candidate-to-candidate distances
+ *  reuse @c distance(dot, make_query_state(norms_a), norms_b).
  */
 template <typename kit_>
 concept inner_hopper_kit = requires(typename kit_::fragment_t fragment, typename kit_::accumulator_t accumulator,
@@ -316,10 +312,7 @@ concept inner_hopper_kit = requires(typename kit_::fragment_t fragment, typename
     typename kit_::norms_accumulator_t;
     typename kit_::query_state_t;
     { kit_::fragment_bytes_k } -> std::convertible_to<u32_t>;
-    { kit_::row_fragments_k } -> std::convertible_to<u32_t>;
-    { kit_::lanes_per_row_k } -> std::convertible_to<u32_t>;
-    { kit_::rows_per_step_k } -> std::convertible_to<u32_t>;
-    { kit_::max_waves_in_flight_k } -> std::convertible_to<u32_t>;
+    { kit_::max_steps_in_flight_k } -> std::convertible_to<u32_t>;
     { kit_::has_norms_k } -> std::convertible_to<bool>;
     { kit_::zero_accumulator() } -> std::same_as<typename kit_::accumulator_t>;
     { kit_::accumulate_dot(fragment, fragment, accumulator) } -> std::same_as<typename kit_::accumulator_t>;
@@ -331,8 +324,7 @@ concept inner_hopper_kit = requires(typename kit_::fragment_t fragment, typename
     { kit_::distance(dot, query_state, norms) } -> std::same_as<inner_distance_t>;
 };
 
-/** @brief Shared @c i8 geometry & dot arithmetic - every @c i8 metric kit inherits it. */
-template <u32_t dimensions_>
+/** @brief Shared @c i8 dot arithmetic - every @c i8 metric kit inherits it. */
 struct inner_hopper_i8_dot_kit {
     using scalar_t = nk::i8_t;
     using fragment_t = uint4;
@@ -349,13 +341,8 @@ struct inner_hopper_i8_dot_kit {
     };
 
     inline static constexpr u32_t fragment_bytes_k = 16;
-    inline static constexpr u32_t row_fragments_k = dimensions_ / 16;
-    inline static constexpr u32_t lanes_per_row_k = row_fragments_k;
-    inline static constexpr u32_t rows_per_step_k = 32 / lanes_per_row_k;
-    inline static constexpr u32_t max_waves_in_flight_k = 8;
+    inline static constexpr u32_t max_steps_in_flight_k = 8;
     inline static constexpr bool has_norms_k = true;
-    static_assert(dimensions_ % 16 == 0 && (lanes_per_row_k & (lanes_per_row_k - 1)) == 0);
-    static_assert(lanes_per_row_k <= 32, "One vector row never spans more than a warp");
 
     static __device__ __forceinline__ accumulator_t zero_accumulator() noexcept { return 0; }
     static __device__ __forceinline__ accumulator_t accumulate_dot(fragment_t a, fragment_t b,
@@ -388,18 +375,16 @@ struct inner_hopper_i8_dot_kit {
     }
 };
 
-template <u32_t dimensions_>
-struct inner_hopper_i8_angular_kit : inner_hopper_i8_dot_kit<dimensions_> {
-    using base_t = inner_hopper_i8_dot_kit<dimensions_>;
+struct inner_hopper_i8_angular_kit : inner_hopper_i8_dot_kit {
+    using base_t = inner_hopper_i8_dot_kit;
     static __device__ __forceinline__ inner_distance_t distance(int dot, typename base_t::query_state_t query_state,
                                                                 typename base_t::norms_t norms) noexcept {
         return 1.0f - static_cast<f32_t>(dot) * query_state.rsqrt * rsqrtf(static_cast<f32_t>(norms.sumsq));
     }
 };
 
-template <u32_t dimensions_>
-struct inner_hopper_i8_sqeuclidean_kit : inner_hopper_i8_dot_kit<dimensions_> {
-    using base_t = inner_hopper_i8_dot_kit<dimensions_>;
+struct inner_hopper_i8_sqeuclidean_kit : inner_hopper_i8_dot_kit {
+    using base_t = inner_hopper_i8_dot_kit;
     static __device__ __forceinline__ inner_distance_t distance(int dot, typename base_t::query_state_t query_state,
                                                                 typename base_t::norms_t norms) noexcept {
         return static_cast<f32_t>(query_state.sumsq) + static_cast<f32_t>(norms.sumsq) - 2.0f * static_cast<f32_t>(dot);
@@ -408,25 +393,24 @@ struct inner_hopper_i8_sqeuclidean_kit : inner_hopper_i8_dot_kit<dimensions_> {
 
 /** @brief Maps a (dtype, metric) pair onto its device kit; unsupported pairs fail the
  *      index instantiation with a one-line constraint error. */
-template <nk_dtype_t vector_dtype_, nk_kernel_kind_t kernel_kind_, u32_t dimensions_>
+template <nk_dtype_t vector_dtype_, nk_kernel_kind_t kernel_kind_>
 struct inner_hopper_kit_for;
 
-template <u32_t dimensions_>
-struct inner_hopper_kit_for<nk_i8_k, nk_kernel_angular_k, dimensions_> {
-    using kit_t = inner_hopper_i8_angular_kit<dimensions_>;
+template <>
+struct inner_hopper_kit_for<nk_i8_k, nk_kernel_angular_k> {
+    using kit_t = inner_hopper_i8_angular_kit;
 };
-template <u32_t dimensions_>
-struct inner_hopper_kit_for<nk_i8_k, nk_kernel_sqeuclidean_k, dimensions_> {
-    using kit_t = inner_hopper_i8_sqeuclidean_kit<dimensions_>;
+template <>
+struct inner_hopper_kit_for<nk_i8_k, nk_kernel_sqeuclidean_k> {
+    using kit_t = inner_hopper_i8_sqeuclidean_kit;
 };
 
-/** @brief Generic cross-lane reduction: folds sub-warp partials of width @p lanes_per_row_
- *      down to the leader lane. One tree serves every kit. */
-template <u32_t lanes_per_row_, typename dot_type_>
-__device__ __forceinline__ dot_type_ inner_hopper_reduce(dot_type_ partial) noexcept {
-#pragma unroll
-    for (u32_t offset = lanes_per_row_ / 2; offset; offset >>= 1)
-        partial += __shfl_down_sync(0xFFFFFFFFu, partial, offset, lanes_per_row_);
+/** @brief Generic cross-lane reduction: folds sub-warp partials of width @p lanes_per_row
+ *      (a warp-uniform power of two) down to the leader lane. One tree serves every kit. */
+template <typename dot_type_>
+__device__ __forceinline__ dot_type_ inner_hopper_reduce(dot_type_ partial, u32_t lanes_per_row) noexcept {
+    for (u32_t offset = lanes_per_row / 2; offset; offset >>= 1)
+        partial += __shfl_down_sync(0xFFFFFFFFu, partial, offset, lanes_per_row);
     return partial;
 }
 
@@ -435,10 +419,10 @@ __device__ __forceinline__ dot_type_ inner_hopper_reduce(dot_type_ partial) noex
 /** @brief Device-resident counter block - all-RMW, no compare-and-swap anywhere.
  *      @ref inner_hopper_index_concurrency */
 struct inner_hopper_counters_t {
-    /** @brief Ticket dispenser and work-queue head fused into one word: a warp's fetch_add
+    /** @brief Identity dispenser and work-queue head fused into one word: a warp's fetch_add
      *      result @b is its node id. Only the host may reset it, between kernel launches,
-     *      to the published count - over-claimed tickets die with their launch. */
-    u32_t next_ticket;
+     *      to the published count - over-claimed ids die with their launch. */
+    u32_t next_node_id;
     /** @brief Published-node count, advanced by a fire-and-forget reduction at each slot-0
      *      release. Advisory: only the admission ramp and @c size() reporting consume it -
      *      unlike the CPU watermark, it implies nothing about @b which ids are published. */
@@ -454,7 +438,7 @@ struct inner_hopper_counters_t {
  *      per-row norms, and fixed-capacity neighbor lists. Under the flat virtual-memory
  *      arena the node id @b is the location - one multiply, no chunk directory.
  */
-template <inner_hopper_kit kit_, u32_t connectivity_>
+template <inner_hopper_kit kit_>
 struct inner_hopper_planes_view {
     using fragment_t = typename kit_::fragment_t;
     using norms_t = typename kit_::norms_t;
@@ -465,18 +449,39 @@ struct inner_hopper_planes_view {
     norms_t* norms;
     /** @brief Neighbor plane, @b [rows,connectivity] ids; slot 0 doubles as the lock word. */
     u32_t* neighbors;
+    /** @brief Neighbor-row width: the stride of @c neighbors and the link budget per node. */
+    u32_t connectivity;
+    /** @brief Fragments per vector row - the stride of @c vectors; the row's byte length is
+     *      the dimension count rounded up to whole fragments, tail bytes zeroed. */
+    u32_t row_fragments;
+    /** @brief Lanes cooperating on one row while scoring: the smallest power of two
+     *      covering @c row_fragments, capped at the warp width. */
+    u32_t lanes_per_row;
+    /** @brief Scoring steps each of those lanes takes to cover one full row. */
+    u32_t steps_per_row;
+    /** @brief Fixed-point reciprocal of @c row_fragments - `ceil(2^42 / row_fragments)` -
+     *      so flattened [row,fragment] word indices split without hardware division. */
+    u64_t row_fragments_magic;
+
+    /** @brief Splits a flattened word index over a @b [rows,row_fragments] grid. */
+    __device__ __forceinline__ u32_t row_of_word(u32_t word) const noexcept {
+        return static_cast<u32_t>((static_cast<u64_t>(word) * row_fragments_magic) >> 42);
+    }
+    __device__ __forceinline__ u32_t fragment_of_word(u32_t word, u32_t row) const noexcept {
+        return word - row * row_fragments;
+    }
 
     /** @brief Lane's fragment of the vector stored at @p node_id. */
     __device__ __forceinline__ fragment_t vector_for(inner_node_id_t node_id, u32_t fragment_index) const noexcept {
-        return vectors[static_cast<std::size_t>(node_id) * kit_::row_fragments_k + fragment_index];
+        return vectors[static_cast<std::size_t>(node_id) * row_fragments + fragment_index];
     }
     __device__ __forceinline__ fragment_t* vector_span_for(inner_node_id_t node_id) const noexcept {
-        return vectors + static_cast<std::size_t>(node_id) * kit_::row_fragments_k;
+        return vectors + static_cast<std::size_t>(node_id) * row_fragments;
     }
     __device__ __forceinline__ norms_t norm_for(inner_node_id_t node_id) const noexcept { return norms[node_id]; }
     __device__ __forceinline__ norms_t& norm_ref_for(inner_node_id_t node_id) const noexcept { return norms[node_id]; }
     __device__ __forceinline__ u32_t* neighbors_for(inner_node_id_t node_id) const noexcept {
-        return neighbors + static_cast<std::size_t>(node_id) * connectivity_;
+        return neighbors + static_cast<std::size_t>(node_id) * connectivity;
     }
 };
 
@@ -499,6 +504,11 @@ struct inner_hopper_neighbors_ref_t {
     using word_ref_t = cuda::atomic_ref<u32_t, cuda::thread_scope_device>;
 
     __device__ __forceinline__ u32_t capacity() const noexcept { return capacity_; }
+    /** @brief Warp-ballot mask of the lanes whose index is a valid slot of this row -
+     *      collective row reads report the sentinel on the lanes outside it. */
+    __device__ __forceinline__ unsigned lane_mask() const noexcept {
+        return capacity_ >= 32 ? 0xFFFFFFFFu : (1u << capacity_) - 1u;
+    }
 
     /** @brief Relaxed atomic read of slot @p index; slot 0 belongs to @c peek_first / @c try_lock. */
     __device__ __forceinline__ inner_node_id_t load_slot(u32_t index) const noexcept {
@@ -542,11 +552,13 @@ struct inner_hopper_neighbors_ref_t {
      *      slot 0 holds the sentinel while locked; pass the displaced first value from
      *      @c try_lock through @c locked_row instead. */
     __device__ __forceinline__ inner_node_id_t load_row(int lane) const noexcept {
+        if (static_cast<u32_t>(lane) >= capacity_) return inner_node_id_unknown_k;
         return lane ? load_slot(lane) : peek_first();
     }
     /** @brief Warp-collective row read for the @b lock holder: lane 0 reports the
      *      displaced @p first_value, the others load their slots relaxed. */
     __device__ __forceinline__ inner_node_id_t locked_row(int lane, inner_node_id_t first_value) const noexcept {
+        if (static_cast<u32_t>(lane) >= capacity_) return inner_node_id_unknown_k;
         return lane ? load_slot(lane) : first_value;
     }
 };
@@ -584,85 +596,117 @@ struct inner_hopper_traversal_context {
 
 /**
  *  @brief Scores one staged batch of up to 32 candidate rows as a single flattened load
- *      volley - word w*32+lane of the @b [batch,row_fragments] fragment grid, so every
- *      lane issues up to @c row_fragments_k independent loads - then reduces sub-warp
- *      partials and packs scored entries onto their staging lanes.
+ *      gather batch. Rows are gathered in groups: a sub-warp of @c lanes_per_row lanes owns
+ *      one row, stepping @c steps_per_row times across its fragments, while the group tile
+ *      keeps up to @c max_steps_in_flight_k independent loads per lane. The query lives in
+ *      a shared-memory span and is re-read by broadcast each step, so no per-lane query
+ *      registers cap the dimension count.
  *
  *  Mutable-plane discipline: vector & norm loads here are plain loads, made safe by the
  *  acquire chain - every staged id was discovered through an acquiring slot-0 read that
  *  synchronizes with its publisher's release. @return This lane's scored entry, or the
- *  sentinel on lanes past @p batch_count.
+ *  sentinel on lanes past @p gathered_count.
  */
-template <inner_hopper_kit kit_, u32_t connectivity_>
+template <inner_hopper_kit kit_>
 __device__ __forceinline__ inner_hopper_scored_node_t inner_hopper_score_batch( //
-    inner_hopper_planes_view<kit_, connectivity_> const& planes, typename kit_::fragment_t query_fragment,
-    typename kit_::query_state_t query_state, u32_t const (&staged_ids)[inner_hopper_cache_rows_k],
-    inner_hopper_scored_node_t (&staged_scored)[32], u32_t batch_count, int lane) noexcept {
+    inner_hopper_planes_view<kit_> const& planes, typename kit_::fragment_t const* query_span,
+    typename kit_::query_state_t query_state, u32_t const (&gathered_ids)[inner_hopper_cache_rows_k],
+    inner_hopper_scored_node_t (&gathered_scored)[32], u32_t gathered_count, int lane, u32_t first_row = 0) noexcept {
 
     using norms_t = typename kit_::norms_t;
-    constexpr u32_t row_fragments_k = kit_::row_fragments_k;
-    constexpr u32_t lanes_per_row_k = kit_::lanes_per_row_k;
-    constexpr u32_t rows_per_step_k = kit_::rows_per_step_k;
-    constexpr u32_t waves_per_pass_k = row_fragments_k < kit_::max_waves_in_flight_k ? row_fragments_k
-                                                                                     : kit_::max_waves_in_flight_k;
-    bool const leader = (lane % lanes_per_row_k) == 0;
+    constexpr u32_t pipeline_k = kit_::max_steps_in_flight_k;
+    u32_t const lanes_log2 = 31 - __clz(planes.lanes_per_row);
+    u32_t const rows_per_gather = 32u >> lanes_log2;
+    u32_t const lane_in_row = static_cast<u32_t>(lane) & (planes.lanes_per_row - 1);
+    u32_t const subwarp = static_cast<u32_t>(lane) >> lanes_log2;
+    bool const leader = lane_in_row == 0;
 
-    // Waves are independent row groups; the pass loop tiles them so at most
-    // `max_waves_in_flight_k` loads - the volley register budget - coexist per lane.
+    // Row groups are independent; the pass loop tiles them so at most `pipeline_k` loads -
+    // the gather register budget - coexist per lane.
 #pragma unroll 1
-    for (u32_t base = 0; base < row_fragments_k; base += waves_per_pass_k) {
-        norms_t batch_norms[waves_per_pass_k];
+    for (u32_t group_base = 0; group_base < planes.lanes_per_row; group_base += pipeline_k) {
+        norms_t batch_norms[pipeline_k];
 #pragma unroll
-        for (u32_t wave = 0; wave < waves_per_pass_k; ++wave) {
-            u32_t const row = (base + wave) * rows_per_step_k + lane / lanes_per_row_k;
-            if (kit_::has_norms_k && leader && row < batch_count) batch_norms[wave] = planes.norm_for(staged_ids[row]);
+        for (u32_t slot = 0; slot != pipeline_k; ++slot) {
+            u32_t const row = (group_base + slot) * rows_per_gather + subwarp;
+            if (kit_::has_norms_k && leader && group_base + slot < planes.lanes_per_row && row < gathered_count)
+                batch_norms[slot] = planes.norm_for(gathered_ids[first_row + row]);
         }
-        typename kit_::fragment_t loaded[waves_per_pass_k];
+        typename kit_::accumulator_t accumulators[pipeline_k];
 #pragma unroll
-        for (u32_t wave = 0; wave < waves_per_pass_k; ++wave) {
-            u32_t const row = ((base + wave) * 32 + lane) / lanes_per_row_k;
-            if (row < batch_count) loaded[wave] = planes.vector_for(staged_ids[row], lane % lanes_per_row_k);
+        for (u32_t slot = 0; slot != pipeline_k; ++slot) accumulators[slot] = kit_::zero_accumulator();
+#pragma unroll 1
+        for (u32_t step = 0; step != planes.steps_per_row; ++step) {
+            u32_t const fragment_index = lane_in_row + (step << lanes_log2);
+            bool const in_row = fragment_index < planes.row_fragments;
+            typename kit_::fragment_t const query_value = in_row ? query_span[fragment_index]
+                                                                 : typename kit_::fragment_t {};
+            typename kit_::fragment_t loaded[pipeline_k];
+#pragma unroll
+            for (u32_t slot = 0; slot != pipeline_k; ++slot) {
+                u32_t const row = (group_base + slot) * rows_per_gather + subwarp;
+                if (in_row && group_base + slot < planes.lanes_per_row && row < gathered_count)
+                    loaded[slot] = planes.vector_for(gathered_ids[first_row + row], fragment_index);
+            }
+#pragma unroll
+            for (u32_t slot = 0; slot != pipeline_k; ++slot) {
+                u32_t const row = (group_base + slot) * rows_per_gather + subwarp;
+                if (in_row && group_base + slot < planes.lanes_per_row && row < gathered_count)
+                    accumulators[slot] = kit_::accumulate_dot(loaded[slot], query_value, accumulators[slot]);
+            }
         }
 #pragma unroll
-        for (u32_t wave = 0; wave < waves_per_pass_k; ++wave) {
-            u32_t const row = ((base + wave) * 32 + lane) / lanes_per_row_k;
-            typename kit_::accumulator_t accumulator = kit_::zero_accumulator();
-            if (row < batch_count) accumulator = kit_::accumulate_dot(loaded[wave], query_fragment, accumulator);
-            typename kit_::dot_t const dot = inner_hopper_reduce<lanes_per_row_k>(kit_::partial_to_dot(accumulator));
-            u32_t const leader_row = (base + wave) * rows_per_step_k + lane / lanes_per_row_k;
-            if (leader && leader_row < batch_count) {
-                inner_distance_t const distance = kit_::distance(dot, query_state, batch_norms[wave]);
-                staged_scored[leader_row] = inner_hopper_scored_node_t::make(distance, staged_ids[leader_row]);
+        for (u32_t slot = 0; slot != pipeline_k; ++slot) {
+            typename kit_::dot_t const dot = inner_hopper_reduce(kit_::partial_to_dot(accumulators[slot]),
+                                                                 planes.lanes_per_row);
+            u32_t const row = (group_base + slot) * rows_per_gather + subwarp;
+            if (leader && group_base + slot < planes.lanes_per_row && row < gathered_count) {
+                inner_distance_t const distance = kit_::distance(dot, query_state, batch_norms[slot]);
+                gathered_scored[row] = inner_hopper_scored_node_t::make(distance, gathered_ids[first_row + row]);
             }
         }
     }
     __syncwarp();
-    return lane < static_cast<int>(batch_count) ? staged_scored[lane] : inner_hopper_scored_node_t::sentinel();
+    return lane < static_cast<int>(gathered_count) ? gathered_scored[lane] : inner_hopper_scored_node_t::sentinel();
+}
+
+/** @brief Scores one gathered chunk against the query and folds it into the pool,
+ *      dropping the entries the pool already holds. */
+template <inner_hopper_kit kit_, u32_t pool_slots_>
+__device__ __forceinline__ void inner_hopper_score_into_pool( //
+    inner_hopper_planes_view<kit_> const& planes, typename kit_::fragment_t const* query_span,
+    typename kit_::query_state_t query_state, u32_t const (&gathered_ids)[inner_hopper_cache_rows_k],
+    inner_hopper_scored_node_t (&gathered_scored)[32], u32_t gathered_count,
+    inner_hopper_traversal_context<pool_slots_>& context, int lane) noexcept {
+    context.telemetry.scored += gathered_count;
+    inner_hopper_scored_node_t staged = inner_hopper_score_batch<kit_>( //
+        planes, query_span, query_state, gathered_ids, gathered_scored, gathered_count, lane);
+    staged = context.pool.deduplicate(staged, lane);
+    context.pool.insert_batch(staged, lane);
 }
 
 /**
  *  @brief Samples one 32-wide batch of distinct, published landmarks below @p sampling_bound
- *      into @p staged_ids - uniform draws gated on the slot-0 publication word, probing
+ *      into @p gathered_ids - uniform draws gated on the slot-0 publication word, probing
  *      forward on unpublished hits so out-of-order publication only costs retries.
  *  @return The number of staged landmarks; zero when the visited set saturated the bound.
  */
-template <inner_hopper_kit kit_, u32_t connectivity_, u32_t tags_count_>
+template <inner_hopper_kit kit_>
 __device__ __forceinline__ u32_t inner_hopper_sample_landmarks( //
-    inner_hopper_planes_view<kit_, connectivity_> const& planes, inner_node_id_t sampling_bound,
-    inner_hopper_visited_tags<tags_count_>& visited, splitmix_u32_t& random_generator,
-    u32_t (&staged_ids)[inner_hopper_cache_rows_k], int lane) noexcept {
+    inner_hopper_planes_view<kit_> const& planes, inner_node_id_t sampling_bound, inner_hopper_visited_set visited,
+    splitmix_u32_t& random_generator, u32_t (&gathered_ids)[inner_hopper_cache_rows_k], int lane) noexcept {
 
     inner_node_id_t draw = random_generator.bounded(sampling_bound);
     bool published = false;
     for (int attempt = 0; attempt != 4 && !published; ++attempt) {
-        inner_hopper_neighbors_ref_t const row {planes.neighbors_for(draw), connectivity_};
+        inner_hopper_neighbors_ref_t const row {planes.neighbors_for(draw), planes.connectivity};
         published = row.peek_first() != inner_node_id_unknown_k;
         if (!published) draw = draw + 1 == sampling_bound ? 0 : draw + 1;
     }
     bool const fresh = visited.test_and_set(draw, lane, published);
     unsigned const fresh_mask = __ballot_sync(0xFFFFFFFFu, fresh);
     u32_t const ordinal = __popc(fresh_mask & ((1u << lane) - 1));
-    if (fresh) staged_ids[ordinal] = draw;
+    if (fresh) gathered_ids[ordinal] = draw;
     __syncwarp();
     return __popc(fresh_mask);
 }
@@ -673,13 +717,12 @@ __device__ __forceinline__ u32_t inner_hopper_sample_landmarks( //
  *      locked candidates after a bounded retry, and leaves up to @c pool.capacity_k nearest
  *      published candidates ascending in @c context.pool.
  */
-template <inner_hopper_kit kit_, u32_t connectivity_, u32_t tags_count_, u32_t pool_slots_>
+template <inner_hopper_kit kit_, u32_t pool_slots_>
 __device__ __forceinline__ void inner_hopper_search_around( //
-    inner_hopper_planes_view<kit_, connectivity_> const& planes, typename kit_::fragment_t query_fragment,
-    typename kit_::query_state_t query_state, inner_node_id_t sampling_bound,
-    inner_hopper_visited_tags<tags_count_>& visited, u32_t (&staged_ids)[inner_hopper_cache_rows_k],
-    inner_hopper_scored_node_t (&staged_scored)[32], inner_hopper_traversal_context<pool_slots_>& context,
-    int lane) noexcept {
+    inner_hopper_planes_view<kit_> const& planes, typename kit_::fragment_t const* query_span,
+    typename kit_::query_state_t query_state, inner_node_id_t sampling_bound, inner_hopper_visited_set visited,
+    u32_t (&gathered_ids)[inner_hopper_cache_rows_k], inner_hopper_scored_node_t (&gathered_scored)[32],
+    inner_hopper_traversal_context<pool_slots_>& context, int lane) noexcept {
 
     constexpr u32_t hops_cap_k = inner_hopper_sorted_pool<pool_slots_>::capacity_k * 4;
     constexpr u32_t restarts_cap_k = 8;
@@ -688,12 +731,15 @@ __device__ __forceinline__ void inner_hopper_search_around( //
     visited.reset(lane);
     pool.clear();
 
-    u32_t batch_count = 0;
     bool seeding = true;
     while (true) {
         if (seeding) {
-            batch_count = inner_hopper_sample_landmarks<kit_, connectivity_>( //
-                planes, sampling_bound, visited, context.random_generator, staged_ids, lane);
+            u32_t const gathered_count = inner_hopper_sample_landmarks<kit_>( //
+                planes, sampling_bound, visited, context.random_generator, gathered_ids, lane);
+            if (gathered_count)
+                inner_hopper_score_into_pool<kit_>( //
+                    planes, query_span, query_state, gathered_ids, gathered_scored, gathered_count, context, lane);
+            seeding = false;
         }
         else {
             inner_hopper_scored_node_t const candidate = pool.nearest_unexpanded(lane);
@@ -717,7 +763,7 @@ __device__ __forceinline__ void inner_hopper_search_around( //
             // leader lane polls the racing lock word: per-lane polls can observe different
             // values of a concurrent unlock, and a value-dependent `continue` would fork
             // the warp across loop iterations - fatal for every collective downstream.
-            inner_hopper_neighbors_ref_t const row {planes.neighbors_for(candidate.id()), connectivity_};
+            inner_hopper_neighbors_ref_t const row {planes.neighbors_for(candidate.id()), planes.connectivity};
             inner_node_id_t first_value = inner_node_id_unknown_k;
             if (lane == 0) {
                 first_value = row.peek_first();
@@ -732,93 +778,183 @@ __device__ __forceinline__ void inner_hopper_search_around( //
                 ++telemetry.locked_drops;
                 continue;
             }
-            inner_node_id_t const neighbor_id = lane ? row.load_slot(lane) : first_value;
+            // The first warp-width of slots - the whole row when the connectivity fits one
+            // warp. Keeping this sweep loop-free keeps the hot traversal path compact.
+            inner_node_id_t const neighbor_id = lane == 0                                   ? first_value
+                                                : static_cast<u32_t>(lane) < row.capacity() ? row.load_slot(lane)
+                                                                                            : inner_node_id_unknown_k;
             bool const usable = neighbor_id != inner_node_id_unknown_k && neighbor_id != candidate.id();
             bool const fresh = visited.test_and_set(neighbor_id, lane, usable);
             unsigned const fresh_mask = __ballot_sync(0xFFFFFFFFu, fresh);
             u32_t const ordinal = __popc(fresh_mask & ((1u << lane) - 1));
-            if (fresh) staged_ids[ordinal] = neighbor_id;
+            if (fresh) gathered_ids[ordinal] = neighbor_id;
             __syncwarp();
-            batch_count = __popc(fresh_mask);
+            u32_t const gathered_count = __popc(fresh_mask);
+            if (gathered_count)
+                inner_hopper_score_into_pool<kit_>( //
+                    planes, query_span, query_state, gathered_ids, gathered_scored, gathered_count, context, lane);
+            // Rows wider than a warp continue a warp-width of slots at a time; the bound is
+            // warp-uniform, so every collective executes at one program point on every lane.
+            for (u32_t slot_base = 32; slot_base < planes.connectivity; slot_base += 32) {
+                u32_t const slot = slot_base + lane;
+                inner_node_id_t const wide_id = slot < planes.connectivity ? row.load_slot(slot)
+                                                                           : inner_node_id_unknown_k;
+                bool const wide_usable = wide_id != inner_node_id_unknown_k && wide_id != candidate.id();
+                bool const wide_fresh = visited.test_and_set(wide_id, lane, wide_usable);
+                unsigned const wide_mask = __ballot_sync(0xFFFFFFFFu, wide_fresh);
+                u32_t const wide_ordinal = __popc(wide_mask & ((1u << lane) - 1));
+                if (wide_fresh) gathered_ids[wide_ordinal] = wide_id;
+                __syncwarp();
+                u32_t const wide_count = __popc(wide_mask);
+                if (wide_count)
+                    inner_hopper_score_into_pool<kit_>( //
+                        planes, query_span, query_state, gathered_ids, gathered_scored, wide_count, context, lane);
+            }
         }
-        if (!batch_count) {
-            seeding = false;
-            continue;
-        }
-        telemetry.scored += batch_count;
-        inner_hopper_scored_node_t staged = inner_hopper_score_batch<kit_, connectivity_>( //
-            planes, query_fragment, query_state, staged_ids, staged_scored, batch_count, lane);
-        staged = pool.deduplicate(staged, lane);
-        pool.insert_batch(staged, lane);
-        seeding = false;
     }
 }
+
+/** @brief Runtime-strided view over the warp's shared vector cache - rows of
+ *      @c row_fragments_ fragments each, aliasing the scratch slice. */
+template <typename fragment_type_>
+struct inner_hopper_vector_cache {
+    fragment_type_* data_;
+    u32_t row_fragments_;
+
+    __device__ __forceinline__ fragment_type_* row(u32_t row_index) const noexcept {
+        return data_ + static_cast<std::size_t>(row_index) * row_fragments_;
+    }
+    __device__ __forceinline__ fragment_type_& at(u32_t row_index, u32_t fragment_index) const noexcept {
+        return row(row_index)[fragment_index];
+    }
+};
+
+/**
+ *  @brief Warp-cooperative ascending buffer of scored nodes over a shared-memory span -
+ *      the device twin of the CPU's sorted buffer. Chunks arrive pre-sorted from the
+ *      32-wide bitonic network and merge in place: every lane ranks its incoming entry
+ *      against the whole span, existing entries count the incoming values ahead of them,
+ *      and one barrier separates the staged reads from the scattered writes. Entries
+ *      ranked past @c capacity_ are dropped - the insert-with-limit contract.
+ */
+struct inner_hopper_sorted_buffer {
+    inner_hopper_scored_node_t* entries_;
+    u32_t size_ = 0;
+    u32_t capacity_;
+
+    __device__ __forceinline__ inner_hopper_scored_node_t at(u32_t rank) const noexcept { return entries_[rank]; }
+
+    __device__ __forceinline__ void insert_chunk(inner_hopper_scored_node_t value, u32_t count, int lane) noexcept {
+        constexpr u32_t span_chunks_k = divide_round_up(inner_hopper_cache_rows_k, 32u);
+        bool const incoming = static_cast<u32_t>(lane) < count;
+        u32_t incoming_rank = incoming ? static_cast<u32_t>(lane) : 0;
+        for (u32_t i = 0; i != size_; ++i) // Warp-uniform bound: every lane walks the span.
+            incoming_rank += incoming && entries_[i].distance_bits() <= value.distance_bits();
+        // Existing entries shift by the number of incoming values strictly ahead of them;
+        // ties resolve the other way than above, so no two final positions collide.
+        inner_hopper_scored_node_t moved[span_chunks_k];
+        u32_t moved_to[span_chunks_k];
+        u32_t chunk = 0;
+        for (u32_t base = 0; base < size_; base += 32, ++chunk) {
+            u32_t const index = base + lane;
+            bool const active = index < size_;
+            moved[chunk] = active ? entries_[index] : inner_hopper_scored_node_t::sentinel();
+            u32_t shift = 0;
+            for (u32_t source = 0; source != count; ++source) // Warp-uniform: shuffles inside.
+                shift += active &&
+                         value.shuffle_from(static_cast<int>(source)).distance_bits() < moved[chunk].distance_bits();
+            moved_to[chunk] = index + shift;
+        }
+        __syncwarp(); // Every displaced entry is staged in registers before any write lands.
+        chunk = 0;
+        for (u32_t base = 0; base < size_; base += 32, ++chunk)
+            if (base + lane < size_ && moved_to[chunk] < capacity_) entries_[moved_to[chunk]] = moved[chunk];
+        if (incoming && incoming_rank < capacity_) entries_[incoming_rank] = value;
+        __syncwarp();
+        size_ = min_of(size_ + count, capacity_);
+    }
+};
+
+/** @brief Shared-memory spans backing one warp's link re-selection, carved after the
+ *      vector cache: the selected target ids, the ascending per-link scores, and the
+ *      refined cache-row indices. */
+struct inner_hopper_relink_scratch {
+    u32_t* selected_ids;
+    inner_hopper_scored_node_t* link_entries;
+    u32_t* refined_rows;
+};
 
 /**
  *  @brief Greedy diversity selection over the ascending pool prefix - the classic NSW
  *      pruning heuristic: a candidate is kept only when it is closer to the query than to
  *      every already-kept link, so links spread across directions. Candidate vectors are
- *      cached in the warp's shared scratch; lane @b j owns kept link @b j.
- *  @return The kept-link count; @p kept_id and @p kept_cache_row are per-lane outputs.
+ *      cached in the warp's shared scratch; the kept list lives in the shared selected
+ *      span, ascending by construction since candidates arrive ascending.
+ *  @return The kept-link count; @p selected_ids holds that many node ids on return.
  */
-template <inner_hopper_kit kit_, u32_t connectivity_, u32_t cache_rows_, u32_t pool_slots_>
+template <inner_hopper_kit kit_, u32_t pool_slots_>
 __device__ __forceinline__ u32_t inner_hopper_select_diverse( //
-    inner_hopper_planes_view<kit_, connectivity_> const& planes,
-    typename kit_::fragment_t (&cache)[cache_rows_][kit_::row_fragments_k],
-    typename kit_::norms_t (&cache_norms)[cache_rows_], u32_t (&staged_ids)[inner_hopper_cache_rows_k],
-    inner_hopper_traversal_context<pool_slots_>& context, inner_node_id_t& kept_id, int lane) noexcept {
+    inner_hopper_planes_view<kit_> const& planes, inner_hopper_vector_cache<typename kit_::fragment_t> cache,
+    typename kit_::norms_t (&cache_norms)[inner_hopper_cache_rows_k], u32_t (&gathered_ids)[inner_hopper_cache_rows_k],
+    u32_t* selected_ids, inner_hopper_traversal_context<pool_slots_>& context, int lane) noexcept {
 
-    constexpr u32_t row_fragments_k = kit_::row_fragments_k;
-    constexpr u32_t selectable_k = min_of(cache_rows_, inner_hopper_cache_rows_k);
     inner_hopper_sorted_pool<pool_slots_>& pool = context.pool;
 
     // Stage the ascending prefix ids & cache their vectors and norms.
     u32_t candidates_count = 0;
 #pragma unroll
-    for (u32_t base = 0; base < selectable_k; base += 32) {
+    for (u32_t base = 0; base < inner_hopper_cache_rows_k; base += 32) {
         inner_hopper_scored_node_t const entry = base + lane < 64 ? pool.rank_entry(base + lane)
                                                                   : inner_hopper_scored_node_t::sentinel();
         unsigned const live = __ballot_sync(0xFFFFFFFFu, !(entry == inner_hopper_scored_node_t::sentinel()));
-        if (!(entry == inner_hopper_scored_node_t::sentinel())) staged_ids[base + lane] = entry.id();
+        if (!(entry == inner_hopper_scored_node_t::sentinel())) gathered_ids[base + lane] = entry.id();
         candidates_count += __popc(live);
         if (live != 0xFFFFFFFFu) break;
     }
     __syncwarp();
-    for (u32_t word = lane; word < candidates_count * row_fragments_k; word += 32)
-        cache[word / row_fragments_k][word % row_fragments_k] = planes.vector_for(staged_ids[word / row_fragments_k],
-                                                                                  word % row_fragments_k);
+    for (u32_t word = lane; word < candidates_count * planes.row_fragments; word += 32) {
+        u32_t const row = planes.row_of_word(word), fragment = planes.fragment_of_word(word, row);
+        __pipeline_memcpy_async(&cache.at(row, fragment), planes.vector_span_for(gathered_ids[row]) + fragment,
+                                sizeof(typename kit_::fragment_t));
+    }
+    __pipeline_commit();
+    __pipeline_wait_prior(0);
     if (kit_::has_norms_k)
-        for (u32_t row = lane; row < candidates_count; row += 32) cache_norms[row] = planes.norm_for(staged_ids[row]);
+        for (u32_t row = lane; row < candidates_count; row += 32) cache_norms[row] = planes.norm_for(gathered_ids[row]);
     __syncwarp();
 
-    kept_id = inner_node_id_unknown_k;
-    u32_t kept_cache_row = 0;
-    u32_t kept_count = 0;
-    for (u32_t candidate_index = 0; candidate_index < candidates_count && kept_count < connectivity_;
+    u32_t selected_count = 0;
+    for (u32_t candidate_index = 0; candidate_index < candidates_count && selected_count < planes.connectivity;
          ++candidate_index) {
         f32_t const to_query = pool.rank_entry(candidate_index).distance();
         bool diverse = true;
-        if (static_cast<u32_t>(lane) < kept_count) {
-            typename kit_::accumulator_t accumulator = kit_::zero_accumulator();
-#pragma unroll
-            for (u32_t fragment = 0; fragment != row_fragments_k; ++fragment)
-                accumulator = kit_::accumulate_dot(cache[candidate_index][fragment], cache[kept_cache_row][fragment],
-                                                   accumulator);
-            f32_t const between = kit_::distance(kit_::partial_to_dot(accumulator),
-                                                 kit_::make_query_state(cache_norms[candidate_index]),
-                                                 cache_norms[kept_cache_row]);
-            diverse = between >= to_query;
-            ++context.telemetry.scored;
-        }
-        if (__all_sync(0xFFFFFFFFu, diverse)) {
-            if (static_cast<u32_t>(lane) == kept_count) {
-                kept_id = staged_ids[candidate_index];
-                kept_cache_row = candidate_index;
+        for (u32_t base = 0; base < selected_count && diverse; base += 32) { // Warp-uniform bounds.
+            bool lane_diverse = true;
+            if (base + lane < selected_count) {
+                u32_t const kept_row = selected_ids[base + lane];
+                typename kit_::accumulator_t accumulator = kit_::zero_accumulator();
+                for (u32_t fragment = 0; fragment != planes.row_fragments; ++fragment)
+                    accumulator = kit_::accumulate_dot(cache.at(candidate_index, fragment),
+                                                       cache.at(kept_row, fragment), accumulator);
+                f32_t const between = kit_::distance(kit_::partial_to_dot(accumulator),
+                                                     kit_::make_query_state(cache_norms[candidate_index]),
+                                                     cache_norms[kept_row]);
+                lane_diverse = between >= to_query;
+                ++context.telemetry.scored;
             }
-            ++kept_count;
+            diverse = __all_sync(0xFFFFFFFFu, lane_diverse);
+        }
+        if (diverse) {
+            if (lane == 0) selected_ids[selected_count] = candidate_index;
+            ++selected_count;
+            __syncwarp();
         }
     }
-    return kept_count;
+    // Rewrite the kept rows as node ids in place - the caller links to nodes, not rows.
+    __syncwarp();
+    for (u32_t slot = lane; slot < selected_count; slot += 32) selected_ids[slot] = gathered_ids[selected_ids[slot]];
+    __syncwarp();
+    return selected_count;
 }
 
 /**
@@ -832,21 +968,26 @@ __device__ __forceinline__ u32_t inner_hopper_select_diverse( //
  *  always runnable. A lock that cannot be acquired within the attempt budget skips the
  *  edge; approximate search tolerates the missing reverse link by construction.
  */
-template <inner_hopper_kit kit_, u32_t connectivity_, u32_t cache_rows_>
+template <inner_hopper_kit kit_>
 __device__ __forceinline__ void inner_hopper_back_link_neighbors( //
-    inner_hopper_planes_view<kit_, connectivity_> const& planes, inner_node_id_t new_node_id,
-    typename kit_::norms_t new_norms, inner_node_id_t kept_id, u32_t kept_count,
-    typename kit_::fragment_t (&cache)[cache_rows_][kit_::row_fragments_k],
-    typename kit_::norms_t (&cache_norms)[cache_rows_], u32_t (&staged_ids)[inner_hopper_cache_rows_k],
-    inner_hopper_scored_node_t (&staged_scored)[32], splitmix_u32_t& random_generator,
+    inner_hopper_planes_view<kit_> const& planes, inner_node_id_t new_node_id, typename kit_::norms_t new_norms,
+    inner_hopper_relink_scratch relink, u32_t selected_count,
+    inner_hopper_vector_cache<typename kit_::fragment_t> cache,
+    typename kit_::norms_t (&cache_norms)[inner_hopper_cache_rows_k], u32_t (&gathered_ids)[inner_hopper_cache_rows_k],
+    inner_hopper_scored_node_t (&gathered_scored)[32], splitmix_u32_t& random_generator,
     inner_hopper_telemetry_t& telemetry, int lane) noexcept {
 
-    constexpr u32_t row_fragments_k = kit_::row_fragments_k;
-    static_assert(cache_rows_ >= connectivity_ + 1, "Re-selection caches every link plus the newcomer");
+    // The cache hosts every existing link, the newcomer on the last row, and the re-linked
+    // target itself on the row before it - the scored batch reads the target as its query.
+    constexpr u32_t newcomer_row_k = inner_hopper_cache_rows_k - 1;
+    constexpr u32_t target_row_k = inner_hopper_cache_rows_k - 2;
+    // Those two reserved rows also bound how many links one warp can re-select in shared
+    // memory; wider rows keep sentinel tails until the arena lifts the cache ceiling.
+    u32_t const connectivity = min_of(planes.connectivity, inner_hopper_cache_rows_k - 2u);
 
-    for (u32_t link = 0; link < kept_count; ++link) {
-        inner_node_id_t const target = __shfl_sync(0xFFFFFFFFu, kept_id, link);
-        inner_hopper_neighbors_ref_t const row {planes.neighbors_for(target), connectivity_};
+    for (u32_t link = 0; link < selected_count; ++link) {
+        inner_node_id_t const target = relink.selected_ids[link];
+        inner_hopper_neighbors_ref_t const row {planes.neighbors_for(target), connectivity};
         inner_node_id_t first_value = inner_node_id_unknown_k;
         if (lane == 0) first_value = row.try_lock(back_link_lock_attempts_k, random_generator);
         first_value = __shfl_sync(0xFFFFFFFFu, first_value, 0);
@@ -860,10 +1001,22 @@ __device__ __forceinline__ void inner_hopper_back_link_neighbors( //
             continue;
         }
 
-        inner_node_id_t const slot_value = row.locked_row(lane, first_value);
-        unsigned const empty_mask = __ballot_sync(0xFFFFFFFFu, slot_value == inner_node_id_unknown_k);
-        if (empty_mask) { // Fast path: append into the first empty slot, unlock unchanged.
-            if (lane == 0) row.store_slot(__ffs(empty_mask) - 1, new_node_id);
+        // Read the whole locked row a warp-width at a time, remembering the first empty
+        // slot; the same sweep stages every live link id for the potential re-selection.
+        u32_t empty_slot = connectivity;
+        for (u32_t base = 0; base < connectivity; base += 32) {
+            u32_t const slot = base + lane;
+            inner_node_id_t const slot_value = slot == 0             ? first_value
+                                               : slot < connectivity ? row.load_slot(slot)
+                                                                     : inner_node_id_unknown_k;
+            if (slot < connectivity) gathered_ids[slot] = slot_value;
+            unsigned const empty_mask = __ballot_sync(0xFFFFFFFFu,
+                                                      slot < connectivity && slot_value == inner_node_id_unknown_k);
+            if (empty_mask && empty_slot == connectivity) empty_slot = base + __ffs(empty_mask) - 1;
+        }
+        __syncwarp();
+        if (empty_slot != connectivity) { // Fast path: append into that slot, unlock unchanged.
+            if (lane == 0) row.store_slot(empty_slot, new_node_id);
             __syncwarp();
             if (lane == 0) row.unlock(first_value);
             continue;
@@ -872,239 +1025,297 @@ __device__ __forceinline__ void inner_hopper_back_link_neighbors( //
         // Full list: score every link & the newcomer against the target itself, then walk
         // all of them ascending, re-running the diversity heuristic, and rewrite the row.
         ++telemetry.full_lists;
-        staged_ids[lane] = slot_value;
+        for (u32_t word = lane; word < planes.row_fragments; word += 32)
+            cache.at(target_row_k, word) = planes.vector_for(target, word);
         __syncwarp();
-        typename kit_::fragment_t const target_fragment = planes.vector_for(target, lane % kit_::lanes_per_row_k);
         typename kit_::query_state_t const target_state = kit_::make_query_state(planes.norm_for(target));
 
         // The newcomer's distance to the target, from its freshly-owned vector row.
         typename kit_::accumulator_t accumulator = kit_::zero_accumulator();
-        accumulator = kit_::accumulate_dot(planes.vector_for(new_node_id, lane % kit_::lanes_per_row_k),
-                                           target_fragment, accumulator);
-        typename kit_::dot_t const self_dot = inner_hopper_reduce<kit_::lanes_per_row_k>(
-            kit_::partial_to_dot(accumulator));
+        for (u32_t word = lane; word < planes.row_fragments; word += 32)
+            accumulator = kit_::accumulate_dot(planes.vector_for(new_node_id, word), cache.at(target_row_k, word),
+                                               accumulator);
+        typename kit_::dot_t const self_dot = inner_hopper_reduce(kit_::partial_to_dot(accumulator), 32u);
         f32_t const newcomer_distance = kit_::distance(__shfl_sync(0xFFFFFFFFu, self_dot, 0), target_state, new_norms);
-        telemetry.scored += connectivity_ + 1;
+        telemetry.scored += connectivity + 1;
 
-        inner_hopper_scored_node_t const scored = inner_hopper_score_batch<kit_, connectivity_>( //
-            planes, target_fragment, target_state, staged_ids, staged_scored, connectivity_, lane);
-        inner_hopper_scored_node_t const sorted_links = inner_hopper_sort32(
-            lane < static_cast<int>(connectivity_)
-                ? inner_hopper_scored_node_t::make(scored.distance(), lane) // Id = slot index.
-                : inner_hopper_scored_node_t::sentinel(),
-            lane);
+        // Score the links a warp-width at a time, pre-sort each chunk with the bitonic
+        // network, and merge every chunk into the ascending sorted buffer - the ported
+        // insert-with-limit, so any link count the cache can hold walks in order.
+        inner_hopper_sorted_buffer links_sorted {relink.link_entries, 0, connectivity};
+        for (u32_t base = 0; base < connectivity; base += 32) {
+            u32_t const chunk_count = min_of(connectivity - base, 32u);
+            inner_hopper_scored_node_t const scored = inner_hopper_score_batch<kit_>( //
+                planes, cache.row(target_row_k), target_state, gathered_ids, gathered_scored, chunk_count, lane, base);
+            inner_hopper_scored_node_t const sorted_chunk = inner_hopper_sort32(
+                static_cast<u32_t>(lane) < chunk_count
+                    ? inner_hopper_scored_node_t::make(scored.distance(), base + lane) // Id = slot index.
+                    : inner_hopper_scored_node_t::sentinel(),
+                lane);
+            links_sorted.insert_chunk(sorted_chunk, chunk_count, lane);
+        }
 
         // Cache the links' vectors (their norms ride the staging) plus the newcomer at the
-        // tail row, then merge-walk all `connectivity_ + 1` ascending by distance-to-target.
-        for (u32_t word = lane; word < connectivity_ * row_fragments_k; word += 32)
-            cache[word / row_fragments_k][word % row_fragments_k] = planes.vector_for(
-                staged_ids[word / row_fragments_k], word % row_fragments_k);
-        for (u32_t word = lane; word < row_fragments_k; word += 32)
-            cache[cache_rows_ - 1][word] = planes.vector_for(new_node_id, word);
-        for (u32_t cache_row = lane; cache_row < connectivity_; cache_row += 32)
-            cache_norms[cache_row] = planes.norm_for(staged_ids[cache_row]);
-        if (lane == 0) cache_norms[cache_rows_ - 1] = new_norms;
+        // tail row, then merge-walk all `connectivity + 1` ascending by distance-to-target.
+        // The fill rides the async-copy pipeline: every fragment is a global-to-shared
+        // `cp.async` that holds no registers, so the runtime word count costs no pressure.
+        u32_t const link_words = connectivity * planes.row_fragments;
+        for (u32_t word = lane; word < link_words; word += 32) {
+            u32_t const cache_row = planes.row_of_word(word), fragment = planes.fragment_of_word(word, cache_row);
+            __pipeline_memcpy_async(&cache.at(cache_row, fragment),
+                                    planes.vector_span_for(gathered_ids[cache_row]) + fragment,
+                                    sizeof(typename kit_::fragment_t));
+        }
+        __pipeline_commit();
+        __pipeline_wait_prior(0);
+        for (u32_t word = lane; word < planes.row_fragments; word += 32)
+            cache.at(newcomer_row_k, word) = planes.vector_for(new_node_id, word);
+        for (u32_t cache_row = lane; cache_row < connectivity; cache_row += 32)
+            cache_norms[cache_row] = planes.norm_for(gathered_ids[cache_row]);
+        if (lane == 0) cache_norms[newcomer_row_k] = new_norms;
         __syncwarp();
 
         u32_t existing_index = 0;
         bool newcomer_pending = true;
-        u32_t refined_cache_row = cache_rows_ - 1;
-        inner_node_id_t refined_id = inner_node_id_unknown_k;
         u32_t refined_count = 0;
-        for (u32_t step = 0; step != connectivity_ + 1 && refined_count != connectivity_; ++step) {
-            inner_hopper_scored_node_t const next_link = existing_index < connectivity_
-                                                             ? sorted_links.shuffle_from(existing_index)
+        for (u32_t step = 0; step != connectivity + 1 && refined_count != connectivity; ++step) {
+            inner_hopper_scored_node_t const next_link = existing_index < links_sorted.size_
+                                                             ? links_sorted.at(existing_index)
                                                              : inner_hopper_scored_node_t::sentinel();
             bool const take_newcomer = newcomer_pending && newcomer_distance < next_link.distance();
             f32_t const candidate_distance = take_newcomer ? newcomer_distance : next_link.distance();
-            u32_t const candidate_row = take_newcomer ? cache_rows_ - 1 : next_link.id();
-            if (!take_newcomer && existing_index >= connectivity_) break;
+            u32_t const candidate_row = take_newcomer ? newcomer_row_k : next_link.id();
+            if (!take_newcomer && existing_index >= links_sorted.size_) break;
             if (take_newcomer) newcomer_pending = false;
             else ++existing_index;
 
             bool diverse = true;
-            if (static_cast<u32_t>(lane) < refined_count) {
-                typename kit_::accumulator_t pair_accumulator = kit_::zero_accumulator();
-#pragma unroll
-                for (u32_t fragment = 0; fragment != row_fragments_k; ++fragment)
-                    pair_accumulator = kit_::accumulate_dot(cache[candidate_row][fragment],
-                                                            cache[refined_cache_row][fragment], pair_accumulator);
-                f32_t const between = kit_::distance(kit_::partial_to_dot(pair_accumulator),
-                                                     kit_::make_query_state(cache_norms[candidate_row]),
-                                                     cache_norms[refined_cache_row]);
-                diverse = between >= candidate_distance;
-                ++telemetry.scored;
-            }
-            if (__all_sync(0xFFFFFFFFu, diverse)) {
-                if (static_cast<u32_t>(lane) == refined_count) {
-                    refined_cache_row = candidate_row;
-                    refined_id = candidate_row == cache_rows_ - 1 ? new_node_id : staged_ids[candidate_row];
+            for (u32_t base = 0; base < refined_count && diverse; base += 32) { // Warp-uniform bounds.
+                bool lane_diverse = true;
+                if (base + lane < refined_count) {
+                    u32_t const kept_row = relink.refined_rows[base + lane];
+                    typename kit_::accumulator_t pair_accumulator = kit_::zero_accumulator();
+                    for (u32_t fragment = 0; fragment != planes.row_fragments; ++fragment)
+                        pair_accumulator = kit_::accumulate_dot(cache.at(candidate_row, fragment),
+                                                                cache.at(kept_row, fragment), pair_accumulator);
+                    f32_t const between = kit_::distance(kit_::partial_to_dot(pair_accumulator),
+                                                         kit_::make_query_state(cache_norms[candidate_row]),
+                                                         cache_norms[kept_row]);
+                    lane_diverse = between >= candidate_distance;
+                    ++telemetry.scored;
                 }
+                diverse = __all_sync(0xFFFFFFFFu, lane_diverse);
+            }
+            if (diverse) {
+                if (lane == 0) relink.refined_rows[refined_count] = candidate_row;
                 ++refined_count;
+                __syncwarp();
             }
         }
 
         // Rewrite the row: tail slots relaxed, shrink sentinel-terminated, head unlocks.
-        if (lane > 0)
-            row.store_slot(lane, static_cast<u32_t>(lane) < refined_count ? refined_id : inner_node_id_unknown_k);
         __syncwarp();
-        inner_node_id_t const refined_head = __shfl_sync(0xFFFFFFFFu, refined_id, 0);
-        if (lane == 0) row.unlock(refined_head);
+        for (u32_t slot = lane; slot < connectivity; slot += 32) {
+            if (slot == 0) continue;
+            inner_node_id_t linked = inner_node_id_unknown_k;
+            if (slot < refined_count) {
+                u32_t const kept_row = relink.refined_rows[slot];
+                linked = kept_row == newcomer_row_k ? new_node_id : gathered_ids[kept_row];
+            }
+            row.store_slot(slot, linked);
+        }
+        __syncwarp();
+        if (lane == 0) {
+            u32_t const head_row = relink.refined_rows[0];
+            row.unlock(head_row == newcomer_row_k ? new_node_id : gathered_ids[head_row]);
+        }
     }
 }
 
-/** @brief Sub-warp reduction for the norms accumulators of the current kits. Only the
- *      sub-warp leader holds the complete sums afterwards - always follow with
+/** @brief Full-warp reduction for the norms accumulators of the current kits - own-vector
+ *      norms accumulate warp-strided across the whole row, whatever its fragment count.
+ *      Only lane 0 holds the complete sums afterwards - always follow with
  *      @c inner_hopper_broadcast_norms before any lane-divergent consumer. */
-template <u32_t lanes_per_row_>
 __device__ __forceinline__ int2 inner_hopper_reduce_norms(int2 partial) noexcept {
 #pragma unroll
-    for (u32_t offset = lanes_per_row_ / 2; offset; offset >>= 1) {
-        partial.x += __shfl_down_sync(0xFFFFFFFFu, partial.x, offset, lanes_per_row_);
-        partial.y += __shfl_down_sync(0xFFFFFFFFu, partial.y, offset, lanes_per_row_);
+    for (u32_t offset = 16; offset; offset >>= 1) {
+        partial.x += __shfl_down_sync(0xFFFFFFFFu, partial.x, offset);
+        partial.y += __shfl_down_sync(0xFFFFFFFFu, partial.y, offset);
     }
     return partial;
 }
-/** @brief Rebroadcasts the sub-warp leader's reduced norms to every lane - values that
- *      feed lane-divergent control flow must be warp-uniform. */
-template <u32_t lanes_per_row_>
+/** @brief Rebroadcasts lane 0's reduced norms to every lane - values that feed
+ *      lane-divergent control flow must be warp-uniform. */
 __device__ __forceinline__ int2 inner_hopper_broadcast_norms(int2 reduced) noexcept {
-    reduced.x = __shfl_sync(0xFFFFFFFFu, reduced.x, 0, lanes_per_row_);
-    reduced.y = __shfl_sync(0xFFFFFFFFu, reduced.y, 0, lanes_per_row_);
+    reduced.x = __shfl_sync(0xFFFFFFFFu, reduced.x, 0);
+    reduced.y = __shfl_sync(0xFFFFFFFFu, reduced.y, 0);
     return reduced;
 }
 
 /** @brief Geometry & plane pointers one insertion launch operates on. Every plane row a
- *      dispensable ticket can touch is mapped and sentinel-filled ahead of the launch, so
+ *      dispensable new_node_id can touch is mapped and sentinel-filled ahead of the launch, so
  *      growth hazards cannot reach the kernel. */
-template <inner_hopper_kit kit_, u32_t connectivity_>
+template <inner_hopper_kit kit_>
 struct inner_hopper_build_view {
-    inner_hopper_planes_view<kit_, connectivity_> planes;
-    /** @brief Incoming vectors, @b [rows,row_fragments] in ticket order, device-resident. */
+    inner_hopper_planes_view<kit_> planes;
+    /** @brief Incoming vectors, @b [rows,row_fragments] in dispensed-id order, device-resident. */
     typename kit_::fragment_t const* staging;
-    /** @brief Tickets strictly below this bound may be claimed & inserted by this launch. */
+    /** @brief Ids strictly below this bound may be claimed & inserted by this launch. */
     u32_t rows_count;
+    /** @brief Runtime shape of the per-warp dynamic-shared scratch: the visited-set slot
+     *      count (a power of two), its precomputed hash shift, and the slice stride that
+     *      also fits the candidate cache. */
+    u32_t visited_capacity;
+    u32_t visited_hash_shift;
+    u32_t scratch_bytes_per_warp;
     inner_hopper_counters_t* counters;
 };
 
 /** @brief Inputs & outputs of one search launch: a batch of queries in, the nearest ids
  *      and - when requested - their distances out, both ascending per query. */
-template <inner_hopper_kit kit_, u32_t connectivity_>
+template <inner_hopper_kit kit_>
 struct inner_hopper_search_view {
-    inner_hopper_planes_view<kit_, connectivity_> planes;
+    inner_hopper_planes_view<kit_> planes;
     typename kit_::fragment_t const* queries; // @b [queries,row_fragments]
     inner_node_id_t* result_ids;              // @b [queries,count]
     inner_distance_t* result_distances;       // @b [queries,count]; null skips the writes
     u32_t queries_count;
     u32_t count;
     u32_t rows_count;
+    /** @brief Runtime shape of the per-warp dynamic-shared scratch. */
+    u32_t visited_capacity;
+    u32_t visited_hash_shift;
+    u32_t scratch_bytes_per_warp;
     inner_hopper_counters_t* counters;
 };
 
 /**
- *  @brief Inserts the node identified by @p ticket: lands the payload & norms, walks the
+ *  @brief Inserts the node identified by @p new_node_id: lands the payload & norms, walks the
  *      published graph, selects diverse links, publishes with one release store, then
  *      wires the reverse edges - the whole CPU insertion flow, one warp per node.
  */
-template <inner_hopper_kit kit_, u32_t connectivity_, u32_t tags_count_, u32_t pool_slots_, u32_t cache_rows_>
+template <inner_hopper_kit kit_, u32_t pool_slots_>
 __device__ __forceinline__ void inner_hopper_insert_one( //
-    inner_hopper_build_view<kit_, connectivity_> const& view, inner_node_id_t ticket,
-    inner_hopper_scratch<tags_count_, typename kit_::fragment_t, cache_rows_, kit_::row_fragments_k>& scratch,
-    typename kit_::norms_t (&cache_norms)[cache_rows_], u32_t (&staged_ids)[inner_hopper_cache_rows_k],
-    inner_hopper_scored_node_t (&staged_scored)[32], inner_hopper_traversal_context<pool_slots_>& context,
-    int lane) noexcept {
+    inner_hopper_build_view<kit_> const& view, inner_node_id_t new_node_id, inner_hopper_visited_set visited,
+    typename kit_::fragment_t* query_span, inner_hopper_vector_cache<typename kit_::fragment_t> cache,
+    inner_hopper_relink_scratch relink, typename kit_::norms_t (&cache_norms)[inner_hopper_cache_rows_k],
+    u32_t (&gathered_ids)[inner_hopper_cache_rows_k], inner_hopper_scored_node_t (&gathered_scored)[32],
+    inner_hopper_traversal_context<pool_slots_>& context, int lane) noexcept {
 
-    constexpr u32_t row_fragments_k = kit_::row_fragments_k;
-    inner_hopper_planes_view<kit_, connectivity_> const& planes = view.planes;
+    inner_hopper_planes_view<kit_> const& planes = view.planes;
 
     // Land the payload: copy the vector fragments, derive both norms from the owned bytes.
-    typename kit_::fragment_t const* staging_row = view.staging + static_cast<std::size_t>(ticket) * row_fragments_k;
-    typename kit_::fragment_t* owned_row = planes.vector_span_for(ticket);
-    for (u32_t fragment = lane; fragment < row_fragments_k; fragment += 32) owned_row[fragment] = staging_row[fragment];
-    typename kit_::fragment_t const query_fragment = staging_row[lane % kit_::lanes_per_row_k];
+    // The same pass parks the query in its shared span for the traversal to re-read.
+    typename kit_::fragment_t const* staging_row = view.staging +
+                                                   static_cast<std::size_t>(new_node_id) * planes.row_fragments;
+    typename kit_::fragment_t* owned_row = planes.vector_span_for(new_node_id);
     typename kit_::norms_accumulator_t norms_accumulator = kit_::zero_norms_accumulator();
-    norms_accumulator = kit_::accumulate_norms(query_fragment, norms_accumulator);
-    norms_accumulator = inner_hopper_reduce_norms<kit_::lanes_per_row_k>(norms_accumulator);
-    norms_accumulator = inner_hopper_broadcast_norms<kit_::lanes_per_row_k>(norms_accumulator);
+    for (u32_t fragment = lane; fragment < planes.row_fragments; fragment += 32) {
+        typename kit_::fragment_t const value = staging_row[fragment];
+        owned_row[fragment] = value;
+        query_span[fragment] = value;
+        norms_accumulator = kit_::accumulate_norms(value, norms_accumulator);
+    }
+    norms_accumulator = inner_hopper_reduce_norms(norms_accumulator);
+    norms_accumulator = inner_hopper_broadcast_norms(norms_accumulator);
     typename kit_::norms_t const new_norms = kit_::partials_to_norms(norms_accumulator);
-    if (lane == 0) planes.norm_ref_for(ticket) = new_norms;
+    if (lane == 0) planes.norm_ref_for(new_node_id) = new_norms;
     typename kit_::query_state_t const query_state = kit_::make_query_state(new_norms);
+    __syncwarp();
 
     // Walk the published prefix - a virgin index publishes an empty node instead.
-    if (ticket != 0) {
-        inner_hopper_visited_tags<tags_count_> visited {scratch.tags};
-        inner_hopper_search_around<kit_, connectivity_>( //
-            planes, query_fragment, query_state, ticket, visited, staged_ids, staged_scored, context, lane);
-    }
+    if (new_node_id != 0)
+        inner_hopper_search_around<kit_>( //
+            planes, query_span, query_state, new_node_id, visited, gathered_ids, gathered_scored, context, lane);
     else context.pool.clear();
 
     // Select diverse links & write the own row - no locks: no reader arrives before the
     // slot-0 release below flips it from the sentinel.
-    inner_node_id_t kept_id = inner_node_id_unknown_k;
-    u32_t const kept_count = inner_hopper_select_diverse<kit_, connectivity_>( //
-        planes, scratch.cache, cache_norms, staged_ids, context, kept_id, lane);
-    inner_hopper_neighbors_ref_t const own_row {planes.neighbors_for(ticket), connectivity_};
-    if (lane > 0 && static_cast<u32_t>(lane) < kept_count) own_row.store_slot(lane, kept_id);
+    u32_t const selected_count = inner_hopper_select_diverse<kit_>( //
+        planes, cache, cache_norms, gathered_ids, relink.selected_ids, context, lane);
+    inner_hopper_neighbors_ref_t const own_row {planes.neighbors_for(new_node_id), planes.connectivity};
+    for (u32_t slot = lane; slot < selected_count; slot += 32)
+        if (slot > 0) own_row.store_slot(slot, relink.selected_ids[slot]);
     __syncwarp();
-    inner_node_id_t const first_link = __shfl_sync(0xFFFFFFFFu, kept_id, 0);
+    inner_node_id_t const first_link = selected_count ? relink.selected_ids[0] : new_node_id;
     if (lane == 0) {
-        own_row.unlock(kept_count ? first_link : ticket); // Self-loop encodes published-empty.
-        atomicAdd(&view.counters->published, 1u);         // Fire-and-forget reduction.
+        own_row.unlock(first_link);               // A self-loop encodes published-empty.
+        atomicAdd(&view.counters->published, 1u); // Fire-and-forget reduction.
     }
 
     // Only now - published, no locks held - wire the reverse edges.
-    inner_hopper_back_link_neighbors<kit_, connectivity_>( //
-        planes, ticket, new_norms, kept_id, kept_count, scratch.cache, cache_norms, staged_ids, staged_scored,
+    inner_hopper_back_link_neighbors<kit_>( //
+        planes, new_node_id, new_norms, relink, selected_count, cache, cache_norms, gathered_ids, gathered_scored,
         context.random_generator, context.telemetry, lane);
 }
 
 /**
+ *
  *  @section inner_hopper_index_concurrency Concurrency & Publication
  *
  *  One warp inserts one node, and no two warps ever synchronize beyond per-neighbor
  *  slot-0 locks: there is no watermark, no publication order, and no compare-and-swap.
- *  The ticket dispenser doubles as the work queue - a warp's fetch_add result @b is its
+ *  The identity dispenser doubles as the work queue - a warp's fetch_add result @b is its
  *  node id, so aborted launches leave no capacity to re-credit and the host restart rule
  *  (reset the dispenser to the published count between launches) is the only bookkeeping.
  *  A node is usable exactly when its slot 0 acquire-loads non-sentinel; a self-loop id
  *  there means "published, zero neighbors". Landmark sampling draws below the claimed
- *  ticket and probes past unpublished hits, so out-of-order publication costs retries,
- *  never correctness. The admission ramp - ticket @b t waits until
+ *  new_node_id and probes past unpublished hits, so out-of-order publication costs retries,
+ *  never correctness. The admission ramp - new_node_id @b t waits until
  *  t < published + max(32, published) - bounds early-graph lock contention and keeps
  *  the sampler's hit rate above one half; past bootstrap, warps never wait on each other.
  *  Every give-up path still publishes (a self-loop tombstone), so dispensed ids never
  *  stall anything, and a post-mortem sweep can tombstone the stragglers of a killed
  *  launch precisely because publication order is free.
  */
-template <inner_hopper_kit kit_, u32_t connectivity_, u32_t tags_count_, u32_t pool_slots_>
-__global__ void __launch_bounds__(inner_hopper_warps_per_block_k * 32)
-    inner_hopper_insert_kernel(inner_hopper_build_view<kit_, connectivity_> view) {
-    using scratch_t =
-        inner_hopper_scratch<tags_count_, typename kit_::fragment_t, inner_hopper_cache_rows_k, kit_::row_fragments_k>;
-    __shared__ scratch_t scratch[inner_hopper_warps_per_block_k];
+template <inner_hopper_kit kit_, u32_t pool_slots_>
+__global__ void __launch_bounds__(inner_hopper_warps_per_block_k * 32, inner_hopper_resident_blocks_per_sm_k)
+    inner_hopper_insert_kernel(inner_hopper_build_view<kit_> view) {
+    // One launch-sized dynamic slice per warp hosts two disjoint lifetimes over the same
+    // bytes: the query span & visited set while traversing, then the candidate-vector
+    // cache while selecting & back-linking - the host sizes the slice to the larger shape.
+    extern __shared__ char dynamic_scratch[];
     __shared__ typename kit_::norms_t cache_norms[inner_hopper_warps_per_block_k][inner_hopper_cache_rows_k];
-    __shared__ u32_t staged_ids[inner_hopper_warps_per_block_k][inner_hopper_cache_rows_k];
-    __shared__ inner_hopper_scored_node_t staged_scored[inner_hopper_warps_per_block_k][32];
+    __shared__ u32_t gathered_ids[inner_hopper_warps_per_block_k][inner_hopper_cache_rows_k];
+    __shared__ inner_hopper_scored_node_t gathered_scored[inner_hopper_warps_per_block_k][32];
 
     int const warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+    char* const scratch_slice = dynamic_scratch + static_cast<std::size_t>(warp) * view.scratch_bytes_per_warp;
+    typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(scratch_slice);
+    inner_hopper_visited_set const visited {
+        reinterpret_cast<u32_t*>(scratch_slice + view.planes.row_fragments * sizeof(typename kit_::fragment_t)),
+        view.visited_capacity, view.visited_hash_shift};
+    inner_hopper_vector_cache<typename kit_::fragment_t> const cache {
+        reinterpret_cast<typename kit_::fragment_t*>(scratch_slice), view.planes.row_fragments};
+    // The re-selection spans live past the cache: the ascending link scores first (widest
+    // alignment), then the selected target ids, then the refined row indices.
+    u32_t const relink_slots = min_of(view.planes.connectivity, inner_hopper_cache_rows_k);
+    char* const relink_base = scratch_slice + //
+                              static_cast<std::size_t>(view.planes.row_fragments) * sizeof(typename kit_::fragment_t) *
+                                  inner_hopper_cache_rows_k;
+    inner_hopper_relink_scratch const relink {
+        reinterpret_cast<u32_t*>(relink_base + sizeof(inner_hopper_scored_node_t) * relink_slots),
+        reinterpret_cast<inner_hopper_scored_node_t*>(relink_base),
+        reinterpret_cast<u32_t*>(relink_base + (sizeof(inner_hopper_scored_node_t) + sizeof(u32_t)) * relink_slots)};
     while (true) {
-        u32_t ticket;
-        if (lane == 0) ticket = atomicAdd(&view.counters->next_ticket, 1u);
-        ticket = __shfl_sync(0xFFFFFFFFu, ticket, 0);
-        if (ticket >= view.rows_count) return;
+        u32_t new_node_id;
+        if (lane == 0) new_node_id = atomicAdd(&view.counters->next_node_id, 1u);
+        new_node_id = __shfl_sync(0xFFFFFFFFu, new_node_id, 0);
+        if (new_node_id >= view.rows_count) return;
 
         while (true) { // Admission ramp - the only bootstrap throttle.
             u32_t published;
             asm volatile("ld.relaxed.gpu.u32 %0, [%1];" : "=r"(published) : "l"(&view.counters->published));
             u32_t const window = max_of(published, admission_ramp_floor_k);
-            if (ticket < published + window) break;
+            if (new_node_id < published + window) break;
             __nanosleep(2048);
         }
 
         inner_hopper_traversal_context<pool_slots_> context;
-        context.random_generator = splitmix_u32_t {0xA5A5A5A5ull ^ (static_cast<u64_t>(ticket) * 33 + lane)};
-        inner_hopper_insert_one<kit_, connectivity_>( //
-            view, ticket, scratch[warp], cache_norms[warp], staged_ids[warp], staged_scored[warp], context, lane);
+        context.random_generator = splitmix_u32_t {0xA5A5A5A5ull ^ (static_cast<u64_t>(new_node_id) * 33 + lane)};
+        inner_hopper_insert_one<kit_>( //
+            view, new_node_id, visited, query_span, cache, relink, cache_norms[warp], gathered_ids[warp],
+            gathered_scored[warp], context, lane);
         context.telemetry.flush(view.counters, lane);
     }
 }
@@ -1112,34 +1323,40 @@ __global__ void __launch_bounds__(inner_hopper_warps_per_block_k * 32)
 /** @brief One warp per query: the same traversal as insertion, reporting the nearest
  *      @c count published ids ascending by distance. Safe against concurrent insertions:
  *      the walk gates every row on its slot-0 word and never writes to the graph. */
-template <inner_hopper_kit kit_, u32_t connectivity_, u32_t tags_count_, u32_t pool_slots_>
-__global__ void __launch_bounds__(inner_hopper_warps_per_block_k * 32)
-    inner_hopper_search_kernel(inner_hopper_search_view<kit_, connectivity_> view) {
-    using scratch_t =
-        inner_hopper_scratch<tags_count_, typename kit_::fragment_t, inner_hopper_cache_rows_k, kit_::row_fragments_k>;
-    __shared__ scratch_t scratch[inner_hopper_warps_per_block_k];
-    __shared__ u32_t staged_ids[inner_hopper_warps_per_block_k][inner_hopper_cache_rows_k];
-    __shared__ inner_hopper_scored_node_t staged_scored[inner_hopper_warps_per_block_k][32];
+template <inner_hopper_kit kit_, u32_t pool_slots_>
+__global__ void __launch_bounds__(inner_hopper_warps_per_block_k * 32, pool_slots_ <= 4 ? 4 : 3)
+    inner_hopper_search_kernel(inner_hopper_search_view<kit_> view) {
+    extern __shared__ char dynamic_scratch[];
+    __shared__ u32_t gathered_ids[inner_hopper_warps_per_block_k][inner_hopper_cache_rows_k];
+    __shared__ inner_hopper_scored_node_t gathered_scored[inner_hopper_warps_per_block_k][32];
 
     int const warp = threadIdx.x / 32, lane = threadIdx.x % 32;
     for (u32_t query_index = blockIdx.x * inner_hopper_warps_per_block_k + warp; query_index < view.queries_count;
          query_index += gridDim.x * inner_hopper_warps_per_block_k) {
 
         typename kit_::fragment_t const* query_row = view.queries +
-                                                     static_cast<std::size_t>(query_index) * kit_::row_fragments_k;
-        typename kit_::fragment_t const query_fragment = query_row[lane % kit_::lanes_per_row_k];
+                                                     static_cast<std::size_t>(query_index) * view.planes.row_fragments;
+        char* const scratch_slice = dynamic_scratch + static_cast<std::size_t>(warp) * view.scratch_bytes_per_warp;
+        typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(scratch_slice);
         typename kit_::norms_accumulator_t norms_accumulator = kit_::zero_norms_accumulator();
-        norms_accumulator = kit_::accumulate_norms(query_fragment, norms_accumulator);
-        norms_accumulator = inner_hopper_reduce_norms<kit_::lanes_per_row_k>(norms_accumulator);
-        norms_accumulator = inner_hopper_broadcast_norms<kit_::lanes_per_row_k>(norms_accumulator);
+        for (u32_t fragment = lane; fragment < view.planes.row_fragments; fragment += 32) {
+            typename kit_::fragment_t const value = query_row[fragment];
+            query_span[fragment] = value;
+            norms_accumulator = kit_::accumulate_norms(value, norms_accumulator);
+        }
+        norms_accumulator = inner_hopper_reduce_norms(norms_accumulator);
+        norms_accumulator = inner_hopper_broadcast_norms(norms_accumulator);
         typename kit_::norms_t const query_norms = kit_::partials_to_norms(norms_accumulator);
         typename kit_::query_state_t const query_state = kit_::make_query_state(query_norms);
+        __syncwarp();
 
         inner_hopper_traversal_context<pool_slots_> context;
         context.random_generator = splitmix_u32_t {0xA5A5A5A5ull ^ (static_cast<u64_t>(query_index) * 33 + lane)};
-        inner_hopper_visited_tags<tags_count_> visited {scratch[warp].tags};
-        inner_hopper_search_around<kit_, connectivity_>( //
-            view.planes, query_fragment, query_state, view.rows_count, visited, staged_ids[warp], staged_scored[warp],
+        inner_hopper_visited_set const visited {
+            reinterpret_cast<u32_t*>(scratch_slice + view.planes.row_fragments * sizeof(typename kit_::fragment_t)),
+            view.visited_capacity, view.visited_hash_shift};
+        inner_hopper_search_around<kit_>( //
+            view.planes, query_span, query_state, view.rows_count, visited, gathered_ids[warp], gathered_scored[warp],
             context, lane);
         // The rank extraction shuffles - every lane participates, only in-range ones store.
         // Ranks past the pool's live prefix surface as sentinel ids, marking absent matches.
@@ -1158,24 +1375,34 @@ __global__ void __launch_bounds__(inner_hopper_warps_per_block_k * 32)
 
 /** @brief Post-drain structural audit of the neighbor plane: every row published, every id
  *      in range, self-loop rows childless, no duplicate edges within a row. One warp scans
- *      one row; each bad row bumps @p violations once. */
-template <u32_t connectivity_>
-__global__ void inner_hopper_invariant_kernel(u32_t const* neighbors, u32_t rows_count, u64_t* violations) {
-    static_assert(connectivity_ == 32, "One warp audits one neighbor row");
+ *      one row, a warp-width of slots at a time; each bad row bumps @p violations once. */
+static __global__ void inner_hopper_invariant_kernel(u32_t const* neighbors, u32_t rows_count, u32_t connectivity,
+                                                     u64_t* violations) {
     std::size_t const warp_index = (blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x) / 32;
     int const lane = threadIdx.x % 32;
     std::size_t const warps = gridDim.x * static_cast<std::size_t>(blockDim.x) / 32;
     for (std::size_t row = warp_index; row < rows_count; row += warps) {
-        u32_t const value = neighbors[row * connectivity_ + lane];
-        u32_t const first = __shfl_sync(0xFFFFFFFFu, value, 0);
-        bool bad = false;
-        bad |= first == inner_node_id_unknown_k;
-        bad |= value != inner_node_id_unknown_k && value >= rows_count;
-        bad |= first == static_cast<u32_t>(row) && lane > 0 && value != inner_node_id_unknown_k;
-#pragma unroll
-        for (int shift = 1; shift < 32; ++shift) { // Uniform trip count: duplicate-edge scan.
-            u32_t const other = __shfl_sync(0xFFFFFFFFu, value, (lane + shift) & 31);
-            bad |= value != inner_node_id_unknown_k && other == value && ((lane + shift) & 31) > lane;
+        u32_t const first = neighbors[row * connectivity];
+        bool bad = first == inner_node_id_unknown_k;
+        for (u32_t base = 0; base < connectivity; base += 32) { // Warp-uniform trip count.
+            u32_t const slot = base + lane;
+            u32_t const value = slot < connectivity ? neighbors[row * connectivity + slot] : inner_node_id_unknown_k;
+            bad |= value != inner_node_id_unknown_k && value >= rows_count;
+            bad |= first == static_cast<u32_t>(row) && slot > 0 && value != inner_node_id_unknown_k;
+            // Duplicate-edge scan: rotate every not-earlier chunk past this lane's value.
+            for (u32_t other_base = base; other_base < connectivity; other_base += 32) {
+                u32_t const other_own = other_base + lane;
+                u32_t const other_value = other_base == base         ? value
+                                          : other_own < connectivity ? neighbors[row * connectivity + other_own]
+                                                                     : inner_node_id_unknown_k;
+                for (int shift = 0; shift < 32; ++shift) {
+                    int const source = (lane + shift) & 31;
+                    u32_t const other = __shfl_sync(0xFFFFFFFFu, other_value, source);
+                    u32_t const other_slot = other_base + static_cast<u32_t>(source);
+                    bad |= value != inner_node_id_unknown_k && other == value && other_slot > slot &&
+                           other_slot < connectivity;
+                }
+            }
         }
         if (__ballot_sync(0xFFFFFFFFu, bad) && lane == 0)
             atomicAdd(reinterpret_cast<unsigned long long*>(violations), 1ull);
@@ -1265,36 +1492,67 @@ struct inner_hopper_arena_t {
  *  @brief Vector Search index for a single uniform latency memory space on Hopper GPUs.
  *
  *  Mirrors the CPU-resident volatile index verb-for-verb - @c reserve, @c insert,
- *  @c search - with three deliberate divergences, each documented where it lives:
- *  geometry is compile-time (register tiles are sized by it), a batch's assigned ids are
- *  the contiguous ticket range (no per-vector id span), and publication is unordered
- *  (@ref inner_hopper_index_concurrency). @section inner_hopper_index_growth Growth
+ *  @c search - with two deliberate divergences, each documented where it lives: a batch's
+ *  assigned ids are the contiguous new_node_id range (no per-vector id span), and
+ *  publication is unordered - see @ref inner_hopper_index_concurrency.
+ *
+ *  @section inner_hopper_index_growth Growth
+ *
  *  The first successful @c reserve() freezes the virtual-address ceiling; physical slabs
  *  map on demand ahead of every launch, and fresh neighbor rows are sentinel-filled
- *  before any ticket covering them can be dispensed.
+ *  before any new_node_id covering them can be dispensed.
  */
 template <                                               //
     nk_dtype_t vector_dtype_ = nk_i8_k,                  //
-    nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k, //
-    u32_t dimensions_ = 128,                             //
-    connectivity_t connectivity_ = connectivity_32_k>    //
+    nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k> //
 struct inner_hopper_index {
 
-    using kit_t = typename inner_hopper_kit_for<vector_dtype_, kernel_kind_, dimensions_>::kit_t;
+    using kit_t = typename inner_hopper_kit_for<vector_dtype_, kernel_kind_>::kit_t;
     using scalar_t = typename kit_t::scalar_t;
     using fragment_t = typename kit_t::fragment_t;
     using norms_t = typename kit_t::norms_t;
     using vectors_view_t = nk::matrix_view<scalar_t>;
-    using planes_view_t = inner_hopper_planes_view<kit_t, connectivity_>;
+    using planes_view_t = inner_hopper_planes_view<kit_t>;
 
-    inline static constexpr u32_t dimensions_k = dimensions_;
-    inline static constexpr u32_t connectivity_k = connectivity_;
     inline static constexpr std::size_t max_node_count_k = inner_hopper_scored_node_t::id_capacity_k;
-    inline static constexpr std::size_t row_bytes_k = static_cast<std::size_t>(kit_t::row_fragments_k) *
-                                                      kit_t::fragment_bytes_k;
-    /** @brief The visited-tag arm must cover the 64-row candidate cache. */
-    inline static constexpr u32_t tags_count_k = sizeof(fragment_t) * kit_t::row_fragments_k * 64 <= 2048 * 4 ? 2048
-                                                                                                              : 4096;
+    /** @brief Default visited-set slot count: a runtime knob now, this is only the
+     *      heuristic floor - the scratch slice must also fit the candidate cache. */
+    inline static constexpr u32_t default_visited_capacity_k = 2048;
+
+    /** @brief Runtime geometry, zero until the first successful @c reserve() freezes it:
+     *      dimensions and connectivity are the most flexible axes of the design. */
+    u32_t dimensions_ = 0;
+    u32_t connectivity_ = 0;
+    u32_t row_fragments_ = 0;
+
+    /** @brief The vector row's byte length: the dimension count rounded up to whole
+     *      fragments, tail bytes kept zero so every dot-derived metric is unaffected. */
+    std::size_t row_bytes() const noexcept {
+        return static_cast<std::size_t>(row_fragments_) * kit_t::fragment_bytes_k;
+    }
+    /** @brief Runtime scoring geometry: lanes cooperating on one row (the smallest power
+     *      of two covering its fragments, at most a warp), and their steps across it. */
+    u32_t lanes_per_row() const noexcept { return min_of(std::bit_ceil(row_fragments_), 32u); }
+    u32_t steps_per_row() const noexcept { return divide_round_up(row_fragments_, lanes_per_row()); }
+
+    /** @brief Runtime shape of the per-warp dynamic-shared scratch slice: the traversal's
+     *      query span & visited set, or the candidate cache - whichever is larger. */
+    struct scratch_shape_t {
+        u32_t visited_capacity;
+        u32_t visited_hash_shift;
+        u32_t bytes_per_warp;
+    };
+    scratch_shape_t scratch_shape() const noexcept {
+        u32_t const query_bytes = static_cast<u32_t>(row_bytes());
+        u32_t const relink_slots = min_of(connectivity_, static_cast<u32_t>(inner_hopper_cache_rows_k));
+        u32_t const relink_bytes = relink_slots * static_cast<u32_t>(sizeof(inner_hopper_scored_node_t) + //
+                                                                     2 * sizeof(u32_t));
+        u32_t const cache_bytes = static_cast<u32_t>(row_bytes()) * inner_hopper_cache_rows_k;
+        u32_t const capacity = default_visited_capacity_k;
+        u32_t const bytes_per_warp = max_of(query_bytes + capacity * static_cast<u32_t>(sizeof(u32_t)), //
+                                            cache_bytes + relink_bytes);
+        return {capacity, 32 - static_cast<u32_t>(std::bit_width(capacity - 1)), bytes_per_warp};
+    }
 
     /** @brief Requested geometry & capacity for a @c reserve() call; frozen by the first success. */
     struct reserve_capacity_t {
@@ -1305,7 +1563,7 @@ struct inner_hopper_index {
     /** @brief Outcome of a @c reserve() call: the capacity & connectivity actually in effect. */
     struct reserve_result_t {
         std::size_t new_capacity = 0;
-        connectivity_t connectivity = connectivity_;
+        connectivity_t connectivity = connectivity_unknown_k;
         status_t status = status_t::success_k;
     };
     /** @brief Optional tuning knobs; zeros mean "derive from connectivity". */
@@ -1315,7 +1573,7 @@ struct inner_hopper_index {
         u32_t expansion_factor = 0;
     };
     /** @brief Outcome & telemetry of one @c insert() batch. Ids are the contiguous range
-     *      @b [first_id,first_id+count) - the ticket order of the incoming rows. */
+     *      @b [first_id,first_id+count) - the dispensed order of the incoming rows. */
     struct insert_result_t {
         status_t status = status_t::success_k;
         std::size_t new_size = 0;
@@ -1354,8 +1612,14 @@ struct inner_hopper_index {
     std::size_t dimensions() const noexcept { return dimensions_; }
     /** @brief Device-side plane views - the audit surface for invariant checkers & tests. */
     planes_view_t planes() const noexcept {
-        return {reinterpret_cast<fragment_t*>(vectors_.base_), reinterpret_cast<norms_t*>(norms_.base_),
-                reinterpret_cast<u32_t*>(neighbors_.base_)};
+        return {reinterpret_cast<fragment_t*>(vectors_.base_),
+                reinterpret_cast<norms_t*>(norms_.base_),
+                reinterpret_cast<u32_t*>(neighbors_.base_),
+                connectivity_,
+                row_fragments_,
+                lanes_per_row(),
+                steps_per_row(),
+                ((u64_t {1} << 42) + row_fragments_ - 1) / row_fragments_};
     }
 
     /**
@@ -1364,7 +1628,14 @@ struct inner_hopper_index {
      *      calls with matching geometry only map further physical slabs.
      */
     reserve_result_t reserve(reserve_capacity_t config) noexcept {
-        if (config.dimensions != dimensions_ || config.connectivity != connectivity_)
+        if (!dimensions_) { // The first call freezes both flexible axes of the geometry.
+            if (!config.dimensions || !config.connectivity)
+                return {0, connectivity_unknown_k, status_t::config_mismatch_k};
+            dimensions_ = static_cast<u32_t>(config.dimensions);
+            connectivity_ = static_cast<u32_t>(config.connectivity);
+            row_fragments_ = divide_round_up<u32_t>(dimensions_ * sizeof(scalar_t), kit_t::fragment_bytes_k);
+        }
+        else if (config.dimensions != dimensions_ || config.connectivity != connectivity_)
             return {mapped_rows_, static_cast<connectivity_t>(connectivity_), status_t::config_mismatch_k};
         if (config.capacity > max_node_count_k)
             return {mapped_rows_, static_cast<connectivity_t>(connectivity_), status_t::overflow_k};
@@ -1376,10 +1647,10 @@ struct inner_hopper_index {
                 return {0, static_cast<connectivity_t>(connectivity_), status_t::device_error_k};
             cuInit(0);
             va_ceiling_rows_ = config.capacity;
-            if (vectors_.reserve(va_ceiling_rows_ * row_bytes_k, device_) != status_t::success_k ||
+            if (vectors_.reserve(va_ceiling_rows_ * row_bytes(), device_) != status_t::success_k ||
                 norms_.reserve(va_ceiling_rows_ * sizeof(norms_t), device_) != status_t::success_k ||
                 neighbors_.reserve(va_ceiling_rows_ * connectivity_ * sizeof(u32_t), device_) != status_t::success_k ||
-                staging_.reserve(va_ceiling_rows_ * row_bytes_k, device_) != status_t::success_k)
+                staging_.reserve(va_ceiling_rows_ * row_bytes(), device_) != status_t::success_k)
                 return {0, static_cast<connectivity_t>(connectivity_), status_t::bad_alloc_k};
             if (cudaMalloc(&counters_, sizeof(inner_hopper_counters_t)) != cudaSuccess ||
                 cudaMemset(counters_, 0, sizeof(inner_hopper_counters_t)) != cudaSuccess)
@@ -1403,22 +1674,32 @@ struct inner_hopper_index {
         std::size_t const total_rows = size_ + rows;
         if (status_t grown = grow_rows(total_rows, stream); grown != status_t::success_k) return {grown};
 
-        // Stage the incoming vectors at their ticket offsets & snapshot the telemetry.
-        if (cudaMemcpyAsync(reinterpret_cast<void*>(staging_.base_ + size_ * row_bytes_k), new_vectors.byte_data(),
-                            rows * row_bytes_k, cudaMemcpyHostToDevice, stream) != cudaSuccess)
+        // Stage the incoming vectors at their new_node_id offsets & snapshot the telemetry.
+        // Pitched upload: host rows are packed scalars, device rows pad to whole fragments;
+        // freshly mapped staging slabs arrive zeroed and pad bytes are never written, so
+        // the zero-tail distance identity holds without an explicit clear.
+        std::size_t const scalar_row_bytes = static_cast<std::size_t>(dimensions_) * sizeof(scalar_t);
+        if (cudaMemcpy2DAsync(reinterpret_cast<void*>(staging_.base_ + size_ * row_bytes()), row_bytes(),
+                              new_vectors.byte_data(), scalar_row_bytes, scalar_row_bytes, rows, cudaMemcpyHostToDevice,
+                              stream) != cudaSuccess)
             return {status_t::device_error_k};
         inner_hopper_counters_t const before = counters_snapshot();
 
-        inner_hopper_build_view<kit_t, connectivity_> view {planes(), //
-                                                            reinterpret_cast<fragment_t const*>(staging_.base_),
-                                                            static_cast<u32_t>(total_rows), counters_};
+        scratch_shape_t const scratch = scratch_shape();
+        inner_hopper_build_view<kit_t> view {planes(), //
+                                             reinterpret_cast<fragment_t const*>(staging_.base_),
+                                             static_cast<u32_t>(total_rows),
+                                             scratch.visited_capacity,
+                                             scratch.visited_hash_shift,
+                                             scratch.bytes_per_warp,
+                                             counters_};
         launch_insert(view, pool_slots_for(config.expansion_factor, 4), stream);
         if (cudaStreamSynchronize(stream) != cudaSuccess) return {status_t::device_error_k};
 
-        // The restart rule: over-claimed tickets died with the launch - rewind the dispenser.
+        // The restart rule: over-claimed ids died with the launch - rewind the dispenser.
         inner_hopper_counters_t after = counters_snapshot();
         if (after.published != total_rows) return {status_t::device_error_k};
-        after.next_ticket = after.published;
+        after.next_node_id = after.published;
         cudaMemcpy(counters_, &after, sizeof(u32_t) * 2, cudaMemcpyHostToDevice);
 
         insert_result_t result;
@@ -1455,24 +1736,32 @@ struct inner_hopper_index {
         inner_node_id_t* device_ids = nullptr;
         inner_distance_t* device_distances = nullptr;
         std::size_t const results_count = queries_count * config.count;
-        if (cudaMallocAsync(&device_queries, queries_count * row_bytes_k, stream) != cudaSuccess ||
+        if (cudaMallocAsync(&device_queries, queries_count * row_bytes(), stream) != cudaSuccess ||
             cudaMallocAsync(reinterpret_cast<void**>(&device_ids), results_count * sizeof(inner_node_id_t), stream) !=
                 cudaSuccess ||
             (wants_distances && cudaMallocAsync(reinterpret_cast<void**>(&device_distances),
                                                 results_count * sizeof(inner_distance_t), stream) != cudaSuccess))
             return {status_t::bad_alloc_k};
-        cudaMemcpyAsync(device_queries, queries.byte_data(), queries_count * row_bytes_k, cudaMemcpyHostToDevice,
-                        stream);
+        // Pitched upload: host rows are packed scalars, device rows pad to whole fragments,
+        // and the pad bytes must be zero for the zero-tail distance identity to hold.
+        std::size_t const scalar_row_bytes = static_cast<std::size_t>(dimensions_) * sizeof(scalar_t);
+        if (scalar_row_bytes != row_bytes()) cudaMemsetAsync(device_queries, 0, queries_count * row_bytes(), stream);
+        cudaMemcpy2DAsync(device_queries, row_bytes(), queries.byte_data(), scalar_row_bytes, scalar_row_bytes,
+                          queries_count, cudaMemcpyHostToDevice, stream);
         inner_hopper_counters_t const before = counters_snapshot();
 
-        inner_hopper_search_view<kit_t, connectivity_> view {planes(),
-                                                             reinterpret_cast<fragment_t const*>(device_queries),
-                                                             device_ids,
-                                                             device_distances,
-                                                             static_cast<u32_t>(queries_count),
-                                                             config.count,
-                                                             static_cast<u32_t>(size_),
-                                                             counters_};
+        scratch_shape_t const scratch = scratch_shape();
+        inner_hopper_search_view<kit_t> view {planes(),
+                                              reinterpret_cast<fragment_t const*>(device_queries),
+                                              device_ids,
+                                              device_distances,
+                                              static_cast<u32_t>(queries_count),
+                                              config.count,
+                                              static_cast<u32_t>(size_),
+                                              scratch.visited_capacity,
+                                              scratch.visited_hash_shift,
+                                              scratch.bytes_per_warp,
+                                              counters_};
         // The pool must cover the requested count, whatever the expansion asked for.
         u32_t const count_slots = divide_round_up<u32_t>(config.count, 32);
         u32_t const expansion = config.expansion_factor > config.count ? config.expansion_factor : config.count * 2;
@@ -1505,15 +1794,15 @@ struct inner_hopper_index {
     int device_sm_count_ = 0;
 
     /** @brief Maps every plane up to @p rows and sentinel-fills the fresh neighbor rows -
-     *      always ahead of any launch that could dispense tickets into them. */
+     *      always ahead of any launch that could dispense new_node_ids into them. */
     status_t grow_rows(std::size_t rows, cudaStream_t stream) noexcept {
         if (rows <= mapped_rows_) return status_t::success_k;
         std::size_t const neighbors_before = neighbors_.mapped_bytes_;
-        if (status_t status = vectors_.grow_to(rows * row_bytes_k); status != status_t::success_k) return status;
+        if (status_t status = vectors_.grow_to(rows * row_bytes()); status != status_t::success_k) return status;
         if (status_t status = norms_.grow_to(rows * sizeof(norms_t)); status != status_t::success_k) return status;
         if (status_t status = neighbors_.grow_to(rows * connectivity_ * sizeof(u32_t)); status != status_t::success_k)
             return status;
-        if (status_t status = staging_.grow_to(rows * row_bytes_k); status != status_t::success_k) return status;
+        if (status_t status = staging_.grow_to(rows * row_bytes()); status != status_t::success_k) return status;
         std::size_t const fresh_bytes = neighbors_.mapped_bytes_ - neighbors_before;
         if (fresh_bytes && cuMemsetD32Async(neighbors_.base_ + neighbors_before, inner_node_id_unknown_k,
                                             fresh_bytes / 4, stream) != CUDA_SUCCESS)
@@ -1539,50 +1828,46 @@ struct inner_hopper_index {
     /** @brief Blocks per grid: three resident blocks per SM saturate the insertion path
      *      at its register budget; oversubscribing eight per SM keeps enough independent
      *      queries in flight to reach the memory-level-parallelism knee while searching. */
-    inline static constexpr u32_t insert_blocks_per_sm_k = 3;
+    inline static constexpr u32_t insert_blocks_per_sm_k = inner_hopper_resident_blocks_per_sm_k;
     inline static constexpr u32_t search_blocks_per_sm_k = 8;
     inline static constexpr u32_t block_threads_k = inner_hopper_warps_per_block_k * 32;
 
-    void launch_insert(inner_hopper_build_view<kit_t, connectivity_> view, u32_t pool_slots,
-                       cudaStream_t stream) noexcept {
-        u32_t const blocks = device_sm_count_ * insert_blocks_per_sm_k;
+    /** @brief Default dynamic-shared-memory opt-in threshold: launches asking for more
+     *      than this must raise the kernel's attribute before the first launch. */
+    inline static constexpr u32_t static_scratch_limit_k = 48 * 1024;
+
+    template <u32_t pool_slots_>
+    void launch_insert_with(inner_hopper_build_view<kit_t> view, cudaStream_t stream) noexcept {
+        u32_t const scratch_bytes = inner_hopper_warps_per_block_k * view.scratch_bytes_per_warp;
+        if (scratch_bytes > static_scratch_limit_k)
+            cudaFuncSetAttribute(inner_hopper_insert_kernel<kit_t, pool_slots_>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize, scratch_bytes);
+        inner_hopper_insert_kernel<kit_t, pool_slots_>
+            <<<device_sm_count_ * insert_blocks_per_sm_k, block_threads_k, scratch_bytes, stream>>>(view);
+    }
+    void launch_insert(inner_hopper_build_view<kit_t> view, u32_t pool_slots, cudaStream_t stream) noexcept {
         switch (pool_slots) {
-        case 2:
-            inner_hopper_insert_kernel<kit_t, connectivity_, tags_count_k, 2>
-                <<<blocks, block_threads_k, 0, stream>>>(view);
-            break;
-        case 4:
-            inner_hopper_insert_kernel<kit_t, connectivity_, tags_count_k, 4>
-                <<<blocks, block_threads_k, 0, stream>>>(view);
-            break;
-        case 8:
-            inner_hopper_insert_kernel<kit_t, connectivity_, tags_count_k, 8>
-                <<<blocks, block_threads_k, 0, stream>>>(view);
-            break;
-        default:
-            inner_hopper_insert_kernel<kit_t, connectivity_, tags_count_k, 16>
-                <<<blocks, block_threads_k, 0, stream>>>(view);
+        case 2: launch_insert_with<2>(view, stream); break;
+        case 4: launch_insert_with<4>(view, stream); break;
+        case 8: launch_insert_with<8>(view, stream); break;
+        default: launch_insert_with<16>(view, stream);
         }
     }
-    void launch_search(inner_hopper_search_view<kit_t, connectivity_> view, u32_t pool_slots,
-                       cudaStream_t stream) noexcept {
-        u32_t const blocks = device_sm_count_ * search_blocks_per_sm_k;
+    template <u32_t pool_slots_>
+    void launch_search_with(inner_hopper_search_view<kit_t> view, cudaStream_t stream) noexcept {
+        u32_t const scratch_bytes = inner_hopper_warps_per_block_k * view.scratch_bytes_per_warp;
+        if (scratch_bytes > static_scratch_limit_k)
+            cudaFuncSetAttribute(inner_hopper_search_kernel<kit_t, pool_slots_>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize, scratch_bytes);
+        inner_hopper_search_kernel<kit_t, pool_slots_>
+            <<<device_sm_count_ * search_blocks_per_sm_k, block_threads_k, scratch_bytes, stream>>>(view);
+    }
+    void launch_search(inner_hopper_search_view<kit_t> view, u32_t pool_slots, cudaStream_t stream) noexcept {
         switch (pool_slots) {
-        case 2:
-            inner_hopper_search_kernel<kit_t, connectivity_, tags_count_k, 2>
-                <<<blocks, block_threads_k, 0, stream>>>(view);
-            break;
-        case 4:
-            inner_hopper_search_kernel<kit_t, connectivity_, tags_count_k, 4>
-                <<<blocks, block_threads_k, 0, stream>>>(view);
-            break;
-        case 8:
-            inner_hopper_search_kernel<kit_t, connectivity_, tags_count_k, 8>
-                <<<blocks, block_threads_k, 0, stream>>>(view);
-            break;
-        default:
-            inner_hopper_search_kernel<kit_t, connectivity_, tags_count_k, 16>
-                <<<blocks, block_threads_k, 0, stream>>>(view);
+        case 2: launch_search_with<2>(view, stream); break;
+        case 4: launch_search_with<4>(view, stream); break;
+        case 8: launch_search_with<8>(view, stream); break;
+        default: launch_search_with<16>(view, stream);
         }
     }
 };
