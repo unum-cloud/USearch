@@ -1,7 +1,7 @@
 /**
- *  @brief Vector Search index for a single uniform latency memory space on H100 & H200 GPUs.
+ *  @brief Vector Search index for a single uniform latency memory space on NVIDIA GPUs.
  *  @author Ash Vardanian
- *  @file include/usearch/inner_hopper_index.cuh
+ *  @file include/usearch/inner_cuda_index.cuh
  *  @date July 18, 2026
  */
 #pragma once
@@ -33,17 +33,17 @@ namespace unum {
 namespace usearch {
 
 /** @brief Warps per thread block across every kernel of this design - four schedulers per
- *      Hopper SM, one warp each. */
-inline constexpr u32_t inner_hopper_warps_per_block_k = 4;
+ *      SM on every modern NVIDIA architecture, one warp each. */
+inline constexpr u32_t inner_cuda_warps_per_block_k = 4;
 /** @brief Resident blocks per SM - a residency contract shared by the launch grids and the
  *      kernels' launch bounds, so the register allocator sizes to it instead of trading
  *      spills for occupancy the launches never ask for. Search kernels with small pools fit
  *      a four-block contract spill-free and earn a third more resident warps; the wider
  *      pool ladder and every insert kernel stay at three. */
-inline constexpr u32_t inner_hopper_resident_blocks_per_sm_k = 3;
+inline constexpr u32_t inner_cuda_resident_blocks_per_sm_k = 3;
 /** @brief Rows of the per-warp shared candidate cache; also bounds the diversity-selection
  *      pool prefix and the staging arrays. */
-inline constexpr u32_t inner_hopper_cache_rows_k = 64;
+inline constexpr u32_t inner_cuda_cache_rows_k = 64;
 /** @brief Floor & jitter of the @c __nanosleep backoff while retrying a held slot-0 lock -
  *      measured to keep hub convoys tolerable on young graphs. */
 inline constexpr u32_t lock_backoff_floor_ns_k = 512;
@@ -71,20 +71,20 @@ inline constexpr u32_t admission_ramp_floor_k = 32;
  *  which is the practical semantic of approximate search either way, and in exchange ids
  *  keep all 32 bits - the id ceiling matches the CPU-resident index exactly.
  */
-struct inner_hopper_scored_node_t {
+struct inner_cuda_scored_node_t {
     u64_t bits_;
 
     inline static constexpr u64_t expanded_bit_k = u64_t(1) << 32;
     /** @brief Dispensable ids: everything but the reserved all-ones sentinel. */
     inline static constexpr std::size_t id_capacity_k = (u64_t(1) << 32) - 1u;
 
-    static __device__ __forceinline__ inner_hopper_scored_node_t make(inner_distance_t distance,
-                                                                      inner_node_id_t node_id) noexcept {
+    static __device__ __forceinline__ inner_cuda_scored_node_t make(inner_distance_t distance,
+                                                                    inner_node_id_t node_id) noexcept {
         u32_t flipped = __float_as_uint(distance);
         flipped ^= (flipped & 0x80000000u) ? 0xFFFFFFFFu : 0x80000000u;
         return {(static_cast<u64_t>(flipped >> 1) << 33) | node_id};
     }
-    __device__ static constexpr inner_hopper_scored_node_t sentinel() noexcept { return {~u64_t(0)}; }
+    __device__ static constexpr inner_cuda_scored_node_t sentinel() noexcept { return {~u64_t(0)}; }
 
     /** @brief The flag-free comparison currency: 31 ordering bits of the flipped distance. */
     __device__ __forceinline__ u32_t distance_bits() const noexcept { return static_cast<u32_t>(bits_ >> 33); }
@@ -98,42 +98,42 @@ struct inner_hopper_scored_node_t {
     __device__ __forceinline__ bool expanded() const noexcept { return bits_ & expanded_bit_k; }
     /** @brief Lazily deletes the entry from the frontier; a no-op on the sentinel. */
     __device__ __forceinline__ void mark_expanded() noexcept { bits_ |= expanded_bit_k; }
-    __device__ __forceinline__ bool operator<(inner_hopper_scored_node_t other) const noexcept {
+    __device__ __forceinline__ bool operator<(inner_cuda_scored_node_t other) const noexcept {
         return bits_ < other.bits_;
     }
-    __device__ __forceinline__ bool operator==(inner_hopper_scored_node_t other) const noexcept {
+    __device__ __forceinline__ bool operator==(inner_cuda_scored_node_t other) const noexcept {
         return bits_ == other.bits_;
     }
 
     /** @brief Warp shuffles have no user-type overloads - the entry shuffles its raw word. */
-    __device__ __forceinline__ inner_hopper_scored_node_t shuffle_xor(int lane_mask) const noexcept {
+    __device__ __forceinline__ inner_cuda_scored_node_t shuffle_xor(int lane_mask) const noexcept {
         return {__shfl_xor_sync(0xFFFFFFFFu, bits_, lane_mask)};
     }
-    __device__ __forceinline__ inner_hopper_scored_node_t shuffle_from(int source_lane) const noexcept {
+    __device__ __forceinline__ inner_cuda_scored_node_t shuffle_from(int source_lane) const noexcept {
         return {__shfl_sync(0xFFFFFFFFu, bits_, source_lane)};
     }
-    __device__ __forceinline__ inner_hopper_scored_node_t shuffle_up(int delta) const noexcept {
+    __device__ __forceinline__ inner_cuda_scored_node_t shuffle_up(int delta) const noexcept {
         return {__shfl_up_sync(0xFFFFFFFFu, bits_, delta)};
     }
 };
-static_assert(sizeof(inner_hopper_scored_node_t) == 8, "Entries shuffle as one 64-bit word");
-static_assert(std::is_trivially_copyable_v<inner_hopper_scored_node_t>);
+static_assert(sizeof(inner_cuda_scored_node_t) == 8, "Entries shuffle as one 64-bit word");
+static_assert(std::is_trivially_copyable_v<inner_cuda_scored_node_t>);
 
 /**
  *  @brief Full bitonic sort of one 32-lane entry vector, ascending by lane - fifteen
  *      shuffle-exchange stages, all in registers.
  */
-__device__ __forceinline__ inner_hopper_scored_node_t inner_hopper_sort32(inner_hopper_scored_node_t value,
-                                                                          int lane) noexcept {
+__device__ __forceinline__ inner_cuda_scored_node_t inner_cuda_sort32(inner_cuda_scored_node_t value,
+                                                                      int lane) noexcept {
 #pragma unroll
     for (int k = 2; k <= 32; k <<= 1)
 #pragma unroll
         for (int j = k >> 1; j; j >>= 1) {
-            inner_hopper_scored_node_t const partner = value.shuffle_xor(j);
+            inner_cuda_scored_node_t const partner = value.shuffle_xor(j);
             bool const up = (lane & k) == 0;
             bool const lower = (lane & j) == 0;
-            inner_hopper_scored_node_t const nearer = value < partner ? value : partner;
-            inner_hopper_scored_node_t const further = value < partner ? partner : value;
+            inner_cuda_scored_node_t const nearer = value < partner ? value : partner;
+            inner_cuda_scored_node_t const further = value < partner ? partner : value;
             value = (up == lower) ? nearer : further;
         }
     return value;
@@ -152,15 +152,15 @@ __device__ __forceinline__ inner_hopper_scored_node_t inner_hopper_sort32(inner_
  *  goes through the fold-merge network below, never a full re-sort.
  */
 template <u32_t slots_>
-struct inner_hopper_sorted_pool {
-    inner_hopper_scored_node_t entries_[slots_];
+struct inner_cuda_sorted_pool {
+    inner_cuda_scored_node_t entries_[slots_];
 
     inline static constexpr u32_t capacity_k = slots_ * 32;
     static_assert((slots_ & (slots_ - 1)) == 0, "The fold-merge network needs a power-of-two slot count");
 
     __device__ __forceinline__ void clear() noexcept {
 #pragma unroll
-        for (u32_t slot = 0; slot != slots_; ++slot) entries_[slot] = inner_hopper_scored_node_t::sentinel();
+        for (u32_t slot = 0; slot != slots_; ++slot) entries_[slot] = inner_cuda_scored_node_t::sentinel();
     }
 
     /**
@@ -169,7 +169,7 @@ struct inner_hopper_sorted_pool {
      *      sequence: a single fold absorbs the batch, log2 of @c slots_ in-lane stages plus
      *      five shuffle stages restore ascending order.
      */
-    __device__ __forceinline__ void insert_batch(inner_hopper_scored_node_t staged, int lane) noexcept {
+    __device__ __forceinline__ void insert_batch(inner_cuda_scored_node_t staged, int lane) noexcept {
         (void)insert_batch_spilling(staged, lane);
     }
 
@@ -179,18 +179,18 @@ struct inner_hopper_sorted_pool {
      *      union's worst 32 - sentinels while the pool still has room. @return This
      *      lane's displaced entry, for the caller to spill onward or drop.
      */
-    __device__ __forceinline__ inner_hopper_scored_node_t insert_batch_spilling(inner_hopper_scored_node_t staged,
-                                                                                int lane) noexcept {
-        inner_hopper_scored_node_t const descending = inner_hopper_sort32(staged, lane).shuffle_xor(31);
-        inner_hopper_scored_node_t const displaced = entries_[slots_ - 1] < descending ? descending
-                                                                                       : entries_[slots_ - 1];
+    __device__ __forceinline__ inner_cuda_scored_node_t insert_batch_spilling(inner_cuda_scored_node_t staged,
+                                                                              int lane) noexcept {
+        inner_cuda_scored_node_t const descending = inner_cuda_sort32(staged, lane).shuffle_xor(31);
+        inner_cuda_scored_node_t const displaced = entries_[slots_ - 1] < descending ? descending
+                                                                                     : entries_[slots_ - 1];
         entries_[slots_ - 1] = entries_[slots_ - 1] < descending ? entries_[slots_ - 1] : descending;
 #pragma unroll
         for (u32_t stride = slots_ / 2; stride >= 1; stride >>= 1)
 #pragma unroll
             for (u32_t base = 0; base < slots_; ++base)
                 if ((base & stride) == 0 && (base | stride) < slots_) {
-                    inner_hopper_scored_node_t const a = entries_[base], b = entries_[base | stride];
+                    inner_cuda_scored_node_t const a = entries_[base], b = entries_[base | stride];
                     entries_[base] = a < b ? a : b;
                     entries_[base | stride] = a < b ? b : a;
                 }
@@ -199,7 +199,7 @@ struct inner_hopper_sorted_pool {
             bool const lower = (lane & j) == 0;
 #pragma unroll
             for (u32_t slot = 0; slot < slots_; ++slot) {
-                inner_hopper_scored_node_t const partner = entries_[slot].shuffle_xor(j);
+                inner_cuda_scored_node_t const partner = entries_[slot].shuffle_xor(j);
                 entries_[slot] = lower == (entries_[slot] < partner) ? entries_[slot] : partner;
             }
         }
@@ -210,19 +210,19 @@ struct inner_hopper_sorted_pool {
     __device__ __forceinline__ u32_t capacity() const noexcept { return capacity_k; }
 
     /** @brief The nearest entry not yet expanded - the frontier's @c top() - or the sentinel. */
-    __device__ __forceinline__ inner_hopper_scored_node_t nearest_unexpanded(int lane) const noexcept {
+    __device__ __forceinline__ inner_cuda_scored_node_t nearest_unexpanded(int lane) const noexcept {
 #pragma unroll
         for (u32_t slot = 0; slot < slots_; ++slot) {
             unsigned const mask = __ballot_sync(0xFFFFFFFFu, !entries_[slot].expanded());
             if (mask) return entries_[slot].shuffle_from(__ffs(mask) - 1);
         }
-        return inner_hopper_scored_node_t::sentinel();
+        return inner_cuda_scored_node_t::sentinel();
     }
 
     /** @brief Lazily deletes @p entry from the frontier - the unrolled-compare spelling
      *      keeps every slot index compile-time. Duplicates cannot arise: the exact
      *      visited set admits every id into the walk exactly once. */
-    __device__ __forceinline__ void mark_expanded_at(inner_hopper_scored_node_t entry) noexcept {
+    __device__ __forceinline__ void mark_expanded_at(inner_cuda_scored_node_t entry) noexcept {
 #pragma unroll
         for (u32_t slot = 0; slot < slots_; ++slot)
             if (entries_[slot] == entry) entries_[slot].mark_expanded();
@@ -234,7 +234,7 @@ struct inner_hopper_sorted_pool {
     }
     /** @brief True once every rank holds a real candidate - the radius becomes binding. */
     __device__ __forceinline__ bool full() const noexcept {
-        return !(entries_[slots_ - 1].shuffle_from(31) == inner_hopper_scored_node_t::sentinel());
+        return !(entries_[slots_ - 1].shuffle_from(31) == inner_cuda_scored_node_t::sentinel());
     }
 
     /**
@@ -243,8 +243,8 @@ struct inner_hopper_sorted_pool {
      *      arena frontier's final fold does: a node promoted out of the tail and later
      *      snapshotted back leaves two arena copies of one id.
      */
-    __device__ __forceinline__ inner_hopper_scored_node_t deduplicate(inner_hopper_scored_node_t staged,
-                                                                      int lane) const noexcept {
+    __device__ __forceinline__ inner_cuda_scored_node_t deduplicate(inner_cuda_scored_node_t staged,
+                                                                    int lane) const noexcept {
         inner_node_id_t const staged_id = staged.id();
         bool resident = false;
 #pragma unroll
@@ -253,15 +253,15 @@ struct inner_hopper_sorted_pool {
             bool holds = false;
 #pragma unroll
             for (u32_t slot = 0; slot < slots_; ++slot)
-                holds |= !(entries_[slot] == inner_hopper_scored_node_t::sentinel()) && entries_[slot].id() == probe_id;
+                holds |= !(entries_[slot] == inner_cuda_scored_node_t::sentinel()) && entries_[slot].id() == probe_id;
             if (__any_sync(0xFFFFFFFFu, holds) && lane == probe) resident = true;
         }
-        return resident ? inner_hopper_scored_node_t::sentinel() : staged;
+        return resident ? inner_cuda_scored_node_t::sentinel() : staged;
     }
 
     /** @brief Entry at @p rank, valid on every lane. */
-    __device__ __forceinline__ inner_hopper_scored_node_t rank_entry(u32_t rank) const noexcept {
-        inner_hopper_scored_node_t result = inner_hopper_scored_node_t::sentinel();
+    __device__ __forceinline__ inner_cuda_scored_node_t rank_entry(u32_t rank) const noexcept {
+        inner_cuda_scored_node_t result = inner_cuda_scored_node_t::sentinel();
 #pragma unroll
         for (u32_t slot = 0; slot < slots_; ++slot)
             if (slot == rank / 32) result = entries_[slot];
@@ -273,14 +273,14 @@ struct inner_hopper_sorted_pool {
  *      entries spilled from the register head, consumed by refills on frontier drain.
  *      Appends past @p capacity_ are counted, never written - the nearest candidates
  *      always reach the head first, so drops only ever shed the farthest tail. */
-struct inner_hopper_tail_pool {
-    inner_hopper_scored_node_t* entries_;
+struct inner_cuda_tail_pool {
+    inner_cuda_scored_node_t* entries_;
     u32_t size_ = 0;
     u32_t capacity_ = 0;
     u32_t dropped_ = 0;
 
-    __device__ __forceinline__ void append(inner_hopper_scored_node_t value, int lane) noexcept {
-        bool const live = !(value == inner_hopper_scored_node_t::sentinel());
+    __device__ __forceinline__ void append(inner_cuda_scored_node_t value, int lane) noexcept {
+        bool const live = !(value == inner_cuda_scored_node_t::sentinel());
         unsigned const live_mask = __ballot_sync(0xFFFFFFFFu, live);
         u32_t const ordinal = __popc(live_mask & ((1u << lane) - 1));
         if (live && size_ + ordinal < capacity_) entries_[size_ + ordinal] = value;
@@ -299,30 +299,30 @@ struct inner_hopper_tail_pool {
  *      one walk body serves this and the arena twin below.
  */
 template <u32_t slots_>
-struct inner_hopper_register_frontier {
-    inner_hopper_sorted_pool<slots_> ranks_;
+struct inner_cuda_register_frontier {
+    inner_cuda_sorted_pool<slots_> ranks_;
 
     __device__ __forceinline__ void reset(int) noexcept { ranks_.clear(); }
     __device__ __forceinline__ u32_t hops_budget() const noexcept { return ranks_.capacity() * 4; }
-    __device__ __forceinline__ void push_batch(inner_hopper_scored_node_t staged, int lane) noexcept {
+    __device__ __forceinline__ void push_batch(inner_cuda_scored_node_t staged, int lane) noexcept {
         ranks_.insert_batch(staged, lane);
     }
     /** @brief The nearest undiscovered-from candidate, already marked expanded - or the
      *      sentinel when every rank is spent. */
-    __device__ __forceinline__ inner_hopper_scored_node_t pop_nearest(int lane) noexcept {
-        inner_hopper_scored_node_t const nearest = ranks_.nearest_unexpanded(lane);
-        if (!(nearest == inner_hopper_scored_node_t::sentinel())) ranks_.mark_expanded_at(nearest);
+    __device__ __forceinline__ inner_cuda_scored_node_t pop_nearest(int lane) noexcept {
+        inner_cuda_scored_node_t const nearest = ranks_.nearest_unexpanded(lane);
+        if (!(nearest == inner_cuda_scored_node_t::sentinel())) ranks_.mark_expanded_at(nearest);
         return nearest;
     }
     /** @brief After a sentinel pop: full ranks mean the walk is done, not just starved. */
     __device__ __forceinline__ bool exhausted() const noexcept { return ranks_.full(); }
     /** @brief The classic radius test: full ranks and a candidate beyond the worst kept. */
-    __device__ __forceinline__ bool beyond_horizon(inner_hopper_scored_node_t candidate) const noexcept {
+    __device__ __forceinline__ bool beyond_horizon(inner_cuda_scored_node_t candidate) const noexcept {
         return ranks_.full() && candidate.distance_bits() > ranks_.radius();
     }
     /** @brief Ranked results are the container itself - nothing to fold. */
     __device__ __forceinline__ void finalize_ranks(int) noexcept {}
-    __device__ __forceinline__ inner_hopper_scored_node_t rank_entry(u32_t rank) const noexcept {
+    __device__ __forceinline__ inner_cuda_scored_node_t rank_entry(u32_t rank) const noexcept {
         return ranks_.rank_entry(rank);
     }
 };
@@ -335,9 +335,9 @@ struct inner_hopper_register_frontier {
  *      the walk retires after @c ef_target_ expansions instead of on a radius test - the
  *      expansion budget IS the ef semantic and the horizon.
  */
-struct inner_hopper_arena_frontier {
-    inner_hopper_sorted_pool<2> head_;
-    inner_hopper_tail_pool tail_;
+struct inner_cuda_arena_frontier {
+    inner_cuda_sorted_pool<2> head_;
+    inner_cuda_tail_pool tail_;
     u32_t ef_target_ = 0;
     u32_t expanded_ = 0;
 
@@ -347,27 +347,27 @@ struct inner_hopper_arena_frontier {
         expanded_ = 0;
     }
     __device__ __forceinline__ u32_t hops_budget() const noexcept { return ef_target_ * 4; }
-    __device__ __forceinline__ void push_batch(inner_hopper_scored_node_t staged, int lane) noexcept {
+    __device__ __forceinline__ void push_batch(inner_cuda_scored_node_t staged, int lane) noexcept {
         tail_.append(head_.insert_batch_spilling(staged, lane), lane);
     }
-    __device__ __forceinline__ inner_hopper_scored_node_t pop_nearest(int lane) noexcept {
+    __device__ __forceinline__ inner_cuda_scored_node_t pop_nearest(int lane) noexcept {
         // A consumed expansion budget IS the frontier's edge: reporting starvation here
         // routes the walk into its drained-frontier exit, where exhausted() seals it.
-        if (exhausted()) return inner_hopper_scored_node_t::sentinel();
-        inner_hopper_scored_node_t nearest = head_.nearest_unexpanded(lane);
-        if (nearest == inner_hopper_scored_node_t::sentinel()) {
+        if (exhausted()) return inner_cuda_scored_node_t::sentinel();
+        inner_cuda_scored_node_t nearest = head_.nearest_unexpanded(lane);
+        if (nearest == inner_cuda_scored_node_t::sentinel()) {
             refill(lane);
             nearest = head_.nearest_unexpanded(lane);
         }
-        if (!(nearest == inner_hopper_scored_node_t::sentinel())) {
+        if (!(nearest == inner_cuda_scored_node_t::sentinel())) {
             head_.mark_expanded_at(nearest);
             ++expanded_;
         }
         return nearest;
     }
     __device__ __forceinline__ bool exhausted() const noexcept { return expanded_ >= ef_target_; }
-    __device__ __forceinline__ bool beyond_horizon(inner_hopper_scored_node_t) const noexcept { return false; }
-    __device__ __forceinline__ inner_hopper_scored_node_t rank_entry(u32_t rank) const noexcept {
+    __device__ __forceinline__ bool beyond_horizon(inner_cuda_scored_node_t) const noexcept { return false; }
+    __device__ __forceinline__ inner_cuda_scored_node_t rank_entry(u32_t rank) const noexcept {
         return head_.rank_entry(rank);
     }
 
@@ -379,16 +379,16 @@ struct inner_hopper_arena_frontier {
      *      but refills recur on every drain, so promotion order only affects scheduling,
      *      never membership. */
     __device__ __forceinline__ void refill(int lane) noexcept {
-        inner_hopper_scored_node_t best = inner_hopper_scored_node_t::sentinel();
+        inner_cuda_scored_node_t best = inner_cuda_scored_node_t::sentinel();
         u32_t best_index = 0;
         for (u32_t index = lane; index < tail_.size_; index += 32) {
-            inner_hopper_scored_node_t const entry = tail_.entries_[index];
+            inner_cuda_scored_node_t const entry = tail_.entries_[index];
             if (!entry.expanded() && entry < best) best = entry, best_index = index;
         }
         __syncwarp();
-        if (!__ballot_sync(0xFFFFFFFFu, !(best == inner_hopper_scored_node_t::sentinel()))) return;
-        if (!(best == inner_hopper_scored_node_t::sentinel())) {
-            inner_hopper_scored_node_t consumed = best;
+        if (!__ballot_sync(0xFFFFFFFFu, !(best == inner_cuda_scored_node_t::sentinel()))) return;
+        if (!(best == inner_cuda_scored_node_t::sentinel())) {
+            inner_cuda_scored_node_t consumed = best;
             consumed.mark_expanded();
             tail_.entries_[best_index] = consumed;
         }
@@ -402,17 +402,17 @@ struct inner_hopper_arena_frontier {
      *      head generation plus every tail entry, duplicates dying in the exact id probe -
      *      and parks them in the head for ranked extraction. Call once, after the walk. */
     __device__ __forceinline__ void finalize_ranks(int lane) noexcept {
-        inner_hopper_sorted_pool<2> results;
+        inner_cuda_sorted_pool<2> results;
         results.clear();
         results.insert_batch(head_.entries_[0], lane);
         results.insert_batch(head_.entries_[1], lane);
         for (u32_t base = 0; base < tail_.size_; base += 32) {
             u32_t const index = base + lane;
-            inner_hopper_scored_node_t entry = index < tail_.size_ ? tail_.entries_[index]
-                                                                   : inner_hopper_scored_node_t::sentinel();
+            inner_cuda_scored_node_t entry = index < tail_.size_ ? tail_.entries_[index]
+                                                                 : inner_cuda_scored_node_t::sentinel();
             // Two arena copies of one node can share a chunk - keep the first per id.
             unsigned const peers = __match_any_sync(0xFFFFFFFFu, entry.id());
-            if (peers & ((1u << lane) - 1)) entry = inner_hopper_scored_node_t::sentinel();
+            if (peers & ((1u << lane) - 1)) entry = inner_cuda_scored_node_t::sentinel();
             entry = results.deduplicate(entry, lane);
             results.insert_batch(entry, lane);
         }
@@ -434,7 +434,7 @@ struct inner_hopper_arena_frontier {
  *  probe budget exhausted on a full neighborhood - reports ids as already visited, so an
  *  under-provisioned walk starves and retires deterministically instead of looping.
  */
-struct inner_hopper_visited_set {
+struct inner_cuda_visited_set {
     /** @brief Packed @b {epoch,id} slots: an entry is live only when its epoch matches
      *      this walk's, so "resetting" is bumping one register - the host zeroes the
      *      arena once per launch batch, and epoch zero marks never-used. */
@@ -471,7 +471,7 @@ struct inner_hopper_visited_set {
 
 /**
  *
- *  @section inner_hopper_kits Math Kits
+ *  @section inner_cuda_kits Math Kits
  *
  *  A kit binds one storage dtype to one metric, mirroring the CPU metric kits: fragments
  *  are 16-byte register tiles, and metrics with precomputable norms finalize "through the
@@ -482,9 +482,9 @@ struct inner_hopper_visited_set {
  *  reuse @c distance(dot, make_query_state(norms_a), norms_b).
  */
 template <typename kit_>
-concept inner_hopper_kit = requires(typename kit_::fragment_t fragment, typename kit_::accumulator_t accumulator,
-                                    typename kit_::norms_accumulator_t norms_accumulator, typename kit_::norms_t norms,
-                                    typename kit_::query_state_t query_state, typename kit_::dot_t dot) {
+concept inner_cuda_kit = requires(typename kit_::fragment_t fragment, typename kit_::accumulator_t accumulator,
+                                  typename kit_::norms_accumulator_t norms_accumulator, typename kit_::norms_t norms,
+                                  typename kit_::query_state_t query_state, typename kit_::dot_t dot) {
     typename kit_::scalar_t;
     typename kit_::fragment_t;
     typename kit_::accumulator_t;
@@ -506,7 +506,7 @@ concept inner_hopper_kit = requires(typename kit_::fragment_t fragment, typename
 };
 
 /** @brief Shared @c i8 dot arithmetic - every @c i8 metric kit inherits it. */
-struct inner_hopper_i8_dot_kit {
+struct inner_cuda_i8_dot_kit {
     using scalar_t = nk::i8_t;
     using fragment_t = uint4;
     using accumulator_t = int;
@@ -556,16 +556,16 @@ struct inner_hopper_i8_dot_kit {
     }
 };
 
-struct inner_hopper_i8_angular_kit : inner_hopper_i8_dot_kit {
-    using base_t = inner_hopper_i8_dot_kit;
+struct inner_cuda_i8_angular_kit : inner_cuda_i8_dot_kit {
+    using base_t = inner_cuda_i8_dot_kit;
     static __device__ __forceinline__ inner_distance_t distance(int dot, typename base_t::query_state_t query_state,
                                                                 typename base_t::norms_t norms) noexcept {
         return 1.0f - static_cast<f32_t>(dot) * query_state.rsqrt * rsqrtf(static_cast<f32_t>(norms.sumsq));
     }
 };
 
-struct inner_hopper_i8_sqeuclidean_kit : inner_hopper_i8_dot_kit {
-    using base_t = inner_hopper_i8_dot_kit;
+struct inner_cuda_i8_sqeuclidean_kit : inner_cuda_i8_dot_kit {
+    using base_t = inner_cuda_i8_dot_kit;
     static __device__ __forceinline__ inner_distance_t distance(int dot, typename base_t::query_state_t query_state,
                                                                 typename base_t::norms_t norms) noexcept {
         return static_cast<f32_t>(query_state.sumsq) + static_cast<f32_t>(norms.sumsq) - 2.0f * static_cast<f32_t>(dot);
@@ -575,21 +575,21 @@ struct inner_hopper_i8_sqeuclidean_kit : inner_hopper_i8_dot_kit {
 /** @brief Maps a (dtype, metric) pair onto its device kit; unsupported pairs fail the
  *      index instantiation with a one-line constraint error. */
 template <nk_dtype_t vector_dtype_, nk_kernel_kind_t kernel_kind_>
-struct inner_hopper_kit_for;
+struct inner_cuda_kit_for;
 
 template <>
-struct inner_hopper_kit_for<nk_i8_k, nk_kernel_angular_k> {
-    using kit_t = inner_hopper_i8_angular_kit;
+struct inner_cuda_kit_for<nk_i8_k, nk_kernel_angular_k> {
+    using kit_t = inner_cuda_i8_angular_kit;
 };
 template <>
-struct inner_hopper_kit_for<nk_i8_k, nk_kernel_sqeuclidean_k> {
-    using kit_t = inner_hopper_i8_sqeuclidean_kit;
+struct inner_cuda_kit_for<nk_i8_k, nk_kernel_sqeuclidean_k> {
+    using kit_t = inner_cuda_i8_sqeuclidean_kit;
 };
 
 /** @brief Generic cross-lane reduction: folds sub-warp partials of width @p lanes_per_row
  *      (a warp-uniform power of two) down to the leader lane. One tree serves every kit. */
 template <typename dot_type_>
-__device__ __forceinline__ dot_type_ inner_hopper_reduce(dot_type_ partial, u32_t lanes_per_row) noexcept {
+__device__ __forceinline__ dot_type_ inner_cuda_reduce(dot_type_ partial, u32_t lanes_per_row) noexcept {
     for (u32_t offset = lanes_per_row / 2; offset; offset >>= 1)
         partial += __shfl_down_sync(0xFFFFFFFFu, partial, offset, lanes_per_row);
     return partial;
@@ -598,8 +598,8 @@ __device__ __forceinline__ dot_type_ inner_hopper_reduce(dot_type_ partial, u32_
 #endif // defined(__CUDACC__)
 
 /** @brief Device-resident counter block - all-RMW, no compare-and-swap anywhere.
- *      @ref inner_hopper_index_concurrency */
-struct inner_hopper_counters_t {
+ *      @ref inner_cuda_index_concurrency */
+struct inner_cuda_counters_t {
     /** @brief Identity dispenser and work-queue head fused into one word: a warp's fetch_add
      *      result @b is its node id. Only the host may reset it, between kernel launches,
      *      to the published count - over-claimed ids die with their launch. */
@@ -619,8 +619,8 @@ struct inner_hopper_counters_t {
  *      per-row norms, and fixed-capacity neighbor lists. Under the flat virtual-memory
  *      arena the node id @b is the location - one multiply, no chunk directory.
  */
-template <inner_hopper_kit kit_>
-struct inner_hopper_planes_view {
+template <inner_cuda_kit kit_>
+struct inner_cuda_planes_view {
     using fragment_t = typename kit_::fragment_t;
     using norms_t = typename kit_::norms_t;
 
@@ -678,7 +678,7 @@ struct inner_hopper_planes_view {
  *  livelock hazard unique to the GPU, and skipped reverse edges are the accepted,
  *  telemetered cost.
  */
-struct inner_hopper_neighbors_ref_t {
+struct inner_cuda_neighbors_ref_t {
     u32_t* row_; // Non-const even for readers: `cuda::atomic_ref` cannot bind const words pre-P3323.
     u32_t capacity_;
 
@@ -745,10 +745,10 @@ struct inner_hopper_neighbors_ref_t {
 };
 
 /** @brief Per-warp register telemetry, folded into the global counters once per node. */
-struct inner_hopper_telemetry_t {
+struct inner_cuda_telemetry_t {
     u64_t hops = 0, scored = 0, lock_attempts = 0, lock_skips = 0, full_lists = 0, restarts = 0, locked_drops = 0;
 
-    __device__ __forceinline__ void flush(inner_hopper_counters_t* counters, int lane) noexcept {
+    __device__ __forceinline__ void flush(inner_cuda_counters_t* counters, int lane) noexcept {
         // @c atomicAdd spells 64-bit as `unsigned long long`; @c u64_t is layout-identical.
         static_assert(sizeof(u64_t) == sizeof(unsigned long long));
         if (lane != 0) return;
@@ -769,10 +769,10 @@ struct inner_hopper_telemetry_t {
  *      lane's PRNG stream, and the running telemetry.
  */
 template <typename frontier_>
-struct inner_hopper_traversal_context {
+struct inner_cuda_traversal_context {
     frontier_ frontier;
     splitmix_u32_t random_generator;
-    inner_hopper_telemetry_t telemetry;
+    inner_cuda_telemetry_t telemetry;
 };
 
 /**
@@ -788,11 +788,11 @@ struct inner_hopper_traversal_context {
  *  synchronizes with its publisher's release. @return This lane's scored entry, or the
  *  sentinel on lanes past @p gathered_count.
  */
-template <inner_hopper_kit kit_>
-__device__ __forceinline__ inner_hopper_scored_node_t inner_hopper_score_batch( //
-    inner_hopper_planes_view<kit_> const& planes, typename kit_::fragment_t const* query_span,
-    typename kit_::query_state_t query_state, u32_t const (&gathered_ids)[inner_hopper_cache_rows_k],
-    inner_hopper_scored_node_t (&gathered_scored)[32], u32_t gathered_count, int lane, u32_t first_row = 0) noexcept {
+template <inner_cuda_kit kit_>
+__device__ __forceinline__ inner_cuda_scored_node_t inner_cuda_score_batch( //
+    inner_cuda_planes_view<kit_> const& planes, typename kit_::fragment_t const* query_span,
+    typename kit_::query_state_t query_state, u32_t const (&gathered_ids)[inner_cuda_cache_rows_k],
+    inner_cuda_scored_node_t (&gathered_scored)[32], u32_t gathered_count, int lane, u32_t first_row = 0) noexcept {
 
     using norms_t = typename kit_::norms_t;
     constexpr u32_t pipeline_k = kit_::max_steps_in_flight_k;
@@ -838,29 +838,29 @@ __device__ __forceinline__ inner_hopper_scored_node_t inner_hopper_score_batch( 
         }
 #pragma unroll
         for (u32_t slot = 0; slot != pipeline_k; ++slot) {
-            typename kit_::dot_t const dot = inner_hopper_reduce(kit_::partial_to_dot(accumulators[slot]),
-                                                                 planes.lanes_per_row);
+            typename kit_::dot_t const dot = inner_cuda_reduce(kit_::partial_to_dot(accumulators[slot]),
+                                                               planes.lanes_per_row);
             u32_t const row = (group_base + slot) * rows_per_gather + subwarp;
             if (leader && group_base + slot < planes.lanes_per_row && row < gathered_count) {
                 inner_distance_t const distance = kit_::distance(dot, query_state, batch_norms[slot]);
-                gathered_scored[row] = inner_hopper_scored_node_t::make(distance, gathered_ids[first_row + row]);
+                gathered_scored[row] = inner_cuda_scored_node_t::make(distance, gathered_ids[first_row + row]);
             }
         }
     }
     __syncwarp();
-    return lane < static_cast<int>(gathered_count) ? gathered_scored[lane] : inner_hopper_scored_node_t::sentinel();
+    return lane < static_cast<int>(gathered_count) ? gathered_scored[lane] : inner_cuda_scored_node_t::sentinel();
 }
 
 /** @brief Scores one gathered chunk against the query and folds it into the pool,
  *      dropping the entries the pool already holds. */
-template <inner_hopper_kit kit_, typename frontier_>
-__device__ __forceinline__ void inner_hopper_score_into_frontier( //
-    inner_hopper_planes_view<kit_> const& planes, typename kit_::fragment_t const* query_span,
-    typename kit_::query_state_t query_state, u32_t const (&gathered_ids)[inner_hopper_cache_rows_k],
-    inner_hopper_scored_node_t (&gathered_scored)[32], u32_t gathered_count,
-    inner_hopper_traversal_context<frontier_>& context, int lane) noexcept {
+template <inner_cuda_kit kit_, typename frontier_>
+__device__ __forceinline__ void inner_cuda_score_into_frontier( //
+    inner_cuda_planes_view<kit_> const& planes, typename kit_::fragment_t const* query_span,
+    typename kit_::query_state_t query_state, u32_t const (&gathered_ids)[inner_cuda_cache_rows_k],
+    inner_cuda_scored_node_t (&gathered_scored)[32], u32_t gathered_count,
+    inner_cuda_traversal_context<frontier_>& context, int lane) noexcept {
     context.telemetry.scored += gathered_count;
-    inner_hopper_scored_node_t const staged = inner_hopper_score_batch<kit_>( //
+    inner_cuda_scored_node_t const staged = inner_cuda_score_batch<kit_>( //
         planes, query_span, query_state, gathered_ids, gathered_scored, gathered_count, lane);
     // No dedup: the exact visited set upstream guarantees every id stages once.
     context.frontier.push_batch(staged, lane);
@@ -872,15 +872,15 @@ __device__ __forceinline__ void inner_hopper_score_into_frontier( //
  *      forward on unpublished hits so out-of-order publication only costs retries.
  *  @return The number of staged landmarks; zero when the visited set saturated the bound.
  */
-template <inner_hopper_kit kit_>
-__device__ __forceinline__ u32_t inner_hopper_sample_landmarks( //
-    inner_hopper_planes_view<kit_> const& planes, inner_node_id_t sampling_bound, inner_hopper_visited_set visited,
-    splitmix_u32_t& random_generator, u32_t (&gathered_ids)[inner_hopper_cache_rows_k], int lane) noexcept {
+template <inner_cuda_kit kit_>
+__device__ __forceinline__ u32_t inner_cuda_sample_landmarks( //
+    inner_cuda_planes_view<kit_> const& planes, inner_node_id_t sampling_bound, inner_cuda_visited_set visited,
+    splitmix_u32_t& random_generator, u32_t (&gathered_ids)[inner_cuda_cache_rows_k], int lane) noexcept {
 
     inner_node_id_t draw = random_generator.bounded(sampling_bound);
     bool published = false;
     for (int attempt = 0; attempt != 4 && !published; ++attempt) {
-        inner_hopper_neighbors_ref_t const row {planes.neighbors_for(draw), planes.connectivity};
+        inner_cuda_neighbors_ref_t const row {planes.neighbors_for(draw), planes.connectivity};
         published = row.peek_first() != inner_node_id_unknown_k;
         if (!published) draw = draw + 1 == sampling_bound ? 0 : draw + 1;
     }
@@ -898,32 +898,32 @@ __device__ __forceinline__ u32_t inner_hopper_sample_landmarks( //
  *      locked candidates after a bounded retry, and leaves the nearest published
  *      candidates ranked in @c context.frontier.
  */
-template <inner_hopper_kit kit_, typename frontier_>
-__device__ __forceinline__ void inner_hopper_search_around( //
-    inner_hopper_planes_view<kit_> const& planes, typename kit_::fragment_t const* query_span,
-    typename kit_::query_state_t query_state, inner_node_id_t sampling_bound, inner_hopper_visited_set visited,
-    u32_t (&gathered_ids)[inner_hopper_cache_rows_k], inner_hopper_scored_node_t (&gathered_scored)[32],
-    inner_hopper_traversal_context<frontier_>& context, int lane) noexcept {
+template <inner_cuda_kit kit_, typename frontier_>
+__device__ __forceinline__ void inner_cuda_search_around( //
+    inner_cuda_planes_view<kit_> const& planes, typename kit_::fragment_t const* query_span,
+    typename kit_::query_state_t query_state, inner_node_id_t sampling_bound, inner_cuda_visited_set visited,
+    u32_t (&gathered_ids)[inner_cuda_cache_rows_k], inner_cuda_scored_node_t (&gathered_scored)[32],
+    inner_cuda_traversal_context<frontier_>& context, int lane) noexcept {
 
     constexpr u32_t restarts_cap_k = 8;
     frontier_& frontier = context.frontier;
-    inner_hopper_telemetry_t& telemetry = context.telemetry;
+    inner_cuda_telemetry_t& telemetry = context.telemetry;
     u32_t const hops_cap = frontier.hops_budget();
     frontier.reset(lane);
 
     bool seeding = true;
     while (true) {
         if (seeding) {
-            u32_t const gathered_count = inner_hopper_sample_landmarks<kit_>( //
+            u32_t const gathered_count = inner_cuda_sample_landmarks<kit_>( //
                 planes, sampling_bound, visited, context.random_generator, gathered_ids, lane);
             if (gathered_count)
-                inner_hopper_score_into_frontier<kit_>( //
+                inner_cuda_score_into_frontier<kit_>( //
                     planes, query_span, query_state, gathered_ids, gathered_scored, gathered_count, context, lane);
             seeding = false;
         }
         else {
-            inner_hopper_scored_node_t const candidate = frontier.pop_nearest(lane);
-            if (candidate == inner_hopper_scored_node_t::sentinel()) {
+            inner_cuda_scored_node_t const candidate = frontier.pop_nearest(lane);
+            if (candidate == inner_cuda_scored_node_t::sentinel()) {
                 // Starvation restart: a drained frontier before an exhausted walk means
                 // nothing reachable from its seeds remains - re-seed and continue.
                 if (frontier.exhausted() || telemetry.restarts >= restarts_cap_k || telemetry.hops >= hops_cap) break;
@@ -942,7 +942,7 @@ __device__ __forceinline__ void inner_hopper_search_around( //
             // leader lane polls the racing lock word: per-lane polls can observe different
             // values of a concurrent unlock, and a value-dependent `continue` would fork
             // the warp across loop iterations - fatal for every collective downstream.
-            inner_hopper_neighbors_ref_t const row {planes.neighbors_for(candidate.id()), planes.connectivity};
+            inner_cuda_neighbors_ref_t const row {planes.neighbors_for(candidate.id()), planes.connectivity};
             inner_node_id_t first_value = inner_node_id_unknown_k;
             if (lane == 0) {
                 first_value = row.peek_first();
@@ -970,7 +970,7 @@ __device__ __forceinline__ void inner_hopper_search_around( //
             __syncwarp();
             u32_t const gathered_count = __popc(fresh_mask);
             if (gathered_count)
-                inner_hopper_score_into_frontier<kit_>( //
+                inner_cuda_score_into_frontier<kit_>( //
                     planes, query_span, query_state, gathered_ids, gathered_scored, gathered_count, context, lane);
             // Rows wider than a warp continue a warp-width of slots at a time; the bound is
             // warp-uniform, so every collective executes at one program point on every lane.
@@ -986,7 +986,7 @@ __device__ __forceinline__ void inner_hopper_search_around( //
                 __syncwarp();
                 u32_t const wide_count = __popc(wide_mask);
                 if (wide_count)
-                    inner_hopper_score_into_frontier<kit_>( //
+                    inner_cuda_score_into_frontier<kit_>( //
                         planes, query_span, query_state, gathered_ids, gathered_scored, wide_count, context, lane);
             }
         }
@@ -996,7 +996,7 @@ __device__ __forceinline__ void inner_hopper_search_around( //
 /** @brief Runtime-strided view over the warp's shared vector cache - rows of
  *      @c row_fragments_ fragments each, aliasing the scratch slice. */
 template <typename fragment_type_>
-struct inner_hopper_vector_cache {
+struct inner_cuda_vector_cache {
     fragment_type_* data_;
     u32_t row_fragments_;
 
@@ -1016,28 +1016,28 @@ struct inner_hopper_vector_cache {
  *      and one barrier separates the staged reads from the scattered writes. Entries
  *      ranked past @c capacity_ are dropped - the insert-with-limit contract.
  */
-struct inner_hopper_sorted_buffer {
-    inner_hopper_scored_node_t* entries_;
+struct inner_cuda_sorted_buffer {
+    inner_cuda_scored_node_t* entries_;
     u32_t size_ = 0;
     u32_t capacity_;
 
-    __device__ __forceinline__ inner_hopper_scored_node_t at(u32_t rank) const noexcept { return entries_[rank]; }
+    __device__ __forceinline__ inner_cuda_scored_node_t at(u32_t rank) const noexcept { return entries_[rank]; }
 
-    __device__ __forceinline__ void insert_chunk(inner_hopper_scored_node_t value, u32_t count, int lane) noexcept {
-        constexpr u32_t span_chunks_k = divide_round_up(inner_hopper_cache_rows_k, 32u);
+    __device__ __forceinline__ void insert_chunk(inner_cuda_scored_node_t value, u32_t count, int lane) noexcept {
+        constexpr u32_t span_chunks_k = divide_round_up(inner_cuda_cache_rows_k, 32u);
         bool const incoming = static_cast<u32_t>(lane) < count;
         u32_t incoming_rank = incoming ? static_cast<u32_t>(lane) : 0;
         for (u32_t i = 0; i != size_; ++i) // Warp-uniform bound: every lane walks the span.
             incoming_rank += incoming && entries_[i].distance_bits() <= value.distance_bits();
         // Existing entries shift by the number of incoming values strictly ahead of them;
         // ties resolve the other way than above, so no two final positions collide.
-        inner_hopper_scored_node_t moved[span_chunks_k];
+        inner_cuda_scored_node_t moved[span_chunks_k];
         u32_t moved_to[span_chunks_k];
         u32_t chunk = 0;
         for (u32_t base = 0; base < size_; base += 32, ++chunk) {
             u32_t const index = base + lane;
             bool const active = index < size_;
-            moved[chunk] = active ? entries_[index] : inner_hopper_scored_node_t::sentinel();
+            moved[chunk] = active ? entries_[index] : inner_cuda_scored_node_t::sentinel();
             u32_t shift = 0;
             for (u32_t source = 0; source != count; ++source) // Warp-uniform: shuffles inside.
                 shift += active &&
@@ -1057,9 +1057,9 @@ struct inner_hopper_sorted_buffer {
 /** @brief Shared-memory spans backing one warp's link re-selection, carved after the
  *      vector cache: the selected target ids, the ascending per-link scores, and the
  *      refined cache-row indices. */
-struct inner_hopper_relink_scratch {
+struct inner_cuda_relink_scratch {
     u32_t* selected_ids;
-    inner_hopper_scored_node_t* link_entries;
+    inner_cuda_scored_node_t* link_entries;
     u32_t* refined_rows;
 };
 
@@ -1071,22 +1071,22 @@ struct inner_hopper_relink_scratch {
  *      span, ascending by construction since candidates arrive ascending.
  *  @return The kept-link count; @p selected_ids holds that many node ids on return.
  */
-template <inner_hopper_kit kit_, typename frontier_>
-__device__ __forceinline__ u32_t inner_hopper_select_diverse( //
-    inner_hopper_planes_view<kit_> const& planes, inner_hopper_vector_cache<typename kit_::fragment_t> cache,
-    typename kit_::norms_t (&cache_norms)[inner_hopper_cache_rows_k], u32_t (&gathered_ids)[inner_hopper_cache_rows_k],
-    u32_t* selected_ids, inner_hopper_traversal_context<frontier_>& context, int lane) noexcept {
+template <inner_cuda_kit kit_, typename frontier_>
+__device__ __forceinline__ u32_t inner_cuda_select_diverse( //
+    inner_cuda_planes_view<kit_> const& planes, inner_cuda_vector_cache<typename kit_::fragment_t> cache,
+    typename kit_::norms_t (&cache_norms)[inner_cuda_cache_rows_k], u32_t (&gathered_ids)[inner_cuda_cache_rows_k],
+    u32_t* selected_ids, inner_cuda_traversal_context<frontier_>& context, int lane) noexcept {
 
     frontier_& frontier = context.frontier;
 
     // Stage the ascending prefix ids & cache their vectors and norms.
     u32_t candidates_count = 0;
 #pragma unroll
-    for (u32_t base = 0; base < inner_hopper_cache_rows_k; base += 32) {
-        inner_hopper_scored_node_t const entry = base + lane < 64 ? frontier.rank_entry(base + lane)
-                                                                  : inner_hopper_scored_node_t::sentinel();
-        unsigned const live = __ballot_sync(0xFFFFFFFFu, !(entry == inner_hopper_scored_node_t::sentinel()));
-        if (!(entry == inner_hopper_scored_node_t::sentinel())) gathered_ids[base + lane] = entry.id();
+    for (u32_t base = 0; base < inner_cuda_cache_rows_k; base += 32) {
+        inner_cuda_scored_node_t const entry = base + lane < 64 ? frontier.rank_entry(base + lane)
+                                                                : inner_cuda_scored_node_t::sentinel();
+        unsigned const live = __ballot_sync(0xFFFFFFFFu, !(entry == inner_cuda_scored_node_t::sentinel()));
+        if (!(entry == inner_cuda_scored_node_t::sentinel())) gathered_ids[base + lane] = entry.id();
         candidates_count += __popc(live);
         if (live != 0xFFFFFFFFu) break;
     }
@@ -1147,26 +1147,25 @@ __device__ __forceinline__ u32_t inner_hopper_select_diverse( //
  *  always runnable. A lock that cannot be acquired within the attempt budget skips the
  *  edge; approximate search tolerates the missing reverse link by construction.
  */
-template <inner_hopper_kit kit_>
-__device__ __forceinline__ void inner_hopper_back_link_neighbors( //
-    inner_hopper_planes_view<kit_> const& planes, inner_node_id_t new_node_id, typename kit_::norms_t new_norms,
-    inner_hopper_relink_scratch relink, u32_t selected_count,
-    inner_hopper_vector_cache<typename kit_::fragment_t> cache,
-    typename kit_::norms_t (&cache_norms)[inner_hopper_cache_rows_k], u32_t (&gathered_ids)[inner_hopper_cache_rows_k],
-    inner_hopper_scored_node_t (&gathered_scored)[32], splitmix_u32_t& random_generator,
-    inner_hopper_telemetry_t& telemetry, int lane) noexcept {
+template <inner_cuda_kit kit_>
+__device__ __forceinline__ void inner_cuda_back_link_neighbors( //
+    inner_cuda_planes_view<kit_> const& planes, inner_node_id_t new_node_id, typename kit_::norms_t new_norms,
+    inner_cuda_relink_scratch relink, u32_t selected_count, inner_cuda_vector_cache<typename kit_::fragment_t> cache,
+    typename kit_::norms_t (&cache_norms)[inner_cuda_cache_rows_k], u32_t (&gathered_ids)[inner_cuda_cache_rows_k],
+    inner_cuda_scored_node_t (&gathered_scored)[32], splitmix_u32_t& random_generator,
+    inner_cuda_telemetry_t& telemetry, int lane) noexcept {
 
     // The cache hosts every existing link, the newcomer on the last row, and the re-linked
     // target itself on the row before it - the scored batch reads the target as its query.
-    constexpr u32_t newcomer_row_k = inner_hopper_cache_rows_k - 1;
-    constexpr u32_t target_row_k = inner_hopper_cache_rows_k - 2;
+    constexpr u32_t newcomer_row_k = inner_cuda_cache_rows_k - 1;
+    constexpr u32_t target_row_k = inner_cuda_cache_rows_k - 2;
     // Those two reserved rows also bound how many links one warp can re-select in shared
     // memory; wider rows keep sentinel tails until the arena lifts the cache ceiling.
-    u32_t const connectivity = min_of(planes.connectivity, inner_hopper_cache_rows_k - 2u);
+    u32_t const connectivity = min_of(planes.connectivity, inner_cuda_cache_rows_k - 2u);
 
     for (u32_t link = 0; link < selected_count; ++link) {
         inner_node_id_t const target = relink.selected_ids[link];
-        inner_hopper_neighbors_ref_t const row {planes.neighbors_for(target), connectivity};
+        inner_cuda_neighbors_ref_t const row {planes.neighbors_for(target), connectivity};
         inner_node_id_t first_value = inner_node_id_unknown_k;
         if (lane == 0) first_value = row.try_lock(back_link_lock_attempts_k, random_generator);
         first_value = __shfl_sync(0xFFFFFFFFu, first_value, 0);
@@ -1214,22 +1213,22 @@ __device__ __forceinline__ void inner_hopper_back_link_neighbors( //
         for (u32_t word = lane; word < planes.row_fragments; word += 32)
             accumulator = kit_::accumulate_dot(planes.vector_for(new_node_id, word), cache.at(target_row_k, word),
                                                accumulator);
-        typename kit_::dot_t const self_dot = inner_hopper_reduce(kit_::partial_to_dot(accumulator), 32u);
+        typename kit_::dot_t const self_dot = inner_cuda_reduce(kit_::partial_to_dot(accumulator), 32u);
         f32_t const newcomer_distance = kit_::distance(__shfl_sync(0xFFFFFFFFu, self_dot, 0), target_state, new_norms);
         telemetry.scored += connectivity + 1;
 
         // Score the links a warp-width at a time, pre-sort each chunk with the bitonic
         // network, and merge every chunk into the ascending sorted buffer - the ported
         // insert-with-limit, so any link count the cache can hold walks in order.
-        inner_hopper_sorted_buffer links_sorted {relink.link_entries, 0, connectivity};
+        inner_cuda_sorted_buffer links_sorted {relink.link_entries, 0, connectivity};
         for (u32_t base = 0; base < connectivity; base += 32) {
             u32_t const chunk_count = min_of(connectivity - base, 32u);
-            inner_hopper_scored_node_t const scored = inner_hopper_score_batch<kit_>( //
+            inner_cuda_scored_node_t const scored = inner_cuda_score_batch<kit_>( //
                 planes, cache.row(target_row_k), target_state, gathered_ids, gathered_scored, chunk_count, lane, base);
-            inner_hopper_scored_node_t const sorted_chunk = inner_hopper_sort32(
+            inner_cuda_scored_node_t const sorted_chunk = inner_cuda_sort32(
                 static_cast<u32_t>(lane) < chunk_count
-                    ? inner_hopper_scored_node_t::make(scored.distance(), base + lane) // Id = slot index.
-                    : inner_hopper_scored_node_t::sentinel(),
+                    ? inner_cuda_scored_node_t::make(scored.distance(), base + lane) // Id = slot index.
+                    : inner_cuda_scored_node_t::sentinel(),
                 lane);
             links_sorted.insert_chunk(sorted_chunk, chunk_count, lane);
         }
@@ -1258,9 +1257,9 @@ __device__ __forceinline__ void inner_hopper_back_link_neighbors( //
         bool newcomer_pending = true;
         u32_t refined_count = 0;
         for (u32_t step = 0; step != connectivity + 1 && refined_count != connectivity; ++step) {
-            inner_hopper_scored_node_t const next_link = existing_index < links_sorted.size_
-                                                             ? links_sorted.at(existing_index)
-                                                             : inner_hopper_scored_node_t::sentinel();
+            inner_cuda_scored_node_t const next_link = existing_index < links_sorted.size_
+                                                           ? links_sorted.at(existing_index)
+                                                           : inner_cuda_scored_node_t::sentinel();
             bool const take_newcomer = newcomer_pending && newcomer_distance < next_link.distance();
             f32_t const candidate_distance = take_newcomer ? newcomer_distance : next_link.distance();
             u32_t const candidate_row = take_newcomer ? newcomer_row_k : next_link.id();
@@ -1314,8 +1313,8 @@ __device__ __forceinline__ void inner_hopper_back_link_neighbors( //
 /** @brief Full-warp reduction for the norms accumulators of the current kits - own-vector
  *      norms accumulate warp-strided across the whole row, whatever its fragment count.
  *      Only lane 0 holds the complete sums afterwards - always follow with
- *      @c inner_hopper_broadcast_norms before any lane-divergent consumer. */
-__device__ __forceinline__ int2 inner_hopper_reduce_norms(int2 partial) noexcept {
+ *      @c inner_cuda_broadcast_norms before any lane-divergent consumer. */
+__device__ __forceinline__ int2 inner_cuda_reduce_norms(int2 partial) noexcept {
 #pragma unroll
     for (u32_t offset = 16; offset; offset >>= 1) {
         partial.x += __shfl_down_sync(0xFFFFFFFFu, partial.x, offset);
@@ -1325,7 +1324,7 @@ __device__ __forceinline__ int2 inner_hopper_reduce_norms(int2 partial) noexcept
 }
 /** @brief Rebroadcasts lane 0's reduced norms to every lane - values that feed
  *      lane-divergent control flow must be warp-uniform. */
-__device__ __forceinline__ int2 inner_hopper_broadcast_norms(int2 reduced) noexcept {
+__device__ __forceinline__ int2 inner_cuda_broadcast_norms(int2 reduced) noexcept {
     reduced.x = __shfl_sync(0xFFFFFFFFu, reduced.x, 0);
     reduced.y = __shfl_sync(0xFFFFFFFFu, reduced.y, 0);
     return reduced;
@@ -1337,21 +1336,21 @@ __device__ __forceinline__ int2 inner_hopper_broadcast_norms(int2 reduced) noexc
  *      ask it for typed spans. Every slice holds the exact visited set; wide walks add
  *      the frontier's spill tail after it.
  */
-struct inner_hopper_arena_shape_t {
+struct inner_cuda_arena_shape_t {
     u32_t visited_slots;
     u32_t visited_hash_shift;
     u32_t tail_entries;
 
     constexpr std::size_t slice_bytes() const noexcept {
         return static_cast<std::size_t>(visited_slots) * sizeof(u64_t) +
-               static_cast<std::size_t>(tail_entries) * sizeof(inner_hopper_scored_node_t);
+               static_cast<std::size_t>(tail_entries) * sizeof(inner_cuda_scored_node_t);
     }
     __device__ __forceinline__ u64_t* visited_span(std::byte* base, std::size_t warp_index) const noexcept {
         return reinterpret_cast<u64_t*>(base + warp_index * slice_bytes());
     }
-    __device__ __forceinline__ inner_hopper_scored_node_t* tail_span(std::byte* base,
-                                                                     std::size_t warp_index) const noexcept {
-        return reinterpret_cast<inner_hopper_scored_node_t*>( //
+    __device__ __forceinline__ inner_cuda_scored_node_t* tail_span(std::byte* base,
+                                                                   std::size_t warp_index) const noexcept {
+        return reinterpret_cast<inner_cuda_scored_node_t*>( //
             base + warp_index * slice_bytes() + static_cast<std::size_t>(visited_slots) * sizeof(u64_t));
     }
 };
@@ -1359,9 +1358,9 @@ struct inner_hopper_arena_shape_t {
 /** @brief Geometry & plane pointers one insertion launch operates on. Every plane row a
  *      dispensable new_node_id can touch is mapped and sentinel-filled ahead of the launch, so
  *      growth hazards cannot reach the kernel. */
-template <inner_hopper_kit kit_>
-struct inner_hopper_build_view {
-    inner_hopper_planes_view<kit_> planes;
+template <inner_cuda_kit kit_>
+struct inner_cuda_build_view {
+    inner_cuda_planes_view<kit_> planes;
     /** @brief Incoming vectors, @b [rows,row_fragments] in dispensed-id order, device-resident. */
     typename kit_::fragment_t const* staging;
     /** @brief Ids strictly below this bound may be claimed & inserted by this launch. */
@@ -1371,15 +1370,15 @@ struct inner_hopper_build_view {
     u32_t scratch_bytes_per_warp;
     /** @brief The traversal arena and each warp's slice of it - the exact visited set. */
     std::byte* arena;
-    inner_hopper_arena_shape_t arena_shape;
-    inner_hopper_counters_t* counters;
+    inner_cuda_arena_shape_t arena_shape;
+    inner_cuda_counters_t* counters;
 };
 
 /** @brief Inputs & outputs of one search launch: a batch of queries in, the nearest ids
  *      and - when requested - their distances out, both ascending per query. */
-template <inner_hopper_kit kit_>
-struct inner_hopper_search_view {
-    inner_hopper_planes_view<kit_> planes;
+template <inner_cuda_kit kit_>
+struct inner_cuda_search_view {
+    inner_cuda_planes_view<kit_> planes;
     typename kit_::fragment_t const* queries; // @b [queries,row_fragments]
     inner_node_id_t* result_ids;              // @b [queries,count]
     inner_distance_t* result_distances;       // @b [queries,count]; null skips the writes
@@ -1394,8 +1393,8 @@ struct inner_hopper_search_view {
     /** @brief The traversal arena and each warp's slice of it - the exact visited set,
      *      then the wide frontier's spill tail. */
     std::byte* arena;
-    inner_hopper_arena_shape_t arena_shape;
-    inner_hopper_counters_t* counters;
+    inner_cuda_arena_shape_t arena_shape;
+    inner_cuda_counters_t* counters;
 };
 
 /**
@@ -1403,15 +1402,15 @@ struct inner_hopper_search_view {
  *      published graph, selects diverse links, publishes with one release store, then
  *      wires the reverse edges - the whole CPU insertion flow, one warp per node.
  */
-template <inner_hopper_kit kit_, typename frontier_>
-__device__ __forceinline__ void inner_hopper_insert_one( //
-    inner_hopper_build_view<kit_> const& view, inner_node_id_t new_node_id, inner_hopper_visited_set visited,
-    typename kit_::fragment_t* query_span, inner_hopper_vector_cache<typename kit_::fragment_t> cache,
-    inner_hopper_relink_scratch relink, typename kit_::norms_t (&cache_norms)[inner_hopper_cache_rows_k],
-    u32_t (&gathered_ids)[inner_hopper_cache_rows_k], inner_hopper_scored_node_t (&gathered_scored)[32],
-    inner_hopper_traversal_context<frontier_>& context, int lane) noexcept {
+template <inner_cuda_kit kit_, typename frontier_>
+__device__ __forceinline__ void inner_cuda_insert_one( //
+    inner_cuda_build_view<kit_> const& view, inner_node_id_t new_node_id, inner_cuda_visited_set visited,
+    typename kit_::fragment_t* query_span, inner_cuda_vector_cache<typename kit_::fragment_t> cache,
+    inner_cuda_relink_scratch relink, typename kit_::norms_t (&cache_norms)[inner_cuda_cache_rows_k],
+    u32_t (&gathered_ids)[inner_cuda_cache_rows_k], inner_cuda_scored_node_t (&gathered_scored)[32],
+    inner_cuda_traversal_context<frontier_>& context, int lane) noexcept {
 
-    inner_hopper_planes_view<kit_> const& planes = view.planes;
+    inner_cuda_planes_view<kit_> const& planes = view.planes;
 
     // Land the payload: copy the vector fragments, derive both norms from the owned bytes.
     // The same pass parks the query in its shared span for the traversal to re-read.
@@ -1425,8 +1424,8 @@ __device__ __forceinline__ void inner_hopper_insert_one( //
         query_span[fragment] = value;
         norms_accumulator = kit_::accumulate_norms(value, norms_accumulator);
     }
-    norms_accumulator = inner_hopper_reduce_norms(norms_accumulator);
-    norms_accumulator = inner_hopper_broadcast_norms(norms_accumulator);
+    norms_accumulator = inner_cuda_reduce_norms(norms_accumulator);
+    norms_accumulator = inner_cuda_broadcast_norms(norms_accumulator);
     typename kit_::norms_t const new_norms = kit_::partials_to_norms(norms_accumulator);
     if (lane == 0) planes.norm_ref_for(new_node_id) = new_norms;
     typename kit_::query_state_t const query_state = kit_::make_query_state(new_norms);
@@ -1434,15 +1433,15 @@ __device__ __forceinline__ void inner_hopper_insert_one( //
 
     // Walk the published prefix - a virgin index publishes an empty node instead.
     if (new_node_id != 0)
-        inner_hopper_search_around<kit_>( //
+        inner_cuda_search_around<kit_>( //
             planes, query_span, query_state, new_node_id, visited, gathered_ids, gathered_scored, context, lane);
     else context.frontier.reset(lane);
 
     // Select diverse links & write the own row - no locks: no reader arrives before the
     // slot-0 release below flips it from the sentinel.
-    u32_t const selected_count = inner_hopper_select_diverse<kit_>( //
+    u32_t const selected_count = inner_cuda_select_diverse<kit_>( //
         planes, cache, cache_norms, gathered_ids, relink.selected_ids, context, lane);
-    inner_hopper_neighbors_ref_t const own_row {planes.neighbors_for(new_node_id), planes.connectivity};
+    inner_cuda_neighbors_ref_t const own_row {planes.neighbors_for(new_node_id), planes.connectivity};
     for (u32_t slot = lane; slot < selected_count; slot += 32)
         if (slot > 0) own_row.store_slot(slot, relink.selected_ids[slot]);
     __syncwarp();
@@ -1453,14 +1452,14 @@ __device__ __forceinline__ void inner_hopper_insert_one( //
     }
 
     // Only now - published, no locks held - wire the reverse edges.
-    inner_hopper_back_link_neighbors<kit_>( //
+    inner_cuda_back_link_neighbors<kit_>( //
         planes, new_node_id, new_norms, relink, selected_count, cache, cache_norms, gathered_ids, gathered_scored,
         context.random_generator, context.telemetry, lane);
 }
 
 /**
  *
- *  @section inner_hopper_index_concurrency Concurrency & Publication
+ *  @section inner_cuda_index_concurrency Concurrency & Publication
  *
  *  One warp inserts one node, and no two warps ever synchronize beyond per-neighbor
  *  slot-0 locks: there is no watermark, no publication order, and no compare-and-swap.
@@ -1477,35 +1476,35 @@ __device__ __forceinline__ void inner_hopper_insert_one( //
  *  stall anything, and a post-mortem sweep can tombstone the stragglers of a killed
  *  launch precisely because publication order is free.
  */
-template <inner_hopper_kit kit_, u32_t pool_slots_>
-__global__ void __launch_bounds__(inner_hopper_warps_per_block_k * 32, inner_hopper_resident_blocks_per_sm_k)
-    inner_hopper_insert_kernel(inner_hopper_build_view<kit_> view) {
+template <inner_cuda_kit kit_, u32_t pool_slots_>
+__global__ void __launch_bounds__(inner_cuda_warps_per_block_k * 32, inner_cuda_resident_blocks_per_sm_k)
+    inner_cuda_insert_kernel(inner_cuda_build_view<kit_> view) {
     // One launch-sized dynamic slice per warp hosts two disjoint lifetimes over the same
     // bytes: the query span while traversing, then the candidate-vector cache while
     // selecting & back-linking - the host sizes the slice to the larger shape. The exact
     // visited set lives in the warp's arena slice, not in shared memory.
     extern __shared__ std::byte dynamic_scratch[];
-    __shared__ typename kit_::norms_t cache_norms[inner_hopper_warps_per_block_k][inner_hopper_cache_rows_k];
-    __shared__ u32_t gathered_ids[inner_hopper_warps_per_block_k][inner_hopper_cache_rows_k];
-    __shared__ inner_hopper_scored_node_t gathered_scored[inner_hopper_warps_per_block_k][32];
+    __shared__ typename kit_::norms_t cache_norms[inner_cuda_warps_per_block_k][inner_cuda_cache_rows_k];
+    __shared__ u32_t gathered_ids[inner_cuda_warps_per_block_k][inner_cuda_cache_rows_k];
+    __shared__ inner_cuda_scored_node_t gathered_scored[inner_cuda_warps_per_block_k][32];
 
     int const warp = threadIdx.x / 32, lane = threadIdx.x % 32;
-    std::size_t const warp_index = blockIdx.x * static_cast<std::size_t>(inner_hopper_warps_per_block_k) + warp;
+    std::size_t const warp_index = blockIdx.x * static_cast<std::size_t>(inner_cuda_warps_per_block_k) + warp;
     std::byte* const scratch_slice = dynamic_scratch + static_cast<std::size_t>(warp) * view.scratch_bytes_per_warp;
     typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(scratch_slice);
     u64_t* const visited_slots = view.arena_shape.visited_span(view.arena, warp_index);
-    inner_hopper_vector_cache<typename kit_::fragment_t> const cache {
+    inner_cuda_vector_cache<typename kit_::fragment_t> const cache {
         reinterpret_cast<typename kit_::fragment_t*>(scratch_slice), view.planes.row_fragments};
     // The re-selection spans live past the cache: the ascending link scores first (widest
     // alignment), then the selected target ids, then the refined row indices.
-    u32_t const relink_slots = min_of(view.planes.connectivity, inner_hopper_cache_rows_k);
+    u32_t const relink_slots = min_of(view.planes.connectivity, inner_cuda_cache_rows_k);
     std::byte* const relink_base = scratch_slice + //
                                    static_cast<std::size_t>(view.planes.row_fragments) *
-                                       sizeof(typename kit_::fragment_t) * inner_hopper_cache_rows_k;
-    inner_hopper_relink_scratch const relink {
-        reinterpret_cast<u32_t*>(relink_base + sizeof(inner_hopper_scored_node_t) * relink_slots),
-        reinterpret_cast<inner_hopper_scored_node_t*>(relink_base),
-        reinterpret_cast<u32_t*>(relink_base + (sizeof(inner_hopper_scored_node_t) + sizeof(u32_t)) * relink_slots)};
+                                       sizeof(typename kit_::fragment_t) * inner_cuda_cache_rows_k;
+    inner_cuda_relink_scratch const relink {
+        reinterpret_cast<u32_t*>(relink_base + sizeof(inner_cuda_scored_node_t) * relink_slots),
+        reinterpret_cast<inner_cuda_scored_node_t*>(relink_base),
+        reinterpret_cast<u32_t*>(relink_base + (sizeof(inner_cuda_scored_node_t) + sizeof(u32_t)) * relink_slots)};
     while (true) {
         u32_t new_node_id;
         if (lane == 0) new_node_id = atomicAdd(&view.counters->next_node_id, 1u);
@@ -1520,11 +1519,11 @@ __global__ void __launch_bounds__(inner_hopper_warps_per_block_k * 32, inner_hop
             __nanosleep(2048);
         }
 
-        inner_hopper_traversal_context<inner_hopper_register_frontier<pool_slots_>> context;
+        inner_cuda_traversal_context<inner_cuda_register_frontier<pool_slots_>> context;
         context.random_generator = splitmix_u32_t {0xA5A5A5A5ull ^ (static_cast<u64_t>(new_node_id) * 33 + lane)};
-        inner_hopper_visited_set const visited {visited_slots, view.arena_shape.visited_slots,
-                                                view.arena_shape.visited_hash_shift, new_node_id + 1};
-        inner_hopper_insert_one<kit_>( //
+        inner_cuda_visited_set const visited {visited_slots, view.arena_shape.visited_slots,
+                                              view.arena_shape.visited_hash_shift, new_node_id + 1};
+        inner_cuda_insert_one<kit_>( //
             view, new_node_id, visited, query_span, cache, relink, cache_norms[warp], gathered_ids[warp],
             gathered_scored[warp], context, lane);
         context.telemetry.flush(view.counters, lane);
@@ -1538,11 +1537,11 @@ __global__ void __launch_bounds__(inner_hopper_warps_per_block_k * 32, inner_hop
  *      they hand in. Safe against concurrent insertions: the walk gates every row on its
  *      slot-0 word and never writes to the graph.
  */
-template <inner_hopper_kit kit_, typename frontier_>
-__device__ __forceinline__ void inner_hopper_search_one( //
-    inner_hopper_search_view<kit_> const& view, u32_t query_index, typename kit_::fragment_t* query_span,
-    inner_hopper_visited_set visited, frontier_ frontier, u32_t (&gathered_ids)[inner_hopper_cache_rows_k],
-    inner_hopper_scored_node_t (&gathered_scored)[32], int lane) noexcept {
+template <inner_cuda_kit kit_, typename frontier_>
+__device__ __forceinline__ void inner_cuda_search_one( //
+    inner_cuda_search_view<kit_> const& view, u32_t query_index, typename kit_::fragment_t* query_span,
+    inner_cuda_visited_set visited, frontier_ frontier, u32_t (&gathered_ids)[inner_cuda_cache_rows_k],
+    inner_cuda_scored_node_t (&gathered_scored)[32], int lane) noexcept {
 
     typename kit_::fragment_t const* query_row = view.queries +
                                                  static_cast<std::size_t>(query_index) * view.planes.row_fragments;
@@ -1552,23 +1551,23 @@ __device__ __forceinline__ void inner_hopper_search_one( //
         query_span[fragment] = value;
         norms_accumulator = kit_::accumulate_norms(value, norms_accumulator);
     }
-    norms_accumulator = inner_hopper_reduce_norms(norms_accumulator);
-    norms_accumulator = inner_hopper_broadcast_norms(norms_accumulator);
+    norms_accumulator = inner_cuda_reduce_norms(norms_accumulator);
+    norms_accumulator = inner_cuda_broadcast_norms(norms_accumulator);
     typename kit_::norms_t const query_norms = kit_::partials_to_norms(norms_accumulator);
     typename kit_::query_state_t const query_state = kit_::make_query_state(query_norms);
     __syncwarp();
 
-    inner_hopper_traversal_context<frontier_> context;
+    inner_cuda_traversal_context<frontier_> context;
     context.frontier = frontier;
     context.random_generator = splitmix_u32_t {0xA5A5A5A5ull ^ (static_cast<u64_t>(query_index) * 33 + lane)};
-    inner_hopper_search_around<kit_>( //
+    inner_cuda_search_around<kit_>( //
         view.planes, query_span, query_state, view.rows_count, visited, gathered_ids, gathered_scored, context, lane);
     // The rank extraction shuffles - every lane participates, only in-range ones store.
     // Ranks past the live prefix surface as sentinel ids, marking absent matches.
     context.frontier.finalize_ranks(lane);
     for (u32_t rank_base = 0; rank_base < view.count; rank_base += 32) {
         u32_t const rank = rank_base + lane;
-        inner_hopper_scored_node_t const ranked_entry = context.frontier.rank_entry(rank);
+        inner_cuda_scored_node_t const ranked_entry = context.frontier.rank_entry(rank);
         if (rank < view.count) {
             std::size_t const slot = static_cast<std::size_t>(query_index) * view.count + rank;
             view.result_ids[slot] = ranked_entry.id();
@@ -1579,25 +1578,25 @@ __device__ __forceinline__ void inner_hopper_search_one( //
 }
 
 /** @brief One warp per query over the register frontier - expansions within the ladder. */
-template <inner_hopper_kit kit_, u32_t pool_slots_>
-__global__ void __launch_bounds__(inner_hopper_warps_per_block_k * 32, pool_slots_ <= 4 ? 4 : 3)
-    inner_hopper_search_kernel(inner_hopper_search_view<kit_> view) {
+template <inner_cuda_kit kit_, u32_t pool_slots_>
+__global__ void __launch_bounds__(inner_cuda_warps_per_block_k * 32, pool_slots_ <= 4 ? 4 : 3)
+    inner_cuda_search_kernel(inner_cuda_search_view<kit_> view) {
     extern __shared__ std::byte dynamic_scratch[];
-    __shared__ u32_t gathered_ids[inner_hopper_warps_per_block_k][inner_hopper_cache_rows_k];
-    __shared__ inner_hopper_scored_node_t gathered_scored[inner_hopper_warps_per_block_k][32];
+    __shared__ u32_t gathered_ids[inner_cuda_warps_per_block_k][inner_cuda_cache_rows_k];
+    __shared__ inner_cuda_scored_node_t gathered_scored[inner_cuda_warps_per_block_k][32];
 
     int const warp = threadIdx.x / 32, lane = threadIdx.x % 32;
-    std::size_t const warp_index = blockIdx.x * static_cast<std::size_t>(inner_hopper_warps_per_block_k) + warp;
+    std::size_t const warp_index = blockIdx.x * static_cast<std::size_t>(inner_cuda_warps_per_block_k) + warp;
     typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(
         dynamic_scratch + static_cast<std::size_t>(warp) * view.scratch_bytes_per_warp);
     u64_t* const visited_slots = view.arena_shape.visited_span(view.arena, warp_index);
     for (u32_t query_index = static_cast<u32_t>(warp_index); query_index < view.queries_count;
-         query_index += gridDim.x * inner_hopper_warps_per_block_k) {
-        inner_hopper_visited_set const visited {visited_slots, view.arena_shape.visited_slots,
-                                                view.arena_shape.visited_hash_shift, query_index + 1};
-        inner_hopper_search_one<kit_>(view, query_index, query_span, visited,
-                                      inner_hopper_register_frontier<pool_slots_> {}, gathered_ids[warp],
-                                      gathered_scored[warp], lane);
+         query_index += gridDim.x * inner_cuda_warps_per_block_k) {
+        inner_cuda_visited_set const visited {visited_slots, view.arena_shape.visited_slots,
+                                              view.arena_shape.visited_hash_shift, query_index + 1};
+        inner_cuda_search_one<kit_>(view, query_index, query_span, visited,
+                                    inner_cuda_register_frontier<pool_slots_> {}, gathered_ids[warp],
+                                    gathered_scored[warp], lane);
     }
 }
 
@@ -1605,36 +1604,36 @@ __global__ void __launch_bounds__(inner_hopper_warps_per_block_k * 32, pool_slot
  *      arena frontier, whose expansion budget @b is the requested expansion factor -
  *      unbounded by any register shape. Results cover the frontier's head, the exact
  *      nearest 64, so the facade admits this path only for counts within it. */
-template <inner_hopper_kit kit_>
-__global__ void __launch_bounds__(inner_hopper_warps_per_block_k * 32, 4)
-    inner_hopper_search_wide_kernel(inner_hopper_search_view<kit_> view) {
+template <inner_cuda_kit kit_>
+__global__ void __launch_bounds__(inner_cuda_warps_per_block_k * 32, 4)
+    inner_cuda_search_wide_kernel(inner_cuda_search_view<kit_> view) {
     extern __shared__ std::byte dynamic_scratch[];
-    __shared__ u32_t gathered_ids[inner_hopper_warps_per_block_k][inner_hopper_cache_rows_k];
-    __shared__ inner_hopper_scored_node_t gathered_scored[inner_hopper_warps_per_block_k][32];
+    __shared__ u32_t gathered_ids[inner_cuda_warps_per_block_k][inner_cuda_cache_rows_k];
+    __shared__ inner_cuda_scored_node_t gathered_scored[inner_cuda_warps_per_block_k][32];
 
     int const warp = threadIdx.x / 32, lane = threadIdx.x % 32;
-    std::size_t const warp_index = blockIdx.x * static_cast<std::size_t>(inner_hopper_warps_per_block_k) + warp;
+    std::size_t const warp_index = blockIdx.x * static_cast<std::size_t>(inner_cuda_warps_per_block_k) + warp;
     typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(
         dynamic_scratch + static_cast<std::size_t>(warp) * view.scratch_bytes_per_warp);
     u64_t* const visited_slots = view.arena_shape.visited_span(view.arena, warp_index);
-    inner_hopper_arena_frontier frontier;
+    inner_cuda_arena_frontier frontier;
     frontier.tail_.entries_ = view.arena_shape.tail_span(view.arena, warp_index);
     frontier.tail_.capacity_ = view.arena_shape.tail_entries;
     frontier.ef_target_ = view.expansion;
     for (u32_t query_index = static_cast<u32_t>(warp_index); query_index < view.queries_count;
-         query_index += gridDim.x * inner_hopper_warps_per_block_k) {
-        inner_hopper_visited_set const visited {visited_slots, view.arena_shape.visited_slots,
-                                                view.arena_shape.visited_hash_shift, query_index + 1};
-        inner_hopper_search_one<kit_>(view, query_index, query_span, visited, frontier, gathered_ids[warp],
-                                      gathered_scored[warp], lane);
+         query_index += gridDim.x * inner_cuda_warps_per_block_k) {
+        inner_cuda_visited_set const visited {visited_slots, view.arena_shape.visited_slots,
+                                              view.arena_shape.visited_hash_shift, query_index + 1};
+        inner_cuda_search_one<kit_>(view, query_index, query_span, visited, frontier, gathered_ids[warp],
+                                    gathered_scored[warp], lane);
     }
 }
 
 /** @brief Post-drain structural audit of the neighbor plane: every row published, every id
  *      in range, self-loop rows childless, no duplicate edges within a row. One warp scans
  *      one row, a warp-width of slots at a time; each bad row bumps @p violations once. */
-static __global__ void inner_hopper_invariant_kernel(u32_t const* neighbors, u32_t rows_count, u32_t connectivity,
-                                                     u64_t* violations) {
+static __global__ void inner_cuda_invariant_kernel(u32_t const* neighbors, u32_t rows_count, u32_t connectivity,
+                                                   u64_t* violations) {
     std::size_t const warp_index = (blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x) / 32;
     int const lane = threadIdx.x % 32;
     std::size_t const warps = gridDim.x * static_cast<std::size_t>(blockDim.x) / 32;
@@ -1674,7 +1673,7 @@ static __global__ void inner_hopper_invariant_kernel(u32_t const* neighbors, u32
  *      stays one multiply. Mapping is host-driven and always completes ahead of any kernel
  *      that could touch the fresh range - growth hazards cannot reach device code.
  */
-struct inner_hopper_arena_t {
+struct inner_cuda_arena_t {
 
     /** @brief Preferred physical slab, rounded to the driver's granularity at reservation -
      *      large enough to amortize mapping calls, small enough for incremental growth. */
@@ -1686,9 +1685,9 @@ struct inner_hopper_arena_t {
     std::size_t slab_bytes_ = 0;
     int device_ = 0;
 
-    inner_hopper_arena_t() = default;
-    inner_hopper_arena_t(inner_hopper_arena_t const&) = delete;
-    inner_hopper_arena_t& operator=(inner_hopper_arena_t const&) = delete;
+    inner_cuda_arena_t() = default;
+    inner_cuda_arena_t(inner_cuda_arena_t const&) = delete;
+    inner_cuda_arena_t& operator=(inner_cuda_arena_t const&) = delete;
 
     /** @brief Reserves @p va_bytes of virtual address space - no physical memory yet. */
     status_t reserve(std::size_t va_bytes, int device) noexcept {
@@ -1728,7 +1727,7 @@ struct inner_hopper_arena_t {
         return status_t::success_k;
     }
 
-    ~inner_hopper_arena_t() noexcept {
+    ~inner_cuda_arena_t() noexcept {
         if (mapped_bytes_) cuMemUnmap(base_, mapped_bytes_);
         if (base_) cuMemAddressFree(base_, va_bytes_);
     }
@@ -1746,14 +1745,14 @@ struct inner_hopper_arena_t {
 #if defined(__CUDACC__)
 
 /**
- *  @brief Vector Search index for a single uniform latency memory space on Hopper GPUs.
+ *  @brief Vector Search index for a single uniform latency memory space on NVIDIA GPUs.
  *
  *  Mirrors the CPU-resident volatile index verb-for-verb - @c reserve, @c insert,
  *  @c search - with two deliberate divergences, each documented where it lives: a batch's
  *  assigned ids are the contiguous new_node_id range (no per-vector id span), and
- *  publication is unordered - see @ref inner_hopper_index_concurrency.
+ *  publication is unordered - see @ref inner_cuda_index_concurrency.
  *
- *  @section inner_hopper_index_growth Growth
+ *  @section inner_cuda_index_growth Growth
  *
  *  The first successful @c reserve() freezes the virtual-address ceiling; physical slabs
  *  map on demand ahead of every launch, and fresh neighbor rows are sentinel-filled
@@ -1762,16 +1761,16 @@ struct inner_hopper_arena_t {
 template <                                               //
     nk_dtype_t vector_dtype_ = nk_i8_k,                  //
     nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k> //
-struct inner_hopper_index {
+struct inner_cuda_index {
 
-    using kit_t = typename inner_hopper_kit_for<vector_dtype_, kernel_kind_>::kit_t;
+    using kit_t = typename inner_cuda_kit_for<vector_dtype_, kernel_kind_>::kit_t;
     using scalar_t = typename kit_t::scalar_t;
     using fragment_t = typename kit_t::fragment_t;
     using norms_t = typename kit_t::norms_t;
     using vectors_view_t = nk::matrix_view<scalar_t>;
-    using planes_view_t = inner_hopper_planes_view<kit_t>;
+    using planes_view_t = inner_cuda_planes_view<kit_t>;
 
-    inline static constexpr std::size_t max_node_count_k = inner_hopper_scored_node_t::id_capacity_k;
+    inline static constexpr std::size_t max_node_count_k = inner_cuda_scored_node_t::id_capacity_k;
     /** @brief Default visited-set slot count: a runtime knob now, this is only the
      *      heuristic floor - the scratch slice must also fit the candidate cache. */
     inline static constexpr u32_t default_visited_capacity_k = 2048;
@@ -1795,17 +1794,17 @@ struct inner_hopper_index {
     /** @brief Bytes of one warp's dynamic-shared slice on the insertion path: the query
      *      span while traversing, then the candidate cache & re-selection spans. */
     u32_t insert_scratch_bytes_per_warp() const noexcept {
-        u32_t const relink_slots = min_of(connectivity_, static_cast<u32_t>(inner_hopper_cache_rows_k));
-        u32_t const relink_bytes = relink_slots * static_cast<u32_t>(sizeof(inner_hopper_scored_node_t) + //
+        u32_t const relink_slots = min_of(connectivity_, static_cast<u32_t>(inner_cuda_cache_rows_k));
+        u32_t const relink_bytes = relink_slots * static_cast<u32_t>(sizeof(inner_cuda_scored_node_t) + //
                                                                      2 * sizeof(u32_t));
-        u32_t const cache_bytes = static_cast<u32_t>(row_bytes()) * inner_hopper_cache_rows_k;
+        u32_t const cache_bytes = static_cast<u32_t>(row_bytes()) * inner_cuda_cache_rows_k;
         return max_of(static_cast<u32_t>(row_bytes()), cache_bytes + relink_bytes);
     }
 
     /** @brief One warp's arena slice for a walk expanding @p expansion candidates: the
      *      exact visited set - sized well past the expected visit count, so linear
      *      probing stays short - plus the spill tail when the walk outgrows registers. */
-    static inner_hopper_arena_shape_t arena_shape_for(u32_t expansion, bool wide) noexcept {
+    static inner_cuda_arena_shape_t arena_shape_for(u32_t expansion, bool wide) noexcept {
         u32_t const visited_slots = std::bit_ceil(64 * expansion);
         return {visited_slots, 32 - static_cast<u32_t>(std::bit_width(visited_slots - 1)), wide ? 32 * expansion : 0};
     }
@@ -1856,10 +1855,10 @@ struct inner_hopper_index {
         explicit operator bool() const noexcept { return status == status_t::success_k; }
     };
 
-    inner_hopper_index(int device = 0) noexcept : device_(device) {}
-    inner_hopper_index(inner_hopper_index const&) = delete;
-    inner_hopper_index& operator=(inner_hopper_index const&) = delete;
-    ~inner_hopper_index() noexcept {
+    inner_cuda_index(int device = 0) noexcept : device_(device) {}
+    inner_cuda_index(inner_cuda_index const&) = delete;
+    inner_cuda_index& operator=(inner_cuda_index const&) = delete;
+    ~inner_cuda_index() noexcept {
         if (counters_) cudaFree(counters_);
     }
 
@@ -1908,8 +1907,8 @@ struct inner_hopper_index {
                 neighbors_.reserve(va_ceiling_rows_ * connectivity_ * sizeof(u32_t), device_) != status_t::success_k ||
                 staging_.reserve(va_ceiling_rows_ * row_bytes(), device_) != status_t::success_k)
                 return {0, static_cast<connectivity_t>(connectivity_), status_t::bad_alloc_k};
-            if (cudaMalloc(&counters_, sizeof(inner_hopper_counters_t)) != cudaSuccess ||
-                cudaMemset(counters_, 0, sizeof(inner_hopper_counters_t)) != cudaSuccess)
+            if (cudaMalloc(&counters_, sizeof(inner_cuda_counters_t)) != cudaSuccess ||
+                cudaMemset(counters_, 0, sizeof(inner_cuda_counters_t)) != cudaSuccess)
                 return {0, static_cast<connectivity_t>(connectivity_), status_t::device_error_k};
         }
         status_t const grown = grow_rows(config.capacity, nullptr);
@@ -1939,32 +1938,32 @@ struct inner_hopper_index {
                               new_vectors.byte_data(), scalar_row_bytes, scalar_row_bytes, rows, cudaMemcpyHostToDevice,
                               stream) != cudaSuccess)
             return {status_t::device_error_k};
-        inner_hopper_counters_t const before = counters_snapshot();
+        inner_cuda_counters_t const before = counters_snapshot();
 
         // Every inserting warp owns an arena slice for its exact visited set.
         u32_t const pool_slots = pool_slots_for(config.expansion_factor, 4);
-        inner_hopper_arena_shape_t const arena_shape = arena_shape_for(pool_slots * 32, false);
+        inner_cuda_arena_shape_t const arena_shape = arena_shape_for(pool_slots * 32, false);
         std::size_t const arena_warps = static_cast<std::size_t>(device_sm_count_) * insert_blocks_per_sm_k *
-                                        inner_hopper_warps_per_block_k;
+                                        inner_cuda_warps_per_block_k;
         std::byte* arena = nullptr;
         if (cudaMallocAsync(reinterpret_cast<void**>(&arena), arena_warps * arena_shape.slice_bytes(), stream) !=
             cudaSuccess)
             return {status_t::bad_alloc_k};
         // One batch-wide zeroing arms the epoch discipline: zero marks never-used slots.
         cudaMemsetAsync(arena, 0, arena_warps * arena_shape.slice_bytes(), stream);
-        inner_hopper_build_view<kit_t> view {planes(), //
-                                             reinterpret_cast<fragment_t const*>(staging_.base_),
-                                             static_cast<u32_t>(total_rows),
-                                             insert_scratch_bytes_per_warp(),
-                                             arena,
-                                             arena_shape,
-                                             counters_};
+        inner_cuda_build_view<kit_t> view {planes(), //
+                                           reinterpret_cast<fragment_t const*>(staging_.base_),
+                                           static_cast<u32_t>(total_rows),
+                                           insert_scratch_bytes_per_warp(),
+                                           arena,
+                                           arena_shape,
+                                           counters_};
         launch_insert(view, pool_slots, stream);
         cudaFreeAsync(arena, stream);
         if (cudaStreamSynchronize(stream) != cudaSuccess) return {status_t::device_error_k};
 
         // The restart rule: over-claimed ids died with the launch - rewind the dispenser.
-        inner_hopper_counters_t after = counters_snapshot();
+        inner_cuda_counters_t after = counters_snapshot();
         if (after.published != total_rows) return {status_t::device_error_k};
         after.next_node_id = after.published;
         cudaMemcpy(counters_, &after, sizeof(u32_t) * 2, cudaMemcpyHostToDevice);
@@ -2002,8 +2001,8 @@ struct inner_hopper_index {
         // The register ladder serves expansions up to its widest pool; anything past it
         // walks the arena-backed pool, whose results cover the head - the nearest 64.
         u32_t const expansion = config.expansion_factor > config.count ? config.expansion_factor : config.count * 2;
-        bool const wide = expansion > inner_hopper_sorted_pool<16>::capacity_k;
-        if (wide && config.count > inner_hopper_sorted_pool<2>::capacity_k) return {status_t::config_mismatch_k};
+        bool const wide = expansion > inner_cuda_sorted_pool<16>::capacity_k;
+        if (wide && config.count > inner_cuda_sorted_pool<2>::capacity_k) return {status_t::config_mismatch_k};
 
         void* device_queries = nullptr;
         inner_node_id_t* device_ids = nullptr;
@@ -2012,9 +2011,9 @@ struct inner_hopper_index {
         // The pool must cover the requested count, whatever the expansion asked for.
         u32_t const count_slots = divide_round_up<u32_t>(config.count, 32);
         u32_t const pool_slots = pool_slots_for(expansion, count_slots > 2 ? count_slots : 2);
-        inner_hopper_arena_shape_t const arena_shape = arena_shape_for(wide ? expansion : pool_slots * 32, wide);
+        inner_cuda_arena_shape_t const arena_shape = arena_shape_for(wide ? expansion : pool_slots * 32, wide);
         std::size_t const arena_warps = static_cast<std::size_t>(device_sm_count_) * search_blocks_per_sm_k *
-                                        inner_hopper_warps_per_block_k;
+                                        inner_cuda_warps_per_block_k;
         std::size_t const results_count = queries_count * config.count;
         if (cudaMallocAsync(&device_queries, queries_count * row_bytes(), stream) != cudaSuccess ||
             cudaMallocAsync(reinterpret_cast<void**>(&device_ids), results_count * sizeof(inner_node_id_t), stream) !=
@@ -2032,20 +2031,20 @@ struct inner_hopper_index {
         if (scalar_row_bytes != row_bytes()) cudaMemsetAsync(device_queries, 0, queries_count * row_bytes(), stream);
         cudaMemcpy2DAsync(device_queries, row_bytes(), queries.byte_data(), scalar_row_bytes, scalar_row_bytes,
                           queries_count, cudaMemcpyHostToDevice, stream);
-        inner_hopper_counters_t const before = counters_snapshot();
+        inner_cuda_counters_t const before = counters_snapshot();
 
-        inner_hopper_search_view<kit_t> view {planes(),
-                                              reinterpret_cast<fragment_t const*>(device_queries),
-                                              device_ids,
-                                              device_distances,
-                                              static_cast<u32_t>(queries_count),
-                                              config.count,
-                                              static_cast<u32_t>(size_),
-                                              static_cast<u32_t>(row_bytes()),
-                                              expansion,
-                                              arena,
-                                              arena_shape,
-                                              counters_};
+        inner_cuda_search_view<kit_t> view {planes(),
+                                            reinterpret_cast<fragment_t const*>(device_queries),
+                                            device_ids,
+                                            device_distances,
+                                            static_cast<u32_t>(queries_count),
+                                            config.count,
+                                            static_cast<u32_t>(size_),
+                                            static_cast<u32_t>(row_bytes()),
+                                            expansion,
+                                            arena,
+                                            arena_shape,
+                                            counters_};
         if (wide) launch_search_wide(view, stream);
         else launch_search(view, pool_slots, stream);
         cudaMemcpyAsync(result_ids.data(), device_ids, results_count * sizeof(inner_node_id_t), cudaMemcpyDeviceToHost,
@@ -2059,7 +2058,7 @@ struct inner_hopper_index {
         cudaFreeAsync(arena, stream);
         if (cudaStreamSynchronize(stream) != cudaSuccess) return {status_t::device_error_k};
 
-        inner_hopper_counters_t const after = counters_snapshot();
+        inner_cuda_counters_t const after = counters_snapshot();
         search_result_t result;
         result.count = config.count;
         result.visited_members = after.hops - before.hops;
@@ -2068,8 +2067,8 @@ struct inner_hopper_index {
     }
 
   private:
-    inner_hopper_arena_t vectors_, norms_, neighbors_, staging_;
-    inner_hopper_counters_t* counters_ = nullptr;
+    inner_cuda_arena_t vectors_, norms_, neighbors_, staging_;
+    inner_cuda_counters_t* counters_ = nullptr;
     std::size_t va_ceiling_rows_ = 0;
     std::size_t mapped_rows_ = 0;
     std::size_t size_ = 0;
@@ -2095,8 +2094,8 @@ struct inner_hopper_index {
         return status_t::success_k;
     }
 
-    inner_hopper_counters_t counters_snapshot() const noexcept {
-        inner_hopper_counters_t snapshot = {};
+    inner_cuda_counters_t counters_snapshot() const noexcept {
+        inner_cuda_counters_t snapshot = {};
         cudaMemcpy(&snapshot, counters_, sizeof(snapshot), cudaMemcpyDeviceToHost);
         return snapshot;
     }
@@ -2111,24 +2110,24 @@ struct inner_hopper_index {
     /** @brief Blocks per grid: three resident blocks per SM saturate the insertion path
      *      at its register budget; oversubscribing eight per SM keeps enough independent
      *      queries in flight to reach the memory-level-parallelism knee while searching. */
-    inline static constexpr u32_t insert_blocks_per_sm_k = inner_hopper_resident_blocks_per_sm_k;
+    inline static constexpr u32_t insert_blocks_per_sm_k = inner_cuda_resident_blocks_per_sm_k;
     inline static constexpr u32_t search_blocks_per_sm_k = 8;
-    inline static constexpr u32_t block_threads_k = inner_hopper_warps_per_block_k * 32;
+    inline static constexpr u32_t block_threads_k = inner_cuda_warps_per_block_k * 32;
 
     /** @brief Default dynamic-shared-memory opt-in threshold: launches asking for more
      *      than this must raise the kernel's attribute before the first launch. */
     inline static constexpr u32_t static_scratch_limit_k = 48 * 1024;
 
     template <u32_t pool_slots_>
-    void launch_insert_with(inner_hopper_build_view<kit_t> view, cudaStream_t stream) noexcept {
-        u32_t const scratch_bytes = inner_hopper_warps_per_block_k * view.scratch_bytes_per_warp;
+    void launch_insert_with(inner_cuda_build_view<kit_t> view, cudaStream_t stream) noexcept {
+        u32_t const scratch_bytes = inner_cuda_warps_per_block_k * view.scratch_bytes_per_warp;
         if (scratch_bytes > static_scratch_limit_k)
-            cudaFuncSetAttribute(inner_hopper_insert_kernel<kit_t, pool_slots_>,
+            cudaFuncSetAttribute(inner_cuda_insert_kernel<kit_t, pool_slots_>,
                                  cudaFuncAttributeMaxDynamicSharedMemorySize, scratch_bytes);
-        inner_hopper_insert_kernel<kit_t, pool_slots_>
+        inner_cuda_insert_kernel<kit_t, pool_slots_>
             <<<device_sm_count_ * insert_blocks_per_sm_k, block_threads_k, scratch_bytes, stream>>>(view);
     }
-    void launch_insert(inner_hopper_build_view<kit_t> view, u32_t pool_slots, cudaStream_t stream) noexcept {
+    void launch_insert(inner_cuda_build_view<kit_t> view, u32_t pool_slots, cudaStream_t stream) noexcept {
         switch (pool_slots) {
         case 2: launch_insert_with<2>(view, stream); break;
         case 4: launch_insert_with<4>(view, stream); break;
@@ -2137,15 +2136,15 @@ struct inner_hopper_index {
         }
     }
     template <u32_t pool_slots_>
-    void launch_search_with(inner_hopper_search_view<kit_t> view, cudaStream_t stream) noexcept {
-        u32_t const scratch_bytes = inner_hopper_warps_per_block_k * view.scratch_bytes_per_warp;
+    void launch_search_with(inner_cuda_search_view<kit_t> view, cudaStream_t stream) noexcept {
+        u32_t const scratch_bytes = inner_cuda_warps_per_block_k * view.scratch_bytes_per_warp;
         if (scratch_bytes > static_scratch_limit_k)
-            cudaFuncSetAttribute(inner_hopper_search_kernel<kit_t, pool_slots_>,
+            cudaFuncSetAttribute(inner_cuda_search_kernel<kit_t, pool_slots_>,
                                  cudaFuncAttributeMaxDynamicSharedMemorySize, scratch_bytes);
-        inner_hopper_search_kernel<kit_t, pool_slots_>
+        inner_cuda_search_kernel<kit_t, pool_slots_>
             <<<device_sm_count_ * search_blocks_per_sm_k, block_threads_k, scratch_bytes, stream>>>(view);
     }
-    void launch_search(inner_hopper_search_view<kit_t> view, u32_t pool_slots, cudaStream_t stream) noexcept {
+    void launch_search(inner_cuda_search_view<kit_t> view, u32_t pool_slots, cudaStream_t stream) noexcept {
         switch (pool_slots) {
         case 2: launch_search_with<2>(view, stream); break;
         case 4: launch_search_with<4>(view, stream); break;
@@ -2153,12 +2152,12 @@ struct inner_hopper_index {
         default: launch_search_with<16>(view, stream);
         }
     }
-    void launch_search_wide(inner_hopper_search_view<kit_t> view, cudaStream_t stream) noexcept {
-        u32_t const scratch_bytes = inner_hopper_warps_per_block_k * view.scratch_bytes_per_warp;
+    void launch_search_wide(inner_cuda_search_view<kit_t> view, cudaStream_t stream) noexcept {
+        u32_t const scratch_bytes = inner_cuda_warps_per_block_k * view.scratch_bytes_per_warp;
         if (scratch_bytes > static_scratch_limit_k)
-            cudaFuncSetAttribute(inner_hopper_search_wide_kernel<kit_t>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+            cudaFuncSetAttribute(inner_cuda_search_wide_kernel<kit_t>, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                  scratch_bytes);
-        inner_hopper_search_wide_kernel<kit_t>
+        inner_cuda_search_wide_kernel<kit_t>
             <<<device_sm_count_ * search_blocks_per_sm_k, block_threads_k, scratch_bytes, stream>>>(view);
     }
 };
