@@ -138,6 +138,8 @@ def _normalize_dtype(
         "bfloat16": ScalarKind.BF16,
         "float16": ScalarKind.F16,
         "int8": ScalarKind.I8,
+        "tq2": getattr(ScalarKind, "TQ2", None),
+        "tq4": getattr(ScalarKind, "TQ4", None),
         np.float64: ScalarKind.F64,
         np.float32: ScalarKind.F32,
         np.float16: ScalarKind.F16,

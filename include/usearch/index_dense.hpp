@@ -10,6 +10,7 @@
 
 #include <usearch/index.hpp>
 #include <usearch/index_plugins.hpp>
+#include <usearch/turboquant.hpp> // TurboQuant rotation + encode
 
 #if defined(USEARCH_DEFINED_CPP17)
 #include <shared_mutex> // `std::shared_mutex`
@@ -477,6 +478,11 @@ class index_dense_gt {
     /// @brief For every managed `compressed_slot_t` stores a pointer to the allocated vector copy.
     mutable vectors_lookup_t vectors_lookup_;
 
+    /// @brief TurboQuant HD³ rotation (shared by all vectors in the index).
+    turboquant_rotation_t tq_rotation_;
+    /// @brief Per-thread scratch buffer for TurboQuant encoding (padded_dim floats).
+    mutable buffer_gt<byte_t, dynamic_allocator_t> tq_scratch_;
+
     using available_threads_allocator_t = aligned_allocator_gt<std::size_t, 64>;
     using available_threads_t = ring_gt<std::size_t, available_threads_allocator_t>;
 
@@ -595,6 +601,8 @@ class index_dense_gt {
 
           vectors_tape_allocator_(std::move(other.vectors_tape_allocator_)), //
           vectors_lookup_(std::move(other.vectors_lookup_)),                 //
+          tq_rotation_(std::move(other.tq_rotation_)),                       //
+          tq_scratch_(std::move(other.tq_scratch_)),                         //
 
           available_threads_(std::move(other.available_threads_)), //
           slot_lookup_(std::move(other.slot_lookup_)),             //
@@ -620,6 +628,8 @@ class index_dense_gt {
 
         std::swap(vectors_tape_allocator_, other.vectors_tape_allocator_);
         std::swap(vectors_lookup_, other.vectors_lookup_);
+        std::swap(tq_rotation_, other.tq_rotation_);
+        std::swap(tq_scratch_, other.tq_scratch_);
 
         std::swap(available_threads_, other.available_threads_);
         std::swap(slot_lookup_, other.slot_lookup_);
@@ -739,6 +749,19 @@ class index_dense_gt {
             if (!new_buffer)
                 return false;
             cast_buffer_ = std::move(new_buffer);
+        }
+        if (metric.is_turboquant()) {
+            if (!tq_rotation_.initialized()) {
+                if (!tq_rotation_.initialize(metric.dimensions()))
+                    return false;
+            }
+            std::size_t scratch_bytes = limits().threads() * tq_rotation_.padded_dim() * sizeof(float);
+            if (scratch_bytes > tq_scratch_.size()) {
+                buffer_gt<byte_t, dynamic_allocator_t> new_scratch(scratch_bytes);
+                if (!new_scratch)
+                    return false;
+                tq_scratch_ = std::move(new_scratch);
+            }
         }
         casts_ = casts_punned_t::make(metric.scalar_kind());
         metric_ = std::move(metric);
@@ -1088,6 +1111,18 @@ class index_dense_gt {
             return false;
         cast_buffer_ = std::move(cast_buffer);
 
+        if (metric_.is_turboquant()) {
+            if (!tq_rotation_.initialized()) {
+                if (!tq_rotation_.initialize(dimensions()))
+                    return false;
+            }
+            std::size_t scratch_bytes = limits.threads() * tq_rotation_.padded_dim() * sizeof(float);
+            buffer_gt<byte_t, dynamic_allocator_t> tq_scratch(scratch_bytes);
+            if (!tq_scratch)
+                return false;
+            tq_scratch_ = std::move(tq_scratch);
+        }
+
         return typed_->reserve(limits);
     }
 
@@ -1421,6 +1456,19 @@ class index_dense_gt {
             cast_buffer_ = cast_buffer_t(cast_buffer_bytes.value);
             if (!cast_buffer_)
                 return result.failed("Failed to allocate memory for the casts");
+            
+            if (metric_.is_turboquant()) {
+                if (!tq_rotation_.initialized()) {
+                    if (!tq_rotation_.initialize(metric_.dimensions()))
+                        return result.failed("Failed to initialize TurboQuant rotation");
+                }
+                std::size_t scratch_bytes = new_limits.threads() * tq_rotation_.padded_dim() * sizeof(float);
+                buffer_gt<byte_t, dynamic_allocator_t> tq_scratch(scratch_bytes);
+                if (!tq_scratch)
+                    return result.failed("Failed to allocate memory for TurboQuant scratch");
+                tq_scratch_ = std::move(tq_scratch);
+            }
+
             casts_ = casts_punned_t::make(head.kind_scalar);
             offset += sizeof(buffer);
         }
@@ -1831,6 +1879,18 @@ class index_dense_gt {
         other.config_ = config_;
         other.cast_buffer_ = std::move(cast_buffer);
         other.casts_ = casts_;
+        
+        if (metric_.is_turboquant()) {
+            if (!other.tq_rotation_.initialize(metric_.dimensions()))
+                return state_result_t{}.failed("Failed to initialize TurboQuant rotation!");
+            
+            std::size_t scratch_bytes = limits().threads() * other.tq_rotation_.padded_dim() * sizeof(float);
+            buffer_gt<byte_t, dynamic_allocator_t> tq_scratch(scratch_bytes);
+            if (!tq_scratch)
+                return state_result_t{}.failed("Failed to allocate memory for TurboQuant scratch!");
+            
+            other.tq_scratch_ = std::move(tq_scratch);
+        }
 
         other.metric_ = metric_;
         other.available_threads_ = std::move(available_threads);
@@ -2169,7 +2229,19 @@ class index_dense_gt {
         byte_t const* vector_data = reinterpret_cast<byte_t const*>(vector);
         {
             byte_t* casted_data = cast_buffer_.data() + metric_.bytes_per_vector() * lock.thread_id;
-            bool casted = cast(vector_data, dimensions(), casted_data);
+            bool casted = false;
+            if (metric_.is_turboquant()) {
+                // TurboQuant encode: float → rotate → quantize → pack.
+                float const* float_input = reinterpret_cast<float const*>(vector);
+                float* scratch = reinterpret_cast<float*>(tq_scratch_.data()) + tq_rotation_.padded_dim() * lock.thread_id;
+                if (metric_.scalar_kind() == scalar_kind_t::tq2_k)
+                    tq_encode_2bit(float_input, tq_rotation_, casted_data, scratch);
+                else
+                    tq_encode_4bit(float_input, tq_rotation_, casted_data, scratch);
+                casted = true;
+            } else {
+                casted = cast(vector_data, dimensions(), casted_data);
+            }
             if (casted)
                 vector_data = casted_data, copy_vector = true;
         }
@@ -2224,10 +2296,22 @@ class index_dense_gt {
         byte_t const* vector_data = reinterpret_cast<byte_t const*>(vector);
         {
             byte_t* casted_data = cast_buffer_.data() + metric_.bytes_per_vector() * lock.thread_id;
-            bool casted = cast(vector_data, dimensions(), casted_data);
+            bool casted = false;
+            if (metric_.is_turboquant()) {
+                float const* float_input = reinterpret_cast<float const*>(vector);
+                float* scratch = reinterpret_cast<float*>(tq_scratch_.data()) + tq_rotation_.padded_dim() * lock.thread_id;
+                if (metric_.scalar_kind() == scalar_kind_t::tq2_k)
+                    tq_encode_2bit(float_input, tq_rotation_, casted_data, scratch);
+                else
+                    tq_encode_4bit(float_input, tq_rotation_, casted_data, scratch);
+                casted = true;
+            } else {
+                casted = cast(vector_data, dimensions(), casted_data);
+            }
             if (casted)
                 vector_data = casted_data;
         }
+
 
         index_search_config_t search_config;
         search_config.thread = lock.thread_id;

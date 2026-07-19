@@ -9,6 +9,7 @@
 #include <thread>  // `std::thread`
 
 #include <usearch/index.hpp> // `expected_gt` and macros
+#include <usearch/turboquant_metric.hpp> // TurboQuant distance functions
 
 #if defined(USEARCH_DEFINED_LINUX)
 #include <sys/auxv.h> // `getauxval()`
@@ -161,6 +162,9 @@ enum class scalar_kind_t : std::uint8_t {
     i32_k = 21,
     i16_k = 22,
     i8_k = 23,
+    // TurboQuant compressed (data-oblivious, training-free):
+    tq2_k = 30, ///< TurboQuant 2-bit per dimension (normalized vectors)
+    tq4_k = 31, ///< TurboQuant 4-bit per dimension (normalized vectors)
 };
 
 /**
@@ -268,6 +272,8 @@ inline std::size_t bits_per_scalar(scalar_kind_t scalar_kind) noexcept {
     case scalar_kind_t::e4m3_k: return 8;
     case scalar_kind_t::e2m3_k: return 8;
     case scalar_kind_t::e3m2_k: return 8;
+    case scalar_kind_t::tq2_k: return 2;
+    case scalar_kind_t::tq4_k: return 4;
     default: return 0;
     }
 }
@@ -297,6 +303,8 @@ inline std::size_t bits_per_scalar_word(scalar_kind_t scalar_kind) noexcept {
     case scalar_kind_t::e4m3_k: return 8;
     case scalar_kind_t::e2m3_k: return 8;
     case scalar_kind_t::e3m2_k: return 8;
+    case scalar_kind_t::tq2_k: return 8;
+    case scalar_kind_t::tq4_k: return 8;
     default: return 0;
     }
 }
@@ -325,6 +333,8 @@ inline char const* scalar_kind_name(scalar_kind_t scalar_kind) noexcept {
     case scalar_kind_t::e4m3_k: return "e4m3";
     case scalar_kind_t::e2m3_k: return "e2m3";
     case scalar_kind_t::e3m2_k: return "e3m2";
+    case scalar_kind_t::tq2_k: return "tq2";
+    case scalar_kind_t::tq4_k: return "tq4";
     default: return "";
     }
 }
@@ -2918,11 +2928,17 @@ class metric_punned_t {
         metric_punned_t metric;
         metric.metric_routed_ = &metric_punned_t::invoke_array_array_third;
         metric.metric_ptr_ = 0;
-        metric.metric_third_arg_ =
-            scalar_kind == scalar_kind_t::b1x8_k ? divide_round_up<CHAR_BIT>(dimensions) : dimensions;
         metric.dimensions_ = dimensions;
         metric.metric_kind_ = metric_kind;
         metric.scalar_kind_ = scalar_kind;
+        // For TurboQuant, the third argument is the padded dimension (power of 2).
+        // For b1x8, it's the number of bytes.  For everything else, it's just dimensions.
+        if (scalar_kind == scalar_kind_t::tq2_k || scalar_kind == scalar_kind_t::tq4_k)
+            metric.metric_third_arg_ = metric.storage_dimensions_();
+        else if (scalar_kind == scalar_kind_t::b1x8_k)
+            metric.metric_third_arg_ = divide_round_up<CHAR_BIT>(dimensions);
+        else
+            metric.metric_third_arg_ = dimensions;
 
         if (!metric.configure_with_numkong())
             metric.configure_with_autovec();
@@ -3009,7 +3025,12 @@ class metric_punned_t {
     }
 
     inline std::size_t bytes_per_vector() const noexcept {
-        return divide_round_up<CHAR_BIT>(dimensions_ * bits_per_scalar(scalar_kind_));
+        return divide_round_up<CHAR_BIT>(storage_dimensions_() * bits_per_scalar(scalar_kind_));
+    }
+
+    /// @brief  True if this metric operates on TurboQuant-compressed vectors.
+    inline bool is_turboquant() const noexcept {
+        return scalar_kind_ == scalar_kind_t::tq2_k || scalar_kind_ == scalar_kind_t::tq4_k;
     }
 
     inline std::size_t scalar_words() const noexcept {
@@ -3095,6 +3116,20 @@ class metric_punned_t {
 #else
     bool configure_with_numkong() noexcept { return false; }
 #endif
+    /// @brief  For TurboQuant types, storage dimensions are padded to the next power of 2 (WHT requirement).
+    inline std::size_t storage_dimensions_() const noexcept {
+        if (scalar_kind_ == scalar_kind_t::tq2_k || scalar_kind_ == scalar_kind_t::tq4_k) {
+            // Pad to next power of 2.
+            std::size_t n = dimensions_;
+            if (n == 0) return 1;
+            n--;
+            n |= n >> 1; n |= n >> 2; n |= n >> 4;
+            n |= n >> 8; n |= n >> 16; n |= n >> 32;
+            return n + 1;
+        }
+        return dimensions_;
+    }
+
     result_t invoke_array_array_third(uptr_t a, uptr_t b) const noexcept {
         auto function_pointer = (metric_array_array_size_t)(metric_ptr_);
         result_t result = function_pointer(a, b, metric_third_arg_);
@@ -3119,6 +3154,8 @@ class metric_punned_t {
             case scalar_kind_t::e2m3_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<e2m3_t, f32_t>>; break;
             case scalar_kind_t::i8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<i8_t, f32_t>>; break;
             case scalar_kind_t::u8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_ip_gt<u8_t, f32_t>>; break;
+            case scalar_kind_t::tq2_k: metric_ptr_ = (uptr_t)&tq_metric_ip_2bit; break;
+            case scalar_kind_t::tq4_k: metric_ptr_ = (uptr_t)&tq_metric_ip_4bit; break;
             default: metric_ptr_ = 0; break;
             }
             break;
@@ -3135,6 +3172,8 @@ class metric_punned_t {
             case scalar_kind_t::e2m3_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_gt<e2m3_t, f32_t>>; break;
             case scalar_kind_t::i8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_i8_t>; break;
             case scalar_kind_t::u8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_cos_u8_t>; break;
+            case scalar_kind_t::tq2_k: metric_ptr_ = (uptr_t)&tq_metric_cos_2bit; break;
+            case scalar_kind_t::tq4_k: metric_ptr_ = (uptr_t)&tq_metric_cos_4bit; break;
             default: metric_ptr_ = 0; break;
             }
             break;
@@ -3151,6 +3190,8 @@ class metric_punned_t {
             case scalar_kind_t::e2m3_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_gt<e2m3_t, f32_t>>; break;
             case scalar_kind_t::i8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_i8_t>; break;
             case scalar_kind_t::u8_k: metric_ptr_ = (uptr_t)&equidimensional_<metric_l2sq_u8_t>; break;
+            case scalar_kind_t::tq2_k: metric_ptr_ = (uptr_t)&tq_metric_l2sq_2bit; break;
+            case scalar_kind_t::tq4_k: metric_ptr_ = (uptr_t)&tq_metric_l2sq_4bit; break;
             default: metric_ptr_ = 0; break;
             }
             break;

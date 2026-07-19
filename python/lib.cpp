@@ -97,6 +97,7 @@ struct dense_indexes_py_t {
     void merge(std::shared_ptr<dense_index_py_t> shard) { shards_.push_back(shard); }
     std::size_t bytes_per_vector() const noexcept { return shards_.empty() ? 0 : shards_[0]->bytes_per_vector(); }
     std::size_t scalar_words() const noexcept { return shards_.empty() ? 0 : shards_[0]->scalar_words(); }
+    std::size_t dimensions() const noexcept { return shards_.empty() ? 0 : shards_[0]->dimensions(); }
     index_limits_t limits() const noexcept { return {size(), std::numeric_limits<std::size_t>::max()}; }
 
     void merge_paths(std::vector<std::string> const& paths, bool view = true, std::size_t threads = 0) {
@@ -272,7 +273,8 @@ static void add_many_to_index(                            //
     Py_ssize_t keys_count = keys_info.shape[0];
     Py_ssize_t vectors_count = vectors_info.shape[0];
     Py_ssize_t vectors_dimensions = vectors_info.shape[1];
-    if (vectors_dimensions != static_cast<Py_ssize_t>(index.scalar_words()))
+    if (vectors_dimensions != static_cast<Py_ssize_t>(index.scalar_words()) &&
+        vectors_dimensions != static_cast<Py_ssize_t>(index.dimensions()))
         throw std::invalid_argument("The number of vector dimensions doesn't match!");
 
     if (keys_count != vectors_count)
@@ -489,7 +491,8 @@ static py::tuple search_many_in_index( //
 
     Py_ssize_t vectors_count = vectors_info.shape[0];
     Py_ssize_t vectors_dimensions = vectors_info.shape[1];
-    if (vectors_dimensions != static_cast<Py_ssize_t>(index.scalar_words()))
+    if (vectors_dimensions != static_cast<Py_ssize_t>(index.scalar_words()) &&
+        vectors_dimensions != static_cast<Py_ssize_t>(index.dimensions()))
         throw std::invalid_argument("The number of vector dimensions doesn't match!");
     if (vectors_info.strides[1] != static_cast<Py_ssize_t>(vectors_info.itemsize))
         throw std::invalid_argument("Matrix rows must be contiguous, try `ascontiguousarray`.");
@@ -1184,7 +1187,9 @@ PYBIND11_MODULE(compiled, m, py::mod_gil_not_used()) {
         .value("U16", scalar_kind_t::u16_k)
         .value("I64", scalar_kind_t::i64_k)
         .value("I32", scalar_kind_t::i32_k)
-        .value("I16", scalar_kind_t::i16_k);
+        .value("I16", scalar_kind_t::i16_k)
+        .value("TQ2", scalar_kind_t::tq2_k)
+        .value("TQ4", scalar_kind_t::tq4_k);
 
     m.def("index_dense_metadata_from_path", [](std::string const& path) -> py::dict {
         index_dense_metadata_result_t meta = index_dense_metadata_from_path(path.c_str());
