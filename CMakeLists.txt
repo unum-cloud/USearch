@@ -434,7 +434,18 @@ if (USEARCH_BUILD_TEST_CPP OR USEARCH_BUILD_BENCH_CPP)
         GIT_TAG 12.0.0
         FIND_PACKAGE_ARGS
     )
-    FetchContent_MakeAvailable(fmt)
+    FetchContent_Declare(
+        yyjson
+        GIT_REPOSITORY https://github.com/ibireme/yyjson.git
+        GIT_TAG 0.12.0
+    )
+    FetchContent_MakeAvailable(fmt clipp yyjson)
+
+    # Upstream clipp ships no usable CMake target — just a single header — so wrap it in one.
+    if (NOT TARGET clipp)
+        add_library(clipp INTERFACE)
+        target_include_directories(clipp INTERFACE "$<BUILD_INTERFACE:${clipp_SOURCE_DIR}/include>")
+    endif ()
 endif ()
 
 # Must be called before "add_subdirectory()", and only when USearch runs the show - a parent project decides its own

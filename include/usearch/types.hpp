@@ -130,6 +130,36 @@ enum connectivity_t : std::uint32_t {
 };
 
 /**
+ *  @brief Element types USearch speaks when exchanging payloads - NumKong's numeric dtypes
+ *      plus the @c bin16_k identities and @c utf8_k strings that interchange formats carry
+ *      and a compute library has no place for. Interchange formats themselves only name
+ *      types as strings over raw blobs; this enum is the USearch-side vocabulary every
+ *      reader parses those spellings into.
+ */
+enum class dtype_t : u32_t {
+    unknown_k = 0,
+    // Integers, by shrinking dynamic range.
+    u64_k,
+    i64_k,
+    u32_k,
+    i32_k,
+    u16_k,
+    i16_k,
+    u8_k,
+    i8_k,
+    // Floats, by shrinking dynamic range.
+    f64_k,
+    f32_k,
+    bf16_k,
+    f16_k,
+    e5m2_k,
+    e4m3_k,
+    // Non-numeric payloads interchange formats carry.
+    bin16_k,
+    utf8_k,
+};
+
+/**
  *  @brief Fixed 32-byte descriptor fronting every serialized inner index payload - volatile
  *      in-RAM snapshots, GPU-resident uploads, and persisted on-NVMe layouts alike. It describes
  *      the graph & its frozen geometry, never the residency: what sections follow and how they
