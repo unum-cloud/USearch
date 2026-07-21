@@ -351,8 +351,8 @@ class max_heap {
  *      @c d·i+1 .. @c d·i+d. Same flat-buffer storage and same public API as @ref max_heap;
  *      the difference is the tree-fan-out @p arity_ controlling per-level work and depth.
  *
- *  Insert (@c shift_up) walks a single path from leaf to root with log_d(n) compare-swaps
- *  - shallower than the binary heap's log_2(n) by a factor of log_2(d). Pop (@c shift_down)
+ *  Insert - @c shift_up - walks a single path from leaf to root with log_d(n) compare-swaps
+ *  - shallower than the binary heap's log_2(n) by a factor of log_2(d). Pop - @c shift_down -
  *  scans up to @p arity_ children per level over log_d(n) levels, so total compares per
  *  pop are roughly the same as binary, just rearranged.
  *
@@ -641,7 +641,7 @@ class sorted_buffer {
      *  @brief Merge a batch of @c batch_size_ candidates into the buffer in a single pass.
      *  @return 64-bit mask - bit @c i is set iff @c batch[i] ended up in the buffer.
      *
-     *  Semantically "take the top-@c limit of (existing ∪ batch)" - the HNSW top-k
+     *  Semantically "take the top @c limit of (existing ∪ batch)" - the HNSW top-k
      *  semantic, which can keep candidates that @c batch_size_ cascading single-element
      *  inserts would reject due to intermediate buffer-top shrinkage.
      *

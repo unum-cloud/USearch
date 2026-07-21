@@ -28,36 +28,6 @@ template <typename index_type_,                                                 
           typename allocator_type_ = typename index_type_::candidates_allocator_t>
 struct inner_volatile_cursor;
 
-/**
- *  @brief Fixed self-describing prefix of a saved @c inner_volatile_index - deliberately
- *      independent of any template parameters, so any instantiation can sniff a payload
- *      before committing to a matching one. The three payload sections - vectors, norms &
- *      neighbors - follow it chunk-by-chunk in node id order.
- */
-struct inner_volatile_index_header_t {
-    /** @brief The expected @c magic contents: "usearch3" read as a little-endian word. */
-    inline static constexpr u64_t magic_k = 0x3368637261657375ull;
-    /** @brief The layout revision this implementation writes and understands. */
-    inline static constexpr u32_t version_k = 1;
-
-    /** @brief Identifies USearch inner volatile payloads; must equal @c magic_k. */
-    u64_t magic;
-    /** @brief Layout revision of the sections that follow. */
-    u32_t version;
-    /** @brief The stored @c nk_dtype_t; must match the loading instantiation. */
-    u32_t dtype;
-    /** @brief The @c nk_kernel_kind_t metric; must match the loading instantiation. */
-    u32_t kernel;
-    /** @brief Scalar dimensions per vector - one half of the frozen geometry. */
-    u32_t dimensions;
-    /** @brief Neighbor ids per node - the other half of the frozen geometry. */
-    u32_t connectivity;
-    /** @brief Published nodes in the payload; the chunk layout re-derives from it. */
-    u32_t node_count;
-};
-static_assert(sizeof(inner_volatile_index_header_t) == 32 &&
-              std::is_trivially_copyable_v<inner_volatile_index_header_t>);
-
 /** @brief Orders scored nodes nearest-first; the comparator of the sorted results pool. */
 struct inner_closer_scored_node_t {
     inline bool operator()(inner_scored_node_t a, inner_scored_node_t b) const noexcept {
@@ -146,14 +116,23 @@ struct inner_traversal_context {
     using views_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<vector_view_t>;
     using norms_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<vector_norms_t>;
     using distances_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<inner_distance_t>;
+    using bytes_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<std::byte>;
 
     using ids_tensor_t = nk::tensor<inner_node_id_t, ids_allocator_t, 1>;
     using views_tensor_t = nk::tensor<vector_view_t, views_allocator_t, 1>;
     using norms_tensor_t = nk::tensor<vector_norms_t, norms_allocator_t, 1>;
-    using distances_tensor_t = nk::tensor<inner_distance_t, distances_allocator_t, 1>;
+    using distances_matrix_t = nk::tensor<inner_distance_t, distances_allocator_t, 2>;
+    using bytes_tensor_t = nk::tensor<std::byte, bytes_allocator_t, 1>;
+    /** @brief One selection's output: @b [kept] scored nodes - the id and its distance to the
+     *      selection's own query. The tensor's live shape is the fill; @c capacity() is the
+     *      reservation, so no separate count exists anywhere. */
+    using selection_t = nk::tensor<inner_scored_node_t, candidates_allocator_t, 1>;
 
     using results_array_t = sorted_buffer<inner_scored_node_t, inner_closer_scored_node_t, candidates_allocator_t>;
-    using frontier_queue_t = max_heap<inner_scored_node_t, inner_further_scored_node_t, candidates_allocator_t>;
+    /** @brief 8-ary: eight 8-byte scored nodes fill one cache line per level scan, and the
+     *      insert-dominated frontier (~2x connectivity pushes per pop) rides the shallower
+     *      log_8 @c shift_up depth. */
+    using frontier_queue_t = max_heap_dary<8, inner_scored_node_t, inner_further_scored_node_t, candidates_allocator_t>;
     using visited_set_t = growing_hash_set<inner_node_id_t, std::hash<inner_node_id_t>, visits_allocator_t>;
 
     /** @brief Nodes we've already scored, kept ascending as the best results so far. */
@@ -167,28 +146,28 @@ struct inner_traversal_context {
     /** @brief Pseudo-random generator for picking traversal starting points. */
     splitmix_u32_t random_generator;
 
-    /** @brief One link selection - parallel @b [links] ids, cached slab views, norms & query
-     *      distances; sized by @c reserve_links from the frozen connectivity, so no hard ceiling
-     *      exists anywhere. The contiguous views & norms feed the 4-way sweeps today and tiled
-     *      kernels later. */
-    struct links_t {
-        ids_tensor_t ids;
-        views_tensor_t vectors;
-        norms_tensor_t norms;
-        /** @brief Distance of each link to the selection's own query - reusable on the reverse
-         *      side, since every supported metric is symmetric. */
-        distances_tensor_t distances;
-        /** @brief The filled prefix across the parallel tensors - the tensors themselves only
-         *      know their reserved extent, and capacity & fill level are different facts. */
-        u32_t count = 0;
-    };
-
-    /** @brief Links chosen for the freshly inserted node. */
-    links_t selected_links;
+    /** @brief Links chosen for the freshly inserted node, with their query distances -
+     *      reusable on the reverse side, since every supported metric is symmetric. */
+    selection_t selected_links;
     /** @brief Re-selection output for one saturated neighbor's list. */
-    links_t refined_links;
-    /** @brief Staged newcomer & existing links of one neighbor, scored in 4-way sweeps. */
-    links_t staged_links;
+    selection_t refined_links;
+
+    /** @brief Ids of one neighbor's staged list - the input of a re-selection, never its output. */
+    ids_tensor_t staged_ids;
+    /** @brief The one staging surface both engines read: contiguous views of the staged rows
+     *      during scoring, then the kept prefix of whichever selection is running. The two
+     *      lives never overlap - scoring drains the staged rows before any selection writes. */
+    views_tensor_t staged_vectors;
+    /** @brief Stored norms, parallel to @c staged_vectors. */
+    norms_tensor_t staged_norms;
+    /** @brief Pair-matrix positions of the kept links, parallel to the running selection's fill. */
+    ids_tensor_t kept_positions;
+
+    /** @brief Tile scratch of the staged Gram: the packed B-tiles plus one row-tile of A-strips. */
+    bytes_tensor_t tiles_scratch;
+    /** @brief The @b [pool,pool] pairwise distances; its row stride is its own trailing extent,
+     *      pre-padded to whole tiles so tail tiles always write in bounds. */
+    distances_matrix_t pair_distances;
 
     /** @brief Total one-to-one distance computations, padding lanes excluded. Like all the
      *      telemetry below, it's a running counter: operations snapshot it on entry and report
@@ -222,18 +201,27 @@ struct inner_traversal_context {
      *      largest selection any path stages - through the context's own allocator. Geometry
      *      freezes once, so the tensors allocate once. */
     bool reserve_links(std::size_t capacity) noexcept {
-        return reserve_links_of(selected_links, capacity) && reserve_links_of(refined_links, capacity) &&
-               reserve_links_of(staged_links, capacity);
+        if (selected_links.capacity() >= capacity) return true;
+        selected_links = selection_t::try_zeros({capacity}, candidates_allocator_t(allocator_));
+        refined_links = selection_t::try_zeros({capacity}, candidates_allocator_t(allocator_));
+        staged_ids = ids_tensor_t::try_zeros({capacity}, ids_allocator_t(allocator_));
+        staged_vectors = views_tensor_t::try_zeros({capacity}, views_allocator_t(allocator_));
+        staged_norms = norms_tensor_t::try_zeros({capacity}, norms_allocator_t(allocator_));
+        kept_positions = ids_tensor_t::try_zeros({capacity}, ids_allocator_t(allocator_));
+        return !selected_links.empty() && !refined_links.empty() && !staged_ids.empty() && !staged_vectors.empty() &&
+               !staged_norms.empty() && !kept_positions.empty();
     }
 
-    /** @brief Sizes one @p links scratch for @p capacity entries; keeps larger allocations. */
-    bool reserve_links_of(links_t& links, std::size_t capacity) noexcept {
-        if (links.ids.size() >= capacity) return true;
-        links.ids = ids_tensor_t::try_zeros({capacity}, ids_allocator_t(allocator_));
-        links.vectors = views_tensor_t::try_zeros({capacity}, views_allocator_t(allocator_));
-        links.norms = norms_tensor_t::try_zeros({capacity}, norms_allocator_t(allocator_));
-        links.distances = distances_tensor_t::try_zeros({capacity}, distances_allocator_t(allocator_));
-        return !links.ids.empty() && !links.vectors.empty() && !links.norms.empty() && !links.distances.empty();
+    /** @brief Sizes the pair matrix for a @p capacity -row pool - arriving pre-padded to whole
+     *      tiles by the caller, which knows its kit's shapes - plus @p scratch_bytes of
+     *      kit-specific tile scratch. The matrix's own trailing extent is the row stride, so
+     *      tail tiles always write in bounds. The context itself stays agnostic of every
+     *      engine's geometry. */
+    bool reserve_tiles(std::size_t capacity, std::size_t scratch_bytes) noexcept {
+        if (pair_distances.extent(0) >= capacity) return true;
+        tiles_scratch = bytes_tensor_t::try_zeros({scratch_bytes}, bytes_allocator_t(allocator_));
+        pair_distances = distances_matrix_t::try_zeros({capacity, capacity}, distances_allocator_t(allocator_));
+        return !tiles_scratch.empty() && !pair_distances.empty();
     }
 
     /** @brief Allocator instance behind every link scratch; the queues hold rebound copies. */
@@ -286,8 +274,17 @@ struct inner_volatile_index {
 
     /** @brief The capability bit of the distance kit the chain actually picked - lower than
      *      @c capability_ when no SIMD kit is adapted for this dtype & metric pair yet. */
-    inline static constexpr nk_capability_t picked_capability_k =
-        kernel_chain<kernel_kind_, scalar_t, capability_>::picked_k;
+    inline static constexpr nk_capability_t picked_quads_capability_k =
+        inner_quads_chain<kernel_kind_, scalar_t, capability_>::picked_k;
+
+    /** @brief The tile backend's capability, on its own independent axis - one machine
+     *      runs icelake 1-to-1 kernels and sapphireamx tiles simultaneously. */
+    inline static constexpr nk_capability_t picked_tiles_capability_k =
+        inner_tiles_chain<kernel_kind_, scalar_t, capability_>::picked_k;
+    /** @brief The tile kit behind the tiled refinement paths; @c no_tiles_kit_t when none compiled. */
+    using tiles_kit_t = typename inner_tiles_chain<kernel_kind_, scalar_t, capability_>::kit_t;
+    /** @brief Whether a tile engine is compiled in for this (kernel, dtype) pair. */
+    inline static constexpr bool has_tiles_k = inner_tiles_chain<kernel_kind_, scalar_t, capability_>::has_tiles_k;
     static_assert( //
         kernel_kind_k == nk_kernel_dot_k || kernel_kind_k == nk_kernel_angular_k ||
         kernel_kind_k == nk_kernel_euclidean_k || kernel_kind_k == nk_kernel_sqeuclidean_k ||
@@ -300,7 +297,8 @@ struct inner_volatile_index {
     using results_array_t = typename inner_traversal_context_t::results_array_t;
     using frontier_queue_t = typename inner_traversal_context_t::frontier_queue_t;
     using visited_set_t = typename inner_traversal_context_t::visited_set_t;
-    using links_t = typename inner_traversal_context_t::links_t;
+    using selection_t = typename inner_traversal_context_t::selection_t;
+    using ids_tensor_t = typename inner_traversal_context_t::ids_tensor_t;
 
     using norms_allocator_t =
         typename std::allocator_traits<vectors_allocator_type_>::template rebind_alloc<vector_norms_t>;
@@ -463,7 +461,7 @@ struct inner_volatile_index {
     /** @brief Scores @p query against four consecutive entries of the cached @p vectors &
      *      @p norms arrays starting at @p start; the gather cursor sticks at @p count - 1, so
      *      short tails repeat the last entry and the kernel always streams four valid lanes. */
-    inline static std::array<distance_t, 4> distances_four_of(     //
+    inline static std::array<distance_t, 4> distances_quad_of(     //
         vector_view_t query, vector_norms_t query_norms,           //
         vector_view_t const* vectors, vector_norms_t const* norms, //
         small_size_t start, small_size_t count) noexcept {
@@ -967,6 +965,26 @@ struct inner_volatile_index {
 
                 // Grow the visited set ahead of the marks - `set()` itself never rehashes.
                 if (!visited.reserve(visited.size() + gathered_count)) return;
+
+                // Full quads - the hot case - mark all four lanes in one interleaved probe
+                // sweep, then merge into the pool with one batched top-k insert: "top-k of
+                // (existing ∪ batch)" keeps candidates that cascading single inserts wrongly
+                // reject, and the accept mask gates the frontier with the post-merge truth
+                // instead of a pre-insert radius bound.
+                if (gathered_count == gathered_ids.size()) {
+                    visited.set(gathered_ids);
+                    std::array<inner_scored_node_t, 4> scored_batch;
+                    for (small_size_t lane = 0; lane != scored_batch.size(); ++lane)
+                        scored_batch[lane] = inner_scored_node_t(gathered_ids[lane], gathered_distances[lane]);
+                    std::uint64_t const accepted = results.insert(scored_batch, expansion_factor);
+                    for (small_size_t lane = 0; lane != scored_batch.size(); ++lane)
+                        if (accepted & (std::uint64_t {1} << lane))
+                            if (!frontier.insert(inner_scored_node_t(scored_batch[lane]))) return;
+                    continue;
+                }
+
+                // The rare partial tail quad falls back to single-element inserts - padding a
+                // batched insert would pollute a not-yet-full pool with duplicate lanes.
                 for (small_size_t lane = 0; lane != gathered_count; ++lane) {
                     visited.set(gathered_ids[lane]);
                     inner_scored_node_t const scored(gathered_ids[lane], gathered_distances[lane]);
@@ -989,15 +1007,31 @@ struct inner_volatile_index {
      *
      *  @param[in] candidates Search results, ascending by distance to the query.
      *  @param[in] limit Ceiling on the kept links - typically the connectivity.
-     *  @param[out] out Receives the kept ids with their cached views, norms & query distances;
-     *      sets @c out.count.
+     *  @param[out] out Receives the kept scored nodes; its live shape is the fill.
      *  @return The number of distance computations performed, for the caller's telemetry.
      */
-    std::size_t select_diverse(results_array_t const& candidates, std::size_t limit, links_t& out) const noexcept {
-        out.count = 0;
+    std::size_t select_diverse(results_array_t const& candidates, std::size_t limit, selection_t& out,
+                               inner_traversal_context_t& context) const noexcept {
+        // The thin pick between the engine siblings. The vector path serves every shape
+        // today; the forward tile sibling - a speculative first-tile rectangle - joins it
+        // next, keyed purely off @c tile_span_k, never a tuned threshold.
+        return select_diverse_via_quads(candidates, limit, out, context);
+    }
+
+    /**
+     *  @brief The vector-engine sibling of @c select_diverse: pair distances computed on the
+     *      fly with the 4-way kernels, the classic greedy scan deciding as they arrive. The
+     *      kept prefix's views & norms ride the staging surface - free during any selection.
+     */
+    std::size_t select_diverse_via_quads(results_array_t const& candidates, std::size_t limit, selection_t& out,
+                                         inner_traversal_context_t& context) const noexcept {
+        if (!out.try_resize({limit})) return 0;
+        vector_view_t* const kept_vectors = context.staged_vectors.data();
+        vector_norms_t* const kept_norms = context.staged_norms.data();
+        small_size_t kept_count = 0;
         std::size_t computed_distances = 0;
         inner_scored_node_t const* candidates_data = candidates.data();
-        for (std::size_t index = 0; index != candidates.size() && out.count != limit; ++index) {
+        for (std::size_t index = 0; index != candidates.size() && kept_count != limit; ++index) {
             inner_scored_node_t const candidate = candidates_data[index];
             chunked_location_t const candidate_location = chunked_location(candidate.node_id);
             vector_view_t const candidate_vector = vector_for(candidate_location);
@@ -1006,10 +1040,10 @@ struct inner_volatile_index {
             // tails repeat the last link. A batch may score a few links past the first
             // violation, but one 4-way dispatch is still far cheaper than four serial ones.
             small_size_t kept = 0;
-            while (kept != out.count) {
-                std::array<distance_t, 4> const kept_distances = distances_four_of( //
-                    candidate_vector, candidate_norms, out.vectors.data(), out.norms.data(), kept, out.count);
-                small_size_t const lanes_count = min_of<small_size_t>(out.count - kept, 4u);
+            while (kept != kept_count) {
+                std::array<distance_t, 4> const kept_distances = distances_quad_of( //
+                    candidate_vector, candidate_norms, kept_vectors, kept_norms, kept, kept_count);
+                small_size_t const lanes_count = min_of<small_size_t>(kept_count - kept, 4u);
                 computed_distances += lanes_count;
                 small_size_t losses = 0;
                 for (small_size_t lane = 0; lane != lanes_count; ++lane)
@@ -1018,14 +1052,194 @@ struct inner_volatile_index {
                 kept += lanes_count;
             }
             // Surviving every batch is the diversity verdict itself - no flag to thread through.
-            if (kept != out.count) continue;
-            out.ids[out.count] = candidate.node_id;
-            out.vectors[out.count] = candidate_vector;
-            out.norms[out.count] = candidate_norms;
-            out.distances[out.count] = candidate.distance;
-            ++out.count;
+            if (kept != kept_count) continue;
+            out[kept_count] = candidate;
+            kept_vectors[kept_count] = candidate_vector;
+            kept_norms[kept_count] = candidate_norms;
+            ++kept_count;
         }
+        // Shrinking within the reservation never fails - the fill becomes the live shape.
+        (void)out.try_resize({kept_count});
         return computed_distances;
+    }
+
+    /**
+     *  @brief The compute half of the tile engine: the full pairwise distance matrix of
+     *      @p rows through the tile kit, into the context's @c pair_distances. The finalize
+     *      kit is the very one the vector path picked, so both engines produce bit-identical
+     *      distances for the deciding siblings to read.
+     *
+     *  @param[in] rows Scattered views of the pool - the staged list, or a candidate pool.
+     *  @param[in] norms The stored norms, parallel to @p rows.
+     *  @param[inout] context Supplies @c pair_distances & @c tiles_scratch from @c reserve_tiles.
+     *  @return The pair count - tiled refinement spend, honestly counted.
+     */
+    std::size_t pair_distances_via_tiles(std::span<vector_view_t const> rows, std::span<vector_norms_t const> norms,
+                                         inner_traversal_context_t& context) const noexcept {
+        constexpr std::size_t rows_k = tiles_kit_t::tile_rows_k;
+        constexpr std::size_t columns_k = tiles_kit_t::tile_columns_k;
+        constexpr std::size_t depth_k = tiles_kit_t::tile_depth_k;
+        std::size_t const count = rows.size();
+        std::size_t const stride = context.pair_distances.extent(1);
+
+        // The engine-agnostic tile composition: pack each row-tile once - the Gram symmetry
+        // turns its gathered A-strips straight into B-tiles - then init → update over depth →
+        // finalize per tile pair. Tail tiles pad by repeating the last valid row, like the
+        // 4-way tails; their lanes finalize into the padded stride and are never read.
+        std::size_t const dimensions = rows[0].size();
+        std::size_t const row_tiles = divide_round_up<std::size_t>(count, rows_k);
+        std::size_t const depth_tiles = divide_round_up<std::size_t>(dimensions, depth_k);
+        // Generic byte allocators promise 16-byte alignment while the tile loads demand the
+        // tiles' own - align the base up into the margin @c scratch_bytes reserved.
+        std::uintptr_t const raw_base = reinterpret_cast<std::uintptr_t>(context.tiles_scratch.data());
+        constexpr std::uintptr_t tile_alignment = alignof(typename tiles_kit_t::a_tile_t);
+        std::uintptr_t const aligned_base = (raw_base + tile_alignment - 1u) & ~(tile_alignment - 1u);
+        typename tiles_kit_t::b_tile_t* const b_tiles = reinterpret_cast<typename tiles_kit_t::b_tile_t*>(aligned_base);
+        typename tiles_kit_t::a_tile_t* const a_tiles = reinterpret_cast<typename tiles_kit_t::a_tile_t*>(
+            b_tiles + row_tiles * depth_tiles);
+        tiles_kit_t::configure_tiles();
+
+        std::array<vector_view_t, rows_k> tile_rows;
+        for (std::size_t column_tile = 0; column_tile != row_tiles; ++column_tile) {
+            for (std::size_t row = 0; row != rows_k; ++row)
+                tile_rows[row] = rows[min_of(column_tile * rows_k + row, count - 1)];
+            for (std::size_t depth_tile = 0; depth_tile != depth_tiles; ++depth_tile) {
+                tiles_kit_t::gather_a_tile(a_tiles[0], tile_rows, depth_tile * depth_k);
+                tiles_kit_t::pack_b_tile(a_tiles[0], b_tiles[column_tile * depth_tiles + depth_tile]);
+            }
+        }
+
+        typename tiles_kit_t::accumulator_tile_t accumulator;
+        std::array<vector_norms_t, rows_k> row_norms;
+        std::array<vector_norms_t, columns_k> column_norms;
+        for (std::size_t row_tile = 0; row_tile != row_tiles; ++row_tile) {
+            for (std::size_t row = 0; row != rows_k; ++row) {
+                std::size_t const source = min_of(row_tile * rows_k + row, count - 1);
+                tile_rows[row] = rows[source];
+                row_norms[row] = norms[source];
+            }
+            for (std::size_t depth_tile = 0; depth_tile != depth_tiles; ++depth_tile)
+                tiles_kit_t::gather_a_tile(a_tiles[depth_tile], tile_rows, depth_tile * depth_k);
+            for (std::size_t column_tile = 0; column_tile != row_tiles; ++column_tile) {
+                for (std::size_t column = 0; column != columns_k; ++column)
+                    column_norms[column] = norms[min_of(column_tile * columns_k + column, count - 1)];
+                tiles_kit_t::init_tile(accumulator);
+                for (std::size_t depth_tile = 0; depth_tile != depth_tiles; ++depth_tile)
+                    tiles_kit_t::update_tile(accumulator, a_tiles[depth_tile],
+                                             b_tiles[column_tile * depth_tiles + depth_tile]);
+                tiles_kit_t::finalize_tile(
+                    accumulator, row_norms, column_norms,
+                    context.pair_distances.data() + row_tile * rows_k * stride + column_tile * columns_k, stride);
+            }
+        }
+        return count * count;
+    }
+
+    /**
+     *  @brief The pair-matrix sibling of @c select_diverse: a pure decision scan over
+     *      precomputed distances - no kernels anywhere. The @p pool entries carry matrix
+     *      @b positions in their @c node_id; a kept position at the staged fill is the
+     *      newcomer, everything below translates through the staged ids.
+     */
+    std::size_t select_diverse_via_pairs(results_array_t const& pool, std::size_t limit, selection_t& out,
+                                         node_id_t newcomer_id, inner_traversal_context_t& context) const noexcept {
+        ids_tensor_t const& staged_ids = context.staged_ids;
+        distance_t const* pairs = context.pair_distances.data();
+        std::size_t const stride = context.pair_distances.extent(1);
+        inner_scored_node_t const* pool_data = pool.data();
+        if (!out.try_resize({limit})) return 0;
+        small_size_t kept_count = 0;
+        for (std::size_t index = 0; index != pool.size() && kept_count != limit; ++index) {
+            small_size_t const position = static_cast<small_size_t>(pool_data[index].node_id);
+            distance_t const* row = pairs + std::size_t(position) * stride;
+            small_size_t losses = 0;
+            for (small_size_t kept = 0; kept != kept_count; ++kept)
+                losses += row[context.kept_positions[kept]] < pool_data[index].distance;
+            if (losses) continue;
+            bool const is_newcomer = position == staged_ids.size();
+            node_id_t const kept_id = is_newcomer ? newcomer_id : staged_ids[position];
+            out[kept_count] = inner_scored_node_t(kept_id, pool_data[index].distance);
+            context.kept_positions[kept_count] = position;
+            ++kept_count;
+        }
+        (void)out.try_resize({kept_count});
+        return 0; // Decision only - every distance here was already paid for.
+    }
+
+    /**
+     *  @brief The vector-engine scoring of one staged list against its owning @p neighbor:
+     *      4-way sweeps feeding the sorted re-selection pool with real node ids, the
+     *      newcomer entering on its reused symmetric score.
+     *  @return The distances computed, for the caller's telemetry.
+     */
+    std::size_t stage_scores_via_quads(vector_view_t neighbor_vector, vector_norms_t neighbor_norms,
+                                       node_id_t new_node_id, distance_t newcomer_score,
+                                       inner_traversal_context_t& context) const noexcept {
+        results_array_t& refining_candidates = context.refining_candidates;
+        small_size_t const count = static_cast<small_size_t>(context.staged_ids.size());
+        small_size_t const pool_limit = count + 1;
+        refining_candidates.insert(inner_scored_node_t(new_node_id, newcomer_score), pool_limit);
+        std::size_t computed = 0;
+        for (small_size_t scored = 0; scored != count;) {
+            std::array<distance_t, 4> const staged_distances = distances_quad_of( //
+                neighbor_vector, neighbor_norms, context.staged_vectors.data(), context.staged_norms.data(), scored,
+                count);
+            small_size_t const lanes_count = min_of<small_size_t>(count - scored, 4u);
+            for (small_size_t lane = 0; lane != lanes_count; ++lane)
+                refining_candidates.insert(
+                    inner_scored_node_t(context.staged_ids[scored + lane], staged_distances[lane]), pool_limit);
+            scored += lanes_count;
+            computed += lanes_count;
+        }
+        return computed;
+    }
+
+    /**
+     *  @brief The tile-engine sibling of @c stage_scores_via_quads: one staged Gram plus
+     *      two 4-way rows - the neighbor's scores ordering the pool, and the newcomer's
+     *      symmetric row & column - so re-selection decides entirely from precomputed pairs.
+     *      Pool entries carry matrix @b positions, ready for @c select_diverse_via_pairs.
+     *  @return The distances computed, Gram pairs included - tiled spend, honestly counted.
+     */
+    std::size_t stage_scores_via_tiles(vector_view_t neighbor_vector, vector_norms_t neighbor_norms,
+                                       vector_view_t new_vector, vector_norms_t new_norms, distance_t newcomer_score,
+                                       inner_traversal_context_t& context) const noexcept {
+        results_array_t& refining_candidates = context.refining_candidates;
+        small_size_t const count = static_cast<small_size_t>(context.staged_ids.size());
+        small_size_t const pool_limit = count + 1;
+        std::size_t const stride = context.pair_distances.extent(1);
+        vector_view_t const* staged_vectors = context.staged_vectors.data();
+        vector_norms_t const* staged_norms = context.staged_norms.data();
+        std::size_t computed = pair_distances_via_tiles(std::span<vector_view_t const> {staged_vectors, count},
+                                                        std::span<vector_norms_t const> {staged_norms, count}, context);
+
+        // The neighbor's scores - the pool's ordering - through the vector engine.
+        for (small_size_t scored = 0; scored != count;) {
+            std::array<distance_t, 4> const scores = distances_quad_of( //
+                neighbor_vector, neighbor_norms, staged_vectors, staged_norms, scored, count);
+            small_size_t const lanes_count = min_of<small_size_t>(count - scored, 4u);
+            for (small_size_t lane = 0; lane != lanes_count; ++lane)
+                refining_candidates.insert(inner_scored_node_t(scored + lane, scores[lane]), pool_limit);
+            scored += lanes_count;
+            computed += lanes_count;
+        }
+
+        // The newcomer's row & column, so it competes uniformly inside the matrix at
+        // position @c count; its own score is the reused symmetric one - never recomputed.
+        distance_t* pairs = context.pair_distances.data();
+        for (small_size_t scored = 0; scored != count;) {
+            std::array<distance_t, 4> const row = distances_quad_of( //
+                new_vector, new_norms, staged_vectors, staged_norms, scored, count);
+            small_size_t const lanes_count = min_of<small_size_t>(count - scored, 4u);
+            for (small_size_t lane = 0; lane != lanes_count; ++lane) {
+                pairs[std::size_t(count) * stride + scored + lane] = row[lane];
+                pairs[std::size_t(scored + lane) * stride + count] = row[lane];
+            }
+            scored += lanes_count;
+            computed += lanes_count;
+        }
+        refining_candidates.insert(inner_scored_node_t(static_cast<node_id_t>(count), newcomer_score), pool_limit);
+        return computed;
     }
 
     /**
@@ -1039,19 +1253,18 @@ struct inner_volatile_index {
      *  another writer owns it - so we politely retry. All slot writes happen under the lock, and
      *  the unlocking release-store of slot 0 is what republishes the edited list.
      *
-     *  @param[in] selected The fresh node's chosen links: the cached views & norms anchor each
-     *      re-selection without re-deriving locations, and the recorded query distances score
-     *      the newcomer for free - the metrics are symmetric.
+     *  @param[in] selected The fresh node's chosen links with their recorded query distances -
+     *      those score the newcomer for free, since the metrics are symmetric.
      *  @param[inout] context Scratch for the re-selection, plus the telemetry counters.
      */
     void back_link_neighbors(node_id_t new_node_id, vector_view_t new_vector, vector_norms_t new_norms,
-                             links_t const& selected, inner_traversal_context_t& context) noexcept {
+                             selection_t const& selected, inner_traversal_context_t& context) noexcept {
 
         results_array_t& refining_candidates = context.refining_candidates;
         std::size_t const node_connectivity = connectivity();
 
-        for (small_size_t link = 0; link != selected.count; ++link) {
-            node_id_t const neighbor_id = selected.ids[link];
+        for (small_size_t link = 0; link != selected.size(); ++link) {
+            node_id_t const neighbor_id = selected[link].node_id;
             chunked_location_t const neighbor_location = chunked_location(neighbor_id);
             neighbors_list_ref_t const neighbor_list = neighbors_for(neighbor_location);
 
@@ -1079,55 +1292,59 @@ struct inner_volatile_index {
             // the neighbor itself, and re-run the diversity heuristic to keep the best spread.
             // Distances are computed under the lock for now; an optimistic precompute-and-revalidate
             // scheme shortening this critical section is a known follow-up.
-            vector_view_t const neighbor_vector = selected.vectors[link];
-            vector_norms_t const neighbor_norms = selected.norms[link];
+            vector_view_t const neighbor_vector = vector_for(neighbor_location);
+            vector_norms_t const neighbor_norms = norm_for(neighbor_location);
 
             // Stage the list at its own slot positions - the lock-displaced slot-0 value first.
-            // The newcomer never enters the staged panel: mixing it in would hand tiled kernels
-            // an irregular connectivity + 1 operand, and its score is already known - every
-            // supported metric is symmetric, so d(neighbor, newcomer) was recorded by the very
-            // selection that kept this link. The panel stays a clean power-of-two matrix.
-            links_t& staged = context.staged_links;
+            // The newcomer never enters the staged rows: mixing it in would hand the tile
+            // kernels an irregular connectivity + 1 operand, and its score is already known -
+            // every supported metric is symmetric, so d(neighbor, newcomer) was recorded by
+            // the very selection that kept this link. The staging stays whole tiles.
+            if (!context.staged_ids.try_resize({slots_count})) {
+                neighbor_list.unlock(first_slot_value);
+                continue;
+            }
             chunked_location_t const first_location = chunked_location(first_slot_value);
-            staged.ids[0] = first_slot_value;
-            staged.vectors[0] = vector_for(first_location);
-            staged.norms[0] = norm_for(first_location);
+            context.staged_ids[0] = first_slot_value;
+            context.staged_vectors[0] = vector_for(first_location);
+            context.staged_norms[0] = norm_for(first_location);
             for (small_size_t slot = 1; slot != slots_count; ++slot) {
                 node_id_t const existing_id = neighbor_list.load_slot(slot);
                 chunked_location_t const existing_location = chunked_location(existing_id);
-                staged.ids[slot] = existing_id;
-                staged.vectors[slot] = vector_for(existing_location);
-                staged.norms[slot] = norm_for(existing_location);
+                context.staged_ids[slot] = existing_id;
+                context.staged_vectors[slot] = vector_for(existing_location);
+                context.staged_norms[slot] = norm_for(existing_location);
             }
-            staged.count = slots_count;
 
             // The re-selection pool is still the whole list plus the newcomer - that "+ 1"
-            // lives in the sorted pool alone, never in any operand shape.
-            small_size_t const pool_limit = slots_count + 1;
+            // lives in the sorted pool alone, never in any operand shape. The engine pick:
+            // tiles Gram the whole staged list and decide from precomputed pairs; vectors
+            // sweep and decide as distances arrive. The newcomer's own score is reused in
+            // both - symmetric metrics recorded it at selection time, never recomputed.
             refining_candidates.clear();
-            refining_candidates.insert(inner_scored_node_t(new_node_id, selected.distances[link]), pool_limit);
-            for (small_size_t scored = 0; scored != staged.count;) {
-                std::array<distance_t, 4> const staged_distances = distances_four_of( //
-                    neighbor_vector, neighbor_norms, staged.vectors.data(), staged.norms.data(), scored, staged.count);
-                small_size_t const lanes_count = min_of<small_size_t>(staged.count - scored, 4u);
-                for (small_size_t lane = 0; lane != lanes_count; ++lane)
-                    refining_candidates.insert( //
-                        inner_scored_node_t(staged.ids[scored + lane], staged_distances[lane]), pool_limit);
-                scored += lanes_count;
+            selection_t& refined = context.refined_links;
+            std::size_t refine_distances = 0;
+            if constexpr (has_tiles_k) {
+                refine_distances = stage_scores_via_tiles(neighbor_vector, neighbor_norms, new_vector, new_norms,
+                                                          selected[link].distance, context);
+                select_diverse_via_pairs(refining_candidates, node_connectivity, refined, new_node_id, context);
             }
-
-            links_t& refined = context.refined_links;
-            std::size_t const refine_distances = select_diverse(refining_candidates, node_connectivity, refined);
-            // The newcomer's score was reused, not recomputed - only the list sweep counts.
-            context.computed_distances += refine_distances + slots_count;
-            context.computed_distances_in_reverse_refines += refine_distances + slots_count;
+            else {
+                refine_distances = stage_scores_via_quads(neighbor_vector, neighbor_norms, new_node_id,
+                                                          selected[link].distance, context);
+                refine_distances += select_diverse_via_quads(refining_candidates, node_connectivity, refined, context);
+            }
+            context.computed_distances += refine_distances;
+            context.computed_distances_in_reverse_refines += refine_distances;
 
             // Rewrite the tail slots, sentinel-terminate any shrink, and unlock with the new head.
-            // `refined.count >= 1` always: the heuristic never rejects the nearest candidate.
-            for (small_size_t slot = 1; slot < refined.count; ++slot) neighbor_list.store_slot(slot, refined.ids[slot]);
-            for (small_size_t slot = refined.count; slot < slots_count; ++slot)
+            // A non-empty refined fill always holds: the heuristic never rejects the nearest candidate.
+            small_size_t const refined_count = static_cast<small_size_t>(refined.size());
+            for (small_size_t slot = 1; slot < refined_count; ++slot)
+                neighbor_list.store_slot(slot, refined[slot].node_id);
+            for (small_size_t slot = refined_count; slot < slots_count; ++slot)
                 neighbor_list.store_slot(slot, inner_node_id_unknown_k);
-            neighbor_list.unlock(refined.ids[0]);
+            neighbor_list.unlock(refined[0].node_id);
         }
     }
 
@@ -1286,6 +1503,16 @@ struct inner_volatile_index {
             !context.reserve_links(node_connectivity))
             return {status_t::bad_alloc_k};
 
+        // The tile planes size from the same frozen geometry and the kit's own shapes - padded
+        // to whole tiles, so the padded pool doubles as the pair-matrix stride, and always wide
+        // enough for the reverse re-selection's list-plus-newcomer.
+        if constexpr (has_tiles_k) {
+            std::size_t const wanted = max_of<std::size_t>(expansion_factor, node_connectivity + 1);
+            std::size_t const pool = divide_round_up<std::size_t>(wanted, tile_span_k) * tile_span_k;
+            if (!context.reserve_tiles(pool, tiles_kit_t::scratch_bytes(pool, geometry_dimensions(geometry))))
+                return {status_t::bad_alloc_k};
+        }
+
         // Claim storage for the whole batch: from here on enough sentinel-filled rows exist for
         // all our nodes, and this thread must roll forward to publishing every id it dispenses.
         expected<node_id_t> const claimed = claim_capacity(incoming_vectors_count);
@@ -1337,20 +1564,21 @@ struct inner_volatile_index {
             // into our own still-unpublished list. No locks are needed: no reader can arrive
             // before slot 0 turns non-sentinel, so relaxed stores into slots 1.. suffice, and the
             // untouched tail keeps its sentinel termination.
-            links_t& selected = context.selected_links;
-            std::size_t const refine_distances = select_diverse(context.results, node_connectivity, selected);
+            selection_t& selected = context.selected_links;
+            std::size_t const refine_distances = select_diverse(context.results, node_connectivity, selected, context);
             context.computed_distances += refine_distances;
             context.computed_distances_in_refines += refine_distances;
             neighbors_list_ref_t const new_neighbors = neighbors_for(new_location);
-            for (small_size_t link = 1; link < selected.count; ++link)
-                new_neighbors.store_slot(link, selected.ids[link]);
+            small_size_t const selected_count = static_cast<small_size_t>(selected.size());
+            for (small_size_t link = 1; link < selected_count; ++link)
+                new_neighbors.store_slot(link, selected[link].node_id);
 
             // Publish the node: slot 0 receives its nearest diverse neighbor, or the node's own id
             // when the graph offered no candidates - the "published, zero neighbors" self-loop
             // encoding, distinguishable from the all-ones "unpublished or locked" sentinel.
             // The release store is what makes the payload visible to any thread that later
             // discovers this node.
-            node_id_t const first_link_id = selected.count ? selected.ids[0] : new_node_id;
+            node_id_t const first_link_id = selected_count ? selected[0].node_id : new_node_id;
             new_neighbors.unlock(first_link_id);
 
             // Take our watermark turn, strictly in dispensed order, keeping the visible prefix
@@ -1483,8 +1711,8 @@ struct inner_volatile_index {
     }
 
     /** @brief The saved-payload prefix - the class-local spelling of the shared,
-     *      template-independent @c inner_volatile_index_header_t. */
-    using header_t = inner_volatile_index_header_t;
+     *      template-independent @c inner_index_header_t. */
+    using header_t = inner_index_header_t;
 
     /** @brief Bytes @c save() will emit for the current contents - size the mapping first.
      *      Monotone counters make the two loads safe in this order under any contract. */

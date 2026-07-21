@@ -129,6 +129,35 @@ enum connectivity_t : std::uint32_t {
     connectivity_128_k = 128,
 };
 
+/**
+ *  @brief Fixed 32-byte descriptor fronting every serialized inner index payload - volatile
+ *      in-RAM snapshots, GPU-resident uploads, and persisted on-NVMe layouts alike. It describes
+ *      the graph & its frozen geometry, never the residency: what sections follow and how they
+ *      are laid out is the per-storage contract versioned by @c version_k.
+ */
+struct inner_index_header_t {
+    /** @brief The expected @c magic contents: "usearch3" read as a little-endian word. */
+    inline static constexpr u64_t magic_k = 0x3368637261657375ull;
+    /** @brief The layout revision this implementation writes and understands. */
+    inline static constexpr u32_t version_k = 1;
+
+    /** @brief Identifies USearch inner index payloads; must equal @c magic_k. */
+    u64_t magic;
+    /** @brief Layout revision of the sections that follow. */
+    u32_t version;
+    /** @brief The stored @c nk_dtype_t; must match the loading instantiation. */
+    u32_t dtype;
+    /** @brief The @c nk_kernel_kind_t metric; must match the loading instantiation. */
+    u32_t kernel;
+    /** @brief Scalar dimensions per vector - one half of the frozen geometry. */
+    u32_t dimensions;
+    /** @brief Neighbor ids per node - the other half of the frozen geometry. */
+    u32_t connectivity;
+    /** @brief Published nodes in the payload; the chunk layout re-derives from it. */
+    u32_t node_count;
+};
+static_assert(sizeof(inner_index_header_t) == 32 && std::is_trivially_copyable_v<inner_index_header_t>);
+
 /** @brief Returns 2^ @p exponent as a value of the requested unsigned type. */
 template <typename result_type_>
 constexpr result_type_ power_of_two(u32_t exponent) noexcept {
@@ -159,6 +188,11 @@ template <typename value_type_>
 constexpr value_type_ max_of(value_type_ first, value_type_ second) noexcept {
     return first < second ? second : first;
 }
+
+/** @brief The universal matrix-engine row count: Intel AMX tiles, Arm SME's ZA at SVL-512,
+ *      and NVIDIA mma fragments all speak 16 rows natively - Hopper's warpgroups speak 4×16.
+ *      Tiled paths across every index design derive their shapes from it, never tune it. */
+inline constexpr std::size_t tile_span_k = 16;
 
 /**
  *  @brief The first position in the ascending @p values not ordered before @p value -
