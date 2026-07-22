@@ -5,11 +5,13 @@
  *  @date July 17, 2026
  */
 #pragma once
+#include <cassert> // `assert` on the `to_span` contiguity contract
+#include <cstdint> // `std::uint32_t`, `std::uint64_t`
+#include <cstring> // `std::memmove`
+
 #include <atomic>      // `std::atomic`
-#include <cassert>     // `assert` on the `to_span` contiguity contract
-#include <cstdint>     // `std::uint32_t`, `std::uint64_t`
-#include <cstring>     // `std::memmove`
 #include <span>        // `std::span`
+#include <string_view> // `std::string_view`
 #include <type_traits> // `std::type_identity_t`
 #include <thread>      // `std::this_thread::yield`
 
@@ -158,6 +160,52 @@ enum class dtype_t : u32_t {
     bin16_k,
     utf8_k,
 };
+
+/** @brief The canonical spelling of @p dtype - the very strings interchange headers carry. */
+constexpr char const* dtype_name(dtype_t dtype) noexcept {
+    switch (dtype) {
+    case dtype_t::u64_k: return "u64";
+    case dtype_t::i64_k: return "i64";
+    case dtype_t::u32_k: return "u32";
+    case dtype_t::i32_k: return "i32";
+    case dtype_t::u16_k: return "u16";
+    case dtype_t::i16_k: return "i16";
+    case dtype_t::u8_k: return "u8";
+    case dtype_t::i8_k: return "i8";
+    case dtype_t::f64_k: return "f64";
+    case dtype_t::f32_k: return "f32";
+    case dtype_t::bf16_k: return "bf16";
+    case dtype_t::f16_k: return "f16";
+    case dtype_t::e5m2_k: return "e5m2";
+    case dtype_t::e4m3_k: return "e4m3";
+    case dtype_t::bin16_k: return "bin16";
+    case dtype_t::utf8_k: return "utf8";
+    case dtype_t::unknown_k: return "unknown";
+    }
+    return "unknown";
+}
+
+/** @brief Parses a canonical dtype spelling - the reverse of @ref dtype_name - mapping
+ *      anything unrecognized onto @c unknown_k. */
+constexpr dtype_t dtype_named(std::string_view name) noexcept {
+    if (name == "u64") return dtype_t::u64_k;
+    if (name == "i64") return dtype_t::i64_k;
+    if (name == "u32") return dtype_t::u32_k;
+    if (name == "i32") return dtype_t::i32_k;
+    if (name == "u16") return dtype_t::u16_k;
+    if (name == "i16") return dtype_t::i16_k;
+    if (name == "u8") return dtype_t::u8_k;
+    if (name == "i8") return dtype_t::i8_k;
+    if (name == "f64") return dtype_t::f64_k;
+    if (name == "f32") return dtype_t::f32_k;
+    if (name == "bf16") return dtype_t::bf16_k;
+    if (name == "f16") return dtype_t::f16_k;
+    if (name == "e5m2") return dtype_t::e5m2_k;
+    if (name == "e4m3") return dtype_t::e4m3_k;
+    if (name == "bin16") return dtype_t::bin16_k;
+    if (name == "utf8") return dtype_t::utf8_k;
+    return dtype_t::unknown_k;
+}
 
 /**
  *  @brief Fixed 32-byte descriptor fronting every serialized inner index payload - volatile

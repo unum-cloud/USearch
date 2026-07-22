@@ -16,6 +16,18 @@
  *
  *  The JSON itself goes through yyjson - exceptions-free C, no schema compilation - and every
  *  allocation flows through the caller's allocator, trampolined into @c yyjson_alc.
+ *
+ *  @see https://github.com/safegraphs/SafeGraphs
+ *
+ *  Beside the SafeGraphs reader live the RetriEval-layout matrix helpers - @ref matrix_save,
+ *  @ref matrix_extents & @ref matrix_load: two little-endian counters, then the dense
+ *  row-major payload, with the element type carried by the file extension. The layout is the
+ *  big-ANN-benchmarks `*bin` convention of the NeurIPS'21 billion-scale challenge and the
+ *  DiskANN ecosystem, as codified by RetriEval - counter width, endianness, and the
+ *  extension-to-dtype table pinned down. Benchmark checkpoints, dataset files, and
+ *  ground-truth ids all share this one shape.
+ *
+ *  @see https://github.com/ashvardanian/RetriEval
  */
 #pragma once
 
@@ -26,10 +38,14 @@
 
 #include <yyjson.h> // The JSON walk - exceptions-free C
 
+#include <numkong/tensor.hpp> // `nk::matrix_view`, `nk::matrix_span`
+
 #include "types.hpp"
 
 namespace unum {
 namespace usearch {
+
+namespace nk = ashvardanian::numkong;
 
 /** @brief One column of a SafeGraphs header: the element type, the fixed row width, and its
  *      buffers as byte ranges @b relative to the data segment - never resolved pointers, so
@@ -75,27 +91,6 @@ struct safegraphs_header_t {
     safegraphs_column_t neighbors;
 };
 
-/** @brief Maps the specification's dtype spellings onto the USearch @ref dtype_t vocabulary. */
-inline dtype_t safegraphs_dtype_of_(std::string_view name) noexcept {
-    if (name == "u8") return dtype_t::u8_k;
-    if (name == "i8") return dtype_t::i8_k;
-    if (name == "u16") return dtype_t::u16_k;
-    if (name == "i16") return dtype_t::i16_k;
-    if (name == "u32") return dtype_t::u32_k;
-    if (name == "i32") return dtype_t::i32_k;
-    if (name == "u64") return dtype_t::u64_k;
-    if (name == "i64") return dtype_t::i64_k;
-    if (name == "f16") return dtype_t::f16_k;
-    if (name == "bf16") return dtype_t::bf16_k;
-    if (name == "f32") return dtype_t::f32_k;
-    if (name == "f64") return dtype_t::f64_k;
-    if (name == "e4m3") return dtype_t::e4m3_k;
-    if (name == "e5m2") return dtype_t::e5m2_k;
-    if (name == "bin16") return dtype_t::bin16_k;
-    if (name == "utf8") return dtype_t::utf8_k;
-    return dtype_t::unknown_k;
-}
-
 /** @brief Trampolines a standard byte allocator into @c yyjson_alc's C ABI. Standard
  *      allocators demand the size back on deallocation while yyjson's free callback supplies
  *      only the pointer, so every block carries its size in a max-aligned prefix. */
@@ -135,9 +130,9 @@ struct safegraphs_yyjson_allocator_ {
 inline void safegraphs_parse_column_(yyjson_val* object, safegraphs_column_t& column) noexcept {
     if (!yyjson_is_obj(object)) return;
     if (char const* name = yyjson_get_str(yyjson_obj_get(object, "dtype"))) //
-        column.dtype = safegraphs_dtype_of_(name);
+        column.dtype = dtype_named(name);
     if (char const* name = yyjson_get_str(yyjson_obj_get(object, "offsets_dtype")))
-        column.offsets_dtype = safegraphs_dtype_of_(name);
+        column.offsets_dtype = dtype_named(name);
     if (yyjson_val* shape = yyjson_obj_get(object, "shape")) column.shape = yyjson_get_uint(shape);
     column.values_start = yyjson_get_uint(yyjson_obj_get(object, "values_start"));
     column.values_length = yyjson_get_uint(yyjson_obj_get(object, "values_length"));
@@ -214,6 +209,79 @@ expected<safegraphs_header_t> safegraphs_read_header(char const* path, allocator
     expected<safegraphs_header_t> const result = safegraphs_read_header(file, allocator);
     std::fclose(file);
     return result;
+}
+
+/** @brief Row & column counts of one RetriEval-layout matrix file - logical dimensions,
+ *      exactly what the tensors' own extents speak, sub-byte packing included. */
+struct matrix_extents_t {
+    /** @brief Rows of the payload matrix. */
+    std::size_t rows = 0;
+    /** @brief Logical values per row - what the producing model emitted, not storage words. */
+    std::size_t columns = 0;
+};
+
+/**
+ *  @brief Writes @p matrix as one RetriEval-layout file at @p path: two little-endian
+ *      @p counter_type_ counters - rows, then columns - and the dense row-major payload.
+ *      The element type is never stored - the file extension carries it, RetriEval-style.
+ *      Extents are logical dimensions; the tensor's own strides account for sub-byte packing.
+ *
+ *  @param[in] path Destination file, truncated & rewritten whole.
+ *  @param[in] matrix The payload; must be contiguous.
+ *  @return @c success_k, @c overflow_k when an extent exceeds the counter range, or
+ *      @c device_error_k on any I/O failure.
+ */
+template <typename value_type_, typename counter_type_ = u32_t>
+status_t matrix_save(char const* path, nk::matrix_view<value_type_> matrix) noexcept {
+    counter_type_ const counters[2] = {static_cast<counter_type_>(matrix.extent(0)),
+                                       static_cast<counter_type_>(matrix.extent(1))};
+    if (counters[0] != matrix.extent(0) || counters[1] != matrix.extent(1)) return status_t::overflow_k;
+    std::size_t const payload_bytes = matrix.extent(0) * static_cast<std::size_t>(matrix.stride_bytes(0));
+    std::FILE* file = std::fopen(path, "wb");
+    if (!file) return status_t::device_error_k;
+    bool written = std::fwrite(counters, sizeof(counter_type_), 2, file) == 2;
+    written = written && std::fwrite(matrix.data(), 1, payload_bytes, file) == payload_bytes;
+    bool const closed = std::fclose(file) == 0;
+    return written && closed ? status_t::success_k : status_t::device_error_k;
+}
+
+/** @brief Reads just the two-counter header of @p path - the caller sizes its destination
+ *      from the returned extents before fetching the payload its own way. */
+template <typename counter_type_ = u32_t>
+expected<matrix_extents_t> matrix_extents(char const* path) noexcept {
+    matrix_extents_t extents;
+    std::FILE* file = std::fopen(path, "rb");
+    if (!file) return {extents, status_t::device_error_k};
+    counter_type_ counters[2];
+    bool const read_whole = std::fread(counters, sizeof(counter_type_), 2, file) == 2;
+    std::fclose(file);
+    if (!read_whole) return {extents, status_t::malformed_k};
+    extents.rows = static_cast<std::size_t>(counters[0]);
+    extents.columns = static_cast<std::size_t>(counters[1]);
+    return {extents, status_t::success_k};
+}
+
+/**
+ *  @brief Fills the caller-shaped @p destination from the payload of @p path, after checking
+ *      the file's counters against the expected extents.
+ *
+ *  @param[in] path A RetriEval-layout matrix file.
+ *  @param[out] destination Receives the payload; must be contiguous.
+ *  @return @c success_k, @c device_error_k when the file cannot open, @c malformed_k on a
+ *      short read, or @c config_mismatch_k when the counters disagree with @p destination.
+ */
+template <typename value_type_, typename counter_type_ = u32_t>
+status_t matrix_load(char const* path, nk::matrix_span<value_type_> destination) noexcept {
+    std::FILE* file = std::fopen(path, "rb");
+    if (!file) return status_t::device_error_k;
+    counter_type_ counters[2];
+    if (std::fread(counters, sizeof(counter_type_), 2, file) != 2) return std::fclose(file), status_t::malformed_k;
+    if (counters[0] != destination.extent(0) || counters[1] != destination.extent(1))
+        return std::fclose(file), status_t::config_mismatch_k;
+    std::size_t const payload_bytes = destination.extent(0) * static_cast<std::size_t>(destination.stride_bytes(0));
+    bool const read_whole = std::fread(destination.data(), 1, payload_bytes, file) == payload_bytes;
+    std::fclose(file);
+    return read_whole ? status_t::success_k : status_t::malformed_k;
 }
 
 } // namespace usearch
