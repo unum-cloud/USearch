@@ -78,19 +78,20 @@ struct inner_volatile_index;
 
 /** @brief Per-thread traversal scratch: the candidate queues, the visited set, the link
  *      selection buffers, and the running telemetry counters - one instance per scanning thread. */
-template <                                               //
-    nk_dtype_t vector_dtype_ = nk_bf16_k,                //
-    nk_capability_t capability_ = nk_cap_icelake_k,      //
-    typename allocator_type_ = std::allocator<std::byte> //
-    >
+template <                                          //
+    nk_dtype_t vector_dtype_ = nk_bf16_k,           //
+    nk_capability_t capability_ = nk_cap_icelake_k, //
+    typename stored_norms_type_ =                   //
+    usearch::vector_norms<typename nk::type_for<vector_dtype_>::type::dot_result_t>,
+    typename allocator_type_ = std::allocator<std::byte>>
 struct inner_traversal_context;
 
-template <nk_dtype_t vector_dtype_, nk_capability_t capability_, typename allocator_type_>
+template <nk_dtype_t vector_dtype_, nk_capability_t capability_, typename stored_norms_type_, typename allocator_type_>
 struct inner_traversal_context {
 
     using scalar_t = typename nk::type_for<vector_dtype_>::type;
     using vector_view_t = nk::vector_view<scalar_t>;
-    using vector_norms_t = usearch::vector_norms<typename scalar_t::dot_result_t>;
+    using vector_norms_t = stored_norms_type_;
 
     using allocator_t = allocator_type_;
     using candidates_allocator_t =
@@ -242,7 +243,10 @@ struct inner_volatile_index {
 
     using vector_view_t = nk::vector_view<scalar_t>;
     using vector_span_t = nk::vector_span<scalar_t>;
-    using vector_norms_t = vector_norms<vector_product_result_t>;
+    /** @brief What the chunks store per row: real moments for norm-consuming finalizes, the
+     *      zero-size stand-in for dot - the second random gather per candidate disappears.
+     *      The metric layer accepts either record natively, widening internally. */
+    using vector_norms_t = stored_norms<kernel_kind_, scalar_t>;
 
     using vectors_view_t = nk::matrix_view<scalar_t>;
     using node_ids_span_t = nk::vector_span<node_id_t>;
@@ -278,7 +282,8 @@ struct inner_volatile_index {
     /**
      *  @brief Each thread aiming to perform scans over the graph needs to have its own object like this.
      */
-    using inner_traversal_context_t = inner_traversal_context<vector_dtype_, capability_, candidates_allocator_t>;
+    using inner_traversal_context_t =
+        inner_traversal_context<vector_dtype_, capability_, vector_norms_t, candidates_allocator_t>;
     using results_array_t = typename inner_traversal_context_t::results_array_t;
     using frontier_queue_t = typename inner_traversal_context_t::frontier_queue_t;
     using visited_set_t = typename inner_traversal_context_t::visited_set_t;
@@ -424,9 +429,10 @@ struct inner_volatile_index {
           vectors_allocator_(vectors_allocator), neighbors_allocator_(neighbors_allocator) {}
 
   private:
-    /** @brief Trampoline for @c usearch::inner_norms with hardened types. */
+    /** @brief Trampoline for the kernel-aware @c usearch::inner_norms with hardened types -
+     *      computed moments for norm-consuming kernels, the empty stand-in for dot. */
     inline static vector_norms_t inner_norms(vector_view_t vec) noexcept {
-        return usearch::inner_norms<capability_, scalar_t>(vec);
+        return usearch::inner_norms<kernel_kind_, capability_, scalar_t>(vec);
     }
     /** @brief Trampoline for @c usearch::distance with hardened types. */
     inline static distance_t distance(                   //
@@ -612,9 +618,11 @@ struct inner_volatile_index {
         return vectors_chunks_[location.chunk_index].row(location.index_in_chunk).as_vector();
     }
 
-    /** @brief Copy of the pre-computed norms of the vector stored at @p location. */
+    /** @brief Copy of the pre-computed norms of the vector stored at @p location - the empty
+     *      stand-in without touching memory when the kernel never reads norms. */
     inline vector_norms_t norm_for(chunked_location_t const& location) const noexcept {
-        return norms_chunks_[location.chunk_index][location.index_in_chunk];
+        if constexpr (std::is_same_v<vector_norms_t, no_norms_t>) return {};
+        else return norms_chunks_[location.chunk_index][location.index_in_chunk];
     }
 
     /** @brief Mutable reference to the norms slot at @p location - only for the slot's unpublished owner. */
@@ -673,14 +681,18 @@ struct inner_volatile_index {
 
             vectors_chunk_t vectors_chunk = vectors_chunk_t::try_zeros( //
                 {chunk_rows, chunk_dimensions}, vectors_allocator_);
-            norms_chunk_t norms_chunk = norms_chunk_t::try_zeros( //
-                {chunk_rows}, norms_allocator_t(vectors_allocator_));
+            // Norms chunks exist only for the kernels whose finalize reads them - dot never
+            // pays this pool, in storage or in the per-candidate gather.
+            norms_chunk_t norms_chunk;
+            if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>)
+                norms_chunk = norms_chunk_t::try_zeros({chunk_rows}, norms_allocator_t(vectors_allocator_));
             // Filling the neighbors with the all-ones sentinel is load-bearing: a sentinel leading
             // slot reads as "unpublished" to every traversal, and sentinel tails terminate shorter
             // lists - so no explicit neighbor counts are stored anywhere.
             neighbors_chunk_t neighbors_chunk = neighbors_chunk_t::try_full( //
                 {chunk_rows, chunk_connectivity}, inner_node_id_unknown_k, neighbors_allocator_);
-            if (vectors_chunk.empty() || norms_chunk.empty() || neighbors_chunk.empty())
+            bool const norms_missing = !std::is_same_v<vector_norms_t, no_norms_t> && norms_chunk.empty();
+            if (vectors_chunk.empty() || norms_missing || neighbors_chunk.empty())
                 return {added_capacity, status_t::bad_alloc_k};
 
             vectors_chunks_[chunks_count_] = std::move(vectors_chunk);
@@ -1518,7 +1530,7 @@ struct inner_volatile_index {
             vector_span_t const owned_vector = vector_span_for(new_location);
             std::memcpy(owned_vector.byte_data(), incoming_vector.byte_data(), vector_bytes);
             vector_norms_t const new_norms = inner_norms(owned_vector);
-            norm_ref_for(new_location) = new_norms;
+            if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>) norm_ref_for(new_location) = new_norms;
 
             // Snapshot the contiguous visibility watermark: every id strictly below it is published,
             // making it the safe bound for random landmark sampling. On a virgin index there is
@@ -1779,10 +1791,11 @@ struct inner_volatile_index {
 
         // Re-derive the norms in node id order - one reduction pass over the freshly copied
         // vectors, through the same kernels the insertion path uses.
-        for (std::size_t node = 0; node != count; ++node) {
-            chunked_location_t const location = chunked_location(static_cast<node_id_t>(node));
-            norms_chunks_[location.chunk_index][location.index_in_chunk] = inner_norms(vector_for(location));
-        }
+        if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>)
+            for (std::size_t node = 0; node != count; ++node) {
+                chunked_location_t const location = chunked_location(static_cast<node_id_t>(node));
+                norms_chunks_[location.chunk_index][location.index_in_chunk] = inner_norms(vector_for(location));
+            }
 
         // Publish: identity first, then the capacity credit, and the watermark last with a
         // release - the same order every publication in this design follows.

@@ -142,6 +142,44 @@ struct vector_norms {
     dot_result_type_ sumsq;
 };
 
+/** @brief Zero-size stand-in for @c vector_norms wherever a kernel's finalize never reads
+ *      them - dot is the pure product. Storage of it vanishes, gathers copy nothing, and
+ *      every norms-shaped call site stays uniform. */
+struct no_norms_t {};
+
+/**
+ *  @brief The norms record worth @b storing for @p kernel_ over @p scalar_ vectors: the real
+ *      moments for finalizes that consume them, the empty stand-in for dot. The kernel ABI
+ *      itself stays uniform - @c moments_of widens either record into the moments it feeds,
+ *      mirroring the 4-state finalize convention.
+ */
+template <nk_kernel_kind_t kernel_, typename scalar_>
+using stored_norms = std::conditional_t<kernel_ == nk_kernel_dot_k, no_norms_t, //
+                                        vector_norms<typename scalar_::dot_result_t>>;
+
+/** @brief Widens a stored norms record into the moments the kernel plumbing consumes - the
+ *      identity for real moments, zeroed moments for the empty stand-in - so the distance
+ *      trampolines keep one body per shape instead of branching per record. */
+template <typename scalar_>
+[[gnu::always_inline]] inline vector_norms<typename scalar_::dot_result_t> moments_of(
+    vector_norms<typename scalar_::dot_result_t> norms) noexcept {
+    return norms;
+}
+template <typename scalar_>
+[[gnu::always_inline]] inline vector_norms<typename scalar_::dot_result_t> moments_of(no_norms_t) noexcept {
+    return {};
+}
+template <typename scalar_, std::size_t lanes_>
+[[gnu::always_inline]] inline std::array<vector_norms<typename scalar_::dot_result_t>, lanes_> moments_of(
+    std::array<vector_norms<typename scalar_::dot_result_t>, lanes_> const& norms) noexcept {
+    return norms;
+}
+template <typename scalar_, std::size_t lanes_>
+[[gnu::always_inline]] inline std::array<vector_norms<typename scalar_::dot_result_t>, lanes_> moments_of(
+    std::array<no_norms_t, lanes_> const&) noexcept {
+    return {};
+}
+
 /**
  *  @brief Per-lane @c 1 - dot in NumKong vec form. Exists to match the
  *  @c nk_*_through_*_from_dot_* signature so the trampoline routes every metric uniformly.
@@ -3850,36 +3888,62 @@ template <nk_capability_t caps_, nk::numeric_dtype scalar_>
     return invoke_inner_norms_(kit_t::compute_norms, vec);
 }
 
+/** @brief The norms worth storing for @p kernel_: computed moments for the finalizes that
+ *      read them. The dot sibling below skips the computation entirely. */
+template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype scalar_>
+    requires(kernel_ != nk_kernel_dot_k)
+[[gnu::always_inline]] inline vector_norms<typename scalar_::dot_result_t> inner_norms(
+    nk::vector_view<scalar_> vec) noexcept {
+    return inner_norms<caps_, scalar_>(vec);
+}
+
+/** @brief Dot never reads norms: this sibling returns the empty stand-in without touching
+ *      the vector, so storing-side callers skip both the compute and the write. */
+template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype scalar_>
+    requires(kernel_ == nk_kernel_dot_k)
+[[gnu::always_inline]] inline no_norms_t inner_norms(nk::vector_view<scalar_>) noexcept {
+    return {};
+}
+
+/** @brief Constrains a norms argument to the two records the kernels understand: the real
+ *      moments, or the empty stand-in that widens to zeroed moments via @c moments_of. */
+template <typename norms_type_, typename scalar_>
+concept norms_argument = std::is_same_v<norms_type_, vector_norms<typename scalar_::dot_result_t>> ||
+                         std::is_same_v<norms_type_, no_norms_t>;
+
 /**
  *  @brief 1-to-1 distance from @c query to @c candidate under @c kernel_.
  *
  *  Free function template - scalar deduced from the @c nk::vector_view; metric and
  *  capability passed explicitly. The chosen kit is internal to the trampoline.
  */
-template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype scalar_>
-[[gnu::always_inline]] inline f32_t distance(                 //
-    nk::vector_view<scalar_> query,                           //
-    vector_norms<typename scalar_::dot_result_t> query_norms, //
-    nk::vector_view<scalar_> candidate,                       //
-    vector_norms<typename scalar_::dot_result_t> candidate_norms) noexcept {
+template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype scalar_, typename norms_type_>
+    requires norms_argument<norms_type_, scalar_>
+[[gnu::always_inline]] inline f32_t distance( //
+    nk::vector_view<scalar_> query,           //
+    norms_type_ query_norms,                  //
+    nk::vector_view<scalar_> candidate,       //
+    norms_type_ candidate_norms) noexcept {
     using kit_t = typename inner_quads_chain<kernel_, scalar_, caps_>::kit_t;
-    auto results = invoke_distances_<1, kit_t>(
-        query, query_norms, std::array<nk::vector_view<scalar_>, 1> {candidate},
-        std::array<vector_norms<typename scalar_::dot_result_t>, 1> {candidate_norms});
+    auto results = invoke_distances_<1, kit_t>( //
+        query, moments_of<scalar_>(query_norms), std::array<nk::vector_view<scalar_>, 1> {candidate},
+        std::array {moments_of<scalar_>(candidate_norms)});
     return results[0];
 }
 
 /**
  *  @brief 1-to-4 distances from @c query to four @c candidates under @c kernel_.
  */
-template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype scalar_>
+template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype scalar_, typename norms_type_>
+    requires norms_argument<norms_type_, scalar_>
 [[gnu::always_inline]] inline std::array<f32_t, 4> distances( //
     nk::vector_view<scalar_> query,                           //
-    vector_norms<typename scalar_::dot_result_t> query_norms, //
+    norms_type_ query_norms,                                  //
     std::array<nk::vector_view<scalar_>, 4> candidates,       //
-    std::array<vector_norms<typename scalar_::dot_result_t>, 4> candidates_norms) noexcept {
+    std::array<norms_type_, 4> candidates_norms) noexcept {
     using kit_t = typename inner_quads_chain<kernel_, scalar_, caps_>::kit_t;
-    return invoke_distances_<4, kit_t>(query, query_norms, candidates, candidates_norms);
+    return invoke_distances_<4, kit_t>(query, moments_of<scalar_>(query_norms), candidates,
+                                       moments_of<scalar_>(candidates_norms));
 }
 
 /** @brief Empty tile kit: the (kernel, scalar) pair has no matrix-engine backend on this
