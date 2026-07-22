@@ -36,7 +36,6 @@
 
 #include "usearch/inner_metric.hpp"
 
-namespace nk = ashvardanian::numkong;
 using namespace unum::usearch;
 
 constexpr std::array<std::size_t, 3> dimensions_to_bench = {256, 768, 1536};

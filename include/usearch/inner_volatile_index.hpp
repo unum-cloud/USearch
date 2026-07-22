@@ -9,12 +9,11 @@
 #include <bit> // `std::bit_width`, `std::bit_floor`
 
 #include <forkunion/types.hpp>
+#include <numkong/tensor.hpp>
 
 #include "usearch/types.hpp"
 #include "usearch/inner_metric.hpp"
 #include "usearch/traversal_queue.hpp"
-
-namespace fu = ashvardanian::forkunion;
 
 namespace unum {
 namespace usearch {

@@ -45,8 +45,6 @@
 namespace unum {
 namespace usearch {
 
-namespace nk = ashvardanian::numkong;
-
 /** @brief One column of a SafeGraphs header: the element type, the fixed row width, and its
  *      buffers as byte ranges @b relative to the data segment - never resolved pointers, so
  *      no memory-mapped representation is assumed anywhere. */

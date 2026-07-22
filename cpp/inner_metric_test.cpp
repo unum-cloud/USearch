@@ -46,7 +46,6 @@
 #include "test.hpp"
 #include "usearch/inner_metric.hpp"
 
-namespace nk = ashvardanian::numkong;
 using namespace unum::usearch;
 
 constexpr std::array<std::size_t, 7> dimensions_to_test = {7, 8, 32, 64, 128, 257, 1024};
@@ -213,11 +212,11 @@ static int check_tiles() noexcept {
 }
 
 /**
- *  @brief One full 16×16 tile of distances - a streaming gather → pack → update depth walk, then a finalize -
- *      against the quads path as the oracle, cell by cell. Both engines finalize through
- *      the same kit the chain picked at @p caps_, so euclidean cells must match exactly and
- *      the shared tolerance covers the rest. Skips silently when the machine lacks the
- *      engine at runtime.
+ *  @brief One full 16×16 tile of distances - a streaming gather → pack → update walk over
+ *      the depth, then a finalize - against the quads path as the oracle, cell by cell.
+ *      Both engines finalize through the same kit the chain picked at @p caps_, so
+ *      euclidean cells must match exactly and the shared tolerance covers the rest.
+ *      Skips silently when the machine lacks the engine at runtime.
  */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
     requires tiles_supported<kernel_, scalar_, caps_>

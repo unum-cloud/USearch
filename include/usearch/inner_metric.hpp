@@ -129,8 +129,6 @@
 namespace unum {
 namespace usearch {
 
-namespace nk = ashvardanian::numkong;
-
 using f32_t = float;
 
 /**
@@ -3926,7 +3924,7 @@ struct u8_sapphireamx_tiles_kit {
         return row_tiles * depth_tiles * sizeof(b_tile_t) + depth_tiles * sizeof(a_tile_t) + alignof(a_tile_t);
     }
 
-    /** @brief One palette programming per eager refinement - never per tile. */
+    /** @brief One palette programming per refinement - never per tile. */
     static void configure_tiles() noexcept { nk_amx_tile_configure_sapphireamx_(); }
 
     /** @brief Gathers one @c tile_depth_k -deep strip of all 16 @p rows - scattered views,
@@ -3953,9 +3951,10 @@ struct u8_sapphireamx_tiles_kit {
     /** @brief Zeroes the accumulator ahead of a depth walk. */
     static void init_tile(accumulator_tile_t& tile) noexcept { nk_dots_u8_init_sapphireamx_(&tile); }
 
-    /** @brief tile += A × B for one depth step - @c TDPBUUD here. The accumulator
-     *      round-trips through memory per step, a couple of tile moves; keeping it
-     *      register-resident across the walk is a known follow-up. */
+    /** @brief tile += A × B for one depth step - @c TDPBUUD here. Deliberately single-step:
+     *      callers interleave the next tile's gather & pack between updates, hiding fetch
+     *      latency behind the matrix op - progressive fetching outweighs the accumulator's
+     *      per-step round-trip through memory. */
     static void update_tile(accumulator_tile_t& tile, a_tile_t const& a_tile, b_tile_t const& b_tile) noexcept {
         nk_compiler_barrier_sapphireamx_();
         _tile_loadd(0, tile.data, 64);

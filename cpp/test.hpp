@@ -24,8 +24,6 @@
 
 namespace unum::usearch {
 
-namespace nk = ashvardanian::numkong;
-
 #define expect(cond) expect_((bool)(cond), __FILE__, __LINE__)
 inline std::size_t expect_(bool condition, char const* file, int line) {
     if (!condition) fmt::print(stderr, "  check failed at {}:{}\n", file, line);
@@ -97,7 +95,6 @@ constexpr float dimension_amplitude() noexcept {
  *      float wrappers via @c from_f32, byte-or-larger integers via the integral constructor. */
 template <typename scalar_>
 auto make_scalar(unsigned value) noexcept {
-    namespace nk = ashvardanian::numkong;
     if constexpr (nk::dimensions_per_value<scalar_>() > 1) return static_cast<std::int8_t>(value);
     else if constexpr (requires { scalar_::from_f32(0.0f); }) return scalar_::from_f32(static_cast<float>(value));
     else return scalar_(value);

@@ -38,9 +38,6 @@
 
 namespace unum::usearch {
 
-namespace nk = ashvardanian::numkong;
-namespace sz = ashvardanian::stringzilla;
-
 /** @brief Infers the payload dtype from the RetriEval extension family: `.fbin` → f32,
  *      `.i8bin` / `.u8bin` / `.bf16bin` accordingly, `.ibin` → u32 neighbor ids. */
 inline nk_dtype_t dtype_of_extension(sz::string_view path) noexcept {

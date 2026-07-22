@@ -15,8 +15,20 @@
 #include <type_traits> // `std::type_identity_t`
 #include <thread>      // `std::this_thread::yield`
 
+/** @brief Pre-announced sister-library namespaces, so the project-wide shortcuts below are
+ *      legal before any of their headers is included. */
+namespace ashvardanian {
+namespace numkong {}
+namespace forkunion {}
+namespace stringzilla {}
+} // namespace ashvardanian
+
 namespace unum {
 namespace usearch {
+
+namespace nk = ashvardanian::numkong;
+namespace fu = ashvardanian::forkunion;
+namespace sz = ashvardanian::stringzilla;
 
 using u32_t = std::uint32_t;
 using u64_t = std::uint64_t;
