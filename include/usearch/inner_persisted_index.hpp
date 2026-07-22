@@ -29,7 +29,10 @@
  *  registration, which is an engine-side resource on every ring API - and the state
  *  machine addresses buffers only by index. Requests carry an offset, a length, a
  *  buffer index, and an opaque tag; completions return the tag and a signed result.
- *  No pointers cross the contract in either direction.
+ *  No pointers cross the contract in either direction. Building the Linux ring engines
+ *  assumes kernel headers 6.1 or newer - the deferred-task-run era every supported
+ *  distro ships - while runtime degrades gracefully on older kernels through setup
+ *  fallbacks and failed-registration probes.
  *
  *  @section inner_persisted_alignment Platform Alignment
  *
@@ -138,15 +141,23 @@ namespace usearch {
 /** @brief Transfer granularity of the record section: every record begins and ends on
  *      a 512-byte boundary, matching the finest NVMe logical block, so direct I/O works
  *      against 512e devices and wastes at most one block on 4Kn ones. */
-inline constexpr std::size_t persisted_block_k = 512;
+inline constexpr std::size_t inner_persisted_block_k = 512;
 
 /** @brief Alignment of every staging buffer - the strictest direct-I/O memory alignment
  *      any mainstream device demands, and a page, so one buffer never splits pages. */
-inline constexpr std::size_t persisted_buffer_alignment_k = 4096;
+inline constexpr std::size_t inner_persisted_alignment_k = 4096;
+
+/** @brief Identity of one in-flight traversal slot within a context's slot array -
+ *      packed into the round-tripped tag and used to index the slots. */
+using inner_traversal_slot_id_t = u32_t;
+
+/** @brief Index into an engine's staging-buffer arena - leased by the state machine,
+ *      carried by every request, and the @c buf_index of registered-buffer submissions. */
+using inner_staging_buffer_id_t = u32_t;
 
 /** @brief Feature bits an engine publishes through its @c capabilities_k constant, so
  *      callers, tests, and docs introspect variants uniformly instead of by type name. */
-enum class io_capability_t : u32_t {
+enum class inner_io_capability_t : u32_t {
     none_k = 0,
     /** @brief Staging buffers are pre-registered with the kernel/ring - no per-read
      *      page pinning; roughly an 11% throughput gain at NVMe rates. */
@@ -159,10 +170,10 @@ enum class io_capability_t : u32_t {
     lba_addressing_k = 1u << 2,
 };
 
-inline constexpr io_capability_t operator|(io_capability_t a, io_capability_t b) noexcept {
-    return static_cast<io_capability_t>(static_cast<u32_t>(a) | static_cast<u32_t>(b));
+inline constexpr inner_io_capability_t operator|(inner_io_capability_t a, inner_io_capability_t b) noexcept {
+    return static_cast<inner_io_capability_t>(static_cast<u32_t>(a) | static_cast<u32_t>(b));
 }
-inline constexpr bool operator&(io_capability_t a, io_capability_t b) noexcept {
+inline constexpr bool operator&(inner_io_capability_t a, inner_io_capability_t b) noexcept {
     return (static_cast<u32_t>(a) & static_cast<u32_t>(b)) != 0;
 }
 
@@ -178,7 +189,7 @@ enum class inner_io_wait_t : u32_t {
 
 /** @brief Whether the payload descriptor routes through the page cache or around it -
  *      @c O_DIRECT on Linux, @c F_NOCACHE on macOS, @c FILE_FLAG_NO_BUFFERING on Windows. */
-enum class io_caching_t : u32_t {
+enum class inner_io_caching_t : u32_t {
     cached_k = 0,
     direct_k = 1,
 };
@@ -195,8 +206,8 @@ enum class inner_io_purpose_t : u32_t {
  *      packed into the one 64-bit word every ring API round-trips untouched -
  *      @c sqe->user_data, @c iocb.aio_data, or IoRing's @c UserData. */
 struct inner_io_tag_t {
-    u32_t slot;
-    u32_t buffer : 31;
+    inner_traversal_slot_id_t slot;
+    inner_staging_buffer_id_t buffer : 31;
     u32_t purpose : 1;
 
     inline u64_t packed() const noexcept {
@@ -219,11 +230,11 @@ struct inner_io_tag_t {
 struct inner_io_request_t {
     /** @brief Byte offset of the record within the payload; block-aligned by format. */
     u64_t offset;
-    /** @brief Bytes to transfer; a whole number of @ref persisted_block_k blocks. */
+    /** @brief Bytes to transfer; a whole number of @ref inner_persisted_block_k blocks. */
     u32_t length;
     /** @brief Index into the engine's staging arena - stays valid until the matching
      *      completion is consumed & the state machine recycles the index. */
-    u32_t buffer;
+    inner_staging_buffer_id_t buffer;
     /** @brief Round-tripped @ref inner_io_tag_t in packed form; opaque to engines. */
     u64_t tag;
 };
@@ -244,12 +255,13 @@ struct inner_io_completion_t {
  */
 template <typename engine_type_>
 concept inner_io_engine = requires(engine_type_& engine, inner_io_request_t request, //
-                                   inner_io_completion_t& completion, inner_io_wait_t wait, u32_t index) {
+                                   inner_io_completion_t& completion, inner_io_wait_t wait,
+                                   inner_staging_buffer_id_t index) {
     { engine.push(request) } noexcept -> std::same_as<bool>;
     { engine.pump(wait) } noexcept -> std::same_as<status_t>;
     { engine.pop(completion) } noexcept -> std::same_as<bool>;
     { engine.buffer(index) } noexcept -> std::same_as<std::byte*>;
-    { engine_type_::capabilities_k } -> std::convertible_to<io_capability_t>;
+    { engine_type_::capabilities_k } -> std::convertible_to<inner_io_capability_t>;
 };
 
 #pragma endregion Vocabulary
@@ -283,28 +295,74 @@ struct inner_persisted_layout_t {
     }
     /** @brief First byte of the record section - the metadata rounded up to a whole block. */
     inline static constexpr std::size_t records_begin(std::size_t node_count) noexcept {
-        return fu::round_up_to_multiple(offsets_begin_k + offsets_bytes(node_count), persisted_block_k);
+        return fu::round_up_to_multiple(offsets_begin_k + offsets_bytes(node_count), inner_persisted_block_k);
     }
 
     /** @brief The record's own id sits right after the count: fetched records identify
      *      themselves, so completions need no side-channel id bookkeeping. */
-    inline static constexpr std::size_t self_offset_k = sizeof(u32_t);
-    inline static constexpr std::size_t ids_offset_k = 2 * sizeof(u32_t);
+    inline static constexpr std::size_t self_id_offset_k = sizeof(inner_node_id_t);
+    inline static constexpr std::size_t neighbor_ids_offset_k = 2 * sizeof(inner_node_id_t);
     inline static constexpr std::size_t norms_offset(std::size_t neighbors_count) noexcept {
-        return fu::round_up_to_multiple(ids_offset_k + neighbors_count * sizeof(u32_t), std::size_t(16));
+        return fu::round_up_to_multiple(neighbor_ids_offset_k + neighbors_count * sizeof(inner_node_id_t),
+                                        std::size_t(16));
     }
     inline static constexpr std::size_t vector_offset(std::size_t neighbors_count, std::size_t norms_bytes) noexcept {
         return fu::round_up_to_multiple(norms_offset(neighbors_count) + norms_bytes, std::size_t(64));
     }
     inline static constexpr std::size_t record_bytes(std::size_t neighbors_count, std::size_t norms_bytes,
                                                      std::size_t vector_bytes) noexcept {
-        return fu::round_up_to_multiple(vector_offset(neighbors_count, norms_bytes) + vector_bytes, persisted_block_k);
+        return fu::round_up_to_multiple(vector_offset(neighbors_count, norms_bytes) + vector_bytes,
+                                        inner_persisted_block_k);
+    }
+};
+
+/**
+ *  @brief Decoded view over one staged record: the format arithmetic of
+ *      @ref inner_persisted_layout_t in one place, every accessor a zero-copy pointer
+ *      into the arena buffer DMA filled. Readers & future writers share it, so the
+ *      offset choreography can never drift between them.
+ */
+struct inner_persisted_record_t {
+    std::byte const* bytes;
+
+    inline u32_t neighbors_count() const noexcept { return *reinterpret_cast<u32_t const*>(bytes); }
+    inline inner_node_id_t self_id() const noexcept {
+        return *reinterpret_cast<inner_node_id_t const*>(bytes + inner_persisted_layout_t::self_id_offset_k);
+    }
+    inline inner_node_id_t const* neighbor_ids() const noexcept {
+        return reinterpret_cast<inner_node_id_t const*>(bytes + inner_persisted_layout_t::neighbor_ids_offset_k);
+    }
+    template <typename norms_type_>
+    inline norms_type_ norms() const noexcept {
+        return *reinterpret_cast<norms_type_ const*>( //
+            bytes + inner_persisted_layout_t::norms_offset(neighbors_count()));
+    }
+    template <typename scalar_type_, typename norms_type_>
+    inline scalar_type_ const* vector() const noexcept {
+        return reinterpret_cast<scalar_type_ const*>(
+            bytes + inner_persisted_layout_t::vector_offset(neighbors_count(), sizeof(norms_type_)));
     }
 };
 
 #pragma endregion Layout
 
 #pragma region Engines
+
+#if !defined(_WIN32)
+/** @brief Closes a POSIX descriptor at scope exit, so early returns need no manual
+ *      teardown - the descriptor-side sibling of the ring's self-unmapping regions. */
+struct inner_posix_descriptor_t {
+    int file_descriptor = -1;
+
+    inner_posix_descriptor_t() noexcept = default;
+    explicit inner_posix_descriptor_t(int descriptor) noexcept : file_descriptor(descriptor) {}
+    inner_posix_descriptor_t(inner_posix_descriptor_t const&) = delete;
+    inner_posix_descriptor_t& operator=(inner_posix_descriptor_t const&) = delete;
+    ~inner_posix_descriptor_t() noexcept {
+        if (file_descriptor >= 0) ::close(file_descriptor);
+    }
+};
+#endif
 
 /**
  *  @brief The aligned staging arena every engine owns: @b [buffer_count] identically
@@ -319,50 +377,74 @@ struct inner_io_arena {
 
     bytes_tensor_t storage;
     std::size_t stride = 0;
+    /** @brief Cached aligned base: the arena never moves after @c reserve, so every
+     *      @c buffer lookup is one multiply-add instead of a repeated round-up. */
+    std::byte* base_ = nullptr;
 
     inline status_t reserve(std::size_t buffer_count, std::size_t buffer_stride,
-                            bytes_allocator_t const& alloc) noexcept {
-        storage = bytes_tensor_t(alloc);
-        stride = fu::round_up_to_multiple(buffer_stride, persisted_buffer_alignment_k);
-        std::size_t bytes = buffer_count * stride + persisted_buffer_alignment_k;
+                            bytes_allocator_t const& allocator) noexcept {
+        storage = bytes_tensor_t(allocator);
+        stride = fu::round_up_to_multiple(buffer_stride, inner_persisted_alignment_k);
+        std::size_t bytes = buffer_count * stride + inner_persisted_alignment_k;
         if (!storage.reserve(bytes)) return status_t::bad_alloc_k;
         if (!storage.try_resize({bytes})) return status_t::bad_alloc_k;
+        std::uintptr_t raw = reinterpret_cast<std::uintptr_t>(storage.data());
+        base_ = reinterpret_cast<std::byte*>(fu::round_up_to_multiple(raw, inner_persisted_alignment_k));
         return status_t::success_k;
     }
-    /** @brief Base of the arena, rounded up so buffer 0 is already direct-I/O aligned. */
-    inline std::byte* base() const noexcept {
-        std::uintptr_t raw = reinterpret_cast<std::uintptr_t>(storage.data());
-        return reinterpret_cast<std::byte*>(fu::round_up_to_multiple(raw, persisted_buffer_alignment_k));
-    }
-    inline std::byte* buffer(u32_t index) const noexcept { return base() + index * stride; }
+    inline std::byte* buffer(inner_staging_buffer_id_t index) const noexcept { return base_ + index * stride; }
 };
 
 /**
- *  @brief Fixed-capacity request & completion staging shared by the engines that
- *      have no kernel-side ring - the synchronous and AIO designs. All storage is
- *      claimed at construction from the supplied byte allocator. Both tensors track
- *      their fill as the live shape - the reservation is the ceiling and no separate
- *      counters exist; completions drain last-first, which the state machine welcomes,
- *      since any completion order drives a valid traversal.
+ *  @brief Fixed-capacity completion queue of the engines that have no kernel-shared
+ *      completion ring - the synchronous and AIO designs. The fill is the live shape
+ *      over a frozen reservation, and completions drain last-first, which the state
+ *      machine welcomes: any completion order drives a valid traversal.
+ */
+template <typename allocator_type_>
+struct inner_io_completions {
+    using completions_allocator_t =
+        typename std::allocator_traits<allocator_type_>::template rebind_alloc<inner_io_completion_t>;
+    using completions_tensor_t = nk::tensor<inner_io_completion_t, completions_allocator_t, 1>;
+
+    completions_tensor_t queue;
+
+    inline status_t reserve(std::size_t queue_depth, allocator_type_ const& allocator) noexcept {
+        queue = completions_tensor_t(completions_allocator_t(allocator));
+        return queue.reserve(queue_depth) ? status_t::success_k : status_t::bad_alloc_k;
+    }
+    inline bool complete(inner_io_completion_t completion) noexcept {
+        std::size_t fill = queue.extent(0);
+        if (!queue.try_resize({fill + 1})) return false;
+        queue[fill] = completion;
+        return true;
+    }
+    inline bool pop(inner_io_completion_t& completion) noexcept {
+        std::size_t fill = queue.extent(0);
+        if (!fill) return false;
+        completion = queue[fill - 1];
+        return queue.try_resize({fill - 1});
+    }
+};
+
+/**
+ *  @brief Request & completion staging of the synchronous engine: the push-encodes /
+ *      pump-submits contract forces requests to live somewhere between the two calls,
+ *      and a blocking @c pread has no kernel-side queue to be that somewhere.
  */
 template <typename allocator_type_>
 struct inner_io_staging {
     using requests_allocator_t =
         typename std::allocator_traits<allocator_type_>::template rebind_alloc<inner_io_request_t>;
-    using completions_allocator_t =
-        typename std::allocator_traits<allocator_type_>::template rebind_alloc<inner_io_completion_t>;
     using requests_tensor_t = nk::tensor<inner_io_request_t, requests_allocator_t, 1>;
-    using completions_tensor_t = nk::tensor<inner_io_completion_t, completions_allocator_t, 1>;
 
     requests_tensor_t pending;
-    completions_tensor_t completed;
+    inner_io_completions<allocator_type_> completions;
 
-    inline status_t reserve(std::size_t queue_depth, allocator_type_ const& alloc) noexcept {
-        pending = requests_tensor_t(requests_allocator_t(alloc));
-        completed = completions_tensor_t(completions_allocator_t(alloc));
+    inline status_t reserve(std::size_t queue_depth, allocator_type_ const& allocator) noexcept {
+        pending = requests_tensor_t(requests_allocator_t(allocator));
         if (!pending.reserve(queue_depth)) return status_t::bad_alloc_k;
-        if (!completed.reserve(queue_depth)) return status_t::bad_alloc_k;
-        return status_t::success_k;
+        return completions.reserve(queue_depth, allocator);
     }
     inline bool push(inner_io_request_t request) noexcept {
         std::size_t fill = pending.extent(0);
@@ -370,18 +452,8 @@ struct inner_io_staging {
         pending[fill] = request;
         return true;
     }
-    inline bool complete(inner_io_completion_t completion) noexcept {
-        std::size_t fill = completed.extent(0);
-        if (!completed.try_resize({fill + 1})) return false;
-        completed[fill] = completion;
-        return true;
-    }
-    inline bool pop(inner_io_completion_t& completion) noexcept {
-        std::size_t fill = completed.extent(0);
-        if (!fill) return false;
-        completion = completed[fill - 1];
-        return completed.try_resize({fill - 1});
-    }
+    inline bool complete(inner_io_completion_t completion) noexcept { return completions.complete(completion); }
+    inline bool pop(inner_io_completion_t& completion) noexcept { return completions.pop(completion); }
 };
 
 /**
@@ -401,7 +473,7 @@ struct inner_posix_sync_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
 
-    inline static constexpr io_capability_t capabilities_k = io_capability_t::none_k;
+    inline static constexpr inner_io_capability_t capabilities_k = inner_io_capability_t::none_k;
 
     inner_posix_sync_engine() noexcept = default;
     inner_posix_sync_engine(inner_posix_sync_engine const&) = delete;
@@ -413,17 +485,17 @@ struct inner_posix_sync_engine {
      *  @param[in] file_descriptor Readable descriptor of the payload file or device.
      *  @param[in] queue_depth Most requests ever outstanding between two pumps.
      *  @param[in] buffer_stride Bytes per staging buffer - the longest record.
-     *  @param[in] alloc Allocator behind the arena & staging arrays.
+     *  @param[in] allocator Allocator behind the arena & staging arrays.
      */
     inline status_t open(int file_descriptor, std::size_t queue_depth, std::size_t buffer_stride,
-                         allocator_t const& alloc) noexcept {
+                         allocator_t const& allocator) noexcept {
         file_descriptor_ = file_descriptor;
-        status_t arena_status = arena_.reserve(queue_depth, buffer_stride, alloc);
+        status_t arena_status = arena_.reserve(queue_depth, buffer_stride, allocator);
         if (arena_status != status_t::success_k) return arena_status;
-        return staging_.reserve(queue_depth, alloc);
+        return staging_.reserve(queue_depth, allocator);
     }
 
-    inline std::byte* buffer(u32_t index) noexcept { return arena_.buffer(index); }
+    inline std::byte* buffer(inner_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
     inline bool push(inner_io_request_t request) noexcept { return staging_.push(request); }
 
     inline status_t pump(inner_io_wait_t wait) noexcept {
@@ -480,7 +552,7 @@ struct inner_linux_aio_engine {
     using control_pointers_tensor_t = nk::tensor<struct iocb*, control_pointers_allocator_t, 1>;
     using events_tensor_t = nk::tensor<struct io_event, events_allocator_t, 1>;
 
-    inline static constexpr io_capability_t capabilities_k = io_capability_t::none_k;
+    inline static constexpr inner_io_capability_t capabilities_k = inner_io_capability_t::none_k;
 
     inner_linux_aio_engine() noexcept = default;
     inner_linux_aio_engine(inner_linux_aio_engine const&) = delete;
@@ -490,72 +562,67 @@ struct inner_linux_aio_engine {
     }
 
     inline status_t open(int file_descriptor, std::size_t queue_depth, std::size_t buffer_stride,
-                         allocator_t const& alloc) noexcept {
+                         allocator_t const& allocator) noexcept {
         file_descriptor_ = file_descriptor;
-        status_t arena_status = arena_.reserve(queue_depth, buffer_stride, alloc);
+        status_t arena_status = arena_.reserve(queue_depth, buffer_stride, allocator);
         if (arena_status != status_t::success_k) return arena_status;
-        control_blocks_ = control_blocks_tensor_t(control_blocks_allocator_t(alloc));
-        control_pointers_ = control_pointers_tensor_t(control_pointers_allocator_t(alloc));
-        events_ = events_tensor_t(events_allocator_t(alloc));
-        if (!control_blocks_.reserve(queue_depth) || !control_blocks_.try_resize({queue_depth}))
-            return status_t::bad_alloc_k;
-        if (!control_pointers_.reserve(queue_depth) || !control_pointers_.try_resize({queue_depth}))
-            return status_t::bad_alloc_k;
+        control_blocks_ = control_blocks_tensor_t(control_blocks_allocator_t(allocator));
+        control_pointers_ = control_pointers_tensor_t(control_pointers_allocator_t(allocator));
+        events_ = events_tensor_t(events_allocator_t(allocator));
+        if (!control_blocks_.reserve(queue_depth)) return status_t::bad_alloc_k;
+        if (!control_pointers_.reserve(queue_depth)) return status_t::bad_alloc_k;
         if (!events_.reserve(queue_depth) || !events_.try_resize({queue_depth})) return status_t::bad_alloc_k;
-        status_t staging_status = staging_.reserve(queue_depth, alloc);
-        if (staging_status != status_t::success_k) return staging_status;
+        status_t completions_status = completions_.reserve(queue_depth, allocator);
+        if (completions_status != status_t::success_k) return completions_status;
         aio_context_ = 0;
         long setup_result = syscall(SYS_io_setup, static_cast<unsigned>(queue_depth), &aio_context_);
         if (setup_result < 0) return status_t::device_error_k;
         return status_t::success_k;
     }
 
-    inline std::byte* buffer(u32_t index) noexcept { return arena_.buffer(index); }
+    inline std::byte* buffer(inner_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
 
+    /** @brief Encodes the control block in place at push - matching the ring engines'
+     *      encode-at-push discipline - so pump only submits; the staged fill is the
+     *      control-block tensor's live shape. */
     inline bool push(inner_io_request_t request) noexcept {
-        if (in_flight_ + staging_.pending.extent(0) == control_blocks_.extent(0)) return false;
-        return staging_.push(request);
+        std::size_t staged = control_blocks_.extent(0);
+        if (in_flight_ + staged == events_.extent(0)) return false;
+        if (!control_blocks_.try_resize({staged + 1}) || !control_pointers_.try_resize({staged + 1})) return false;
+        struct iocb& control = control_blocks_[staged];
+        control = iocb {};
+        control.aio_fildes = static_cast<u32_t>(file_descriptor_);
+        control.aio_lio_opcode = IOCB_CMD_PREAD;
+        control.aio_buf = reinterpret_cast<std::uintptr_t>(arena_.buffer(request.buffer));
+        control.aio_nbytes = request.length;
+        control.aio_offset = static_cast<std::int64_t>(request.offset);
+        control.aio_data = request.tag;
+        control_pointers_[staged] = &control;
+        return true;
     }
 
     inline status_t pump(inner_io_wait_t wait) noexcept {
-        // Submission: translate every staged request into a control block, then one syscall.
-        if (staging_.pending.extent(0)) {
-            for (std::size_t i = 0; i != staging_.pending.extent(0); ++i) {
-                inner_io_request_t const& request = staging_.pending[i];
-                struct iocb& control = control_blocks_[i];
-                control = iocb {};
-                control.aio_fildes = static_cast<u32_t>(file_descriptor_);
-                control.aio_lio_opcode = IOCB_CMD_PREAD;
-                control.aio_buf = reinterpret_cast<std::uintptr_t>(arena_.buffer(request.buffer));
-                control.aio_nbytes = request.length;
-                control.aio_offset = static_cast<std::int64_t>(request.offset);
-                control.aio_data = request.tag;
-                control_pointers_[i] = &control;
-            }
-            long submitted = syscall(SYS_io_submit, aio_context_, static_cast<long>(staging_.pending.extent(0)),
-                                     control_pointers_.data());
+        std::size_t staged = control_blocks_.extent(0);
+        if (staged) {
+            long submitted = syscall(SYS_io_submit, aio_context_, static_cast<long>(staged), control_pointers_.data());
             if (submitted < 0) return status_t::device_error_k;
             in_flight_ += static_cast<std::size_t>(submitted);
-            if (!staging_.pending.try_resize({0})) return status_t::overflow_k;
+            if (!control_blocks_.try_resize({0}) || !control_pointers_.try_resize({0})) return status_t::overflow_k;
         }
         if (!in_flight_) return status_t::success_k;
-        // Reap: one non-blocking attempt, one monitored pause, then the blocking call -
-        // the waiter absorbs the common completes-in-microseconds case without a sleep.
-        long reaped = reap_(0);
+        // AIO surfaces no monitorable completion word, so there is no user-space fast
+        // path: one io_getevents does it. A blocking reap returns ready events at once
+        // and blocks only when none are in yet - a preceding min=0 probe is redundant.
+        long reaped = reap_(wait == inner_io_wait_t::blocking_k ? 1 : 0);
         if (reaped < 0) return status_t::device_error_k;
-        if (!reaped && wait == inner_io_wait_t::blocking_k) {
-            wait_t {}(&in_flight_word_, in_flight_word_, 0u, fu::wait_capped_t {});
-            reaped = reap_(1);
-            if (reaped < 0) return status_t::device_error_k;
-        }
         for (long i = 0; i != reaped; ++i)
-            if (!staging_.complete(inner_io_completion_t {events_[i].data, events_[i].res}))
+            if (!completions_.complete(inner_io_completion_t {events_[i].data, events_[i].res}))
                 return status_t::overflow_k;
         in_flight_ -= static_cast<std::size_t>(reaped);
         return status_t::success_k;
     }
 
-    inline bool pop(inner_io_completion_t& completion) noexcept { return staging_.pop(completion); }
+    inline bool pop(inner_io_completion_t& completion) noexcept { return completions_.pop(completion); }
 
   private:
     inline long reap_(long minimum) noexcept {
@@ -566,14 +633,11 @@ struct inner_linux_aio_engine {
     int file_descriptor_ = -1;
     aio_context_t aio_context_ = 0;
     std::size_t in_flight_ = 0;
-    /** @brief AIO posts no user-visible completion word, so the waiter monitors this
-     *      never-changing local - degrading gracefully to its timed-pause behavior. */
-    u32_t in_flight_word_ = 0;
     control_blocks_tensor_t control_blocks_;
     control_pointers_tensor_t control_pointers_;
     events_tensor_t events_;
     inner_io_arena<allocator_t> arena_;
-    inner_io_staging<allocator_t> staging_;
+    inner_io_completions<allocator_t> completions_;
 };
 
 /**
@@ -591,14 +655,14 @@ struct inner_linux_aio_engine {
  */
 /** @brief SQE geometry of one ring: 64-byte entries for block-layer reads, or the
  *      128-byte form whose inline command area carries NVMe passthrough. */
-enum class uring_form_t : u32_t {
+enum class inner_uring_form_t : u32_t {
     compact_k = 0,
     nvme_k = 1,
 };
 
 /** @brief Completion discipline of one ring: interrupt-driven CQEs, or device-queue
  *      polling via @c IORING_SETUP_IOPOLL - which demands direct I/O & poll queues. */
-enum class uring_reaping_t : u32_t {
+enum class inner_uring_reaping_t : u32_t {
     interrupted_k = 0,
     polled_k = 1,
 };
@@ -607,20 +671,30 @@ enum class uring_reaping_t : u32_t {
  *      a waiter can monitor the CQ tail from user space - while @c deferred_k rings
  *      run completion work only inside @c io_uring_enter, the single-issuer
  *      deferred-task-run discipline, making tail spinning pointless. */
-enum class uring_posting_t : u32_t {
+enum class inner_uring_posting_t : u32_t {
     immediate_k = 0,
     deferred_k = 1,
 };
 
+/** @brief Whether NVMe passthrough commands reference pre-registered arena buffers
+ *      via @c IORING_URING_CMD_FIXED - honored by kernels 6.14 & newer, skipping the
+ *      per-command page pinning - or pass plain addresses the kernel pins each time.
+ *      Older kernels reject the flag per command, so this stays an explicit opt-in
+ *      rather than a registration-success probe. */
+enum class inner_uring_command_buffers_t : u32_t {
+    plain_k = 0,
+    fixed_k = 1,
+};
+
 /** @brief One @c mmap -ed ring region; unmaps itself, so teardown is member order. */
-struct uring_mapping_t {
+struct inner_uring_mapping_t {
     void* base = nullptr;
     std::size_t bytes = 0;
 
-    uring_mapping_t() noexcept = default;
-    uring_mapping_t(uring_mapping_t const&) = delete;
-    uring_mapping_t& operator=(uring_mapping_t const&) = delete;
-    ~uring_mapping_t() noexcept { reset(); }
+    inner_uring_mapping_t() noexcept = default;
+    inner_uring_mapping_t(inner_uring_mapping_t const&) = delete;
+    inner_uring_mapping_t& operator=(inner_uring_mapping_t const&) = delete;
+    ~inner_uring_mapping_t() noexcept { reset(); }
 
     inline status_t map(int ring_descriptor, std::size_t map_bytes, u64_t region) noexcept {
         base = ::mmap(nullptr, map_bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring_descriptor,
@@ -640,7 +714,7 @@ struct uring_mapping_t {
 
 /** @brief Everything the submission side of one ring needs: the kernel-shared head &
  *      tail words, the index-order array, the wrap mask, and the SQE array. */
-struct uring_submissions_t {
+struct inner_uring_submissions_t {
     u32_t* head = nullptr;
     u32_t* tail = nullptr;
     u32_t* order = nullptr;
@@ -650,7 +724,7 @@ struct uring_submissions_t {
 };
 
 /** @brief The completion-side mirror: head & tail words, wrap mask, and CQE array. */
-struct uring_completions_t {
+struct inner_uring_completions_t {
     u32_t* head = nullptr;
     u32_t* tail = nullptr;
     u32_t mask = 0;
@@ -673,27 +747,27 @@ struct inner_uring_ring_t {
      *  @param[in] form SQE & CQE strides - compact, or doubled for NVMe passthrough.
      *  @param[in] reaping Interrupt-driven completions, or device-queue polling.
      */
-    inline status_t setup(std::size_t queue_depth, uring_form_t form, uring_reaping_t reaping) noexcept {
+    inline status_t setup(std::size_t queue_depth, inner_uring_form_t form, inner_uring_reaping_t reaping) noexcept {
         struct io_uring_params params;
         u32_t shape_flags = 0;
-        if (form == uring_form_t::nvme_k) shape_flags |= IORING_SETUP_SQE128 | IORING_SETUP_CQE32;
-        if (reaping == uring_reaping_t::polled_k) shape_flags |= IORING_SETUP_IOPOLL;
+        if (form == inner_uring_form_t::nvme_k) shape_flags |= IORING_SETUP_SQE128 | IORING_SETUP_CQE32;
+        if (reaping == inner_uring_reaping_t::polled_k) shape_flags |= IORING_SETUP_IOPOLL;
         u32_t preferred_flags = shape_flags | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
         for (u32_t flags : {preferred_flags, shape_flags}) {
             params = io_uring_params {};
             params.flags = flags;
-            long fd = syscall(SYS_io_uring_setup, static_cast<unsigned>(queue_depth), &params);
-            if (fd >= 0) {
-                ring_descriptor_ = static_cast<int>(fd);
+            long ring_file_descriptor = syscall(SYS_io_uring_setup, static_cast<unsigned>(queue_depth), &params);
+            if (ring_file_descriptor >= 0) {
+                ring_descriptor_ = static_cast<int>(ring_file_descriptor);
                 break;
             }
             if (flags == shape_flags) return status_t::device_error_k;
         }
         reaping_ = reaping;
-        posting_ = params.flags & IORING_SETUP_DEFER_TASKRUN ? uring_posting_t::deferred_k //
-                                                             : uring_posting_t::immediate_k;
-        submissions_.stride = form == uring_form_t::nvme_k ? 128 : sizeof(struct io_uring_sqe);
-        completions_.stride = form == uring_form_t::nvme_k ? 32 : sizeof(struct io_uring_cqe);
+        posting_ = params.flags & IORING_SETUP_DEFER_TASKRUN ? inner_uring_posting_t::deferred_k //
+                                                             : inner_uring_posting_t::immediate_k;
+        submissions_.stride = form == inner_uring_form_t::nvme_k ? 128 : sizeof(struct io_uring_sqe);
+        completions_.stride = form == inner_uring_form_t::nvme_k ? 32 : sizeof(struct io_uring_cqe);
 
         // Map the two rings & the SQE array. Modern kernels serve SQ & CQ from one mapping.
         std::size_t submission_bytes = params.sq_off.array + params.sq_entries * sizeof(u32_t);
@@ -702,7 +776,7 @@ struct inner_uring_ring_t {
         if (single_mmap) submission_bytes = max_of(submission_bytes, completion_bytes);
         status_t mapped = submission_mapping_.map(ring_descriptor_, submission_bytes, IORING_OFF_SQ_RING);
         if (mapped != status_t::success_k) return mapped;
-        uring_mapping_t const& completion_mapping = single_mmap ? submission_mapping_ : completion_mapping_;
+        inner_uring_mapping_t const& completion_mapping = single_mmap ? submission_mapping_ : completion_mapping_;
         if (!single_mmap) {
             mapped = completion_mapping_.map(ring_descriptor_, completion_bytes, IORING_OFF_CQ_RING);
             if (mapped != status_t::success_k) return mapped;
@@ -720,6 +794,7 @@ struct inner_uring_ring_t {
         completions_.mask = *completion_mapping.word(params.cq_off.ring_mask);
         completions_.entries = static_cast<std::byte*>(completion_mapping.base) + params.cq_off.cqes;
         pending_tail_ = *submissions_.tail;
+        register_ring_descriptor_();
         return status_t::success_k;
     }
 
@@ -736,6 +811,22 @@ struct inner_uring_ring_t {
         std::int32_t descriptors[1] = {file_descriptor};
         long registered = syscall(SYS_io_uring_register, ring_descriptor_, IORING_REGISTER_FILES, descriptors, 1u);
         return registered < 0 ? status_t::device_error_k : status_t::success_k;
+    }
+
+    /** @brief Pins every buffer of @p arena into the ring's registered-buffer table -
+     *      one @c iovec per staging buffer - building the transient iovec array through
+     *      @p allocator, so even setup scratch honors the caller's memory domain. */
+    template <typename allocator_type_>
+    inline status_t register_arena(inner_io_arena<allocator_type_> const& arena, std::size_t buffer_count,
+                                   allocator_type_ const& allocator) noexcept {
+        using iovecs_allocator_t = typename std::allocator_traits<allocator_type_>::template rebind_alloc<struct iovec>;
+        using iovecs_tensor_t = nk::tensor<struct iovec, iovecs_allocator_t, 1>;
+        iovecs_tensor_t buffer_regions {iovecs_allocator_t(allocator)};
+        if (!buffer_regions.reserve(buffer_count) || !buffer_regions.try_resize({buffer_count}))
+            return status_t::bad_alloc_k;
+        for (std::size_t i = 0; i != buffer_count; ++i)
+            buffer_regions[i] = iovec {arena.buffer(static_cast<inner_staging_buffer_id_t>(i)), arena.stride};
+        return register_buffers(std::span<struct iovec const> {buffer_regions.data(), buffer_count});
     }
 
     /** @brief Claims the next SQE slot, or returns null when the ring is full. The caller
@@ -759,11 +850,17 @@ struct inner_uring_ring_t {
         if (to_submit) std::atomic_ref<u32_t>(*submissions_.tail).store(pending_tail_, std::memory_order_release);
         // Polled rings only harvest device completions inside the syscall, and deferred
         // task-run rings only post them there - both must ask for events every time.
-        bool getevents = min_complete || posting_ == uring_posting_t::deferred_k || //
-                         reaping_ == uring_reaping_t::polled_k;
+        bool getevents = min_complete || posting_ == inner_uring_posting_t::deferred_k || //
+                         reaping_ == inner_uring_reaping_t::polled_k;
         if (!to_submit && !getevents) return status_t::success_k;
-        long entered = syscall(SYS_io_uring_enter, ring_descriptor_, to_submit, min_complete,
-                               getevents ? IORING_ENTER_GETEVENTS : 0u, nullptr, 0ull);
+        u32_t enter_flags = getevents ? IORING_ENTER_GETEVENTS : 0u;
+        int enter_descriptor = ring_descriptor_;
+        if (ring_registered_) {
+            enter_flags |= IORING_ENTER_REGISTERED_RING;
+            enter_descriptor = static_cast<int>(registered_ring_index_);
+        }
+        long entered = syscall(SYS_io_uring_enter, enter_descriptor, to_submit, min_complete, enter_flags, nullptr,
+                               0ull);
         if (entered < 0 && errno != EINTR && errno != EBUSY && errno != EAGAIN) return status_t::device_error_k;
         return status_t::success_k;
     }
@@ -782,26 +879,64 @@ struct inner_uring_ring_t {
         return true;
     }
 
-    /** @brief The CQ tail word - the address a ForkUnion waiter monitors while the
-     *      kernel completes reads in the background. */
-    inline u32_t const* completion_tail_word() const noexcept { return completions_.tail; }
-    inline u32_t completion_tail_seen() const noexcept {
-        return std::atomic_ref<u32_t>(*completions_.tail).load(std::memory_order_acquire);
+    /** @brief The full submit-and-reap discipline shared by every ring engine: nonblocking
+     *      submits & returns; blocking on an async-posting ring pays one capped @p wait_type_
+     *      monitor on the CQ tail before the blocking enter - a completion landing in that
+     *      window reaps for zero syscalls - while deferred & polled rings fuse the pending
+     *      batch and the wait into a single enter. */
+    template <typename wait_type_>
+    inline status_t pump(inner_io_wait_t wait) noexcept {
+        if (wait == inner_io_wait_t::nonblocking_k) return enter(0);
+        if (reaps_asynchronously_()) {
+            status_t submitted = enter(0);
+            if (submitted != status_t::success_k) return submitted;
+            u32_t seen = completion_tail_seen_();
+            wait_type_ {}(completion_tail_word_(), seen, 0u, fu::wait_capped_t {});
+            if (completion_tail_seen_() != seen) return status_t::success_k;
+        }
+        return enter(1);
     }
-    /** @brief When CQEs become visible - @c immediate_k rings reward a tail-monitoring
-     *      waiter, @c deferred_k rings must be entered. */
-    inline uring_posting_t posting() const noexcept { return posting_; }
 
   private:
+    /** @brief The CQ tail word - the address a ForkUnion waiter monitors while the
+     *      kernel completes reads in the background. */
+    inline u32_t const* completion_tail_word_() const noexcept { return completions_.tail; }
+    inline u32_t completion_tail_seen_() const noexcept {
+        return std::atomic_ref<u32_t>(*completions_.tail).load(std::memory_order_acquire);
+    }
+    /** @brief True only when CQEs land in shared memory between syscalls - immediate
+     *      posting under interrupt-driven reaping. Deferred task-run and IOPOLL rings
+     *      post CQEs strictly inside @c io_uring_enter, so a user-space tail monitor
+     *      can never observe them and the submit & wait pair fuses into one enter. */
+    inline bool reaps_asynchronously_() const noexcept {
+        return posting_ == inner_uring_posting_t::immediate_k && reaping_ == inner_uring_reaping_t::interrupted_k;
+    }
+
+    /** @brief Registers the ring descriptor so every enter addresses it by index,
+     *      skipping the per-syscall descriptor-table lookup. Silent no-op fallback on
+     *      pre-5.18 kernels, where the registration opcode is simply rejected. */
+    inline void register_ring_descriptor_() noexcept {
+        struct io_uring_rsrc_update ring_update {};
+        ring_update.data = static_cast<u64_t>(ring_descriptor_);
+        ring_update.offset = static_cast<u32_t>(-1); // The kernel assigns the index.
+        long ring_registered = syscall(SYS_io_uring_register, ring_descriptor_, IORING_REGISTER_RING_FDS, &ring_update,
+                                       1u);
+        if (ring_registered < 0) return;
+        registered_ring_index_ = ring_update.offset;
+        ring_registered_ = true;
+    }
+
     int ring_descriptor_ = -1;
-    uring_reaping_t reaping_ = uring_reaping_t::interrupted_k;
-    uring_posting_t posting_ = uring_posting_t::immediate_k;
-    uring_mapping_t submission_mapping_;
-    uring_mapping_t completion_mapping_;
-    uring_mapping_t entries_mapping_;
-    uring_submissions_t submissions_;
-    uring_completions_t completions_;
+    inner_uring_reaping_t reaping_ = inner_uring_reaping_t::interrupted_k;
+    inner_uring_posting_t posting_ = inner_uring_posting_t::immediate_k;
+    inner_uring_mapping_t submission_mapping_;
+    inner_uring_mapping_t completion_mapping_;
+    inner_uring_mapping_t entries_mapping_;
+    inner_uring_submissions_t submissions_;
+    inner_uring_completions_t completions_;
     u32_t pending_tail_ = 0;
+    u32_t registered_ring_index_ = 0;
+    bool ring_registered_ = false;
 };
 
 /**
@@ -823,28 +958,33 @@ struct inner_linux_uring_read_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
 
-    inline static constexpr io_capability_t capabilities_k = io_capability_t::none_k;
+    inline static constexpr inner_io_capability_t capabilities_k = inner_io_capability_t::none_k;
 
     inner_linux_uring_read_engine() noexcept = default;
     inner_linux_uring_read_engine(inner_linux_uring_read_engine const&) = delete;
     inner_linux_uring_read_engine& operator=(inner_linux_uring_read_engine const&) = delete;
 
     inline status_t open(int file_descriptor, std::size_t queue_depth, std::size_t buffer_stride,
-                         allocator_t const& alloc) noexcept {
-        file_descriptor_ = file_descriptor;
-        status_t arena_status = arena_.reserve(queue_depth, buffer_stride, alloc);
+                         allocator_t const& allocator) noexcept {
+        status_t arena_status = arena_.reserve(queue_depth, buffer_stride, allocator);
         if (arena_status != status_t::success_k) return arena_status;
-        return ring_.setup(queue_depth, uring_form_t::compact_k, uring_reaping_t::interrupted_k);
+        status_t ring_status = ring_.setup(queue_depth, inner_uring_form_t::compact_k,
+                                           inner_uring_reaping_t::interrupted_k);
+        if (ring_status != status_t::success_k) return ring_status;
+        // Fixed-file registration composes with any opcode: plain reads keep their
+        // unregistered buffers but still shed the per-submission descriptor refcount.
+        return ring_.register_file(file_descriptor);
     }
 
-    inline std::byte* buffer(u32_t index) noexcept { return arena_.buffer(index); }
+    inline std::byte* buffer(inner_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
 
     inline bool push(inner_io_request_t request) noexcept {
         struct io_uring_sqe* entry = ring_.next_submission();
         if (!entry) return false;
         *entry = io_uring_sqe {};
         entry->opcode = IORING_OP_READ;
-        entry->fd = file_descriptor_;
+        entry->flags = IOSQE_FIXED_FILE;
+        entry->fd = 0; // Fixed-file index, not a descriptor: the one registered payload.
         entry->addr = reinterpret_cast<std::uintptr_t>(arena_.buffer(request.buffer));
         entry->len = request.length;
         entry->off = request.offset;
@@ -852,22 +992,11 @@ struct inner_linux_uring_read_engine {
         return true;
     }
 
-    inline status_t pump(inner_io_wait_t wait) noexcept {
-        status_t submitted = ring_.enter(0);
-        if (submitted != status_t::success_k) return submitted;
-        if (wait == inner_io_wait_t::nonblocking_k) return status_t::success_k;
-        if (ring_.posting() == uring_posting_t::immediate_k) {
-            u32_t seen = ring_.completion_tail_seen();
-            wait_t {}(ring_.completion_tail_word(), seen, 0u, fu::wait_capped_t {});
-            if (ring_.completion_tail_seen() != seen) return status_t::success_k;
-        }
-        return ring_.enter(1);
-    }
+    inline status_t pump(inner_io_wait_t wait) noexcept { return ring_.pump<wait_t>(wait); }
 
     inline bool pop(inner_io_completion_t& completion) noexcept { return ring_.pop(completion); }
 
   private:
-    int file_descriptor_ = -1;
     inner_uring_ring_t ring_;
     inner_io_arena<allocator_t> arena_;
 };
@@ -883,31 +1012,26 @@ template <typename wait_type_ = dummy_waiter_t, typename allocator_type_ = std::
 struct inner_linux_uring_fixed_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
-    using iovecs_allocator_t = typename std::allocator_traits<allocator_type_>::template rebind_alloc<struct iovec>;
-    using iovecs_tensor_t = nk::tensor<struct iovec, iovecs_allocator_t, 1>;
 
-    inline static constexpr io_capability_t capabilities_k = io_capability_t::fixed_buffers_k;
+    inline static constexpr inner_io_capability_t capabilities_k = inner_io_capability_t::fixed_buffers_k;
 
     inner_linux_uring_fixed_engine() noexcept = default;
     inner_linux_uring_fixed_engine(inner_linux_uring_fixed_engine const&) = delete;
     inner_linux_uring_fixed_engine& operator=(inner_linux_uring_fixed_engine const&) = delete;
 
     inline status_t open(int file_descriptor, std::size_t queue_depth, std::size_t buffer_stride,
-                         allocator_t const& alloc) noexcept {
-        status_t arena_status = arena_.reserve(queue_depth, buffer_stride, alloc);
+                         allocator_t const& allocator) noexcept {
+        status_t arena_status = arena_.reserve(queue_depth, buffer_stride, allocator);
         if (arena_status != status_t::success_k) return arena_status;
-        status_t ring_status = ring_.setup(queue_depth, uring_form_t::compact_k, uring_reaping_t::interrupted_k);
+        status_t ring_status = ring_.setup(queue_depth, inner_uring_form_t::compact_k,
+                                           inner_uring_reaping_t::interrupted_k);
         if (ring_status != status_t::success_k) return ring_status;
-        iovecs_tensor_t vectors {iovecs_allocator_t(alloc)};
-        if (!vectors.reserve(queue_depth) || !vectors.try_resize({queue_depth})) return status_t::bad_alloc_k;
-        for (std::size_t i = 0; i != queue_depth; ++i)
-            vectors[i] = iovec {arena_.buffer(static_cast<u32_t>(i)), arena_.stride};
-        status_t buffers_status = ring_.register_buffers(std::span<struct iovec const> {vectors.data(), queue_depth});
+        status_t buffers_status = ring_.register_arena(arena_, queue_depth, allocator);
         if (buffers_status != status_t::success_k) return buffers_status;
         return ring_.register_file(file_descriptor);
     }
 
-    inline std::byte* buffer(u32_t index) noexcept { return arena_.buffer(index); }
+    inline std::byte* buffer(inner_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
 
     inline bool push(inner_io_request_t request) noexcept {
         struct io_uring_sqe* entry = ring_.next_submission();
@@ -924,17 +1048,7 @@ struct inner_linux_uring_fixed_engine {
         return true;
     }
 
-    inline status_t pump(inner_io_wait_t wait) noexcept {
-        status_t submitted = ring_.enter(0);
-        if (submitted != status_t::success_k) return submitted;
-        if (wait == inner_io_wait_t::nonblocking_k) return status_t::success_k;
-        if (ring_.posting() == uring_posting_t::immediate_k) {
-            u32_t seen = ring_.completion_tail_seen();
-            wait_t {}(ring_.completion_tail_word(), seen, 0u, fu::wait_capped_t {});
-            if (ring_.completion_tail_seen() != seen) return status_t::success_k;
-        }
-        return ring_.enter(1);
-    }
+    inline status_t pump(inner_io_wait_t wait) noexcept { return ring_.pump<wait_t>(wait); }
 
     inline bool pop(inner_io_completion_t& completion) noexcept { return ring_.pop(completion); }
 
@@ -961,32 +1075,26 @@ template <typename wait_type_ = dummy_waiter_t, typename allocator_type_ = std::
 struct inner_linux_uring_polled_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
-    using iovecs_allocator_t = typename std::allocator_traits<allocator_type_>::template rebind_alloc<struct iovec>;
-    using iovecs_tensor_t = nk::tensor<struct iovec, iovecs_allocator_t, 1>;
 
-    inline static constexpr io_capability_t capabilities_k = io_capability_t::fixed_buffers_k |
-                                                             io_capability_t::polled_k;
+    inline static constexpr inner_io_capability_t capabilities_k = inner_io_capability_t::fixed_buffers_k |
+                                                                   inner_io_capability_t::polled_k;
 
     inner_linux_uring_polled_engine() noexcept = default;
     inner_linux_uring_polled_engine(inner_linux_uring_polled_engine const&) = delete;
     inner_linux_uring_polled_engine& operator=(inner_linux_uring_polled_engine const&) = delete;
 
     inline status_t open(int file_descriptor, std::size_t queue_depth, std::size_t buffer_stride,
-                         allocator_t const& alloc) noexcept {
-        status_t arena_status = arena_.reserve(queue_depth, buffer_stride, alloc);
+                         allocator_t const& allocator) noexcept {
+        status_t arena_status = arena_.reserve(queue_depth, buffer_stride, allocator);
         if (arena_status != status_t::success_k) return arena_status;
-        status_t ring_status = ring_.setup(queue_depth, uring_form_t::compact_k, uring_reaping_t::polled_k);
+        status_t ring_status = ring_.setup(queue_depth, inner_uring_form_t::compact_k, inner_uring_reaping_t::polled_k);
         if (ring_status != status_t::success_k) return ring_status;
-        iovecs_tensor_t vectors {iovecs_allocator_t(alloc)};
-        if (!vectors.reserve(queue_depth) || !vectors.try_resize({queue_depth})) return status_t::bad_alloc_k;
-        for (std::size_t i = 0; i != queue_depth; ++i)
-            vectors[i] = iovec {arena_.buffer(static_cast<u32_t>(i)), arena_.stride};
-        status_t buffers_status = ring_.register_buffers(std::span<struct iovec const> {vectors.data(), queue_depth});
+        status_t buffers_status = ring_.register_arena(arena_, queue_depth, allocator);
         if (buffers_status != status_t::success_k) return buffers_status;
         return ring_.register_file(file_descriptor);
     }
 
-    inline std::byte* buffer(u32_t index) noexcept { return arena_.buffer(index); }
+    inline std::byte* buffer(inner_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
 
     inline bool push(inner_io_request_t request) noexcept {
         struct io_uring_sqe* entry = ring_.next_submission();
@@ -1003,16 +1111,7 @@ struct inner_linux_uring_polled_engine {
         return true;
     }
 
-    inline status_t pump(inner_io_wait_t wait) noexcept {
-        // With IOPOLL every enter both submits & polls the device queues for completions.
-        status_t polled = ring_.enter(0);
-        if (polled != status_t::success_k) return polled;
-        if (wait == inner_io_wait_t::nonblocking_k) return status_t::success_k;
-        u32_t seen = ring_.completion_tail_seen();
-        if (ring_.completion_tail_seen() != seen) return status_t::success_k;
-        wait_t {}(ring_.completion_tail_word(), seen, 0u, fu::wait_capped_t {});
-        return ring_.enter(1);
-    }
+    inline status_t pump(inner_io_wait_t wait) noexcept { return ring_.pump<wait_t>(wait); }
 
     inline bool pop(inner_io_completion_t& completion) noexcept { return ring_.pop(completion); }
 
@@ -1048,7 +1147,7 @@ struct inner_linux_uring_nvme_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
 
-    inline static constexpr io_capability_t capabilities_k = io_capability_t::lba_addressing_k;
+    inline static constexpr inner_io_capability_t capabilities_k = inner_io_capability_t::lba_addressing_k;
     inline static constexpr std::uint8_t nvme_read_opcode_k = 0x02;
 
     inner_linux_uring_nvme_engine() noexcept = default;
@@ -1056,21 +1155,33 @@ struct inner_linux_uring_nvme_engine {
     inner_linux_uring_nvme_engine& operator=(inner_linux_uring_nvme_engine const&) = delete;
 
     /** @brief Presets the namespace LBA geometry - log2 of the LBA size, 9 for 512e,
-     *      12 for 4Kn - which @c open cannot derive without an admin Identify pass. */
-    inline void configure(u32_t lba_shift) noexcept { lba_shift_ = lba_shift; }
+     *      12 for 4Kn - which @c open cannot derive without an admin Identify pass, and
+     *      the command-buffer mode, an explicit 6.14+ opt-in. */
+    inline void configure(u32_t lba_shift, inner_uring_command_buffers_t command_buffers =
+                                               inner_uring_command_buffers_t::plain_k) noexcept {
+        lba_shift_ = lba_shift;
+        command_buffers_ = command_buffers;
+    }
 
     inline status_t open(int file_descriptor, std::size_t queue_depth, std::size_t buffer_stride,
-                         allocator_t const& alloc) noexcept {
+                         allocator_t const& allocator) noexcept {
         file_descriptor_ = file_descriptor;
-        status_t arena_status = arena_.reserve(queue_depth, buffer_stride, alloc);
+        status_t arena_status = arena_.reserve(queue_depth, buffer_stride, allocator);
         if (arena_status != status_t::success_k) return arena_status;
         int namespace_id = ioctl(file_descriptor, NVME_IOCTL_ID);
         if (namespace_id < 0) return status_t::device_error_k;
         namespace_id_ = static_cast<u32_t>(namespace_id);
-        return ring_.setup(queue_depth, uring_form_t::nvme_k, uring_reaping_t::interrupted_k);
+        status_t ring_status = ring_.setup(queue_depth, inner_uring_form_t::nvme_k,
+                                           inner_uring_reaping_t::interrupted_k);
+        if (ring_status != status_t::success_k) return ring_status;
+        if (command_buffers_ == inner_uring_command_buffers_t::fixed_k) {
+            status_t buffers_status = ring_.register_arena(arena_, queue_depth, allocator);
+            if (buffers_status != status_t::success_k) return buffers_status;
+        }
+        return status_t::success_k;
     }
 
-    inline std::byte* buffer(u32_t index) noexcept { return arena_.buffer(index); }
+    inline std::byte* buffer(inner_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
 
     inline bool push(inner_io_request_t request) noexcept {
         struct io_uring_sqe* entry = ring_.next_submission();
@@ -1081,6 +1192,10 @@ struct inner_linux_uring_nvme_engine {
         entry->fd = file_descriptor_;
         entry->cmd_op = NVME_URING_CMD_IO;
         entry->user_data = request.tag;
+        if (command_buffers_ == inner_uring_command_buffers_t::fixed_k) {
+            entry->uring_cmd_flags = IORING_URING_CMD_FIXED;
+            entry->buf_index = static_cast<std::uint16_t>(request.buffer);
+        }
         struct nvme_uring_cmd* command = reinterpret_cast<struct nvme_uring_cmd*>(entry->cmd);
         command->opcode = nvme_read_opcode_k;
         command->nsid = namespace_id_;
@@ -1094,17 +1209,7 @@ struct inner_linux_uring_nvme_engine {
         return true;
     }
 
-    inline status_t pump(inner_io_wait_t wait) noexcept {
-        status_t submitted = ring_.enter(0);
-        if (submitted != status_t::success_k) return submitted;
-        if (wait == inner_io_wait_t::nonblocking_k) return status_t::success_k;
-        if (ring_.posting() == uring_posting_t::immediate_k) {
-            u32_t seen = ring_.completion_tail_seen();
-            wait_t {}(ring_.completion_tail_word(), seen, 0u, fu::wait_capped_t {});
-            if (ring_.completion_tail_seen() != seen) return status_t::success_k;
-        }
-        return ring_.enter(1);
-    }
+    inline status_t pump(inner_io_wait_t wait) noexcept { return ring_.pump<wait_t>(wait); }
 
     /** @brief Rewrites the NVMe convention - zero result means the full transfer - into
      *      the byte-count convention the state machine consumes. */
@@ -1118,6 +1223,7 @@ struct inner_linux_uring_nvme_engine {
     int file_descriptor_ = -1;
     u32_t namespace_id_ = 0;
     u32_t lba_shift_ = 9;
+    inner_uring_command_buffers_t command_buffers_ = inner_uring_command_buffers_t::plain_k;
     inner_uring_ring_t ring_;
     inner_io_arena<allocator_t> arena_;
 };
@@ -1146,7 +1252,7 @@ struct inner_windows_ioring_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
 
-    inline static constexpr io_capability_t capabilities_k = io_capability_t::fixed_buffers_k;
+    inline static constexpr inner_io_capability_t capabilities_k = inner_io_capability_t::fixed_buffers_k;
 
     inner_windows_ioring_engine() noexcept = default;
     inner_windows_ioring_engine(inner_windows_ioring_engine const&) = delete;
@@ -1156,18 +1262,18 @@ struct inner_windows_ioring_engine {
     }
 
     inline status_t open(HANDLE file_handle, std::size_t queue_depth, std::size_t buffer_stride,
-                         allocator_t const& alloc) noexcept {
-        status_t arena_status = arena_.reserve(queue_depth, buffer_stride, alloc);
+                         allocator_t const& allocator) noexcept {
+        status_t arena_status = arena_.reserve(queue_depth, buffer_stride, allocator);
         if (arena_status != status_t::success_k) return arena_status;
         IORING_CREATE_FLAGS flags {IORING_CREATE_REQUIRED_FLAGS_NONE, IORING_CREATE_ADVISORY_FLAGS_NONE};
         HRESULT created = CreateIoRing(IORING_VERSION_3, flags, static_cast<UINT32>(queue_depth),
                                        static_cast<UINT32>(queue_depth * 2), &ring_);
         if (!SUCCEEDED(created)) return status_t::device_error_k;
-        buffer_infos_ = buffer_infos_tensor_t(buffer_infos_allocator_t(alloc));
+        buffer_infos_ = buffer_infos_tensor_t(buffer_infos_allocator_t(allocator));
         if (!buffer_infos_.reserve(queue_depth) || !buffer_infos_.try_resize({queue_depth}))
             return status_t::bad_alloc_k;
         for (std::size_t i = 0; i != queue_depth; ++i)
-            buffer_infos_[i] = IORING_BUFFER_INFO {arena_.buffer(static_cast<u32_t>(i)),
+            buffer_infos_[i] = IORING_BUFFER_INFO {arena_.buffer(static_cast<inner_staging_buffer_id_t>(i)),
                                                    static_cast<UINT32>(arena_.stride)};
         HRESULT buffers = BuildIoRingRegisterBuffers(ring_, static_cast<UINT32>(queue_depth), buffer_infos_.data(), 0);
         if (!SUCCEEDED(buffers)) return status_t::device_error_k;
@@ -1176,7 +1282,7 @@ struct inner_windows_ioring_engine {
         return SUCCEEDED(files) ? status_t::success_k : status_t::device_error_k;
     }
 
-    inline std::byte* buffer(u32_t index) noexcept { return arena_.buffer(index); }
+    inline std::byte* buffer(inner_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
 
     inline bool push(inner_io_request_t request) noexcept {
         IORING_BUFFER_REF buffer_ref = IoRingBufferRefFromIndexAndOffset(request.buffer, 0);
@@ -1220,7 +1326,7 @@ struct inner_windows_ioring_engine {
 #pragma region State Machine
 
 /** @brief Progress of one in-flight traversal through its slot's lifecycle. */
-enum class persisted_stage_t : std::uint8_t {
+enum class inner_persisted_stage_t : std::uint8_t {
     /** @brief The slot is free; @c reset arms it with the next pending query. */
     idle_k,
     /** @brief Fetches are outstanding; completions drive the traversal forward. */
@@ -1245,6 +1351,9 @@ struct inner_persisted_slot {
     using vector_view_t = nk::vector_view<scalar_t>;
     using vector_norms_t = usearch::vector_norms<typename scalar_t::dot_result_t>;
 
+    /** @brief Default integer type to use for loops and indexing at sub-index scale. */
+    using small_size_t = std::uint32_t;
+
     using allocator_t = allocator_type_;
     using candidates_allocator_t =
         typename std::allocator_traits<allocator_t>::template rebind_alloc<inner_scored_node_t>;
@@ -1256,19 +1365,19 @@ struct inner_persisted_slot {
     using frontier_queue_t = max_heap_dary<8, inner_scored_node_t, inner_further_scored_node_t, candidates_allocator_t>;
     using visited_set_t = growing_hash_set<inner_node_id_t, std::hash<inner_node_id_t>, visits_allocator_t>;
 
-    persisted_stage_t stage = persisted_stage_t::idle_k;
+    inner_persisted_stage_t stage = inner_persisted_stage_t::idle_k;
     /** @brief Reads issued and not yet completed for this slot; the slot only advances
      *      to its next hop when this drains to zero. */
-    u32_t inflight_reads = 0;
+    small_size_t inflight_reads = 0;
 
     /** @brief The caller's query row; must outlive the batch. */
     vector_view_t query;
     vector_norms_t query_norms {};
     /** @brief Which batch row this slot is serving - indexes the output arrays. */
-    u32_t query_index = 0;
+    small_size_t query_index = 0;
     /** @brief This search's result-pool breadth - at most the reserved capacity, which
      *      container growth rounding can silently exceed; the traversal trusts only this. */
-    u32_t pool_limit = 0;
+    small_size_t pool_limit = 0;
 
     /** @brief Nodes we've already scored, kept ascending as the best results so far. */
     results_array_t results;
@@ -1277,6 +1386,11 @@ struct inner_persisted_slot {
     /** @brief Nodes already fetched for scoring; exact by design - the recall ceiling
      *      of a lossy filter is not worth its memory. */
     visited_set_t visited;
+    /** @brief Leased buffer indexes of score completions awaiting a quad flush - drained
+     *      every fourth arrival, and once more when the hop's in-flight reads reach zero,
+     *      so deferral adds no latency. Stashing the index alone keeps the record bytes
+     *      where DMA left them until the one moment the quad kernel reads them. */
+    fu::limited_array<inner_staging_buffer_id_t, 4> pending_scores;
     /** @brief Pseudo-random generator for picking this slot's traversal starting points. */
     splitmix_u32_t random_generator;
 
@@ -1285,15 +1399,15 @@ struct inner_persisted_slot {
     inner_persisted_slot(inner_persisted_slot const&) = delete;
     inner_persisted_slot& operator=(inner_persisted_slot const&) = delete;
 
-    /** @brief Re-seats every container on @p alloc & sizes it for @p expansion results
+    /** @brief Re-seats every container on @p allocator & sizes it for @p expansion results
      *      and the visited volume one traversal can touch. Slots default-construct so
      *      arrays of them can be sized first; this late binding is what places their
      *      queues in the caller's memory domain. Called once per context, never per query. */
     inline status_t reserve(std::size_t expansion, std::size_t connectivity_ceiling,
-                            candidates_allocator_t const& alloc) noexcept {
-        results = results_array_t(alloc);
-        frontier = frontier_queue_t(alloc);
-        visited = visited_set_t(visits_allocator_t(alloc));
+                            candidates_allocator_t const& allocator) noexcept {
+        results = results_array_t(allocator);
+        frontier = frontier_queue_t(allocator);
+        visited = visited_set_t(visits_allocator_t(allocator));
         if (!results.reserve(expansion)) return status_t::bad_alloc_k;
         if (!frontier.reserve(expansion * connectivity_ceiling)) return status_t::bad_alloc_k;
         if (!visited.reserve(expansion * connectivity_ceiling * 2)) return status_t::bad_alloc_k;
@@ -1301,9 +1415,9 @@ struct inner_persisted_slot {
     }
 
     /** @brief Recycles the slot for @p new_query without touching any capacity. */
-    inline void reset(vector_view_t new_query, vector_norms_t new_query_norms, u32_t new_query_index,
-                      u32_t new_pool_limit, u64_t seed) noexcept {
-        stage = persisted_stage_t::traversing_k;
+    inline void reset(vector_view_t new_query, vector_norms_t new_query_norms, small_size_t new_query_index,
+                      small_size_t new_pool_limit, u64_t seed) noexcept {
+        stage = inner_persisted_stage_t::traversing_k;
         inflight_reads = 0;
         query = new_query;
         query_norms = new_query_norms;
@@ -1312,6 +1426,7 @@ struct inner_persisted_slot {
         results.clear();
         frontier.clear();
         visited.clear();
+        pending_scores.clear();
         random_generator = splitmix_u32_t(seed);
     }
 };
@@ -1332,9 +1447,10 @@ struct inner_persisted_context {
     using engine_t = engine_type_;
     using allocator_t = allocator_type_;
     using slot_t = inner_persisted_slot<vector_dtype_, allocator_t>;
-    using ids_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<u32_t>;
+    using buffer_ids_allocator_t =
+        typename std::allocator_traits<allocator_t>::template rebind_alloc<inner_staging_buffer_id_t>;
     using slots_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<slot_t>;
-    using ids_tensor_t = nk::tensor<u32_t, ids_allocator_t, 1>;
+    using buffer_ids_tensor_t = nk::tensor<inner_staging_buffer_id_t, buffer_ids_allocator_t, 1>;
     using slots_array_t = fu::dynamic_array<slot_t, slots_allocator_t>;
 
     static_assert(inner_io_engine<engine_t>);
@@ -1345,7 +1461,7 @@ struct inner_persisted_context {
     /** @brief Stack of free arena buffer indexes; the live shape is the stack depth,
      *      so no separate top exists. The memory itself belongs to the engine - the
      *      state machine only leases indexes. */
-    ids_tensor_t free_buffers;
+    buffer_ids_tensor_t free_buffers;
 
     /** @brief The reserved result-pool ceiling; per-search pools are capped by it. */
     std::size_t expansion_capacity = 0;
@@ -1357,8 +1473,9 @@ struct inner_persisted_context {
     /** @brief Reads issued across the context's lifetime, refetches included. */
     std::size_t issued_reads = 0;
 
-    inner_persisted_context(allocator_t const& alloc = {}) noexcept
-        : engine(), slots(slots_allocator_t(alloc)), free_buffers(ids_allocator_t(alloc)), allocator_(alloc) {}
+    inner_persisted_context(allocator_t const& allocator = {}) noexcept
+        : engine(), slots(slots_allocator_t(allocator)), free_buffers(buffer_ids_allocator_t(allocator)),
+          allocator_(allocator) {}
     inner_persisted_context(inner_persisted_context const&) = delete;
     inner_persisted_context& operator=(inner_persisted_context const&) = delete;
 
@@ -1378,7 +1495,8 @@ struct inner_persisted_context {
         // connectivity scoring fetches, so each slot budgets connectivity + 1 buffers.
         std::size_t depth = slot_count * (max_of<std::size_t>(connectivity_ceiling, 1) + 1);
         if (!free_buffers.reserve(depth) || !free_buffers.try_resize({depth})) return status_t::bad_alloc_k;
-        for (std::size_t i = 0; i != depth; ++i) free_buffers[i] = static_cast<u32_t>(depth - 1 - i);
+        for (std::size_t i = 0; i != depth; ++i)
+            free_buffers[i] = static_cast<inner_staging_buffer_id_t>(depth - 1 - i);
 
         if (!slots.try_resize(slot_count)) return status_t::bad_alloc_k;
         for (std::size_t i = 0; i != slot_count; ++i) {
@@ -1390,12 +1508,12 @@ struct inner_persisted_context {
         return status_t::success_k;
     }
 
-    inline u32_t acquire_buffer() noexcept {
+    inline inner_staging_buffer_id_t acquire_buffer() noexcept {
         std::size_t depth = free_buffers.extent(0);
-        u32_t leased = free_buffers[depth - 1];
+        inner_staging_buffer_id_t leased = free_buffers[depth - 1];
         return (void)free_buffers.try_resize({depth - 1}), leased;
     }
-    inline void release_buffer(u32_t index) noexcept {
+    inline void release_buffer(inner_staging_buffer_id_t index) noexcept {
         std::size_t depth = free_buffers.extent(0);
         (void)free_buffers.try_resize({depth + 1}); // Never exceeds the reservation it drained from.
         free_buffers[depth] = index;
@@ -1473,7 +1591,8 @@ struct inner_persisted_index {
      *      is immutable, so arbitrary readers share one instance with no fences at all. */
     inline static constexpr synchronization_t synchronization_ceiling_k = synchronization_t::immutable_k;
 
-    inner_persisted_index(offsets_allocator_type_ const& alloc = {}) noexcept : offsets_(offsets_allocator_t(alloc)) {}
+    inner_persisted_index(offsets_allocator_type_ const& allocator = {}) noexcept
+        : offsets_(offsets_allocator_t(allocator)) {}
     inner_persisted_index(inner_persisted_index const&) = delete;
     inner_persisted_index& operator=(inner_persisted_index const&) = delete;
     ~inner_persisted_index() noexcept { close(); }
@@ -1485,46 +1604,44 @@ struct inner_persisted_index {
      *  @param[in] caching Routes the engine-side descriptor through the page cache,
      *      or around it - @c O_DIRECT on Linux, @c F_NOCACHE on macOS.
      */
-    inline status_t open(char const* path, io_caching_t caching = io_caching_t::cached_k) noexcept {
+    inline status_t open(char const* path, inner_io_caching_t caching = inner_io_caching_t::cached_k) noexcept {
 #if defined(_WIN32)
         (void)path, (void)caching;
         return status_t::uninitialized_k; // Windows file plumbing arrives with its engine's bring-up.
 #else
-        int metadata_descriptor = ::open(path, O_RDONLY);
-        if (metadata_descriptor < 0) return status_t::device_error_k;
+        inner_posix_descriptor_t metadata {::open(path, O_RDONLY)};
+        if (metadata.file_descriptor < 0) return status_t::device_error_k;
         inner_index_header_t header;
-        ssize_t header_bytes = ::pread(metadata_descriptor, &header, sizeof(header), 0);
+        ssize_t header_bytes = ::pread(metadata.file_descriptor, &header, sizeof(header), 0);
         if (header_bytes != sizeof(header) || header.magic != inner_index_header_t::magic_k ||
             header.version != inner_index_header_t::version_k)
-            return ::close(metadata_descriptor), status_t::malformed_k;
+            return status_t::malformed_k;
         if (header.dtype != static_cast<u32_t>(vector_dtype_) || header.kernel != static_cast<u32_t>(kernel_kind_))
-            return ::close(metadata_descriptor), status_t::config_mismatch_k;
+            return status_t::config_mismatch_k;
 
         dimensions_ = header.dimensions;
         connectivity_ceiling_ = header.connectivity;
         std::size_t offsets_count = std::size_t(header.node_count) + 1;
-        if (!offsets_.reserve(offsets_count) || !offsets_.try_resize({offsets_count}))
-            return ::close(metadata_descriptor), status_t::bad_alloc_k;
+        if (!offsets_.reserve(offsets_count) || !offsets_.try_resize({offsets_count})) return status_t::bad_alloc_k;
         std::size_t offsets_bytes = inner_persisted_layout_t::offsets_bytes(header.node_count);
-        ssize_t read_bytes = ::pread(metadata_descriptor, offsets_.data(), offsets_bytes,
+        ssize_t read_bytes = ::pread(metadata.file_descriptor, offsets_.data(), offsets_bytes,
                                      inner_persisted_layout_t::offsets_begin_k);
-        ::close(metadata_descriptor);
         if (read_bytes != static_cast<ssize_t>(offsets_bytes)) return status_t::malformed_k;
 
         record_capacity_ = 0;
         for (small_size_t i = 0; i != header.node_count; ++i) {
             u64_t begin = offsets_[i], end = offsets_[i + 1];
-            if (end < begin || begin % persisted_block_k) return status_t::malformed_k;
+            if (end < begin || begin % inner_persisted_block_k) return status_t::malformed_k;
             record_capacity_ = max_of<std::size_t>(record_capacity_, end - begin);
         }
         int flags = O_RDONLY;
 #if defined(__linux__)
-        if (caching == io_caching_t::direct_k) flags |= O_DIRECT;
+        if (caching == inner_io_caching_t::direct_k) flags |= O_DIRECT;
 #endif
         data_descriptor_ = ::open(path, flags);
         if (data_descriptor_ < 0) return status_t::device_error_k;
 #if defined(__APPLE__)
-        if (caching == io_caching_t::direct_k) fcntl(data_descriptor_, F_NOCACHE, 1);
+        if (caching == inner_io_caching_t::direct_k) fcntl(data_descriptor_, F_NOCACHE, 1);
 #endif
         return status_t::success_k;
 #endif
@@ -1635,20 +1752,8 @@ struct inner_persisted_index {
         small_size_t finished_queries = 0;
 
         while (finished_queries != total_queries) {
-            // Arm every idle slot with the next pending query.
-            for (std::size_t slot_index = 0; slot_index != context.slots.size() && next_query != total_queries;
-                 ++slot_index) {
-                slot_t& slot = context.slots[slot_index];
-                if (slot.stage != persisted_stage_t::idle_k) continue;
-                vector_view_t query = queries.row(next_query).as_vector();
-                slot.reset(query, inner_norms(query), next_query, pool_limit, //
-                           u64_t(next_query) * 0x9E3779B97F4A7C15ull + slot_index + 1);
-                ++next_query;
-                node_id_t seed = slot.random_generator.bounded(size());
-                slot.visited.set(seed);
-                status_t emitted = emit_(context, static_cast<u32_t>(slot_index), seed, inner_io_purpose_t::score_k);
-                if (emitted != status_t::success_k) return outcome.status = emitted, outcome;
-            }
+            status_t armed = arm_slots_(context, queries, pool_limit, next_query, total_queries);
+            if (armed != status_t::success_k) return outcome.status = armed, outcome;
 
             status_t pumped = context.engine.pump(inner_io_wait_t::blocking_k);
             if (pumped != status_t::success_k) return outcome.status = pumped, outcome;
@@ -1659,16 +1764,7 @@ struct inner_persisted_index {
                 if (consumed != status_t::success_k) return outcome.status = consumed, outcome;
             }
 
-            // Harvest every converged slot into its output row & recycle it.
-            for (std::size_t slot_index = 0; slot_index != context.slots.size(); ++slot_index) {
-                slot_t& slot = context.slots[slot_index];
-                if (slot.stage != persisted_stage_t::finished_k) continue;
-                small_size_t kept = static_cast<small_size_t>(min_of<std::size_t>(slot.results.size(), wanted));
-                for (small_size_t i = 0; i != kept; ++i) results(slot.query_index, i) = slot.results[i];
-                result_counts[slot.query_index] = kept;
-                slot.stage = persisted_stage_t::idle_k;
-                ++finished_queries;
-            }
+            harvest_slots_(context, results, result_counts, wanted, finished_queries);
         }
         outcome.expanded_members = context.expanded_members - expanded_before;
         outcome.computed_distances = context.computed_distances - computed_before;
@@ -1694,10 +1790,18 @@ struct inner_persisted_index {
         return usearch::distance<kernel_kind_, capability_, scalar_t>( //
             query, query_norms, candidate, candidate_norms);
     }
+    /** @brief Trampoline for @c usearch::distances with hardened types. */
+    inline static std::array<distance_t, 4> distances(   //
+        vector_view_t query, vector_norms_t query_norms, //
+        std::array<vector_view_t, 4> candidates, std::array<vector_norms_t, 4> candidates_norms) noexcept {
+        return usearch::distances<kernel_kind_, capability_, scalar_t>( //
+            query, query_norms, candidates, candidates_norms);
+    }
 
     /** @brief Issues one record fetch on behalf of @p slot_index, leasing an arena index. */
-    inline status_t emit_(context_t& context, u32_t slot_index, node_id_t node, inner_io_purpose_t purpose) noexcept {
-        u32_t buffer_index = context.acquire_buffer();
+    inline status_t emit_(context_t& context, inner_traversal_slot_id_t slot_index, node_id_t node,
+                          inner_io_purpose_t purpose) noexcept {
+        inner_staging_buffer_id_t buffer_index = context.acquire_buffer();
         inner_io_tag_t tag;
         tag.slot = slot_index;
         tag.buffer = buffer_index;
@@ -1714,51 +1818,110 @@ struct inner_persisted_index {
         return context.engine.push(request) ? status_t::success_k : status_t::overflow_k;
     }
 
-    /** @brief Routes one completed read back into its slot & advances the traversal. */
+    /** @brief Arms every idle slot with the next pending query row & seeds its traversal -
+     *      the admission half of the pump loop. */
+    inline status_t arm_slots_(context_t& context, vectors_view_t queries, small_size_t pool_limit,
+                               small_size_t& next_query, small_size_t total_queries) noexcept {
+        for (inner_traversal_slot_id_t slot_index = 0;
+             slot_index != context.slots.size() && next_query != total_queries; ++slot_index) {
+            slot_t& slot = context.slots[slot_index];
+            if (slot.stage != inner_persisted_stage_t::idle_k) continue;
+            vector_view_t query = queries.row(next_query).as_vector();
+            slot.reset(query, inner_norms(query), next_query, pool_limit, //
+                       u64_t(next_query) * 0x9E3779B97F4A7C15ull + slot_index + 1);
+            ++next_query;
+            node_id_t seed = slot.random_generator.bounded(size());
+            slot.visited.set(seed);
+            status_t emitted = emit_(context, slot_index, seed, inner_io_purpose_t::score_k);
+            if (emitted != status_t::success_k) return emitted;
+        }
+        return status_t::success_k;
+    }
+
+    /** @brief Routes one completed read back into its slot & advances the traversal.
+     *      Score completions are deferred - only their leased buffer index is stashed -
+     *      so the quad kernel scores four arena-resident records per invocation. */
     inline status_t consume_(context_t& context, inner_io_completion_t completion) noexcept {
         inner_io_tag_t tag = inner_io_tag_t::unpack(completion.tag);
         slot_t& slot = context.slots[tag.slot];
-        std::byte const* record = context.engine.buffer(tag.buffer);
         slot.inflight_reads--;
         if (completion.result < 0) return context.release_buffer(tag.buffer), status_t::device_error_k;
 
-        u32_t neighbors_count = *reinterpret_cast<u32_t const*>(record);
         if (static_cast<inner_io_purpose_t>(tag.purpose) == inner_io_purpose_t::score_k) {
-            // Score the fetched vector against the slot's query & rank the node.
-            std::size_t vector_at = inner_persisted_layout_t::vector_offset(neighbors_count, sizeof(vector_norms_t));
-            std::size_t norms_at = inner_persisted_layout_t::norms_offset(neighbors_count);
-            vector_view_t candidate {reinterpret_cast<scalar_t const*>(record + vector_at), dimensions_};
-            vector_norms_t candidate_norms = *reinterpret_cast<vector_norms_t const*>(record + norms_at);
-            node_id_t node = node_of_(record);
-            distance_t score = distance(slot.query, slot.query_norms, candidate, candidate_norms);
-            context.computed_distances++;
-            bool results_full = slot.results.size() == slot.pool_limit;
-            distance_t worst = results_full ? slot.results.top().distance : 0;
-            if (!results_full || score < worst) {
-                slot.results.insert({node, score}, slot.pool_limit);
-                slot.frontier.insert_reserved({node, score});
-            }
+            slot.pending_scores.try_push_back(tag.buffer);
+            if (slot.pending_scores.full()) flush_scores_(context, slot);
         }
         else {
-            // Expansion: walk the neighbor list & fetch every unvisited id for scoring.
-            context.expanded_members++;
-            u32_t const* neighbor_ids = reinterpret_cast<u32_t const*>(record + inner_persisted_layout_t::ids_offset_k);
-            for (u32_t i = 0; i != neighbors_count; ++i) {
-                node_id_t neighbor = neighbor_ids[i];
-                if (neighbor == inner_node_id_unknown_k || slot.visited.set(neighbor)) continue;
-                status_t emitted = emit_(context, tag.slot, neighbor, inner_io_purpose_t::score_k);
-                if (emitted != status_t::success_k) return context.release_buffer(tag.buffer), emitted;
-            }
+            inner_persisted_record_t record {context.engine.buffer(tag.buffer)};
+            status_t expanded = expand_(context, tag.slot, record);
+            context.release_buffer(tag.buffer);
+            if (expanded != status_t::success_k) return expanded;
         }
-        context.release_buffer(tag.buffer);
-        if (!slot.inflight_reads) advance_(context, tag.slot);
+        if (!slot.inflight_reads) {
+            if (slot.pending_scores.size()) flush_scores_(context, slot); // The hop's short tail.
+            advance_(context, tag.slot);
+        }
         return status_t::success_k;
+    }
+
+    /** @brief Walks an expanded @p record's neighbor list & fetches every unvisited id
+     *      for scoring - the fan-out half of one hop. */
+    inline status_t expand_(context_t& context, inner_traversal_slot_id_t slot_index,
+                            inner_persisted_record_t record) noexcept {
+        slot_t& slot = context.slots[slot_index];
+        context.expanded_members++;
+        node_id_t const* neighbor_ids = record.neighbor_ids();
+        u32_t neighbors_count = record.neighbors_count();
+        for (small_size_t i = 0; i != neighbors_count; ++i) {
+            node_id_t neighbor = neighbor_ids[i];
+            if (neighbor == inner_node_id_unknown_k || slot.visited.set(neighbor)) continue;
+            status_t emitted = emit_(context, slot_index, neighbor, inner_io_purpose_t::score_k);
+            if (emitted != status_t::success_k) return emitted;
+        }
+        return status_t::success_k;
+    }
+
+    /** @brief Scores up to four deferred completions of one slot through a single quad
+     *      kernel, merges them with one batched top-k insert whose accept mask gates the
+     *      frontier, and releases their staging buffers. Short tails replicate lane 0 so
+     *      the kernel always streams four valid lanes; only real lanes reach the pool or
+     *      the telemetry. */
+    inline void flush_scores_(context_t& context, slot_t& slot) noexcept {
+        small_size_t fill = static_cast<small_size_t>(slot.pending_scores.size());
+        std::array<vector_view_t, 4> lane_vectors;
+        std::array<vector_norms_t, 4> lane_norms;
+        std::array<node_id_t, 4> lane_nodes;
+        for (small_size_t lane = 0; lane != 4; ++lane) {
+            inner_persisted_record_t record {
+                context.engine.buffer(slot.pending_scores[min_of<small_size_t>(lane, fill - 1)])};
+            lane_vectors[lane] = vector_view_t {record.vector<scalar_t, vector_norms_t>(), dimensions_};
+            lane_norms[lane] = record.norms<vector_norms_t>();
+            lane_nodes[lane] = record.self_id();
+        }
+        std::array<distance_t, 4> scores = distances(slot.query, slot.query_norms, lane_vectors, lane_norms);
+        context.computed_distances += fill;
+        if (fill == 4) {
+            std::array<inner_scored_node_t, 4> batch;
+            for (small_size_t lane = 0; lane != 4; ++lane)
+                batch[lane] = inner_scored_node_t {lane_nodes[lane], scores[lane]};
+            std::uint64_t accepted = slot.results.insert(batch, slot.pool_limit);
+            for (small_size_t lane = 0; lane != 4; ++lane)
+                if (accepted & (std::uint64_t {1} << lane))
+                    slot.frontier.insert_reserved(inner_scored_node_t(batch[lane]));
+        }
+        else {
+            for (small_size_t lane = 0; lane != fill; ++lane)
+                if (slot.results.insert(inner_scored_node_t {lane_nodes[lane], scores[lane]}, slot.pool_limit))
+                    slot.frontier.insert_reserved(inner_scored_node_t {lane_nodes[lane], scores[lane]});
+        }
+        for (small_size_t lane = 0; lane != fill; ++lane) context.release_buffer(slot.pending_scores[lane]);
+        slot.pending_scores.clear();
     }
 
     /** @brief With nothing in flight, either expands the most promising frontier node
      *      or declares convergence - the classic best-first termination: the closest
      *      unexpanded candidate is already further than the worst kept result. */
-    inline void advance_(context_t& context, u32_t slot_index) noexcept {
+    inline void advance_(context_t& context, inner_traversal_slot_id_t slot_index) noexcept {
         slot_t& slot = context.slots[slot_index];
         while (slot.frontier.size()) {
             inner_scored_node_t best = slot.frontier.top();
@@ -1769,12 +1932,23 @@ struct inner_persisted_index {
             if (emitted != status_t::success_k) break;
             return;
         }
-        slot.stage = persisted_stage_t::finished_k;
+        slot.stage = inner_persisted_stage_t::finished_k;
     }
 
-    /** @brief Recovers the record's own id from its self-identifying header word. */
-    inline static node_id_t node_of_(std::byte const* record) noexcept {
-        return *reinterpret_cast<node_id_t const*>(record + inner_persisted_layout_t::self_offset_k);
+    /** @brief Copies every converged slot's ascending results into its output row &
+     *      recycles the slot - the retirement half of the pump loop. */
+    inline void harvest_slots_(context_t& context, nk::matrix_span<inner_scored_node_t> results,
+                               nk::vector_span<small_size_t> result_counts, small_size_t wanted,
+                               small_size_t& finished_queries) noexcept {
+        for (inner_traversal_slot_id_t slot_index = 0; slot_index != context.slots.size(); ++slot_index) {
+            slot_t& slot = context.slots[slot_index];
+            if (slot.stage != inner_persisted_stage_t::finished_k) continue;
+            small_size_t kept = static_cast<small_size_t>(min_of<std::size_t>(slot.results.size(), wanted));
+            for (small_size_t i = 0; i != kept; ++i) results(slot.query_index, i) = slot.results[i];
+            result_counts[slot.query_index] = kept;
+            slot.stage = inner_persisted_stage_t::idle_k;
+            ++finished_queries;
+        }
     }
 
     offsets_tensor_t offsets_;
