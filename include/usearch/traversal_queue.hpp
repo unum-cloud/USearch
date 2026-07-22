@@ -588,6 +588,7 @@ class sorted_buffer {
     inline std::size_t size() const noexcept { return size_; }
     inline std::size_t capacity() const noexcept { return capacity_; }
     inline element_t const& top() const noexcept { return elements_[size_ - 1]; }
+    inline element_t const& operator[](std::size_t i) const noexcept { return elements_[i]; }
     inline element_t const* begin() const noexcept { return elements_; }
     inline element_t const* end() const noexcept { return elements_ + size_; }
     inline void clear() noexcept { size_ = 0; }

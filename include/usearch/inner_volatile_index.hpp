@@ -27,20 +27,6 @@ template <typename index_type_,                                                 
           typename allocator_type_ = typename index_type_::candidates_allocator_t>
 struct inner_volatile_cursor;
 
-/** @brief Orders scored nodes nearest-first; the comparator of the sorted results pool. */
-struct inner_closer_scored_node_t {
-    inline bool operator()(inner_scored_node_t a, inner_scored_node_t b) const noexcept {
-        return a.distance < b.distance;
-    }
-};
-
-/** @brief Orders scored nodes furthest-first; the comparator of the max-heap frontier. */
-struct inner_further_scored_node_t {
-    inline bool operator()(inner_scored_node_t a, inner_scored_node_t b) const noexcept {
-        return a.distance > b.distance;
-    }
-};
-
 /**
  *  @brief Vector Search index for a single uniform latency memory space.
  *
