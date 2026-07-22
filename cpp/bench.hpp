@@ -63,12 +63,18 @@ inline std::string humanize(double value) {
 /** @brief Names the benchmarked dtype subset; NumKong exposes no C-level name table yet. */
 inline char const* dtype_name(nk_dtype_t dtype) noexcept {
     switch (dtype) {
+    // Sorted by decreasing dynamic range, grouped floats, signed integers, unsigned.
     case nk_f32_k: return "f32";
     case nk_bf16_k: return "bf16";
+    case nk_f16_k: return "f16";
+    case nk_e5m2_k: return "e5m2";
+    case nk_e4m3_k: return "e4m3";
     case nk_i8_k: return "i8";
-    case nk_u8_k: return "u8";
     case nk_i4_k: return "i4";
     case nk_u32_k: return "u32";
+    case nk_u8_k: return "u8";
+    case nk_u4_k: return "u4";
+    case nk_u1_k: return "u1";
     default: return "unknown";
     }
 }
@@ -79,6 +85,9 @@ inline char const* kernel_name(nk_kernel_kind_t kernel) noexcept {
     case nk_kernel_dot_k: return "dot";
     case nk_kernel_angular_k: return "angular";
     case nk_kernel_euclidean_k: return "euclidean";
+    case nk_kernel_sqeuclidean_k: return "sqeuclidean";
+    case nk_kernel_hamming_k: return "hamming";
+    case nk_kernel_jaccard_k: return "jaccard";
     default: return "unknown";
     }
 }

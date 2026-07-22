@@ -1634,7 +1634,7 @@ static __global__ void inner_cuda_invariant_kernel(u32_t const* neighbors, u32_t
  *  and telemetry are disjoint by construction, so an insert stream and a search stream
  *  never alias scratch.
  */
-template <nk_dtype_t, nk_kernel_kind_t, typename, typename, typename>
+template <nk_dtype_t, nk_kernel_kind_t, cuda_arch_t, typename, typename, typename>
 struct inner_cuda_index;
 
 template <cuda_allocator allocator_type_ = cuda_device_allocator<std::byte>>
@@ -1691,7 +1691,7 @@ struct inner_cuda_traversal_context {
   private:
     /** @brief Only the index's verbs reach the raw scratch - callers observe a context
      *      through @c results and the snapshots, never through its buffers. */
-    template <nk_dtype_t, nk_kernel_kind_t, typename, typename, typename>
+    template <nk_dtype_t, nk_kernel_kind_t, cuda_arch_t, typename, typename, typename>
     friend struct inner_cuda_index;
 
     using telemetry_allocator_t = typename allocator_t::template rebind<inner_cuda_telemetry_block_t>::other;
@@ -1744,12 +1744,14 @@ struct inner_cuda_traversal_context {
 template <                                                                  //
     nk_dtype_t vector_dtype_ = nk_i8_k,                                     //
     nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k,                    //
+    cuda_arch_t arch_ceiling_ = cuda_arch_blackwell_k,                      //
     typename vectors_allocator_type_ = cuda_vmm_allocator<std::byte>,       //
     typename neighbors_allocator_type_ = cuda_vmm_allocator<std::byte>,     //
     typename traversals_allocator_type_ = cuda_device_allocator<std::byte>> //
 struct inner_cuda_index {
 
-    using kit_t = typename inner_cuda_kit_for<vector_dtype_, kernel_kind_>::kit_t;
+    using kit_chain_t = inner_cuda_kit_chain<vector_dtype_, kernel_kind_, arch_ceiling_>;
+    using kit_t = typename kit_chain_t::kit_t;
     using vectors_allocator_t = vectors_allocator_type_;
     using neighbors_allocator_t = neighbors_allocator_type_;
     using traversals_allocator_t = traversals_allocator_type_;
@@ -1775,6 +1777,9 @@ struct inner_cuda_index {
     inline static constexpr nk_kernel_kind_t kernel_kind_k = kernel_kind_;
     /** @brief Capability labels for the shared reports: the GPU picks no CPU SIMD tier. */
     inline static constexpr nk_capability_t picked_quads_capability_k = nk_cap_serial_k;
+    /** @brief The generation row the kit chain selected under this instantiation's ceiling -
+     *      the GPU twin of @c picked_quads_capability_k, surfaced in the bench reports. */
+    inline static constexpr cuda_arch_t picked_arch_k = kit_chain_t::picked_arch_k;
     inline static constexpr bool has_tiles_k = false;
     inline static constexpr nk_capability_t picked_tiles_capability_k = nk_cap_serial_k;
 

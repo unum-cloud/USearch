@@ -309,7 +309,7 @@ template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 concept cuda_combo_supported = requires { typename inner_cuda_kit_for<dtype_, kernel_>::kit_t; };
 
 /** @brief No-op sibling picked when the pair's device kit is not adapted yet. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_>
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t arch_ceiling_>
     requires(!cuda_combo_supported<stored_dtype_, kernel_>)
 static int stage_and_run(persisted_dataset<dataset_scalar_type_> const&, bench_options_t const& options, int) {
     fmt::print("skipped: no device kit adapted for {} · {}\n", dtype_name(options.stored_dtype),
@@ -319,11 +319,11 @@ static int stage_and_run(persisted_dataset<dataset_scalar_type_> const&, bench_o
 
 /** @brief The innermost hop: binds the concrete CUDA-index instantiation, wires the typed
  *      source views and the staging trampoline, and runs the phases in checkpoint order. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_>
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t arch_ceiling_>
     requires(cuda_combo_supported<stored_dtype_, kernel_>)
 static int stage_and_run(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
                          int device) {
-    using index_t = inner_cuda_index<stored_dtype_, kernel_>;
+    using index_t = inner_cuda_index<stored_dtype_, kernel_, arch_ceiling_>;
     using bench_context_t = cuda_bench_context<index_t>;
     using streamed_t = streamed_dataset<dataset_scalar_type_, bench_context_t>;
     using scalar_t = typename bench_context_t::scalar_t;
@@ -381,14 +381,15 @@ static int stage_and_run(persisted_dataset<dataset_scalar_type_> const& dataset,
 
 /** @brief Kernel axis: lowers the runtime metric to a compile-time kernel kind, the terminal hop
  *      into @ref stage_and_run - whose concept gate skips any pair whose device kit is unadapted. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, cuda_arch_t arch_ceiling_>
 static int run_with_metric(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
                            int device) {
     return dispatch_value<nk_kernel_dot_k, nk_kernel_angular_k, nk_kernel_euclidean_k, nk_kernel_hamming_k,
                           nk_kernel_jaccard_k>(
         options.kernel,
         [&](auto kernel) {
-            return stage_and_run<dataset_scalar_type_, stored_dtype_, kernel.value>(dataset, options, device);
+            return stage_and_run<dataset_scalar_type_, stored_dtype_, kernel.value, arch_ceiling_>(dataset, options,
+                                                                                                   device);
         },
         [&](auto metric) {
             fmt::print("Unsupported metric {}; pick --angular, --euclidean, --hamming, or --jaccard\n",
@@ -399,22 +400,42 @@ static int run_with_metric(persisted_dataset<dataset_scalar_type_> const& datase
 
 /** @brief Stored-dtype axis: the CLI's chosen store instantiates the kernel chain, or reports the
  *      dtypes that carry device kits. */
-template <typename dataset_scalar_type_>
+template <typename dataset_scalar_type_, cuda_arch_t arch_ceiling_>
 static int run_with_stored_dtype(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
                                  int device) {
-    return dispatch_value<nk_f32_k, nk_f16_k, nk_bf16_k, nk_i8_k, nk_u8_k, nk_i4_k, nk_u1_k>(
+    // Sorted by decreasing dynamic range, grouped floats, signed integers, unsigned.
+    return dispatch_value<nk_f32_k, nk_bf16_k, nk_f16_k, nk_i8_k, nk_i4_k, nk_u8_k, nk_u1_k>(
         options.stored_dtype,
-        [&](auto dtype) { return run_with_metric<dataset_scalar_type_, dtype.value>(dataset, options, device); },
         [&](auto dtype) {
-            fmt::print("Stored dtype {} has no device kits; override with --f16, --bf16, --i8, --u8, --i4, or --u1\n",
+            return run_with_metric<dataset_scalar_type_, dtype.value, arch_ceiling_>(dataset, options, device);
+        },
+        [&](auto dtype) {
+            fmt::print("Stored dtype {} has no device kits; " //
+                       "override with --f32, --bf16, --f16, --i8, --i4, --u8, or --u1\n",
                        dtype_name(dtype));
             return 1;
         });
 }
 
+/** @brief The outermost compile-time hop, the CPU @c run_with_compute's twin: the CLI's
+ *      architecture ceiling picks which kit-chain rows every cell below may select, so two
+ *      runs on one device compare generation codegen side by side. */
+template <typename dataset_scalar_type_>
+static int run_with_arch(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
+                         int device, cuda_arch_t arch_ceiling) {
+    switch (arch_ceiling) {
+    case cuda_arch_ampere_k:
+        return run_with_stored_dtype<dataset_scalar_type_, cuda_arch_ampere_k>(dataset, options, device);
+    case cuda_arch_ada_k: return run_with_stored_dtype<dataset_scalar_type_, cuda_arch_ada_k>(dataset, options, device);
+    case cuda_arch_hopper_k:
+        return run_with_stored_dtype<dataset_scalar_type_, cuda_arch_hopper_k>(dataset, options, device);
+    default: return run_with_stored_dtype<dataset_scalar_type_, cuda_arch_blackwell_k>(dataset, options, device);
+    }
+}
+
 /** @brief Opens the dataset with the file-native scalar and enters the typed cascade. */
 template <typename dataset_scalar_type_>
-static int open_and_run(bench_options_t const& options, int device) {
+static int open_and_run(bench_options_t const& options, int device, cuda_arch_t arch_ceiling) {
     auto opened = persisted_dataset<dataset_scalar_type_>::try_open(
         options.vectors_path.c_str(), options.queries_path.empty() ? nullptr : options.queries_path.c_str(),
         options.neighbors_path.empty() ? nullptr : options.neighbors_path.c_str());
@@ -422,7 +443,7 @@ static int open_and_run(bench_options_t const& options, int device) {
         fmt::print("Failed to open the dataset: {}\n", options.vectors_path);
         return 1;
     }
-    return run_with_stored_dtype<dataset_scalar_type_>(opened.value, options, device);
+    return run_with_arch<dataset_scalar_type_>(opened.value, options, device, arch_ceiling);
 }
 
 #pragma endregion
@@ -430,17 +451,22 @@ static int open_and_run(bench_options_t const& options, int device) {
 int main(int argc, char** argv) {
     bench_options_t options;
     int device = 0;
+    std::string max_arch_name;
 
     auto cli = ( //
         (clipp::option("--vectors") & clipp::value("path", options.vectors_path)) % "base vectors, `.fbin` family",
         (clipp::option("--queries") & clipp::value("path", options.queries_path)) % "query vectors, same dtype",
         (clipp::option("--neighbors") & clipp::value("path", options.neighbors_path)) % "ground truth, `.ibin`",
         (clipp::option("--device") & clipp::value("id", device)) % "CUDA device ordinal; 0 by default",
-        (clipp::option("--f16").set(options.stored_dtype, nk_f16_k) |
+        (clipp::option("--max-arch") & clipp::value("name", max_arch_name)) %
+            "kit-generation ceiling: ampere, ada, hopper, or blackwell; newest by default",
+        // Sorted by decreasing dynamic range, grouped floats, signed integers, unsigned.
+        (clipp::option("--f32").set(options.stored_dtype, nk_f32_k) |
          clipp::option("--bf16").set(options.stored_dtype, nk_bf16_k) |
+         clipp::option("--f16").set(options.stored_dtype, nk_f16_k) |
          clipp::option("--i8").set(options.stored_dtype, nk_i8_k) |
-         clipp::option("--u8").set(options.stored_dtype, nk_u8_k) |
          clipp::option("--i4").set(options.stored_dtype, nk_i4_k) |
+         clipp::option("--u8").set(options.stored_dtype, nk_u8_k) |
          clipp::option("--u1").set(options.stored_dtype, nk_u1_k)) %
             "stored dtype override, staging `nk::cast` on ingest",
         (clipp::option("--dot").set(options.kernel, nk_kernel_dot_k) |
@@ -489,12 +515,27 @@ int main(int argc, char** argv) {
                double(properties.totalGlobalMem) / 1e9);
     nk_dtype_t const file_dtype = dtype_of_extension(options.vectors_path.c_str());
     if (options.stored_dtype == nk_dtype_unknown_k) options.stored_dtype = file_dtype;
-    fmt::print("  kernels requested: {} · {}\n", dtype_name(options.stored_dtype), kernel_name(options.kernel));
+
+    // The generation ceiling caps which kit-chain rows the cascade may select - capping
+    // above the device is harmless, the fatbin loader still serves what the card admits.
+    cuda_arch_t arch_ceiling = cuda_arch_blackwell_k;
+    if (max_arch_name == "ampere") arch_ceiling = cuda_arch_ampere_k;
+    else if (max_arch_name == "ada") arch_ceiling = cuda_arch_ada_k;
+    else if (max_arch_name == "hopper") arch_ceiling = cuda_arch_hopper_k;
+    else if (!max_arch_name.empty() && max_arch_name != "blackwell") {
+        fmt::print("Unknown --max-arch {}; this table offers: ampere ada hopper blackwell\n", max_arch_name);
+        return 1;
+    }
+    fmt::print("  kernels requested: {} · {} · up to {} kits\n", dtype_name(options.stored_dtype),
+               kernel_name(options.kernel), max_arch_name.empty() ? "blackwell" : max_arch_name.c_str());
 
     // File-scalar axis: lower the file's dtype to the C++ wrapper the run is instantiated over,
     // through NumKong's own `type_for` - the same paradigm the typed cascade rides.
     return dispatch_value<nk_f32_k, nk_i8_k, nk_u8_k>(
-        file_dtype, [&](auto dtype) { return open_and_run<typename nk::type_for<dtype.value>::type>(options, device); },
+        file_dtype,
+        [&](auto dtype) {
+            return open_and_run<typename nk::type_for<dtype.value>::type>(options, device, arch_ceiling);
+        },
         [&](auto dtype) {
             fmt::print("Unsupported dataset dtype {} for the CUDA kits\n", dtype_name(dtype));
             return 1;

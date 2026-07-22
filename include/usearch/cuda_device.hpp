@@ -35,6 +35,19 @@
 namespace unum {
 namespace usearch {
 
+/** @brief GPU generations on the @c __CUDA_ARCH__ scale - a plain enum, so tiers order
+ *      against each other and against that macro directly. */
+enum cuda_arch_t : int {
+    /** @brief The sm_80 floor: @c dp4a, packed-half & bf16x2 fma, @c cp.async. */
+    cuda_arch_ampere_k = 800,
+    /** @brief sm_89 adds the fp8 conversions - the e4m3/e5m2 kits' requirement. */
+    cuda_arch_ada_k = 890,
+    /** @brief sm_90 adds TMA, thread-block clusters, and distributed shared memory. */
+    cuda_arch_hopper_k = 900,
+    /** @brief sm_100 adds Tensor Memory, fp6/fp4 conversions, and scalar @c fma.f32.f16. */
+    cuda_arch_blackwell_k = 1000,
+};
+
 /**
  *  @brief One GPU's hardware specification - the facts runtime dispatch consults, in the
  *      spirit of StringZilla's & NumKong's capability queries. Hardware only, never derived
@@ -56,6 +69,10 @@ struct cuda_device_specs_t {
     int compute_minor = 0;
     /** @brief Total device-resident memory in bytes. */
     std::size_t vram_bytes = 0;
+
+    /** @brief This device's generation on the @c cuda_arch_t scale - the runtime side of
+     *      the kit chains' architecture ceilings, like the CPU's detected capability mask. */
+    cuda_arch_t arch() const noexcept { return static_cast<cuda_arch_t>(compute_major * 100 + compute_minor * 10); }
 
     /** @brief Queries the runtime for @p ordinal's specification - fallible like every
      *      probe of external state, so the value is only meaningful on @c success_k. */
