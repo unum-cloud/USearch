@@ -52,6 +52,60 @@ check_printf() {
         "$file prints through the C stdio family - C++ sources print through fmt:::"
 }
 
+# Byte-blind copies in C++ sources - a `std::memcpy` hides what the type system or the vector
+# unit can state outright: same-type copies are assignments or explicit vector moves, and
+# reinterpretations are `std::bit_cast`. The C bindings under c/ keep their memcpy.
+check_memcpy() {
+    local copies
+    copies=$(printf '%s\n' "$added" | grep -E '\bmemcpy[[:space:]]*\(' || true)
+    [ -z "$copies" ] || fail "$copies" \
+        "$file copies through memcpy - use explicit instructions, assignment, or std::bit_cast:"
+}
+
+# STL dynamic containers in the public headers hide allocations, grow behind the caller's back,
+# and sidestep the allocator-threading discipline every index design follows. The house
+# replacements: `fu::dynamic_array` for fixed-once object arrays, `nk::tensor` for numeric &
+# POD storage, and the `traversal_queue.hpp` structures for queues & sets. Non-owning views
+# like `std::span` & `std::string_view` stay welcome.
+check_stl_dynamic_containers() {
+    local owners
+    owners=$(printf '%s\n' "$added" |
+        grep -E '\bstd::(vector|list|forward_list|map|multimap|set|multiset|unordered_[a-z_]+|string|basic_string|priority_queue|stack|queue)\b' || true)
+    [ -z "$owners" ] || fail "$owners" \
+        "$file uses an STL dynamic container - use fu::dynamic_array, nk::tensor, or the traversal_queue structures:"
+}
+
+# Subscripting a call's result chains two accessors where the container offers one:
+# `matrix.row(i)[j]`, `pool.begin()[i]`, and `.data()[i]` all hide the same raw-pointer hop.
+# Use the multi-index `operator()` - `matrix(i, j)` - or the container's own `operator[]`;
+# a bare `.data()` pointer is reserved for one-time lifts handed to syscalls and SIMD kernels.
+check_call_chained_subscript() {
+    local chained
+    chained=$(printf '%s\n' "$added" | grep -E '\)\[' || true)
+    [ -z "$chained" ] || fail "$chained" \
+        "$file subscripts a call result - use operator()(i, j) or the container's operator[]:"
+}
+
+# GCC atomic builtins fork the memory-model dialect. In-place words go through
+# `std::atomic_ref` with explicit `std::memory_order` - the same currency the ForkUnion
+# waiters monitor, so loads, stores & waits compose.
+check_gcc_atomics() {
+    local builtins
+    builtins=$(printf '%s\n' "$added" | grep -E '__atomic_[a-z_]+|__builtin_[a-z_]+|__ATOMIC_[A-Z_]+' || true)
+    [ -z "$builtins" ] || fail "$builtins" \
+        "$file uses GCC atomic builtins - use std::atomic_ref with explicit memory orders:"
+}
+
+# A bare `bool` parameter is unreadable at the call site - `setup(n, true, false)` names
+# nothing. Public headers spell the choice with a two-value enum; predicate helpers in
+# tests & benches, where the bool IS the domain, stay out of scope.
+check_boolean_parameters() {
+    local flags
+    flags=$(printf '%s\n' "$added" | grep -E '[(,] ?bool [a-z_]+' || true)
+    [ -z "$flags" ] || fail "$flags" \
+        "$file takes a bare bool parameter - name the choice with a two-value enum:"
+}
+
 # Backward-looking prose in comments - "v2", "v3", "the previous implementation" - rots the moment
 # the rewrite ships and reads as changelog noise. Docstrings describe behavior on its own terms,
 # forward-looking; history belongs in commit messages and design documents.
@@ -101,6 +155,38 @@ check_markdown_doxygen() {
         "            for a 1-2 token emphasis, plain prose otherwise:"
 }
 
+# A Doxygen command glued to the preceding character - `(@c foo)`, `-@ref bar` - breaks syntax
+# highlighting in most viewers, which only recognize the command after whitespace. Reword the
+# sentence so the command stands free; parentheses around a command are the usual offender.
+check_doxygen_glued() {
+    local glued
+    glued=$(printf '%s\n' "$added" | grep -E '^\+[[:space:]]*(\*|//)' |
+        grep -E '[^[:space:]]@(brief|section|subsection|param|tparam|returns?|ref|see|note|file|date|author|c|p|b)\b' || true)
+    [ -z "$glued" ] || fail "$glued" \
+        "$file glues a Doxygen command to the previous character - highlighting needs" \
+        "            whitespace before every @command, so reword around it:"
+}
+
+# An `@section` line reads as a heading only when air surrounds it: the comment lines directly
+# above and below must be empty (`*` alone). Spacing is context, not a line, so like the workflow
+# check this validates the whole staged file - the tree already conforms.
+check_section_spacing() {
+    git show ":$file" | grep -q '@section' || return 0
+    local cramped
+    cramped=$(git show ":$file" | awk '
+        { lines[NR] = $0 }
+        END {
+            for (i = 1; i <= NR; ++i)
+                if (lines[i] ~ /@section/) {
+                    if (lines[i - 1] !~ /^[[:space:]]*\*[[:space:]]*$/) printf "line %d: no empty comment line above the @section\n", i
+                    if (lines[i + 1] !~ /^[[:space:]]*\*[[:space:]]*$/) printf "line %d: no empty comment line below the @section\n", i
+                }
+        }')
+    [ -z "$cramped" ] || fail "$cramped" \
+        "$file crams an @section against its neighbors - keep one empty comment line" \
+        "            above and below every @section heading:"
+}
+
 # Member documentation is Doxygen: a bare `//` line directly above a declaration (a member or a type)
 # is the banned doc style - those entities get `/** @brief ... */`. Scoped to headers, and bounded to
 # at most 4 spaces of indentation: class members live there, while the same `Type name = ...;` shape
@@ -146,6 +232,31 @@ check_stl_streams() {
         grep -E 'std::[a-z_]*stream|std::(cout|cerr|cin|clog|endl)\b|#[[:space:]]*include[[:space:]]*<(iostream|sstream|fstream|ostream|istream|iomanip)>' || true)
     [ -z "$streams" ] || fail "$streams" \
         "$file uses C++ iostreams - print through fmt::, read files through C stdio or mmap:"
+}
+
+# A range rebuilt from its own parts - `{x.data(), x.size()}` - means a conversion or an
+# accessor is missing: `std::vector` converts to `std::span`, NumKong spans convert to views,
+# and containers can grow `begin()`/`end()`. Pass the range itself.
+check_range_reconstruction() {
+    # `types.hpp` hosts `to_span` - the very conversion this check points everyone to - so its
+    # own definition is the one legitimate `.data()/.size()` reconstruction site.
+    [ "$file" = "include/usearch/types.hpp" ] && return 0
+    local rebuilt
+    rebuilt=$(printf '%s\n' "$added" |
+        grep -E '\{ *([A-Za-z_][A-Za-z0-9_.]*)\.data\(\), *\1\.size\(\) *\}' || true)
+    [ -z "$rebuilt" ] || fail "$rebuilt" \
+        "$file rebuilds a range from its own .data()/.size() - pass the range itself," \
+        "            or add the missing accessor or conversion:"
+}
+
+# `.data()` as an emptiness probe reads as pointer plumbing; every NumKong tensor, view,
+# and span - like the STL containers - spells it `empty()`.
+check_data_null_probe() {
+    local probes
+    probes=$(printf '%s\n' "$added" |
+        grep -E '![A-Za-z_][A-Za-z0-9_.]*\.data\(\)|\.data\(\) *== *nullptr' || true)
+    [ -z "$probes" ] || fail "$probes" \
+        "$file probes emptiness through .data() - use empty():"
 }
 
 # `std::deque` - a chunked indirection-heavy container with unpredictable locality. Address
@@ -210,23 +321,32 @@ check_workflow_names() {
 while IFS= read -r -d '' file; do
     added=$(git diff --cached --unified=0 -- "$file" | grep '^+' | grep -v '^+++' || true)
     case "$file" in
-    *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.cu)
+    *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.cu | *.cuh)
         check_ascii_arrows
         check_backward_references
         check_rulers
         check_param_directions
         check_markdown_doxygen
+        check_doxygen_glued
+        check_section_spacing
         check_hand_ceils
         check_region_dashes
         check_iterator_laundering
         ;;&
     include/*.hpp | *.h)
         check_bare_member_docs
+        check_stl_dynamic_containers
+        check_boolean_parameters
         ;;&
     cpp/*.cpp | cpp/*.hpp | include/*.hpp)
         check_printf
+        check_memcpy
         check_stl_streams
         check_deque
+        check_range_reconstruction
+        check_data_null_probe
+        check_call_chained_subscript
+        check_gcc_atomics
         ;;
     *.md) check_ascii_arrows_prose ;;
     .github/workflows/*.yml | .github/workflows/*.yaml) check_workflow_names ;;
@@ -238,7 +358,7 @@ done < <(git diff --cached --name-only --diff-filter=ACM -z)
 if command -v clang-format > /dev/null 2>&1 && [ -f .clang-format ]; then
     while IFS= read -r -d '' file; do
         case "$file" in
-        *.c | *.h | *.hpp | *.cpp | *.cc | *.cu) ;;
+        *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh) ;;
         *) continue ;;
         esac
         if ! clang-format --dry-run -Werror "$file" > /dev/null 2>&1; then
@@ -247,6 +367,20 @@ if command -v clang-format > /dev/null 2>&1 && [ -f .clang-format ]; then
         fi
     done < <(git diff --cached --name-only --diff-filter=ACM -z)
 fi
+
+while IFS= read -r -d '' file; do
+    case "$file" in
+    *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh) ;;
+    *) continue ;;
+    esac
+    # Abbreviated identifiers are banned in favor of whole words: lo/hi/bot must be
+    # low/high/bottom. Word-boundary match on the staged content, code files only.
+    if git show ":$file" | grep -nE '\b(lo|hi|bot)\b' | grep -v '@' > /dev/null; then
+        echo "pre-commit: $file uses an abbreviated identifier (lo/hi/bot) - spell it out:"
+        git show ":$file" | grep -nE '\b(lo|hi|bot)\b' | grep -v '@' | head -3
+        failed=1
+    fi
+done < <(git diff --cached --name-only --diff-filter=ACM -z)
 
 if command -v cmake-format > /dev/null 2>&1 && [ -f .cmake-format.py ]; then
     while IFS= read -r -d '' file; do
