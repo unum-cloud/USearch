@@ -61,7 +61,7 @@ constexpr std::size_t reader_minimal_searches_k = 16;
 /** @brief Gate: a (dtype, kernel) cell is testable once its serial kernel kit is adapted. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 concept index_combo_supported = requires {
-    typename kernel_chain<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>::kit_t;
+    typename inner_quads_chain<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>::kit_t;
 };
 
 /** @brief Waiter that misbehaves on purpose: mostly yields, but occasionally oversleeps for
@@ -335,39 +335,57 @@ static std::size_t test_concurrent_search() {
     return failures_count;
 }
 
-template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, typename waiter_type_ = dummy_waiter_t>
-static std::size_t test_combination(char const* name) {
-    if constexpr (!index_combo_supported<dtype_, kernel_>) {
-        fmt::print("skipped  {:<20} : serial kernels not adapted yet\n", name);
-        return 0;
+/** @brief No-op sibling picked when the tuple's serial kernels are not adapted yet. */
+template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, typename waiter_type_ = dummy_waiter_t,
+          nk_capability_t caps_ = nk_cap_serial_k>
+    requires(!index_combo_supported<dtype_, kernel_>)
+static std::size_t test_configuration(char const* name) {
+    fmt::print("skipped  {:<20} : serial kernels not adapted yet\n", name);
+    return 0;
+}
+
+template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, typename waiter_type_ = dummy_waiter_t,
+          nk_capability_t caps_ = nk_cap_serial_k>
+    requires(index_combo_supported<dtype_, kernel_>)
+static std::size_t test_configuration(char const* name) {
+    // SIMD-tier cells execute their intrinsics unconditionally, so they run only where
+    // the machine offers every requested bit; the tile permission handshake is per-process.
+    if constexpr (caps_ != nk_cap_serial_k) {
+        if ((nk_capabilities_available() & caps_) != caps_) {
+            fmt::print("skipped  {:<20} : capabilities missing at runtime\n", name);
+            return 0;
+        }
+        nk_configure_thread(nk_capabilities_available());
     }
-    else {
-        using index_t =
-            inner_volatile_index<dtype_, kernel_, nk_cap_serial_k, waiter_type_, counting_allocator<std::byte>,
-                                 counting_allocator<std::byte>, std::allocator<std::byte>>;
-        std::size_t failures_count = 0;
-        failures_count += test_guards<index_t>();
-        failures_count += test_three_vectors<index_t, kernel_>();
-        failures_count += test_growth_and_recall<index_t, kernel_>();
-        failures_count += test_concurrent_build<index_t, kernel_>();
-        failures_count += test_concurrent_search<index_t, kernel_>();
-        fmt::print("{}  {:<20} : {} failures\n", failures_count ? "FAILED" : "passed", name, failures_count);
-        return failures_count;
-    }
+    using index_t = inner_volatile_index<dtype_, kernel_, caps_, waiter_type_, counting_allocator<std::byte>,
+                                         counting_allocator<std::byte>, std::allocator<std::byte>>;
+    std::size_t failures_count = 0;
+    failures_count += test_guards<index_t>();
+    failures_count += test_three_vectors<index_t, kernel_>();
+    failures_count += test_growth_and_recall<index_t, kernel_>();
+    failures_count += test_concurrent_build<index_t, kernel_>();
+    failures_count += test_concurrent_search<index_t, kernel_>();
+    fmt::print("{}  {:<20} : {} failures\n", failures_count ? "FAILED" : "passed", name, failures_count);
+    return failures_count;
 }
 
 int main() {
     std::size_t failures_count = 0;
-    failures_count += test_combination<nk_f32_k, nk_kernel_dot_k>("f32+dot");
-    failures_count += test_combination<nk_f32_k, nk_kernel_angular_k>("f32+angular");
-    failures_count += test_combination<nk_f32_k, nk_kernel_euclidean_k>("f32+euclidean");
-    failures_count += test_combination<nk_u8_k, nk_kernel_euclidean_k>("u8+euclidean");
-    failures_count += test_combination<nk_u8_k, nk_kernel_angular_k>("u8+angular");
-    failures_count += test_combination<nk_i4_k, nk_kernel_angular_k>("i4+angular");
-    failures_count += test_combination<nk_bf16_k, nk_kernel_angular_k>("bf16+angular");
-    failures_count += test_combination<nk_i8_k, nk_kernel_euclidean_k>("i8+euclidean");
-    failures_count += test_combination<nk_bf16_k, nk_kernel_angular_k, flaky_waiter_t>("bf16+angular+flaky");
-    failures_count += test_combination<nk_i8_k, nk_kernel_euclidean_k, flaky_waiter_t>("i8+euclidean+flaky");
+    failures_count += test_configuration<nk_f32_k, nk_kernel_dot_k>("f32+dot");
+    failures_count += test_configuration<nk_f32_k, nk_kernel_angular_k>("f32+angular");
+    failures_count += test_configuration<nk_f32_k, nk_kernel_euclidean_k>("f32+euclidean");
+    failures_count += test_configuration<nk_u8_k, nk_kernel_euclidean_k>("u8+euclidean");
+    failures_count += test_configuration<nk_u8_k, nk_kernel_angular_k>("u8+angular");
+    failures_count += test_configuration<nk_i4_k, nk_kernel_angular_k>("i4+angular");
+    failures_count += test_configuration<nk_bf16_k, nk_kernel_angular_k>("bf16+angular");
+    failures_count += test_configuration<nk_i8_k, nk_kernel_euclidean_k>("i8+euclidean");
+    failures_count += test_configuration<nk_bf16_k, nk_kernel_angular_k, flaky_waiter_t>("bf16+angular+flaky");
+    failures_count += test_configuration<nk_i8_k, nk_kernel_euclidean_k, flaky_waiter_t>("i8+euclidean+flaky");
+    // The tiled u8 tier: the serial floor, icelake quads, and sapphireamx tiles.
+    constexpr nk_capability_t tiles_caps_k = static_cast<nk_capability_t>( //
+        nk_cap_serial_k | nk_cap_icelake_k | nk_cap_sapphireamx_k);
+    failures_count += test_configuration<nk_u8_k, nk_kernel_euclidean_k, dummy_waiter_t, tiles_caps_k>( //
+        "u8+euclidean+tiles");
     fmt::print("{}: {} total failures\n", failures_count ? "FAILED" : "OK", failures_count);
     return failures_count ? 1 : 0;
 }

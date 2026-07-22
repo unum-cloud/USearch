@@ -514,54 +514,37 @@ struct inner_volatile_index {
                (static_cast<std::size_t>(chunks_count - doubling_phase_chunks_k) << slab_rows_log2_k);
     }
 
-    /** @brief Serialized bytes of one node under @p geometry: its vector, norms & neighbors. */
-    inline static constexpr std::size_t node_bytes_of_(packed_geometry_id_t geometry) noexcept {
-        std::size_t const vector_bytes = divide_round_up<std::size_t>(geometry_dimensions(geometry),
-                                                                      nk::dimensions_per_value<scalar_t>()) *
-                                         sizeof(scalar_t);
-        return vector_bytes + sizeof(vector_norms_t) + geometry_connectivity(geometry) * sizeof(node_id_t);
-    }
-
-    /** @brief Copies the first @p count rows of every chunk in @p chunks - @p row_bytes each -
-     *      into @p output, returning its remaining tail. Templated because the three chunk
-     *      directories are distinct @c fu::dynamic_padded_array instantiations. */
-    template <typename chunks_type_>
-    static std::span<std::byte> save_rows_(std::span<std::byte> output, chunks_type_ const& chunks, std::size_t count,
-                                           std::size_t row_bytes) noexcept {
+    /** @brief Copies the first @p count rows of every chunk in @p chunks into the dense rows
+     *      of @p output - typed element copies, one bulk run per chunk. The row width in
+     *      storage values derives from the stride, so sub-byte packing needs no special case.
+     *      Templated because the chunk directories are distinct @c fu::dynamic_padded_array
+     *      instantiations. */
+    template <typename chunks_type_, typename value_type_>
+    static void save_rows_(nk::tensor_span<value_type_, 2> output, chunks_type_ const& chunks,
+                           std::size_t count) noexcept {
+        std::size_t const row_values = static_cast<std::size_t>(output.stride_bytes(0)) / sizeof(value_type_);
+        value_type_* destination = output.data();
         for (small_size_t chunk = 0; count; ++chunk) {
             std::size_t const chunk_rows = capacity_of_chunks(chunk + 1) - capacity_of_chunks(chunk);
             std::size_t const rows = min_of(chunk_rows, count);
-            std::size_t const bytes = rows * row_bytes;
-            // The bulk copy leans on NumKong's dense strides - rows pack without padding - and
-            // the span carries the remaining budget, so an overrun trips here, not in memory.
-            assert(static_cast<std::size_t>(chunks[chunk].view().stride_bytes(0)) == row_bytes);
-            assert(bytes <= output.size());
-            std::memcpy(output.data(), chunks[chunk].data(), bytes);
-            output = output.subspan(bytes);
+            destination = std::copy_n(chunks[chunk].data(), rows * row_values, destination);
             count -= rows;
         }
-        return output;
     }
 
-    /** @brief Fills the first @p count rows of every chunk in @p chunks - @p row_bytes each -
-     *      from @p input, returning its remaining tail. Templated for the same reason as
-     *      @ref save_rows_. */
-    template <typename chunks_type_>
-    static std::span<std::byte const> load_rows_(std::span<std::byte const> input, chunks_type_& chunks,
-                                                 std::size_t count, std::size_t row_bytes) noexcept {
+    /** @brief Fills the first @p count rows of every chunk in @p chunks from the dense rows of
+     *      @p input. Templated for the same reason as @ref save_rows_. */
+    template <typename chunks_type_, typename value_type_>
+    static void load_rows_(nk::tensor_view<value_type_, 2> input, chunks_type_& chunks, std::size_t count) noexcept {
+        std::size_t const row_values = static_cast<std::size_t>(input.stride_bytes(0)) / sizeof(value_type_);
+        value_type_ const* source = input.data();
         for (small_size_t chunk = 0; count; ++chunk) {
             std::size_t const chunk_rows = capacity_of_chunks(chunk + 1) - capacity_of_chunks(chunk);
             std::size_t const rows = min_of(chunk_rows, count);
-            std::size_t const bytes = rows * row_bytes;
-            // The bulk copy leans on NumKong's dense strides - rows pack without padding - and
-            // the span carries the remaining budget, so an overrun trips here, not in memory.
-            assert(static_cast<std::size_t>(chunks[chunk].view().stride_bytes(0)) == row_bytes);
-            assert(bytes <= input.size());
-            std::memcpy(chunks[chunk].data(), input.data(), bytes);
-            input = input.subspan(bytes);
+            std::copy_n(source, rows * row_values, chunks[chunk].data());
+            source += rows * row_values;
             count -= rows;
         }
-        return input;
     }
 
     /**
@@ -1710,31 +1693,49 @@ struct inner_volatile_index {
         return search_typed<synchronization_t::concurrent_k>(query_vector, context, config);
     }
 
-    /** @brief The saved-payload prefix - the class-local spelling of the shared,
-     *      template-independent @c inner_index_header_t. */
+    /** @brief The class-local spelling of the shared, template-independent
+     *      @c inner_index_header_t. The index itself never writes it - checkpoint
+     *      writers prefix their own containers with it. */
     using header_t = inner_index_header_t;
 
-    /** @brief Bytes @c save() will emit for the current contents - size the mapping first.
+    /** @brief The matrix shapes @c save() fills - the caller sizes its buffers from these.
+     *      All extents are logical: the tensors' own strides account for sub-byte packing.
      *      Monotone counters make the two loads safe in this order under any contract. */
-    std::size_t saved_size() const noexcept {
+    struct saved_shape_t {
+        /** @brief Rows of both matrices - the published node count. */
+        std::size_t nodes = 0;
+        /** @brief Logical dimensions per vector - the vectors matrix's trailing extent. */
+        std::size_t dimensions = 0;
+        /** @brief Neighbor ids per neighbors-matrix row - the frozen connectivity. */
+        std::size_t connectivity = 0;
+    };
+
+    /** @brief The shapes a @c save() of the current contents fills. */
+    saved_shape_t saved_shape() const noexcept {
         packed_geometry_id_t const geometry = geometry_.load(std::memory_order_acquire);
         std::size_t const count = last_visible_id_.load(std::memory_order_acquire);
-        return sizeof(header_t) + count * node_bytes_of_(geometry);
+        return {count, geometry_dimensions(geometry), geometry_connectivity(geometry)};
     }
 
     /**
-     *  @brief Copies the whole index - header, vectors, norms & neighbor lists - into @p output.
+     *  @brief Copies the published prefix into two caller-owned matrices - vectors and
+     *      sentinel-padded neighbor lists. Norms are never serialized: they re-derive from
+     *      the vectors on @c load(). The neighbor rows keep the positional sentinel
+     *      convention - any id at or past the node count names no node - so the matrix is
+     *      interchange-ready as a fixed-degree column without rewriting.
      *
      *  A checkpointing reader, not a mutator: concurrent searches keep running, but the caller
      *  must certify a mutation-free environment - @c immutable_k or @c exclusive_k - since
      *  back-linking rewrites published rows. The counters are re-checked after the copy, so a
      *  violated contract surfaces as @c contended_k instead of a silently torn snapshot.
      *
-     *  @param[out] output Destination bytes; at least @c saved_size() of them.
+     *  @param[out] vectors Destination @b [nodes,dimensions] matrix, per @c saved_shape().
+     *  @param[out] neighbors Destination @b [nodes,connectivity] matrix, per @c saved_shape().
      *  @param[in] synchronization The caller's certified environment; never @c concurrent_k.
      *  @return @c success_k, or why the snapshot was not produced.
      */
-    status_t save(std::span<std::byte> output, synchronization_t synchronization) const noexcept {
+    status_t save(nk::matrix_span<scalar_t> vectors, nk::matrix_span<node_id_t> neighbors,
+                  synchronization_t synchronization) const noexcept {
         if (synchronization == synchronization_t::concurrent_k) return status_t::config_mismatch_k;
 
         // The seqlock-style guard: snapshot the counters, copy, and re-check. Ordering the
@@ -1744,26 +1745,13 @@ struct inner_volatile_index {
         node_id_t const allocated_before = last_allocated_id_.load(std::memory_order_acquire);
         if (visible_before != dispensed_before) return status_t::contended_k;
 
-        packed_geometry_id_t const geometry = geometry_.load(std::memory_order_acquire);
-        std::size_t const count = visible_before;
-        if (output.size() < sizeof(header_t) + count * node_bytes_of_(geometry)) return status_t::config_mismatch_k;
+        saved_shape_t const shape = saved_shape();
+        if (vectors.extent(0) != shape.nodes || vectors.extent(1) != shape.dimensions ||
+            neighbors.extent(0) != shape.nodes || neighbors.extent(1) != shape.connectivity)
+            return status_t::config_mismatch_k;
 
-        header_t header;
-        header.magic = header_t::magic_k;
-        header.version = header_t::version_k;
-        header.dtype = static_cast<u32_t>(vector_dtype_k);
-        header.kernel = static_cast<u32_t>(kernel_kind_k);
-        header.dimensions = geometry_dimensions(geometry);
-        header.connectivity = geometry_connectivity(geometry);
-        header.node_count = static_cast<u32_t>(count);
-        std::memcpy(output.data(), &header, sizeof(header));
-
-        std::size_t const vector_bytes =
-            divide_round_up<std::size_t>(header.dimensions, nk::dimensions_per_value<scalar_t>()) * sizeof(scalar_t);
-        std::span<std::byte> tail = output.subspan(sizeof(header));
-        tail = save_rows_(tail, vectors_chunks_, count, vector_bytes);
-        tail = save_rows_(tail, norms_chunks_, count, sizeof(vector_norms_t));
-        tail = save_rows_(tail, neighbors_chunks_, count, header.connectivity * sizeof(node_id_t));
+        save_rows_(vectors, vectors_chunks_, shape.nodes);
+        save_rows_(neighbors, neighbors_chunks_, shape.nodes);
 
         // Re-check in the same order: any movement means the contract was violated mid-copy.
         bool const settled = last_visible_id_.load(std::memory_order_acquire) == visible_before &&
@@ -1773,55 +1761,43 @@ struct inner_volatile_index {
     }
 
     /**
-     *  @brief Restores an index previously written by @c save() from @p input.
+     *  @brief Restores contents previously written by @c save() from two typed matrices,
+     *      re-deriving every vector's norms - they are never serialized.
      *
-     *  Demands a virgin index & sole ownership: the geometry freezes through the same one-CAS
-     *  path as @c reserve(), chunks allocate through the index's own allocators, and the
-     *  counters publish last. A failed load leaves the structure unusable - destroy it.
+     *  Demands sole ownership of an empty index whose geometry is already frozen: the caller
+     *  reads its own container's header, calls @c reserve() with the recorded geometry, and
+     *  then loads - so shapes validate against the frozen geometry instead of trusting bytes.
+     *  A failed load leaves the structure unusable - destroy it.
      *
-     *  @param[in] input The saved bytes; content beyond the recorded sections is ignored.
+     *  @param[in] vectors Source @b [nodes,dimensions] matrix of stored scalars.
+     *  @param[in] neighbors Source @b [nodes,connectivity] matrix of sentinel-padded ids.
      *  @param[in] synchronization The caller's certified environment; only @c exclusive_k loads.
      *  @return @c success_k, or why nothing was restored.
      */
-    status_t load(std::span<std::byte const> input, synchronization_t synchronization) noexcept {
+    status_t load(nk::matrix_view<scalar_t> vectors, nk::matrix_view<node_id_t> neighbors,
+                  synchronization_t synchronization) noexcept {
         if (synchronization != synchronization_t::exclusive_k) return status_t::config_mismatch_k;
-        if (input.size() < sizeof(header_t)) return status_t::malformed_k;
+        packed_geometry_id_t const geometry = geometry_.load(std::memory_order_acquire);
+        if (!geometry || last_visible_id_.load(std::memory_order_acquire) != 0) return status_t::config_mismatch_k;
 
-        header_t header;
-        std::memcpy(&header, input.data(), sizeof(header));
-        if (header.magic != header_t::magic_k || header.version != header_t::version_k) return status_t::malformed_k;
-        if (header.dtype != static_cast<u32_t>(vector_dtype_k) || header.kernel != static_cast<u32_t>(kernel_kind_k))
-            return status_t::config_mismatch_k;
-
-        // A virgin snapshot - saved before any reserve() - restores to a virgin index.
-        if (!header.dimensions && !header.connectivity && !header.node_count) return status_t::success_k;
-        // Geometry sanity for untrusted bytes: both halves must be present, and the connectivity
-        // must be a power of two - the cache-line tiling & the slot-0 lock design depend on it.
-        if (!header.dimensions || !header.connectivity || (header.connectivity & (header.connectivity - 1u)) != 0)
-            return status_t::malformed_k;
-
-        packed_geometry_id_t const geometry = pack_geometry(header.dimensions,
-                                                            static_cast<connectivity_t>(header.connectivity));
-        std::size_t const count = header.node_count;
-        // Divide instead of multiplying: a hostile header's count × node bytes can overflow
-        // 64 bits and slip past a product-form bound; the quotient form cannot.
-        if (count && (input.size() - sizeof(header_t)) / node_bytes_of_(geometry) < count) return status_t::malformed_k;
-
-        packed_geometry_id_t expected_geometry = 0;
-        if (!geometry_.compare_exchange_strong(expected_geometry, geometry, std::memory_order_acq_rel,
-                                               std::memory_order_acquire))
+        std::size_t const count = vectors.extent(0);
+        if (vectors.extent(1) != geometry_dimensions(geometry) || neighbors.extent(0) != count ||
+            neighbors.extent(1) != geometry_connectivity(geometry))
             return status_t::config_mismatch_k;
         if (!count) return status_t::success_k;
 
         expected<std::size_t> const grown = create_next_chunk(count);
         if (grown.status != status_t::success_k) return grown.status;
 
-        std::size_t const vector_bytes =
-            divide_round_up<std::size_t>(header.dimensions, nk::dimensions_per_value<scalar_t>()) * sizeof(scalar_t);
-        std::span<std::byte const> tail = input.subspan(sizeof(header));
-        tail = load_rows_(tail, vectors_chunks_, count, vector_bytes);
-        tail = load_rows_(tail, norms_chunks_, count, sizeof(vector_norms_t));
-        tail = load_rows_(tail, neighbors_chunks_, count, header.connectivity * sizeof(node_id_t));
+        load_rows_(vectors, vectors_chunks_, count);
+        load_rows_(neighbors, neighbors_chunks_, count);
+
+        // Re-derive the norms in node id order - one reduction pass over the freshly copied
+        // vectors, through the same kernels the insertion path uses.
+        for (std::size_t node = 0; node != count; ++node) {
+            chunked_location_t const location = chunked_location(static_cast<node_id_t>(node));
+            norms_chunks_[location.chunk_index][location.index_in_chunk] = inner_norms(vector_for(location));
+        }
 
         // Publish: identity first, then the capacity credit, and the watermark last with a
         // release - the same order every publication in this design follows.

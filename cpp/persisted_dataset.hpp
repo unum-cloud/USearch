@@ -33,6 +33,7 @@
 #include <numkong/vector.hpp>
 #include <stringzilla/stringzilla.hpp>
 
+#include "usearch/serialization.hpp"
 #include "usearch/types.hpp"
 
 namespace unum::usearch {
@@ -172,14 +173,15 @@ class mmap_view_t {
 #endif
 };
 
-/** @brief Splits a mapped matrix file into (@p rows, @p columns), validating that the payload
- *      holds enough @p scalar_type_ values - sub-byte packing included. The header is two
+/** @brief Splits a mapped matrix file into its extents, validating that the payload holds
+ *      enough @p scalar_type_ values - sub-byte packing included. The header is two
  *      little-endian @p counter_type_ counters, so both `u32`-headed RetriEval files and
  *      `u64`-headed billion-scale exports parse with the right instantiation. */
 template <typename scalar_type_, typename counter_type_>
-status_t parse_matrix_header(mmap_view_t const& mapping, std::size_t& rows, std::size_t& columns) noexcept {
+expected<matrix_extents_t> parse_matrix_header(mmap_view_t const& mapping) noexcept {
+    matrix_extents_t extents;
     constexpr std::size_t header_bytes_k = 2 * sizeof(counter_type_);
-    if (mapping.size() < header_bytes_k) return status_t::config_mismatch_k;
+    if (mapping.size() < header_bytes_k) return {extents, status_t::config_mismatch_k};
     counter_type_ rows_header, columns_header;
     std::memcpy(&rows_header, mapping.data(), sizeof(rows_header));
     std::memcpy(&columns_header, mapping.data() + sizeof(rows_header), sizeof(columns_header));
@@ -188,9 +190,10 @@ status_t parse_matrix_header(mmap_view_t const& mapping, std::size_t& rows, std:
                                                                     nk::dimensions_per_value<scalar_type_>());
     std::size_t const expected_bytes = header_bytes_k +
                                        static_cast<std::size_t>(rows_header) * values_per_row * sizeof(scalar_type_);
-    if (mapping.size() < expected_bytes) return status_t::config_mismatch_k;
-    rows = static_cast<std::size_t>(rows_header), columns = static_cast<std::size_t>(columns_header);
-    return status_t::success_k;
+    if (mapping.size() < expected_bytes) return {extents, status_t::config_mismatch_k};
+    extents.rows = static_cast<std::size_t>(rows_header);
+    extents.columns = static_cast<std::size_t>(columns_header);
+    return {extents, status_t::success_k};
 }
 
 /** @brief Views the payload behind a parsed matrix header as a NumKong matrix. */
@@ -231,29 +234,32 @@ class persisted_dataset {
         persisted_dataset dataset;
         auto vectors = mmap_view_t::try_map(vectors_path);
         if (vectors.status != status_t::success_k) return {std::move(dataset), vectors.status};
-        status_t parsed = parse_matrix_header<scalar_type_, header_counter_type_>(vectors.value, dataset.vectors_rows_,
-                                                                                  dataset.dimensions_);
-        if (parsed != status_t::success_k) return {std::move(dataset), parsed};
+        auto const vectors_extents = parse_matrix_header<scalar_type_, header_counter_type_>(vectors.value);
+        if (vectors_extents.status != status_t::success_k) return {std::move(dataset), vectors_extents.status};
+        dataset.vectors_rows_ = vectors_extents.value.rows;
+        dataset.dimensions_ = vectors_extents.value.columns;
         dataset.vectors_mapping_ = std::move(vectors.value);
 
         if (queries_path) {
             auto queries = mmap_view_t::try_map(queries_path);
             if (queries.status != status_t::success_k) return {std::move(dataset), queries.status};
-            std::size_t queries_columns = 0;
-            parsed = parse_matrix_header<scalar_type_, header_counter_type_>(queries.value, dataset.queries_rows_,
-                                                                             queries_columns);
-            if (parsed != status_t::success_k) return {std::move(dataset), parsed};
-            if (queries_columns != dataset.dimensions_) return {std::move(dataset), status_t::config_mismatch_k};
+            auto const queries_extents = parse_matrix_header<scalar_type_, header_counter_type_>(queries.value);
+            if (queries_extents.status != status_t::success_k) return {std::move(dataset), queries_extents.status};
+            if (queries_extents.value.columns != dataset.dimensions_)
+                return {std::move(dataset), status_t::config_mismatch_k};
+            dataset.queries_rows_ = queries_extents.value.rows;
             dataset.queries_mapping_ = std::move(queries.value);
         }
         if (neighbors_path) {
             auto neighbors = mmap_view_t::try_map(neighbors_path);
             if (neighbors.status != status_t::success_k) return {std::move(dataset), neighbors.status};
-            parsed = parse_matrix_header<neighbor_id_type_, header_counter_type_>(
-                neighbors.value, dataset.neighbors_rows_, dataset.neighbors_depth_);
-            if (parsed != status_t::success_k) return {std::move(dataset), parsed};
-            if (dataset.queries_mapping_ && dataset.neighbors_rows_ != dataset.queries_rows_)
+            auto const neighbors_extents = parse_matrix_header<neighbor_id_type_, header_counter_type_>(
+                neighbors.value);
+            if (neighbors_extents.status != status_t::success_k) return {std::move(dataset), neighbors_extents.status};
+            if (dataset.queries_mapping_ && neighbors_extents.value.rows != dataset.queries_rows_)
                 return {std::move(dataset), status_t::config_mismatch_k};
+            dataset.neighbors_rows_ = neighbors_extents.value.rows;
+            dataset.neighbors_depth_ = neighbors_extents.value.columns;
             dataset.neighbors_mapping_ = std::move(neighbors.value);
         }
         return {std::move(dataset), status_t::success_k};

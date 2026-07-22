@@ -423,9 +423,18 @@ if (USEARCH_USE_NUMKONG)
     endif ()
 endif ()
 
-# {fmt} for the C++ smoke tests (libstdc++ doesn't ship `std::print` yet on our toolchain). Fetched only when something
-# actually links it, and `FIND_PACKAGE_ARGS` lets a system-provided package satisfy the dependency without touching the
-# network.
+# Delegate ForkUnion likewise — its own CMakeLists.txt exports `forkunion::header` for the C++ templates and
+# `forkunion::static` / `forkunion::shared` for the C-level topology, fabric, and pool implementation.
+add_subdirectory(forkunion)
+
+# Delegate StringZilla likewise — its own CMakeLists.txt exports `stringzilla::stringzilla_header` for the header-only
+# templates and shared/static shims for its C-level dynamic dispatch; its test & bench targets default off downstream.
+add_subdirectory(stringzilla)
+
+# Third-party dependencies, every pin in one place, fetched only when something actually links them: {fmt} for the C++
+# smoke tests (libstdc++ doesn't ship `std::print` yet on our toolchain), clipp for the benchmark CLIs, and yyjson for
+# the SafeGraphs header reader. `FIND_PACKAGE_ARGS` lets a system-provided {fmt} satisfy the dependency without touching
+# the network.
 if (USEARCH_BUILD_TEST_CPP OR USEARCH_BUILD_BENCH_CPP)
     include(FetchContent)
     FetchContent_Declare(
@@ -433,6 +442,11 @@ if (USEARCH_BUILD_TEST_CPP OR USEARCH_BUILD_BENCH_CPP)
         GIT_REPOSITORY https://github.com/fmtlib/fmt.git
         GIT_TAG 12.0.0
         FIND_PACKAGE_ARGS
+    )
+    FetchContent_Declare(
+        clipp
+        GIT_REPOSITORY https://github.com/muellan/clipp
+        GIT_TAG v1.2.3
     )
     FetchContent_Declare(
         yyjson

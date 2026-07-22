@@ -40,13 +40,15 @@
  *  - 7/8 of the logical cores participate, unless `--threads` overrides - full occupancy
  *    starves the ordered publication path and collapses throughput.
  */
-#include <algorithm> // `std::nth_element`
+#include <cmath>   // `std::abs`
+#include <cstdint> // `std::uint32_t`
+
+#include <algorithm> // `std::nth_element`, `std::copy_n`
 #include <atomic>    // `std::atomic`
 #include <chrono>    // `std::chrono::steady_clock`
-#include <cmath>     // `std::abs`
-#include <cstdint>   // `std::uint32_t`
 #include <memory>    // `std::unique_ptr`
 #include <string>    // `std::string`
+#include <typeinfo>  // `typeid`
 #include <vector>    // `std::vector`
 
 #include <clipp.h>
@@ -59,6 +61,7 @@
 #include <numkong/numkong.hpp>
 
 #include <usearch/inner_volatile_index.hpp>
+#include <usearch/serialization.hpp>
 
 #include "bench.hpp"
 #include "persisted_dataset.hpp"
@@ -86,10 +89,8 @@ struct capability_choice {
  *      target macros. The implicit floor the table never lists is the serial kernels. */
 inline constexpr capability_choice<nk_capability_t> compute_choices_k[] = {
 #if NK_TARGET_X8664_
-    {"haswell", nk_cap_haswell_k},
-    {"skylake", nk_cap_skylake_k},
-    {"icelake", nk_cap_icelake_k},
-    {"genoa", nk_cap_genoa_k},
+    {"haswell", nk_cap_haswell_k}, {"skylake", nk_cap_skylake_k},         {"icelake", nk_cap_icelake_k},
+    {"genoa", nk_cap_genoa_k},     {"sapphireamx", nk_cap_sapphireamx_k},
 #elif NK_TARGET_ARM64_
     {"neon", nk_cap_neon_k},
     {"neonsdot", nk_cap_neonsdot_k},
@@ -232,14 +233,29 @@ struct bench_options_t {
     std::size_t batch = 0;
     /** @brief Neighbors-list width per node; must match a `connectivity_t` tiling. */
     std::size_t connectivity = 32;
-    /** @brief Insertion candidate pool. Calibrated on SIFT 10M with @c expansion_search to
-     *      clear 99% recall@10 with margin: 128/192 lands at 99.3%, and the leaner 96/192
-     *      rides the line at 99.1% with ~30% faster ingestion. */
-    std::size_t expansion_add = 128;
+    /** @brief Insertion candidate pool. Calibrated on SIFT 10M against @c expansion_search for
+     *      the build-once-search-forever regime: 256/96 clears 99.3% recall@10 at roughly half
+     *      the per-query distance work of 128/192, collapsing the p99 latency ~4x - build
+     *      compute spent once to keep every future query cheap. */
+    std::size_t expansion_add = 256;
     /** @brief Search candidate pool; see @c expansion_add for the calibration. */
-    std::size_t expansion_search = 192;
+    std::size_t expansion_search = 96;
     /** @brief Matches per query to return & judge. */
     std::size_t top_k = 10;
+    /** @brief Search every ingested vector for itself instead of the query file - the
+     *      calibration-free navigability probe, with a search phase as long as the ingestion. */
+    bool self_recall = false;
+    /** @brief Checkpoint name to serialize every domain index into after ingestion - resolved
+     *      through @ref checkpoint_path_of, so the file name itself stamps the index type. */
+    std::string save_name;
+    /** @brief Checkpoint name to restore domain indexes from before ingestion; pair it with
+     *      `--skip-vectors`, so only the unindexed topping streams in. */
+    std::string load_name;
+    /** @brief Directory the checkpoint blobs land in. The tmpfs-backed default suits small
+     *      runs; point 100M-scale runs at a real disk. */
+    std::string checkpoints_dir = "/tmp";
+    /** @brief Rows the loaded indexes already cover; ingestion resumes right after them. */
+    std::size_t skip_vectors = 0;
     /** @brief Cap on ingested rows; zero ingests the whole file. */
     std::size_t max_vectors = 0;
     /** @brief Huge pages the launcher provisioned before starting the process; zero expects
@@ -249,6 +265,27 @@ struct bench_options_t {
     /** @brief Print the manual and exit. */
     bool help = false;
 };
+
+/** @brief The three matrix files one checkpointed slot spans - each a RetriEval-layout dump. */
+struct checkpoint_paths_t {
+    std::string vectors;
+    std::string neighbors;
+    std::string rows;
+};
+
+/** @brief Resolves a user-facing checkpoint name into one slot's matrix-file paths. The
+ *      StringZilla hash of the mangled index type stamps compatibility - a checkpoint built
+ *      by any other instantiation resolves to different file names, so a mismatched load
+ *      simply finds nothing - and the files themselves are plain dataset-shaped matrices any
+ *      RetriEval tool opens. */
+template <typename index_type_>
+static checkpoint_paths_t checkpoint_paths_of(bench_options_t const& options, std::string_view name, std::size_t slot,
+                                              std::size_t slot_count) {
+    std::string const prefix = fmt::format("{}/{}-{:016x}-{}-{}", options.checkpoints_dir, name,
+                                           sz::string_view {typeid(index_type_).name()}.hash(), slot, slot_count);
+    return {fmt::format("{}.vectors.{}bin", prefix, index_type_::scalar_t::dtype_name()), //
+            prefix + ".neighbors.ibin", prefix + ".rows.ibin"};
+}
 
 #pragma endregion
 
@@ -441,17 +478,80 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
                     bench.index_of_compute_domain[compute_domain] = slot;
         }
 
+    if (bench.options.skip_vectors > rows) {
+        fmt::print("--skip-vectors {} exceeds the {} viewed rows\n", bench.options.skip_vectors, rows);
+        return false;
+    }
     bench.indexes.reserve(indexes_count);
     bench.id_to_row.resize(indexes_count);
     for (std::size_t slot = 0; slot != indexes_count; ++slot) {
         fu_memory_domain_id_t const domain = memory_domains.empty() ? -1 : memory_domains[slot];
         bench.indexes.push_back(std::make_unique<index_t>(allocator_t {domain}, allocator_t {domain}));
-        auto reserved = bench.indexes.back()->reserve({rows, connectivity, dimensions});
+        index_t& index = *bench.indexes.back();
+        bench.id_to_row[slot].resize(rows);
+
+        // Reserving first freezes the CLI geometry and pre-grows capacity; a checkpoint then
+        // loads against that frozen geometry, so a header mismatch fails loudly below instead
+        // of restoring an incompatible graph.
+        auto reserved = index.reserve({rows, connectivity, dimensions});
         if (reserved.status != status_t::success_k) {
             fmt::print("Failed to reserve {} × {}d\n", rows, dimensions);
             return false;
         }
-        bench.id_to_row[slot].resize(rows);
+
+        // Three RetriEval-layout matrix dumps per slot: the file name's type hash carries
+        // compatibility, the two-counter headers carry the shapes, and any dataset tool opens
+        // them. The id → row map restores the recall bookkeeping the index itself never stores.
+        if (!bench.options.load_name.empty()) {
+            using scalar_t = typename index_t::scalar_t;
+            checkpoint_paths_t const paths = checkpoint_paths_of<index_t>(bench.options, bench.options.load_name, slot,
+                                                                          indexes_count);
+            auto mapped_vectors = mmap_view_t::try_map(paths.vectors.c_str());
+            auto mapped_neighbors = mmap_view_t::try_map(paths.neighbors.c_str());
+            auto mapped_rows = mmap_view_t::try_map(paths.rows.c_str());
+            if (mapped_vectors.status != status_t::success_k || mapped_neighbors.status != status_t::success_k ||
+                mapped_rows.status != status_t::success_k) {
+                fmt::print("Failed to map the {} checkpoint for slot {}\n", bench.options.load_name, slot);
+                return false;
+            }
+
+            auto const vectors_extents = parse_matrix_header<scalar_t, std::uint32_t>(mapped_vectors.value);
+            auto const neighbors_extents = parse_matrix_header<std::uint32_t, std::uint32_t>(mapped_neighbors.value);
+            auto const map_extents = parse_matrix_header<std::uint32_t, std::uint32_t>(mapped_rows.value);
+            bool const parsed = vectors_extents.status == status_t::success_k &&
+                                neighbors_extents.status == status_t::success_k &&
+                                map_extents.status == status_t::success_k;
+            std::size_t const loaded_nodes = vectors_extents.value.rows;
+            if (!parsed || vectors_extents.value.columns != dimensions ||
+                neighbors_extents.value.columns != connectivity || map_extents.value.columns != 1 ||
+                neighbors_extents.value.rows != loaded_nodes || map_extents.value.rows != loaded_nodes) {
+                fmt::print("Checkpoint {} disagrees with the run's geometry\n", bench.options.load_name);
+                return false;
+            }
+
+            nk::matrix_view<scalar_t> const vectors_view = view_matrix_payload<scalar_t, std::uint32_t>(
+                mapped_vectors.value, loaded_nodes, dimensions);
+            nk::matrix_view<std::uint32_t> const neighbors_view = view_matrix_payload<std::uint32_t, std::uint32_t>(
+                mapped_neighbors.value, loaded_nodes, connectivity);
+            status_t const loaded = index.load(vectors_view, neighbors_view, synchronization_t::exclusive_k);
+            if (loaded != status_t::success_k) {
+                fmt::print("Failed to restore {}: status {}\n", paths.vectors, int(loaded));
+                return false;
+            }
+            nk::matrix_view<std::uint32_t> const rows_view = view_matrix_payload<std::uint32_t, std::uint32_t>(
+                mapped_rows.value, loaded_nodes, 1);
+            std::copy_n(rows_view.data(), loaded_nodes, bench.id_to_row[slot].data());
+        }
+    }
+
+    // The loaded base must cover exactly the skipped prefix - anything else would judge
+    // recall against rows the graph never saw.
+    std::size_t loaded_rows = 0;
+    for (auto const& index : bench.indexes) loaded_rows += index->size();
+    if (loaded_rows != bench.options.skip_vectors) {
+        fmt::print("Loaded indexes cover {} rows, but --skip-vectors says {}\n", loaded_rows,
+                   bench.options.skip_vectors);
+        return false;
     }
 
     // Every pool thread constructs its own traversal context, so the scratch - results,
@@ -459,6 +559,9 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
     bench.traversals.resize(threads);
     auto traversals_init = [](fu_lambda_context_t punned, std::size_t thread, std::size_t compute_domain) noexcept {
         auto& bench = *static_cast<bench_t*>(punned);
+        // AMX tile state needs a per-thread OS permission handshake before first use;
+        // NumKong's thread configurator performs it and no-ops everywhere else.
+        nk_configure_thread(nk_capabilities_available());
         fu_memory_domain_id_t const domain =
             bench.options.memory_domains.empty()
                 ? fu_memory_domain_id_t {-1}
@@ -473,15 +576,17 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
             return false;
         }
     bench.lanes.resize(threads);
-    bench.hit_rows = nk::matrix<std::uint32_t>::try_zeros({streamed.queries.extent(0), bench.options.top_k});
-    bench.hit_distances = nk::matrix<typename bench_t::distance_t>::try_zeros(
-        {streamed.queries.extent(0), bench.options.top_k});
+    // Self-recall probes every ingested row, so the per-query buffers follow the larger count.
+    std::size_t const search_count = bench.options.self_recall ? streamed.vectors.extent(0)
+                                                               : streamed.queries.extent(0);
+    bench.hit_rows = nk::matrix<std::uint32_t>::try_zeros({search_count, bench.options.top_k});
+    bench.hit_distances = nk::matrix<typename bench_t::distance_t>::try_zeros({search_count, bench.options.top_k});
     if (bench.hit_rows.empty() || bench.hit_distances.empty()) {
         fmt::print("Failed to allocate the per-query hit matrices\n");
         return false;
     }
-    bench.hit_counts.resize(streamed.queries.extent(0));
-    bench.latencies_us.resize(streamed.queries.extent(0));
+    bench.hit_counts.resize(search_count);
+    bench.latencies_us.resize(search_count);
     return true;
 }
 
@@ -501,9 +606,11 @@ void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_
 
     typename index_t::insert_config_t config;
     config.expansion_factor = static_cast<small_size_t>(bench.options.expansion_add);
+    // With a loaded base, tasks cover only the topping - shift into absolute dataset rows.
+    std::size_t const row = task + bench.options.skip_vectors;
     vector_view_t vector;
-    if constexpr (streamed_dataset_type_::zero_copy_k) vector = streamed.vectors.row(task).as_vector();
-    else vector = streamed.stage(streamed.vectors.row(task).as_vector(), thread, task);
+    if constexpr (streamed_dataset_type_::zero_copy_k) vector = streamed.vectors.row(row).as_vector();
+    else vector = streamed.stage(streamed.vectors.row(row).as_vector(), thread, task);
 
     std::size_t const slot = bench.index_of_compute_domain[compute_domain];
     index_t& index = *bench.indexes[slot];
@@ -521,7 +628,7 @@ void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_
     lane.computed_distances_in_refines += inserted.computed_distances_in_refines;
     lane.computed_distances_in_reverse_refines += inserted.computed_distances_in_reverse_refines;
     lane.restarts += inserted.restarts;
-    bench.id_to_row[slot][local_id] = static_cast<std::uint32_t>(task);
+    bench.id_to_row[slot][local_id] = static_cast<std::uint32_t>(row);
 }
 
 template <typename streamed_dataset_type_>
@@ -530,9 +637,15 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     using scalar_t = typename streamed_dataset_type_::scalar_t;
     auto& bench = streamed.bench;
     std::size_t const rows = streamed.vectors.extent(0);
+    std::size_t const inserted_rows = rows - bench.options.skip_vectors;
+    if (!inserted_rows) {
+        fmt::print(header_style(), "\nInsertion\n");
+        fmt::print("  skipped: the loaded base already covers all {} rows\n", rows);
+        return true;
+    }
 
     auto started = clock_t::now();
-    fu_pool_for_n_dynamic(pool, rows, &insertion_callback<streamed_dataset_type_>, &streamed);
+    fu_pool_for_n_dynamic(pool, inserted_rows, &insertion_callback<streamed_dataset_type_>, &streamed);
     double const seconds = std::chrono::duration<double>(clock_t::now() - started).count();
 
     if (std::size_t failures = bench.failed_tasks.load(); failures) {
@@ -549,24 +662,75 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
                                                                double(sums.computed_distances)
                                                          : 0.0;
     fmt::print(header_style(), "\nInsertion\n");
-    fmt::print("  shape: {} × {}d\n", rows, streamed.vectors.extent(1));
-    fmt::print("  kernels: {} · {} · {} kit\n", scalar_t::dtype_name(),
+    fmt::print("  shape: {} × {}d\n", inserted_rows, streamed.vectors.extent(1));
+    if (bench.options.skip_vectors) fmt::print("  topping: {} loaded rows\n", bench.options.skip_vectors);
+    fmt::print("  quads: {} · {} · {} kit\n", scalar_t::dtype_name(),
                kernel_name(streamed_dataset_type_::bench_t::kernel_kind_k),
-               bit_name(compute_span_k, index_t::picked_capability_k, "serial"));
-    if (index_t::picked_capability_k == nk_cap_serial_k &&
+               bit_name(compute_span_k, index_t::picked_quads_capability_k, "serial"));
+    if constexpr (index_t::has_tiles_k)
+        fmt::print("  tiles: {} · reverse refinement\n",
+                   bit_name(compute_span_k, index_t::picked_tiles_capability_k, "none"));
+    if (index_t::picked_quads_capability_k == nk_cap_serial_k &&
         (bench.options.max_compute & nk_capabilities_available() & ~nk_cap_serial_k))
         fmt::print(verdict_style(false), "  ⚠ scalar fallback: no SIMD kit is adapted for this dtype & metric\n");
     fmt::print("  threads: {}\n", fu_pool_threads_count(pool));
     if (bench.indexes.size() > 1) fmt::print("  indexes: {}, one per memory domain\n", bench.indexes.size());
     fmt::print("  wall: {:.2f} s\n", seconds);
-    fmt::print("  throughput: {}/s\n", humanize(double(rows) / seconds));
+    fmt::print("  throughput: {}/s\n", humanize(double(inserted_rows) / seconds));
     fmt::print("  distances: {} ({:.1f}% refines, {:.1f}% reverse)\n", humanize(double(sums.computed_distances)),
                refine_share, reverse_share);
     fmt::print("  visited: {}\n", humanize(double(sums.visited_members)));
     fmt::print("  restarts: ");
-    fmt::print(verdict_style(sums.restarts < rows / 100 + 1), "{}\n", sums.restarts);
+    fmt::print(verdict_style(sums.restarts < inserted_rows / 100 + 1), "{}\n", sums.restarts);
     if (std::size_t resident = peak_resident_bytes(); resident)
         fmt::print("  peak resident: {:.2f} GB\n", double(resident) / 1e9);
+    return true;
+}
+
+/** @brief Serializes every domain index as three RetriEval-layout matrices - vectors,
+ *      neighbors, and the id → row map - so later runs @c --load the base and stream only
+ *      the topping: a 100M experiment then costs an mmap, not a half-hour rebuild. */
+template <typename streamed_dataset_type_>
+bool save_indexes(streamed_dataset_type_& streamed) {
+    using bench_t = typename streamed_dataset_type_::bench_t;
+    using index_t = typename bench_t::index_t;
+    using scalar_t = typename index_t::scalar_t;
+    using node_id_t = typename index_t::node_id_t;
+    using clock_t = std::chrono::steady_clock;
+    auto& bench = streamed.bench;
+    auto started = clock_t::now();
+    std::size_t const slots = bench.indexes.size();
+    std::size_t total_bytes = 0;
+    for (std::size_t slot = 0; slot != slots; ++slot) {
+        auto& index = *bench.indexes[slot];
+        typename index_t::saved_shape_t const shape = index.saved_shape();
+        auto vectors = nk::matrix<scalar_t>::try_zeros({shape.nodes, shape.dimensions});
+        auto neighbors = nk::matrix<node_id_t>::try_zeros({shape.nodes, shape.connectivity});
+        if (vectors.empty() || neighbors.empty()) {
+            fmt::print("Failed to stage {} rows for serialization\n", shape.nodes);
+            return false;
+        }
+        status_t const saved = index.save(vectors.span(), neighbors.span(), synchronization_t::immutable_k);
+        if (saved != status_t::success_k) {
+            fmt::print("Failed to serialize index {}: status {}\n", slot, int(saved));
+            return false;
+        }
+
+        checkpoint_paths_t const paths = checkpoint_paths_of<index_t>(bench.options, bench.options.save_name, //
+                                                                      slot, slots);
+        nk::matrix_view<std::uint32_t> const rows_map_view {bench.id_to_row[slot].data(), {shape.nodes, 1}};
+        bool const written = matrix_save<scalar_t>(paths.vectors.c_str(), vectors.view()) == status_t::success_k &&
+                             matrix_save<node_id_t>(paths.neighbors.c_str(), neighbors.view()) == status_t::success_k &&
+                             matrix_save<std::uint32_t>(paths.rows.c_str(), rows_map_view) == status_t::success_k;
+        if (!written) {
+            fmt::print("Failed to write the {} checkpoint for slot {}\n", bench.options.save_name, slot);
+            return false;
+        }
+        total_bytes += shape.nodes * (static_cast<std::size_t>(vectors.view().stride_bytes(0)) + //
+                                      shape.connectivity * sizeof(node_id_t) + sizeof(std::uint32_t));
+    }
+    double const seconds = std::chrono::duration<double>(clock_t::now() - started).count();
+    fmt::print("Saved {} indexes: {:.2f} GB in {:.2f} s\n", bench.indexes.size(), double(total_bytes) / 1e9, seconds);
     return true;
 }
 
@@ -587,9 +751,15 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
 
     typename index_t::search_config_t config;
     config.expansion_factor = static_cast<small_size_t>(bench.options.expansion_search);
+    // The search phase runs strictly after ingestion, so the mutation-free contract holds by
+    // construction - certify it and measure the atomics-free traversal.
+    config.synchronization = synchronization_t::immutable_k;
+    // Under self-recall the "query file" is the base itself: every stored vector must find
+    // its own row - theorem-grade navigability probing with zero ground-truth files.
+    auto const source_row = bench.options.self_recall ? streamed.vectors.row(query) : streamed.queries.row(query);
     vector_view_t query_vector;
-    if constexpr (streamed_dataset_type_::zero_copy_k) query_vector = streamed.queries.row(query).as_vector();
-    else query_vector = streamed.stage(streamed.queries.row(query).as_vector(), thread, query);
+    if constexpr (streamed_dataset_type_::zero_copy_k) query_vector = source_row.as_vector();
+    else query_vector = streamed.stage(source_row.as_vector(), thread, query);
 
     std::uint32_t* const merged_rows = bench.hit_rows.row(query).data();
     auto* const merged_distances = bench.hit_distances.row(query).data();
@@ -619,7 +789,7 @@ template <typename streamed_dataset_type_>
 bool run_search(streamed_dataset_type_& streamed, fu_pool_t pool) {
     using clock_t = std::chrono::steady_clock;
     auto& bench = streamed.bench;
-    std::size_t const query_count = streamed.queries.extent(0);
+    std::size_t const query_count = bench.options.self_recall ? streamed.vectors.extent(0) : streamed.queries.extent(0);
     for (telemetry_lane_t& lane : bench.lanes) lane = telemetry_lane_t {};
 
     auto started = clock_t::now();
@@ -639,7 +809,8 @@ bool run_search(streamed_dataset_type_& streamed, fu_pool_t pool) {
     };
 
     fmt::print(header_style(), "\nSearch\n");
-    fmt::print("  queries: {} at top-{}\n", query_count, bench.options.top_k);
+    fmt::print("  queries: {} at top-{}{}\n", query_count, bench.options.top_k,
+               bench.options.self_recall ? " · self-recall" : "");
     fmt::print("  threads: {}\n", fu_pool_threads_count(pool));
     fmt::print("  wall: {:.2f} s\n", seconds);
     fmt::print("  throughput: {} QPS\n", humanize(double(query_count) / seconds));
@@ -650,7 +821,25 @@ bool run_search(streamed_dataset_type_& streamed, fu_pool_t pool) {
     fmt::print("  restarts: {}\n", sums.restarts);
     // Judgment runs after the clock stopped, so QPS never depends on how much we measure.
     // One sweep per query produces every verdict; the discount tables are built once.
-    if (!bench.ground_truth.empty()) {
+    if (bench.options.self_recall) {
+        std::size_t found_at_1 = 0, found_at_k = 0;
+        for (std::size_t query = 0; query != query_count; ++query) {
+            auto const returned = to_span(bench.hit_rows.row(query).as_vector()).first(bench.hit_counts[query]);
+            std::uint32_t const own_row = static_cast<std::uint32_t>(query);
+            found_at_1 += !returned.empty() && returned.front() == own_row;
+            bool within = false;
+            for (std::uint32_t row : returned) within |= row == own_row;
+            found_at_k += within;
+        }
+        double const queries = double(query_count);
+        double const self_at_1 = 100.0 * double(found_at_1) / queries;
+        double const self_at_k = 100.0 * double(found_at_k) / queries;
+        fmt::print("  self-recall@1: ");
+        fmt::print(verdict_style(self_at_1 >= 99.0), "{:.2f}%\n", self_at_1);
+        fmt::print("  self-recall@{}: ", bench.options.top_k);
+        fmt::print(verdict_style(self_at_k >= 99.0), "{:.2f}%\n", self_at_k);
+    }
+    else if (!bench.ground_truth.empty()) {
         std::size_t const judged_depth = std::min(bench.options.top_k, bench.ground_truth.extent(1));
         std::vector<std::uint32_t> scratch(judged_depth);
         std::vector<double> discounts(bench.options.top_k), ideal(bench.options.top_k);
@@ -775,6 +964,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
 
     if (!prepare(streamed, launch.pool, launch.topology)) return 1;
     if (!run_insertion(streamed, launch.pool)) return 1;
+    if (!launch.options.save_name.empty() && !save_indexes(streamed)) return 1;
     if (!run_search(streamed, launch.pool)) return 1;
     return 0;
 }
@@ -956,6 +1146,16 @@ int main(int argc, char** argv) {
             "search candidate pool; 192 by default, tuned for 99% recall@10",
         (clipp::option("--top-k") & clipp::value("count", options.top_k)) % "matches per query to judge",
         (clipp::option("--max-vectors") & clipp::value("count", options.max_vectors)) % "cap on ingested rows",
+        clipp::option("--self-recall").set(options.self_recall, true) % //
+            "query every stored vector for itself instead of the query file",
+        (clipp::option("--save") & clipp::value("name", options.save_name)) % //
+            "checkpoint name to serialize every domain index into after ingestion",
+        (clipp::option("--load") & clipp::value("name", options.load_name)) % //
+            "checkpoint name to restore domain indexes from instead of building",
+        (clipp::option("--checkpoints-dir") & clipp::value("dir", options.checkpoints_dir)) % //
+            "directory for checkpoint blobs; /tmp by default",
+        (clipp::option("--skip-vectors") & clipp::value("count", options.skip_vectors)) % //
+            "rows the loaded indexes already cover",
         (clipp::option("--huge-pages") & clipp::value("count", options.huge_pages)) %
             "huge pages provisioned before launch; enforced, so base-page fallbacks fail fast",
         clipp::option("--help").set(options.help) % "print this message");

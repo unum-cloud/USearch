@@ -3,7 +3,7 @@ if (USEARCH_BUILD_TEST_CPP)
     setup_target(test_cpp)
     add_test(NAME test_cpp COMMAND test_cpp)
 
-    target_include_directories(test_cpp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../stringzilla/include)
+    target_link_libraries(test_cpp PRIVATE stringzilla::stringzilla_header)
 
     # Export the dynamic symbol table so `backtrace_symbols` / `std::stacktrace` can resolve function names when the
     # in-test crash handler fires.
@@ -25,15 +25,13 @@ if (USEARCH_BUILD_TEST_CPP)
 endif ()
 
 if (USEARCH_BUILD_BENCH_CPP)
-    include(clipp)
     add_executable(bench_cpp bench.cpp)
     setup_target(bench_cpp)
     target_link_libraries(bench_cpp PRIVATE clipp)
 
     add_executable(inner_volatile_index_bench_cpp inner_volatile_index_bench.cpp)
     setup_target(inner_volatile_index_bench_cpp)
-    target_include_directories(
-        inner_volatile_index_bench_cpp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../stringzilla/include
+    target_link_libraries(
+        inner_volatile_index_bench_cpp PRIVATE clipp fmt::fmt forkunion::static stringzilla::stringzilla_header yyjson
     )
-    target_link_libraries(inner_volatile_index_bench_cpp PRIVATE clipp fmt::fmt forkunion::static)
 endif ()
