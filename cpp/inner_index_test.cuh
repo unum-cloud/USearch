@@ -39,10 +39,18 @@
 namespace unum {
 namespace usearch {
 
-/** @brief Vector width shared by the larger scenarios; small enough to keep serial kernels fast. */
-constexpr std::size_t test_dimensions_k = 16;
-/** @brief Vector width for the tiny smoke scenarios. */
-constexpr std::size_t tiny_dimensions_k = 8;
+/** @brief Storage values per vector in the larger scenarios - NumKong's unit of one
+ *      scalar object; small enough to keep serial kernels fast. */
+constexpr std::size_t test_values_k = 16;
+/** @brief Storage values per vector in the tiny smoke scenarios. */
+constexpr std::size_t tiny_values_k = 8;
+/** @brief Logical dimensions spanned by @p values_count storage values of one dtype -
+ *      NumKong's @c dimensions_per_value conversion, so every dtype gets the same storage
+ *      budget: 16 i8 values carry 16 dimensions, 16 u1x8 values carry 128. */
+template <typename scalar_>
+constexpr std::size_t dimensions_for(std::size_t values_count) noexcept {
+    return values_count * nk::dimensions_per_value<scalar_>();
+}
 /** @brief Node count marching the growth scenario across several doubling chunks. */
 constexpr std::size_t growth_nodes_count_k = 1'500;
 /** @brief Nodes inserted by each lane of the concurrent scenarios. */
@@ -69,6 +77,9 @@ struct flaky_waiter_t {
 
   private:
     static void misbehave_() noexcept {
+        // A deliberate exception to the no-thread-locals rule: the index constructs its
+        // waiter as a stateless temporary at every wait site, so a persistent per-thread
+        // fuzz stream has nowhere else to live until the waiter surface takes instances.
         static thread_local test_random_t random_generator {0xF1A6ull};
         if (random_generator.below(64) == 0) std::this_thread::sleep_for(std::chrono::microseconds(200));
         else std::this_thread::yield();
@@ -104,18 +115,18 @@ static std::size_t test_guards(make_index_type_ const& make_index) {
     {
         index_type_ index = make_index(ledger);
         typename index_type_::inner_traversal_context_t context {{}};
-        auto vectors = make_vectors<scalar_t>(3, tiny_dimensions_k, 42);
+        auto vectors = make_vectors<scalar_t>(3, dimensions_for<scalar_t>(tiny_values_k), 42);
 
         auto inserted = index.insert(vectors.view(), {}, context);
         failures_count += expect(inserted.status == status_t::uninitialized_k);
         auto found = index.search(vectors.view().row(0).as_vector(), context);
         failures_count += expect(found.status == status_t::success_k && found.count == 0);
 
-        auto reserved = index.reserve({64, connectivity_16_k, tiny_dimensions_k});
+        auto reserved = index.reserve({64, connectivity_16_k, dimensions_for<scalar_t>(tiny_values_k)});
         failures_count += expect(reserved.status == status_t::success_k && reserved.new_capacity >= 64);
-        auto mismatched = index.reserve({64, connectivity_32_k, tiny_dimensions_k});
+        auto mismatched = index.reserve({64, connectivity_32_k, dimensions_for<scalar_t>(tiny_values_k)});
         failures_count += expect(mismatched.status == status_t::config_mismatch_k);
-        auto matching = index.reserve({32, connectivity_16_k, tiny_dimensions_k});
+        auto matching = index.reserve({32, connectivity_16_k, dimensions_for<scalar_t>(tiny_values_k)});
         failures_count += expect(matching.status == status_t::success_k);
     }
     failures_count += expect_eq(ledger.live_bytes.load(), 0);
@@ -133,10 +144,11 @@ static std::size_t test_three_vectors(make_index_type_ const& make_index) {
     {
         index_type_ index = make_index(ledger);
         typename index_type_::inner_traversal_context_t context {{}};
-        auto vectors = make_vectors<scalar_t>(3, tiny_dimensions_k, 7);
+        auto vectors = make_vectors<scalar_t>(3, dimensions_for<scalar_t>(tiny_values_k), 7);
 
-        failures_count += expect(index.reserve({8, connectivity_16_k, tiny_dimensions_k}).status ==
-                                 status_t::success_k);
+        failures_count += expect(
+            index.reserve({8, connectivity_16_k, dimensions_for<scalar_t>(tiny_values_k)}).status ==
+            status_t::success_k);
         std::array<inner_node_id_t, 3> assigned_ids;
         auto inserted = index.insert(vectors.view(), {assigned_ids.data(), assigned_ids.size()}, context);
         failures_count += expect(inserted.status == status_t::success_k);
@@ -168,10 +180,11 @@ static std::size_t test_growth_and_recall(make_index_type_ const& make_index) {
     {
         index_type_ index = make_index(ledger);
         typename index_type_::inner_traversal_context_t context {{}};
-        auto vectors = make_vectors<scalar_t>(growth_nodes_count_k, test_dimensions_k, 2026);
+        auto vectors = make_vectors<scalar_t>(growth_nodes_count_k, dimensions_for<scalar_t>(test_values_k), 2026);
 
-        failures_count += expect(index.reserve({16, connectivity_16_k, test_dimensions_k}).status ==
-                                 status_t::success_k);
+        failures_count += expect(
+            index.reserve({16, connectivity_16_k, dimensions_for<scalar_t>(test_values_k)}).status ==
+            status_t::success_k);
         std::vector<inner_node_id_t> assigned_ids(growth_nodes_count_k);
         auto inserted = index.insert(vectors.view(), {assigned_ids.data(), assigned_ids.size()}, context);
         failures_count += expect(inserted.status == status_t::success_k);
@@ -212,10 +225,11 @@ static std::size_t test_save_load_roundtrip(make_index_type_ const& make_index) 
     {
         index_type_ index = make_index(ledger);
         typename index_type_::inner_traversal_context_t context {{}};
-        auto vectors = make_vectors<scalar_t>(growth_nodes_count_k, test_dimensions_k, 4242);
+        auto vectors = make_vectors<scalar_t>(growth_nodes_count_k, dimensions_for<scalar_t>(test_values_k), 4242);
 
-        failures_count += expect(index.reserve({growth_nodes_count_k, connectivity_16_k, test_dimensions_k}).status ==
-                                 status_t::success_k);
+        failures_count += expect(
+            index.reserve({growth_nodes_count_k, connectivity_16_k, dimensions_for<scalar_t>(test_values_k)}).status ==
+            status_t::success_k);
         std::vector<inner_node_id_t> assigned_ids(growth_nodes_count_k);
         failures_count += expect(
             index.insert(vectors.view(), {assigned_ids.data(), assigned_ids.size()}, context).status ==
@@ -259,6 +273,7 @@ static std::size_t test_save_load_roundtrip(make_index_type_ const& make_index) 
  *      one traversal context each, then id-uniqueness and sampled self-recall checks. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 static std::size_t test_concurrent_build(make_index_type_ const& make_index) {
+    using scalar_t = typename index_type_::scalar_t;
     std::size_t failures_count = 0;
     allocation_ledger_t ledger;
     {
@@ -269,10 +284,12 @@ static std::size_t test_concurrent_build(make_index_type_ const& make_index) {
         if (!pool.try_spawn(lanes_count)) return expect(false);
 
         index_type_ index = make_index(ledger);
-        failures_count += expect(index.reserve({nodes_count, connectivity_16_k, test_dimensions_k}).status ==
-                                 status_t::success_k);
+        failures_count += expect(
+            index.reserve({nodes_count, connectivity_16_k, dimensions_for<scalar_t>(test_values_k)}).status ==
+            status_t::success_k);
 
-        auto lanes = make_lanes<index_type_>(lanes_count, lane_nodes_count_k, test_dimensions_k, 100);
+        auto lanes = make_lanes<index_type_>(lanes_count, lane_nodes_count_k, dimensions_for<scalar_t>(test_values_k),
+                                             100);
         std::vector<inner_node_id_t> assigned_ids(nodes_count);
         std::atomic<std::size_t> failed_lanes_count {0};
 
@@ -330,11 +347,13 @@ static std::size_t test_concurrent_search(make_index_type_ const& make_index) {
         if (!pool.try_spawn(writers_count + 1)) return expect(false);
 
         index_type_ index = make_index(ledger);
-        failures_count += expect(index.reserve({nodes_count, connectivity_16_k, test_dimensions_k}).status ==
-                                 status_t::success_k);
+        failures_count += expect(
+            index.reserve({nodes_count, connectivity_16_k, dimensions_for<scalar_t>(test_values_k)}).status ==
+            status_t::success_k);
 
-        auto lanes = make_lanes<index_type_>(writers_count + 1, lane_nodes_count_k, test_dimensions_k, 200);
-        auto query_vectors = make_vectors<scalar_t>(queries_count, test_dimensions_k, 777);
+        auto lanes = make_lanes<index_type_>(writers_count + 1, lane_nodes_count_k,
+                                             dimensions_for<scalar_t>(test_values_k), 200);
+        auto query_vectors = make_vectors<scalar_t>(queries_count, dimensions_for<scalar_t>(test_values_k), 777);
 
         std::atomic<std::size_t> writers_remaining {writers_count};
         std::atomic<std::size_t> racing_violations {0};

@@ -106,5 +106,8 @@ int main() {
     failures_count += test_configuration<nk_kernel_euclidean_k, nk_u8_k>("cuda-u8+euclidean");
     failures_count += test_configuration<nk_kernel_angular_k, nk_f16_k>("cuda-f16+angular");
     failures_count += test_configuration<nk_kernel_euclidean_k, nk_bf16_k>("cuda-bf16+euclidean");
+    failures_count += test_configuration<nk_kernel_angular_k, nk_i4_k>("cuda-i4+angular");
+    failures_count += test_configuration<nk_kernel_hamming_k, nk_u1_k>("cuda-u1+hamming");
+    failures_count += test_configuration<nk_kernel_jaccard_k, nk_u1_k>("cuda-u1+jaccard");
     return failures_count ? 1 : 0;
 }

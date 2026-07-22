@@ -1798,10 +1798,16 @@ struct inner_cuda_index {
         return static_cast<u32_t>(geometry);
     }
 
+    /** @brief Bytes of one packed logical row, counted bit-exactly through NumKong's own
+     *      reflection - sub-byte types pack several dimensions per storage value, and
+     *      @c bits_per_dimension already knows every packing. */
+    std::size_t packed_row_bytes() const noexcept {
+        return divide_round_up<std::size_t>(dimensions() * scalar_t::bits_per_dimension(), 8u);
+    }
     /** @brief Fragments per vector row - derived from the frozen dimensions, like every
      *      row measure below: the geometry word is the only stored source of truth. */
     u32_t row_fragments() const noexcept {
-        return divide_round_up<u32_t>(static_cast<u32_t>(dimensions() * sizeof(scalar_t)), kit_t::fragment_bytes_k);
+        return divide_round_up<u32_t>(static_cast<u32_t>(packed_row_bytes()), kit_t::fragment_bytes_k);
     }
     /** @brief The vector row's byte length: the dimension count rounded up to whole
      *      fragments, tail bytes kept zero so every dot-derived metric is unaffected. */
@@ -1997,7 +2003,7 @@ struct inner_cuda_index {
         // batch and the arena depend only on batch-local offsets, never on first_id.
         std::byte* const staging = context.ensure_staging(rows * row_bytes());
         if (!staging) return {status_t::bad_alloc_k};
-        std::size_t const scalar_row_bytes = dimensions() * sizeof(scalar_t);
+        std::size_t const scalar_row_bytes = packed_row_bytes();
         if (scalar_row_bytes != row_bytes()) cudaMemsetAsync(staging, 0, rows * row_bytes(), stream);
         if (cudaMemcpy2DAsync(staging, row_bytes(), new_vectors.byte_data(), scalar_row_bytes, scalar_row_bytes, rows,
                               cudaMemcpyHostToDevice, stream) != cudaSuccess)
@@ -2130,7 +2136,7 @@ struct inner_cuda_index {
         context.epoch_floor_ += queries_count;
         // Pitched upload: host rows are packed scalars, device rows pad to whole fragments,
         // and the pad bytes must be zero for the zero-tail distance identity to hold.
-        std::size_t const scalar_row_bytes = dimensions() * sizeof(scalar_t);
+        std::size_t const scalar_row_bytes = packed_row_bytes();
         if (scalar_row_bytes != row_bytes()) cudaMemsetAsync(device_queries, 0, queries_count * row_bytes(), stream);
         cudaMemcpy2DAsync(device_queries, row_bytes(), queries.byte_data(), scalar_row_bytes, scalar_row_bytes,
                           queries_count, cudaMemcpyHostToDevice, stream);
@@ -2223,7 +2229,7 @@ struct inner_cuda_index {
             neighbors.extent(0) != shape.nodes || neighbors.extent(1) != shape.connectivity)
             return status_t::config_mismatch_k;
         if (!shape.nodes) return status_t::success_k;
-        std::size_t const scalar_row_bytes = shape.dimensions * sizeof(scalar_t);
+        std::size_t const scalar_row_bytes = packed_row_bytes();
         if (cudaMemcpy2D(vectors.data(), scalar_row_bytes, vectors_plane_.base(), row_bytes(), scalar_row_bytes,
                          shape.nodes, cudaMemcpyDeviceToHost) != cudaSuccess)
             return status_t::device_error_k;
@@ -2250,7 +2256,7 @@ struct inner_cuda_index {
             return status_t::config_mismatch_k;
         if (!nodes) return status_t::success_k;
         if (status_t grown = grow_rows(nodes, nullptr); grown != status_t::success_k) return grown;
-        std::size_t const scalar_row_bytes = dimensions() * sizeof(scalar_t);
+        std::size_t const scalar_row_bytes = packed_row_bytes();
         if (cudaMemcpy2D(vectors_plane_.base(), row_bytes(), vectors.data(), scalar_row_bytes, scalar_row_bytes, nodes,
                          cudaMemcpyHostToDevice) != cudaSuccess)
             return status_t::device_error_k;

@@ -51,8 +51,10 @@ struct allocation_ledger_t {
  *      deallocation lands in the shared ledger, which must balance to zero at scope exit.
  *
  *  The default constructor exists only because @c nk::tensor requires a default-constructible
- *  allocator for its empty instances; a defaulted copy aborts on any real
- *  allocation, so all live memory provably flows through ledgered instances.
+ *  allocator for its empty instances; a defaulted copy aborts on any real allocation, so
+ *  every allocation on an audited plane provably flows through ledgered instances. The
+ *  audit covers the planes instantiated with this allocator - the CPU cells ledger their
+ *  vectors & neighbors planes, while per-context scratch stays on the plain heap.
  */
 template <typename value_type_>
 struct counting_allocator {
@@ -116,10 +118,46 @@ struct test_random_t {
     }
 };
 
+/** @brief Builds vectors with planted cluster structure: a few random centroid rows, each
+ *      emitted row a centroid copy with a small share of dimensions redrawn. Uniform
+ *      random data concentrates pairwise distances into one narrow band - a flat landscape
+ *      no graph can navigate, at its worst for binary vectors - while planting bimodalizes
+ *      them: within a cluster only the redrawn dimensions differ, across clusters most do,
+ *      so self-recall measures navigation instead of fighting near-equidistance. Both
+ *      constants derive from the shape: eight centroids keep every cluster deep at the
+ *      scenarios' row counts, and redrawing dimensions/16 keeps cluster members distinct
+ *      while preserving a several-fold within-to-across distance margin. */
+template <typename scalar_>
+nk::matrix<scalar_> make_clustered_vectors(std::size_t count, std::size_t dimensions, u64_t seed) {
+    constexpr std::size_t centroids_count_k = 8;
+    std::size_t const redrawn_dimensions = divide_round_up<std::size_t>(dimensions, 16);
+    auto centroids = nk::matrix<scalar_>::try_zeros({centroids_count_k, dimensions});
+    auto vectors = nk::matrix<scalar_>::try_zeros({count, dimensions});
+    test_random_t random_generator(seed);
+    for (std::size_t centroid = 0; centroid != centroids_count_k; ++centroid) {
+        auto centroid_span = centroids.row(centroid).as_vector();
+        for (std::size_t dimension = 0; dimension != dimensions; ++dimension)
+            centroid_span[dimension] = make_scalar<scalar_>(random_generator.below(8));
+    }
+    for (std::size_t row = 0; row != count; ++row) {
+        auto row_span = vectors.row(row).as_vector();
+        auto centroid_span = centroids.row(random_generator.below(centroids_count_k)).as_vector();
+        for (std::size_t dimension = 0; dimension != dimensions; ++dimension)
+            row_span[dimension] = centroid_span[dimension];
+        for (std::size_t redraw = 0; redraw != redrawn_dimensions; ++redraw)
+            row_span[random_generator.below(static_cast<unsigned>(dimensions))] = make_scalar<scalar_>(
+                random_generator.below(8));
+    }
+    return vectors;
+}
+
 /** @brief Fills a row-major matrix with pseudo-random small values from {0..7}, exactly
- *      representable in every supported scalar type down to i4 nibbles. */
+ *      representable in every supported scalar type down to i4 nibbles. Binary vectors
+ *      route through the planted-cluster generator: their flat draw has no navigable
+ *      structure, and each bit keeps a fair coin either way. */
 template <typename scalar_>
 nk::matrix<scalar_> make_vectors(std::size_t count, std::size_t dimensions, u64_t seed) {
+    if constexpr (std::is_same_v<scalar_, nk::u1x8_t>) return make_clustered_vectors<scalar_>(count, dimensions, seed);
     auto vectors = nk::matrix<scalar_>::try_zeros({count, dimensions});
     test_random_t random_generator(seed);
     for (std::size_t row = 0; row != count; ++row) {
