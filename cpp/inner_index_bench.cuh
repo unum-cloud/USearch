@@ -16,12 +16,14 @@
  */
 #pragma once
 
-#include <algorithm> // `std::nth_element`, `std::min`
-#include <atomic>    // `std::atomic`
-#include <cstdint>   // `std::uint32_t`
-#include <span>      // `std::span`
-#include <string>    // `std::string`
-#include <vector>    // `std::vector`
+#include <algorithm>   // `std::nth_element`, `std::min`
+#include <cmath>       // `std::abs` for the rescale amplitude
+#include <atomic>      // `std::atomic`
+#include <cstdint>     // `std::uint32_t`
+#include <span>        // `std::span`
+#include <string>      // `std::string`
+#include <type_traits> // `std::integral_constant` for the dispatch chains
+#include <vector>      // `std::vector`
 
 #include <fmt/color.h>
 #include <fmt/format.h>
@@ -119,6 +121,69 @@ constexpr capability_type_ highest_bit(std::span<capability_choice<capability_ty
     for (capability_choice<capability_type_> const& choice : choices)
         if (mask & choice.bit) highest = choice.bit;
     return highest;
+}
+
+/** @brief The index of the newest table row of @p choices inside @p mask, or @c choices.size()
+ *      when the mask names none - the dispatch cascade's entry point into a table. */
+template <typename capability_type_>
+constexpr std::size_t highest_index(std::span<capability_choice<capability_type_> const> choices,
+                                    capability_type_ mask) noexcept {
+    std::size_t highest = choices.size();
+    for (std::size_t choice = 0; choice != choices.size(); ++choice)
+        if (mask & choices[choice].bit) highest = choice;
+    return highest;
+}
+
+/** @brief The index of the @p choices row named @p name, or @c choices.size() when unmatched -
+ *      the CLI's entry point into a table, the naming inverse of @ref highest_index. */
+template <typename capability_type_>
+inline std::size_t index_of_name(std::span<capability_choice<capability_type_> const> choices,
+                                 std::string_view name) noexcept {
+    for (std::size_t choice = 0; choice != choices.size(); ++choice)
+        if (name == choices[choice].name) return choice;
+    return choices.size();
+}
+
+/** @brief The schedule allow-mask intersected with what this machine actually offers - the
+ *      one place the @c fu_capabilities_t & @c fu_runtime_capabilities C-enum arithmetic is
+ *      re-typed, so its callers never re-cast. */
+inline fu_capabilities_t effective_schedule(fu_capabilities_t allow) noexcept {
+    return static_cast<fu_capabilities_t>(allow & fu_runtime_capabilities());
+}
+
+/** @brief Every schedule bit except the waiter hints - the floor a `--max-schedule` ceiling
+ *      builds on, keeping the pool-management toolbox while capping the wait instruction. */
+inline constexpr fu_capabilities_t schedule_floor_k = static_cast<fu_capabilities_t>(fu_capabilities_all_k &
+                                                                                     ~fu_capability_any_yield_k);
+
+/**
+ *  @brief Lowers a runtime table position in `[0, count_)` to a compile-time index and hands it
+ *      to @p on_row as an @c integral_constant; a position at or past the tail takes @p on_floor.
+ *      The compute & schedule axes both ride this - "the newest row the mask allows, else a floor".
+ *
+ *  Every position instantiates its own @p on_row, so the whole per-row template grid is built at
+ *  compile time and one branch is selected at runtime - the compile-time cascade, one axis deep.
+ */
+template <std::size_t count_, std::size_t choice_ = 0>
+int dispatch_index(std::size_t position, auto on_row, auto on_floor) {
+    if constexpr (choice_ < count_) {
+        if (position == choice_) return on_row(std::integral_constant<std::size_t, choice_> {});
+        return dispatch_index<count_, choice_ + 1>(position, on_row, on_floor);
+    }
+    else return on_floor();
+}
+
+/**
+ *  @brief Matches a runtime enum against a compile-time value set, handing the match to @p on_value
+ *      as an @c integral_constant; an unlisted value goes to @p on_unknown as the raw runtime value,
+ *      so its diagnostic can name what was rejected. The stored-dtype & kernel axes both ride this -
+ *      "one of these instantiations, else an error".
+ */
+template <auto value_, auto... rest_>
+int dispatch_value(decltype(value_) runtime, auto on_value, auto on_unknown) {
+    if (runtime == value_) return on_value(std::integral_constant<decltype(value_), value_> {});
+    if constexpr (sizeof...(rest_) == 0) return on_unknown(runtime);
+    else return dispatch_value<rest_...>(runtime, on_value, on_unknown);
 }
 
 /** @brief Everything the CLI can configure; zeroes mean "infer from the dataset & machine". */
@@ -386,8 +451,13 @@ inline void report_search_metrics(bench_options_t const& options, std::size_t qu
     fmt::print("  threads: {}\n", threads);
     fmt::print("  wall: {:.2f} s\n", seconds);
     fmt::print("  throughput: {} QPS\n", humanize(double(query_count) / seconds));
-    fmt::print("  latency: p50 {:.0f} µs · p90 {:.0f} µs · p99 {:.0f} µs\n", percentile(0.50), percentile(0.90),
-               percentile(0.99));
+    // Batch-shaped backends have no honest per-query clock - an empty latency span asks
+    // for the mean instead of three identical pseudo-percentiles.
+    if (latencies_us.empty())
+        fmt::print("  latency: {:.0f} µs mean per query, batch-uniform\n", seconds * 1e6 / double(query_count));
+    else
+        fmt::print("  latency: p50 {:.0f} µs · p90 {:.0f} µs · p99 {:.0f} µs\n", percentile(0.50), percentile(0.90),
+                   percentile(0.99));
     fmt::print("  distances/query: {}\n", humanize(double(sums.computed_distances) / double(query_count)));
     fmt::print("  visited/query: {}\n", humanize(double(sums.visited_members) / double(query_count)));
     fmt::print("  restarts: {}\n", sums.restarts);
@@ -467,6 +537,7 @@ inline void judge_hits(bench_options_t const& options, bench_results_t& results,
 template <typename dataset_scalar_type_, typename bench_context_type_>
 struct streamed_dataset {
     using bench_t = bench_context_type_;
+    using dataset_scalar_t = dataset_scalar_type_;
     using scalar_t = typename bench_context_type_::scalar_t;
     using vector_view_t = typename bench_context_type_::vector_view_t;
     static constexpr bool zero_copy_k = std::is_same_v<dataset_scalar_type_, scalar_t>;
@@ -494,6 +565,22 @@ struct streamed_dataset {
     nk::tensor_span<nk::f32_t, 3> rescaling;
     /** @brief The global symmetric factor applied before integer downcasts. */
     float scale = 1.0f;
+
+    /** @brief One SIMD @c reduce_minmax pass over the whole source payload finds the
+     *      amplitude; the same factor then rescales every vector AND every query, keeping
+     *      their geometry consistent. Prints the chosen factor. A no-op unless this run
+     *      downcasts a non-integral source into an integral store. */
+    void establish_scale() {
+        if constexpr (scaled_k) {
+            typename dataset_scalar_type_::reduce_minmax_value_t min_value {}, max_value {};
+            std::size_t min_index = 0, max_index = 0;
+            nk::reduce_minmax(vectors.as_vector(), &min_value, &min_index, &max_value, &max_index);
+            float const max_amplitude = std::max(std::abs(float(min_value)), std::abs(float(max_value)));
+            if (max_amplitude > 0) scale = target_amplitude_k / max_amplitude;
+            fmt::print("Rescaling {} → {} by ×{:.4f} before the downcast\n", dataset_scalar_type_::dtype_name(),
+                       scalar_t::dtype_name(), scale);
+        }
+    }
 
     /** @brief Converts one source row into the calling thread's own staging plane and views
      *      it back; @p task rotates the row within the plane, so in-flight tasks never clash. */
@@ -554,12 +641,11 @@ inline void print_machine(fu_topology_t topology, fu_fabric_t fabric, bench_opti
     fmt::print("  compute ceiling: {}\n",
                bit_name(compute_span_k, highest_bit(compute_span_k, options.max_compute & available, nk_cap_serial_k),
                         "serial"));
-    fmt::print("  scheduling ceiling: {}\n",
-               bit_name(schedule_span_k,
-                        highest_bit(schedule_span_k,
-                                    static_cast<fu_capabilities_t>(options.max_schedule & fu_runtime_capabilities()),
-                                    fu_capabilities_unknown_k),
-                        "standard"));
+    fmt::print(
+        "  scheduling ceiling: {}\n",
+        bit_name(schedule_span_k,
+                 highest_bit(schedule_span_k, effective_schedule(options.max_schedule), fu_capabilities_unknown_k),
+                 "standard"));
     fmt::print("  kernels requested: {} · {}\n", dtype_name(options.stored_dtype), kernel_name(options.kernel));
 }
 

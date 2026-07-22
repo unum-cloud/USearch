@@ -134,20 +134,21 @@ inline std::size_t streamed_batch_rows(bench_options_t const& options, std::size
     return std::min(std::max<std::size_t>(preferred, 1), total_rows);
 }
 
-/** @brief Stages up to @p batch_rows source rows starting at @p first_row into one
+/** @brief Stages up to @p batch_rows rows of @p source starting at @p first_row into one
  *      device-ready host matrix - a zero-copy view when the scalars already match, or the
- *      trampoline's contiguous plane after per-row rescale & cast. */
+ *      trampoline's single contiguous plane after per-row rescale & cast. Both phases share
+ *      it: insertion stages base rows, search stages queries or the self-recall base. */
 template <typename streamed_dataset_type_>
-static typename streamed_dataset_type_::bench_t::vectors_view_t stage_batch(streamed_dataset_type_& streamed,
-                                                                            std::size_t first_row,
-                                                                            std::size_t batch_rows) {
+static typename streamed_dataset_type_::bench_t::vectors_view_t stage_batch(
+    streamed_dataset_type_& streamed, nk::matrix_view<typename streamed_dataset_type_::dataset_scalar_t> source,
+    std::size_t first_row, std::size_t batch_rows) {
     using vectors_view_t = typename streamed_dataset_type_::bench_t::vectors_view_t;
-    std::size_t const dimensions = streamed.vectors.extent(1);
+    std::size_t const dimensions = source.extent(1);
     if constexpr (streamed_dataset_type_::zero_copy_k)
-        return vectors_view_t {streamed.vectors.row(first_row).data(), {batch_rows, dimensions}};
+        return vectors_view_t {source.row(first_row).data(), {batch_rows, dimensions}};
     else {
         for (std::size_t row = 0; row != batch_rows; ++row)
-            streamed.stage(streamed.vectors.row(first_row + row).as_vector(), 0, row);
+            streamed.stage(source.row(first_row + row).as_vector(), 0, row);
         return vectors_view_t {streamed.staging.row(0).row(0).data(), {batch_rows, dimensions}};
     }
 }
@@ -180,7 +181,7 @@ static bool run_insertion(streamed_dataset_type_& streamed) {
     for (std::size_t offset = 0; offset < inserted_rows;) {
         std::size_t const first_row = bench.options.skip_vectors + offset;
         std::size_t const batch = std::min(batch_rows, inserted_rows - offset);
-        auto const staged = stage_batch(streamed, first_row, batch);
+        auto const staged = stage_batch(streamed, streamed.vectors, first_row, batch);
         auto inserted = bench.index->insert(staged, {batch_ids.data(), batch}, *bench.traversal, config);
         if (!inserted) {
             fmt::print("Insertion failed at row {}: status {}\n", first_row, int(inserted.status));
@@ -256,13 +257,7 @@ static bool run_search(streamed_dataset_type_& streamed) {
     double seconds = 0;
     for (std::size_t offset = 0; offset < query_count;) {
         std::size_t const batch = std::min(batch_rows, query_count - offset);
-        typename bench_t::vectors_view_t staged;
-        if constexpr (streamed_dataset_type_::zero_copy_k)
-            staged = {source.row(offset).data(), {batch, source.extent(1)}};
-        else {
-            for (std::size_t row = 0; row != batch; ++row) streamed.stage(source.row(offset + row).as_vector(), 0, row);
-            staged = {streamed.staging.row(0).row(0).data(), {batch, source.extent(1)}};
-        }
+        auto const staged = stage_batch(streamed, source, offset, batch);
 
         auto started = clock_t::now();
         auto found = bench.index->search(staged, nk::matrix_span<node_id_t> {found_ids.data(), {batch, top_k}},
@@ -278,26 +273,27 @@ static bool run_search(streamed_dataset_type_& streamed) {
         bench.lane.computed_distances += found.computed_distances;
         bench.lane.restarts += found.restarts;
 
-        float const shared_latency_us = float(batch_seconds * 1e6 / double(batch));
         for (std::size_t row = 0; row != batch; ++row) {
             std::uint32_t* const merged_rows = bench.results.hit_rows.row(offset + row).data();
             auto* const merged_distances = bench.results.hit_distances.row(offset + row).data();
+            auto const found_row_ids = found_ids.view().row(row);
+            auto const found_row_distances = found_distances.view().row(row);
             std::size_t merged_count = 0;
             for (std::size_t rank = 0; rank != top_k; ++rank) {
-                node_id_t const id = found_ids.view().row(row).data()[rank];
+                node_id_t const id = found_row_ids[rank];
                 if (static_cast<std::size_t>(id) >= node_count) break; // Sentinel-padded tail.
                 merged_rows[merged_count] = bench.id_to_row[id];
-                merged_distances[merged_count] = found_distances.view().row(row).data()[rank];
+                merged_distances[merged_count] = found_row_distances[rank];
                 ++merged_count;
             }
             bench.results.hit_counts[offset + row] = static_cast<std::uint32_t>(merged_count);
-            bench.results.latencies_us[offset + row] = shared_latency_us;
         }
         offset += batch;
     }
 
-    report_search_metrics(bench.options, query_count, seconds, 1, bench.lane,
-                          {bench.results.latencies_us.data(), bench.results.latencies_us.size()});
+    // The empty latency span asks the shared report for the batch-uniform mean - one
+    // launch clocks a whole batch, so per-query percentiles would be fiction here.
+    report_search_metrics(bench.options, query_count, seconds, 1, bench.lane, {});
     judge_hits(bench.options, bench.results, query_count);
     return true;
 }
@@ -306,12 +302,28 @@ static bool run_search(streamed_dataset_type_& streamed) {
 
 #pragma region Dispatch Cascade
 
+/** @brief Gate: a (stored dtype, kernel) cell is runnable once its device kit is adapted
+ *      in @c inner_metric.cuh - unadapted combinations report as skipped and light up
+ *      automatically when their kits land, exactly like the CPU cascade. */
+template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
+concept cuda_combo_supported = requires { typename inner_cuda_kit_for<dtype_, kernel_>::kit_t; };
+
+/** @brief No-op sibling picked when the pair's device kit is not adapted yet. */
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_>
+    requires(!cuda_combo_supported<stored_dtype_, kernel_>)
+static int stage_and_run(persisted_dataset<dataset_scalar_type_> const&, bench_options_t const& options, int) {
+    fmt::print("skipped: no device kit adapted for {} · {}\n", dtype_name(options.stored_dtype),
+               kernel_name(options.kernel));
+    return 0;
+}
+
 /** @brief The innermost hop: binds the concrete CUDA-index instantiation, wires the typed
  *      source views and the staging trampoline, and runs the phases in checkpoint order. */
-template <typename dataset_scalar_type_, nk_kernel_kind_t kernel_>
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_>
+    requires(cuda_combo_supported<stored_dtype_, kernel_>)
 static int stage_and_run(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
                          int device) {
-    using index_t = inner_cuda_index<nk_i8_k, kernel_>;
+    using index_t = inner_cuda_index<stored_dtype_, kernel_>;
     using bench_context_t = cuda_bench_context<index_t>;
     using streamed_t = streamed_dataset<dataset_scalar_type_, bench_context_t>;
     using scalar_t = typename bench_context_t::scalar_t;
@@ -333,7 +345,9 @@ static int stage_and_run(persisted_dataset<dataset_scalar_type_> const& dataset,
     nk::tensor<scalar_t, std::allocator<scalar_t>, 3> staging;
     nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3> rescaling_planes;
     if constexpr (!streamed_t::zero_copy_k) {
-        std::size_t const batch_rows = streamed_batch_rows(options, rows);
+        // The trampoline serves both phases, so it follows the larger of the two row
+        // counts - a query file bigger than the base must not overflow the plane.
+        std::size_t const batch_rows = streamed_batch_rows(options, std::max(rows, source_queries.extent(0)));
         staging = nk::tensor<scalar_t, std::allocator<scalar_t>, 3>::try_zeros({1, batch_rows, dimensions});
         if (staging.empty()) {
             fmt::print("Failed to allocate {} staging rows of {}d {}\n", batch_rows, dimensions,
@@ -350,19 +364,7 @@ static int stage_and_run(persisted_dataset<dataset_scalar_type_> const& dataset,
                 return 1;
             }
             streamed.rescaling = rescaling_planes.span();
-
-            // One SIMD `reduce_minmax` pass over the contiguous payload finds the amplitude;
-            // the same factor then rescales every vector AND every query, keeping their
-            // geometry consistent.
-            typename dataset_scalar_type_::reduce_minmax_value_t min_value {}, max_value {};
-            std::size_t min_index = 0, max_index = 0;
-            nk::vector_view<dataset_scalar_type_> const flat {dataset.vectors().data(), rows * dimensions};
-            nk::reduce_minmax(flat, &min_value, &min_index, &max_value, &max_index);
-            double const max_amplitude = std::max(std::abs(double(float(min_value))),
-                                                  std::abs(double(float(max_value))));
-            if (max_amplitude > 0) streamed.scale = float(streamed_t::target_amplitude_k / max_amplitude);
-            fmt::print("Rescaling {} → {} by ×{:.4f} before the downcast\n", dataset_scalar_type_::dtype_name(),
-                       scalar_t::dtype_name(), streamed.scale);
+            streamed.establish_scale();
         }
     }
 
@@ -377,15 +379,37 @@ static int stage_and_run(persisted_dataset<dataset_scalar_type_> const& dataset,
     return 0;
 }
 
-template <typename dataset_scalar_type_>
+/** @brief Kernel axis: lowers the runtime metric to a compile-time kernel kind, the terminal hop
+ *      into @ref stage_and_run - whose concept gate skips any pair whose device kit is unadapted. */
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
 static int run_with_metric(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
                            int device) {
-    switch (options.kernel) {
-    case nk_kernel_angular_k: return stage_and_run<dataset_scalar_type_, nk_kernel_angular_k>(dataset, options, device);
-    case nk_kernel_euclidean_k:
-        return stage_and_run<dataset_scalar_type_, nk_kernel_euclidean_k>(dataset, options, device);
-    default: fmt::print("Unsupported metric for the CUDA kits; pick --angular or --euclidean\n"); return 1;
-    }
+    return dispatch_value<nk_kernel_dot_k, nk_kernel_angular_k, nk_kernel_euclidean_k, nk_kernel_hamming_k,
+                          nk_kernel_jaccard_k>(
+        options.kernel,
+        [&](auto kernel) {
+            return stage_and_run<dataset_scalar_type_, stored_dtype_, kernel.value>(dataset, options, device);
+        },
+        [&](auto metric) {
+            fmt::print("Unsupported metric {}; pick --angular, --euclidean, --hamming, or --jaccard\n",
+                       kernel_name(metric));
+            return 1;
+        });
+}
+
+/** @brief Stored-dtype axis: the CLI's chosen store instantiates the kernel chain, or reports the
+ *      dtypes that carry device kits. */
+template <typename dataset_scalar_type_>
+static int run_with_stored_dtype(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
+                                 int device) {
+    return dispatch_value<nk_f32_k, nk_f16_k, nk_bf16_k, nk_i8_k, nk_u8_k, nk_i4_k, nk_u1_k>(
+        options.stored_dtype,
+        [&](auto dtype) { return run_with_metric<dataset_scalar_type_, dtype.value>(dataset, options, device); },
+        [&](auto dtype) {
+            fmt::print("Stored dtype {} has no device kits; override with --f16, --bf16, --i8, --u8, --i4, or --u1\n",
+                       dtype_name(dtype));
+            return 1;
+        });
 }
 
 /** @brief Opens the dataset with the file-native scalar and enters the typed cascade. */
@@ -398,7 +422,7 @@ static int open_and_run(bench_options_t const& options, int device) {
         fmt::print("Failed to open the dataset: {}\n", options.vectors_path);
         return 1;
     }
-    return run_with_metric<dataset_scalar_type_>(opened.value, options, device);
+    return run_with_stored_dtype<dataset_scalar_type_>(opened.value, options, device);
 }
 
 #pragma endregion
@@ -412,9 +436,19 @@ int main(int argc, char** argv) {
         (clipp::option("--queries") & clipp::value("path", options.queries_path)) % "query vectors, same dtype",
         (clipp::option("--neighbors") & clipp::value("path", options.neighbors_path)) % "ground truth, `.ibin`",
         (clipp::option("--device") & clipp::value("id", device)) % "CUDA device ordinal; 0 by default",
-        (clipp::option("--angular").set(options.kernel, nk_kernel_angular_k) |
-         clipp::option("--euclidean").set(options.kernel, nk_kernel_euclidean_k)) %
-            "metric; angular by default",
+        (clipp::option("--f16").set(options.stored_dtype, nk_f16_k) |
+         clipp::option("--bf16").set(options.stored_dtype, nk_bf16_k) |
+         clipp::option("--i8").set(options.stored_dtype, nk_i8_k) |
+         clipp::option("--u8").set(options.stored_dtype, nk_u8_k) |
+         clipp::option("--i4").set(options.stored_dtype, nk_i4_k) |
+         clipp::option("--u1").set(options.stored_dtype, nk_u1_k)) %
+            "stored dtype override, staging `nk::cast` on ingest",
+        (clipp::option("--dot").set(options.kernel, nk_kernel_dot_k) |
+         clipp::option("--angular").set(options.kernel, nk_kernel_angular_k) |
+         clipp::option("--euclidean").set(options.kernel, nk_kernel_euclidean_k) |
+         clipp::option("--hamming").set(options.kernel, nk_kernel_hamming_k) |
+         clipp::option("--jaccard").set(options.kernel, nk_kernel_jaccard_k)) %
+            "metric; angular by default, the binary pair for --u1",
         (clipp::option("--batch") & clipp::value("rows", options.batch)) %
             "rows & queries per launch; 65536 by default",
         (clipp::option("--connectivity") & clipp::value("degree", options.connectivity)) % "16, 32, or 128",
@@ -453,13 +487,16 @@ int main(int argc, char** argv) {
     fmt::print(header_style(), "Machine\n");
     fmt::print("  device {}: {} · {} SMs · {:.0f} GB\n", device, properties.name, properties.multiProcessorCount,
                double(properties.totalGlobalMem) / 1e9);
-    fmt::print("  kernels requested: i8 · {}\n", kernel_name(options.kernel));
-
     nk_dtype_t const file_dtype = dtype_of_extension(options.vectors_path.c_str());
-    switch (file_dtype) {
-    case nk_f32_k: return open_and_run<nk::f32_t>(options, device);
-    case nk_i8_k: return open_and_run<nk::i8_t>(options, device);
-    case nk_u8_k: return open_and_run<nk::u8_t>(options, device);
-    default: fmt::print("Unsupported dataset dtype for the CUDA kits\n"); return 1;
-    }
+    if (options.stored_dtype == nk_dtype_unknown_k) options.stored_dtype = file_dtype;
+    fmt::print("  kernels requested: {} · {}\n", dtype_name(options.stored_dtype), kernel_name(options.kernel));
+
+    // File-scalar axis: lower the file's dtype to the C++ wrapper the run is instantiated over,
+    // through NumKong's own `type_for` - the same paradigm the typed cascade rides.
+    return dispatch_value<nk_f32_k, nk_i8_k, nk_u8_k>(
+        file_dtype, [&](auto dtype) { return open_and_run<typename nk::type_for<dtype.value>::type>(options, device); },
+        [&](auto dtype) {
+            fmt::print("Unsupported dataset dtype {} for the CUDA kits\n", dtype_name(dtype));
+            return 1;
+        });
 }

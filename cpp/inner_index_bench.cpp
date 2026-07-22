@@ -24,7 +24,11 @@
  *
  *  Huge pages are provisioned outside the process, before it starts; `--huge-pages` then
  *  declares the expectation, which the harness logs and enforces - a mismatch fails the
- *  run instead of silently benchmarking base pages:
+ *  run instead of silently benchmarking base pages. The effect is anything but cosmetic:
+ *  random vector gathers over a multi-GB pool miss the STLB on nearly every access under
+ *  4 KB pages, stacking a page walk onto each already-cold load, and 2 MB pages have
+ *  measured ~30% higher insertion throughput and ~20% higher search QPS on SIFT-10M on a
+ *  dual-socket Sapphire Rapids box - the largest single-switch effect this harness knows:
  *
  *  @code{.sh}
  *  sudo sysctl vm.nr_hugepages=16384        # 32 GB of 2 MB pages, split across the domains
@@ -48,6 +52,7 @@
 #include <cstdint>   // `std::uint32_t`
 #include <memory>    // `std::unique_ptr`
 #include <string>    // `std::string`
+#include <tuple>     // `std::tuple`, `std::tuple_element_t` for the schedule waiter list
 #include <vector>    // `std::vector`
 
 #include <clipp.h>
@@ -77,6 +82,12 @@ using monitor_waiter_t = fu::risc5_wrs_t;
 using hint_waiter_t = fu::standard_yield_t;
 using monitor_waiter_t = fu::standard_yield_t;
 #endif
+
+/** @brief The waiter type each schedule table row instantiates, positionally - the data list the
+ *      schedule axis indexes, mirroring how the compute axis indexes @c prefix_mask. Every real
+ *      table has two rows; on the fallback arch both entries collapse onto the yield floor, so
+ *      only row 0 is ever reachable. */
+using schedule_waiters_t = std::tuple<hint_waiter_t, monitor_waiter_t>;
 
 /**
  *  @brief Allocates on a ForkUnion memory domain when one is chosen at runtime, and on the
@@ -529,19 +540,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
                 return 1;
             }
             streamed.rescaling = rescaling_planes.span();
-
-            // One SIMD `reduce_minmax` pass over the contiguous payload finds the amplitude;
-            // the same factor then rescales every vector AND every query, keeping their
-            // geometry consistent.
-            typename dataset_scalar_type_::reduce_minmax_value_t min_value {}, max_value {};
-            std::size_t min_index = 0, max_index = 0;
-            nk::vector_view<dataset_scalar_type_> const flat {dataset.vectors().data(), rows * dimensions};
-            nk::reduce_minmax(flat, &min_value, &min_index, &max_value, &max_index);
-            double const max_amplitude = std::max(std::abs(double(float(min_value))),
-                                                  std::abs(double(float(max_value))));
-            if (max_amplitude > 0) streamed.scale = float(streamed_t::target_amplitude_k / max_amplitude);
-            fmt::print("Rescaling {} → {} by ×{:.4f} before the downcast\n", dataset_scalar_type_::dtype_name(),
-                       scalar_t::dtype_name(), streamed.scale);
+            streamed.establish_scale();
         }
     }
 
@@ -556,88 +555,64 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
     return 0;
 }
 
+/** @brief Kernel axis: lowers the runtime metric to a compile-time kernel kind, the terminal
+ *      hop into @ref stage_and_run. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename wait_type_>
 int run_with_metric(bench_launch<dataset_scalar_type_> const& launch) {
-    switch (launch.options.kernel) {
-    case nk_kernel_dot_k:
-        return stage_and_run<dataset_scalar_type_, stored_dtype_, nk_kernel_dot_k, capability_, wait_type_>(launch);
-    case nk_kernel_angular_k:
-        return stage_and_run<dataset_scalar_type_, stored_dtype_, nk_kernel_angular_k, capability_, wait_type_>(launch);
-    case nk_kernel_euclidean_k:
-        return stage_and_run<dataset_scalar_type_, stored_dtype_, nk_kernel_euclidean_k, capability_, wait_type_>(
-            launch);
-    default: fmt::print("Unsupported metric\n"); return 1;
-    }
+    return dispatch_value<nk_kernel_dot_k, nk_kernel_angular_k, nk_kernel_euclidean_k>(
+        launch.options.kernel,
+        [&](auto kernel) {
+            return stage_and_run<dataset_scalar_type_, stored_dtype_, kernel.value, capability_, wait_type_>(launch);
+        },
+        [&](auto metric) {
+            fmt::print("Unsupported metric {}\n", kernel_name(metric));
+            return 1;
+        });
 }
 
+/** @brief Schedule axis: the newest schedule row the allow-mask admits - intersected with what
+ *      this machine actually offers, which is what gates Arm's runtime-only `WFET` - picks the
+ *      waiter from @ref schedule_waiters_t; the same mask already reached `fu_pool_new`, so the
+ *      pool waits the same way. Past the table's tail sits the STL yield floor. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_>
 int run_with_schedule(bench_launch<dataset_scalar_type_> const& launch) {
-    // The newest schedule row the allow-mask admits - intersected with what this machine
-    // actually offers, which is what gates Arm's runtime-only `WFET` - picks the waiter;
-    // the same mask already reached `fu_pool_new`, so the pool waits the same way.
-    fu_capabilities_t const effective = static_cast<fu_capabilities_t>(launch.options.max_schedule &
-                                                                       fu_runtime_capabilities());
-    std::size_t chosen = schedule_choices_count_k;
-    for (std::size_t choice = 0; choice != schedule_choices_count_k; ++choice)
-        if (effective & schedule_choices_k[choice].bit) chosen = choice;
-    switch (chosen) {
-    case 0: return run_with_metric<dataset_scalar_type_, stored_dtype_, capability_, hint_waiter_t>(launch);
-    case 1:
-        if constexpr (schedule_choices_count_k > 1)
-            return run_with_metric<dataset_scalar_type_, stored_dtype_, capability_, monitor_waiter_t>(launch);
-        break;
-    default: break;
-    }
-    return run_with_metric<dataset_scalar_type_, stored_dtype_, capability_, yield_waiter_t>(launch);
+    return dispatch_index<schedule_choices_count_k>(
+        highest_index(schedule_span_k, effective_schedule(launch.options.max_schedule)),
+        [&](auto row) {
+            using wait_type_ = std::tuple_element_t<row.value, schedule_waiters_t>;
+            return run_with_metric<dataset_scalar_type_, stored_dtype_, capability_, wait_type_>(launch);
+        },
+        [&] { return run_with_metric<dataset_scalar_type_, stored_dtype_, capability_, yield_waiter_t>(launch); });
 }
 
+/** @brief Compute axis: the allow-mask intersected with the runtime detection picks the newest
+ *      table row, whose @ref prefix_mask ceiling instantiates @ref run_with_schedule. Past the
+ *      table's tail sits the one ceiling every machine owns: the serial kernels - serving an
+ *      explicit `--max-compute serial` and any CPU with no SIMD bits. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
 int run_with_compute(bench_launch<dataset_scalar_type_> const& launch) {
-    // The effective set is the allow-mask intersected with the runtime detection; the
-    // newest table row inside it picks the instantiation. The per-architecture tables
-    // differ in length, so every case beyond a table's tail is discarded at compile time
-    // rather than indexing the choices out of bounds.
     nk_capability_t const effective = launch.options.max_compute & nk_capabilities_available();
-    std::size_t chosen = compute_choices_count_k;
-    for (std::size_t choice = 0; choice != compute_choices_count_k; ++choice)
-        if (effective & compute_choices_k[choice].bit) chosen = choice;
-    switch (chosen) {
-    case 0: return run_with_schedule<dataset_scalar_type_, stored_dtype_, prefix_mask(compute_span_k, 0)>(launch);
-    case 1:
-        if constexpr (compute_choices_count_k > 1)
-            return run_with_schedule<dataset_scalar_type_, stored_dtype_, prefix_mask(compute_span_k, 1)>(launch);
-        break;
-    case 2:
-        if constexpr (compute_choices_count_k > 2)
-            return run_with_schedule<dataset_scalar_type_, stored_dtype_, prefix_mask(compute_span_k, 2)>(launch);
-        break;
-    case 3:
-        if constexpr (compute_choices_count_k > 3)
-            return run_with_schedule<dataset_scalar_type_, stored_dtype_, prefix_mask(compute_span_k, 3)>(launch);
-        break;
-    case 4:
-        if constexpr (compute_choices_count_k > 4)
-            return run_with_schedule<dataset_scalar_type_, stored_dtype_, prefix_mask(compute_span_k, 4)>(launch);
-        break;
-    default: break;
-    }
-    // Past the table's tail sits the one ceiling every machine owns: the serial kernels.
-    // This branch serves an explicit `--max-compute serial`, and any CPU with no SIMD bits.
-    return run_with_schedule<dataset_scalar_type_, stored_dtype_, nk_cap_serial_k>(launch);
+    return dispatch_index<compute_choices_count_k>(
+        highest_index(compute_span_k, effective),
+        [&](auto row) {
+            return run_with_schedule<dataset_scalar_type_, stored_dtype_, prefix_mask(compute_span_k, row.value)>(
+                launch);
+        },
+        [&] { return run_with_schedule<dataset_scalar_type_, stored_dtype_, nk_cap_serial_k>(launch); });
 }
 
+/** @brief Stored-dtype axis: the CLI's chosen store instantiates the compute chain, or reports
+ *      the dtypes that carry adapted CPU kits. */
 template <typename dataset_scalar_type_>
 int run_with_stored_dtype(bench_launch<dataset_scalar_type_> const& launch) {
-    switch (launch.options.stored_dtype) {
-    case nk_bf16_k: return run_with_compute<dataset_scalar_type_, nk_bf16_k>(launch);
-    case nk_i8_k: return run_with_compute<dataset_scalar_type_, nk_i8_k>(launch);
-    case nk_u8_k: return run_with_compute<dataset_scalar_type_, nk_u8_k>(launch);
-    case nk_i4_k: return run_with_compute<dataset_scalar_type_, nk_i4_k>(launch);
-    default:
-        fmt::print("Stored dtype {} has no adapted kernels; override with --bf16, --i8, --u8, or --i4\n",
-                   dtype_name(launch.options.stored_dtype));
-        return 1;
-    }
+    return dispatch_value<nk_bf16_k, nk_i8_k, nk_u8_k, nk_i4_k>(
+        launch.options.stored_dtype,
+        [&](auto dtype) { return run_with_compute<dataset_scalar_type_, dtype.value>(launch); },
+        [&](auto dtype) {
+            fmt::print("Stored dtype {} has no adapted kernels; override with --bf16, --i8, --u8, or --i4\n",
+                       dtype_name(dtype));
+            return 1;
+        });
 }
 
 /** @brief Opens the dataset with the file-native scalar and enters the typed cascade. */
@@ -722,9 +697,7 @@ int main(int argc, char** argv) {
     // intersects with the runtime bits anyway.
     if (max_compute_name == "serial") { options.max_compute = nk_cap_serial_k; }
     else if (!max_compute_name.empty()) {
-        std::size_t named = compute_choices_count_k;
-        for (std::size_t choice = 0; choice != compute_choices_count_k; ++choice)
-            if (max_compute_name == compute_choices_k[choice].name) named = choice;
+        std::size_t const named = index_of_name(compute_span_k, max_compute_name);
         if (named == compute_choices_count_k) {
             fmt::print("Unknown --max-compute {}; this table offers: serial", max_compute_name);
             for (capability_choice<nk_capability_t> const& choice : compute_choices_k) fmt::print(" {}", choice.name);
@@ -738,13 +711,9 @@ int main(int argc, char** argv) {
     // placement, huge pages - stay allowed, so `fu_pool_new` keeps its full toolbox. The
     // floor keyword is "standard", after @c fu::standard_yield_t - Arm's own YIELD hint
     // legitimately owns the "yield" row.
-    if (max_schedule_name == "standard") {
-        options.max_schedule = static_cast<fu_capabilities_t>(fu_capabilities_all_k & ~fu_capability_any_yield_k);
-    }
+    if (max_schedule_name == "standard") { options.max_schedule = schedule_floor_k; }
     else if (!max_schedule_name.empty()) {
-        std::size_t named = schedule_choices_count_k;
-        for (std::size_t choice = 0; choice != schedule_choices_count_k; ++choice)
-            if (max_schedule_name == schedule_choices_k[choice].name) named = choice;
+        std::size_t const named = index_of_name(schedule_span_k, max_schedule_name);
         if (named == schedule_choices_count_k) {
             fmt::print("Unknown --max-schedule {}; this table offers: standard", max_schedule_name);
             for (capability_choice<fu_capabilities_t> const& choice : schedule_choices_k)
@@ -752,8 +721,7 @@ int main(int argc, char** argv) {
             fmt::print("\n");
             return 1;
         }
-        options.max_schedule = static_cast<fu_capabilities_t>((fu_capabilities_all_k & ~fu_capability_any_yield_k) |
-                                                              prefix_mask(schedule_span_k, named));
+        options.max_schedule = static_cast<fu_capabilities_t>(schedule_floor_k | prefix_mask(schedule_span_k, named));
     }
 
     fu_topology_t topology = fu_topology_new();
@@ -821,14 +789,15 @@ int main(int argc, char** argv) {
         }
     }
 
-    int exit_code = 1;
-    switch (file_dtype) {
-    case nk_f32_k: exit_code = open_and_run<nk::f32_t>(options, pool, topology); break;
-    case nk_bf16_k: exit_code = open_and_run<nk::bf16_t>(options, pool, topology); break;
-    case nk_i8_k: exit_code = open_and_run<nk::i8_t>(options, pool, topology); break;
-    case nk_u8_k: exit_code = open_and_run<nk::u8_t>(options, pool, topology); break;
-    default: fmt::print("Unsupported dataset dtype\n"); break;
-    }
+    // File-scalar axis: the newest hop of the compile-time cascade, lowering the file's dtype
+    // to the C++ wrapper the whole run is instantiated over through NumKong's own `type_for`.
+    int const exit_code = dispatch_value<nk_f32_k, nk_bf16_k, nk_i8_k, nk_u8_k>(
+        file_dtype,
+        [&](auto dtype) { return open_and_run<typename nk::type_for<dtype.value>::type>(options, pool, topology); },
+        [&](auto dtype) {
+            fmt::print("Unsupported dataset dtype {}\n", dtype_name(dtype));
+            return 1;
+        });
 
     fu_pool_delete(pool);
     fu_fabric_delete(fabric);
