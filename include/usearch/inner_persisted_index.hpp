@@ -126,6 +126,7 @@
 #include <windows.h>
 #endif
 
+#include <forkunion/capabilities.hpp> // `fu::preferred_yield_t` - the default waiter
 #include <forkunion/types.hpp>
 #include <numkong/tensor.hpp>
 
@@ -468,7 +469,7 @@ struct inner_io_staging {
  *  Note @c F_NOCACHE is a hint, not @c O_DIRECT: unaligned I/O silently falls back
  *  to the buffered path, and resident pages are still served from cache.
  */
-template <typename wait_type_ = dummy_waiter_t, typename allocator_type_ = std::allocator<std::byte>>
+template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
 struct inner_posix_sync_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
@@ -539,7 +540,7 @@ struct inner_posix_sync_engine {
  *  block inside @c io_submit - which costs this design nothing, since every record
  *  read is already block-aligned.
  */
-template <typename wait_type_ = dummy_waiter_t, typename allocator_type_ = std::allocator<std::byte>>
+template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
 struct inner_linux_aio_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
@@ -953,7 +954,7 @@ struct inner_uring_ring_t {
  *  Under @c DEFER_TASKRUN the spin is skipped - completions only post inside
  *  @c io_uring_enter by design.
  */
-template <typename wait_type_ = dummy_waiter_t, typename allocator_type_ = std::allocator<std::byte>>
+template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
 struct inner_linux_uring_read_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
@@ -1008,7 +1009,7 @@ struct inner_linux_uring_read_engine {
  *      roughly an 11% throughput gain at NVMe rates. Kernel floor matches the read
  *      engine; registration itself works on any ring.
  */
-template <typename wait_type_ = dummy_waiter_t, typename allocator_type_ = std::allocator<std::byte>>
+template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
 struct inner_linux_uring_fixed_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
@@ -1071,7 +1072,7 @@ struct inner_linux_uring_fixed_engine {
  *  waiters make this the energy-efficient busy-wait - with a final blocking
  *  enter as the backstop.
  */
-template <typename wait_type_ = dummy_waiter_t, typename allocator_type_ = std::allocator<std::byte>>
+template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
 struct inner_linux_uring_polled_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
@@ -1142,7 +1143,7 @@ struct inner_linux_uring_polled_engine {
  *  NVMe status codes, negatives remain kernel errors - @c pop folds both failure
  *  families into negative results for the state machine.
  */
-template <typename wait_type_ = dummy_waiter_t, typename allocator_type_ = std::allocator<std::byte>>
+template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
 struct inner_linux_uring_nvme_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
@@ -1247,7 +1248,7 @@ struct inner_linux_uring_nvme_engine {
  *  IoRing nor NVMe character devices exist there; only native Windows exercises
  *  this code.
  */
-template <typename wait_type_ = dummy_waiter_t, typename allocator_type_ = std::allocator<std::byte>>
+template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
 struct inner_windows_ioring_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
@@ -1437,10 +1438,10 @@ struct inner_persisted_slot {
  *      many traversals in flight. Constructed once, recycled across batches; owns
  *      no index state whatsoever.
  */
-template <                                                           //
-    nk_dtype_t vector_dtype_ = nk_bf16_k,                            //
-    typename engine_type_ = inner_posix_sync_engine<dummy_waiter_t>, //
-    typename allocator_type_ = std::allocator<std::byte>             //
+template <                                                                  //
+    nk_dtype_t vector_dtype_ = nk_bf16_k,                                   //
+    typename engine_type_ = inner_posix_sync_engine<fu::preferred_yield_t>, //
+    typename allocator_type_ = std::allocator<std::byte>                    //
     >
 struct inner_persisted_context {
 
@@ -1551,12 +1552,12 @@ struct inner_persisted_context {
  *  sibling file or block-device view of the same namespace. This class currently
  *  targets the file & block-device engines end-to-end.
  */
-template <                                                           //
-    nk_dtype_t vector_dtype_ = nk_bf16_k,                            //
-    nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k,             //
-    nk_capability_t capability_ = nk_cap_icelake_k,                  //
-    typename engine_type_ = inner_posix_sync_engine<dummy_waiter_t>, //
-    typename offsets_allocator_type_ = std::allocator<std::byte>     //
+template <                                                                  //
+    nk_dtype_t vector_dtype_ = nk_bf16_k,                                   //
+    nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k,                    //
+    nk_capability_t capability_ = nk_cap_icelake_k,                         //
+    typename engine_type_ = inner_posix_sync_engine<fu::preferred_yield_t>, //
+    typename offsets_allocator_type_ = std::allocator<std::byte>            //
     >
 struct inner_persisted_index {
 

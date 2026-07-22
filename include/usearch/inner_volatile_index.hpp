@@ -8,6 +8,7 @@
 
 #include <bit> // `std::bit_width`, `std::bit_floor`
 
+#include <forkunion/capabilities.hpp> // `fu::preferred_yield_t` - the default waiter
 #include <forkunion/types.hpp>
 #include <numkong/tensor.hpp>
 
@@ -69,7 +70,7 @@ template <                                                          //
     nk_dtype_t vector_dtype_ = nk_bf16_k,                           //
     nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k,            //
     nk_capability_t capability_ = nk_cap_icelake_k,                 //
-    typename wait_type_ = dummy_waiter_t,                           //
+    typename wait_type_ = fu::preferred_yield_t,                    //
     typename vectors_allocator_type_ = std::allocator<std::byte>,   //
     typename neighbors_allocator_type_ = std::allocator<std::byte>, //
     typename traversals_allocator_type_ = std::allocator<std::byte> //
