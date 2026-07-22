@@ -54,9 +54,9 @@
 #define SZ_USE_X86_AVX512 0            // Sanitizers hate AVX512
 #include <stringzilla/stringzilla.hpp> // Levenshtein distance implementation
 
-#include <usearch/index.hpp>
-#include <usearch/index_dense.hpp>
-#include <usearch/index_plugins.hpp>
+#include "index.hpp"
+#include "index_dense.hpp"
+#include "index_plugins.hpp"
 
 using namespace unum::usearch;
 using namespace unum;

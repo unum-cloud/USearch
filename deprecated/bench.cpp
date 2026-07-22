@@ -44,7 +44,7 @@
 #include <omp.h> // `omp_set_num_threads()`
 #endif
 
-#include <usearch/index_dense.hpp>
+#include "index_dense.hpp"
 
 using namespace unum::usearch;
 using namespace unum;

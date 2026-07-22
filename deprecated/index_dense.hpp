@@ -8,8 +8,8 @@
 #include "index.hpp"
 #include <stdlib.h> // `aligned_alloc`
 
-#include <usearch/index.hpp>
-#include <usearch/index_plugins.hpp>
+#include "index.hpp"
+#include "index_plugins.hpp"
 
 #if defined(USEARCH_DEFINED_CPP17)
 #include <shared_mutex> // `std::shared_mutex`
