@@ -149,7 +149,7 @@ struct inner_traversal_context {
     /** @brief Pair-matrix positions of the kept links, parallel to the running selection's fill. */
     ids_tensor_t kept_positions;
 
-    /** @brief Tile scratch of the staged Gram: the packed B-tiles plus one row-tile of A-strips. */
+    /** @brief Tile scratch of the staged Gram: the packed B-tiles plus one span of A-tiles. */
     bytes_tensor_t tiles_scratch;
     /** @brief The @b [pool,pool] pairwise distances; its row stride is its own trailing extent,
      *      pre-padded to whole tiles so tail tiles always write in bounds. */
@@ -992,9 +992,11 @@ struct inner_volatile_index {
      */
     std::size_t select_diverse(results_array_t const& candidates, std::size_t limit, selection_t& out,
                                inner_traversal_context_t& context) const noexcept {
-        // The thin pick between the engine siblings. The vector path serves every shape
-        // today; the forward tile sibling - a speculative first-tile rectangle - joins it
-        // next, keyed purely off @c tile_span_k, never a tuned threshold.
+        // The thin pick between the engine siblings: pools spanning at least one tile take
+        // the span-by-kept-tiles rectangles, keyed purely off `tile_span_k`, never a tuned
+        // threshold.
+        if constexpr (has_tiles_k)
+            if (candidates.size() >= tile_span_k) return select_diverse_via_tiles(candidates, limit, out, context);
         return select_diverse_via_quads(candidates, limit, out, context);
     }
 
@@ -1039,6 +1041,125 @@ struct inner_volatile_index {
             ++kept_count;
         }
         // Shrinking within the reservation never fails - the fill becomes the live shape.
+        (void)out.try_resize({kept_count});
+        return computed_distances;
+    }
+
+    /**
+     *  @brief The tile-engine sibling of @c select_diverse: candidates advance one span of
+     *      @c tile_span_k rows at a time - the A-side of the tile kit - each span paying one
+     *      span × kept-tiles rectangle before the greedy scan decides from precomputed rows,
+     *      the standard gather → pack → init → update → finalize walk against the kept links
+     *      instead of a full square.
+     *
+     *  Only the kept tiles frozen at the span's start ride the matrix; links accepted after
+     *  that - the sub-tile fringe and any kept tile completed mid-span - score on the 4-way
+     *  kernels straight off the staging surface, so no tile is ever recomputed. A kept tile
+     *  packs exactly once, when its sixteenth link lands, and serves every later span.
+     *  Decisions match @c select_diverse_via_quads including the first-strict-violation
+     *  rule, and the shared finalize kit keeps both engines' distances bit-identical - only
+     *  the compute schedule differs.
+     */
+    std::size_t select_diverse_via_tiles(results_array_t const& candidates, std::size_t limit, selection_t& out,
+                                         inner_traversal_context_t& context) const noexcept {
+        constexpr std::size_t rows_k = tiles_kit_t::tile_rows_k;
+        constexpr std::size_t columns_k = tiles_kit_t::tile_columns_k;
+        constexpr std::size_t depth_k = tiles_kit_t::tile_depth_k;
+        if (!out.try_resize({limit})) return 0;
+
+        vector_view_t* const kept_vectors = context.staged_vectors.data();
+        vector_norms_t* const kept_norms = context.staged_norms.data();
+        distance_t* const pairs = context.pair_distances.data();
+        std::size_t const stride = context.pair_distances.extent(1);
+        std::size_t const count = candidates.size();
+        inner_scored_node_t const* candidates_data = candidates.data();
+
+        // The scratch splits like the reverse path's: the packed kept tiles first, then the
+        // span's A-tiles - the same alignment fix-up into the margin `scratch_bytes` reserved.
+        std::size_t const dimensions = vector_for(chunked_location(candidates_data[0].node_id)).size();
+        std::size_t const depth_tiles = divide_round_up<std::size_t>(dimensions, depth_k);
+        std::uintptr_t const raw_base = reinterpret_cast<std::uintptr_t>(context.tiles_scratch.data());
+        constexpr std::uintptr_t tile_alignment = alignof(typename tiles_kit_t::a_tile_t);
+        std::uintptr_t const aligned_base = (raw_base + tile_alignment - 1u) & ~(tile_alignment - 1u);
+        typename tiles_kit_t::b_tile_t* const kept_tiles = reinterpret_cast<typename tiles_kit_t::b_tile_t*>( //
+            aligned_base);
+        std::size_t const kept_tiles_capacity = divide_round_up<std::size_t>(limit, columns_k);
+        typename tiles_kit_t::a_tile_t* const a_tiles = reinterpret_cast<typename tiles_kit_t::a_tile_t*>(
+            kept_tiles + kept_tiles_capacity * depth_tiles);
+        tiles_kit_t::configure_tiles();
+
+        typename tiles_kit_t::accumulator_tile_t accumulator;
+        std::array<vector_view_t, rows_k> span_vectors;
+        std::array<vector_norms_t, rows_k> span_norms;
+        std::array<vector_view_t, columns_k> kept_tile_vectors;
+        std::array<vector_norms_t, columns_k> kept_tile_norms;
+        small_size_t kept_count = 0;
+        std::size_t computed_distances = 0;
+        for (std::size_t span_begin = 0; span_begin < count && kept_count != limit; span_begin += rows_k) {
+            std::size_t const span_count = min_of<std::size_t>(count - span_begin, rows_k);
+            for (std::size_t row = 0; row != rows_k; ++row) {
+                chunked_location_t const location = chunked_location( //
+                    candidates_data[min_of(span_begin + row, count - 1)].node_id);
+                span_vectors[row] = vector_for(location);
+                span_norms[row] = norm_for(location);
+            }
+
+            // The rectangle: this span against every kept tile frozen before it started,
+            // finalized into the pair matrix at the kept tile's column offset, span-local rows.
+            std::size_t const kept_tiles_frozen = kept_count / columns_k;
+            if (kept_tiles_frozen) {
+                for (std::size_t depth_tile = 0; depth_tile != depth_tiles; ++depth_tile)
+                    tiles_kit_t::gather_a_tile(a_tiles[depth_tile], span_vectors, depth_tile * depth_k);
+                for (std::size_t kept_tile = 0; kept_tile != kept_tiles_frozen; ++kept_tile) {
+                    for (std::size_t column = 0; column != columns_k; ++column)
+                        kept_tile_norms[column] = kept_norms[kept_tile * columns_k + column];
+                    tiles_kit_t::init_tile(accumulator);
+                    for (std::size_t depth_tile = 0; depth_tile != depth_tiles; ++depth_tile)
+                        tiles_kit_t::update_tile(accumulator, a_tiles[depth_tile],
+                                                 kept_tiles[kept_tile * depth_tiles + depth_tile]);
+                    tiles_kit_t::finalize_tile(accumulator, span_norms, kept_tile_norms, //
+                                               pairs + kept_tile * columns_k, stride);
+                }
+                computed_distances += span_count * kept_tiles_frozen * columns_k;
+            }
+
+            for (std::size_t row = 0; row != span_count && kept_count != limit; ++row) {
+                inner_scored_node_t const candidate = candidates_data[span_begin + row];
+                distance_t const* matrix_row = pairs + row * stride;
+                std::size_t const frozen_links = kept_tiles_frozen * columns_k;
+                small_size_t losses = 0;
+                for (std::size_t kept = 0; kept != frozen_links; ++kept)
+                    losses += matrix_row[kept] < candidate.distance;
+                // Links accepted after the rectangle froze score on the 4-way path, exactly
+                // like the vector sibling - the staging surface already holds them.
+                small_size_t fringe = static_cast<small_size_t>(frozen_links);
+                while (!losses && fringe != kept_count) {
+                    std::array<distance_t, 4> const fringe_distances = distances_quad_of( //
+                        span_vectors[row], span_norms[row], kept_vectors, kept_norms, fringe, kept_count);
+                    small_size_t const lanes_count = min_of<small_size_t>(kept_count - fringe, 4u);
+                    computed_distances += lanes_count;
+                    for (small_size_t lane = 0; lane != lanes_count; ++lane)
+                        losses += fringe_distances[lane] < candidate.distance;
+                    fringe += lanes_count;
+                }
+                if (losses) continue;
+                out[kept_count] = candidate;
+                kept_vectors[kept_count] = span_vectors[row];
+                kept_norms[kept_count] = span_norms[row];
+                ++kept_count;
+                // A sixteenth link completes a kept tile: gather → pack it once, through the
+                // same staging A-tile, and every later span streams it straight into updates.
+                if (kept_count % columns_k == 0) {
+                    std::size_t const kept_tile = kept_count / columns_k - 1;
+                    for (std::size_t column = 0; column != columns_k; ++column)
+                        kept_tile_vectors[column] = kept_vectors[kept_tile * columns_k + column];
+                    for (std::size_t depth_tile = 0; depth_tile != depth_tiles; ++depth_tile) {
+                        tiles_kit_t::gather_a_tile(a_tiles[0], kept_tile_vectors, depth_tile * depth_k);
+                        tiles_kit_t::pack_b_tile(a_tiles[0], kept_tiles[kept_tile * depth_tiles + depth_tile]);
+                    }
+                }
+            }
+        }
         (void)out.try_resize({kept_count});
         return computed_distances;
     }
