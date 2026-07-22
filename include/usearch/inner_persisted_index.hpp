@@ -1900,20 +1900,9 @@ struct inner_persisted_index {
         }
         std::array<distance_t, 4> scores = distances(slot.query, slot.query_norms, lane_vectors, lane_norms);
         context.computed_distances += fill;
-        if (fill == 4) {
-            std::array<inner_scored_node_t, 4> batch;
-            for (small_size_t lane = 0; lane != 4; ++lane)
-                batch[lane] = inner_scored_node_t {lane_nodes[lane], scores[lane]};
-            std::uint64_t accepted = slot.results.insert(batch, slot.pool_limit);
-            for (small_size_t lane = 0; lane != 4; ++lane)
-                if (accepted & (std::uint64_t {1} << lane))
-                    slot.frontier.insert_reserved(inner_scored_node_t(batch[lane]));
-        }
-        else {
-            for (small_size_t lane = 0; lane != fill; ++lane)
-                if (slot.results.insert(inner_scored_node_t {lane_nodes[lane], scores[lane]}, slot.pool_limit))
-                    slot.frontier.insert_reserved(inner_scored_node_t {lane_nodes[lane], scores[lane]});
-        }
+        for (small_size_t lane = 0; lane != fill; ++lane)
+            if (slot.results.insert(inner_scored_node_t {lane_nodes[lane], scores[lane]}, slot.pool_limit))
+                slot.frontier.insert_reserved(inner_scored_node_t {lane_nodes[lane], scores[lane]});
         for (small_size_t lane = 0; lane != fill; ++lane) context.release_buffer(slot.pending_scores[lane]);
         slot.pending_scores.clear();
     }

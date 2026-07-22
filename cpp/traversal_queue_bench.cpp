@@ -64,9 +64,10 @@ void bench_sorted_buffer_insert_n_separate(benchmark::State& state) {
     state.counters["batch_N"] = static_cast<double>(batch_size_);
 }
 
-/** @brief Apples-to-apples: one @c insert(std::array, limit) call per iteration. */
+/** @brief Apples-to-apples: sort the batch - the network for quads, the library beyond -
+ *      then one sorted-span @c insert(span, limit) call per iteration. */
 template <std::size_t batch_size_>
-void bench_sorted_buffer_insert_one_batch(benchmark::State& state) {
+void bench_sorted_buffer_insert_span(benchmark::State& state) {
     auto const limit = static_cast<std::size_t>(state.range(0));
     sorted_buffer<std::uint32_t> buffer;
     buffer.reserve(limit);
@@ -76,26 +77,9 @@ void bench_sorted_buffer_insert_one_batch(benchmark::State& state) {
     for (auto _ : state) {
         std::array<std::uint32_t, batch_size_> batch;
         for (auto& value : batch) value = random_generator();
-        benchmark::DoNotOptimize(buffer.insert(batch, limit));
-    }
-    state.SetItemsProcessed(state.iterations() * batch_size_);
-    state.counters["batch_N"] = static_cast<double>(batch_size_);
-}
-
-/** @brief Apples-to-apples: one @c insert_sorted(std::array, limit) call per iteration. */
-template <std::size_t batch_size_>
-void bench_sorted_buffer_insert_one_presorted(benchmark::State& state) {
-    auto const limit = static_cast<std::size_t>(state.range(0));
-    sorted_buffer<std::uint32_t> buffer;
-    buffer.reserve(limit);
-    std::mt19937 random_generator {0x5EEDu};
-    for (std::size_t i = 0; i < limit; ++i) buffer.insert(random_generator(), limit);
-
-    for (auto _ : state) {
-        std::array<std::uint32_t, batch_size_> batch;
-        for (auto& value : batch) value = random_generator();
-        std::sort(batch.begin(), batch.end());
-        benchmark::DoNotOptimize(buffer.insert_sorted(batch, limit));
+        if constexpr (batch_size_ <= 4) network_sort(std::span(batch));
+        else std::sort(batch.begin(), batch.end());
+        benchmark::DoNotOptimize(buffer.insert(std::span(batch), limit));
     }
     state.SetItemsProcessed(state.iterations() * batch_size_);
     state.counters["batch_N"] = static_cast<double>(batch_size_);
@@ -103,14 +87,11 @@ void bench_sorted_buffer_insert_one_presorted(benchmark::State& state) {
 
 BENCHMARK(bench_sorted_buffer_insert_one)->Arg(16)->Arg(64)->Arg(256);
 BENCHMARK_TEMPLATE(bench_sorted_buffer_insert_n_separate, 4)->Arg(64)->Arg(256);
-BENCHMARK_TEMPLATE(bench_sorted_buffer_insert_one_batch, 4)->Arg(64)->Arg(256);
-BENCHMARK_TEMPLATE(bench_sorted_buffer_insert_one_presorted, 4)->Arg(64)->Arg(256);
+BENCHMARK_TEMPLATE(bench_sorted_buffer_insert_span, 4)->Arg(64)->Arg(256);
 BENCHMARK_TEMPLATE(bench_sorted_buffer_insert_n_separate, 16)->Arg(64)->Arg(256);
-BENCHMARK_TEMPLATE(bench_sorted_buffer_insert_one_batch, 16)->Arg(64)->Arg(256);
-BENCHMARK_TEMPLATE(bench_sorted_buffer_insert_one_presorted, 16)->Arg(64)->Arg(256);
+BENCHMARK_TEMPLATE(bench_sorted_buffer_insert_span, 16)->Arg(64)->Arg(256);
 BENCHMARK_TEMPLATE(bench_sorted_buffer_insert_n_separate, 32)->Arg(64)->Arg(256);
-BENCHMARK_TEMPLATE(bench_sorted_buffer_insert_one_batch, 32)->Arg(64)->Arg(256);
-BENCHMARK_TEMPLATE(bench_sorted_buffer_insert_one_presorted, 32)->Arg(64)->Arg(256);
+BENCHMARK_TEMPLATE(bench_sorted_buffer_insert_span, 32)->Arg(64)->Arg(256);
 
 void bench_hash_set_set_one(benchmark::State& state) {
     auto const expected_size = static_cast<std::size_t>(state.range(0));

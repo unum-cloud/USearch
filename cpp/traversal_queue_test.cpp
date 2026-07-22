@@ -69,9 +69,9 @@ int check_sorted_buffer_single_element() noexcept {
 }
 
 /**
- *  @brief Parity of the batched @c insert(std::array,limit) against a full @c std::sort
- *      of (existing ∪ batch) truncated to the limit. Tested at batch sizes 4 and 16 to
- *      exercise both the hand-friendly case and the generic-template case.
+ *  @brief Parity of the sorted-span @c insert(span,limit) against a full @c std::sort of
+ *      (existing ∪ batch) truncated to the limit. Quad-sized batches pre-sort through
+ *      @c network_sort - auditing the network itself - wider ones through the library sort.
  */
 template <std::size_t batch_size_>
 int check_sorted_buffer_batch_parity(unsigned seed) noexcept {
@@ -89,7 +89,9 @@ int check_sorted_buffer_batch_parity(unsigned seed) noexcept {
     for (int step = 0; step < steps_k; ++step) {
         std::array<std::uint32_t, batch_size_> batch;
         for (auto& value : batch) value = distribution(random_generator);
-        tested.insert(batch, limit_k);
+        if constexpr (batch_size_ <= 4) network_sort(std::span(batch));
+        else std::sort(batch.begin(), batch.end());
+        tested.insert(std::span(batch), limit_k);
 
         for (std::uint32_t v : batch) oracle_flat.push_back(v);
         std::sort(oracle_flat.begin(), oracle_flat.end());
@@ -104,45 +106,6 @@ int check_sorted_buffer_batch_parity(unsigned seed) noexcept {
             if (tested.data()[i] != oracle_flat[i]) {
                 fmt::print(stderr, "FAIL sorted_buffer N={} parity step={} i={} tested={} oracle={}\n", batch_size_,
                            step, i, tested.data()[i], oracle_flat[i]);
-                return ++failures;
-            }
-    }
-    return failures;
-}
-
-/** @brief @c insert_sorted on a pre-sorted batch must match @c insert on the same unsorted batch. */
-template <std::size_t batch_size_>
-int check_sorted_buffer_insert_sorted_parity(unsigned seed) noexcept {
-    constexpr std::size_t limit_k = 64;
-    constexpr int steps_k = 400;
-    sorted_buffer<std::uint32_t> sorted_path;
-    sorted_buffer<std::uint32_t> unsorted_path;
-    sorted_path.reserve(2 * limit_k);
-    unsorted_path.reserve(2 * limit_k);
-
-    std::mt19937 random_generator {seed};
-    std::uniform_int_distribution<std::uint32_t> distribution(0, 1'000'000);
-
-    int failures = 0;
-    for (int step = 0; step < steps_k; ++step) {
-        std::array<std::uint32_t, batch_size_> batch;
-        for (auto& value : batch) value = distribution(random_generator);
-
-        std::array<std::uint32_t, batch_size_> presorted = batch;
-        std::sort(presorted.begin(), presorted.end());
-
-        unsorted_path.insert(batch, limit_k);
-        sorted_path.insert_sorted(presorted, limit_k);
-
-        if (unsorted_path.size() != sorted_path.size()) {
-            fmt::print(stderr, "FAIL insert_sorted N={} step={} sizes diverge sorted={} unsorted={}\n", batch_size_,
-                       step, sorted_path.size(), unsorted_path.size());
-            return ++failures;
-        }
-        for (std::size_t i = 0; i < sorted_path.size(); ++i)
-            if (sorted_path.data()[i] != unsorted_path.data()[i]) {
-                fmt::print(stderr, "FAIL insert_sorted N={} step={} i={} sorted={} unsorted={}\n", batch_size_, step, i,
-                           sorted_path.data()[i], unsorted_path.data()[i]);
                 return ++failures;
             }
     }
@@ -361,8 +324,6 @@ int main(void) {
     failures += check_sorted_buffer_single_element();
     failures += check_sorted_buffer_batch_parity<4>(0xABCD1234u);
     failures += check_sorted_buffer_batch_parity<16>(0x13572468u);
-    failures += check_sorted_buffer_insert_sorted_parity<4>(0xF00DBABEu);
-    failures += check_sorted_buffer_insert_sorted_parity<16>(0xDEADBEEFu);
 
     failures += check_hash_set_single_element();
     failures += check_hash_set_batch_parity<4>(0xFEEDFACEu);

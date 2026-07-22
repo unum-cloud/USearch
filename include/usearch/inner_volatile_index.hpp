@@ -76,6 +76,32 @@ template <                                                          //
     >
 struct inner_volatile_index;
 
+/** @brief The compiled-out default predicate of @c search_if: every check disappears, so the
+ *      unfiltered paths pay nothing for the predicate axis existing. */
+struct no_predicate_t {};
+
+/** @brief One quad's worth of predicate-admitted candidates - the output buffer handed to
+ *      batched @c search_if predicates, bounded by the distance kernels' fan-out. */
+using inner_admissions_t = fu::limited_array<inner_scored_node_t, 4>;
+
+/**
+ *  @brief Runs @p predicate over one scored quad, filling @p admissions with what it admits.
+ *
+ *  Callables come in two shapes, detected by signature: batched functors receive the whole
+ *  @p scored span and push admitted entries themselves - amortizing expensive external
+ *  checks across the 4-way gathers the scan already stages, with distances in view - while
+ *  per-node @c bool(inner_node_id_t) functors are walked lane by lane. @c no_predicate_t
+ *  never reaches here: its callers are compiled out whole.
+ */
+template <typename predicate_type_>
+inline void invoke_admission(predicate_type_& predicate, std::span<inner_scored_node_t const> scored,
+                             inner_admissions_t& admissions) noexcept {
+    if constexpr (requires { predicate(scored, admissions); }) predicate(scored, admissions);
+    else
+        for (inner_scored_node_t const candidate : scored)
+            if (predicate(candidate.node_id)) admissions.try_push_back(candidate);
+}
+
 /** @brief Per-thread traversal scratch: the candidate queues, the visited set, the link
  *      selection buffers, and the running telemetry counters - one instance per scanning thread. */
 template <                                          //
@@ -772,9 +798,12 @@ struct inner_volatile_index {
      *  space, so every call makes strict progress without retry budgets - the sampler is exact,
      *  not heuristic. Only transiently locked nodes are re-rolled, mirroring the traversal policy.
      */
-    template <synchronization_t synchronization_ = synchronization_t::concurrent_k>
+    template <synchronization_t synchronization_ = synchronization_t::concurrent_k,
+              typename predicate_type_ = no_predicate_t>
     bool sample_landmarks(vector_view_t query, vector_norms_t query_norms, node_id_t first_invisible_id,
-                          std::size_t expansion_factor, inner_traversal_context_t& context) noexcept {
+                          std::size_t expansion_factor, inner_traversal_context_t& context,
+                          predicate_type_&& predicate = predicate_type_ {}) noexcept {
+        constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, no_predicate_t>;
 
         results_array_t& results = context.results;
         frontier_queue_t& frontier = context.frontier;
@@ -819,11 +848,23 @@ struct inner_volatile_index {
         std::array<distance_t, 4> const landmark_distances = distances( //
             query, query_norms, landmarks_vectors, landmarks_norms);
         context.computed_distances += landmarks_in_batch;
-        for (small_size_t lane = 0; lane != landmarks_in_batch; ++lane) {
-            inner_scored_node_t const scored(landmarks_ids[lane], landmark_distances[lane]);
-            if (!frontier.insert(inner_scored_node_t(scored))) return false;
-            results.insert(inner_scored_node_t(scored), expansion_factor);
+        std::array<inner_scored_node_t, 4> landmarks_scored;
+        for (small_size_t lane = 0; lane != landmarks_in_batch; ++lane)
+            landmarks_scored[lane] = inner_scored_node_t(landmarks_ids[lane], landmark_distances[lane]);
+        std::span const scored = std::span(landmarks_scored).first(landmarks_in_batch);
+        network_sort(scored, inner_closer_scored_node_t {});
+
+        // Matching landmarks enter the admitted pool right here: they are marked visited, so
+        // the walk never re-scores them and this is their one admission opportunity.
+        if constexpr (predicated_k) {
+            inner_admissions_t admissions;
+            invoke_admission(predicate, scored, admissions);
+            network_sort(std::span(admissions), inner_closer_scored_node_t {});
+            context.refining_candidates.insert(std::span(admissions), expansion_factor);
         }
+        results.insert(scored, expansion_factor);
+        for (small_size_t lane = 0; lane != landmarks_in_batch; ++lane)
+            if (!frontier.insert(inner_scored_node_t(scored[lane]))) return false;
         return true;
     }
 
@@ -838,10 +879,16 @@ struct inner_volatile_index {
      *  @param[in] expansion_factor Breadth of the candidate pool - the walk's stopping radius.
      *  @param[inout] context Scratch & telemetry; must arrive pre-reserved & pre-cleared, and ends
      *      with up to @p expansion_factor nearest published candidates in @c context.results.
+     *  @param[in] predicate Optional admission filter - see @c search_if. Non-matching nodes
+     *      still score and route the walk; only matching ones enter @c context.refining_candidates,
+     *      whose radius governs termination once that pool fills.
      */
-    template <synchronization_t synchronization_ = synchronization_t::concurrent_k>
+    template <synchronization_t synchronization_ = synchronization_t::concurrent_k,
+              typename predicate_type_ = no_predicate_t>
     void search_around(vector_view_t query, vector_norms_t query_norms, node_id_t first_invisible_id,
-                       std::size_t expansion_factor, inner_traversal_context_t& context) noexcept {
+                       std::size_t expansion_factor, inner_traversal_context_t& context,
+                       predicate_type_&& predicate = predicate_type_ {}) noexcept {
+        constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, no_predicate_t>;
 
         results_array_t& results = context.results;
         frontier_queue_t& frontier = context.frontier;
@@ -852,7 +899,8 @@ struct inner_volatile_index {
         // gathered in 4-way batches to amortize the loop overhead over unrolled "gathers".
         small_size_t const landmark_batches = divide_round_up<small_size_t>(node_connectivity, 4);
         for (small_size_t landmarks_batch = 0; landmarks_batch != landmark_batches; ++landmarks_batch)
-            if (!sample_landmarks<synchronization_>(query, query_norms, first_invisible_id, expansion_factor, context))
+            if (!sample_landmarks<synchronization_>(query, query_norms, first_invisible_id, expansion_factor, context,
+                                                    predicate))
                 break;
 
         // Greedily walk the frontier nearest-first, keeping the best `expansion_factor` in `results`.
@@ -864,9 +912,13 @@ struct inner_volatile_index {
             // `visited` (bounded by the published set) and `results` (bounded by the expansion
             // factor), so restarts are self-limiting by construction.
             if (frontier.empty()) {
-                if (results.size() >= expansion_factor) break;
+                // A predicated walk re-seeds until the admitted pool fills - matches may hide in
+                // regions the drained frontier never reached - still self-limited by the visited
+                // set's growth toward the published id space.
+                std::size_t const filled = predicated_k ? context.refining_candidates.size() : results.size();
+                if (filled >= expansion_factor) break;
                 if (!sample_landmarks<synchronization_>(query, query_norms, first_invisible_id, expansion_factor,
-                                                        context))
+                                                        context, predicate))
                     break;
                 ++context.restarts;
                 continue;
@@ -875,11 +927,24 @@ struct inner_volatile_index {
             // Peek - don't pop yet: the chosen node's neighbor list may be locked, in which case
             // we retry the selection rather than dropping it from the frontier.
             inner_scored_node_t const candidate = frontier.top();
-            // `results` stays sorted ascending, so its back is the furthest kept - our search radius.
-            distance_t const radius = results.top().distance;
-            // Once the nearest unexpanded node is past that radius and `results` is full,
-            // nothing deeper can improve the answer.
-            if (candidate.distance > radius && results.size() == expansion_factor) break;
+            if constexpr (predicated_k) {
+                // A predicated walk switches to the admitted pool's radius once that pool
+                // fills: matches are sparser than nodes, so that radius is the wider one and
+                // the walk runs deeper; until it fills, the navigation radius keeps the
+                // frontier honest.
+                results_array_t const& matches = context.refining_candidates;
+                bool const matches_full = matches.size() == expansion_factor;
+                if (matches_full && candidate.distance > matches.top().distance) break;
+                if (!matches_full && results.size() == expansion_factor && candidate.distance > results.top().distance)
+                    break;
+            }
+            else {
+                // `results` stays sorted ascending, so its back is the furthest kept - our search radius.
+                distance_t const radius = results.top().distance;
+                // Once the nearest unexpanded node is past that radius and `results` is full,
+                // nothing deeper can improve the answer.
+                if (candidate.distance > radius && results.size() == expansion_factor) break;
+            }
 
             chunked_location_t const candidate_location = chunked_location(candidate.node_id);
             neighbors_list_ref<synchronization_> const candidate_neighbors = neighbors_for<synchronization_>( //
@@ -942,37 +1007,37 @@ struct inner_volatile_index {
                 std::array<distance_t, 4> const gathered_distances = distances( //
                     query, query_norms, gathered_vectors, gathered_norms);
                 context.computed_distances += gathered_count;
+                std::array<inner_scored_node_t, 4> scored_batch;
+                for (small_size_t lane = 0; lane != gathered_count; ++lane)
+                    scored_batch[lane] = inner_scored_node_t(gathered_ids[lane], gathered_distances[lane]);
+                std::span const scored = std::span(scored_batch).first(gathered_count);
+                network_sort(scored, inner_closer_scored_node_t {});
+
+                // Predicate admission is independent of navigation: a matching node enters the
+                // admitted pool even when the navigation pool rejects it, and a non-matching
+                // node keeps routing - filtering the walk itself would strand it in islands.
+                // The re-sort only normalizes what a reordering predicate may hand back - for
+                // order-preserving ones the network fires no exchanges.
+                if constexpr (predicated_k) {
+                    inner_admissions_t admissions;
+                    invoke_admission(predicate, scored, admissions);
+                    network_sort(std::span(admissions), inner_closer_scored_node_t {});
+                    context.refining_candidates.insert(std::span(admissions), expansion_factor);
+                }
 
                 // Grow the visited set ahead of the marks - `set()` itself never rehashes.
+                // Full quads - the hot case - mark all four lanes in one interleaved probe sweep.
                 if (!visited.reserve(visited.size() + gathered_count)) return;
+                if (gathered_count == gathered_ids.size()) visited.set(gathered_ids);
+                else
+                    for (small_size_t lane = 0; lane != gathered_count; ++lane) visited.set(gathered_ids[lane]);
 
-                // Full quads - the hot case - mark all four lanes in one interleaved probe
-                // sweep, then merge into the pool with one batched top-k insert: "top-k of
-                // (existing ∪ batch)" keeps candidates that cascading single inserts wrongly
-                // reject, and the accept mask gates the frontier with the post-merge truth
-                // instead of a pre-insert radius bound.
-                if (gathered_count == gathered_ids.size()) {
-                    visited.set(gathered_ids);
-                    std::array<inner_scored_node_t, 4> scored_batch;
-                    for (small_size_t lane = 0; lane != scored_batch.size(); ++lane)
-                        scored_batch[lane] = inner_scored_node_t(gathered_ids[lane], gathered_distances[lane]);
-                    std::uint64_t const accepted = results.insert(scored_batch, expansion_factor);
-                    for (small_size_t lane = 0; lane != scored_batch.size(); ++lane)
-                        if (accepted & (std::uint64_t {1} << lane))
-                            if (!frontier.insert(inner_scored_node_t(scored_batch[lane]))) return;
-                    continue;
-                }
-
-                // The rare partial tail quad falls back to single-element inserts - padding a
-                // batched insert would pollute a not-yet-full pool with duplicate lanes.
-                for (small_size_t lane = 0; lane != gathered_count; ++lane) {
-                    visited.set(gathered_ids[lane]);
-                    inner_scored_node_t const scored(gathered_ids[lane], gathered_distances[lane]);
-                    // Skip candidates that can't improve a full result pool - the classic bound.
-                    if (results.size() == expansion_factor && scored.distance >= results.top().distance) continue;
-                    if (!frontier.insert(inner_scored_node_t(scored))) return;
-                    results.insert(inner_scored_node_t(scored), expansion_factor);
-                }
+                // One merge folds the ascending quad into the pool; the accepted entries are
+                // its prefix - the top-expansion-of-the-union truth - and only they enter the
+                // frontier.
+                std::size_t const accepted_count = results.insert(scored, expansion_factor);
+                for (small_size_t lane = 0; lane != accepted_count; ++lane)
+                    if (!frontier.insert(inner_scored_node_t(scored[lane]))) return;
             }
         }
     }
@@ -1742,21 +1807,30 @@ struct inner_volatile_index {
         explicit operator bool() const noexcept { return status == status_t::success_k; }
     };
 
-    /** @brief The compile-time form of @c search(): one whole-traversal instantiation per
-     *      @p synchronization_ contract, so the exclusive form carries no atomics at all. */
-    template <synchronization_t synchronization_>
+    /** @brief The compile-time form of @c search() & @c search_if(): one whole-traversal
+     *      instantiation per @p synchronization_ contract, so the exclusive form carries no
+     *      atomics at all, and per predicate type, so @c no_predicate_t compiles every
+     *      admission check out of the unfiltered paths. */
+    template <synchronization_t synchronization_, typename predicate_type_ = no_predicate_t>
     search_result_t search_typed(vector_view_t query_vector, inner_traversal_context_t& context,
-                                 search_config_t config = {}) noexcept {
+                                 search_config_t config = {},
+                                 predicate_type_&& predicate = predicate_type_ {}) noexcept {
+        constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, no_predicate_t>;
 
         std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
                                                                      : connectivity() * 2;
 
         // Same load-bearing reservations as in `insert`: the scratch structures never grow on
-        // their own mid-traversal.
+        // their own mid-traversal. A predicated walk also owns the admitted pool - the
+        // re-selection buffer, idle during any search - sized to the same expansion.
         if (!context.results.reserve(expansion_factor) ||       //
             !context.frontier.reserve(expansion_factor * 4u) || //
             !context.visited.reserve(expansion_factor * 4u))
             return {status_t::bad_alloc_k};
+        if constexpr (predicated_k) {
+            if (!context.refining_candidates.reserve(expansion_factor)) return {status_t::bad_alloc_k};
+            context.refining_candidates.clear();
+        }
         context.results.clear();
         context.frontier.clear();
         context.visited.clear();
@@ -1776,7 +1850,13 @@ struct inner_volatile_index {
         std::size_t const restarts_before = context.restarts;
 
         vector_norms_t const query_norms = inner_norms(query_vector);
-        search_around<synchronization_>(query_vector, query_norms, first_invisible_id, expansion_factor, context);
+        search_around<synchronization_>(query_vector, query_norms, first_invisible_id, expansion_factor, context,
+                                        std::forward<predicate_type_>(predicate));
+
+        // The result contract is one pool: matches always land in `context.results`, so a
+        // predicated walk swaps its admitted pool into place - both are the same buffer type,
+        // and the navigation leftovers get cleared by whichever call reuses that scratch next.
+        if constexpr (predicated_k) std::swap(context.results, context.refining_candidates);
 
         search_result_t result;
         result.count = context.results.size();
@@ -1809,6 +1889,45 @@ struct inner_volatile_index {
         if (config.synchronization != synchronization_t::concurrent_k)
             return search_typed<synchronization_t::immutable_k>(query_vector, context, config);
         return search_typed<synchronization_t::concurrent_k>(query_vector, context, config);
+    }
+
+    /**
+     *  @brief Finds the nearest published neighbors of @p query_vector that satisfy
+     *      @p predicate - the filtered sibling of @c search, sharing its whole contract.
+     *
+     *  Non-matching nodes still score and route the walk - filtering navigation itself would
+     *  strand it in disconnected islands - but only matching nodes enter the reported pool,
+     *  whose radius governs termination once it holds @c expansion_factor entries; until then
+     *  the ordinary navigation radius bounds the frontier. Predicates come in two shapes,
+     *  detected by signature: per-node @c bool(inner_node_id_t), or batched - receiving the
+     *  scored quad and an admissions buffer, pushing what it admits:
+     *
+     *  @code{.cpp}
+     *  index.search_if(query, [&](std::span<inner_scored_node_t const> scored, auto& admitted) {
+     *      for (inner_scored_node_t candidate : scored)
+     *          if (labels[candidate.node_id] == wanted) admitted.try_push_back(candidate);
+     *  }, context);
+     *  @endcode
+     *
+     *  The batch amortizes expensive external checks across the 4-way gathers the scan
+     *  already stages, with distances in view - so radius cut-offs are just predicates.
+     *  Each node is tested at most once per query: the exact visited set is the predicate's
+     *  memoization. With a trivially-true predicate the results match @c search exactly.
+     *
+     *  @param[in] query_vector The query, in the index's own dtype & frozen dimensionality.
+     *  @param[in] predicate The admission filter, called with published node ids only.
+     *  @param[inout] context The calling thread's scratch & telemetry: the matches end up in
+     *      @c context.results, ascending by distance - the nearest first.
+     *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
+     */
+    template <typename predicate_type_>
+    search_result_t search_if(vector_view_t query_vector, predicate_type_&& predicate,
+                              inner_traversal_context_t& context, search_config_t config = {}) noexcept {
+        if (config.synchronization != synchronization_t::concurrent_k)
+            return search_typed<synchronization_t::immutable_k>(query_vector, context, config,
+                                                                std::forward<predicate_type_>(predicate));
+        return search_typed<synchronization_t::concurrent_k>(query_vector, context, config,
+                                                             std::forward<predicate_type_>(predicate));
     }
 
     /** @brief The class-local spelling of the shared, template-independent

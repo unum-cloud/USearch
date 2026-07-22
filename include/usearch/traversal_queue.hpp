@@ -15,6 +15,7 @@
 #include <algorithm>   // `std::lower_bound`, `std::sort_heap`, `std::min`, `std::max`
 #include <array>       // `std::array` - batch-of-four overloads
 #include <cstddef>     // `std::size_t`
+#include <span>        // `std::span` - the sorted-batch insert argument
 #include <cstdint>     // `SIZE_MAX`, `std::uint8_t`
 #include <cstring>     // `std::memcpy`, `std::memset`
 #include <functional>  // `std::less`, `std::hash`
@@ -76,6 +77,27 @@ inline element_type_ default_free_value() noexcept {
     static_assert(std::is_integral<element_type_>::value,
                   "`growing_hash_set` requires an integral element type for its sentinel convention");
     return (std::numeric_limits<element_type_>::max)();
+}
+
+/**
+ *  @brief Sorts up to four @p values ascending by @p comparator_type_ through fully-unrolled
+ *      sorting networks - no loops, no recursion, no library sort; the four-element network
+ *      is the optimal five compare-exchanges.
+ *
+ *  Exchanges fire only on strict inversions, so equal elements keep their original order -
+ *  the stability the sorted-batch @c sorted_buffer::insert relies on for reproducible ties.
+ */
+template <typename element_type_, std::size_t extent_, typename comparator_type_ = std::less<void>>
+inline void network_sort(std::span<element_type_, extent_> values, comparator_type_ comparator = {}) noexcept {
+    auto exchange = [&](std::size_t left, std::size_t right) noexcept {
+        if (comparator(values[right], values[left])) std::swap(values[left], values[right]);
+    };
+    switch (values.size()) {
+    case 4: exchange(0, 1), exchange(2, 3), exchange(0, 2), exchange(1, 3), exchange(1, 2); return;
+    case 3: exchange(0, 1), exchange(0, 2), exchange(1, 2); return;
+    case 2: exchange(0, 1); return;
+    default: return; // Zero or one element is sorted by definition.
+    }
 }
 
 /**
@@ -612,9 +634,7 @@ class sorted_buffer {
 
     inline void insert_reserved(element_t&& element) noexcept {
         std::size_t slot = size_ ? std::lower_bound(elements_, elements_ + size_, element, &less) - elements_ : 0;
-        std::size_t to_move = size_ - slot;
-        element_t* source = elements_ + size_ - 1;
-        for (; to_move; --to_move, --source) source[1] = source[0];
+        shift_right(slot, size_);
         elements_[slot] = element;
         size_++;
     }
@@ -630,157 +650,47 @@ class sorted_buffer {
     inline bool insert(element_t&& element, std::size_t limit) noexcept {
         if (size_ == limit && !less(element, elements_[size_ - 1])) return false;
         std::size_t slot = size_ ? std::lower_bound(elements_, elements_ + size_, element, &less) - elements_ : 0;
-        std::size_t to_move = size_ - slot - (size_ == limit);
-        element_t* source = elements_ + size_ - 1 - (size_ == limit);
-        for (; to_move; --to_move, --source) source[1] = source[0];
+        shift_right(slot, size_ - (size_ == limit));
         elements_[slot] = element;
         size_ += size_ != limit;
         return true;
     }
 
     /**
-     *  @brief Merge a batch of @c batch_size_ candidates into the buffer in a single pass.
-     *  @return 64-bit mask - bit @c i is set iff @c batch[i] ended up in the buffer.
+     *  @brief Merges an ascending pre-sorted @p batch into the buffer in one back-to-front
+     *      pass, keeping the top @p limit of the union - existing elements win ties.
+     *  @return The number of accepted @p batch entries - always a @b prefix of the ascending
+     *      batch, since any rejected entry rejects everything at or above it.
      *
-     *  Semantically "take the top @c limit of (existing ∪ batch)" - the HNSW top-k
-     *  semantic, which can keep candidates that @c batch_size_ cascading single-element
-     *  inserts would reject due to intermediate buffer-top shrinkage.
-     *
-     *  When the buffer is full a partition step first scans the batch against the current
-     *  top and discards entries that can't beat it - exactly the same O(1) reject the
-     *  single-element @ref insert benefits from, applied to all @c batch_size_ lanes in
-     *  one O(N) sweep. If every entry loses we return immediately without sorting or
-     *  shifting anything. When some entries survive we presort and merge only those
-     *  s ≤ N survivors, dropping the sort cost from O(N log N) to O(s log s) and
-     *  the merge work to O(s + size). For all-reject HNSW steady state this collapses
-     *  to a fixed cost per batch independent of the buffer's contents.
-     *
-     *  Callers that can supply a pre-sorted batch (distances already sorted out of a
-     *  SIMD kernel) should reach for @ref insert_sorted - it bypasses both the
-     *  partition and the presort.
+     *  The caller owns the ordering: micro-batches out of the 4-way kernels sort in a few
+     *  compare-exchanges via @ref network_sort, never a library sort. One merge pass costs
+     *  O(accepted + shifted) element moves - no per-element search, no intermediate state.
      */
-    template <std::size_t batch_size_>
-    inline std::uint64_t insert(std::array<element_t, batch_size_> const& batch_in, std::size_t limit) noexcept {
-        static_assert(batch_size_ > 0 && batch_size_ <= 64, "Batch size must fit the uint64 return mask");
-        struct indexed_element_t {
-            element_t value;
-            std::uint8_t lane;
-        };
-        std::array<indexed_element_t, batch_size_> survivors;
-        std::size_t survivor_count = 0;
-
-        if (size_ == limit) {
-            // Partition: keep only batch entries that beat the current top.
-            element_t const& current_top = elements_[size_ - 1];
-            for (std::size_t lane = 0; lane < batch_size_; ++lane)
-                if (less(batch_in[lane], current_top)) {
-                    survivors[survivor_count].value = batch_in[lane];
-                    survivors[survivor_count].lane = static_cast<std::uint8_t>(lane);
-                    ++survivor_count;
-                }
-            if (survivor_count == 0) return 0; // O(N) all-reject return - no sort, no shift
-        }
-        else {
-            // Buffer not yet full - every batch entry is a candidate.
-            for (std::size_t lane = 0; lane < batch_size_; ++lane) {
-                survivors[lane].value = batch_in[lane];
-                survivors[lane].lane = static_cast<std::uint8_t>(lane);
-            }
-            survivor_count = batch_size_;
-        }
-
-        std::sort(survivors.begin(), survivors.begin() + survivor_count,
-                  [](indexed_element_t const& first, indexed_element_t const& second) noexcept {
-                      return less(first.value, second.value);
-                  });
-
-        std::size_t const total = size_ + survivor_count;
-        std::size_t const new_size = (total < limit) ? total : limit;
+    inline std::size_t insert(std::span<element_t const> batch, std::size_t limit) noexcept {
+        std::size_t const count = batch.size();
+        std::size_t const total = size_ + count;
+        std::size_t const new_size = total < limit ? total : limit;
         std::size_t const drop = total - new_size;
         std::size_t existing_tail = size_;
-        std::size_t batch_tail = survivor_count;
-        std::uint64_t accepted_sorted = (survivor_count == 64) //
-                                            ? static_cast<std::uint64_t>(~std::uint64_t {0})
-                                            : ((std::uint64_t {1} << survivor_count) - 1);
+        std::size_t batch_tail = count;
 
-        // Drop phase - evict the `drop` largest elements from (existing ∪ survivors).
-        for (std::size_t iteration = 0; iteration < drop; ++iteration) {
-            bool const pop_batch = (existing_tail == 0) || (batch_tail > 0 && less(elements_[existing_tail - 1],
-                                                                                   survivors[batch_tail - 1].value));
-            if (pop_batch) {
-                accepted_sorted &= ~(std::uint64_t {1} << (batch_tail - 1));
-                --batch_tail;
-            }
-            else { --existing_tail; }
-        }
-        // Merge phase - write the remaining `new_size` entries from back to front.
-        std::size_t write_index = new_size;
-        while (write_index > 0 && batch_tail > 0) {
-            bool const pick_batch = (existing_tail == 0) ||
-                                    less(elements_[existing_tail - 1], survivors[batch_tail - 1].value);
-            --write_index;
-            if (pick_batch) {
-                elements_[write_index] = survivors[batch_tail - 1].value;
-                --batch_tail;
-            }
-            else {
-                elements_[write_index] = elements_[existing_tail - 1];
-                --existing_tail;
-            }
-            if (batch_tail == 0 && existing_tail == write_index) break;
-        }
-        size_ = new_size;
-
-        // Remap sorted-survivors acceptance bits back to caller's original lane positions.
-        std::uint64_t out = 0;
-        for (std::size_t sorted_index = 0; sorted_index < survivor_count; ++sorted_index)
-            if (accepted_sorted & (std::uint64_t {1} << sorted_index))
-                out |= std::uint64_t {1} << survivors[sorted_index].lane;
-        return out;
-    }
-
-    /**
-     *  @brief Merge a pre-sorted (ascending) batch into the buffer in a single pass.
-     *  @return 64-bit mask - bit @c i is set iff @c batch[i] ended up in the buffer.
-     *
-     *  Identical to @ref insert(std::array, limit) but assumes the caller has already
-     *  sorted @p batch ascending by @c comparator_t. Skips the presort entirely, saving
-     *  O(N log N) comparisons. No permutation tracking is needed since the caller's
-     *  lane @c i corresponds directly to the batch's @c i-th ascending position.
-     */
-    template <std::size_t batch_size_>
-    inline std::uint64_t insert_sorted(std::array<element_t, batch_size_> const& batch, std::size_t limit) noexcept {
-        static_assert(batch_size_ > 0 && batch_size_ <= 64, "Batch size must fit the uint64 return mask");
-        std::size_t const total = size_ + batch_size_;
-        std::size_t const new_size = (total < limit) ? total : limit;
-        std::size_t const drop = total - new_size;
-        std::size_t existing_tail = size_;
-        std::size_t batch_tail = batch_size_;
-        std::uint64_t accepted = (batch_size_ == 64)                                  //
-                                     ? static_cast<std::uint64_t>(~std::uint64_t {0}) //
-                                     : ((std::uint64_t {1} << batch_size_) - 1);
-
-        for (std::size_t iteration = 0; iteration < drop; ++iteration) {
-            bool const pop_batch = (existing_tail == 0) ||
+        // Drop phase - discard the `drop` largest of (existing ∪ batch) from the tails.
+        for (std::size_t iteration = 0; iteration != drop; ++iteration) {
+            bool const pop_batch = existing_tail == 0 ||
                                    (batch_tail > 0 && less(elements_[existing_tail - 1], batch[batch_tail - 1]));
-            if (pop_batch) {
-                accepted &= ~(std::uint64_t {1} << (batch_tail - 1));
-                --batch_tail;
-            }
-            else { --existing_tail; }
+            if (pop_batch) --batch_tail;
+            else --existing_tail;
         }
+        std::size_t const accepted = batch_tail;
+
+        // Merge phase - write the surviving `new_size` entries from back to front.
         std::size_t write_index = new_size;
         while (write_index > 0 && batch_tail > 0) {
-            bool const pick_batch = (existing_tail == 0) || less(elements_[existing_tail - 1], batch[batch_tail - 1]);
+            bool const pick_batch = existing_tail == 0 || //
+                                    less(elements_[existing_tail - 1], batch[batch_tail - 1]);
             --write_index;
-            if (pick_batch) {
-                elements_[write_index] = batch[batch_tail - 1];
-                --batch_tail;
-            }
-            else {
-                elements_[write_index] = elements_[existing_tail - 1];
-                --existing_tail;
-            }
+            if (pick_batch) elements_[write_index] = batch[--batch_tail];
+            else elements_[write_index] = elements_[--existing_tail];
             if (batch_tail == 0 && existing_tail == write_index) break;
         }
         size_ = new_size;
@@ -803,6 +713,14 @@ class sorted_buffer {
 
   private:
     static bool less(element_t const& a, element_t const& b) noexcept { return comparator_t {}(a, b); }
+
+    /** @brief Opens a slot at @p slot by moving the [@p slot, @p tail) range one position
+     *      right, back to front, so the overlap never clobbers unread elements. */
+    void shift_right(std::size_t slot, std::size_t tail) noexcept {
+        std::size_t to_move = tail - slot;
+        element_t* source = elements_ + tail - 1;
+        for (; to_move; --to_move, --source) source[1] = source[0];
+    }
 };
 
 /**

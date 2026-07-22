@@ -51,20 +51,15 @@ struct inner_scored_node_t {
     inner_distance_t distance;
 };
 
-/** @brief Orders scored nodes nearest-first; the comparator of the sorted results pool.
- *      The flag publishes that this order is the ascending order of each packed element's
- *      high 32 bits read as @c f32 - the contract SIMD container siblings key on. */
+/** @brief Orders scored nodes nearest-first; the comparator of the sorted results pool. */
 struct inner_closer_scored_node_t {
-    static constexpr bool ascends_by_high_f32_bits_k = true;
     inline bool operator()(inner_scored_node_t a, inner_scored_node_t b) const noexcept {
         return a.distance < b.distance;
     }
 };
 
-/** @brief Orders scored nodes furthest-first; the comparator of the max-heap frontier.
- *      The flag mirrors @c inner_closer_scored_node_t for the descending direction. */
+/** @brief Orders scored nodes furthest-first; the comparator of the max-heap frontier. */
 struct inner_further_scored_node_t {
-    static constexpr bool descends_by_high_f32_bits_k = true;
     inline bool operator()(inner_scored_node_t a, inner_scored_node_t b) const noexcept {
         return a.distance > b.distance;
     }

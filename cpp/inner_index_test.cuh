@@ -24,7 +24,9 @@
 #include <algorithm> // `std::sort`, `std::unique`
 #include <array>     // `std::array`
 #include <atomic>    // `std::atomic`
+#include <bit>       // `std::bit_cast` - the ULP distance of the oracle audits
 #include <chrono>    // `std::chrono::microseconds`
+#include <cstdlib>   // `std::abs`
 #include <thread>    // `std::this_thread::sleep_for`
 #include <vector>    // `std::vector`
 
@@ -34,6 +36,7 @@
 #include <numkong/numkong.hpp>
 
 #include "test.hpp"
+#include "usearch/inner_metric.hpp" // `usearch::distance`, `usearch::inner_norms` - the oracle's kernels
 #include "usearch/types.hpp"
 
 namespace unum {
@@ -213,6 +216,139 @@ static std::size_t test_growth_and_recall(make_index_type_ const& make_index) {
     return failures_count;
 }
 
+/**
+ *  @brief The predicated search contract, audited against an exact oracle.
+ *
+ *  The oracle scans every stored vector through the same free kernels the index picked -
+ *  @c picked_quads_capability_k - so its distances are bit-identical to the traversal's and
+ *  the checks can be exact where approximation permits: a trivially-true predicate must
+ *  reproduce @c search verbatim; every reported id must satisfy its predicate and carry the
+ *  oracle's distance for that id, bit-for-bit; the per-node and batched callable shapes must
+ *  agree; excluded self-matches must never surface; recall of the true filtered nearest is
+ *  held to the same bar as the unfiltered suite across three selectivity decades - every
+ *  other node, one in 16, and one in 64; and an impossible predicate drains legally.
+ */
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+static std::size_t test_predicated_search(make_index_type_ const& make_index) {
+    using scalar_t = typename index_type_::scalar_t;
+    constexpr nk_capability_t caps_k = index_type_::picked_quads_capability_k;
+    std::size_t failures_count = 0;
+    allocation_ledger_t ledger;
+    {
+        index_type_ index = make_index(ledger);
+        typename index_type_::inner_traversal_context_t context {{}};
+        auto vectors = make_vectors<scalar_t>(growth_nodes_count_k, dimensions_for<scalar_t>(test_values_k), 7071);
+
+        failures_count += expect(
+            index.reserve({growth_nodes_count_k, connectivity_16_k, dimensions_for<scalar_t>(test_values_k)}).status ==
+            status_t::success_k);
+        std::vector<inner_node_id_t> assigned_ids(growth_nodes_count_k);
+        failures_count += expect(
+            index.insert(vectors.view(), {assigned_ids.data(), assigned_ids.size()}, context).status ==
+            status_t::success_k);
+
+        // The oracle: distances of one query against the whole store, through the very 4-way
+        // kernels the traversal dispatches. Closeness follows the metric suite's convention -
+        // relative 1e-3 - because the fast-math build legally re-derives float finalizes per
+        // inlining context; integer-cored euclidean matches exactly anyway, and a wrong id or
+        // vector diverges by orders of magnitude, which is what this audit exists to catch.
+        auto close_enough = [](inner_distance_t actual, inner_distance_t expected) noexcept {
+            f32_t const scale = std::fmax(std::fmax(std::fabs(actual), std::fabs(expected)), 1.0f);
+            return std::fabs(actual - expected) <= 1e-3f * scale;
+        };
+        auto oracle_distance = [&](std::size_t query_row, inner_node_id_t node_id) noexcept {
+            auto query_view = vectors.view().row(query_row).as_vector();
+            auto node_view = vectors.view().row(node_id).as_vector();
+            auto node_norms = usearch::inner_norms<kernel_, caps_k, scalar_t>(node_view);
+            auto lane_distances = usearch::distances<kernel_, caps_k, scalar_t>(
+                query_view, usearch::inner_norms<kernel_, caps_k, scalar_t>(query_view),
+                {node_view, node_view, node_view, node_view}, {node_norms, node_norms, node_norms, node_norms});
+            return lane_distances[0];
+        };
+        // The stochastic landmark seeding rides the context's persistent generator, so exact
+        // walk parity is only defined between FRESH contexts with identical generator state.
+        std::size_t const query_row = growth_nodes_count_k / 2;
+        auto query = vectors.view().row(query_row).as_vector();
+        typename index_type_::inner_traversal_context_t unfiltered_context {{}};
+        auto unfiltered = index.search(query, unfiltered_context);
+        failures_count += expect(unfiltered.status == status_t::success_k && unfiltered.count > 0);
+        inner_scored_node_t const* reference = unfiltered_context.results.data();
+
+        // The trivially-true predicate walks and reports exactly like the unfiltered sibling.
+        auto all_pass = [](inner_node_id_t) noexcept { return true; };
+        typename index_type_::inner_traversal_context_t all_pass_context {{}};
+        auto with_true = index.search_if(query, all_pass, all_pass_context);
+        failures_count += expect_eq(with_true.count, unfiltered.count);
+        for (std::size_t match = 0; match != with_true.count && match != unfiltered.count; ++match) {
+            failures_count += expect_eq(all_pass_context.results.data()[match].node_id, reference[match].node_id);
+            failures_count += expect(all_pass_context.results.data()[match].distance == reference[match].distance);
+        }
+
+        // The batched shape must agree with the per-node shape on the same walk.
+        auto even_only = [](inner_node_id_t node_id) noexcept { return node_id % 2 == 0; };
+        auto even_batched = [](std::span<inner_scored_node_t const> scored, auto& admitted) noexcept {
+            for (inner_scored_node_t const candidate : scored)
+                if (candidate.node_id % 2 == 0) admitted.try_push_back(candidate);
+        };
+        typename index_type_::inner_traversal_context_t scalar_context {{}}, batched_context {{}};
+        auto with_scalar = index.search_if(query, even_only, scalar_context);
+        auto with_batched = index.search_if(query, even_batched, batched_context);
+        failures_count += expect(with_scalar.status == status_t::success_k && with_scalar.count > 0);
+        failures_count += expect_eq(with_batched.count, with_scalar.count);
+        for (std::size_t match = 0; match != with_batched.count && match != with_scalar.count; ++match)
+            failures_count += expect_eq(batched_context.results.data()[match].node_id,
+                                        scalar_context.results.data()[match].node_id);
+
+        // Three selectivity decades over sampled queries: every reported id satisfies its
+        // predicate and carries the oracle's distance bit-for-bit; distances ascend; a query
+        // whose own id is excluded never surfaces itself. Even samples query a matching row -
+        // the filtered analog of the suite's self-recall bar, scored per decade on the two
+        // denser ones; odd samples query an excluded row, auditing admission purity. The
+        // sparsest decade is exactness-audited only: recall there belongs to the future
+        // cardinality-driven brute-force crossover, not the graph walk.
+        std::size_t const moduli[] = {2, 16, 64};
+        std::size_t hits = 0, recall_samples = 0;
+        for (std::size_t modulus : moduli) {
+            auto matches = [modulus](inner_node_id_t node_id) noexcept { return node_id % modulus == 0; };
+            for (std::size_t sample = 0; sample != 8; ++sample) {
+                std::size_t sampled_row = ((sample * 641 + modulus) % growth_nodes_count_k) / modulus * modulus;
+                if (sample % 2) sampled_row += 1; // An excluded neighbor of a matching row.
+                typename index_type_::inner_traversal_context_t sampled_context {{}};
+                auto found = index.search_if(vectors.view().row(sampled_row).as_vector(), matches, sampled_context);
+                bool const self_matches = sampled_row % modulus == 0;
+                // The sparsest decade may legally drain empty on excluded-row queries: until
+                // the admitted pool fills, the navigation radius bounds the walk, and no match
+                // needs to fall inside it. A matching self is always near enough to admit.
+                failures_count += expect(found.status == status_t::success_k);
+                failures_count += expect(found.count > 0 || (modulus == 64 && !self_matches));
+                inner_scored_node_t const* results = sampled_context.results.data();
+                bool self_found = false;
+                for (std::size_t match = 0; match != found.count; ++match) {
+                    failures_count += expect(results[match].node_id % modulus == 0);
+                    failures_count += expect(close_enough(results[match].distance, //
+                                                          oracle_distance(sampled_row, results[match].node_id)));
+                    if (match) failures_count += expect(results[match].distance >= results[match - 1].distance);
+                    if (!self_matches) failures_count += expect(results[match].node_id != assigned_ids[sampled_row]);
+                    self_found |= results[match].node_id == assigned_ids[sampled_row];
+                }
+                if constexpr (kernel_ != nk_kernel_dot_k)
+                    if (self_matches && modulus != 64) hits += self_found, ++recall_samples;
+            }
+        }
+        if constexpr (kernel_ != nk_kernel_dot_k)
+            failures_count += expect(hits * 100 >= recall_samples * minimal_recall_percent_k);
+
+        // An impossible predicate drains legally: empty result set, successful status.
+        auto none_pass = [](inner_node_id_t) noexcept { return false; };
+        typename index_type_::inner_traversal_context_t none_context {{}};
+        auto with_none = index.search_if(query, none_pass, none_context);
+        failures_count += expect(with_none.status == status_t::success_k);
+        failures_count += expect_eq(with_none.count, std::size_t {0});
+    }
+    failures_count += expect_eq(ledger.live_bytes.load(), 0);
+    return failures_count;
+}
+
 /** @brief Round-trips the graph through the two-matrix serialization: build, save, load into
  *      a fresh reserved index, and expect the restored graph to answer self-queries just as
  *      the original did - norms re-derive on load and are never serialized. */
@@ -367,18 +503,31 @@ static std::size_t test_concurrent_search(make_index_type_ const& make_index) {
             }
             if (lane != 0) return;
 
+            // Every other step runs the predicated sibling under the same race: all the
+            // unfiltered invariants must hold, plus admission purity - no id the predicate
+            // rejects may ever surface, no matter how the writers interleave.
+            auto odd_only = [](inner_node_id_t node_id) noexcept { return node_id % 2 == 1; };
             std::size_t violations = 0;
             for (std::size_t step = 0; step < reader_minimal_searches_k || //
                                        writers_remaining.load(std::memory_order_acquire) != 0;
                  ++step) {
-                auto found = index.search( //
-                    query_vectors.view().row(step % queries_count).as_vector(), lanes.contexts[0]);
+                auto query = query_vectors.view().row(step % queries_count).as_vector();
+                // The predicated sibling runs only where the backend exposes the verb -
+                // the GPU joins this arm the moment a device-side search_if lands.
+                constexpr bool predicable_k = requires { index.search_if(query, odd_only, lanes.contexts[0]); };
+                bool const predicated = predicable_k && step % 2 == 1;
+                auto found = [&] {
+                    if constexpr (predicable_k)
+                        if (predicated) return index.search_if(query, odd_only, lanes.contexts[0]);
+                    return index.search(query, lanes.contexts[0]);
+                }();
                 std::size_t const published_after = index.size();
                 violations += found.status != status_t::success_k;
                 violations += found.count > expansion_bound;
                 for (std::size_t match = 0; match != found.count; ++match) {
                     inner_scored_node_t const scored = lanes.contexts[0].results.data()[match];
                     violations += scored.node_id >= published_after;
+                    violations += predicated && scored.node_id % 2 != 1;
                     if (match) violations += scored.distance < lanes.contexts[0].results.data()[match - 1].distance;
                 }
             }
