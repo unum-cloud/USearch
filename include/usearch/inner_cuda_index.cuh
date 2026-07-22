@@ -27,6 +27,7 @@
 #include <numkong/vector.hpp>
 
 #include "usearch/cuda_device.hpp"
+#include "usearch/inner_metric.cuh"
 #include "usearch/types.hpp"
 
 namespace unum {
@@ -485,157 +486,6 @@ struct inner_cuda_visited_set_t {
         return fresh;
     }
 };
-
-/**
- *
- *  @section inner_cuda_kits Math Kits
- *
- *  A kit binds one storage dtype to one metric, mirroring the CPU metric kits: fragments
- *  are 16-byte register tiles, and metrics with precomputable norms finalize "through the
- *  dot". Row geometry - how many fragments span one vector, how many lanes cooperate on a
- *  row - is runtime state of the planes view, not the kit: dimensions are frozen by the
- *  first @c reserve, never by a type. The cross-lane reduction is deliberately not a kit
- *  member - one shuffle tree serves every kit. Symmetric candidate-to-candidate distances
- *  reuse @c distance(dot, make_query_state(norms_a), norms_b).
- */
-template <typename kit_>
-concept inner_cuda_kit = requires(typename kit_::fragment_t fragment, typename kit_::accumulator_t accumulator,
-                                  typename kit_::norms_accumulator_t norms_accumulator, typename kit_::norms_t norms,
-                                  typename kit_::query_state_t query_state, typename kit_::dot_t dot,
-                                  inner_distance_t ranked) {
-    typename kit_::scalar_t;
-    typename kit_::fragment_t;
-    typename kit_::accumulator_t;
-    typename kit_::dot_t;
-    typename kit_::norms_t;
-    typename kit_::norms_accumulator_t;
-    typename kit_::query_state_t;
-    { kit_::fragment_bytes_k } -> std::convertible_to<u32_t>;
-    { kit_::max_gathers_in_flight_k } -> std::convertible_to<u32_t>;
-    { kit_::has_norms_k } -> std::convertible_to<bool>;
-    { kit_::zero_accumulator() } -> std::same_as<typename kit_::accumulator_t>;
-    { kit_::accumulate_dot(fragment, fragment, accumulator) } -> std::same_as<typename kit_::accumulator_t>;
-    { kit_::partial_to_dot(accumulator) } -> std::same_as<typename kit_::dot_t>;
-    { kit_::zero_norms_accumulator() } -> std::same_as<typename kit_::norms_accumulator_t>;
-    { kit_::accumulate_norms(fragment, norms_accumulator) } -> std::same_as<typename kit_::norms_accumulator_t>;
-    { kit_::partials_to_norms(norms_accumulator) } -> std::same_as<typename kit_::norms_t>;
-    { kit_::make_query_state(norms) } -> std::same_as<typename kit_::query_state_t>;
-    { kit_::distance(dot, query_state, norms) } -> std::same_as<inner_distance_t>;
-    { kit_::convert_to_distance(ranked) } -> std::same_as<inner_distance_t>;
-};
-
-/** @brief Shared @c i8 dot arithmetic - every @c i8 metric kit inherits it. */
-struct inner_cuda_i8_dot_kit {
-    using scalar_t = nk::i8_t;
-    using fragment_t = uint4;
-    using accumulator_t = int;
-    using dot_t = int;
-    /** @brief Layout-identical to the CPU planes' @b {sum,sumsq} norms record. */
-    struct norms_t {
-        int sum, sumsq;
-    };
-    using norms_accumulator_t = int2;
-    struct query_state_t {
-        f32_t rsqrt;
-        int sumsq;
-    };
-
-    inline static constexpr u32_t fragment_bytes_k = 16;
-    /** @brief Ceiling on concurrently in-flight candidate-vector gathers per lane - the
-     *      memory-parallelism window over the @b candidate axis, never the dimension axis. */
-    inline static constexpr u32_t max_gathers_in_flight_k = 8;
-    inline static constexpr bool has_norms_k = true;
-
-    static __device__ __forceinline__ accumulator_t zero_accumulator() noexcept { return 0; }
-    static __device__ __forceinline__ accumulator_t accumulate_dot(fragment_t a, fragment_t b,
-                                                                   accumulator_t accumulator) noexcept {
-        accumulator = __dp4a(static_cast<int>(a.x), static_cast<int>(b.x), accumulator);
-        accumulator = __dp4a(static_cast<int>(a.y), static_cast<int>(b.y), accumulator);
-        accumulator = __dp4a(static_cast<int>(a.z), static_cast<int>(b.z), accumulator);
-        return __dp4a(static_cast<int>(a.w), static_cast<int>(b.w), accumulator);
-    }
-    static __device__ __forceinline__ dot_t partial_to_dot(accumulator_t accumulator) noexcept { return accumulator; }
-
-    static __device__ __forceinline__ norms_accumulator_t zero_norms_accumulator() noexcept { return {0, 0}; }
-    static __device__ __forceinline__ norms_accumulator_t accumulate_norms(fragment_t a,
-                                                                           norms_accumulator_t accumulator) noexcept {
-        accumulator.x = __dp4a(static_cast<int>(a.x), 0x01010101, accumulator.x);
-        accumulator.x = __dp4a(static_cast<int>(a.y), 0x01010101, accumulator.x);
-        accumulator.x = __dp4a(static_cast<int>(a.z), 0x01010101, accumulator.x);
-        accumulator.x = __dp4a(static_cast<int>(a.w), 0x01010101, accumulator.x);
-        accumulator.y = __dp4a(static_cast<int>(a.x), static_cast<int>(a.x), accumulator.y);
-        accumulator.y = __dp4a(static_cast<int>(a.y), static_cast<int>(a.y), accumulator.y);
-        accumulator.y = __dp4a(static_cast<int>(a.z), static_cast<int>(a.z), accumulator.y);
-        accumulator.y = __dp4a(static_cast<int>(a.w), static_cast<int>(a.w), accumulator.y);
-        return accumulator;
-    }
-    static __device__ __forceinline__ norms_t partials_to_norms(norms_accumulator_t accumulator) noexcept {
-        return {accumulator.x, accumulator.y};
-    }
-    static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
-        return {norms.sumsq ? rsqrtf(static_cast<f32_t>(norms.sumsq)) : 0.0f, norms.sumsq};
-    }
-    /** @brief Output-boundary finalize, the CPU kits' @c convert_to_distances in miniature:
-     *      the traversal ranks on raw @c distance values end to end, and only the matches a
-     *      caller receives pass through here - identity unless a metric owes a monotone
-     *      transform, like Euclidean's square root. */
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
-        return ranked;
-    }
-};
-
-struct inner_cuda_i8_angular_kit : inner_cuda_i8_dot_kit {
-    using base_t = inner_cuda_i8_dot_kit;
-    static __device__ __forceinline__ inner_distance_t distance(int dot, typename base_t::query_state_t query_state,
-                                                                typename base_t::norms_t norms) noexcept {
-        return 1.0f - static_cast<f32_t>(dot) * query_state.rsqrt * rsqrtf(static_cast<f32_t>(norms.sumsq));
-    }
-};
-
-struct inner_cuda_i8_sqeuclidean_kit : inner_cuda_i8_dot_kit {
-    using base_t = inner_cuda_i8_dot_kit;
-    static __device__ __forceinline__ inner_distance_t distance(int dot, typename base_t::query_state_t query_state,
-                                                                typename base_t::norms_t norms) noexcept {
-        return static_cast<f32_t>(query_state.sumsq) + static_cast<f32_t>(norms.sumsq) - 2.0f * static_cast<f32_t>(dot);
-    }
-};
-
-/** @brief Metric-true Euclidean over the squared-distance walk: rankings are identical
- *      under the monotone square root, so the whole traversal IS the sqeuclidean kit, and
- *      only the reported matches pay one @c sqrtf each - numerically matching the CPU
- *      euclidean kits, whose sqrt equally lives in the output-boundary finalize. */
-struct inner_cuda_i8_euclidean_kit : inner_cuda_i8_sqeuclidean_kit {
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
-        return sqrtf(ranked);
-    }
-};
-
-/** @brief Maps a (dtype, metric) pair onto its device kit; unsupported pairs fail the
- *      index instantiation with a one-line constraint error. */
-template <nk_dtype_t vector_dtype_, nk_kernel_kind_t kernel_kind_>
-struct inner_cuda_kit_for;
-
-template <>
-struct inner_cuda_kit_for<nk_i8_k, nk_kernel_angular_k> {
-    using kit_t = inner_cuda_i8_angular_kit;
-};
-template <>
-struct inner_cuda_kit_for<nk_i8_k, nk_kernel_sqeuclidean_k> {
-    using kit_t = inner_cuda_i8_sqeuclidean_kit;
-};
-template <>
-struct inner_cuda_kit_for<nk_i8_k, nk_kernel_euclidean_k> {
-    using kit_t = inner_cuda_i8_euclidean_kit;
-};
-
-/** @brief Generic cross-lane reduction: folds sub-warp partials of width @p lanes_per_row
- *      (a warp-uniform power of two) down to the leader lane. One tree serves every kit. */
-template <typename dot_type_>
-__device__ __forceinline__ dot_type_ inner_cuda_reduce(dot_type_ partial, u32_t lanes_per_row) noexcept {
-    for (u32_t offset = lanes_per_row / 2; offset; offset >>= 1)
-        partial += __shfl_down_sync(0xFFFFFFFFu, partial, offset, lanes_per_row);
-    return partial;
-}
 
 #endif // defined(__CUDACC__)
 
@@ -1379,26 +1229,6 @@ __device__ __forceinline__ void inner_cuda_back_link_neighbors( //
             row.unlock(head_row == newcomer_row_k ? new_node_id : gathered_ids[head_row]);
         }
     }
-}
-
-/** @brief Full-warp reduction for the norms accumulators of the current kits - own-vector
- *      norms accumulate warp-strided across the whole row, whatever its fragment count.
- *      Only lane 0 holds the complete sums afterwards - always follow with
- *      @c inner_cuda_broadcast_norms before any lane-divergent consumer. */
-__device__ __forceinline__ int2 inner_cuda_reduce_norms(int2 partial) noexcept {
-#pragma unroll
-    for (u32_t offset = 16; offset; offset >>= 1) {
-        partial.x += __shfl_down_sync(0xFFFFFFFFu, partial.x, offset);
-        partial.y += __shfl_down_sync(0xFFFFFFFFu, partial.y, offset);
-    }
-    return partial;
-}
-/** @brief Rebroadcasts lane 0's reduced norms to every lane - values that feed
- *      lane-divergent control flow must be warp-uniform. */
-__device__ __forceinline__ int2 inner_cuda_broadcast_norms(int2 reduced) noexcept {
-    reduced.x = __shfl_sync(0xFFFFFFFFu, reduced.x, 0);
-    reduced.y = __shfl_sync(0xFFFFFFFFu, reduced.y, 0);
-    return reduced;
 }
 
 /**

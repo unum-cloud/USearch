@@ -71,10 +71,10 @@ struct counting_cuda_allocator {
 
 static_assert(cuda_reservable_allocator<counting_cuda_allocator<std::byte>>);
 
-template <nk_kernel_kind_t kernel_>
+template <nk_kernel_kind_t kernel_, nk_dtype_t dtype_ = nk_i8_k>
 static std::size_t test_configuration(char const* name) {
     using allocator_t = counting_cuda_allocator<std::byte>;
-    using index_t = inner_cuda_index<nk_i8_k, kernel_, allocator_t, allocator_t>;
+    using index_t = inner_cuda_index<dtype_, kernel_, allocator_t, allocator_t>;
     auto make_index = [](allocation_ledger_t& ledger) {
         return index_t {allocator_t {counting_allocator<std::byte>(ledger)},
                         allocator_t {counting_allocator<std::byte>(ledger)}};
@@ -103,5 +103,8 @@ int main() {
     failures_count += test_configuration<nk_kernel_sqeuclidean_k>("cuda-i8+sqeuclidean");
     failures_count += test_configuration<nk_kernel_euclidean_k>("cuda-i8+euclidean");
     failures_count += test_configuration<nk_kernel_angular_k>("cuda-i8+angular");
+    failures_count += test_configuration<nk_kernel_euclidean_k, nk_u8_k>("cuda-u8+euclidean");
+    failures_count += test_configuration<nk_kernel_angular_k, nk_f16_k>("cuda-f16+angular");
+    failures_count += test_configuration<nk_kernel_euclidean_k, nk_bf16_k>("cuda-bf16+euclidean");
     return failures_count ? 1 : 0;
 }
