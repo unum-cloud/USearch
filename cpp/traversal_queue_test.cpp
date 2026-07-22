@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <random>
 #include <string_view>
+#include <unordered_set> // The reference oracle of the hash-set growth-parity audit
 #include <vector>
 
 #include <fmt/format.h>
@@ -122,6 +123,52 @@ int check_hash_set_single_element() noexcept {
     failures += check_true(hash_set.set(42) == true, "hash_set repeat insert returns true");
     failures += check_true(hash_set.test(42), "hash_set test sees inserted key");
     failures += check_true(!hash_set.test(99), "hash_set test does not see absent key");
+    return failures;
+}
+
+/**
+ *  @brief Randomized membership parity against @c std::unordered_set across repeated growth
+ *      cycles - the audit for the grown-into-unreachable bug class: a rehash placing
+ *      elements through any probe walk other than the reader's strands them invisible.
+ */
+int check_hash_set_growth_parity(unsigned seed) noexcept {
+    constexpr int rounds_k = 12, inserts_per_round_k = 700;
+    growing_hash_set<std::uint32_t> tested;
+    std::unordered_set<std::uint32_t> oracle;
+    tested.reserve(16); // Start tiny, so the rounds force many rehashes through every size.
+
+    std::mt19937 random_generator {seed};
+    std::uniform_int_distribution<std::uint32_t> distribution(0, 100'000);
+
+    int failures = 0;
+    for (int round = 0; round < rounds_k; ++round) {
+        if (!tested.reserve(oracle.size() + inserts_per_round_k)) {
+            fmt::print(stderr, "FAIL hash_set growth round={} reserve failed\n", round);
+            return ++failures;
+        }
+        for (int step = 0; step < inserts_per_round_k; ++step) {
+            std::uint32_t key = distribution(random_generator);
+            while (key == default_free_value<std::uint32_t>()) key = distribution(random_generator);
+            bool const was_known = tested.set(key);
+            bool const oracle_known = !oracle.insert(key).second;
+            if (was_known != oracle_known) {
+                fmt::print(stderr, "FAIL hash_set growth round={} step={} key={} tested={} oracle={}\n", round, step,
+                           key, was_known, oracle_known);
+                return ++failures;
+            }
+        }
+        // Every element ever inserted must remain reachable after all the rehashes so far.
+        for (std::uint32_t key : oracle)
+            if (!tested.test(key)) {
+                fmt::print(stderr, "FAIL hash_set growth round={} key={} unreachable after rehash\n", round, key);
+                return ++failures;
+            }
+        if (tested.size() != oracle.size()) {
+            fmt::print(stderr, "FAIL hash_set growth round={} sizes diverge tested={} oracle={}\n", round,
+                       tested.size(), oracle.size());
+            return ++failures;
+        }
+    }
     return failures;
 }
 
@@ -326,6 +373,7 @@ int main(void) {
     failures += check_sorted_buffer_batch_parity<16>(0x13572468u);
 
     failures += check_hash_set_single_element();
+    failures += check_hash_set_growth_parity(0xAB5EEDEDu);
     failures += check_hash_set_batch_parity<4>(0xFEEDFACEu);
     failures += check_hash_set_batch_parity<16>(0x01234567u);
 

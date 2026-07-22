@@ -14,6 +14,7 @@
 
 #include <algorithm>   // `std::lower_bound`, `std::sort_heap`, `std::min`, `std::max`
 #include <array>       // `std::array` - batch-of-four overloads
+#include <bit>         // `std::countr_zero` - first-empty lane of a probe group
 #include <cstddef>     // `std::size_t`
 #include <span>        // `std::span` - the sorted-batch insert argument
 #include <cstdint>     // `SIZE_MAX`, `std::uint8_t`
@@ -24,6 +25,10 @@
 #include <new>         // `new (ptr) element_t(value)` for "placement-new"
 #include <type_traits> // `std::is_trivially_destructible`, `std::is_integral`
 #include <utility>     // `std::swap`, `std::move`, `std::forward`
+
+#if defined(__AVX512F__)
+#include <immintrin.h> // 512-bit group probes of the visited hash-set
+#endif
 
 namespace unum {
 namespace usearch {
@@ -797,18 +802,75 @@ class growing_hash_set {
     growing_hash_set(growing_hash_set const&) = delete;
     growing_hash_set& operator=(growing_hash_set const&) = delete;
 
+  private:
+#if defined(__AVX512F__)
+    /** @brief Sixteen 4-byte slots fill one 512-bit register, so the probe advances a whole
+     *      cache line per step; wider or narrower elements keep the classic scalar walk. */
+    static constexpr bool simd_groups_k = sizeof(element_t) == 4 && std::is_integral_v<element_t>;
+#else
+    static constexpr bool simd_groups_k = false;
+#endif
+
+    /**
+     *  @brief The one probe walk behind @c test, @c set, and the rehash: returns the slot
+     *      holding @p elem, or the empty slot where it belongs. A single shared algorithm is
+     *      what keeps placement and lookup coherent - a rehash placing elements any other
+     *      way would strand them unreachable.
+     */
+    static inline element_t* locate_(element_t* slots, std::size_t capacity, hasher_t const& hasher,
+                                     element_t elem) noexcept
+        requires(!simd_groups_k)
+    {
+        std::size_t index = hasher(elem) & (capacity - 1);
+        while (slots[index] != default_free_value<element_t>() && slots[index] != elem)
+            index = (index + 1) & (capacity - 1);
+        return slots + index;
+    }
+
+#if defined(__AVX512F__)
+    /**
+     *  @brief The group sibling of the scalar @c locate_: one unaligned 512-bit load compares
+     *      sixteen slots at once - one mask for the key, one for the empty sentinel - so a
+     *      probe touches cache lines, not slots, and the mispredicted probe-continue branch
+     *      of the scalar walk disappears.
+     *
+     *  Placement is group-ordered: an element may land @b before its exact hashed slot inside
+     *  its starting group, and every reader replicates that order, so a group containing any
+     *  empty lane terminates the walk. Groups are 16-aligned and the capacity is a power of
+     *  two, so once it reaches 16 no load ever straddles the table's end; smaller tables take
+     *  the scalar walk below.
+     */
+    static inline element_t* locate_(element_t* slots, std::size_t capacity, hasher_t const& hasher,
+                                     element_t elem) noexcept
+        requires(simd_groups_k)
+    {
+        if (capacity < 16) {
+            std::size_t index = hasher(elem) & (capacity - 1);
+            while (slots[index] != default_free_value<element_t>() && slots[index] != elem)
+                index = (index + 1) & (capacity - 1);
+            return slots + index;
+        }
+        __m512i const key = _mm512_set1_epi32(static_cast<int>(elem));
+        __m512i const empty = _mm512_set1_epi32(static_cast<int>(default_free_value<element_t>()));
+        std::size_t group = (hasher(elem) & (capacity - 1)) & ~std::size_t {15};
+        while (true) {
+            __m512i const block = _mm512_loadu_si512(slots + group);
+            __mmask16 const key_lanes = _mm512_cmpeq_epi32_mask(block, key);
+            if (key_lanes) return slots + group + std::countr_zero(static_cast<unsigned>(key_lanes));
+            __mmask16 const empty_lanes = _mm512_cmpeq_epi32_mask(block, empty);
+            if (empty_lanes) return slots + group + std::countr_zero(static_cast<unsigned>(empty_lanes));
+            group = (group + 16) & (capacity - 1);
+        }
+    }
+#endif
+
+  public:
     /**
      *  @brief Checks if the element is already in the hash-set.
      *  @return @c true if the element is present.
      */
     inline bool test(element_t const& elem) const noexcept {
-        std::size_t index = hasher_(elem) & (capacity_ - 1);
-        while (slots_[index] != default_free_value<element_t>()) {
-            if (slots_[index] == elem) return true;
-
-            index = (index + 1) & (capacity_ - 1);
-        }
-        return false;
+        return *locate_(slots_, capacity_, hasher_, elem) == elem;
     }
 
     /**
@@ -817,14 +879,9 @@ class growing_hash_set {
      *      @c false when it was newly inserted.
      */
     inline bool set(element_t const& elem) noexcept {
-        std::size_t index = hasher_(elem) & (capacity_ - 1);
-        while (slots_[index] != default_free_value<element_t>()) {
-            // Already exists
-            if (slots_[index] == elem) return true;
-
-            index = (index + 1) & (capacity_ - 1);
-        }
-        slots_[index] = elem;
+        element_t* slot = locate_(slots_, capacity_, hasher_, elem);
+        if (*slot == elem) return true;
+        *slot = elem;
         ++count_;
         return false;
     }
@@ -862,16 +919,13 @@ class growing_hash_set {
 
         std::memset((void*)new_slots, 0xFF, new_capacity * sizeof(element_t));
         std::size_t new_count = count_;
-        if (count_) {
+        // Re-place through the very same probe walk `test` & `set` use - the target slot of
+        // a not-yet-present element is exactly where `locate_` lands.
+        if (count_)
             for (std::size_t old_index = 0; old_index != capacity_; ++old_index) {
                 if (slots_[old_index] == default_free_value<element_t>()) continue;
-
-                std::size_t new_index = hasher_(slots_[old_index]) & (new_capacity - 1);
-                while (new_slots[new_index] != default_free_value<element_t>())
-                    new_index = (new_index + 1) & (new_capacity - 1);
-                new_slots[new_index] = slots_[old_index];
+                *locate_(new_slots, new_capacity, hasher_, slots_[old_index]) = slots_[old_index];
             }
-        }
 
         reset();
         slots_ = new_slots;
