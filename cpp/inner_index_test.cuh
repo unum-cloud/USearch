@@ -1,32 +1,28 @@
 /**
- *  @brief Smoke & concurrency tests for @c inner_volatile_index over a curated set of
- *      (dtype, kernel) instantiations - not the whole combinatorial space.
+ *  @brief The index-agnostic test scenario library shared by every inner-index category -
+ *      volatile in-RAM, GPU-resident, and persisted alike.
  *
  *  @author Ash Vardanian
- *  @file cpp/inner_volatile_index_test.cpp
- *  @date July 17, 2026
+ *  @file cpp/inner_index_test.cuh
+ *  @date July 22, 2026
  *
- *  The covered matrix is: f32+dot, f32+angular, f32+euclidean, u8+euclidean, u8+angular,
- *  i4+angular - each gated by a compile-time concept, so combinations whose serial kernels
- *  are not yet adapted in @c inner_metric.hpp report as skipped and light up automatically
- *  once the kits land. Two already-adapted stand-ins (bf16+angular, i8+euclidean) keep the
- *  index machinery genuinely exercised in the meantime, and repeat with a deliberately
- *  flaky waiter that oversleeps at random, widening the interleaving windows around locks
- *  and watermark turns far beyond hardware timing. Only the serial capability is
- *  instantiated - the metrics themselves are tested in @c inner_metric_test.cpp.
+ *  Every scenario is a template over the index type, and each translation unit composes its
+ *  own suite explicitly: the calls a TU makes ARE its capability claims, so a backend that
+ *  cannot race simply never calls the racing scenarios, and the omission is auditable at
+ *  the call site instead of hiding in a trait. Translation units name their concrete index
+ *  instantiations and pass a ledgered factory constructing them - this header names no
+ *  index and assumes no constructor shape, so the same scenarios compile under host
+ *  compilers and nvcc.
  *
- *  Allocators are tested separately too, but a counting allocator flows through the vectors
- *  & neighbors parameters to prove propagation: it tallies live bytes into a ledger that
- *  must balance to zero when each test's scope closes. Parallel tests use ForkUnion's
+ *  Allocators are tested by construction: a counting allocator flows through the vectors &
+ *  neighbors parameters to prove propagation, tallying live bytes into a ledger that must
+ *  balance to zero when each scenario's scope closes. Parallel scenarios use ForkUnion's
  *  default flat pool - no NUMA machinery in tests.
- *
- *  Test ladder: guards (uninitialized / mismatched-geometry) → three vectors → growth
- *  across chunk boundaries with self-recall → concurrent multi-threaded construction →
- *  a reader lane racing the writers on interleaving-independent invariants. Removal,
- *  update, filtering, and serialization tests are deliberately absent: those features are
- *  banned or out of scope at this layer by design.
  */
+#pragma once
+
 #include <algorithm> // `std::sort`, `std::unique`
+#include <array>     // `std::array`
 #include <atomic>    // `std::atomic`
 #include <chrono>    // `std::chrono::microseconds`
 #include <thread>    // `std::this_thread::sleep_for`
@@ -34,22 +30,22 @@
 
 #include <fmt/format.h>
 #include <forkunion.hpp>
+#include <numkong/numkong.h>
 #include <numkong/numkong.hpp>
 
 #include "test.hpp"
-#include "usearch/inner_volatile_index.hpp"
+#include "usearch/types.hpp"
 
-namespace nk = ashvardanian::numkong;
-namespace fu = ashvardanian::forkunion;
-using namespace unum::usearch;
+namespace unum {
+namespace usearch {
 
-/** @brief Vector width shared by the larger tests; small enough to keep serial kernels fast. */
+/** @brief Vector width shared by the larger scenarios; small enough to keep serial kernels fast. */
 constexpr std::size_t test_dimensions_k = 16;
-/** @brief Vector width for the tiny smoke tests. */
+/** @brief Vector width for the tiny smoke scenarios. */
 constexpr std::size_t tiny_dimensions_k = 8;
-/** @brief Node count marching the growth test across several doubling chunks. */
+/** @brief Node count marching the growth scenario across several doubling chunks. */
 constexpr std::size_t growth_nodes_count_k = 1'500;
-/** @brief Nodes inserted by each lane of the concurrent tests. */
+/** @brief Nodes inserted by each lane of the concurrent scenarios. */
 constexpr std::size_t lane_nodes_count_k = 256;
 /** @brief Self-recall sampling threshold: at least this share of samples must find themselves. */
 constexpr std::size_t minimal_recall_percent_k = 90;
@@ -57,12 +53,6 @@ constexpr std::size_t minimal_recall_percent_k = 90;
 constexpr float self_match_tolerance_k = 1e-3f;
 /** @brief The reader lane performs at least this many searches, even if writers finish first. */
 constexpr std::size_t reader_minimal_searches_k = 16;
-
-/** @brief Gate: a (dtype, kernel) cell is testable once its serial kernel kit is adapted. */
-template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
-concept index_combo_supported = requires {
-    typename inner_quads_chain<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>::kit_t;
-};
 
 /** @brief Waiter that misbehaves on purpose: mostly yields, but occasionally oversleeps for
  *      hundreds of microseconds, stretching the lock & watermark contention windows far beyond
@@ -85,26 +75,19 @@ struct flaky_waiter_t {
     }
 };
 
-/** @brief Constructs an index whose vectors & neighbors allocators both report to @p ledger.
- *      Relies on guaranteed copy elision - the index itself is neither copyable nor movable. */
+/** @brief Per-lane state for the concurrent scenarios: one vector slice & one traversal context each. */
 template <typename index_type_>
-index_type_ make_ledgered_index(allocation_ledger_t& ledger) {
-    return index_type_ {counting_allocator<std::byte>(ledger), counting_allocator<std::byte>(ledger)};
-}
-
-/** @brief Per-lane state for the concurrent tests: one vector slice & one traversal context each. */
-template <typename index_type_>
-struct test_lanes_t {
+struct test_lanes {
     std::vector<nk::matrix<typename index_type_::scalar_t>> slices;
     std::vector<typename index_type_::inner_traversal_context_t> contexts;
 };
 
 /** @brief Prepares @p lanes_count lanes with distinctly-seeded vector slices & fresh contexts. */
 template <typename index_type_>
-test_lanes_t<index_type_> make_lanes(std::size_t lanes_count, std::size_t nodes_per_lane, std::size_t dimensions,
-                                     u64_t seed) {
+test_lanes<index_type_> make_lanes(std::size_t lanes_count, std::size_t nodes_per_lane, std::size_t dimensions,
+                                   u64_t seed) {
     using context_t = typename index_type_::inner_traversal_context_t;
-    test_lanes_t<index_type_> lanes;
+    test_lanes<index_type_> lanes;
     for (std::size_t lane = 0; lane != lanes_count; ++lane) {
         lanes.slices.push_back(make_vectors<typename index_type_::scalar_t>(nodes_per_lane, dimensions, seed + lane));
         lanes.contexts.emplace_back(typename context_t::allocator_t {});
@@ -112,14 +95,14 @@ test_lanes_t<index_type_> make_lanes(std::size_t lanes_count, std::size_t nodes_
     return lanes;
 }
 
-/** @brief Guards: pre-reserve misuse and geometry freezing, on a fresh index per test. */
-template <typename index_type_>
-static std::size_t test_guards() {
+/** @brief Guards: pre-reserve misuse and geometry freezing, on a fresh index per scenario. */
+template <typename index_type_, typename make_index_type_>
+static std::size_t test_guards(make_index_type_ const& make_index) {
     using scalar_t = typename index_type_::scalar_t;
     std::size_t failures_count = 0;
     allocation_ledger_t ledger;
     {
-        index_type_ index = make_ledgered_index<index_type_>(ledger);
+        index_type_ index = make_index(ledger);
         typename index_type_::inner_traversal_context_t context {{}};
         auto vectors = make_vectors<scalar_t>(3, tiny_dimensions_k, 42);
 
@@ -139,16 +122,16 @@ static std::size_t test_guards() {
     return failures_count;
 }
 
-/** @brief The classic smoke test: three vectors in, each finds itself first. The dot kernel
+/** @brief The classic smoke scenario: three vectors in, each finds itself first. The dot kernel
  *      maximizes similarity instead of minimizing distance, so self-nearest is only asserted
  *      for the symmetric kernels. */
-template <typename index_type_, nk_kernel_kind_t kernel_>
-static std::size_t test_three_vectors() {
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+static std::size_t test_three_vectors(make_index_type_ const& make_index) {
     using scalar_t = typename index_type_::scalar_t;
     std::size_t failures_count = 0;
     allocation_ledger_t ledger;
     {
-        index_type_ index = make_ledgered_index<index_type_>(ledger);
+        index_type_ index = make_index(ledger);
         typename index_type_::inner_traversal_context_t context {{}};
         auto vectors = make_vectors<scalar_t>(3, tiny_dimensions_k, 7);
 
@@ -177,13 +160,13 @@ static std::size_t test_three_vectors() {
 
 /** @brief Growth across several doubling chunks, then sampled self-recall on the big graph,
  *      with telemetry accounting sanity checks along the way. */
-template <typename index_type_, nk_kernel_kind_t kernel_>
-static std::size_t test_growth_and_recall() {
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+static std::size_t test_growth_and_recall(make_index_type_ const& make_index) {
     using scalar_t = typename index_type_::scalar_t;
     std::size_t failures_count = 0;
     allocation_ledger_t ledger;
     {
-        index_type_ index = make_ledgered_index<index_type_>(ledger);
+        index_type_ index = make_index(ledger);
         typename index_type_::inner_traversal_context_t context {{}};
         auto vectors = make_vectors<scalar_t>(growth_nodes_count_k, test_dimensions_k, 2026);
 
@@ -217,10 +200,65 @@ static std::size_t test_growth_and_recall() {
     return failures_count;
 }
 
+/** @brief Round-trips the graph through the two-matrix serialization: build, save, load into
+ *      a fresh reserved index, and expect the restored graph to answer self-queries just as
+ *      the original did - norms re-derive on load and are never serialized. */
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+static std::size_t test_save_load_roundtrip(make_index_type_ const& make_index) {
+    using scalar_t = typename index_type_::scalar_t;
+    using node_id_t = typename index_type_::node_id_t;
+    std::size_t failures_count = 0;
+    allocation_ledger_t ledger;
+    {
+        index_type_ index = make_index(ledger);
+        typename index_type_::inner_traversal_context_t context {{}};
+        auto vectors = make_vectors<scalar_t>(growth_nodes_count_k, test_dimensions_k, 4242);
+
+        failures_count += expect(index.reserve({growth_nodes_count_k, connectivity_16_k, test_dimensions_k}).status ==
+                                 status_t::success_k);
+        std::vector<inner_node_id_t> assigned_ids(growth_nodes_count_k);
+        failures_count += expect(
+            index.insert(vectors.view(), {assigned_ids.data(), assigned_ids.size()}, context).status ==
+            status_t::success_k);
+
+        auto const shape = index.saved_shape();
+        auto saved_vectors = nk::matrix<scalar_t>::try_zeros({shape.nodes, shape.dimensions});
+        auto saved_neighbors = nk::matrix<node_id_t>::try_zeros({shape.nodes, shape.connectivity});
+        failures_count += expect(!saved_vectors.empty() && !saved_neighbors.empty());
+        failures_count += expect(index.save(saved_vectors.span(), saved_neighbors.span(),
+                                            synchronization_t::exclusive_k) == status_t::success_k);
+
+        index_type_ restored = make_index(ledger);
+        failures_count += expect(
+            restored.reserve({shape.nodes, static_cast<connectivity_t>(shape.connectivity), shape.dimensions}).status ==
+            status_t::success_k);
+        failures_count += expect(restored.load(saved_vectors.view(), saved_neighbors.view(),
+                                               synchronization_t::exclusive_k) == status_t::success_k);
+        failures_count += expect_eq(restored.size(), shape.nodes);
+
+        if constexpr (kernel_ != nk_kernel_dot_k) {
+            std::size_t hits = 0, samples = 32;
+            for (std::size_t sample = 0; sample != samples; ++sample) {
+                std::size_t const row = sample * (growth_nodes_count_k / samples);
+                auto found = restored.search(vectors.view().row(row).as_vector(), context);
+                failures_count += expect(found.status == status_t::success_k && found.count > 0);
+                for (std::size_t match = 0; match != found.count; ++match)
+                    if (context.results.data()[match].node_id == assigned_ids[row]) {
+                        ++hits;
+                        break;
+                    }
+            }
+            failures_count += expect(hits * 100 >= samples * minimal_recall_percent_k);
+        }
+    }
+    failures_count += expect_eq(ledger.live_bytes.load(), 0);
+    return failures_count;
+}
+
 /** @brief Concurrent construction on ForkUnion's default flat pool: distinct slices per lane,
  *      one traversal context each, then id-uniqueness and sampled self-recall checks. */
-template <typename index_type_, nk_kernel_kind_t kernel_>
-static std::size_t test_concurrent_build() {
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+static std::size_t test_concurrent_build(make_index_type_ const& make_index) {
     std::size_t failures_count = 0;
     allocation_ledger_t ledger;
     {
@@ -230,7 +268,7 @@ static std::size_t test_concurrent_build() {
         fu::flat_pool_t pool;
         if (!pool.try_spawn(lanes_count)) return expect(false);
 
-        index_type_ index = make_ledgered_index<index_type_>(ledger);
+        index_type_ index = make_index(ledger);
         failures_count += expect(index.reserve({nodes_count, connectivity_16_k, test_dimensions_k}).status ==
                                  status_t::success_k);
 
@@ -278,8 +316,8 @@ static std::size_t test_concurrent_build() {
  *  the reader & writers share only the index itself, and any sanitizer report is an index bug
  *  rather than test-harness noise.
  */
-template <typename index_type_, nk_kernel_kind_t kernel_>
-static std::size_t test_concurrent_search() {
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+static std::size_t test_concurrent_search(make_index_type_ const& make_index) {
     using scalar_t = typename index_type_::scalar_t;
     std::size_t failures_count = 0;
     allocation_ledger_t ledger;
@@ -291,7 +329,7 @@ static std::size_t test_concurrent_search() {
         fu::flat_pool_t pool;
         if (!pool.try_spawn(writers_count + 1)) return expect(false);
 
-        index_type_ index = make_ledgered_index<index_type_>(ledger);
+        index_type_ index = make_index(ledger);
         failures_count += expect(index.reserve({nodes_count, connectivity_16_k, test_dimensions_k}).status ==
                                  status_t::success_k);
 
@@ -335,57 +373,11 @@ static std::size_t test_concurrent_search() {
     return failures_count;
 }
 
-/** @brief No-op sibling picked when the tuple's serial kernels are not adapted yet. */
-template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, typename waiter_type_ = dummy_waiter_t,
-          nk_capability_t caps_ = nk_cap_serial_k>
-    requires(!index_combo_supported<dtype_, kernel_>)
-static std::size_t test_configuration(char const* name) {
-    fmt::print("skipped  {:<20} : serial kernels not adapted yet\n", name);
-    return 0;
-}
-
-template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, typename waiter_type_ = dummy_waiter_t,
-          nk_capability_t caps_ = nk_cap_serial_k>
-    requires(index_combo_supported<dtype_, kernel_>)
-static std::size_t test_configuration(char const* name) {
-    // SIMD-tier cells execute their intrinsics unconditionally, so they run only where
-    // the machine offers every requested bit; the tile permission handshake is per-process.
-    if constexpr (caps_ != nk_cap_serial_k) {
-        if ((nk_capabilities_available() & caps_) != caps_) {
-            fmt::print("skipped  {:<20} : capabilities missing at runtime\n", name);
-            return 0;
-        }
-        nk_configure_thread(nk_capabilities_available());
-    }
-    using index_t = inner_volatile_index<dtype_, kernel_, caps_, waiter_type_, counting_allocator<std::byte>,
-                                         counting_allocator<std::byte>, std::allocator<std::byte>>;
-    std::size_t failures_count = 0;
-    failures_count += test_guards<index_t>();
-    failures_count += test_three_vectors<index_t, kernel_>();
-    failures_count += test_growth_and_recall<index_t, kernel_>();
-    failures_count += test_concurrent_build<index_t, kernel_>();
-    failures_count += test_concurrent_search<index_t, kernel_>();
+/** @brief Prints one verdict line for a cell's summed scenario @p failures_count. */
+inline std::size_t report_scenarios(char const* name, std::size_t failures_count) {
     fmt::print("{}  {:<20} : {} failures\n", failures_count ? "FAILED" : "passed", name, failures_count);
     return failures_count;
 }
 
-int main() {
-    std::size_t failures_count = 0;
-    failures_count += test_configuration<nk_f32_k, nk_kernel_dot_k>("f32+dot");
-    failures_count += test_configuration<nk_f32_k, nk_kernel_angular_k>("f32+angular");
-    failures_count += test_configuration<nk_f32_k, nk_kernel_euclidean_k>("f32+euclidean");
-    failures_count += test_configuration<nk_u8_k, nk_kernel_euclidean_k>("u8+euclidean");
-    failures_count += test_configuration<nk_u8_k, nk_kernel_angular_k>("u8+angular");
-    failures_count += test_configuration<nk_i4_k, nk_kernel_angular_k>("i4+angular");
-    failures_count += test_configuration<nk_bf16_k, nk_kernel_angular_k>("bf16+angular");
-    failures_count += test_configuration<nk_i8_k, nk_kernel_euclidean_k>("i8+euclidean");
-    failures_count += test_configuration<nk_bf16_k, nk_kernel_angular_k, flaky_waiter_t>("bf16+angular+flaky");
-    failures_count += test_configuration<nk_i8_k, nk_kernel_euclidean_k, flaky_waiter_t>("i8+euclidean+flaky");
-    // The tiled u8 tier: the serial floor, icelake quads, and sapphireamx tiles.
-    constexpr nk_capability_t tiles_caps_k = static_cast<nk_capability_t>( //
-        nk_cap_serial_k | nk_cap_icelake_k | nk_cap_sapphireamx_k);
-    failures_count += test_configuration<nk_u8_k, nk_kernel_euclidean_k, dummy_waiter_t, tiles_caps_k>( //
-        "u8+euclidean+tiles");
-    fmt::print("{}: {} total failures\n", failures_count ? "FAILED" : "OK", failures_count);
-    return failures_count ? 1 : 0;
-}
+} // namespace usearch
+} // namespace unum

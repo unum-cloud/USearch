@@ -36,6 +36,7 @@ option(USEARCH_BUILD_JNI "Compile JNI library for Java bindings" OFF)
 option(USEARCH_BUILD_WOLFRAM "Compile Wolfram Language bindings" OFF)
 option(USEARCH_BUILD_SQLITE "Compile separate SQLite extension" OFF)
 option(USEARCH_BUILD_WASM "Compile WebAssembly bindings" OFF)
+option(USEARCH_BUILD_CUDA "Compile CUDA index tests & benchmarks" OFF)
 
 # Enable the in-repo Git hooks. Git will not auto-run hooks shipped inside a clone (that would let any cloned repo
 # execute code), so point `core.hooksPath` at `.githooks` here - configuring the build arms the `pre-commit` checks.

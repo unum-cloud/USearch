@@ -273,7 +273,7 @@ struct inner_cuda_sorted_pool {
  *      entries spilled from the register head, consumed by refills on frontier drain.
  *      Appends past @p capacity_ are counted, never written - the nearest candidates
  *      always reach the head first, so drops only ever shed the farthest tail. */
-struct inner_cuda_tail_pool {
+struct inner_cuda_tail_pool_t {
     inner_cuda_scored_node_t* entries_;
     u32_t size_ = 0;
     u32_t capacity_ = 0;
@@ -337,7 +337,7 @@ struct inner_cuda_register_frontier {
  */
 struct inner_cuda_arena_frontier {
     inner_cuda_sorted_pool<2> head_;
-    inner_cuda_tail_pool tail_;
+    inner_cuda_tail_pool_t tail_;
     u32_t ef_target_ = 0;
     u32_t expanded_ = 0;
 
@@ -434,7 +434,7 @@ struct inner_cuda_arena_frontier {
  *  probe budget exhausted on a full neighborhood - reports ids as already visited, so an
  *  under-provisioned walk starves and retires deterministically instead of looping.
  */
-struct inner_cuda_visited_set {
+struct inner_cuda_visited_set_t {
     /** @brief Packed @b {epoch,id} slots: an entry is live only when its epoch matches
      *      this walk's, so "resetting" is bumping one register - the host zeroes the
      *      arena once per launch batch, and epoch zero marks never-used. */
@@ -900,7 +900,7 @@ __device__ __forceinline__ void inner_cuda_score_into_frontier( //
  */
 template <inner_cuda_kit kit_>
 __device__ __forceinline__ u32_t inner_cuda_sample_landmarks( //
-    inner_cuda_planes_view<kit_> const& planes, inner_node_id_t sampling_bound, inner_cuda_visited_set visited,
+    inner_cuda_planes_view<kit_> const& planes, inner_node_id_t sampling_bound, inner_cuda_visited_set_t visited,
     splitmix_u32_t& random_generator, u32_t (&gathered_ids)[inner_cuda_cache_rows_k], int lane) noexcept {
 
     inner_node_id_t draw = random_generator.bounded(sampling_bound);
@@ -927,7 +927,7 @@ __device__ __forceinline__ u32_t inner_cuda_sample_landmarks( //
 template <inner_cuda_kit kit_, typename frontier_>
 __device__ __forceinline__ void inner_cuda_search_around( //
     inner_cuda_planes_view<kit_> const& planes, typename kit_::fragment_t const* query_span,
-    typename kit_::query_state_t query_state, inner_node_id_t sampling_bound, inner_cuda_visited_set visited,
+    typename kit_::query_state_t query_state, inner_node_id_t sampling_bound, inner_cuda_visited_set_t visited,
     u32_t (&gathered_ids)[inner_cuda_cache_rows_k], inner_cuda_scored_node_t (&gathered_scored)[32],
     inner_cuda_warp_context<frontier_>& context, int lane) noexcept {
 
@@ -1439,7 +1439,7 @@ struct inner_cuda_search_view {
  */
 template <inner_cuda_kit kit_, typename frontier_>
 __device__ __forceinline__ void inner_cuda_insert_one( //
-    inner_cuda_build_view<kit_> const& view, inner_node_id_t new_node_id, inner_cuda_visited_set visited,
+    inner_cuda_build_view<kit_> const& view, inner_node_id_t new_node_id, inner_cuda_visited_set_t visited,
     typename kit_::fragment_t* query_span, inner_cuda_vector_cache<typename kit_::fragment_t> cache,
     inner_cuda_relink_scratch relink, typename kit_::norms_t (&cache_norms)[inner_cuda_cache_rows_k],
     u32_t (&gathered_ids)[inner_cuda_cache_rows_k], inner_cuda_scored_node_t (&gathered_scored)[32],
@@ -1560,8 +1560,8 @@ __global__ void __launch_bounds__(inner_cuda_warps_per_block_k * 32, inner_cuda_
 
         inner_cuda_warp_context<inner_cuda_register_frontier<pool_slots_>> context;
         context.random_generator = splitmix_u32_t {0xA5A5A5A5ull ^ (static_cast<u64_t>(new_node_id) * 33 + lane)};
-        inner_cuda_visited_set const visited {visited_slots, view.arena_shape.visited_slots,
-                                              view.arena_shape.visited_hash_shift, new_node_id + 1};
+        inner_cuda_visited_set_t const visited {visited_slots, view.arena_shape.visited_slots,
+                                                view.arena_shape.visited_hash_shift, new_node_id + 1};
         inner_cuda_insert_one<kit_>( //
             view, new_node_id, visited, query_span, cache, relink, cache_norms[warp], gathered_ids[warp],
             gathered_scored[warp], context, lane);
@@ -1579,7 +1579,7 @@ __global__ void __launch_bounds__(inner_cuda_warps_per_block_k * 32, inner_cuda_
 template <inner_cuda_kit kit_, typename frontier_>
 __device__ __forceinline__ void inner_cuda_search_one( //
     inner_cuda_search_view<kit_> const& view, u32_t query_index, typename kit_::fragment_t* query_span,
-    inner_cuda_visited_set visited, frontier_ frontier, u32_t (&gathered_ids)[inner_cuda_cache_rows_k],
+    inner_cuda_visited_set_t visited, frontier_ frontier, u32_t (&gathered_ids)[inner_cuda_cache_rows_k],
     inner_cuda_scored_node_t (&gathered_scored)[32], int lane) noexcept {
 
     typename kit_::fragment_t const* query_row = view.queries +
@@ -1632,8 +1632,8 @@ __global__ void __launch_bounds__(inner_cuda_warps_per_block_k * 32, pool_slots_
     u64_t* const visited_slots = view.arena_shape.visited_span(view.arena, warp_index);
     for (u32_t query_index = static_cast<u32_t>(warp_index); query_index < view.queries_count;
          query_index += gridDim.x * inner_cuda_warps_per_block_k) {
-        inner_cuda_visited_set const visited {visited_slots, view.arena_shape.visited_slots,
-                                              view.arena_shape.visited_hash_shift, query_index + 1};
+        inner_cuda_visited_set_t const visited {visited_slots, view.arena_shape.visited_slots,
+                                                view.arena_shape.visited_hash_shift, query_index + 1};
         inner_cuda_search_one<kit_>(view, query_index, query_span, visited,
                                     inner_cuda_register_frontier<pool_slots_> {}, gathered_ids[warp],
                                     gathered_scored[warp], lane);
@@ -1662,8 +1662,8 @@ __global__ void __launch_bounds__(inner_cuda_warps_per_block_k * 32, 4)
     frontier.ef_target_ = view.expansion;
     for (u32_t query_index = static_cast<u32_t>(warp_index); query_index < view.queries_count;
          query_index += gridDim.x * inner_cuda_warps_per_block_k) {
-        inner_cuda_visited_set const visited {visited_slots, view.arena_shape.visited_slots,
-                                              view.arena_shape.visited_hash_shift, query_index + 1};
+        inner_cuda_visited_set_t const visited {visited_slots, view.arena_shape.visited_slots,
+                                                view.arena_shape.visited_hash_shift, query_index + 1};
         inner_cuda_search_one<kit_>(view, query_index, query_span, visited, frontier, gathered_ids[warp],
                                     gathered_scored[warp], lane);
     }
@@ -1869,10 +1869,12 @@ struct inner_cuda_index {
     using planes_view_t = inner_cuda_planes_view<kit_t>;
     using inner_traversal_context_t = inner_cuda_traversal_context<traversals_allocator_t>;
 
-    /** @brief One graph, many concurrent agents: batches claim disjoint dense id ranges
-     *      under the growth latch, dispense offsets from per-launch cursors, and the
-     *      all-RMW publication protocol already makes overlapping searches safe. */
-    inline static constexpr bool concurrent_k = true;
+    /** @brief The strongest @c synchronization_t contract this design honors - purely
+     *      documentation, nothing routes on it. One graph, many concurrent agents: batches
+     *      claim disjoint dense id ranges under the admission latch, dispense offsets from
+     *      per-launch cursors, and the all-RMW publication protocol makes overlapping
+     *      searches safe. */
+    inline static constexpr synchronization_t synchronization_ceiling_k = synchronization_t::concurrent_k;
     inline static constexpr nk_kernel_kind_t kernel_kind_k = kernel_kind_;
     /** @brief Capability labels for the shared reports: the GPU picks no CPU SIMD tier. */
     inline static constexpr nk_capability_t picked_quads_capability_k = nk_cap_serial_k;

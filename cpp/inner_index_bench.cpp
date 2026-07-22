@@ -1,21 +1,23 @@
 /**
- *  @brief Profiling harness for the volatile index over real persisted datasets.
+ *  @brief Profiling harness for the CPU-resident volatile index over real persisted datasets.
  *
  *  @author Ash Vardanian
- *  @file cpp/inner_volatile_index_bench.cpp
+ *  @file cpp/inner_index_bench.cpp
  *  @date July 17, 2026
  *
- *  Unlike the test suite, which sweeps synthetic combinations for correctness, this harness
- *  profiles insertion & search throughput on RetriEval-style binary datasets. It builds on
- *  the ForkUnion C-level topology, fabric, and pool abstractions, and prints with {fmt}.
- *  A ready-made playground is the Unum Wiki 1M dataset:
+ *  The backend-neutral surface - options, checkpoints, dataset streaming, telemetry, result
+ *  judgment, and the machine report - lives in @c inner_index_bench.cuh; this translation
+ *  unit owns everything CPU: the ForkUnion run loops streaming one row or query per task,
+ *  the NUMA-domain placement, the waiter dispatch, and the compile-time cascade resolving
+ *  the CLI into one concrete @c inner_volatile_index instantiation. A ready-made playground
+ *  is the Unum Wiki 1M dataset:
  *
  *  @code{.sh}
  *  mkdir -p ~/datasets/wiki_1M && cd ~/datasets/wiki_1M &&
  *      wget -nc https://huggingface.co/datasets/unum-cloud/ann-wiki-1m/resolve/main/base.1M.fbin &&
  *      wget -nc https://huggingface.co/datasets/unum-cloud/ann-wiki-1m/resolve/main/query.public.100K.fbin &&
  *      wget -nc https://huggingface.co/datasets/unum-cloud/ann-wiki-1m/resolve/main/groundtruth.public.100K.ibin
- *  inner_volatile_index_bench_cpp --vectors ~/datasets/wiki_1M/base.1M.fbin \
+ *  inner_index_bench_cpp --vectors ~/datasets/wiki_1M/base.1M.fbin \
  *      --queries ~/datasets/wiki_1M/query.public.100K.fbin \
  *      --neighbors ~/datasets/wiki_1M/groundtruth.public.100K.ibin --bf16
  *  @endcode
@@ -26,7 +28,7 @@
  *
  *  @code{.sh}
  *  sudo sysctl vm.nr_hugepages=16384        # 32 GB of 2 MB pages, split across the domains
- *  inner_volatile_index_bench_cpp --huge-pages 16384 \
+ *  inner_index_bench_cpp --huge-pages 16384 \
  *      --vectors ~/datasets/sift_10M/base.10M.u8bin --memory-domain all
  *  @endcode
  *
@@ -40,120 +42,25 @@
  *  - 7/8 of the logical cores participate, unless `--threads` overrides - full occupancy
  *    starves the ordered publication path and collapses throughput.
  */
-#include <cmath>   // `std::abs`
-#include <cstdint> // `std::uint32_t`
-
-#include <algorithm> // `std::nth_element`, `std::copy_n`
-#include <atomic>    // `std::atomic`
+#include <algorithm> // `std::max`, `std::min`, `std::copy_n`
 #include <chrono>    // `std::chrono::steady_clock`
+#include <cmath>     // `std::abs`
+#include <cstdint>   // `std::uint32_t`
 #include <memory>    // `std::unique_ptr`
 #include <string>    // `std::string`
-#include <typeinfo>  // `typeid`
 #include <vector>    // `std::vector`
 
 #include <clipp.h>
-#include <fmt/color.h>
 #include <fmt/format.h>
 
-#include <forkunion.h>
-#include <forkunion/capabilities.hpp>
-#include <numkong/numkong.h>
-#include <numkong/numkong.hpp>
-
 #include <usearch/inner_volatile_index.hpp>
-#include <usearch/serialization.hpp>
 
-#include "bench.hpp"
+#include "inner_index_bench.cuh"
 #include "persisted_dataset.hpp"
-#include "test.hpp"
 
-namespace fu = ashvardanian::forkunion;
-namespace nk = ashvardanian::numkong;
+using namespace unum::usearch;
 
-// The bench lives in the project's namespace, like the test suites - its types and helpers
-// are project vocabulary, so no alias or qualification noise is needed.
-namespace unum::usearch {
-
-#pragma region Options and Styling
-
-/** @brief One named capability ceiling - the row shape the compute and schedule tables
- *      share, so their prefix-masks, name lookups, and prints are one machinery. */
-template <typename capability_type_>
-struct capability_choice {
-    char const* name;
-    capability_type_ bit;
-};
-
-/** @brief Compute-capability ceilings the kernel chains adapt, in ascending preference per
- *      architecture, named by NumKong's microarchitecture vocabulary and split by its own
- *      target macros. The implicit floor the table never lists is the serial kernels. */
-inline constexpr capability_choice<nk_capability_t> compute_choices_k[] = {
-#if NK_TARGET_X8664_
-    {"haswell", nk_cap_haswell_k}, {"skylake", nk_cap_skylake_k},         {"icelake", nk_cap_icelake_k},
-    {"genoa", nk_cap_genoa_k},     {"sapphireamx", nk_cap_sapphireamx_k},
-#elif NK_TARGET_ARM64_
-    {"neon", nk_cap_neon_k},
-    {"neonsdot", nk_cap_neonsdot_k},
-    {"neonbfdot", nk_cap_neonbfdot_k},
-#else
-    {"serial", nk_cap_serial_k},
-#endif
-};
-inline constexpr std::size_t compute_choices_count_k = sizeof(compute_choices_k) / sizeof(compute_choices_k[0]);
-
-/** @brief Scheduling ceilings the harness instantiates waiters for, in ascending strength
- *      per architecture, named by ForkUnion's own instruction vocabulary and split by its
- *      own detection macros. The implicit floor is the STL yield, like serial for compute;
- *      Arm's `WFET` has no compile-time feature macro, so its row - like every row - is
- *      gated by the runtime capability mask at dispatch. */
-inline constexpr capability_choice<fu_capabilities_t> schedule_choices_k[] = {
-#if FU_DETECT_ARCH_X86_64_
-    {"pause", fu_capability_x86_pause_k},
-    {"tpause", fu_capability_x86_tpause_k},
-#elif FU_DETECT_ARCH_ARM64_
-    {"yield", fu_capability_arm64_yield_k},
-    {"wfet", fu_capability_arm64_wfet_k},
-#elif FU_DETECT_ARCH_RISC5_
-    {"pause", fu_capability_risc5_pause_k},
-    {"wrs", fu_capability_risc5_wrs_k},
-#else
-    {"standard", fu_capabilities_unknown_k},
-#endif
-};
-inline constexpr std::size_t schedule_choices_count_k = sizeof(schedule_choices_k) / sizeof(schedule_choices_k[0]);
-
-/** @brief The tables as spans - the currency of the shared ceiling helpers below. */
-inline constexpr std::span<capability_choice<nk_capability_t> const> compute_span_k {compute_choices_k};
-inline constexpr std::span<capability_choice<fu_capabilities_t> const> schedule_span_k {schedule_choices_k};
-
-/** @brief Everything at or below the @p index-th ceiling of @p choices, as one allow-mask. */
-template <typename capability_type_>
-constexpr capability_type_ prefix_mask(std::span<capability_choice<capability_type_> const> choices,
-                                       std::size_t index) noexcept {
-    capability_type_ mask {};
-    for (std::size_t choice = 0; choice <= index && choice < choices.size(); ++choice)
-        mask = static_cast<capability_type_>(mask | choices[choice].bit);
-    return mask;
-}
-
-/** @brief Names a single capability bit of @p choices; the unlisted @p floor backs them all. */
-template <typename capability_type_>
-constexpr char const* bit_name(std::span<capability_choice<capability_type_> const> choices, capability_type_ bit,
-                               char const* floor) noexcept {
-    for (capability_choice<capability_type_> const& choice : choices)
-        if (choice.bit == bit) return choice.name;
-    return floor;
-}
-
-/** @brief The newest table bit of @p choices inside @p mask, or @p floor when none is. */
-template <typename capability_type_>
-constexpr capability_type_ highest_bit(std::span<capability_choice<capability_type_> const> choices,
-                                       capability_type_ mask, capability_type_ floor) noexcept {
-    capability_type_ highest = floor;
-    for (capability_choice<capability_type_> const& choice : choices)
-        if (mask & choice.bit) highest = choice.bit;
-    return highest;
-}
+#pragma region CPU Pipeline
 
 /** @brief The STL floor below the schedule table, correct on every machine. */
 using yield_waiter_t = fu::standard_yield_t;
@@ -206,109 +113,10 @@ struct domain_or_default_allocator {
     }
 };
 
-/** @brief Everything the CLI can configure; zeroes mean "infer from the dataset & machine". */
-struct bench_options_t {
-    /** @brief The base vectors file, in the RetriEval `.fbin` extension family. */
-    std::string vectors_path;
-    /** @brief Optional query vectors of the same dtype; absent means self-queries. */
-    std::string queries_path;
-    /** @brief Optional `.ibin` ground-truth neighbors; absent skips the quality judgment. */
-    std::string neighbors_path;
-    /** @brief The representation vectors are stored in; unknown means "as the file". */
-    nk_dtype_t stored_dtype = nk_dtype_unknown_k;
-    /** @brief Allow-mask over NumKong kernel capabilities, intersected with the runtime
-     *      detection - the native ceiling shape, so new bits need no new plumbing. */
-    nk_capability_t max_compute = nk_cap_any_k;
-    /** @brief Allow-mask over ForkUnion scheduling capabilities, forwarded verbatim to
-     *      @c fu_pool_new and mirrored by the waiter type the index instantiates. */
-    fu_capabilities_t max_schedule = fu_capabilities_all_k;
-    /** @brief The distance kernel driving both construction & search. */
-    nk_kernel_kind_t kernel = nk_kernel_angular_k;
-    /** @brief Engaged memory domains: empty is one machine-wide heap index, a single entry
-     *      pins memory & threads to it, and several build one index per listed domain. */
-    std::vector<fu_memory_domain_id_t> memory_domains;
-    /** @brief Worker threads; zero takes 7/8 of the available logical cores. */
-    std::size_t threads = 0;
-    /** @brief Staging trampoline rows shared by all threads; zero takes 4 × threads. */
-    std::size_t batch = 0;
-    /** @brief Neighbors-list width per node; must match a `connectivity_t` tiling. */
-    std::size_t connectivity = 32;
-    /** @brief Insertion candidate pool. Calibrated on SIFT 10M against @c expansion_search for
-     *      the build-once-search-forever regime: 256/96 clears 99.3% recall@10 at roughly half
-     *      the per-query distance work of 128/192, collapsing the p99 latency ~4x - build
-     *      compute spent once to keep every future query cheap. */
-    std::size_t expansion_add = 256;
-    /** @brief Search candidate pool; see @c expansion_add for the calibration. */
-    std::size_t expansion_search = 96;
-    /** @brief Matches per query to return & judge. */
-    std::size_t top_k = 10;
-    /** @brief Search every ingested vector for itself instead of the query file - the
-     *      calibration-free navigability probe, with a search phase as long as the ingestion. */
-    bool self_recall = false;
-    /** @brief Checkpoint name to serialize every domain index into after ingestion - resolved
-     *      through @ref checkpoint_path_of, so the file name itself stamps the index type. */
-    std::string save_name;
-    /** @brief Checkpoint name to restore domain indexes from before ingestion; pair it with
-     *      `--skip-vectors`, so only the unindexed topping streams in. */
-    std::string load_name;
-    /** @brief Directory the checkpoint blobs land in. The tmpfs-backed default suits small
-     *      runs; point 100M-scale runs at a real disk. */
-    std::string checkpoints_dir = "/tmp";
-    /** @brief Rows the loaded indexes already cover; ingestion resumes right after them. */
-    std::size_t skip_vectors = 0;
-    /** @brief Cap on ingested rows; zero ingests the whole file. */
-    std::size_t max_vectors = 0;
-    /** @brief Huge pages the launcher provisioned before starting the process; zero expects
-     *      none, any other value is enforced - a run that silently fell back to base pages
-     *      must never masquerade as a huge-page result. */
-    std::size_t huge_pages = 0;
-    /** @brief Print the manual and exit. */
-    bool help = false;
-};
-
-/** @brief The three matrix files one checkpointed slot spans - each a RetriEval-layout dump. */
-struct checkpoint_paths_t {
-    std::string vectors;
-    std::string neighbors;
-    std::string rows;
-};
-
-/** @brief Resolves a user-facing checkpoint name into one slot's matrix-file paths. The
- *      StringZilla hash of the mangled index type stamps compatibility - a checkpoint built
- *      by any other instantiation resolves to different file names, so a mismatched load
- *      simply finds nothing - and the files themselves are plain dataset-shaped matrices any
- *      RetriEval tool opens. */
-template <typename index_type_>
-static checkpoint_paths_t checkpoint_paths_of(bench_options_t const& options, std::string_view name, std::size_t slot,
-                                              std::size_t slot_count) {
-    std::string const prefix = fmt::format("{}/{}-{:016x}-{}-{}", options.checkpoints_dir, name,
-                                           sz::string_view {typeid(index_type_).name()}.hash(), slot, slot_count);
-    return {fmt::format("{}.vectors.{}bin", prefix, index_type_::scalar_t::dtype_name()), //
-            prefix + ".neighbors.ibin", prefix + ".rows.ibin"};
-}
-
-#pragma endregion
-
-#pragma region Typed Runs
-
-/** @brief Telemetry sums each thread accumulates privately, padded away from its neighbors. */
-struct alignas(64) telemetry_lane_t {
-    /** @brief Frontier candidates whose neighbor lists were expanded. */
-    std::size_t visited_members = 0;
-    /** @brief Total distance computations, padding lanes excluded. */
-    std::size_t computed_distances = 0;
-    /** @brief Subset of @c computed_distances spent in diversity selection. */
-    std::size_t computed_distances_in_refines = 0;
-    /** @brief Subset of @c computed_distances spent re-selecting while back-linking. */
-    std::size_t computed_distances_in_reverse_refines = 0;
-    /** @brief Starvation restarts - a graph-connectivity health signal. */
-    std::size_t restarts = 0;
-};
-
 /**
- *  @brief The index-side state one fully-typed benchmark run shares between its phases:
- *      the indexes - one per engaged memory domain - their per-thread traversal contexts,
- *      and the recall bookkeeping.
+ *  @brief The CPU-side state one fully-typed benchmark run shares between its phases: the
+ *      indexes - one per engaged memory domain - their per-thread traversal contexts, and
+ *      the embedded backend-neutral judgment results.
  *
  *  The dataset never appears here - the data side lives in @c streamed_dataset, which
  *  bridges the file's scalar into the stored one vector-by-vector. In the default and
@@ -316,11 +124,10 @@ struct alignas(64) telemetry_lane_t {
  *  domain owns one, every prong routes to its local index through
  *  @c index_of_compute_domain, and searches gather through @c merge_into.
  */
-template <nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, nk_capability_t capability_, typename wait_type_>
+template <typename index_type_>
 struct bench_context {
     using allocator_t = domain_or_default_allocator<std::byte>;
-    using index_t =
-        inner_volatile_index<stored_dtype_, kernel_, capability_, wait_type_, allocator_t, allocator_t, allocator_t>;
+    using index_t = index_type_;
     using scalar_t = typename index_t::scalar_t;
     using small_size_t = typename index_t::small_size_t;
     using traversal_t = typename index_t::inner_traversal_context_t;
@@ -328,116 +135,24 @@ struct bench_context {
     using vectors_view_t = typename index_t::vectors_view_t;
     using distance_t = typename index_t::distance_t;
 
-    static constexpr nk_kernel_kind_t kernel_kind_k = kernel_;
+    static constexpr nk_kernel_kind_t kernel_kind_k = index_t::kernel_kind_k;
 
     bench_options_t const& options;
     /** @brief One index per engaged memory domain; the indirection buys address stability,
      *      as an index holds atomics and never moves. */
     std::vector<std::unique_ptr<index_t>> indexes;
-    /** @brief The @b [indexes,rows] recall bookkeeping: dense node id → global dataset row. */
-    std::vector<std::vector<std::uint32_t>> id_to_row;
     /** @brief Routes every prong to the index local to its compute domain. */
     std::vector<std::size_t> index_of_compute_domain;
-    /** @brief The @b [queries,depth] expected neighbors; empty when absent or truncated
-     *      by `--max-vectors`. */
-    nk::matrix_view<std::uint32_t> ground_truth;
     /** @brief One graph-walking context per pool thread, built by that thread itself with
      *      its local memory domain's allocator. */
     std::vector<std::unique_ptr<traversal_t>> traversals;
     /** @brief Per-thread telemetry sums, padded apart to stay contention-free. */
     std::vector<telemetry_lane_t> lanes;
-    /** @brief The @b [queries,top_k] merged global rows of every query's gathered hits. */
-    nk::matrix<std::uint32_t> hit_rows;
-    /** @brief The @b [queries,top_k] distances matching @c hit_rows entry-for-entry. */
-    nk::matrix<distance_t> hit_distances;
-    /** @brief Merged hits per query, sizing each row for the post-clock judgment. */
-    std::vector<std::uint32_t> hit_counts;
-    /** @brief Per-query end-to-end lookup latencies, in microseconds. */
-    std::vector<float> latencies_us;
-    /** @brief Tasks that returned an error in either phase; any non-zero fails the run. */
-    std::atomic<std::size_t> failed_tasks {0};
+    /** @brief The backend-neutral judgment state both phases fill. */
+    bench_results_t results;
 
     bench_context(bench_options_t const& options) noexcept : options(options) {}
 };
-
-/**
- *  @brief The data-side of a run: typed views over the source rows and the bounded staging
- *      matrix the streaming `nk::cast`s trampoline through, one vector at a time.
- *
- *  The staging matrix holds `--batch` rows for ALL threads - never a whole-dataset copy.
- *  Each thread owns a contiguous area of it and rotates through that area as its tasks
- *  stream by, so concurrent tasks never share a row and no `malloc` follows the clocks.
- *  When the file scalar already matches the stored one, the staging is empty and every
- *  access is a zero-copy view into the mapping.
- */
-template <typename dataset_scalar_type_, typename bench_context_type_>
-struct streamed_dataset {
-    using bench_t = bench_context_type_;
-    using scalar_t = typename bench_context_type_::scalar_t;
-    using vector_view_t = typename bench_context_type_::vector_view_t;
-    static constexpr bool zero_copy_k = std::is_same_v<dataset_scalar_type_, scalar_t>;
-
-    /** @brief Float sources downcast into integer targets only after a global symmetric
-     *      rescale into the target's range - a raw saturating cast collapses the value
-     *      distribution, degenerates the distances, and loops the graph traversal.
-     *      NumKong's own reflection drives both the classification and the range. */
-    static constexpr bool scaled_k = !zero_copy_k && !nk::is_integral_dtype<dataset_scalar_type_>() &&
-                                     nk::is_integral_dtype<scalar_t>();
-
-    /** @brief The largest magnitude one stored dimension can carry, in the stored dtype. */
-    static constexpr float target_amplitude_k = dimension_amplitude<scalar_t>();
-
-    /** @brief The index-side state both phases feed - punned through the pool callbacks. */
-    bench_context_type_& bench;
-    /** @brief The @b [rows,dimensions] mapped source rows, in the file's own scalar. */
-    nk::matrix_view<dataset_scalar_type_> vectors;
-    /** @brief The @b [queries,dimensions] mapped query rows - or a prefix of @c vectors. */
-    nk::matrix_view<dataset_scalar_type_> queries;
-    /** @brief The @b [threads,rows_per_thread,dimensions] staging trampoline planes. */
-    nk::tensor_span<scalar_t, 3> staging;
-    /** @brief The @b [threads,rows_per_thread,dimensions] `f32` rescaling planes; only
-     *      set when @c scaled_k. */
-    nk::tensor_span<nk::f32_t, 3> rescaling;
-    /** @brief The global symmetric factor applied before integer downcasts. */
-    float scale = 1.0f;
-
-    /** @brief Converts one source row into the calling thread's own staging plane and views
-     *      it back; @p task rotates the row within the plane, so in-flight tasks never clash. */
-    vector_view_t stage(nk::vector_view<dataset_scalar_type_> source, std::size_t thread, std::size_t task) noexcept {
-        std::size_t const dimensions = vectors.extent(1);
-        std::size_t const rotation = task % staging.extent(1);
-        auto landing = staging.row(thread).row(rotation).as_vector();
-        if constexpr (scaled_k) {
-            // One SIMD `nk::scale` affine pass replaces a scalar multiply loop; an f32
-            // source feeds it straight from the mapping, skipping the widening cast.
-            auto rescaled = rescaling.row(thread).row(rotation).as_vector();
-            nk_f32_t const alpha = scale;
-            nk_f32_t const beta = 0.0f;
-            if constexpr (std::is_same_v<dataset_scalar_type_, nk::f32_t>)
-                nk::scale(source.data(), dimensions, &alpha, &beta, rescaled.data());
-            else {
-                nk::cast(source, rescaled);
-                nk::scale(rescaled.data(), dimensions, &alpha, &beta, rescaled.data());
-            }
-            nk::cast(rescaled.data(), dimensions, landing.data());
-        }
-        else { nk::cast(source, landing); }
-        return vector_view_t {landing.data(), dimensions};
-    }
-};
-
-/** @brief Sums the per-thread telemetry after a phase; the lanes stay untouched. */
-static telemetry_lane_t summed_lanes(std::vector<telemetry_lane_t> const& lanes) noexcept {
-    telemetry_lane_t sums;
-    for (telemetry_lane_t const& lane : lanes) {
-        sums.visited_members += lane.visited_members;
-        sums.computed_distances += lane.computed_distances;
-        sums.computed_distances_in_refines += lane.computed_distances_in_refines;
-        sums.computed_distances_in_reverse_refines += lane.computed_distances_in_reverse_refines;
-        sums.restarts += lane.restarts;
-    }
-    return sums;
-}
 
 /** @brief Builds one index per engaged memory domain, reserves each for the viewed rows, and
  *      sizes all per-thread state off the pool's actual thread count - everything fallible,
@@ -454,11 +169,8 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
     std::size_t const threads = fu_pool_threads_count(pool);
     std::size_t const compute_domains = fu_compute_domains_count(topology);
 
-    connectivity_t connectivity = connectivity_unknown_k;
-    if (bench.options.connectivity == 16) connectivity = connectivity_16_k;
-    else if (bench.options.connectivity == 32) connectivity = connectivity_32_k;
-    else if (bench.options.connectivity == 128) connectivity = connectivity_128_k;
-    else {
+    connectivity_t const connectivity = connectivity_of(bench.options.connectivity);
+    if (connectivity == connectivity_unknown_k) {
         fmt::print("Unsupported --connectivity {}; pick 16, 32, or 128\n", bench.options.connectivity);
         return false;
     }
@@ -483,12 +195,12 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
         return false;
     }
     bench.indexes.reserve(indexes_count);
-    bench.id_to_row.resize(indexes_count);
+    bench.results.id_to_row.resize(indexes_count);
     for (std::size_t slot = 0; slot != indexes_count; ++slot) {
         fu_memory_domain_id_t const domain = memory_domains.empty() ? -1 : memory_domains[slot];
         bench.indexes.push_back(std::make_unique<index_t>(allocator_t {domain}, allocator_t {domain}));
         index_t& index = *bench.indexes.back();
-        bench.id_to_row[slot].resize(rows);
+        bench.results.id_to_row[slot].resize(rows);
 
         // Reserving first freezes the CLI geometry and pre-grows capacity; a checkpoint then
         // loads against that frozen geometry, so a header mismatch fails loudly below instead
@@ -499,49 +211,14 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
             return false;
         }
 
-        // Three RetriEval-layout matrix dumps per slot: the file name's type hash carries
-        // compatibility, the two-counter headers carry the shapes, and any dataset tool opens
-        // them. The id → row map restores the recall bookkeeping the index itself never stores.
-        if (!bench.options.load_name.empty()) {
-            using scalar_t = typename index_t::scalar_t;
-            checkpoint_paths_t const paths = checkpoint_paths_of<index_t>(bench.options, bench.options.load_name, slot,
-                                                                          indexes_count);
-            auto mapped_vectors = mmap_view_t::try_map(paths.vectors.c_str());
-            auto mapped_neighbors = mmap_view_t::try_map(paths.neighbors.c_str());
-            auto mapped_rows = mmap_view_t::try_map(paths.rows.c_str());
-            if (mapped_vectors.status != status_t::success_k || mapped_neighbors.status != status_t::success_k ||
-                mapped_rows.status != status_t::success_k) {
-                fmt::print("Failed to map the {} checkpoint for slot {}\n", bench.options.load_name, slot);
-                return false;
-            }
-
-            auto const vectors_extents = parse_matrix_header<scalar_t, std::uint32_t>(mapped_vectors.value);
-            auto const neighbors_extents = parse_matrix_header<std::uint32_t, std::uint32_t>(mapped_neighbors.value);
-            auto const map_extents = parse_matrix_header<std::uint32_t, std::uint32_t>(mapped_rows.value);
-            bool const parsed = vectors_extents.status == status_t::success_k &&
-                                neighbors_extents.status == status_t::success_k &&
-                                map_extents.status == status_t::success_k;
-            std::size_t const loaded_nodes = vectors_extents.value.rows;
-            if (!parsed || vectors_extents.value.columns != dimensions ||
-                neighbors_extents.value.columns != connectivity || map_extents.value.columns != 1 ||
-                neighbors_extents.value.rows != loaded_nodes || map_extents.value.rows != loaded_nodes) {
-                fmt::print("Checkpoint {} disagrees with the run's geometry\n", bench.options.load_name);
-                return false;
-            }
-
-            nk::matrix_view<scalar_t> const vectors_view = view_matrix_payload<scalar_t, std::uint32_t>(
-                mapped_vectors.value, loaded_nodes, dimensions);
-            nk::matrix_view<std::uint32_t> const neighbors_view = view_matrix_payload<std::uint32_t, std::uint32_t>(
-                mapped_neighbors.value, loaded_nodes, connectivity);
-            status_t const loaded = index.load(vectors_view, neighbors_view, synchronization_t::exclusive_k);
-            if (loaded != status_t::success_k) {
-                fmt::print("Failed to restore {}: status {}\n", paths.vectors, int(loaded));
-                return false;
-            }
-            nk::matrix_view<std::uint32_t> const rows_view = view_matrix_payload<std::uint32_t, std::uint32_t>(
-                mapped_rows.value, loaded_nodes, 1);
-            std::copy_n(rows_view.data(), loaded_nodes, bench.id_to_row[slot].data());
-        }
+        // Three RetriEval-layout matrix dumps per slot: the file name's dtype-kernel-
+        // connectivity stamp carries compatibility across backends, the two-counter headers
+        // carry the shapes, and any dataset tool opens them. The id → row map restores the
+        // recall bookkeeping the index itself never stores.
+        if (!bench.options.load_name.empty() &&
+            !load_checkpoint(bench.options, index, dimensions, std::span {bench.results.id_to_row[slot]}, slot,
+                             indexes_count))
+            return false;
     }
 
     // The loaded base must cover exactly the skipped prefix - anything else would judge
@@ -579,14 +256,14 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
     // Self-recall probes every ingested row, so the per-query buffers follow the larger count.
     std::size_t const search_count = bench.options.self_recall ? streamed.vectors.extent(0)
                                                                : streamed.queries.extent(0);
-    bench.hit_rows = nk::matrix<std::uint32_t>::try_zeros({search_count, bench.options.top_k});
-    bench.hit_distances = nk::matrix<typename bench_t::distance_t>::try_zeros({search_count, bench.options.top_k});
-    if (bench.hit_rows.empty() || bench.hit_distances.empty()) {
+    bench.results.hit_rows = nk::matrix<std::uint32_t>::try_zeros({search_count, bench.options.top_k});
+    bench.results.hit_distances = nk::matrix<inner_distance_t>::try_zeros({search_count, bench.options.top_k});
+    if (bench.results.hit_rows.empty() || bench.results.hit_distances.empty()) {
         fmt::print("Failed to allocate the per-query hit matrices\n");
         return false;
     }
-    bench.hit_counts.resize(search_count);
-    bench.latencies_us.resize(search_count);
+    bench.results.hit_counts.resize(search_count);
+    bench.results.latencies_us.resize(search_count);
     return true;
 }
 
@@ -618,7 +295,7 @@ void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_
     vectors_view_t const one_row {vector.data(), 1, streamed.vectors.extent(1)};
     auto inserted = index.insert(one_row, {&local_id, std::size_t {1}}, *bench.traversals[thread], config);
     if (!inserted) {
-        bench.failed_tasks.fetch_add(1, std::memory_order_relaxed);
+        bench.results.failed_tasks.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
@@ -628,7 +305,7 @@ void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_
     lane.computed_distances_in_refines += inserted.computed_distances_in_refines;
     lane.computed_distances_in_reverse_refines += inserted.computed_distances_in_reverse_refines;
     lane.restarts += inserted.restarts;
-    bench.id_to_row[slot][local_id] = static_cast<std::uint32_t>(row);
+    bench.results.id_to_row[slot][local_id] = static_cast<std::uint32_t>(row);
 }
 
 template <typename streamed_dataset_type_>
@@ -648,7 +325,7 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     fu_pool_for_n_dynamic(pool, inserted_rows, &insertion_callback<streamed_dataset_type_>, &streamed);
     double const seconds = std::chrono::duration<double>(clock_t::now() - started).count();
 
-    if (std::size_t failures = bench.failed_tasks.load(); failures) {
+    if (std::size_t failures = bench.results.failed_tasks.load(); failures) {
         fmt::print("Insertion failed on {} vectors\n", failures);
         return false;
     }
@@ -692,42 +369,16 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
  *      the topping: a 100M experiment then costs an mmap, not a half-hour rebuild. */
 template <typename streamed_dataset_type_>
 bool save_indexes(streamed_dataset_type_& streamed) {
-    using bench_t = typename streamed_dataset_type_::bench_t;
-    using index_t = typename bench_t::index_t;
-    using scalar_t = typename index_t::scalar_t;
-    using node_id_t = typename index_t::node_id_t;
     using clock_t = std::chrono::steady_clock;
     auto& bench = streamed.bench;
     auto started = clock_t::now();
     std::size_t const slots = bench.indexes.size();
     std::size_t total_bytes = 0;
     for (std::size_t slot = 0; slot != slots; ++slot) {
-        auto& index = *bench.indexes[slot];
-        typename index_t::saved_shape_t const shape = index.saved_shape();
-        auto vectors = nk::matrix<scalar_t>::try_zeros({shape.nodes, shape.dimensions});
-        auto neighbors = nk::matrix<node_id_t>::try_zeros({shape.nodes, shape.connectivity});
-        if (vectors.empty() || neighbors.empty()) {
-            fmt::print("Failed to stage {} rows for serialization\n", shape.nodes);
-            return false;
-        }
-        status_t const saved = index.save(vectors.span(), neighbors.span(), synchronization_t::immutable_k);
-        if (saved != status_t::success_k) {
-            fmt::print("Failed to serialize index {}: status {}\n", slot, int(saved));
-            return false;
-        }
-
-        checkpoint_paths_t const paths = checkpoint_paths_of<index_t>(bench.options, bench.options.save_name, //
-                                                                      slot, slots);
-        nk::matrix_view<std::uint32_t> const rows_map_view {bench.id_to_row[slot].data(), {shape.nodes, 1}};
-        bool const written = matrix_save<scalar_t>(paths.vectors.c_str(), vectors.view()) == status_t::success_k &&
-                             matrix_save<node_id_t>(paths.neighbors.c_str(), neighbors.view()) == status_t::success_k &&
-                             matrix_save<std::uint32_t>(paths.rows.c_str(), rows_map_view) == status_t::success_k;
-        if (!written) {
-            fmt::print("Failed to write the {} checkpoint for slot {}\n", bench.options.save_name, slot);
-            return false;
-        }
-        total_bytes += shape.nodes * (static_cast<std::size_t>(vectors.view().stride_bytes(0)) + //
-                                      shape.connectivity * sizeof(node_id_t) + sizeof(std::uint32_t));
+        std::size_t const saved_bytes = save_checkpoint(bench.options, *bench.indexes[slot],
+                                                        std::span {bench.results.id_to_row[slot]}, slot, slots);
+        if (!saved_bytes) return false;
+        total_bytes += saved_bytes;
     }
     double const seconds = std::chrono::duration<double>(clock_t::now() - started).count();
     fmt::print("Saved {} indexes: {:.2f} GB in {:.2f} s\n", bench.indexes.size(), double(total_bytes) / 1e9, seconds);
@@ -761,8 +412,8 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
     if constexpr (streamed_dataset_type_::zero_copy_k) query_vector = source_row.as_vector();
     else query_vector = streamed.stage(source_row.as_vector(), thread, query);
 
-    std::uint32_t* const merged_rows = bench.hit_rows.row(query).data();
-    auto* const merged_distances = bench.hit_distances.row(query).data();
+    std::uint32_t* const merged_rows = bench.results.hit_rows.row(query).data();
+    auto* const merged_distances = bench.results.hit_distances.row(query).data();
     std::size_t merged_count = 0;
 
     auto started = clock_t::now();
@@ -770,19 +421,19 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
         index_t& index = *bench.indexes[slot];
         auto found = index.search(query_vector, *bench.traversals[thread], config);
         if (!found) {
-            bench.failed_tasks.fetch_add(1, std::memory_order_relaxed);
+            bench.results.failed_tasks.fetch_add(1, std::memory_order_relaxed);
             return;
         }
         lane.visited_members += found.visited_members;
         lane.computed_distances += found.computed_distances;
         lane.restarts += found.restarts;
         auto const& results = bench.traversals[thread]->results;
-        merged_count = merge_search_results(to_span(results), bench.id_to_row[slot],
+        merged_count = merge_search_results(to_span(results), bench.results.id_to_row[slot],
                                             std::span {merged_rows, bench.options.top_k},
                                             std::span {merged_distances, bench.options.top_k}, merged_count);
     }
-    bench.latencies_us[query] = std::chrono::duration<float, std::micro>(clock_t::now() - started).count();
-    bench.hit_counts[query] = static_cast<std::uint32_t>(merged_count);
+    bench.results.latencies_us[query] = std::chrono::duration<float, std::micro>(clock_t::now() - started).count();
+    bench.results.hit_counts[query] = static_cast<std::uint32_t>(merged_count);
 }
 
 template <typename streamed_dataset_type_>
@@ -796,82 +447,14 @@ bool run_search(streamed_dataset_type_& streamed, fu_pool_t pool) {
     fu_pool_for_n(pool, query_count, &search_callback<streamed_dataset_type_>, &streamed);
     double const seconds = std::chrono::duration<double>(clock_t::now() - started).count();
 
-    if (std::size_t failures = bench.failed_tasks.load(); failures) {
+    if (std::size_t failures = bench.results.failed_tasks.load(); failures) {
         fmt::print("Search failed on {} queries\n", failures);
         return false;
     }
     telemetry_lane_t const sums = summed_lanes(bench.lanes);
-
-    auto percentile = [&](double share) {
-        std::size_t const rank = std::min(query_count - 1, std::size_t(share * double(query_count)));
-        std::nth_element(bench.latencies_us.begin(), bench.latencies_us.begin() + rank, bench.latencies_us.end());
-        return bench.latencies_us[rank];
-    };
-
-    fmt::print(header_style(), "\nSearch\n");
-    fmt::print("  queries: {} at top-{}{}\n", query_count, bench.options.top_k,
-               bench.options.self_recall ? " · self-recall" : "");
-    fmt::print("  threads: {}\n", fu_pool_threads_count(pool));
-    fmt::print("  wall: {:.2f} s\n", seconds);
-    fmt::print("  throughput: {} QPS\n", humanize(double(query_count) / seconds));
-    fmt::print("  latency: p50 {:.0f} µs · p90 {:.0f} µs · p99 {:.0f} µs\n", percentile(0.50), percentile(0.90),
-               percentile(0.99));
-    fmt::print("  distances/query: {}\n", humanize(double(sums.computed_distances) / double(query_count)));
-    fmt::print("  visited/query: {}\n", humanize(double(sums.visited_members) / double(query_count)));
-    fmt::print("  restarts: {}\n", sums.restarts);
-    // Judgment runs after the clock stopped, so QPS never depends on how much we measure.
-    // One sweep per query produces every verdict; the discount tables are built once.
-    if (bench.options.self_recall) {
-        std::size_t found_at_1 = 0, found_at_k = 0;
-        for (std::size_t query = 0; query != query_count; ++query) {
-            auto const returned = to_span(bench.hit_rows.row(query).as_vector()).first(bench.hit_counts[query]);
-            std::uint32_t const own_row = static_cast<std::uint32_t>(query);
-            found_at_1 += !returned.empty() && returned.front() == own_row;
-            bool within = false;
-            for (std::uint32_t row : returned) within |= row == own_row;
-            found_at_k += within;
-        }
-        double const queries = double(query_count);
-        double const self_at_1 = 100.0 * double(found_at_1) / queries;
-        double const self_at_k = 100.0 * double(found_at_k) / queries;
-        fmt::print("  self-recall@1: ");
-        fmt::print(verdict_style(self_at_1 >= 99.0), "{:.2f}%\n", self_at_1);
-        fmt::print("  self-recall@{}: ", bench.options.top_k);
-        fmt::print(verdict_style(self_at_k >= 99.0), "{:.2f}%\n", self_at_k);
-    }
-    else if (!bench.ground_truth.empty()) {
-        std::size_t const judged_depth = std::min(bench.options.top_k, bench.ground_truth.extent(1));
-        std::vector<std::uint32_t> scratch(judged_depth);
-        std::vector<double> discounts(bench.options.top_k), ideal(bench.options.top_k);
-        fill_discounts(discounts, ideal);
-
-        std::size_t found_at_1 = 0, found_at_k = 0, shared = 0;
-        double gain = 0;
-        for (std::size_t query = 0; query != query_count; ++query) {
-            auto expected = bench.ground_truth.row(query).as_vector();
-            auto const returned = to_span(bench.hit_rows.row(query).as_vector()).first(bench.hit_counts[query]);
-            found_at_1 += !returned.empty() && returned.front() == expected[0];
-            auto verdict = judge_ranking(std::span<std::uint32_t const> {returned},
-                                         to_span(expected).first(judged_depth), std::span<std::uint32_t> {scratch},
-                                         std::span<double const> {discounts});
-            found_at_k += verdict.found_nearest;
-            shared += verdict.overlap;
-            gain += verdict.gain;
-        }
-
-        double const queries = double(query_count);
-        double const recall_at_1 = 100.0 * double(found_at_1) / queries;
-        double const recall_at_k = 100.0 * double(found_at_k) / queries;
-        double const overlap_at_k = 100.0 * double(shared) / (queries * double(judged_depth));
-        double const gain_at_k = 100.0 * gain / (queries * ideal[judged_depth - 1]);
-        fmt::print("  recall@1: ");
-        fmt::print(verdict_style(recall_at_1 >= 90.0), "{:.1f}%\n", recall_at_1);
-        fmt::print("  recall@{}: ", judged_depth);
-        fmt::print(verdict_style(recall_at_k >= 99.0), "{:.1f}%\n", recall_at_k);
-        fmt::print("  overlap@{}: {:.1f}%\n", judged_depth, overlap_at_k);
-        fmt::print("  ndcg@{}: {:.1f}%\n", judged_depth, gain_at_k);
-    }
-    else { fmt::print("  recall: skipped, no ground-truth neighbors provided\n"); }
+    report_search_metrics(bench.options, query_count, seconds, fu_pool_threads_count(pool), sums,
+                          {bench.results.latencies_us.data(), bench.results.latencies_us.size()});
+    judge_hits(bench.options, bench.results, query_count);
     return true;
 }
 
@@ -889,8 +472,9 @@ struct bench_launch {
 };
 
 /**
- *  @brief The innermost hop: wires the typed source views and the bounded staging
- *      trampoline into a @c streamed_dataset, and runs both phases.
+ *  @brief The innermost hop: binds the concrete volatile-index instantiation, wires the
+ *      typed source views and the bounded staging trampoline into a @c streamed_dataset,
+ *      and runs both phases.
  *
  *  When the file scalar already matches the stored one, everything is a zero-copy view
  *  into the mappings; otherwise the staging matrix holds just `--batch` rows - typically a
@@ -900,7 +484,10 @@ struct bench_launch {
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_,
           nk_capability_t capability_, typename wait_type_>
 int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
-    using bench_context_type_ = bench_context<stored_dtype_, kernel_, capability_, wait_type_>;
+    using allocator_t = domain_or_default_allocator<std::byte>;
+    using index_t =
+        inner_volatile_index<stored_dtype_, kernel_, capability_, wait_type_, allocator_t, allocator_t, allocator_t>;
+    using bench_context_type_ = bench_context<index_t>;
     using streamed_t = streamed_dataset<dataset_scalar_type_, bench_context_type_>;
     using scalar_t = typename bench_context_type_::scalar_t;
 
@@ -958,7 +545,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
         }
     }
 
-    if (dataset.has_ground_truth() && !launch.options.max_vectors) bench.ground_truth = dataset.neighbors();
+    if (dataset.has_ground_truth() && !launch.options.max_vectors) bench.results.ground_truth = dataset.neighbors();
     else if (dataset.has_ground_truth())
         fmt::print("Ground truth ignored: --max-vectors truncates the graph it was computed for\n");
 
@@ -1068,51 +655,7 @@ int open_and_run(bench_options_t const& options, fu_pool_t pool, fu_topology_t t
 
 #pragma endregion
 
-/** @brief Prints the machine as ForkUnion sees it: cores, compute & memory domains, and the
- *      NUMA fabric levels, next to the NumKong capability the kernels will actually use. */
-static void print_machine(fu_topology_t topology, fu_fabric_t fabric, bench_options_t const& options,
-                          std::size_t threads) {
-    std::size_t const compute_domains = fu_compute_domains_count(topology);
-    std::size_t const memory_domains = fu_memory_domains_count(topology);
-    fmt::print(header_style(), "Machine\n");
-    fmt::print("  logical cores: {}\n", fu_logical_cores_count(topology));
-    fmt::print("  compute domains: {}\n", compute_domains);
-    fmt::print("  memory domains: {}\n", memory_domains);
-    for (std::size_t domain = 0; domain != memory_domains; ++domain)
-        fmt::print("  memory domain {}: fabric level {}, huge pages {:.2f} GB\n", domain,
-                   fu_fabric_memory_level_in(fabric, domain), double(fu_volume_huge_pages_in(topology, domain)) / 1e9);
-    if (!options.memory_domains.empty()) {
-        fmt::print("  engaged memory domains:");
-        for (fu_memory_domain_id_t domain : options.memory_domains) fmt::print(" {}", domain);
-        fmt::print("\n");
-    }
-    fmt::print("  threads engaged: {}\n", threads);
-
-    char scheduling_names[256] = {0};
-    fu_name_capabilities(fu_runtime_capabilities(), scheduling_names, sizeof(scheduling_names));
-    fmt::print("  scheduling detected: {}\n", scheduling_names);
-
-    nk_capability_t const available = nk_capabilities_available();
-    fmt::print("  compute detected: serial");
-    for (capability_choice<nk_capability_t> const& choice : compute_choices_k)
-        if (available & choice.bit) fmt::print(" {}", choice.name);
-    fmt::print("\n");
-    fmt::print("  compute ceiling: {}\n",
-               bit_name(compute_span_k, highest_bit(compute_span_k, options.max_compute & available, nk_cap_serial_k),
-                        "serial"));
-    fmt::print("  scheduling ceiling: {}\n",
-               bit_name(schedule_span_k,
-                        highest_bit(schedule_span_k,
-                                    static_cast<fu_capabilities_t>(options.max_schedule & fu_runtime_capabilities()),
-                                    fu_capabilities_unknown_k),
-                        "standard"));
-    fmt::print("  kernels requested: {} · {}\n", dtype_name(options.stored_dtype), kernel_name(options.kernel));
-}
-
-} // namespace unum::usearch
-
 int main(int argc, char** argv) {
-    using namespace unum::usearch;
     bench_options_t options;
     std::string max_compute_name, max_schedule_name, memory_domain_name;
 
@@ -1161,7 +704,7 @@ int main(int argc, char** argv) {
         clipp::option("--help").set(options.help) % "print this message");
 
     if (!clipp::parse(argc, argv, cli) || options.help || options.vectors_path.empty()) {
-        for (auto const& section : clipp::make_man_page(cli, "inner_volatile_index_bench_cpp"))
+        for (auto const& section : clipp::make_man_page(cli, "inner_index_bench_cpp"))
             fmt::print("{}\n{}\n\n", section.title(), section.content());
         return options.help ? 0 : 1;
     }
