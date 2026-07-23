@@ -3,7 +3,7 @@
  *      volatile in-RAM, GPU-resident, and persisted alike.
  *
  *  @author Ash Vardanian
- *  @file cpp/inner_index_bench.cuh
+ *  @file bench/dense_index.cuh
  *  @date July 22, 2026
  *
  *  Only what every backend genuinely shares lives here: the CLI option set, the RetriEval

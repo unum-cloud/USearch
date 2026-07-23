@@ -1,16 +1,17 @@
 /**
  *  @brief Smoke tests for @c dense/ram_metric.hpp 1-to-1, 1-to-4, and tiled kernels against
- *      NumKong's monolithic 1-to-1 reference - @c nk::dot / @c nk::angular / @c nk::sqeuclidean.
+ *      NumKong's monolithic 1-to-1 reference - @c nk::dot / @c nk::angular / @c nk::sqeuclidean -
+ *      shared by the per-dtype shards.
  *
  *  @author Ash Vardanian
- *  @file cpp/inner_metric_test.cpp
+ *  @file test/dense_metric.hpp
  *  @date April 21, 2026
  *
  *  USearch's @c distance and @c distances entry points compose a kit (per scalar +
  *  capability) with a metric overlay (per kernel) and route through a single trampoline.
  *  The test:
  *
- *  1. Enumerates every NumKong scalar in @c main and every @c (kernel,scalar,capability)
+ *  1. Enumerates one NumKong scalar per shard and every @c (kernel,scalar,capability)
  *     tuple inside @c check_scalar. The @c quads_supported concept gates each
  *     call so combinations not yet adapted are no-ops at compile time without breaking
  *     the build - new kits and chains light up the matching cells automatically.
@@ -23,13 +24,15 @@
  *     of distances - a streaming gather → pack → update walk over the depth, then a
  *     finalize - and compares every cell against the @c distance oracle, skipping
  *     silently when the machine lacks the engine at runtime.
- *  4. Returns non-zero exit code if any comparison fails. Each check returns its own
- *     failure count; counts roll up to @c main without any global mutable state.
+ *  4. Each check returns its own failure count; counts roll up through the shard entry
+ *     points to the suite's @c main without any global mutable state.
  *
  *  The input vectors are populated with cyclic values from {0..7} - representable
  *  exactly in every supported scalar (Float64..E2M1, i8/u8, i4/u4) - at four different
  *  cyclic rotations so the four candidates differ from the query and from each other.
  */
+#pragma once
+
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -309,38 +312,3 @@ int check_scalar<nk::u1x8_t>() noexcept {
  */
 template <typename scalar_>
 concept scalar_wired = quads_supported<nk_kernel_dot_k, scalar_, nk_cap_serial_k>;
-
-static_assert(scalar_wired<nk::bf16_t>);
-static_assert(scalar_wired<nk::f16_t>);
-static_assert(scalar_wired<nk::e5m2_t>);
-static_assert(scalar_wired<nk::e4m3_t>);
-static_assert(scalar_wired<nk::e3m2_t>);
-static_assert(scalar_wired<nk::e2m3_t>);
-static_assert(scalar_wired<nk::u8_t>);
-static_assert(scalar_wired<nk::i8_t>);
-static_assert(scalar_wired<nk::u4x2_t>);
-static_assert(scalar_wired<nk::i4x2_t>);
-static_assert(scalar_wired<nk::u1x8_t>);
-
-int main(void) {
-    int failures = 0;
-
-    failures += check_scalar<nk::f64_t>();
-    failures += check_scalar<nk::f32_t>();
-    failures += check_scalar<nk::bf16_t>();
-    failures += check_scalar<nk::f16_t>();
-    failures += check_scalar<nk::e5m2_t>();
-    failures += check_scalar<nk::e4m3_t>();
-    failures += check_scalar<nk::e3m2_t>();
-    failures += check_scalar<nk::e2m3_t>();
-
-    failures += check_scalar<nk::i8_t>();
-    failures += check_scalar<nk::i4x2_t>();
-
-    failures += check_scalar<nk::u8_t>();
-    failures += check_scalar<nk::u4x2_t>();
-    failures += check_scalar<nk::u1x8_t>();
-
-    if (failures != 0) fmt::print(stderr, "{} failure(s)\n", failures);
-    return failures == 0 ? 0 : 1;
-}

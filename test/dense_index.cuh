@@ -3,7 +3,7 @@
  *      volatile in-RAM, GPU-resident, and persisted alike.
  *
  *  @author Ash Vardanian
- *  @file cpp/inner_index_test.cuh
+ *  @file test/dense_index.cuh
  *  @date July 22, 2026
  *
  *  Every scenario is a template over the index type, and each translation unit composes its

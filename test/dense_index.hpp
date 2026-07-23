@@ -1,29 +1,31 @@
 /**
- *  @brief Smoke & concurrency tests for the CPU-resident @c dense_ram_index over a
- *      curated set of (dtype, kernel) instantiations - not the whole combinatorial space.
+ *  @brief The CPU-side suite composer for @c dense_ram_index smoke & concurrency tests,
+ *      shared by the per-dtype shards - each names a curated set of (dtype, kernel)
+ *      cells, never the whole combinatorial space.
  *
  *  @author Ash Vardanian
- *  @file cpp/inner_index_test.cpp
+ *  @file test/dense_index.hpp
  *  @date July 17, 2026
  *
- *  The scenarios themselves live in @c inner_index_test.cuh, templated over the index type;
- *  this translation unit names the volatile instantiations, their compile-time & runtime
- *  gates, and composes the suite explicitly. The covered matrix is:
- *  f32+dot, f32+angular, f32+euclidean, u8+euclidean, u8+angular, i4+angular - each gated
- *  by a compile-time concept, so combinations whose serial kernels are not yet adapted in
- *  @c dense/ram_metric.hpp report as skipped and light up automatically once the kits land.
- *  Two already-adapted stand-ins (bf16+angular, i8+euclidean) keep the index machinery
- *  genuinely exercised in the meantime, and repeat with a deliberately flaky waiter that
- *  oversleeps at random, widening the interleaving windows around locks and watermark turns
- *  far beyond hardware timing. A u8+euclidean tiles cell exercises the sapphireamx engine
- *  end to end where the machine offers it. Removal, update, and filtering tests are
- *  deliberately absent: those features are banned at this layer by design.
+ *  The scenarios themselves live in @c dense_index.cuh, templated over the index type;
+ *  each shard names its instantiations, their compile-time & runtime gates, and composes
+ *  the suite explicitly. Cells are gated by a compile-time concept, so combinations whose
+ *  serial kernels are not yet adapted in @c dense/ram_metric.hpp report as skipped and
+ *  light up automatically once the kits land. Shards may repeat cells with a deliberately
+ *  flaky waiter that oversleeps at random, widening the interleaving windows around locks
+ *  and watermark turns far beyond hardware timing, and may add tiles cells exercising the
+ *  matrix engines end to end where the machine offers them. Removal, update, and
+ *  filtering tests are deliberately absent: those features are banned at this layer by
+ *  design.
  */
+#pragma once
+
 #include <fmt/format.h>
 #include <numkong/numkong.hpp>
 
-#include "inner_index_test.cuh"
 #include "usearch/dense/ram_index.hpp"
+
+#include "dense_index.cuh"
 
 using namespace unum::usearch;
 
@@ -75,26 +77,4 @@ static std::size_t test_configuration(char const* name) {
     failures_count += test_concurrent_build<index_t, kernel_>(make_index);
     failures_count += test_concurrent_search<index_t, kernel_>(make_index);
     return report_scenarios(name, failures_count);
-}
-
-int main() {
-    std::size_t failures_count = 0;
-    failures_count += test_configuration<nk_f32_k, nk_kernel_dot_k>("f32+dot");
-    failures_count += test_configuration<nk_f32_k, nk_kernel_angular_k>("f32+angular");
-    failures_count += test_configuration<nk_f32_k, nk_kernel_euclidean_k>("f32+euclidean");
-    failures_count += test_configuration<nk_u8_k, nk_kernel_euclidean_k>("u8+euclidean");
-    failures_count += test_configuration<nk_u8_k, nk_kernel_angular_k>("u8+angular");
-    failures_count += test_configuration<nk_i4_k, nk_kernel_angular_k>("i4+angular");
-    failures_count += test_configuration<nk_bf16_k, nk_kernel_angular_k>("bf16+angular");
-    failures_count += test_configuration<nk_i8_k, nk_kernel_euclidean_k>("i8+euclidean");
-    failures_count += test_configuration<nk_bf16_k, nk_kernel_angular_k, flaky_waiter_t>("bf16+angular+flaky");
-    failures_count += test_configuration<nk_i8_k, nk_kernel_euclidean_k, flaky_waiter_t>("i8+euclidean+flaky");
-
-    // The tiled u8 tier: the serial floor, icelake quads, and sapphireamx tiles.
-    constexpr nk_capability_t tiles_caps_k = static_cast<nk_capability_t>( //
-        nk_cap_serial_k | nk_cap_icelake_k | nk_cap_sapphireamx_k);
-    failures_count += test_configuration<nk_u8_k, nk_kernel_euclidean_k, dummy_waiter_t, tiles_caps_k>( //
-        "u8+euclidean+tiles");
-    fmt::println("{}: {} total failures", failures_count ? "FAILED" : "OK", failures_count);
-    return failures_count ? 1 : 0;
 }

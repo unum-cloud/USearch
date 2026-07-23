@@ -3,7 +3,7 @@
  *      @c sorted_buffer, and @c growing_hash_set - including their multi-element overloads.
  *
  *  @author Ash Vardanian
- *  @file cpp/traversal_queue_bench.cpp
+ *  @file bench/ram_queue.cpp
  *  @date April 25, 2026
  *
  *  Pure data-structure microbenches. No L1-noise simulator, no HNSW context. Each cell

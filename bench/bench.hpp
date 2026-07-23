@@ -2,7 +2,7 @@
  *  @brief Logging & styling helpers shared by the benchmarking harnesses.
  *
  *  @author Ash Vardanian
- *  @file cpp/bench.hpp
+ *  @file bench/bench.hpp
  *  @date July 17, 2026
  *
  *  Everything here is presentation-only: TTY-aware {fmt} styles that degrade to plain text

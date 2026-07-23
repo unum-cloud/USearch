@@ -473,6 +473,14 @@ if (${USEARCH_BUILD_TEST_CPP} OR ${USEARCH_BUILD_BENCH_CPP})
     add_subdirectory(cpp)
 endif ()
 
+if (${USEARCH_BUILD_TEST_CPP})
+    add_subdirectory(test)
+endif ()
+
+if (${USEARCH_BUILD_BENCH_CPP})
+    add_subdirectory(bench)
+endif ()
+
 if (${USEARCH_BUILD_WOLFRAM})
     add_subdirectory(wolfram)
 endif ()

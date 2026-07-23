@@ -3,10 +3,10 @@
  *      consumer of the shared scenario library.
  *
  *  @author Ash Vardanian
- *  @file cpp/inner_index_test.cu
+ *  @file test/dense_index.cu
  *  @date July 22, 2026
  *
- *  The scenarios live in @c inner_index_test.cuh, templated over the index type; this
+ *  The scenarios live in @c dense_index.cuh, templated over the index type; this
  *  translation unit names the CUDA index cells, composes their suite explicitly, and adapts
  *  the harness's host-side allocation ledger to device memory, so the same
  *  live-bytes-must-balance discipline audits the GPU planes.
@@ -17,7 +17,7 @@
 
 #include "usearch/dense/vram_index.cuh"
 
-#include "inner_index_test.cuh"
+#include "dense_index.cuh"
 
 using namespace unum::usearch;
 

@@ -2,11 +2,11 @@
  *  @brief Profiling harness for the GPU-resident dense index over real persisted datasets.
  *
  *  @author Ash Vardanian
- *  @file cpp/inner_index_bench.cu
+ *  @file bench/dense_index.cu
  *  @date July 22, 2026
  *
  *  The backend-neutral surface - options, checkpoints, dataset streaming, telemetry, result
- *  judgment - lives in @c inner_index_bench.cuh; this translation unit owns everything CUDA:
+ *  judgment - lives in @c dense_index.cuh; this translation unit owns everything CUDA:
  *  one device, one @c dense_vram_index instantiation, and batch-shaped run loops - the GPU
  *  ingests and answers thousands of rows per launch, so the pipeline streams the dataset in
  *  `--batch`-row slabs instead of one row per task. Checkpoints share the CPU bench's
@@ -28,7 +28,7 @@
 
 #include <usearch/dense/vram_indexes.cuh>
 
-#include "inner_index_bench.cuh"
+#include "dense_index.cuh"
 #include "persisted_dataset.hpp"
 
 using namespace unum::usearch;
@@ -547,7 +547,7 @@ int main(int argc, char** argv) {
         clipp::option("--help").set(options.help) % "print this message");
 
     if (!clipp::parse(argc, argv, cli) || options.help || options.vectors_path.empty()) {
-        for (auto const& section : clipp::make_man_page(cli, "inner_index_bench_cu"))
+        for (auto const& section : clipp::make_man_page(cli, "usearch_bench_cuda"))
             fmt::println("{}\n{}\n", section.title(), section.content());
         return options.help ? 0 : 1;
     }

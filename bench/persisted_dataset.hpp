@@ -2,7 +2,7 @@
  *  @brief Read-only memory-mapped datasets in the RetriEval binary layout.
  *
  *  @author Ash Vardanian
- *  @file cpp/persisted_dataset.hpp
+ *  @file bench/persisted_dataset.hpp
  *  @date July 17, 2026
  *
  *  Each file starts with two little-endian `u32` counters - rows, then columns - followed

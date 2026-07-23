@@ -3,10 +3,10 @@
  *      and tiled kernels against NumKong's monolithic 1-to-1 reference.
  *
  *  @author Ash Vardanian
- *  @file cpp/inner_metric_bench.cpp
+ *  @file bench/dense_metric.cpp
  *  @date April 23, 2026
  *
- *  Mirrors the structure of @c cpp/inner_metric_test.cpp - the @c quads_supported concept
+ *  Mirrors the structure of @c test/dense_metric.hpp - the @c quads_supported concept
  *  gates each cell so unadapted (kernel, scalar, caps) tuples don't get registered, and
  *  new kits or chains light up matching benchmark cells automatically. Three flavors per
  *  supported tuple: USearch's @c distance (1-to-1), USearch's @c distances (1-to-4 fan-out),

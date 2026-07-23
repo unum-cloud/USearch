@@ -3,7 +3,7 @@
  *      and universally-representable synthetic data generation.
  *
  *  @author Ash Vardanian
- *  @file cpp/test.hpp
+ *  @file test/test.hpp
  *  @date July 17, 2026
  *
  *  Checks return their own failure counts and roll up to @c main without global mutable
@@ -168,3 +168,31 @@ nk::matrix<scalar_> make_vectors(std::size_t count, std::size_t dimensions, u64_
     return vectors;
 }
 } // namespace unum::usearch
+
+#pragma region Suite Entry Points
+
+/** @brief Per-family, per-dtype suite entries the shard translation units define and the
+ *      suite's @c main composes explicitly; each returns its shard's failure count. */
+std::size_t test_dense_index_f32();
+std::size_t test_dense_index_u8();
+std::size_t test_dense_index_i8();
+std::size_t test_dense_index_bf16();
+std::size_t test_dense_index_i4();
+
+std::size_t test_dense_metric_f64();
+std::size_t test_dense_metric_f32();
+std::size_t test_dense_metric_bf16();
+std::size_t test_dense_metric_f16();
+std::size_t test_dense_metric_e5m2();
+std::size_t test_dense_metric_e4m3();
+std::size_t test_dense_metric_e3m2();
+std::size_t test_dense_metric_e2m3();
+std::size_t test_dense_metric_i8();
+std::size_t test_dense_metric_i4();
+std::size_t test_dense_metric_u8();
+std::size_t test_dense_metric_u4();
+std::size_t test_dense_metric_u1();
+
+std::size_t test_ram_queue();
+
+#pragma endregion Suite Entry Points

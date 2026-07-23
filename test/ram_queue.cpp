@@ -4,10 +4,10 @@
  *      larger-N batch overloads plus @c insert_many / @c pop_many on the heap.
  *
  *  @author Ash Vardanian
- *  @file cpp/traversal_queue_test.cpp
+ *  @file test/ram_queue.cpp
  *  @date April 24, 2026
  *
- *  Mirrors the structure of @c cpp/inner_metric_test.cpp:
+ *  Mirrors the structure of @c test/dense_metric.hpp:
  *
  *  1. One monolithic TU, no test framework. Each check returns a failure count;
  *     counts roll up to @c main without any global mutable state. A non-zero exit
@@ -366,7 +366,7 @@ int check_max_heap_pop_many() noexcept {
     return failures;
 }
 
-int main(void) {
+std::size_t test_ram_queue() {
     int failures = 0;
     failures += check_sorted_buffer_single_element();
     failures += check_sorted_buffer_batch_parity<4>(0xABCD1234u);
@@ -400,6 +400,5 @@ int main(void) {
     failures += check_max_heap_pop_many<4>();
     failures += check_max_heap_pop_many<8>();
 
-    if (failures != 0) fmt::print(stderr, "{} failure(s)\n", failures);
-    return failures == 0 ? 0 : 1;
+    return static_cast<std::size_t>(failures);
 }

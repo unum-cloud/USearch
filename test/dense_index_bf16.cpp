@@ -1,0 +1,16 @@
+/**
+ *  @brief Smoke & concurrency tests for the CPU-resident @c dense_ram_index over bf16 cells,
+ *      repeated under a deliberately flaky waiter to widen the interleaving windows.
+ *  @author Ash Vardanian
+ *  @file test/dense_index_bf16.cpp
+ *  @date July 23, 2026
+ */
+#include "dense_index.hpp"
+#include "test.hpp"
+
+std::size_t test_dense_index_bf16() {
+    std::size_t failures_count = 0;
+    failures_count += test_configuration<nk_bf16_k, nk_kernel_angular_k>("bf16+angular");
+    failures_count += test_configuration<nk_bf16_k, nk_kernel_angular_k, flaky_waiter_t>("bf16+angular+flaky");
+    return failures_count;
+}
