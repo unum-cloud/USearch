@@ -59,6 +59,7 @@
 #include <fmt/format.h>
 
 #include <usearch/dense/ram_index.hpp>
+#include <usearch/dense/ram_indexes.hpp>
 
 #include "inner_index_bench.cuh"
 #include "persisted_dataset.hpp"
@@ -149,11 +150,12 @@ struct bench_context {
     static constexpr nk_kernel_kind_t kernel_kind_k = index_t::kernel_kind_k;
 
     bench_options_t const& options;
-    /** @brief One index per engaged memory domain; the indirection buys address stability,
-     *      as an index holds atomics and never moves. */
-    std::vector<std::unique_ptr<index_t>> indexes;
-    /** @brief Routes every prong to the index local to its compute domain. */
-    std::vector<std::size_t> index_of_compute_domain;
+    /** @brief Owns one shard per engaged memory domain; the indirection buys address
+     *      stability, as an index holds atomics and never moves. */
+    std::vector<std::unique_ptr<index_t>> shards;
+    /** @brief The adopted multi-shard view: the compute-domain routing and the merged
+     *      cross-shard search. */
+    dense_ram_indexes<index_t> indexes;
     /** @brief One graph-walking context per pool thread, built by that thread itself with
      *      its local memory domain's allocator. */
     std::vector<std::unique_ptr<traversal_t>> traversals;
@@ -192,25 +194,18 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
     // directory slots, not memory.
     std::vector<fu_memory_domain_id_t> const& memory_domains = bench.options.memory_domains;
     std::size_t const indexes_count = std::max<std::size_t>(1, memory_domains.size());
-    bench.index_of_compute_domain.resize(compute_domains, 0);
-    if (memory_domains.size() > 1)
-        for (std::size_t compute_domain = 0; compute_domain != compute_domains; ++compute_domain) {
-            std::size_t const local_memory = fu_local_memory_of(topology, compute_domain);
-            for (std::size_t slot = 0; slot != memory_domains.size(); ++slot)
-                if (static_cast<std::size_t>(memory_domains[slot]) == local_memory)
-                    bench.index_of_compute_domain[compute_domain] = slot;
-        }
+    if (bench.indexes.route(topology, std::span {memory_domains}) != status_t::success_k) return false;
 
     if (bench.options.skip_vectors > rows) {
         fmt::println("--skip-vectors {} exceeds the {} viewed rows", bench.options.skip_vectors, rows);
         return false;
     }
-    bench.indexes.reserve(indexes_count);
+    bench.shards.reserve(indexes_count);
     bench.results.id_to_row.resize(indexes_count);
     for (std::size_t slot = 0; slot != indexes_count; ++slot) {
         fu_memory_domain_id_t const domain = memory_domains.empty() ? -1 : memory_domains[slot];
-        bench.indexes.push_back(std::make_unique<index_t>(allocator_t {domain}, allocator_t {domain}));
-        index_t& index = *bench.indexes.back();
+        bench.shards.push_back(std::make_unique<index_t>(allocator_t {domain}, allocator_t {domain}));
+        index_t& index = *bench.shards.back();
         bench.results.id_to_row[slot].resize(rows);
 
         // Reserving first freezes the CLI geometry and pre-grows capacity; a checkpoint then
@@ -232,10 +227,14 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
             return false;
     }
 
+    // The view adopts the owned shards once they all exist and stop moving.
+    std::vector<index_t*> adopted(indexes_count);
+    for (std::size_t slot = 0; slot != indexes_count; ++slot) adopted[slot] = bench.shards[slot].get();
+    if (bench.indexes.adopt(std::span {adopted}) != status_t::success_k) return false;
+
     // The loaded base must cover exactly the skipped prefix - anything else would judge
     // recall against rows the graph never saw.
-    std::size_t loaded_rows = 0;
-    for (auto const& index : bench.indexes) loaded_rows += index->size();
+    std::size_t const loaded_rows = bench.indexes.size();
     if (loaded_rows != bench.options.skip_vectors) {
         fmt::println("Loaded indexes cover {} rows, but --skip-vectors says {}", loaded_rows,
                      bench.options.skip_vectors);
@@ -253,7 +252,7 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
         fu_memory_domain_id_t const domain =
             bench.options.memory_domains.empty()
                 ? fu_memory_domain_id_t {-1}
-                : bench.options.memory_domains[bench.index_of_compute_domain[compute_domain]];
+                : bench.options.memory_domains[bench.indexes.local_slot(compute_domain)];
         bench.traversals[thread] = std::make_unique<traversal_t>(
             typename traversal_t::allocator_t {allocator_t {domain}});
     };
@@ -300,8 +299,8 @@ void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_
     if constexpr (streamed_dataset_type_::zero_copy_k) vector = streamed.vectors.row(row).as_vector();
     else vector = streamed.stage(streamed.vectors.row(row).as_vector(), thread, task);
 
-    std::size_t const slot = bench.index_of_compute_domain[compute_domain];
-    index_t& index = *bench.indexes[slot];
+    std::size_t const slot = bench.indexes.local_slot(compute_domain);
+    index_t& index = bench.indexes.shard(slot);
     dense_node_id_t local_id = 0;
     vectors_view_t const one_row {vector.data(), 1, streamed.vectors.extent(1)};
     auto inserted = index.insert(one_row, {&local_id, std::size_t {1}}, *bench.traversals[thread], config);
@@ -362,7 +361,8 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
         (bench.options.max_compute & nk_capabilities_available() & ~nk_cap_serial_k))
         fmt::print(verdict_style(false), "  ⚠ scalar fallback: no SIMD kit is adapted for this dtype & metric\n");
     fmt::println("  threads: {}", fu_pool_threads_count(pool));
-    if (bench.indexes.size() > 1) fmt::println("  indexes: {}, one per memory domain", bench.indexes.size());
+    if (bench.indexes.shards_count() > 1)
+        fmt::println("  indexes: {}, one per memory domain", bench.indexes.shards_count());
     fmt::println("  wall: {:.2f} s", seconds);
     fmt::println("  throughput: {}/s", humanize(double(inserted_rows) / seconds));
     fmt::println("  distances: {} ({:.1f}% refines, {:.1f}% reverse)", humanize(double(sums.computed_distances)),
@@ -383,16 +383,16 @@ bool save_indexes(streamed_dataset_type_& streamed) {
     using clock_t = std::chrono::steady_clock;
     auto& bench = streamed.bench;
     auto started = clock_t::now();
-    std::size_t const slots = bench.indexes.size();
+    std::size_t const slots = bench.indexes.shards_count();
     std::size_t total_bytes = 0;
     for (std::size_t slot = 0; slot != slots; ++slot) {
-        std::size_t const saved_bytes = save_checkpoint(bench.options, *bench.indexes[slot],
+        std::size_t const saved_bytes = save_checkpoint(bench.options, bench.indexes.shard(slot),
                                                         std::span {bench.results.id_to_row[slot]}, slot, slots);
         if (!saved_bytes) return false;
         total_bytes += saved_bytes;
     }
     double const seconds = std::chrono::duration<double>(clock_t::now() - started).count();
-    fmt::println("Saved {} indexes: {:.2f} GB in {:.2f} s", bench.indexes.size(), double(total_bytes) / 1e9, seconds);
+    fmt::println("Saved {} indexes: {:.2f} GB in {:.2f} s", slots, double(total_bytes) / 1e9, seconds);
     return true;
 }
 
@@ -425,26 +425,20 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
 
     std::uint32_t* const merged_rows = bench.results.hit_rows.row(query).data();
     auto* const merged_distances = bench.results.hit_distances.row(query).data();
-    std::size_t merged_count = 0;
 
     auto started = clock_t::now();
-    for (std::size_t slot = 0; slot != bench.indexes.size(); ++slot) {
-        index_t& index = *bench.indexes[slot];
-        auto found = index.search(query_vector, *bench.traversals[thread], config);
-        if (!found) {
-            bench.results.failed_tasks.fetch_add(1, std::memory_order_relaxed);
-            return;
-        }
-        lane.visited_members += found.visited_members;
-        lane.computed_distances += found.computed_distances;
-        lane.restarts += found.restarts;
-        auto const& results = bench.traversals[thread]->results;
-        merged_count = merge_search_results(to_span(results), bench.results.id_to_row[slot],
-                                            std::span {merged_rows, bench.options.top_k},
-                                            std::span {merged_distances, bench.options.top_k}, merged_count);
+    auto found = bench.indexes.search(query_vector, *bench.traversals[thread], config, bench.results.id_to_row,
+                                      std::span {merged_rows, bench.options.top_k},
+                                      std::span {merged_distances, bench.options.top_k});
+    if (!found) {
+        bench.results.failed_tasks.fetch_add(1, std::memory_order_relaxed);
+        return;
     }
+    lane.visited_members += found.visited_members;
+    lane.computed_distances += found.computed_distances;
+    lane.restarts += found.restarts;
     bench.results.latencies_us[query] = std::chrono::duration<float, std::micro>(clock_t::now() - started).count();
-    bench.results.hit_counts[query] = static_cast<std::uint32_t>(merged_count);
+    bench.results.hit_counts[query] = static_cast<std::uint32_t>(found.count);
 }
 
 template <typename streamed_dataset_type_>

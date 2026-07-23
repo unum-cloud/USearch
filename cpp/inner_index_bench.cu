@@ -26,7 +26,7 @@
 #include <cuda_runtime.h>
 #include <fmt/format.h>
 
-#include <usearch/dense/vram_index.cuh>
+#include <usearch/dense/vram_indexes.cuh>
 
 #include "inner_index_bench.cuh"
 #include "persisted_dataset.hpp"
