@@ -1,5 +1,5 @@
 /**
- *  @brief Profiling harness for the GPU-resident inner index over real persisted datasets.
+ *  @brief Profiling harness for the GPU-resident dense index over real persisted datasets.
  *
  *  @author Ash Vardanian
  *  @file cpp/inner_index_bench.cu
@@ -7,7 +7,7 @@
  *
  *  The backend-neutral surface - options, checkpoints, dataset streaming, telemetry, result
  *  judgment - lives in @c inner_index_bench.cuh; this translation unit owns everything CUDA:
- *  one device, one @c inner_cuda_index instantiation, and batch-shaped run loops - the GPU
+ *  one device, one @c dense_vram_index instantiation, and batch-shaped run loops - the GPU
  *  ingests and answers thousands of rows per launch, so the pipeline streams the dataset in
  *  `--batch`-row slabs instead of one row per task. Checkpoints share the CPU bench's
  *  RetriEval-layout matrix files: the type-hash in the file name differs per instantiation,
@@ -44,7 +44,7 @@ struct cuda_bench_context {
     using index_t = index_type_;
     using scalar_t = typename index_t::scalar_t;
     using small_size_t = typename index_t::small_size_t;
-    using traversal_t = typename index_t::inner_traversal_context_t;
+    using traversal_t = typename index_t::dense_traversal_context_t;
     using vector_view_t = typename index_t::vector_view_t;
     using vectors_view_t = typename index_t::vectors_view_t;
     using node_id_t = typename index_t::node_id_t;
@@ -117,7 +117,7 @@ static bool prepare(streamed_dataset_type_& streamed) {
     std::size_t const search_count = bench.options.self_recall ? streamed.vectors.extent(0)
                                                                : streamed.queries.extent(0);
     bench.results.hit_rows = nk::matrix<std::uint32_t>::try_zeros({search_count, bench.options.top_k});
-    bench.results.hit_distances = nk::matrix<inner_distance_t>::try_zeros({search_count, bench.options.top_k});
+    bench.results.hit_distances = nk::matrix<dense_distance_t>::try_zeros({search_count, bench.options.top_k});
     if (bench.results.hit_rows.empty() || bench.results.hit_distances.empty()) {
         fmt::println("Failed to allocate the per-query hit matrices");
         return false;
@@ -251,7 +251,7 @@ static bool run_search(streamed_dataset_type_& streamed) {
     config.synchronization = synchronization_t::immutable_k;
     std::size_t const batch_rows = streamed_batch_rows(bench.options, query_count);
     auto found_ids = nk::matrix<node_id_t>::try_zeros({batch_rows, top_k});
-    auto found_distances = nk::matrix<inner_distance_t>::try_zeros({batch_rows, top_k});
+    auto found_distances = nk::matrix<dense_distance_t>::try_zeros({batch_rows, top_k});
     if (found_ids.empty() || found_distances.empty()) {
         fmt::println("Failed to allocate the batch result matrices");
         return false;
@@ -265,7 +265,7 @@ static bool run_search(streamed_dataset_type_& streamed) {
 
         auto started = clock_t::now();
         auto found = bench.index->search(staged, nk::matrix_span<node_id_t> {found_ids.data(), {batch, top_k}},
-                                         nk::matrix_span<inner_distance_t> {found_distances.data(), {batch, top_k}},
+                                         nk::matrix_span<dense_distance_t> {found_distances.data(), {batch, top_k}},
                                          *bench.traversal, config);
         double const batch_seconds = std::chrono::duration<double>(clock_t::now() - started).count();
         if (!found) {
@@ -312,7 +312,7 @@ static bool run_search(streamed_dataset_type_& streamed) {
  *      in @c dense/vram_metric.cuh - unadapted combinations report as skipped and light up
  *      automatically when their kits land, exactly like the CPU cascade. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
-concept cuda_combo_supported = requires { typename inner_cuda_kit_for<dtype_, kernel_>::kit_t; };
+concept cuda_combo_supported = requires { typename dense_cuda_kit_for<dtype_, kernel_>::kit_t; };
 
 /** @brief No-op sibling picked when the pair's device kit is not adapted yet. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t arch_ceiling_,
@@ -336,7 +336,7 @@ template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kin
     requires(cuda_combo_supported<stored_dtype_, kernel_>)
 static int stage_and_run(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
                          int device) {
-    using index_t = inner_cuda_index<stored_dtype_, kernel_, arch_ceiling_, plane_allocator_, plane_allocator_>;
+    using index_t = dense_vram_index<stored_dtype_, kernel_, arch_ceiling_, plane_allocator_, plane_allocator_>;
     using bench_context_t = cuda_bench_context<index_t>;
     using streamed_t = streamed_dataset<dataset_scalar_type_, bench_context_t>;
     using scalar_t = typename bench_context_t::scalar_t;

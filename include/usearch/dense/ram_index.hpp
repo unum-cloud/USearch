@@ -19,33 +19,33 @@
 namespace unum {
 namespace usearch {
 
-/** @brief External reader's cursor over one @c inner_volatile_index - declared here, defined
+/** @brief External reader's cursor over one @c dense_ram_index - declared here, defined
  *      after the index it befriends. The allocator defaults to the index's own traversals-side
  *      family, so staging inherits the same NUMA-aware placement as the traversal contexts;
  *      external readers pinned elsewhere override it. */
 template <typename index_type_,                                                 //
           synchronization_t synchronization_ = synchronization_t::concurrent_k, //
           typename allocator_type_ = typename index_type_::candidates_allocator_t>
-struct inner_volatile_cursor;
+struct dense_ram_cursor;
 
 /**
  *  @brief Vector Search index for a single uniform latency memory space.
  *
- *  @section inner_volatile_index_metrics Supported Metrics
+ *  @section dense_ram_index_metrics Supported Metrics
  *
  *  This template is designed exclusively for dense representations in the most common metric spaces:
  *  @b Inner-Product, Angular (Cosine), Euclidean (L2), Hamming (Manhattan), and Jaccard (Tanimoto).
  *  All of them can be trivially inferred in a single pass of vector-vector products if L1 and L2
  *  norms of the vectors are known ahead of time and stored locally.
  *
- *  @section inner_volatile_index_growth Growth Limits
+ *  @section dense_ram_index_growth Growth Limits
  *
  *  This index is designed exclusively for @b up-to-4-billion entries, all stored @b in-memory.
  *  Float32 distance representations are used to compare entries which may result in recall regressions for
  *  small K queries. The typical mode of use is to retrieve significantly more entries from the index of
  *  quantized vectors and rerank them with either pre-quantized vectors or original data.
  *
- *  @section inner_volatile_index_concurrency Concurrency & Transactions
+ *  @section dense_ram_index_concurrency Concurrency & Transactions
  *
  *  This class is designed to allow simultaneous construction and traversal in heavily multi-threaded environments.
  *  One design previously considered is to have a small number of locks proportional to the CPU core count and
@@ -55,11 +55,11 @@ struct inner_volatile_cursor;
  *  at the start of independent cache lines. Besides those, we use a minimal number of "atomics" for book-keeping,
  *  avoiding expensive Compare-And-Swap exchange operations.
  *
- *  @section inner_volatile_index_persistence Persistence
+ *  @section dense_ram_index_persistence Persistence
  *
  *  This index is not expected to be accessed from disk. For that, explore io_uring and SPDK reimplementations.
  *
- *  @section inner_volatile_index_malloc Memory Allocation Strategy
+ *  @section dense_ram_index_malloc Memory Allocation Strategy
  *
  *  Instead of re-allocating one huge matrix and paying the padding memory costs right after the growth phase,
  *  we implement a custom memory allocation strategy. On small-ish indexes we progressively grow through power-of-two
@@ -75,7 +75,7 @@ template <                                                          //
     typename neighbors_allocator_type_ = std::allocator<std::byte>, //
     typename traversals_allocator_type_ = std::allocator<std::byte> //
     >
-struct inner_volatile_index;
+struct dense_ram_index;
 
 /** @brief The compiled-out default predicate of @c search_if: every check disappears, so the
  *      unfiltered paths pay nothing for the predicate axis existing. */
@@ -83,7 +83,7 @@ struct no_predicate_t {};
 
 /** @brief One quad's worth of predicate-admitted candidates - the output buffer handed to
  *      batched @c search_if predicates, bounded by the distance kernels' fan-out. */
-using inner_admissions_t = fu::limited_array<inner_scored_node_t, 4>;
+using dense_admissions_t = fu::limited_array<dense_scored_node_t, 4>;
 
 /**
  *  @brief Runs @p predicate over one scored quad, filling @p admissions with what it admits.
@@ -91,15 +91,15 @@ using inner_admissions_t = fu::limited_array<inner_scored_node_t, 4>;
  *  Callables come in two shapes, detected by signature: batched functors receive the whole
  *  @p scored span and push admitted entries themselves - amortizing expensive external
  *  checks across the 4-way gathers the scan already stages, with distances in view - while
- *  per-node @c bool(inner_node_id_t) functors are walked lane by lane. @c no_predicate_t
+ *  per-node @c bool(dense_node_id_t) functors are walked lane by lane. @c no_predicate_t
  *  never reaches here: its callers are compiled out whole.
  */
 template <typename predicate_type_>
-inline void invoke_admission(predicate_type_& predicate, std::span<inner_scored_node_t const> scored,
-                             inner_admissions_t& admissions) noexcept {
+inline void invoke_admission(predicate_type_& predicate, std::span<dense_scored_node_t const> scored,
+                             dense_admissions_t& admissions) noexcept {
     if constexpr (requires { predicate(scored, admissions); }) predicate(scored, admissions);
     else
-        for (inner_scored_node_t const candidate : scored)
+        for (dense_scored_node_t const candidate : scored)
             if (predicate(candidate.node_id)) admissions.try_push_back(candidate);
 }
 
@@ -111,10 +111,10 @@ template <                                          //
     typename stored_norms_type_ =                   //
     usearch::vector_norms<typename nk::type_for<vector_dtype_>::type::dot_result_t>,
     typename allocator_type_ = std::allocator<std::byte>>
-struct inner_traversal_context;
+struct dense_traversal_context;
 
 template <nk_dtype_t vector_dtype_, nk_capability_t capability_, typename stored_norms_type_, typename allocator_type_>
-struct inner_traversal_context {
+struct dense_traversal_context {
 
     using scalar_t = typename nk::type_for<vector_dtype_>::type;
     using vector_view_t = nk::vector_view<scalar_t>;
@@ -122,31 +122,31 @@ struct inner_traversal_context {
 
     using allocator_t = allocator_type_;
     using candidates_allocator_t =
-        typename std::allocator_traits<allocator_t>::template rebind_alloc<inner_scored_node_t>;
+        typename std::allocator_traits<allocator_t>::template rebind_alloc<dense_scored_node_t>;
     /** @brief The hash-set allocates raw bytes and places ids itself, so it demands a byte allocator. */
     using visits_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<std::byte>;
-    using ids_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<inner_node_id_t>;
+    using ids_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<dense_node_id_t>;
     using views_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<vector_view_t>;
     using norms_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<vector_norms_t>;
-    using distances_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<inner_distance_t>;
+    using distances_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<dense_distance_t>;
     using bytes_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<std::byte>;
 
-    using ids_tensor_t = nk::tensor<inner_node_id_t, ids_allocator_t, 1>;
+    using ids_tensor_t = nk::tensor<dense_node_id_t, ids_allocator_t, 1>;
     using views_tensor_t = nk::tensor<vector_view_t, views_allocator_t, 1>;
     using norms_tensor_t = nk::tensor<vector_norms_t, norms_allocator_t, 1>;
-    using distances_matrix_t = nk::tensor<inner_distance_t, distances_allocator_t, 2>;
+    using distances_matrix_t = nk::tensor<dense_distance_t, distances_allocator_t, 2>;
     using bytes_tensor_t = nk::tensor<std::byte, bytes_allocator_t, 1>;
     /** @brief One selection's output: @b [kept] scored nodes - the id and its distance to the
      *      selection's own query. The tensor's live shape is the fill; @c capacity() is the
      *      reservation, so no separate count exists anywhere. */
-    using selection_t = nk::tensor<inner_scored_node_t, candidates_allocator_t, 1>;
+    using selection_t = nk::tensor<dense_scored_node_t, candidates_allocator_t, 1>;
 
-    using results_array_t = sorted_buffer<inner_scored_node_t, inner_closer_scored_node_t, candidates_allocator_t>;
+    using results_array_t = sorted_buffer<dense_scored_node_t, dense_closer_scored_node_t, candidates_allocator_t>;
     /** @brief 8-ary: eight 8-byte scored nodes fill one cache line per level scan, and the
      *      insert-dominated frontier (~2x connectivity pushes per pop) rides the shallower
      *      log_8 @c shift_up depth. */
-    using frontier_queue_t = max_heap_dary<8, inner_scored_node_t, inner_further_scored_node_t, candidates_allocator_t>;
-    using visited_set_t = growing_hash_set<inner_node_id_t, std::hash<inner_node_id_t>, visits_allocator_t>;
+    using frontier_queue_t = max_heap_dary<8, dense_scored_node_t, dense_further_scored_node_t, candidates_allocator_t>;
+    using visited_set_t = growing_hash_set<dense_node_id_t, std::hash<dense_node_id_t>, visits_allocator_t>;
 
     /** @brief Nodes we've already scored, kept ascending as the best results so far. */
     results_array_t results;
@@ -196,19 +196,19 @@ struct inner_traversal_context {
      *      a graph-connectivity health signal unique to the flat NSW design. */
     std::size_t restarts = 0;
 
-    inner_traversal_context() noexcept = delete;
-    inner_traversal_context(inner_traversal_context const&) noexcept = delete;
-    inner_traversal_context& operator=(inner_traversal_context const&) noexcept = delete;
+    dense_traversal_context() noexcept = delete;
+    dense_traversal_context(dense_traversal_context const&) noexcept = delete;
+    dense_traversal_context& operator=(dense_traversal_context const&) noexcept = delete;
 
     /** @brief Constructs every traversal container with a rebound copy of @p alloc - and keeps
      *      the allocator for the lazily-sized link scratches - so all scratch lands wherever the
      *      caller's allocator places it, like a NUMA domain local to the owning thread. */
-    inner_traversal_context(allocator_t alloc) noexcept
+    dense_traversal_context(allocator_t alloc) noexcept
         : results(candidates_allocator_t(alloc)), refining_candidates(candidates_allocator_t(alloc)),
           frontier(candidates_allocator_t(alloc)), visited(visits_allocator_t(alloc)), random_generator(),
           allocator_(alloc) {}
-    inner_traversal_context(inner_traversal_context&&) = default;
-    inner_traversal_context& operator=(inner_traversal_context&&) = default;
+    dense_traversal_context(dense_traversal_context&&) = default;
+    dense_traversal_context& operator=(dense_traversal_context&&) = default;
 
     /** @brief Sizes every link scratch for @p capacity entries - the frozen connectivity, the
      *      largest selection any path stages - through the context's own allocator. Geometry
@@ -246,20 +246,20 @@ template <                                                                      
     typename wait_type_,                                                                  //
     typename vectors_allocator_type_, typename neighbors_allocator_type_,
     typename traversals_allocator_type_> //
-struct inner_volatile_index {
+struct dense_ram_index {
 
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
 
     using scalar_t = typename nk::type_for<vector_dtype_>::type;
     using vector_product_result_t = typename scalar_t::dot_result_t;
     using distance_t = f32_t;
-    using candidate_t = inner_scored_node_t;
+    using candidate_t = dense_scored_node_t;
 
     /** @brief Default integer type to use for loops and indexing at sub-index scale. */
     using small_size_t = std::uint32_t;
 
-    /** @brief Node identifier within this sub-index - the class-local spelling of @c inner_node_id_t. */
-    using node_id_t = inner_node_id_t;
+    /** @brief Node identifier within this sub-index - the class-local spelling of @c dense_node_id_t. */
+    using node_id_t = dense_node_id_t;
 
     using vectors_allocator_t =
         typename std::allocator_traits<vectors_allocator_type_>::template rebind_alloc<scalar_t>;
@@ -284,23 +284,23 @@ struct inner_volatile_index {
     using wait_t = wait_type_;
 
     template <typename, synchronization_t, typename>
-    friend struct inner_volatile_cursor;
+    friend struct dense_ram_cursor;
 
     inline static constexpr nk_kernel_kind_t kernel_kind_k = kernel_kind_;
 
     /** @brief The capability bit of the distance kit the chain actually picked - lower than
      *      @c capability_ when no SIMD kit is adapted for this dtype & metric pair yet. */
     inline static constexpr nk_capability_t picked_quads_capability_k =
-        inner_quads_chain<kernel_kind_, scalar_t, capability_>::picked_k;
+        dense_quads_chain<kernel_kind_, scalar_t, capability_>::picked_k;
 
     /** @brief The tile backend's capability, on its own independent axis - one machine
      *      runs icelake 1-to-1 kernels and sapphireamx tiles simultaneously. */
     inline static constexpr nk_capability_t picked_tiles_capability_k =
-        inner_tiles_chain<kernel_kind_, scalar_t, capability_>::picked_k;
+        dense_tiles_chain<kernel_kind_, scalar_t, capability_>::picked_k;
     /** @brief The tile kit behind the tiled refinement paths; @c no_tiles_kit_t when none compiled. */
-    using tiles_kit_t = typename inner_tiles_chain<kernel_kind_, scalar_t, capability_>::kit_t;
+    using tiles_kit_t = typename dense_tiles_chain<kernel_kind_, scalar_t, capability_>::kit_t;
     /** @brief Whether a tile engine is compiled in for this (kernel, dtype) pair. */
-    inline static constexpr bool has_tiles_k = inner_tiles_chain<kernel_kind_, scalar_t, capability_>::has_tiles_k;
+    inline static constexpr bool has_tiles_k = dense_tiles_chain<kernel_kind_, scalar_t, capability_>::has_tiles_k;
     static_assert( //
         kernel_kind_k == nk_kernel_dot_k || kernel_kind_k == nk_kernel_angular_k ||
         kernel_kind_k == nk_kernel_euclidean_k || kernel_kind_k == nk_kernel_sqeuclidean_k ||
@@ -309,13 +309,13 @@ struct inner_volatile_index {
     /**
      *  @brief Each thread aiming to perform scans over the graph needs to have its own object like this.
      */
-    using inner_traversal_context_t =
-        inner_traversal_context<vector_dtype_, capability_, vector_norms_t, candidates_allocator_t>;
-    using results_array_t = typename inner_traversal_context_t::results_array_t;
-    using frontier_queue_t = typename inner_traversal_context_t::frontier_queue_t;
-    using visited_set_t = typename inner_traversal_context_t::visited_set_t;
-    using selection_t = typename inner_traversal_context_t::selection_t;
-    using ids_tensor_t = typename inner_traversal_context_t::ids_tensor_t;
+    using dense_traversal_context_t =
+        dense_traversal_context<vector_dtype_, capability_, vector_norms_t, candidates_allocator_t>;
+    using results_array_t = typename dense_traversal_context_t::results_array_t;
+    using frontier_queue_t = typename dense_traversal_context_t::frontier_queue_t;
+    using visited_set_t = typename dense_traversal_context_t::visited_set_t;
+    using selection_t = typename dense_traversal_context_t::selection_t;
+    using ids_tensor_t = typename dense_traversal_context_t::ids_tensor_t;
 
     using norms_allocator_t =
         typename std::allocator_traits<vectors_allocator_type_>::template rebind_alloc<vector_norms_t>;
@@ -324,23 +324,23 @@ struct inner_volatile_index {
     using norms_chunk_t = nk::tensor<vector_norms_t, norms_allocator_t, 1>;
     using neighbors_chunk_t = nk::matrix<u32_t, neighbors_allocator_t>;
 
-    /** @brief Rows in the very first chunk, as a power-of-two exponent. @ref inner_volatile_index_malloc */
+    /** @brief Rows in the very first chunk, as a power-of-two exponent. @ref dense_ram_index_malloc */
     inline static constexpr small_size_t first_chunk_rows_log2_k = 10; // 1'024 rows
-    /** @brief Rows in every mature slab-sized chunk, as a power-of-two exponent. @ref inner_volatile_index_malloc */
+    /** @brief Rows in every mature slab-sized chunk, as a power-of-two exponent. @ref dense_ram_index_malloc */
     inline static constexpr small_size_t slab_rows_log2_k = 20; // 1'048'576 rows
     /** @brief Chunks in the doubling phase of the growth schedule: the first chunk plus one per doubling. */
     inline static constexpr small_size_t doubling_phase_chunks_k = slab_rows_log2_k - first_chunk_rows_log2_k + 1;
     /** @brief Node ids covered by the doubling phase: 2^(slab_rows_log2_k + 1) - 2^first_chunk_rows_log2_k. */
     inline static constexpr node_id_t doubling_phase_capacity_k = power_of_two<node_id_t>(slab_rows_log2_k + 1) -
                                                                   power_of_two<node_id_t>(first_chunk_rows_log2_k);
-    /** @brief Upper bound on the chunk count, addressing the entire 2^32 id space. @ref inner_volatile_index_growth */
+    /** @brief Upper bound on the chunk count, addressing the entire 2^32 id space. @ref dense_ram_index_growth */
     inline static constexpr small_size_t max_chunks_k =
         doubling_phase_chunks_k +
         static_cast<small_size_t>(((u64_t(1) << 32) - doubling_phase_capacity_k) >> slab_rows_log2_k);
 
     /** @brief Ceiling on dispensable node ids: the all-ones id is the sentinel and must never be
      *      claimed, so at most 2^32 - 1 rows are ever accounted - the final chunk physically holds
-     *      one extra row that stays forever unclaimed. @ref inner_volatile_index_growth */
+     *      one extra row that stays forever unclaimed. @ref dense_ram_index_growth */
     inline static constexpr std::size_t max_node_count_k = (u64_t(1) << 32) - 1u;
 
     /**
@@ -351,21 +351,21 @@ struct inner_volatile_index {
      *  after that, so readers can dereference chunk headers with zero synchronization while a single
      *  writer default-constructs the next one in place. The stride pads every header to
      *  @c fu::default_alignment_k, keeping the writer's half-built entry off the readers' cache lines.
-     *  @ref inner_volatile_index_malloc
+     *  @ref dense_ram_index_malloc
      */
     fu::dynamic_padded_array<vectors_chunk_t, vectors_allocator_type_> vectors_chunks_;
 
     /**
      *  @brief Separately allocated array slabs, where each entry holds the pre-computed norms of one vector.
      *      Slot indexes are global, monotonically transparently growing across individual arrays.
-     *  @ref inner_volatile_index_malloc
+     *  @ref dense_ram_index_malloc
      */
     fu::dynamic_padded_array<norms_chunk_t, vectors_allocator_type_> norms_chunks_;
 
     /**
      *  @brief Separately allocated matrix slabs, where each row is the fixed-capacity neighbors list of one vector.
      *      Slot indexes are global, monotonically transparently growing across individual matrices.
-     *  @ref inner_volatile_index_malloc
+     *  @ref dense_ram_index_malloc
      */
     fu::dynamic_padded_array<neighbors_chunk_t, neighbors_allocator_type_> neighbors_chunks_;
 
@@ -385,13 +385,13 @@ struct inner_volatile_index {
     /**
      *  @brief The id dispenser: the identifier the next wired node receives. Incremented one-by-one
      *      at wiring time, so ids follow the global wiring-start order and each thread holds at most
-     *      one unpublished id. @ref inner_volatile_index_concurrency
+     *      one unpublished id. @ref dense_ram_index_concurrency
      */
     std::atomic<node_id_t> next_visible_id_ {0};
     /**
      *  @brief The visibility watermark: every id strictly below it is published, its vector, norms &
      *      neighbors readable - the safe bound for random landmark sampling. Advanced strictly in
-     *      dispensed order by each publisher taking its turn. @ref inner_volatile_index_concurrency
+     *      dispensed order by each publisher taking its turn. @ref dense_ram_index_concurrency
      */
     std::atomic<node_id_t> last_visible_id_ {0};
 
@@ -433,11 +433,11 @@ struct inner_volatile_index {
     /** @brief Allocator instance handed to every neighbors chunk. */
     [[no_unique_address]] neighbors_allocator_t neighbors_allocator_;
 
-    inner_volatile_index(inner_volatile_index const&) noexcept = delete;
-    inner_volatile_index& operator=(inner_volatile_index const&) noexcept = delete;
+    dense_ram_index(dense_ram_index const&) noexcept = delete;
+    dense_ram_index& operator=(dense_ram_index const&) noexcept = delete;
 
-    inner_volatile_index(inner_volatile_index&&) noexcept = delete;
-    inner_volatile_index& operator=(inner_volatile_index&&) noexcept = delete;
+    dense_ram_index(dense_ram_index&&) noexcept = delete;
+    dense_ram_index& operator=(dense_ram_index&&) noexcept = delete;
 
     /**
      *  @brief Constructs an empty index, remembering the allocators to hand to every future chunk.
@@ -446,8 +446,8 @@ struct inner_volatile_index {
      *  @c fu::default_alignment_k, so the grower's half-built header never shares a cache line
      *  with the ones readers dereference. Their storage is allocated lazily, ahead of the first chunk.
      */
-    inner_volatile_index(vectors_allocator_type_ const& vectors_allocator = {},
-                         neighbors_allocator_type_ const& neighbors_allocator = {}) noexcept
+    dense_ram_index(vectors_allocator_type_ const& vectors_allocator = {},
+                    neighbors_allocator_type_ const& neighbors_allocator = {}) noexcept
         : vectors_chunks_(vectors_allocator,
                           fu::round_up_to_multiple(sizeof(vectors_chunk_t), fu::default_alignment_k)),
           norms_chunks_(vectors_allocator, fu::round_up_to_multiple(sizeof(norms_chunk_t), fu::default_alignment_k)),
@@ -456,10 +456,10 @@ struct inner_volatile_index {
           vectors_allocator_(vectors_allocator), neighbors_allocator_(neighbors_allocator) {}
 
   private:
-    /** @brief Trampoline for the kernel-aware @c usearch::inner_norms with hardened types -
+    /** @brief Trampoline for the kernel-aware @c usearch::dense_norms with hardened types -
      *      computed moments for norm-consuming kernels, the empty stand-in for dot. */
-    inline static vector_norms_t inner_norms(vector_view_t vec) noexcept {
-        return usearch::inner_norms<kernel_kind_, capability_, scalar_t>(vec);
+    inline static vector_norms_t dense_norms(vector_view_t vec) noexcept {
+        return usearch::dense_norms<kernel_kind_, capability_, scalar_t>(vec);
     }
     /** @brief Trampoline for @c usearch::distance with hardened types. */
     inline static distance_t distance(                   //
@@ -502,7 +502,7 @@ struct inner_volatile_index {
     /** @brief Maps the global @p node_id onto a chunk and a row within it via a @b closed-form
      *      analytical solution - O(1) time and memory, no per-chunk metadata to walk or binary-search.
      *
-     *  Chunk sizes follow the growth schedule from @ref inner_volatile_index_malloc: the first chunk
+     *  Chunk sizes follow the growth schedule from @ref dense_ram_index_malloc: the first chunk
      *  holds 2^ @c first_chunk_rows_log2_k rows, every next chunk doubles, until reaching the slab
      *  size of 2^ @c slab_rows_log2_k rows - all chunks after that keep that fixed slab size.
      *  Doubling gives closed-form prefix sums, so the lookup is one @c lzcnt plus a few adds -
@@ -569,13 +569,13 @@ struct inner_volatile_index {
      *  @brief Typed view over one node's neighbor row - the only legal way to touch a list that
      *      concurrent scanners may be reading. Copyable value type with reference semantics.
      *
-     *  Slot 0 is the combined lock & first-neighbor word: the all-ones @c inner_node_id_unknown_k
+     *  Slot 0 is the combined lock & first-neighbor word: the all-ones @c dense_node_id_unknown_k
      *  sentinel while unpublished, empty, or locked for editing - otherwise the plain id of the
      *  first neighbor. Ids are stored raw and no row bytes are spent on bookkeeping, so the
      *  neighbor capacity stays a power of two, tiling whole cache lines. Slots 1.. are accessed
      *  as relaxed atomics on both sides, making the "stale-but-valid mix" a scanner can observe
      *  during a concurrent re-link defined behavior instead of a data race.
-     *  @ref inner_volatile_index_concurrency
+     *  @ref dense_ram_index_concurrency
      *
      *  Under a mutation-free contract - @c immutable_k or stronger - every atomic degrades to a
      *  plain load: with no writers alive there is nothing to order, and plain reads free the
@@ -614,14 +614,14 @@ struct inner_volatile_index {
          *      published nodes: locking an unpublished row would spin until its owner publishes. */
         inline node_id_t lock() const noexcept {
             node_id_t first_value = std::atomic_ref<node_id_t>(row_[0]).exchange( //
-                inner_node_id_unknown_k, std::memory_order_acq_rel);
-            while (first_value == inner_node_id_unknown_k) {
+                dense_node_id_unknown_k, std::memory_order_acq_rel);
+            while (first_value == dense_node_id_unknown_k) {
                 // Monitored capped wait on the lock word itself: the holder's unlock store wakes
                 // us; the cap guards the arming race. The address form exists precisely for such
                 // in-place words that are not `std::atomic` objects.
-                wait_type_ {}(row_.data(), inner_node_id_unknown_k, 0u, fu::wait_capped_t {});
+                wait_type_ {}(row_.data(), dense_node_id_unknown_k, 0u, fu::wait_capped_t {});
                 first_value = std::atomic_ref<node_id_t>(row_[0]).exchange( //
-                    inner_node_id_unknown_k, std::memory_order_acq_rel);
+                    dense_node_id_unknown_k, std::memory_order_acq_rel);
             }
             return first_value;
         }
@@ -658,7 +658,7 @@ struct inner_volatile_index {
     }
 
     /** @brief Typed view over the fixed-capacity neighbors list at @p location - atomic by
-     *      default, plain under a mutation-free contract. @ref inner_volatile_index_concurrency */
+     *      default, plain under a mutation-free contract. @ref dense_ram_index_concurrency */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k>
     inline neighbors_list_ref<synchronization_> neighbors_for(chunked_location_t const& location) noexcept {
         return {neighbors_chunks_[location.chunk_index].row(location.index_in_chunk).as_vector()};
@@ -670,7 +670,7 @@ struct inner_volatile_index {
 
     /**
      *  @brief Allocates & publishes chunks until at least @p minimal_capacity fresh rows are added,
-     *      following the growth schedule of @ref inner_volatile_index_malloc.
+     *      following the growth schedule of @ref dense_ram_index_malloc.
      *  @return The number of added rows - possibly non-zero even when the status is a failure,
      *      in which case the caller must still credit them back to @c remaining_capacity_.
      *
@@ -717,7 +717,7 @@ struct inner_volatile_index {
             // slot reads as "unpublished" to every traversal, and sentinel tails terminate shorter
             // lists - so no explicit neighbor counts are stored anywhere.
             neighbors_chunk_t neighbors_chunk = neighbors_chunk_t::try_full( //
-                {chunk_rows, chunk_connectivity}, inner_node_id_unknown_k, neighbors_allocator_);
+                {chunk_rows, chunk_connectivity}, dense_node_id_unknown_k, neighbors_allocator_);
             bool const norms_missing = !std::is_same_v<vector_norms_t, no_norms_t> && norms_chunk.empty();
             if (vectors_chunk.empty() || norms_missing || neighbors_chunk.empty())
                 return {added_capacity, status_t::bad_alloc_k};
@@ -744,13 +744,13 @@ struct inner_volatile_index {
      *  @c next_visible_id_ at wiring time. On success, enough sentinel-filled rows exist for
      *  @p count dispenses, and the caller must roll forward to wiring & publishing them all -
      *  claimed capacity cannot be handed back once ids are dispensed against it, or the
-     *  visibility watermark would stall forever. @ref inner_volatile_index_concurrency
+     *  visibility watermark would stall forever. @ref dense_ram_index_concurrency
      */
     expected<node_id_t> claim_capacity(std::size_t count) noexcept {
         // A batch beyond the id-space ceiling can never succeed: reject it before the counter
         // dance, so it neither grows the index to its maximum in vain nor overflows the signed
         // capacity arithmetic below.
-        if (count > max_node_count_k) return {inner_node_id_unknown_k, status_t::overflow_k};
+        if (count > max_node_count_k) return {dense_node_id_unknown_k, status_t::overflow_k};
         while (true) {
             std::ptrdiff_t const old_remaining_capacity = remaining_capacity_.fetch_sub( //
                 count, std::memory_order_acquire);
@@ -766,7 +766,7 @@ struct inner_volatile_index {
                     // Revert our claim - crediting any partially added chunks along the way -
                     // so that a smaller insertion may succeed later.
                     remaining_capacity_.fetch_add(count + added_capacity, std::memory_order_release);
-                    return {inner_node_id_unknown_k, chunk_status};
+                    return {dense_node_id_unknown_k, chunk_status};
                 }
                 node_id_t const first_id = last_allocated_id_.fetch_add(count, std::memory_order_acquire);
                 remaining_capacity_.fetch_add(added_capacity, std::memory_order_release);
@@ -802,7 +802,7 @@ struct inner_volatile_index {
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k,
               typename predicate_type_ = no_predicate_t>
     bool sample_landmarks(vector_view_t query, vector_norms_t query_norms, node_id_t first_invisible_id,
-                          std::size_t expansion_factor, inner_traversal_context_t& context,
+                          std::size_t expansion_factor, dense_traversal_context_t& context,
                           predicate_type_&& predicate = predicate_type_ {}) noexcept {
         constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, no_predicate_t>;
 
@@ -829,7 +829,7 @@ struct inner_volatile_index {
             // Published nodes may be transiently locked for re-linking - re-roll those. Under a
             // mutation-free contract every sampled node is published & unlocked - no probe needed.
             if constexpr (synchronization_ == synchronization_t::concurrent_k)
-                if (neighbors_for(landmark_location).peek_first() == inner_node_id_unknown_k) continue;
+                if (neighbors_for(landmark_location).peek_first() == dense_node_id_unknown_k) continue;
 
             visited.set(landmark_node_id);
             landmarks_ids[landmarks_in_batch] = landmark_node_id;
@@ -849,23 +849,23 @@ struct inner_volatile_index {
         std::array<distance_t, 4> const landmark_distances = distances( //
             query, query_norms, landmarks_vectors, landmarks_norms);
         context.computed_distances += landmarks_in_batch;
-        std::array<inner_scored_node_t, 4> landmarks_scored;
+        std::array<dense_scored_node_t, 4> landmarks_scored;
         for (small_size_t lane = 0; lane != landmarks_in_batch; ++lane)
-            landmarks_scored[lane] = inner_scored_node_t(landmarks_ids[lane], landmark_distances[lane]);
+            landmarks_scored[lane] = dense_scored_node_t(landmarks_ids[lane], landmark_distances[lane]);
         std::span const scored = std::span(landmarks_scored).first(landmarks_in_batch);
-        network_sort(scored, inner_closer_scored_node_t {});
+        network_sort(scored, dense_closer_scored_node_t {});
 
         // Matching landmarks enter the admitted pool right here: they are marked visited, so
         // the walk never re-scores them and this is their one admission opportunity.
         if constexpr (predicated_k) {
-            inner_admissions_t admissions;
+            dense_admissions_t admissions;
             invoke_admission(predicate, scored, admissions);
-            network_sort(std::span(admissions), inner_closer_scored_node_t {});
+            network_sort(std::span(admissions), dense_closer_scored_node_t {});
             context.refining_candidates.insert(std::span(admissions), expansion_factor);
         }
         results.insert(scored, expansion_factor);
         for (small_size_t lane = 0; lane != landmarks_in_batch; ++lane)
-            if (!frontier.insert(inner_scored_node_t(scored[lane]))) return false;
+            if (!frontier.insert(dense_scored_node_t(scored[lane]))) return false;
         return true;
     }
 
@@ -887,7 +887,7 @@ struct inner_volatile_index {
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k,
               typename predicate_type_ = no_predicate_t>
     void search_around(vector_view_t query, vector_norms_t query_norms, node_id_t first_invisible_id,
-                       std::size_t expansion_factor, inner_traversal_context_t& context,
+                       std::size_t expansion_factor, dense_traversal_context_t& context,
                        predicate_type_&& predicate = predicate_type_ {}) noexcept {
         constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, no_predicate_t>;
 
@@ -927,7 +927,7 @@ struct inner_volatile_index {
 
             // Peek - don't pop yet: the chosen node's neighbor list may be locked, in which case
             // we retry the selection rather than dropping it from the frontier.
-            inner_scored_node_t const candidate = frontier.top();
+            dense_scored_node_t const candidate = frontier.top();
             if constexpr (predicated_k) {
                 // A predicated walk switches to the admitted pool's radius once that pool
                 // fills: matches are sparser than nodes, so that radius is the wider one and
@@ -956,7 +956,7 @@ struct inner_volatile_index {
             // same nearest candidate until it does - dropping it would silently degrade recall.
             node_id_t const first_neighbor_id = candidate_neighbors.peek_first();
             if constexpr (synchronization_ == synchronization_t::concurrent_k)
-                if (first_neighbor_id == inner_node_id_unknown_k) continue;
+                if (first_neighbor_id == dense_node_id_unknown_k) continue;
 
             // The node is live and readable - commit to it and drop it from the frontier.
             frontier.pop();
@@ -980,7 +980,7 @@ struct inner_volatile_index {
                 for (; gathered_count != gathered_ids.size() && neighbor_slot != slots_count; ++neighbor_slot) {
                     node_id_t const neighbor_id = neighbor_slot ? candidate_neighbors.load_slot(neighbor_slot) //
                                                                 : first_neighbor_id;
-                    if (neighbor_id == inner_node_id_unknown_k) {
+                    if (neighbor_id == dense_node_id_unknown_k) {
                         list_ended = true;
                         break;
                     }
@@ -1008,11 +1008,11 @@ struct inner_volatile_index {
                 std::array<distance_t, 4> const gathered_distances = distances( //
                     query, query_norms, gathered_vectors, gathered_norms);
                 context.computed_distances += gathered_count;
-                std::array<inner_scored_node_t, 4> scored_batch;
+                std::array<dense_scored_node_t, 4> scored_batch;
                 for (small_size_t lane = 0; lane != gathered_count; ++lane)
-                    scored_batch[lane] = inner_scored_node_t(gathered_ids[lane], gathered_distances[lane]);
+                    scored_batch[lane] = dense_scored_node_t(gathered_ids[lane], gathered_distances[lane]);
                 std::span const scored = std::span(scored_batch).first(gathered_count);
-                network_sort(scored, inner_closer_scored_node_t {});
+                network_sort(scored, dense_closer_scored_node_t {});
 
                 // Predicate admission is independent of navigation: a matching node enters the
                 // admitted pool even when the navigation pool rejects it, and a non-matching
@@ -1020,9 +1020,9 @@ struct inner_volatile_index {
                 // The re-sort only normalizes what a reordering predicate may hand back - for
                 // order-preserving ones the network fires no exchanges.
                 if constexpr (predicated_k) {
-                    inner_admissions_t admissions;
+                    dense_admissions_t admissions;
                     invoke_admission(predicate, scored, admissions);
-                    network_sort(std::span(admissions), inner_closer_scored_node_t {});
+                    network_sort(std::span(admissions), dense_closer_scored_node_t {});
                     context.refining_candidates.insert(std::span(admissions), expansion_factor);
                 }
 
@@ -1038,7 +1038,7 @@ struct inner_volatile_index {
                 // frontier.
                 std::size_t const accepted_count = results.insert(scored, expansion_factor);
                 for (small_size_t lane = 0; lane != accepted_count; ++lane)
-                    if (!frontier.insert(inner_scored_node_t(scored[lane]))) return;
+                    if (!frontier.insert(dense_scored_node_t(scored[lane]))) return;
             }
         }
     }
@@ -1057,7 +1057,7 @@ struct inner_volatile_index {
      *  @return The number of distance computations performed, for the caller's telemetry.
      */
     std::size_t select_diverse(results_array_t const& candidates, std::size_t limit, selection_t& out,
-                               inner_traversal_context_t& context) const noexcept {
+                               dense_traversal_context_t& context) const noexcept {
         // The thin pick between the engine siblings: pools spanning at least one tile take
         // the span-by-kept-tiles rectangles, keyed purely off `tile_span_k`, never a tuned
         // threshold.
@@ -1072,15 +1072,15 @@ struct inner_volatile_index {
      *      kept prefix's views & norms ride the staging surface - free during any selection.
      */
     std::size_t select_diverse_via_quads(results_array_t const& candidates, std::size_t limit, selection_t& out,
-                                         inner_traversal_context_t& context) const noexcept {
+                                         dense_traversal_context_t& context) const noexcept {
         if (!out.try_resize({limit})) return 0;
         vector_view_t* const kept_vectors = context.staged_vectors.data();
         vector_norms_t* const kept_norms = context.staged_norms.data();
         small_size_t kept_count = 0;
         std::size_t computed_distances = 0;
-        inner_scored_node_t const* candidates_data = candidates.data();
+        dense_scored_node_t const* candidates_data = candidates.data();
         for (std::size_t index = 0; index != candidates.size() && kept_count != limit; ++index) {
-            inner_scored_node_t const candidate = candidates_data[index];
+            dense_scored_node_t const candidate = candidates_data[index];
             chunked_location_t const candidate_location = chunked_location(candidate.node_id);
             vector_view_t const candidate_vector = vector_for(candidate_location);
             vector_norms_t const candidate_norms = norm_for(candidate_location);
@@ -1127,7 +1127,7 @@ struct inner_volatile_index {
      *  the compute schedule differs.
      */
     std::size_t select_diverse_via_tiles(results_array_t const& candidates, std::size_t limit, selection_t& out,
-                                         inner_traversal_context_t& context) const noexcept {
+                                         dense_traversal_context_t& context) const noexcept {
         constexpr std::size_t rows_k = tiles_kit_t::tile_rows_k;
         constexpr std::size_t columns_k = tiles_kit_t::tile_columns_k;
         constexpr std::size_t depth_k = tiles_kit_t::tile_depth_k;
@@ -1138,7 +1138,7 @@ struct inner_volatile_index {
         distance_t* const pairs = context.pair_distances.data();
         std::size_t const stride = context.pair_distances.extent(1);
         std::size_t const count = candidates.size();
-        inner_scored_node_t const* candidates_data = candidates.data();
+        dense_scored_node_t const* candidates_data = candidates.data();
 
         // The scratch splits like the reverse path's: the packed kept tiles first, then the
         // span's A-tiles - the same alignment fix-up into the margin `scratch_bytes` reserved.
@@ -1190,7 +1190,7 @@ struct inner_volatile_index {
             }
 
             for (std::size_t row = 0; row != span_count && kept_count != limit; ++row) {
-                inner_scored_node_t const candidate = candidates_data[span_begin + row];
+                dense_scored_node_t const candidate = candidates_data[span_begin + row];
                 distance_t const* matrix_row = pairs + row * stride;
                 std::size_t const frozen_links = kept_tiles_frozen * columns_k;
                 small_size_t losses = 0;
@@ -1242,7 +1242,7 @@ struct inner_volatile_index {
      *  @return The pair count - tiled refinement spend, honestly counted.
      */
     std::size_t pair_distances_via_tiles(std::span<vector_view_t const> rows, std::span<vector_norms_t const> norms,
-                                         inner_traversal_context_t& context) const noexcept {
+                                         dense_traversal_context_t& context) const noexcept {
         constexpr std::size_t rows_k = tiles_kit_t::tile_rows_k;
         constexpr std::size_t columns_k = tiles_kit_t::tile_columns_k;
         constexpr std::size_t depth_k = tiles_kit_t::tile_depth_k;
@@ -1309,11 +1309,11 @@ struct inner_volatile_index {
      *      newcomer, everything below translates through the staged ids.
      */
     std::size_t select_diverse_via_pairs(results_array_t const& pool, std::size_t limit, selection_t& out,
-                                         node_id_t newcomer_id, inner_traversal_context_t& context) const noexcept {
+                                         node_id_t newcomer_id, dense_traversal_context_t& context) const noexcept {
         ids_tensor_t const& staged_ids = context.staged_ids;
         distance_t const* pairs = context.pair_distances.data();
         std::size_t const stride = context.pair_distances.extent(1);
-        inner_scored_node_t const* pool_data = pool.data();
+        dense_scored_node_t const* pool_data = pool.data();
         if (!out.try_resize({limit})) return 0;
         small_size_t kept_count = 0;
         for (std::size_t index = 0; index != pool.size() && kept_count != limit; ++index) {
@@ -1325,7 +1325,7 @@ struct inner_volatile_index {
             if (losses) continue;
             bool const is_newcomer = position == staged_ids.size();
             node_id_t const kept_id = is_newcomer ? newcomer_id : staged_ids[position];
-            out[kept_count] = inner_scored_node_t(kept_id, pool_data[index].distance);
+            out[kept_count] = dense_scored_node_t(kept_id, pool_data[index].distance);
             context.kept_positions[kept_count] = position;
             ++kept_count;
         }
@@ -1341,11 +1341,11 @@ struct inner_volatile_index {
      */
     std::size_t stage_scores_via_quads(vector_view_t neighbor_vector, vector_norms_t neighbor_norms,
                                        node_id_t new_node_id, distance_t newcomer_score,
-                                       inner_traversal_context_t& context) const noexcept {
+                                       dense_traversal_context_t& context) const noexcept {
         results_array_t& refining_candidates = context.refining_candidates;
         small_size_t const count = static_cast<small_size_t>(context.staged_ids.size());
         small_size_t const pool_limit = count + 1;
-        refining_candidates.insert(inner_scored_node_t(new_node_id, newcomer_score), pool_limit);
+        refining_candidates.insert(dense_scored_node_t(new_node_id, newcomer_score), pool_limit);
         std::size_t computed = 0;
         for (small_size_t scored = 0; scored != count;) {
             std::array<distance_t, 4> const staged_distances = distances_quad_of( //
@@ -1354,7 +1354,7 @@ struct inner_volatile_index {
             small_size_t const lanes_count = min_of<small_size_t>(count - scored, 4u);
             for (small_size_t lane = 0; lane != lanes_count; ++lane)
                 refining_candidates.insert(
-                    inner_scored_node_t(context.staged_ids[scored + lane], staged_distances[lane]), pool_limit);
+                    dense_scored_node_t(context.staged_ids[scored + lane], staged_distances[lane]), pool_limit);
             scored += lanes_count;
             computed += lanes_count;
         }
@@ -1370,7 +1370,7 @@ struct inner_volatile_index {
      */
     std::size_t stage_scores_via_tiles(vector_view_t neighbor_vector, vector_norms_t neighbor_norms,
                                        vector_view_t new_vector, vector_norms_t new_norms, distance_t newcomer_score,
-                                       inner_traversal_context_t& context) const noexcept {
+                                       dense_traversal_context_t& context) const noexcept {
         results_array_t& refining_candidates = context.refining_candidates;
         small_size_t const count = static_cast<small_size_t>(context.staged_ids.size());
         small_size_t const pool_limit = count + 1;
@@ -1386,7 +1386,7 @@ struct inner_volatile_index {
                 neighbor_vector, neighbor_norms, staged_vectors, staged_norms, scored, count);
             small_size_t const lanes_count = min_of<small_size_t>(count - scored, 4u);
             for (small_size_t lane = 0; lane != lanes_count; ++lane)
-                refining_candidates.insert(inner_scored_node_t(scored + lane, scores[lane]), pool_limit);
+                refining_candidates.insert(dense_scored_node_t(scored + lane, scores[lane]), pool_limit);
             scored += lanes_count;
             computed += lanes_count;
         }
@@ -1405,7 +1405,7 @@ struct inner_volatile_index {
             scored += lanes_count;
             computed += lanes_count;
         }
-        refining_candidates.insert(inner_scored_node_t(static_cast<node_id_t>(count), newcomer_score), pool_limit);
+        refining_candidates.insert(dense_scored_node_t(static_cast<node_id_t>(count), newcomer_score), pool_limit);
         return computed;
     }
 
@@ -1425,7 +1425,7 @@ struct inner_volatile_index {
      *  @param[inout] context Scratch for the re-selection, plus the telemetry counters.
      */
     void back_link_neighbors(node_id_t new_node_id, vector_view_t new_vector, vector_norms_t new_norms,
-                             selection_t const& selected, inner_traversal_context_t& context) noexcept {
+                             selection_t const& selected, dense_traversal_context_t& context) noexcept {
 
         results_array_t& refining_candidates = context.refining_candidates;
         std::size_t const node_connectivity = connectivity();
@@ -1447,7 +1447,7 @@ struct inner_volatile_index {
             // Fast path: room to append - no distance math at all.
             small_size_t const slots_count = neighbor_list.capacity();
             small_size_t existing_count = 1;
-            while (existing_count != slots_count && neighbor_list.load_slot(existing_count) != inner_node_id_unknown_k)
+            while (existing_count != slots_count && neighbor_list.load_slot(existing_count) != dense_node_id_unknown_k)
                 ++existing_count;
             if (existing_count != slots_count) {
                 neighbor_list.store_slot(existing_count, new_node_id);
@@ -1510,7 +1510,7 @@ struct inner_volatile_index {
             for (small_size_t slot = 1; slot < refined_count; ++slot)
                 neighbor_list.store_slot(slot, refined[slot].node_id);
             for (small_size_t slot = refined_count; slot < slots_count; ++slot)
-                neighbor_list.store_slot(slot, inner_node_id_unknown_k);
+                neighbor_list.store_slot(slot, dense_node_id_unknown_k);
             neighbor_list.unlock(refined[0].node_id);
         }
     }
@@ -1620,7 +1620,7 @@ struct inner_volatile_index {
      *
      *  Per claimed node the flow is: land the payload, walk the graph for candidates, wire & publish.
      *  All fallible scratch allocations happen before the id claim - once ids are claimed, this
-     *  thread must roll forward to publication. @ref inner_volatile_index_concurrency
+     *  thread must roll forward to publication. @ref dense_ram_index_concurrency
      *
      *  @param[in] new_vectors The batch to insert, one row per vector, in the frozen geometry.
      *  @param[out] assigned_ids Caller-owned output: either empty, or exactly one slot per incoming
@@ -1631,7 +1631,7 @@ struct inner_volatile_index {
      *  @param[inout] context The calling thread's scratch & telemetry, reused across batches.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      */
-    insert_result_t insert(vectors_view_t new_vectors, node_ids_span_t assigned_ids, inner_traversal_context_t& context,
+    insert_result_t insert(vectors_view_t new_vectors, node_ids_span_t assigned_ids, dense_traversal_context_t& context,
                            insert_config_t config = {}) noexcept {
 
         std::size_t const incoming_vectors_count = new_vectors.extent(0); // rows, not scalars
@@ -1716,7 +1716,7 @@ struct inner_volatile_index {
             vector_view_t const incoming_vector = new_vectors.row(incoming_index).as_vector();
             vector_span_t const owned_vector = vector_span_for(new_location);
             std::memcpy(owned_vector.byte_data(), incoming_vector.byte_data(), vector_bytes);
-            vector_norms_t const new_norms = inner_norms(owned_vector);
+            vector_norms_t const new_norms = dense_norms(owned_vector);
             if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>) norm_ref_for(new_location) = new_norms;
 
             // Snapshot the contiguous visibility watermark: every id strictly below it is published,
@@ -1780,7 +1780,7 @@ struct inner_volatile_index {
     /**
      *  @brief Entry removals are explicitly banned to simplify concurrency management.
      */
-    status_t remove(node_ids_view_t, inner_traversal_context_t&) noexcept = delete;
+    status_t remove(node_ids_view_t, dense_traversal_context_t&) noexcept = delete;
 
     /** @brief Optional tuning knobs for @c search(); zeros mean "derive from connectivity". */
     struct search_config_t {
@@ -1813,7 +1813,7 @@ struct inner_volatile_index {
      *      atomics at all, and per predicate type, so @c no_predicate_t compiles every
      *      admission check out of the unfiltered paths. */
     template <synchronization_t synchronization_, typename predicate_type_ = no_predicate_t>
-    search_result_t search_typed(vector_view_t query_vector, inner_traversal_context_t& context,
+    search_result_t search_typed(vector_view_t query_vector, dense_traversal_context_t& context,
                                  search_config_t config = {},
                                  predicate_type_&& predicate = predicate_type_ {}) noexcept {
         constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, no_predicate_t>;
@@ -1850,7 +1850,7 @@ struct inner_volatile_index {
         std::size_t const computed_distances_before = context.computed_distances;
         std::size_t const restarts_before = context.restarts;
 
-        vector_norms_t const query_norms = inner_norms(query_vector);
+        vector_norms_t const query_norms = dense_norms(query_vector);
         search_around<synchronization_>(query_vector, query_norms, first_invisible_id, expansion_factor, context,
                                         std::forward<predicate_type_>(predicate));
 
@@ -1878,14 +1878,14 @@ struct inner_volatile_index {
      *  moment their publisher advances the watermark; reverse-edge ids above this query's
      *  watermark snapshot are skipped by the translation-frontier invariant, and picked up by
      *  any later query with a fresher snapshot. Under @c immutable_k - or stronger - the caller
-     *  certifies no mutators and the traversal runs atomics-free. @ref inner_volatile_index_concurrency
+     *  certifies no mutators and the traversal runs atomics-free. @ref dense_ram_index_concurrency
      *
      *  @param[in] query_vector The query, in the index's own dtype & frozen dimensionality.
      *  @param[inout] context The calling thread's scratch & telemetry: the matches end up in
      *      @c context.results, ascending by distance - the nearest first.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      */
-    search_result_t search(vector_view_t query_vector, inner_traversal_context_t& context,
+    search_result_t search(vector_view_t query_vector, dense_traversal_context_t& context,
                            search_config_t config = {}) noexcept {
         if (config.synchronization != synchronization_t::concurrent_k)
             return search_typed<synchronization_t::immutable_k>(query_vector, context, config);
@@ -1900,12 +1900,12 @@ struct inner_volatile_index {
      *  strand it in disconnected islands - but only matching nodes enter the reported pool,
      *  whose radius governs termination once it holds @c expansion_factor entries; until then
      *  the ordinary navigation radius bounds the frontier. Predicates come in two shapes,
-     *  detected by signature: per-node @c bool(inner_node_id_t), or batched - receiving the
+     *  detected by signature: per-node @c bool(dense_node_id_t), or batched - receiving the
      *  scored quad and an admissions buffer, pushing what it admits:
      *
      *  @code{.cpp}
-     *  index.search_if(query, [&](std::span<inner_scored_node_t const> scored, auto& admitted) {
-     *      for (inner_scored_node_t candidate : scored)
+     *  index.search_if(query, [&](std::span<dense_scored_node_t const> scored, auto& admitted) {
+     *      for (dense_scored_node_t candidate : scored)
      *          if (labels[candidate.node_id] == wanted) admitted.try_push_back(candidate);
      *  }, context);
      *  @endcode
@@ -1923,7 +1923,7 @@ struct inner_volatile_index {
      */
     template <typename predicate_type_>
     search_result_t search_if(vector_view_t query_vector, predicate_type_&& predicate,
-                              inner_traversal_context_t& context, search_config_t config = {}) noexcept {
+                              dense_traversal_context_t& context, search_config_t config = {}) noexcept {
         if (config.synchronization != synchronization_t::concurrent_k)
             return search_typed<synchronization_t::immutable_k>(query_vector, context, config,
                                                                 std::forward<predicate_type_>(predicate));
@@ -1932,9 +1932,9 @@ struct inner_volatile_index {
     }
 
     /** @brief The class-local spelling of the shared, template-independent
-     *      @c inner_index_header_t. The index itself never writes it - checkpoint
+     *      @c dense_index_header_t. The index itself never writes it - checkpoint
      *      writers prefix their own containers with it. */
-    using header_t = inner_index_header_t;
+    using header_t = dense_index_header_t;
 
     /** @brief The matrix shapes @c save() fills - the caller sizes its buffers from these.
      *      All extents are logical: the tensors' own strides account for sub-byte packing.
@@ -2035,7 +2035,7 @@ struct inner_volatile_index {
         if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>)
             for (std::size_t node = 0; node != count; ++node) {
                 chunked_location_t const location = chunked_location(static_cast<node_id_t>(node));
-                norms_chunks_[location.chunk_index][location.index_in_chunk] = inner_norms(vector_for(location));
+                norms_chunks_[location.chunk_index][location.index_in_chunk] = dense_norms(vector_for(location));
             }
 
         // Publish: identity first, then the capacity credit, and the watermark last with a
@@ -2049,7 +2049,7 @@ struct inner_volatile_index {
 };
 
 /**
- *  @brief External reader's cursor over the published prefix of one @c inner_volatile_index:
+ *  @brief External reader's cursor over the published prefix of one @c dense_ram_index:
  *      random access & id-order iteration over nodes, plus edge-following through a privately
  *      staged copy of the current node's neighbor list.
  *
@@ -2067,7 +2067,7 @@ struct inner_volatile_index {
  *  snapshot to admit them.
  */
 template <typename index_type_, synchronization_t synchronization_, typename allocator_type_>
-struct inner_volatile_cursor {
+struct dense_ram_cursor {
 
     using index_t = index_type_;
     using allocator_t = allocator_type_;
@@ -2104,14 +2104,14 @@ struct inner_volatile_cursor {
     small_size_t connectivity_;
 
     /** @brief Binds the cursor & captures its snapshots; allocates nothing - call @c reserve(). */
-    explicit inner_volatile_cursor(index_t const& index) noexcept
+    explicit dense_ram_cursor(index_t const& index) noexcept
         : index_(&index), visible_count_(index.last_visible_id_.load(watermark_order_k)), current_(visible_count_),
           connectivity_(static_cast<small_size_t>(index.connectivity())) {}
 
-    inner_volatile_cursor(inner_volatile_cursor const&) = delete;
-    inner_volatile_cursor& operator=(inner_volatile_cursor const&) = delete;
-    inner_volatile_cursor(inner_volatile_cursor&&) = default;
-    inner_volatile_cursor& operator=(inner_volatile_cursor&&) = default;
+    dense_ram_cursor(dense_ram_cursor const&) = delete;
+    dense_ram_cursor& operator=(dense_ram_cursor const&) = delete;
+    dense_ram_cursor(dense_ram_cursor&&) = default;
+    dense_ram_cursor& operator=(dense_ram_cursor&&) = default;
 
     /** @brief Sizes the staging for the frozen connectivity through @p allocator - the index's
      *      traversals-side family by default; call once before any @c seek. */
@@ -2150,22 +2150,22 @@ struct inner_volatile_cursor {
         // pre-P3323 currency for observing atomics in const memory, and the opaque call keeps
         // the compiler from hoisting the re-check out of the loop.
         if constexpr (synchronization_ == synchronization_t::concurrent_k)
-            while (row[0] == inner_node_id_unknown_k)
-                typename index_t::wait_t {}(row.data(), inner_node_id_unknown_k, small_size_t(0), fu::wait_capped_t {});
+            while (row[0] == dense_node_id_unknown_k)
+                typename index_t::wait_t {}(row.data(), dense_node_id_unknown_k, small_size_t(0), fu::wait_capped_t {});
         for (small_size_t slot = 0; slot != connectivity_; ++slot) staged_neighbors_[slot] = row[slot];
         // Decode the row's encodings: a self-loop is "published, zero neighbors", and the
         // all-ones sentinel terminates shorter lists.
         if (staged_neighbors_[0] == node) { staged_count_ = 0; }
         else {
             small_size_t live = 0;
-            while (live != connectivity_ && staged_neighbors_[live] != inner_node_id_unknown_k) ++live;
+            while (live != connectivity_ && staged_neighbors_[live] != dense_node_id_unknown_k) ++live;
             staged_count_ = live;
         }
         return true;
     }
 
     /** @brief Moves to the next id below the snapshot, or past the end. */
-    inner_volatile_cursor& operator++() noexcept {
+    dense_ram_cursor& operator++() noexcept {
         if (current_ + 1 < visible_count_) { seek(current_ + 1); }
         else {
             current_ = visible_count_;
@@ -2174,7 +2174,7 @@ struct inner_volatile_cursor {
         return *this;
     }
     /** @brief Deleted: it would copy the staging tensor - an allocation in disguise. */
-    inner_volatile_cursor operator++(int) = delete;
+    dense_ram_cursor operator++(int) = delete;
 
     /** @brief Follows edge @p slot of the staged list; @c false when the slot is beyond the
      *      live prefix or its target is above this cursor's snapshot. */

@@ -35,32 +35,32 @@ using u64_t = std::uint64_t;
 using f32_t = float;
 
 /** @brief Dense node identifier within one sub-index - 32 bits, matching the 4-billion ceiling. */
-using inner_node_id_t = u32_t;
+using dense_node_id_t = u32_t;
 /** @brief Distance representation shared by all metrics, regardless of the stored dtype. */
-using inner_distance_t = f32_t;
+using dense_distance_t = f32_t;
 
 /** @brief Reserved all-ones value, never a valid node id within a sub-index. Doubles as the
  *      lock & empty-slot sentinel in neighbor lists of every index design. */
-inline constexpr inner_node_id_t inner_node_id_unknown_k = 0xFFFFFFFFu;
+inline constexpr dense_node_id_t dense_node_id_unknown_k = 0xFFFFFFFFu;
 
 /** @brief One traversal candidate: a node id paired with its distance to the query. */
-struct inner_scored_node_t {
+struct dense_scored_node_t {
     /** @brief Identifier of the scored node within its sub-index. */
-    inner_node_id_t node_id;
+    dense_node_id_t node_id;
     /** @brief Distance to the query, in the instantiated kernel's metric. */
-    inner_distance_t distance;
+    dense_distance_t distance;
 };
 
 /** @brief Orders scored nodes nearest-first; the comparator of the sorted results pool. */
-struct inner_closer_scored_node_t {
-    inline bool operator()(inner_scored_node_t a, inner_scored_node_t b) const noexcept {
+struct dense_closer_scored_node_t {
+    inline bool operator()(dense_scored_node_t a, dense_scored_node_t b) const noexcept {
         return a.distance < b.distance;
     }
 };
 
 /** @brief Orders scored nodes furthest-first; the comparator of the max-heap frontier. */
-struct inner_further_scored_node_t {
-    inline bool operator()(inner_scored_node_t a, inner_scored_node_t b) const noexcept {
+struct dense_further_scored_node_t {
+    inline bool operator()(dense_scored_node_t a, dense_scored_node_t b) const noexcept {
         return a.distance > b.distance;
     }
 };
@@ -234,18 +234,18 @@ constexpr dtype_t dtype_named(std::string_view name) noexcept {
 }
 
 /**
- *  @brief Fixed 32-byte descriptor fronting every serialized inner index payload - volatile
+ *  @brief Fixed 32-byte descriptor fronting every serialized dense index payload - volatile
  *      in-RAM snapshots, GPU-resident uploads, and persisted on-NVMe layouts alike. It describes
  *      the graph & its frozen geometry, never the residency: what sections follow and how they
  *      are laid out is the per-storage contract versioned by @c version_k.
  */
-struct inner_index_header_t {
+struct dense_index_header_t {
     /** @brief The expected @c magic contents: "usearch3" read as a little-endian word. */
     inline static constexpr u64_t magic_k = 0x3368637261657375ull;
     /** @brief The layout revision this implementation writes and understands. */
     inline static constexpr u32_t version_k = 1;
 
-    /** @brief Identifies USearch inner index payloads; must equal @c magic_k. */
+    /** @brief Identifies USearch dense index payloads; must equal @c magic_k. */
     u64_t magic;
     /** @brief Layout revision of the sections that follow. */
     u32_t version;
@@ -260,7 +260,7 @@ struct inner_index_header_t {
     /** @brief Published nodes in the payload; the chunk layout re-derives from it. */
     u32_t node_count;
 };
-static_assert(sizeof(inner_index_header_t) == 32 && std::is_trivially_copyable_v<inner_index_header_t>);
+static_assert(sizeof(dense_index_header_t) == 32 && std::is_trivially_copyable_v<dense_index_header_t>);
 
 /** @brief Returns 2^ @p exponent as a value of the requested unsigned type. */
 template <typename result_type_>

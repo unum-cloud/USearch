@@ -1,5 +1,5 @@
 /**
- *  @brief Throughput benchmarks for @c inner_metric distance functions for 1-to-1, 1-to-4,
+ *  @brief Throughput benchmarks for @c dense/ram_metric.hpp distance functions for 1-to-1, 1-to-4,
  *      and tiled kernels against NumKong's monolithic 1-to-1 reference.
  *
  *  @author Ash Vardanian
@@ -41,11 +41,11 @@ using namespace unum::usearch;
 constexpr std::array<std::size_t, 3> dimensions_to_bench = {256, 768, 1536};
 
 /**
- *  @brief True iff @c inner_quads_chain has a specialization for this (kernel, scalar, caps)
+ *  @brief True iff @c dense_quads_chain has a specialization for this (kernel, scalar, caps)
  *  tuple - unadapted tuples are skipped at registration time.
  */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-concept quads_supported = requires { typename inner_quads_chain<kernel_, scalar_, caps_>::kit_t; };
+concept quads_supported = requires { typename dense_quads_chain<kernel_, scalar_, caps_>::kit_t; };
 
 /**
  *  @brief True iff USearch has any kit for this (kernel, scalar) pair across capability
@@ -144,7 +144,7 @@ static candidate_pool<scalar_> make_candidate_pool(std::size_t dim) {
     for (std::size_t row = 0; row < row_count; ++row) fill_cyclic(pool.matrix.span().row(row).as_vector(), row);
     pool.norms.reserve(row_count);
     for (std::size_t row = 0; row < row_count; ++row)
-        pool.norms.push_back(inner_norms<nk_cap_serial_k>(pool.matrix.view().row(row).as_vector()));
+        pool.norms.push_back(dense_norms<nk_cap_serial_k>(pool.matrix.view().row(row).as_vector()));
     return pool;
 }
 
@@ -176,7 +176,7 @@ static void bench_distance(benchmark::State& state) {
     fill_cyclic(query.span(), 0);
     auto pool = make_candidate_pool<scalar_>(dim);
     auto query_view = query.view();
-    auto query_norms = inner_norms<caps_>(query_view);
+    auto query_norms = dense_norms<caps_>(query_view);
 
     std::size_t const row_index_mask = pool.matrix.extent(0) - 1;
     std::mt19937 random_generator {0xDEADBEEFu};
@@ -199,7 +199,7 @@ static void bench_distances_quad(benchmark::State& state) {
     fill_cyclic(query.span(), 0);
     auto pool = make_candidate_pool<scalar_>(dim);
     auto query_view = query.view();
-    auto query_norms = inner_norms<caps_>(query_view);
+    auto query_norms = dense_norms<caps_>(query_view);
 
     std::size_t const row_index_mask = pool.matrix.extent(0) - 1;
     std::mt19937 random_generator {0xDEADBEEFu};
@@ -308,7 +308,7 @@ static void register_baseline(std::string_view kernel_name, std::string_view sca
 /** @brief True iff a tile engine is compiled for this tuple - the tiles chain always names
  *      a kit, so the gate is its @c has_tiles_k verdict, never the alias's existence. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-concept tiles_supported = inner_tiles_chain<kernel_, scalar_, caps_>::has_tiles_k;
+concept tiles_supported = dense_tiles_chain<kernel_, scalar_, caps_>::has_tiles_k;
 
 /** @brief One 16×16 tile of distances per iteration - gather, pack, and the depth walk - the tile
  *      engine's primitive throughput, comparable against 256 quads-path distances. */
@@ -316,7 +316,7 @@ template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
     requires tiles_supported<kernel_, scalar_, caps_>
 static void bench_distances_tile(benchmark::State& state) {
     nk_configure_thread(nk_capabilities_available());
-    using tiles_kit_t = typename inner_tiles_chain<kernel_, scalar_, caps_>::kit_t;
+    using tiles_kit_t = typename dense_tiles_chain<kernel_, scalar_, caps_>::kit_t;
     constexpr std::size_t rows_k = tiles_kit_t::tile_rows_k;
     std::size_t const dim = static_cast<std::size_t>(state.range(0));
     std::size_t const depth_tiles = dim / tiles_kit_t::tile_depth_k;
@@ -328,7 +328,7 @@ static void bench_distances_tile(benchmark::State& state) {
     for (std::size_t row = 0; row != rows_k; ++row) {
         fill_cyclic(storage.row(row).as_vector(), row);
         views[row] = vectors.row(row).as_vector();
-        norms[row] = inner_norms<caps_>(views[row]);
+        norms[row] = dense_norms<caps_>(views[row]);
     }
     typename tiles_kit_t::a_tile_t a_tile;
     typename tiles_kit_t::b_tile_t b_tile;

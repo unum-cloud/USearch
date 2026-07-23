@@ -1,5 +1,5 @@
 /**
- *  @brief The index-agnostic test scenario library shared by every inner-index category -
+ *  @brief The index-agnostic test scenario library shared by every dense-index residency -
  *      volatile in-RAM, GPU-resident, and persisted alike.
  *
  *  @author Ash Vardanian
@@ -36,7 +36,7 @@
 #include <numkong/numkong.hpp>
 
 #include "test.hpp"
-#include "usearch/dense/ram_metric.hpp" // `usearch::distance`, `usearch::inner_norms` - the oracle's kernels
+#include "usearch/dense/ram_metric.hpp" // `usearch::distance`, `usearch::dense_norms` - the oracle's kernels
 #include "usearch/types.hpp"
 
 namespace unum {
@@ -93,14 +93,14 @@ struct flaky_waiter_t {
 template <typename index_type_>
 struct test_lanes {
     std::vector<nk::matrix<typename index_type_::scalar_t>> slices;
-    std::vector<typename index_type_::inner_traversal_context_t> contexts;
+    std::vector<typename index_type_::dense_traversal_context_t> contexts;
 };
 
 /** @brief Prepares @p lanes_count lanes with distinctly-seeded vector slices & fresh contexts. */
 template <typename index_type_>
 test_lanes<index_type_> make_lanes(std::size_t lanes_count, std::size_t nodes_per_lane, std::size_t dimensions,
                                    u64_t seed) {
-    using context_t = typename index_type_::inner_traversal_context_t;
+    using context_t = typename index_type_::dense_traversal_context_t;
     test_lanes<index_type_> lanes;
     for (std::size_t lane = 0; lane != lanes_count; ++lane) {
         lanes.slices.push_back(make_vectors<typename index_type_::scalar_t>(nodes_per_lane, dimensions, seed + lane));
@@ -117,7 +117,7 @@ static std::size_t test_guards(make_index_type_ const& make_index) {
     allocation_ledger_t ledger;
     {
         index_type_ index = make_index(ledger);
-        typename index_type_::inner_traversal_context_t context {{}};
+        typename index_type_::dense_traversal_context_t context {{}};
         auto vectors = make_vectors<scalar_t>(3, dimensions_for<scalar_t>(tiny_values_k), 42);
 
         auto inserted = index.insert(vectors.view(), {}, context);
@@ -146,13 +146,13 @@ static std::size_t test_three_vectors(make_index_type_ const& make_index) {
     allocation_ledger_t ledger;
     {
         index_type_ index = make_index(ledger);
-        typename index_type_::inner_traversal_context_t context {{}};
+        typename index_type_::dense_traversal_context_t context {{}};
         auto vectors = make_vectors<scalar_t>(3, dimensions_for<scalar_t>(tiny_values_k), 7);
 
         failures_count += expect(
             index.reserve({8, connectivity_16_k, dimensions_for<scalar_t>(tiny_values_k)}).status ==
             status_t::success_k);
-        std::array<inner_node_id_t, 3> assigned_ids;
+        std::array<dense_node_id_t, 3> assigned_ids;
         auto inserted = index.insert(vectors.view(), {assigned_ids.data(), assigned_ids.size()}, context);
         failures_count += expect(inserted.status == status_t::success_k);
         failures_count += expect_eq(inserted.new_size, 3u);
@@ -162,7 +162,7 @@ static std::size_t test_three_vectors(make_index_type_ const& make_index) {
             auto found = index.search(vectors.view().row(row).as_vector(), context);
             failures_count += expect(found.status == status_t::success_k && found.count >= 1);
             if constexpr (kernel_ != nk_kernel_dot_k) {
-                inner_scored_node_t const nearest = context.results.data()[0];
+                dense_scored_node_t const nearest = context.results.data()[0];
                 failures_count += expect_eq(nearest.node_id, assigned_ids[row]);
                 failures_count += expect(nearest.distance < self_match_tolerance_k && //
                                          nearest.distance > -self_match_tolerance_k);
@@ -182,13 +182,13 @@ static std::size_t test_growth_and_recall(make_index_type_ const& make_index) {
     allocation_ledger_t ledger;
     {
         index_type_ index = make_index(ledger);
-        typename index_type_::inner_traversal_context_t context {{}};
+        typename index_type_::dense_traversal_context_t context {{}};
         auto vectors = make_vectors<scalar_t>(growth_nodes_count_k, dimensions_for<scalar_t>(test_values_k), 2026);
 
         failures_count += expect(
             index.reserve({16, connectivity_16_k, dimensions_for<scalar_t>(test_values_k)}).status ==
             status_t::success_k);
-        std::vector<inner_node_id_t> assigned_ids(growth_nodes_count_k);
+        std::vector<dense_node_id_t> assigned_ids(growth_nodes_count_k);
         auto inserted = index.insert(vectors.view(), {assigned_ids.data(), assigned_ids.size()}, context);
         failures_count += expect(inserted.status == status_t::success_k);
         failures_count += expect_eq(inserted.new_size, growth_nodes_count_k);
@@ -236,13 +236,13 @@ static std::size_t test_predicated_search(make_index_type_ const& make_index) {
     allocation_ledger_t ledger;
     {
         index_type_ index = make_index(ledger);
-        typename index_type_::inner_traversal_context_t context {{}};
+        typename index_type_::dense_traversal_context_t context {{}};
         auto vectors = make_vectors<scalar_t>(growth_nodes_count_k, dimensions_for<scalar_t>(test_values_k), 7071);
 
         failures_count += expect(
             index.reserve({growth_nodes_count_k, connectivity_16_k, dimensions_for<scalar_t>(test_values_k)}).status ==
             status_t::success_k);
-        std::vector<inner_node_id_t> assigned_ids(growth_nodes_count_k);
+        std::vector<dense_node_id_t> assigned_ids(growth_nodes_count_k);
         failures_count += expect(
             index.insert(vectors.view(), {assigned_ids.data(), assigned_ids.size()}, context).status ==
             status_t::success_k);
@@ -252,16 +252,16 @@ static std::size_t test_predicated_search(make_index_type_ const& make_index) {
         // relative 1e-3 - because the fast-math build legally re-derives float finalizes per
         // inlining context; integer-cored euclidean matches exactly anyway, and a wrong id or
         // vector diverges by orders of magnitude, which is what this audit exists to catch.
-        auto close_enough = [](inner_distance_t actual, inner_distance_t expected) noexcept {
+        auto close_enough = [](dense_distance_t actual, dense_distance_t expected) noexcept {
             f32_t const scale = std::fmax(std::fmax(std::fabs(actual), std::fabs(expected)), 1.0f);
             return std::fabs(actual - expected) <= 1e-3f * scale;
         };
-        auto oracle_distance = [&](std::size_t query_row, inner_node_id_t node_id) noexcept {
+        auto oracle_distance = [&](std::size_t query_row, dense_node_id_t node_id) noexcept {
             auto query_view = vectors.view().row(query_row).as_vector();
             auto node_view = vectors.view().row(node_id).as_vector();
-            auto node_norms = usearch::inner_norms<kernel_, caps_k, scalar_t>(node_view);
+            auto node_norms = usearch::dense_norms<kernel_, caps_k, scalar_t>(node_view);
             auto lane_distances = usearch::distances<kernel_, caps_k, scalar_t>(
-                query_view, usearch::inner_norms<kernel_, caps_k, scalar_t>(query_view),
+                query_view, usearch::dense_norms<kernel_, caps_k, scalar_t>(query_view),
                 {node_view, node_view, node_view, node_view}, {node_norms, node_norms, node_norms, node_norms});
             return lane_distances[0];
         };
@@ -269,14 +269,14 @@ static std::size_t test_predicated_search(make_index_type_ const& make_index) {
         // walk parity is only defined between FRESH contexts with identical generator state.
         std::size_t const query_row = growth_nodes_count_k / 2;
         auto query = vectors.view().row(query_row).as_vector();
-        typename index_type_::inner_traversal_context_t unfiltered_context {{}};
+        typename index_type_::dense_traversal_context_t unfiltered_context {{}};
         auto unfiltered = index.search(query, unfiltered_context);
         failures_count += expect(unfiltered.status == status_t::success_k && unfiltered.count > 0);
-        inner_scored_node_t const* reference = unfiltered_context.results.data();
+        dense_scored_node_t const* reference = unfiltered_context.results.data();
 
         // The trivially-true predicate walks and reports exactly like the unfiltered sibling.
-        auto all_pass = [](inner_node_id_t) noexcept { return true; };
-        typename index_type_::inner_traversal_context_t all_pass_context {{}};
+        auto all_pass = [](dense_node_id_t) noexcept { return true; };
+        typename index_type_::dense_traversal_context_t all_pass_context {{}};
         auto with_true = index.search_if(query, all_pass, all_pass_context);
         failures_count += expect_eq(with_true.count, unfiltered.count);
         for (std::size_t match = 0; match != with_true.count && match != unfiltered.count; ++match) {
@@ -285,12 +285,12 @@ static std::size_t test_predicated_search(make_index_type_ const& make_index) {
         }
 
         // The batched shape must agree with the per-node shape on the same walk.
-        auto even_only = [](inner_node_id_t node_id) noexcept { return node_id % 2 == 0; };
-        auto even_batched = [](std::span<inner_scored_node_t const> scored, auto& admitted) noexcept {
-            for (inner_scored_node_t const candidate : scored)
+        auto even_only = [](dense_node_id_t node_id) noexcept { return node_id % 2 == 0; };
+        auto even_batched = [](std::span<dense_scored_node_t const> scored, auto& admitted) noexcept {
+            for (dense_scored_node_t const candidate : scored)
                 if (candidate.node_id % 2 == 0) admitted.try_push_back(candidate);
         };
-        typename index_type_::inner_traversal_context_t scalar_context {{}}, batched_context {{}};
+        typename index_type_::dense_traversal_context_t scalar_context {{}}, batched_context {{}};
         auto with_scalar = index.search_if(query, even_only, scalar_context);
         auto with_batched = index.search_if(query, even_batched, batched_context);
         failures_count += expect(with_scalar.status == status_t::success_k && with_scalar.count > 0);
@@ -309,11 +309,11 @@ static std::size_t test_predicated_search(make_index_type_ const& make_index) {
         std::size_t const moduli[] = {2, 16, 64};
         std::size_t hits = 0, recall_samples = 0;
         for (std::size_t modulus : moduli) {
-            auto matches = [modulus](inner_node_id_t node_id) noexcept { return node_id % modulus == 0; };
+            auto matches = [modulus](dense_node_id_t node_id) noexcept { return node_id % modulus == 0; };
             for (std::size_t sample = 0; sample != 8; ++sample) {
                 std::size_t sampled_row = ((sample * 641 + modulus) % growth_nodes_count_k) / modulus * modulus;
                 if (sample % 2) sampled_row += 1; // An excluded neighbor of a matching row.
-                typename index_type_::inner_traversal_context_t sampled_context {{}};
+                typename index_type_::dense_traversal_context_t sampled_context {{}};
                 auto found = index.search_if(vectors.view().row(sampled_row).as_vector(), matches, sampled_context);
                 bool const self_matches = sampled_row % modulus == 0;
                 // The sparsest decade may legally drain empty on excluded-row queries: until
@@ -321,7 +321,7 @@ static std::size_t test_predicated_search(make_index_type_ const& make_index) {
                 // needs to fall inside it. A matching self is always near enough to admit.
                 failures_count += expect(found.status == status_t::success_k);
                 failures_count += expect(found.count > 0 || (modulus == 64 && !self_matches));
-                inner_scored_node_t const* results = sampled_context.results.data();
+                dense_scored_node_t const* results = sampled_context.results.data();
                 bool self_found = false;
                 for (std::size_t match = 0; match != found.count; ++match) {
                     failures_count += expect(results[match].node_id % modulus == 0);
@@ -339,8 +339,8 @@ static std::size_t test_predicated_search(make_index_type_ const& make_index) {
             failures_count += expect(hits * 100 >= recall_samples * minimal_recall_percent_k);
 
         // An impossible predicate drains legally: empty result set, successful status.
-        auto none_pass = [](inner_node_id_t) noexcept { return false; };
-        typename index_type_::inner_traversal_context_t none_context {{}};
+        auto none_pass = [](dense_node_id_t) noexcept { return false; };
+        typename index_type_::dense_traversal_context_t none_context {{}};
         auto with_none = index.search_if(query, none_pass, none_context);
         failures_count += expect(with_none.status == status_t::success_k);
         failures_count += expect_eq(with_none.count, std::size_t {0});
@@ -360,13 +360,13 @@ static std::size_t test_save_load_roundtrip(make_index_type_ const& make_index) 
     allocation_ledger_t ledger;
     {
         index_type_ index = make_index(ledger);
-        typename index_type_::inner_traversal_context_t context {{}};
+        typename index_type_::dense_traversal_context_t context {{}};
         auto vectors = make_vectors<scalar_t>(growth_nodes_count_k, dimensions_for<scalar_t>(test_values_k), 4242);
 
         failures_count += expect(
             index.reserve({growth_nodes_count_k, connectivity_16_k, dimensions_for<scalar_t>(test_values_k)}).status ==
             status_t::success_k);
-        std::vector<inner_node_id_t> assigned_ids(growth_nodes_count_k);
+        std::vector<dense_node_id_t> assigned_ids(growth_nodes_count_k);
         failures_count += expect(
             index.insert(vectors.view(), {assigned_ids.data(), assigned_ids.size()}, context).status ==
             status_t::success_k);
@@ -426,7 +426,7 @@ static std::size_t test_concurrent_build(make_index_type_ const& make_index) {
 
         auto lanes = make_lanes<index_type_>(lanes_count, lane_nodes_count_k, dimensions_for<scalar_t>(test_values_k),
                                              100);
-        std::vector<inner_node_id_t> assigned_ids(nodes_count);
+        std::vector<dense_node_id_t> assigned_ids(nodes_count);
         std::atomic<std::size_t> failed_lanes_count {0};
 
         pool.for_threads([&](std::size_t lane) noexcept {
@@ -449,7 +449,7 @@ static std::size_t test_concurrent_build(make_index_type_ const& make_index) {
                 std::size_t const lane = sample % lanes_count, row = (sample * 37) % lane_nodes_count_k;
                 auto found = index.search(lanes.slices[lane].view().row(row).as_vector(), lanes.contexts[0]);
                 failures_count += expect(found.status == status_t::success_k && found.count > 0);
-                inner_scored_node_t const nearest = lanes.contexts[0].results.data()[0];
+                dense_scored_node_t const nearest = lanes.contexts[0].results.data()[0];
                 hits += nearest.distance < self_match_tolerance_k && nearest.distance > -self_match_tolerance_k;
             }
             failures_count += expect(hits * 100 >= samples * minimal_recall_percent_k);
@@ -506,7 +506,7 @@ static std::size_t test_concurrent_search(make_index_type_ const& make_index) {
             // Every other step runs the predicated sibling under the same race: all the
             // unfiltered invariants must hold, plus admission purity - no id the predicate
             // rejects may ever surface, no matter how the writers interleave.
-            auto odd_only = [](inner_node_id_t node_id) noexcept { return node_id % 2 == 1; };
+            auto odd_only = [](dense_node_id_t node_id) noexcept { return node_id % 2 == 1; };
             std::size_t violations = 0;
             for (std::size_t step = 0; step < reader_minimal_searches_k || //
                                        writers_remaining.load(std::memory_order_acquire) != 0;
@@ -525,7 +525,7 @@ static std::size_t test_concurrent_search(make_index_type_ const& make_index) {
                 violations += found.status != status_t::success_k;
                 violations += found.count > expansion_bound;
                 for (std::size_t match = 0; match != found.count; ++match) {
-                    inner_scored_node_t const scored = lanes.contexts[0].results.data()[match];
+                    dense_scored_node_t const scored = lanes.contexts[0].results.data()[match];
                     violations += scored.node_id >= published_after;
                     violations += predicated && scored.node_id % 2 != 1;
                     if (match) violations += scored.distance < lanes.contexts[0].results.data()[match - 1].distance;

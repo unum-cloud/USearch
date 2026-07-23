@@ -11,19 +11,19 @@
  *  read requests and consumes completions - and pluggable per-OS engines pump those
  *  requests through whatever asynchronous interface the platform offers.
  *
- *  @section inner_persisted_engines I/O Engines
+ *  @section dense_nvme_engines I/O Engines
  *
- *  Seven engines satisfy the same @c inner_io_engine concept, each a standalone type
+ *  Seven engines satisfy the same @c dense_io_engine concept, each a standalone type
  *  named after the exact platform capability it drives, selected at compile time and
  *  instantiated once per traversal context:
  *
- *  - @c inner_posix_sync_engine - blocking @c pread, the portable reference & macOS path,
- *  - @c inner_linux_aio_engine - @c io_submit / @c io_getevents, for io_uring-gated clouds,
- *  - @c inner_linux_uring_read_engine - io_uring @c IORING_OP_READ on any descriptor,
- *  - @c inner_linux_uring_fixed_engine - @c IORING_OP_READ_FIXED over registered buffers & files,
- *  - @c inner_linux_uring_polled_engine - registered resources + @c IORING_SETUP_IOPOLL,
- *  - @c inner_linux_uring_nvme_engine - NVMe passthrough via @c IORING_OP_URING_CMD,
- *  - @c inner_windows_ioring_engine - I/O Rings on Windows 11 22H2 & newer.
+ *  - @c dense_posix_sync_engine - blocking @c pread, the portable reference & macOS path,
+ *  - @c dense_linux_aio_engine - @c io_submit / @c io_getevents, for io_uring-gated clouds,
+ *  - @c dense_linux_uring_read_engine - io_uring @c IORING_OP_READ on any descriptor,
+ *  - @c dense_linux_uring_fixed_engine - @c IORING_OP_READ_FIXED over registered buffers & files,
+ *  - @c dense_linux_uring_polled_engine - registered resources + @c IORING_SETUP_IOPOLL,
+ *  - @c dense_linux_uring_nvme_engine - NVMe passthrough via @c IORING_OP_URING_CMD,
+ *  - @c dense_windows_ioring_engine - I/O Rings on Windows 11 22H2 & newer.
  *
  *  Engines own the aligned staging-buffer arena - the natural consequence of buffer
  *  registration, which is an engine-side resource on every ring API - and the state
@@ -34,7 +34,7 @@
  *  distro ships - while runtime degrades gracefully on older kernels through setup
  *  fallbacks and failed-registration probes.
  *
- *  @section inner_persisted_alignment Platform Alignment
+ *  @section dense_nvme_alignment Platform Alignment
  *
  *  The engine contract is the intersection of four asynchronous-read APIs - one
  *  bullet per contract verb, platforms in a fixed order: io_uring, then Linux AIO,
@@ -64,26 +64,26 @@
  *  @c res & @c flags. Everything else in those 64/128-byte slots stays zero, which is
  *  why the request POD below carries exactly four words.
  *
- *  @section inner_persisted_format Storage Format
+ *  @section dense_nvme_format Storage Format
  *
- *  The payload opens with the shared @c inner_index_header_t, then a plain array of
+ *  The payload opens with the shared @c dense_index_header_t, then a plain array of
  *  @b [node_count+1] 64-bit byte offsets, then the node records. Each record is fully
  *  self-contained - neighbor ids, pre-computed norms, and the vector - padded to the
  *  512-byte transfer block, so one read services one hop of one traversal. Neighbor
  *  lists are variable-length: the record stores its own count, and the offsets array
  *  is the only random-access directory.
  *
- *  @section inner_persisted_concurrency Concurrency
+ *  @section dense_nvme_concurrency Concurrency
  *
  *  The graph is immutable, so the index object holds no atomics, no locks, and no
  *  compare-and-swap loops. All mutable state - slots, queues, the engine with its
- *  arena - lives in the per-thread @c inner_persisted_context, and no two threads
+ *  arena - lives in the per-thread @c dense_nvme_context, and no two threads
  *  ever share one. The only spinning in the design is the engine-side completion
  *  wait, delegated to the same ForkUnion monitor-waiter vocabulary the in-memory
  *  index uses for lock sentinels: @c TPAUSE on x86, @c WFET on Arm, plain yields
  *  elsewhere - energy-efficient busy-waiting instead of hard spins.
  *
- *  @section inner_persisted_rnd R&D Emulation
+ *  @section dense_nvme_rnd R&D Emulation
  *
  *  Development against emulated NVMe latency profiles uses the in-kernel @c null_blk
  *  driver; a RAM-rich box models any device tier without hardware:
@@ -142,23 +142,23 @@ namespace usearch {
 /** @brief Transfer granularity of the record section: every record begins and ends on
  *      a 512-byte boundary, matching the finest NVMe logical block, so direct I/O works
  *      against 512e devices and wastes at most one block on 4Kn ones. */
-inline constexpr std::size_t inner_persisted_block_k = 512;
+inline constexpr std::size_t dense_nvme_block_k = 512;
 
 /** @brief Alignment of every staging buffer - the strictest direct-I/O memory alignment
  *      any mainstream device demands, and a page, so one buffer never splits pages. */
-inline constexpr std::size_t inner_persisted_alignment_k = 4096;
+inline constexpr std::size_t dense_nvme_alignment_k = 4096;
 
 /** @brief Identity of one in-flight traversal slot within a context's slot array -
  *      packed into the round-tripped tag and used to index the slots. */
-using inner_traversal_slot_id_t = u32_t;
+using dense_traversal_slot_id_t = u32_t;
 
 /** @brief Index into an engine's staging-buffer arena - leased by the state machine,
  *      carried by every request, and the @c buf_index of registered-buffer submissions. */
-using inner_staging_buffer_id_t = u32_t;
+using dense_staging_buffer_id_t = u32_t;
 
 /** @brief Feature bits an engine publishes through its @c capabilities_k constant, so
  *      callers, tests, and docs introspect variants uniformly instead of by type name. */
-enum class inner_io_capability_t : u32_t {
+enum class dense_io_capability_t : u32_t {
     none_k = 0,
     /** @brief Staging buffers are pre-registered with the kernel/ring - no per-read
      *      page pinning; roughly an 11% throughput gain at NVMe rates. */
@@ -171,17 +171,17 @@ enum class inner_io_capability_t : u32_t {
     lba_addressing_k = 1u << 2,
 };
 
-inline constexpr inner_io_capability_t operator|(inner_io_capability_t a, inner_io_capability_t b) noexcept {
-    return static_cast<inner_io_capability_t>(static_cast<u32_t>(a) | static_cast<u32_t>(b));
+inline constexpr dense_io_capability_t operator|(dense_io_capability_t a, dense_io_capability_t b) noexcept {
+    return static_cast<dense_io_capability_t>(static_cast<u32_t>(a) | static_cast<u32_t>(b));
 }
-inline constexpr bool operator&(inner_io_capability_t a, inner_io_capability_t b) noexcept {
+inline constexpr bool operator&(dense_io_capability_t a, dense_io_capability_t b) noexcept {
     return (static_cast<u32_t>(a) & static_cast<u32_t>(b)) != 0;
 }
 
 /** @brief How a @c pump call treats completions: return with whatever is already
  *      reaped, or insist on at least one - the polling-vs-blocking axis shared by
  *      every engine. */
-enum class inner_io_wait_t : u32_t {
+enum class dense_io_wait_t : u32_t {
     /** @brief Submit & reap what's there; never sleep. */
     nonblocking_k = 0,
     /** @brief Submit, then hold until at least one completion lands. */
@@ -190,13 +190,13 @@ enum class inner_io_wait_t : u32_t {
 
 /** @brief Whether the payload descriptor routes through the page cache or around it -
  *      @c O_DIRECT on Linux, @c F_NOCACHE on macOS, @c FILE_FLAG_NO_BUFFERING on Windows. */
-enum class inner_io_caching_t : u32_t {
+enum class dense_io_caching_t : u32_t {
     cached_k = 0,
     direct_k = 1,
 };
 
 /** @brief Why a record was fetched; routes the completion inside the state machine. */
-enum class inner_io_purpose_t : u32_t {
+enum class dense_io_purpose_t : u32_t {
     /** @brief The record's vector will be scored against the slot's query. */
     score_k = 0,
     /** @brief The record's neighbor list will extend the slot's frontier. */
@@ -206,16 +206,16 @@ enum class inner_io_purpose_t : u32_t {
 /** @brief Opaque per-read cookie: the issuing slot, the staging buffer, and the purpose,
  *      packed into the one 64-bit word every ring API round-trips untouched -
  *      @c sqe->user_data, @c iocb.aio_data, or IoRing's @c UserData. */
-struct inner_io_tag_t {
-    inner_traversal_slot_id_t slot;
-    inner_staging_buffer_id_t buffer : 31;
+struct dense_io_tag_t {
+    dense_traversal_slot_id_t slot;
+    dense_staging_buffer_id_t buffer : 31;
     u32_t purpose : 1;
 
     inline u64_t packed() const noexcept {
         return static_cast<u64_t>(slot) << 32 | static_cast<u64_t>(buffer) << 1 | static_cast<u64_t>(purpose);
     }
-    inline static inner_io_tag_t unpack(u64_t word) noexcept {
-        inner_io_tag_t tag;
+    inline static dense_io_tag_t unpack(u64_t word) noexcept {
+        dense_io_tag_t tag;
         tag.slot = static_cast<u32_t>(word >> 32);
         tag.buffer = static_cast<u32_t>(word) >> 1;
         tag.purpose = static_cast<u32_t>(word) & 1u;
@@ -228,21 +228,21 @@ struct inner_io_tag_t {
  *      the start of the payload; LBA-addressed engines rescale internally. The
  *      destination address never appears - the engine derives it from @p buffer,
  *      which is also the @c buf_index of registered-buffer submissions. */
-struct inner_io_request_t {
+struct dense_io_request_t {
     /** @brief Byte offset of the record within the payload; block-aligned by format. */
     u64_t offset;
-    /** @brief Bytes to transfer; a whole number of @ref inner_persisted_block_k blocks. */
+    /** @brief Bytes to transfer; a whole number of @ref dense_nvme_block_k blocks. */
     u32_t length;
     /** @brief Index into the engine's staging arena - stays valid until the matching
      *      completion is consumed & the state machine recycles the index. */
-    inner_staging_buffer_id_t buffer;
-    /** @brief Round-tripped @ref inner_io_tag_t in packed form; opaque to engines. */
+    dense_staging_buffer_id_t buffer;
+    /** @brief Round-tripped @ref dense_io_tag_t in packed form; opaque to engines. */
     u64_t tag;
 };
 
 /** @brief One completed read, surfaced by an engine's @c pop. A negative @c result is
  *      a negated @c errno -like error; otherwise it's the byte count transferred. */
-struct inner_io_completion_t {
+struct dense_io_completion_t {
     u64_t tag;
     std::int64_t result;
 };
@@ -255,14 +255,14 @@ struct inner_io_completion_t {
  *      memory a completed read landed in.
  */
 template <typename engine_type_>
-concept inner_io_engine = requires(engine_type_& engine, inner_io_request_t request, //
-                                   inner_io_completion_t& completion, inner_io_wait_t wait,
-                                   inner_staging_buffer_id_t index) {
+concept dense_io_engine = requires(engine_type_& engine, dense_io_request_t request, //
+                                   dense_io_completion_t& completion, dense_io_wait_t wait,
+                                   dense_staging_buffer_id_t index) {
     { engine.push(request) } noexcept -> std::same_as<bool>;
     { engine.pump(wait) } noexcept -> std::same_as<status_t>;
     { engine.pop(completion) } noexcept -> std::same_as<bool>;
     { engine.buffer(index) } noexcept -> std::same_as<std::byte*>;
-    { engine_type_::capabilities_k } -> std::convertible_to<inner_io_capability_t>;
+    { engine_type_::capabilities_k } -> std::convertible_to<dense_io_capability_t>;
 };
 
 #pragma endregion Vocabulary
@@ -286,25 +286,25 @@ concept inner_io_engine = requires(engine_type_& engine, inner_io_request_t requ
  *  The 64-byte vector alignment keeps SIMD loads within the staging buffer natural;
  *  the trailing block padding makes every record's extent a valid direct-I/O transfer.
  */
-struct inner_persisted_layout_t {
+struct dense_nvme_layout_t {
 
     /** @brief Offsets array begins right after the 32-byte shared header. */
-    inline static constexpr std::size_t offsets_begin_k = sizeof(inner_index_header_t);
+    inline static constexpr std::size_t offsets_begin_k = sizeof(dense_index_header_t);
 
     inline static constexpr std::size_t offsets_bytes(std::size_t node_count) noexcept {
         return (node_count + 1) * sizeof(u64_t);
     }
     /** @brief First byte of the record section - the metadata rounded up to a whole block. */
     inline static constexpr std::size_t records_begin(std::size_t node_count) noexcept {
-        return fu::round_up_to_multiple(offsets_begin_k + offsets_bytes(node_count), inner_persisted_block_k);
+        return fu::round_up_to_multiple(offsets_begin_k + offsets_bytes(node_count), dense_nvme_block_k);
     }
 
     /** @brief The record's own id sits right after the count: fetched records identify
      *      themselves, so completions need no side-channel id bookkeeping. */
-    inline static constexpr std::size_t self_id_offset_k = sizeof(inner_node_id_t);
-    inline static constexpr std::size_t neighbor_ids_offset_k = 2 * sizeof(inner_node_id_t);
+    inline static constexpr std::size_t self_id_offset_k = sizeof(dense_node_id_t);
+    inline static constexpr std::size_t neighbor_ids_offset_k = 2 * sizeof(dense_node_id_t);
     inline static constexpr std::size_t norms_offset(std::size_t neighbors_count) noexcept {
-        return fu::round_up_to_multiple(neighbor_ids_offset_k + neighbors_count * sizeof(inner_node_id_t),
+        return fu::round_up_to_multiple(neighbor_ids_offset_k + neighbors_count * sizeof(dense_node_id_t),
                                         std::size_t(16));
     }
     inline static constexpr std::size_t vector_offset(std::size_t neighbors_count, std::size_t norms_bytes) noexcept {
@@ -312,36 +312,35 @@ struct inner_persisted_layout_t {
     }
     inline static constexpr std::size_t record_bytes(std::size_t neighbors_count, std::size_t norms_bytes,
                                                      std::size_t vector_bytes) noexcept {
-        return fu::round_up_to_multiple(vector_offset(neighbors_count, norms_bytes) + vector_bytes,
-                                        inner_persisted_block_k);
+        return fu::round_up_to_multiple(vector_offset(neighbors_count, norms_bytes) + vector_bytes, dense_nvme_block_k);
     }
 };
 
 /**
  *  @brief Decoded view over one staged record: the format arithmetic of
- *      @ref inner_persisted_layout_t in one place, every accessor a zero-copy pointer
+ *      @ref dense_nvme_layout_t in one place, every accessor a zero-copy pointer
  *      into the arena buffer DMA filled. Readers & future writers share it, so the
  *      offset choreography can never drift between them.
  */
-struct inner_persisted_record_t {
+struct dense_nvme_record_t {
     std::byte const* bytes;
 
     inline u32_t neighbors_count() const noexcept { return *reinterpret_cast<u32_t const*>(bytes); }
-    inline inner_node_id_t self_id() const noexcept {
-        return *reinterpret_cast<inner_node_id_t const*>(bytes + inner_persisted_layout_t::self_id_offset_k);
+    inline dense_node_id_t self_id() const noexcept {
+        return *reinterpret_cast<dense_node_id_t const*>(bytes + dense_nvme_layout_t::self_id_offset_k);
     }
-    inline inner_node_id_t const* neighbor_ids() const noexcept {
-        return reinterpret_cast<inner_node_id_t const*>(bytes + inner_persisted_layout_t::neighbor_ids_offset_k);
+    inline dense_node_id_t const* neighbor_ids() const noexcept {
+        return reinterpret_cast<dense_node_id_t const*>(bytes + dense_nvme_layout_t::neighbor_ids_offset_k);
     }
     template <typename norms_type_>
     inline norms_type_ norms() const noexcept {
         return *reinterpret_cast<norms_type_ const*>( //
-            bytes + inner_persisted_layout_t::norms_offset(neighbors_count()));
+            bytes + dense_nvme_layout_t::norms_offset(neighbors_count()));
     }
     template <typename scalar_type_, typename norms_type_>
     inline scalar_type_ const* vector() const noexcept {
         return reinterpret_cast<scalar_type_ const*>(
-            bytes + inner_persisted_layout_t::vector_offset(neighbors_count(), sizeof(norms_type_)));
+            bytes + dense_nvme_layout_t::vector_offset(neighbors_count(), sizeof(norms_type_)));
     }
 };
 
@@ -352,14 +351,14 @@ struct inner_persisted_record_t {
 #if !defined(_WIN32)
 /** @brief Closes a POSIX descriptor at scope exit, so early returns need no manual
  *      teardown - the descriptor-side sibling of the ring's self-unmapping regions. */
-struct inner_posix_descriptor_t {
+struct dense_posix_descriptor_t {
     int file_descriptor = -1;
 
-    inner_posix_descriptor_t() noexcept = default;
-    explicit inner_posix_descriptor_t(int descriptor) noexcept : file_descriptor(descriptor) {}
-    inner_posix_descriptor_t(inner_posix_descriptor_t const&) = delete;
-    inner_posix_descriptor_t& operator=(inner_posix_descriptor_t const&) = delete;
-    ~inner_posix_descriptor_t() noexcept {
+    dense_posix_descriptor_t() noexcept = default;
+    explicit dense_posix_descriptor_t(int descriptor) noexcept : file_descriptor(descriptor) {}
+    dense_posix_descriptor_t(dense_posix_descriptor_t const&) = delete;
+    dense_posix_descriptor_t& operator=(dense_posix_descriptor_t const&) = delete;
+    ~dense_posix_descriptor_t() noexcept {
         if (file_descriptor >= 0) ::close(file_descriptor);
     }
 };
@@ -372,7 +371,7 @@ struct inner_posix_descriptor_t {
  *      with registered buffers hand exactly these extents to the kernel.
  */
 template <typename allocator_type_>
-struct inner_io_arena {
+struct dense_io_arena {
     using bytes_allocator_t = typename std::allocator_traits<allocator_type_>::template rebind_alloc<std::byte>;
     using bytes_tensor_t = nk::tensor<std::byte, bytes_allocator_t, 1>;
 
@@ -385,15 +384,15 @@ struct inner_io_arena {
     inline status_t reserve(std::size_t buffer_count, std::size_t buffer_stride,
                             bytes_allocator_t const& allocator) noexcept {
         storage = bytes_tensor_t(allocator);
-        stride = fu::round_up_to_multiple(buffer_stride, inner_persisted_alignment_k);
-        std::size_t bytes = buffer_count * stride + inner_persisted_alignment_k;
+        stride = fu::round_up_to_multiple(buffer_stride, dense_nvme_alignment_k);
+        std::size_t bytes = buffer_count * stride + dense_nvme_alignment_k;
         if (!storage.reserve(bytes)) return status_t::bad_alloc_k;
         if (!storage.try_resize({bytes})) return status_t::bad_alloc_k;
         std::uintptr_t raw = reinterpret_cast<std::uintptr_t>(storage.data());
-        base_ = reinterpret_cast<std::byte*>(fu::round_up_to_multiple(raw, inner_persisted_alignment_k));
+        base_ = reinterpret_cast<std::byte*>(fu::round_up_to_multiple(raw, dense_nvme_alignment_k));
         return status_t::success_k;
     }
-    inline std::byte* buffer(inner_staging_buffer_id_t index) const noexcept { return base_ + index * stride; }
+    inline std::byte* buffer(dense_staging_buffer_id_t index) const noexcept { return base_ + index * stride; }
 };
 
 /**
@@ -403,10 +402,10 @@ struct inner_io_arena {
  *      machine welcomes: any completion order drives a valid traversal.
  */
 template <typename allocator_type_>
-struct inner_io_completions {
+struct dense_io_completions {
     using completions_allocator_t =
-        typename std::allocator_traits<allocator_type_>::template rebind_alloc<inner_io_completion_t>;
-    using completions_tensor_t = nk::tensor<inner_io_completion_t, completions_allocator_t, 1>;
+        typename std::allocator_traits<allocator_type_>::template rebind_alloc<dense_io_completion_t>;
+    using completions_tensor_t = nk::tensor<dense_io_completion_t, completions_allocator_t, 1>;
 
     completions_tensor_t queue;
 
@@ -414,13 +413,13 @@ struct inner_io_completions {
         queue = completions_tensor_t(completions_allocator_t(allocator));
         return queue.reserve(queue_depth) ? status_t::success_k : status_t::bad_alloc_k;
     }
-    inline bool complete(inner_io_completion_t completion) noexcept {
+    inline bool complete(dense_io_completion_t completion) noexcept {
         std::size_t fill = queue.extent(0);
         if (!queue.try_resize({fill + 1})) return false;
         queue[fill] = completion;
         return true;
     }
-    inline bool pop(inner_io_completion_t& completion) noexcept {
+    inline bool pop(dense_io_completion_t& completion) noexcept {
         std::size_t fill = queue.extent(0);
         if (!fill) return false;
         completion = queue[fill - 1];
@@ -434,27 +433,27 @@ struct inner_io_completions {
  *      and a blocking @c pread has no kernel-side queue to be that somewhere.
  */
 template <typename allocator_type_>
-struct inner_io_staging {
+struct dense_io_staging {
     using requests_allocator_t =
-        typename std::allocator_traits<allocator_type_>::template rebind_alloc<inner_io_request_t>;
-    using requests_tensor_t = nk::tensor<inner_io_request_t, requests_allocator_t, 1>;
+        typename std::allocator_traits<allocator_type_>::template rebind_alloc<dense_io_request_t>;
+    using requests_tensor_t = nk::tensor<dense_io_request_t, requests_allocator_t, 1>;
 
     requests_tensor_t pending;
-    inner_io_completions<allocator_type_> completions;
+    dense_io_completions<allocator_type_> completions;
 
     inline status_t reserve(std::size_t queue_depth, allocator_type_ const& allocator) noexcept {
         pending = requests_tensor_t(requests_allocator_t(allocator));
         if (!pending.reserve(queue_depth)) return status_t::bad_alloc_k;
         return completions.reserve(queue_depth, allocator);
     }
-    inline bool push(inner_io_request_t request) noexcept {
+    inline bool push(dense_io_request_t request) noexcept {
         std::size_t fill = pending.extent(0);
         if (!pending.try_resize({fill + 1})) return false;
         pending[fill] = request;
         return true;
     }
-    inline bool complete(inner_io_completion_t completion) noexcept { return completions.complete(completion); }
-    inline bool pop(inner_io_completion_t& completion) noexcept { return completions.pop(completion); }
+    inline bool complete(dense_io_completion_t completion) noexcept { return completions.complete(completion); }
+    inline bool pop(dense_io_completion_t& completion) noexcept { return completions.pop(completion); }
 };
 
 /**
@@ -470,15 +469,15 @@ struct inner_io_staging {
  *  to the buffered path, and resident pages are still served from cache.
  */
 template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
-struct inner_posix_sync_engine {
+struct dense_posix_sync_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
 
-    inline static constexpr inner_io_capability_t capabilities_k = inner_io_capability_t::none_k;
+    inline static constexpr dense_io_capability_t capabilities_k = dense_io_capability_t::none_k;
 
-    inner_posix_sync_engine() noexcept = default;
-    inner_posix_sync_engine(inner_posix_sync_engine const&) = delete;
-    inner_posix_sync_engine& operator=(inner_posix_sync_engine const&) = delete;
+    dense_posix_sync_engine() noexcept = default;
+    dense_posix_sync_engine(dense_posix_sync_engine const&) = delete;
+    dense_posix_sync_engine& operator=(dense_posix_sync_engine const&) = delete;
 
     /** @brief Binds the engine to an open descriptor, sizes the staging arrays, and
      *      claims the buffer arena - one buffer per possible outstanding request.
@@ -496,13 +495,13 @@ struct inner_posix_sync_engine {
         return staging_.reserve(queue_depth, allocator);
     }
 
-    inline std::byte* buffer(inner_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
-    inline bool push(inner_io_request_t request) noexcept { return staging_.push(request); }
+    inline std::byte* buffer(dense_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
+    inline bool push(dense_io_request_t request) noexcept { return staging_.push(request); }
 
-    inline status_t pump(inner_io_wait_t wait) noexcept {
+    inline status_t pump(dense_io_wait_t wait) noexcept {
         (void)wait; // Every pending request completes synchronously, so waiting is implicit.
         for (std::size_t i = 0; i != staging_.pending.extent(0); ++i) {
-            inner_io_request_t const& request = staging_.pending[i];
+            dense_io_request_t const& request = staging_.pending[i];
 #if defined(_WIN32)
             std::int64_t result = -1; // The portable engine is POSIX-only; Windows uses I/O Rings.
 #else
@@ -510,17 +509,17 @@ struct inner_posix_sync_engine {
                                     static_cast<off_t>(request.offset));
             std::int64_t result = bytes < 0 ? -static_cast<std::int64_t>(errno) : bytes;
 #endif
-            if (!staging_.complete(inner_io_completion_t {request.tag, result})) return status_t::overflow_k;
+            if (!staging_.complete(dense_io_completion_t {request.tag, result})) return status_t::overflow_k;
         }
         return staging_.pending.try_resize({0}) ? status_t::success_k : status_t::overflow_k;
     }
 
-    inline bool pop(inner_io_completion_t& completion) noexcept { return staging_.pop(completion); }
+    inline bool pop(dense_io_completion_t& completion) noexcept { return staging_.pop(completion); }
 
   private:
     int file_descriptor_ = -1;
-    inner_io_arena<allocator_t> arena_;
-    inner_io_staging<allocator_t> staging_;
+    dense_io_arena<allocator_t> arena_;
+    dense_io_staging<allocator_t> staging_;
 };
 
 #if defined(__linux__)
@@ -541,7 +540,7 @@ struct inner_posix_sync_engine {
  *  read is already block-aligned.
  */
 template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
-struct inner_linux_aio_engine {
+struct dense_linux_aio_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
     using control_blocks_allocator_t =
@@ -553,12 +552,12 @@ struct inner_linux_aio_engine {
     using control_pointers_tensor_t = nk::tensor<struct iocb*, control_pointers_allocator_t, 1>;
     using events_tensor_t = nk::tensor<struct io_event, events_allocator_t, 1>;
 
-    inline static constexpr inner_io_capability_t capabilities_k = inner_io_capability_t::none_k;
+    inline static constexpr dense_io_capability_t capabilities_k = dense_io_capability_t::none_k;
 
-    inner_linux_aio_engine() noexcept = default;
-    inner_linux_aio_engine(inner_linux_aio_engine const&) = delete;
-    inner_linux_aio_engine& operator=(inner_linux_aio_engine const&) = delete;
-    ~inner_linux_aio_engine() noexcept {
+    dense_linux_aio_engine() noexcept = default;
+    dense_linux_aio_engine(dense_linux_aio_engine const&) = delete;
+    dense_linux_aio_engine& operator=(dense_linux_aio_engine const&) = delete;
+    ~dense_linux_aio_engine() noexcept {
         if (aio_context_) syscall(SYS_io_destroy, aio_context_);
     }
 
@@ -581,12 +580,12 @@ struct inner_linux_aio_engine {
         return status_t::success_k;
     }
 
-    inline std::byte* buffer(inner_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
+    inline std::byte* buffer(dense_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
 
     /** @brief Encodes the control block in place at push - matching the ring engines'
      *      encode-at-push discipline - so pump only submits; the staged fill is the
      *      control-block tensor's live shape. */
-    inline bool push(inner_io_request_t request) noexcept {
+    inline bool push(dense_io_request_t request) noexcept {
         std::size_t staged = control_blocks_.extent(0);
         if (in_flight_ + staged == events_.extent(0)) return false;
         if (!control_blocks_.try_resize({staged + 1}) || !control_pointers_.try_resize({staged + 1})) return false;
@@ -602,7 +601,7 @@ struct inner_linux_aio_engine {
         return true;
     }
 
-    inline status_t pump(inner_io_wait_t wait) noexcept {
+    inline status_t pump(dense_io_wait_t wait) noexcept {
         std::size_t staged = control_blocks_.extent(0);
         if (staged) {
             long submitted = syscall(SYS_io_submit, aio_context_, static_cast<long>(staged), control_pointers_.data());
@@ -614,16 +613,16 @@ struct inner_linux_aio_engine {
         // AIO surfaces no monitorable completion word, so there is no user-space fast
         // path: one io_getevents does it. A blocking reap returns ready events at once
         // and blocks only when none are in yet - a preceding min=0 probe is redundant.
-        long reaped = reap_(wait == inner_io_wait_t::blocking_k ? 1 : 0);
+        long reaped = reap_(wait == dense_io_wait_t::blocking_k ? 1 : 0);
         if (reaped < 0) return status_t::device_error_k;
         for (long i = 0; i != reaped; ++i)
-            if (!completions_.complete(inner_io_completion_t {events_[i].data, events_[i].res}))
+            if (!completions_.complete(dense_io_completion_t {events_[i].data, events_[i].res}))
                 return status_t::overflow_k;
         in_flight_ -= static_cast<std::size_t>(reaped);
         return status_t::success_k;
     }
 
-    inline bool pop(inner_io_completion_t& completion) noexcept { return completions_.pop(completion); }
+    inline bool pop(dense_io_completion_t& completion) noexcept { return completions_.pop(completion); }
 
   private:
     inline long reap_(long minimum) noexcept {
@@ -637,8 +636,8 @@ struct inner_linux_aio_engine {
     control_blocks_tensor_t control_blocks_;
     control_pointers_tensor_t control_pointers_;
     events_tensor_t events_;
-    inner_io_arena<allocator_t> arena_;
-    inner_io_completions<allocator_t> completions_;
+    dense_io_arena<allocator_t> arena_;
+    dense_io_completions<allocator_t> completions_;
 };
 
 /**
@@ -656,14 +655,14 @@ struct inner_linux_aio_engine {
  */
 /** @brief SQE geometry of one ring: 64-byte entries for block-layer reads, or the
  *      128-byte form whose inline command area carries NVMe passthrough. */
-enum class inner_uring_form_t : u32_t {
+enum class dense_uring_form_t : u32_t {
     compact_k = 0,
     nvme_k = 1,
 };
 
 /** @brief Completion discipline of one ring: interrupt-driven CQEs, or device-queue
  *      polling via @c IORING_SETUP_IOPOLL - which demands direct I/O & poll queues. */
-enum class inner_uring_reaping_t : u32_t {
+enum class dense_uring_reaping_t : u32_t {
     interrupted_k = 0,
     polled_k = 1,
 };
@@ -672,7 +671,7 @@ enum class inner_uring_reaping_t : u32_t {
  *      a waiter can monitor the CQ tail from user space - while @c deferred_k rings
  *      run completion work only inside @c io_uring_enter, the single-issuer
  *      deferred-task-run discipline, making tail spinning pointless. */
-enum class inner_uring_posting_t : u32_t {
+enum class dense_uring_posting_t : u32_t {
     immediate_k = 0,
     deferred_k = 1,
 };
@@ -682,20 +681,20 @@ enum class inner_uring_posting_t : u32_t {
  *      per-command page pinning - or pass plain addresses the kernel pins each time.
  *      Older kernels reject the flag per command, so this stays an explicit opt-in
  *      rather than a registration-success probe. */
-enum class inner_uring_command_buffers_t : u32_t {
+enum class dense_uring_command_buffers_t : u32_t {
     plain_k = 0,
     fixed_k = 1,
 };
 
 /** @brief One @c mmap -ed ring region; unmaps itself, so teardown is member order. */
-struct inner_uring_mapping_t {
+struct dense_uring_mapping_t {
     void* base = nullptr;
     std::size_t bytes = 0;
 
-    inner_uring_mapping_t() noexcept = default;
-    inner_uring_mapping_t(inner_uring_mapping_t const&) = delete;
-    inner_uring_mapping_t& operator=(inner_uring_mapping_t const&) = delete;
-    ~inner_uring_mapping_t() noexcept { reset(); }
+    dense_uring_mapping_t() noexcept = default;
+    dense_uring_mapping_t(dense_uring_mapping_t const&) = delete;
+    dense_uring_mapping_t& operator=(dense_uring_mapping_t const&) = delete;
+    ~dense_uring_mapping_t() noexcept { reset(); }
 
     inline status_t map(int ring_descriptor, std::size_t map_bytes, u64_t region) noexcept {
         base = ::mmap(nullptr, map_bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring_descriptor,
@@ -715,7 +714,7 @@ struct inner_uring_mapping_t {
 
 /** @brief Everything the submission side of one ring needs: the kernel-shared head &
  *      tail words, the index-order array, the wrap mask, and the SQE array. */
-struct inner_uring_submissions_t {
+struct dense_uring_submissions_t {
     u32_t* head = nullptr;
     u32_t* tail = nullptr;
     u32_t* order = nullptr;
@@ -725,7 +724,7 @@ struct inner_uring_submissions_t {
 };
 
 /** @brief The completion-side mirror: head & tail words, wrap mask, and CQE array. */
-struct inner_uring_completions_t {
+struct dense_uring_completions_t {
     u32_t* head = nullptr;
     u32_t* tail = nullptr;
     u32_t mask = 0;
@@ -733,12 +732,12 @@ struct inner_uring_completions_t {
     std::size_t stride = 0;
 };
 
-struct inner_uring_ring_t {
+struct dense_uring_ring_t {
 
-    inner_uring_ring_t() noexcept = default;
-    inner_uring_ring_t(inner_uring_ring_t const&) = delete;
-    inner_uring_ring_t& operator=(inner_uring_ring_t const&) = delete;
-    ~inner_uring_ring_t() noexcept {
+    dense_uring_ring_t() noexcept = default;
+    dense_uring_ring_t(dense_uring_ring_t const&) = delete;
+    dense_uring_ring_t& operator=(dense_uring_ring_t const&) = delete;
+    ~dense_uring_ring_t() noexcept {
         if (ring_descriptor_ >= 0) ::close(ring_descriptor_);
     }
 
@@ -748,11 +747,11 @@ struct inner_uring_ring_t {
      *  @param[in] form SQE & CQE strides - compact, or doubled for NVMe passthrough.
      *  @param[in] reaping Interrupt-driven completions, or device-queue polling.
      */
-    inline status_t setup(std::size_t queue_depth, inner_uring_form_t form, inner_uring_reaping_t reaping) noexcept {
+    inline status_t setup(std::size_t queue_depth, dense_uring_form_t form, dense_uring_reaping_t reaping) noexcept {
         struct io_uring_params params;
         u32_t shape_flags = 0;
-        if (form == inner_uring_form_t::nvme_k) shape_flags |= IORING_SETUP_SQE128 | IORING_SETUP_CQE32;
-        if (reaping == inner_uring_reaping_t::polled_k) shape_flags |= IORING_SETUP_IOPOLL;
+        if (form == dense_uring_form_t::nvme_k) shape_flags |= IORING_SETUP_SQE128 | IORING_SETUP_CQE32;
+        if (reaping == dense_uring_reaping_t::polled_k) shape_flags |= IORING_SETUP_IOPOLL;
         u32_t preferred_flags = shape_flags | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
         for (u32_t flags : {preferred_flags, shape_flags}) {
             params = io_uring_params {};
@@ -765,10 +764,10 @@ struct inner_uring_ring_t {
             if (flags == shape_flags) return status_t::device_error_k;
         }
         reaping_ = reaping;
-        posting_ = params.flags & IORING_SETUP_DEFER_TASKRUN ? inner_uring_posting_t::deferred_k //
-                                                             : inner_uring_posting_t::immediate_k;
-        submissions_.stride = form == inner_uring_form_t::nvme_k ? 128 : sizeof(struct io_uring_sqe);
-        completions_.stride = form == inner_uring_form_t::nvme_k ? 32 : sizeof(struct io_uring_cqe);
+        posting_ = params.flags & IORING_SETUP_DEFER_TASKRUN ? dense_uring_posting_t::deferred_k //
+                                                             : dense_uring_posting_t::immediate_k;
+        submissions_.stride = form == dense_uring_form_t::nvme_k ? 128 : sizeof(struct io_uring_sqe);
+        completions_.stride = form == dense_uring_form_t::nvme_k ? 32 : sizeof(struct io_uring_cqe);
 
         // Map the two rings & the SQE array. Modern kernels serve SQ & CQ from one mapping.
         std::size_t submission_bytes = params.sq_off.array + params.sq_entries * sizeof(u32_t);
@@ -777,7 +776,7 @@ struct inner_uring_ring_t {
         if (single_mmap) submission_bytes = max_of(submission_bytes, completion_bytes);
         status_t mapped = submission_mapping_.map(ring_descriptor_, submission_bytes, IORING_OFF_SQ_RING);
         if (mapped != status_t::success_k) return mapped;
-        inner_uring_mapping_t const& completion_mapping = single_mmap ? submission_mapping_ : completion_mapping_;
+        dense_uring_mapping_t const& completion_mapping = single_mmap ? submission_mapping_ : completion_mapping_;
         if (!single_mmap) {
             mapped = completion_mapping_.map(ring_descriptor_, completion_bytes, IORING_OFF_CQ_RING);
             if (mapped != status_t::success_k) return mapped;
@@ -818,7 +817,7 @@ struct inner_uring_ring_t {
      *      one @c iovec per staging buffer - building the transient iovec array through
      *      @p allocator, so even setup scratch honors the caller's memory domain. */
     template <typename allocator_type_>
-    inline status_t register_arena(inner_io_arena<allocator_type_> const& arena, std::size_t buffer_count,
+    inline status_t register_arena(dense_io_arena<allocator_type_> const& arena, std::size_t buffer_count,
                                    allocator_type_ const& allocator) noexcept {
         using iovecs_allocator_t = typename std::allocator_traits<allocator_type_>::template rebind_alloc<struct iovec>;
         using iovecs_tensor_t = nk::tensor<struct iovec, iovecs_allocator_t, 1>;
@@ -826,7 +825,7 @@ struct inner_uring_ring_t {
         if (!buffer_regions.reserve(buffer_count) || !buffer_regions.try_resize({buffer_count}))
             return status_t::bad_alloc_k;
         for (std::size_t i = 0; i != buffer_count; ++i)
-            buffer_regions[i] = iovec {arena.buffer(static_cast<inner_staging_buffer_id_t>(i)), arena.stride};
+            buffer_regions[i] = iovec {arena.buffer(static_cast<dense_staging_buffer_id_t>(i)), arena.stride};
         return register_buffers(std::span<struct iovec const> {buffer_regions.data(), buffer_count});
     }
 
@@ -851,8 +850,8 @@ struct inner_uring_ring_t {
         if (to_submit) std::atomic_ref<u32_t>(*submissions_.tail).store(pending_tail_, std::memory_order_release);
         // Polled rings only harvest device completions inside the syscall, and deferred
         // task-run rings only post them there - both must ask for events every time.
-        bool getevents = min_complete || posting_ == inner_uring_posting_t::deferred_k || //
-                         reaping_ == inner_uring_reaping_t::polled_k;
+        bool getevents = min_complete || posting_ == dense_uring_posting_t::deferred_k || //
+                         reaping_ == dense_uring_reaping_t::polled_k;
         if (!to_submit && !getevents) return status_t::success_k;
         u32_t enter_flags = getevents ? IORING_ENTER_GETEVENTS : 0u;
         int enter_descriptor = ring_descriptor_;
@@ -868,7 +867,7 @@ struct inner_uring_ring_t {
 
     /** @brief Drains one CQE into @p completion; NVMe passthrough status decoding is the
      *      caller's job - this layer only surfaces the primary result word. */
-    inline bool pop(inner_io_completion_t& completion) noexcept {
+    inline bool pop(dense_io_completion_t& completion) noexcept {
         u32_t head = *completions_.head;
         u32_t tail = std::atomic_ref<u32_t>(*completions_.tail).load(std::memory_order_acquire);
         if (head == tail) return false;
@@ -886,8 +885,8 @@ struct inner_uring_ring_t {
      *      window reaps for zero syscalls - while deferred & polled rings fuse the pending
      *      batch and the wait into a single enter. */
     template <typename wait_type_>
-    inline status_t pump(inner_io_wait_t wait) noexcept {
-        if (wait == inner_io_wait_t::nonblocking_k) return enter(0);
+    inline status_t pump(dense_io_wait_t wait) noexcept {
+        if (wait == dense_io_wait_t::nonblocking_k) return enter(0);
         if (reaps_asynchronously_()) {
             status_t submitted = enter(0);
             if (submitted != status_t::success_k) return submitted;
@@ -910,7 +909,7 @@ struct inner_uring_ring_t {
      *      post CQEs strictly inside @c io_uring_enter, so a user-space tail monitor
      *      can never observe them and the submit & wait pair fuses into one enter. */
     inline bool reaps_asynchronously_() const noexcept {
-        return posting_ == inner_uring_posting_t::immediate_k && reaping_ == inner_uring_reaping_t::interrupted_k;
+        return posting_ == dense_uring_posting_t::immediate_k && reaping_ == dense_uring_reaping_t::interrupted_k;
     }
 
     /** @brief Registers the ring descriptor so every enter addresses it by index,
@@ -928,13 +927,13 @@ struct inner_uring_ring_t {
     }
 
     int ring_descriptor_ = -1;
-    inner_uring_reaping_t reaping_ = inner_uring_reaping_t::interrupted_k;
-    inner_uring_posting_t posting_ = inner_uring_posting_t::immediate_k;
-    inner_uring_mapping_t submission_mapping_;
-    inner_uring_mapping_t completion_mapping_;
-    inner_uring_mapping_t entries_mapping_;
-    inner_uring_submissions_t submissions_;
-    inner_uring_completions_t completions_;
+    dense_uring_reaping_t reaping_ = dense_uring_reaping_t::interrupted_k;
+    dense_uring_posting_t posting_ = dense_uring_posting_t::immediate_k;
+    dense_uring_mapping_t submission_mapping_;
+    dense_uring_mapping_t completion_mapping_;
+    dense_uring_mapping_t entries_mapping_;
+    dense_uring_submissions_t submissions_;
+    dense_uring_completions_t completions_;
     u32_t pending_tail_ = 0;
     u32_t registered_ring_index_ = 0;
     bool ring_registered_ = false;
@@ -955,31 +954,31 @@ struct inner_uring_ring_t {
  *  @c io_uring_enter by design.
  */
 template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
-struct inner_linux_uring_read_engine {
+struct dense_linux_uring_read_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
 
-    inline static constexpr inner_io_capability_t capabilities_k = inner_io_capability_t::none_k;
+    inline static constexpr dense_io_capability_t capabilities_k = dense_io_capability_t::none_k;
 
-    inner_linux_uring_read_engine() noexcept = default;
-    inner_linux_uring_read_engine(inner_linux_uring_read_engine const&) = delete;
-    inner_linux_uring_read_engine& operator=(inner_linux_uring_read_engine const&) = delete;
+    dense_linux_uring_read_engine() noexcept = default;
+    dense_linux_uring_read_engine(dense_linux_uring_read_engine const&) = delete;
+    dense_linux_uring_read_engine& operator=(dense_linux_uring_read_engine const&) = delete;
 
     inline status_t open(int file_descriptor, std::size_t queue_depth, std::size_t buffer_stride,
                          allocator_t const& allocator) noexcept {
         status_t arena_status = arena_.reserve(queue_depth, buffer_stride, allocator);
         if (arena_status != status_t::success_k) return arena_status;
-        status_t ring_status = ring_.setup(queue_depth, inner_uring_form_t::compact_k,
-                                           inner_uring_reaping_t::interrupted_k);
+        status_t ring_status = ring_.setup(queue_depth, dense_uring_form_t::compact_k,
+                                           dense_uring_reaping_t::interrupted_k);
         if (ring_status != status_t::success_k) return ring_status;
         // Fixed-file registration composes with any opcode: plain reads keep their
         // unregistered buffers but still shed the per-submission descriptor refcount.
         return ring_.register_file(file_descriptor);
     }
 
-    inline std::byte* buffer(inner_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
+    inline std::byte* buffer(dense_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
 
-    inline bool push(inner_io_request_t request) noexcept {
+    inline bool push(dense_io_request_t request) noexcept {
         struct io_uring_sqe* entry = ring_.next_submission();
         if (!entry) return false;
         *entry = io_uring_sqe {};
@@ -993,13 +992,13 @@ struct inner_linux_uring_read_engine {
         return true;
     }
 
-    inline status_t pump(inner_io_wait_t wait) noexcept { return ring_.pump<wait_t>(wait); }
+    inline status_t pump(dense_io_wait_t wait) noexcept { return ring_.pump<wait_t>(wait); }
 
-    inline bool pop(inner_io_completion_t& completion) noexcept { return ring_.pop(completion); }
+    inline bool pop(dense_io_completion_t& completion) noexcept { return ring_.pop(completion); }
 
   private:
-    inner_uring_ring_t ring_;
-    inner_io_arena<allocator_t> arena_;
+    dense_uring_ring_t ring_;
+    dense_io_arena<allocator_t> arena_;
 };
 
 /**
@@ -1010,31 +1009,31 @@ struct inner_linux_uring_read_engine {
  *      engine; registration itself works on any ring.
  */
 template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
-struct inner_linux_uring_fixed_engine {
+struct dense_linux_uring_fixed_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
 
-    inline static constexpr inner_io_capability_t capabilities_k = inner_io_capability_t::fixed_buffers_k;
+    inline static constexpr dense_io_capability_t capabilities_k = dense_io_capability_t::fixed_buffers_k;
 
-    inner_linux_uring_fixed_engine() noexcept = default;
-    inner_linux_uring_fixed_engine(inner_linux_uring_fixed_engine const&) = delete;
-    inner_linux_uring_fixed_engine& operator=(inner_linux_uring_fixed_engine const&) = delete;
+    dense_linux_uring_fixed_engine() noexcept = default;
+    dense_linux_uring_fixed_engine(dense_linux_uring_fixed_engine const&) = delete;
+    dense_linux_uring_fixed_engine& operator=(dense_linux_uring_fixed_engine const&) = delete;
 
     inline status_t open(int file_descriptor, std::size_t queue_depth, std::size_t buffer_stride,
                          allocator_t const& allocator) noexcept {
         status_t arena_status = arena_.reserve(queue_depth, buffer_stride, allocator);
         if (arena_status != status_t::success_k) return arena_status;
-        status_t ring_status = ring_.setup(queue_depth, inner_uring_form_t::compact_k,
-                                           inner_uring_reaping_t::interrupted_k);
+        status_t ring_status = ring_.setup(queue_depth, dense_uring_form_t::compact_k,
+                                           dense_uring_reaping_t::interrupted_k);
         if (ring_status != status_t::success_k) return ring_status;
         status_t buffers_status = ring_.register_arena(arena_, queue_depth, allocator);
         if (buffers_status != status_t::success_k) return buffers_status;
         return ring_.register_file(file_descriptor);
     }
 
-    inline std::byte* buffer(inner_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
+    inline std::byte* buffer(dense_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
 
-    inline bool push(inner_io_request_t request) noexcept {
+    inline bool push(dense_io_request_t request) noexcept {
         struct io_uring_sqe* entry = ring_.next_submission();
         if (!entry) return false;
         *entry = io_uring_sqe {};
@@ -1049,13 +1048,13 @@ struct inner_linux_uring_fixed_engine {
         return true;
     }
 
-    inline status_t pump(inner_io_wait_t wait) noexcept { return ring_.pump<wait_t>(wait); }
+    inline status_t pump(dense_io_wait_t wait) noexcept { return ring_.pump<wait_t>(wait); }
 
-    inline bool pop(inner_io_completion_t& completion) noexcept { return ring_.pop(completion); }
+    inline bool pop(dense_io_completion_t& completion) noexcept { return ring_.pop(completion); }
 
   private:
-    inner_uring_ring_t ring_;
-    inner_io_arena<allocator_t> arena_;
+    dense_uring_ring_t ring_;
+    dense_io_arena<allocator_t> arena_;
 };
 
 /**
@@ -1073,31 +1072,31 @@ struct inner_linux_uring_fixed_engine {
  *  enter as the backstop.
  */
 template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
-struct inner_linux_uring_polled_engine {
+struct dense_linux_uring_polled_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
 
-    inline static constexpr inner_io_capability_t capabilities_k = inner_io_capability_t::fixed_buffers_k |
-                                                                   inner_io_capability_t::polled_k;
+    inline static constexpr dense_io_capability_t capabilities_k = dense_io_capability_t::fixed_buffers_k |
+                                                                   dense_io_capability_t::polled_k;
 
-    inner_linux_uring_polled_engine() noexcept = default;
-    inner_linux_uring_polled_engine(inner_linux_uring_polled_engine const&) = delete;
-    inner_linux_uring_polled_engine& operator=(inner_linux_uring_polled_engine const&) = delete;
+    dense_linux_uring_polled_engine() noexcept = default;
+    dense_linux_uring_polled_engine(dense_linux_uring_polled_engine const&) = delete;
+    dense_linux_uring_polled_engine& operator=(dense_linux_uring_polled_engine const&) = delete;
 
     inline status_t open(int file_descriptor, std::size_t queue_depth, std::size_t buffer_stride,
                          allocator_t const& allocator) noexcept {
         status_t arena_status = arena_.reserve(queue_depth, buffer_stride, allocator);
         if (arena_status != status_t::success_k) return arena_status;
-        status_t ring_status = ring_.setup(queue_depth, inner_uring_form_t::compact_k, inner_uring_reaping_t::polled_k);
+        status_t ring_status = ring_.setup(queue_depth, dense_uring_form_t::compact_k, dense_uring_reaping_t::polled_k);
         if (ring_status != status_t::success_k) return ring_status;
         status_t buffers_status = ring_.register_arena(arena_, queue_depth, allocator);
         if (buffers_status != status_t::success_k) return buffers_status;
         return ring_.register_file(file_descriptor);
     }
 
-    inline std::byte* buffer(inner_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
+    inline std::byte* buffer(dense_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
 
-    inline bool push(inner_io_request_t request) noexcept {
+    inline bool push(dense_io_request_t request) noexcept {
         struct io_uring_sqe* entry = ring_.next_submission();
         if (!entry) return false;
         *entry = io_uring_sqe {};
@@ -1112,13 +1111,13 @@ struct inner_linux_uring_polled_engine {
         return true;
     }
 
-    inline status_t pump(inner_io_wait_t wait) noexcept { return ring_.pump<wait_t>(wait); }
+    inline status_t pump(dense_io_wait_t wait) noexcept { return ring_.pump<wait_t>(wait); }
 
-    inline bool pop(inner_io_completion_t& completion) noexcept { return ring_.pop(completion); }
+    inline bool pop(dense_io_completion_t& completion) noexcept { return ring_.pop(completion); }
 
   private:
-    inner_uring_ring_t ring_;
-    inner_io_arena<allocator_t> arena_;
+    dense_uring_ring_t ring_;
+    dense_io_arena<allocator_t> arena_;
 };
 
 /**
@@ -1144,22 +1143,22 @@ struct inner_linux_uring_polled_engine {
  *  families into negative results for the state machine.
  */
 template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
-struct inner_linux_uring_nvme_engine {
+struct dense_linux_uring_nvme_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
 
-    inline static constexpr inner_io_capability_t capabilities_k = inner_io_capability_t::lba_addressing_k;
+    inline static constexpr dense_io_capability_t capabilities_k = dense_io_capability_t::lba_addressing_k;
     inline static constexpr std::uint8_t nvme_read_opcode_k = 0x02;
 
-    inner_linux_uring_nvme_engine() noexcept = default;
-    inner_linux_uring_nvme_engine(inner_linux_uring_nvme_engine const&) = delete;
-    inner_linux_uring_nvme_engine& operator=(inner_linux_uring_nvme_engine const&) = delete;
+    dense_linux_uring_nvme_engine() noexcept = default;
+    dense_linux_uring_nvme_engine(dense_linux_uring_nvme_engine const&) = delete;
+    dense_linux_uring_nvme_engine& operator=(dense_linux_uring_nvme_engine const&) = delete;
 
     /** @brief Presets the namespace LBA geometry - log2 of the LBA size, 9 for 512e,
      *      12 for 4Kn - which @c open cannot derive without an admin Identify pass, and
      *      the command-buffer mode, an explicit 6.14+ opt-in. */
-    inline void configure(u32_t lba_shift, inner_uring_command_buffers_t command_buffers =
-                                               inner_uring_command_buffers_t::plain_k) noexcept {
+    inline void configure(u32_t lba_shift, dense_uring_command_buffers_t command_buffers =
+                                               dense_uring_command_buffers_t::plain_k) noexcept {
         lba_shift_ = lba_shift;
         command_buffers_ = command_buffers;
     }
@@ -1172,19 +1171,19 @@ struct inner_linux_uring_nvme_engine {
         int namespace_id = ioctl(file_descriptor, NVME_IOCTL_ID);
         if (namespace_id < 0) return status_t::device_error_k;
         namespace_id_ = static_cast<u32_t>(namespace_id);
-        status_t ring_status = ring_.setup(queue_depth, inner_uring_form_t::nvme_k,
-                                           inner_uring_reaping_t::interrupted_k);
+        status_t ring_status = ring_.setup(queue_depth, dense_uring_form_t::nvme_k,
+                                           dense_uring_reaping_t::interrupted_k);
         if (ring_status != status_t::success_k) return ring_status;
-        if (command_buffers_ == inner_uring_command_buffers_t::fixed_k) {
+        if (command_buffers_ == dense_uring_command_buffers_t::fixed_k) {
             status_t buffers_status = ring_.register_arena(arena_, queue_depth, allocator);
             if (buffers_status != status_t::success_k) return buffers_status;
         }
         return status_t::success_k;
     }
 
-    inline std::byte* buffer(inner_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
+    inline std::byte* buffer(dense_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
 
-    inline bool push(inner_io_request_t request) noexcept {
+    inline bool push(dense_io_request_t request) noexcept {
         struct io_uring_sqe* entry = ring_.next_submission();
         if (!entry) return false;
         u64_t* entry_words = reinterpret_cast<u64_t*>(entry);
@@ -1193,7 +1192,7 @@ struct inner_linux_uring_nvme_engine {
         entry->fd = file_descriptor_;
         entry->cmd_op = NVME_URING_CMD_IO;
         entry->user_data = request.tag;
-        if (command_buffers_ == inner_uring_command_buffers_t::fixed_k) {
+        if (command_buffers_ == dense_uring_command_buffers_t::fixed_k) {
             entry->uring_cmd_flags = IORING_URING_CMD_FIXED;
             entry->buf_index = static_cast<std::uint16_t>(request.buffer);
         }
@@ -1210,11 +1209,11 @@ struct inner_linux_uring_nvme_engine {
         return true;
     }
 
-    inline status_t pump(inner_io_wait_t wait) noexcept { return ring_.pump<wait_t>(wait); }
+    inline status_t pump(dense_io_wait_t wait) noexcept { return ring_.pump<wait_t>(wait); }
 
     /** @brief Rewrites the NVMe convention - zero result means the full transfer - into
      *      the byte-count convention the state machine consumes. */
-    inline bool pop(inner_io_completion_t& completion) noexcept {
+    inline bool pop(dense_io_completion_t& completion) noexcept {
         if (!ring_.pop(completion)) return false;
         if (completion.result > 0) completion.result = -EIO; // NVMe status codes are failures.
         return true;
@@ -1224,9 +1223,9 @@ struct inner_linux_uring_nvme_engine {
     int file_descriptor_ = -1;
     u32_t namespace_id_ = 0;
     u32_t lba_shift_ = 9;
-    inner_uring_command_buffers_t command_buffers_ = inner_uring_command_buffers_t::plain_k;
-    inner_uring_ring_t ring_;
-    inner_io_arena<allocator_t> arena_;
+    dense_uring_command_buffers_t command_buffers_ = dense_uring_command_buffers_t::plain_k;
+    dense_uring_ring_t ring_;
+    dense_io_arena<allocator_t> arena_;
 };
 
 #endif // defined(__linux__)
@@ -1249,16 +1248,16 @@ struct inner_linux_uring_nvme_engine {
  *  this code.
  */
 template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
-struct inner_windows_ioring_engine {
+struct dense_windows_ioring_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
 
-    inline static constexpr inner_io_capability_t capabilities_k = inner_io_capability_t::fixed_buffers_k;
+    inline static constexpr dense_io_capability_t capabilities_k = dense_io_capability_t::fixed_buffers_k;
 
-    inner_windows_ioring_engine() noexcept = default;
-    inner_windows_ioring_engine(inner_windows_ioring_engine const&) = delete;
-    inner_windows_ioring_engine& operator=(inner_windows_ioring_engine const&) = delete;
-    ~inner_windows_ioring_engine() noexcept {
+    dense_windows_ioring_engine() noexcept = default;
+    dense_windows_ioring_engine(dense_windows_ioring_engine const&) = delete;
+    dense_windows_ioring_engine& operator=(dense_windows_ioring_engine const&) = delete;
+    ~dense_windows_ioring_engine() noexcept {
         if (ring_) CloseIoRing(ring_);
     }
 
@@ -1274,7 +1273,7 @@ struct inner_windows_ioring_engine {
         if (!buffer_infos_.reserve(queue_depth) || !buffer_infos_.try_resize({queue_depth}))
             return status_t::bad_alloc_k;
         for (std::size_t i = 0; i != queue_depth; ++i)
-            buffer_infos_[i] = IORING_BUFFER_INFO {arena_.buffer(static_cast<inner_staging_buffer_id_t>(i)),
+            buffer_infos_[i] = IORING_BUFFER_INFO {arena_.buffer(static_cast<dense_staging_buffer_id_t>(i)),
                                                    static_cast<UINT32>(arena_.stride)};
         HRESULT buffers = BuildIoRingRegisterBuffers(ring_, static_cast<UINT32>(queue_depth), buffer_infos_.data(), 0);
         if (!SUCCEEDED(buffers)) return status_t::device_error_k;
@@ -1283,9 +1282,9 @@ struct inner_windows_ioring_engine {
         return SUCCEEDED(files) ? status_t::success_k : status_t::device_error_k;
     }
 
-    inline std::byte* buffer(inner_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
+    inline std::byte* buffer(dense_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
 
-    inline bool push(inner_io_request_t request) noexcept {
+    inline bool push(dense_io_request_t request) noexcept {
         IORING_BUFFER_REF buffer_ref = IoRingBufferRefFromIndexAndOffset(request.buffer, 0);
         IORING_HANDLE_REF handle_ref = IoRingHandleRefFromIndex(0);
         HRESULT built = BuildIoRingReadFile(ring_, handle_ref, buffer_ref, request.length, request.offset, request.tag,
@@ -1293,14 +1292,14 @@ struct inner_windows_ioring_engine {
         return SUCCEEDED(built);
     }
 
-    inline status_t pump(inner_io_wait_t wait) noexcept {
+    inline status_t pump(dense_io_wait_t wait) noexcept {
         UINT32 submitted = 0;
-        bool blocking = wait == inner_io_wait_t::blocking_k;
+        bool blocking = wait == dense_io_wait_t::blocking_k;
         HRESULT result = SubmitIoRing(ring_, blocking ? 1u : 0u, blocking ? INFINITE : 0u, &submitted);
         return SUCCEEDED(result) ? status_t::success_k : status_t::device_error_k;
     }
 
-    inline bool pop(inner_io_completion_t& completion) noexcept {
+    inline bool pop(dense_io_completion_t& completion) noexcept {
         IORING_CQE entry;
         if (PopIoRingCompletion(ring_, &entry) != S_OK) return false;
         completion.tag = entry.UserData;
@@ -1316,7 +1315,7 @@ struct inner_windows_ioring_engine {
 
     HANDLE file_handle_ = nullptr;
     HIORING ring_ = nullptr;
-    inner_io_arena<allocator_t> arena_;
+    dense_io_arena<allocator_t> arena_;
     buffer_infos_tensor_t buffer_infos_;
 };
 
@@ -1327,7 +1326,7 @@ struct inner_windows_ioring_engine {
 #pragma region State Machine
 
 /** @brief Progress of one in-flight traversal through its slot's lifecycle. */
-enum class inner_persisted_stage_t : std::uint8_t {
+enum class dense_nvme_stage_t : std::uint8_t {
     /** @brief The slot is free; @c reset arms it with the next pending query. */
     idle_k,
     /** @brief Fetches are outstanding; completions drive the traversal forward. */
@@ -1346,7 +1345,7 @@ template <                                               //
     nk_dtype_t vector_dtype_ = nk_bf16_k,                //
     typename allocator_type_ = std::allocator<std::byte> //
     >
-struct inner_persisted_slot {
+struct dense_nvme_slot {
 
     using scalar_t = typename nk::type_for<vector_dtype_>::type;
     using vector_view_t = nk::vector_view<scalar_t>;
@@ -1357,16 +1356,16 @@ struct inner_persisted_slot {
 
     using allocator_t = allocator_type_;
     using candidates_allocator_t =
-        typename std::allocator_traits<allocator_t>::template rebind_alloc<inner_scored_node_t>;
+        typename std::allocator_traits<allocator_t>::template rebind_alloc<dense_scored_node_t>;
     /** @brief The hash-set allocates raw bytes and places ids itself, so it demands a byte allocator. */
     using visits_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<std::byte>;
 
-    using results_array_t = sorted_buffer<inner_scored_node_t, inner_closer_scored_node_t, candidates_allocator_t>;
+    using results_array_t = sorted_buffer<dense_scored_node_t, dense_closer_scored_node_t, candidates_allocator_t>;
     /** @brief 8-ary: eight 8-byte scored nodes fill one cache line per level scan. */
-    using frontier_queue_t = max_heap_dary<8, inner_scored_node_t, inner_further_scored_node_t, candidates_allocator_t>;
-    using visited_set_t = growing_hash_set<inner_node_id_t, std::hash<inner_node_id_t>, visits_allocator_t>;
+    using frontier_queue_t = max_heap_dary<8, dense_scored_node_t, dense_further_scored_node_t, candidates_allocator_t>;
+    using visited_set_t = growing_hash_set<dense_node_id_t, std::hash<dense_node_id_t>, visits_allocator_t>;
 
-    inner_persisted_stage_t stage = inner_persisted_stage_t::idle_k;
+    dense_nvme_stage_t stage = dense_nvme_stage_t::idle_k;
     /** @brief Reads issued and not yet completed for this slot; the slot only advances
      *      to its next hop when this drains to zero. */
     small_size_t inflight_reads = 0;
@@ -1391,14 +1390,14 @@ struct inner_persisted_slot {
      *      every fourth arrival, and once more when the hop's in-flight reads reach zero,
      *      so deferral adds no latency. Stashing the index alone keeps the record bytes
      *      where DMA left them until the one moment the quad kernel reads them. */
-    fu::limited_array<inner_staging_buffer_id_t, 4> pending_scores;
+    fu::limited_array<dense_staging_buffer_id_t, 4> pending_scores;
     /** @brief Pseudo-random generator for picking this slot's traversal starting points. */
     splitmix_u32_t random_generator;
 
-    inner_persisted_slot() noexcept = default;
-    inner_persisted_slot(inner_persisted_slot&&) noexcept = default;
-    inner_persisted_slot(inner_persisted_slot const&) = delete;
-    inner_persisted_slot& operator=(inner_persisted_slot const&) = delete;
+    dense_nvme_slot() noexcept = default;
+    dense_nvme_slot(dense_nvme_slot&&) noexcept = default;
+    dense_nvme_slot(dense_nvme_slot const&) = delete;
+    dense_nvme_slot& operator=(dense_nvme_slot const&) = delete;
 
     /** @brief Re-seats every container on @p allocator & sizes it for @p expansion results
      *      and the visited volume one traversal can touch. Slots default-construct so
@@ -1418,7 +1417,7 @@ struct inner_persisted_slot {
     /** @brief Recycles the slot for @p new_query without touching any capacity. */
     inline void reset(vector_view_t new_query, vector_norms_t new_query_norms, small_size_t new_query_index,
                       small_size_t new_pool_limit, u64_t seed) noexcept {
-        stage = inner_persisted_stage_t::traversing_k;
+        stage = dense_nvme_stage_t::traversing_k;
         inflight_reads = 0;
         query = new_query;
         query_norms = new_query_norms;
@@ -1440,21 +1439,21 @@ struct inner_persisted_slot {
  */
 template <                                                                  //
     nk_dtype_t vector_dtype_ = nk_bf16_k,                                   //
-    typename engine_type_ = inner_posix_sync_engine<fu::preferred_yield_t>, //
+    typename engine_type_ = dense_posix_sync_engine<fu::preferred_yield_t>, //
     typename allocator_type_ = std::allocator<std::byte>                    //
     >
-struct inner_persisted_context {
+struct dense_nvme_context {
 
     using engine_t = engine_type_;
     using allocator_t = allocator_type_;
-    using slot_t = inner_persisted_slot<vector_dtype_, allocator_t>;
+    using slot_t = dense_nvme_slot<vector_dtype_, allocator_t>;
     using buffer_ids_allocator_t =
-        typename std::allocator_traits<allocator_t>::template rebind_alloc<inner_staging_buffer_id_t>;
+        typename std::allocator_traits<allocator_t>::template rebind_alloc<dense_staging_buffer_id_t>;
     using slots_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<slot_t>;
-    using buffer_ids_tensor_t = nk::tensor<inner_staging_buffer_id_t, buffer_ids_allocator_t, 1>;
+    using buffer_ids_tensor_t = nk::tensor<dense_staging_buffer_id_t, buffer_ids_allocator_t, 1>;
     using slots_array_t = fu::dynamic_array<slot_t, slots_allocator_t>;
 
-    static_assert(inner_io_engine<engine_t>);
+    static_assert(dense_io_engine<engine_t>);
 
     engine_t engine;
     slots_array_t slots;
@@ -1474,11 +1473,11 @@ struct inner_persisted_context {
     /** @brief Reads issued across the context's lifetime, refetches included. */
     std::size_t issued_reads = 0;
 
-    inner_persisted_context(allocator_t const& allocator = {}) noexcept
+    dense_nvme_context(allocator_t const& allocator = {}) noexcept
         : engine(), slots(slots_allocator_t(allocator)), free_buffers(buffer_ids_allocator_t(allocator)),
           allocator_(allocator) {}
-    inner_persisted_context(inner_persisted_context const&) = delete;
-    inner_persisted_context& operator=(inner_persisted_context const&) = delete;
+    dense_nvme_context(dense_nvme_context const&) = delete;
+    dense_nvme_context& operator=(dense_nvme_context const&) = delete;
 
     /** @brief The allocator every slot & the engine inherit - exposed so the index can
      *      thread it into @c engine.open, keeping NUMA-domain placement intact. */
@@ -1497,7 +1496,7 @@ struct inner_persisted_context {
         std::size_t depth = slot_count * (max_of<std::size_t>(connectivity_ceiling, 1) + 1);
         if (!free_buffers.reserve(depth) || !free_buffers.try_resize({depth})) return status_t::bad_alloc_k;
         for (std::size_t i = 0; i != depth; ++i)
-            free_buffers[i] = static_cast<inner_staging_buffer_id_t>(depth - 1 - i);
+            free_buffers[i] = static_cast<dense_staging_buffer_id_t>(depth - 1 - i);
 
         if (!slots.try_resize(slot_count)) return status_t::bad_alloc_k;
         for (std::size_t i = 0; i != slot_count; ++i) {
@@ -1509,12 +1508,12 @@ struct inner_persisted_context {
         return status_t::success_k;
     }
 
-    inline inner_staging_buffer_id_t acquire_buffer() noexcept {
+    inline dense_staging_buffer_id_t acquire_buffer() noexcept {
         std::size_t depth = free_buffers.extent(0);
-        inner_staging_buffer_id_t leased = free_buffers[depth - 1];
+        dense_staging_buffer_id_t leased = free_buffers[depth - 1];
         return (void)free_buffers.try_resize({depth - 1}), leased;
     }
-    inline void release_buffer(inner_staging_buffer_id_t index) noexcept {
+    inline void release_buffer(dense_staging_buffer_id_t index) noexcept {
         std::size_t depth = free_buffers.extent(0);
         (void)free_buffers.try_resize({depth + 1}); // Never exceeds the reservation it drained from.
         free_buffers[depth] = index;
@@ -1536,7 +1535,7 @@ struct inner_persisted_context {
  *  contexts, and all I/O flows through the context's engine - so the same immutable
  *  index instance serves any number of threads, each pumping its own context.
  *
- *  @section inner_persisted_index_traversal Traversal Shape
+ *  @section dense_nvme_index_traversal Traversal Shape
  *
  *  Every fetched record carries both the vector and the neighbor list, so scoring a
  *  node costs one read. Expanding a node re-fetches its record to recover the neighbor
@@ -1545,7 +1544,7 @@ struct inner_persisted_context {
  *  queues. Within one traversal, hops are sequential by nature; across the slots of a
  *  context, everything overlaps.
  *
- *  @section inner_persisted_index_passthru Passthrough Caveat
+ *  @section dense_nvme_index_passthru Passthrough Caveat
  *
  *  The LBA-addressed engine cannot serve @c open's metadata loading - character
  *  devices reject @c pread - so a passthrough deployment loads the directory from a
@@ -1556,10 +1555,10 @@ template <                                                                  //
     nk_dtype_t vector_dtype_ = nk_bf16_k,                                   //
     nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k,                    //
     nk_capability_t capability_ = nk_cap_icelake_k,                         //
-    typename engine_type_ = inner_posix_sync_engine<fu::preferred_yield_t>, //
+    typename engine_type_ = dense_posix_sync_engine<fu::preferred_yield_t>, //
     typename offsets_allocator_type_ = std::allocator<std::byte>            //
     >
-struct inner_persisted_index {
+struct dense_nvme_index {
 
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
     inline static constexpr nk_kernel_kind_t kernel_kind_k = kernel_kind_;
@@ -1570,15 +1569,15 @@ struct inner_persisted_index {
 
     /** @brief Default integer type to use for loops and indexing at sub-index scale. */
     using small_size_t = std::uint32_t;
-    /** @brief Node identifier within this sub-index - the class-local spelling of @c inner_node_id_t. */
-    using node_id_t = inner_node_id_t;
+    /** @brief Node identifier within this sub-index - the class-local spelling of @c dense_node_id_t. */
+    using node_id_t = dense_node_id_t;
 
     using vector_view_t = nk::vector_view<scalar_t>;
     using vectors_view_t = nk::matrix_view<scalar_t>;
     using vector_norms_t = vector_norms<vector_product_result_t>;
 
     using engine_t = engine_type_;
-    using context_t = inner_persisted_context<vector_dtype_, engine_t, offsets_allocator_type_>;
+    using context_t = dense_nvme_context<vector_dtype_, engine_t, offsets_allocator_type_>;
     using slot_t = typename context_t::slot_t;
 
     using offsets_allocator_t = typename std::allocator_traits<offsets_allocator_type_>::template rebind_alloc<u64_t>;
@@ -1587,16 +1586,16 @@ struct inner_persisted_index {
     /** @brief The capability bit of the distance kit the chain actually picked - lower than
      *      @c capability_ when no SIMD kit is adapted for this dtype & metric pair yet. */
     inline static constexpr nk_capability_t picked_quads_capability_k =
-        inner_quads_chain<kernel_kind_, scalar_t, capability_>::picked_k;
+        dense_quads_chain<kernel_kind_, scalar_t, capability_>::picked_k;
     /** @brief The strongest @c synchronization_t contract this design honors: the payload
      *      is immutable, so arbitrary readers share one instance with no fences at all. */
     inline static constexpr synchronization_t synchronization_ceiling_k = synchronization_t::immutable_k;
 
-    inner_persisted_index(offsets_allocator_type_ const& allocator = {}) noexcept
+    dense_nvme_index(offsets_allocator_type_ const& allocator = {}) noexcept
         : offsets_(offsets_allocator_t(allocator)) {}
-    inner_persisted_index(inner_persisted_index const&) = delete;
-    inner_persisted_index& operator=(inner_persisted_index const&) = delete;
-    ~inner_persisted_index() noexcept { close(); }
+    dense_nvme_index(dense_nvme_index const&) = delete;
+    dense_nvme_index& operator=(dense_nvme_index const&) = delete;
+    ~dense_nvme_index() noexcept { close(); }
 
     /** @brief Loads the directory - header & offsets - through ordinary buffered reads,
      *      and keeps a separate descriptor for the engines, optionally @c O_DIRECT.
@@ -1605,17 +1604,17 @@ struct inner_persisted_index {
      *  @param[in] caching Routes the engine-side descriptor through the page cache,
      *      or around it - @c O_DIRECT on Linux, @c F_NOCACHE on macOS.
      */
-    inline status_t open(char const* path, inner_io_caching_t caching = inner_io_caching_t::cached_k) noexcept {
+    inline status_t open(char const* path, dense_io_caching_t caching = dense_io_caching_t::cached_k) noexcept {
 #if defined(_WIN32)
         (void)path, (void)caching;
         return status_t::uninitialized_k; // Windows file plumbing arrives with its engine's bring-up.
 #else
-        inner_posix_descriptor_t metadata {::open(path, O_RDONLY)};
+        dense_posix_descriptor_t metadata {::open(path, O_RDONLY)};
         if (metadata.file_descriptor < 0) return status_t::device_error_k;
-        inner_index_header_t header;
+        dense_index_header_t header;
         ssize_t header_bytes = ::pread(metadata.file_descriptor, &header, sizeof(header), 0);
-        if (header_bytes != sizeof(header) || header.magic != inner_index_header_t::magic_k ||
-            header.version != inner_index_header_t::version_k)
+        if (header_bytes != sizeof(header) || header.magic != dense_index_header_t::magic_k ||
+            header.version != dense_index_header_t::version_k)
             return status_t::malformed_k;
         if (header.dtype != static_cast<u32_t>(vector_dtype_) || header.kernel != static_cast<u32_t>(kernel_kind_))
             return status_t::config_mismatch_k;
@@ -1624,25 +1623,25 @@ struct inner_persisted_index {
         connectivity_ceiling_ = header.connectivity;
         std::size_t offsets_count = std::size_t(header.node_count) + 1;
         if (!offsets_.reserve(offsets_count) || !offsets_.try_resize({offsets_count})) return status_t::bad_alloc_k;
-        std::size_t offsets_bytes = inner_persisted_layout_t::offsets_bytes(header.node_count);
+        std::size_t offsets_bytes = dense_nvme_layout_t::offsets_bytes(header.node_count);
         ssize_t read_bytes = ::pread(metadata.file_descriptor, offsets_.data(), offsets_bytes,
-                                     inner_persisted_layout_t::offsets_begin_k);
+                                     dense_nvme_layout_t::offsets_begin_k);
         if (read_bytes != static_cast<ssize_t>(offsets_bytes)) return status_t::malformed_k;
 
         record_capacity_ = 0;
         for (small_size_t i = 0; i != header.node_count; ++i) {
             u64_t begin = offsets_[i], end = offsets_[i + 1];
-            if (end < begin || begin % inner_persisted_block_k) return status_t::malformed_k;
+            if (end < begin || begin % dense_nvme_block_k) return status_t::malformed_k;
             record_capacity_ = max_of<std::size_t>(record_capacity_, end - begin);
         }
         int flags = O_RDONLY;
 #if defined(__linux__)
-        if (caching == inner_io_caching_t::direct_k) flags |= O_DIRECT;
+        if (caching == dense_io_caching_t::direct_k) flags |= O_DIRECT;
 #endif
         data_descriptor_ = ::open(path, flags);
         if (data_descriptor_ < 0) return status_t::device_error_k;
 #if defined(__APPLE__)
-        if (caching == inner_io_caching_t::direct_k) fcntl(data_descriptor_, F_NOCACHE, 1);
+        if (caching == dense_io_caching_t::direct_k) fcntl(data_descriptor_, F_NOCACHE, 1);
 #endif
         return status_t::success_k;
 #endif
@@ -1715,7 +1714,7 @@ struct inner_persisted_index {
      *  simultaneously - each through its own context. Within a call the slots pipeline
      *  freely: a fast query's slot is recycled for the next pending row while slower
      *  traversals are still in flight, so the engine's queue stays full until the
-     *  batch drains. @ref inner_persisted_concurrency
+     *  batch drains. @ref dense_nvme_concurrency
      *
      *  @param[in] queries The query batch, shape @b [count,dimensions], in the index's
      *      own dtype & frozen dimensionality.
@@ -1728,7 +1727,7 @@ struct inner_persisted_index {
      *      sized by a prior @c reserve.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      */
-    search_result_t search(vectors_view_t queries, nk::matrix_span<inner_scored_node_t> results,
+    search_result_t search(vectors_view_t queries, nk::matrix_span<dense_scored_node_t> results,
                            nk::vector_span<small_size_t> result_counts, context_t& context,
                            search_config_t config = {}) noexcept {
 
@@ -1756,10 +1755,10 @@ struct inner_persisted_index {
             status_t armed = arm_slots_(context, queries, pool_limit, next_query, total_queries);
             if (armed != status_t::success_k) return outcome.status = armed, outcome;
 
-            status_t pumped = context.engine.pump(inner_io_wait_t::blocking_k);
+            status_t pumped = context.engine.pump(dense_io_wait_t::blocking_k);
             if (pumped != status_t::success_k) return outcome.status = pumped, outcome;
 
-            inner_io_completion_t completion;
+            dense_io_completion_t completion;
             while (context.engine.pop(completion)) {
                 status_t consumed = consume_(context, completion);
                 if (consumed != status_t::success_k) return outcome.status = consumed, outcome;
@@ -1780,9 +1779,9 @@ struct inner_persisted_index {
         return requested ? requested : 2 * max_of<std::size_t>(connectivity_ceiling_, 1);
     }
 
-    /** @brief Trampoline for @c usearch::inner_norms with hardened types. */
-    inline static vector_norms_t inner_norms(vector_view_t vec) noexcept {
-        return usearch::inner_norms<capability_, scalar_t>(vec);
+    /** @brief Trampoline for @c usearch::dense_norms with hardened types. */
+    inline static vector_norms_t dense_norms(vector_view_t vec) noexcept {
+        return usearch::dense_norms<capability_, scalar_t>(vec);
     }
     /** @brief Trampoline for @c usearch::distance with hardened types. */
     inline static distance_t distance(                   //
@@ -1800,15 +1799,15 @@ struct inner_persisted_index {
     }
 
     /** @brief Issues one record fetch on behalf of @p slot_index, leasing an arena index. */
-    inline status_t emit_(context_t& context, inner_traversal_slot_id_t slot_index, node_id_t node,
-                          inner_io_purpose_t purpose) noexcept {
-        inner_staging_buffer_id_t buffer_index = context.acquire_buffer();
-        inner_io_tag_t tag;
+    inline status_t emit_(context_t& context, dense_traversal_slot_id_t slot_index, node_id_t node,
+                          dense_io_purpose_t purpose) noexcept {
+        dense_staging_buffer_id_t buffer_index = context.acquire_buffer();
+        dense_io_tag_t tag;
         tag.slot = slot_index;
         tag.buffer = buffer_index;
         tag.purpose = static_cast<u32_t>(purpose);
         u64_t begin = offsets_[node], end = offsets_[node + 1];
-        inner_io_request_t request;
+        dense_io_request_t request;
         request.offset = begin;
         request.length = static_cast<u32_t>(end - begin);
         request.buffer = buffer_index;
@@ -1823,17 +1822,17 @@ struct inner_persisted_index {
      *      the admission half of the pump loop. */
     inline status_t arm_slots_(context_t& context, vectors_view_t queries, small_size_t pool_limit,
                                small_size_t& next_query, small_size_t total_queries) noexcept {
-        for (inner_traversal_slot_id_t slot_index = 0;
+        for (dense_traversal_slot_id_t slot_index = 0;
              slot_index != context.slots.size() && next_query != total_queries; ++slot_index) {
             slot_t& slot = context.slots[slot_index];
-            if (slot.stage != inner_persisted_stage_t::idle_k) continue;
+            if (slot.stage != dense_nvme_stage_t::idle_k) continue;
             vector_view_t query = queries.row(next_query).as_vector();
-            slot.reset(query, inner_norms(query), next_query, pool_limit, //
+            slot.reset(query, dense_norms(query), next_query, pool_limit, //
                        u64_t(next_query) * 0x9E3779B97F4A7C15ull + slot_index + 1);
             ++next_query;
             node_id_t seed = slot.random_generator.bounded(size());
             slot.visited.set(seed);
-            status_t emitted = emit_(context, slot_index, seed, inner_io_purpose_t::score_k);
+            status_t emitted = emit_(context, slot_index, seed, dense_io_purpose_t::score_k);
             if (emitted != status_t::success_k) return emitted;
         }
         return status_t::success_k;
@@ -1842,18 +1841,18 @@ struct inner_persisted_index {
     /** @brief Routes one completed read back into its slot & advances the traversal.
      *      Score completions are deferred - only their leased buffer index is stashed -
      *      so the quad kernel scores four arena-resident records per invocation. */
-    inline status_t consume_(context_t& context, inner_io_completion_t completion) noexcept {
-        inner_io_tag_t tag = inner_io_tag_t::unpack(completion.tag);
+    inline status_t consume_(context_t& context, dense_io_completion_t completion) noexcept {
+        dense_io_tag_t tag = dense_io_tag_t::unpack(completion.tag);
         slot_t& slot = context.slots[tag.slot];
         slot.inflight_reads--;
         if (completion.result < 0) return context.release_buffer(tag.buffer), status_t::device_error_k;
 
-        if (static_cast<inner_io_purpose_t>(tag.purpose) == inner_io_purpose_t::score_k) {
+        if (static_cast<dense_io_purpose_t>(tag.purpose) == dense_io_purpose_t::score_k) {
             slot.pending_scores.try_push_back(tag.buffer);
             if (slot.pending_scores.full()) flush_scores_(context, slot);
         }
         else {
-            inner_persisted_record_t record {context.engine.buffer(tag.buffer)};
+            dense_nvme_record_t record {context.engine.buffer(tag.buffer)};
             status_t expanded = expand_(context, tag.slot, record);
             context.release_buffer(tag.buffer);
             if (expanded != status_t::success_k) return expanded;
@@ -1867,16 +1866,16 @@ struct inner_persisted_index {
 
     /** @brief Walks an expanded @p record's neighbor list & fetches every unvisited id
      *      for scoring - the fan-out half of one hop. */
-    inline status_t expand_(context_t& context, inner_traversal_slot_id_t slot_index,
-                            inner_persisted_record_t record) noexcept {
+    inline status_t expand_(context_t& context, dense_traversal_slot_id_t slot_index,
+                            dense_nvme_record_t record) noexcept {
         slot_t& slot = context.slots[slot_index];
         context.expanded_members++;
         node_id_t const* neighbor_ids = record.neighbor_ids();
         u32_t neighbors_count = record.neighbors_count();
         for (small_size_t i = 0; i != neighbors_count; ++i) {
             node_id_t neighbor = neighbor_ids[i];
-            if (neighbor == inner_node_id_unknown_k || slot.visited.set(neighbor)) continue;
-            status_t emitted = emit_(context, slot_index, neighbor, inner_io_purpose_t::score_k);
+            if (neighbor == dense_node_id_unknown_k || slot.visited.set(neighbor)) continue;
+            status_t emitted = emit_(context, slot_index, neighbor, dense_io_purpose_t::score_k);
             if (emitted != status_t::success_k) return emitted;
         }
         return status_t::success_k;
@@ -1893,7 +1892,7 @@ struct inner_persisted_index {
         std::array<vector_norms_t, 4> lane_norms;
         std::array<node_id_t, 4> lane_nodes;
         for (small_size_t lane = 0; lane != 4; ++lane) {
-            inner_persisted_record_t record {
+            dense_nvme_record_t record {
                 context.engine.buffer(slot.pending_scores[min_of<small_size_t>(lane, fill - 1)])};
             lane_vectors[lane] = vector_view_t {record.vector<scalar_t, vector_norms_t>(), dimensions_};
             lane_norms[lane] = record.norms<vector_norms_t>();
@@ -1902,8 +1901,8 @@ struct inner_persisted_index {
         std::array<distance_t, 4> scores = distances(slot.query, slot.query_norms, lane_vectors, lane_norms);
         context.computed_distances += fill;
         for (small_size_t lane = 0; lane != fill; ++lane)
-            if (slot.results.insert(inner_scored_node_t {lane_nodes[lane], scores[lane]}, slot.pool_limit))
-                slot.frontier.insert_reserved(inner_scored_node_t {lane_nodes[lane], scores[lane]});
+            if (slot.results.insert(dense_scored_node_t {lane_nodes[lane], scores[lane]}, slot.pool_limit))
+                slot.frontier.insert_reserved(dense_scored_node_t {lane_nodes[lane], scores[lane]});
         for (small_size_t lane = 0; lane != fill; ++lane) context.release_buffer(slot.pending_scores[lane]);
         slot.pending_scores.clear();
     }
@@ -1911,32 +1910,32 @@ struct inner_persisted_index {
     /** @brief With nothing in flight, either expands the most promising frontier node
      *      or declares convergence - the classic best-first termination: the closest
      *      unexpanded candidate is already further than the worst kept result. */
-    inline void advance_(context_t& context, inner_traversal_slot_id_t slot_index) noexcept {
+    inline void advance_(context_t& context, dense_traversal_slot_id_t slot_index) noexcept {
         slot_t& slot = context.slots[slot_index];
         while (slot.frontier.size()) {
-            inner_scored_node_t best = slot.frontier.top();
+            dense_scored_node_t best = slot.frontier.top();
             bool results_full = slot.results.size() == slot.pool_limit;
             if (results_full && best.distance > slot.results.top().distance) break;
             slot.frontier.pop();
-            status_t emitted = emit_(context, slot_index, best.node_id, inner_io_purpose_t::expand_k);
+            status_t emitted = emit_(context, slot_index, best.node_id, dense_io_purpose_t::expand_k);
             if (emitted != status_t::success_k) break;
             return;
         }
-        slot.stage = inner_persisted_stage_t::finished_k;
+        slot.stage = dense_nvme_stage_t::finished_k;
     }
 
     /** @brief Copies every converged slot's ascending results into its output row &
      *      recycles the slot - the retirement half of the pump loop. */
-    inline void harvest_slots_(context_t& context, nk::matrix_span<inner_scored_node_t> results,
+    inline void harvest_slots_(context_t& context, nk::matrix_span<dense_scored_node_t> results,
                                nk::vector_span<small_size_t> result_counts, small_size_t wanted,
                                small_size_t& finished_queries) noexcept {
-        for (inner_traversal_slot_id_t slot_index = 0; slot_index != context.slots.size(); ++slot_index) {
+        for (dense_traversal_slot_id_t slot_index = 0; slot_index != context.slots.size(); ++slot_index) {
             slot_t& slot = context.slots[slot_index];
-            if (slot.stage != inner_persisted_stage_t::finished_k) continue;
+            if (slot.stage != dense_nvme_stage_t::finished_k) continue;
             small_size_t kept = static_cast<small_size_t>(min_of<std::size_t>(slot.results.size(), wanted));
             for (small_size_t i = 0; i != kept; ++i) results(slot.query_index, i) = slot.results[i];
             result_counts[slot.query_index] = kept;
-            slot.stage = inner_persisted_stage_t::idle_k;
+            slot.stage = dense_nvme_stage_t::idle_k;
             ++finished_queries;
         }
     }

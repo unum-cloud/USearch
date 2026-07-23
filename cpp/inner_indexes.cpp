@@ -32,6 +32,6 @@ namespace us = unum::usearch;
 namespace fu = ashvardanian::forkunion;
 namespace nk = ashvardanian::numkong;
 
-using bf6_angular_domain_t = inner_volatile_index<nk_bf16_k, nk_kernel_angular_k, nk_cap_icelake_k,
-                                                  fu::preferred_yield_t, fu::domain_allocator<nk::bf16_t>,
-                                                  fu::domain_allocator<us::inner_node_id_t>, std::allocator<std::byte>>;
+using bf6_angular_domain_t = dense_ram_index<nk_bf16_k, nk_kernel_angular_k, nk_cap_icelake_k, fu::preferred_yield_t,
+                                             fu::domain_allocator<nk::bf16_t>,
+                                             fu::domain_allocator<us::dense_node_id_t>, std::allocator<std::byte>>;

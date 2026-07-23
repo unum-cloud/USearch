@@ -1,5 +1,5 @@
 /**
- *  @brief Smoke tests for @c inner_metric 1-to-1, 1-to-4, and tiled kernels against
+ *  @brief Smoke tests for @c dense/ram_metric.hpp 1-to-1, 1-to-4, and tiled kernels against
  *      NumKong's monolithic 1-to-1 reference - @c nk::dot / @c nk::angular / @c nk::sqeuclidean.
  *
  *  @author Ash Vardanian
@@ -51,17 +51,17 @@ using namespace unum::usearch;
 constexpr std::array<std::size_t, 7> dimensions_to_test = {7, 8, 32, 64, 128, 257, 1024};
 
 /**
- *  @brief Checks whether @c inner_quads_chain has a specialization with a @c kit_t alias for
+ *  @brief Checks whether @c dense_quads_chain has a specialization with a @c kit_t alias for
  *  this @c (kernel,scalar,caps) tuple - unadapted tuples are skipped at compile time.
  */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-concept quads_supported = requires { typename inner_quads_chain<kernel_, scalar_, caps_>::kit_t; };
+concept quads_supported = requires { typename dense_quads_chain<kernel_, scalar_, caps_>::kit_t; };
 
 /** @brief True iff a tile engine is compiled for this tuple. The tiles chain always names a
  *      kit - @c no_tiles_kit_t at minimum - so the gate is its @c has_tiles_k verdict, never
  *      the alias's existence. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-concept tiles_supported = inner_tiles_chain<kernel_, scalar_, caps_>::has_tiles_k;
+concept tiles_supported = dense_tiles_chain<kernel_, scalar_, caps_>::has_tiles_k;
 
 /**
  *  @brief Populates the input @p vec with small scalars - universally representable in any
@@ -147,8 +147,8 @@ static int check_quads(std::size_t dim) noexcept {
     // With a single capability bit requested, exactly one cascade row can match, so the
     // winner is either that tier or the serial fallback. Anything else means a row names
     // a kit from another backend - numerically indistinguishable, hence the static check.
-    static_assert(inner_quads_chain<kernel_, scalar_, caps_>::picked_k == caps_ ||
-                      inner_quads_chain<kernel_, scalar_, caps_>::picked_k == nk_cap_serial_k,
+    static_assert(dense_quads_chain<kernel_, scalar_, caps_>::picked_k == caps_ ||
+                      dense_quads_chain<kernel_, scalar_, caps_>::picked_k == nk_cap_serial_k,
                   "Capability cascade selected a tier that was never requested");
 
     auto query = nk::vector<scalar_>::try_zeros(dim);
@@ -168,11 +168,11 @@ static int check_quads(std::size_t dim) noexcept {
     auto third_candidate_view = third_candidate.view();
     auto fourth_candidate_view = fourth_candidate.view();
 
-    auto query_norms = inner_norms<caps_>(query_view);
-    auto first_candidate_norms = inner_norms<caps_>(first_candidate_view);
-    auto second_candidate_norms = inner_norms<caps_>(second_candidate_view);
-    auto third_candidate_norms = inner_norms<caps_>(third_candidate_view);
-    auto fourth_candidate_norms = inner_norms<caps_>(fourth_candidate_view);
+    auto query_norms = dense_norms<caps_>(query_view);
+    auto first_candidate_norms = dense_norms<caps_>(first_candidate_view);
+    auto second_candidate_norms = dense_norms<caps_>(second_candidate_view);
+    auto third_candidate_norms = dense_norms<caps_>(third_candidate_view);
+    auto fourth_candidate_norms = dense_norms<caps_>(fourth_candidate_view);
 
     f32_t const first_reference = reference_distance<kernel_>(query_view, first_candidate_view);
     f32_t const second_reference = reference_distance<kernel_>(query_view, second_candidate_view);
@@ -224,7 +224,7 @@ static int check_tiles() noexcept {
     if ((nk_capabilities_available() & caps_) != caps_) return 0;
     nk_configure_thread(nk_capabilities_available());
 
-    using tiles_kit_t = typename inner_tiles_chain<kernel_, scalar_, caps_>::kit_t;
+    using tiles_kit_t = typename dense_tiles_chain<kernel_, scalar_, caps_>::kit_t;
     constexpr std::size_t rows_k = tiles_kit_t::tile_rows_k;
     constexpr std::size_t dimensions_k = 128; // Two full depth tiles - the shape the index runs.
     constexpr std::size_t depth_tiles_k = dimensions_k / tiles_kit_t::tile_depth_k;
@@ -236,7 +236,7 @@ static int check_tiles() noexcept {
     for (std::size_t row = 0; row != rows_k; ++row) {
         fill_cyclic(storage.row(row).as_vector(), row);
         views[row] = vectors.row(row).as_vector();
-        norms[row] = inner_norms<caps_>(views[row]);
+        norms[row] = dense_norms<caps_>(views[row]);
     }
 
     typename tiles_kit_t::a_tile_t a_tile;

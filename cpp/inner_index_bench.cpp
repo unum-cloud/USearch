@@ -9,7 +9,7 @@
  *  judgment, and the machine report - lives in @c inner_index_bench.cuh; this translation
  *  unit owns everything CPU: the ForkUnion run loops streaming one row or query per task,
  *  the NUMA-domain placement, the waiter dispatch, and the compile-time cascade resolving
- *  the CLI into one concrete @c inner_volatile_index instantiation. A ready-made playground
+ *  the CLI into one concrete @c dense_ram_index instantiation. A ready-made playground
  *  is the Unum Wiki 1M dataset:
  *
  *  @code{.sh}
@@ -141,7 +141,7 @@ struct bench_context {
     using index_t = index_type_;
     using scalar_t = typename index_t::scalar_t;
     using small_size_t = typename index_t::small_size_t;
-    using traversal_t = typename index_t::inner_traversal_context_t;
+    using traversal_t = typename index_t::dense_traversal_context_t;
     using vector_view_t = typename index_t::vector_view_t;
     using vectors_view_t = typename index_t::vectors_view_t;
     using distance_t = typename index_t::distance_t;
@@ -268,7 +268,7 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
     std::size_t const search_count = bench.options.self_recall ? streamed.vectors.extent(0)
                                                                : streamed.queries.extent(0);
     bench.results.hit_rows = nk::matrix<std::uint32_t>::try_zeros({search_count, bench.options.top_k});
-    bench.results.hit_distances = nk::matrix<inner_distance_t>::try_zeros({search_count, bench.options.top_k});
+    bench.results.hit_distances = nk::matrix<dense_distance_t>::try_zeros({search_count, bench.options.top_k});
     if (bench.results.hit_rows.empty() || bench.results.hit_distances.empty()) {
         fmt::println("Failed to allocate the per-query hit matrices");
         return false;
@@ -302,7 +302,7 @@ void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_
 
     std::size_t const slot = bench.index_of_compute_domain[compute_domain];
     index_t& index = *bench.indexes[slot];
-    inner_node_id_t local_id = 0;
+    dense_node_id_t local_id = 0;
     vectors_view_t const one_row {vector.data(), 1, streamed.vectors.extent(1)};
     auto inserted = index.insert(one_row, {&local_id, std::size_t {1}}, *bench.traversals[thread], config);
     if (!inserted) {
@@ -497,7 +497,7 @@ template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kin
 int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
     using allocator_t = domain_or_default_allocator<std::byte>;
     using index_t =
-        inner_volatile_index<stored_dtype_, kernel_, capability_, wait_type_, allocator_t, allocator_t, allocator_t>;
+        dense_ram_index<stored_dtype_, kernel_, capability_, wait_type_, allocator_t, allocator_t, allocator_t>;
     using bench_context_type_ = bench_context<index_t>;
     using streamed_t = streamed_dataset<dataset_scalar_type_, bench_context_type_>;
     using scalar_t = typename bench_context_type_::scalar_t;

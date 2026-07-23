@@ -1,5 +1,5 @@
 /**
- *  @brief Device metric kits for the CUDA inner indexes - the GPU twin of @c ram_metric.hpp.
+ *  @brief Device metric kits for the dense VRAM indexes - the GPU twin of @c ram_metric.hpp.
  *  @author Ash Vardanian
  *  @file include/usearch/dense/vram_metric.cuh
  *  @date July 22, 2026
@@ -44,16 +44,16 @@ namespace usearch {
  *      alone. Kit-chain layers intersect their architecture requirement with this AND with
  *      the caller's ceiling, the CPU-style side-by-side selector. */
 #if defined(__CUDA_ARCH__)
-inline constexpr cuda_arch_t inner_cuda_target_arch_k = static_cast<cuda_arch_t>(__CUDA_ARCH__);
+inline constexpr cuda_arch_t dense_cuda_target_arch_k = static_cast<cuda_arch_t>(__CUDA_ARCH__);
 #else
-inline constexpr cuda_arch_t inner_cuda_target_arch_k = cuda_arch_ampere_k;
+inline constexpr cuda_arch_t dense_cuda_target_arch_k = cuda_arch_ampere_k;
 #endif
 
 template <typename kit_>
-concept inner_cuda_kit = requires(typename kit_::fragment_t fragment, typename kit_::accumulator_t accumulator,
+concept dense_cuda_kit = requires(typename kit_::fragment_t fragment, typename kit_::accumulator_t accumulator,
                                   typename kit_::norms_accumulator_t norms_accumulator, typename kit_::norms_t norms,
                                   typename kit_::query_state_t query_state, typename kit_::dot_t dot,
-                                  inner_distance_t ranked) {
+                                  dense_distance_t ranked) {
     typename kit_::scalar_t;
     typename kit_::fragment_t;
     typename kit_::accumulator_t;
@@ -71,14 +71,14 @@ concept inner_cuda_kit = requires(typename kit_::fragment_t fragment, typename k
     { kit_::accumulate_norms(fragment, norms_accumulator) } -> std::same_as<typename kit_::norms_accumulator_t>;
     { kit_::partials_to_norms(norms_accumulator) } -> std::same_as<typename kit_::norms_t>;
     { kit_::make_query_state(norms) } -> std::same_as<typename kit_::query_state_t>;
-    { kit_::distance(dot, query_state, norms) } -> std::same_as<inner_distance_t>;
-    { kit_::convert_to_distance(ranked) } -> std::same_as<inner_distance_t>;
+    { kit_::distance(dot, query_state, norms) } -> std::same_as<dense_distance_t>;
+    { kit_::convert_to_distance(ranked) } -> std::same_as<dense_distance_t>;
 };
 
 /** @brief Generic cross-lane reduction: folds sub-warp partials of width @p lanes_per_row
  *      (a warp-uniform power of two) down to the leader lane. One tree serves every kit. */
 template <typename dot_type_>
-__device__ __forceinline__ dot_type_ inner_cuda_reduce(dot_type_ partial, u32_t lanes_per_row) noexcept {
+__device__ __forceinline__ dot_type_ dense_cuda_reduce(dot_type_ partial, u32_t lanes_per_row) noexcept {
     for (u32_t offset = lanes_per_row / 2; offset; offset >>= 1)
         partial += __shfl_down_sync(0xFFFFFFFFu, partial, offset, lanes_per_row);
     return partial;
@@ -86,7 +86,7 @@ __device__ __forceinline__ dot_type_ inner_cuda_reduce(dot_type_ partial, u32_t 
 
 /** @brief Full-warp reduction of a two-component norms accumulator - {sum,sumsq} for the
  *      arithmetic kits, {popcount,popcount} for the binary ones. */
-__device__ __forceinline__ int2 inner_cuda_reduce_norms(int2 partial) noexcept {
+__device__ __forceinline__ int2 dense_cuda_reduce_norms(int2 partial) noexcept {
 #pragma unroll
     for (u32_t offset = 16; offset; offset >>= 1) {
         partial.x += __shfl_down_sync(0xFFFFFFFFu, partial.x, offset);
@@ -94,7 +94,7 @@ __device__ __forceinline__ int2 inner_cuda_reduce_norms(int2 partial) noexcept {
     }
     return partial;
 }
-__device__ __forceinline__ uint2 inner_cuda_reduce_norms(uint2 partial) noexcept {
+__device__ __forceinline__ uint2 dense_cuda_reduce_norms(uint2 partial) noexcept {
 #pragma unroll
     for (u32_t offset = 16; offset; offset >>= 1) {
         partial.x += __shfl_down_sync(0xFFFFFFFFu, partial.x, offset);
@@ -102,7 +102,7 @@ __device__ __forceinline__ uint2 inner_cuda_reduce_norms(uint2 partial) noexcept
     }
     return partial;
 }
-__device__ __forceinline__ float2 inner_cuda_reduce_norms(float2 partial) noexcept {
+__device__ __forceinline__ float2 dense_cuda_reduce_norms(float2 partial) noexcept {
 #pragma unroll
     for (u32_t offset = 16; offset; offset >>= 1) {
         partial.x += __shfl_down_sync(0xFFFFFFFFu, partial.x, offset);
@@ -113,17 +113,17 @@ __device__ __forceinline__ float2 inner_cuda_reduce_norms(float2 partial) noexce
 
 /** @brief Rebroadcasts lane 0's reduced norms to every lane - values that feed
  *      lane-divergent control flow must be warp-uniform. */
-__device__ __forceinline__ int2 inner_cuda_broadcast_norms(int2 reduced) noexcept {
+__device__ __forceinline__ int2 dense_cuda_broadcast_norms(int2 reduced) noexcept {
     reduced.x = __shfl_sync(0xFFFFFFFFu, reduced.x, 0);
     reduced.y = __shfl_sync(0xFFFFFFFFu, reduced.y, 0);
     return reduced;
 }
-__device__ __forceinline__ uint2 inner_cuda_broadcast_norms(uint2 reduced) noexcept {
+__device__ __forceinline__ uint2 dense_cuda_broadcast_norms(uint2 reduced) noexcept {
     reduced.x = __shfl_sync(0xFFFFFFFFu, reduced.x, 0);
     reduced.y = __shfl_sync(0xFFFFFFFFu, reduced.y, 0);
     return reduced;
 }
-__device__ __forceinline__ float2 inner_cuda_broadcast_norms(float2 reduced) noexcept {
+__device__ __forceinline__ float2 dense_cuda_broadcast_norms(float2 reduced) noexcept {
     reduced.x = __shfl_sync(0xFFFFFFFFu, reduced.x, 0);
     reduced.y = __shfl_sync(0xFFFFFFFFu, reduced.y, 0);
     return reduced;
@@ -181,28 +181,28 @@ struct f32_ampere_inner_kit_t {
     }
     /** @brief The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
      *      a distance as @b 1-dot, monotone decreasing and negative-safe. */
-    static __device__ __forceinline__ inner_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
         return 1.0f - dot;
     }
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return ranked;
     }
 };
 
 struct f32_ampere_angular_kit_t : f32_ampere_inner_kit_t {
-    static __device__ __forceinline__ inner_distance_t distance(f32_t dot, query_state_t query_state,
+    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
         return 1.0f - dot * query_state.rsqrt * (norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f);
     }
 };
 struct f32_ampere_sqeuclidean_kit_t : f32_ampere_inner_kit_t {
-    static __device__ __forceinline__ inner_distance_t distance(f32_t dot, query_state_t query_state,
+    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
         return query_state.sumsq + norms.sumsq - 2.0f * dot;
     }
 };
 struct f32_ampere_euclidean_kit_t : f32_ampere_sqeuclidean_kit_t {
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return sqrtf(ranked);
     }
 };
@@ -272,28 +272,28 @@ struct f16_ampere_inner_kit_t {
     }
     /** @brief The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
      *      a distance as @b 1-dot, monotone decreasing and negative-safe. */
-    static __device__ __forceinline__ inner_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
         return 1.0f - dot;
     }
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return ranked;
     }
 };
 
 struct f16_ampere_angular_kit_t : f16_ampere_inner_kit_t {
-    static __device__ __forceinline__ inner_distance_t distance(f32_t dot, query_state_t query_state,
+    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
         return 1.0f - dot * query_state.rsqrt * (norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f);
     }
 };
 struct f16_ampere_sqeuclidean_kit_t : f16_ampere_inner_kit_t {
-    static __device__ __forceinline__ inner_distance_t distance(f32_t dot, query_state_t query_state,
+    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
         return query_state.sumsq + norms.sumsq - 2.0f * dot;
     }
 };
 struct f16_ampere_euclidean_kit_t : f16_ampere_sqeuclidean_kit_t {
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return sqrtf(ranked);
     }
 };
@@ -357,28 +357,28 @@ struct bf16_ampere_inner_kit_t {
     }
     /** @brief The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
      *      a distance as @b 1-dot, monotone decreasing and negative-safe. */
-    static __device__ __forceinline__ inner_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
         return 1.0f - dot;
     }
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return ranked;
     }
 };
 
 struct bf16_ampere_angular_kit_t : bf16_ampere_inner_kit_t {
-    static __device__ __forceinline__ inner_distance_t distance(f32_t dot, query_state_t query_state,
+    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
         return 1.0f - dot * query_state.rsqrt * (norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f);
     }
 };
 struct bf16_ampere_sqeuclidean_kit_t : bf16_ampere_inner_kit_t {
-    static __device__ __forceinline__ inner_distance_t distance(f32_t dot, query_state_t query_state,
+    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
         return query_state.sumsq + norms.sumsq - 2.0f * dot;
     }
 };
 struct bf16_ampere_euclidean_kit_t : bf16_ampere_sqeuclidean_kit_t {
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return sqrtf(ranked);
     }
 };
@@ -439,27 +439,27 @@ struct i8_ampere_inner_kit_t {
     }
     /** @brief The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
      *      a distance as @b 1-dot, monotone decreasing and negative-safe. */
-    static __device__ __forceinline__ inner_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
         return 1.0f - static_cast<f32_t>(dot);
     }
     /** @brief Output-boundary finalize, the CPU kits' @c convert_to_distances in miniature:
      *      the traversal ranks on raw @c distance values end to end, and only the matches a
      *      caller receives pass through here - identity unless a metric owes a monotone
      *      transform, like Euclidean's square root. */
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return ranked;
     }
 };
 
 struct i8_ampere_angular_kit_t : i8_ampere_inner_kit_t {
-    static __device__ __forceinline__ inner_distance_t distance(int dot, query_state_t query_state,
+    static __device__ __forceinline__ dense_distance_t distance(int dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
         return 1.0f - static_cast<f32_t>(dot) * query_state.rsqrt *
                           (norms.sumsq ? rsqrtf(static_cast<f32_t>(norms.sumsq)) : 0.0f);
     }
 };
 struct i8_ampere_sqeuclidean_kit_t : i8_ampere_inner_kit_t {
-    static __device__ __forceinline__ inner_distance_t distance(int dot, query_state_t query_state,
+    static __device__ __forceinline__ dense_distance_t distance(int dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
         return static_cast<f32_t>(query_state.sumsq) + static_cast<f32_t>(norms.sumsq) - 2.0f * static_cast<f32_t>(dot);
     }
@@ -468,7 +468,7 @@ struct i8_ampere_sqeuclidean_kit_t : i8_ampere_inner_kit_t {
  *      under the monotone square root, so only reported matches pay one @c sqrtf each -
  *      numerically matching the CPU euclidean kits. */
 struct i8_ampere_euclidean_kit_t : i8_ampere_sqeuclidean_kit_t {
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return sqrtf(ranked);
     }
 };
@@ -525,29 +525,29 @@ struct u8_ampere_inner_kit_t {
     }
     /** @brief The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
      *      a distance as @b 1-dot, monotone decreasing and negative-safe. */
-    static __device__ __forceinline__ inner_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
         return 1.0f - static_cast<f32_t>(dot);
     }
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return ranked;
     }
 };
 
 struct u8_ampere_angular_kit_t : u8_ampere_inner_kit_t {
-    static __device__ __forceinline__ inner_distance_t distance(u32_t dot, query_state_t query_state,
+    static __device__ __forceinline__ dense_distance_t distance(u32_t dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
         return 1.0f - static_cast<f32_t>(dot) * query_state.rsqrt *
                           (norms.sumsq ? rsqrtf(static_cast<f32_t>(norms.sumsq)) : 0.0f);
     }
 };
 struct u8_ampere_sqeuclidean_kit_t : u8_ampere_inner_kit_t {
-    static __device__ __forceinline__ inner_distance_t distance(u32_t dot, query_state_t query_state,
+    static __device__ __forceinline__ dense_distance_t distance(u32_t dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
         return static_cast<f32_t>(query_state.sumsq) + static_cast<f32_t>(norms.sumsq) - 2.0f * static_cast<f32_t>(dot);
     }
 };
 struct u8_ampere_euclidean_kit_t : u8_ampere_sqeuclidean_kit_t {
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return sqrtf(ranked);
     }
 };
@@ -624,28 +624,28 @@ struct e4m3_ada_inner_kit_t {
     }
     /** @brief The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
      *      a distance as @b 1-dot, monotone decreasing and negative-safe. */
-    static __device__ __forceinline__ inner_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
         return 1.0f - dot;
     }
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return ranked;
     }
 };
 
 struct e4m3_ada_angular_kit_t : e4m3_ada_inner_kit_t {
-    static __device__ __forceinline__ inner_distance_t distance(f32_t dot, query_state_t query_state,
+    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
         return 1.0f - dot * query_state.rsqrt * (norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f);
     }
 };
 struct e4m3_ada_sqeuclidean_kit_t : e4m3_ada_inner_kit_t {
-    static __device__ __forceinline__ inner_distance_t distance(f32_t dot, query_state_t query_state,
+    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
         return query_state.sumsq + norms.sumsq - 2.0f * dot;
     }
 };
 struct e4m3_ada_euclidean_kit_t : e4m3_ada_sqeuclidean_kit_t {
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return sqrtf(ranked);
     }
 };
@@ -715,28 +715,28 @@ struct e5m2_ada_inner_kit_t {
     }
     /** @brief The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
      *      a distance as @b 1-dot, monotone decreasing and negative-safe. */
-    static __device__ __forceinline__ inner_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
         return 1.0f - dot;
     }
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return ranked;
     }
 };
 
 struct e5m2_ada_angular_kit_t : e5m2_ada_inner_kit_t {
-    static __device__ __forceinline__ inner_distance_t distance(f32_t dot, query_state_t query_state,
+    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
         return 1.0f - dot * query_state.rsqrt * (norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f);
     }
 };
 struct e5m2_ada_sqeuclidean_kit_t : e5m2_ada_inner_kit_t {
-    static __device__ __forceinline__ inner_distance_t distance(f32_t dot, query_state_t query_state,
+    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
         return query_state.sumsq + norms.sumsq - 2.0f * dot;
     }
 };
 struct e5m2_ada_euclidean_kit_t : e5m2_ada_sqeuclidean_kit_t {
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return sqrtf(ranked);
     }
 };
@@ -811,29 +811,29 @@ struct i4x2_ampere_inner_kit_t {
     }
     /** @brief The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
      *      a distance as @b 1-dot, monotone decreasing and negative-safe. */
-    static __device__ __forceinline__ inner_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
         return 1.0f - static_cast<f32_t>(dot);
     }
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return ranked;
     }
 };
 
 struct i4x2_ampere_angular_kit_t : i4x2_ampere_inner_kit_t {
-    static __device__ __forceinline__ inner_distance_t distance(int dot, query_state_t query_state,
+    static __device__ __forceinline__ dense_distance_t distance(int dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
         return 1.0f - static_cast<f32_t>(dot) * query_state.rsqrt *
                           (norms.sumsq ? rsqrtf(static_cast<f32_t>(norms.sumsq)) : 0.0f);
     }
 };
 struct i4x2_ampere_sqeuclidean_kit_t : i4x2_ampere_inner_kit_t {
-    static __device__ __forceinline__ inner_distance_t distance(int dot, query_state_t query_state,
+    static __device__ __forceinline__ dense_distance_t distance(int dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
         return static_cast<f32_t>(query_state.sumsq) + static_cast<f32_t>(norms.sumsq) - 2.0f * static_cast<f32_t>(dot);
     }
 };
 struct i4x2_ampere_euclidean_kit_t : i4x2_ampere_sqeuclidean_kit_t {
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return sqrtf(ranked);
     }
 };
@@ -898,29 +898,29 @@ struct u4x2_ampere_inner_kit_t {
     }
     /** @brief The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
      *      a distance as @b 1-dot, monotone decreasing and negative-safe. */
-    static __device__ __forceinline__ inner_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
         return 1.0f - static_cast<f32_t>(dot);
     }
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return ranked;
     }
 };
 
 struct u4x2_ampere_angular_kit_t : u4x2_ampere_inner_kit_t {
-    static __device__ __forceinline__ inner_distance_t distance(u32_t dot, query_state_t query_state,
+    static __device__ __forceinline__ dense_distance_t distance(u32_t dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
         return 1.0f - static_cast<f32_t>(dot) * query_state.rsqrt *
                           (norms.sumsq ? rsqrtf(static_cast<f32_t>(norms.sumsq)) : 0.0f);
     }
 };
 struct u4x2_ampere_sqeuclidean_kit_t : u4x2_ampere_inner_kit_t {
-    static __device__ __forceinline__ inner_distance_t distance(u32_t dot, query_state_t query_state,
+    static __device__ __forceinline__ dense_distance_t distance(u32_t dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
         return static_cast<f32_t>(query_state.sumsq) + static_cast<f32_t>(norms.sumsq) - 2.0f * static_cast<f32_t>(dot);
     }
 };
 struct u4x2_ampere_euclidean_kit_t : u4x2_ampere_sqeuclidean_kit_t {
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return sqrtf(ranked);
     }
 };
@@ -979,10 +979,10 @@ struct u1x8_ampere_inner_kit_t {
     }
     /** @brief The inner base IS the dot-kernel kit: for bit vectors the dot is the
      *      intersection popcount, flipped into a distance as @b 1-dot. */
-    static __device__ __forceinline__ inner_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
         return 1.0f - static_cast<f32_t>(dot);
     }
-    static __device__ __forceinline__ inner_distance_t convert_to_distance(inner_distance_t ranked) noexcept {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return ranked;
     }
 };
@@ -991,7 +991,7 @@ struct u1x8_ampere_inner_kit_t {
  *      since the intersection is bounded by either operand's count - so the stored
  *      popcount norms turn the intersection dot into the XOR count without a second pass. */
 struct u1x8_ampere_hamming_kit_t : u1x8_ampere_inner_kit_t {
-    static __device__ __forceinline__ inner_distance_t distance(u32_t dot, query_state_t query_state,
+    static __device__ __forceinline__ dense_distance_t distance(u32_t dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
         return static_cast<f32_t>(query_state.sumsq + norms.sum - 2 * dot);
     }
@@ -1000,7 +1000,7 @@ struct u1x8_ampere_hamming_kit_t : u1x8_ampere_inner_kit_t {
 /** @brief Jaccard distance: 1 - intersection / union, union = |a| + |b| - intersection;
  *      two empty sets are identical, distance zero. */
 struct u1x8_ampere_jaccard_kit_t : u1x8_ampere_inner_kit_t {
-    static __device__ __forceinline__ inner_distance_t distance(u32_t dot, query_state_t query_state,
+    static __device__ __forceinline__ dense_distance_t distance(u32_t dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
         u32_t const unions = query_state.sumsq + norms.sum - dot;
         return unions ? 1.0f - static_cast<f32_t>(dot) / static_cast<f32_t>(unions) : 0.0f;
@@ -1013,8 +1013,8 @@ struct u1x8_ampere_jaccard_kit_t : u1x8_ampere_inner_kit_t {
  *      A row is admissible when its architecture requirement clears both gates: the
  *      caller's ceiling - the ask - and this compilation pass's target - the can. */
 template <cuda_arch_t required_arch_, cuda_arch_t arch_ceiling_, typename kit_>
-struct inner_cuda_arch_layer {
-    static constexpr bool available_k = required_arch_ <= arch_ceiling_ && required_arch_ <= inner_cuda_target_arch_k;
+struct dense_cuda_arch_layer {
+    static constexpr bool available_k = required_arch_ <= arch_ceiling_ && required_arch_ <= dense_cuda_target_arch_k;
     static constexpr cuda_arch_t required_arch_k = required_arch_;
     using kit_t = kit_;
 };
@@ -1022,13 +1022,13 @@ struct inner_cuda_arch_layer {
 /** @brief The CPU's @c first_available_kit, verbatim in spirit: the first admissible layer
  *      wins, the floor backs them all, and @c picked_arch_k names the winner for reports. */
 template <typename fallback_, typename... layers_>
-struct inner_cuda_first_available_kit {
+struct dense_cuda_first_available_kit {
     using type = fallback_;
     static constexpr cuda_arch_t picked_arch_k = cuda_arch_ampere_k;
 };
 template <typename fallback_, typename head_, typename... tail_>
-struct inner_cuda_first_available_kit<fallback_, head_, tail_...> {
-    using next_t = inner_cuda_first_available_kit<fallback_, tail_...>;
+struct dense_cuda_first_available_kit<fallback_, head_, tail_...> {
+    using next_t = dense_cuda_first_available_kit<fallback_, tail_...>;
     using type = std::conditional_t<head_::available_k, typename head_::kit_t, typename next_t::type>;
     static constexpr cuda_arch_t picked_arch_k = head_::available_k ? head_::required_arch_k : next_t::picked_arch_k;
 };
@@ -1037,157 +1037,157 @@ struct inner_cuda_first_available_kit<fallback_, head_, tail_...> {
  *      fail the index instantiation with a one-line constraint error. Rows sort like the
  *      kit families: widest types first, packed bits last. */
 template <nk_dtype_t vector_dtype_, nk_kernel_kind_t kernel_kind_>
-struct inner_cuda_kit_for;
+struct dense_cuda_kit_for;
 
 /**
  *  @brief The dispatch entry every index instantiation resolves through: (dtype, kernel,
  *      ceiling) to one kit, side-by-side comparable like the CPU chains - two ceilings in
  *      one binary run different rows on the same device.
  *
- *  The generic body serves the floor from @c inner_cuda_kit_for; a cell earns its own
- *  specialization enumerating @c inner_cuda_arch_layer rows the moment a newer generation lands, e.g.:
+ *  The generic body serves the floor from @c dense_cuda_kit_for; a cell earns its own
+ *  specialization enumerating @c dense_cuda_arch_layer rows the moment a newer generation lands, e.g.:
  *
  *  @code{.cpp}
  *  template <cuda_arch_t arch_ceiling_>
- *  struct inner_cuda_kit_chain<nk_bf16_k, nk_kernel_angular_k, arch_ceiling_> {
- *      using selected_t = inner_cuda_first_available_kit<
+ *  struct dense_cuda_kit_chain<nk_bf16_k, nk_kernel_angular_k, arch_ceiling_> {
+ *      using selected_t = dense_cuda_first_available_kit<
  *          bf16_ampere_angular_kit_t,
- *          inner_cuda_arch_layer<cuda_arch_blackwell_k, arch_ceiling_, bf16_blackwell_angular_kit_t>>;
+ *          dense_cuda_arch_layer<cuda_arch_blackwell_k, arch_ceiling_, bf16_blackwell_angular_kit_t>>;
  *      using kit_t = typename selected_t::type;
  *      static constexpr cuda_arch_t picked_arch_k = selected_t::picked_arch_k;
  *  };
  *  @endcode
  */
 template <nk_dtype_t vector_dtype_, nk_kernel_kind_t kernel_kind_, cuda_arch_t arch_ceiling_ = cuda_arch_blackwell_k>
-struct inner_cuda_kit_chain {
-    using kit_t = typename inner_cuda_kit_for<vector_dtype_, kernel_kind_>::kit_t;
+struct dense_cuda_kit_chain {
+    using kit_t = typename dense_cuda_kit_for<vector_dtype_, kernel_kind_>::kit_t;
     static constexpr cuda_arch_t picked_arch_k = cuda_arch_ampere_k;
 };
 
 template <>
-struct inner_cuda_kit_for<nk_f32_k, nk_kernel_dot_k> {
+struct dense_cuda_kit_for<nk_f32_k, nk_kernel_dot_k> {
     using kit_t = f32_ampere_inner_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_f32_k, nk_kernel_angular_k> {
+struct dense_cuda_kit_for<nk_f32_k, nk_kernel_angular_k> {
     using kit_t = f32_ampere_angular_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_f32_k, nk_kernel_sqeuclidean_k> {
+struct dense_cuda_kit_for<nk_f32_k, nk_kernel_sqeuclidean_k> {
     using kit_t = f32_ampere_sqeuclidean_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_f32_k, nk_kernel_euclidean_k> {
+struct dense_cuda_kit_for<nk_f32_k, nk_kernel_euclidean_k> {
     using kit_t = f32_ampere_euclidean_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_f16_k, nk_kernel_dot_k> {
+struct dense_cuda_kit_for<nk_f16_k, nk_kernel_dot_k> {
     using kit_t = f16_ampere_inner_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_f16_k, nk_kernel_angular_k> {
+struct dense_cuda_kit_for<nk_f16_k, nk_kernel_angular_k> {
     using kit_t = f16_ampere_angular_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_f16_k, nk_kernel_sqeuclidean_k> {
+struct dense_cuda_kit_for<nk_f16_k, nk_kernel_sqeuclidean_k> {
     using kit_t = f16_ampere_sqeuclidean_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_f16_k, nk_kernel_euclidean_k> {
+struct dense_cuda_kit_for<nk_f16_k, nk_kernel_euclidean_k> {
     using kit_t = f16_ampere_euclidean_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_bf16_k, nk_kernel_dot_k> {
+struct dense_cuda_kit_for<nk_bf16_k, nk_kernel_dot_k> {
     using kit_t = bf16_ampere_inner_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_bf16_k, nk_kernel_angular_k> {
+struct dense_cuda_kit_for<nk_bf16_k, nk_kernel_angular_k> {
     using kit_t = bf16_ampere_angular_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_bf16_k, nk_kernel_sqeuclidean_k> {
+struct dense_cuda_kit_for<nk_bf16_k, nk_kernel_sqeuclidean_k> {
     using kit_t = bf16_ampere_sqeuclidean_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_bf16_k, nk_kernel_euclidean_k> {
+struct dense_cuda_kit_for<nk_bf16_k, nk_kernel_euclidean_k> {
     using kit_t = bf16_ampere_euclidean_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_i8_k, nk_kernel_dot_k> {
+struct dense_cuda_kit_for<nk_i8_k, nk_kernel_dot_k> {
     using kit_t = i8_ampere_inner_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_i8_k, nk_kernel_angular_k> {
+struct dense_cuda_kit_for<nk_i8_k, nk_kernel_angular_k> {
     using kit_t = i8_ampere_angular_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_i8_k, nk_kernel_sqeuclidean_k> {
+struct dense_cuda_kit_for<nk_i8_k, nk_kernel_sqeuclidean_k> {
     using kit_t = i8_ampere_sqeuclidean_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_i8_k, nk_kernel_euclidean_k> {
+struct dense_cuda_kit_for<nk_i8_k, nk_kernel_euclidean_k> {
     using kit_t = i8_ampere_euclidean_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_u8_k, nk_kernel_dot_k> {
+struct dense_cuda_kit_for<nk_u8_k, nk_kernel_dot_k> {
     using kit_t = u8_ampere_inner_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_u8_k, nk_kernel_angular_k> {
+struct dense_cuda_kit_for<nk_u8_k, nk_kernel_angular_k> {
     using kit_t = u8_ampere_angular_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_u8_k, nk_kernel_sqeuclidean_k> {
+struct dense_cuda_kit_for<nk_u8_k, nk_kernel_sqeuclidean_k> {
     using kit_t = u8_ampere_sqeuclidean_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_u8_k, nk_kernel_euclidean_k> {
+struct dense_cuda_kit_for<nk_u8_k, nk_kernel_euclidean_k> {
     using kit_t = u8_ampere_euclidean_kit_t;
 };
 #if __CUDA_ARCH__ >= 890 || !defined(__CUDA_ARCH__)
 template <>
-struct inner_cuda_kit_for<nk_e4m3_k, nk_kernel_angular_k> {
+struct dense_cuda_kit_for<nk_e4m3_k, nk_kernel_angular_k> {
     using kit_t = e4m3_ada_angular_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_e4m3_k, nk_kernel_euclidean_k> {
+struct dense_cuda_kit_for<nk_e4m3_k, nk_kernel_euclidean_k> {
     using kit_t = e4m3_ada_euclidean_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_e5m2_k, nk_kernel_angular_k> {
+struct dense_cuda_kit_for<nk_e5m2_k, nk_kernel_angular_k> {
     using kit_t = e5m2_ada_angular_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_e5m2_k, nk_kernel_euclidean_k> {
+struct dense_cuda_kit_for<nk_e5m2_k, nk_kernel_euclidean_k> {
     using kit_t = e5m2_ada_euclidean_kit_t;
 };
 #endif
 template <>
-struct inner_cuda_kit_for<nk_i4_k, nk_kernel_angular_k> {
+struct dense_cuda_kit_for<nk_i4_k, nk_kernel_angular_k> {
     using kit_t = i4x2_ampere_angular_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_i4_k, nk_kernel_euclidean_k> {
+struct dense_cuda_kit_for<nk_i4_k, nk_kernel_euclidean_k> {
     using kit_t = i4x2_ampere_euclidean_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_u4_k, nk_kernel_angular_k> {
+struct dense_cuda_kit_for<nk_u4_k, nk_kernel_angular_k> {
     using kit_t = u4x2_ampere_angular_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_u4_k, nk_kernel_euclidean_k> {
+struct dense_cuda_kit_for<nk_u4_k, nk_kernel_euclidean_k> {
     using kit_t = u4x2_ampere_euclidean_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_u1_k, nk_kernel_dot_k> {
+struct dense_cuda_kit_for<nk_u1_k, nk_kernel_dot_k> {
     using kit_t = u1x8_ampere_inner_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_u1_k, nk_kernel_hamming_k> {
+struct dense_cuda_kit_for<nk_u1_k, nk_kernel_hamming_k> {
     using kit_t = u1x8_ampere_hamming_kit_t;
 };
 template <>
-struct inner_cuda_kit_for<nk_u1_k, nk_kernel_jaccard_k> {
+struct dense_cuda_kit_for<nk_u1_k, nk_kernel_jaccard_k> {
     using kit_t = u1x8_ampere_jaccard_kit_t;
 };
 

@@ -1,5 +1,5 @@
 /**
- *  @brief The backend-neutral benchmarking surface shared by every inner-index category -
+ *  @brief The backend-neutral benchmarking surface shared by every dense-index residency -
  *      volatile in-RAM, GPU-resident, and persisted alike.
  *
  *  @author Ash Vardanian
@@ -439,7 +439,7 @@ struct bench_results_t {
     /** @brief The @b [queries,top_k] merged global rows of every query's gathered hits. */
     nk::matrix<std::uint32_t> hit_rows;
     /** @brief The @b [queries,top_k] distances matching @c hit_rows entry-for-entry. */
-    nk::matrix<inner_distance_t> hit_distances;
+    nk::matrix<dense_distance_t> hit_distances;
     /** @brief Merged hits per query, sizing each row for the post-clock judgment. */
     std::vector<std::uint32_t> hit_counts;
     /** @brief Per-query end-to-end lookup latencies, in microseconds. */

@@ -1,5 +1,5 @@
 /**
- *  @brief Smoke & concurrency tests for the CPU-resident @c inner_volatile_index over a
+ *  @brief Smoke & concurrency tests for the CPU-resident @c dense_ram_index over a
  *      curated set of (dtype, kernel) instantiations - not the whole combinatorial space.
  *
  *  @author Ash Vardanian
@@ -30,7 +30,7 @@ using namespace unum::usearch;
 /** @brief Gate: a (dtype, kernel) cell is testable once its serial kernel kit is adapted. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 concept index_combo_supported = requires {
-    typename inner_quads_chain<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>::kit_t;
+    typename dense_quads_chain<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>::kit_t;
 };
 
 /** @brief No-op sibling picked when the tuple's serial kernels are not adapted yet. */
@@ -58,8 +58,8 @@ static std::size_t test_configuration(char const* name) {
         nk_configure_thread(nk_capabilities_available());
     }
 
-    using index_t = inner_volatile_index<dtype_, kernel_, caps_, waiter_type_, counting_allocator<std::byte>,
-                                         counting_allocator<std::byte>, std::allocator<std::byte>>;
+    using index_t = dense_ram_index<dtype_, kernel_, caps_, waiter_type_, counting_allocator<std::byte>,
+                                    counting_allocator<std::byte>, std::allocator<std::byte>>;
     auto make_index = [](allocation_ledger_t& ledger) {
         return index_t {counting_allocator<std::byte>(ledger), counting_allocator<std::byte>(ledger)};
     };
