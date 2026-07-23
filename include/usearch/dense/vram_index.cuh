@@ -1,7 +1,7 @@
 /**
  *  @brief Vector Search index for a single uniform latency memory space on NVIDIA GPUs.
  *  @author Ash Vardanian
- *  @file include/usearch/inner_cuda_index.cuh
+ *  @file include/usearch/dense/vram_index.cuh
  *  @date July 18, 2026
  */
 #pragma once
@@ -26,9 +26,9 @@
 #include <numkong/types.h>
 #include <numkong/vector.hpp>
 
-#include "usearch/cuda_device.hpp"
-#include "usearch/inner_metric.cuh"
 #include "usearch/types.hpp"
+#include "usearch/vram_device.hpp"
+#include "usearch/dense/vram_metric.cuh"
 
 namespace unum {
 namespace usearch {

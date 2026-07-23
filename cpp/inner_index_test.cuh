@@ -36,7 +36,7 @@
 #include <numkong/numkong.hpp>
 
 #include "test.hpp"
-#include "usearch/inner_metric.hpp" // `usearch::distance`, `usearch::inner_norms` - the oracle's kernels
+#include "usearch/dense/ram_metric.hpp" // `usearch::distance`, `usearch::inner_norms` - the oracle's kernels
 #include "usearch/types.hpp"
 
 namespace unum {

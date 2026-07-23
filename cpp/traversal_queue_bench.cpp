@@ -1,5 +1,5 @@
 /**
- *  @brief Throughput benchmarks for @c traversal_queue.hpp containers - @c max_heap,
+ *  @brief Throughput benchmarks for @c ram_queue.hpp containers - @c max_heap,
  *      @c sorted_buffer, and @c growing_hash_set - including their multi-element overloads.
  *
  *  @author Ash Vardanian
@@ -27,7 +27,7 @@
 
 #include <benchmark/benchmark.h>
 
-#include "usearch/traversal_queue.hpp"
+#include "usearch/ram_queue.hpp"
 
 using namespace unum::usearch;
 

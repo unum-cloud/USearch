@@ -1,7 +1,7 @@
 /**
  *  @brief Host-side vocabulary for driving one CUDA device - specs, streams, allocators.
  *  @author Ash Vardanian
- *  @file include/usearch/cuda_device.hpp
+ *  @file include/usearch/vram_device.hpp
  *  @date July 22, 2026
  *
  *  Everything here is host-side driver & runtime API code - no kernels, no device-side

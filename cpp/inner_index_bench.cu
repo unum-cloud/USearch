@@ -26,7 +26,7 @@
 #include <cuda_runtime.h>
 #include <fmt/format.h>
 
-#include <usearch/inner_cuda_index.cuh>
+#include <usearch/dense/vram_index.cuh>
 
 #include "inner_index_bench.cuh"
 #include "persisted_dataset.hpp"
@@ -309,7 +309,7 @@ static bool run_search(streamed_dataset_type_& streamed) {
 #pragma region Dispatch Cascade
 
 /** @brief Gate: a (stored dtype, kernel) cell is runnable once its device kit is adapted
- *      in @c inner_metric.cuh - unadapted combinations report as skipped and light up
+ *      in @c dense/vram_metric.cuh - unadapted combinations report as skipped and light up
  *      automatically when their kits land, exactly like the CPU cascade. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 concept cuda_combo_supported = requires { typename inner_cuda_kit_for<dtype_, kernel_>::kit_t; };

@@ -1,7 +1,7 @@
 /**
  *  @brief Cache-control & prefetch hints for 1-to-N graph-traversal distance compute.
  *  @author Ash Vardanian
- *  @file memory_hints.hpp
+ *  @file include/usearch/ram_hints.hpp
  *  @date April 22, 2026
  */
 #pragma once

@@ -1,7 +1,7 @@
 /**
- *  @brief Device metric kits for the CUDA inner indexes - the GPU twin of @c inner_metric.hpp.
+ *  @brief Device metric kits for the CUDA inner indexes - the GPU twin of @c ram_metric.hpp.
  *  @author Ash Vardanian
- *  @file include/usearch/inner_metric.cuh
+ *  @file include/usearch/dense/vram_metric.cuh
  *  @date July 22, 2026
  *
  *  A kit binds one storage dtype to one metric on one GPU generation, named like the CPU
@@ -30,8 +30,8 @@
 
 #include <numkong/numkong.hpp>
 
-#include "usearch/cuda_device.hpp"
 #include "usearch/types.hpp"
+#include "usearch/vram_device.hpp"
 
 #if defined(__CUDACC__)
 

@@ -26,7 +26,7 @@
 #include <forkunion/allocators.hpp>
 #include <numkong/numkong.hpp>
 
-#include <usearch/inner_volatile_index.hpp>
+#include <usearch/dense/ram_index.hpp>
 
 namespace us = unum::usearch;
 namespace fu = ashvardanian::forkunion;

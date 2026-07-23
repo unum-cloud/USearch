@@ -3,7 +3,7 @@
  *      backed by NumKong.
  *
  *  @author Ash Vardanian
- *  @file inner_metric.hpp
+ *  @file include/usearch/dense/ram_metric.hpp
  *  @date April 21, 2026
  *
  *  This header is the hot inner loop of @c basic_dense_hindex - everything called per
@@ -101,8 +101,8 @@
 #include <numkong/types.hpp>
 #include <numkong/vector.hpp>
 
-#include "memory_hints.hpp"
-#include "types.hpp"
+#include "usearch/ram_hints.hpp"
+#include "usearch/types.hpp"
 
 /**
  *  @brief Per-step cache-hint feature gates for the @c invoke_distances_ trampoline.

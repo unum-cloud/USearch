@@ -1,7 +1,7 @@
 /**
  *  @brief Vector Search index for a single uniform latency memory space.
  *  @author Ash Vardanian
- *  @file include/usearch/inner_volatile_index.hpp
+ *  @file include/usearch/dense/ram_index.hpp
  *  @date July 26, 2023
  */
 #pragma once
@@ -13,8 +13,8 @@
 #include <numkong/tensor.hpp>
 
 #include "usearch/types.hpp"
-#include "usearch/inner_metric.hpp"
-#include "usearch/traversal_queue.hpp"
+#include "usearch/ram_queue.hpp"
+#include "usearch/dense/ram_metric.hpp"
 
 namespace unum {
 namespace usearch {

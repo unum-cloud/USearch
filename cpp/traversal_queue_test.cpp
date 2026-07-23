@@ -1,5 +1,5 @@
 /**
- *  @brief Smoke tests for @c traversal_queue.hpp containers - @c max_heap,
+ *  @brief Smoke tests for @c ram_queue.hpp containers - @c max_heap,
  *      @c sorted_buffer, and @c growing_hash_set - including their four-wide and
  *      larger-N batch overloads plus @c insert_many / @c pop_many on the heap.
  *
@@ -27,7 +27,7 @@
 
 #include <fmt/format.h>
 
-#include "usearch/traversal_queue.hpp"
+#include "usearch/ram_queue.hpp"
 
 using namespace unum::usearch;
 

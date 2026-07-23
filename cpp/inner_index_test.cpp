@@ -11,7 +11,7 @@
  *  gates, and composes the suite explicitly. The covered matrix is:
  *  f32+dot, f32+angular, f32+euclidean, u8+euclidean, u8+angular, i4+angular - each gated
  *  by a compile-time concept, so combinations whose serial kernels are not yet adapted in
- *  @c inner_metric.hpp report as skipped and light up automatically once the kits land.
+ *  @c dense/ram_metric.hpp report as skipped and light up automatically once the kits land.
  *  Two already-adapted stand-ins (bf16+angular, i8+euclidean) keep the index machinery
  *  genuinely exercised in the meantime, and repeat with a deliberately flaky waiter that
  *  oversleeps at random, widening the interleaving windows around locks and watermark turns
@@ -23,7 +23,7 @@
 #include <numkong/numkong.hpp>
 
 #include "inner_index_test.cuh"
-#include "usearch/inner_volatile_index.hpp"
+#include "usearch/dense/ram_index.hpp"
 
 using namespace unum::usearch;
 

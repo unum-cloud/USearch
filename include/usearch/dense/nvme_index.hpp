@@ -1,7 +1,7 @@
 /**
  *  @brief Vector Search index for pre-constructed read-only graphs on block storage.
  *  @author Ash Vardanian
- *  @file include/usearch/inner_persisted_index.hpp
+ *  @file include/usearch/dense/nvme_index.hpp
  *  @date July 22, 2026
  *
  *  Unlike the mutation-oriented in-memory design, this header is built around one idea:
@@ -131,8 +131,8 @@
 #include <numkong/tensor.hpp>
 
 #include "usearch/types.hpp"
-#include "usearch/inner_metric.hpp"
-#include "usearch/traversal_queue.hpp"
+#include "usearch/ram_queue.hpp"
+#include "usearch/dense/ram_metric.hpp"
 
 namespace unum {
 namespace usearch {

@@ -1,7 +1,7 @@
 /**
  *  @brief SIMD-accelerated dynamic data-structures for Graph traversals.
  *  @author Ash Vardanian
- *  @file traversal_queue.hpp
+ *  @file include/usearch/ram_queue.hpp
  *  @date April 21, 2026
  *
  *  Standalone header providing baseline dynamic data-structures for Graph traversals, like:

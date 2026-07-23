@@ -44,7 +44,7 @@
 #include <numkong/vector.hpp>
 
 #include "test.hpp"
-#include "usearch/inner_metric.hpp"
+#include "usearch/dense/ram_metric.hpp"
 
 using namespace unum::usearch;
 

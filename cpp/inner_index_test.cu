@@ -15,7 +15,7 @@
 
 #include <fmt/format.h>
 
-#include "usearch/inner_cuda_index.cuh"
+#include "usearch/dense/vram_index.cuh"
 
 #include "inner_index_test.cuh"
 

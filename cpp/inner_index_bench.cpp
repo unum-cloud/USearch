@@ -58,7 +58,7 @@
 #include <clipp.h>
 #include <fmt/format.h>
 
-#include <usearch/inner_volatile_index.hpp>
+#include <usearch/dense/ram_index.hpp>
 
 #include "inner_index_bench.cuh"
 #include "persisted_dataset.hpp"
