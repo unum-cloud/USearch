@@ -324,10 +324,10 @@ static int stage_and_run(persisted_dataset<dataset_scalar_type_> const&, bench_o
     return 0;
 }
 
-/** @brief The multi-GPU pipeline, defined with the fleet machinery below - the cascade
- *      only needs its shape to route `--devices` runs. */
+/** @brief The multi-GPU pipeline over an index group - the cascade only needs its shape
+ *      to route `--devices` runs; the definition follows the group machinery. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t arch_ceiling_>
-static int run_fleet(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options);
+static int run_indexes(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options);
 
 /** @brief The innermost hop: binds the concrete CUDA-index instantiation, wires the typed
  *      source views and the staging trampoline, and runs the phases in checkpoint order. */
@@ -343,8 +343,8 @@ static int stage_and_run(persisted_dataset<dataset_scalar_type_> const& dataset,
 
     if (options.devices.size() > 1) {
         if constexpr (std::is_same_v<plane_allocator_, cuda_vmm_allocator<std::byte>>)
-            return run_fleet<dataset_scalar_type_, stored_dtype_, kernel_, arch_ceiling_>(dataset, options);
-        fmt::println("skipped: the fleet pipeline needs virtual-memory planes; drop --managed-memory");
+            return run_indexes<dataset_scalar_type_, stored_dtype_, kernel_, arch_ceiling_>(dataset, options);
+        fmt::println("skipped: the multi-index pipeline needs virtual-memory planes; drop --managed-memory");
         return 0;
     }
 
@@ -501,11 +501,11 @@ int main(int argc, char** argv) {
         (clipp::option("--neighbors") & clipp::value("path", options.neighbors_path)) % "ground truth, `.ibin`",
         (clipp::option("--device") & clipp::value("id", device)) % "CUDA device ordinal; 0 by default",
         (clipp::option("--devices") & clipp::value("list", devices_list)) %
-            "comma-separated ordinals for the fleet pipeline: one shard per device",
-        clipp::option("--fleet-merged").set(options.fleet_merged, true) % //
+            "comma-separated ordinals for the multi-index pipeline: one shard per device",
+        clipp::option("--merge").set(options.merge, true) % //
             "stitch the shards into ONE graph after ingest; single-walk queries",
-        (clipp::option("--merge-expansion") & clipp::value("breadth", options.merge_expansion)) %
-            "merge-phase insertion pool; inherits --expansion-add by default",
+        (clipp::option("--expansion-merge") & clipp::value("breadth", options.expansion_merge)) %
+            "merge candidate pool; inherits --expansion-add by default",
         (clipp::option("--max-arch") & clipp::value("name", max_arch_name)) %
             "kit-generation ceiling: ampere, ada, hopper, or blackwell; newest by default",
         clipp::option("--managed-memory").set(plane_space, cuda_address_space_t::managed_k) % //

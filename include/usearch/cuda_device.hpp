@@ -28,7 +28,8 @@
 #include <cuda.h>         // Driver API: `cuMemAddressReserve`, `cuMemCreate`, `cuMemMap`
 #include <cuda_runtime.h> // Runtime API: `cudaMallocAsync`, `cudaMallocManaged`, `cudaHostAlloc`
 
-#include <forkunion/types.hpp> // `fu::round_up_to_multiple` & friends
+#include <forkunion/topology.hpp> // `fu::volume_ram` - the managed planes' host-memory budget
+#include <forkunion/types.hpp>    // `fu::round_up_to_multiple` & friends
 
 #include "usearch/types.hpp"
 
@@ -297,6 +298,12 @@ struct cuda_managed_allocator {
     std::size_t reserved_bytes() const noexcept { return va_bytes_; }
     std::size_t committed_bytes() const noexcept { return committed_bytes_; }
     int device() const noexcept { return device_; }
+
+    /** @brief The reservation ceiling this backend budgets against: half the physical
+     *      host RAM - managed reservations are real allocations, and claiming it all
+     *      starves the host of staging buffers and page cache. Device planes budget
+     *      against VRAM instead, so only this backend consults the topology. */
+    static std::size_t budget_bytes() noexcept { return fu::volume_ram() / 2; }
 
     void release() noexcept {
         if (base_) cudaFree(base_);

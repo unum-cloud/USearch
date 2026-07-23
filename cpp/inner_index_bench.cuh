@@ -243,11 +243,17 @@ struct bench_options_t {
      *      none, any other value is enforced - a run that silently fell back to base pages
      *      must never masquerade as a huge-page result. */
     std::size_t huge_pages = 0;
-    /** @brief CUDA device group for the fleet pipeline: one shard index per listed
+    /** @brief CUDA device group for the multi-index pipeline: one shard index per listed
      *      ordinal, ingest striped round-robin from one host thread. Empty runs the
      *      single-device pipeline on `--device`. */
     std::vector<int> devices;
     /** @brief Merge the shards into ONE stitched graph after ingest and answer queries
+     *      with a single walk; false scatters every query to all shards and k-way merges
+     *      the hits on the host. */
+    bool merge = false;
+    /** @brief Merge candidate pool; zero inherits `--expansion-add`. Halving it roughly
+     *      halves the merge wall for under a recall point. */
+    std::size_t expansion_merge = 0;
     /** @brief Print the manual and exit. */
     bool help = false;
 };
@@ -462,7 +468,7 @@ inline void report_search_metrics(bench_options_t const& options, std::size_t qu
         fmt::println("  latency: {:.0f} µs mean per query, batch-uniform", seconds * 1e6 / double(query_count));
     else
         fmt::println("  latency: p50 {:.0f} µs · p90 {:.0f} µs · p99 {:.0f} µs", percentile(0.50), percentile(0.90),
-                   percentile(0.99));
+                     percentile(0.99));
     fmt::println("  distances/query: {}", humanize(double(sums.computed_distances) / double(query_count)));
     fmt::println("  visited/query: {}", humanize(double(sums.visited_members) / double(query_count)));
     fmt::println("  restarts: {}", sums.restarts);
@@ -583,7 +589,7 @@ struct streamed_dataset {
             float const max_amplitude = std::max(std::abs(float(min_value)), std::abs(float(max_value)));
             if (max_amplitude > 0) scale = target_amplitude_k / max_amplitude;
             fmt::println("Rescaling {} → {} by ×{:.4f} before the downcast", dataset_scalar_type_::dtype_name(),
-                       scalar_t::dtype_name(), scale);
+                         scalar_t::dtype_name(), scale);
         }
     }
 
@@ -626,8 +632,8 @@ inline void print_machine(fu_topology_t topology, fu_fabric_t fabric, bench_opti
     fmt::println("  memory domains: {}", memory_domains);
     for (std::size_t domain = 0; domain != memory_domains; ++domain)
         fmt::println("  memory domain {}: fabric level {}, huge pages {:.2f} GB", domain,
-                   fu_fabric_memory_level_in(fabric, domain),
-double(fu_volume_huge_pages_in(topology, domain)) / 1e9);
+                     fu_fabric_memory_level_in(fabric, domain),
+                     double(fu_volume_huge_pages_in(topology, domain)) / 1e9);
     if (!options.memory_domains.empty()) {
         fmt::print("  engaged memory domains:");
         for (fu_memory_domain_id_t domain : options.memory_domains) fmt::print(" {}", domain);
@@ -645,8 +651,8 @@ double(fu_volume_huge_pages_in(topology, domain)) / 1e9);
         if (available & choice.bit) fmt::print(" {}", choice.name);
     fmt::println("");
     fmt::println("  compute ceiling: {}",
-               bit_name(compute_span_k, highest_bit(compute_span_k, options.max_compute & available, nk_cap_serial_k),
-                        "serial"));
+                 bit_name(compute_span_k, highest_bit(compute_span_k, options.max_compute & available, nk_cap_serial_k),
+                          "serial"));
     fmt::print(
         "  scheduling ceiling: {}\n",
         bit_name(schedule_span_k,
