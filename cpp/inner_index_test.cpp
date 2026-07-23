@@ -38,7 +38,7 @@ template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, typename waiter_type_ = d
           nk_capability_t caps_ = nk_cap_serial_k>
     requires(!index_combo_supported<dtype_, kernel_>)
 static std::size_t test_configuration(char const* name) {
-    fmt::print("skipped  {:<20} : serial kernels not adapted yet\n", name);
+    fmt::println("skipped  {:<20} : serial kernels not adapted yet", name);
     return 0;
 }
 
@@ -52,7 +52,7 @@ static std::size_t test_configuration(char const* name) {
     // the machine offers every requested bit; the tile permission handshake is per-process.
     if constexpr (caps_ != nk_cap_serial_k) {
         if ((nk_capabilities_available() & caps_) != caps_) {
-            fmt::print("skipped  {:<20} : capabilities missing at runtime\n", name);
+            fmt::println("skipped  {:<20} : capabilities missing at runtime", name);
             return 0;
         }
         nk_configure_thread(nk_capabilities_available());
@@ -95,6 +95,6 @@ int main() {
         nk_cap_serial_k | nk_cap_icelake_k | nk_cap_sapphireamx_k);
     failures_count += test_configuration<nk_u8_k, nk_kernel_euclidean_k, dummy_waiter_t, tiles_caps_k>( //
         "u8+euclidean+tiles");
-    fmt::print("{}: {} total failures\n", failures_count ? "FAILED" : "OK", failures_count);
+    fmt::println("{}: {} total failures", failures_count ? "FAILED" : "OK", failures_count);
     return failures_count ? 1 : 0;
 }

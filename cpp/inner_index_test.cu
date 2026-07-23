@@ -95,10 +95,10 @@ int main() {
     int devices_count = 0;
     cudaError_t const probed = cudaGetDeviceCount(&devices_count);
     if (probed != cudaSuccess || !devices_count) {
-        fmt::print("skipped  {:<20} : no CUDA device reachable\n", "cuda");
+        fmt::println("skipped  {:<20} : no CUDA device reachable", "cuda");
         return 0;
     }
-    fmt::print("CUDA devices: {}\n", devices_count);
+    fmt::println("CUDA devices: {}", devices_count);
     std::size_t failures_count = 0;
     failures_count += test_configuration<nk_kernel_sqeuclidean_k>("cuda-i8+sqeuclidean");
     failures_count += test_configuration<nk_kernel_euclidean_k>("cuda-i8+euclidean");

@@ -543,7 +543,7 @@ static std::size_t test_concurrent_search(make_index_type_ const& make_index) {
 
 /** @brief Prints one verdict line for a cell's summed scenario @p failures_count. */
 inline std::size_t report_scenarios(char const* name, std::size_t failures_count) {
-    fmt::print("{}  {:<20} : {} failures\n", failures_count ? "FAILED" : "passed", name, failures_count);
+    fmt::println("{}  {:<20} : {} failures", failures_count ? "FAILED" : "passed", name, failures_count);
     return failures_count;
 }
 

@@ -11,6 +11,7 @@
  */
 #pragma once
 
+#include <chrono>  // `std::chrono::steady_clock` for progress rates
 #include <cmath>   // `std::log2` for ranking gains
 #include <cstddef> // `std::size_t`
 #include <cstdio>  // `std::fopen` for `/proc/self/status`, `stdout` for the TTY probe
@@ -59,6 +60,67 @@ inline std::string humanize(double value) {
     if (value >= 1e3) return fmt::format("{:.2f} k", value / 1e3);
     return fmt::format("{:.0f}", value);
 }
+
+/**
+ *  @brief Phase progress for every usage form: an in-place line with a bar, rate, and ETA
+ *      on a TTY, or one plain line per completed decile when piped or logged - short and
+ *      ANSI-free where scrollback is permanent.
+ *
+ *  Tick with the completed count from the driving loop; @c finish clears the TTY line so
+ *  the phase report takes its place.
+ */
+class progress_bar_t {
+  public:
+    progress_bar_t(char const* label, std::size_t total) noexcept : label_(label), total_(total) {}
+
+    void tick(std::size_t completed) noexcept {
+        if (stdout_is_terminal()) render_bar_(completed);
+        else render_decile_(completed);
+    }
+    void finish() noexcept {
+        if (stdout_is_terminal()) fmt::print("\r\033[K");
+    }
+
+  private:
+    inline static constexpr std::size_t bar_cells_k = 24;
+
+    char const* label_;
+    std::size_t total_;
+    std::chrono::steady_clock::time_point started_ {std::chrono::steady_clock::now()};
+    std::chrono::steady_clock::time_point rendered_ {};
+    std::size_t reported_deciles_ = 0;
+
+    double rate_per_second_(std::size_t completed) const noexcept {
+        double const seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started_).count();
+        return seconds > 0 ? static_cast<double>(completed) / seconds : 0;
+    }
+
+    void render_bar_(std::size_t completed) noexcept {
+        auto const now = std::chrono::steady_clock::now();
+        bool const final = completed == total_;
+        if (!final && now - rendered_ < std::chrono::milliseconds(100)) return; // The work outruns the terminal.
+        rendered_ = now;
+        std::size_t const filled_cells = total_ ? bar_cells_k * completed / total_ : bar_cells_k;
+        std::string cells;
+        for (std::size_t cell = 0; cell != bar_cells_k; ++cell) cells += cell < filled_cells ? "█" : "░";
+        double const rate = rate_per_second_(completed);
+        double const eta_seconds = rate > 0 ? static_cast<double>(total_ - completed) / rate : 0;
+        fmt::print("\r\033[K  {} {} {} / {} · {}/s · eta {:.0f} s", label_, cells, humanize(double(completed)),
+                   humanize(double(total_)), humanize(rate), eta_seconds);
+        std::fflush(stdout);
+    }
+
+    void render_decile_(std::size_t completed) noexcept {
+        std::size_t const deciles = total_ ? 10 * completed / total_ : 10;
+        if (completed != total_ && deciles == reported_deciles_) return;
+        reported_deciles_ = deciles;
+        fmt::println("  {}: {} / {} · {}/s", label_, humanize(double(completed)), humanize(double(total_)),
+                     humanize(rate_per_second_(completed)));
+        // A piped stdout is block-buffered: without the flush a decile line can lag its
+        // phase by minutes in `tee`-style logs, which exist precisely to watch progress.
+        std::fflush(stdout);
+    }
+};
 
 /** @brief Names the benchmarked dtype subset; NumKong exposes no C-level name table yet. */
 inline char const* dtype_name(nk_dtype_t dtype) noexcept {

@@ -243,6 +243,11 @@ struct bench_options_t {
      *      none, any other value is enforced - a run that silently fell back to base pages
      *      must never masquerade as a huge-page result. */
     std::size_t huge_pages = 0;
+    /** @brief CUDA device group for the fleet pipeline: one shard index per listed
+     *      ordinal, ingest striped round-robin from one host thread. Empty runs the
+     *      single-device pipeline on `--device`. */
+    std::vector<int> devices;
+    /** @brief Merge the shards into ONE stitched graph after ingest and answer queries
     /** @brief Print the manual and exit. */
     bool help = false;
 };
@@ -307,7 +312,7 @@ static bool load_checkpoint(bench_options_t const& options, index_type_& index, 
     auto mapped_rows = mmap_view_t::try_map(paths.rows.c_str());
     if (mapped_vectors.status != status_t::success_k || mapped_neighbors.status != status_t::success_k ||
         mapped_rows.status != status_t::success_k) {
-        fmt::print("Failed to map the {} checkpoint for slot {}\n", options.load_name, slot);
+        fmt::println("Failed to map the {} checkpoint for slot {}", options.load_name, slot);
         return false;
     }
 
@@ -321,7 +326,7 @@ static bool load_checkpoint(bench_options_t const& options, index_type_& index, 
         neighbors_extents.value.columns != options.connectivity || map_extents.value.columns != 1 ||
         neighbors_extents.value.rows != loaded_nodes || map_extents.value.rows != loaded_nodes ||
         loaded_nodes > id_to_row.size()) {
-        fmt::print("Checkpoint {} disagrees with the run's geometry\n", options.load_name);
+        fmt::println("Checkpoint {} disagrees with the run's geometry", options.load_name);
         return false;
     }
 
@@ -331,7 +336,7 @@ static bool load_checkpoint(bench_options_t const& options, index_type_& index, 
         mapped_neighbors.value, loaded_nodes, options.connectivity);
     status_t const loaded = index.load(vectors_view, neighbors_view, synchronization_t::exclusive_k);
     if (loaded != status_t::success_k) {
-        fmt::print("Failed to restore {}: status {}\n", paths.vectors, int(loaded));
+        fmt::println("Failed to restore {}: status {}", paths.vectors, int(loaded));
         return false;
     }
     nk::matrix_view<std::uint32_t> const rows_view = view_matrix_payload<std::uint32_t, std::uint32_t>(
@@ -363,12 +368,12 @@ static std::size_t save_checkpoint(bench_options_t const& options, index_type_& 
     auto vectors = nk::matrix<scalar_t>::try_zeros({shape.nodes, shape.dimensions});
     auto neighbors = nk::matrix<node_id_t>::try_zeros({shape.nodes, shape.connectivity});
     if (vectors.empty() || neighbors.empty()) {
-        fmt::print("Failed to stage {} rows for serialization\n", shape.nodes);
+        fmt::println("Failed to stage {} rows for serialization", shape.nodes);
         return 0;
     }
     status_t const saved = index.save(vectors.span(), neighbors.span(), synchronization_t::immutable_k);
     if (saved != status_t::success_k) {
-        fmt::print("Failed to serialize index {}: status {}\n", slot, int(saved));
+        fmt::println("Failed to serialize index {}: status {}", slot, int(saved));
         return 0;
     }
 
@@ -378,7 +383,7 @@ static std::size_t save_checkpoint(bench_options_t const& options, index_type_& 
                          matrix_save<node_id_t>(paths.neighbors.c_str(), neighbors.view()) == status_t::success_k &&
                          matrix_save<std::uint32_t>(paths.rows.c_str(), rows_map_view) == status_t::success_k;
     if (!written) {
-        fmt::print("Failed to write the {} checkpoint for slot {}\n", options.save_name, slot);
+        fmt::println("Failed to write the {} checkpoint for slot {}", options.save_name, slot);
         return 0;
     }
     return shape.nodes * (static_cast<std::size_t>(vectors.view().stride_bytes(0)) + //
@@ -447,20 +452,20 @@ inline void report_search_metrics(bench_options_t const& options, std::size_t qu
         return latencies_us[rank];
     };
     fmt::print(header_style(), "\nSearch\n");
-    fmt::print("  queries: {} at top-{}{}\n", query_count, options.top_k, options.self_recall ? " · self-recall" : "");
-    fmt::print("  threads: {}\n", threads);
-    fmt::print("  wall: {:.2f} s\n", seconds);
-    fmt::print("  throughput: {} QPS\n", humanize(double(query_count) / seconds));
+    fmt::println("  queries: {} at top-{}{}", query_count, options.top_k, options.self_recall ? " · self-recall" : "");
+    fmt::println("  threads: {}", threads);
+    fmt::println("  wall: {:.2f} s", seconds);
+    fmt::println("  throughput: {} QPS", humanize(double(query_count) / seconds));
     // Batch-shaped backends have no honest per-query clock - an empty latency span asks
     // for the mean instead of three identical pseudo-percentiles.
     if (latencies_us.empty())
-        fmt::print("  latency: {:.0f} µs mean per query, batch-uniform\n", seconds * 1e6 / double(query_count));
+        fmt::println("  latency: {:.0f} µs mean per query, batch-uniform", seconds * 1e6 / double(query_count));
     else
-        fmt::print("  latency: p50 {:.0f} µs · p90 {:.0f} µs · p99 {:.0f} µs\n", percentile(0.50), percentile(0.90),
+        fmt::println("  latency: p50 {:.0f} µs · p90 {:.0f} µs · p99 {:.0f} µs", percentile(0.50), percentile(0.90),
                    percentile(0.99));
-    fmt::print("  distances/query: {}\n", humanize(double(sums.computed_distances) / double(query_count)));
-    fmt::print("  visited/query: {}\n", humanize(double(sums.visited_members) / double(query_count)));
-    fmt::print("  restarts: {}\n", sums.restarts);
+    fmt::println("  distances/query: {}", humanize(double(sums.computed_distances) / double(query_count)));
+    fmt::println("  visited/query: {}", humanize(double(sums.visited_members) / double(query_count)));
+    fmt::println("  restarts: {}", sums.restarts);
 }
 
 /** @brief Judges the merged hits after the clocks stopped - self-recall against own rows, or
@@ -514,10 +519,10 @@ inline void judge_hits(bench_options_t const& options, bench_results_t& results,
         fmt::print(verdict_style(recall_at_1 >= 90.0), "{:.1f}%\n", recall_at_1);
         fmt::print("  recall@{}: ", judged_depth);
         fmt::print(verdict_style(recall_at_k >= 99.0), "{:.1f}%\n", recall_at_k);
-        fmt::print("  overlap@{}: {:.1f}%\n", judged_depth, overlap_at_k);
-        fmt::print("  ndcg@{}: {:.1f}%\n", judged_depth, gain_at_k);
+        fmt::println("  overlap@{}: {:.1f}%", judged_depth, overlap_at_k);
+        fmt::println("  ndcg@{}: {:.1f}%", judged_depth, gain_at_k);
     }
-    else { fmt::print("  recall: skipped, no ground-truth neighbors provided\n"); }
+    else { fmt::println("  recall: skipped, no ground-truth neighbors provided"); }
 }
 
 #pragma endregion
@@ -577,7 +582,7 @@ struct streamed_dataset {
             nk::reduce_minmax(vectors.as_vector(), &min_value, &min_index, &max_value, &max_index);
             float const max_amplitude = std::max(std::abs(float(min_value)), std::abs(float(max_value)));
             if (max_amplitude > 0) scale = target_amplitude_k / max_amplitude;
-            fmt::print("Rescaling {} → {} by ×{:.4f} before the downcast\n", dataset_scalar_type_::dtype_name(),
+            fmt::println("Rescaling {} → {} by ×{:.4f} before the downcast", dataset_scalar_type_::dtype_name(),
                        scalar_t::dtype_name(), scale);
         }
     }
@@ -616,29 +621,30 @@ inline void print_machine(fu_topology_t topology, fu_fabric_t fabric, bench_opti
     std::size_t const compute_domains = fu_compute_domains_count(topology);
     std::size_t const memory_domains = fu_memory_domains_count(topology);
     fmt::print(header_style(), "Machine\n");
-    fmt::print("  logical cores: {}\n", fu_logical_cores_count(topology));
-    fmt::print("  compute domains: {}\n", compute_domains);
-    fmt::print("  memory domains: {}\n", memory_domains);
+    fmt::println("  logical cores: {}", fu_logical_cores_count(topology));
+    fmt::println("  compute domains: {}", compute_domains);
+    fmt::println("  memory domains: {}", memory_domains);
     for (std::size_t domain = 0; domain != memory_domains; ++domain)
-        fmt::print("  memory domain {}: fabric level {}, huge pages {:.2f} GB\n", domain,
-                   fu_fabric_memory_level_in(fabric, domain), double(fu_volume_huge_pages_in(topology, domain)) / 1e9);
+        fmt::println("  memory domain {}: fabric level {}, huge pages {:.2f} GB", domain,
+                   fu_fabric_memory_level_in(fabric, domain),
+double(fu_volume_huge_pages_in(topology, domain)) / 1e9);
     if (!options.memory_domains.empty()) {
         fmt::print("  engaged memory domains:");
         for (fu_memory_domain_id_t domain : options.memory_domains) fmt::print(" {}", domain);
-        fmt::print("\n");
+        fmt::println("");
     }
-    fmt::print("  threads engaged: {}\n", threads);
+    fmt::println("  threads engaged: {}", threads);
 
     char scheduling_names[256] = {0};
     fu_name_capabilities(fu_runtime_capabilities(), scheduling_names, sizeof(scheduling_names));
-    fmt::print("  scheduling detected: {}\n", scheduling_names);
+    fmt::println("  scheduling detected: {}", scheduling_names);
 
     nk_capability_t const available = nk_capabilities_available();
     fmt::print("  compute detected: serial");
     for (capability_choice<nk_capability_t> const& choice : compute_choices_k)
         if (available & choice.bit) fmt::print(" {}", choice.name);
-    fmt::print("\n");
-    fmt::print("  compute ceiling: {}\n",
+    fmt::println("");
+    fmt::println("  compute ceiling: {}",
                bit_name(compute_span_k, highest_bit(compute_span_k, options.max_compute & available, nk_cap_serial_k),
                         "serial"));
     fmt::print(
@@ -646,7 +652,7 @@ inline void print_machine(fu_topology_t topology, fu_fabric_t fabric, bench_opti
         bit_name(schedule_span_k,
                  highest_bit(schedule_span_k, effective_schedule(options.max_schedule), fu_capabilities_unknown_k),
                  "standard"));
-    fmt::print("  kernels requested: {} · {}\n", dtype_name(options.stored_dtype), kernel_name(options.kernel));
+    fmt::println("  kernels requested: {} · {}", dtype_name(options.stored_dtype), kernel_name(options.kernel));
 }
 
 } // namespace unum::usearch

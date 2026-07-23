@@ -182,7 +182,7 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
 
     connectivity_t const connectivity = connectivity_of(bench.options.connectivity);
     if (connectivity == connectivity_unknown_k) {
-        fmt::print("Unsupported --connectivity {}; pick 16, 32, or 128\n", bench.options.connectivity);
+        fmt::println("Unsupported --connectivity {}; pick 16, 32, or 128", bench.options.connectivity);
         return false;
     }
 
@@ -202,7 +202,7 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
         }
 
     if (bench.options.skip_vectors > rows) {
-        fmt::print("--skip-vectors {} exceeds the {} viewed rows\n", bench.options.skip_vectors, rows);
+        fmt::println("--skip-vectors {} exceeds the {} viewed rows", bench.options.skip_vectors, rows);
         return false;
     }
     bench.indexes.reserve(indexes_count);
@@ -218,7 +218,7 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
         // of restoring an incompatible graph.
         auto reserved = index.reserve({rows, connectivity, dimensions});
         if (reserved.status != status_t::success_k) {
-            fmt::print("Failed to reserve {} × {}d\n", rows, dimensions);
+            fmt::println("Failed to reserve {} × {}d", rows, dimensions);
             return false;
         }
 
@@ -237,8 +237,8 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
     std::size_t loaded_rows = 0;
     for (auto const& index : bench.indexes) loaded_rows += index->size();
     if (loaded_rows != bench.options.skip_vectors) {
-        fmt::print("Loaded indexes cover {} rows, but --skip-vectors says {}\n", loaded_rows,
-                   bench.options.skip_vectors);
+        fmt::println("Loaded indexes cover {} rows, but --skip-vectors says {}", loaded_rows,
+                     bench.options.skip_vectors);
         return false;
     }
 
@@ -260,7 +260,7 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
     fu_pool_for_threads(pool, traversals_init, &bench);
     for (std::size_t thread = 0; thread != threads; ++thread)
         if (!bench.traversals[thread]) {
-            fmt::print("Failed to build the per-thread traversal contexts\n");
+            fmt::println("Failed to build the per-thread traversal contexts");
             return false;
         }
     bench.lanes.resize(threads);
@@ -270,7 +270,7 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
     bench.results.hit_rows = nk::matrix<std::uint32_t>::try_zeros({search_count, bench.options.top_k});
     bench.results.hit_distances = nk::matrix<inner_distance_t>::try_zeros({search_count, bench.options.top_k});
     if (bench.results.hit_rows.empty() || bench.results.hit_distances.empty()) {
-        fmt::print("Failed to allocate the per-query hit matrices\n");
+        fmt::println("Failed to allocate the per-query hit matrices");
         return false;
     }
     bench.results.hit_counts.resize(search_count);
@@ -328,7 +328,7 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     std::size_t const inserted_rows = rows - bench.options.skip_vectors;
     if (!inserted_rows) {
         fmt::print(header_style(), "\nInsertion\n");
-        fmt::print("  skipped: the loaded base already covers all {} rows\n", rows);
+        fmt::println("  skipped: the loaded base already covers all {} rows", rows);
         return true;
     }
 
@@ -337,7 +337,7 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     double const seconds = std::chrono::duration<double>(clock_t::now() - started).count();
 
     if (std::size_t failures = bench.results.failed_tasks.load(); failures) {
-        fmt::print("Insertion failed on {} vectors\n", failures);
+        fmt::println("Insertion failed on {} vectors", failures);
         return false;
     }
     telemetry_lane_t const sums = summed_lanes(bench.lanes);
@@ -350,28 +350,28 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
                                                                double(sums.computed_distances)
                                                          : 0.0;
     fmt::print(header_style(), "\nInsertion\n");
-    fmt::print("  shape: {} × {}d\n", inserted_rows, streamed.vectors.extent(1));
-    if (bench.options.skip_vectors) fmt::print("  topping: {} loaded rows\n", bench.options.skip_vectors);
-    fmt::print("  quads: {} · {} · {} kit\n", scalar_t::dtype_name(),
-               kernel_name(streamed_dataset_type_::bench_t::kernel_kind_k),
-               bit_name(compute_span_k, index_t::picked_quads_capability_k, "serial"));
+    fmt::println("  shape: {} × {}d", inserted_rows, streamed.vectors.extent(1));
+    if (bench.options.skip_vectors) fmt::println("  topping: {} loaded rows", bench.options.skip_vectors);
+    fmt::println("  quads: {} · {} · {} kit", scalar_t::dtype_name(),
+                 kernel_name(streamed_dataset_type_::bench_t::kernel_kind_k),
+                 bit_name(compute_span_k, index_t::picked_quads_capability_k, "serial"));
     if constexpr (index_t::has_tiles_k)
-        fmt::print("  tiles: {} · reverse refinement\n",
-                   bit_name(compute_span_k, index_t::picked_tiles_capability_k, "none"));
+        fmt::println("  tiles: {} · reverse refinement",
+                     bit_name(compute_span_k, index_t::picked_tiles_capability_k, "none"));
     if (index_t::picked_quads_capability_k == nk_cap_serial_k &&
         (bench.options.max_compute & nk_capabilities_available() & ~nk_cap_serial_k))
         fmt::print(verdict_style(false), "  ⚠ scalar fallback: no SIMD kit is adapted for this dtype & metric\n");
-    fmt::print("  threads: {}\n", fu_pool_threads_count(pool));
-    if (bench.indexes.size() > 1) fmt::print("  indexes: {}, one per memory domain\n", bench.indexes.size());
-    fmt::print("  wall: {:.2f} s\n", seconds);
-    fmt::print("  throughput: {}/s\n", humanize(double(inserted_rows) / seconds));
-    fmt::print("  distances: {} ({:.1f}% refines, {:.1f}% reverse)\n", humanize(double(sums.computed_distances)),
-               refine_share, reverse_share);
-    fmt::print("  visited: {}\n", humanize(double(sums.visited_members)));
+    fmt::println("  threads: {}", fu_pool_threads_count(pool));
+    if (bench.indexes.size() > 1) fmt::println("  indexes: {}, one per memory domain", bench.indexes.size());
+    fmt::println("  wall: {:.2f} s", seconds);
+    fmt::println("  throughput: {}/s", humanize(double(inserted_rows) / seconds));
+    fmt::println("  distances: {} ({:.1f}% refines, {:.1f}% reverse)", humanize(double(sums.computed_distances)),
+                 refine_share, reverse_share);
+    fmt::println("  visited: {}", humanize(double(sums.visited_members)));
     fmt::print("  restarts: ");
     fmt::print(verdict_style(sums.restarts < inserted_rows / 100 + 1), "{}\n", sums.restarts);
     if (std::size_t resident = peak_resident_bytes(); resident)
-        fmt::print("  peak resident: {:.2f} GB\n", double(resident) / 1e9);
+        fmt::println("  peak resident: {:.2f} GB", double(resident) / 1e9);
     return true;
 }
 
@@ -392,7 +392,7 @@ bool save_indexes(streamed_dataset_type_& streamed) {
         total_bytes += saved_bytes;
     }
     double const seconds = std::chrono::duration<double>(clock_t::now() - started).count();
-    fmt::print("Saved {} indexes: {:.2f} GB in {:.2f} s\n", bench.indexes.size(), double(total_bytes) / 1e9, seconds);
+    fmt::println("Saved {} indexes: {:.2f} GB in {:.2f} s", bench.indexes.size(), double(total_bytes) / 1e9, seconds);
     return true;
 }
 
@@ -459,7 +459,7 @@ bool run_search(streamed_dataset_type_& streamed, fu_pool_t pool) {
     double const seconds = std::chrono::duration<double>(clock_t::now() - started).count();
 
     if (std::size_t failures = bench.results.failed_tasks.load(); failures) {
-        fmt::print("Search failed on {} queries\n", failures);
+        fmt::println("Search failed on {} queries", failures);
         return false;
     }
     telemetry_lane_t const sums = summed_lanes(bench.lanes);
@@ -526,8 +526,8 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
         std::size_t const rows_per_thread = divide_round_up(batch_rows, threads);
         staging = nk::tensor<scalar_t, std::allocator<scalar_t>, 3>::try_zeros({threads, rows_per_thread, dimensions});
         if (staging.empty()) {
-            fmt::print("Failed to allocate {} staging rows of {}d {}\n", batch_rows, dimensions,
-                       scalar_t::dtype_name());
+            fmt::println("Failed to allocate {} staging rows of {}d {}", batch_rows, dimensions,
+                         scalar_t::dtype_name());
             return 1;
         }
         streamed.staging = staging.span();
@@ -536,7 +536,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
             rescaling_planes = nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3>::try_zeros(
                 {threads, rows_per_thread, dimensions});
             if (rescaling_planes.empty()) {
-                fmt::print("Failed to allocate {} rescaling rows of {}d f32\n", batch_rows, dimensions);
+                fmt::println("Failed to allocate {} rescaling rows of {}d f32", batch_rows, dimensions);
                 return 1;
             }
             streamed.rescaling = rescaling_planes.span();
@@ -546,7 +546,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
 
     if (dataset.has_ground_truth() && !launch.options.max_vectors) bench.results.ground_truth = dataset.neighbors();
     else if (dataset.has_ground_truth())
-        fmt::print("Ground truth ignored: --max-vectors truncates the graph it was computed for\n");
+        fmt::println("Ground truth ignored: --max-vectors truncates the graph it was computed for");
 
     if (!prepare(streamed, launch.pool, launch.topology)) return 1;
     if (!run_insertion(streamed, launch.pool)) return 1;
@@ -565,7 +565,7 @@ int run_with_metric(bench_launch<dataset_scalar_type_> const& launch) {
             return stage_and_run<dataset_scalar_type_, stored_dtype_, kernel.value, capability_, wait_type_>(launch);
         },
         [&](auto metric) {
-            fmt::print("Unsupported metric {}\n", kernel_name(metric));
+            fmt::println("Unsupported metric {}", kernel_name(metric));
             return 1;
         });
 }
@@ -609,8 +609,8 @@ int run_with_stored_dtype(bench_launch<dataset_scalar_type_> const& launch) {
         launch.options.stored_dtype,
         [&](auto dtype) { return run_with_compute<dataset_scalar_type_, dtype.value>(launch); },
         [&](auto dtype) {
-            fmt::print("Stored dtype {} has no adapted kernels; override with --bf16, --i8, --u8, or --i4\n",
-                       dtype_name(dtype));
+            fmt::println("Stored dtype {} has no adapted kernels; override with --bf16, --i8, --u8, or --i4",
+                         dtype_name(dtype));
             return 1;
         });
 }
@@ -622,7 +622,7 @@ int open_and_run(bench_options_t const& options, fu_pool_t pool, fu_topology_t t
         options.vectors_path.c_str(), options.queries_path.empty() ? nullptr : options.queries_path.c_str(),
         options.neighbors_path.empty() ? nullptr : options.neighbors_path.c_str());
     if (opened.status != status_t::success_k) {
-        fmt::print("Failed to open the dataset: {}\n", options.vectors_path);
+        fmt::println("Failed to open the dataset: {}", options.vectors_path);
         return 1;
     }
     return run_with_stored_dtype(bench_launch<dataset_scalar_type_> {opened.value, options, pool, topology});
@@ -680,13 +680,13 @@ int main(int argc, char** argv) {
 
     if (!clipp::parse(argc, argv, cli) || options.help || options.vectors_path.empty()) {
         for (auto const& section : clipp::make_man_page(cli, "inner_index_bench_cpp"))
-            fmt::print("{}\n{}\n\n", section.title(), section.content());
+            fmt::println("{}\n{}\n", section.title(), section.content());
         return options.help ? 0 : 1;
     }
 
     nk_dtype_t const file_dtype = dtype_of_extension(options.vectors_path.c_str());
     if (file_dtype == nk_dtype_unknown_k || file_dtype == nk_u32_k) {
-        fmt::print("Unrecognized vectors extension: {}\n", options.vectors_path);
+        fmt::println("Unrecognized vectors extension: {}", options.vectors_path);
         return 1;
     }
     if (options.stored_dtype == nk_dtype_unknown_k) options.stored_dtype = file_dtype;
@@ -701,7 +701,7 @@ int main(int argc, char** argv) {
         if (named == compute_choices_count_k) {
             fmt::print("Unknown --max-compute {}; this table offers: serial", max_compute_name);
             for (capability_choice<nk_capability_t> const& choice : compute_choices_k) fmt::print(" {}", choice.name);
-            fmt::print("\n");
+            fmt::println("");
             return 1;
         }
         options.max_compute = nk_cap_serial_k | prefix_mask(compute_span_k, named);
@@ -718,7 +718,7 @@ int main(int argc, char** argv) {
             fmt::print("Unknown --max-schedule {}; this table offers: standard", max_schedule_name);
             for (capability_choice<fu_capabilities_t> const& choice : schedule_choices_k)
                 fmt::print(" {}", choice.name);
-            fmt::print("\n");
+            fmt::println("");
             return 1;
         }
         options.max_schedule = static_cast<fu_capabilities_t>(schedule_floor_k | prefix_mask(schedule_span_k, named));
@@ -728,7 +728,7 @@ int main(int argc, char** argv) {
     fu_fabric_t fabric = fu_fabric_new();
     fu_pool_t pool = fu_pool_new("usearch_bench", options.max_schedule);
     if (!topology || !pool) {
-        fmt::print("Failed to inspect the topology or create the pool\n");
+        fmt::println("Failed to inspect the topology or create the pool");
         return 1;
     }
 
@@ -742,8 +742,8 @@ int main(int argc, char** argv) {
         fu_memory_domain_id_t const domain = static_cast<fu_memory_domain_id_t>(
             std::strtol(memory_domain_name.c_str(), nullptr, 10));
         if (domain < 0 || static_cast<std::size_t>(domain) >= fu_memory_domains_count(topology)) {
-            fmt::print("Unknown --memory-domain {}; this machine has {} memory domains\n", memory_domain_name,
-                       fu_memory_domains_count(topology));
+            fmt::println("Unknown --memory-domain {}; this machine has {} memory domains", memory_domain_name,
+                         fu_memory_domains_count(topology));
             return 1;
         }
         options.memory_domains.push_back(domain);
@@ -771,7 +771,7 @@ int main(int argc, char** argv) {
         spawned = fu_pool_spawn(topology, pool, threads, fu_caller_inclusive_k);
     }
     if (!spawned) {
-        fmt::print("Failed to spawn {} threads\n", threads);
+        fmt::println("Failed to spawn {} threads", threads);
         return 1;
     }
     print_machine(topology, fabric, options, threads);
@@ -782,9 +782,9 @@ int main(int argc, char** argv) {
         std::size_t volume = 0;
         for (std::size_t domain = 0; domain != fu_memory_domains_count(topology); ++domain)
             volume += fu_volume_huge_pages_in(topology, domain);
-        fmt::print("  huge pages expected: {}, available: {:.2f} GB\n", options.huge_pages, double(volume) / 1e9);
+        fmt::println("  huge pages expected: {}, available: {:.2f} GB", options.huge_pages, double(volume) / 1e9);
         if (!volume) {
-            fmt::print("--huge-pages expects {}, but the domains report none\n", options.huge_pages);
+            fmt::println("--huge-pages expects {}, but the domains report none", options.huge_pages);
             return 1;
         }
     }
@@ -795,7 +795,7 @@ int main(int argc, char** argv) {
         file_dtype,
         [&](auto dtype) { return open_and_run<typename nk::type_for<dtype.value>::type>(options, pool, topology); },
         [&](auto dtype) {
-            fmt::print("Unsupported dataset dtype {}\n", dtype_name(dtype));
+            fmt::println("Unsupported dataset dtype {}", dtype_name(dtype));
             return 1;
         });
 

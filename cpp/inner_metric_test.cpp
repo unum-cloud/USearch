@@ -10,7 +10,7 @@
  *  capability) with a metric overlay (per kernel) and route through a single trampoline.
  *  The test:
  *
- *  1. Enumerates every NumKong scalar in @c main and every @c (kernel, scalar, capability)
+ *  1. Enumerates every NumKong scalar in @c main and every @c (kernel,scalar,capability)
  *     tuple inside @c check_scalar. The @c quads_supported concept gates each
  *     call so combinations not yet adapted are no-ops at compile time without breaking
  *     the build - new kits and chains light up the matching cells automatically.
