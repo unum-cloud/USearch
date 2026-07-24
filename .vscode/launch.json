@@ -5,7 +5,7 @@
             "name": "Unit Test C++",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build_debug/test_cpp",
+            "program": "${workspaceFolder}/build_debug/usearch_test",
             "cwd": "${workspaceFolder}",
             "environment": [
                 {
@@ -18,18 +18,27 @@
                 }
             ],
             "stopAtEntry": false,
-            "linux": {
-                "preLaunchTask": "Linux Build Debug",
-                "MIMode": "gdb"
-            },
+            "preLaunchTask": "Build Debug",
+            "MIMode": "gdb",
             "osx": {
-                "preLaunchTask": "MacOS Build Debug",
                 "MIMode": "lldb"
             },
             "windows": {
-                "preLaunchTask": "Windows Build Debug",
                 "type": "cppvsdbg",
-                "program": "${workspaceFolder}/build_debug/test_cpp.exe"
+                "program": "${workspaceFolder}/build_debug/usearch_test.exe"
+            }
+        },
+        {
+            "name": "Unit Test C++ Core",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build_debug/test/usearch_test_core",
+            "cwd": "${workspaceFolder}",
+            "stopAtEntry": false,
+            "preLaunchTask": "Build Debug",
+            "MIMode": "gdb",
+            "osx": {
+                "MIMode": "lldb"
             }
         },
         {
@@ -49,105 +58,85 @@
                 }
             ],
             "stopAtEntry": false,
-            "linux": {
-                "preLaunchTask": "Linux Build Debug",
-                "MIMode": "gdb"
-            },
+            "preLaunchTask": "Build Debug",
+            "MIMode": "gdb",
             "osx": {
-                "preLaunchTask": "MacOS Build Debug",
                 "MIMode": "lldb"
             },
             "windows": {
-                "preLaunchTask": "Windows Build Debug",
                 "type": "cppvsdbg",
                 "program": "${workspaceFolder}/build_debug/test_c.exe"
             }
         },
         {
-            "name": "Debug C++ on Wiki 1M @Cos",
+            "name": "Unit Test CUDA",
+            "type": "cuda-gdb",
+            "request": "launch",
+            "program": "${workspaceFolder}/build_dev/test/usearch_test_cuda",
+            "cwd": "${workspaceFolder}",
+            "stopAtEntry": false,
+            "breakOnLaunch": false,
+            "preLaunchTask": "Build Dev"
+        },
+        {
+            "name": "Benchmark C++ on Wiki 1M",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build_debug/bench_cpp",
+            "program": "${workspaceFolder}/build_profile/usearch_bench",
             "cwd": "${workspaceFolder}",
             "args": [
                 "--vectors",
-                "datasets/wiki_1M/base.1M.fbin",
+                "data/wiki-1m/base.1M.fbin",
                 "--queries",
-                "datasets/wiki_1M/query.public.100K.fbin",
+                "data/wiki-1m/query.public.100K.fbin",
                 "--neighbors",
-                "datasets/wiki_1M/groundtruth.public.100K.ibin",
-                "--ip"
-            ],
-            "environment": [
-                {
-                    "name": "ASAN_OPTIONS",
-                    "value": "detect_leaks=0:atexit=1:strict_init_order=1:strict_string_checks=1"
-                }
+                "data/wiki-1m/groundtruth.public.100K.ibin"
             ],
             "stopAtEntry": false,
-            "linux": {
-                "preLaunchTask": "Linux Build Debug",
-                "MIMode": "gdb",
-                "environment": [
-                    {
-                        "name": "MALLOC_CHECK_",
-                        "value": "2"
-                    }
-                ]
-            },
+            "preLaunchTask": "Build Profile",
+            "MIMode": "gdb",
             "osx": {
-                "preLaunchTask": "MacOS Build Debug",
                 "MIMode": "lldb"
             }
         },
         {
-            "name": "Debug C++ on Text-to-Image 1B @Cos",
+            "name": "Benchmark C++ on Deep 10M",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build_debug/bench_cpp",
+            "program": "${workspaceFolder}/build_profile/usearch_bench",
             "cwd": "${workspaceFolder}",
             "args": [
                 "--vectors",
-                "datasets/t2i_1B/base.1B.fbin",
+                "data/deep-1b/base.10M.fbin",
                 "--queries",
-                "datasets/t2i_1B/query.public.100K.fbin",
+                "data/deep-1b/query.public.10K.fbin",
                 "--neighbors",
-                "datasets/t2i_1B/groundtruth.public.100K.ibin",
-                "--cos"
-            ],
-            "environment": [
-                {
-                    "name": "ASAN_OPTIONS",
-                    "value": "detect_leaks=0:atexit=1:strict_init_order=1:strict_string_checks=1"
-                }
+                "data/deep-1b/groundtruth.public.10K.ibin"
             ],
             "stopAtEntry": false,
-            "linux": {
-                "preLaunchTask": "Linux Build Debug",
-                "MIMode": "gdb"
-            },
+            "preLaunchTask": "Build Profile",
+            "MIMode": "gdb",
             "osx": {
-                "preLaunchTask": "MacOS Build Debug",
                 "MIMode": "lldb"
             }
         },
         {
-            "name": "Run C++ on Text-to-Image 1M @Cos",
-            "type": "cppdbg",
+            "name": "Benchmark CUDA on Deep 10M",
+            "type": "cuda-gdb",
             "request": "launch",
-            "program": "${workspaceFolder}/build_release/bench_cpp",
+            "program": "${workspaceFolder}/build_dev/bench/usearch_bench_cuda",
             "cwd": "${workspaceFolder}",
             "args": [
                 "--vectors",
-                "datasets/t2i_1M/base.1M.fbin",
+                "data/deep-1b/base.10M.fbin",
                 "--queries",
-                "datasets/t2i_1M/query.public.100K.fbin",
+                "data/deep-1b/query.public.10K.fbin",
                 "--neighbors",
-                "datasets/t2i_1M/groundtruth.public.100K.ibin",
+                "data/deep-1b/groundtruth.public.10K.ibin"
             ],
             "stopAtEntry": false,
-            "preLaunchTask": "Linux Build Release",
-            "MIMode": "gdb"
+            "breakOnLaunch": false,
+            "preLaunchTask": "Build Dev"
         },
         {
             "name": "Debug PyTest",
@@ -169,11 +158,11 @@
             "args": [
                 "speed",
                 "--vectors",
-                "datasets/wiki_1M/base.1M.fbin",
+                "data/wiki-1m/base.1M.fbin",
                 "--queries",
-                "datasets/wiki_1M/query.public.100K.fbin",
+                "data/wiki-1m/query.public.100K.fbin",
                 "--neighbors",
-                "datasets/wiki_1M/groundtruth.public.100K.ibin",
+                "data/wiki-1m/groundtruth.public.100K.ibin"
             ],
             "justMyCode": true
         },

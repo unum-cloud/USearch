@@ -19,6 +19,7 @@ bin
 /build*
 _deps
 CMakeCache.txt
+CMakeUserPresets.json
 CMakeFiles
 cmake_install.cmake
 
@@ -101,3 +102,8 @@ csharp/packages
 *.out
 *.app
 
+
+# Claude Code local state
+.claude/
+data/*
+!data/.gitkeep

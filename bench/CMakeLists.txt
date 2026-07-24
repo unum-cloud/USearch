@@ -28,7 +28,7 @@ if (USEARCH_BUILD_CUDA)
         usearch_bench_cuda
         PROPERTIES CXX_STANDARD 20
                    CUDA_STANDARD 20
-                   CUDA_ARCHITECTURES "90a"
+                   CUDA_ARCHITECTURES "${USEARCH_CUDA_ARCHITECTURES}"
     )
     target_compile_options(usearch_bench_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
     target_link_libraries(

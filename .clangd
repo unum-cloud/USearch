@@ -1,0 +1,36 @@
+# Shared by every editor that speaks LSP. Machine-specific overrides - a toolkit
+# outside the default prefix, a differently named build tree - belong in the user
+# config at `~/.config/clangd/config.yaml`, which clangd merges on top of this.
+#
+# `dev` is the preset that enables CUDA, so its database is the only one covering
+# the `.cu` units: `cmake --preset dev && cmake --build --preset dev`.
+CompileFlags:
+  CompilationDatabase: build_dev
+
+---
+# nvcc command lines carry driver flags clang rejects; dropping them leaves the
+# include paths and defines intact.
+If:
+  PathMatch: [.*\.cu, .*\.cuh]
+CompileFlags:
+  # Headers reach clangd as plain C++ unless the language is forced, turning every
+  # `__device__` into a parse error. Parsing targets Hopper - the lowest
+  # architecture the device headers use unguarded - and generates no code.
+  Add: [-xcuda, --cuda-gpu-arch=sm_90a, -Wno-unknown-cuda-version]
+  Remove:
+    - -forward-unknown-to-host-compiler
+    - -forward-unknown-opts
+    - --generate-code*
+    - -gencode*
+    - --expt-*
+    - --extended-lambda
+    - --options-file*
+    - -Xcompiler*
+    - -Xcudafe*
+    - -Xptxas*
+    - -ccbin*
+    - --compiler-bindir*
+    - -rdc*
+    - --relocatable-device-code*
+    - --use_fast_math
+    - --threads*

@@ -1,6 +1,6 @@
 # This CMake file is heavily inspired by following `usearch` CMake:
 # https://github.com/nlohmann/json/blob/develop/CMakeLists.txt
-cmake_minimum_required(VERSION 3.21 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.28 FATAL_ERROR)
 project(
     usearch
     VERSION 2.25.1
@@ -37,6 +37,23 @@ option(USEARCH_BUILD_WOLFRAM "Compile Wolfram Language bindings" OFF)
 option(USEARCH_BUILD_SQLITE "Compile separate SQLite extension" OFF)
 option(USEARCH_BUILD_WASM "Compile WebAssembly bindings" OFF)
 option(USEARCH_BUILD_CUDA "Compile CUDA index tests & benchmarks" OFF)
+
+# One list feeds every CUDA target, so a fat binary from this tree runs on the whole fleet. Ampere is the floor: its
+# cubins stay loadable on every later 8.x part, so "80" alone covers 86 and 89. Hopper and both Blackwell lines are
+# architecture-specific ("a" suffix) because the kernels reach for `wgmma` and the tensor-memory instructions, which
+# carry no forward-compatible PTX - each needs its own entry. Override with a single architecture, or with "native",
+# when iterating on one machine and the extra compile time is not worth paying.
+set(USEARCH_CUDA_ARCHITECTURES
+    "80;90a;100a;120a"
+    CACHE STRING "GPU architectures baked into the CUDA targets: Ampere floor, Hopper, Blackwell datacenter & consumer"
+)
+
+# Blackwell entries ("100a", "120a") are only understood from CMake 3.31 onward, while the CPU-only build stays on the
+# 3.28 floor that stock Ubuntu 24.04 ships. Demanding the newer CMake only when CUDA is requested keeps the library
+# consumable by distributions whose CMake predates the Blackwell tables.
+if (USEARCH_BUILD_CUDA AND CMAKE_VERSION VERSION_LESS 3.31)
+    message(FATAL_ERROR "USEARCH_BUILD_CUDA needs CMake 3.31 or newer for Blackwell architectures, found ${CMAKE_VERSION}")
+endif ()
 
 # Enable the in-repo Git hooks. Git will not auto-run hooks shipped inside a clone (that would let any cloned repo
 # execute code), so point `core.hooksPath` at `.githooks` here - configuring the build arms the `pre-commit` checks.
@@ -244,12 +261,7 @@ function (setup_target TARGET_NAME)
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         target_compile_options(
             ${TARGET_NAME}
-            PRIVATE $<$<CONFIG:RELEASE>:-O3>
-                    $<$<CONFIG:RELWITHDEBINFO>:-O3
-                    -g>
-                    $<$<CONFIG:DEBUG>:-O0
-                    -g
-                    -fsanitize=address
+            PRIVATE $<$<CONFIG:DEBUG>:-fsanitize=address
                     -fsanitize=leak
                     -fsanitize=alignment
                     -fsanitize=undefined
@@ -286,12 +298,7 @@ function (setup_target TARGET_NAME)
     elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         target_compile_options(
             ${TARGET_NAME}
-            PRIVATE $<$<CONFIG:RELEASE>:-O3>
-                    $<$<CONFIG:RELWITHDEBINFO>:-O3
-                    -g>
-                    $<$<CONFIG:DEBUG>:-O0
-                    -g
-                    -fsanitize=address
+            PRIVATE $<$<CONFIG:DEBUG>:-fsanitize=address
                     -fsanitize=alignment
                     -fsanitize=undefined
                     >
@@ -338,7 +345,7 @@ function (setup_target TARGET_NAME)
         target_compile_definitions(${TARGET_NAME} PRIVATE --expt-relaxed-constexpr --extended-lambda)
         set_property(SOURCE bench.cpp PROPERTY LANGUAGE CUDA)
         set_target_properties(${TARGET_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)
-        set_target_properties(${TARGET_NAME} PROPERTIES CUDA_ARCHITECTURES "86")
+        set_target_properties(${TARGET_NAME} PROPERTIES CUDA_ARCHITECTURES "${USEARCH_CUDA_ARCHITECTURES}")
 
     elseif (CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         target_compile_options(${TARGET_NAME} PRIVATE -w -ferror-limit=1)
@@ -435,14 +442,15 @@ add_subdirectory(stringzilla)
 # Third-party dependencies, every pin in one place, fetched only when something actually links them: {fmt} for the C++
 # smoke tests (libstdc++ doesn't ship `std::print` yet on our toolchain), clipp for the benchmark CLIs, and yyjson for
 # the SafeGraphs header reader. `FIND_PACKAGE_ARGS` lets a system-provided {fmt} satisfy the dependency without touching
-# the network.
+# the network, but only from the pinned version up - the copies distributions ship predate `fmt::println` and would fail
+# deep in the suites rather than here.
 if (USEARCH_BUILD_TEST_CPP OR USEARCH_BUILD_BENCH_CPP)
     include(FetchContent)
     FetchContent_Declare(
         fmt
         GIT_REPOSITORY https://github.com/fmtlib/fmt.git
         GIT_TAG 12.0.0
-        FIND_PACKAGE_ARGS
+        FIND_PACKAGE_ARGS 12.0.0
     )
     FetchContent_Declare(
         clipp

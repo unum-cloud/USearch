@@ -123,16 +123,16 @@ Here is an example of running the C++ benchmark:
 
 ```sh
 build_profile/bench_cpp \
-    --vectors datasets/wiki_1M/base.1M.fbin \
-    --queries datasets/wiki_1M/query.public.100K.fbin \
-    --neighbors datasets/wiki_1M/groundtruth.public.100K.ibin \
+    --vectors data/wiki-1m/base.1M.fbin \
+    --queries data/wiki-1m/query.public.100K.fbin \
+    --neighbors data/wiki-1m/groundtruth.public.100K.ibin \
     --dtype bf16 --metric ip
 
 build_profile/bench_cpp \
-    --vectors datasets/t2i_1B/base.1B.fbin \
-    --queries datasets/t2i_1B/query.public.100K.fbin \
-    --neighbors datasets/t2i_1B/groundtruth.public.100K.ibin \
-    --output datasets/t2i_1B/index.usearch \
+    --vectors data/t2i-1b/base.1B.fbin \
+    --queries data/t2i-1b/query.public.100K.fbin \
+    --neighbors data/t2i-1b/groundtruth.public.100K.ibin \
+    --output data/t2i-1b/index.usearch \
     --dtype bf16 --metric cos
 ```
 
@@ -212,37 +212,37 @@ A cross-modal dataset of ~2.75M image-text pairs embedded with UForm VL English 
 No separate query/ground-truth files — the natural ground truth is the image-text pairing: `image[i]` matches `text[i]`.
 
 ```sh
-mkdir -p datasets/cc_3M/ && \
+mkdir -p data/cc-3m/ && \
     wget -nc https://huggingface.co/datasets/unum-cloud/ann-cc-3m/resolve/main/images.uform-vl-english.fbin \
-        -O datasets/cc_3M/images.fbin && \
+        -O data/cc-3m/images.fbin && \
     wget -nc https://huggingface.co/datasets/unum-cloud/ann-cc-3m/resolve/main/texts.uform-vl-english.fbin \
-        -O datasets/cc_3M/texts.fbin
+        -O data/cc-3m/texts.fbin
 ```
 
 To benchmark cross-modal join:
 
 ```bash
 python python/scripts/join.py \
-    --vectors-a datasets/cc_3M/texts.fbin \
-    --vectors-b datasets/cc_3M/images.fbin \
+    --vectors-a data/cc-3m/texts.fbin \
+    --vectors-b data/cc-3m/images.fbin \
     --metric cos --diagnostics
 ```
 
 ### Unum UForm Wiki
 
 ```sh
-mkdir -p datasets/wiki_1M/ && \
-    wget -nc https://huggingface.co/datasets/unum-cloud/ann-wiki-1m/resolve/main/base.1M.fbin -P datasets/wiki_1M/ &&
-    wget -nc https://huggingface.co/datasets/unum-cloud/ann-wiki-1m/resolve/main/query.public.100K.fbin -P datasets/wiki_1M/ &&
-    wget -nc https://huggingface.co/datasets/unum-cloud/ann-wiki-1m/resolve/main/groundtruth.public.100K.ibin -P datasets/wiki_1M/
+mkdir -p data/wiki-1m/ && \
+    wget -nc https://huggingface.co/datasets/unum-cloud/ann-wiki-1m/resolve/main/base.1M.fbin -P data/wiki-1m/ &&
+    wget -nc https://huggingface.co/datasets/unum-cloud/ann-wiki-1m/resolve/main/query.public.100K.fbin -P data/wiki-1m/ &&
+    wget -nc https://huggingface.co/datasets/unum-cloud/ann-wiki-1m/resolve/main/groundtruth.public.100K.ibin -P data/wiki-1m/
 ```
 
 ### Arxiv with E5
 
 ```sh
-mkdir -p datasets/arxiv_2M/ && \
-    wget -nc https://huggingface.co/datasets/unum-cloud/ann-arxiv-2m/resolve/main/abstract.e5-base-v2.fbin -P datasets/arxiv_2M/ &&
-    wget -nc https://huggingface.co/datasets/unum-cloud/ann-arxiv-2m/resolve/main/title.e5-base-v2.fbin -P datasets/arxiv_2M/
+mkdir -p data/arxiv-2m/ && \
+    wget -nc https://huggingface.co/datasets/unum-cloud/ann-arxiv-2m/resolve/main/abstract.e5-base-v2.fbin -P data/arxiv-2m/ &&
+    wget -nc https://huggingface.co/datasets/unum-cloud/ann-arxiv-2m/resolve/main/title.e5-base-v2.fbin -P data/arxiv-2m/
 ```
 
 ### Yandex Text-to-Image
@@ -253,20 +253,20 @@ mkdir -p datasets/arxiv_2M/ && \
 > testing, not recall evaluation.
 
 ```sh
-mkdir -p datasets/t2i_1B/ && \
-    wget -nc https://storage.yandexcloud.net/yandex-research/ann-datasets/T2I/base.1B.fbin -P datasets/t2i_1B/ &&
-    wget -nc https://storage.yandexcloud.net/yandex-research/ann-datasets/T2I/query.public.100K.fbin -P datasets/t2i_1B/ &&
-    wget -nc https://storage.yandexcloud.net/yandex-research/ann-datasets/T2I/groundtruth.public.100K.ibin -P datasets/t2i_1B/
+mkdir -p data/t2i-1b/ && \
+    wget -nc https://storage.yandexcloud.net/yandex-research/ann-datasets/T2I/base.1B.fbin -P data/t2i-1b/ &&
+    wget -nc https://storage.yandexcloud.net/yandex-research/ann-datasets/T2I/query.public.100K.fbin -P data/t2i-1b/ &&
+    wget -nc https://storage.yandexcloud.net/yandex-research/ann-datasets/T2I/groundtruth.public.100K.ibin -P data/t2i-1b/
 ```
 
 To run the benchmark (requires the full 1B base for valid recall):
 
 ```bash
 build_profile/bench_cpp \
-    --vectors datasets/t2i_1B/base.1B.fbin \
-    --queries datasets/t2i_1B/query.public.100K.fbin \
-    --neighbors datasets/t2i_1B/groundtruth.public.100K.ibin \
-    --output datasets/t2i_1B/index.usearch \
+    --vectors data/t2i-1b/base.1B.fbin \
+    --queries data/t2i-1b/query.public.100K.fbin \
+    --neighbors data/t2i-1b/groundtruth.public.100K.ibin \
+    --output data/t2i-1b/index.usearch \
     --dtype bf16 --metric cos
 ```
 
@@ -278,20 +278,20 @@ build_profile/bench_cpp \
 > only for throughput/latency testing, not recall evaluation.
 
 ```sh
-mkdir -p datasets/deep_1B/ && \
-    wget -nc https://storage.yandexcloud.net/yandex-research/ann-datasets/DEEP/base.1B.fbin -P datasets/deep_1B/ &&
-    wget -nc https://storage.yandexcloud.net/yandex-research/ann-datasets/DEEP/query.public.10K.fbin -P datasets/deep_1B/ &&
-    wget -nc https://storage.yandexcloud.net/yandex-research/ann-datasets/DEEP/groundtruth.public.10K.ibin -P datasets/deep_1B/
+mkdir -p data/deep-1b/ && \
+    wget -nc https://storage.yandexcloud.net/yandex-research/ann-datasets/DEEP/base.1B.fbin -P data/deep-1b/ &&
+    wget -nc https://storage.yandexcloud.net/yandex-research/ann-datasets/DEEP/query.public.10K.fbin -P data/deep-1b/ &&
+    wget -nc https://storage.yandexcloud.net/yandex-research/ann-datasets/DEEP/groundtruth.public.10K.ibin -P data/deep-1b/
 ```
 
 To run the benchmark (requires the full 1B base for valid recall):
 
 ```bash
 build_profile/bench_cpp \
-    --vectors datasets/deep_1B/base.1B.fbin \
-    --queries datasets/deep_1B/query.public.10K.fbin \
-    --neighbors datasets/deep_1B/groundtruth.public.10K.ibin \
-    --output datasets/deep_1B/index.usearch \
+    --vectors data/deep-1b/base.1B.fbin \
+    --queries data/deep-1b/query.public.10K.fbin \
+    --neighbors data/deep-1b/groundtruth.public.10K.ibin \
+    --output data/deep-1b/index.usearch \
     --dtype bf16 --metric l2sq
 ```
 
@@ -329,25 +329,25 @@ build_profile/bench_cpp \
 #### 100M subset, ~12 GB
 
 ```sh
-mkdir -p datasets/sift_100M/ && \
-    wget -nc https://dl.fbaipublicfiles.com/billion-scale-ann-benchmarks/bigann/query.public.10K.u8bin -P datasets/sift_100M/ && \
-    wget -nc https://dl.fbaipublicfiles.com/billion-scale-ann-benchmarks/GT_100M/bigann-100M -O datasets/sift_100M/groundtruth.public.10K.ibin && \
+mkdir -p data/sift-100m/ && \
+    wget -nc https://dl.fbaipublicfiles.com/billion-scale-ann-benchmarks/bigann/query.public.10K.u8bin -P data/sift-100m/ && \
+    wget -nc https://dl.fbaipublicfiles.com/billion-scale-ann-benchmarks/GT_100M/bigann-100M -O data/sift-100m/groundtruth.public.10K.ibin && \
     wget --header="Range: bytes=0-12800000007" \
         https://dl.fbaipublicfiles.com/billion-scale-ann-benchmarks/bigann/base.1B.u8bin \
-        -O datasets/sift_100M/base.100M.u8bin && \
+        -O data/sift-100m/base.100M.u8bin && \
     python3 -c "
 import struct
-with open('datasets/sift_100M/base.100M.u8bin', 'r+b') as f:
+with open('data/sift-100m/base.100M.u8bin', 'r+b') as f:
     f.write(struct.pack('I', 100_000_000))
 "
 ```
 
 ```bash
 build_profile/bench_cpp \
-    --vectors datasets/sift_100M/base.100M.u8bin \
-    --queries datasets/sift_100M/query.public.10K.u8bin \
-    --neighbors datasets/sift_100M/groundtruth.public.10K.ibin \
-    --output datasets/sift_100M/index.usearch \
+    --vectors data/sift-100m/base.100M.u8bin \
+    --queries data/sift-100m/query.public.10K.u8bin \
+    --neighbors data/sift-100m/groundtruth.public.10K.ibin \
+    --output data/sift-100m/index.usearch \
     --dtype u8 --metric l2sq
 ```
 
@@ -414,27 +414,27 @@ build_profile/bench_cpp \
 #### 100M subset, ~37 GB
 
 ```sh
-mkdir -p datasets/turing_100M/ && \
+mkdir -p data/turing-100m/ && \
     wget -nc https://comp21storage.z5.web.core.windows.net/comp21/MSFT-TURING-ANNS/query100K.fbin \
-        -O datasets/turing_100M/query.public.100K.fbin && \
+        -O data/turing-100m/query.public.100K.fbin && \
     wget -nc https://comp21storage.z5.web.core.windows.net/comp21/MSFT-TURING-ANNS/msturing-gt-100M \
-        -O datasets/turing_100M/groundtruth.public.100K.ibin && \
+        -O data/turing-100m/groundtruth.public.100K.ibin && \
     wget --header="Range: bytes=0-40000000007" \
         https://comp21storage.z5.web.core.windows.net/comp21/MSFT-TURING-ANNS/base1b.fbin \
-        -O datasets/turing_100M/base.100M.fbin && \
+        -O data/turing-100m/base.100M.fbin && \
     python3 -c "
 import struct
-with open('datasets/turing_100M/base.100M.fbin', 'r+b') as f:
+with open('data/turing-100m/base.100M.fbin', 'r+b') as f:
     f.write(struct.pack('I', 100_000_000))
 "
 ```
 
 ```bash
 build_profile/bench_cpp \
-    --vectors datasets/turing_100M/base.100M.fbin \
-    --queries datasets/turing_100M/query.public.100K.fbin \
-    --neighbors datasets/turing_100M/groundtruth.public.100K.ibin \
-    --output datasets/turing_100M/index.usearch \
+    --vectors data/turing-100m/base.100M.fbin \
+    --queries data/turing-100m/query.public.100K.fbin \
+    --neighbors data/turing-100m/groundtruth.public.100K.ibin \
+    --output data/turing-100m/index.usearch \
     --dtype bf16 --metric l2sq
 ```
 
@@ -450,20 +450,20 @@ mkdir -p datasets/spacev_1B/ && \
 A smaller 100M dataset can be pulled from Hugging Face.
 
 ```sh
-mkdir -p datasets/spacev_100M/ && \
-    wget -nc https://huggingface.co/datasets/unum-cloud/ann-spacev-100m/resolve/main/ids.100M.i32bin -P datasets/spacev_100M/ &&
-    wget -nc https://huggingface.co/datasets/unum-cloud/ann-spacev-100m/resolve/main/base.100M.i8bin -P datasets/spacev_100M/ &&
-    wget -nc https://huggingface.co/datasets/unum-cloud/ann-spacev-100m/resolve/main/query.30K.i8bin -P datasets/spacev_100M/ &&
-    wget -nc https://huggingface.co/datasets/unum-cloud/ann-spacev-100m/resolve/main/groundtruth.30K.i32bin -P datasets/spacev_100M/ &&
-    wget -nc https://huggingface.co/datasets/unum-cloud/ann-spacev-100m/resolve/main/groundtruth.30K.f32bin -P datasets/spacev_100M/
+mkdir -p data/spacev-100m/ && \
+    wget -nc https://huggingface.co/datasets/unum-cloud/ann-spacev-100m/resolve/main/ids.100M.i32bin -P data/spacev-100m/ &&
+    wget -nc https://huggingface.co/datasets/unum-cloud/ann-spacev-100m/resolve/main/base.100M.i8bin -P data/spacev-100m/ &&
+    wget -nc https://huggingface.co/datasets/unum-cloud/ann-spacev-100m/resolve/main/query.30K.i8bin -P data/spacev-100m/ &&
+    wget -nc https://huggingface.co/datasets/unum-cloud/ann-spacev-100m/resolve/main/groundtruth.30K.i32bin -P data/spacev-100m/ &&
+    wget -nc https://huggingface.co/datasets/unum-cloud/ann-spacev-100m/resolve/main/groundtruth.30K.f32bin -P data/spacev-100m/
 ```
 
 ```bash
 build_profile/bench_cpp \
-    --vectors datasets/spacev_100M/base.100M.i8bin \
-    --queries datasets/spacev_100M/query.30K.i8bin \
-    --neighbors datasets/spacev_100M/groundtruth.30K.i32bin \
-    --output datasets/spacev_100M/index.usearch \
+    --vectors data/spacev-100m/base.100M.i8bin \
+    --queries data/spacev-100m/query.30K.i8bin \
+    --neighbors data/spacev-100m/groundtruth.30K.i32bin \
+    --output data/spacev-100m/index.usearch \
     --dtype i8 \
     --metric l2sq
 ```

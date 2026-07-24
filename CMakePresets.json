@@ -1,0 +1,245 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 28,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "description": "Ninja, LLVM, a build tree named after the preset, and a compilation database for the language server. `lld` links the template-heavy targets several times faster than `bfd`. Export CMAKE_CXX_COMPILER_LAUNCHER=ccache to cache objects; point CC/CXX elsewhere for GCC.",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build_${presetName}",
+            "cacheVariables": {
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "CMAKE_C_COMPILER": "clang",
+                "CMAKE_CXX_COMPILER": "clang++",
+                "CMAKE_EXE_LINKER_FLAGS": "-fuse-ld=lld",
+                "CMAKE_SHARED_LINKER_FLAGS": "-fuse-ld=lld",
+                "CMAKE_OPTIMIZE_DEPENDENCIES": "ON"
+            }
+        },
+        {
+            "name": "debug",
+            "inherits": "base",
+            "displayName": "Debug - unit tests with sanitizers",
+            "description": "Unoptimized C++ and C suites; the compiler wiring arms the leak sanitizer here.",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "USEARCH_USE_NUMKONG": "ON",
+                "USEARCH_BUILD_TEST_CPP": "ON",
+                "USEARCH_BUILD_BENCH_CPP": "OFF",
+                "USEARCH_BUILD_LIB_C": "ON",
+                "USEARCH_BUILD_TEST_C": "ON"
+            }
+        },
+        {
+            "name": "check",
+            "inherits": "base",
+            "displayName": "Check - fastest compile cycle",
+            "description": "Does it still compile, nothing more. `-O0` is the one flag that moves the needle on these instantiation grids: measured per shard, -O3 and -O1 both cost ~9.8s while -O0 costs 3.5s, against a 2.8s front-end floor.",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
+                "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
+                "USEARCH_USE_NUMKONG": "ON",
+                "USEARCH_BUILD_TEST_CPP": "ON",
+                "USEARCH_BUILD_BENCH_CPP": "ON",
+                "USEARCH_BUILD_LIB_C": "ON",
+                "USEARCH_BUILD_TEST_C": "ON"
+            }
+        },
+        {
+            "name": "relwithdebinfo",
+            "inherits": "base",
+            "displayName": "RelWithDebInfo - optimized tests with symbols",
+            "description": "Optimized, with full DWARF for stepping through the suites.",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "USEARCH_USE_NUMKONG": "ON",
+                "USEARCH_BUILD_TEST_CPP": "ON",
+                "USEARCH_BUILD_BENCH_CPP": "OFF"
+            }
+        },
+        {
+            "name": "release",
+            "inherits": "base",
+            "displayName": "Release - every CPU target",
+            "description": "The full CPU matrix: C++ suite, benchmarks, the C 99 library and its test.",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "USEARCH_USE_NUMKONG": "ON",
+                "USEARCH_BUILD_TEST_CPP": "ON",
+                "USEARCH_BUILD_BENCH_CPP": "ON",
+                "USEARCH_BUILD_LIB_C": "ON",
+                "USEARCH_BUILD_TEST_C": "ON"
+            }
+        },
+        {
+            "name": "profile",
+            "inherits": "base",
+            "displayName": "Profile - benchmarks under perf",
+            "description": "What every number in BENCHMARKS.md is measured with: full optimization, plus the symbols `perf` needs to attribute samples.",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O3 -g -DNDEBUG",
+                "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O3 -g -DNDEBUG",
+                "USEARCH_USE_NUMKONG": "ON",
+                "USEARCH_BUILD_TEST_CPP": "OFF",
+                "USEARCH_BUILD_BENCH_CPP": "ON",
+                "USEARCH_BUILD_LIB_C": "ON",
+                "USEARCH_BUILD_TEST_C": "ON"
+            }
+        },
+        {
+            "name": "dev",
+            "inherits": "base",
+            "displayName": "Dev - everything, CUDA included",
+            "description": "The iteration tree, and the only one covering the `.cu` units - so `.clangd` reads its database. Optimized enough to run, with line tables instead of full DWARF and the fat binary narrowed to the host GPU.",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O2 -gline-tables-only -DNDEBUG",
+                "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O2 -gline-tables-only -DNDEBUG",
+                "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O2 -lineinfo -DNDEBUG",
+                "USEARCH_USE_NUMKONG": "ON",
+                "USEARCH_BUILD_TEST_CPP": "ON",
+                "USEARCH_BUILD_BENCH_CPP": "ON",
+                "USEARCH_BUILD_LIB_C": "ON",
+                "USEARCH_BUILD_TEST_C": "ON",
+                "USEARCH_BUILD_CUDA": "ON",
+                "USEARCH_CUDA_ARCHITECTURES": "native"
+            }
+        },
+        {
+            "name": "trace",
+            "inherits": "dev",
+            "displayName": "Trace - where the build time goes",
+            "description": "Emits a .json next to every object; open them in a flame-graph viewer or aggregate with ClangBuildAnalyzer to see which instantiations dominate.",
+            "cacheVariables": {
+                "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O2 -gline-tables-only -DNDEBUG -ftime-trace"
+            }
+        },
+        {
+            "name": "fleet",
+            "inherits": "dev",
+            "displayName": "Fleet - CUDA fat binary, Ampere through Blackwell",
+            "description": "Same targets as `dev`, emitting every architecture the fleet spans - what shipping artifacts and cross-machine runs need.",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "USEARCH_CUDA_ARCHITECTURES": "80;90a;100a;120a"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "debug",
+            "configurePreset": "debug",
+            "jobs": 0
+        },
+        {
+            "name": "check",
+            "configurePreset": "check",
+            "jobs": 0
+        },
+        {
+            "name": "relwithdebinfo",
+            "configurePreset": "relwithdebinfo",
+            "jobs": 0
+        },
+        {
+            "name": "release",
+            "configurePreset": "release",
+            "jobs": 0
+        },
+        {
+            "name": "profile",
+            "configurePreset": "profile",
+            "jobs": 0
+        },
+        {
+            "name": "dev",
+            "configurePreset": "dev",
+            "jobs": 0
+        },
+        {
+            "name": "trace",
+            "configurePreset": "trace",
+            "jobs": 0
+        },
+        {
+            "name": "fleet",
+            "configurePreset": "fleet",
+            "jobs": 0
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "output": {
+                "outputOnFailure": true
+            },
+            "execution": {
+                "stopOnFailure": true
+            }
+        },
+        {
+            "name": "debug",
+            "inherits": "base",
+            "configurePreset": "debug"
+        },
+        {
+            "name": "relwithdebinfo",
+            "inherits": "base",
+            "configurePreset": "relwithdebinfo"
+        },
+        {
+            "name": "release",
+            "inherits": "base",
+            "configurePreset": "release"
+        },
+        {
+            "name": "dev",
+            "inherits": "base",
+            "configurePreset": "dev"
+        }
+    ],
+    "workflowPresets": [
+        {
+            "name": "release",
+            "steps": [
+                {
+                    "type": "configure",
+                    "name": "release"
+                },
+                {
+                    "type": "build",
+                    "name": "release"
+                },
+                {
+                    "type": "test",
+                    "name": "release"
+                }
+            ]
+        },
+        {
+            "name": "dev",
+            "steps": [
+                {
+                    "type": "configure",
+                    "name": "dev"
+                },
+                {
+                    "type": "build",
+                    "name": "dev"
+                },
+                {
+                    "type": "test",
+                    "name": "dev"
+                }
+            ]
+        }
+    ]
+}

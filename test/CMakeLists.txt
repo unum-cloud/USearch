@@ -1,6 +1,6 @@
 # One suite executable listing the per-family test units, sharded per dtype so the
-# instantiation grids build in parallel; shards drop to -O1, whose optimizer time buys a
-# correctness suite nothing.
+# instantiation grids build in parallel. Optimization level comes from the configuration:
+# measured on these shards, -O1 costs as much as -O3 and only slows the suite down.
 add_executable(
     usearch_test
     test.cpp
@@ -25,7 +25,6 @@ add_executable(
     dense_index_i4.cpp
 )
 setup_target(usearch_test)
-target_compile_options(usearch_test PRIVATE -O1)
 target_link_libraries(usearch_test PRIVATE fmt::fmt)
 add_test(NAME usearch_test COMMAND usearch_test)
 
@@ -52,7 +51,7 @@ if (USEARCH_BUILD_CUDA)
         usearch_test_cuda
         PROPERTIES CXX_STANDARD 20
                    CUDA_STANDARD 20
-                   CUDA_ARCHITECTURES "90a"
+                   CUDA_ARCHITECTURES "${USEARCH_CUDA_ARCHITECTURES}"
     )
     target_compile_options(usearch_test_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
     target_link_libraries(usearch_test_cuda PRIVATE fmt::fmt CUDA::cuda_driver)

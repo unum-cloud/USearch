@@ -2,8 +2,9 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Linux Build Debug",
-            "command": "cmake -DCMAKE_CXX_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12 -DUSEARCH_BUILD_TEST_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=1 -DCMAKE_BUILD_TYPE=Debug -B ./build_debug && cmake --build ./build_debug --config Debug",
+            "label": "Build Debug",
+            "detail": "Unoptimized C++ and C suites, sanitizers armed",
+            "command": "cmake --preset debug && cmake --build --preset debug",
             "args": [],
             "type": "shell",
             "problemMatcher": [
@@ -11,8 +12,20 @@
             ]
         },
         {
-            "label": "Linux Build Release",
-            "command": "cmake -DCMAKE_CXX_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12 -DUSEARCH_BUILD_TEST_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=1 -DCMAKE_BUILD_TYPE=Release -B ./build_release && cmake --build ./build_release --config RelWithDebInfo",
+            "label": "Build Release",
+            "detail": "Every CPU target, optimized",
+            "command": "cmake --preset release && cmake --build --preset release",
+            "args": [],
+            "type": "shell",
+            "group": "build",
+            "problemMatcher": [
+                "$gcc"
+            ]
+        },
+        {
+            "label": "Build Profile",
+            "detail": "The benchmark configuration BENCHMARKS.md measures",
+            "command": "cmake --preset profile && cmake --build --preset profile",
             "args": [],
             "type": "shell",
             "problemMatcher": [
@@ -20,52 +33,31 @@
             ]
         },
         {
-            "label": "MacOS Build Debug",
-            "command": "cmake -DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++ -DUSEARCH_BUILD_TEST_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=0 -DCMAKE_BUILD_TYPE=Debug -B ./build_debug && cmake --build ./build_debug --config Debug",
-            "args": [],
-            "type": "shell"
-        },
-        {
-            "label": "MacOS Build Release",
-            "command": "cmake -DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++ -DUSEARCH_BUILD_TEST_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=0 -DCMAKE_BUILD_TYPE=Release -B ./build_release && cmake --build ./build_release --config RelWithDebInfo",
-            "args": [],
-            "type": "shell"
-        },
-        {
-            "label": "Windows Build Debug",
-            "command": "cmake -DUSEARCH_BUILD_TEST_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=0 -DCMAKE_BUILD_TYPE=Debug -B ./build_debug && cmake --build ./build_debug --config Debug",
+            "label": "Build Dev",
+            "detail": "Everything including CUDA, narrowed to the host GPU - the tree the language server reads",
+            "command": "cmake --preset dev && cmake --build --preset dev",
             "args": [],
             "type": "shell",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
             "problemMatcher": [
-                "$msCompile"
-            ],
-            "options": {
-                "shell": {
-                    "executable": "cmd.exe",
-                    "args": [
-                        "/d",
-                        "/c"
-                    ]
-                }
-            }
+                "$nvcc",
+                "$gcc"
+            ]
         },
         {
-            "label": "Windows Build Release",
-            "command": "cmake -DUSEARCH_BUILD_TEST_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=0 -DCMAKE_BUILD_TYPE=Release -B ./build_release && cmake --build ./build_release --config RelWithDebInfo",
+            "label": "Test Dev",
+            "detail": "CTest over the dev tree",
+            "command": "ctest --preset dev",
             "args": [],
             "type": "shell",
-            "problemMatcher": [
-                "$msCompile"
-            ],
-            "options": {
-                "shell": {
-                    "executable": "cmd.exe",
-                    "args": [
-                        "/d",
-                        "/c"
-                    ]
-                }
-            }
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "problemMatcher": []
         },
         {
             "label": "Swift Build",

@@ -25,14 +25,36 @@
     "editor.tabSize": 2
   },
   "autoDocstring.docstringFormat": "sphinx",
-  "C_Cpp.default.cppStandard": "c++20",
-  "C_Cpp.default.cStandard": "c17",
-  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
-  "C_Cpp.default.includePath": [
-    "${workspaceFolder}/include",
-    "${workspaceFolder}/numkong/include",
-    "${workspaceFolder}/stringzilla/include"
+  "[c]": {
+    "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
+    "editor.formatOnSave": true
+  },
+  "[cpp]": {
+    "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
+    "editor.formatOnSave": true
+  },
+  "[cuda-cpp]": {
+    "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
+    "editor.formatOnSave": true
+  },
+  "[cmake]": {
+    "editor.formatOnSave": false
+  },
+  "C_Cpp.autocomplete": "disabled",
+  "C_Cpp.errorSquiggles": "disabled",
+  "C_Cpp.formatting": "disabled",
+  "C_Cpp.intelliSenseEngine": "disabled",
+  "clangd.arguments": [
+    "--background-index",
+    "--clang-tidy",
+    "--completion-style=detailed",
+    "--header-insertion=never",
+    "--pch-storage=memory"
   ],
+  "clangd.checkUpdates": false,
+  "clangd.onConfigChanged": "restart",
+  "cmake.options.statusBarVisibility": "compact",
+  "cmake.useCMakePresets": "always",
   "cSpell.words": [
     "allclose",
     "arange",
@@ -63,6 +85,7 @@
     "furo",
     "geospatial",
     "googleanalytics",
+    "Gotoh",
     "groundtruth",
     "hashable",
     "HNSW",
@@ -86,8 +109,10 @@
     "ndarray",
     "NDCG",
     "ndim",
+    "Needleman",
     "nlevels",
     "Numba",
+    "numkong",
     "numpy",
     "NVME",
     "objc",
@@ -102,7 +127,6 @@
     "rtype",
     "SIMD",
     "simsimd",
-    "numkong",
     "SLOC",
     "Sonatype",
     "sorensen",
@@ -123,6 +147,7 @@
     "vectorize",
     "Vincenty",
     "Wasmer",
+    "Wunsch",
     "Xunit",
     "Yuga"
   ],
@@ -154,6 +179,8 @@
     "__tree": "cpp",
     "__tuple": "cpp",
     "__verbose_abort": "cpp",
+    "*.cu": "cuda-cpp",
+    "*.cuh": "cuda-cpp",
     "*.tcc": "cpp",
     "algorithm": "cpp",
     "any": "cpp",
