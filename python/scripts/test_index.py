@@ -165,6 +165,47 @@ def test_index_get_missing_keys(multi):
     assert index.get(1) is None
 
 
+def test_u8_vectors_not_misread_as_binary():
+    """`uint8` vectors must be stored as bytes, not bit-packed binary (#595).
+
+    A NumPy `uint8` buffer is ambiguous: the same bytes back both bit-packed
+    binary vectors (`b1x8`) and unsigned byte vectors (`u8`). When no explicit
+    `dtype` is passed to `add`/`search`, the buffer used to resolve to `b1x8`,
+    so a `u8` index silently reinterpreted its data as packed bits and collapsed
+    the vectors to (near-)zero. The index's own scalar kind must disambiguate.
+    """
+    reset_randomness()
+    ndim = 8
+    # Sparse small counts, like the reporter's feature-count vectors.
+    vector = np.zeros(ndim, dtype=np.uint8)
+    vector[2] = 3
+    vector[5] = 7
+
+    index = Index(ndim=ndim, metric=MetricKind.L2sq, dtype=ScalarKind.U8)
+    index.add(0, vector)  # no explicit dtype: the previously-broken path
+
+    # Round-trip: the stored bytes must match the input, not zeros.
+    stored = index.get(0, ScalarKind.U8)
+    assert np.array_equal(stored, vector), f"u8 vector corrupted on add: {stored}"
+
+    # Search must be coherent: the exact vector is its own nearest neighbor at
+    # distance 0, and a far vector ranks strictly behind it.
+    far = np.zeros(ndim, dtype=np.uint8)
+    far[0] = 200
+    far[7] = 200
+    index.add(1, far)
+    matches = index.search(vector, 2)
+    assert matches.keys[0] == 0
+    assert float(matches.distances[0]) == 0.0
+    assert float(matches.distances[1]) > 0.0
+
+    # The fix must not touch binary indexes: uint8 still means bit-packed there.
+    binary = Index(ndim=64, metric=MetricKind.Hamming, dtype=ScalarKind.B1)
+    packed = np.array([0b10101010] * 8, dtype=np.uint8)
+    binary.add(0, packed)
+    assert float(binary.search(packed, 1).distances[0]) == 0.0
+
+
 @pytest.mark.parametrize("ndim", [3, 97, 256])
 @pytest.mark.parametrize("metric", [MetricKind.Cos, MetricKind.L2sq])
 @pytest.mark.parametrize("batch_size", [1, 7, 1024])

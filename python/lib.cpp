@@ -97,6 +97,9 @@ struct dense_indexes_py_t {
     void merge(std::shared_ptr<dense_index_py_t> shard) { shards_.push_back(shard); }
     std::size_t bytes_per_vector() const noexcept { return shards_.empty() ? 0 : shards_[0]->bytes_per_vector(); }
     std::size_t scalar_words() const noexcept { return shards_.empty() ? 0 : shards_[0]->scalar_words(); }
+    scalar_kind_t scalar_kind() const noexcept {
+        return shards_.empty() ? scalar_kind_t::unknown_k : shards_[0]->scalar_kind();
+    }
     index_limits_t limits() const noexcept { return {size(), std::numeric_limits<std::size_t>::max()}; }
 
     void merge_paths(std::vector<std::string> const& paths, bool view = true, std::size_t threads = 0) {
@@ -178,6 +181,24 @@ scalar_kind_t numpy_string_to_kind(std::string const& name) {
         return scalar_kind_t::f64_k;
     else
         return scalar_kind_t::unknown_k;
+}
+
+/// @brief Resolves the scalar kind of a NumPy buffer for a specific index.
+///
+/// NumPy `uint8` buffers are ambiguous: the same bytes back both bit-packed
+/// binary vectors (`b1x8`) and unsigned byte vectors (`u8`), and
+/// `numpy_string_to_kind` maps `uint8` to `b1x8` for backwards compatibility.
+/// When the caller passed no explicit `scalar_kind`, disambiguate against the
+/// index's own scalar kind, so a `u8` index isn't fed its data as packed bits
+/// (which silently zeroed out the vectors). See issue #595.
+template <typename index_at>
+scalar_kind_t resolve_buffer_kind(scalar_kind_t requested, py::buffer_info const& buffer_info, index_at const& index) {
+    if (requested != scalar_kind_t::unknown_k)
+        return requested;
+    scalar_kind_t detected = numpy_string_to_kind(buffer_info.format);
+    if (detected == scalar_kind_t::b1x8_k && index.scalar_kind() == scalar_kind_t::u8_k)
+        return scalar_kind_t::u8_k;
+    return detected;
 }
 
 template <typename result_at> void forward_error(result_at&& result) {
@@ -286,9 +307,7 @@ static void add_many_to_index(                            //
     // kind here.
 
     // clang-format off
-    scalar_kind_t kind = (scalar_kind != scalar_kind_t::unknown_k)
-        ? scalar_kind
-        : numpy_string_to_kind(vectors_info.format);
+    scalar_kind_t kind = resolve_buffer_kind(scalar_kind, vectors_info, index);
     switch (kind) {
     case scalar_kind_t::f64_k: add_typed_to_index<f64_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
     case scalar_kind_t::f32_k: add_typed_to_index<f32_t>(index, keys_info, vectors_info, force_copy, threads, progress); break;
@@ -501,9 +520,7 @@ static py::tuple search_many_in_index( //
     std::atomic<std::size_t> stats_computed_distances(0);
 
     // clang-format off
-    scalar_kind_t kind = (scalar_kind != scalar_kind_t::unknown_k)
-        ? scalar_kind
-        : numpy_string_to_kind(vectors_info.format);
+    scalar_kind_t kind = resolve_buffer_kind(scalar_kind, vectors_info, index);
     switch (kind) {
     case scalar_kind_t::f64_k: search_typed<f64_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
     case scalar_kind_t::f32_k: search_typed<f32_t>(index, vectors_info, wanted, exact, threads, keys_py, distances_py, counts_py, stats_visited_members, stats_computed_distances, progress); break;
@@ -780,9 +797,7 @@ static py::tuple cluster_vectors(        //
     rows_lookup_gt<byte_t const> queries_end = queries_begin + queries_count;
 
     // clang-format off
-    scalar_kind_t kind = (scalar_kind != scalar_kind_t::unknown_k)
-        ? scalar_kind
-        : numpy_string_to_kind(queries_info.format);
+    scalar_kind_t kind = resolve_buffer_kind(scalar_kind, queries_info, index);
     {
         py::gil_scoped_release release;
         std::unique_lock<std::mutex> lock(*index.mutex_ptr_);
