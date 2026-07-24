@@ -27,7 +27,8 @@
 
 #include "dense_index.cuh"
 
-using namespace unum::usearch;
+namespace unum {
+namespace usearch {
 
 /** @brief Gate: a (dtype, kernel) cell is testable once its serial kernel kit is adapted. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
@@ -78,3 +79,6 @@ static std::size_t test_configuration(char const* name) {
     failures_count += test_concurrent_search<index_t, kernel_>(make_index);
     return report_scenarios(name, failures_count);
 }
+
+} // namespace usearch
+} // namespace unum

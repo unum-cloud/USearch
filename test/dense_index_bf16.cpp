@@ -6,7 +6,8 @@
  *  @date July 23, 2026
  */
 #include "dense_index.hpp"
-#include "test.hpp"
+
+using namespace unum::usearch;
 
 std::size_t test_dense_index_bf16() {
     std::size_t failures_count = 0;

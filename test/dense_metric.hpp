@@ -49,7 +49,8 @@
 #include "test.hpp"
 #include "usearch/dense/ram_metric.hpp"
 
-using namespace unum::usearch;
+namespace unum {
+namespace usearch {
 
 constexpr std::array<std::size_t, 7> dimensions_to_test = {7, 8, 32, 64, 128, 257, 1024};
 
@@ -312,3 +313,6 @@ int check_scalar<nk::u1x8_t>() noexcept {
  */
 template <typename scalar_>
 concept scalar_wired = quads_supported<nk_kernel_dot_k, scalar_, nk_cap_serial_k>;
+
+} // namespace usearch
+} // namespace unum

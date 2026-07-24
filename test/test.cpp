@@ -9,6 +9,8 @@
 
 #include "test.hpp"
 
+using namespace unum::usearch;
+
 int main() {
     std::size_t failures_count = 0;
 

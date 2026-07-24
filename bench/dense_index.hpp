@@ -68,7 +68,8 @@
 #include "dense_index.cuh"
 #include "persisted_dataset.hpp"
 
-using namespace unum::usearch;
+namespace unum {
+namespace usearch {
 
 #pragma region CPU Pipeline
 
@@ -600,3 +601,6 @@ int run_with_compute(bench_launch<dataset_scalar_type_> const& launch) {
 }
 
 #pragma endregion
+
+} // namespace usearch
+} // namespace unum

@@ -13,25 +13,28 @@
  */
 #include "dense_index.hpp"
 
-extern template int run_with_compute<nk::f32_t, nk_bf16_k>(bench_launch<nk::f32_t> const&);
-extern template int run_with_compute<nk::bf16_t, nk_bf16_k>(bench_launch<nk::bf16_t> const&);
-extern template int run_with_compute<nk::i8_t, nk_bf16_k>(bench_launch<nk::i8_t> const&);
-extern template int run_with_compute<nk::u8_t, nk_bf16_k>(bench_launch<nk::u8_t> const&);
+using namespace unum::usearch;
+namespace us = unum::usearch;
 
-extern template int run_with_compute<nk::f32_t, nk_i8_k>(bench_launch<nk::f32_t> const&);
-extern template int run_with_compute<nk::bf16_t, nk_i8_k>(bench_launch<nk::bf16_t> const&);
-extern template int run_with_compute<nk::i8_t, nk_i8_k>(bench_launch<nk::i8_t> const&);
-extern template int run_with_compute<nk::u8_t, nk_i8_k>(bench_launch<nk::u8_t> const&);
+extern template int us::run_with_compute<nk::f32_t, nk_bf16_k>(bench_launch<nk::f32_t> const&);
+extern template int us::run_with_compute<nk::bf16_t, nk_bf16_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_compute<nk::i8_t, nk_bf16_k>(bench_launch<nk::i8_t> const&);
+extern template int us::run_with_compute<nk::u8_t, nk_bf16_k>(bench_launch<nk::u8_t> const&);
 
-extern template int run_with_compute<nk::f32_t, nk_u8_k>(bench_launch<nk::f32_t> const&);
-extern template int run_with_compute<nk::bf16_t, nk_u8_k>(bench_launch<nk::bf16_t> const&);
-extern template int run_with_compute<nk::i8_t, nk_u8_k>(bench_launch<nk::i8_t> const&);
-extern template int run_with_compute<nk::u8_t, nk_u8_k>(bench_launch<nk::u8_t> const&);
+extern template int us::run_with_compute<nk::f32_t, nk_i8_k>(bench_launch<nk::f32_t> const&);
+extern template int us::run_with_compute<nk::bf16_t, nk_i8_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_compute<nk::i8_t, nk_i8_k>(bench_launch<nk::i8_t> const&);
+extern template int us::run_with_compute<nk::u8_t, nk_i8_k>(bench_launch<nk::u8_t> const&);
 
-extern template int run_with_compute<nk::f32_t, nk_i4_k>(bench_launch<nk::f32_t> const&);
-extern template int run_with_compute<nk::bf16_t, nk_i4_k>(bench_launch<nk::bf16_t> const&);
-extern template int run_with_compute<nk::i8_t, nk_i4_k>(bench_launch<nk::i8_t> const&);
-extern template int run_with_compute<nk::u8_t, nk_i4_k>(bench_launch<nk::u8_t> const&);
+extern template int us::run_with_compute<nk::f32_t, nk_u8_k>(bench_launch<nk::f32_t> const&);
+extern template int us::run_with_compute<nk::bf16_t, nk_u8_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_compute<nk::i8_t, nk_u8_k>(bench_launch<nk::i8_t> const&);
+extern template int us::run_with_compute<nk::u8_t, nk_u8_k>(bench_launch<nk::u8_t> const&);
+
+extern template int us::run_with_compute<nk::f32_t, nk_i4_k>(bench_launch<nk::f32_t> const&);
+extern template int us::run_with_compute<nk::bf16_t, nk_i4_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_compute<nk::i8_t, nk_i4_k>(bench_launch<nk::i8_t> const&);
+extern template int us::run_with_compute<nk::u8_t, nk_i4_k>(bench_launch<nk::u8_t> const&);
 
 /** @brief Stored-dtype axis: the CLI's chosen store instantiates the compute chain, or reports
  *      the dtypes that carry adapted CPU kits. */

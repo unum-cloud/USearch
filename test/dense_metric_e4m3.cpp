@@ -5,7 +5,8 @@
  *  @date July 23, 2026
  */
 #include "dense_metric.hpp"
-#include "test.hpp"
+
+using namespace unum::usearch;
 
 static_assert(scalar_wired<nk::e4m3_t>);
 

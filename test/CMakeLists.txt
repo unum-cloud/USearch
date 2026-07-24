@@ -42,7 +42,16 @@ if (USEARCH_BUILD_CUDA)
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
 
-    add_executable(usearch_test_cuda dense_index.cu)
+    add_executable(
+        usearch_test_cuda
+        dense_index.cu
+        dense_index_i8.cu
+        dense_index_u8.cu
+        dense_index_f16.cu
+        dense_index_bf16.cu
+        dense_index_i4.cu
+        dense_index_u1.cu
+    )
     target_include_directories(
         usearch_test_cuda PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
                                   ${PROJECT_SOURCE_DIR}/numkong/include ${PROJECT_SOURCE_DIR}/forkunion/include

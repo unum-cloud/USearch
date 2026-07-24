@@ -5,6 +5,7 @@
  *  @date July 23, 2026
  */
 #include "dense_metric.hpp"
-#include "test.hpp"
+
+using namespace unum::usearch;
 
 std::size_t test_dense_metric_f32() { return static_cast<std::size_t>(check_scalar<nk::f32_t>()); }

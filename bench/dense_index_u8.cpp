@@ -7,7 +7,10 @@
  */
 #include "dense_index.hpp"
 
-template int run_with_compute<nk::f32_t, nk_u8_k>(bench_launch<nk::f32_t> const&);
-template int run_with_compute<nk::bf16_t, nk_u8_k>(bench_launch<nk::bf16_t> const&);
-template int run_with_compute<nk::i8_t, nk_u8_k>(bench_launch<nk::i8_t> const&);
-template int run_with_compute<nk::u8_t, nk_u8_k>(bench_launch<nk::u8_t> const&);
+namespace us = unum::usearch;
+namespace nk = ashvardanian::numkong;
+
+template int us::run_with_compute<nk::f32_t, nk_u8_k>(us::bench_launch<nk::f32_t> const&);
+template int us::run_with_compute<nk::bf16_t, nk_u8_k>(us::bench_launch<nk::bf16_t> const&);
+template int us::run_with_compute<nk::i8_t, nk_u8_k>(us::bench_launch<nk::i8_t> const&);
+template int us::run_with_compute<nk::u8_t, nk_u8_k>(us::bench_launch<nk::u8_t> const&);
