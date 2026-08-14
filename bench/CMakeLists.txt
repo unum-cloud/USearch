@@ -2,15 +2,17 @@
 # carrying its slice of the instantiation grid in a parallel LLVM backend.
 add_executable(
     usearch_bench
-    dense_index.cpp
-    dense_index_bf16.cpp
-    dense_index_i8.cpp
-    dense_index_u8.cpp
-    dense_index_i4.cpp
+    dense.cpp
+    dense/ram_index_bf16.cpp
+    dense/ram_index_i8.cpp
+    dense/ram_index_u8.cpp
+    dense/ram_index_i4.cpp
 )
 setup_target(usearch_bench)
-target_include_directories(usearch_bench PRIVATE ${PROJECT_SOURCE_DIR}/test)
-target_link_libraries(usearch_bench PRIVATE clipp fmt::fmt forkunion::static stringzilla::stringzilla_header yyjson)
+target_include_directories(usearch_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/test)
+target_link_libraries(
+    usearch_bench PRIVATE clipp fmt::fmt yyjson ${USEARCH_FORKUNION_LIBRARY} ${USEARCH_STRINGZILLA_LIBRARY}
+)
 
 # The CUDA bench skips `setup_target`: its host-compiler flags don't survive the CUDA
 # driver, so the target wires the interface includes directly.
@@ -20,19 +22,18 @@ if (USEARCH_BUILD_CUDA)
 
     add_executable(
         usearch_bench_cuda
-        dense_index.cu
-        dense_index_f32.cu
-        dense_index_bf16.cu
-        dense_index_f16.cu
-        dense_index_i8.cu
-        dense_index_i4.cu
-        dense_index_u8.cu
-        dense_index_u1.cu
+        dense.cu
+        dense/vram_index_f32.cu
+        dense/vram_index_bf16.cu
+        dense/vram_index_f16.cu
+        dense/vram_index_i8.cu
+        dense/vram_index_i4.cu
+        dense/vram_index_u8.cu
+        dense/vram_index_u1.cu
     )
     target_include_directories(
         usearch_bench_cuda PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
-                                   ${PROJECT_SOURCE_DIR}/numkong/include ${PROJECT_SOURCE_DIR}/forkunion/include
-                                   ${PROJECT_SOURCE_DIR}/test
+                                   ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/test
     )
     set_target_properties(
         usearch_bench_cuda
@@ -42,7 +43,7 @@ if (USEARCH_BUILD_CUDA)
     )
     target_compile_options(usearch_bench_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
     target_link_libraries(
-        usearch_bench_cuda PRIVATE clipp fmt::fmt forkunion::static stringzilla::stringzilla_header yyjson
-                                   CUDA::cuda_driver
+        usearch_bench_cuda PRIVATE clipp fmt::fmt yyjson CUDA::cuda_driver ${USEARCH_FORKUNION_LIBRARY}
+                                   ${USEARCH_STRINGZILLA_LIBRARY}
     )
 endif ()

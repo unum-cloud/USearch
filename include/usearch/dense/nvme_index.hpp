@@ -130,8 +130,8 @@
 #include <forkunion/types.hpp>
 #include <numkong/tensor.hpp>
 
-#include "usearch/types.hpp"
-#include "usearch/ram_queue.hpp"
+#include "usearch/utilities/types.hpp"
+#include "usearch/utilities/ram_queue.hpp"
 #include "usearch/dense/ram_metric.hpp"
 
 namespace unum {

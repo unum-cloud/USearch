@@ -101,8 +101,8 @@
 #include <numkong/types.hpp>
 #include <numkong/vector.hpp>
 
-#include "usearch/ram_hints.hpp"
-#include "usearch/types.hpp"
+#include "usearch/utilities/types.hpp"
+#include "usearch/utilities/ram_hints.hpp"
 
 /**
  *  @brief Per-step cache-hint feature gates for the @c invoke_distances_ trampoline.

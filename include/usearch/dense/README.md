@@ -1,7 +1,7 @@
 # Dense Indexes
 
 Everything dense, one level deep: equidimensional vectors whose most common similarity measures - Inner-Product, Angular, Euclidean, Hamming, Jaccard - derive from a single inner product of two vectors, so pre-computed per-vector norms cut the arithmetic intensity of the composite metrics by 3x.
-The flat glue header `usearch/dense_index.hpp` pulls the portable RAM residency; the VRAM and NVMe siblings stay opt-in through their own extensions.
+The RAM residency is the portable default every platform owns; the VRAM and NVMe siblings stay opt-in through their own extensions, so neither belongs in a portable include.
 
 ## Residencies
 

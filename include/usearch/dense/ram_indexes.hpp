@@ -18,7 +18,7 @@
 #include <forkunion.h>         // `fu_topology_t`, `fu_local_memory_of` - the placement facts
 #include <forkunion/types.hpp> // `fu::dynamic_array` - the shard & routing tables
 
-#include "usearch/types.hpp"
+#include "usearch/utilities/types.hpp"
 #include "usearch/dense/ram_index.hpp"
 
 namespace unum {

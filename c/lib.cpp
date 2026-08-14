@@ -2,9 +2,7 @@
 
 #include <usearch/index_dense.hpp>
 
-extern "C" {
-#include "usearch.h"
-}
+#include <usearch/dense_index.h>
 
 // Check if NDEBUG is defined to determine if it's a release build
 #ifdef NDEBUG

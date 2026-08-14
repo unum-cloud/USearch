@@ -1,0 +1,10 @@
+// Clang C module map for the USearch C interface. There is no umbrella header, so the
+// module lists the modality headers directly - importing it brings every modality and the
+// shared vocabulary they all include.
+module USearchC {
+    header "usearch/types.h"
+    header "usearch/dense_index.h"
+    header "usearch/sequence_index.h"
+    header "usearch/geospatial_index.h"
+    export *
+}

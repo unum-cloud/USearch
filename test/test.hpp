@@ -20,7 +20,7 @@
 #include <numkong/tensor.hpp>
 #include <numkong/vector.hpp>
 
-#include "usearch/types.hpp"
+#include "usearch/utilities/types.hpp"
 
 namespace unum::usearch {
 
@@ -171,27 +171,10 @@ nk::matrix<scalar_> make_vectors(std::size_t count, std::size_t dimensions, u64_
 
 #pragma region Suite Entry Points
 
-/** @brief Per-family, per-dtype suite entries the shard translation units define and the
- *      suite's @c main composes explicitly; each returns its shard's failure count. */
-std::size_t test_dense_index_f32();
-std::size_t test_dense_index_u8();
-std::size_t test_dense_index_i8();
-std::size_t test_dense_index_bf16();
-std::size_t test_dense_index_i4();
-
-std::size_t test_dense_metric_f64();
-std::size_t test_dense_metric_f32();
-std::size_t test_dense_metric_bf16();
-std::size_t test_dense_metric_f16();
-std::size_t test_dense_metric_e5m2();
-std::size_t test_dense_metric_e4m3();
-std::size_t test_dense_metric_e3m2();
-std::size_t test_dense_metric_e2m3();
-std::size_t test_dense_metric_i8();
-std::size_t test_dense_metric_i4();
-std::size_t test_dense_metric_u8();
-std::size_t test_dense_metric_u4();
-std::size_t test_dense_metric_u1();
+/** @brief Per-area suite entries the composer translation units define and the suite's
+ *      @c main composes explicitly; each returns its area's failure count. The per-dtype
+ *      shards below them are named by their own area's header, never here. */
+std::size_t test_dense_all();
 
 std::size_t test_ram_queue();
 

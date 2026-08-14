@@ -1,0 +1,4 @@
+# The pure C surface: `typedef` is this language's own spelling, so the C++ modernization
+# does not apply; everything else inherits from the repository root.
+InheritParentConfig: true
+Checks: '-modernize-use-using,-hicpp-use-using'

@@ -30,8 +30,8 @@
 
 #include <numkong/numkong.hpp>
 
-#include "usearch/types.hpp"
-#include "usearch/vram_device.hpp"
+#include "usearch/utilities/types.hpp"
+#include "usearch/utilities/vram_device.hpp"
 
 #if defined(__CUDACC__)
 

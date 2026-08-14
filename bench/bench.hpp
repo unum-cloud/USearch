@@ -30,7 +30,7 @@
 
 #include <numkong/types.h>
 
-#include "usearch/types.hpp"
+#include "usearch/utilities/types.hpp"
 
 namespace unum::usearch {
 

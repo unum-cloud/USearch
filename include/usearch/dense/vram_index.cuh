@@ -26,9 +26,9 @@
 #include <numkong/types.h>
 #include <numkong/vector.hpp>
 
-#include "usearch/types.hpp"
-#include "usearch/vram_device.hpp"
-#include "usearch/vram_queue.cuh"
+#include "usearch/utilities/types.hpp"
+#include "usearch/utilities/vram_device.hpp"
+#include "usearch/utilities/vram_queue.cuh"
 #include "usearch/dense/vram_metric.cuh"
 
 namespace unum {

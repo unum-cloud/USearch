@@ -1,7 +1,7 @@
 /**
  *  @file       test.c
  *  @author     Ash Vardanian
- *  @brief      Unit tests for the pure-C ABI of USearch (`usearch.h`).
+ *  @brief      Unit tests for the pure-C ABI of USearch (`usearch/dense_index.h`).
  *  @date       June 25, 2023
  *
  *  Exercises the lifecycle of `usearch_index_t` through the public C surface:
@@ -38,7 +38,7 @@
 #include <unistd.h>
 #endif
 
-#include "usearch.h"
+#include <usearch/dense_index.h>
 
 static void usearch_write_backtrace(int signal_number) {
     fprintf(stderr, "\n[usearch] Fatal signal %d. Back-trace:\n", signal_number);

@@ -4,31 +4,33 @@
 add_executable(
     usearch_test
     test.cpp
-    ram_queue.cpp
-    dense_metric_f64.cpp
-    dense_metric_f32.cpp
-    dense_metric_bf16.cpp
-    dense_metric_f16.cpp
-    dense_metric_e5m2.cpp
-    dense_metric_e4m3.cpp
-    dense_metric_e3m2.cpp
-    dense_metric_e2m3.cpp
-    dense_metric_i8.cpp
-    dense_metric_i4.cpp
-    dense_metric_u8.cpp
-    dense_metric_u4.cpp
-    dense_metric_u1.cpp
-    dense_index_f32.cpp
-    dense_index_u8.cpp
-    dense_index_i8.cpp
-    dense_index_bf16.cpp
-    dense_index_i4.cpp
+    dense.cpp
+    utilities/ram_queue.cpp
+    dense/ram_metric_f64.cpp
+    dense/ram_metric_f32.cpp
+    dense/ram_metric_bf16.cpp
+    dense/ram_metric_f16.cpp
+    dense/ram_metric_e5m2.cpp
+    dense/ram_metric_e4m3.cpp
+    dense/ram_metric_e3m2.cpp
+    dense/ram_metric_e2m3.cpp
+    dense/ram_metric_i8.cpp
+    dense/ram_metric_i4.cpp
+    dense/ram_metric_u8.cpp
+    dense/ram_metric_u4.cpp
+    dense/ram_metric_u1.cpp
+    dense/ram_index_f32.cpp
+    dense/ram_index_u8.cpp
+    dense/ram_index_i8.cpp
+    dense/ram_index_bf16.cpp
+    dense/ram_index_i4.cpp
 )
 setup_target(usearch_test)
+target_include_directories(usearch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(usearch_test PRIVATE fmt::fmt)
 add_test(NAME usearch_test COMMAND usearch_test)
 
-# The core tier's proof: types.hpp, ram_queue.hpp & ram_hints.hpp compile with the
+# The core tier's proof: types.hpp, ram_queue.hpp & utilities/ram_hints.hpp compile with the
 # standard library alone - only -Iinclude, no submodule paths, no third-party targets.
 add_executable(usearch_test_core core.cpp)
 target_include_directories(usearch_test_core PRIVATE ${PROJECT_SOURCE_DIR}/include)
@@ -44,17 +46,17 @@ if (USEARCH_BUILD_CUDA)
 
     add_executable(
         usearch_test_cuda
-        dense_index.cu
-        dense_index_i8.cu
-        dense_index_u8.cu
-        dense_index_f16.cu
-        dense_index_bf16.cu
-        dense_index_i4.cu
-        dense_index_u1.cu
+        dense.cu
+        dense/vram_index_i8.cu
+        dense/vram_index_u8.cu
+        dense/vram_index_f16.cu
+        dense/vram_index_bf16.cu
+        dense/vram_index_i4.cu
+        dense/vram_index_u1.cu
     )
     target_include_directories(
         usearch_test_cuda PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
-                                  ${PROJECT_SOURCE_DIR}/numkong/include ${PROJECT_SOURCE_DIR}/forkunion/include
+                                  ${CMAKE_CURRENT_SOURCE_DIR}
     )
     set_target_properties(
         usearch_test_cuda
