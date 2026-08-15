@@ -1,6 +1,6 @@
 # USearch for Rust
 
-Detailed symbol list and documentation for USearch Rust SDK can be found on [docs.rs](https://docs.rs/usearch/latest/usearch/struct.Index.html).
+Detailed symbol list and documentation for the USearch Rust SDK can be found on [docs.rs](https://docs.rs/usearch).
 
 ## Installation
 
@@ -8,229 +8,163 @@ Detailed symbol list and documentation for USearch Rust SDK can be found on [doc
 cargo add usearch
 ```
 
-This will add a USearch dependency to your `Cargo.toml` file.
+The crate links the pre-instantiated C library and consumes it through its stable C headers, so no index template is instantiated in your build.
+[NumKong](https://github.com/ashvardanian/NumKong) is a hard dependency rather than a feature: its matrices, scalar types, and traits _are_ this crate's vocabulary, and it supplies the SIMD kernels.
 
-```toml
-[dependencies]
-usearch = "..."
-```
-
-By default, [NumKong](https://github.com/ashvardanian/numkong) is used to provide dynamic dispatch for SIMD operations.
-You can, however, override that by specifying custom features in your `Cargo.toml` file.
-To disable all features, use the following configuration:
-
-```toml
-[dependencies]
-usearch = { version = "...", default-features = false }
-```
-
-To enable specific features, use the following configuration:
-
-```toml
-[dependencies]
-usearch = { version = "...", features = ["numkong", "openmp", "fp16lib"] }
-```
-
-OpenMP (`openmp`) will use the OpenMP runtime for parallelism.
-It may not be available on all platforms, but on Linux it will lead to better performance and lower latency of small-batch operations on multi-core CPUs.
-The `fp16lib` flag will bring in the C-layer `fp16` library to emulate half-precision floating point operations on older CPUs, where it may not be natively supported.
+Building from a source checkout compiles `c/lib.cpp` and the `src/` shards, so the submodules must be present.
+Pointing `USEARCH_LIB_DIR` at a CMake build directory skips that and links the library already there.
 
 ## Quickstart
 
+Every batch input and output is a NumKong matrix - a base pointer, a row count, and a byte stride - so a memory-mapped dataset feeds the index with no reshape and no copy.
+
 ```rust
-use usearch::{Index, IndexOptions, MetricKind, ScalarKind, new_index};
+use usearch::dense::{Metric, Options, Outputs, Stats};
+use usearch::{rows, DenseIndex, Distance, Key, ScalarKind};
 
-let options = IndexOptions {
-    dimensions: 3, // necessary for most metric kinds
-    metric: MetricKind::IP, // or ::L2sq, ::Cos ...
-    quantization: ScalarKind::BF16, // or ::F32, ::F16, ::E5M2, ::E4M3, ::E3M2, ::E2M3, ::U8, ::I8, ::B1x8 ...
-    connectivity: 0, // zero for auto
-    expansion_add: 0, // zero for auto
-    expansion_search: 0, // zero for auto
-};
+let index = DenseIndex::new(&Options {
+    dimensions: 4,
+    metric: Metric::Angular,
+    quantization: ScalarKind::I8,
+    ..Options::default()
+})?;
+index.reserve(1_000)?;
 
-let index: Index = new_index(&options).unwrap();
+let keys = [Key::from(42u64), Key::from(43u64)];
+let slab: [f32; 8] = [0.2, 0.1, 0.2, 0.1, 0.1, 0.2, 0.1, 0.2];
+index.add(&keys, rows(&slab, 4), 0, None)?;
 
-assert!(index.reserve(10).is_ok());
-assert!(index.capacity() >= 10);
-assert!(index.connectivity() != 0);
-assert_eq!(index.dimensions(), 3);
-assert_eq!(index.size(), 0);
-
-let first: [f32; 3] = [0.2, 0.1, 0.2];
-let second: [f32; 3] = [0.2, 0.1, 0.2];
-
-assert!(index.add(42, &first).is_ok());
-assert!(index.add(43, &second).is_ok());
-assert_eq!(index.size(), 2);
-
-// Read back the tags
-let results = index.search(&first, 10).unwrap();
-assert_eq!(results.keys.len(), 2);
+let query: [f32; 4] = [0.2, 0.1, 0.2, 0.1];
+let (mut found, mut scores, mut counts) = ([Key::NIL; 10], [0.0 as Distance; 10], [0usize; 1]);
+let mut outputs = Outputs::packed(&mut found, &mut scores, &mut counts, 10);
+index.search_into(rows(&query, 4), 0, &mut outputs, None)?;
 ```
+
+`rows` borrows a packed slab; a dataset whose rows are padded to a wider pitch passes `MatrixView::from_raw_parts` instead, which takes the byte stride directly.
+The scalar type of the input is independent of the stored quantization - the `f32` slab above lands in an `i8` index - so nothing needs converting before insertion.
+
+## Search Allocates Nothing
+
+There is one search verb and it writes into buffers you own, so a benchmark loop allocates once and never again.
+The width of the keys matrix _is_ the "k" in "kANN", so the wanted count cannot disagree with the space reserved for it.
+
+```rust
+let mut keys = vec![Key::NIL; queries_count * 10];
+let mut distances = vec![0.0; queries_count * 10];
+let mut counts = vec![0usize; queries_count];
+let mut outputs = Outputs::packed(&mut keys, &mut distances, &mut counts, 10);
+let mut stats = Stats::default();
+
+index.search_into(rows(&queries, 768), 128, &mut outputs, Some(&mut stats))?;
+println!("{} distances computed", stats.computed_distances);
+```
+
+The candidate-pool breadth rides the call rather than the handle, so a recall sweep is a loop over `ef` values against one immutable index, with no mutation and no synchronization between points.
+
+## Residency
+
+Where the payload lives is an enum, not a flag, and it decides what loading a checkpoint means: materialize into RAM, upload to a device, or open in place on disk.
+
+```rust
+use usearch::{Addressing, Device, HugePages, IoMode, Residency};
+
+Residency::Ram { threads: 0, huge_pages: HugePages::RequireHugePages };
+Residency::Vram { device: Device::Ordinal(0), addressing: Addressing::DeviceOnly };
+Residency::Nvme { sector_bytes: 512, queue_depth: 0, io: IoMode::Direct };
+```
+
+An NVMe handle opens a checkpoint in place and is read-only, so every mutating verb fails on it.
+Bigger indexes come from merging, never mutating: shards build in RAM, serialize, and join a manifest.
 
 ## Serialization
 
-To save and load the index from disk, use the following methods:
+The path extension picks the layout - a `.safegraphs` path is one monolith, a `.safegraphs.json` path is a manifest cataloging many.
 
 ```rust
-assert!(index.save("index.usearch").is_ok());
-assert!(index.load("index.usearch").is_ok());
-assert!(index.view("index.usearch").is_ok());
+index.save("index.safegraphs")?;
+index.load("index.safegraphs")?;
+
+let options = DenseIndex::metadata("index.safegraphs")?; // geometry without loading a shard
 ```
 
-Viewing the index does not load the data into memory, but allows you to inspect and traverse the index structure from external memory using memory-mapping.
-Similarly, serializing to/from in-memory buffers is supported.
-So you can memory-map the index file manually, and later call `view_from_buffer` or one of its siblings.
-
-```rust
-assert!(index.save_to_buffer(&mut serialization_buffer).is_ok());
-assert!(index.load_from_buffer(&serialization_buffer).is_ok());
-assert!(index.view_from_buffer(&serialization_buffer).is_ok());
-```
+Checkpoints are residency-portable: one file materializes into RAM, uploads to a device, or opens in place on disk, decided by the handle that loads it.
+In-memory buffers hold single monoliths only, through `save_buffer` and `load_buffer`.
 
 ## Metrics
 
-USearch comes pre-packaged with NumKong, bringing over 100 SIMD-accelerated distance kernels for x86 and ARM architectures.
-That includes:
+Every metric derives from a single inner-product kernel with pre-computed magnitudes, which is why this binding does not expose the C layer's custom-callback escape hatch: a caller-supplied metric forfeits the SIMD kernel chains and the magnitude cache both.
 
-- `MetricKind::IP` - Inner Product metric, defined as `IP = 1 - sum(a[i] * b[i])`.
-- `MetricKind::L2sq` - Squared Euclidean Distance metric, defined as `L2 = sum((a[i] - b[i])^2)`.
-- `MetricKind::Cos` - Cosine Similarity metric, defined as `Cos = 1 - sum(a[i] * b[i]) / (sqrt(sum(a[i]^2) * sqrt(sum(b[i]^2)))`.
-- `MetricKind::Pearson` - Pearson Correlation metric.
-- `MetricKind::Haversine` - Haversine (Great Circle) Distance metric.
-- `MetricKind::Divergence` - Jensen Shannon Divergence metric.
-- `MetricKind::Hamming` - Bit-level Hamming Distance metric, defined as the number of differing bits.
-- `MetricKind::Tanimoto` - Bit-level Tanimoto (Jaccard) metric, defined as the number of intersecting bits divided by the number of union bits.
-- `MetricKind::Sorensen` - Bit-level Sorensen metric.
+- `Metric::Inner` - inner product.
+- `Metric::Angular` - cosine distance, over pre-computed magnitudes.
+- `Metric::Euclidean` - squared euclidean distance.
+- `Metric::Hamming` - bit-level, over the packed sub-byte kinds.
+- `Metric::Jaccard` - bit-level, over the packed sub-byte kinds.
 
-### User-Defined Metrics
+## Filtering With Predicates
 
-Custom metrics allow for the implementation of specific algorithms to measure the distance or similarity between vectors in the index.
-To use a custom metric with USearch, define a function that matches the expected signature and pass it to your index on creation, or later with `change_metric`.
-Let's say you are implementing a weighted distance function to search through joint embeddings of images and textual descriptions of some products in a catalog, taking some [UForm](https://github.com/unum-cloud/uform) or CLIP-like models.
+Cross-referencing an external database during traversal beats paging through results and filtering afterwards.
+Non-matching entries still route the traversal, so recall does not collapse at low selectivity.
 
 ```rust
-use numkong::SpatialSimilarity;
-
-let image_dimensions: usize = 768;
-let text_dimensions: usize = 512;
-let image_weights: f32 = 0.7;
-let text_weights: f32 = 0.9;
-
-let weighted_distance = Box::new(move |a: *const f32, b: *const f32| unsafe {
-    let a_slice = std::slice::from_raw_parts(a, image_dimensions + text_dimensions);
-    let b_slice = std::slice::from_raw_parts(b, image_dimensions + text_dimensions);
-
-    let image_similarity = f32::cosine(a_slice[0..image_dimensions], b_slice[0..image_dimensions]);
-    let text_similarity = f32::cosine(a_slice[image_dimensions..], b_slice[image_dimensions..]);
-    let similarity = image_weights * image_similarity + text_weights * text_similarity / (image_weights + text_weights);
-    
-    1.0 - similarity
-});
-index.change_metric(weighted_distance);
+let is_odd = |key: Key| key.as_u64().is_some_and(|value| value % 2 == 1);
+index.search_if_into(rows(&query, 768), 0, &mut outputs, None, &is_odd)?;
 ```
 
-You can always revert back to one of the native metrics by calling:
-    
-```rust
-index.change_metric_kind(MetricKind::Cos);
-```
+## Scalar Types
 
-## Filtering with Predicates
+The scalar types are NumKong's, so nothing needs re-wrapping to move between the two crates - `f16` and `bf16` included, emulated where the CPU has no native support.
 
-Sometimes you may want to cross-reference search-results against some external database or filter them based on some criteria.
-In most engines, you'd have to manually perform paging requests, successively filtering the results.
-In USearch you can simply pass a predicate function to the search method, which will be applied directly during graph traversal.
+| Rust type                            | `ScalarKind`                    |
+| ------------------------------------ | ------------------------------- |
+| `f64`, `f32`                         | `F64`, `F32`                    |
+| `bf16`, `f16`                        | `BF16`, `F16`                   |
+| `e5m2`, `e4m3`, `e3m2`, `e2m3`       | `E5M2`, `E4M3`, `E3M2`, `E2M3`  |
+| `i8`, `i4x2`                         | `I8`, `I4x2`                    |
+| `u8`, `u4x2`, `u1x8`                 | `U8`, `U4x2`, `U1x8`            |
+
+Initializing an index with a packed quantization and adding floating-point vectors quantizes on ingest; the `u1x8` type also lets you pass packed bit-vectors directly.
 
 ```rust
-let is_odd = |key: Key| key % 2 == 1;
-let query = vec![0.2, 0.1, 0.2, 0.1, 0.3];
-let results = index.filtered_search(&query, 10, is_odd).unwrap();
-assert!(
-    results.keys.iter().all(|&key| key % 2 == 1),
-    "All keys must be odd"
-);
-```
-
-## Quantization and Custom Scalar Types
-
-USearch supports the Rust-native `f32` and `f64` scalar types, as well as the `i8` for quantized 8-bit scalars.
-Going beyond that, USearch supports non-native `f16` and `b1x8` for half-precision floating point and binary vectors, respectively.
-
-### Half Precision Floating Point
-
-Rust has no native support for half-precision floating-point numbers, but USearch provides a `f16` type.
-It has no advanced functionality - it is a transparent wrapper around `i16` and can be used with `half` or any other half-precision library.
-Assuming USearch uses the IEEE 754 no conversion is needed, you can `unsafe`-cast the outputs of other IEEE-compliant libraries to `usearch::f16`.
-
-```rust
-use usearch::f16 as USearchF16;
-use half::f16 as HalfF16;
-
-let vector_a: Vec<HalfF16> = ...
-let vector_b: Vec<HalfF16> = ...
-
-let buffer_a: &[USearchF16] = unsafe { std::slice::from_raw_parts(a_half.as_ptr() as *const USearchF16, a_half.len()) };
-let buffer_b: &[USearchF16] = unsafe { std::slice::from_raw_parts(b_half.as_ptr() as *const USearchF16, b_half.len()) };
-
-index.add(42, buffer_a);
-index.add(43, buffer_b);
-```
-
-### Binary Vectors
-
-USearch also implements binary distance functions and natively supports bit-vectors.
-If you initialize the index with `quantization: ScalarKind::B1x8`, you can add floating-point vectors and they will be quantized mapping positive values to `1` and negative and zero values to `0`.
-Alternatively, you can use the `b1x8` type to represent packed binary vectors directly.
-
-```rs
-let index = Index::new(&IndexOptions {
+let index = DenseIndex::new(&Options {
     dimensions: 8,
-    metric: MetricKind::Hamming,
-    quantization: ScalarKind::B1x8,
-    ..Default::default()
-})
-.unwrap();
+    metric: Metric::Hamming,
+    quantization: ScalarKind::U1x8,
+    ..Options::default()
+})?;
 
-// Binary vectors represented as `b1x8` slices
-let vector42: Vec<b1x8> = vec![b1x8(0b00001111)];
-let vector43: Vec<b1x8> = vec![b1x8(0b11110000)];
-let query: Vec<b1x8> = vec![b1x8(0b01111000)];
-
-// Adding binary vectors to the index
-index.reserve(10).unwrap();
-index.add(42, &vector42).unwrap();
-index.add(43, &vector43).unwrap();
-
-let results = index.search(&query, 5).unwrap();
-
-// Validate the search results based on Hamming distance
-assert_eq!(results.keys.len(), 2);
-assert_eq!(results.keys[0], 43);
-assert_eq!(results.distances[0], 2.0); // 2 bits differ between query and vector43
-assert_eq!(results.keys[1], 42);
-assert_eq!(results.distances[1], 6.0); // 6 bits differ between query and vector42
+let slab = [u1x8(0b0000_1111), u1x8(0b1111_0000)];
+index.add(&keys, rows(&slab, 8), 0, None)?;
 ```
 
-## Performance Tuning
+## Streaming and Iteration
 
-To optimize the performance of the index, you can adjust the expansion values used during index creation and search operations.
-Higher expansion values will lead to better search accuracy at the cost of slightly increased memory usage, but potentially much higher search times.
-Following methods are available to adjust the expansion values:
+A finder is a resumable best-first traversal, so callers that post-filter aggressively pull until satisfied instead of guessing "k" upfront.
 
-```rs
-println!("Add expansion: {}", index.expansion_add());
-println!("Search expansion: {}", index.expansion_search());
-index.change_expansion_add(32);
-index.change_expansion_search(32);
+```rust
+for found in index.find(&query)? {
+    let found = found?;
+    if found.distance > 0.3 { break; }
+    println!("{} at {}", found.key, found.distance);
+}
 ```
 
-Optimizing hardware utilization, you may want to check the SIMD hardware acceleration capabilities of the index and memory consumption.
-The first will print the codename of the most advanced SIMD instruction set supported by the CPU and used by the index.
-The second will print the memory usage of the index in bytes.
+A cursor walks the index contents as a sequential row scan behind a publication watermark, so concurrent inserts never appear mid-iteration.
 
-```rs
-println!("Hardware acceleration: {}", index.hardware_acceleration());
-println!("Memory usage: {}", index.memory_usage());
+```rust
+let mut cursor = index.cursor::<f32>()?;
+let mut keys = vec![Key::NIL; 1024];
+let mut vectors = vec![0.0f32; 1024 * 768];
+loop {
+    let written = cursor.next_batch(&mut keys, Some(&mut usearch::rows_mut(&mut vectors, 768)))?;
+    if written == 0 { break; }
+}
+```
+
+## Introspection
+
+```rust
+println!("{} entries in {} bytes", index.size()?, index.memory_usage()?);
+println!("dispatched to {}", index.capabilities()?);
+println!("compiled for {}", usearch::capabilities_compiled());
+println!("available here {}", usearch::capabilities_available());
 ```
