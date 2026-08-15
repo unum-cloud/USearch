@@ -11,6 +11,47 @@
  *  a single row passes a count of one with any stride. Handles are created against one
  *  residency - RAM, VRAM, or NVMe - picked by the tagged options union, which also decides
  *  how loading behaves.
+ *
+ *  @section dense_index_serialization Serialization
+ *
+ *  Checkpoints ride the SafeGraphs interchange format, and the path extension picks the
+ *  layout. A @c .safegraphs path is one monolith: a self-describing file holding one shard's
+ *  vectors, neighbor lists, and its key column. A @c .safegraphs.json path is a manifest: a
+ *  small JSON catalog of many such monoliths - each with shard-local node ids, so edges
+ *  never cross files - with every shard path resolved relative to the manifest. Physical
+ *  placement is the filesystem's job: a manifest entry may be a symlink onto another mounted
+ *  SSD, and reads & writes follow it, so striping one index across devices needs no extra
+ *  API surface. In-memory buffers hold single monoliths only, since a manifest's relative
+ *  paths have nothing to resolve against in memory. Checkpoints are residency-portable: one
+ *  file materializes into RAM, uploads to a device, or opens in place on disk.
+ *
+ *  @section dense_index_gpu_acceleration GPU Acceleration & Constraints
+ *
+ *  A VRAM handle builds and searches on one device, and its capacity is bound by that
+ *  device's memory: the geometry freezes at the first reservation, and rows grow only up to
+ *  what the device hosts. Unified addressing lifts the ceiling to host memory through the
+ *  pager, trading traversal latency for datasets past the device - the knob for indexes
+ *  that fit one machine but not one accelerator.
+ *
+ *  @section dense_index_nvme_traversals NVME Traversals & Mergers
+ *
+ *  An NVMe handle opens a checkpoint in place and traverses it through the configured I/O
+ *  engine. External-memory graphs are never modified in place, so the handle is read-only,
+ *  and every mutating verb fails on it. Bigger indexes come from merging, never mutating:
+ *  shards build in RAM, serialize as monoliths, and join a manifest - the compaction shape
+ *  of LSM storage.
+ *
+ *  @section dense_index_concurrency Concurrency & Thread Safety
+ *
+ *  A handle may be shared across threads. On a RAM handle, insertions and searches overlap
+ *  freely: searches read only entries published behind the visibility watermark and never
+ *  write to the graph, while insertions synchronize through per-node locks and publish in
+ *  order. A VRAM handle is driven by one host thread through streams - operations on
+ *  distinct streams overlap, host threading adds nothing. An NVMe handle admits arbitrarily
+ *  many concurrent searches, having nothing to mutate. Serialization is the one exception:
+ *  saving demands a mutation-free window, though concurrent readers keep searching
+ *  throughout. Per-call outputs - stats, counts, the error pointer - belong to their call
+ *  and must not be shared between in-flight calls.
  */
 #ifndef UNUM_USEARCH_DENSE_INDEX_H
 #define UNUM_USEARCH_DENSE_INDEX_H
@@ -28,7 +69,7 @@ extern "C" {
  *  @see usearch_dense_add
  *  @see usearch_dense_search
  */
-USEARCH_EXPORT typedef void* usearch_dense_t;
+USEARCH_EXPORT typedef void* usearch_dense_index_t;
 
 /**
  *  @brief A consistent snapshot cursor over the index contents. Captures the publication
@@ -69,39 +110,6 @@ USEARCH_EXPORT typedef enum usearch_dense_metric_t {
 USEARCH_EXPORT typedef usearch_distance_t (*usearch_dense_metric_callback_t)( //
     void const* first, void const* second, size_t dimensions, void* state);
 
-/** @brief RAM-residency behavior: CPU threading & memory backing of the volatile index. */
-USEARCH_EXPORT typedef struct usearch_dense_ram_options_t {
-    /** @brief Worker threads for construction & batched search; zero takes 7/8 of the
-     *      logical cores - full occupancy starves the ordered publication path. */
-    size_t threads;
-    /** @brief Rounds stored rows up to the SIMD step quantum: cache-line-aligned rows and
-     *      tail-free unrolled kernels, at the price of slightly larger arenas. */
-    bool pad_dimensions;
-    /** @brief Expects a provisioned huge-page pool and fails loudly when it is missing,
-     *      rather than silently degrading to base pages. */
-    bool huge_pages;
-} usearch_dense_ram_options_t;
-
-/** @brief VRAM-residency behavior: device selection for the GPU-traversed index. */
-USEARCH_EXPORT typedef struct usearch_dense_vram_options_t {
-    /** @brief CUDA device ordinal; negative picks the first free device. */
-    int32_t device;
-    /** @brief Allows spilling cold shards into host memory over unified addressing. */
-    bool unified_addressing;
-} usearch_dense_vram_options_t;
-
-/** @brief NVMe-residency behavior: the on-disk arena and its I/O engine. */
-USEARCH_EXPORT typedef struct usearch_dense_nvme_options_t {
-    /** @brief Directory hosting the index arena & checkpoints. Must outlive the handle. */
-    char const* directory;
-    /** @brief I/O granularity in bytes; zero probes the device. 512 fits one 256-d i8 row. */
-    uint32_t sector_bytes;
-    /** @brief Submission ring depth; zero derives from the device's queue capabilities. */
-    uint32_t queue_depth;
-    /** @brief O_DIRECT-class page-cache bypass - the default and the point. */
-    bool direct_io;
-} usearch_dense_nvme_options_t;
-
 /**
  *  @brief Construction & loading options of a dense index. The @c residency field tags
  *      which union member is read; zeroed optional fields derive from the geometry.
@@ -115,138 +123,145 @@ USEARCH_EXPORT typedef struct usearch_dense_options_t {
     void* metric_callback_state;
     /** @brief The scalar type vectors are stored & quantized into. */
     usearch_scalar_t quantization;
-    /** @brief The number of dimensions in the indexed vectors. */
+    /** @brief The number of dimensions in the indexed vectors; zero defers the geometry to
+     *      a later @c usearch_dense_load, which reads it off the checkpoint. */
     size_t dimensions;
+    /** @brief Rounds stored rows up to the SIMD step quantum: cache-line-aligned rows and
+     *      tail-free unrolled kernels, at the price of slightly larger arenas. A property
+     *      of the stored layout, so it applies whichever residency traverses it. */
+    bool pad_dimensions;
     /** @brief The @b optional connections-per-node bound; zero derives. */
     size_t connectivity;
     /** @brief Selects the active member of the union below, and the meaning of "load". */
     usearch_residency_t residency;
     union {
-        usearch_dense_ram_options_t ram;
-        usearch_dense_vram_options_t vram;
-        usearch_dense_nvme_options_t nvme;
+        usearch_ram_options_t ram;
+        usearch_vram_options_t vram;
+        usearch_nvme_options_t nvme;
     };
 } usearch_dense_options_t;
 
 /**
  *  @brief Initializes a new dense index for the residency the options select.
  *  @param[in] options Pointer to the populated options structure.
- *  @param[out] error Pointer to a string where an error message will be stored, on failure.
+ *  @param[out] error Populated with a status and a static message; the status is
+ *      @c usearch_success_k when the call succeeded.
  *  @return A handle to the initialized index, or @c NULL on failure.
  */
-USEARCH_EXPORT usearch_dense_t usearch_dense_init(usearch_dense_options_t const* options, usearch_error_t* error);
+USEARCH_EXPORT usearch_dense_index_t usearch_dense_init(usearch_dense_options_t const* options, usearch_error_t* error);
 
 /**
- *  @brief Frees the resources associated with the index.
+ *  @brief Frees the resources associated with the index; cannot fail, so takes no error.
  *  @param[inout] index The handle to be freed; invalid afterwards.
- *  @param[out] error Pointer to a string where an error message will be stored, on failure.
  */
-USEARCH_EXPORT void usearch_dense_free(usearch_dense_t index, usearch_error_t* error);
+USEARCH_EXPORT void usearch_dense_free(usearch_dense_index_t index);
 
 /**
  *  @brief Reserves capacity for a number of incoming vectors ahead of insertion.
  *  @param[inout] index The handle to be resized.
  *  @param[in] capacity The desired total capacity, including the current size.
- *  @param[out] error Pointer to a string where an error message will be stored, on failure.
+ *  @param[out] error Populated with a status and a static message; the status is
+ *      @c usearch_success_k when the call succeeded.
  */
-USEARCH_EXPORT void usearch_dense_reserve(usearch_dense_t index, size_t capacity, usearch_error_t* error);
+USEARCH_EXPORT void usearch_dense_reserve(usearch_dense_index_t index, size_t capacity, usearch_error_t* error);
 
 /**
  *  @brief Erases all entries, keeping the reserved capacity and frozen geometry.
  *  @param[inout] index The handle to be cleared.
- *  @param[out] error Pointer to a string where an error message will be stored, on failure.
+ *  @param[out] error Populated with a status and a static message; the status is
+ *      @c usearch_success_k when the call succeeded.
  */
-USEARCH_EXPORT void usearch_dense_clear(usearch_dense_t index, usearch_error_t* error);
+USEARCH_EXPORT void usearch_dense_clear(usearch_dense_index_t index, usearch_error_t* error);
 
 /** @brief Reports the number of stored entries. */
-USEARCH_EXPORT size_t usearch_dense_size(usearch_dense_t index, usearch_error_t* error);
+USEARCH_EXPORT size_t usearch_dense_size(usearch_dense_index_t index, usearch_error_t* error);
 /** @brief Reports the reserved capacity in entries. */
-USEARCH_EXPORT size_t usearch_dense_capacity(usearch_dense_t index, usearch_error_t* error);
+USEARCH_EXPORT size_t usearch_dense_capacity(usearch_dense_index_t index, usearch_error_t* error);
 /** @brief Reports the frozen dimensionality of the stored vectors. */
-USEARCH_EXPORT size_t usearch_dense_dimensions(usearch_dense_t index, usearch_error_t* error);
+USEARCH_EXPORT size_t usearch_dense_dimensions(usearch_dense_index_t index, usearch_error_t* error);
 /** @brief Reports the frozen connections-per-node bound of the graph. */
-USEARCH_EXPORT size_t usearch_dense_connectivity(usearch_dense_t index, usearch_error_t* error);
+USEARCH_EXPORT size_t usearch_dense_connectivity(usearch_dense_index_t index, usearch_error_t* error);
 /** @brief Reports the memory usage of the index in bytes. */
-USEARCH_EXPORT size_t usearch_dense_memory_usage(usearch_dense_t index, usearch_error_t* error);
+USEARCH_EXPORT size_t usearch_dense_memory_usage(usearch_dense_index_t index, usearch_error_t* error);
 /** @brief Reports the capability codename the index dispatched to on this machine. */
-USEARCH_EXPORT char const* usearch_dense_capabilities(usearch_dense_t index, usearch_error_t* error);
+USEARCH_EXPORT char const* usearch_dense_capabilities(usearch_dense_index_t index, usearch_error_t* error);
 
 /**
- *  @brief Optional per-call configuration & telemetry for insertions. Zero-initialize before
- *      use: the setting fields are read as the batch starts, the @b reported fields are
- *      overwritten as it ends. Passing @c NULL derives every setting and skips reporting.
+ *  @brief Optional per-call settings, shared by insertion and both search forms - a pure
+ *      input, never written. Passing @c NULL derives every setting.
  */
-USEARCH_EXPORT typedef struct usearch_dense_add_config_t {
-    /** @brief The @b optional construction candidate-pool breadth; zero derives. */
-    size_t expansion;
-    /** @brief @b Reported: graph nodes visited while placing the batch. */
-    size_t visited_nodes;
-    /** @brief @b Reported: distances computed while placing the batch. */
+USEARCH_EXPORT typedef struct usearch_dense_expansion_config_t {
+    /** @brief The @b optional candidate-pool breadth; zero derives. */
+    size_t expansion_factor;
+} usearch_dense_expansion_config_t;
+
+/**
+ *  @brief Traversal telemetry, shared by insertion and both search forms - a pure output,
+ *      fully overwritten by the call it is passed to. Passing @c NULL skips reporting.
+ */
+USEARCH_EXPORT typedef struct usearch_dense_traversal_stats_t {
+    /** @brief Graph members visited while resolving the batch. */
+    size_t visited_members;
+    /** @brief Distances computed while resolving the batch, diversity re-selections included. */
     size_t computed_distances;
-} usearch_dense_add_config_t;
+    /** @brief Starvation restarts - re-seedings after the frontier drained prematurely,
+     *      and a graph-connectivity health signal rather than a cost counter. */
+    size_t restarts;
+} usearch_dense_traversal_stats_t;
 
 /**
  *  @brief Adds a strided matrix of vectors under their keys - the native batch operation;
- *      a single vector is a one-row matrix.
+ *      a single vector is a one-row matrix. Overlaps safely with concurrent searches on
+ *      the same handle. @ref dense_index_concurrency
  *
  *  @param[inout] index The handle to be populated.
  *  @param[in] keys Array of @p count keys, one per row.
  *  @param[in] vectors Base pointer of the first row of vector data.
  *  @param[in] count Number of rows in @p vectors and entries in @p keys.
  *  @param[in] stride Number of bytes between starts of consecutive rows in @p vectors.
- *  @param[in] kind The scalar type of @p vectors, converted on ingest when it differs
+ *  @param[in] scalar_kind The scalar type of @p vectors, converted on ingest when it differs
  *      from the stored quantization.
- *  @param[inout] config The @b optional per-call configuration & telemetry; @c NULL derives
- *      every setting and skips reporting.
- *  @param[out] error Pointer to a string where an error message will be stored, on failure.
+ *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
+ *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
+ *  @param[out] error Populated with a status and a static message; the status is
+ *      @c usearch_success_k when the call succeeded.
  *  @return Number of successfully inserted rows - equal to @p count unless an error stopped
  *      the batch early.
  */
-USEARCH_EXPORT size_t usearch_dense_add(              //
-    usearch_dense_t index, usearch_key_t const* keys, //
-    void const* vectors, size_t count, size_t stride, //
-    usearch_scalar_t kind,                            //
-    usearch_dense_add_config_t* config, usearch_error_t* error);
-
-/**
- *  @brief Optional per-call configuration & telemetry for searches, shared by the plain and
- *      the filtered form. Zero-initialize before use: the setting fields are read as the
- *      batch starts, the @b reported fields are overwritten as it ends. Passing @c NULL
- *      derives every setting and skips reporting.
- */
-USEARCH_EXPORT typedef struct usearch_dense_search_config_t {
-    /** @brief The @b optional search candidate-pool breadth; zero derives. */
-    size_t expansion;
-    /** @brief @b Reported: graph nodes visited while resolving the batch. */
-    size_t visited_nodes;
-    /** @brief @b Reported: distances computed while resolving the batch. */
-    size_t computed_distances;
-} usearch_dense_search_config_t;
+USEARCH_EXPORT size_t usearch_dense_add(                    //
+    usearch_dense_index_t index, usearch_key_t const* keys, //
+    void const* vectors, size_t count, size_t stride,       //
+    usearch_scalar_t scalar_kind,                           //
+    usearch_dense_expansion_config_t const* config, usearch_dense_traversal_stats_t* stats, usearch_error_t* error);
 
 /**
  *  @brief Performs k-Approximate Nearest Neighbors Search for a strided matrix of queries -
  *      the native batch operation, parallelized internally; one query is a one-row matrix.
+ *      Never writes to the graph, so any number may overlap with concurrent insertions.
+ *  @ref dense_index_concurrency
  *
  *  @param[in] index The handle to be queried.
  *  @param[in] queries Base pointer of the first query row.
  *  @param[in] queries_count Number of query rows.
  *  @param[in] queries_stride Number of bytes between starts of consecutive query rows.
- *  @param[in] queries_kind The scalar type of the query rows.
+ *  @param[in] scalar_kind The scalar type of the query rows.
  *  @param[in] wanted Upper bound on matches per query - the "k" in "kANN".
- *  @param[inout] config The @b optional per-call configuration & telemetry; @c NULL derives
- *      every setting and skips reporting.
+ *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
+ *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
  *  @param[out] keys Output matrix of `queries_count × wanted` keys; rows contiguous.
  *  @param[in] keys_stride Number of bytes between starts of consecutive rows in @p keys.
  *  @param[out] distances Output matrix of `queries_count × wanted` distances; rows contiguous.
  *  @param[in] distances_stride Number of bytes between starts of consecutive @p distances rows.
  *  @param[out] counts Output array of @p queries_count per-query match counts.
- *  @param[out] error Pointer to a string where an error message will be stored, on failure.
+ *  @param[out] error Populated with a status and a static message; the status is
+ *      @c usearch_success_k when the call succeeded.
  */
 USEARCH_EXPORT void usearch_dense_search(                             //
-    usearch_dense_t index,                                            //
+    usearch_dense_index_t index,                                      //
     void const* queries, size_t queries_count, size_t queries_stride, //
-    usearch_scalar_t queries_kind, size_t wanted,                     //
-    usearch_dense_search_config_t* config,                            //
+    usearch_scalar_t scalar_kind, size_t wanted,                      //
+    usearch_dense_expansion_config_t const* config,                   //
+    usearch_dense_traversal_stats_t* stats,                           //
     usearch_key_t* keys, size_t keys_stride,                          //
     usearch_distance_t* distances, size_t distances_stride,           //
     size_t* counts, usearch_error_t* error);
@@ -260,36 +275,43 @@ USEARCH_EXPORT void usearch_dense_search(                             //
  *  @param[in] predicate_state Opaque pointer forwarded into every @p predicate call.
  */
 USEARCH_EXPORT void usearch_dense_search_if(                          //
-    usearch_dense_t index,                                            //
+    usearch_dense_index_t index,                                      //
     void const* queries, size_t queries_count, size_t queries_stride, //
-    usearch_scalar_t queries_kind, size_t wanted,                     //
-    usearch_dense_search_config_t* config,                            //
+    usearch_scalar_t scalar_kind, size_t wanted,                      //
+    usearch_dense_expansion_config_t const* config,                   //
+    usearch_dense_traversal_stats_t* stats,                           //
     usearch_predicate_t predicate, void* predicate_state,             //
     usearch_key_t* keys, size_t keys_stride,                          //
     usearch_distance_t* distances, size_t distances_stride,           //
     size_t* counts, usearch_error_t* error);
 
 /**
- *  @brief Checks if the index holds at least one entry under @p key.
+ *  @brief Counts the entries stored under @p key; zero means the index holds none.
+ *
+ *  Every entry is one row of @c dimensions, so the count is the whole extent and there is
+ *  nothing further to report - the sibling modalities carry a stats out-parameter here only
+ *  because their entries vary in size. Pairing this with @c usearch_dense_get is not
+ *  atomic, but harmlessly so: entries are only ever added, so a stale count under-reports
+ *  and @c usearch_dense_get returns the true total.
  */
-USEARCH_EXPORT bool usearch_dense_contains(usearch_dense_t index, usearch_key_t key, usearch_error_t* error);
+USEARCH_EXPORT size_t usearch_dense_count(usearch_dense_index_t index, usearch_key_t key, usearch_error_t* error);
 
 /**
- *  @brief Counts the entries stored under @p key.
- */
-USEARCH_EXPORT size_t usearch_dense_count(usearch_dense_t index, usearch_key_t key, usearch_error_t* error);
-
-/**
- *  @brief Retrieves up to @p count vectors stored under @p key into a strided matrix.
- *  @param[out] vectors Base pointer of the output matrix; rows contiguous.
+ *  @brief Retrieves the vectors stored under @p key into a strided matrix, one row per
+ *      entry sharing the key, in insertion order.
+ *  @param[out] vectors Base pointer of the output matrix; @c NULL probes the count without
+ *      copying.
+ *  @param[in] wanted Upper bound on rows to write - the row capacity of @p vectors.
  *  @param[in] stride Number of bytes between starts of consecutive output rows.
- *  @param[in] kind The scalar type to export as, converted from storage when different.
- *  @return Number of rows written.
+ *  @param[in] scalar_kind The scalar type to export as, converted from storage when different.
+ *  @return The @b true number of entries under @p key, never the number written - a value
+ *      above @p wanted means the copy was truncated, so allocate that many and call again.
+ *      Zero when the key is absent.
  */
-USEARCH_EXPORT size_t usearch_dense_get(        //
-    usearch_dense_t index, usearch_key_t key,   //
-    void* vectors, size_t count, size_t stride, //
-    usearch_scalar_t kind, usearch_error_t* error);
+USEARCH_EXPORT size_t usearch_dense_get(            //
+    usearch_dense_index_t index, usearch_key_t key, //
+    void* vectors, size_t wanted, size_t stride,    //
+    usearch_scalar_t scalar_kind, usearch_error_t* error);
 
 /**
  *  @brief Absorbs @p donor into @p index - cheaper than re-inserting its vectors one by
@@ -297,97 +319,99 @@ USEARCH_EXPORT size_t usearch_dense_get(        //
  *      must not be used afterwards, not even for @c usearch_dense_free. Readers of
  *      @p index may keep searching throughout: unpublished rows hide behind the watermark.
  */
-USEARCH_EXPORT void usearch_dense_merge(usearch_dense_t index, usearch_dense_t donor, usearch_error_t* error);
+USEARCH_EXPORT void usearch_dense_merge(usearch_dense_index_t index, usearch_dense_index_t donor,
+                                        usearch_error_t* error);
 
 /**
  *  @brief Opens a snapshot cursor over the current contents; see @c usearch_dense_cursor_t.
  *  @return The cursor, or @c NULL on failure.
  */
-USEARCH_EXPORT usearch_dense_cursor_t usearch_dense_entries(usearch_dense_t index, usearch_error_t* error);
+USEARCH_EXPORT usearch_dense_cursor_t usearch_dense_cursor(usearch_dense_index_t index, usearch_error_t* error);
 
 /**
  *  @brief Copies the next batch of entries out of the cursor into strided outputs.
- *  @param[out] keys Output array of up to @p count keys.
- *  @param[out] vectors Output matrix of up to @p count rows; @c NULL skips vector export.
+ *  @param[out] keys Output array of up to @p wanted keys.
+ *  @param[out] vectors Output matrix of up to @p wanted rows; @c NULL skips vector export.
+ *  @param[in] wanted Upper bound on rows to write - the capacity of @p keys and @p vectors.
  *  @param[in] stride Number of bytes between starts of consecutive output vector rows.
- *  @param[in] kind The scalar type to export vectors as.
+ *  @param[in] scalar_kind The scalar type to export vectors as.
  *  @return Number of rows written; zero when the snapshot is exhausted.
  */
-USEARCH_EXPORT size_t usearch_dense_entries_next(       //
+USEARCH_EXPORT size_t usearch_dense_cursor_next(        //
     usearch_dense_cursor_t cursor, usearch_key_t* keys, //
-    void* vectors, size_t count, size_t stride,         //
-    usearch_scalar_t kind, usearch_error_t* error);
+    void* vectors, size_t wanted, size_t stride,        //
+    usearch_scalar_t scalar_kind, usearch_error_t* error);
 
 /** @brief Releases the cursor. */
-USEARCH_EXPORT void usearch_dense_entries_free(usearch_dense_cursor_t cursor);
+USEARCH_EXPORT void usearch_dense_cursor_free(usearch_dense_cursor_t cursor);
 
 /**
  *  @brief Opens a resumable nearest-neighbor stream for one query; see @c usearch_dense_finder_t.
  *  @return The finder, or @c NULL on failure.
  */
 USEARCH_EXPORT usearch_dense_finder_t usearch_dense_find( //
-    usearch_dense_t index, void const* query, usearch_scalar_t kind, usearch_error_t* error);
+    usearch_dense_index_t index, void const* query, usearch_scalar_t scalar_kind, usearch_error_t* error);
 
 /**
- *  @brief Pulls up to @p count next-nearest matches from the stream. Ordering beyond the
+ *  @brief Pulls up to @p wanted next-nearest matches from the stream. Ordering beyond the
  *      expansion horizon is best-effort nearest, not globally exact.
+ *  @param[in] wanted Upper bound on matches to write - the capacity of @p keys and @p distances.
  *  @return Number of matches written; zero when the traversal is drained.
  */
-USEARCH_EXPORT size_t usearch_dense_find_next(                        //
-    usearch_dense_finder_t finder,                                    //
-    usearch_key_t* keys, usearch_distance_t* distances, size_t count, //
+USEARCH_EXPORT size_t usearch_dense_find_next(                         //
+    usearch_dense_finder_t finder,                                     //
+    usearch_key_t* keys, usearch_distance_t* distances, size_t wanted, //
     usearch_error_t* error);
 
 /** @brief Releases the finder and the traversal context it pinned. */
 USEARCH_EXPORT void usearch_dense_find_free(usearch_dense_finder_t finder);
 
 /**
- *  @brief Reports the expected serialized size of the index in bytes.
+ *  @brief Reports the expected serialized size in bytes: every shard file, plus the
+ *      manifest when the index spans more than one.
  */
-USEARCH_EXPORT size_t usearch_dense_serialized_length(usearch_dense_t index, usearch_error_t* error);
+USEARCH_EXPORT size_t usearch_dense_serialized_length(usearch_dense_index_t index, usearch_error_t* error);
 
 /**
- *  @brief Saves the index under a checkpoint path.
+ *  @brief Saves the index under @p path in the layout its extension picks - one monolith,
+ *      or a manifest beside its shards. Demands a mutation-free window; concurrent readers
+ *      keep searching throughout. @ref dense_index_serialization
  */
-USEARCH_EXPORT void usearch_dense_save(usearch_dense_t index, char const* path, usearch_error_t* error);
+USEARCH_EXPORT void usearch_dense_save(usearch_dense_index_t index, usearch_string_t path, usearch_error_t* error);
 
 /**
- *  @brief Loads a checkpoint into an initialized handle. The handle's residency decides the
- *      behavior: materialize into RAM, upload to the device, or open in place on disk.
+ *  @brief Loads a checkpoint into an initialized handle, shard by shard, with the handle's
+ *      residency deciding the behavior: materialize into RAM, upload to the device, or open
+ *      in place on disk - the read-only form, where mutating verbs fail. A handle whose
+ *      geometry was left zeroed freezes it here, from the checkpoint's own headers.
+ *  @ref dense_index_serialization
  */
-USEARCH_EXPORT void usearch_dense_load(usearch_dense_t index, char const* path, usearch_error_t* error);
+USEARCH_EXPORT void usearch_dense_load(usearch_dense_index_t index, usearch_string_t path, usearch_error_t* error);
 
 /**
- *  @brief Creates a read-only view of a checkpoint without copying it into memory.
+ *  @brief Reads a checkpoint's geometry & metric metadata into @p options without loading
+ *      it - from the manifest's summary when @p path names one, so no shard is opened.
  */
-USEARCH_EXPORT void usearch_dense_view(usearch_dense_t index, char const* path, usearch_error_t* error);
+USEARCH_EXPORT void usearch_dense_metadata( //
+    usearch_string_t path, usearch_dense_options_t* options, usearch_error_t* error);
 
 /**
- *  @brief Reads a checkpoint's geometry & metric metadata into @p options without loading it.
- */
-USEARCH_EXPORT void usearch_dense_metadata(char const* path, usearch_dense_options_t* options, usearch_error_t* error);
-
-/**
- *  @brief Saves the index into a caller-owned memory buffer of @p length bytes.
+ *  @brief Saves the index into a caller-owned memory buffer of @p length bytes, as one
+ *      monolith. @ref dense_index_serialization
  */
 USEARCH_EXPORT void usearch_dense_save_buffer( //
-    usearch_dense_t index, void* buffer, size_t length, usearch_error_t* error);
+    usearch_dense_index_t index, void* buffer, size_t length, usearch_error_t* error);
 
 /**
- *  @brief Loads an index from a memory buffer into an initialized handle.
+ *  @brief Loads a monolith from a memory buffer into an initialized handle, with the
+ *      handle's residency deciding the behavior like @c usearch_dense_load; a residency
+ *      that opens in place demands the buffer outlive the handle.
  */
 USEARCH_EXPORT void usearch_dense_load_buffer( //
-    usearch_dense_t index, void const* buffer, size_t length, usearch_error_t* error);
+    usearch_dense_index_t index, void const* buffer, size_t length, usearch_error_t* error);
 
 /**
- *  @brief Creates a read-only view over a serialized index in a caller-owned buffer, which
- *      must outlive the handle.
- */
-USEARCH_EXPORT void usearch_dense_view_buffer( //
-    usearch_dense_t index, void const* buffer, size_t length, usearch_error_t* error);
-
-/**
- *  @brief Reads geometry & metric metadata from a serialized buffer into @p options.
+ *  @brief Reads geometry & metric metadata from a serialized monolith buffer into @p options.
  */
 USEARCH_EXPORT void usearch_dense_metadata_buffer( //
     void const* buffer, size_t length, usearch_dense_options_t* options, usearch_error_t* error);

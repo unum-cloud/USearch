@@ -32,10 +32,15 @@ extern "C" {
 #endif
 
 /**
- *  @brief User-facing 64-bit key identifying one entry of any index. Keys need not be
- *      unique: several entries may share one, and count-like functions report how many.
+ *  @brief User-facing 128-bit key identifying one entry of any index - sixteen opaque
+ *      bytes, rendered canonically as a lowercase dashed UUID, matching SafeGraphs'
+ *      @c bin16 key column. Keys need not be unique: several entries may share one, and
+ *      count-like functions report how many. Integer identities park in the low bytes
+ *      with the rest zeroed.
  */
-USEARCH_EXPORT typedef uint64_t usearch_key_t;
+USEARCH_EXPORT typedef struct usearch_key_t {
+    uint8_t bytes[16];
+} usearch_key_t;
 
 /**
  *  @brief Distance or similarity score between two entries, in the metric of the index
@@ -44,10 +49,59 @@ USEARCH_EXPORT typedef uint64_t usearch_key_t;
 USEARCH_EXPORT typedef double usearch_distance_t;
 
 /**
- *  @brief Pointer to a null-terminated error message, or @c NULL when the call succeeded.
- *      Returned error messages are static and @b don't need to be deallocated.
+ *  @brief A borrowed run of bytes and its length, never null-terminated by contract - the
+ *      shape StringZilla's @c sz_string_view_t takes and the one every modality's string
+ *      arguments arrive in. Callers holding a Rust @c str, a Go string, or a Java byte array
+ *      pass their own storage without manufacturing a terminator none of them keeps.
  */
-USEARCH_EXPORT typedef char const* usearch_error_t;
+USEARCH_EXPORT typedef struct usearch_string_t {
+    char const* data;
+    size_t length;
+} usearch_string_t;
+
+/**
+ *  @brief What went wrong, in a vocabulary shared by the engine and by every binding that
+ *      validates before calling it - so one failure carries one identity, whoever catches it.
+ *
+ *  Some enumerators name failures this library never returns itself: a binding holding richer
+ *  layout information than the ABI can accept rejects the call before it crosses, and reports
+ *  the same status the engine would if it could see the same thing. The set describes the
+ *  project's failures, not this implementation's exits, so unused enumerators are deliberate.
+ */
+USEARCH_EXPORT typedef enum usearch_status_t {
+    /** @brief The call completed; @c message carries nothing. */
+    usearch_success_k = 0,
+    /** @brief An allocation or reservation could not be satisfied. */
+    usearch_error_out_of_memory_k = 1,
+    /** @brief Dimensionality, row counts, or output capacity disagree. */
+    usearch_error_shape_mismatch_k = 2,
+    /** @brief A stride or packing the engine cannot traverse. */
+    usearch_error_unsupported_layout_k = 3,
+    /** @brief A scalar, metric, or residency tag this build does not know. */
+    usearch_error_unknown_kind_k = 4,
+    /** @brief A mutating verb on a handle that opens its checkpoint in place. */
+    usearch_error_read_only_k = 5,
+    /** @brief A file could not be opened, read, written, or parsed. */
+    usearch_error_io_k = 6,
+    /** @brief A device could not be selected, or its memory could not be claimed. */
+    usearch_error_device_k = 7,
+    /** @brief A caller-supplied representation could not be decoded - a malformed key, a
+     *      truncated buffer, a checkpoint that ends early. */
+    usearch_error_malformed_input_k = 8,
+    /** @brief The library reported neither success nor a failure - a contract violation
+     *      rather than a condition, so it names a defect and not a state. */
+    usearch_error_internal_k = 9,
+} usearch_status_t;
+
+/**
+ *  @brief Outcome of one call: a status every binding can branch on, and a static message
+ *      carrying the detail the status cannot. Messages are static and @b don't need to be
+ *      deallocated, and are @c NULL exactly when the status is @c usearch_success_k.
+ */
+USEARCH_EXPORT typedef struct usearch_error_t {
+    usearch_status_t status;
+    char const* message;
+} usearch_error_t;
 
 /**
  *  @brief Scalar types the indexes store and exchange, named by width and encoding.
@@ -87,6 +141,42 @@ USEARCH_EXPORT typedef enum usearch_residency_t {
     /** @brief Persisted index traversed through pluggable I/O engines, sized past RAM. */
     usearch_residency_nvme_k = 2,
 } usearch_residency_t;
+
+/**
+ *  @brief RAM-residency behavior: CPU threading & memory backing of the volatile index.
+ *      Every modality's RAM arm is this struct - the knobs are properties of the engine,
+ *      not of what it traverses.
+ */
+USEARCH_EXPORT typedef struct usearch_ram_options_t {
+    /** @brief Worker threads for construction & batched search; zero takes 7/8 of the
+     *      logical cores - full occupancy starves the ordered publication path. */
+    size_t threads;
+    /** @brief Expects a provisioned huge-page pool and fails loudly when it is missing,
+     *      rather than silently degrading to base pages. */
+    bool huge_pages;
+} usearch_ram_options_t;
+
+/** @brief VRAM-residency behavior: device selection for the GPU-traversed index. */
+USEARCH_EXPORT typedef struct usearch_vram_options_t {
+    /** @brief CUDA device ordinal; negative picks the first free device. */
+    int32_t device;
+    /** @brief Allows spilling cold shards into host memory over unified addressing. */
+    bool unified_addressing;
+} usearch_vram_options_t;
+
+/**
+ *  @brief NVMe-residency behavior: the I/O engine the handle will traverse checkpoints
+ *      with. The checkpoint itself arrives through the modality's @c load verb, never
+ *      through these options.
+ */
+USEARCH_EXPORT typedef struct usearch_nvme_options_t {
+    /** @brief I/O granularity in bytes; zero probes the device. 512 fits one 256-d i8 row. */
+    uint32_t sector_bytes;
+    /** @brief Submission ring depth; zero derives from the device's queue capabilities. */
+    uint32_t queue_depth;
+    /** @brief O_DIRECT-class page-cache bypass - the default and the point. */
+    bool direct_io;
+} usearch_nvme_options_t;
 
 /**
  *  @brief Type-punned per-key admission predicate for filtered searches: return non-zero
