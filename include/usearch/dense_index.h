@@ -43,6 +43,9 @@
  *
  *  @section dense_index_concurrency Concurrency & Thread Safety
  *
+ *  A batch insertion is all-or-nothing: every fallible step precedes the claim of the first
+ *  entry identity, so a failed batch publishes nothing and leaves the reported size untouched.
+ *
  *  A handle may be shared across threads. On a RAM handle, insertions and searches overlap
  *  freely: searches read only entries published behind the visibility watermark and never
  *  write to the graph, while insertions synchronize through per-node locks and publish in
@@ -52,6 +55,23 @@
  *  saving demands a mutation-free window, though concurrent readers keep searching
  *  throughout. Per-call outputs - stats, counts, the error pointer - belong to their call
  *  and must not be shared between in-flight calls.
+ *
+ *  @section dense_index_linear_algebra Approximate Products & Attention
+ *
+ *  Two opt-in verbs at the end of this header read the graph as linear algebra rather than as a
+ *  search. @c usearch_dense_multiply is an approximate `A × Bᵀ` in the shape of BLAS' `?GEMM`,
+ *  with the indexed rows as `B`, and a sparse output: every pair the traversal scored, not only
+ *  the nearest. Unlike a sparse `?GEMM`, the output pattern is not implied by the operands' own
+ *  pattern - it is whatever the walk touched - so the product is dense-in, sparse-out, and its
+ *  sparsity is magnitude-driven.
+ *
+ *  @c usearch_dense_attend folds a softmax over that same walk. A running maximum, partition,
+ *  and weighted value sum update per scored batch and rescale whenever the maximum moves - the
+ *  online-softmax recurrence of Flash Attention, with the graph replacing the linear sweep over
+ *  key tiles. Softmax weights decay exponentially, so scoring a superset of the true top matches
+ *  costs accuracy nothing, and neither verb pays for the ranking a search would. One index serves
+ *  one layer's one key-value head: grouped-query and multi-head-latent attention already share
+ *  their keys across query heads, so every query head is just another row of the query matrix.
  */
 #ifndef UNUM_USEARCH_DENSE_INDEX_H
 #define UNUM_USEARCH_DENSE_INDEX_H
@@ -225,8 +245,11 @@ USEARCH_EXPORT typedef struct usearch_dense_traversal_stats_t {
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
  *  @param[out] error Populated with a status and a static message; the status is
  *      @c usearch_success_k when the call succeeded.
- *  @return Number of successfully inserted rows - equal to @p count unless an error stopped
- *      the batch early.
+ *  @return @p count on success, zero on failure - a batch is all-or-nothing. Every step that
+ *      can fail runs before the first entry identity is claimed, so a rejected batch leaves
+ *      the index untouched and publishes no row. An accelerator fault severe enough to poison
+ *      the device context is the sole exception: it reports @c usearch_error_device_k and
+ *      latches the index unusable rather than partially applied.
  */
 USEARCH_EXPORT size_t usearch_dense_add(                    //
     usearch_dense_index_t index, usearch_key_t const* keys, //
@@ -415,6 +438,116 @@ USEARCH_EXPORT void usearch_dense_load_buffer( //
  */
 USEARCH_EXPORT void usearch_dense_metadata_buffer( //
     void const* buffer, size_t length, usearch_dense_options_t* options, usearch_error_t* error);
+
+/**
+ *  @brief Approximate sparse product of a strided matrix against the indexed rows - the linear
+ *      algebra sibling of @c usearch_dense_search, reporting @b every pair the traversal scored
+ *      instead of only the nearest. @ref dense_index_linear_algebra
+ *
+ *  A walk scores many times the pairs a search reports, and each of them is an exact product the
+ *  caller would otherwise recompute - this verb hands them all back. Pairs arrive in traversal
+ *  order rather than sorted, and carry no duplicates: the traversal's visited set admits each
+ *  indexed row at most once per query row.
+ *
+ *  @param[in] index The handle supplying the right-hand rows.
+ *  @param[in] rows Base pointer of the first left-hand row.
+ *  @param[in] rows_count Number of left-hand rows.
+ *  @param[in] rows_stride Number of bytes between starts of consecutive left-hand rows.
+ *  @param[in] scalar_kind The scalar type of the left-hand rows.
+ *  @param[in] wanted Upper bound on pairs emitted per row - the column capacity of the outputs.
+ *  @param[in] config The @b optional per-call settings; @c NULL derives every setting. A wider
+ *      expansion factor widens the emitted pattern, being what the walk's breadth decides.
+ *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
+ *  @param[out] columns Output matrix of `rows_count × wanted` keys, naming the indexed row of
+ *      each pair; rows contiguous.
+ *  @param[in] columns_stride Number of bytes between starts of consecutive @p columns rows.
+ *  @param[out] products Output matrix of `rows_count × wanted` products, positionally paired
+ *      with @p columns; rows contiguous.
+ *  @param[in] products_stride Number of bytes between starts of consecutive @p products rows.
+ *  @param[out] counts Output array of @p rows_count per-row pair counts. Each reports the
+ *      @b true number of pairs scored, never the number written - a value above @p wanted means
+ *      that row was truncated to its nearest pairs, so raise @p wanted and call again.
+ *  @param[out] error Populated with a status and a static message; the status is
+ *      @c usearch_success_k when the call succeeded.
+ */
+USEARCH_EXPORT void usearch_dense_multiply(                  //
+    usearch_dense_index_t index,                             //
+    void const* rows, size_t rows_count, size_t rows_stride, //
+    usearch_scalar_t scalar_kind, size_t wanted,             //
+    usearch_dense_expansion_config_t const* config,          //
+    usearch_dense_traversal_stats_t* stats,                  //
+    usearch_key_t* columns, size_t columns_stride,           //
+    usearch_distance_t* products, size_t products_stride,    //
+    size_t* counts, usearch_error_t* error);
+
+/**
+ *  @brief Optional per-call settings of @c usearch_dense_attend - a pure input, never written.
+ *      Passing @c NULL derives every setting.
+ */
+USEARCH_EXPORT typedef struct usearch_dense_attention_config_t {
+    /** @brief The @b optional candidate-pool breadth; zero derives. */
+    size_t expansion_factor;
+    /** @brief The @b optional logit scale, conventionally the inverse square root of the head
+     *      dimensionality; zero derives it from the index's frozen geometry. */
+    float score_scale;
+    /** @brief The @b optional residual-mass threshold the walk stops at, the mass-denominated
+     *      sibling of the radius a search terminates on; zero derives. */
+    float mass_tolerance;
+} usearch_dense_attention_config_t;
+
+/**
+ *  @brief Softmax-weighted attention of a strided query matrix over the indexed keys, folded
+ *      into the graph walk in a single pass - no match list is materialized, and each value row
+ *      is gathered exactly once, at the moment its key was scored.
+ *  @ref dense_index_linear_algebra
+ *
+ *  The index holds the keys and @p values holds the value rows, addressed by key: an entry's key
+ *  is its row offset into @p values, parked in the low bytes with the rest zeroed. Token
+ *  positions already are such keys, so a context inserted in position order needs no mapping,
+ *  and the publication watermark becomes the causal mask - a chunk of keys is attendable only
+ *  once its insertion published.
+ *
+ *  Never writes to the graph, so any number of these may overlap with concurrent insertions -
+ *  which is what streaming a growing context through this verb amounts to.
+ *  @ref dense_index_concurrency
+ *
+ *  @param[in] index The handle holding one layer's keys for one key-value head.
+ *  @param[in] queries Base pointer of the first query row; every query head sharing those keys
+ *      is one more row here.
+ *  @param[in] queries_count Number of query rows.
+ *  @param[in] queries_stride Number of bytes between starts of consecutive query rows.
+ *  @param[in] queries_scalar_kind The scalar type of the query rows.
+ *  @param[in] values Base pointer of the first value row.
+ *  @param[in] value_dimensions Number of dimensions per value row, independent of the key
+ *      dimensionality the index froze.
+ *  @param[in] values_stride Number of bytes between starts of consecutive value rows.
+ *  @param[in] values_scalar_kind The scalar type of the value rows.
+ *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
+ *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
+ *  @param[out] outputs Output matrix of `queries_count × value_dimensions` attended rows,
+ *      already divided by their partitions; rows contiguous.
+ *  @param[in] outputs_stride Number of bytes between starts of consecutive @p outputs rows.
+ *  @param[in] outputs_scalar_kind The scalar type to write @p outputs as.
+ *  @param[out] maximum_scores The @b optional array of @p queries_count running maxima;
+ *      @c NULL skips reporting.
+ *  @param[out] partitions The @b optional array of @p queries_count softmax denominators;
+ *      @c NULL skips reporting. Reported together, the pair recombines this branch with another
+ *      over the same queries - a dense recent window, or a second shard of one context - by the
+ *      partial-softmax rescaling, which is the only reason to ask for either.
+ *  @param[out] error Populated with a status and a static message; the status is
+ *      @c usearch_success_k when the call succeeded.
+ */
+USEARCH_EXPORT void usearch_dense_attend(                                       //
+    usearch_dense_index_t index,                                                //
+    void const* queries, size_t queries_count, size_t queries_stride,           //
+    usearch_scalar_t queries_scalar_kind,                                       //
+    void const* values, size_t value_dimensions, size_t values_stride,          //
+    usearch_scalar_t values_scalar_kind,                                        //
+    usearch_dense_attention_config_t const* config,                             //
+    usearch_dense_traversal_stats_t* stats,                                     //
+    void* outputs, size_t outputs_stride, usearch_scalar_t outputs_scalar_kind, //
+    float* maximum_scores, float* partitions,                                   //
+    usearch_error_t* error);
 
 #ifdef __cplusplus
 }
