@@ -2,78 +2,11 @@
 
 import PackageDescription
 
-let cxxSettings: [CXXSetting] = [
-    .headerSearchPath("../include/"),
-    .define("USEARCH_USE_NUMKONG", to: "1"),
-    .define("NK_DYNAMIC_DISPATCH", to: "1"),
-    .define("NK_NATIVE_F16", to: "0"),
-    .define("NK_NATIVE_BF16", to: "0"),
-]
-
-var targets: [Target] = []
-
-// Conditionally build the Objective-C target only on non-Linux platforms.
-#if !os(Linux)
-    targets.append(
-        .target(
-            name: "USearchObjectiveC",
-            dependencies: [
-                .product(name: "CNumKongDispatch", package: "NumKong"),
-            ],
-            path: "objc",
-            sources: ["USearchObjective.mm"],
-            cxxSettings: cxxSettings
-        )
-    )
-#endif
-
-// Always build the C and Swift targets.
-targets += [
-    .target(
-        name: "USearchC",
-        dependencies: [
-            .product(name: "CNumKongDispatch", package: "NumKong"),
-        ],
-        path: "c",
-        sources: ["usearch.h", "lib.cpp"],
-        publicHeadersPath: ".",
-        cxxSettings: cxxSettings
-    ),
-    .target(
-        name: "USearch",
-        dependencies: ["USearchC"],
-        path: "swift",
-        exclude: ["README.md", "Test.swift"],
-        sources: ["USearchIndex.swift", "USearchIndex+Sugar.swift", "Util.swift"],
-        cxxSettings: cxxSettings
-    ),
-    .testTarget(
-        name: "USearchTestsSwift",
-        dependencies: ["USearch"],
-        path: "swift",
-        sources: ["Test.swift"]
-    ),
-]
-
-// Configure products similarly.
-var products: [Product] = []
-
-#if !os(Linux)
-    products.append(
-        .library(
-            name: "USearchObjectiveC",
-            targets: ["USearchObjectiveC"]
-        )
-    )
-#endif
-
-products.append(
-    .library(
-        name: "USearch",
-        targets: ["USearch"]
-    )
-)
-
+// The C surface is consumed as headers, not as sources: `src/dense_index.cpp` pulls the whole
+// NumKong, ForkUnion, and StringZilla stack, has a CUDA sibling SwiftPM cannot drive, and is
+// built by CMake into `libusearch_c` for every other binding already. So `USearchC` is the
+// module map over `include/`, and the Swift target links the library CMake produced. Point the
+// linker at it with `swift build -Xlinker -L<build directory>`, or install it system-wide.
 let package = Package(
     name: "USearch",
     platforms: [
@@ -82,10 +15,34 @@ let package = Package(
         .watchOS(.v8),
         .tvOS(.v15),
     ],
-    products: products,
-    dependencies: [
-        .package(url: "https://github.com/ashvardanian/NumKong", from: "7.5.0"),
+    products: [
+        .library(
+            name: "USearch",
+            targets: ["USearch"]
+        )
     ],
-    targets: targets,
-    cxxLanguageStandard: CXXLanguageStandard.cxx11
+    targets: [
+        .target(
+            name: "USearchC",
+            path: ".",
+            sources: ["swift/USearchC.c"],
+            publicHeadersPath: "include",
+            cSettings: [.headerSearchPath("include")]
+        ),
+        .target(
+            name: "USearch",
+            dependencies: ["USearchC"],
+            path: "swift",
+            exclude: ["README.md", "Test.swift", "CUSearch.c"],
+            sources: ["Types.swift", "DenseIndex.swift"],
+            linkerSettings: [.linkedLibrary("usearch_c")]
+        ),
+        .testTarget(
+            name: "USearchTestsSwift",
+            dependencies: ["USearch"],
+            path: "swift",
+            exclude: ["README.md", "CUSearch.c", "Types.swift", "DenseIndex.swift"],
+            sources: ["Test.swift"]
+        ),
+    ]
 )
