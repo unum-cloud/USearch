@@ -24,8 +24,14 @@ endif ()
 # Options
 option(USEARCH_INSTALL "Install CMake targets" OFF)
 
-option(USEARCH_USE_OPENMP "Use OpenMP for a thread pool" OFF)
-option(USEARCH_USE_NUMKONG "Use NumKong hardware-accelerated metrics" OFF)
+# One switch per sibling library, same shape for each: ON acquires the dependency and defines `USEARCH_USE_<NAME>=1`,
+# OFF leaves the tree buildable without it. Defaults are ON because the headers currently reach for all three; they
+# become OFF-able as the guards land.
+option(USEARCH_USE_NUMKONG "Use NumKong hardware-accelerated metrics" ON)
+option(USEARCH_USE_FORKUNION "Use ForkUnion thread pools and NUMA topology" ON)
+option(USEARCH_USE_STRINGZILLA "Use StringZilla string kernels and parsing" ON)
+option(USEARCH_USE_SMASHTABLE "Use SmashTable concurrent hash tables for key mappings" ON)
+
 option(USEARCH_USE_JEMALLOC "Use JeMalloc for faster memory allocations" OFF)
 
 option(USEARCH_BUILD_TEST_CPP "Compile a native unit test in C++" ${USEARCH_IS_MAIN_PROJECT})
@@ -52,7 +58,9 @@ set(USEARCH_CUDA_ARCHITECTURES
 # 3.28 floor that stock Ubuntu 24.04 ships. Demanding the newer CMake only when CUDA is requested keeps the library
 # consumable by distributions whose CMake predates the Blackwell tables.
 if (USEARCH_BUILD_CUDA AND CMAKE_VERSION VERSION_LESS 3.31)
-    message(FATAL_ERROR "USEARCH_BUILD_CUDA needs CMake 3.31 or newer for Blackwell architectures, found ${CMAKE_VERSION}")
+    message(
+        FATAL_ERROR "USEARCH_BUILD_CUDA needs CMake 3.31 or newer for Blackwell architectures, found ${CMAKE_VERSION}"
+    )
 endif ()
 
 # Enable the in-repo Git hooks. Git will not auto-run hooks shipped inside a clone (that would let any cloned repo
@@ -156,12 +164,6 @@ set(USEARCH_INCLUDE_BUILD_DIR "${PROJECT_SOURCE_DIR}/include/")
 # behind - and the interface target must say so, or external consumers get an unbuildable contract.
 target_compile_features(${USEARCH_TARGET_NAME} INTERFACE cxx_std_20)
 
-# Core compilation settings affecting "index.hpp"
-target_compile_definitions(${USEARCH_TARGET_NAME} INTERFACE "USEARCH_USE_OPENMP=$<BOOL:${USEARCH_USE_OPENMP}>")
-
-# Supplementary compilation settings affecting "index_plugins.hpp"
-target_compile_definitions(${USEARCH_TARGET_NAME} INTERFACE "USEARCH_USE_NUMKONG=$<BOOL:${USEARCH_USE_NUMKONG}>")
-
 # Define which types can be compiled
 target_compile_definitions(
     ${USEARCH_TARGET_NAME} INTERFACE "USEARCH_CAN_COMPILE_FP16=$<BOOL:${USEARCH_CAN_COMPILE_FP16}>"
@@ -179,19 +181,6 @@ target_compile_definitions(
 target_include_directories(
     ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE} INTERFACE $<BUILD_INTERFACE:${USEARCH_INCLUDE_BUILD_DIR}>
                                                                $<INSTALL_INTERFACE:include>
-)
-# Dependency headers ride the build tree only: an `INSTALL_INTERFACE` here would point at prefix-relative directories
-# that nothing installs, breaking the installed package. Once `find_package(numkong)` / `find_package(forkunion)`
-# configs ship in the pinned submodules, these become plain target links resolved through `find_dependency`.
-if (USEARCH_USE_NUMKONG)
-    target_include_directories(
-        ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE}
-        INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/numkong/include>
-    )
-endif ()
-target_include_directories(
-    ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE}
-    INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/forkunion/include>
 )
 # Install a pkg-config file, so other tools can find this
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/pkg-config.pc.in" "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc")
@@ -241,10 +230,6 @@ endif ()
 
 find_package(Threads REQUIRED)
 
-if (USEARCH_USE_OPENMP)
-    find_package(OpenMP REQUIRED)
-endif ()
-
 if (USEARCH_USE_JEMALLOC)
     include(jemalloc)
 endif ()
@@ -254,7 +239,9 @@ if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif ()
 
-# Function to setup target
+# Shared wiring for every target this project builds. Optimization and debug level are deliberately absent: they live in
+# `CMAKE_<LANG>_FLAGS_<CONFIG>`, where a preset or a command-line switch can move them. Only what the code actually
+# depends on - fast math, the diagnostics, the sanitizers - is pinned here.
 function (setup_target TARGET_NAME)
     # Compiler-specific options List of all possible compiler IDs:
     # https://cmake.org/cmake/help/latest/variable/CMAKE_LANG_COMPILER_ID.html
@@ -289,10 +276,6 @@ function (setup_target TARGET_NAME)
             -fPIC
         )
 
-        if (USEARCH_USE_OPENMP)
-            target_link_libraries(${TARGET_NAME} PRIVATE OpenMP::OpenMP_CXX)
-        endif ()
-
         target_link_libraries(${TARGET_NAME} PRIVATE Threads::Threads)
 
     elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -326,10 +309,6 @@ function (setup_target TARGET_NAME)
             # It's likely LLVM Clang
             target_compile_options(${TARGET_NAME} PRIVATE $<$<CONFIG:DEBUG>:-fsanitize=leak>)
             target_link_options(${TARGET_NAME} PRIVATE $<$<CONFIG:DEBUG>:-fsanitize=leak>)
-        endif ()
-
-        if (USEARCH_USE_OPENMP)
-            target_link_libraries(${TARGET_NAME} PRIVATE OpenMP::OpenMP_CXX)
         endif ()
 
         if (CMAKE_HOST_SYSTEM_NAME MATCHES "Darwin")
@@ -402,14 +381,17 @@ function (setup_target TARGET_NAME)
         set_target_properties(${TARGET_NAME} PROPERTIES PREFIX "lib")
     endif ()
 
-    # Core compilation settings affecting "index.hpp"
-    target_compile_definitions(${TARGET_NAME} PRIVATE "USEARCH_USE_OPENMP=$<BOOL:${USEARCH_USE_OPENMP}>")
+    # The same switches the interface target carries, repeated here because these targets copy header paths off that
+    # target rather than linking it - see `usearch_use_sibling`.
+    target_compile_definitions(
+        ${TARGET_NAME}
+        PRIVATE "USEARCH_USE_NUMKONG=$<BOOL:${USEARCH_USE_NUMKONG}>"
+                "USEARCH_USE_FORKUNION=$<BOOL:${USEARCH_USE_FORKUNION}>"
+                "USEARCH_USE_STRINGZILLA=$<BOOL:${USEARCH_USE_STRINGZILLA}>"
+    )
 
-    # Supplementary compilation settings affecting "index_plugins.hpp"
-    target_compile_definitions(${TARGET_NAME} PRIVATE "USEARCH_USE_NUMKONG=$<BOOL:${USEARCH_USE_NUMKONG}>")
-
-    # Link NumKong: the `nk_shared` target from `add_subdirectory(numkong)` carries its own include paths, compile
-    # definitions (NK_DYNAMIC_DISPATCH, NK_TARGET_*), and ISA probes.
+    # Link NumKong: the `nk_shared` target carries its own include paths, compile definitions (NK_DYNAMIC_DISPATCH,
+    # NK_TARGET_*), and ISA probes.
     if (USEARCH_USE_NUMKONG AND TARGET nk_shared)
         target_compile_definitions(${TARGET_NAME} PRIVATE "NK_DYNAMIC_DISPATCH=1")
         target_link_libraries(${TARGET_NAME} PRIVATE nk_shared)
@@ -417,27 +399,83 @@ function (setup_target TARGET_NAME)
 
 endfunction ()
 
-# Delegate NumKong compilation to its own CMakeLists.txt — it handles ISA detection, NK_TARGET_* flags, and SIMD
-# dispatch backends internally.
+# Sibling libraries build themselves: each ships a CMakeLists.txt handling its own ISA detection and dispatch. They
+# arrive as submodules in a recursive clone, and as pinned fetches otherwise - a plain `git clone` of USearch, or a
+# `FetchContent` of it from another project, still configures. Pins match the submodule commits.
+include(FetchContent)
+
+# One switch per sibling, and the switch decides everything about it: whether it is acquired, whether the interface
+# target links it, and what `USEARCH_USE_<NAME>` expands to in the headers. The macro is defined either way, so the
+# guards compile without the library present. Include directories are also copied onto the interface target, because
+# `setup_target` reads `INTERFACE_INCLUDE_DIRECTORIES` directly - a genex that sees only what this target declares, not
+# what its link interface would carry - to keep the C++20 feature requirement off the pure-C targets.
+function (usearch_use_sibling NAME LINK_TARGET REPOSITORY TAG)
+    string(TOUPPER ${NAME} SWITCH)
+    target_compile_definitions(
+        ${USEARCH_TARGET_NAME} INTERFACE "USEARCH_USE_${SWITCH}=$<BOOL:${USEARCH_USE_${SWITCH}}>"
+    )
+
+    if (NOT USEARCH_USE_${SWITCH})
+        return()
+    endif ()
+
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${NAME}/CMakeLists.txt")
+        add_subdirectory(${NAME})
+    else ()
+        message(STATUS "usearch: ${NAME} submodule absent, fetching ${TAG}")
+        FetchContent_Declare(
+            ${NAME}
+            GIT_REPOSITORY ${REPOSITORY}
+            GIT_TAG ${TAG}
+        )
+        FetchContent_MakeAvailable(${NAME})
+    endif ()
+
+    target_link_libraries(${USEARCH_TARGET_NAME} INTERFACE ${LINK_TARGET})
+    target_include_directories(
+        ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE}
+        INTERFACE $<TARGET_PROPERTY:${LINK_TARGET},INTERFACE_INCLUDE_DIRECTORIES>
+    )
+endfunction ()
+
+# NumKong wants its shared library built for runtime ISA dispatch, so the flag is set before the subdirectory lands.
 if (USEARCH_USE_NUMKONG)
     set(NK_BUILD_SHARED
         ON
         CACHE BOOL "" FORCE
     )
-    add_subdirectory(numkong)
-
-    if (TARGET nk_shared)
-        set_target_properties(nk_shared PROPERTIES ENABLE_EXPORTS ON)
-    endif ()
 endif ()
 
-# Delegate ForkUnion likewise — its own CMakeLists.txt exports `forkunion::header` for the C++ templates and
-# `forkunion::static` / `forkunion::shared` for the C-level topology, fabric, and pool implementation.
-add_subdirectory(forkunion)
+usearch_use_sibling(
+    numkong numkong::numkong https://github.com/ashvardanian/NumKong a51b52f7468d86227f5ae24df4049a19046b5267
+)
+usearch_use_sibling(
+    forkunion forkunion::header https://github.com/ashvardanian/ForkUnion 9f1d91c3529fc735f0ab60cbc895f449c7139d28
+)
+usearch_use_sibling(
+    stringzilla stringzilla::stringzilla_header https://github.com/ashvardanian/StringZilla
+    a6402dd71d01a8967a62bcc45a900477e0232f60
+)
+usearch_use_sibling(
+    smashtable smashtable::smashtable https://github.com/ashvardanian/SmashTable
+    1c0629cb94bf26f5d843c0d19009765e647eea44
+)
 
-# Delegate StringZilla likewise — its own CMakeLists.txt exports `stringzilla::stringzilla_header` for the header-only
-# templates and shared/static shims for its C-level dynamic dispatch; its test & bench targets default off downstream.
-add_subdirectory(stringzilla)
+# The dispatch library exports symbols the pre-loaded metrics resolve against at runtime.
+if (TARGET nk_shared)
+    set_target_properties(nk_shared PROPERTIES ENABLE_EXPORTS ON)
+endif ()
+
+# Executables needing the compiled halves - the ForkUnion pool, the StringZilla kernels - name these instead of the
+# targets, so a switched-off sibling leaves an empty entry rather than a reference to a target that was never defined.
+set(USEARCH_FORKUNION_LIBRARY "")
+set(USEARCH_STRINGZILLA_LIBRARY "")
+if (USEARCH_USE_FORKUNION)
+    set(USEARCH_FORKUNION_LIBRARY forkunion::static)
+endif ()
+if (USEARCH_USE_STRINGZILLA)
+    set(USEARCH_STRINGZILLA_LIBRARY stringzilla::stringzilla_header)
+endif ()
 
 # Third-party dependencies, every pin in one place, fetched only when something actually links them: {fmt} for the C++
 # smoke tests (libstdc++ doesn't ship `std::print` yet on our toolchain), clipp for the benchmark CLIs, and yyjson for
@@ -445,7 +483,6 @@ add_subdirectory(stringzilla)
 # the network, but only from the pinned version up - the copies distributions ship predate `fmt::println` and would fail
 # deep in the suites rather than here.
 if (USEARCH_BUILD_TEST_CPP OR USEARCH_BUILD_BENCH_CPP)
-    include(FetchContent)
     FetchContent_Declare(
         fmt
         GIT_REPOSITORY https://github.com/fmtlib/fmt.git
@@ -478,7 +515,7 @@ if (USEARCH_IS_MAIN_PROJECT)
 endif ()
 
 if (${USEARCH_BUILD_TEST_CPP} OR ${USEARCH_BUILD_BENCH_CPP})
-    add_subdirectory(cpp)
+    add_subdirectory(src)
 endif ()
 
 if (${USEARCH_BUILD_TEST_CPP})
