@@ -1,22 +1,15 @@
 import os
 import platform
-import subprocess
 import sys
+from pathlib import Path
 
-from pybind11.setup_helpers import Pybind11Extension
-from setuptools import setup
+from setuptools import Extension, setup
+from setuptools.command.build_ext import build_ext
 
 compile_args = []
+cxx_compile_args = []
 link_args = []
 macros_args = []
-
-
-def get_bool_env(name: str, preference: bool) -> bool:
-    return os.environ.get(name, "1" if preference else "0") == "1"
-
-
-def get_bool_env_w_name(name: str, preference: bool) -> tuple:
-    return name, "1" if get_bool_env(name, preference) else "0"
 
 
 # Check the environment variables
@@ -26,33 +19,11 @@ is_windows: bool = sys.platform == "win32"
 machine: str = platform.machine().lower()
 
 
-is_gcc = False
-is_clang = False
-if is_linux:
-    cxx = os.environ.get("CXX")
-    if cxx:
-        try:
-            command = "where" if os.name == "nt" else "which"
-            full_path = subprocess.check_output([command, cxx], text=True).strip()
-            compiler_name = os.path.basename(full_path)
-            is_gcc = ("g++" in compiler_name) and ("clang++" not in compiler_name)
-            is_clang = ("clang++" in compiler_name) and ("g++" not in compiler_name)
-        except subprocess.CalledProcessError:
-            pass
-
-
-# ? Is there a way we can bring back NumKong on Windows?
-# ? Using `ctypes.CDLL(numkong.__file__)` breaks the CI
-# ? with "Windows fatal exception: access violation".
-prefer_numkong: bool = not is_windows
-prefer_openmp: bool = is_linux and is_gcc
-
-use_numkong: bool = get_bool_env("USEARCH_USE_NUMKONG", prefer_numkong)
-use_openmp: bool = get_bool_env("USEARCH_USE_OPENMP", prefer_openmp)
-
-# Common arguments for all platforms
-macros_args.append(("USEARCH_USE_OPENMP", "1" if use_openmp else "0"))
-macros_args.append(("USEARCH_USE_NUMKONG", "1" if use_numkong else "0"))
+# Sibling libraries come from the submodules, and every wheel compiles all three in - the switches the
+# CMake build exposes have no equivalent here, so the macros are constants.
+macros_args.append(("USEARCH_USE_NUMKONG", "1"))
+macros_args.append(("USEARCH_USE_FORKUNION", "1"))
+macros_args.append(("USEARCH_USE_STRINGZILLA", "1"))
 
 
 #! NumKong uses dynamic dispatch, and will not build the library as part of `usearch` package.
@@ -60,7 +31,7 @@ macros_args.append(("USEARCH_USE_NUMKONG", "1" if use_numkong else "0"))
 #! install it separately!
 macros_args.extend(
     [
-        ("NK_DYNAMIC_DISPATCH", "1" if use_numkong else "0"),
+        ("NK_DYNAMIC_DISPATCH", "1"),
         ("NK_TARGET_NEON", "0"),  # ? Hide-out all complex intrinsics
         ("NK_TARGET_NEONBFDOT", "0"),  # ? Hide-out all complex intrinsics
         ("NK_TARGET_NEONHALF", "0"),  # ? Hide-out all complex intrinsics
@@ -98,103 +69,160 @@ macros_args.extend(
     ]
 )
 
+# The CPython layer is C and the instantiation grid is C++, so the two carry separate flag
+# sets and `MixedLanguageBuildExt` below compiles them in separate passes.
 if is_linux:
-    compile_args.append("-std=c++20")
+    compile_args.append("-std=c11")
     compile_args.append("-O3")  # Maximize performance
-    compile_args.append("-ffast-math")  # Maximize floating-point performance
     compile_args.append("-Wno-unknown-pragmas")
     compile_args.append("-fdiagnostics-color=always")
+    compile_args.append("-g1")  # Simplify debugging; the normal `-g` makes builds much longer
 
-    # Simplify debugging, but the normal `-g` may make builds much longer!
-    compile_args.append("-g1")
+    cxx_compile_args.append("-std=c++20")
+    cxx_compile_args.append("-O3")
+    cxx_compile_args.append("-ffast-math")  # Maximize floating-point performance
+    cxx_compile_args.append("-Wno-unknown-pragmas")
+    cxx_compile_args.append("-fdiagnostics-color=always")
+    cxx_compile_args.append("-g1")
 
     # Linking to NumKong
-    compile_args.append("-Wl,--unresolved-symbols=ignore-in-shared-libs")
+    link_args.append("-Wl,--unresolved-symbols=ignore-in-shared-libs")
     link_args.append("-static-libstdc++")
-
-    if use_openmp:
-        compile_args.append("-fopenmp")
-        link_args.append("-lgomp")
 
 if is_macos:
     # MacOS 10.15 or higher is needed for `aligned_alloc` support.
     # https://github.com/unum-cloud/USearch/actions/runs/4975434891/jobs/8902603392
     compile_args.append("-mmacosx-version-min=10.15")
-    compile_args.append("-std=c++20")
-    compile_args.append("-O3")  # Maximize performance
-    compile_args.append("-ffast-math")  # Maximize floating-point performance
+    compile_args.append("-std=c11")
+    compile_args.append("-O3")
     compile_args.append("-fcolor-diagnostics")
     compile_args.append("-Wno-unknown-pragmas")
-
-    # Simplify debugging, but the normal `-g` may make builds much longer!
     compile_args.append("-g1")
+
+    cxx_compile_args.append("-mmacosx-version-min=10.15")
+    cxx_compile_args.append("-std=c++20")
+    cxx_compile_args.append("-O3")
+    cxx_compile_args.append("-ffast-math")
+    cxx_compile_args.append("-fcolor-diagnostics")
+    cxx_compile_args.append("-Wno-unknown-pragmas")
+    cxx_compile_args.append("-g1")
 
     # NumKong symbols are resolved at runtime via ctypes.CDLL in __init__.py
     link_args.append("-undefined")
     link_args.append("dynamic_lookup")
 
-    # Linking OpenMP requires additional preparation in CIBuildWheel.
-    # We must install `brew install llvm` ahead of time.
-    # import subprocess as cli
-    # llvm_base = cli.check_output(["brew", "--prefix", "llvm"]).strip().decode("utf-8")
-    # if len(llvm_base):
-    #     compile_args.append(f"-I{llvm_base}/include")
-    #     compile_args.append("-Xpreprocessor -fopenmp")
-    #     link_args.append(f"-L{llvm_base}/lib")
-    #     link_args.append("-lomp")
-    #     macros_args.append(("USEARCH_USE_OPENMP", "1"))
-
 if is_windows:
-    compile_args.append("/std:c++20")
     compile_args.append("/O2")
-    compile_args.append("/fp:fast")  # Enable fast math for MSVC
     compile_args.append("/W1")  # Reduce warnings verbosity
+
+    cxx_compile_args.append("/std:c++20")
+    cxx_compile_args.append("/O2")
+    cxx_compile_args.append("/fp:fast")  # Enable fast math for MSVC
+    cxx_compile_args.append("/W1")
     link_args.append("/FORCE")  # Force linking with missing NumKong symbols
 
 
-sources = ["python/lib.cpp"]
+# The CPython layer: module glue first, then the shared ingestion, then one file per modality
+# named after the header it mirrors - the same stems `rust/` and `include/usearch/` list.
+binding_sources = [
+    "python/lib.c",
+    "python/types.c",
+    "python/dense_index.c",
+    "python/sequence_index.c",
+    "python/matrix_index.c",
+    "python/geospatial_index.c",
+]
+
+# The type-erasure boundary plus the per-dtype shards, in the order `src/CMakeLists.txt` lists
+# them - add a shard here when one joins the library. Mirrors `build.rs`.
+library_sources = [
+    "src/types.cpp",
+    "src/dense_index.cpp",
+    "src/dense/ram_index_bf16.cpp",
+    "src/dense/ram_index_f16.cpp",
+    "src/dense/ram_index_e5m2.cpp",
+    "src/dense/ram_index_e4m3.cpp",
+    "src/dense/ram_index_e3m2.cpp",
+    "src/dense/ram_index_e2m3.cpp",
+    "src/dense/ram_index_i8.cpp",
+    "src/dense/ram_index_i4.cpp",
+    "src/dense/ram_index_u8.cpp",
+    "src/dense/ram_index_u4.cpp",
+    "src/dense/ram_index_u1.cpp",
+    "src/sequence.cpp",
+]
+
+macros_args.append(("USEARCH_BUILD_CUDA", "0"))
 
 ext_modules = [
-    Pybind11Extension(
+    Extension(
+        # Lives under the `usearch` package so `usearch/__init__.py` preloads NumKong first.
         "usearch.compiled",
-        sources,
+        binding_sources + library_sources,
         extra_compile_args=compile_args,
         extra_link_args=link_args,
         define_macros=macros_args,
-        language="c++",
+        language="c++",  # Only the linker; the `.c` files still compile as C.
     ),
 ]
 
-__version__ = open("VERSION", "r").read().strip()
+
+class MixedLanguageBuildExt(build_ext):
+    """Compiles the C++ instantiation grid apart from the C bindings, then links the two.
+
+    One flag set cannot serve both: `-std=c++20` is a hard error on a `.c` translation unit,
+    and the shards need it. Compiling the shards here also caps the job count, since in a
+    container `os.cpu_count` reports the host and a dozen parallel shards will OOM a wheel
+    builder.
+    """
+
+    def initialize_options(self):
+        super().initialize_options()
+        self.parallel = int(os.environ.get("USEARCH_BUILD_PARALLEL", min(os.cpu_count() or 1, 4)))
+
+    def build_extension(self, extension):
+        cxx_sources = [source for source in extension.sources if source.endswith((".cpp", ".cc", ".cu"))]
+        if cxx_sources:
+            extension.sources = [source for source in extension.sources if source not in cxx_sources]
+            objects = self.compiler.compile(
+                cxx_sources,
+                output_dir=self.build_temp,
+                macros=list(extension.define_macros),
+                include_dirs=list(extension.include_dirs) + list(self.include_dirs or []),
+                debug=self.debug,
+                extra_postargs=cxx_compile_args,
+                depends=extension.depends,
+            )
+            extension.extra_objects = list(extension.extra_objects) + objects
+        super().build_extension(extension)
+
+
+__version__ = Path("VERSION").read_text().strip()
 __lib_name__ = "usearch"
 
 this_directory = os.path.abspath(os.path.dirname(__file__))
 with open(os.path.join(this_directory, "README.md"), encoding="utf-8") as f:
     long_description = f.read()
 
-# Depending on the macros, adjust the include directories
+# Sibling headers come from the submodules, so a wheel can only be built from a recursive clone.
 include_dirs = [
     "include",
     "python",
+    "src",
+    "numkong/include",
+    "forkunion/include",
     "stringzilla/include",
 ]
+
+# NumKong is the one sibling with a runtime half - `python/usearch/__init__.py` resolves its shared
+# library through `ctypes` - so it is the only one that has to be installed alongside the wheel.
+# Batch inputs arrive through the buffer protocol, so NumPy is a convenience of `usearch.eval`
+# and of the test suite, never of the index itself.
 install_requires = [
-    "numpy",
-    "tqdm",
+    "numkong",
+    "stringzilla",
 ]
-if use_numkong:
-    include_dirs.append("numkong/include")
-    install_requires.append("numkong")
 
-
-# With Clang, `setuptools` doesn't properly use the `language="c++"` argument we pass.
-# The right thing would be to pass down `-x c++` to the compiler, before specifying the source files.
-# This nasty workaround overrides the `CC` environment variable with the `CXX` variable.
-cc_compiler_variable = os.environ.get("CC")
-cxx_compiler_variable = os.environ.get("CXX")
-if is_clang:
-    if cxx_compiler_variable:
-        os.environ["CC"] = cxx_compiler_variable
 
 setup(
     name=__lib_name__,
@@ -205,7 +233,7 @@ setup(
     description="Smaller & Faster Single-File Vector Search Engine from Unum",
     author="Ash Vardanian",
     author_email="info@unum.cloud",
-    python_requires=">=3.10",
+    python_requires=">=3.12",
     url="https://github.com/unum-cloud/USearch",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -233,10 +261,7 @@ setup(
     ],
     include_dirs=include_dirs,
     ext_modules=ext_modules,
+    cmdclass={"build_ext": MixedLanguageBuildExt},
+    extras_require={"eval": ["numpy", "tqdm"]},
     install_requires=install_requires,
 )
-
-# Reset the CC environment variable, that we overrode earlier.
-if is_clang:
-    if cxx_compiler_variable:
-        os.environ["CC"] = cc_compiler_variable

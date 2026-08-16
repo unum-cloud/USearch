@@ -1,0 +1,33 @@
+"""Dataset serialization - the `fbin`, `ibin`, and `ivecs` formats `usearch.io` reads.
+
+Run:
+    python -m pytest test/tooling.py -v
+"""
+
+from __future__ import annotations
+
+import os
+
+import numpy as np
+import pytest
+
+from usearch.io import load_matrix, save_matrix
+
+from .base import batch_sizes, dense_dimensions
+
+
+@pytest.mark.parametrize("rows", batch_sizes)
+@pytest.mark.parametrize("columns", dense_dimensions)
+@pytest.mark.parametrize(("extension", "dtype"), [("fbin", np.float32), ("ibin", np.int32)])
+def test_matrix_roundtrip(tmp_path, rows: int, columns: int, extension: str, dtype):
+    """A matrix written in either format reads back identical."""
+    generator = np.random.default_rng(0)
+    original = (
+        generator.random((rows, columns)).astype(dtype)
+        if dtype is np.float32
+        else generator.integers(0, rows + 1, size=(rows, columns)).astype(dtype)
+    )
+    path = str(tmp_path / f"matrix.{extension}")
+    save_matrix(original, path)
+    assert np.array_equal(original, load_matrix(path))
+    os.remove(path)

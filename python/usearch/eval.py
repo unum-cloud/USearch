@@ -1,154 +1,97 @@
+"""Measuring what a built index actually retrieves.
+
+The oracle is NumKong: it computes distances in the same metric vocabulary and the same kernel
+family the index dispatches to, so a recall number compares like with like. NumPy stays for
+generation and for the top-k selection, where NumKong has no `argsort` and precision is moot.
+"""
+
 from __future__ import annotations
 
-from collections import defaultdict
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from math import ceil
-from time import time_ns
+from time import perf_counter_ns
 from typing import Any
 
 import numpy as np
 
-from usearch.index import (
-    BatchMatches,
-    Index,
-    Key,
-    MetricKind,
-    MetricKindBitwise,
-    ScalarKind,
-    _normalize_dtype,
-    _normalize_metric,
-)
-from usearch.io import load_matrix
+import numkong as nk
+from usearch import DenseIndex
+from usearch.keys import integers_to_keys, keys_to_integers
 
-# Actual representable value range for each USearch scalar type.
-_SCALAR_RANGE: dict[ScalarKind, tuple[float, float]] = {
-    ScalarKind.F64: (-1e308, 1e308),
-    ScalarKind.F32: (-3.4e38, 3.4e38),
-    ScalarKind.BF16: (-3.39e38, 3.39e38),
-    ScalarKind.F16: (-65504.0, 65504.0),
-    ScalarKind.E5M2: (-57344.0, 57344.0),
-    ScalarKind.E4M3: (-448.0, 448.0),
-    ScalarKind.E3M2: (-28.0, 28.0),
-    ScalarKind.E2M3: (-7.5, 7.5),
-    ScalarKind.I8: (-127.0, 127.0),
-    ScalarKind.U8: (0.0, 255.0),
-}
+# `integers_to_keys` and `keys_to_integers` are re-exported so a caller reaching for the recall
+# harness finds the identity bridge beside it.
+__all__ = [
+    "SearchStats",
+    "exact_matches",
+    "index_keys",
+    "integers_to_keys",
+    "keys_to_integers",
+    "measure_seconds",
+    "random_vectors",
+    "self_recall",
+]
 
-# Actual representable value range for numpy input types.
-_INPUT_DTYPE_RANGE: dict[type, tuple[float, float]] = {
-    np.float64: (-1e308, 1e308),
-    np.float32: (-3.4e38, 3.4e38),
-    np.float16: (-65504.0, 65504.0),
-    np.int8: (-127.0, 127.0),
-    np.uint8: (0.0, 255.0),
-}
+# Metrics over packed bits, where generation produces bit vectors rather than gaussians.
+_BITWISE_METRICS = ("hamming", "jaccard")
 
-# Generation ceiling: we never need components larger than this.
-_MAX_GENERATION_RANGE = 1000.0
+# NumKong scores `inner` as the raw dot product while the index scores it as `1 - dot`, so the
+# two rank a candidate list in opposite directions. Every other metric agrees on direction, and
+# ranking is all an oracle needs - a monotone difference in magnitude changes no ordering.
+_DESCENDING_METRICS = ("inner",)
 
 
 def random_vectors(
     count: int,
-    metric: MetricKind = MetricKind.IP,
-    quantization: ScalarKind = ScalarKind.F32,
-    ndim: int | None = None,
-    index: Index | None = None,
-    input_dtype: type | None = None,
-    # Deprecated alias for `quantization` — will be removed in v3.
-    dtype: ScalarKind | None = None,
+    dimensions: int,
+    *,
+    metric: str = "angular",
+    seed: int = 0,
 ) -> np.ndarray:
-    """Produces a collection of random vectors for the provided `metric` and `quantization`.
+    """Reproducible `float32` rows for the given metric.
 
-    For bitwise metrics: generates random packed bit vectors.
-    For spatial metrics: generates gaussian vectors scaled to fill the quantization
-    type's full dynamic range. For IP metric, additionally normalizes to unit sphere.
-
-    :param quantization: USearch scalar type that determines the value range.
-    :param input_dtype: Numpy dtype for the output array. The value range is
-        intersected with the quantization range so values survive the cast without
-        collapsing. Useful when testing different input dtypes with the same index.
-    :param dtype: Deprecated alias for `quantization`.
+    Bitwise metrics get packed bits, where *dimensions* counts bits rather than scalars;
+    everything else gets unit-norm gaussians, which sit in the representable range of every
+    quantization the index offers. The *seed* fixes the draw, so a failure reproduces.
     """
-    # Handle deprecated `dtype` alias
-    if dtype is not None:
-        quantization = dtype
+    generator = np.random.default_rng(seed)
+    if metric in _BITWISE_METRICS:
+        bits = generator.integers(2, size=(count, dimensions), dtype=np.uint8)
+        return np.packbits(bits, axis=1)
 
-    # Infer default parameters from the `index`, if passed
-    if index is not None:
-        if not isinstance(index, Index):
-            raise ValueError("Unsupported `index` type")
+    rows = generator.standard_normal((count, dimensions)).astype(np.float32)
+    norms = np.maximum(np.linalg.norm(rows, axis=1, keepdims=True), 1e-10)
+    return (rows / norms).astype(np.float32)
 
-        ndim = index.ndim
-        quantization = index.numpy_dtype
-        metric = index.metric
 
-    else:
-        metric: MetricKind = _normalize_metric(metric)
-        quantization: ScalarKind = _normalize_dtype(quantization, ndim=ndim, metric=metric)
+def exact_matches(vectors, queries, wanted: int, *, metric: str = "angular") -> np.ndarray:
+    """Brute-force ground truth, scored by the kernels the index itself dispatches to.
 
-    # Produce data
-    if metric in MetricKindBitwise or quantization == ScalarKind.B1:
-        bit_vectors = np.random.randint(2, size=(count, ndim))
-        return np.packbits(bit_vectors, axis=1)
-
-    # Compute effective value range: start with quantization range,
-    # intersect with input dtype range if specified, then clamp to
-    # a sensible generation ceiling (we never need components of 1e38).
-    low, high = _SCALAR_RANGE.get(quantization, (-1.0, 1.0))
-    if input_dtype is not None:
-        input_low, input_high = _INPUT_DTYPE_RANGE.get(input_dtype, (low, high))
-        low = max(low, input_low)
-        high = min(high, input_high)
-    low = max(low, -_MAX_GENERATION_RANGE)
-    high = min(high, _MAX_GENERATION_RANGE)
-
-    # Gaussian: mean = midpoint of range, stddev = range / 6 (99.7% within bounds).
-    mean = (low + high) / 2.0
-    stddev = max((high - low) / 6.0, 1e-6)
-
-    # Output numpy dtype: use input_dtype if specified, otherwise infer from
-    # the quantization type. Types without native numpy equivalents (bf16, FP8, FP6)
-    # stay as float32 — USearch handles quantization internally.
-    _QUANT_TO_NUMPY: dict[ScalarKind, type] = {
-        ScalarKind.F64: np.float64,
-        ScalarKind.F32: np.float32,
-        ScalarKind.F16: np.float16,
-        ScalarKind.I8: np.int8,
-        ScalarKind.U8: np.uint8,
-    }
-    numpy_dtype = input_dtype if input_dtype is not None else _QUANT_TO_NUMPY.get(quantization, np.float32)
-    x = (np.random.randn(count, ndim) * stddev + mean).astype(numpy_dtype)
-
-    # For IP metric, normalize to unit sphere
-    if metric == MetricKind.IP:
-        norms = np.linalg.norm(x.astype(np.float64), axis=1, keepdims=True)
-        norms = np.maximum(norms, 1e-10)
-        x = (x.astype(np.float64) / norms).astype(numpy_dtype)
-
-    return x
+    Scores the ``(Q, dimensions)`` queries against the ``(N, dimensions)`` matrix the index was
+    built over, in one of the index's own metric names, and returns a ``(Q, wanted)`` matrix of
+    row offsets into *vectors*, nearest first.
+    """
+    scores = np.asarray(nk.cdist(queries, vectors, metric, out_dtype="float64"))
+    if metric in _DESCENDING_METRICS:
+        scores = -scores
+    wanted = min(wanted, scores.shape[1])
+    candidates = np.argpartition(scores, wanted - 1, axis=1)[:, :wanted]
+    ordering = np.take_along_axis(scores, candidates, axis=1).argsort(axis=1)
+    return np.take_along_axis(candidates, ordering, axis=1)
 
 
 @dataclass
 class SearchStats:
-    """
-    Contains statistics for one or more search runs, including the number of
-    internal nodes that were fetched (`visited_members`) and the number
-    of times the distance metric was invoked (`computed_distances`).
+    """What one or more search runs cost, and how much of the truth they found.
 
-    Other derivative metrics include the `mean_recall` and `mean_efficiency`.
-    Recall is the share of queried vectors, that were successfully found.
-    Efficiency describes the number of distances that had to be computed for
-    each query, normalized to size of the `index`. Highest efficiency is 0.(9),
-    lowest is zero. Highest is achieved, when the distance metric was computed
-    just once per query. Lowest happens during exact search, when every distance
-    to every present vector had to be computed.
+    Recall is the share of queries whose true nearest neighbor came back. Efficiency is the
+    share of the index a query did not have to score: highest when one distance sufficed,
+    zero when every vector was visited, as in an exact scan.
     """
 
     index_size: int
     count_queries: int
     count_matches: int
-
     visited_members: int
     computed_distances: int
 
@@ -161,42 +104,47 @@ class SearchStats:
         return self.count_matches / self.count_queries
 
 
-def self_recall(index: Index, sample: float | int = 1.0, **kwargs) -> SearchStats:
-    """Simplest benchmark for a quality of search, which queries every
-    existing member of the index, to make sure approximate search finds
-    the point itself.
+def index_keys(index: DenseIndex) -> np.ndarray:
+    """Every identity the index holds, as a (size, 16) matrix, walked through one snapshot."""
+    batches = [np.asarray(batch).copy() for batch in index.batches()]
+    if not batches:
+        return np.zeros((0, 16), dtype=np.uint8)
+    return np.concatenate(batches, axis=0)
 
-    :param index: Non-empty pre-constructed index
-    :type index: Index
-    :param sample: Share (or number) of vectors to search, defaults to 1.0
-    :type sample: Union[float, int]
-    :return: Evaluation report with key metrics
-    :rtype: SearchStats
+
+def self_recall(index: DenseIndex, sample: float | int = 1.0, count: int = 1, **kwargs) -> SearchStats:
+    """Queries the index with its own vectors, which must find themselves.
+
+    The weakest recall test there is, and the cheapest: it needs no ground truth. Use
+    ``exact_matches`` when the question is how the index ranks against the exact answer.
+
+    The *sample* is a share when a float and a count when an integer, and *count* is how many
+    matches each query retrieves.
     """
     if len(index) == 0:
-        return 0
-    if "count" not in kwargs:
-        kwargs["count"] = 1
+        return SearchStats(0, 0, 0, 0, 0)
 
-    if "keys" in kwargs:
-        keys = kwargs.pop("keys")
-    else:
-        keys = np.array(index.keys)
-
+    keys = kwargs.pop("keys", None)
+    keys = np.asarray(index_keys(index) if keys is None else keys)
     if sample != 1.0:
-        if isinstance(sample, float):
-            sample = int(ceil(len(keys) * sample))
-        keys = np.random.choice(keys, sample)
+        wanted = int(ceil(len(keys) * sample)) if isinstance(sample, float) else sample
+        chosen = np.random.default_rng(0).choice(len(keys), wanted, replace=False)
+        keys = keys[chosen]
 
-    if "vectors" in kwargs:
-        vectors = kwargs.pop("vectors")
-    else:
-        vectors = index.get(keys)
+    vectors = kwargs.pop("vectors", None)
+    if vectors is None:
+        vectors = np.concatenate([np.asarray(index[row]) for row in keys], axis=0)
 
-    matches = index.search(vectors, **kwargs)
-    count_matches: int = (
-        matches.count_matches(keys) if isinstance(matches, BatchMatches) else int(matches.keys[0] == keys[0])
-    )
+    matches = index.search(vectors, count, **kwargs)
+    expected = keys_to_integers(keys)
+    found = keys_to_integers(matches.keys)
+    counts = np.asarray(matches.counts)
+
+    count_matches = 0
+    for query_index in range(len(expected)):
+        row = found[query_index, : counts[query_index]]
+        count_matches += int(np.any(row == expected[query_index]))
+
     return SearchStats(
         index_size=len(index),
         count_queries=len(keys),
@@ -206,374 +154,8 @@ def self_recall(index: Index, sample: float | int = 1.0, **kwargs) -> SearchStat
     )
 
 
-def measure_seconds(f: Callable) -> tuple[float, Any]:
-    """Simple function profiling decorator.
-
-    :param f: Function to be profiled
-    :type f: Callable
-    :return: Time elapsed in seconds and the result of the execution
-    :rtype: Tuple[float, Any]
-    """
-    a = time_ns()
-    result = f()
-    b = time_ns()
-    c = b - a
-    secs = c / (10**9)
-    return secs, result
-
-
-def dcg(relevances: np.ndarray, k: int | None = None) -> np.ndarray:
-    """Calculate DCG (Discounted Cumulative Gain) up to position k.
-
-    :param relevances: List of true relevance scores (in the order as they are ranked)
-    :type relevances: list
-    :param k: Position up to which DCG is computed
-    :type k: int
-    :return: The DCG score at position k
-    :rtype: float
-    """
-    if k:
-        relevances = np.asarray(relevances)[:k]
-
-    n_relevances = len(relevances)
-    if n_relevances == 0:
-        return 0.0
-
-    discounts = np.log2(np.arange(n_relevances) + 2)
-    return np.sum(relevances / discounts)
-
-
-def ndcg(relevances: np.ndarray, k: int | None = None) -> np.ndarray:
-    """Calculate NDCG (Normalized Discounted Cumulative Gain) at position k.
-
-    :param relevances: List of true relevance scores (in the order as they are ranked)
-    :type relevances: list
-    :param k: Position up to which NDCG is computed
-    :type k: int
-    :return: The NDCG score at position k
-    :rtype: float
-    """
-    best_dcg = dcg(sorted(relevances, reverse=True), k)
-    if best_dcg == 0:
-        return 0.0
-
-    return dcg(relevances, k) / best_dcg
-
-
-def relevance(expected: np.ndarray, predicted: np.ndarray, k: int | None = None) -> np.ndarray:
-    """Calculate relevance scores. Binary relevance scores
-
-    :param expected: ground-truth keys
-    :type expected: np.ndarray
-    :param predicted: predicted keys
-    :type predicted: np.ndarray
-    """
-    expected = expected[:k]
-    predicted = predicted[:k]
-    return [1 if i in expected else 0 for i in predicted]
-
-
-@dataclass
-class Dataset:
-    keys: np.ndarray
-    vectors: np.ndarray
-    queries: np.ndarray
-    neighbors: np.ndarray
-
-    def crop_neighbors(self, k: int):
-        self.neighbors = self.neighbors[:, k]
-
-    @property
-    def ndim(self):
-        return self.vectors.shape[1]
-
-    @staticmethod
-    def build(
-        vectors: str | None = None,
-        queries: str | None = None,
-        neighbors: str | None = None,
-        count: int | None = None,
-        ndim: int | None = None,
-        k: int | None = None,
-    ):
-        """Either loads an existing dataset from disk, or generates one on the fly.
-
-        :param vectors: _description_, defaults to None
-        :type vectors: Optional[str], optional
-        :param queries: _description_, defaults to None
-        :type queries: Optional[str], optional
-        :param neighbors: _description_, defaults to None
-        :type neighbors: Optional[str], optional
-        :param count: _description_, defaults to None
-        :type count: Optional[int], optional
-        :param ndim: _description_, defaults to None
-        :type ndim: Optional[int], optional
-        :param k: _description_, defaults to None
-        :type k: Optional[int], optional
-        """
-
-        d = Dataset(None, None, None, None)
-
-        if vectors is not None:
-            assert ndim is None
-
-            d.vectors = load_matrix(vectors)
-            ndim = d.vectors.shape[1]
-            count = min(d.vectors.shape[0], count) if count is not None else d.vectors.shape[0]
-            d.vectors = d.vectors[:count, :]
-            d.keys = np.arange(count, dtype=Key)
-
-            if queries is not None:
-                d.queries = load_matrix(queries)
-            else:
-                d.queries = d.vectors
-
-            if neighbors is not None:
-                d.neighbors = load_matrix(neighbors)
-                if k is not None:
-                    d.neighbors = d.neighbors[:, :k]
-            else:
-                assert k is None, "Cant override `k`, will retrieve one neighbor"
-                d.neighbors = np.reshape(d.keys, (count, 1))
-
-        else:
-            assert ndim is not None
-            assert count is not None
-            assert k is None, "Cant override `k`, will retrieve one neighbor"
-
-            d.vectors = random_vectors(count=count, ndim=ndim)
-            d.queries = d.vectors
-            d.keys = np.arange(count, dtype=Key)
-            d.neighbors = np.reshape(d.keys, (count, 1))
-
-        return d
-
-
-@dataclass
-class TaskResult:
-    add_operations: int | None = None
-    add_per_second: float | None = None
-
-    search_operations: int | None = None
-    search_per_second: float | None = None
-    recall_at_one: float | None = None
-
-    def __repr__(self) -> str:
-        parts = []
-        if self.add_per_second:
-            parts.append(f"{self.add_per_second:.2f} add/s")
-        if self.search_per_second:
-            parts.append(f"{self.search_per_second:.2f} search/s")
-        if self.recall_at_one:
-            parts.append(f"{self.recall_at_one * 100:.2f}% recall@1")
-        return ", ".join(parts)
-
-    @property
-    def add_seconds(self) -> float:
-        return self.add_operations / self.add_per_second
-
-    @property
-    def search_seconds(self) -> float:
-        return self.search_operations / self.search_per_second
-
-    def __add__(self, other: TaskResult):
-        result = TaskResult()
-        if self.add_operations and other.add_operations:
-            result.add_operations = self.add_operations + other.add_operations
-            result.add_per_second = result.add_operations / (self.add_seconds + other.add_seconds)
-        else:
-            base = self if self.add_operations else other
-            result.add_operations = base.add_operations
-            result.add_per_second = base.add_per_second
-
-        if self.search_operations and other.search_operations:
-            result.search_operations = self.search_operations + other.search_operations
-            result.recall_at_one = (
-                self.recall_at_one * self.search_operations + other.recall_at_one * other.search_operations
-            ) / (self.search_operations + other.search_operations)
-            result.search_per_second = result.search_operations / (self.search_seconds + other.search_seconds)
-        else:
-            base = self if self.search_operations else other
-            result.search_operations = base.search_operations
-            result.search_per_second = base.search_per_second
-            result.recall_at_one = base.recall_at_one
-
-        return result
-
-
-@dataclass
-class AddTask:
-    keys: np.ndarray
-    vectors: np.ndarray
-
-    def __call__(self, index: Index) -> TaskResult:
-        batch_size: int = self.vectors.shape[0]
-        old_size: int = len(index)
-        dt, _ = measure_seconds(lambda: index.add(self.keys, self.vectors))
-
-        assert len(index) == old_size + batch_size
-        return TaskResult(
-            add_operations=batch_size,
-            add_per_second=batch_size / dt,
-        )
-
-    @property
-    def ndim(self):
-        return self.vectors.shape[1]
-
-    @property
-    def count(self):
-        return self.vectors.shape[0]
-
-    def inplace_shuffle(self):
-        """Reorders the `vectors` and `keys`. Often used for robustness benchmarks."""
-
-        new_order = np.arange(self.count)
-        np.random.shuffle(new_order)
-        self.keys = self.keys[new_order]
-        self.vectors = self.vectors[new_order, :]
-
-    def slices(self, batch_size: int) -> list[AddTask]:
-        """Splits this dataset into smaller chunks."""
-
-        return [
-            AddTask(
-                keys=self.keys[start_row : start_row + batch_size],
-                vectors=self.vectors[start_row : start_row + batch_size, :],
-            )
-            for start_row in range(0, self.count, batch_size)
-        ]
-
-    def clusters(self, number_of_clusters: int) -> list[AddTask]:
-        """Splits this dataset into smaller chunks."""
-
-        from sklearn.cluster import KMeans
-
-        clustering = KMeans(
-            n_clusters=number_of_clusters,
-            random_state=0,
-            n_init="auto",
-        ).fit(self.vectors)
-
-        partitioning = defaultdict(list)
-        for row, cluster in enumerate(clustering.labels_):
-            partitioning[cluster].append(row)
-
-        return [
-            AddTask(
-                keys=self.keys[rows],
-                vectors=self.vectors[rows, :],
-            )
-            for rows in partitioning.values()
-        ]
-
-
-@dataclass
-class SearchTask:
-    queries: np.ndarray
-    neighbors: np.ndarray
-
-    def __call__(self, index: Index) -> TaskResult:
-        dt, results = measure_seconds(lambda: index.search(self.queries, self.neighbors.shape[1]))
-
-        return TaskResult(
-            search_per_second=self.queries.shape[0] / dt,
-            recall_at_one=results.mean_recall(self.neighbors[:, 0].flatten()),
-        )
-
-    def slices(self, batch_size: int) -> list[SearchTask]:
-        """Splits this dataset into smaller chunks."""
-
-        return [
-            SearchTask(
-                queries=self.queries[start_row : start_row + batch_size, :],
-                neighbors=self.neighbors[start_row : start_row + batch_size, :],
-            )
-            for start_row in range(0, self.queries.shape[0], batch_size)
-        ]
-
-
-@dataclass
-class Evaluation:
-    tasks: list[AddTask | SearchTask]
-    count: int
-    ndim: int
-
-    @staticmethod
-    def for_dataset(dataset: Dataset, batch_size: int = 0, clusters: int = 1) -> Evaluation:
-        tasks = []
-        add = AddTask(vectors=dataset.vectors, keys=dataset.keys)
-        search = SearchTask(queries=dataset.queries, neighbors=dataset.neighbors)
-
-        if batch_size:
-            tasks.extend(add.slices(batch_size))
-            tasks.extend(search.slices(batch_size))
-        elif clusters != 1:
-            tasks.extend(add.clusters(clusters))
-            print(tasks)
-            tasks.append(search)
-        else:
-            tasks.append(add)
-            tasks.append(search)
-
-        return Evaluation(
-            tasks=tasks,
-            count=add.count,
-            ndim=add.ndim,
-        )
-
-    def __call__(self, index: Index, post_clean: bool = True) -> dict:
-        task_result = TaskResult()
-
-        try:
-            for task in self.tasks:
-                task_result = task_result + task(index)
-        except KeyboardInterrupt:
-            pass
-
-        if post_clean:
-            index.clear()
-        return {
-            **index.specs,
-            **asdict(task_result),
-        }
-
-
-if __name__ == "__main__":
-    import argparse
-
-    # Initialize the argument parser
-    parser = argparse.ArgumentParser(description="Evaluate vector search index for speed and accuracy.")
-
-    # Define expected arguments
-    parser.add_argument("--vectors", type=str, required=False, help="Path to the file containing the vectors.")
-    parser.add_argument("--queries", type=str, required=False, help="Path to the file containing the query vectors.")
-    parser.add_argument("--neighbors", type=str, required=False, help="Path to the file with neighbor arrays.")
-    parser.add_argument("--dtype", type=str, required=False, help="Quantization type for internal storage.")
-    parser.add_argument("--metric", type=str, required=False, help="Distance function.")
-    parser.add_argument("--count", type=int, help="Number of vectors to use.")
-    parser.add_argument("--ndim", type=int, help="Number of dimensions for the vectors.")
-    parser.add_argument("--batch_size", type=int, default=0, help="Batch size for indexing and searching.")
-    parser.add_argument("--clusters", type=int, default=1, help="Number of clusters for indexing.")
-
-    # Parse arguments from the command line
-    args = parser.parse_args()
-
-    # Load or generate dataset
-    dataset = Dataset.build(
-        vectors=args.vectors,
-        queries=args.queries,
-        neighbors=args.neighbors,
-        count=args.count,
-        ndim=args.ndim,
-    )
-
-    # Prepare the evaluation
-    evaluation = Evaluation.for_dataset(dataset, batch_size=args.batch_size, clusters=args.clusters)
-    index = Index(ndim=dataset.ndim, dtype=args.dtype, metric=args.metric)
-
-    # Perform the evaluation
-    results = evaluation(index)
-
-    # Print the evaluation results
-    print("Evaluation results:", results)
+def measure_seconds(callable_to_time: Callable) -> tuple[float, Any]:
+    """Times one call with the monotonic clock, returning the seconds and whatever it returned."""
+    before = perf_counter_ns()
+    result = callable_to_time()
+    return (perf_counter_ns() - before) / 1e9, result

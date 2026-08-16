@@ -48,15 +48,12 @@ def load_matrix(
     view: bool = False,
     dtype: type | None = None,
 ) -> np.ndarray | None:
-    """Read *.ibin, *.bbib, *.hbin, *.fbin, *.dbin, *.i8bin, *.i32bin files with matrices.
+    """Reads a matrix from an ``.ibin``, ``.bbib``, ``.hbin``, ``.fbin``, ``.dbin``, ``.i8bin``,
+    or ``.i32bin`` file.
 
-    :param filename: path to the matrix file
-    :param start_row: start reading vectors from this index
-    :param count_rows: number of vectors to read. If None, read all vectors
-    :param view: set to `True` to memory-map the file instead of loading to RAM
-
-    :return: parsed matrix
-    :rtype: numpy.ndarray
+    Reads *count_rows* vectors starting at *start_row*, or every vector when *count_rows* is
+    None. Setting *view* memory-maps the file rather than loading it into RAM, which is how a
+    dataset larger than memory is read.
     """
     if dtype is None:
         dtype = guess_numpy_dtype_from_filename(filename)
@@ -107,12 +104,10 @@ def load_matrix(
 
 
 def save_matrix(vectors: np.ndarray, filename: str):
-    """Write *.ibin, *.bbib, *.hbin, *.fbin, *.dbin, *.i8bin, *.i32bin, *.f32bin files with matrices.
+    """Writes a matrix to an ``.ibin``, ``.bbib``, ``.hbin``, ``.fbin``, ``.dbin``, ``.i8bin``,
+    ``.i32bin``, or ``.f32bin`` file.
 
-    :param vectors: the matrix to serialize
-    :type vectors: numpy.ndarray
-    :param filename: path to the matrix file
-    :type filename: str
+    The extension decides the scalar type, so it must agree with the matrix's own dtype.
     """
     if filename.endswith(".fbin"):
         dtype = np.float32

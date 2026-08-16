@@ -3,24 +3,24 @@
 #   - `macos` wheels for x86_64, arm64, and universal2;
 #   - `windows` wheels for AMD64, and ARM64. But not x86.
 #   - `manylinux` and `musllinux` wheels for Linux on x86_64, aarch64. But not i686, ppc64le, s390x;
-#   * for CPython versions from 3.10 to 3.14 (including free-threaded 3.13t and 3.14t).
-#   = meaning 7 platforms * 7 Python versions = 49 builds.
+#   * for CPython versions from 3.12 to 3.14 (including free-threaded 3.13t and 3.14t).
+#   = meaning 7 platforms * 5 Python versions = 35 builds.
 [build-system]
 build-backend = "setuptools.build_meta"
 requires = [
   "setuptools>=42",
   "wheel",
-  "cmake>=3.22",
-  "pybind11>=2.13.6",
-  "numpy",
   "numkong>=7.5.0",
 ]
 
 [tool.pytest.ini_options]
-addopts = "-ra --showlocals --strict-markers --strict-config -s -x -p no:warnings"
+# No `-x`: one failure must not hide the rest, which is how a wrong `batches` dtype survived
+# a green run. The four flags below match NumKong's and StringZilla's blocks exactly.
+addopts = ["-ra", "--showlocals", "--strict-markers", "--strict-config"]
 filterwarnings = ["error"]
 minversion = "6.0"
-testpaths = ["python/scripts"]
+python_files = ["*.py"]
+testpaths = ["test"]
 xfail_strict = true
 
 # Avoid running tests, as everything is happening in a super slow container
@@ -99,7 +99,7 @@ tests = [
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py312"
 
 [tool.ruff.format]
 quote-style = "double"
@@ -111,6 +111,9 @@ select = [
   "F",     # pyflakes
   "I",     # isort (import ordering)
   "UP",    # pyupgrade (modernize syntax)
+  "YTT",   # flake8-2020 (misreading `sys.version` and friends)
+  "B",     # flake8-bugbear (likely bugs)
+  "SIM",   # flake8-simplify (needless complexity)
 ]
 ignore = [
   "E501",  # line too long (handled by formatter)

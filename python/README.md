@@ -10,326 +10,193 @@ pip install usearch
 
 ```python
 import numpy as np
-from usearch.index import Index, Matches
+from usearch import DenseIndex
 
-index = Index(
-    ndim=3, # Define the number of dimensions in input vectors
-    metric='cos', # Choose 'l2sq', 'ip', 'haversine' or other metric, default = 'cos'
-    dtype='bf16', # Quantize to 'f16', 'e5m2', 'e4m3', 'e3m2', 'e2m3', 'u8', 'i8', 'b1'..., default = None
-    connectivity=16, # How frequent should the connections in the graph be, optional
-    expansion_add=128, # Control the recall of indexing, optional
-    expansion_search=64, # Control the quality of search, optional
+index = DenseIndex(
+    dimensions=256,         # Scalars per vector
+    metric="angular",       # 'inner', 'angular', 'euclidean', 'hamming', or 'jaccard'
+    quantization="bf16",    # The stored scalar type: 'f64'...'e2m3', 'i8', 'u8', 'u1x8'
+    connectivity=16,        # Connections per node; 0 derives it from the geometry
 )
 
-vector = np.array([0.2, 0.6, 0.4])
-index.add(42, vector)
-matches: Matches = index.search(vector, 10)
+vectors = np.random.rand(10_000, 256).astype(np.float32)
+index.reserve(len(vectors))
+index.add(np.arange(len(vectors)), vectors)
 
-assert len(index) == 1
-assert len(matches) == 1
-assert matches[0].key == 42
-assert matches[0].distance <= 0.001
-assert np.allclose(index[42], vector)
+matches = index.search(vectors[:100], 10)
+assert len(index) == 10_000
+assert np.asarray(matches.distances).shape == (100, 10)
+assert matches[0][0].distance < 0.001
 ```
 
-Python bindings are implemented with [`pybind/pybind11`](https://github.com/pybind/pybind11).
-Assuming the presence of Global Interpreter Lock in Python, we spawn threads in the C++ layer on large insertions.
+The bindings are pure CPython, sitting directly on the library's stable C ABI - no PyBind11, no NanoBind, and no SWIG.
+Every verb is a batch, and one vector is a one-row matrix, so a memory-mapped dataset reaches the index with no reshape and no copy.
+
+## Modalities
+
+One index type per modality, each mirroring the C header of the same name:
+
+| Python | C header | Rust |
+|---|---|---|
+| `usearch.DenseIndex` | `usearch/dense_index.h` | `usearch::dense::Index` |
+| `usearch.SequenceIndex` | `usearch/sequence_index.h` | `usearch::sequence::Index` |
+| `usearch.MatrixIndex` | `usearch/matrix_index.h` | `usearch::matrix::Index` |
+| `usearch.GeospatialIndex` | `usearch/geospatial_index.h` | `usearch::geospatial::Index` |
+
+`DenseIndex` is the one instantiated today; the rest announce themselves with a `NotImplementedError` until their engines land.
+
+## Identities
+
+Keys are 128 bits wide and render as lowercase dashed UUIDs.
+Integer identities park in the low eight bytes, so `Key(42)` prints as `00000000-0000-0000-0000-00000000002a`, and keys need not be unique - several entries may share one, and `count` reports how many.
+
+```python
+from usearch import Key
+
+Key(42)                                         # from an integer
+Key("00000000-0000-0000-0000-00000000002a")     # from the dashed rendering
+Key(uuid.uuid4())                               # from a `uuid.UUID`
+```
+
+No NumPy dtype expresses a 128-bit integer, so batch identities travel as big-endian sixteen-byte rows - an `(N, 16)` buffer of `uint8` - in both directions.
+`usearch.keys` carries `integers_to_keys` and `keys_to_integers` for the common case where identities really are just row numbers.
+
+## Inputs & Outputs
+
+Inputs arrive through PEP 3118 first and `__array_interface__` second, so NumPy is never required and a PyTorch or TensorFlow tensor needs no round-trip through it.
+Only the row pitch may stride; a strided column would force a gather the SIMD kernels have no form for.
+
+Results come back as one `Matches` object whose fields are zero-copy views over arenas it owns:
+
+```python
+matches = index.search(queries, 10)
+matches.keys          # memoryview, shape (queries, 10, 16), format 'B'
+matches.distances     # memoryview, shape (queries, 10),     format 'd'
+matches.counts        # memoryview, shape (queries,)
+matches.visited_members, matches.computed_distances, matches.restarts
+matches[0]            # a tuple of `Match` objects, one per hit for query zero
+np.asarray(matches.distances)   # zero-copy; NumPy never entered the binding
+```
+
+When you already own the output buffers, `search_into` writes into them and allocates nothing:
+
+```python
+keys = np.empty((len(queries), 10, 16), dtype=np.uint8)
+distances = np.empty((len(queries), 10), dtype=np.float64)
+counts = np.empty(len(queries), dtype=np.uint64)
+index.search_into(queries, 10, keys, distances, counts)
+```
+
+## Expansion Rides The Call
+
+The candidate-pool breadth is a per-call setting rather than a property of the handle, so a recall sweep runs against one immutable index with no mutation between points:
+
+```python
+for expansion_factor in (16, 32, 64, 128, 256):
+    matches = index.search(queries, 10, expansion_factor=expansion_factor)
+    print(expansion_factor, matches.computed_distances)
+```
+
+## Filtered Search
+
+A predicate admits keys one at a time.
+Non-matching entries still route the traversal, so recall does not collapse at low selectivity.
+The callback re-enters Python, so it runs under the GIL and serializes the walk - every other verb releases the GIL and lets the library parallelize internally.
+
+```python
+matches = index.search(queries, 10, predicate=lambda key: int(key) % 2 == 0)
+```
+
+## Retrieval & Iteration
+
+```python
+index.count(42)             # entries sharing this key
+42 in index                 # the same question, as a membership test
+index[42]                   # a (count, dimensions) memoryview of what is stored under it
+
+for keys in index.batches(1024):                    # snapshot walk, keys only
+    ...
+for keys, vectors in index.batches(1024, dtype="f32"):   # snapshot walk with payloads
+    ...
+for match in index.find(query):                     # resumable best-first stream
+    if match.distance > 0.3:
+        break
+```
 
 ## Serialization
 
-```py
-index.save('index.usearch')
-index.load('index.usearch') # Copy the whole index into memory
-index.view('index.usearch') # View from disk without loading in memory
+```python
+index.save("index.safegraphs")
+index.load("index.safegraphs")
 ```
 
-If you don't know anything about the index except its path, there are two more endpoints to know:
-
-```py
-Index.metadata('index.usearch') -> IndexMetadata
-Index.restore('index.usearch', view=False) -> Index
-```
-
-## Batch Operations
-
-Adding or querying a batch of entries is identical to adding a single vector.
-The difference would be in the shape of the tensors.
-
-```py
-n = 100
-keys = np.arange(n)
-vectors = np.random.uniform(0, 0.3, (n, index.ndim)).astype(np.float32)
-
-index.add(keys, vectors, threads=..., copy=...)
-matches: BatchMatches = index.search(vectors, 10, threads=...)
-
-first_query_matches: Matches = matches[0]
-assert matches[0].key == 0
-assert matches[0].distance <= 0.001
-
-assert len(matches) == vectors.shape[0]
-assert len(matches[0]) <= 10
-```
-
-You can also override the default `threads` and `copy` arguments in bulk workloads.
-The first controls the number of threads spawned for the task, where `threads=0` (the default) uses all available cores.
-The second controls whether the vector itself will be persisted inside the index.
-If you can preserve the lifetime of the vector somewhere else, you can avoid the copy.
-
-> When using `BatchMatches`, be aware that unused positions in the results arrays will be filled with sentinel values, like the signaling `NaN` for floating-point distances.
-> Don't forget to check for `matches.counts` if you are using the recommended batch interfaces.
-
-## Scalar Quantization & NumKong Interop
-
-USearch indexes can store vectors in a variety of quantized formats, trading precision for memory and speed.
-The `add` and `search` operations automatically cast between the input type and the index storage type.
-
-| `dtype` |           Bits | Best For                           |
-| :------ | -------------: | :--------------------------------- |
-| `f64`   |             64 | Maximum precision                  |
-| `f32`   |             32 | Default NumPy type                 |
-| `bf16`  |             16 | Recommended default on modern CPUs |
-| `f16`   |             16 | Widely supported half-precision    |
-| `e5m2`  |              8 | Float8, wider range (±57344)       |
-| `e4m3`  |              8 | Float8, higher precision (±448)    |
-| `e3m2`  | 6, padded to 8 | Float6, MX-compatible (±28)        |
-| `e2m3`  | 6, padded to 8 | Float6, MX-compatible (±7.5)       |
-| `i8`    |              8 | Cosine-like metrics                |
-| `u8`    |              8 | Cosine-like metrics                |
-| `b1`    |              1 | Binary metrics                     |
-
-For types not natively representable in NumPy (`bf16`, `e5m2`, `e4m3`, `e3m2`, `e2m3`), you can pre-quantize with [NumKong](https://github.com/ashvardanian/numkong) and pass the raw buffers with an explicit `dtype=` parameter:
+A handle constructed with `dimensions=0` freezes its geometry from the checkpoint's own headers on `load`.
+To learn a checkpoint's shape without opening a shard, ask for its metadata - the keys are this class's own constructor keywords, so it round-trips:
 
 ```python
-import numkong as nk
-import numpy as np
-from usearch.index import Index
-
-vectors_f32 = np.random.rand(1000, 256).astype(np.float32)
-keys = np.arange(1000)
-
-# Option 1: let USearch quantize internally
-index = Index(ndim=256, metric='cos', dtype='e4m3')
-index.add(keys, vectors_f32)
-
-# Option 2: pre-quantize with NumKong and pass raw buffers
-vectors_e4m3 = np.asarray(nk.Tensor(vectors_f32).astype('e4m3'))
-index2 = Index(ndim=256, metric='cos', dtype='e4m3')
-index2.add(keys, vectors_e4m3, dtype='e4m3')
-matches = index2.search(vectors_e4m3[:5], 10, dtype='e4m3')
+index = DenseIndex(**DenseIndex.metadata("index.safegraphs"))
+index.load("index.safegraphs")
 ```
 
-## User-Defined Metrics and JIT in Python
+Both verbs also accept a buffer of `serialized_length` bytes in place of a path.
 
-### [Numba][numba]
+## Residency
 
-Assuming the language boundary exists between Python user code and C++ implementation, there are more efficient solutions than passing a Python callable to the engine.
-Luckily, with the help of [Numba][numba], we can JIT compile a function with a matching signature and pass it down to the engine.
+Where the payload lives and which engine traverses it is a constructor keyword, and it also decides what "load" means: materialize into RAM, upload to a device, or open in place on disk.
 
-```py
-from numba import cfunc, types, carray
-
-ndim = 256
-signature = types.float32(
-    types.CPointer(types.float32),
-    types.CPointer(types.float32))
-
-@cfunc(signature)
-def inner_product(a, b):
-    a_array = carray(a, ndim)
-    b_array = carray(b, ndim)
-    c = 0.0
-    for i in range(ndim):
-        c += a_array[i] * b_array[i]
-    return 1 - c
-
-index = Index(ndim=ndim, metric=CompiledMetric(
-    pointer=inner_product.address,
-    kind=MetricKind.IP,
-    signature=MetricSignature.ArrayArray,
-))
+```python
+DenseIndex(dimensions=256, residency="ram", threads=0, pages="huge")
+DenseIndex(dimensions=256, residency="vram", device=0, addressing="unified")
+DenseIndex(dimensions=256, residency="nvme", sector_bytes=512, queue_depth=0, io="direct")
 ```
 
-Alternatively, you can avoid pre-defining the number of dimensions, and pass it separately:
+External-memory graphs are never modified in place, so an NVMe handle is read-only and every mutating verb fails on it.
+Bigger indexes come from merging:
 
-```py
-signature = types.float32(
-    types.CPointer(types.float32),
-    types.CPointer(types.float32),
-    types.uint64)
-
-@cfunc(signature)
-def inner_product(a, b, ndim):
-    a_array = carray(a, ndim)
-    b_array = carray(b, ndim)
-    c = 0.0
-    for i in range(ndim):
-        c += a_array[i] * b_array[i]
-    return 1 - c
-
-index = Index(ndim=ndim, metric=CompiledMetric(
-    pointer=inner_product.address,
-    kind=MetricKind.IP,
-    signature=MetricSignature.ArrayArraySize,
-))
+```python
+first.merge(second)   # `second` is consumed and must not be used afterwards
 ```
 
-```sh
-pip install numba
+## Linear Algebra
+
+Two verbs read the same walk as arithmetic rather than as retrieval.
+Both are into-only: the width of what they emit is the caller's to choose, so there is no allocating door to choose it for them.
+
+`multiply_into` reports __every__ pair the traversal scored rather than only the nearest - an approximate `A × Bᵀ`, dense in and sparse out.
+A walk computes many times the products it reports and each of them is exact, so the caller stops recomputing what the index already knew.
+It returns how many rows truncated, which makes the retry loop a `while`:
+
+```python
+while index.multiply_into(rows, wanted, columns, products, counts):
+    wanted *= 2
+    columns, products, counts = grow(wanted)
 ```
 
-### [Cppyy][cppyy]
+A count above `wanted` is the truth about that row, not a slice bound - unlike `search_into`, where it can never exceed the width.
 
-Similarly, you can use Cppyy with Cling to JIT-compile native C or C++ code and pass it to USearch, which may be a good idea, if you want to explicitly request loop-unrolling or other low-level optimizations!
+`attend_into` folds a softmax over that same walk, the online-softmax recurrence of Flash Attention with the graph replacing the linear sweep over key tiles.
+The index holds one layer's keys for one key-value head; `values` holds the value rows, addressed by key, so a context inserted in token order needs no mapping and the publication watermark doubles as the causal mask.
 
-```py
-import cppyy
-import cppyy.ll
-
-cppyy.cppdef("""
-float inner_product(float *a, float *b) {
-    float result = 0;
-#pragma unroll
-    for (size_t i = 0; i != ndim; ++i)
-        result += a[i] * b[i];
-    return 1 - result;
-}
-""".replace("ndim", str(ndim)))
-
-function = cppyy.gbl.inner_product
-index = Index(ndim=ndim, metric=CompiledMetric(
-    pointer=cppyy.ll.addressof(function),
-    kind=MetricKind.IP,
-    signature=MetricSignature.ArrayArraySize,
-))
+```python
+index.attend_into(queries, values, outputs, outputs_dtype="bf16")
 ```
 
-```sh
-conda install -c conda-forge cppyy
-```
+Ask for `maximum_scores` and `partitions` together to recombine this branch with another over the same queries - a dense recent window, or a second shard of one context - by partial-softmax rescaling.
+One alone is a number nothing can use, so passing one without the other is refused.
 
-### [PeachPy][peachpy]
+## Composition & Concurrency
 
-We have covered JIT-ing Python with Numba and C++ with Cppyy and Cling.
-How about writing Assembly directly?
-That is also possible.
-Below is an example of constructing the "Inner Product" distance for 8-dimensional `f32` vectors for x86 using [PeachPy][peachpy].
-
-```py
-from peachpy import (
-    Argument,
-    ptr,
-    float_,
-    const_float_,
-)
-from peachpy.x86_64 import (
-    abi,
-    Function,
-    uarch,
-    isa,
-    GeneralPurposeRegister64,
-    LOAD,
-    YMMRegister,
-    VSUBPS,
-    VADDPS,
-    VHADDPS,
-    VMOVUPS,
-    VFMADD231PS,
-    VPERM2F128,
-    VXORPS,
-    RETURN,
-)
-
-a = Argument(ptr(const_float_), name="a")
-b = Argument(ptr(const_float_), name="b")
-
-with Function(
-    "inner_product", (a, b), float_, target=uarch.default + isa.avx2
-) as asm_function:
-    
-    # Request two 64-bit general-purpose registers for addresses
-    reg_a, reg_b = GeneralPurposeRegister64(), GeneralPurposeRegister64()
-    LOAD.ARGUMENT(reg_a, a)
-    LOAD.ARGUMENT(reg_b, b)
-
-    # Load the vectors
-    ymm_a = YMMRegister()
-    ymm_b = YMMRegister()
-    VMOVUPS(ymm_a, [reg_a])
-    VMOVUPS(ymm_b, [reg_b])
-
-    # Prepare the accumulator
-    ymm_c = YMMRegister()
-    ymm_one = YMMRegister()
-    VXORPS(ymm_c, ymm_c, ymm_c)
-    VXORPS(ymm_one, ymm_one, ymm_one)
-
-    # Accumulate A and B product into C
-    VFMADD231PS(ymm_c, ymm_a, ymm_b)
-
-    # Reduce the contents of a YMM register
-    ymm_c_permuted = YMMRegister()
-    VPERM2F128(ymm_c_permuted, ymm_c, ymm_c, 1)
-    VADDPS(ymm_c, ymm_c, ymm_c_permuted)
-    VHADDPS(ymm_c, ymm_c, ymm_c)
-    VHADDPS(ymm_c, ymm_c, ymm_c)
-
-    # Negate the values, to go from "similarity" to "distance"
-    VSUBPS(ymm_c, ymm_one, ymm_c)
-
-    # A common convention is to return floats in XMM registers
-    RETURN(ymm_c.as_xmm)
-
-python_function = asm_function.finalize(abi.detect()).encode().load()
-metric = CompiledMetric(
-    pointer=python_function.loader.code_address,
-    kind=MetricKind.IP,
-    signature=MetricSignature.ArrayArray,
-)
-index = Index(ndim=ndim, metric=metric)
-```
-
-[numba]: https://numba.readthedocs.io/en/stable/reference/jit-compilation.html#c-callbacks
-[cppyy]: https://cppyy.readthedocs.io/en/latest/
-[peachpy]: https://github.com/Maratyszcza/PeachPy
+A handle may be shared across threads.
+Searches never write to the graph, so any number may overlap with insertions, and saving needs a mutation-free window.
+Extensions declare `Py_MOD_GIL_NOT_USED`, so free-threaded builds run without the interpreter lock.
 
 ## Tooling
 
-To work with `bbin`, `fbin`, `ibin`, `hbin` matrix files USearch provides `load_matrix` and `save_matrix`.
-Such files are standard in k-ANN tasks and represent a binary object with all the scalars, prepended by two 32-bit integers - the number of rows and columns in the matrix.
+`usearch.io` reads and writes the `fbin` / `ibin` / `ivecs` matrix formats, and `usearch.eval` carries the recall harness:
 
-```py
-from usearch.index import Index
-from usearch.io import load_matrix, save_matrix
+```python
+from usearch.eval import self_recall, random_vectors
 
-vectors = load_matrix('deep1B.fbin')
-index = Index(ndim=vectors.shape[1])
-index.add(keys, vectors)
-```
-
-One may often want to evaluate the quality of the constructed index before running in production.
-The trivial way is to measure `recall@1` on the entries already present in the index.
-
-```py
-from usearch.eval import self_recall
-
-stats: SearchStats = self_recall(index, exact=True)
-assert stats.visited_members == 0, "Exact search won't attend index nodes"
-assert stats.computed_distances == len(index), "And will compute the distance to every node"
-
-stats: SearchStats = self_recall(index, exact=False)
-assert stats.visited_members > 0
-assert stats.computed_distances <= len(index)
-```
-
-In case you have some ground-truth data for more than one entry, you compare search results against expected values:
-
-```py
-from usearch.eval import relevance, dcg, ndcg, random_vectors
-
-vectors = random_vectors(index=index)
-matches_approximate = index.search(vectors)
-matches_exact = index.search(vectors, exact=True)
-relevance_scores = relevance(matches_exact, matches_approximate)
-print(dcg(relevance_scores), ndcg(relevance_scores))
+stats = self_recall(index)
+print(stats.mean_recall, stats.mean_efficiency)
 ```

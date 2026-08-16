@@ -231,7 +231,7 @@ def test_sqlite_distances_in_high_dimensions(num_vectors: int, ndim: int):
     # Generate and insert random vectors
     vectors = []
 
-    for i in range(num_vectors):
+    for _index in range(num_vectors):
         # Generate a random 256-dimensional vector
         vector = np.random.rand(ndim)
         vectors.append(vector)
@@ -266,7 +266,7 @@ def test_sqlite_distances_in_high_dimensions(num_vectors: int, ndim: int):
     """
     cursor.execute(similarities)
 
-    for a, b, similarity_json, similarity_f32, similarity_f16 in cursor.fetchall():
+    for _first, _second, similarity_json, similarity_f32, similarity_f16 in cursor.fetchall():
         assert math.isclose(similarity_json, similarity_f32, abs_tol=0.1)
         assert math.isclose(similarity_json, similarity_f16, abs_tol=0.1)
 
@@ -307,7 +307,7 @@ def test_sqlite_distances_in_low_dimensions(num_vectors: int):
     )
 
     # Insert random vectors into the table
-    for i in range(num_vectors):
+    for _index in range(num_vectors):
         vector = np.random.rand(4)  # Generate a random 4-dimensional vector
         cursor.execute(
             """
@@ -336,7 +336,7 @@ def test_sqlite_distances_in_low_dimensions(num_vectors: int):
     )
 
     # Validate the results of the distance computations
-    for id1, id2, similarity_f32, similarity_f16, haversine_meters in cursor.fetchall():
+    for _first, _second, similarity_f32, similarity_f16, haversine_meters in cursor.fetchall():
         assert 0 <= similarity_f32 <= 1, "Cosine similarity (f32) must be between 0 and 1"
         assert 0 <= similarity_f16 <= 1, "Cosine similarity (f16) must be between 0 and 1"
         assert haversine_meters >= 0, "Haversine distance must be non-negative"

@@ -1,3 +1,5 @@
+"""Smaller & Faster Single-File Vector Search Engine from Unum."""
+
 import ctypes
 import os
 import platform
@@ -33,37 +35,22 @@ except ImportError:
     pass  # If the user doesn't want NumKong, we assume they know what they're doing
 
 
-from usearch.compiled import (
-    # Default values:
-    DEFAULT_CONNECTIVITY,
-    DEFAULT_EXPANSION_ADD,
-    DEFAULT_EXPANSION_SEARCH,
-    USES_NUMKONG,
-    USES_NUMKONG_DYNAMIC_DISPATCH,
-    # Dependencies:
-    USES_OPENMP,
-    USES_SIMSIMD,
-    USES_SIMSIMD_DYNAMIC_DISPATCH,
-    VERSION_MAJOR,
-    VERSION_MINOR,
-    VERSION_PATCH,
-    hardware_acceleration,
-    hardware_acceleration_available,
-    # Hardware capabilities:
-    hardware_acceleration_compiled,
-)
+from usearch import compiled as _extension
+from usearch.compiled import *  # noqa: F401,F403
 
-__version__ = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}"
+__version__ = _extension.__version__
+
+del _extension
 
 
 class BinaryManager:
-    def __init__(self, version: str | None = None):
-        if version is None:
-            version = __version__
+    """Locates or downloads the prebuilt `usearch_sqlite` extension binary."""
+
+    def __init__(self, version: str | None = None) -> None:
         self.version = version or __version__
 
     @staticmethod
-    def determine_download_dir():
+    def determine_download_dir() -> str:
         # Check if running within a virtual environment
         virtual_env = os.getenv("VIRTUAL_ENV")
         if virtual_env:
@@ -128,7 +115,7 @@ class BinaryManager:
         local_path = os.path.join(download_dir, target_filename)
         if not os.path.exists(local_path):
             # If not found locally, warn the user and download from GitHub
-            warnings.warn("Will download `usearch_sqlite` binary from GitHub.", UserWarning)
+            warnings.warn("Will download `usearch_sqlite` binary from GitHub.", UserWarning, stacklevel=2)
             try:
                 source_url = self.determine_download_url(self.version, source_filename)
                 os.makedirs(download_dir, exist_ok=True)
@@ -136,9 +123,9 @@ class BinaryManager:
             except HTTPError as e:
                 # If the download fails due to HTTPError (e.g., 404 Not Found), like a missing lib version
                 if e.code == 404:
-                    warnings.warn(f"Download failed: {e.url} could not be found.", UserWarning)
+                    warnings.warn(f"Download failed: {e.url} could not be found.", UserWarning, stacklevel=2)
                 else:
-                    warnings.warn(f"Download failed with HTTP error: {e.code} {e.reason}", UserWarning)
+                    warnings.warn(f"Download failed with HTTP error: {e.code} {e.reason}", UserWarning, stacklevel=2)
                 return None
 
         # Handle the case where binary_path does not exist after supposed successful download
@@ -146,11 +133,11 @@ class BinaryManager:
             path_wout_extension, _, _ = local_path.rpartition(".")
             return path_wout_extension
         else:
-            warnings.warn("Failed to download `usearch_sqlite` binary from GitHub.", UserWarning)
+            warnings.warn("Failed to download `usearch_sqlite` binary from GitHub.", UserWarning, stacklevel=2)
             return None
 
 
-def sqlite_path(version: str = None) -> str:
+def sqlite_path(version: str | None = None) -> str:
     manager = BinaryManager(version=version)
     result = manager.sqlite_found_or_downloaded()
     if result is None:
