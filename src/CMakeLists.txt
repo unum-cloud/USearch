@@ -4,11 +4,18 @@
 # arms join the variant without the portable library ever seeing the CUDA SDK.
 add_library(
     usearch_indexes STATIC
-    dense.cpp
+    dense_index.cpp
     dense/ram_index_bf16.cpp
-    dense/ram_index_i4.cpp
+    dense/ram_index_f16.cpp
+    dense/ram_index_e5m2.cpp
+    dense/ram_index_e4m3.cpp
+    dense/ram_index_e3m2.cpp
+    dense/ram_index_e2m3.cpp
     dense/ram_index_i8.cpp
+    dense/ram_index_i4.cpp
     dense/ram_index_u8.cpp
+    dense/ram_index_u4.cpp
+    dense/ram_index_u1.cpp
     sequence.cpp
 )
 setup_target(usearch_indexes)
@@ -22,7 +29,7 @@ if (USEARCH_BUILD_CUDA)
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
 
-    add_library(usearch_indexes_cuda STATIC dense.cu)
+    add_library(usearch_indexes_cuda STATIC dense_index.cu)
     target_include_directories(
         usearch_indexes_cuda PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
                                      ${CMAKE_CURRENT_SOURCE_DIR}

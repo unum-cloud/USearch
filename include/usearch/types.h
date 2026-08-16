@@ -91,6 +91,17 @@ USEARCH_EXPORT typedef enum usearch_status_t {
     /** @brief The library reported neither success nor a failure - a contract violation
      *      rather than a condition, so it names a defect and not a state. */
     usearch_error_internal_k = 9,
+    /** @brief A hard design ceiling was reached, like the 32-bit id space; a smaller request
+     *      cannot help where a smaller allocation would. */
+    usearch_error_overflow_k = 10,
+    /** @brief The verb needs a prior successful reservation that never happened. */
+    usearch_error_uninitialized_k = 11,
+    /** @brief The request contradicts an already-frozen configuration, like re-reserving with
+     *      a different geometry. */
+    usearch_error_config_mismatch_k = 12,
+    /** @brief A synchronization contract was violated by a concurrent operation; discard any
+     *      produced output and retry in a quieter phase. */
+    usearch_error_contended_k = 13,
 } usearch_status_t;
 
 /**
@@ -127,6 +138,49 @@ USEARCH_EXPORT typedef enum usearch_scalar_t {
     usearch_scalar_u1x8_k = 22,
 
 } usearch_scalar_t;
+
+/**
+ *  @brief The CPU families USearch ships tuned variants for - dispatch reports its pick in
+ *      this vocabulary, and callers may pin one. Each class bundles the compute features,
+ *      wait instruction, and atomics its silicon generation guarantees.
+ */
+USEARCH_EXPORT typedef enum usearch_cpu_class_t {
+    usearch_cpu_class_unknown_k = 0,
+    /** @brief The portable floor: no SIMD assumptions, standard yields. */
+    usearch_cpu_class_serial_k,
+    /** @brief Haswell-class x86: AVX2 & FMA, the 256-bit floor. */
+    usearch_cpu_class_intel_haswell_k,
+    /** @brief Skylake-class x86: the AVX-512 foundation tier. */
+    usearch_cpu_class_intel_skylake_k,
+    /** @brief Icelake-class x86: AVX-512 VNNI & VPOPCNT - the integer & bit workhorse. */
+    usearch_cpu_class_intel_icelake_k,
+    /** @brief Genoa-class x86 - Zen 4 and newer: native bf16 dot products over AVX-512. */
+    usearch_cpu_class_amd_genoa_k,
+    /** @brief Graviton2-class Arm - Neoverse N1, the bare NEON floor; phones predating
+     *      Armv8.6 land here too. */
+    usearch_cpu_class_aws_g2_k,
+    /** @brief Armv8.6+ NEON: dot products, bf16 & f16 fused multiplies - Apple M2,
+     *      Cortex-A710 & X2 class silicon. */
+    usearch_cpu_class_apple_m2_k,
+    /** @brief Graviton5-class Arm - Neoverse V3, Armv9.2: monitored waits guaranteed. */
+    usearch_cpu_class_aws_g5_k,
+    /** @brief Vera-class Arm - NVIDIA's Armv9.2-generation cores with FP8 dot products. */
+    usearch_cpu_class_nvidia_vera_k,
+} usearch_cpu_class_t;
+
+/**
+ *  @brief The GPU families USearch ships tuned variants for, the device twin of
+ *      @c usearch_cpu_class_t: one class per generation of kernel kits.
+ */
+USEARCH_EXPORT typedef enum usearch_gpu_class_t {
+    usearch_gpu_class_unknown_k = 0,
+    /** @brief Hopper-class NVIDIA - H100 & H200: no TMA gather, DPX instructions. */
+    usearch_gpu_class_nvidia_hopper_k,
+    /** @brief Blackwell-class NVIDIA - B200 & GB200: TMA gather4 scattered fetches. */
+    usearch_gpu_class_nvidia_blackwell_k,
+    /** @brief Rubin-class NVIDIA - the Vera-Rubin platform's device half. */
+    usearch_gpu_class_nvidia_rubin_k,
+} usearch_gpu_class_t;
 
 /**
  *  @brief Where an index's payload lives and which engine traverses it. Selects the active

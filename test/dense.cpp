@@ -29,10 +29,13 @@ std::size_t test_dense_all() {
     failures_count += test_dense_metric_u1();
 
     failures_count += test_dense_index_f32();
-    failures_count += test_dense_index_u8();
-    failures_count += test_dense_index_i8();
     failures_count += test_dense_index_bf16();
+    failures_count += test_dense_index_f16();
+    failures_count += test_dense_index_e5m2();
+    failures_count += test_dense_index_i8();
     failures_count += test_dense_index_i4();
+    failures_count += test_dense_index_u8();
+    failures_count += test_dense_index_u1();
 
     return failures_count;
 }

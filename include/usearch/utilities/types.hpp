@@ -6,8 +6,9 @@
  */
 #pragma once
 #include <cassert> // `assert` on the `to_span` contiguity contract
+#include <cstddef> // `std::byte`
 #include <cstdint> // `std::uint32_t`, `std::uint64_t`
-#include <cstring> // `std::memmove`
+#include <cstring> // `std::memmove`, `std::memcmp`
 
 #include <atomic>      // `std::atomic`
 #include <span>        // `std::span`
@@ -19,8 +20,9 @@
  *      legal before any of their headers is included. */
 namespace ashvardanian {
 namespace numkong {}
-namespace forkunion {}
 namespace stringzilla {}
+namespace forkunion {}
+namespace smashtable {}
 } // namespace ashvardanian
 
 namespace unum {
@@ -29,10 +31,22 @@ namespace usearch {
 namespace nk = ashvardanian::numkong;
 namespace fu = ashvardanian::forkunion;
 namespace sz = ashvardanian::stringzilla;
+namespace st = ashvardanian::smashtable;
 
 using u32_t = std::uint32_t;
 using u64_t = std::uint64_t;
 using f32_t = float;
+using f64_t = double;
+
+/** @brief The 128-bit key default - the SafeGraphs @c bin16 column, one UUID per node. */
+struct uuid_t {
+    std::byte bytes[16];
+
+    bool operator==(uuid_t const& other) const noexcept {
+        return std::memcmp(bytes, other.bytes, sizeof(bytes)) == 0;
+    }
+};
+static_assert(std::is_trivially_copyable_v<uuid_t> && sizeof(uuid_t) == 16);
 
 /** @brief Dense node identifier within one sub-index - 32 bits, matching the 4-billion ceiling. */
 using dense_node_id_t = u32_t;
@@ -137,6 +151,7 @@ enum class synchronization_t : u32_t {
     exclusive_k,
 };
 
+
 enum connectivity_t : std::uint32_t {
     connectivity_unknown_k = 0,
     /**
@@ -166,7 +181,7 @@ enum connectivity_t : std::uint32_t {
  */
 enum class dtype_t : u32_t {
     unknown_k = 0,
-    // Integers, by shrinking dynamic range.
+    /* Integers, by shrinking dynamic range. */
     u64_k,
     i64_k,
     u32_k,
@@ -175,14 +190,14 @@ enum class dtype_t : u32_t {
     i16_k,
     u8_k,
     i8_k,
-    // Floats, by shrinking dynamic range.
+    /* Floats, by shrinking dynamic range. */
     f64_k,
     f32_k,
     bf16_k,
     f16_k,
     e5m2_k,
     e4m3_k,
-    // Non-numeric payloads interchange formats carry.
+    /* Non-numeric payloads interchange formats carry. */
     bin16_k,
     utf8_k,
 };
@@ -421,6 +436,77 @@ struct dummy_waiter_t {
         std::this_thread::yield();
     }
 };
+
+/**
+ *  @brief The CPU families USearch ships tuned variants for - our own vocabulary, never an
+ *      alias of a sister library's feature bits. Each class bundles the compute features,
+ *      wait instruction, and atomics its silicon generation guarantees; explicit helpers
+ *      lower a class onto NumKong, ForkUnion & StringZilla capability masks where those
+ *      libraries are linked.
+ */
+enum class cpu_class_t : u32_t {
+    unknown_k = 0,
+    /** @brief The portable floor: no SIMD assumptions, standard yields. */
+    serial_k,
+    /** @brief Haswell-class x86: AVX2 & FMA, the 256-bit floor. */
+    intel_haswell_k,
+    /** @brief Skylake-class x86: the AVX-512 foundation tier. */
+    intel_skylake_k,
+    /** @brief Icelake-class x86: AVX-512 VNNI & VPOPCNT - the integer & bit workhorse. */
+    intel_icelake_k,
+    /** @brief Genoa-class x86 - Zen 4 and newer: native @c bf16 dot products over AVX-512. */
+    amd_genoa_k,
+    /** @brief Graviton2-class Arm - Neoverse N1, the bare NEON floor; pre-v8.6 phones land
+     *      here too. */
+    aws_g2_k,
+    /** @brief Armv8.6+ NEON: dot products, @c bf16 & @c f16 fused multiplies. Named for
+     *      Apple M2; Cortex-A710 & X2 - Snapdragon 8 Gen 1, AmpereOne - carry the same. */
+    apple_m2_k,
+    /** @brief Graviton5-class Arm - Neoverse V3, Armv9.2: the @c apple_m2_k bundle with
+     *      @c FEAT_WFxT guaranteed, so waits monitor instead of spinning; M4-class too. */
+    aws_g5_k,
+    /** @brief Vera-class Arm - NVIDIA's v9.2+ cores with @c FEAT_FP8 dot products. */
+    nvidia_vera_k,
+};
+
+/**
+ *  @brief The GPU families USearch ships tuned variants for, the device twin of
+ *      @ref cpu_class_t: one class per generation of kernel kits, lowered onto CUDA
+ *      architecture ceilings through explicit helpers where the CUDA SDK is linked.
+ */
+enum class gpu_class_t : u32_t {
+    unknown_k = 0,
+    /** @brief Hopper-class NVIDIA - H100 & H200: no TMA gather, DPX instructions. */
+    nvidia_hopper_k,
+    /** @brief Blackwell-class NVIDIA - B200 & GB200: TMA @c gather4 scattered fetches
+     *      and @c tcgen05 tensor-core GEMMs. */
+    nvidia_blackwell_k,
+    /** @brief Rubin-class NVIDIA - the Vera-Rubin platform's device half. */
+    nvidia_rubin_k,
+};
+
+/** @brief Feature bits an I/O engine publishes through its @c capabilities_k constant, so
+ *      callers, tests, and docs introspect variants uniformly instead of by type name. */
+enum class io_capability_t : u32_t {
+    none_k = 0,
+    /** @brief Staging buffers are pre-registered with the kernel/ring - no per-read
+     *      page pinning; roughly an 11% throughput gain at NVMe rates. */
+    fixed_buffers_k = 1u << 0,
+    /** @brief Completions are polled from device queues instead of interrupt-driven;
+     *      needs poll-capable queues & direct I/O; ~21% on top of the fixed path. */
+    polled_k = 1u << 1,
+    /** @brief Requests address raw LBAs on a namespace, not file offsets - the
+     *      filesystem & block layer are bypassed; ~20-30% over the block path. */
+    lba_addressing_k = 1u << 2,
+};
+
+inline constexpr io_capability_t operator|(io_capability_t a, io_capability_t b) noexcept {
+    return static_cast<io_capability_t>(static_cast<u32_t>(a) | static_cast<u32_t>(b));
+}
+
+inline constexpr bool operator&(io_capability_t a, io_capability_t b) noexcept {
+    return (static_cast<u32_t>(a) & static_cast<u32_t>(b)) != 0;
+}
 
 } // namespace usearch
 } // namespace unum

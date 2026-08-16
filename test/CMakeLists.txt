@@ -20,10 +20,13 @@ add_executable(
     dense/ram_metric_u4.cpp
     dense/ram_metric_u1.cpp
     dense/ram_index_f32.cpp
-    dense/ram_index_u8.cpp
-    dense/ram_index_i8.cpp
     dense/ram_index_bf16.cpp
+    dense/ram_index_f16.cpp
+    dense/ram_index_e5m2.cpp
+    dense/ram_index_i8.cpp
     dense/ram_index_i4.cpp
+    dense/ram_index_u8.cpp
+    dense/ram_index_u1.cpp
 )
 setup_target(usearch_test)
 target_include_directories(usearch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
