@@ -1,1417 +1,573 @@
-﻿using System.Diagnostics;
-using System.Numerics;
 using System.Runtime.InteropServices;
-using Cloud.Unum.USearch;
 
 namespace Cloud.Unum.USearch.Tests;
 
-public class UsearchIndexTests
+/// <summary>
+/// The boundary of the binding: marshalling, the options round trip through the residency union,
+/// key byte order, stride arithmetic, handle ownership, and truncation reporting. That vector
+/// search works is the C library's job, and is not re-tested here.
+/// </summary>
+public class USearchIndexTests
 {
-    // Epsilon for real values comparisons
-    private const float EqualTolerance = 1e-6f;
-    private static readonly RealEqualityComparer<float> s_floatComparer;
-    private static readonly RealEqualityComparer<double> s_doubleComparer;
+    private const ulong Dimensions = 4;
 
-    static UsearchIndexTests()
+    private static DenseOptions SmallOptions() => new()
     {
-        s_floatComparer = new RealEqualityComparer<float>(EqualTolerance);
-        s_doubleComparer = new RealEqualityComparer<double>(EqualTolerance);
+        Dimensions = Dimensions,
+        Metric = DenseMetric.Euclidean,
+        Quantization = ScalarKind.F32,
+        Connectivity = 11,
+        Residency = Residency.Default,
+    };
+
+    private static USearchIndex SmallIndex()
+    {
+        USearchIndex index = new(SmallOptions());
+        index.Reserve(64);
+        return index;
+    }
+
+    private static float[] RowOf(float first) => [first, first + 1f, first + 2f, first + 3f];
+
+    #region Keys
+
+    [Fact]
+    public void KeyRendersIntegerIdentitiesInTheLowBytes()
+    {
+        USearchKey key = USearchKey.FromUInt64(42);
+
+        Assert.Equal("00000000-0000-0000-0000-00000000002a", key.ToString());
+        Assert.Equal(0x2a, key[15]);
+        Assert.Equal(0, key[0]);
+        Assert.True(key.TryGetUInt64(out ulong identity));
+        Assert.Equal(42UL, identity);
     }
 
     [Fact]
-    public void IndexOptions_InitializesEmptyArguments_ConstructedWithMinimalOrUnknownValues()
+    public void KeyParsesTheRenderingItPrints()
     {
-        // Arrange
-        var controlIndexOptions = new IndexOptions(
-            metricKind: MetricKind.Unknown,
-            metric: default,
-            quantization: ScalarKind.Unknown,
-            dimensions: 0,
-            connectivity: 0,
-            expansionAdd: 0,
-            expansionSearch: 0,
-            multi: false
-        );
+        USearchKey wide = USearchKey.Parse("0123abcd-4567-89ef-fedc-ba9876543210");
 
-        // Act
-        var indexOptions = new IndexOptions();
-
-        // Assert
-        Assert.Equal(controlIndexOptions, indexOptions);
+        Assert.Equal("0123abcd-4567-89ef-fedc-ba9876543210", wide.ToString());
+        Assert.Equal(0x01, wide[0]);
+        Assert.Equal(0x10, wide[15]);
+        Assert.False(wide.TryGetUInt64(out _));
+        Assert.Equal(wide, USearchKey.Parse("0123ABCD456789EFFEDCBA9876543210"));
+        Assert.False(USearchKey.TryParse("0123abcd", out _));
+        Assert.False(USearchKey.TryParse("0123abcd-4567-89ef-fedc-ba98765432zz", out _));
     }
 
     [Fact]
-    public void PersistAndRestore()
+    public void KeyEqualityAgreesWithHashing()
     {
+        USearchKey first = 7UL;
+        USearchKey same = USearchKey.FromUInt64(7);
+        USearchKey other = USearchKey.Parse("0123abcd-4567-89ef-fedc-ba9876543210");
 
-        string pathUsearch = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "savedVectorFolder");
-        if (!Directory.Exists(pathUsearch))
+        Assert.True(first == same);
+        Assert.True(first != other);
+        Assert.Equal(first.GetHashCode(), same.GetHashCode());
+        Assert.NotEqual(first.GetHashCode(), other.GetHashCode());
+        Assert.Single(new HashSet<USearchKey> { first, same });
+    }
+
+    [Fact]
+    public void KeysCrossTheBoundaryIntact()
+    {
+        using USearchIndex index = SmallIndex();
+        USearchKey wide = USearchKey.Parse("0123abcd-4567-89ef-fedc-ba9876543210");
+
+        Assert.Equal(1UL, index.Add<float>(wide, RowOf(1f)));
+        Assert.Equal(1UL, index.Count(wide));
+        Assert.True(index.Contains(wide));
+        Assert.False(index.Contains(USearchKey.FromUInt64(1)));
+
+        SearchResults found = index.Search<float>(RowOf(1f), wanted: 1);
+        Assert.Equal(wide, found.KeysOf(0)[0]);
+    }
+
+    #endregion Keys
+
+    #region Options & Residency
+
+    [Fact]
+    public void ResidencyUnionIsAsWideAsItsWidestArm()
+    {
+        int union = Marshal.SizeOf<NativeResidencyOptions>();
+
+        Assert.Equal(Marshal.SizeOf<NativeRamOptions>(), union);
+        Assert.True(union >= Marshal.SizeOf<NativeVramOptions>());
+        Assert.True(union >= Marshal.SizeOf<NativeNvmeOptions>());
+        Assert.Equal(0, Marshal.OffsetOf<NativeResidencyOptions>(nameof(NativeResidencyOptions.Ram)).ToInt32());
+        Assert.Equal(0, Marshal.OffsetOf<NativeResidencyOptions>(nameof(NativeResidencyOptions.Vram)).ToInt32());
+        Assert.Equal(0, Marshal.OffsetOf<NativeResidencyOptions>(nameof(NativeResidencyOptions.Nvme)).ToInt32());
+    }
+
+    [Fact]
+    public void RamOptionsSurviveTheRoundTrip()
+    {
+        DenseOptions options = DenseOptions.Default;
+        options.Dimensions = 96;
+        options.Connectivity = 24;
+        options.DimensionPadding = DimensionPadding.SimdQuantumDimensions;
+        options.Residency = new Residency
         {
-            Directory.CreateDirectory(pathUsearch);
+            Kind = ResidencyKind.Ram,
+            Threads = 12,
+            HugePages = HugePages.RequireHugePages,
         };
 
-        var savedPath = Path.Combine(pathUsearch, "tmp.usearch");
+        DenseOptions reloaded = options.Reload();
 
-        using var index = new USearchIndex(
-            metricKind: MetricKind.Pearson, // Overwrite the default metric
-            quantization: ScalarKind.Float64, // Don't quantize at all - max precision
-            dimensions: 3,  // Define the number of dimensions in input vectors
-            connectivity: 11, // How frequent should the connections in the graph be, optional
-            expansionAdd: 15, // Control the recall of indexing, optional
-            expansionSearch: 19 // Control the quality of search, optional
-        );
-
-        var vector = new double[] { 0.2f, 0.6f, 0.4f };
-        index.Add(42, vector);
-        index.Save(savedPath);
-
-        Trace.Assert(File.Exists(savedPath));
-        Trace.Assert(File.Exists(Path.Combine(pathUsearch, "tmp.usearch")));
-
-        using var indexRestored = new USearchIndex(savedPath);
-        Trace.Assert(indexRestored.Size() == 1);
-        int matches = indexRestored.Search(vector, 10, out ulong[] keys, out float[] distances);
-        Trace.Assert(matches == 1);
-        Trace.Assert(keys[0] == 42);
-        Trace.Assert(distances[0] <= 0.001f);
-
-        // Clean-up
-        File.Delete(savedPath);
+        Assert.Equal(96UL, reloaded.Dimensions);
+        Assert.Equal(24UL, reloaded.Connectivity);
+        Assert.Equal(DimensionPadding.SimdQuantumDimensions, reloaded.DimensionPadding);
+        Assert.Equal(DenseMetric.Angular, reloaded.Metric);
+        Assert.Equal(ScalarKind.BF16, reloaded.Quantization);
+        Assert.Equal(ResidencyKind.Ram, reloaded.Residency.Kind);
+        Assert.Equal(12UL, reloaded.Residency.Threads);
+        Assert.Equal(HugePages.RequireHugePages, reloaded.Residency.HugePages);
     }
 
     [Fact]
-    public void USearch_InitializesWithRequiredArgumentsSetToMinimalOrUnknownValue_UpdatesIndexOptions()
+    public void VramAndNvmeOptionsSurviveTheRoundTrip()
     {
-        // Arrange
-        const uint ExpectedDimensions = 0;
-        const uint ExpectedConnectivity = 16;
-        const uint ExpectedCapacity = 0;
-        const uint ExpectedSize = 0;
+        DenseOptions vram = SmallOptions();
+        vram.Residency = Residency.OnDevice(-1, Addressing.UnifiedAddressing);
 
-        var initMetricKind = MetricKind.Unknown;
-        ulong initDimensions = 0;
-        var initQuantization = ScalarKind.Unknown;
+        DenseOptions reloadedVram = vram.Reload();
+        Assert.Equal(ResidencyKind.Vram, reloadedVram.Residency.Kind);
+        Assert.Equal(-1, reloadedVram.Residency.Device);
+        Assert.Equal(Addressing.UnifiedAddressing, reloadedVram.Residency.Addressing);
 
-        // Act
-        using (var index = new USearchIndex(initMetricKind, initQuantization, initDimensions))
+        DenseOptions nvme = SmallOptions();
+        nvme.Residency = new Residency
         {
-            // Assert
-            Assert.Equal(ExpectedDimensions, index.Dimensions());
-            Assert.Equal(ExpectedConnectivity, index.Connectivity());
-            Assert.True(ExpectedCapacity <= index.Capacity());
-            Assert.Equal(ExpectedSize, index.Size());
-        }
-    }
-
-    [Fact]
-    public void USearch_InitializesWithIndexOptionsWithMinimalOrUnknownValue_UpdatesIndexOptions()
-    {
-        // Arrange
-        const uint ExpectedDimensions = 0;
-        const uint ExpectedConnectivity = 16;
-        const uint ExpectedCapacity = 0;
-        const uint ExpectedSize = 0;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Unknown,
-            metric: default,
-            quantization: ScalarKind.Unknown,
-            dimensions: 0,
-            connectivity: 0,
-            expansionAdd: 0,
-            expansionSearch: 0,
-            multi: false
-        );
-
-        // Act
-        using (var index = new USearchIndex(indexOptions))
-        {
-            // Assert
-            Assert.Equal(ExpectedDimensions, index.Dimensions());
-            Assert.Equal(ExpectedConnectivity, index.Connectivity());
-            Assert.True(ExpectedCapacity <= index.Capacity());
-            Assert.Equal(ExpectedSize, index.Size());
-        }
-    }
-
-    [Fact]
-    public void Add_FloatVector_UpdatesIndexOptions()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const uint AddKey = 1;
-        const uint NonExistentKey = 2;
-        const uint ExpectedSize = 1;
-        const uint ExpectedCapacity = 1;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float32,
-            dimensions: Dimensions
-        );
-
-        var inputVector = GenerateFloatVector((int)Dimensions);
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            // Act
-            index.Add(AddKey, inputVector);
-
-            // Assert
-            Assert.True(index.Contains(AddKey));
-            Assert.False(index.Contains(NonExistentKey));
-            Assert.Equal(ExpectedSize, index.Size());
-            Assert.True(ExpectedCapacity <= index.Capacity());
-        }
-    }
-
-    [Fact]
-    public void Add_FloatVector_MiniFloatQuantizations()
-    {
-        ScalarKind[] kinds = { ScalarKind.E5M2, ScalarKind.E4M3, ScalarKind.E3M2, ScalarKind.E2M3 };
-        foreach (var kind in kinds)
-        {
-            var indexOptions = new IndexOptions(
-                metricKind: MetricKind.Cos,
-                quantization: kind,
-                dimensions: 64
-            );
-            var vector = GenerateFloatVector(64);
-            using (var index = new USearchIndex(indexOptions))
-            {
-                index.Add(1, vector);
-                Assert.True(index.Contains(1));
-                Assert.Equal(1u, index.Size());
-
-                int found = index.Search(vector, 1, out ulong[] keys, out float[] distances);
-                Assert.Equal(1, found);
-                Assert.Equal(1UL, keys[0]);
-            }
-        }
-    }
-
-    [Fact]
-    public void Add_ByteVector_UpdatesIndexOptions()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const uint AddKey = 1;
-        const uint NonExistentKey = 2;
-        const uint ExpectedSize = 1;
-        const uint ExpectedCapacity = 1;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Int8,
-            dimensions: Dimensions
-        );
-
-        var inputVector = GenerateByteVector((int)Dimensions);
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            // Act
-            index.Add(AddKey, inputVector);
-
-            // Assert
-            Assert.True(index.Contains(AddKey));
-            Assert.False(index.Contains(NonExistentKey));
-            Assert.Equal(ExpectedSize, index.Size());
-            Assert.True(ExpectedCapacity <= index.Capacity());
-        }
-    }
-
-    [Fact]
-    public void Add_DoubleVector_UpdatesIndexOptions()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const uint AddKey = 1;
-        const uint NonExistentKey = 2;
-        const uint ExpectedSize = 1;
-        const uint ExpectedCapacity = 1;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float64,
-            dimensions: Dimensions
-        );
-
-        var inputVector = GenerateDoubleVector((int)Dimensions);
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            // Act
-            index.Add(AddKey, inputVector);
-
-            // Assert
-            Assert.True(index.Contains(AddKey));
-            Assert.False(index.Contains(NonExistentKey));
-            Assert.Equal(ExpectedSize, index.Size());
-            Assert.True(ExpectedCapacity <= index.Capacity());
-        }
-    }
-
-
-    [Fact]
-    public void Add_BitsVector_UpdatesIndexOptions()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const uint AddKey = 1;
-        const uint NonExistentKey = 2;
-        const uint ExpectedSize = 1;
-        const uint ExpectedCapacity = 1;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Hamming,
-            quantization: ScalarKind.Bits1,
-            dimensions: Dimensions
-        );
-
-        var inputVector = GenerateBitsVector((int)Dimensions);
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            // Act
-            index.Add(AddKey, inputVector);
-
-            // Assert
-            Assert.True(index.Contains(AddKey));
-            Assert.False(index.Contains(NonExistentKey));
-            Assert.Equal(ExpectedSize, index.Size());
-            Assert.True(ExpectedCapacity <= index.Capacity());
-        }
-    }
-
-    [Fact]
-    public void Add_ManyFloatVectorsUnderSameKeySeparatelyInMultiKeyIndex_UpdatesIndexOptions()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-        const int AddFactor = 5;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float32,
-            dimensions: Dimensions,
-            multi: true
-        );
-
-        var inputVector = GenerateFloatVector((int)Dimensions);
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            // Act
-            for (int i = 0; i < AddFactor; i++)
-            {
-                index.Add(AddKey, inputVector);
-            }
-
-            // Assert
-            Assert.True(index.Contains(AddKey));
-            Assert.Equal((uint)AddFactor, index.Size());
-            Assert.True((uint)AddFactor <= index.Capacity());
-        }
-    }
-
-    [Fact]
-    public void Add_ManyByteVectorsUnderSameKeySeparatelyInMultiKeyIndex_UpdatesIndexOptions()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-        const int AddFactor = 5;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Int8,
-            dimensions: Dimensions,
-            multi: true
-        );
-
-        var inputVector = GenerateByteVector((int)Dimensions);
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            // Act
-            for (int i = 0; i < AddFactor; i++)
-            {
-                index.Add(AddKey, inputVector);
-            }
-
-            // Assert
-            Assert.True(index.Contains(AddKey));
-            Assert.Equal((uint)AddFactor, index.Size());
-            Assert.True((uint)AddFactor <= index.Capacity());
-        }
-    }
-
-    [Fact]
-    public void Add_ManyDoubleVectorsUnderSameKeySeparatelyInMultiKeyIndex_UpdatesIndexOptions()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-        const int AddFactor = 5;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float64,
-            dimensions: Dimensions,
-            multi: true
-        );
-
-        var inputVector = GenerateDoubleVector((int)Dimensions);
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            // Act
-            for (int i = 0; i < AddFactor; i++)
-            {
-                index.Add(AddKey, inputVector);
-            }
-
-            // Assert
-            Assert.True(index.Contains(AddKey));
-            Assert.Equal((uint)AddFactor, index.Size());
-            Assert.True((uint)AddFactor <= index.Capacity());
-        }
-    }
-
-    [Fact]
-    public void Add_ManyFloatVectorsUnderSameKeyInBatchInMultiKeyIndex_UpdatesIndexOptions()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-        const uint BatchSize = 5;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float32,
-            dimensions: Dimensions,
-            multi: true
-        );
-
-        (var inputKeys, var inputVectors) = (
-                Enumerable.Repeat(AddKey, (int)BatchSize).ToArray(),
-                GenerateManyFloatVectors((int)BatchSize, (int)Dimensions)
-        );
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            // Act
-            index.Add(inputKeys, inputVectors);
-
-            // Assert
-            Assert.True(index.Contains(AddKey));
-            Assert.Equal(BatchSize, index.Size());
-            Assert.True(BatchSize <= index.Capacity());
-            Assert.Equal((int)BatchSize, index.Count(AddKey));
-        }
-    }
-
-    [Fact]
-    public void Add_ManyByteVectorsUnderSameKeyInBatchInMultiKeyIndex_UpdatesIndexOptions()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-        const uint BatchSize = 5;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Int8,
-            dimensions: Dimensions,
-            multi: true
-        );
-
-        (var inputKeys, var inputVectors) = (
-            Enumerable.Repeat(AddKey, (int)BatchSize).ToArray(),
-            GenerateManyByteVectors((int)BatchSize, (int)Dimensions)
-        );
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            // Act
-            index.Add(inputKeys, inputVectors);
-
-            // Assert
-            Assert.True(index.Contains(AddKey));
-            Assert.Equal(BatchSize, index.Size());
-            Assert.True(BatchSize <= index.Capacity());
-            Assert.Equal((int)BatchSize, index.Count(AddKey));
-        }
-    }
-
-    [Fact]
-    public void Add_ManyDoubleVectorsUnderSameKeyInBatchInMultiKeyIndex_UpdatesIndexOptions()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-        const uint BatchSize = 5;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float64,
-            dimensions: Dimensions,
-            multi: true
-        );
-
-        (var inputKeys, var inputVectors) = (
-                Enumerable.Repeat(AddKey, (int)BatchSize).ToArray(),
-                GenerateManyDoubleVectors((int)BatchSize, (int)Dimensions)
-        );
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            // Act
-            index.Add(inputKeys, inputVectors);
-
-            // Assert
-            Assert.True(index.Contains(AddKey));
-            Assert.Equal(BatchSize, index.Size());
-            Assert.True(BatchSize <= index.Capacity());
-            Assert.Equal((int)BatchSize, index.Count(AddKey));
-        }
-    }
-
-    [Fact]
-    public void Get_ManyFloatVectorsUnderSameKeyInMultiKeyIndex_ReturnsCorrectValue()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-        const int RetrieveCount = 5;
-        const int BatchSize = 10;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float32,
-            dimensions: Dimensions,
-            multi: true
-        );
-
-        (var inputKeys, var inputVectors) = (
-            Enumerable.Repeat(AddKey, BatchSize).ToArray(),
-            GenerateManyFloatVectors(BatchSize, (int)Dimensions)
-        );
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(inputKeys, inputVectors);
-
-            // Act
-            int foundVectorsCount = index.Get(AddKey, RetrieveCount, out float[][] retrievedVectors);
-
-            // Assert
-            Assert.Equal(RetrieveCount, foundVectorsCount);
-        }
-    }
-
-    [Fact]
-    public void Get_ManyByteVectorsUnderSameKeyInMultiKeyIndex_ReturnsCorrectValue()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-        const int RetrieveCount = 5;
-        const int BatchSize = 10;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Int8,
-            dimensions: Dimensions,
-            multi: true
-        );
-
-        (var inputKeys, var inputVectors) = (
-            Enumerable.Repeat(AddKey, BatchSize).ToArray(),
-            GenerateManyByteVectors(BatchSize, (int)Dimensions)
-        );
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(inputKeys, inputVectors);
-
-            // Act
-            int foundVectorsCount = index.Get(AddKey, RetrieveCount, out float[][] retrievedVectors);
-
-            // Assert
-            Assert.Equal(RetrieveCount, foundVectorsCount);
-        }
-    }
-
-    [Fact]
-    public void Get_ManyBitsVectorsUnderSameKeyInMultiKeyIndex_ReturnsCorrectValue()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-        const int RetrieveCount = 5;
-        const int BatchSize = 10;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Hamming,
-            quantization: ScalarKind.Bits1,
-            dimensions: Dimensions,
-            multi: true
-        );
-
-        (var inputKeys, var inputVectors) = (
-            Enumerable.Repeat(AddKey, BatchSize).ToArray(),
-            GenerateManyBitsVectors(BatchSize, (int)Dimensions)
-        );
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(inputKeys, inputVectors);
-
-            // Act
-            int foundVectorsCount = index.Get(AddKey, RetrieveCount, out float[][] retrievedVectors);
-
-            // Assert
-            Assert.Equal(RetrieveCount, foundVectorsCount);
-        }
-    }
-
-    [Fact]
-    public void Get_ManyDoubleVectorsUnderSameKeyInMultiKeyIndex_ReturnsCorrectCountValue()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-        const int RetrieveCount = 5;
-        const int BatchSize = 10;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float64,
-            dimensions: Dimensions,
-            multi: true
-        );
-
-        (var inputKeys, var inputVectors) = (
-                Enumerable.Repeat(AddKey, BatchSize).ToArray(),
-                GenerateManyDoubleVectors(BatchSize, (int)Dimensions)
-        );
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(inputKeys, inputVectors);
-
-            // Act
-            int foundVectorsCount = index.Get(AddKey, RetrieveCount, out double[][] retrievedVectors);
-
-            // Assert
-            Assert.Equal(RetrieveCount, foundVectorsCount);
-        }
-    }
-
-    [Fact]
-    public void Get_AfterAddingFloatVector_ReturnsEqualVector()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float32,
-            dimensions: Dimensions
-        );
-
-        (var inputKey, var inputVector) = (AddKey, GenerateFloatVector((int)Dimensions));
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(inputKey, inputVector);
-
-            // Act
-            index.Get(inputKey, out float[] retrievedVector);
-
-            // Assert
-            Assert.Equal(inputVector, retrievedVector, s_floatComparer);
-        }
-    }
-
-    [Fact]
-    public void Get_AfterAddingByteVector_ReturnsEqualVector()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Int8,
-            dimensions: Dimensions
-        );
-
-        (var inputKey, var inputVector) = (AddKey, GenerateByteVector((int)Dimensions));
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(inputKey, inputVector);
-
-            // Act
-            index.Get(inputKey, out sbyte[] retrievedVector);
-
-            // Assert
-            Assert.Equal(inputVector, retrievedVector);
-        }
-    }
-
-    [Fact]
-    public void Get_AfterAddingDoubleVector_ReturnsEqualVector()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float64,
-            dimensions: Dimensions
-        );
-
-        (var inputKey, var inputVector) = (AddKey, GenerateDoubleVector((int)Dimensions));
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(inputKey, inputVector);
-
-            // Act
-            index.Get(inputKey, out double[] retrievedVector);
-
-            // Assert
-            Assert.Equal(inputVector, retrievedVector, s_doubleComparer);
-        }
-    }
-
-    [Fact]
-    public void Add_AddingTwoFloatVectorsUnderSameKey_ThrowsException()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float32,
-            dimensions: Dimensions
-        );
-
-        (var inputKey, var inputVector) = (AddKey, GenerateFloatVector((int)Dimensions));
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(inputKey, inputVector);
-
-            // Act
-            Action actual = () => index.Add(inputKey, inputVector);
-
-            // Assert
-            Assert.Throws<USearchException>(actual);
-        }
-    }
-
-    [Fact]
-    public void Add_AddingTwoByteVectorsUnderSameKey_ThrowsException()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Int8,
-            dimensions: Dimensions
-        );
-
-        (var inputKey, var inputVector) = (AddKey, GenerateByteVector((int)Dimensions));
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(inputKey, inputVector);
-
-            // Act
-            Action actual = () => index.Add(inputKey, inputVector);
-
-            // Assert
-            Assert.Throws<USearchException>(actual);
-        }
-    }
-
-    [Fact]
-    public void Add_AddingTwoDoubleVectorsUnderSameKey_ThrowsException()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float64,
-            dimensions: Dimensions
-        );
-
-        (var inputKey, var inputVector) = (AddKey, GenerateDoubleVector((int)Dimensions));
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(inputKey, inputVector);
-
-            // Act
-            Action actual = () => index.Add(inputKey, inputVector);
-
-            // Assert
-            Assert.Throws<USearchException>(actual);
-        }
-    }
-
-    [Fact]
-    public void Remove_InsertedFloatVector_ReturnsInsertedVectorsCount()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-        const int ExpectedRemoveReturn = 1;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float32,
-            dimensions: Dimensions
-        );
-
-        (var inputKey, var inputVector) = (AddKey, GenerateFloatVector((int)Dimensions));
-
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(inputKey, inputVector);
-
-            // Act
-            var removedCount = index.Remove(AddKey);
-
-            // Assert
-            Assert.Equal(ExpectedRemoveReturn, removedCount);
-        }
-    }
-
-    [Fact]
-    public void Remove_InsertedByteVector_ReturnsInsertedVectorsCount()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-        const int ExpectedRemoveReturn = 1;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Int8,
-            dimensions: Dimensions
-        );
-
-        (var inputKey, var inputVector) = (AddKey, GenerateByteVector((int)Dimensions));
-
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(inputKey, inputVector);
-
-            // Act
-            var removedCount = index.Remove(AddKey);
-
-            // Assert
-            Assert.Equal(ExpectedRemoveReturn, removedCount);
-        }
-    }
-
-    [Fact]
-    public void Remove_InsertedDoubleVector_ReturnsInsertedVectorsCount()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong TestAddKey = 1;
-        const int ExpectedRemoveReturn = 1;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float64,
-            dimensions: Dimensions
-        );
-
-        (var inputKey, var inputVector) = (TestAddKey, GenerateDoubleVector((int)Dimensions));
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(inputKey, inputVector);
-
-            // Act
-            var removedCount = index.Remove(TestAddKey);
-
-            // Assert
-            Assert.Equal(ExpectedRemoveReturn, removedCount);
-        }
-    }
-
-    [Fact]
-    public void Remove_InsertedManyFloatVectorsUnderSameKeyInMultiKeyIndex_ReturnsInsertedVectorsCount()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-        const int BatchSize = 2;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float32,
-            dimensions: Dimensions,
-            multi: true
-        );
-
-        (var inputKeys, var inputVectors) = (
-            Enumerable.Repeat(AddKey, BatchSize).ToArray(),
-            GenerateManyFloatVectors(BatchSize, (int)Dimensions)
-        );
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(inputKeys, inputVectors);
-
-            // Act
-            var removedCount = index.Remove(AddKey);
-
-            // Assert
-            Assert.Equal(BatchSize, removedCount);
-        }
-    }
-
-    [Fact]
-    public void Remove_InsertedManyByteVectorsUnderSameKeyInMultiKeyIndex_ReturnsInsertedVectorsCount()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-        const int BatchSize = 2;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Int8,
-            dimensions: Dimensions,
-            multi: true
-        );
-
-        (var inputKeys, var inputVectors) = (
-            Enumerable.Repeat(AddKey, BatchSize).ToArray(),
-            GenerateManyByteVectors(BatchSize, (int)Dimensions)
-        );
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(inputKeys, inputVectors);
-
-            // Act
-            var removedCount = index.Remove(AddKey);
-
-            // Assert
-            Assert.Equal(BatchSize, removedCount);
-        }
-    }
-
-    [Fact]
-    public void Remove_InsertedManyDoubleVectorUnderSameKeyInMultiKeyIndex_ReturnsInsertedVectorsCount()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-        const int BatchSize = 2;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float64,
-            dimensions: Dimensions,
-            multi: true
-        );
-
-        (var inputKeys, var inputVectors) = (
-            Enumerable.Repeat(AddKey, BatchSize).ToArray(),
-            GenerateManyDoubleVectors(BatchSize, (int)Dimensions)
-        );
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(inputKeys, inputVectors);
-
-            // Act
-            var removedCount = index.Remove(AddKey);
-
-            // Assert
-            Assert.Equal(BatchSize, removedCount);
-        }
-    }
-
-    [Fact]
-    public void Get_NonExistentKey_ReturnsZeroCountAndEmptyVector()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong NonExistentKey = 1;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float32,
-            dimensions: Dimensions
-        );
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            // Act
-            var retrievedCount = index.Get(NonExistentKey, out float[] retrievedVector);
-
-            // Assert
-            Assert.True(retrievedCount == 0);
-            Assert.Null(retrievedVector);
-        }
-    }
-
-    [Fact]
-    public void Rename_ExistingKey_ReturnsInsertedVectorsCount()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong TestAddKey = 1;
-        const ulong TestRenameKey = 2;
-        const int ExpectedRenamedCount = 1;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float32,
-            dimensions: Dimensions,
-            multi: false
-        );
-
-        var inputVector = GenerateFloatVector((int)Dimensions);
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(TestAddKey, inputVector);
-
-            // Act
-            var renamedCount = index.Rename(TestAddKey, TestRenameKey);
-
-            // Assert
-            Assert.Equal(ExpectedRenamedCount, renamedCount);
-        }
-    }
-
-    [Fact]
-    public void Rename_ExistingKey_UpdatesOptionsProperly()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-        const ulong RenameToKey = 2;
-        const ulong ExpectedSize = 1;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float32,
-            dimensions: Dimensions,
-            multi: false
-        );
-
-        var inputVector = GenerateFloatVector((int)Dimensions);
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(AddKey, inputVector);
-
-            // Act
-            index.Rename(AddKey, RenameToKey);
-
-            // Assert
-            Assert.False(index.Contains(AddKey));
-            Assert.True(index.Contains(RenameToKey));
-            Assert.Equal(ExpectedSize, index.Size());
-        }
-    }
-
-    [Fact]
-    public void Rename_ExistingKeyInMultiKeyIndex_ReturnsInsertedVectorsCount()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-        const ulong RenameKey = 2;
-        const int BatchSize = 10;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float32,
-            dimensions: Dimensions,
-            multi: true
-        );
-
-        var inputKeys = Enumerable.Repeat((int)AddKey, BatchSize).Select(x => (ulong)x).ToArray();
-        var inputVectors = GenerateManyFloatVectors(BatchSize, (int)Dimensions);
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(inputKeys, inputVectors);
-
-            // Act
-            var vectorsCount = index.Rename(AddKey, RenameKey);
-
-            // Assert
-            Assert.Equal(BatchSize, vectorsCount);
-        }
-    }
-
-    [Fact]
-    public void Rename_ExistingKeyInMultiKeyIndex_UpdatesOptionsProperly()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-        const ulong AddKey = 1;
-        const ulong RenameToKey = 2;
-        const int BatchSize = 2;
-        const ulong ExpectedSize = 2;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float32,
-            dimensions: Dimensions,
-            multi: true
-        );
-
-        (var inputKeys, var inputVectors) = (
-            Enumerable.Range((int)AddKey, BatchSize).Select(x => (ulong)x).ToArray(),
-            GenerateManyFloatVectors(BatchSize, (int)Dimensions)
-        );
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(
-                inputKeys,
-                inputVectors
-            );
-
-            // Act
-            var vectorsCount = index.Rename(AddKey, RenameToKey);
-
-            // Assert
-            Assert.False(index.Contains(AddKey));
-            Assert.True(index.Contains(RenameToKey));
-            Assert.Equal(ExpectedSize, index.Size());
-        }
-    }
-
-    [Fact]
-    public void Rename_ExistingKeyToExistingKeyInMultiKeyIndex_ReturnsInsertedVectorsCount()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float32,
-            dimensions: Dimensions,
-            multi: true
-        );
-
-        var inputKeys = new ulong[] { 1, 1, 1, 2, 2 };
-        var inputVectors = GenerateManyFloatVectors(5, (int)Dimensions);
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(inputKeys, inputVectors);
-
-            // Act
-            var renamedCount = index.Rename(1, 2);
-
-            // Assert
-            Assert.Equal(3, renamedCount);
-        }
-    }
-
-    [Fact]
-    public void Rename_ExistingKeyToExistingKeyInMultiKeyIndex_UpdatesOptionsProperly()
-    {
-        // Arrange
-        const uint Dimensions = 10;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float32,
-            dimensions: Dimensions,
-            multi: true
-        );
-
-        var inputKeys = new ulong[] { 1, 1, 1, 2, 2 };
-        var inputVectors = GenerateManyFloatVectors(5, (int)Dimensions);
-
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(inputKeys, inputVectors);
-
-            // Act
-            var renamedCount = index.Rename(1, 2);
-
-            // Assert
-            Assert.False(index.Contains(1));
-            Assert.True(index.Contains(2));
-            Assert.Equal(5UL, index.Size());
-        }
-    }
-
-    [Fact]
-    public void Search_UsingL2sq_ReturnsCorrectDistances()
-    {
-        // Arrange
-        const uint Dimensions = 2;
-        const int StartKey = 1;
-        const int VectorsCount = 5;
-        const int MaxSearchCount = 2;
-
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float32,
-            dimensions: Dimensions,
-            multi: true
-        );
-
-        var inputKeys = Enumerable.Range(StartKey, VectorsCount).Select(i => (ulong)i).ToArray();
-        var inputVectors = new float[][]
-        {
-            new float[] { -0.5f, -0.6f },
-            new float[] { -0.1f, -0.1f },
-            new float[] { 0.2f, 0.2f },
-            new float[] { 0.7f, 0.8f },
-            new float[] { 0.9f, 1.0f }
+            Kind = ResidencyKind.Nvme,
+            SectorBytes = 512,
+            QueueDepth = 64,
+            IOMode = IOMode.PageCachedIO,
         };
-        var queryVector = new float[] { 0.0f, 0.0f };
 
-        using (var index = new USearchIndex(MetricKind.L2sq, ScalarKind.Float32, 2))
+        DenseOptions reloadedNvme = nvme.Reload();
+        Assert.Equal(ResidencyKind.Nvme, reloadedNvme.Residency.Kind);
+        Assert.Equal(512u, reloadedNvme.Residency.SectorBytes);
+        Assert.Equal(64u, reloadedNvme.Residency.QueueDepth);
+        Assert.Equal(IOMode.PageCachedIO, reloadedNvme.Residency.IOMode);
+    }
+
+    [Fact]
+    public void UnknownTagsAreRejectedRatherThanGuessedAt()
+    {
+        DenseOptions unknownResidency = SmallOptions();
+        unknownResidency.Residency = new Residency { Kind = (ResidencyKind)7 };
+        Assert.Equal(
+            Status.UnknownKind,
+            Assert.Throws<USearchException>(() => unknownResidency.Reload()).Status);
+
+        DenseOptions unknownMetric = SmallOptions();
+        unknownMetric.Metric = (DenseMetric)9;
+        Assert.Equal(
+            Status.UnknownKind,
+            Assert.Throws<USearchException>(() => unknownMetric.Reload()).Status);
+
+        DenseOptions unknownQuantization = SmallOptions();
+        unknownQuantization.Quantization = (ScalarKind)44;
+        Assert.Equal(
+            Status.UnknownKind,
+            Assert.Throws<USearchException>(() => unknownQuantization.Reload()).Status);
+    }
+
+    [Fact]
+    public void OptionsReachTheLibraryAsTheyWereWritten()
+    {
+        using USearchIndex index = new(SmallOptions());
+
+        Assert.Equal(Dimensions, index.Dimensions());
+        Assert.Equal(11UL, index.Connectivity());
+        Assert.Equal(0UL, index.Size());
+        Assert.NotEmpty(index.Capabilities());
+    }
+
+    #endregion Options & Residency
+
+    #region Geometry
+
+    [Fact]
+    public void UnfrozenGeometryIsRefusedRatherThanSizedToZero()
+    {
+        DenseOptions deferred = DenseOptions.Default;
+        deferred.Quantization = ScalarKind.F32;
+        using USearchIndex index = new(deferred);
+
+        Assert.Equal(0UL, index.Dimensions());
+        Assert.Equal(
+            Status.Uninitialized,
+            Assert.Throws<USearchException>(() => index.Add<float>(1UL, RowOf(1f))).Status);
+        Assert.Equal(
+            Status.Uninitialized,
+            Assert.Throws<USearchException>(() => index.Search<float>(RowOf(1f), 1)).Status);
+    }
+
+    [Fact]
+    public void MismatchedRowWidthsAreRefused()
+    {
+        using USearchIndex index = SmallIndex();
+        float[] tooNarrow = [1f, 2f, 3f];
+
+        Assert.Equal(
+            Status.ShapeMismatch,
+            Assert.Throws<USearchException>(() => index.Add<float>(1UL, tooNarrow)).Status);
+        Assert.Equal(
+            Status.ShapeMismatch,
+            Assert.Throws<USearchException>(() => index.Search<float>(tooNarrow, 1)).Status);
+    }
+
+    [Fact]
+    public void UnnameableScalarTypesAreRefused()
+    {
+        using USearchIndex index = SmallIndex();
+        short[] row = [1, 2, 3, 4];
+
+        Assert.Equal(
+            Status.UnknownKind,
+            Assert.Throws<USearchException>(() => index.Add<short>(1UL, row)).Status);
+    }
+
+    [Fact]
+    public void OversizedExtentsAreRefusedBeforeAllocating()
+    {
+        Assert.Equal(
+            Status.Overflow,
+            Assert.Throws<USearchException>(
+                () => Extents.CheckedRowMajor(ulong.MaxValue / 2, 4, 16, "probe")).Status);
+        Assert.Equal(
+            Status.Overflow,
+            Assert.Throws<USearchException>(
+                () => Extents.CheckedRowMajor(1, ulong.MaxValue / 8, 16, "probe")).Status);
+
+        using USearchIndex index = SmallIndex();
+        float[] twoQueries = [.. RowOf(1f), .. RowOf(2f)];
+        Assert.Equal(
+            Status.Overflow,
+            Assert.Throws<USearchException>(() => index.Search<float>(twoQueries, int.MaxValue)).Status);
+    }
+
+    #endregion Geometry
+
+    #region Batches & Strides
+
+    [Fact]
+    public void BatchedRowsAndQueriesKeepTheirLanes()
+    {
+        using USearchIndex index = SmallIndex();
+        USearchKey[] keys = [1UL, 2UL, 3UL];
+        float[] rows = [.. RowOf(10f), .. RowOf(20f), .. RowOf(30f)];
+
+        Assert.Equal(3UL, index.Add<float>(keys, rows));
+        Assert.Equal(3UL, index.Size());
+
+        float[] queries = [.. RowOf(30f), .. RowOf(10f)];
+        SearchResults found = index.Search<float>(queries, wanted: 2);
+
+        Assert.Equal(2, found.Queries);
+        Assert.Equal(2, found.CountOf(0));
+        Assert.Equal(2, found.CountOf(1));
+        Assert.Equal(USearchKey.FromUInt64(3), found.KeysOf(0)[0]);
+        Assert.Equal(USearchKey.FromUInt64(1), found.KeysOf(1)[0]);
+        Assert.Equal(2, found.DistancesOf(0).Length);
+        Assert.Equal(0d, found.DistancesOf(0)[0], 6);
+    }
+
+    [Fact]
+    public void SearchesReportFewerMatchesThanWantedWithoutReadingPastThem()
+    {
+        using USearchIndex index = SmallIndex();
+        index.Add<float>(1UL, RowOf(1f));
+
+        SearchResults found = index.Search<float>(RowOf(1f), wanted: 8);
+
+        Assert.Equal(8, found.Wanted);
+        Assert.Equal(1, found.CountOf(0));
+        Assert.Single(found.KeysOf(0).ToArray());
+        Assert.Single(found.DistancesOf(0).ToArray());
+    }
+
+    [Fact]
+    public void ReportedCountsAboveTheRowWidthAreClamped()
+    {
+        // The sibling verbs disagree on what a count means, so the slicing clamps rather than
+        // trusting it: entries past the row width were never written by anyone.
+        SearchResults results = new(new USearchKey[4], new double[4], [(nuint)5, (nuint)1], wanted: 2);
+
+        Assert.Equal(2, results.CountOf(0));
+        Assert.Equal(2, results.KeysOf(0).Length);
+        Assert.Equal(1, results.CountOf(1));
+        Assert.Equal(1, results.DistancesOf(1).Length);
+    }
+
+    [Fact]
+    public void TraversalStatisticsAreReportedAndAccumulate()
+    {
+        using USearchIndex index = SmallIndex();
+        TraversalStats insertion = new();
+        index.Add<float>([1UL, 2UL], [.. RowOf(1f), .. RowOf(2f)], stats: insertion);
+
+        TraversalStats query = new();
+        index.Search<float>(RowOf(1f), wanted: 2, stats: query);
+
+        Assert.True(insertion.VisitedMembers > 0);
+        Assert.True(query.ComputedDistances > 0);
+
+        ulong before = query.ComputedDistances;
+        query.Accumulate(insertion);
+        Assert.Equal(before + insertion.ComputedDistances, query.ComputedDistances);
+    }
+
+    [Fact]
+    public void ScalarKindsOtherThanFloatCross()
+    {
+        DenseOptions options = SmallOptions();
+        options.Quantization = ScalarKind.I8;
+        using USearchIndex index = new(options);
+        index.Reserve(4);
+
+        sbyte[] row = [1, 2, 3, 4];
+        Assert.Equal(1UL, index.Add<sbyte>(1UL, row));
+
+        Half[] halves = [(Half)1f, (Half)2f, (Half)3f, (Half)4f];
+        Assert.Equal(1UL, index.Add<Half>(2UL, halves));
+
+        double[] retrieved = new double[Dimensions];
+        Assert.Equal(1UL, index.Get<double>(2UL, retrieved));
+        Assert.Equal(new double[] { 1, 2, 3, 4 }, retrieved);
+    }
+
+    #endregion Batches & Strides
+
+    #region Retrieval
+
+    [Fact]
+    public void GetReportsTheTrueCountAndTruncatesTheCopy()
+    {
+        using USearchIndex index = SmallIndex();
+        USearchKey shared = 5UL;
+        index.Add<float>([shared, shared, shared], [.. RowOf(1f), .. RowOf(2f), .. RowOf(3f)]);
+
+        Assert.Equal(3UL, index.Count(shared));
+
+        float[] roomForOne = new float[Dimensions];
+        Assert.Equal(3UL, index.Get<float>(shared, roomForOne));
+        Assert.Equal(RowOf(1f), roomForOne);
+
+        float[] roomForAll = new float[3 * Dimensions];
+        Assert.Equal(3UL, index.Get<float>(shared, roomForAll));
+        Assert.Equal(RowOf(3f), roomForAll[(int)(2 * Dimensions)..]);
+    }
+
+    [Fact]
+    public void GetOfAnAbsentKeyWritesNothing()
+    {
+        using USearchIndex index = SmallIndex();
+        index.Add<float>(1UL, RowOf(1f));
+
+        float[] untouched = new float[Dimensions];
+        Assert.Equal(0UL, index.Get<float>(99UL, untouched));
+        Assert.Equal(0UL, index.Count(99UL));
+        Assert.Equal(new float[Dimensions], untouched);
+    }
+
+    #endregion Retrieval
+
+    #region Filtered Search
+
+    [Fact]
+    public void FilteredSearchesAdmitOnlyWhatThePredicateApproves()
+    {
+        using USearchIndex index = SmallIndex();
+        USearchKey[] keys = [1UL, 2UL, 3UL, 4UL];
+        float[] rows = [.. RowOf(1f), .. RowOf(2f), .. RowOf(3f), .. RowOf(4f)];
+        index.Add<float>(keys, rows);
+
+        SearchResults found = index.SearchIf<float>(
+            RowOf(1f), wanted: 4, admits: key => key.TryGetUInt64(out ulong identity) && identity % 2 == 0);
+
+        Assert.Equal(2, found.CountOf(0));
+        foreach (USearchKey key in found.KeysOf(0))
         {
-            index.Add(inputKeys, inputVectors);
-
-            // Act
-            var matchCount = index.Search(queryVector, MaxSearchCount, out ulong[] returnedKeys, out float[] returnedDistances);
-            _ = index.Get(returnedKeys[0], out float[] firstVector);
-            _ = index.Get(returnedKeys[1], out float[] secondVector);
-
-            // Assert
-            Assert.Equal(MaxSearchCount, matchCount);
-            Assert.Equal(new ulong[] { 2UL, 3UL }, returnedKeys);
-            Assert.Equal(L2sqDistance.L2sq<float>(queryVector, firstVector), returnedDistances[0], EqualTolerance);
-            Assert.Equal(L2sqDistance.L2sq<float>(queryVector, secondVector), returnedDistances[1], EqualTolerance);
+            Assert.True(key.TryGetUInt64(out ulong identity));
+            Assert.Equal(0UL, identity % 2);
         }
     }
 
     [Fact]
-    public void Search_AfterRemovingKey_ReturnsCorrectMatches()
+    public void PredicateFailuresSurfaceAfterTheCallRatherThanUnwindingThroughIt()
     {
-        // Arrange
-        const uint Dimensions = 2;
-        const ulong StartKey = 1;
-        const int VectorsCount = 10;
-        const ulong RemoveKey = 3;
-        const int MaxSearchCount = 9;
+        using USearchIndex index = SmallIndex();
+        index.Add<float>([1UL, 2UL], [.. RowOf(1f), .. RowOf(2f)]);
 
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float32,
-            dimensions: Dimensions,
-            multi: true
-        );
+        USearchException failure = Assert.Throws<USearchException>(
+            () => index.SearchIf<float>(RowOf(1f), wanted: 2, admits: _ => throw new InvalidOperationException()));
 
-        var inputKeys = Enumerable.Range((int)StartKey, VectorsCount).Select(x => (ulong)x).ToArray();
-        var inputVectors = GenerateManyFloatVectors(VectorsCount, (int)Dimensions);
-        var queryVector = GenerateFloatVector((int)Dimensions);
+        Assert.Equal(Status.Internal, failure.Status);
+        Assert.IsType<InvalidOperationException>(failure.InnerException);
+    }
 
-        using (var index = new USearchIndex(indexOptions))
+    #endregion Filtered Search
+
+    #region Handles
+
+    [Fact]
+    public void MergeConsumesTheDonor()
+    {
+        using USearchIndex index = SmallIndex();
+        index.Add<float>(1UL, RowOf(1f));
+
+        USearchIndex donor = SmallIndex();
+        donor.Add<float>(2UL, RowOf(2f));
+        index.Merge(donor);
+
+        Assert.Equal(2UL, index.Size());
+        Assert.True(index.Contains(2UL));
+        Assert.Equal(Status.Uninitialized, Assert.Throws<USearchException>(() => donor.Size()).Status);
+
+        // A later dispose of the consumed donor must not double-free.
+        donor.Dispose();
+        donor.Dispose();
+    }
+
+    [Fact]
+    public void DisposedHandlesRefuseEveryVerb()
+    {
+        USearchIndex index = SmallIndex();
+        index.Dispose();
+        index.Dispose();
+
+        Assert.Equal(Status.Uninitialized, Assert.Throws<USearchException>(() => index.Size()).Status);
+        Assert.Equal(Status.Uninitialized, Assert.Throws<USearchException>(() => index.Count(1UL)).Status);
+    }
+
+    [Fact]
+    public void CursorsWalkTheSnapshotTheyCaptured()
+    {
+        using USearchIndex index = SmallIndex();
+        index.Add<float>([1UL, 2UL, 3UL], [.. RowOf(1f), .. RowOf(2f), .. RowOf(3f)]);
+
+        using USearchCursor cursor = index.Snapshot();
+        index.Add<float>(4UL, RowOf(4f));
+
+        USearchKey[] keys = new USearchKey[2];
+        float[] vectors = new float[2 * Dimensions];
+        Assert.Equal(2, cursor.Next<float>(keys, vectors));
+        Assert.Equal(USearchKey.FromUInt64(1), keys[0]);
+        Assert.Equal(RowOf(2f), vectors[(int)Dimensions..]);
+
+        Assert.Equal(1, cursor.Next(keys));
+        Assert.Equal(USearchKey.FromUInt64(3), keys[0]);
+        Assert.Equal(0, cursor.Next(keys));
+    }
+
+    [Fact]
+    public void FindersStreamMatchesAcrossPulls()
+    {
+        using USearchIndex index = SmallIndex();
+        index.Add<float>([1UL, 2UL, 3UL], [.. RowOf(1f), .. RowOf(2f), .. RowOf(3f)]);
+
+        using USearchFinder finder = index.Find<float>(RowOf(1f));
+        USearchKey[] keys = new USearchKey[2];
+        double[] distances = new double[2];
+
+        Assert.Equal(2, finder.Next(keys, distances));
+        Assert.Equal(USearchKey.FromUInt64(1), keys[0]);
+        Assert.Equal(1, finder.Next(keys, distances));
+        Assert.Equal(USearchKey.FromUInt64(3), keys[0]);
+        Assert.Equal(0, finder.Next(keys, distances));
+    }
+
+    #endregion Handles
+
+    #region Serialization
+
+    [Fact]
+    public void CheckpointsRoundTripThroughAPathAndFreezeTheGeometry()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"usearch-{Guid.NewGuid():N}.safegraphs");
+        try
         {
-            index.Add(inputKeys, inputVectors);
-            index.Remove(RemoveKey);
+            using (USearchIndex index = SmallIndex())
+            {
+                index.Add<float>([1UL, 2UL], [.. RowOf(1f), .. RowOf(2f)]);
+                index.Save(path);
+            }
 
-            // Act
-            var matchCount = index.Search(queryVector, MaxSearchCount, out ulong[] returnedKeys, out float[] returnedDistances);
+            Assert.True(File.Exists(path));
 
-            // Assert
-            Assert.Equal(VectorsCount - 1, matchCount);
-            Assert.Equivalent(inputKeys.Where(x => x != RemoveKey).ToArray(), returnedKeys);
+            DenseOptions metadata = USearchIndex.Metadata(path);
+            Assert.Equal(Dimensions, metadata.Dimensions);
+            Assert.Equal(DenseMetric.Euclidean, metadata.Metric);
+
+            DenseOptions deferred = DenseOptions.Default;
+            deferred.Quantization = ScalarKind.F32;
+            using USearchIndex restored = new(deferred);
+            Assert.Equal(0UL, restored.Dimensions());
+
+            restored.Load(path);
+            Assert.Equal(Dimensions, restored.Dimensions());
+            Assert.Equal(2UL, restored.Size());
+            Assert.Equal(USearchKey.FromUInt64(2), restored.Search<float>(RowOf(2f), 1).KeysOf(0)[0]);
+        }
+        finally
+        {
+            File.Delete(path);
         }
     }
 
     [Fact]
-    public void Search_CountExceedsIndexSize_ReturnsAllMatches()
+    public void CheckpointsRoundTripThroughABuffer()
     {
-        // Arrange
-        const uint Dimensions = 2;
-        const ulong StartKey = 1;
-        const int VectorsCount = 2;
-        const int MaxSearchCount = 10;
+        using USearchIndex index = SmallIndex();
+        index.Add<float>(1UL, RowOf(1f));
 
-        var indexOptions = new IndexOptions(
-            metricKind: MetricKind.Cos,
-            quantization: ScalarKind.Float32,
-            dimensions: Dimensions,
-            multi: true
-        );
+        byte[] buffer = new byte[index.SerializedLength()];
+        Assert.NotEmpty(buffer);
+        index.SaveToBuffer(buffer);
 
-        var inputKeys = Enumerable.Range((int)StartKey, VectorsCount).Select(x => (ulong)x).ToArray();
-        var inputVectors = GenerateManyFloatVectors(VectorsCount, (int)Dimensions);
-        var queryVector = GenerateFloatVector((int)Dimensions);
+        DenseOptions metadata = USearchIndex.MetadataFromBuffer(buffer);
+        Assert.Equal(Dimensions, metadata.Dimensions);
 
-        using (var index = new USearchIndex(indexOptions))
-        {
-            index.Add(inputKeys, inputVectors);
+        using USearchIndex restored = new(SmallOptions());
+        restored.LoadFromBuffer(buffer);
+        Assert.Equal(1UL, restored.Size());
+        Assert.True(restored.Contains(1UL));
 
-            // Act
-            var matchCount = index.Search(queryVector, MaxSearchCount, out ulong[] returnedKeys, out float[] returnedDistances);
-
-            // Assert
-            Assert.Equal(VectorsCount, matchCount);
-            Assert.Equivalent(inputKeys, returnedKeys);
-        }
+        Assert.Equal(
+            Status.MalformedInput,
+            Assert.Throws<USearchException>(() => restored.LoadFromBuffer(ReadOnlySpan<byte>.Empty)).Status);
     }
 
-    #region private ================================================================================
-
-    private static float[] GenerateFloatVector(int vectorLength)
+    [Fact]
+    public void LibraryFailuresArriveAsStatusesRatherThanMessages()
     {
-        return Enumerable.Range(0, vectorLength).Select(i => (float)i).ToArray();
+        using USearchIndex index = new(SmallOptions());
+
+        USearchException failure = Assert.Throws<USearchException>(
+            () => index.Load(Path.Combine(Path.GetTempPath(), "usearch-absent-checkpoint.safegraphs")));
+
+        Assert.Equal(Status.IOFailure, failure.Status);
+        Assert.Contains("could not be opened", failure.Message, StringComparison.Ordinal);
     }
 
-    private static float[][] GenerateManyFloatVectors(int n, int vectorLength)
+    #endregion Serialization
+
+    #region Introspection
+
+    [Fact]
+    public void LibraryProbesReportSomething()
     {
-        var result = new float[n][];
-        for (int i = 0; i < n; i++)
-        {
-            result[i] = Enumerable.Range(0, vectorLength).Select(i => (float)i).ToArray();
-        }
-        return result;
+        Assert.NotEmpty(USearchCapabilities.Version());
+        Assert.NotEmpty(USearchCapabilities.CapabilitiesCompiled());
+        Assert.NotEmpty(USearchCapabilities.CapabilitiesAvailable());
     }
 
-    private static sbyte[] GenerateByteVector(int vectorLength)
-    {
-        return Enumerable.Range(0, vectorLength).Select(i => (sbyte)i).ToArray();
-    }
-
-    private static byte[] GenerateBitsVector(int vectorLength)
-    {
-        return Enumerable.Range(0, vectorLength).Select(i => (byte)i).ToArray();
-    }
-
-    private static sbyte[][] GenerateManyByteVectors(int n, int vectorLength)
-    {
-        var result = new sbyte[n][];
-        for (int i = 0; i < n; i++)
-        {
-            result[i] = Enumerable.Range(0, vectorLength).Select(i => (sbyte)i).ToArray();
-        }
-        return result;
-    }
-
-    private static byte[][] GenerateManyBitsVectors(int n, int vectorLength)
-    {
-        var result = new byte[n][];
-        for (int i = 0; i < n; i++)
-        {
-            result[i] = Enumerable.Range(0, vectorLength).Select(i => (byte)i).ToArray();
-        }
-        return result;
-    }
-
-    private static double[] GenerateDoubleVector(int n)
-    {
-        return Enumerable.Range(0, n).Select(i => (double)i).ToArray();
-    }
-
-    private static float[][] GenerateManyDoubleVectors(int n, int vectorLength)
-    {
-        var result = new float[n][];
-        for (int i = 0; i < n; i++)
-        {
-            result[i] = Enumerable.Range(0, vectorLength).Select(i => (float)i).ToArray();
-        }
-        return result;
-    }
-
-    #endregion
-}
-
-internal sealed class RealEqualityComparer<T> : IEqualityComparer<T> where T : unmanaged
-{
-    private readonly T _threshold;
-
-    public RealEqualityComparer(T threshold) => this._threshold = threshold;
-
-    public bool Equals(T a, T b)
-    {
-        return Math.Abs((dynamic)a - (dynamic)b) < this._threshold;
-    }
-
-    public int GetHashCode(T obj)
-    {
-        return obj.GetHashCode();
-    }
-}
-
-internal static class L2sqDistance
-{
-    public static double L2sq<TNumber>(ReadOnlySpan<TNumber> x, ReadOnlySpan<TNumber> y) where TNumber : unmanaged
-    {
-        if (typeof(TNumber) == typeof(float))
-        {
-            ReadOnlySpan<float> floatSpanX = MemoryMarshal.Cast<TNumber, float>(x);
-            ReadOnlySpan<float> floatSpanY = MemoryMarshal.Cast<TNumber, float>(y);
-            return L2sqImplementation(floatSpanX, floatSpanY);
-        }
-        else if (typeof(TNumber) == typeof(double))
-        {
-            ReadOnlySpan<double> doubleSpanX = MemoryMarshal.Cast<TNumber, double>(x);
-            ReadOnlySpan<double> doubleSpanY = MemoryMarshal.Cast<TNumber, double>(y);
-            return L2sqImplementation(doubleSpanX, doubleSpanY);
-        }
-        else
-        {
-            throw new NotSupportedException();
-        }
-    }
-
-    public static double L2sq<TNumber>(TNumber[] x, TNumber[] y)
-    where TNumber : unmanaged
-    {
-        return L2sq(new ReadOnlySpan<TNumber>(x), new ReadOnlySpan<TNumber>(y));
-    }
-
-    #region private ================================================================================
-
-    private static double L2sqImplementation(ReadOnlySpan<double> x, ReadOnlySpan<double> y)
-    {
-        double distanceSum = 0;
-        for (int i = 0; i < x.Length; i++)
-        {
-            distanceSum += (x[i] - y[i]) * (x[i] - y[i]);
-        }
-        return distanceSum;
-    }
-
-    private static double L2sqImplementation(ReadOnlySpan<float> x, ReadOnlySpan<float> y)
-    {
-        double distanceSum = 0;
-        for (int i = 0; i < x.Length; i++)
-        {
-            distanceSum += (x[i] - y[i]) * (x[i] - y[i]);
-        }
-        return distanceSum;
-    }
-
-    #endregion
+    #endregion Introspection
 }

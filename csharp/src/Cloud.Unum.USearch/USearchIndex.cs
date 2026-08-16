@@ -1,769 +1,792 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
 using static Cloud.Unum.USearch.NativeMethods;
 
 namespace Cloud.Unum.USearch;
 
+#region Index
+
 /// <summary>
-/// USearchIndex class provides a managed wrapper for the USearch library's index functionality.
+/// A Vector Search Index over equidimensional dense representations - the managed twin of
+/// <c>include/usearch/dense_index.h</c>.
 /// </summary>
-public class USearchIndex : IDisposable
+/// <remarks>
+/// Every verb is a batch over row-major matrices, so a single vector is a one-row matrix. The
+/// candidate-pool breadth rides each call rather than the handle, which lets a recall sweep run
+/// against one immutable index with no mutation between points.
+/// <para>
+/// A handle may be shared across threads, so no method here takes a lock. On a RAM handle,
+/// insertions and searches overlap freely: searches read only entries published behind the
+/// visibility watermark and never write to the graph, while insertions synchronize through
+/// per-node locks and publish in order. Serialization is the one exception, demanding a
+/// mutation-free window, though concurrent readers keep searching throughout.
+/// </para>
+/// </remarks>
+public sealed unsafe class USearchIndex : IDisposable
 {
-    private IntPtr _index;
-    private bool _disposedValue = false;
-    private ulong _cachedDimensions;
+    private IntPtr _handle;
 
-    /// <summary>
-    /// Initializes a new instance of the USearchIndex class with specified options.
-    /// </summary>
-    /// <param name="metricKind">The metric kind used for distance calculation between vectors.</param>
-    /// <param name="quantization">The scalar kind used for quantization of vector data during indexing.</param>
-    /// <param name="dimensions">The number of dimensions in the vectors to be indexed.</param>
-    /// <param name="connectivity">The optional connectivity parameter that limits connections-per-node in the graph.</param>
-    /// <param name="expansionAdd">The optional expansion factor used for index construction when adding vectors.</param>
-    /// <param name="expansionSearch">The optional expansion factor used for index construction during search operations.</param>
-    /// <param name="multi">When set allows multiple vectors to map to the same key.</param>
-    public USearchIndex(
-        MetricKind metricKind,
-        ScalarKind quantization,
-        ulong dimensions,
-        ulong connectivity = 0,
-        ulong expansionAdd = 0,
-        ulong expansionSearch = 0,
-        bool multi = false
-    )
+    /// <summary>Initializes an index for the residency its options select.</summary>
+    /// <param name="options">The construction and loading options.</param>
+    public USearchIndex(DenseOptions options)
     {
-        IndexOptions initOptions = new()
+        NativeDenseOptions lowered = options.Lower();
+        this._handle = usearch_dense_init(&lowered, out NativeError error);
+        error.ThrowIfFailed();
+        if (this._handle == IntPtr.Zero)
         {
-            metric_kind = metricKind,
-            metric = default,
-            quantization = quantization,
-            dimensions = dimensions,
-            connectivity = connectivity,
-            expansion_add = expansionAdd,
-            expansion_search = expansionSearch,
-            multi = multi
-        };
-
-        this._index = usearch_init(ref initOptions, out IntPtr error);
-        HandleError(error);
-        this._cachedDimensions = dimensions;
-    }
-
-    /// <summary>
-    /// Initializes a new instance of the USearchIndex class with specified options.
-    /// </summary>
-    /// <param name="options">The options structure containing initialization parameters.</param>
-    public USearchIndex(IndexOptions options)
-    {
-        this._index = usearch_init(ref options, out IntPtr error);
-        HandleError(error);
-        this._cachedDimensions = options.dimensions;
-    }
-
-    /// <summary>
-    /// Initializes a new instance of the USearchIndex class and loads or views the index from a specified file.
-    /// </summary>
-    /// <param name="path">The file path from where the index will be loaded or viewed.</param>
-    /// <param name="view">If true, creates a view of the index without copying it into memory.</param>
-    public USearchIndex(string path, bool view = false)
-    {
-        IndexOptions initOptions = new();
-        this._index = usearch_init(ref initOptions, out IntPtr error);
-        HandleError(error);
-
-        if (view)
-        {
-            usearch_view(this._index, path, out error);
+            throw new USearchException(Status.Internal, "the library returned no handle and no error");
         }
-        else
+    }
+
+    /// <summary>
+    /// Reads a checkpoint's geometry and metric metadata without loading it - from the manifest's
+    /// summary when the path names one, so no shard is opened.
+    /// </summary>
+    /// <param name="path">The checkpoint path.</param>
+    /// <returns>The options the checkpoint's headers describe.</returns>
+    public static DenseOptions Metadata(string path)
+    {
+        byte[] encoded = EncodePath(path);
+        NativeDenseOptions lowered = default;
+        fixed (byte* data = encoded)
         {
-            usearch_load(this._index, path, out error);
+            usearch_dense_metadata(Borrow(data, encoded.Length), &lowered, out NativeError error);
+            error.ThrowIfFailed();
         }
 
-        HandleError(error);
-
-        this._cachedDimensions = this.Dimensions();
+        return DenseOptions.Lift(lowered);
     }
 
-    /// <summary>
-    /// Saves the index to a specified file.
-    /// </summary>
-    /// <param name="path">The file path where the index will be saved.</param>
-    public void Save(string path)
+    /// <summary>Reads geometry and metric metadata from a serialized monolith buffer.</summary>
+    /// <param name="buffer">The monolith's bytes.</param>
+    /// <returns>The options the monolith's header describes.</returns>
+    public static DenseOptions MetadataFromBuffer(ReadOnlySpan<byte> buffer)
     {
-        usearch_save(this._index, path, out IntPtr error);
-        HandleError(error);
+        if (buffer.IsEmpty)
+        {
+            throw new USearchException(Status.MalformedInput, "the buffer is empty");
+        }
+
+        NativeDenseOptions lowered = default;
+        fixed (byte* source = buffer)
+        {
+            usearch_dense_metadata_buffer(source, (nuint)buffer.Length, &lowered, out NativeError error);
+            error.ThrowIfFailed();
+        }
+
+        return DenseOptions.Lift(lowered);
     }
 
-    /// <summary>
-    /// Gets the current size (number of vectors) of the index.
-    /// </summary>
-    /// <returns>The number of vectors in the index.</returns>
+    /// <summary>Claims capacity for incoming vectors, counting the entries already stored.</summary>
+    /// <param name="capacity">The desired total capacity.</param>
+    public void Reserve(ulong capacity)
+    {
+        usearch_dense_reserve(this.Handle, (nuint)capacity, out NativeError error);
+        error.ThrowIfFailed();
+    }
+
+    /// <summary>Erases all entries, keeping the reserved capacity and the frozen geometry.</summary>
+    public void Clear()
+    {
+        usearch_dense_clear(this.Handle, out NativeError error);
+        error.ThrowIfFailed();
+    }
+
+    /// <summary>Reports the number of stored entries.</summary>
+    /// <returns>The entry count.</returns>
     public ulong Size()
     {
-        ulong size = (ulong)usearch_size(this._index, out IntPtr error);
-        HandleError(error);
-        return size;
+        nuint reading = usearch_dense_size(this.Handle, out NativeError error);
+        error.ThrowIfFailed();
+        return reading;
     }
 
-    /// <summary>
-    /// Gets the current capacity (number of vectors) of the index.
-    /// </summary>
-    /// <returns>The capacity of the index.</returns>
+    /// <summary>Reports the reserved capacity in entries.</summary>
+    /// <returns>The capacity.</returns>
     public ulong Capacity()
     {
-        ulong capacity = (ulong)usearch_capacity(this._index, out IntPtr error);
-        HandleError(error);
-        return capacity;
+        nuint reading = usearch_dense_capacity(this.Handle, out NativeError error);
+        error.ThrowIfFailed();
+        return reading;
     }
 
-    /// <summary>
-    /// Gets the number of dimensions in the vectors in the index.
-    /// </summary>
-    /// <returns>The number of dimensions.</returns>
+    /// <summary>Reports the frozen width of the stored vectors; zero until a load freezes it.</summary>
+    /// <returns>The dimensionality.</returns>
     public ulong Dimensions()
     {
-        ulong dimensions = (ulong)usearch_dimensions(this._index, out IntPtr error);
-        HandleError(error);
-        return dimensions;
+        nuint reading = usearch_dense_dimensions(this.Handle, out NativeError error);
+        error.ThrowIfFailed();
+        return reading;
     }
 
-    /// <summary>
-    /// Gets the connectivity parameter of the index.
-    /// </summary>
-    /// <returns>The connectivity parameter.</returns>
+    /// <summary>Reports the frozen connections-per-node bound of the graph.</summary>
+    /// <returns>The connectivity.</returns>
     public ulong Connectivity()
     {
-        ulong connectivity = (ulong)usearch_connectivity(this._index, out IntPtr error);
-        HandleError(error);
-        return connectivity;
+        nuint reading = usearch_dense_connectivity(this.Handle, out NativeError error);
+        error.ThrowIfFailed();
+        return reading;
+    }
+
+    /// <summary>Reports the memory the index occupies, in bytes.</summary>
+    /// <returns>The byte count.</returns>
+    public ulong MemoryUsage()
+    {
+        nuint reading = usearch_dense_memory_usage(this.Handle, out NativeError error);
+        error.ThrowIfFailed();
+        return reading;
     }
 
     /// <summary>
-    /// Checks if the index contains a vector with a specific key.
+    /// Reports the expected serialized size in bytes: every shard file, plus the manifest when the
+    /// index spans more than one.
     /// </summary>
-    /// <param name="key">The key to be checked.</param>
-    /// <returns>True if the index contains the vector with the given key, false otherwise.</returns>
-    public bool Contains(ulong key)
+    /// <returns>The byte count.</returns>
+    public ulong SerializedLength()
     {
-        bool result = usearch_contains(this._index, key, out IntPtr error);
-        HandleError(error);
-        return result;
+        nuint reading = usearch_dense_serialized_length(this.Handle, out NativeError error);
+        error.ThrowIfFailed();
+        return reading;
+    }
+
+    /// <summary>Reports the capability codename the index dispatched to on this machine.</summary>
+    /// <returns>The codename.</returns>
+    public string Capabilities()
+    {
+        IntPtr reading = usearch_dense_capabilities(this.Handle, out NativeError error);
+        error.ThrowIfFailed();
+        return Marshal.PtrToStringAnsi(reading)
+            ?? throw new USearchException(Status.Internal, "the library reported no capabilities and no error");
+    }
+
+    /// <summary>Inserts one vector under its key - the one-row case of the batch below.</summary>
+    /// <typeparam name="TScalar">The element type of the vector.</typeparam>
+    /// <param name="key">The identity to store the vector under.</param>
+    /// <param name="vector">The vector's scalars, one row wide.</param>
+    /// <param name="expansionFactor">The candidate-pool breadth; zero derives.</param>
+    /// <param name="stats">The traversal telemetry to fill, when the caller wants any.</param>
+    /// <returns>One on success; a batch is all-or-nothing.</returns>
+    public ulong Add<TScalar>(
+        USearchKey key, ReadOnlySpan<TScalar> vector, ulong expansionFactor = 0, TraversalStats? stats = null)
+        where TScalar : unmanaged
+    {
+        return this.Add(new ReadOnlySpan<USearchKey>(in key), vector, expansionFactor, stats);
     }
 
     /// <summary>
-    /// Counts the number of entries in the index under a specific key.
+    /// Inserts a row-major matrix of vectors under their keys - the native batch operation, which
+    /// overlaps safely with concurrent searches on the same handle.
     /// </summary>
-    /// <param name="key">The key to be checked.</param>
-    /// <returns>The number of vectors found under that key.</returns>
-    public int Count(ulong key)
+    /// <remarks>
+    /// The input scalar type is independent of the stored quantization; the library converts on
+    /// ingest. Rows are packed, so the byte pitch is the row's own width.
+    /// </remarks>
+    /// <typeparam name="TScalar">The element type of the vector rows.</typeparam>
+    /// <param name="keys">One identity per row.</param>
+    /// <param name="vectors">The rows, packed end to end.</param>
+    /// <param name="expansionFactor">The candidate-pool breadth; zero derives.</param>
+    /// <param name="stats">The traversal telemetry to fill, when the caller wants any.</param>
+    /// <returns>The row count on success and zero on failure: every fallible step runs before the
+    /// first entry identity is claimed, so a rejected batch publishes nothing.</returns>
+    public ulong Add<TScalar>(
+        ReadOnlySpan<USearchKey> keys,
+        ReadOnlySpan<TScalar> vectors,
+        ulong expansionFactor = 0,
+        TraversalStats? stats = null)
+        where TScalar : unmanaged
     {
-        int count = checked((int)usearch_count(this._index, key, out IntPtr error));
-        HandleError(error);
-        return count;
+        ulong dimensions = this.FrozenDimensions();
+        int expected = Extents.CheckedRowMajor((ulong)keys.Length, dimensions, (ulong)sizeof(TScalar), "insertion");
+        if (vectors.Length != expected)
+        {
+            throw new USearchException(
+                Status.ShapeMismatch, "the vector rows are not as wide as the index geometry, or the counts disagree");
+        }
+
+        if (keys.IsEmpty)
+        {
+            return 0;
+        }
+
+        NativeExpansionConfig config = new() { ExpansionFactor = (nuint)expansionFactor };
+        NativeTraversalStats reported = default;
+        nuint added;
+        fixed (USearchKey* keysPointer = keys)
+        fixed (TScalar* vectorsPointer = vectors)
+        {
+            added = usearch_dense_add(
+                this.Handle, keysPointer, vectorsPointer, (nuint)keys.Length,
+                Scalars.RowBytes<TScalar>(dimensions), Scalars.KindOf<TScalar>(),
+                &config, &reported, out NativeError error);
+            error.ThrowIfFailed();
+        }
+
+        stats?.Adopt(reported);
+        return added;
     }
 
     /// <summary>
-    /// Reserves additional capacity in the index.
+    /// Resolves a row-major matrix of queries into the nearest entries - the native batch
+    /// operation, parallelized internally, which never writes to the graph.
     /// </summary>
-    /// <param name="size">The number of new vectors to reserve capacity for.</param>
-    private void IncreaseCapacity(ulong size)
-    {
-        usearch_reserve(this._index, (UIntPtr)(this.Size() + size), out IntPtr error);
-        HandleError(error);
-    }
+    /// <typeparam name="TScalar">The element type of the query rows.</typeparam>
+    /// <param name="queries">The query rows, packed end to end.</param>
+    /// <param name="wanted">The upper bound on matches per query - the "k" in kANN.</param>
+    /// <param name="expansionFactor">The candidate-pool breadth; zero derives.</param>
+    /// <param name="stats">The traversal telemetry to fill, when the caller wants any.</param>
+    /// <returns>The keys, distances, and per-query counts the batch produced.</returns>
+    public SearchResults Search<TScalar>(
+        ReadOnlySpan<TScalar> queries, int wanted, ulong expansionFactor = 0, TraversalStats? stats = null)
+        where TScalar : unmanaged =>
+        this.SearchDispatch(queries, wanted, expansionFactor, stats, null);
 
     /// <summary>
-    /// Checks if the index has enough capacity to add a specific number of vectors.
-    /// If not, increases the capacity.
+    /// The filtered sibling of <see cref="Search"/>, admitting only the keys the predicate
+    /// approves. Non-matching entries still route the traversal, so recall does not collapse at
+    /// low selectivity.
     /// </summary>
-    /// <param name="size_increase">The number of vectors to be added.</param>
-    private void CheckIncreaseCapacity(ulong size_increase)
+    /// <remarks>
+    /// The predicate runs on the library's worker threads, so it must be safe for concurrent use.
+    /// An exception it throws cannot cross the boundary: the first one is captured, every later
+    /// candidate is rejected, and the failure is raised here once the call returns.
+    /// </remarks>
+    /// <typeparam name="TScalar">The element type of the query rows.</typeparam>
+    /// <param name="queries">The query rows, packed end to end.</param>
+    /// <param name="wanted">The upper bound on matches per query.</param>
+    /// <param name="admits">The per-key admission predicate.</param>
+    /// <param name="expansionFactor">The candidate-pool breadth; zero derives.</param>
+    /// <param name="stats">The traversal telemetry to fill, when the caller wants any.</param>
+    /// <returns>The keys, distances, and per-query counts the batch produced.</returns>
+    public SearchResults SearchIf<TScalar>(
+        ReadOnlySpan<TScalar> queries,
+        int wanted,
+        Func<USearchKey, bool> admits,
+        ulong expansionFactor = 0,
+        TraversalStats? stats = null)
+        where TScalar : unmanaged
     {
-        ulong size_demand = this.Size() + size_increase;
-        if (this.Capacity() < size_demand)
+        if (admits is null)
         {
-            this.IncreaseCapacity(size_increase);
+            throw new USearchException(Status.MalformedInput, "the admission predicate is null");
         }
+
+        return this.SearchDispatch(queries, wanted, expansionFactor, stats, admits);
     }
 
-    /// <summary>
-    /// Adds a vector with a specific key to the index.
-    /// </summary>
-    /// <param name="key">The key associated with the vector.</param>
-    /// <param name="vector">The vector data to be added.</param>
-    public void Add(ulong key, float[] vector)
+    private SearchResults SearchDispatch<TScalar>(
+        ReadOnlySpan<TScalar> queries,
+        int wanted,
+        ulong expansionFactor,
+        TraversalStats? stats,
+        Func<USearchKey, bool>? admits)
+        where TScalar : unmanaged
     {
-        this.CheckIncreaseCapacity(1);
-        GCHandle handle = GCHandle.Alloc(vector, GCHandleType.Pinned);
-        try
+        if (wanted <= 0)
         {
-            IntPtr vectorPtr = handle.AddrOfPinnedObject();
-            usearch_add(this._index, key, vectorPtr, ScalarKind.Float32, out IntPtr error);
-            HandleError(error);
+            throw new USearchException(Status.ShapeMismatch, "the outputs reserve no room for a single match");
         }
-        finally
-        {
-            handle.Free();
-        }
-    }
 
-    /// <summary>
-    /// Adds a vector with a specific key to the index.
-    /// </summary>
-    /// <param name="key">The key associated with the vector.</param>
-    /// <param name="vector">The vector data to be added.</param>
-    public void Add(ulong key, sbyte[] vector)
-    {
-        this.CheckIncreaseCapacity(1);
-        GCHandle handle = GCHandle.Alloc(vector, GCHandleType.Pinned);
-        try
+        ulong dimensions = this.FrozenDimensions();
+        if ((ulong)queries.Length % dimensions != 0)
         {
-            IntPtr vectorPtr = handle.AddrOfPinnedObject();
-            usearch_add(this._index, key, vectorPtr, ScalarKind.Int8, out IntPtr error);
-            HandleError(error);
+            throw new USearchException(
+                Status.ShapeMismatch, "the query rows are not as wide as the index geometry");
         }
-        finally
-        {
-            handle.Free();
-        }
-    }
 
-    /// <summary>
-    /// Adds a vector with a specific key to the index.
-    /// </summary>
-    /// <param name="key">The key associated with the vector.</param>
-    /// <param name="vector">The vector data to be added.</param>
-    public void Add(ulong key, double[] vector)
-    {
-        this.CheckIncreaseCapacity(1);
-        GCHandle handle = GCHandle.Alloc(vector, GCHandleType.Pinned);
-        try
+        ulong queriesCount = (ulong)queries.Length / dimensions;
+        int matches = Extents.CheckedRowMajor(queriesCount, (ulong)wanted, USearchKey.ByteCount, "search output");
+        USearchKey[] keys = new USearchKey[matches];
+        double[] distances = new double[matches];
+        nuint[] counts = new nuint[queriesCount];
+        SearchResults results = new(keys, distances, counts, wanted);
+        if (queriesCount == 0)
         {
-            IntPtr vectorPtr = handle.AddrOfPinnedObject();
-            usearch_add(this._index, key, vectorPtr, ScalarKind.Float64, out IntPtr error);
-            HandleError(error);
+            return results;
         }
-        finally
-        {
-            handle.Free();
-        }
-    }
 
-    /// <summary>
-    /// Adds a vector with a specific key to the index.
-    /// </summary>
-    /// <param name="key">The key associated with the vector.</param>
-    /// <param name="vector">The vector data to be added.</param>
-    public void Add(ulong key, byte[] vector)
-    {
-        this.CheckIncreaseCapacity(1);
-        GCHandle handle = GCHandle.Alloc(vector, GCHandleType.Pinned);
-        try
+        NativeExpansionConfig config = new() { ExpansionFactor = (nuint)expansionFactor };
+        NativeTraversalStats reported = default;
+        nuint keysStride = (nuint)wanted * USearchKey.ByteCount;
+        nuint distancesStride = (nuint)wanted * sizeof(double);
+        AdmissionTrampoline? trampoline = admits is null ? null : new AdmissionTrampoline(admits);
+        NativePredicate? predicate = trampoline is null ? null : trampoline.Admit;
+        fixed (TScalar* queriesPointer = queries)
+        fixed (USearchKey* keysPointer = keys)
+        fixed (double* distancesPointer = distances)
+        fixed (nuint* countsPointer = counts)
         {
-            IntPtr vectorPtr = handle.AddrOfPinnedObject();
-            usearch_add(this._index, key, vectorPtr, ScalarKind.Bits1, out IntPtr error);
-            HandleError(error);
-        }
-        finally
-        {
-            handle.Free();
-        }
-    }
-
-    /// <summary>
-    /// Adds multiple vectors with specific keys to the index.
-    /// </summary>
-    /// <param name="keys">The keys associated with the vectors.</param>
-    /// <param name="vectors">The vector data to be added.</param>
-    public void Add(ulong[] keys, float[][] vectors)
-    {
-        this.CheckIncreaseCapacity((ulong)vectors.Length);
-        for (int i = 0; i < vectors.Length; i++)
-        {
-            GCHandle handle = GCHandle.Alloc(vectors[i], GCHandleType.Pinned);
-            try
+            NativeError error;
+            if (predicate is null)
             {
-                IntPtr vectorPtr = handle.AddrOfPinnedObject();
-                usearch_add(this._index, keys[i], vectorPtr, ScalarKind.Float32, out IntPtr error);
-                HandleError(error);
-            }
-            finally
-            {
-                handle.Free();
-            }
-        }
-    }
-
-    /// <summary>
-    /// Adds multiple vectors with specific keys to the index.
-    /// </summary>
-    /// <param name="keys">The keys associated with the vectors.</param>
-    /// <param name="vectors">The vector data to be added.</param>
-    public void Add(ulong[] keys, sbyte[][] vectors)
-    {
-        this.CheckIncreaseCapacity((ulong)vectors.Length);
-        for (int i = 0; i < vectors.Length; i++)
-        {
-            GCHandle handle = GCHandle.Alloc(vectors[i], GCHandleType.Pinned);
-            try
-            {
-                IntPtr vectorPtr = handle.AddrOfPinnedObject();
-                usearch_add(this._index, keys[i], vectorPtr, ScalarKind.Int8, out IntPtr error);
-                HandleError(error);
-            }
-            finally
-            {
-                handle.Free();
-            }
-        }
-    }
-
-    /// <summary>
-    /// Adds multiple vectors with specific keys to the index.
-    /// </summary>
-    /// <param name="keys">The keys associated with the vectors.</param>
-    /// <param name="vectors">The vector data to be added.</param>
-    public void Add(ulong[] keys, byte[][] vectors)
-    {
-        this.CheckIncreaseCapacity((ulong)vectors.Length);
-        for (int i = 0; i < vectors.Length; i++)
-        {
-            GCHandle handle = GCHandle.Alloc(vectors[i], GCHandleType.Pinned);
-            try
-            {
-                IntPtr vectorPtr = handle.AddrOfPinnedObject();
-                usearch_add(this._index, keys[i], vectorPtr, ScalarKind.Bits1, out IntPtr error);
-                HandleError(error);
-            }
-            finally
-            {
-                handle.Free();
-            }
-        }
-    }
-
-    /// <summary>
-    /// Adds multiple vectors with specific keys to the index.
-    /// </summary>
-    /// <param name="keys">The keys associated with the vectors.</param>
-    /// <param name="vectors">The vector data to be added.</param>
-    public void Add(ulong[] keys, double[][] vectors)
-    {
-        this.CheckIncreaseCapacity((ulong)vectors.Length);
-        for (int i = 0; i < vectors.Length; i++)
-        {
-            GCHandle handle = GCHandle.Alloc(vectors[i], GCHandleType.Pinned);
-            try
-            {
-                IntPtr vectorPtr = handle.AddrOfPinnedObject();
-                usearch_add(this._index, keys[i], vectorPtr, ScalarKind.Float64, out IntPtr error);
-                HandleError(error);
-            }
-            finally
-            {
-                handle.Free();
-            }
-        }
-    }
-
-    /// <summary>
-    /// Retrieves the vector associated with the given key from the index.
-    /// </summary>
-    /// <param name="key">The key of the vector to retrieve.</param>
-    /// <param name="vector">The vector data retrieved from the index.</param>
-    /// <returns>The number of vectors found under that key.</returns>
-    public int Get(ulong key, out float[] vector)
-    {
-        vector = new float[this._cachedDimensions];
-        GCHandle handle = GCHandle.Alloc(vector, GCHandleType.Pinned);
-        try
-        {
-            IntPtr vectorPtr = handle.AddrOfPinnedObject();
-            int foundVectorsCount = checked((int)NativeMethods.usearch_get(this._index, key, (UIntPtr)1, vectorPtr, ScalarKind.Float32, out IntPtr error));
-            HandleError(error);
-            if (foundVectorsCount < 1)
-            {
-                vector = null;
-            }
-
-            return foundVectorsCount;
-        }
-        finally
-        {
-            handle.Free();
-        }
-    }
-
-    /// <summary>
-    /// Retrieves the vector associated with the given key from the index.
-    /// </summary>
-    /// <param name="key">The key of the vector to retrieve.</param>
-    /// <param name="vector">The vector data retrieved from the index.</param>
-    /// <returns>The number of vectors found under that key.</returns>
-    public int Get(ulong key, out sbyte[] vector)
-    {
-        vector = new sbyte[this._cachedDimensions];
-        GCHandle handle = GCHandle.Alloc(vector, GCHandleType.Pinned);
-        try
-        {
-            IntPtr vectorPtr = handle.AddrOfPinnedObject();
-            int foundVectorsCount = checked((int)NativeMethods.usearch_get(this._index, key, (UIntPtr)1, vectorPtr, ScalarKind.Int8, out IntPtr error));
-            HandleError(error);
-            if (foundVectorsCount < 1)
-            {
-                vector = null;
-            }
-
-            return foundVectorsCount;
-        }
-        finally
-        {
-            handle.Free();
-        }
-    }
-
-    /// <summary>
-    /// Retrieves multiple vectors associated with the given key from the index.
-    /// </summary>
-    /// <param name="key">The key of the vectors to retrieve.</param>
-    /// <param name="count">The number of vectors to retrieve.</param>
-    /// <param name="vectors">The vectors data retrieved from the index.</param>
-    /// <returns>The number of vectors found under that key.</returns>
-    public int Get(ulong key, int count, out float[][] vectors)
-    {
-        var flattenVectors = new float[count * (int)this._cachedDimensions];
-        GCHandle handle = GCHandle.Alloc(flattenVectors, GCHandleType.Pinned);
-        try
-        {
-            IntPtr vectorPtr = handle.AddrOfPinnedObject();
-            int foundVectorsCount = checked((int)NativeMethods.usearch_get(this._index, key, (UIntPtr)count, vectorPtr, ScalarKind.Float32, out IntPtr error));
-            HandleError(error);
-            if (foundVectorsCount < 1)
-            {
-                vectors = null;
+                usearch_dense_search(
+                    this.Handle, queriesPointer, (nuint)queriesCount, Scalars.RowBytes<TScalar>(dimensions),
+                    Scalars.KindOf<TScalar>(), (nuint)wanted, &config, &reported,
+                    keysPointer, keysStride, distancesPointer, distancesStride, countsPointer, out error);
             }
             else
             {
-                vectors = new float[foundVectorsCount][];
-                for (int i = 0; i < foundVectorsCount; i++)
-                {
-                    vectors[i] = new float[(int)this._cachedDimensions];
-                    Array.Copy(flattenVectors, i * (int)this._cachedDimensions, vectors[i], 0, (int)this._cachedDimensions);
-                }
+                usearch_dense_search_if(
+                    this.Handle, queriesPointer, (nuint)queriesCount, Scalars.RowBytes<TScalar>(dimensions),
+                    Scalars.KindOf<TScalar>(), (nuint)wanted, &config, &reported, predicate, IntPtr.Zero,
+                    keysPointer, keysStride, distancesPointer, distancesStride, countsPointer, out error);
+                GC.KeepAlive(predicate);
             }
 
-            return foundVectorsCount;
+            trampoline?.Rethrow();
+            error.ThrowIfFailed();
         }
-        finally
-        {
-            handle.Free();
-        }
+
+        stats?.Adopt(reported);
+        return results;
     }
 
-    /// <summary>
-    /// Retrieves multiple vectors associated with the given key from the index.
-    /// </summary>
-    /// <param name="key">The key of the vectors to retrieve.</param>
-    /// <param name="count">The number of vectors to retrieve.</param>
-    /// <param name="vectors">The vectors data retrieved from the index.</param>
-    /// <returns>The number of vectors found under that key.</returns>
-    public int Get(ulong key, int count, out sbyte[][] vectors)
+    /// <summary>Counts the entries stored under a key; zero means the index holds none.</summary>
+    /// <param name="key">The identity to look for.</param>
+    /// <returns>How many entries share that key.</returns>
+    public ulong Count(USearchKey key)
     {
-        var flattenVectors = new sbyte[count * (int)this._cachedDimensions];
-        GCHandle handle = GCHandle.Alloc(flattenVectors, GCHandleType.Pinned);
-        try
-        {
-            IntPtr vectorPtr = handle.AddrOfPinnedObject();
-            int foundVectorsCount = checked((int)NativeMethods.usearch_get(this._index, key, (UIntPtr)count, vectorPtr, ScalarKind.Int8, out IntPtr error));
-            HandleError(error);
-            if (foundVectorsCount < 1)
-            {
-                vectors = null;
-            }
-            else
-            {
-                vectors = new sbyte[foundVectorsCount][];
-                for (int i = 0; i < foundVectorsCount; i++)
-                {
-                    vectors[i] = new sbyte[(int)this._cachedDimensions];
-                    Array.Copy(flattenVectors, i * (int)this._cachedDimensions, vectors[i], 0, (int)this._cachedDimensions);
-                }
-            }
+        nuint counted = usearch_dense_count(this.Handle, key, out NativeError error);
+        error.ThrowIfFailed();
+        return counted;
+    }
 
-            return foundVectorsCount;
-        }
-        finally
+    /// <summary>Reports whether the index holds at least one entry under a key.</summary>
+    /// <param name="key">The identity to look for.</param>
+    /// <returns>True when the index holds one or more.</returns>
+    public bool Contains(USearchKey key) => this.Count(key) != 0;
+
+    /// <summary>
+    /// Retrieves the vectors stored under a key into a row-major matrix, one row per entry sharing
+    /// the key, in insertion order.
+    /// </summary>
+    /// <typeparam name="TScalar">The element type to export as.</typeparam>
+    /// <param name="key">The identity to look for.</param>
+    /// <param name="vectors">The rows to fill, packed end to end.</param>
+    /// <returns>The true number of entries, never the number written: a count above the matrix's
+    /// row capacity means the copy was truncated, so size for that many and call again.</returns>
+    public ulong Get<TScalar>(USearchKey key, Span<TScalar> vectors) where TScalar : unmanaged
+    {
+        ulong dimensions = this.FrozenDimensions();
+        if ((ulong)vectors.Length % dimensions != 0)
         {
-            handle.Free();
+            throw new USearchException(
+                Status.ShapeMismatch, "the output rows are not as wide as the index geometry");
         }
+
+        nuint entries;
+        fixed (TScalar* vectorsPointer = vectors)
+        {
+            entries = usearch_dense_get(
+                this.Handle, key, vectorsPointer, (nuint)((ulong)vectors.Length / dimensions),
+                Scalars.RowBytes<TScalar>(dimensions), Scalars.KindOf<TScalar>(), out NativeError error);
+            error.ThrowIfFailed();
+        }
+
+        return entries;
     }
 
     /// <summary>
-    /// Retrieves the vector associated with the given key from the index.
+    /// Absorbs a donor index - cheaper than re-inserting its vectors one by one, wiring
+    /// cross-links via landmark stitching. Readers of this index may keep searching throughout,
+    /// since unpublished rows hide behind the watermark.
     /// </summary>
-    /// <param name="key">The key of the vector to retrieve.</param>
-    /// <param name="vector">The vector data retrieved from the index.</param>
-    /// <returns>The number of vectors found under that key.</returns>
-    public int Get(ulong key, out double[] vector)
+    /// <remarks>
+    /// The donor is consumed whether the call succeeds or fails: the C side owns it afterwards, so
+    /// the donor handle is emptied here and its own <see cref="Dispose"/> becomes a no-op. The
+    /// donor demands exclusive ownership for the duration - any concurrent verb on it, from any
+    /// thread, is a use-after-free.
+    /// </remarks>
+    /// <param name="donor">The index to absorb.</param>
+    public void Merge(USearchIndex donor)
     {
-        vector = new double[this._cachedDimensions];
-        GCHandle handle = GCHandle.Alloc(vector, GCHandleType.Pinned);
-        try
+        if (donor is null || donor._handle == IntPtr.Zero)
         {
-            IntPtr vectorPtr = handle.AddrOfPinnedObject();
-            int foundVectorsCount = checked((int)NativeMethods.usearch_get(this._index, key, (UIntPtr)1, vectorPtr, ScalarKind.Float64, out IntPtr error));
-            HandleError(error);
-            if (foundVectorsCount < 1)
-            {
-                vector = null;
-            }
+            throw new USearchException(Status.Uninitialized, "the donor index is disposed or was never initialized");
+        }
 
-            return foundVectorsCount;
-        }
-        finally
+        IntPtr consumed = Interlocked.Exchange(ref donor._handle, IntPtr.Zero);
+        usearch_dense_merge(this.Handle, consumed, out NativeError error);
+        error.ThrowIfFailed();
+    }
+
+    /// <summary>Opens a snapshot cursor over the current contents.</summary>
+    /// <returns>The cursor, which the caller disposes.</returns>
+    public USearchCursor Snapshot()
+    {
+        IntPtr cursor = usearch_dense_cursor(this.Handle, out NativeError error);
+        error.ThrowIfFailed();
+        if (cursor == IntPtr.Zero)
         {
-            handle.Free();
+            throw new USearchException(Status.Internal, "the library returned no cursor and no error");
         }
+
+        return new USearchCursor(cursor, this.Dimensions());
+    }
+
+    /// <summary>Opens a resumable nearest-neighbor stream for one query.</summary>
+    /// <typeparam name="TScalar">The element type of the query row.</typeparam>
+    /// <param name="query">The query's scalars, one row wide.</param>
+    /// <returns>The finder, which the caller disposes.</returns>
+    public USearchFinder Find<TScalar>(ReadOnlySpan<TScalar> query) where TScalar : unmanaged
+    {
+        ulong dimensions = this.FrozenDimensions();
+        if ((ulong)query.Length != dimensions)
+        {
+            throw new USearchException(Status.ShapeMismatch, "the query row is not as wide as the index geometry");
+        }
+
+        IntPtr finder;
+        fixed (TScalar* queryPointer = query)
+        {
+            finder = usearch_dense_find(this.Handle, queryPointer, Scalars.KindOf<TScalar>(), out NativeError error);
+            error.ThrowIfFailed();
+        }
+
+        if (finder == IntPtr.Zero)
+        {
+            throw new USearchException(Status.Internal, "the library returned no finder and no error");
+        }
+
+        return new USearchFinder(finder);
     }
 
     /// <summary>
-    /// Retrieves multiple vectors associated with the given key from the index.
+    /// Writes the index under a path, in the layout its extension picks - one <c>.safegraphs</c>
+    /// monolith, or a <c>.safegraphs.json</c> manifest beside its shards. Demands a mutation-free
+    /// window; concurrent readers keep searching throughout.
     /// </summary>
-    /// <param name="key">The key of the vectors to retrieve.</param>
-    /// <param name="count">The number of vectors to retrieve.</param>
-    /// <param name="vectors">The vectors data retrieved from the index.</param>
-    /// <returns>The number of vectors found under that key.</returns>
-    public int Get(ulong key, int count, out double[][] vectors)
+    /// <param name="path">Where the checkpoint is written.</param>
+    public void Save(string path)
     {
-        var flattenVectors = new double[count * (int)this._cachedDimensions];
-        GCHandle handle = GCHandle.Alloc(flattenVectors, GCHandleType.Pinned);
-        try
+        byte[] encoded = EncodePath(path);
+        fixed (byte* data = encoded)
         {
-            IntPtr vectorPtr = handle.AddrOfPinnedObject();
-            int foundVectorsCount = checked((int)NativeMethods.usearch_get(this._index, key, (UIntPtr)count, vectorPtr, ScalarKind.Float64, out IntPtr error));
-            HandleError(error);
-            if (foundVectorsCount < 1)
-            {
-                vectors = null;
-            }
-            else
-            {
-                vectors = new double[foundVectorsCount][];
-                for (int i = 0; i < foundVectorsCount; i++)
-                {
-                    vectors[i] = new double[(int)this._cachedDimensions];
-                    Array.Copy(flattenVectors, i * (int)this._cachedDimensions, vectors[i], 0, (int)this._cachedDimensions);
-                }
-            }
-
-            return foundVectorsCount;
-        }
-        finally
-        {
-            handle.Free();
-        }
-    }
-
-    /// <summary>
-    /// Searches for the closest vectors to the query vector.
-    /// </summary>
-    /// <param name="queryVector">The query vector data.</param>
-    /// <param name="count">The number of nearest neighbors to search.</param>
-    /// <param name="keys">The keys of the nearest neighbors found.</param>
-    /// <param name="distances">The distances to the nearest neighbors found.</param>
-    /// <param name="scalarKind">The scalar type used in the query vector data.</param>
-    /// <returns>The number of matches found.</returns>
-    private int Search<T>(T[] queryVector, int count, out ulong[] keys, out float[] distances, ScalarKind scalarKind)
-    {
-        keys = new ulong[count];
-        distances = new float[count];
-
-        GCHandle handle = GCHandle.Alloc(queryVector, GCHandleType.Pinned);
-        GCHandle keysHandle = GCHandle.Alloc(keys, GCHandleType.Pinned);
-        GCHandle distancesHandle = GCHandle.Alloc(distances, GCHandleType.Pinned);
-        try
-        {
-            IntPtr queryVectorPtr = handle.AddrOfPinnedObject();
-            IntPtr keysPtr = keysHandle.AddrOfPinnedObject();
-            IntPtr distancesPtr = distancesHandle.AddrOfPinnedObject();
-            int matches = checked((int)NativeMethods.usearch_search(this._index, queryVectorPtr, scalarKind, (UIntPtr)count, keysPtr, distancesPtr, out IntPtr error));
-            HandleError(error);
-
-            if (matches < count)
-            {
-                Array.Resize(ref keys, matches);
-                Array.Resize(ref distances, matches);
-            }
-
-            return matches;
-        }
-        finally
-        {
-            handle.Free();
-            keysHandle.Free();
-            distancesHandle.Free();
+            usearch_dense_save(this.Handle, Borrow(data, encoded.Length), out NativeError error);
+            error.ThrowIfFailed();
         }
     }
 
     /// <summary>
-    /// Searches for the closest vectors to the query vector.
+    /// Reads a checkpoint into this handle, shard by shard, with the handle's residency deciding
+    /// the behavior: materialize into RAM, upload to the device, or open in place on disk. A
+    /// handle whose geometry was left zeroed freezes it here, from the checkpoint's own headers.
     /// </summary>
-    /// <param name="queryVector">The query vector data.</param>
-    /// <param name="count">The number of nearest neighbors to search.</param>
-    /// <param="keys">The keys of the nearest neighbors found.</param>
-    /// <param name="distances">The distances to the nearest neighbors found.</param>
-    /// <returns>The number of matches found.</returns>
-    public int Search(float[] queryVector, int count, out ulong[] keys, out float[] distances)
+    /// <param name="path">Where the checkpoint is read from.</param>
+    public void Load(string path)
     {
-        return this.Search(queryVector, count, out keys, out distances, ScalarKind.Float32);
-    }
-
-    /// <summary>
-    /// Searches for the closest vectors to the query vector.
-    /// </summary>
-    /// <param name="queryVector">The query vector data.</param>
-    /// <param name="count">The number of nearest neighbors to search.</param>
-    /// <param="keys">The keys of the nearest neighbors found.</param>
-    /// <param name="distances">The distances to the nearest neighbors found.</param>
-    /// <returns>The number of matches found.</returns>
-    public int Search(sbyte[] queryVector, int count, out ulong[] keys, out float[] distances)
-    {
-        return this.Search(queryVector, count, out keys, out distances, ScalarKind.Int8);
-    }
-
-    /// <summary>
-    /// Searches for the closest vectors to the query vector.
-    /// </summary>
-    /// <param name="queryVector">The query vector data.</param>
-    /// <param="count">The number of nearest neighbors to search.</param>
-    /// <param="keys">The keys of the nearest neighbors found.</param>
-    /// <param="distances">The distances to the nearest neighbors found.</param>
-    /// <returns>The number of matches found.</returns>
-    public int Search(double[] queryVector, int count, out ulong[] keys, out float[] distances)
-    {
-        return this.Search(queryVector, count, out keys, out distances, ScalarKind.Float64);
-    }
-
-    /// <summary>
-    /// Removes the vector associated with the given key from the index.
-    /// </summary>
-    /// <param name="key">The key of the vector to be removed.</param>
-    /// <returns>The number of vectors removed.</returns>
-    public int Remove(ulong key)
-    {
-        int removedCount = checked((int)usearch_remove(this._index, key, out IntPtr error));
-        HandleError(error);
-        return removedCount;
-    }
-
-    /// <summary>
-    /// Renames the vector to map to a different key.
-    /// </summary>
-    /// <param name="keyFrom">The current key of the vector.</param>
-    /// <param name="keyTo">The new key for the vector.</param>
-    /// <returns>The number of vectors renamed.</returns>
-    public int Rename(ulong keyFrom, ulong keyTo)
-    {
-        int foundVectorsCount = checked((int)usearch_rename(this._index, keyFrom, keyTo, out IntPtr error));
-        HandleError(error);
-        return foundVectorsCount;
-    }
-
-    /// <summary>
-    /// Handles errors by throwing a USearchException if the error pointer is not null.
-    /// </summary>
-    /// <param name="error">The error pointer returned by USearch functions.</param>
-    private static void HandleError(IntPtr error)
-    {
-        if (error != IntPtr.Zero)
+        byte[] encoded = EncodePath(path);
+        fixed (byte* data = encoded)
         {
-            throw new USearchException($"USearch operation failed: {Marshal.PtrToStringAnsi(error)}");
+            usearch_dense_load(this.Handle, Borrow(data, encoded.Length), out NativeError error);
+            error.ThrowIfFailed();
         }
     }
 
     /// <summary>
-    /// Frees the resources associated with the index.
+    /// Writes the index into a caller-owned buffer as one monolith. Size the buffer with
+    /// <see cref="SerializedLength"/>.
     /// </summary>
-    private void FreeIndex()
+    /// <param name="buffer">The bytes to write into.</param>
+    public void SaveToBuffer(Span<byte> buffer)
     {
-        if (this._index != IntPtr.Zero)
+        if (buffer.IsEmpty)
         {
-            usearch_free(this._index, out IntPtr error);
-            HandleError(error);
-            this._index = IntPtr.Zero;
+            throw new USearchException(Status.ShapeMismatch, "the buffer is empty");
+        }
+
+        fixed (byte* target = buffer)
+        {
+            usearch_dense_save_buffer(this.Handle, target, (nuint)buffer.Length, out NativeError error);
+            error.ThrowIfFailed();
         }
     }
 
     /// <summary>
-    /// Performs application-defined tasks associated with freeing, releasing, or resetting unmanaged resources.
+    /// Reads a monolith from a buffer into this handle, with the residency deciding the behavior
+    /// like <see cref="Load"/>. A residency that opens in place demands the buffer outlive the
+    /// handle.
     /// </summary>
+    /// <param name="buffer">The monolith's bytes.</param>
+    public void LoadFromBuffer(ReadOnlySpan<byte> buffer)
+    {
+        if (buffer.IsEmpty)
+        {
+            throw new USearchException(Status.MalformedInput, "the buffer is empty");
+        }
+
+        fixed (byte* source = buffer)
+        {
+            usearch_dense_load_buffer(this.Handle, source, (nuint)buffer.Length, out NativeError error);
+            error.ThrowIfFailed();
+        }
+    }
+
+    /// <summary>Releases the index. Freeing cannot fail, and a freed handle must not be used.</summary>
     public void Dispose()
     {
-        this.Dispose(true);
+        IntPtr released = Interlocked.Exchange(ref this._handle, IntPtr.Zero);
+        if (released != IntPtr.Zero)
+        {
+            usearch_dense_free(released);
+        }
+
         GC.SuppressFinalize(this);
     }
 
+    /// <summary>Releases the index when the caller forgot to.</summary>
+    ~USearchIndex() => this.Dispose();
+
+    private IntPtr Handle => this._handle != IntPtr.Zero
+        ? this._handle
+        : throw new USearchException(Status.Uninitialized, "the index is disposed or was consumed by a merge");
+
     /// <summary>
-    /// Releases the unmanaged resources used by the USearchIndex and optionally releases the managed resources.
+    /// Reports the frozen width, refusing the verbs that cannot be shaped without one. A zeroed
+    /// geometry is legal until a checkpoint freezes it, and every extent derived from it is zero.
     /// </summary>
-    /// <param name="disposing">If true, release both managed and unmanaged resources; otherwise, release only unmanaged resources.</param>
-    protected virtual void Dispose(bool disposing)
+    private ulong FrozenDimensions()
     {
-        if (!this._disposedValue)
+        ulong dimensions = this.Dimensions();
+        if (dimensions == 0)
         {
-            this.FreeIndex();
-            this._disposedValue = true;
+            throw new USearchException(
+                Status.Uninitialized,
+                "the geometry is not frozen: construct with dimensions, or load a checkpoint that carries them");
+        }
+
+        return dimensions;
+    }
+
+    private static byte[] EncodePath(string path)
+    {
+        if (string.IsNullOrEmpty(path))
+        {
+            throw new USearchException(Status.MalformedInput, "the path is empty");
+        }
+
+        return Encoding.UTF8.GetBytes(path);
+    }
+
+    private static NativeString Borrow(byte* data, int length) =>
+        new() { Data = (IntPtr)data, Length = (nuint)length };
+
+    /// <summary>
+    /// Holds a managed predicate the engine calls from its own worker threads, and the first
+    /// exception it threw. A managed exception must not unwind through native frames, so it is
+    /// captured here and raised once the call has returned.
+    /// </summary>
+    private sealed class AdmissionTrampoline
+    {
+        private readonly Func<USearchKey, bool> _admits;
+        private Exception? _escaped;
+
+        internal AdmissionTrampoline(Func<USearchKey, bool> admits) => this._admits = admits;
+
+        internal int Admit(USearchKey key, IntPtr state)
+        {
+            if (Volatile.Read(ref this._escaped) is not null)
+            {
+                return 0;
+            }
+
+            try
+            {
+                return this._admits(key) ? 1 : 0;
+            }
+            // Every exception is caught on purpose: this frame is called from a native worker
+            // thread, and unwinding through native frames terminates the process.
+#pragma warning disable CA1031
+            catch (Exception failure)
+#pragma warning restore CA1031
+            {
+                Interlocked.CompareExchange(ref this._escaped, failure, null);
+                return 0;
+            }
+        }
+
+        internal void Rethrow()
+        {
+            if (this._escaped is Exception failure)
+            {
+                throw new USearchException(Status.Internal, "the admission predicate threw", failure);
+            }
         }
     }
+}
 
+#endregion Index
 
-    /// <summary>
-    /// Returns the SIMD capability used by this index.
-    /// </summary>
-    public string HardwareAcceleration()
+#region Cursor & Finder
+
+/// <summary>
+/// A consistent snapshot cursor over the index contents. It captures the publication watermark at
+/// creation, so concurrent inserts never appear mid-iteration, and the walk is a sequential row
+/// scan - export, migration, and visualization feed off it.
+/// </summary>
+public sealed unsafe class USearchCursor : IDisposable
+{
+    private IntPtr _handle;
+    private readonly ulong _dimensions;
+
+    internal USearchCursor(IntPtr handle, ulong dimensions)
     {
-        var ptr = NativeMethods.usearch_hardware_acceleration(_index, out var error);
-        HandleError(error);
-        return Marshal.PtrToStringAnsi(ptr) ?? "serial";
+        this._handle = handle;
+        this._dimensions = dimensions;
     }
 
-    /// <summary>
-    /// Destructor for the USearchIndex class.
-    /// </summary>
-    ~USearchIndex() => this.Dispose(false);
+    /// <summary>Copies the next batch of keys out of the snapshot, skipping the vectors.</summary>
+    /// <param name="keys">The keys to fill.</param>
+    /// <returns>How many rows were written; zero when the snapshot is exhausted.</returns>
+    public int Next(Span<USearchKey> keys)
+    {
+        nuint written;
+        fixed (USearchKey* keysPointer = keys)
+        {
+            written = NativeMethods.usearch_dense_cursor_next(
+                this.Handle, keysPointer, null, (nuint)keys.Length, 0, ScalarKind.Unknown, out NativeError error);
+            error.ThrowIfFailed();
+        }
+
+        return (int)written;
+    }
+
+    /// <summary>Copies the next batch of keys and vectors out of the snapshot.</summary>
+    /// <typeparam name="TScalar">The element type to export vectors as.</typeparam>
+    /// <param name="keys">The keys to fill.</param>
+    /// <param name="vectors">The rows to fill, packed end to end, one per key.</param>
+    /// <returns>How many rows were written; zero when the snapshot is exhausted.</returns>
+    public int Next<TScalar>(Span<USearchKey> keys, Span<TScalar> vectors) where TScalar : unmanaged
+    {
+        if (this._dimensions == 0)
+        {
+            throw new USearchException(Status.Uninitialized, "the geometry is not frozen, so a row has no width");
+        }
+
+        int rows = Extents.CheckedRowMajor(
+            (ulong)keys.Length, this._dimensions, (ulong)sizeof(TScalar), "cursor output");
+        if (vectors.Length < rows)
+        {
+            throw new USearchException(Status.ShapeMismatch, "the vector rows do not cover every requested key");
+        }
+
+        nuint written;
+        fixed (USearchKey* keysPointer = keys)
+        fixed (TScalar* vectorsPointer = vectors)
+        {
+            written = NativeMethods.usearch_dense_cursor_next(
+                this.Handle, keysPointer, vectorsPointer, (nuint)keys.Length,
+                Scalars.RowBytes<TScalar>(this._dimensions), Scalars.KindOf<TScalar>(),
+                out NativeError error);
+            error.ThrowIfFailed();
+        }
+
+        return (int)written;
+    }
+
+    /// <summary>Releases the cursor. Freeing cannot fail, and a freed cursor must not be used.</summary>
+    public void Dispose()
+    {
+        IntPtr released = Interlocked.Exchange(ref this._handle, IntPtr.Zero);
+        if (released != IntPtr.Zero)
+        {
+            NativeMethods.usearch_dense_cursor_free(released);
+        }
+
+        GC.SuppressFinalize(this);
+    }
+
+    /// <summary>Releases the cursor when the caller forgot to.</summary>
+    ~USearchCursor() => this.Dispose();
+
+    private IntPtr Handle => this._handle != IntPtr.Zero
+        ? this._handle
+        : throw new USearchException(Status.Uninitialized, "the cursor is disposed");
 }
 
 /// <summary>
-/// System-wide hardware capability queries — not tied to any index instance.
+/// A resumable nearest-neighbor stream: best-first traversal is naturally pausable, so the finder
+/// owns a live frontier and visited set and yields matches lazily. Callers that post-filter
+/// aggressively pull until satisfied instead of guessing "k" upfront, and each open finder pins
+/// one traversal context's memory - dispose it promptly.
+/// </summary>
+public sealed unsafe class USearchFinder : IDisposable
+{
+    private IntPtr _handle;
+
+    internal USearchFinder(IntPtr handle) => this._handle = handle;
+
+    /// <summary>
+    /// Pulls the next matches from the stream. Ordering beyond the expansion horizon is
+    /// best-effort nearest, not globally exact.
+    /// </summary>
+    /// <param name="keys">The keys to fill.</param>
+    /// <param name="distances">The distances to fill, positionally paired with the keys.</param>
+    /// <returns>How many matches were written; zero when the traversal is drained.</returns>
+    public int Next(Span<USearchKey> keys, Span<double> distances)
+    {
+        int wanted = Math.Min(keys.Length, distances.Length);
+        nuint written;
+        fixed (USearchKey* keysPointer = keys)
+        fixed (double* distancesPointer = distances)
+        {
+            written = NativeMethods.usearch_dense_find_next(
+                this.Handle, keysPointer, distancesPointer, (nuint)wanted, out NativeError error);
+            error.ThrowIfFailed();
+        }
+
+        return (int)written;
+    }
+
+    /// <summary>Releases the finder and the traversal context it pinned.</summary>
+    public void Dispose()
+    {
+        IntPtr released = Interlocked.Exchange(ref this._handle, IntPtr.Zero);
+        if (released != IntPtr.Zero)
+        {
+            NativeMethods.usearch_dense_find_free(released);
+        }
+
+        GC.SuppressFinalize(this);
+    }
+
+    /// <summary>Releases the finder when the caller forgot to.</summary>
+    ~USearchFinder() => this.Dispose();
+
+    private IntPtr Handle => this._handle != IntPtr.Zero
+        ? this._handle
+        : throw new USearchException(Status.Uninitialized, "the finder is disposed");
+}
+
+#endregion Cursor & Finder
+
+#region Introspection
+
+/// <summary>
+/// Library-wide probes, tied to no index instance.
 /// </summary>
 public static class USearchCapabilities
 {
-    /// <summary>
-    /// Returns the USearch library version string.
-    /// </summary>
-    public static string Version()
-    {
-        var ptr = NativeMethods.usearch_version();
-        return Marshal.PtrToStringAnsi(ptr) ?? "unknown";
-    }
+    /// <summary>Reports the version of the linked library.</summary>
+    /// <returns>The version string.</returns>
+    public static string Version() => Marshal.PtrToStringAnsi(NativeMethods.usearch_version()) ?? "unknown";
 
     /// <summary>
-    /// Returns a comma-separated list of ISAs compiled into this binary.
+    /// Lists the hardware capabilities the linked binary was compiled with, comma separated.
     /// </summary>
-    public static string HardwareAccelerationCompiled()
-    {
-        var ptr = NativeMethods.usearch_hardware_acceleration_compiled();
-        return Marshal.PtrToStringAnsi(ptr) ?? "serial";
-    }
+    /// <returns>The capability names.</returns>
+    public static string CapabilitiesCompiled() =>
+        Marshal.PtrToStringAnsi(NativeMethods.usearch_capabilities_compiled()) ?? "serial";
 
     /// <summary>
-    /// Returns a comma-separated list of ISAs available at runtime.
+    /// Lists the hardware capabilities the current machine offers at runtime, comma separated.
     /// </summary>
-    public static string HardwareAccelerationAvailable()
-    {
-        var ptr = NativeMethods.usearch_hardware_acceleration_available();
-        return Marshal.PtrToStringAnsi(ptr) ?? "serial";
-    }
+    /// <returns>The capability names.</returns>
+    public static string CapabilitiesAvailable() =>
+        Marshal.PtrToStringAnsi(NativeMethods.usearch_capabilities_available()) ?? "serial";
 }
+
+#endregion Introspection
