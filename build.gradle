@@ -78,6 +78,13 @@ spotless {
     // }
 }
 
+// The JNI boundary compiles against `include/usearch/*.h` alone - flat C headers with no
+// submodule of their own - and links the pre-instantiated `usearch_c` shared library, which
+// CMake builds with `-DUSEARCH_BUILD_LIB_C=1`. Point `usearchLibraryPath` at the directory
+// holding it; nothing here instantiates an index template, so no NumKong, ForkUnion, or
+// StringZilla header is reachable from this translation unit.
+ext.usearchLibraryPath = (findProperty("usearchLibraryPath") ?: "$rootDir/build_release").toString()
+
 model {
 
     components {
@@ -86,20 +93,11 @@ model {
             sources {
                 cpp {
                     source {
-                        srcDirs "java/cloud/unum/usearch"
-                        include "**/*.cpp"
+                        srcDirs "java"
+                        include "*.cpp"
                     }
                     exportedHeaders {
-                        srcDirs "include", "fp16/include", "simsimd/include", "${Jvm.current().javaHome}/include"
-                    }
-                }
-                c {
-                    source {
-                        srcDirs "simsimd/c/"
-                        include "**/*.c"
-                    }
-                    exportedHeaders {
-                        srcDirs "simsimd/include"
+                        srcDirs "include", "${Jvm.current().javaHome}/include"
                     }
                 }
             }
@@ -107,77 +105,28 @@ model {
                 buildable = false
             }
             binaries.withType(SharedLibraryBinarySpec) {
-                cppCompiler.args '-DUSEARCH_USE_FP16LIB=1'
-                cppCompiler.args '-DUSEARCH_USE_SIMSIMD=1'
-                cppCompiler.args '-DSIMSIMD_DYNAMIC_DISPATCH=1'
-                cppCompiler.args '-DSIMSIMD_NATIVE_BF16=0'
-                cppCompiler.args '-DSIMSIMD_NATIVE_F16=0'
-
-                if (targetPlatform.operatingSystem.linux) {
-                    cppCompiler.args '-I', "${Jvm.current().javaHome}/include/linux"
-                    cppCompiler.args '-D_FILE_OFFSET_BITS=64'
-                    cppCompiler.args '-std=c++17'
-                    cppCompiler.args '-O2'
-                    cppCompiler.args '-ffast-math'
-                    cppCompiler.args '-Wno-unknown-pragmas'
-
-                    // x86_64 targets for Linux CI
-                    cppCompiler.args '-DSIMSIMD_TARGET_HASWELL=1'
-                    cppCompiler.args '-DSIMSIMD_TARGET_SKYLAKE=1'
-                    cppCompiler.args '-DSIMSIMD_TARGET_ICE=1'
-                    cppCompiler.args '-DSIMSIMD_TARGET_GENOA=1'
-                    cppCompiler.args '-DSIMSIMD_TARGET_SAPPHIRE=1'
-                    cppCompiler.args '-DSIMSIMD_TARGET_TURIN=0'
-                    cppCompiler.args '-DSIMSIMD_TARGET_SIERRA=0'
-
-                    // ARM targets for Linux ARM64 builds
-                    cppCompiler.args '-DSIMSIMD_TARGET_NEON=1'
-                    cppCompiler.args '-DSIMSIMD_TARGET_NEON_BF16=1'
-                    cppCompiler.args '-DSIMSIMD_TARGET_NEON_F16=1'
-                    cppCompiler.args '-DSIMSIMD_TARGET_NEON_I8=1'
-                    cppCompiler.args '-DSIMSIMD_TARGET_SVE=1'
-                    cppCompiler.args '-DSIMSIMD_TARGET_SVE_BF16=1'
-                    cppCompiler.args '-DSIMSIMD_TARGET_SVE_F16=1'
-                    cppCompiler.args '-DSIMSIMD_TARGET_SVE_I8=1'
-                    cppCompiler.args '-DSIMSIMD_TARGET_SVE2=1'
-
-                } else if (targetPlatform.operatingSystem.macOsX) {
-                    cppCompiler.args '-I', "${Jvm.current().javaHome}/include/darwin"
-                    cppCompiler.args '-D_FILE_OFFSET_BITS=64'
-                    cppCompiler.args '-mmacosx-version-min=10.15'
-                    cppCompiler.args '-std=c++17'
-                    cppCompiler.args '-O2'
-                    cppCompiler.args '-ffast-math'
-                    cppCompiler.args '-Wno-unknown-pragmas'
-
-                    // ARM targets for Apple Silicon (M1/M2/M3/M4)
-                    cppCompiler.args '-DSIMSIMD_TARGET_NEON=1'
-                    cppCompiler.args '-DSIMSIMD_TARGET_NEON_BF16=1'
-                    cppCompiler.args '-DSIMSIMD_TARGET_NEON_F16=1'
-                    cppCompiler.args '-DSIMSIMD_TARGET_NEON_I8=1'
-
-                    // x86_64 targets for Intel Macs
-                    cppCompiler.args '-DSIMSIMD_TARGET_HASWELL=1'
-
-                } else if (targetPlatform.operatingSystem.windows) {
+                if (targetPlatform.operatingSystem.windows) {
                     cppCompiler.args "-I${Jvm.current().javaHome}/include/win32"
-                    cppCompiler.args '/std:c++17'
+                    cppCompiler.args '/std:c++20'
                     cppCompiler.args '/O2'
-                    cppCompiler.args '/fp:fast'
                     cppCompiler.args '/W1'
-
-                } else if (targetPlatform.name.contains("android")) {
-                    // Android support - similar to macOS ARM settings
-                    cppCompiler.args '-std=c++17'
+                    linker.args "/LIBPATH:${project.ext.usearchLibraryPath}", 'usearch_c.lib'
+                } else {
+                    if (targetPlatform.operatingSystem.macOsX) {
+                        cppCompiler.args '-I', "${Jvm.current().javaHome}/include/darwin"
+                        cppCompiler.args '-mmacosx-version-min=11.0'
+                    } else if (targetPlatform.operatingSystem.linux) {
+                        cppCompiler.args '-I', "${Jvm.current().javaHome}/include/linux"
+                    }
+                    cppCompiler.args '-D_FILE_OFFSET_BITS=64'
+                    cppCompiler.args '-std=c++20'
                     cppCompiler.args '-O2'
-                    cppCompiler.args '-ffast-math'
+                    cppCompiler.args '-fPIC'
+                    cppCompiler.args '-fexceptions'
                     cppCompiler.args '-Wno-unknown-pragmas'
-
-                    // ARM targets for Android devices
-                    cppCompiler.args '-DSIMSIMD_TARGET_NEON=1'
-                    cppCompiler.args '-DSIMSIMD_TARGET_NEON_BF16=1'
-                    cppCompiler.args '-DSIMSIMD_TARGET_NEON_F16=1'
-                    cppCompiler.args '-DSIMSIMD_TARGET_NEON_I8=1'
+                    linker.args '-L', project.ext.usearchLibraryPath.toString()
+                    linker.args '-lusearch_c'
+                    linker.args "-Wl,-rpath,${project.ext.usearchLibraryPath}"
                 }
             }
         }
@@ -202,6 +151,18 @@ test {
 
     // Rearrange test classpath, add compiled JAR instead of main classes
     classpath = project.sourceSets.test.output + configurations.testRuntimeClasspath + files(jar.archiveFile)
+
+    // The JNI library is found on the library path, and the pre-instantiated library it links
+    // through the loader path beside it.
+    def nativeDirectory = file("$buildDir/libs/usearch/shared")
+    systemProperty "java.library.path",
+        [nativeDirectory.absolutePath, project.ext.usearchLibraryPath].join(File.pathSeparator)
+    environment "LD_LIBRARY_PATH",
+        [nativeDirectory.absolutePath, project.ext.usearchLibraryPath, System.getenv("LD_LIBRARY_PATH") ?: ""]
+            .findAll { it }.join(File.pathSeparator)
+    environment "DYLD_LIBRARY_PATH",
+        [nativeDirectory.absolutePath, project.ext.usearchLibraryPath, System.getenv("DYLD_LIBRARY_PATH") ?: ""]
+            .findAll { it }.join(File.pathSeparator)
 
     // Enable detailed test logging
     testLogging {
