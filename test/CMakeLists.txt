@@ -5,7 +5,7 @@ add_executable(
     usearch_test
     test.cpp
     dense.cpp
-    utilities/ram_queue.cpp
+    utilities/ram_buffers.cpp
     dense/ram_metric_f64.cpp
     dense/ram_metric_f32.cpp
     dense/ram_metric_bf16.cpp
@@ -33,7 +33,7 @@ target_include_directories(usearch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(usearch_test PRIVATE fmt::fmt)
 add_test(NAME usearch_test COMMAND usearch_test)
 
-# The core tier's proof: types.hpp, ram_queue.hpp & utilities/ram_hints.hpp compile with the
+# The core tier's proof: types.hpp, ram_buffers.hpp, ram_tables.hpp & utilities/ram_hints.hpp compile with the
 # standard library alone - only -Iinclude, no submodule paths, no third-party targets.
 add_executable(usearch_test_core core.cpp)
 target_include_directories(usearch_test_core PRIVATE ${PROJECT_SOURCE_DIR}/include)

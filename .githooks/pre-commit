@@ -278,6 +278,25 @@ check_iterator_laundering() {
         "$file launders an iterator through &* - use the container's data() or address the element:"
 }
 
+# The dependency-free core: include/usearch/utilities/ and include/usearch/basic/ ship as a
+# standalone header-only library - standard-library & OS headers only, no submodules. Angle
+# includes of sibling & third-party libraries are banned outright, and quoted includes may only
+# name headers inside the same two directories.
+check_dependency_free_core() {
+    local foreign
+    foreign=$(printf '%s\n' "$added" | grep -E \
+        '#[[:space:]]*include[[:space:]]*<(numkong|forkunion|stringzilla|smashtable|yyjson|fmt|benchmark|cuda|thrust|cub)[/.>]' || true)
+    [ -z "$foreign" ] || fail "$foreign" \
+        "$file lives in the dependency-free core (utilities/ + basic/) but includes a" \
+        "            sibling or third-party library - standard & OS headers only:"
+    local quoted
+    quoted=$(printf '%s\n' "$added" | grep -E '#[[:space:]]*include[[:space:]]*"' |
+        grep -vE '"usearch/(utilities|basic)/' || true)
+    [ -z "$quoted" ] || fail "$quoted" \
+        "$file lives in the dependency-free core (utilities/ + basic/) but quotes a header" \
+        "            outside those two directories:"
+}
+
 # CI workflows - every job and every step carries a `name:`. An unnamed step renders as its raw
 # command in the Actions UI, and job names are what branch protection's required checks reference,
 # so an anonymous one can't be pinned. Names are structure, not lines, so unlike the checks above
@@ -321,6 +340,9 @@ check_workflow_names() {
 while IFS= read -r -d '' file; do
     added=$(git diff --cached --unified=0 -- "$file" | grep '^+' | grep -v '^+++' || true)
     case "$file" in
+    include/usearch/utilities/* | include/usearch/basic/*)
+        check_dependency_free_core
+        ;;&
     *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.cu | *.cuh)
         check_ascii_arrows
         check_backward_references

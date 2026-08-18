@@ -145,12 +145,12 @@ concept cuda_reservable_allocator = requires(allocator_ allocator, std::size_t b
  *      code. Fresh slabs arrive zeroed. The in-VRAM performance default for the planes.
  */
 template <typename value_type_ = std::byte>
-struct cuda_vmm_allocator {
+struct cuda_virtual_memory_allocator {
     using value_type = value_type_;
     inline static constexpr cuda_address_space_t address_space_k = cuda_address_space_t::device_k;
     template <typename other_>
     struct rebind {
-        using other = cuda_vmm_allocator<other_>;
+        using other = cuda_virtual_memory_allocator<other_>;
     };
 
     /** @brief Preferred physical slab, rounded to the driver's granularity at reservation -
@@ -158,33 +158,34 @@ struct cuda_vmm_allocator {
     inline static constexpr std::size_t preferred_slab_bytes_k = 128u << 20;
 
     CUdeviceptr base_ = 0;
-    std::size_t va_bytes_ = 0;
+    std::size_t virtual_address_bytes_ = 0;
     std::size_t mapped_bytes_ = 0;
     std::size_t slab_bytes_ = 0;
     int device_ = 0;
 
-    cuda_vmm_allocator() = default;
+    cuda_virtual_memory_allocator() = default;
     /** @brief Names the GPU the future reservation pins to - placement only, no driver call. */
-    explicit cuda_vmm_allocator(int device) noexcept : device_(device) {}
+    explicit cuda_virtual_memory_allocator(int device) noexcept : device_(device) {}
     /** @brief Copies the placement configuration only - a live reservation is never
      *      copyable; indexes copy allocators before any reservation exists, the STL way. */
-    cuda_vmm_allocator(cuda_vmm_allocator const& other) noexcept : device_(other.device_) {}
+    cuda_virtual_memory_allocator(cuda_virtual_memory_allocator const& other) noexcept : device_(other.device_) {}
     template <typename other_>
-    cuda_vmm_allocator(cuda_vmm_allocator<other_> const& other) noexcept : device_(other.device_) {}
-    cuda_vmm_allocator& operator=(cuda_vmm_allocator const&) = delete;
-    ~cuda_vmm_allocator() noexcept { release(); }
+    cuda_virtual_memory_allocator(cuda_virtual_memory_allocator<other_> const& other) noexcept
+        : device_(other.device_) {}
+    cuda_virtual_memory_allocator& operator=(cuda_virtual_memory_allocator const&) = delete;
+    ~cuda_virtual_memory_allocator() noexcept { release(); }
 
-    /** @brief Reserves @p va_bytes of virtual address space on @p device - no physical
+    /** @brief Reserves @p virtual_address_bytes of virtual address space on @p device - no physical
      *      memory yet, so the ceiling costs nothing and should be generous. */
-    status_t reserve_range(std::size_t va_bytes, int device) noexcept {
+    status_t reserve_range(std::size_t virtual_address_bytes, int device) noexcept {
         CUmemAllocationProp properties = allocation_properties_(device);
         std::size_t granularity = 0;
         if (cuMemGetAllocationGranularity(&granularity, &properties, CU_MEM_ALLOC_GRANULARITY_MINIMUM) != CUDA_SUCCESS)
             return status_t::device_error_k;
         slab_bytes_ = max_of(granularity, preferred_slab_bytes_k / granularity * granularity);
-        va_bytes_ = fu::round_up_to_multiple(va_bytes, slab_bytes_);
+        virtual_address_bytes_ = fu::round_up_to_multiple(virtual_address_bytes, slab_bytes_);
         device_ = device;
-        if (cuMemAddressReserve(&base_, va_bytes_, 0, 0, 0) != CUDA_SUCCESS) return status_t::bad_alloc_k;
+        if (cuMemAddressReserve(&base_, virtual_address_bytes_, 0, 0, 0) != CUDA_SUCCESS) return status_t::bad_alloc_k;
         return status_t::success_k;
     }
 
@@ -196,7 +197,7 @@ struct cuda_vmm_allocator {
      *  handle registry is needed - the destructor's unmap is the final release.
      */
     status_t commit(std::size_t bytes) noexcept {
-        if (bytes > va_bytes_) return status_t::overflow_k;
+        if (bytes > virtual_address_bytes_) return status_t::overflow_k;
         CUmemAllocationProp properties = allocation_properties_(device_);
         CUmemAccessDesc access = {};
         access.location = properties.location;
@@ -214,14 +215,14 @@ struct cuda_vmm_allocator {
     }
 
     value_type* base() const noexcept { return reinterpret_cast<value_type*>(static_cast<std::uintptr_t>(base_)); }
-    std::size_t reserved_bytes() const noexcept { return va_bytes_; }
+    std::size_t reserved_bytes() const noexcept { return virtual_address_bytes_; }
     std::size_t committed_bytes() const noexcept { return mapped_bytes_; }
     int device() const noexcept { return device_; }
 
     void release() noexcept {
         if (mapped_bytes_) cuMemUnmap(base_, mapped_bytes_);
-        if (base_) cuMemAddressFree(base_, va_bytes_);
-        base_ = 0, va_bytes_ = 0, mapped_bytes_ = 0;
+        if (base_) cuMemAddressFree(base_, virtual_address_bytes_);
+        base_ = 0, virtual_address_bytes_ = 0, mapped_bytes_ = 0;
     }
 
   private:
@@ -251,7 +252,7 @@ struct cuda_managed_allocator {
     };
 
     value_type* base_ = nullptr;
-    std::size_t va_bytes_ = 0;
+    std::size_t virtual_address_bytes_ = 0;
     std::size_t committed_bytes_ = 0;
     int device_ = 0;
 
@@ -265,23 +266,24 @@ struct cuda_managed_allocator {
     cuda_managed_allocator& operator=(cuda_managed_allocator const&) = delete;
     ~cuda_managed_allocator() noexcept { release(); }
 
-    status_t reserve_range(std::size_t va_bytes, int device) noexcept {
+    status_t reserve_range(std::size_t virtual_address_bytes, int device) noexcept {
         device_ = device;
-        va_bytes_ = va_bytes;
-        if (cudaMallocManaged(reinterpret_cast<void**>(&base_), va_bytes, cudaMemAttachGlobal) != cudaSuccess)
+        virtual_address_bytes_ = virtual_address_bytes;
+        if (cudaMallocManaged(reinterpret_cast<void**>(&base_), virtual_address_bytes, cudaMemAttachGlobal) !=
+            cudaSuccess)
             return status_t::bad_alloc_k;
         cudaMemLocation device_location = {};
         device_location.type = cudaMemLocationTypeDevice;
         device_location.id = device;
         cudaMemLocation host_location = {};
         host_location.type = cudaMemLocationTypeHost;
-        cudaMemAdvise(base_, va_bytes, cudaMemAdviseSetPreferredLocation, device_location);
-        cudaMemAdvise(base_, va_bytes, cudaMemAdviseSetAccessedBy, host_location);
+        cudaMemAdvise(base_, virtual_address_bytes, cudaMemAdviseSetPreferredLocation, device_location);
+        cudaMemAdvise(base_, virtual_address_bytes, cudaMemAdviseSetAccessedBy, host_location);
         return status_t::success_k;
     }
 
     status_t commit(std::size_t bytes) noexcept {
-        if (bytes > va_bytes_) return status_t::overflow_k;
+        if (bytes > virtual_address_bytes_) return status_t::overflow_k;
         // Managed pages are not guaranteed zeroed, and the planes' sentinel fills assume
         // fresh rows arrive zeroed like virtual-memory slabs do - so growth zeroes exactly
         // the fresh range on the device, which also commits its residency there.
@@ -295,7 +297,7 @@ struct cuda_managed_allocator {
     }
 
     value_type* base() const noexcept { return base_; }
-    std::size_t reserved_bytes() const noexcept { return va_bytes_; }
+    std::size_t reserved_bytes() const noexcept { return virtual_address_bytes_; }
     std::size_t committed_bytes() const noexcept { return committed_bytes_; }
     int device() const noexcept { return device_; }
 
@@ -307,7 +309,7 @@ struct cuda_managed_allocator {
 
     void release() noexcept {
         if (base_) cudaFree(base_);
-        base_ = nullptr, va_bytes_ = 0, committed_bytes_ = 0;
+        base_ = nullptr, virtual_address_bytes_ = 0, committed_bytes_ = 0;
     }
 };
 
@@ -421,7 +423,7 @@ cuda_unique_ptr<typename allocator_::value_type, allocator_> cuda_make_unique(al
     return {pointer, cuda_deleter<allocator_> {allocator, count}};
 }
 
-static_assert(cuda_reservable_allocator<cuda_vmm_allocator<std::byte>>);
+static_assert(cuda_reservable_allocator<cuda_virtual_memory_allocator<std::byte>>);
 static_assert(cuda_reservable_allocator<cuda_managed_allocator<std::byte>>);
 static_assert(cuda_allocator<cuda_device_allocator<std::byte>>);
 static_assert(cuda_allocator<cuda_pinned_allocator<std::byte>>);

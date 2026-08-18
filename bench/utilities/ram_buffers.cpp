@@ -1,9 +1,9 @@
 /**
- *  @brief Throughput benchmarks for @c ram_queue.hpp containers - @c max_heap,
+ *  @brief Throughput benchmarks for the @c ram_buffers.hpp & @c ram_tables.hpp containers - @c max_heap,
  *      @c sorted_buffer, and @c growing_hash_set - including their multi-element overloads.
  *
  *  @author Ash Vardanian
- *  @file bench/utilities/ram_queue.cpp
+ *  @file bench/utilities/ram_buffers.cpp
  *  @date April 25, 2026
  *
  *  Pure data-structure microbenches. No L1-noise simulator, no HNSW context. Each cell
@@ -27,7 +27,8 @@
 
 #include <benchmark/benchmark.h>
 
-#include "usearch/utilities/ram_queue.hpp"
+#include "usearch/utilities/ram_buffers.hpp"
+#include "usearch/utilities/ram_tables.hpp"
 
 using namespace unum::usearch;
 

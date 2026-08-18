@@ -176,6 +176,6 @@ nk::matrix<scalar_> make_vectors(std::size_t count, std::size_t dimensions, u64_
  *      shards below them are named by their own area's header, never here. */
 std::size_t test_dense_all();
 
-std::size_t test_ram_queue();
+std::size_t test_ram_buffers();
 
 #pragma endregion Suite Entry Points

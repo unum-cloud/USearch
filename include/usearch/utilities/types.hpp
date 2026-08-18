@@ -11,6 +11,7 @@
 #include <cstring> // `std::memmove`, `std::memcmp`
 
 #include <atomic>      // `std::atomic`
+#include <functional>  // `std::hash` - specialized for `uuid_t` below
 #include <span>        // `std::span`
 #include <string_view> // `std::string_view`
 #include <type_traits> // `std::type_identity_t`
@@ -42,9 +43,7 @@ using f64_t = double;
 struct uuid_t {
     std::byte bytes[16];
 
-    bool operator==(uuid_t const& other) const noexcept {
-        return std::memcmp(bytes, other.bytes, sizeof(bytes)) == 0;
-    }
+    bool operator==(uuid_t const& other) const noexcept { return std::memcmp(bytes, other.bytes, sizeof(bytes)) == 0; }
 };
 static_assert(std::is_trivially_copyable_v<uuid_t> && sizeof(uuid_t) == 16);
 
@@ -150,7 +149,6 @@ enum class synchronization_t : u32_t {
     /** @brief Sole ownership - nothing else touches the index, readers included. */
     exclusive_k,
 };
-
 
 enum connectivity_t : std::uint32_t {
     connectivity_unknown_k = 0,
@@ -510,3 +508,9 @@ inline constexpr bool operator&(io_capability_t a, io_capability_t b) noexcept {
 
 } // namespace usearch
 } // namespace unum
+
+/** @brief Makes @c uuid_t a first-class key of standard-hash-keyed containers. */
+template <>
+struct std::hash<unum::usearch::uuid_t> {
+    std::size_t operator()(unum::usearch::uuid_t const& key) const noexcept;
+};

@@ -87,15 +87,15 @@ static_assert(std::is_trivially_copyable_v<dense_cuda_scored_node_t>);
 __device__ __forceinline__ dense_cuda_scored_node_t dense_cuda_sort32(dense_cuda_scored_node_t value,
                                                                       int lane) noexcept {
 #pragma unroll
-    for (int k = 2; k <= 32; k <<= 1)
+    for (int stage_width = 2; stage_width <= 32; stage_width <<= 1)
 #pragma unroll
-        for (int j = k >> 1; j; j >>= 1) {
-            dense_cuda_scored_node_t const partner = value.shuffle_xor(j);
-            bool const up = (lane & k) == 0;
-            bool const lower = (lane & j) == 0;
+        for (int partner_stride = stage_width >> 1; partner_stride; partner_stride >>= 1) {
+            dense_cuda_scored_node_t const partner = value.shuffle_xor(partner_stride);
+            bool const ascending = (lane & stage_width) == 0;
+            bool const lower = (lane & partner_stride) == 0;
             dense_cuda_scored_node_t const nearer = value < partner ? value : partner;
             dense_cuda_scored_node_t const further = value < partner ? partner : value;
-            value = (up == lower) ? nearer : further;
+            value = (ascending == lower) ? nearer : further;
         }
     return value;
 }
@@ -151,16 +151,17 @@ struct dense_cuda_sorted_pool {
 #pragma unroll
             for (u32_t base = 0; base < slots_; ++base)
                 if ((base & stride) == 0 && (base | stride) < slots_) {
-                    dense_cuda_scored_node_t const a = entries_[base], b = entries_[base | stride];
-                    entries_[base] = a < b ? a : b;
-                    entries_[base | stride] = a < b ? b : a;
+                    dense_cuda_scored_node_t const lower_entry = entries_[base];
+                    dense_cuda_scored_node_t const upper_entry = entries_[base | stride];
+                    entries_[base] = lower_entry < upper_entry ? lower_entry : upper_entry;
+                    entries_[base | stride] = lower_entry < upper_entry ? upper_entry : lower_entry;
                 }
 #pragma unroll
-        for (int j = 16; j; j >>= 1) {
-            bool const lower = (lane & j) == 0;
+        for (int partner_stride = 16; partner_stride; partner_stride >>= 1) {
+            bool const lower = (lane & partner_stride) == 0;
 #pragma unroll
             for (u32_t slot = 0; slot < slots_; ++slot) {
-                dense_cuda_scored_node_t const partner = entries_[slot].shuffle_xor(j);
+                dense_cuda_scored_node_t const partner = entries_[slot].shuffle_xor(partner_stride);
                 entries_[slot] = lower == (entries_[slot] < partner) ? entries_[slot] : partner;
             }
         }
@@ -302,7 +303,7 @@ struct dense_cuda_register_frontier {
  *      the walk retires after @c expansion_target_ expansions instead of on a radius test - the
  *      expansion budget IS the ef semantic and the horizon.
  */
-struct dense_cuda_arena_frontier {
+struct dense_cuda_arena_frontier_t {
     dense_cuda_sorted_pool<2> head_;
     dense_cuda_tail_pool_t tail_;
     u32_t expansion_target_ = 0;

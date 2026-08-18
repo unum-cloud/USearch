@@ -6,12 +6,13 @@
  *  @date July 23, 2026
  *
  *  This translation unit builds with only @c -Iinclude, so any dependency creeping into
- *  @c types.hpp, @c ram_queue.hpp, or @c utilities/ram_hints.hpp fails loudly in CI instead
+ *  @c types.hpp, @c ram_buffers.hpp, @c ram_tables.hpp, or @c utilities/ram_hints.hpp fails loudly in CI instead
  *  of silently widening the core tier. The checks are deliberately minimal - instantiate the
  *  traversal structures, push & pop a few entries - existence is the assertion.
  */
 #include "usearch/utilities/types.hpp"
-#include "usearch/utilities/ram_queue.hpp"
+#include "usearch/utilities/ram_buffers.hpp"
+#include "usearch/utilities/ram_tables.hpp"
 #include "usearch/utilities/ram_hints.hpp"
 
 using namespace unum::usearch;

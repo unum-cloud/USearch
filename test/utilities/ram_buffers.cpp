@@ -1,10 +1,10 @@
 /**
- *  @brief Smoke tests for @c ram_queue.hpp containers - @c max_heap,
- *      @c sorted_buffer, and @c growing_hash_set - including their four-wide and
- *      larger-N batch overloads plus @c insert_many / @c pop_many on the heap.
+ *  @brief Smoke tests for the @c ram_buffers.hpp & @c ram_tables.hpp containers -
+ *      @c max_heap, @c sorted_buffer, and @c growing_hash_set - including their four-wide
+ *      and larger-N batch overloads plus @c insert_many / @c pop_many on the heap.
  *
  *  @author Ash Vardanian
- *  @file test/utilities/ram_queue.cpp
+ *  @file test/utilities/ram_buffers.cpp
  *  @date April 24, 2026
  *
  *  Mirrors the structure of @c test/dense_metric.hpp:
@@ -27,7 +27,8 @@
 
 #include <fmt/format.h>
 
-#include "usearch/utilities/ram_queue.hpp"
+#include "usearch/utilities/ram_buffers.hpp"
+#include "usearch/utilities/ram_tables.hpp"
 
 using namespace unum::usearch;
 
@@ -366,7 +367,7 @@ int check_max_heap_pop_many() noexcept {
     return failures;
 }
 
-std::size_t test_ram_queue() {
+std::size_t test_ram_buffers() {
     int failures = 0;
     failures += check_sorted_buffer_single_element();
     failures += check_sorted_buffer_batch_parity<4>(0xABCD1234u);

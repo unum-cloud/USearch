@@ -14,7 +14,7 @@ using namespace unum::usearch;
 int main() {
     std::size_t failures_count = 0;
 
-    failures_count += test_ram_queue();
+    failures_count += test_ram_buffers();
     failures_count += test_dense_all();
 
     fmt::println("{}: {} total failures", failures_count ? "FAILED" : "OK", failures_count);
