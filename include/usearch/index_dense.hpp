@@ -1050,17 +1050,18 @@ class index_dense_gt {
      */
     bool try_reserve(index_limits_t limits) {
 
+        // Reserving is monotonic: reducing thread limits must not shrink member-addressed storage.
+        limits.members = (std::max)(limits.members, typed_->capacity());
+        limits.members = (std::max)(limits.members, vectors_lookup_.size());
+
         // The slot lookup system will generally prefer power-of-two sizes.
         if (config_.enable_key_lookups) {
             unique_lock_t lock(slot_lookup_mutex_);
             if (!slot_lookup_.try_reserve(limits.members))
                 return false;
-            limits.members = slot_lookup_.capacity();
         }
 
-        // Once the `slot_lookup_` grows, let's use its capacity as the new
-        // target for the `vectors_lookup_` to synchronize allocations and
-        // expensive index re-organizations.
+        // Hash-table load-factor slack does not need corresponding vector or graph slots.
         if (limits.members != vectors_lookup_.size()) {
             vectors_lookup_t new_vectors_lookup(limits.members);
             if (!new_vectors_lookup)
