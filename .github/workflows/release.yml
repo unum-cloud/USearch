@@ -230,7 +230,7 @@ jobs:
         run: |
           case "${{ matrix.arch }}" in
             x64)  expected='x86-64'    ;;
-            x86)  expected='80386\|Intel 80386' ;;
+            x86)  expected='i386\|80386' ;;
           esac
           file ./build_release/libusearch_c.dll
           file ./build_release/libusearch_c.dll | grep -q "$expected"
@@ -897,7 +897,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: "24"
+          node-version: ${{ env.NODE_VERSION }}
           registry-url: "https://registry.npmjs.org"
 
       - name: Download prebuilds

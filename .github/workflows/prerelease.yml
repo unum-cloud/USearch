@@ -415,7 +415,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: ${{ env.PYTHON_VERSION }}
       - name: Setup QEMU
         uses: docker/setup-qemu-action@v3
       - name: Install cibuildwheel
@@ -449,7 +449,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: ${{ env.PYTHON_VERSION }}
       - name: Install cibuildwheel
         uses: nick-fields/retry@v4
         with:
@@ -481,7 +481,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: ${{ env.PYTHON_VERSION }}
       - name: Install cibuildwheel
         uses: nick-fields/retry@v4
         with:

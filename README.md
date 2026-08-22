@@ -545,7 +545,7 @@ index = Index(ndim=ndim, metric=CompiledMetric(
 
 ```bibtex
 @software{Vardanian_USearch,
-doi = {10.5281/zenodo.7949416},
+doi = {10.5281/zenodo.7949415},
 author = {Vardanian, Ash},
 title = {{USearch by Unum Cloud}},
 url = {https://github.com/unum-cloud/USearch},

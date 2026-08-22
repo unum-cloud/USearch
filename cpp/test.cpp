@@ -1113,9 +1113,6 @@ template <typename key_at, typename slot_at> void test_strings() {
 }
 
 /**
- * @brief Tests replacing and updating entries in index_dense_gt to ensure consistency after modifications.
- */
-/**
  *  @brief  Churns a tightly-reserved index, so `slot_lookup_` accumulates tombstones.
  *
  *  Removals leave tombstones that probes must walk past. If they are never reclaimed the
@@ -1181,6 +1178,10 @@ template <typename key_at, typename slot_at> void test_slot_lookup_churn() {
         expect(copy.contains(key));
 }
 
+/**
+ *  @brief  Tests replacing and updating entries in `index_dense_gt`, to ensure consistency
+ *          after modifications.
+ */
 template <typename key_at, typename slot_at> void test_replacing_update() {
 
     using vector_key_t = key_at;

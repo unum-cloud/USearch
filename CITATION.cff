@@ -4,15 +4,21 @@ message: "If you use this software, please cite it as below."
 type: software
 license: Apache-2.0
 version: 2.26.0
-doi: 10.5281/zenodo.7949416
+doi: 10.5281/zenodo.7949415
 repository-code: https://github.com/unum-cloud/USearch
 url: https://github.com/unum-cloud/USearch
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.21300595
+    description: "v2.26.0 — version DOI"
+  - type: swh
+    value: swh:1:rel:ae9977c0e73e859522b742876ecab9af90690628
+    description: "v2.26.0 — Software Heritage release"
 abstract: >-
-  Portable single-header similarity search and clustering library
-  with SIMD-optimized and user-defined metrics,
-  supporting 15+ quantization levels from f64 to f6 and single-bit,
-  with native bindings for C++, Python, Rust, JavaScript, Java, Go, Swift, C#, C, Objective-C, and Wolfram,
-  trusted by Google, Microsoft, ClickHouse, DuckDB, ScyallDB, Yugabyte, TiDB, and others.
+  Portable single-header similarity search and clustering library with SIMD-optimized and
+  user-defined metrics, supporting 15+ quantization levels from f64 to f6 and single-bit, with
+  native bindings for C++, Python, Rust, JavaScript, Java, Go, Swift, C#, C, Objective-C, and
+  Wolfram, trusted by Google, Microsoft, ClickHouse, DuckDB, ScyllaDB, Yugabyte, TiDB, and others.
 
 authors:
   - family-names: Vardanian
