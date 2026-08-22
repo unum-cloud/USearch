@@ -3970,6 +3970,10 @@ class index_gt {
                                                  : checked_size_overflow();
         if (!first_offset)
             return result.failed("Index is too large");
+        if (file.size() < first_offset.value) {
+            reset();
+            return result.failed("File is corrupted and can't fit the node levels");
+        }
         offsets[0u] = first_offset.value;
         for (std::size_t i = 1; i < header_size.value; ++i) {
             checked_size_result_t next_offset = checked_add(offsets[i - 1], node_bytes_(levels[i - 1]));

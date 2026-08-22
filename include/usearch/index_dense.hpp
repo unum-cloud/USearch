@@ -1358,6 +1358,11 @@ class index_dense_gt {
         if (!result)
             return result;
 
+        // `offset` is caller-supplied, so every `file.size() - offset` below would
+        // otherwise underflow into a huge span instead of failing.
+        if (offset > file.size())
+            return result.failed("File is corrupted and lacks matrix dimensions");
+
         // Infer the new index size
         std::uint64_t matrix_rows = 0;
         std::uint64_t matrix_cols = 0;
@@ -1383,7 +1388,12 @@ class index_dense_gt {
                 matrix_cols = dimensions[1];
                 offset += sizeof(dimensions);
             }
-            vectors_buffer = {file.data() + offset, static_cast<std::size_t>(matrix_rows * matrix_cols)};
+            // bound the vectors matrix span against the file (overflow-safe; offset <= file.size() holds here)
+            checked_size_result_t vectors_bytes =
+                checked_mul(static_cast<std::size_t>(matrix_rows), static_cast<std::size_t>(matrix_cols));
+            if (!vectors_bytes || file.size() - offset < vectors_bytes.value)
+                return result.failed("File is corrupted: vectors matrix exceeds file size");
+            vectors_buffer = {file.data() + offset, vectors_bytes.value};
             offset += vectors_buffer.size();
         }
 
