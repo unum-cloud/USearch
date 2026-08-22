@@ -3256,7 +3256,7 @@ class index_gt {
         // Pass 2: reverse links, for every level. Snapshot this node's forward
         // neighbors under its lock, release, then link each neighbor back to it.
         // (form_reverse_links_ locks the *neighbor* nodes, so we must not hold this
-        // node's lock across it — see the consistent lock ordering in CLAUDE.md.)
+        // node's lock across it.)
         //
         // The snapshot lives in a per-thread context buffer (reused across adds, not
         // a per-add heap allocation), and is sized via the null-returning allocator
