@@ -74,7 +74,6 @@ fn build_usearch() -> Result<(), Box<dyn Error>> {
             .flag_if_supported("/fp:fast")
             .flag_if_supported("/W1") // Reduce warnings verbosity
             .flag_if_supported("/EHsc")
-            .flag_if_supported("/MD")
             .flag_if_supported("/permissive-")
             .flag_if_supported("/sdl-")
             .define("_ALLOW_RUNTIME_LIBRARY_MISMATCH", None)
