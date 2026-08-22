@@ -1427,6 +1427,67 @@ void test_load_after_metric_make() {
     std::remove(path);
 }
 
+/**
+ *  @brief  Feeds `view` a truncated index file.
+ *
+ *  The matrix dimensions and the node count come from the file itself, so a short file
+ *  describes a matrix and a level array that reach past the mapping. Both must be rejected
+ *  rather than walked, and a caller-supplied offset past the end must fail the same way.
+ */
+void test_view_of_truncated_file() {
+    std::printf("Testing view of a truncated index file\n");
+
+    using index_t = index_dense_gt<std::int64_t, std::uint32_t>;
+    std::size_t const dimensions = 64;
+    std::size_t const collection = 2048;
+    char const* path = "tmp_truncated.usearch";
+
+    metric_punned_t metric(dimensions, metric_kind_t::l2sq_k, scalar_kind<f32_t>());
+    index_t::state_result_t built = index_t::make(metric);
+    expect(built);
+    expect(built.index.try_reserve(collection));
+    std::vector<float> vector(dimensions);
+    for (std::size_t i = 0; i != collection; ++i) {
+        for (std::size_t d = 0; d != dimensions; ++d)
+            vector[d] = static_cast<float>((i * 31 + d) % 997) / 997.f;
+        expect(built.index.add(static_cast<std::int64_t>(i), vector.data()));
+    }
+    expect(built.index.save(path));
+
+    std::vector<char> prefix;
+    {
+        std::FILE* file = std::fopen(path, "rb");
+        expect(file != nullptr);
+        std::fseek(file, 0, SEEK_END);
+        long const bytes = std::ftell(file);
+        std::fseek(file, 0, SEEK_SET);
+        prefix.resize(static_cast<std::size_t>(bytes) / 8);
+        expect(std::fread(prefix.data(), 1, prefix.size(), file) == prefix.size());
+        std::fclose(file);
+    }
+    {
+        std::FILE* file = std::fopen(path, "wb");
+        expect(file != nullptr);
+        std::fwrite(prefix.data(), 1, prefix.size(), file);
+        std::fclose(file);
+    }
+
+    index_t::state_result_t viewed = index_t::make(metric);
+    expect(viewed);
+    serialization_result_t truncated = viewed.index.view(path);
+    expect(!truncated);
+    truncated.error.release();
+
+    // A caller-supplied offset past the end must fail the same way.
+    index_t::state_result_t offset_viewed = index_t::make(metric);
+    expect(offset_viewed);
+    serialization_result_t beyond = offset_viewed.index.view(memory_mapped_file_t(path), prefix.size() * 4);
+    expect(!beyond);
+    beyond.error.release();
+
+    std::remove(path);
+}
+
 int main(int, char**) {
     install_crash_handlers();
 
@@ -1523,5 +1584,6 @@ int main(int, char**) {
     test_filtered_search();
     test_isolate();
     test_load_after_metric_make();
+    test_view_of_truncated_file();
     return 0;
 }

@@ -1358,6 +1358,11 @@ class index_dense_gt {
         if (!result)
             return result;
 
+        // `offset` is caller-supplied, so every `file.size() - offset` below would
+        // otherwise underflow into a huge span instead of failing.
+        if (offset > file.size())
+            return result.failed("File is corrupted and lacks matrix dimensions");
+
         // Infer the new index size
         std::uint64_t matrix_rows = 0;
         std::uint64_t matrix_cols = 0;
@@ -1395,7 +1400,7 @@ class index_dense_gt {
         // Load metadata and choose the right metric
         {
             index_dense_head_buffer_t buffer;
-            if (offset > file.size() || file.size() - offset < sizeof(buffer))
+            if (file.size() - offset < sizeof(buffer))
                 return result.failed("File is corrupted and lacks a header");
 
             std::memcpy(buffer, file.data() + offset, sizeof(buffer));
