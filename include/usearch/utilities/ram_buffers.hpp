@@ -12,12 +12,13 @@
  */
 #pragma once
 
+#include <cstddef> // `std::size_t`
+#include <cstdint> // `SIZE_MAX`, `std::uint8_t`
+#include <cstring> // `std::memcpy`
+
 #include <algorithm>   // `std::lower_bound`, `std::sort_heap`, `std::min`, `std::max`
 #include <array>       // `std::array` - batch-of-four overloads
-#include <cstddef>     // `std::size_t`
 #include <span>        // `std::span` - the sorted-batch insert argument
-#include <cstdint>     // `SIZE_MAX`, `std::uint8_t`
-#include <cstring>     // `std::memcpy`
 #include <functional>  // `std::less`
 #include <memory>      // `std::allocator`
 #include <new>         // `new (ptr) element_t(value)` for "placement-new"
@@ -705,9 +706,10 @@ class sorted_buffer {
 };
 
 /**
- *  @brief Exception-free flat dynamic array: the unsorted staging sibling of
- *      @c sorted_buffer, for per-thread scratch that fills, drains & refills. Growth is
- *      explicit through @c reserve; @c push_back never allocates.
+ *  @brief Exception-free flat dynamic array: the unsorted sibling of @c sorted_buffer,
+ *      serving both trivial per-thread scratch and arrays of heavier objects, as long as
+ *      moves & destruction never throw. Growth is explicit through @c reserve;
+ *      @c push_back never allocates.
  */
 template <                                                    //
     typename element_type_,                                   //
@@ -717,8 +719,8 @@ class growing_buffer {
     using element_t = element_type_;
     using allocator_t = allocator_type_;
 
-    static_assert(std::is_trivially_destructible<element_t>(), "This buffer is designed for trivial structs");
-    static_assert(std::is_trivially_copy_constructible<element_t>(), "This buffer is designed for trivial structs");
+    static_assert(std::is_nothrow_move_constructible<element_t>() && std::is_nothrow_destructible<element_t>(),
+                  "Elements relocate on growth and die in `reset`, so neither may throw");
 
     using value_type = element_t;
 
@@ -750,16 +752,21 @@ class growing_buffer {
     ~growing_buffer() noexcept { reset(); }
 
     void reset() noexcept {
+        clear();
         if (elements_) allocator_.deallocate(elements_, capacity_);
         elements_ = nullptr;
         capacity_ = 0;
+    }
+
+    inline void clear() noexcept {
+        if constexpr (!std::is_trivially_destructible<element_t>())
+            for (std::size_t position = 0; position != size_; ++position) elements_[position].~element_t();
         size_ = 0;
     }
 
     inline bool empty() const noexcept { return !size_; }
     inline std::size_t size() const noexcept { return size_; }
     inline std::size_t capacity() const noexcept { return capacity_; }
-    inline void clear() noexcept { size_ = 0; }
 
     inline element_t& operator[](std::size_t position) noexcept { return elements_[position]; }
     inline element_t const& operator[](std::size_t position) const noexcept { return elements_[position]; }
@@ -779,7 +786,10 @@ class growing_buffer {
         auto new_elements = allocator_.allocate(new_capacity);
         if (!new_elements) return false;
 
-        if (size_) std::copy_n(elements_, size_, new_elements);
+        for (std::size_t position = 0; position != size_; ++position) {
+            new (new_elements + position) element_t(std::move(elements_[position]));
+            elements_[position].~element_t();
+        }
         if (elements_) allocator_.deallocate(elements_, capacity_);
 
         elements_ = new_elements;
@@ -788,20 +798,31 @@ class growing_buffer {
     }
 
     /** @brief Appends @p element into pre-reserved capacity - the hot-path form. */
-    inline void push_back_reserved(element_t element) noexcept { elements_[size_++] = element; }
+    inline void push_back_reserved(element_t element) noexcept {
+        new (elements_ + size_) element_t(std::move(element));
+        ++size_;
+    }
 
     /** @brief Appends @p element if capacity allows; never allocates. */
     inline bool push_back(element_t element) noexcept {
         if (size_ == capacity_) return false;
-        elements_[size_++] = element;
+        push_back_reserved(std::move(element));
         return true;
     }
 
-    inline element_t pop_back() noexcept { return elements_[--size_]; }
+    inline element_t pop_back() noexcept {
+        element_t popped = std::move(elements_[--size_]);
+        elements_[size_].~element_t();
+        return popped;
+    }
 
-    /** @brief Sets the live fill to @p count within reserved capacity - for spans handed
-     *      to batched kernels that fill the buffer through raw memory. */
-    inline void resize_reserved(std::size_t count) noexcept { size_ = count; }
+    /** @brief Moves the live fill to @p count within reserved capacity, value-constructing
+     *      growth and destroying shrinkage; never allocates. Instantiates only for
+     *      default-constructible elements. */
+    inline void resize(std::size_t count) noexcept {
+        for (; size_ > count; --size_) elements_[size_ - 1].~element_t();
+        for (; size_ < count; ++size_) new (elements_ + size_) element_t();
+    }
 };
 
 } // namespace usearch

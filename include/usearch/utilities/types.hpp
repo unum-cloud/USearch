@@ -11,6 +11,7 @@
 #include <cstring> // `std::memmove`, `std::memcmp`
 
 #include <atomic>      // `std::atomic`
+#include <bit>         // `std::bit_cast` - hashing `uuid_t` as two words
 #include <functional>  // `std::hash` - specialized for `uuid_t` below
 #include <span>        // `std::span`
 #include <string_view> // `std::string_view`
@@ -75,38 +76,6 @@ struct dense_closer_scored_node_t {
 struct dense_further_scored_node_t {
     inline bool operator()(dense_scored_node_t a, dense_scored_node_t b) const noexcept {
         return a.distance > b.distance;
-    }
-};
-
-/**
- *  @brief Minimal 8-byte SplitMix64 PRNG for stochastic NSW start-point selection.
- *
- *  Picked over @c std::mt19937 (5 KB of per-thread state on libstdc++) and @c std::minstd_rand
- *  (a per-call 64-bit modulo). Quality is ample for spreading entry points; each traversal
- *  context owns one, seeded distinctly per thread or warp lane so the streams decorrelate.
- *  Every member is @c constexpr, so CUDA toolchains compiling with relaxed-constexpr call
- *  it from device code through this one definition.
- */
-struct splitmix_u32_t {
-    using seed_t = u64_t;
-    seed_t state_;
-
-    constexpr explicit splitmix_u32_t(seed_t seed = 0) noexcept : state_(seed) {}
-
-    /** @brief One SplitMix64 step. */
-    constexpr seed_t unbounded() noexcept {
-        seed_t z = (state_ += 0x9E3779B97F4A7C15ull);
-        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
-        return z ^ (z >> 31);
-    }
-
-    /** @brief Index in [0, @p bound) via Lemire's multiply-shift - one multiply, no division.
-     *      Bias is about @p bound / 2^32, negligible for entry-point selection. The random operand
-     *      must be narrowed to 32 bits @b before widening: multiplying the full 64-bit state
-     *      would let its high bits survive the shift and escape the bound. */
-    constexpr u32_t bounded(u32_t bound) noexcept {
-        return static_cast<u32_t>(static_cast<u64_t>(static_cast<u32_t>(unbounded())) * bound >> 32);
     }
 };
 
@@ -506,11 +475,104 @@ inline constexpr bool operator&(io_capability_t a, io_capability_t b) noexcept {
     return (static_cast<u32_t>(a) & static_cast<u32_t>(b)) != 0;
 }
 
+/**
+ *  @brief The high half of the full @p first x @p second product - the multiply-shift
+ *      kernel mapping a uniform word onto a bounded range without division.
+ *
+ *  Computed in half-width limbs, so no double-width type is ever needed: one definition
+ *  serves every unsigned width on every compiler, @c constexpr and device-callable alike.
+ *  Schoolbook four-limb form from Henry S. Warren Jr., "Hacker's Delight", 2nd ed., §8-2.
+ */
+template <typename word_type_>
+constexpr word_type_ multiply_high(word_type_ first, word_type_ second) noexcept {
+    static_assert(std::is_integral_v<word_type_> && std::is_unsigned_v<word_type_>);
+    constexpr unsigned half_bits_k = sizeof(word_type_) * 4u;
+    constexpr word_type_ half_mask_k = (word_type_(1) << half_bits_k) - word_type_(1);
+    word_type_ const first_low = first & half_mask_k, first_high = first >> half_bits_k;
+    word_type_ const second_low = second & half_mask_k, second_high = second >> half_bits_k;
+    word_type_ const cross = (first_low * second_low >> half_bits_k) + first_high * second_low;
+    word_type_ const cross_with_carry = (cross & half_mask_k) + first_low * second_high;
+    return first_high * second_high + (cross >> half_bits_k) + (cross_with_carry >> half_bits_k);
+}
+
+/** @brief Avalanches all 64 bits of @p word - the SplitMix64 finalizer, the one bit-mixing
+ *      primitive behind the PRNG, the UUID hash, and the open-addressing probe starts. */
+constexpr u64_t mix_bits(u64_t word) noexcept {
+    word = (word ^ (word >> 30)) * 0xBF58476D1CE4E5B9ull;
+    word = (word ^ (word >> 27)) * 0x94D049BB133111EBull;
+    return word ^ (word >> 31);
+}
+
+/**
+ *  @brief Minimal 8-byte SplitMix64 engine for stochastic NSW start-point selection - the
+ *      cheap-to-construct sibling of the standard engines, paired with @ref uniform_below
+ *      the way the standard pairs engines with distributions.
+ *
+ *  Picked over @c std::mt19937 (5 KB of per-thread state on libstdc++) and @c std::minstd_rand
+ *  (a per-call 64-bit modulo). Quality is ample for spreading entry points; each traversal
+ *  context owns one, seeded distinctly per thread or warp lane so the streams decorrelate.
+ *  Every member is @c constexpr, so CUDA toolchains compiling with relaxed-constexpr call
+ *  it from device code through this one definition. Satisfies the standard
+ *  @c uniform_random_bit_generator concept, so the standard distributions accept it too.
+ */
+struct splitmix64_t {
+    using result_type = u64_t;
+
+    u64_t state = 0;
+
+    static constexpr u64_t min() noexcept { return 0; }
+    static constexpr u64_t max() noexcept { return ~u64_t(0); }
+
+    /** @brief One SplitMix64 step: 64 fresh uniform bits. */
+    constexpr u64_t operator()() noexcept { return mix_bits(state += 0x9E3779B97F4A7C15ull); }
+};
+
+/**
+ *  @brief Uniform index distribution over [0, @c bound) - the cheap sibling of
+ *      @c std::uniform_int_distribution: an aggregate holding one word, drawing through a
+ *      single width-appropriate multiply-shift, no rejection loop. Bias is about
+ *      @c bound / 2^w for the index's bit width w, negligible for entry-point selection.
+ *
+ *  The random operand narrows to the index width @b before the multiply: wider surviving
+ *  engine bits would land in the kept half and escape the bound.
+ */
+template <typename index_type_>
+struct uniform_below;
+
+template <>
+struct uniform_below<u32_t> {
+    u32_t bound = 0;
+
+    /** @brief One draw, through plain 64-bit arithmetic. */
+    template <typename generator_type_>
+    constexpr u32_t operator()(generator_type_& generator) const noexcept {
+        return static_cast<u32_t>(static_cast<u64_t>(static_cast<u32_t>(generator())) * bound >> 32u);
+    }
+};
+
+template <>
+struct uniform_below<u64_t> {
+    u64_t bound = 0;
+
+    /** @brief One draw, through the high half of the 128-bit product. @ref multiply_high */
+    template <typename generator_type_>
+    constexpr u64_t operator()(generator_type_& generator) const noexcept {
+        return multiply_high(static_cast<u64_t>(generator()), bound);
+    }
+};
+
 } // namespace usearch
 } // namespace unum
 
-/** @brief Makes @c uuid_t a first-class key of standard-hash-keyed containers. */
+/** @brief Makes @c uuid_t a first-class key of standard-hash-keyed containers: fold one
+ *      mixed half into the other, then mix again - @ref unum::usearch::mix_bits twice. */
 template <>
 struct std::hash<unum::usearch::uuid_t> {
-    std::size_t operator()(unum::usearch::uuid_t const& key) const noexcept;
+    std::size_t operator()(unum::usearch::uuid_t const& key) const noexcept {
+        struct halves_t {
+            unum::usearch::u64_t low, high;
+        };
+        auto const halves = std::bit_cast<halves_t>(key);
+        return static_cast<std::size_t>(unum::usearch::mix_bits(halves.low ^ unum::usearch::mix_bits(halves.high)));
+    }
 };

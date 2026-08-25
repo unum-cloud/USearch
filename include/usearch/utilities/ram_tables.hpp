@@ -261,15 +261,17 @@ class growing_hash_set {
 /**
  *  @brief Insert-only, linear-probe hash multimap. Duplicate keys coexist as separate
  *      slots, which is what makes concurrent insertion CAS-once instead of lock-and-chain:
- *      a slot's value word flips from the reserved all-ones sentinel to its mapped value
- *      exactly once.
+ *      a slot's state advances @c empty_k → @c building_k → @c published_k exactly once.
  *
- *  Readers are wait-free: they probe with acquire loads and treat an in-flight slot -
- *  claimed, value not yet visible - as occupied-but-mismatched, never as end-of-chain.
- *  Growth is explicit: @c reserve may be called repeatedly to rehash into a larger slot
- *  array, but it demands a mutation-free phase - concurrent inserts never trigger a
- *  hidden migration, they fail with @c overflow_k when the table is full. The all-ones
- *  @p value_type_ bit-pattern is reserved as the empty sentinel and must never be inserted.
+ *  Slot states live in a parallel control-byte array the probes scan - 64 states per cache
+ *  line - so a slot's key & value are touched only on a published candidate, and no key or
+ *  value bit-pattern is ever reserved. Readers are wait-free: they probe with acquire
+ *  loads, stop at @c empty_k, and treat @c building_k as occupied-but-mismatched - never
+ *  as end-of-chain - so a half-published entry is merely invisible, never wrong. Growth is
+ *  explicit: @c reserve may be called repeatedly to rehash into a larger array, but it
+ *  demands a mutation-free phase - concurrent inserts never trigger a hidden migration,
+ *  they fail with @c overflow_k when the quota is spent. The slot count stays at least
+ *  twice the entry quota, so every probe chain terminates.
  */
 template <typename key_type_, typename value_type_,             //
           typename hash_type_ = std::hash<key_type_>,           //
@@ -283,51 +285,165 @@ class growing_multimap {
     using hash_t = hash_type_;
     using allocator_t = allocator_type_;
 
+    /** @brief Lifecycle of one slot, advanced monotonically by its one claiming inserter. */
+    enum class slot_state_t : std::uint8_t {
+        /** @brief Never claimed - the probe chain terminator. */
+        empty_k = 0,
+        /** @brief Claimed; the key & value stores have not been released yet. */
+        building_k,
+        /** @brief Fully published; the key & value are immutable from here on. */
+        published_k,
+    };
+
     growing_multimap(growing_multimap const&) noexcept = delete;
     growing_multimap& operator=(growing_multimap const&) noexcept = delete;
 
-    explicit growing_multimap(allocator_t allocator = {}) noexcept;
-    ~growing_multimap() noexcept;
+    explicit growing_multimap(allocator_t allocator = {}) noexcept : allocator_(std::move(allocator)) {}
+    ~growing_multimap() noexcept { reset(); }
 
-    /** @brief Sizes the slot array for @p capacity entries at a bounded load factor.
-     *      Repeatable: a larger @p capacity rehashes into a fresh array, single-threaded -
-     *      the caller certifies no concurrent readers or writers for the growth call. */
-    status_t reserve(std::size_t capacity) noexcept;
+    growing_multimap(growing_multimap&& other) noexcept
+        : slots_(exchange(other.slots_, nullptr)), states_(exchange(other.states_, nullptr)),
+          slots_count_(exchange(other.slots_count_, 0)), entries_quota_(exchange(other.entries_quota_, 0)),
+          inserted_count_(other.inserted_count_.load(std::memory_order_relaxed)), hash_(std::move(other.hash_)),
+          allocator_(std::move(other.allocator_)) {
+        other.inserted_count_.store(0, std::memory_order_relaxed);
+    }
+
+    void reset() noexcept {
+        if (slots_)
+            bytes_allocator_t(allocator_)
+                .deallocate(reinterpret_cast<std::byte*>(slots_), carved_bytes_of(slots_count_));
+        slots_ = nullptr;
+        states_ = nullptr;
+        slots_count_ = 0;
+        entries_quota_ = 0;
+        inserted_count_.store(0, std::memory_order_relaxed);
+    }
+
+    /** @brief Sizes the slot array for @p capacity entries at a load factor of at most one
+     *      half. Repeatable: a larger @p capacity rehashes into a fresh array, single-
+     *      threaded - the caller certifies no concurrent readers or writers for the call. */
+    status_t reserve(std::size_t capacity) noexcept {
+        if (capacity <= entries_quota_) return status_t::success_k;
+
+        std::size_t const new_slots_count = ceil2(max_of<std::size_t>(capacity * 2u, 16u));
+        std::byte* const new_bytes = bytes_allocator_t(allocator_).allocate(carved_bytes_of(new_slots_count));
+        if (!new_bytes) return status_t::bad_alloc_k;
+        slot_t* const new_slots = reinterpret_cast<slot_t*>(new_bytes);
+        slot_state_t* const new_states = reinterpret_cast<slot_state_t*>(new_bytes + //
+                                                                         new_slots_count * sizeof(slot_t));
+        for (std::size_t position = 0; position != new_slots_count; ++position)
+            new_states[position] = slot_state_t::empty_k;
+
+        // Re-place settled entries through the same probe walk `insert` uses; the phase is
+        // mutation-free, so no building slots can exist and plain stores suffice.
+        for (std::size_t position = 0; position != slots_count_; ++position) {
+            if (states_[position] != slot_state_t::published_k) continue;
+            std::size_t chain = first_probe_of(slots_[position].key, new_slots_count);
+            while (new_states[chain] != slot_state_t::empty_k) chain = (chain + 1) & (new_slots_count - 1);
+            new_slots[chain] = slots_[position];
+            new_states[chain] = slot_state_t::published_k;
+        }
+
+        if (slots_)
+            bytes_allocator_t(allocator_)
+                .deallocate(reinterpret_cast<std::byte*>(slots_), carved_bytes_of(slots_count_));
+        slots_ = new_slots;
+        states_ = new_states;
+        slots_count_ = new_slots_count;
+        entries_quota_ = capacity;
+        return status_t::success_k;
+    }
 
     /** @brief Claims one slot along the probe path of @p key - safe under arbitrary
-     *      concurrent inserts & lookups; fails with @c overflow_k when full. */
-    status_t insert(key_t const& key, value_t value) noexcept;
+     *      concurrent inserts & lookups; fails with @c overflow_k once the quota is spent. */
+    status_t insert(key_t const& key, value_t value) noexcept {
+        if (!slots_count_) return status_t::uninitialized_k;
+        // Claim quota before touching any slot, so probe chains stay bounded by construction.
+        if (inserted_count_.fetch_add(1, std::memory_order_relaxed) >= entries_quota_) {
+            inserted_count_.fetch_sub(1, std::memory_order_relaxed);
+            return status_t::overflow_k;
+        }
+        std::size_t chain = first_probe_of(key, slots_count_);
+        while (true) {
+            std::atomic_ref<slot_state_t> state(states_[chain]);
+            slot_state_t expected_empty = slot_state_t::empty_k;
+            if (state.load(std::memory_order_relaxed) == slot_state_t::empty_k &&
+                state.compare_exchange_strong(expected_empty, slot_state_t::building_k, std::memory_order_acquire,
+                                              std::memory_order_relaxed)) {
+                slots_[chain].key = key;
+                slots_[chain].value = value;
+                state.store(slot_state_t::published_k, std::memory_order_release);
+                return status_t::success_k;
+            }
+            chain = (chain + 1) & (slots_count_ - 1);
+        }
+    }
 
     /** @brief One value stored under @p key, or @c malformed_k when absent. Duplicates
      *      surface in an unspecified order - use @c find_each to see them all. */
-    expected<value_t> find(key_t const& key) const noexcept;
+    expected<value_t> find(key_t const& key) const noexcept {
+        expected<value_t> result {value_t {}, status_t::malformed_k};
+        find_each(key, [&](value_t value) noexcept { result = {value, status_t::success_k}; });
+        return result;
+    }
 
-    /** @brief Invokes @p callback for every value stored under @p key. */
+    /** @brief Invokes @p callback for every value stored under @p key - wait-free. */
     template <typename callback_type_>
-    void find_each(key_t const& key, callback_type_&& callback) const noexcept;
+    void find_each(key_t const& key, callback_type_&& callback) const noexcept {
+        if (!slots_count_) return;
+        std::size_t chain = first_probe_of(key, slots_count_);
+        while (true) {
+            slot_state_t const state = std::atomic_ref<slot_state_t const>(states_[chain]) //
+                                           .load(std::memory_order_acquire);
+            if (state == slot_state_t::empty_k) return;
+            // A building slot's key is still in flight - occupied, but never a match.
+            if (state == slot_state_t::published_k && slots_[chain].key == key) callback(slots_[chain].value);
+            chain = (chain + 1) & (slots_count_ - 1);
+        }
+    }
 
     /** @brief Number of values stored under @p key. */
-    std::size_t count(key_t const& key) const noexcept;
+    std::size_t count(key_t const& key) const noexcept {
+        std::size_t matches = 0;
+        find_each(key, [&](value_t) noexcept { ++matches; });
+        return matches;
+    }
 
     /** @brief Whether at least one value is stored under @p key. */
-    bool contains(key_t const& key) const noexcept;
+    bool contains(key_t const& key) const noexcept { return find(key).status == status_t::success_k; }
 
     /** @brief Total inserted entries across all keys. */
-    std::size_t size() const noexcept;
+    std::size_t size() const noexcept { return inserted_count_.load(std::memory_order_relaxed); }
 
     /** @brief Total entries the current slot array can host. */
-    std::size_t capacity() const noexcept;
+    std::size_t capacity() const noexcept { return entries_quota_; }
 
   private:
-    /** @brief One probe slot: the key beside its value; the value doubles as the claim
-     *      word, release-stored after the key lands. */
+    /** @brief One probe slot: the key beside its value; its lifecycle lives in the
+     *      parallel control-byte array, so no payload bit-pattern is ever reserved. */
     struct slot_t {
         key_t key;
         value_t value;
     };
 
+    using bytes_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<std::byte>;
+
+    /** @brief One allocation carries both planes: the slots, then the control bytes. */
+    static std::size_t carved_bytes_of(std::size_t slots_count) noexcept {
+        return slots_count * (sizeof(slot_t) + sizeof(slot_state_t));
+    }
+
+    /** @brief Avalanches the hash through @ref mix_bits before masking, so the identity
+     *      hashes of sequential integer keys still scatter across the table. */
+    std::size_t first_probe_of(key_t const& key, std::size_t slots_count) const noexcept {
+        return static_cast<std::size_t>(mix_bits(static_cast<u64_t>(hash_(key)))) & (slots_count - 1);
+    }
+
     slot_t* slots_ = nullptr;
+    slot_state_t* states_ = nullptr;
     std::size_t slots_count_ = 0;
+    std::size_t entries_quota_ = 0;
     std::atomic<std::size_t> inserted_count_ {0};
 
     [[no_unique_address]] hash_t hash_;
