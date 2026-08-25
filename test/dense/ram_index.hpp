@@ -88,9 +88,12 @@ static std::size_t test_configuration(char const* name) {
 /** @brief Per-dtype CPU index suite entries the shard translation units define and
  *      @c dense.cpp composes explicitly; each returns its shard's failure count. */
 std::size_t test_dense_index_f32();
-std::size_t test_dense_index_u8();
-std::size_t test_dense_index_i8();
 std::size_t test_dense_index_bf16();
+std::size_t test_dense_index_f16();
+std::size_t test_dense_index_e5m2();
+std::size_t test_dense_index_i8();
 std::size_t test_dense_index_i4();
+std::size_t test_dense_index_u8();
+std::size_t test_dense_index_u1();
 
 #pragma endregion Suite Entry Points

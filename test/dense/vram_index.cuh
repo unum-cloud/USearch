@@ -31,36 +31,40 @@ struct counting_cuda_allocator {
         using other = counting_cuda_allocator<other_>;
     };
 
-    cuda_vmm_allocator<value_type_> vmm_;
+    cuda_virtual_memory_allocator<value_type_> virtual_memory_;
     allocation_ledger_t* ledger_ = nullptr;
     std::size_t tallied_bytes_ = 0;
 
     counting_cuda_allocator() noexcept = default;
     counting_cuda_allocator(counting_allocator<std::byte> const& host) noexcept : ledger_(host.ledger_) {}
-    counting_cuda_allocator(counting_cuda_allocator const& other) noexcept : vmm_(other.vmm_), ledger_(other.ledger_) {}
+    counting_cuda_allocator(counting_cuda_allocator const& other) noexcept
+        : virtual_memory_(other.virtual_memory_), ledger_(other.ledger_) {}
     template <typename other_>
     counting_cuda_allocator(counting_cuda_allocator<other_> const& other) noexcept
-        : vmm_(other.vmm_), ledger_(other.ledger_) {}
+        : virtual_memory_(other.virtual_memory_), ledger_(other.ledger_) {}
     ~counting_cuda_allocator() noexcept { release(); }
 
-    status_t reserve_range(std::size_t bytes, int device) noexcept { return vmm_.reserve_range(bytes, device); }
+    status_t reserve_range(std::size_t bytes, int device) noexcept {
+        return virtual_memory_.reserve_range(bytes, device);
+    }
     status_t commit(std::size_t bytes) noexcept {
-        status_t const status = vmm_.commit(bytes);
-        if (ledger_ && vmm_.committed_bytes() > tallied_bytes_) {
-            ledger_->live_bytes.fetch_add(static_cast<std::ptrdiff_t>(vmm_.committed_bytes() - tallied_bytes_));
+        status_t const status = virtual_memory_.commit(bytes);
+        if (ledger_ && virtual_memory_.committed_bytes() > tallied_bytes_) {
+            ledger_->live_bytes.fetch_add(
+                static_cast<std::ptrdiff_t>(virtual_memory_.committed_bytes() - tallied_bytes_));
             ledger_->total_allocations.fetch_add(1);
-            tallied_bytes_ = vmm_.committed_bytes();
+            tallied_bytes_ = virtual_memory_.committed_bytes();
         }
         return status;
     }
-    value_type* base() const noexcept { return vmm_.base(); }
-    std::size_t reserved_bytes() const noexcept { return vmm_.reserved_bytes(); }
-    std::size_t committed_bytes() const noexcept { return vmm_.committed_bytes(); }
-    int device() const noexcept { return vmm_.device(); }
+    value_type* base() const noexcept { return virtual_memory_.base(); }
+    std::size_t reserved_bytes() const noexcept { return virtual_memory_.reserved_bytes(); }
+    std::size_t committed_bytes() const noexcept { return virtual_memory_.committed_bytes(); }
+    int device() const noexcept { return virtual_memory_.device(); }
     void release() noexcept {
         if (ledger_ && tallied_bytes_) ledger_->live_bytes.fetch_sub(static_cast<std::ptrdiff_t>(tallied_bytes_));
         tallied_bytes_ = 0;
-        vmm_.release();
+        virtual_memory_.release();
     }
 };
 

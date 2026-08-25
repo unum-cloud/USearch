@@ -35,8 +35,8 @@ int main() {
     visited.set(42);
     if (!visited.test(42) || visited.test(43)) return 1;
 
-    splitmix_u32_t random_generator {7};
-    [[maybe_unused]] u32_t const bounded = random_generator.bounded(10);
+    splitmix64_t random_generator {7};
+    [[maybe_unused]] u32_t const drawn = uniform_below<u32_t> {10}(random_generator);
 
     prefetch_query_sse_t const prefetch;
     prefetch(&random_generator);

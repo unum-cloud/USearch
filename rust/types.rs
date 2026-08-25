@@ -132,6 +132,14 @@ pub enum Status {
     MalformedInput = 8,
     /// The library reported neither success nor a failure.
     Internal = 9,
+    /// A hard design ceiling was reached, like the 32-bit id space.
+    Overflow = 10,
+    /// The verb needs a prior successful reservation that never happened.
+    Uninitialized = 11,
+    /// The request contradicts an already-frozen configuration.
+    ConfigMismatch = 12,
+    /// A synchronization contract was violated by a concurrent operation.
+    Contended = 13,
     /// A status a newer library reported and this binding has no name for.
     Unrecognized = -1,
 }
@@ -148,6 +156,10 @@ impl Status {
             7 => Status::Device,
             8 => Status::MalformedInput,
             9 => Status::Internal,
+            10 => Status::Overflow,
+            11 => Status::Uninitialized,
+            12 => Status::ConfigMismatch,
+            13 => Status::Contended,
             _ => Status::Unrecognized,
         }
     }
@@ -783,6 +795,10 @@ mod tests {
             Status::Device,
             Status::MalformedInput,
             Status::Internal,
+            Status::Overflow,
+            Status::Uninitialized,
+            Status::ConfigMismatch,
+            Status::Contended,
         ];
         for status in statuses {
             let raw = ffi::usearch_error_t {

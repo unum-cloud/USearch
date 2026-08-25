@@ -4,22 +4,24 @@
  *  @brief      Unit tests for the pure-C ABI of USearch (`usearch/dense_index.h`).
  *  @date       June 25, 2023
  *
- *  Exercises the lifecycle of `usearch_index_t` through the public C surface:
- *  index creation with every supported metric and scalar kind, `add` / `get` /
- *  `find` / `remove`, on-disk `save` / `load` / `view`, and error propagation
- *  via `usearch_error_t`. The harness is intentionally dependency-free so it
- *  can run in the same matrix as the C++ tests and on cross-compilation
- *  targets where only the C runtime is available.
+ *  Exercises the dense surface through the ABI every binding consumes: initialization and
+ *  reservation, batch `add` and `search`, retrieval by key, and the error contract of
+ *  `usearch_error_t`. Scoped to the verbs `src/` instantiates today - the header runs ahead of
+ *  the implementation, and a smoke test that cannot link proves nothing. The harness is
+ *  intentionally dependency-free so it can run in the same matrix as the C++ tests and on
+ *  cross-compilation targets where only the C runtime is available.
  *
  *  On startup we install a signal handler (see `install_crash_handlers`) that
  *  prints a native back-trace before re-raising, so CI logs pinpoint the
  *  faulting frame instead of stopping at a bare exit code.
  */
 #include <errno.h>
-#include <signal.h> // `signal`, `raise`, `SIGSEGV`
-#include <stdio.h>  // `remove`
-#include <stdlib.h>
-#include <string.h> // `memset`
+#include <signal.h>  // `signal`, `raise`, `SIGSEGV`
+#include <stdbool.h> // `bool`
+#include <stdint.h>  // `uint8_t`, `uint64_t`
+#include <stdio.h>   // `printf`
+#include <stdlib.h>  // `malloc`, `free`
+#include <string.h>  // `memset`, `memcmp`
 #include <sys/stat.h>
 
 /* Back-trace support for the C test harness. The `signal` API is standard C;
@@ -58,8 +60,7 @@ static void usearch_write_backtrace(int signal_number) {
         if (SymFromAddr(current_process, (DWORD64)backtrace_frames[frame_index], 0, symbol_info))
             fprintf(stderr, "  #%2u %s + 0x%llx\n", (unsigned)frame_index, symbol_info->Name,
                     (unsigned long long)((DWORD64)backtrace_frames[frame_index] - symbol_info->Address));
-        else
-            fprintf(stderr, "  #%2u %p\n", (unsigned)frame_index, backtrace_frames[frame_index]);
+        else fprintf(stderr, "  #%2u %p\n", (unsigned)frame_index, backtrace_frames[frame_index]);
     }
 #elif defined(__unix__) || defined(__APPLE__)
     enum { backtrace_depth_limit = 64 };
@@ -87,8 +88,7 @@ static void install_crash_handlers(void) {
 }
 
 void expect(bool must_be_true, char const* message) {
-    if (must_be_true)
-        return;
+    if (must_be_true) return;
     message = message ? message : "C unit test failed";
     printf("Assert: %s\n", message);
     exit(-1);
@@ -106,409 +106,224 @@ void expect(bool must_be_true, char const* message) {
 float* create_vectors(size_t const count, size_t const dimensions) {
     float* data = (float*)malloc(count * dimensions * sizeof(float));
     expect(data, "Failed to allocate memory");
-    for (size_t index = 0; index < count * dimensions; ++index)
-        data[index] = (float)rand() / (float)RAND_MAX;
+    for (size_t index = 0; index < count * dimensions; ++index) data[index] = (float)rand() / (float)RAND_MAX;
     return data;
 }
 
-usearch_init_options_t create_options(size_t const dimensions) {
-    usearch_init_options_t opts;
-    opts.connectivity = 3; // 32 in faiss
-    opts.dimensions = dimensions;
-    opts.expansion_add = 40;    // 40 in faiss
-    opts.expansion_search = 16; // 10 in faiss
-    opts.metric_kind = usearch_metric_ip_k;
-    opts.metric = NULL;
-    opts.quantization = usearch_scalar_f32_k;
-    opts.multi = false;
-    return opts;
+/** @brief Wraps an integer identity into the 128-bit key the ABI takes, low bytes last. */
+usearch_key_t key_of(uint64_t value) {
+    usearch_key_t key;
+    memset(key.bytes, 0, sizeof(key.bytes));
+    for (unsigned byte_index = 0; byte_index != 8; ++byte_index)
+        key.bytes[15 - byte_index] = (uint8_t)(value >> (byte_index * 8));
+    return key;
+}
+
+/** @brief An angular RAM index over @p dimensions -wide `f32` rows, every optional field derived. */
+usearch_dense_options_t create_options(size_t const dimensions) {
+    usearch_dense_options_t options;
+    memset(&options, 0, sizeof(options));
+    options.metric = usearch_dense_metric_angular_k;
+    options.quantization = usearch_scalar_f32_k;
+    options.dimensions = dimensions;
+    options.connectivity = 16;
+    options.residency = usearch_residency_ram_k;
+    return options;
 }
 
 /**
- *  This test is designed to verify the initialization of the index with specific dimensions and ensures that the
- *  associated properties are set correctly. It initializes the index twice, checking for errors at each step, and
- *  performs a reserve operation to pre-allocate space in the index, verifying the correct settings of size, capacity,
- *  dimensions, and connectivity after each operation.
+ *  Initializes an index twice, checking the error slot at each step, and reserves capacity,
+ *  verifying that size, capacity, dimensions, and connectivity read back as configured.
  */
 void test_init(size_t const collection_size, size_t const dimensions) {
-    printf("Test: Index Initialization... %zu vectors, %zu dimensions \n", collection_size, dimensions);
+    printf("Test: Index Initialization... %zu vectors, %zu dimensions\n", collection_size, dimensions);
 
-    // Init index
-    usearch_error_t error = NULL;
-    usearch_init_options_t opts = create_options(dimensions);
-    usearch_index_t index = usearch_init(&opts, &error);
-    expect(!error, error);
-    usearch_free(index, &error);
-    expect(!error, error);
+    usearch_dense_options_t options = create_options(dimensions);
+    usearch_error_t error = {0};
 
-    // Init second time
-    index = usearch_init(&opts, &error);
-    expect(!error, error);
+    usearch_dense_index_t index = usearch_dense_init(&options, &error);
+    expect(!error.message, error.message);
+    expect(index != NULL, "Initialization returned no handle");
+    usearch_dense_free(index);
 
-    expect_eq(usearch_size(index, &error), 0, error);
-    expect_eq(usearch_capacity(index, &error), 0, error);
-    expect_eq(usearch_dimensions(index, &error), dimensions, error);
-    expect_eq(usearch_connectivity(index, &error), opts.connectivity, error);
+    index = usearch_dense_init(&options, &error);
+    expect(!error.message, error.message);
 
-    // Reserve
-    usearch_reserve(index, collection_size, &error);
-    expect(!error, error);
-    expect_eq(usearch_size(index, &error), 0, error);
-    expect(usearch_capacity(index, &error) >= collection_size, error);
-    expect_eq(usearch_dimensions(index, &error), dimensions, error);
-    expect_eq(usearch_connectivity(index, &error), opts.connectivity, error);
-    expect(usearch_hardware_acceleration(index, &error), error);
-    expect(usearch_memory_usage(index, &error), error);
+    usearch_dense_reserve(index, collection_size, &error);
+    expect(!error.message, error.message);
 
-    usearch_free(index, &error);
-    expect(!error, error);
+    expect_eq(usearch_dense_size(index, &error), 0, "Fresh index must be empty");
+    expect(!error.message, error.message);
+    expect(usearch_dense_capacity(index, &error) >= collection_size, "Capacity must cover the reservation");
+    expect(!error.message, error.message);
+    expect_eq(usearch_dense_dimensions(index, &error), dimensions, "Dimensions must read back as configured");
+    expect(!error.message, error.message);
+    expect_eq(usearch_dense_connectivity(index, &error), options.connectivity,
+              "Connectivity must read back as configured");
+    expect(!error.message, error.message);
 
+    usearch_dense_free(index);
     printf("Test: Index Initialization - PASSED\n");
 }
 
 /**
- *  This test validates the addition of vectors to the index. It initializes the index and reserves space for vectors.
- *  It then iteratively adds vectors to the index and checks if the index contains the added vectors by verifying the
- *  size, capacity, and presence of each vector in the index.
+ *  Inserts a batch and queries every row back, which an exact self-search must answer with the
+ *  row's own key. The batch is all-or-nothing, so a short return is a failure even without an
+ *  error status.
  */
-void test_add_vector(size_t const collection_size, size_t const dimensions) {
-    printf("Test: Add Vector... %zu vectors, %zu dimensions \n", collection_size, dimensions);
+void test_add_and_search(size_t const collection_size, size_t const dimensions) {
+    printf("Test: Add & Search... %zu vectors, %zu dimensions\n", collection_size, dimensions);
 
-    usearch_error_t error = NULL;
-    usearch_init_options_t opts = create_options(dimensions);
-    usearch_index_t index = usearch_init(&opts, &error);
-    usearch_reserve(index, collection_size, &error);
+    usearch_dense_options_t options = create_options(dimensions);
+    usearch_error_t error = {0};
+    usearch_dense_index_t index = usearch_dense_init(&options, &error);
+    expect(!error.message, error.message);
+    usearch_dense_reserve(index, collection_size, &error);
+    expect(!error.message, error.message);
 
-    // Add vectors
-    float* data = create_vectors(collection_size, dimensions);
-    for (size_t i = 0; i < collection_size; ++i) {
-        usearch_key_t key = i;
-        usearch_add(index, key, data + i * dimensions, usearch_scalar_f32_k, &error);
-        expect(!error, error);
+    float* const data = create_vectors(collection_size, dimensions);
+    usearch_key_t* const keys = (usearch_key_t*)malloc(collection_size * sizeof(usearch_key_t));
+    expect(keys, "Failed to allocate keys");
+    for (size_t row = 0; row != collection_size; ++row) keys[row] = key_of(row);
+
+    size_t const row_bytes = dimensions * sizeof(float);
+    size_t const inserted = usearch_dense_add(index, keys, data, collection_size, row_bytes, usearch_scalar_f32_k, NULL,
+                                              NULL, &error);
+    expect(!error.message, error.message);
+    expect_eq(inserted, collection_size, "A batch is all-or-nothing");
+    expect_eq(usearch_dense_size(index, &error), collection_size, "Every row must be published");
+
+    // One match per query, so the output matrices are one column wide.
+    usearch_key_t* const found_keys = (usearch_key_t*)malloc(collection_size * sizeof(usearch_key_t));
+    usearch_distance_t* const found_distances = (usearch_distance_t*)malloc(collection_size *
+                                                                            sizeof(usearch_distance_t));
+    size_t* const counts = (size_t*)malloc(collection_size * sizeof(size_t));
+    expect(found_keys && found_distances && counts, "Failed to allocate outputs");
+
+    usearch_dense_search(index, data, collection_size, row_bytes, usearch_scalar_f32_k, 1, NULL, NULL, found_keys,
+                         sizeof(usearch_key_t), found_distances, sizeof(usearch_distance_t), counts, &error);
+    expect(!error.message, error.message);
+
+    size_t recalled = 0;
+    for (size_t row = 0; row != collection_size; ++row) {
+        expect(counts[row] != 0, "Every query must find something in a non-empty index");
+        usearch_key_t const expected = key_of(row);
+        recalled += memcmp(found_keys[row].bytes, expected.bytes, sizeof(expected.bytes)) == 0;
     }
+    // Approximate search may miss, but a self-query missing itself often means a broken graph.
+    expect(recalled * 10 >= collection_size * 9, "Self-recall collapsed below 90%");
 
-    expect_eq(usearch_size(index, &error), collection_size, error);
-    expect(usearch_capacity(index, &error) >= collection_size, error);
-
-    // Check vectors in the index
-    for (size_t i = 0; i < collection_size; ++i) {
-        usearch_key_t key = i;
-        expect(usearch_contains(index, key, &error), error);
-    }
-    expect(!usearch_contains(index, -1, &error), error); // Non existing key
-
-    free(data);
-    usearch_free(index, &error);
-    printf("Test: Add Vector - PASSED\n");
-}
-
-/**
- *  This test ensures that vectors added to the index can be correctly found. It initializes the index, reserves space,
- *  and adds vectors. It then performs a search query for each added vector to ensure that the vectors are correctly
- *  found in the index, validating the count of found vectors.
- */
-void test_find_vector(size_t const collection_size, size_t const dimensions) {
-    printf("Test: Find Vector... %zu vectors, %zu dimensions \n", collection_size, dimensions);
-
-    usearch_error_t error = NULL;
-    usearch_init_options_t opts = create_options(dimensions);
-    usearch_index_t index = usearch_init(&opts, &error);
-    usearch_reserve(index, collection_size, &error);
-
-    // Create result buffers
-    usearch_key_t* keys = (usearch_key_t*)malloc(collection_size * sizeof(usearch_key_t));
-    float* distances = (float*)malloc(collection_size * sizeof(float));
-    expect(keys && distances, "Failed to allocate memory");
-
-    // Add vectors
-    float* data = create_vectors(collection_size, dimensions);
-    for (size_t i = 0; i < collection_size; ++i) {
-        usearch_key_t key = i;
-        usearch_add(index, key, data + i * dimensions, usearch_scalar_f32_k, &error);
-        expect(!error, error);
-    }
-
-    // Find the vectors
-    for (size_t i = 0; i < collection_size; i++) {
-        size_t found_count = usearch_search(index, data + i * dimensions, usearch_scalar_f32_k, collection_size, keys,
-                                            distances, &error);
-        expect(!error, error);
-        expect(found_count >= 1 && found_count <= collection_size, "Vector is missing");
-    }
-
-    free(data);
+    free(counts);
+    free(found_distances);
+    free(found_keys);
     free(keys);
-    free(distances);
-    usearch_free(index, &error);
-    printf("Test: Find Vector - PASSED\n");
+    free(data);
+    usearch_dense_free(index);
+    printf("Test: Add & Search - PASSED\n");
 }
 
 /**
- *  This test checks the ability of the index to handle multiple vectors associated with the same key. It initializes
- *  the index with the multi-option enabled, reserves space, and adds multiple vectors with the same key. The test then
- *  retrieves vectors associated with the key from the index and checks the count of retrieved vectors.
+ *  Reads entries back by key. `usearch_dense_get` reports the true entry count rather than the
+ *  number written, so a probe with a NULL output is how a caller sizes its buffer.
  */
-void test_get_vector(size_t const collection_size, size_t const dimensions) {
-    printf("Test: Get Vector... %zu vectors, %zu dimensions \n", collection_size, dimensions);
+void test_count_and_get(size_t const dimensions) {
+    printf("Test: Count & Get... %zu dimensions\n", dimensions);
 
-    usearch_error_t error = NULL;
-    usearch_init_options_t opts = create_options(dimensions);
-    opts.multi = true;
-    usearch_index_t index = usearch_init(&opts, &error);
-    usearch_reserve(index, collection_size, &error);
+    usearch_dense_options_t options = create_options(dimensions);
+    usearch_error_t error = {0};
+    usearch_dense_index_t index = usearch_dense_init(&options, &error);
+    expect(!error.message, error.message);
+    usearch_dense_reserve(index, 2, &error);
+    expect(!error.message, error.message);
 
-    // Create result buffers
-    float* vectors = (float*)malloc(collection_size * dimensions * sizeof(float));
-    expect(vectors, "Failed to allocate memory");
+    float* const data = create_vectors(2, dimensions);
+    usearch_key_t const keys[2] = {key_of(7), key_of(8)};
+    size_t const row_bytes = dimensions * sizeof(float);
+    usearch_dense_add(index, keys, data, 2, row_bytes, usearch_scalar_f32_k, NULL, NULL, &error);
+    expect(!error.message, error.message);
 
-    // Add multiple vectors with SAME key
-    usearch_key_t const key = 1;
-    float* data = create_vectors(collection_size, dimensions);
-    for (size_t i = 0; i < collection_size; i++) {
-        usearch_add(index, key, data + i * dimensions, usearch_scalar_f32_k, &error);
-        expect(!error, error);
-    }
+    expect_eq(usearch_dense_count(index, key_of(7), &error), 1, "The key was inserted once");
+    expect(!error.message, error.message);
+    expect_eq(usearch_dense_count(index, key_of(9), &error), 0, "The key was never inserted");
+    expect(!error.message, error.message);
 
-    // Retrieve vectors from index
-    size_t found_count = usearch_get(index, key, collection_size, vectors, usearch_scalar_f32_k, &error);
-    expect_eq(found_count, collection_size, "Vector is missing");
+    expect_eq(usearch_dense_get(index, key_of(7), NULL, 0, 0, usearch_scalar_f32_k, &error), 1,
+              "A NULL output probes the count");
+    expect(!error.message, error.message);
 
-    free(vectors);
+    float* const retrieved = (float*)malloc(row_bytes);
+    expect(retrieved, "Failed to allocate the retrieval buffer");
+    expect_eq(usearch_dense_get(index, key_of(7), retrieved, 1, row_bytes, usearch_scalar_f32_k, &error), 1,
+              "Retrieval must report the true entry count");
+    expect(!error.message, error.message);
+    for (size_t position = 0; position != dimensions; ++position)
+        expect(retrieved[position] == data[position], "An f32 index must return f32 rows unchanged");
+
+    free(retrieved);
     free(data);
-    usearch_free(index, &error);
-
-    printf("Test: Get Vector - PASSED\n");
+    usearch_dense_free(index);
+    printf("Test: Count & Get - PASSED\n");
 }
 
 /**
- *  This test ensures that vectors can be successfully removed from the index. It initializes the index, reserves space,
- *  and adds vectors. It then iteratively removes each vector from the index and checks for errors. However, note that
- *  the assert in this test expects an error, indicating that the remove functionality is not currently supported.
+ *  A message is @c NULL exactly when the status is success, and the slot a caller reuses is
+ *  fully overwritten - the contract every binding branches on. Only the success half is
+ *  exercised here; the failing verbs are the ones `src/` has yet to instantiate.
  */
-void test_remove_vector(size_t const collection_size, size_t const dimensions) {
-    printf("Test: Remove Vector... %zu vectors, %zu dimensions \n", collection_size, dimensions);
+void test_error_contract(size_t const dimensions) {
+    printf("Test: Error Contract\n");
 
-    usearch_error_t error = NULL;
-    usearch_init_options_t opts = create_options(dimensions);
-    usearch_index_t index = usearch_init(&opts, &error);
-    usearch_reserve(index, collection_size, &error);
+    usearch_dense_options_t options = create_options(dimensions);
+    // A slot carrying an earlier failure must come back clean, not merely unchanged.
+    usearch_error_t error = {usearch_error_io_k, "a stale message the call must overwrite"};
 
-    // Add vectors
-    float* data = create_vectors(collection_size, dimensions);
-    for (size_t i = 0; i < collection_size; ++i) {
-        usearch_key_t key = i;
-        usearch_add(index, key, data + i * dimensions, usearch_scalar_f32_k, &error);
-        expect(!error, error);
-    }
+    usearch_dense_index_t const index = usearch_dense_init(&options, &error);
+    expect(index != NULL, "Initialization returned no handle");
+    expect_eq(error.status, usearch_success_k, "A successful call must report success");
+    expect(error.message == NULL, "A successful call must carry no message");
 
-    // Remove the vectors
-    for (size_t i = 0; i < collection_size; i++) {
-        usearch_key_t key = i;
-        usearch_remove(index, key, &error);
-        expect(!error, "Currently, Remove is not supported");
-    }
+    usearch_dense_reserve(index, 4, &error);
+    expect_eq(error.status, usearch_success_k, "A successful call must report success");
+    expect(error.message == NULL, "A successful call must carry no message");
 
-    free(data);
-    usearch_free(index, &error);
-    printf("Test: Remove Vector - PASSED\n");
+    // A key the index never saw is a state, not a failure.
+    expect_eq(usearch_dense_count(index, key_of(4242), &error), 0, "An absent key counts zero");
+    expect_eq(error.status, usearch_success_k, "An absent key is not an error");
+
+    usearch_dense_free(index);
+    printf("Test: Error Contract - PASSED\n");
 }
 
-/**
- *  This test validates the save and load functionality of the index. It initializes the index, reserves space, and adds
- *  vectors. The index is then saved to a file and freed. A new index is initialized, and the previously saved index is
- *  loaded into it. The test then validates the loaded index properties and ensures that it contains all the vectors
- *  from the saved index.
- */
-void test_save_load(size_t const collection_size, size_t const dimensions) {
-    printf("Test: Save/Load... %zu vectors, %zu dimensions \n", collection_size, dimensions);
-    float* data = create_vectors(collection_size, dimensions);
-
-    usearch_error_t error = NULL;
-    usearch_init_options_t opts = create_options(dimensions);
-    usearch_init_options_t weird_ops = opts;
-    weird_ops.connectivity = 11;
-    weird_ops.expansion_add = 15;
-    weird_ops.expansion_search = 19;
-    weird_ops.metric_kind = usearch_metric_pearson_k;
-    weird_ops.quantization = usearch_scalar_f64_k;
-
-    {
-
-        usearch_index_t index = usearch_init(&weird_ops, &error);
-        usearch_reserve(index, collection_size, &error);
-
-        // Add vectors
-        for (size_t i = 0; i < collection_size; ++i) {
-            usearch_key_t key = i;
-            usearch_add(index, key, data + i * dimensions, usearch_scalar_f32_k, &error);
-            expect(!error, error);
-        }
-
-        // Save and free the index
-        usearch_save(index, "tmp.usearch", &error);
-        expect(!error, error);
-        usearch_free(index, &error);
-        expect(!error, error);
-    }
-
-    // Reset the options
-    opts.connectivity = 0;
-    opts.dimensions = 0;
-    opts.expansion_add = 0;
-    opts.expansion_search = 0;
-    opts.metric = NULL;
-    opts.quantization = usearch_scalar_unknown_k;
-    opts.metric_kind = usearch_metric_unknown_k;
-
-    // Reinit
-    {
-
-        usearch_index_t index = usearch_init(NULL, &error);
-        expect(!error, error);
-        // expect(usearch_size(index, &error) == 0, error);
-
-        // Load
-        usearch_load(index, "tmp.usearch", &error);
-        expect(!error, error);
-        expect(usearch_size(index, &error) == collection_size, error);
-        expect(usearch_capacity(index, &error) == collection_size, error);
-        expect(usearch_dimensions(index, &error) == dimensions, error);
-        expect(usearch_connectivity(index, &error) == weird_ops.connectivity, error);
-
-        // Check vectors in the index
-        for (size_t i = 0; i < collection_size; ++i) {
-            usearch_key_t key = i;
-            expect(usearch_contains(index, key, &error), error);
-        }
-
-        // Create result buffers
-        usearch_key_t* keys = (usearch_key_t*)malloc(collection_size * sizeof(usearch_key_t));
-        float* distances = (float*)malloc(collection_size * sizeof(float));
-        expect(keys && distances, "Failed to allocate memory");
-
-        // Find the vectors
-        usearch_change_threads_search(index, 1, &error);
-        for (size_t i = 0; i < collection_size; i++) {
-            size_t found_count = usearch_search(index, data + i * dimensions, usearch_scalar_f32_k, collection_size,
-                                                keys, distances, &error);
-            expect(!error, error);
-            expect(found_count >= 1 && found_count <= collection_size, "Vector is missing");
-        }
-
-        free(keys);
-        free(distances);
-        usearch_free(index, &error);
-    }
-
-    free(data);
-
-    // Remove the file from disk
-    remove("tmp.usearch");
-    printf("Test: Save/Load - PASSED\n");
+/** @brief The library-wide probes, which take no handle and cannot fail. */
+void test_library_probes(void) {
+    printf("Test: Library Probes\n");
+    expect(usearch_version() != NULL, "The version must be reported");
+    expect(usearch_capabilities_compiled() != NULL, "The compiled capabilities must be reported");
+    expect(usearch_capabilities_available() != NULL, "The available capabilities must be reported");
+    printf("Test: Library Probes - PASSED\n");
 }
 
-/**
- *  This test is designed to validate the view functionality of the index. It initializes the index, reserves space, and
- *  adds vectors. The index is then saved to a file and freed. A new index is initialized and a view is created from the
- *  saved index file. The test is mainly focused on ensuring that no errors occur during these operations, but it does
- *  not verify the properties or contents of the viewed index.
- */
-void test_view(size_t const collection_size, size_t const dimensions) {
-    printf("Test: View... %zu vectors, %zu dimensions \n", collection_size, dimensions);
-
-    usearch_error_t error = NULL;
-    usearch_init_options_t opts = create_options(dimensions);
-    usearch_index_t index = usearch_init(&opts, &error);
-    usearch_reserve(index, collection_size, &error);
-
-    // Add vectors
-    float* data = create_vectors(collection_size, dimensions);
-    for (size_t i = 0; i < collection_size; ++i) {
-        usearch_key_t key = i;
-        usearch_add(index, key, data + i * dimensions, usearch_scalar_f32_k, &error);
-        expect(!error, error);
-    }
-
-    // Save and free the index
-    usearch_save(index, "tmp.usearch", &error);
-    expect(!error, error);
-    usearch_free(index, &error);
-    expect(!error, error);
-
-    // Reinit
-    index = usearch_init(&opts, &error);
-    expect(!error, error);
-
-    // View
-    usearch_view(index, "tmp.usearch", &error);
-    expect(!error, error);
-
-    free(data);
-    usearch_free(index, &error);
-    printf("Test: View - PASSED\n");
-}
-
-void test_mini_float_quantizations(size_t const collection_size, size_t const dimensions) {
-    printf("Test: Mini-float quantizations... %zu vectors, %zu dimensions\n", collection_size, dimensions);
-    usearch_scalar_kind_t kinds[] = {
-        usearch_scalar_e5m2_k,
-        usearch_scalar_e4m3_k,
-        usearch_scalar_e3m2_k,
-        usearch_scalar_e2m3_k,
-    };
-    float* data = create_vectors(collection_size, dimensions);
-    usearch_key_t* keys = (usearch_key_t*)malloc(collection_size * sizeof(usearch_key_t));
-    float* distances = (float*)malloc(collection_size * sizeof(float));
-    expect(keys && distances, "Failed to allocate memory");
-
-    for (size_t k = 0; k < sizeof(kinds) / sizeof(kinds[0]); ++k) {
-        usearch_error_t error = NULL;
-        usearch_init_options_t opts = create_options(dimensions);
-        opts.quantization = kinds[k];
-        usearch_index_t index = usearch_init(&opts, &error);
-        expect(!error, error);
-        usearch_reserve(index, collection_size, &error);
-        expect(!error, error);
-        for (size_t i = 0; i < collection_size; ++i) {
-            usearch_add(index, (usearch_key_t)i, data + i * dimensions, usearch_scalar_f32_k, &error);
-            expect(!error, error);
-        }
-        expect_eq(usearch_size(index, &error), collection_size, error);
-        for (size_t i = 0; i < collection_size; ++i) {
-            size_t found =
-                usearch_search(index, data + i * dimensions, usearch_scalar_f32_k, 1, keys, distances, &error);
-            expect(!error, error);
-            expect(found >= 1, "Vector not found");
-        }
-        usearch_free(index, &error);
-    }
-    free(data);
-    free(keys);
-    free(distances);
-    printf("Test: Mini-float quantizations - PASSED\n");
-}
-
-int main(int argc, char const* argv[]) {
-    install_crash_handlers();
-    printf("Running tests...\n");
-    printf("USearch version: %s\n", usearch_version());
-
-    size_t collection_sizes[] = {11, 512};
-    size_t dimensions[] = {83, 2}; // Not all distance functions make sense for 1 dimensional data
-    for (size_t index = 0; index < sizeof(collection_sizes) / sizeof(collection_sizes[0]); ++index) {
-        for (size_t jdx = 0; jdx < sizeof(dimensions) / sizeof(dimensions[0]); ++jdx) {
-            test_init(collection_sizes[index], dimensions[jdx]);
-            test_add_vector(collection_sizes[index], dimensions[jdx]);
-            test_find_vector(collection_sizes[index], dimensions[jdx]);
-            test_get_vector(collection_sizes[index], dimensions[jdx]);
-            test_remove_vector(collection_sizes[index], dimensions[jdx]);
-            test_save_load(collection_sizes[index], dimensions[jdx]);
-            test_view(collection_sizes[index], dimensions[jdx]);
-            test_mini_float_quantizations(collection_sizes[index], dimensions[jdx]);
-        }
-    }
-
+int main(int argc, char* argv[]) {
     (void)argc;
     (void)argv;
+    install_crash_handlers();
+
+    printf("USearch C ABI tests: %s\n", usearch_version());
+    printf("  compiled: %s\n", usearch_capabilities_compiled());
+    printf("  available: %s\n", usearch_capabilities_available());
+
+    test_library_probes();
+    test_error_contract(64);
+
+    size_t const collection_sizes[] = {11, 512};
+    size_t const dimension_counts[] = {83, 256};
+    for (size_t size_index = 0; size_index != 2; ++size_index)
+        for (size_t dimension_index = 0; dimension_index != 2; ++dimension_index) {
+            test_init(collection_sizes[size_index], dimension_counts[dimension_index]);
+            test_add_and_search(collection_sizes[size_index], dimension_counts[dimension_index]);
+        }
+    test_count_and_get(dimension_counts[0]);
+
+    printf("All tests passed!\n");
     return 0;
 }

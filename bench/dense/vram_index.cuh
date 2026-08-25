@@ -341,7 +341,7 @@ int stage_and_run(persisted_dataset<dataset_scalar_type_> const& dataset, bench_
     using scalar_t = typename bench_context_t::scalar_t;
 
     if (options.devices.size() > 1) {
-        if constexpr (std::is_same_v<plane_allocator_, cuda_vmm_allocator<std::byte>>)
+        if constexpr (std::is_same_v<plane_allocator_, cuda_virtual_memory_allocator<std::byte>>)
             return run_indexes<dataset_scalar_type_, stored_dtype_, kernel_, arch_ceiling_>(dataset, options);
         fmt::println("skipped: the multi-index pipeline needs virtual-memory planes; drop --managed-memory");
         return 0;
@@ -454,7 +454,7 @@ int run_with_stored_dtype(persisted_dataset<dataset_scalar_type_> const& dataset
     return plane_space == cuda_address_space_t::managed_k
                ? run_with_arch<dataset_scalar_type_, stored_dtype_, cuda_managed_allocator<std::byte>>( //
                      dataset, options, device, arch_ceiling)
-               : run_with_arch<dataset_scalar_type_, stored_dtype_, cuda_vmm_allocator<std::byte>>( //
+               : run_with_arch<dataset_scalar_type_, stored_dtype_, cuda_virtual_memory_allocator<std::byte>>( //
                      dataset, options, device, arch_ceiling);
 }
 

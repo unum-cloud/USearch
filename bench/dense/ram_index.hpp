@@ -119,7 +119,10 @@ struct domain_or_default_allocator {
 
     value_type_* allocate(std::size_t count) noexcept {
         if (memory_domain < 0) return static_cast<value_type_*>(std::malloc(count * sizeof(value_type_)));
-        return static_cast<value_type_*>(fu_allocate_on_domain_id(memory_domain, count * sizeof(value_type_)));
+        void* memory = nullptr;
+        if (fu_allocate_on_domain_id(memory_domain, count * sizeof(value_type_), &memory) != fu_success_k)
+            return nullptr;
+        return static_cast<value_type_*>(memory);
     }
     void deallocate(value_type_* pointer, std::size_t count) noexcept {
         if (memory_domain < 0) return std::free(pointer);
@@ -184,8 +187,12 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
     auto& bench = streamed.bench;
     std::size_t const rows = streamed.vectors.extent(0);
     std::size_t const dimensions = streamed.vectors.extent(1);
-    std::size_t const threads = fu_pool_threads_count(pool);
-    std::size_t const compute_domains = fu_compute_domains_count(topology);
+    std::size_t threads = 0, compute_domains = 0;
+    if (fu_pool_threads_count(pool, &threads) != fu_success_k ||
+        fu_compute_domains_count(topology, &compute_domains) != fu_success_k) {
+        fmt::println("Failed to read the pool's shape");
+        return false;
+    }
 
     connectivity_t const connectivity = connectivity_of(bench.options.connectivity);
     if (connectivity == connectivity_unknown_k) {
@@ -365,7 +372,9 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     if (index_t::picked_quads_capability_k == nk_cap_serial_k &&
         (bench.options.max_compute & nk_capabilities_available() & ~nk_cap_serial_k))
         fmt::print(verdict_style(false), "  ⚠ scalar fallback: no SIMD kit is adapted for this dtype & metric\n");
-    fmt::println("  threads: {}", fu_pool_threads_count(pool));
+    std::size_t reported_threads = 0;
+    [[maybe_unused]] fu_status_t const counted = fu_pool_threads_count(pool, &reported_threads);
+    fmt::println("  threads: {}", reported_threads);
     if (bench.indexes.shards_count() > 1)
         fmt::println("  indexes: {}, one per memory domain", bench.indexes.shards_count());
     fmt::println("  wall: {:.2f} s", seconds);
@@ -462,7 +471,9 @@ bool run_search(streamed_dataset_type_& streamed, fu_pool_t pool) {
         return false;
     }
     telemetry_lane_t const sums = summed_lanes(bench.lanes);
-    report_search_metrics(bench.options, query_count, seconds, fu_pool_threads_count(pool), sums,
+    std::size_t searching_threads = 0;
+    [[maybe_unused]] fu_status_t const counted = fu_pool_threads_count(pool, &searching_threads);
+    report_search_metrics(bench.options, query_count, seconds, searching_threads, sums,
                           {bench.results.latencies_us.data(), bench.results.latencies_us.size()});
     judge_hits(bench.options, bench.results, query_count);
     return true;
@@ -520,7 +531,11 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
     /** @brief Owns the rescaling planes @c streamed_dataset::rescaling views. */
     nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3> rescaling_planes;
     if constexpr (!streamed_t::zero_copy_k) {
-        std::size_t const threads = fu_pool_threads_count(launch.pool);
+        std::size_t threads = 0;
+        if (fu_pool_threads_count(launch.pool, &threads) != fu_success_k || !threads) {
+            fmt::println("Failed to read the pool's thread count");
+            return 1;
+        }
         std::size_t const batch_rows = launch.options.batch ? std::max(launch.options.batch, threads) : 4 * threads;
         std::size_t const rows_per_thread = divide_round_up(batch_rows, threads);
         staging = nk::tensor<scalar_t, std::allocator<scalar_t>, 3>::try_zeros({threads, rows_per_thread, dimensions});

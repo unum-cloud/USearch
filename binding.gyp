@@ -25,10 +25,15 @@
             "include_dirs": [
                 "<!@(node -p \"require('node-addon-api').include\")",
                 "include",
+                "numkong/include",
+                "forkunion/include",
+                "stringzilla/include",
             ],
             "defines": [
                 "USEARCH_USE_NUMKONG=1",
                 "NK_DYNAMIC_DISPATCH=1",
+                "USEARCH_USE_FORKUNION=1",
+                "USEARCH_USE_STRINGZILLA=1",
             ],
             "xcode_settings": {
                 "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
@@ -43,36 +48,6 @@
                     "AdditionalOptions": ["-std:c++20", "/Zc:preprocessor"],
                 }
             },
-            "conditions": [
-                [
-                    'OS=="linux"',
-                    {
-                        "cflags_cc": [
-                            '<!(if [ "$USEARCH_USE_OPENMP" = "1" ]; then echo \'-fopenmp\'; fi)',
-                        ],
-                        "ldflags": ['<!(if [ "$USEARCH_USE_OPENMP" = "1" ]; then echo \'-lgomp\'; fi)'],
-                        "defines": [
-                            "USEARCH_USE_OPENMP=<!(echo ${USEARCH_USE_OPENMP:-0})",
-                        ],
-                    },
-                ],
-                [
-                    'OS=="mac"',
-                    {
-                        "defines": [
-                            "USEARCH_USE_OPENMP=0",
-                        ],
-                    },
-                ],
-                [
-                    'OS=="win"',
-                    {
-                        "defines": [
-                            "USEARCH_USE_OPENMP=0",
-                        ],
-                    },
-                ],
-            ],
         }
     ]
 }

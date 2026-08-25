@@ -2,16 +2,31 @@ API Reference
 ===============
 
 =================================
-usearch/index.hpp
+usearch/utilities/types.hpp
 =================================
-.. doxygenfile:: index.hpp
+.. doxygenfile:: utilities/types.hpp
 
 =================================
-usearch/index_plugins.hpp
+usearch/basic/ram_index.hpp
 =================================
-.. doxygenfile:: index_plugins.hpp
+.. doxygenfile:: basic/ram_index.hpp
 
 =================================
-usearch/index_dense.hpp
+usearch/dense/ram_metric.hpp
 =================================
-.. doxygenfile:: index_dense.hpp
+.. doxygenfile:: dense/ram_metric.hpp
+
+=================================
+usearch/dense/ram_index.hpp
+=================================
+.. doxygenfile:: dense/ram_index.hpp
+
+=================================
+usearch/dense/ram_indexes.hpp
+=================================
+.. doxygenfile:: dense/ram_indexes.hpp
+
+=================================
+usearch/dense/nvme_index.hpp
+=================================
+.. doxygenfile:: dense/nvme_index.hpp

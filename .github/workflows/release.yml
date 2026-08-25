@@ -51,11 +51,11 @@ jobs:
             csharp/nuget/nuget-package.props:>(\d+\.\d+\.\d+)</Version>
             CMakeLists.txt:VERSION (\d+\.\d+\.\d+)
           update-major-version-in: |
-            include/usearch/index.hpp:^#define USEARCH_VERSION_MAJOR (\d+)
+            include/usearch/types.h:^#define USEARCH_VERSION_MAJOR (\d+)
           update-minor-version-in: |
-            include/usearch/index.hpp:^#define USEARCH_VERSION_MINOR (\d+)
+            include/usearch/types.h:^#define USEARCH_VERSION_MINOR (\d+)
           update-patch-version-in: |
-            include/usearch/index.hpp:^#define USEARCH_VERSION_PATCH (\d+)
+            include/usearch/types.h:^#define USEARCH_VERSION_PATCH (\d+)
           dry-run: "false"
           push: "true"
           create-release: "true"
@@ -148,7 +148,7 @@ jobs:
           touch "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/DEBIAN/control"
           mkdir -p "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/usr/local/lib"
           mkdir "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/usr/local/include"
-          cp c/usearch.h "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/usr/local/include/"
+          cp -r include/usearch "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/usr/local/include/"
           cp build_release/libusearch_c.so "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/usr/local/lib/"
           echo -e "Package: usearch\nVersion: ${{ steps.set_version.outputs.version }}\nMaintainer: Ash Vardanian\nArchitecture: ${{ matrix.arch }}\nDescription: Faster & Smaller Single-File Search Engine for Vectors & Texts" > "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/DEBIAN/control"
           dpkg-deb --build "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}"
@@ -218,8 +218,8 @@ jobs:
           cmake --build ./build_release --config Release
           mkdir pkg
           copy .\build_release\libusearch_c.dll pkg\
-          copy .\c\usearch.h pkg\
-          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_c.dll usearch.h
+          xcopy /E /I .\include\usearch pkg\usearch
+          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_c.dll usearch
 
       - name: Build library (MSVC ARM64)
         if: matrix.arch == 'arm64'
@@ -228,8 +228,8 @@ jobs:
           cmake --build ./build_release --config Release
           mkdir pkg
           copy .\build_release\libusearch_c.dll pkg\
-          copy .\c\usearch.h pkg\
-          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_c.dll usearch.h
+          xcopy /E /I .\include\usearch pkg\usearch
+          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_c.dll usearch
 
       - name: Upload native library for Java
         uses: actions/upload-artifact@v5
@@ -284,7 +284,10 @@ jobs:
                 -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
                 -B ./build_release
           cmake --build ./build_release --config Release
-          zip -j usearch_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip build_release/libusearch_c.dylib c/usearch.h
+          mkdir pkg
+          cp build_release/libusearch_c.dylib pkg/
+          cp -r include/usearch pkg/
+          (cd pkg && zip -r ../usearch_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip libusearch_c.dylib usearch)
           mv build_release/libusearch_sqlite.dylib usearch_sqlite_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.dylib
 
       - name: Upload native library for Java
@@ -360,7 +363,10 @@ jobs:
 
       - name: Package library
         run: |
-          zip -j usearch_android_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip build_artifacts/libusearch_c.so c/usearch.h
+          mkdir pkg
+          cp build_artifacts/libusearch_c.so pkg/
+          cp -r include/usearch pkg/
+          (cd pkg && zip -r ../usearch_android_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip libusearch_c.so usearch)
 
       - name: Upload native library for Java
         uses: actions/upload-artifact@v5
@@ -647,16 +653,15 @@ jobs:
             -DUSEARCH_BUILD_TEST_C=OFF \
             -DUSEARCH_BUILD_BENCH_CPP=OFF \
             -DUSEARCH_BUILD_SQLITE=OFF \
-            -DUSEARCH_USE_OPENMP=OFF \
             -DUSEARCH_USE_NUMKONG=ON \
             -DUSEARCH_USE_JEMALLOC=OFF
 
           emmake cmake --build build_wasm --config Release
 
           cd build_wasm
-          cp ../c/usearch.h .
-          tar -czf ../usearch_wasm_${{ steps.set_version.outputs.version }}.tar.gz libusearch_c.* usearch.h
-          zip -j ../usearch_wasm_${{ steps.set_version.outputs.version }}.zip libusearch_c.* usearch.h
+          cp -r ../include/usearch .
+          tar -czf ../usearch_wasm_${{ steps.set_version.outputs.version }}.tar.gz libusearch_c.* usearch
+          zip -r ../usearch_wasm_${{ steps.set_version.outputs.version }}.zip libusearch_c.* usearch
 
       - name: Upload archives
         uses: xresloader/upload-to-github-release@v1
@@ -830,14 +835,17 @@ jobs:
       - name: Install Dependencies
         run: |
           npm install --ignore-scripts
-      - run: npm run prebuild-single
+      - name: Prebuild for one target
+        run: npm run prebuild-single
         if: matrix.os != 'macos-14'
-      - run: npm run prebuild-darwin-x64+arm64
+      - name: Prebuild the macOS universal binary
+        run: npm run prebuild-darwin-x64+arm64
         env:
           CC: clang
           CXX: clang++
         if: matrix.os == 'macos-14'
-      - run: file prebuilds/*/*
+      - name: Inspect the prebuilt binaries
+        run: file prebuilds/*/*
         if: matrix.os == 'macos-14'
       - name: Extra for cross build
         if: matrix.os == 'ubuntu-24.04'
@@ -1119,7 +1127,7 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=1
+          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=1
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_c.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
@@ -1129,7 +1137,7 @@ jobs:
         run: |
           brew update
           brew reinstall cmake
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=0 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=0
+          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=0
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_c.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
@@ -1138,7 +1146,7 @@ jobs:
         if: matrix.os == 'windows-2022'
         run: |
           choco install cmake
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=0 -DUSEARCH_USE_NUMKONG=0 -DUSEARCH_USE_JEMALLOC=0
+          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_NUMKONG=0 -DUSEARCH_USE_JEMALLOC=0
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
           cp "${{ github.workspace }}\build_artifacts\libusearch_c.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"

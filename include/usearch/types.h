@@ -31,6 +31,11 @@ extern "C" {
 #endif
 #endif
 
+/** @brief The library's version, which the release tooling rewrites in place. */
+#define USEARCH_VERSION_MAJOR 3
+#define USEARCH_VERSION_MINOR 0
+#define USEARCH_VERSION_PATCH 0
+
 /**
  *  @brief User-facing 128-bit key identifying one entry of any index - sixteen opaque
  *      bytes, rendered canonically as a lowercase dashed UUID, matching SafeGraphs'

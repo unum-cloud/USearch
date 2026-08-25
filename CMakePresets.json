@@ -28,7 +28,6 @@
             "description": "Unoptimized C++ and C suites; the compiler wiring arms the leak sanitizer here.",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
-                "USEARCH_USE_NUMKONG": "ON",
                 "USEARCH_BUILD_TEST_CPP": "ON",
                 "USEARCH_BUILD_BENCH_CPP": "OFF",
                 "USEARCH_BUILD_LIB_C": "ON",
@@ -44,7 +43,6 @@
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo",
                 "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
                 "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
-                "USEARCH_USE_NUMKONG": "ON",
                 "USEARCH_BUILD_TEST_CPP": "ON",
                 "USEARCH_BUILD_BENCH_CPP": "ON",
                 "USEARCH_BUILD_LIB_C": "ON",
@@ -58,7 +56,6 @@
             "description": "Optimized, with full DWARF for stepping through the suites.",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-                "USEARCH_USE_NUMKONG": "ON",
                 "USEARCH_BUILD_TEST_CPP": "ON",
                 "USEARCH_BUILD_BENCH_CPP": "OFF"
             }
@@ -70,7 +67,6 @@
             "description": "The full CPU matrix: C++ suite, benchmarks, the C 99 library and its test.",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
-                "USEARCH_USE_NUMKONG": "ON",
                 "USEARCH_BUILD_TEST_CPP": "ON",
                 "USEARCH_BUILD_BENCH_CPP": "ON",
                 "USEARCH_BUILD_LIB_C": "ON",
@@ -86,7 +82,6 @@
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo",
                 "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O3 -g -DNDEBUG",
                 "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O3 -g -DNDEBUG",
-                "USEARCH_USE_NUMKONG": "ON",
                 "USEARCH_BUILD_TEST_CPP": "OFF",
                 "USEARCH_BUILD_BENCH_CPP": "ON",
                 "USEARCH_BUILD_LIB_C": "ON",
@@ -103,7 +98,6 @@
                 "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O2 -gline-tables-only -DNDEBUG",
                 "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O2 -gline-tables-only -DNDEBUG",
                 "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O2 -lineinfo -DNDEBUG",
-                "USEARCH_USE_NUMKONG": "ON",
                 "USEARCH_BUILD_TEST_CPP": "ON",
                 "USEARCH_BUILD_BENCH_CPP": "ON",
                 "USEARCH_BUILD_LIB_C": "ON",

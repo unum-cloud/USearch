@@ -81,7 +81,7 @@
                     "Cargo.toml",
                     "Cargo.lock",
                     "wasmer.toml",
-                    "./include/usearch/index.hpp",
+                    "./include/usearch/types.h",
                     "./csharp/nuget/nuget-package.props",
                     "CITATION.cff"
                 ],

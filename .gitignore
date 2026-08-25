@@ -58,7 +58,7 @@ target/
 Package.resolved
 
 # Golang SDK
-golang/usearch.h
+golang/usearch/
 
 # C# SDK
 csharp/**/[Bb]in/

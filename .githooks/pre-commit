@@ -43,6 +43,15 @@ check_ascii_arrows_prose() {
         "$file uses the ASCII '->' arrow - prose arrows are the Unicode →:"
 }
 
+# A Unicode arrow glued to its neighbor - `key→id` - reads as one token to searchers and
+# renderers alike; the arrow always gets whitespace on both sides.
+check_glued_arrows() {
+    local glued
+    glued=$(printf '%s\n' "$added" | grep -E '[^[:space:]]→|→[^[:space:]]' || true)
+    [ -z "$glued" ] || fail "$glued" \
+        "$file glues a Unicode arrow to its neighbor - surround every → with whitespace:"
+}
+
 # C stdio printing in C++ sources - tests & headers print through fmt::. The C bindings under c/
 # keep their stdio; the dispatch below only routes C++ translation units here.
 check_printf() {
@@ -60,6 +69,19 @@ check_memcpy() {
     copies=$(printf '%s\n' "$added" | grep -E '\bmemcpy[[:space:]]*\(' || true)
     [ -z "$copies" ] || fail "$copies" \
         "$file copies through memcpy - use explicit instructions, assignment, or std::bit_cast:"
+}
+
+# Host threads managing GPUs in CUDA sources - fleets of NVLink-resident devices are
+# orchestrated with per-device non-blocking streams and events from ONE host thread: kernel
+# launches are already asynchronous, cross-device ordering is `cudaStreamWaitEvent`, and
+# completion is an event-sync loop, so `std::thread` adds nothing but scheduling noise.
+check_host_threads() {
+    local threads
+    threads=$(printf '%s\n' "$added" |
+        grep -E '\bstd::(thread|jthread|async)\b|#include[[:space:]]*<thread>|\bpthread_' || true)
+    [ -z "$threads" ] || fail "$threads" \
+        "$file spawns host threads in a GPU backend - orchestrate devices with per-device" \
+        "            non-blocking cudaStream_t + cudaEvent_t from one host thread:"
 }
 
 # STL dynamic containers in the public headers hide allocations, grow behind the caller's back,
@@ -149,7 +171,8 @@ check_markdown_doxygen() {
     local emphasis
     emphasis=$(printf '%s\n' "$added" | grep -E '^\+[[:space:]]*(\*|//)' |
         grep -oE '\*\*[^*]+\*\*|__[^_]+__' |
-        grep -vE '^__(restrict|inline|volatile|asm|attribute|builtin[A-Za-z0-9_]*|STDC)__$' || true)
+        grep -vE '^__(restrict|inline|volatile|asm|attribute|builtin[A-Za-z0-9_]*|STDC)__$' |
+        grep -vE '^__[a-z][a-z0-9_]*__$' || true)
     [ -z "$emphasis" ] || fail "$emphasis" \
         "$file uses Markdown emphasis in a Doxygen comment (it prints literally) - use @b" \
         "            for a 1-2 token emphasis, plain prose otherwise:"
@@ -213,14 +236,18 @@ check_hand_ceils() {
         "$file hand-rolls a ceiling division - use divide_round_up from usearch/types.hpp:"
 }
 
-# A `#pragma region` label must carry no dash. clang-format mis-tokenises `#pragma region - Name`
-# (it reflows around the `-`), so the region markers drift out of place on the next format run. Keep
-# the label a plain phrase: `#pragma region Name`.
-check_region_dashes() {
-    local dashed
-    dashed=$(printf '%s\n' "$added" | grep -E '^\+[[:space:]]*#pragma[[:space:]]+(end)?region\b[^-]*-' || true)
-    [ -z "$dashed" ] || fail "$dashed" \
-        "$file has a dash in a #pragma region label - clang-format mishandles it, drop the dash:"
+# A `#pragma region` label must be letters, digits & spaces only. clang-format tokenises the label
+# as code, so a dash, ampersand, colon, or any other symbol makes it reflow the marker and the
+# regions drift out of place on the next format run. Keep the label a plain phrase:
+# `#pragma region Name`.
+check_region_labels() {
+    local symbolic
+    symbolic=$(printf '%s\n' "$added" |
+        grep -E '^\+[[:space:]]*#pragma[[:space:]]+(end)?region[[:space:]]' |
+        grep -E '#pragma[[:space:]]+(end)?region[[:space:]]+.*[^A-Za-z0-9 ]' || true)
+    [ -z "$symbolic" ] || fail "$symbolic" \
+        "$file has a symbol in a #pragma region label - clang-format mishandles anything" \
+        "            beyond letters, digits & spaces, so reword the label:"
 }
 
 # C++ iostreams - `std::cout`, `std::ifstream`, `std::ostringstream`, and the rest of the
@@ -297,6 +324,37 @@ check_dependency_free_core() {
         "            outside those two directories:"
 }
 
+# A design justified by another project's design ages into a lie the moment that project moves,
+# and it tells a reader nothing about THIS code. State what the code does and why it does it.
+check_sibling_justification() {
+    local borrowed
+    borrowed=$(printf '%s\n' "$added" | grep -inE \
+        '(the (way|split|shape|idiom|dialect|convention|form|style|precedent))[^.]{0,40}(numkong|stringzilla|forkunion|sibling)|(numkong|stringzilla|forkunion|sibling)[^.]{0,40}(idiom|dialect|house style|does it|spells it|takes|would)|(matching|mirror(s|ing)?|mimic(s|king)?|copie[sd]|borrow(s|ed)?|same as) (how )?(numkong|stringzilla|forkunion|the sibling)' || true)
+    [ -z "$borrowed" ] || fail "$borrowed" \
+        "$file justifies a design by a sibling project - say what this code does and why," \
+        "            not which repository it was copied from:"
+}
+
+# Boxed and ruled banners are not section markers here: code uses `#pragma region` / `# region`,
+# and printed output uses plain lines.
+check_banner_rules() {
+    local banners
+    banners=$(printf '%s\n' "$added" | grep -nE '(^\+|["'"'"'])[[:space:]]*(={4,}|-{4,}|#{4,})|(={3,}|-{3,}|#{3,})[[:space:]]*["'"'"']' || true)
+    [ -z "$banners" ] || fail "$banners" \
+        "$file draws a ===/---/### banner - sections are \`#pragma region\` or \`# region\`," \
+        "            and printed output takes a plain line:"
+}
+
+# `sys.version` is a display string whose shape is not contractual; every question about the
+# running interpreter has a structured answer.
+check_python_version_probe() {
+    local probes
+    probes=$(printf '%s\n' "$added" | grep -nE 'sys\.version[^_]' || true)
+    [ -z "$probes" ] || fail "$probes" \
+        "$file parses \`sys.version\`, a human-readable string - use \`sys.version_info\` for" \
+        "            comparisons or \`platform.python_version()\` for display:"
+}
+
 # CI workflows - every job and every step carries a `name:`. An unnamed step renders as its raw
 # command in the Actions UI, and job names are what branch protection's required checks reference,
 # so an anonymous one can't be pinned. Names are structure, not lines, so unlike the checks above
@@ -345,6 +403,7 @@ while IFS= read -r -d '' file; do
         ;;&
     *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.cu | *.cuh)
         check_ascii_arrows
+        check_glued_arrows
         check_backward_references
         check_rulers
         check_param_directions
@@ -352,8 +411,11 @@ while IFS= read -r -d '' file; do
         check_doxygen_glued
         check_section_spacing
         check_hand_ceils
-        check_region_dashes
+        check_region_labels
         check_iterator_laundering
+        ;;&
+    *.cu | *.cuh)
+        check_host_threads
         ;;&
     include/*.hpp | *.h)
         check_bare_member_docs
@@ -370,7 +432,16 @@ while IFS= read -r -d '' file; do
         check_call_chained_subscript
         check_gcc_atomics
         ;;
-    *.md) check_ascii_arrows_prose ;;
+    *.md)
+        check_ascii_arrows_prose
+        check_glued_arrows
+        check_sibling_justification
+        ;;
+    *.py | *.pyi)
+        check_sibling_justification
+        check_banner_rules
+        check_python_version_probe
+        ;;
     .github/workflows/*.yml | .github/workflows/*.yaml) check_workflow_names ;;
     esac
 done < <(git diff --cached --name-only --diff-filter=ACM -z)

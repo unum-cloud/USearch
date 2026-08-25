@@ -873,7 +873,6 @@ WARN_LOGFILE           =
 # - Benchmarks
 
 INPUT                  =    ../include/usearch/
-                            ../c/usearch.h
                             ../java/cloud/unum/usearch/Index.java
                             ../objc/include/USearchObjective.h
                             ../swift/USearch.swift

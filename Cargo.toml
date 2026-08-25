@@ -6,35 +6,34 @@ edition = "2021"
 include = [
   "/rust/**",
   "/include/**",
+  "/c/**",
+  "/src/**",
   "/build.rs",
 ]
 license = "Apache-2.0"
 name = "usearch"
 publish = true
 repository = "https://github.com/unum-cloud/USearch"
-version = "2.25.1"
-
-[features]
-default = ["numkong"]
-numkong = ["dep:numkong"]
-openmp = []
-simsimd = ["numkong"]
+version = "3.0.0"
 
 [lib]
 name = "usearch"
 path = "rust/lib.rs"
 
 [dependencies]
-cxx = "1.0.194"
-# For local NumKong development, add a `[patch.crates-io]` override in your
-# personal `.cargo/config.toml` rather than editing this file.
-numkong = {version = ">=7.5.0", optional = true}
+# NumKong is not optional and not merely a build input: its matrices, scalar types, and traits
+# are the crate's public vocabulary, and `build.rs` links the SIMD kernels it compiles. For local
+# NumKong development, add a `[patch.crates-io]` override in your personal `.cargo/config.toml`
+# rather than editing this file.
+numkong = ">=7.7.0"
 
 [build-dependencies]
-cxx-build = "1.0.194"
+cc = {version = "1.2.36", features = ["parallel"]}
 
 [dev-dependencies]
-fork_union = "2.1.1" # for concurrency tests
-rand = "0.10.0" 
-rand_chacha = "0.10.0" # random number generator
-rand_distr = "0.6.0" # uniform floats distribution
+# The concurrency tests drive the index from outside through ForkUnion's pool, the same
+# scheduler the library uses internally. Version 3 matches the `forkunion/` submodule and the
+# sibling crates; its `spawn` takes a `&Topology`, which version 2 had no notion of.
+forkunion = "3.0"
+rand = "0.10"
+rand_chacha = "0.10" # reproducible across platforms, unlike the thread generator

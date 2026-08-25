@@ -9,7 +9,7 @@
 [submodule "forkunion"]
 	path = forkunion
 	url = https://github.com/ashvardanian/ForkUnion
-	branch = main-dev
+	branch = main-v4
 [submodule "smashtable"]
 	path = smashtable
 	url = https://github.com/ashvardanian/SmashTable

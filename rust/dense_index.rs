@@ -523,11 +523,12 @@ impl Index {
         Ok(measured)
     }
 
-    /// Adds a matrix of vectors under their keys - the native batch operation, returning the
-    /// number of rows inserted.
+    /// Adds a matrix of vectors under their keys - the native batch operation.
     ///
-    /// Overlaps safely with concurrent searches on the same handle. The input scalar type is
-    /// independent of the stored quantization; the library converts on ingest.
+    /// Returns the row count on success and zero on failure: a batch is all-or-nothing, since
+    /// every fallible step runs before the first entry identity is claimed. Overlaps safely
+    /// with concurrent searches on the same handle, and the input scalar type is independent
+    /// of the stored quantization - the library converts on ingest.
     pub fn add<Scalar: crate::types::Scalar>(
         &self,
         keys: &[Key],

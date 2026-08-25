@@ -157,11 +157,18 @@ int main(int argc, char** argv) {
         options.max_schedule = static_cast<fu_capabilities_t>(schedule_floor_k | prefix_mask(schedule_span_k, named));
     }
 
-    fu_topology_t topology = fu_topology_new();
-    fu_fabric_t fabric = fu_fabric_new();
-    fu_pool_t pool = fu_pool_new("usearch_bench", options.max_schedule);
-    if (!topology || !pool) {
+    fu_topology_t topology = nullptr;
+    fu_fabric_t fabric = nullptr;
+    fu_pool_t pool = nullptr;
+    if (fu_topology_new(&topology) != fu_success_k || fu_fabric_new(&fabric) != fu_success_k ||
+        fu_pool_new("usearch_bench", options.max_schedule, &pool) != fu_success_k) {
         fmt::println("Failed to inspect the topology or create the pool");
+        return 1;
+    }
+
+    std::size_t memory_domains = 0;
+    if (fu_memory_domains_count(topology, &memory_domains) != fu_success_k) {
+        fmt::println("Failed to count the memory domains");
         return 1;
     }
 
@@ -169,14 +176,14 @@ int main(int argc, char** argv) {
     // heap index, a single id pins memory & threads to that domain, and `all` builds one
     // index per memory domain - the list IS the placement, no modes.
     if (memory_domain_name == "all")
-        for (std::size_t domain = 0; domain != fu_memory_domains_count(topology); ++domain)
+        for (std::size_t domain = 0; domain != memory_domains; ++domain)
             options.memory_domains.push_back(static_cast<fu_memory_domain_id_t>(domain));
     else if (!memory_domain_name.empty()) {
         fu_memory_domain_id_t const domain = static_cast<fu_memory_domain_id_t>(
             std::strtol(memory_domain_name.c_str(), nullptr, 10));
-        if (domain < 0 || static_cast<std::size_t>(domain) >= fu_memory_domains_count(topology)) {
+        if (domain < 0 || static_cast<std::size_t>(domain) >= memory_domains) {
             fmt::println("Unknown --memory-domain {}; this machine has {} memory domains", memory_domain_name,
-                         fu_memory_domains_count(topology));
+                         memory_domains);
             return 1;
         }
         options.memory_domains.push_back(domain);
@@ -189,19 +196,33 @@ int main(int argc, char** argv) {
     bool spawned = false;
     std::size_t threads = options.threads;
     if (options.memory_domains.size() == 1) {
-        std::size_t const compute_domains = fu_compute_domains_count(topology);
+        std::size_t compute_domains = 0;
+        if (fu_compute_domains_count(topology, &compute_domains) != fu_success_k) {
+            fmt::println("Failed to count the compute domains");
+            return 1;
+        }
         for (std::size_t compute_domain = 0; compute_domain != compute_domains && !spawned; ++compute_domain) {
-            if (fu_local_memory_of(topology, compute_domain) !=
-                static_cast<std::size_t>(options.memory_domains.front()))
-                continue;
-            if (!threads)
-                threads = std::max<std::size_t>(1, fu_logical_cores_count_in(topology, compute_domain) * 7 / 8);
-            spawned = fu_pool_spawn_on(topology, pool, compute_domain, threads, fu_caller_inclusive_k);
+            std::size_t local_memory = 0;
+            if (fu_local_memory_of(topology, compute_domain, &local_memory) != fu_success_k) continue;
+            if (local_memory != static_cast<std::size_t>(options.memory_domains.front())) continue;
+            if (!threads) {
+                std::size_t local_cores = 0;
+                if (fu_logical_cores_count_in(topology, compute_domain, &local_cores) != fu_success_k) continue;
+                threads = std::max<std::size_t>(1, local_cores * 7 / 8);
+            }
+            spawned = fu_pool_spawn_on(topology, pool, compute_domain, threads, fu_caller_inclusive_k) == fu_success_k;
         }
     }
     else {
-        if (!threads) threads = std::max<std::size_t>(1, fu_logical_cores_count(topology) * 7 / 8);
-        spawned = fu_pool_spawn(topology, pool, threads, fu_caller_inclusive_k);
+        if (!threads) {
+            std::size_t logical_cores = 0;
+            if (fu_logical_cores_count(topology, &logical_cores) != fu_success_k) {
+                fmt::println("Failed to count the logical cores");
+                return 1;
+            }
+            threads = std::max<std::size_t>(1, logical_cores * 7 / 8);
+        }
+        spawned = fu_pool_spawn(topology, pool, threads, fu_caller_inclusive_k) == fu_success_k;
     }
     if (!spawned) {
         fmt::println("Failed to spawn {} threads", threads);
@@ -213,8 +234,11 @@ int main(int argc, char** argv) {
     // `--huge-pages` declares the expectation, enforced against what the domains report.
     if (options.huge_pages) {
         std::size_t volume = 0;
-        for (std::size_t domain = 0; domain != fu_memory_domains_count(topology); ++domain)
-            volume += fu_volume_huge_pages_in(topology, domain);
+        for (std::size_t domain = 0; domain != memory_domains; ++domain) {
+            std::size_t domain_volume = 0;
+            if (fu_volume_huge_pages_in(topology, domain, &domain_volume) != fu_success_k) continue;
+            volume += domain_volume;
+        }
         fmt::println("  huge pages expected: {}, available: {:.2f} GB", options.huge_pages, double(volume) / 1e9);
         if (!volume) {
             fmt::println("--huge-pages expects {}, but the domains report none", options.huge_pages);

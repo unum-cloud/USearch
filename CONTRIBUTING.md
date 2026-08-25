@@ -35,7 +35,7 @@ Using modern syntax, this is how you build and run the test suite:
 ```sh
 cmake -D USEARCH_BUILD_TEST_CPP=1 -D CMAKE_BUILD_TYPE=Debug -B build_debug
 cmake --build build_debug --config Debug
-build_debug/test_cpp
+build_debug/usearch_test
 ```
 
 If the build mode is not specified, the default is `Release`.
@@ -43,7 +43,7 @@ If the build mode is not specified, the default is `Release`.
 ```sh
 cmake -D USEARCH_BUILD_TEST_CPP=1 -B build_release
 cmake --build build_release --config Release
-build_release/test_cpp
+build_release/usearch_test
 ```
 
 For development purposes, you may want to include symbols information in the build:
@@ -51,8 +51,42 @@ For development purposes, you may want to include symbols information in the bui
 ```sh
 cmake -D USEARCH_BUILD_TEST_CPP=1 -D CMAKE_BUILD_TYPE=RelWithDebInfo -B build_relwithdebinfo
 cmake --build build_relwithdebinfo --config RelWithDebInfo
-build_relwithdebinfo/test_cpp
+build_relwithdebinfo/usearch_test
 ```
+
+Those three configurations, and the benchmarking one from [BENCHMARKS.md](BENCHMARKS.md), are also packaged as CMake presets, so the flag soup below is optional:
+
+```sh
+cmake --list-presets              # debug, relwithdebinfo, release, profile, dev, trace, fleet
+cmake --preset release            # configures into `build_release`
+cmake --build --preset release    # builds it
+ctest --preset release            # runs the suites
+```
+
+Every preset writes into `build_<preset name>`, exports a `compile_commands.json` for the language server, links with `lld`, and builds with LLVM through Ninja.
+Two of them are about GPUs: `dev` compiles the CUDA suites for the host GPU alone, which is the fastest way to iterate and the tree the repo's `.clangd` reads, while `fleet` emits a fat binary spanning every architecture from the Ampere floor through both Blackwell lines.
+`trace` adds `-ftime-trace`, dropping a profile beside every object for when a translation unit starts dominating the build.
+Machine-specific overrides - a different compiler, `ccache`, a CUDA toolkit outside the default prefix - belong in an untracked `CMakeUserPresets.json` beside it:
+
+```json
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "dev-local",
+            "inherits": "dev",
+            "binaryDir": "${sourceDir}/build_dev",
+            "cacheVariables": {
+                "CMAKE_CUDA_HOST_COMPILER": "/usr/bin/g++-14",
+                "CMAKE_CXX_COMPILER_LAUNCHER": "ccache"
+            }
+        }
+    ]
+}
+```
+
+The CUDA presets need CMake 3.31 or newer - the release that learned the Blackwell architectures - while the CPU-only build stays on the 3.28 floor.
+Ubuntu's own package predates the former, so [Kitware's repository](https://apt.kitware.com) is the way to get it.
 
 The CMakeLists.txt file has a number of options you can pass:
 
@@ -62,18 +96,26 @@ The CMakeLists.txt file has a number of options you can pass:
   - `USEARCH_BUILD_LIB_C` - build the C library
   - `USEARCH_BUILD_TEST_C` - build the C test suite
   - `USEARCH_BUILD_SQLITE` - build the SQLite extension ([no Windows](https://gist.github.com/zeljic/d8b542788b225b1bcb5fce169ee28c55))
-- Which dependencies to use:
-  - `USEARCH_USE_OPENMP` - use OpenMP for parallelism
-  - `USEARCH_USE_NUMKONG` - use NumKong for vectorization
+  - `USEARCH_BUILD_CUDA` - build the CUDA test & benchmark suites
+- Which GPUs to target:
+  - `USEARCH_CUDA_ARCHITECTURES` - the architectures baked into the CUDA targets, `80;90a;100a;120a` by default: the Ampere floor, whose cubins stay loadable on every later 8.x part, then Hopper and both Blackwell lines, each architecture-specific because the kernels reach for instructions with no forward-compatible PTX. Set it to `native` while iterating on one machine.
+- Which sibling libraries to use, one switch each, all defaulting to `ON`. Every one is fetched at the pinned commit when its submodule isn't checked out, and defines `USEARCH_USE_<NAME>` for the headers either way:
+  - `USEARCH_USE_NUMKONG` - hardware-accelerated metrics
+  - `USEARCH_USE_FORKUNION` - thread pools and NUMA topology
+  - `USEARCH_USE_STRINGZILLA` - string kernels and parsing
+- Which other dependencies to use:
   - `USEARCH_USE_JEMALLOC` - use Jemalloc for memory management
+
+Those switches govern the CMake build only.
+The language bindings compile all three siblings in unconditionally, taking their headers from `numkong/include`, `forkunion/include`, and `stringzilla/include` in the checkout - so `setup.py`, `binding.gyp`, `build.rs`, and `Package.swift` each name the same three roots and define the same three `USEARCH_USE_<NAME>=1` macros, and none of them builds from a non-recursive clone.
 
 Putting all of this together, compiling all targets on most platforms should work with the following snippet:
 
 ```sh
-cmake -D CMAKE_BUILD_TYPE=Release -D USEARCH_USE_NUMKONG=1 -D USEARCH_USE_OPENMP=1 -D USEARCH_USE_JEMALLOC=1 -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_BENCH_CPP=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_SQLITE=0 -B build_release
+cmake -D CMAKE_BUILD_TYPE=Release -D USEARCH_USE_JEMALLOC=1 -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_BENCH_CPP=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_SQLITE=0 -B build_release
 
 cmake --build build_release --config Release
-build_release/test_cpp
+build_release/usearch_test
 build_release/test_c
 ```
 
@@ -85,8 +127,6 @@ cmake \
     -D CMAKE_BUILD_TYPE=Release \
     -D CMAKE_C_COMPILER="$(brew --prefix llvm)/bin/clang" \
     -D CMAKE_CXX_COMPILER="$(brew --prefix llvm)/bin/clang++" \
-    -D USEARCH_USE_NUMKONG=1 \
-    -D USEARCH_USE_OPENMP=1 \
     -D USEARCH_USE_JEMALLOC=1 \
     -D USEARCH_BUILD_TEST_CPP=1 \
     -D USEARCH_BUILD_BENCH_CPP=1 \
@@ -95,7 +135,7 @@ cmake \
     -B build_release
 
 cmake --build build_release --config Release
-build_release/test_cpp
+build_release/usearch_test
 build_release/test_c
 ```
 
@@ -103,9 +143,10 @@ Linting:
 
 ```sh
 cppcheck --enable=all --force --suppress=cstyleCast --suppress=unusedFunction \
-    include/usearch/index.hpp \
-    include/usearch/index_dense.hpp \
-    include/usearch/index_plugins.hpp
+    include/usearch/utilities/types.hpp \
+    include/usearch/basic/ram_index.hpp \
+    include/usearch/dense/ram_index.hpp \
+    include/usearch/dense/ram_metric.hpp
 ```
 
 I'd recommend putting the following breakpoints when debugging the code in GDB:
@@ -384,20 +425,26 @@ USearch provides Go bindings, that depend on the C library that must be installe
 So one should first compile the C library, link it with Go, and only then run tests.
 
 ```sh
-cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_USE_NUMKONG=1 -D USEARCH_USE_OPENMP=1
+cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1
 cmake --build build_release --config Release -j
 
 cp build_release/libusearch_c.so golang/ # or .dylib to install the library on macOS
-cp c/usearch.h golang/                   # to make the header available to Go
+cp -r include/usearch golang/            # to make the headers available to Go
 
-cd golang && LD_LIBRARY_PATH=. go test -v ; cd ..
+cd golang && LD_LIBRARY_PATH=. go test -race -v ./... ; cd ..
 ```
 
-For static checks:
+The race detector matters here: the tests drive one shared handle from many goroutines, and it is the only thing that catches a missing `runtime.KeepAlive` around a matrix crossing into C.
+
+Compilation and the static checks need only the headers, not the library, so they run before it links:
 
 ```sh
+cp -r include/usearch golang/
+
 cd golang
-go vet ./...
+go build ./...      # compiles the cgo preamble and shim.c against the real headers
+go vet ./...        # catches the cgo pointer-rule violations the headers cannot
+gofmt -l .          # must print nothing
 staticcheck ./...   # if installed
 golangci-lint run   # if installed
 ```
@@ -475,7 +522,7 @@ USearch provides CSharp bindings, that depend on the C library that must be inst
 So one should first compile the C library, link it with CSharp, and only then run tests.
 
 ```sh
-cmake -B build_artifacts -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_USE_NUMKONG=1 -D USEARCH_USE_OPENMP=1
+cmake -B build_artifacts -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1
 cmake --build build_artifacts --config Release -j
 ```
 

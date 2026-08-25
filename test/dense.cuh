@@ -288,7 +288,9 @@ static std::size_t test_predicated_search(make_index_type_ const& make_index) {
         auto even_only = [](dense_node_id_t node_id) noexcept { return node_id % 2 == 0; };
         auto even_batched = [](std::span<dense_scored_node_t const> scored, auto& admitted) noexcept {
             for (dense_scored_node_t const candidate : scored)
-                if (candidate.node_id % 2 == 0) admitted.try_push_back(candidate);
+                if (candidate.node_id % 2 == 0) {
+                    [[maybe_unused]] fu::status_t const kept = admitted.push_back(candidate);
+                }
         };
         typename index_type_::dense_traversal_context_t scalar_context {{}}, batched_context {{}};
         auto with_scalar = index.search_if(query, even_only, scalar_context);

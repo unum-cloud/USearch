@@ -624,16 +624,23 @@ struct streamed_dataset {
  *      NUMA fabric levels, next to the NumKong capability the kernels will actually use. */
 inline void print_machine(fu_topology_t topology, fu_fabric_t fabric, bench_options_t const& options,
                           std::size_t threads) {
-    std::size_t const compute_domains = fu_compute_domains_count(topology);
-    std::size_t const memory_domains = fu_memory_domains_count(topology);
+    // Every topology query reports through a status and writes its answer out; a machine
+    // description is worth printing even where one of them declines to answer.
+    std::size_t compute_domains = 0, memory_domains = 0, logical_cores = 0;
+    [[maybe_unused]] fu_status_t const compute_status = fu_compute_domains_count(topology, &compute_domains);
+    [[maybe_unused]] fu_status_t const memory_status = fu_memory_domains_count(topology, &memory_domains);
+    [[maybe_unused]] fu_status_t const cores_status = fu_logical_cores_count(topology, &logical_cores);
     fmt::print(header_style(), "Machine\n");
-    fmt::println("  logical cores: {}", fu_logical_cores_count(topology));
+    fmt::println("  logical cores: {}", logical_cores);
     fmt::println("  compute domains: {}", compute_domains);
     fmt::println("  memory domains: {}", memory_domains);
-    for (std::size_t domain = 0; domain != memory_domains; ++domain)
-        fmt::println("  memory domain {}: fabric level {}, huge pages {:.2f} GB", domain,
-                     fu_fabric_memory_level_in(fabric, domain),
-                     double(fu_volume_huge_pages_in(topology, domain)) / 1e9);
+    for (std::size_t domain = 0; domain != memory_domains; ++domain) {
+        std::size_t fabric_level = 0, huge_pages_bytes = 0;
+        [[maybe_unused]] fu_status_t const level_status = fu_fabric_memory_level_in(fabric, domain, &fabric_level);
+        [[maybe_unused]] fu_status_t const pages_status = fu_volume_huge_pages_in(topology, domain, &huge_pages_bytes);
+        fmt::println("  memory domain {}: fabric level {}, huge pages {:.2f} GB", domain, fabric_level,
+                     double(huge_pages_bytes) / 1e9);
+    }
     if (!options.memory_domains.empty()) {
         fmt::print("  engaged memory domains:");
         for (fu_memory_domain_id_t domain : options.memory_domains) fmt::print(" {}", domain);
@@ -642,7 +649,9 @@ inline void print_machine(fu_topology_t topology, fu_fabric_t fabric, bench_opti
     fmt::println("  threads engaged: {}", threads);
 
     char scheduling_names[256] = {0};
-    fu_name_capabilities(fu_runtime_capabilities(), scheduling_names, sizeof(scheduling_names));
+    std::size_t scheduling_names_length = 0;
+    [[maybe_unused]] fu_status_t const named = fu_name_capabilities(fu_runtime_capabilities(), scheduling_names,
+                                                                    sizeof(scheduling_names), &scheduling_names_length);
     fmt::println("  scheduling detected: {}", scheduling_names);
 
     nk_capability_t const available = nk_capabilities_available();

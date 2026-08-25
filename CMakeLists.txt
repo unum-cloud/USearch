@@ -514,7 +514,13 @@ if (USEARCH_IS_MAIN_PROJECT)
     enable_testing()
 endif ()
 
-if (${USEARCH_BUILD_TEST_CPP} OR ${USEARCH_BUILD_BENCH_CPP})
+# Every consumer of the pre-instantiated library needs this, the C interface included - its implementation is
+# `src/dense_index.cpp` and the per-dtype shards beside it.
+if (${USEARCH_BUILD_TEST_CPP}
+    OR ${USEARCH_BUILD_BENCH_CPP}
+    OR ${USEARCH_BUILD_LIB_C}
+    OR ${USEARCH_BUILD_TEST_C}
+)
     add_subdirectory(src)
 endif ()
 

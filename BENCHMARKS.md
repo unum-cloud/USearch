@@ -64,16 +64,16 @@ To achieve best highest results we suggest compiling locally for the target arch
 
 ```sh
 git submodule update --init --recursive
-cmake -DUSEARCH_BUILD_BENCH_CPP=1 -DUSEARCH_BUILD_TEST_C=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_OPENMP=1 -DCMAKE_BUILD_TYPE=RelWithDebInfo -B build_profile
-cmake --build build_profile --config RelWithDebInfo --parallel
-build_profile/bench_cpp --help
+cmake --preset profile
+cmake --build --preset profile
+build_profile/usearch_bench --help
 ```
 
 Which would print the following instructions.
 
 ```txt
 SYNOPSIS
-        build_profile/bench_cpp [--vectors <path>] [--queries <path>] [--neighbors <path>] [-o
+        build_profile/usearch_bench [--vectors <path>] [--queries <path>] [--neighbors <path>] [-o
                                 <path>] [-b] [-j <integer>] [-c <integer>] [--expansion-add
                                 <integer>] [--expansion-search <integer>] [--rows-skip <integer>]
                                 [--rows-take <integer>] [--dtype <type>] [--metric <name>] [-h]
@@ -122,13 +122,13 @@ OPTIONS
 Here is an example of running the C++ benchmark:
 
 ```sh
-build_profile/bench_cpp \
+build_profile/usearch_bench \
     --vectors data/wiki-1m/base.1M.fbin \
     --queries data/wiki-1m/query.public.100K.fbin \
     --neighbors data/wiki-1m/groundtruth.public.100K.ibin \
     --dtype bf16 --metric ip
 
-build_profile/bench_cpp \
+build_profile/usearch_bench \
     --vectors data/t2i-1b/base.1B.fbin \
     --queries data/t2i-1b/query.public.100K.fbin \
     --neighbors data/t2i-1b/groundtruth.public.100K.ibin \
@@ -170,7 +170,7 @@ Datasets below are grouped by scale; only configurations with matching ground tr
 | :----------------------------------- | :---------: | :--------: | :----: | :-------: | :---------------: |
 | [Meta BIGANN (SIFT)][bigann]         |    `u8`     |    128     |   L2   |  1.2 GB   | 10K queries, yes  |
 | [Microsoft Turing-ANNS][msft-turing] |    `f32`    |    100     |   L2   |  3.7 GB   | 100K queries, yes |
-| [Yandex Deep][yandex-deep]           |    `f32`    |     96     |  L2  |    3.6 GB     |  ¹ no subset GT   |
+| [Yandex Deep][yandex-deep]           |    `f32`    |     96     |   L2   |  3.6 GB   |  ¹ no subset GT   |
 
 > ¹ Yandex only publishes ground truth computed against the full 1B dataset. A `base.10M.fbin` exists for
 > download but using 1B ground truth with a subset will produce misleadingly low recall. Use it only for
@@ -262,7 +262,7 @@ mkdir -p data/t2i-1b/ && \
 To run the benchmark (requires the full 1B base for valid recall):
 
 ```bash
-build_profile/bench_cpp \
+build_profile/usearch_bench \
     --vectors data/t2i-1b/base.1B.fbin \
     --queries data/t2i-1b/query.public.100K.fbin \
     --neighbors data/t2i-1b/groundtruth.public.100K.ibin \
@@ -287,7 +287,7 @@ mkdir -p data/deep-1b/ && \
 To run the benchmark (requires the full 1B base for valid recall):
 
 ```bash
-build_profile/bench_cpp \
+build_profile/usearch_bench \
     --vectors data/deep-1b/base.1B.fbin \
     --queries data/deep-1b/query.public.10K.fbin \
     --neighbors data/deep-1b/groundtruth.public.10K.ibin \
@@ -318,7 +318,7 @@ with open('datasets/sift_10M/base.10M.u8bin', 'r+b') as f:
 ```
 
 ```bash
-build_profile/bench_cpp \
+build_profile/usearch_bench \
     --vectors datasets/sift_10M/base.10M.u8bin \
     --queries datasets/sift_10M/query.public.10K.u8bin \
     --neighbors datasets/sift_10M/groundtruth.public.10K.ibin \
@@ -343,7 +343,7 @@ with open('data/sift-100m/base.100M.u8bin', 'r+b') as f:
 ```
 
 ```bash
-build_profile/bench_cpp \
+build_profile/usearch_bench \
     --vectors data/sift-100m/base.100M.u8bin \
     --queries data/sift-100m/query.public.10K.u8bin \
     --neighbors data/sift-100m/groundtruth.public.10K.ibin \
@@ -376,7 +376,7 @@ with open('datasets/turing_1M/base.1M.fbin', 'r+b') as f:
 ```
 
 ```bash
-build_profile/bench_cpp \
+build_profile/usearch_bench \
     --vectors datasets/turing_1M/base.1M.fbin \
     --queries datasets/turing_1M/query.public.100K.fbin \
     --neighbors datasets/turing_1M/groundtruth.public.100K.ibin \
@@ -403,7 +403,7 @@ with open('datasets/turing_10M/base.10M.fbin', 'r+b') as f:
 ```
 
 ```bash
-build_profile/bench_cpp \
+build_profile/usearch_bench \
     --vectors datasets/turing_10M/base.10M.fbin \
     --queries datasets/turing_10M/query.public.100K.fbin \
     --neighbors datasets/turing_10M/groundtruth.public.100K.ibin \
@@ -430,7 +430,7 @@ with open('data/turing-100m/base.100M.fbin', 'r+b') as f:
 ```
 
 ```bash
-build_profile/bench_cpp \
+build_profile/usearch_bench \
     --vectors data/turing-100m/base.100M.fbin \
     --queries data/turing-100m/query.public.100K.fbin \
     --neighbors data/turing-100m/groundtruth.public.100K.ibin \
@@ -459,7 +459,7 @@ mkdir -p data/spacev-100m/ && \
 ```
 
 ```bash
-build_profile/bench_cpp \
+build_profile/usearch_bench \
     --vectors data/spacev-100m/base.100M.i8bin \
     --queries data/spacev-100m/query.30K.i8bin \
     --neighbors data/spacev-100m/groundtruth.30K.i32bin \
@@ -474,17 +474,17 @@ With `perf`:
 
 ```sh
 # Pass environment variables with `-E`, and `-d` for details
-sudo -E perf stat -d build_profile/bench_cpp ...
-sudo -E perf mem -d build_profile/bench_cpp ...
+sudo -E perf stat -d build_profile/usearch_bench ...
+sudo -E perf mem -d build_profile/usearch_bench ...
 # Sample on-CPU functions for the specified command, at 1 Kilo Hertz:
-sudo -E perf record -F 1000 build_profile/bench_cpp ...
-perf record -d -e arm_spe// -- build_profile/bench_cpp ..
+sudo -E perf record -F 1000 build_profile/usearch_bench ...
+perf record -d -e arm_spe// -- build_profile/usearch_bench ..
 ```
 
 ### Caches
 
 ```sh
-sudo perf stat -e 'faults,dTLB-loads,dTLB-load-misses,cache-misses,cache-references' build_profile/bench_cpp ...
+sudo perf stat -e 'faults,dTLB-loads,dTLB-load-misses,cache-misses,cache-references' build_profile/usearch_bench ...
 ```
 
 Typical output on a 1M vectors dataset is:
