@@ -52,6 +52,17 @@ inline element_type_ default_free_value() noexcept {
 }
 
 /**
+ *  @brief Whether a membership structure already held the element an insert offered it -
+ *      an answer, never a failure, so it never travels as a @c status_t.
+ */
+enum class membership_t : bool {
+    /** @brief The element was absent, and this insert is the one that added it. */
+    fresh_k = false,
+    /** @brief The element was already there, and the insert changed nothing. */
+    present_k = true,
+};
+
+/**
  *  @brief Minimalistic open-addressing hash-set, used to track visited nodes during graph
  *      traversal - a sparse alternative to a bit-set in our primary use case.
  *
@@ -198,21 +209,20 @@ class growing_hash_set {
 
     /**
      *  @brief Inserts an element into the hash-set.
-     *  @return The previous membership: @c true if the element was already present,
-     *      @c false when it was newly inserted.
+     *  @return The membership the element had @b before this call.
      */
-    inline bool set(element_t const& elem) noexcept {
+    [[nodiscard]] inline membership_t set(element_t const& elem) noexcept {
         element_t* slot = locate_(slots_, capacity_, hasher_, elem);
-        if (*slot == elem) return true;
+        if (*slot == elem) return membership_t::present_k;
         *slot = elem;
         ++count_;
-        return false;
+        return membership_t::fresh_k;
     }
 
     /**
      *  @brief Inserts up to @c batch_size_ elements sequentially.
-     *  @return 64-bit mask - bit @c i is set iff @c batch[i] was newly inserted (matching
-     *      the single-element @c set convention where a newly-inserted element returns @c false).
+     *  @return 64-bit mask - bit @c i is set iff @c batch[i] was newly inserted, i.e. iff the
+     *      single-element @ref set would have answered @c fresh_k.
      *
      *  Scalar baseline just calls @ref set in a loop; the measured win over single-element
      *  inserts (~1.6× on the microbench) comes from the compiler interleaving independent
@@ -220,25 +230,25 @@ class growing_hash_set {
      *  bucket compares without changing the call shape.
      */
     template <std::size_t batch_size_>
-    inline std::uint64_t set(std::array<element_t, batch_size_> const& batch) noexcept {
-        static_assert(batch_size_ > 0 && batch_size_ <= 64, "Batch size must fit the uint64 return mask");
-        std::uint64_t out = 0;
+    inline u64_t set(std::array<element_t, batch_size_> const& batch) noexcept {
+        static_assert(batch_size_ > 0 && batch_size_ <= 64, "Batch size must fit the u64 return mask");
+        u64_t out = 0;
         for (std::size_t i = 0; i < batch_size_; ++i)
-            if (!set(batch[i])) out |= std::uint64_t {1} << i;
+            if (set(batch[i]) == membership_t::fresh_k) out |= u64_t {1} << i;
         return out;
     }
 
     /**
      *  @brief Extends the capacity of the hash-set, rehashing every present element.
-     *  @return @c true if enough capacity is available, @c false if memory allocation failed.
+     *  @return @c success_k when the capacity is available, @c bad_alloc_k otherwise.
      */
-    bool reserve(std::size_t new_capacity) noexcept {
+    [[nodiscard]] status_t reserve(std::size_t new_capacity) noexcept {
         new_capacity = (new_capacity * 5u) / 3u;
-        if (new_capacity <= capacity_) return true;
+        if (new_capacity <= capacity_) return status_t::success_k;
 
         new_capacity = ceil2(new_capacity);
         element_t* new_slots = (element_t*)allocator_.allocate(new_capacity * sizeof(element_t));
-        if (!new_slots) return false;
+        if (!new_slots) return status_t::bad_alloc_k;
 
         std::memset((void*)new_slots, 0xFF, new_capacity * sizeof(element_t));
         std::size_t new_count = count_;
@@ -254,7 +264,7 @@ class growing_hash_set {
         slots_ = new_slots;
         capacity_ = new_capacity;
         count_ = new_count;
-        return true;
+        return status_t::success_k;
     }
 };
 
@@ -286,7 +296,7 @@ class growing_multimap {
     using allocator_t = allocator_type_;
 
     /** @brief Lifecycle of one slot, advanced monotonically by its one claiming inserter. */
-    enum class slot_state_t : std::uint8_t {
+    enum class slot_state_t : u8_t {
         /** @brief Never claimed - the probe chain terminator. */
         empty_k = 0,
         /** @brief Claimed; the key & value stores have not been released yet. */
@@ -323,7 +333,7 @@ class growing_multimap {
     /** @brief Sizes the slot array for @p capacity entries at a load factor of at most one
      *      half. Repeatable: a larger @p capacity rehashes into a fresh array, single-
      *      threaded - the caller certifies no concurrent readers or writers for the call. */
-    status_t reserve(std::size_t capacity) noexcept {
+    [[nodiscard]] status_t reserve(std::size_t capacity) noexcept {
         if (capacity <= entries_quota_) return status_t::success_k;
 
         std::size_t const new_slots_count = ceil2(max_of<std::size_t>(capacity * 2u, 16u));
@@ -357,7 +367,7 @@ class growing_multimap {
 
     /** @brief Claims one slot along the probe path of @p key - safe under arbitrary
      *      concurrent inserts & lookups; fails with @c overflow_k once the quota is spent. */
-    status_t insert(key_t const& key, value_t value) noexcept {
+    [[nodiscard]] status_t insert(key_t const& key, value_t value) noexcept {
         if (!slots_count_) return status_t::uninitialized_k;
         // Claim quota before touching any slot, so probe chains stay bounded by construction.
         if (inserted_count_.fetch_add(1, std::memory_order_relaxed) >= entries_quota_) {
@@ -382,7 +392,7 @@ class growing_multimap {
 
     /** @brief One value stored under @p key, or @c malformed_k when absent. Duplicates
      *      surface in an unspecified order - use @c find_each to see them all. */
-    expected<value_t> find(key_t const& key) const noexcept {
+    [[nodiscard]] expected<value_t> find(key_t const& key) const noexcept {
         expected<value_t> result {value_t {}, status_t::malformed_k};
         find_each(key, [&](value_t value) noexcept { result = {value, status_t::success_k}; });
         return result;
@@ -411,7 +421,7 @@ class growing_multimap {
     }
 
     /** @brief Whether at least one value is stored under @p key. */
-    bool contains(key_t const& key) const noexcept { return find(key).status == status_t::success_k; }
+    bool contains(key_t const& key) const noexcept { return static_cast<bool>(find(key)); }
 
     /** @brief Total inserted entries across all keys. */
     std::size_t size() const noexcept { return inserted_count_.load(std::memory_order_relaxed); }

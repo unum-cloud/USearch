@@ -13,7 +13,8 @@
 #include <numkong/tensor.hpp>
 
 #include "usearch/utilities/types.hpp"
-#include "usearch/utilities/ram_queue.hpp"
+#include "usearch/utilities/ram_buffers.hpp"
+#include "usearch/utilities/ram_tables.hpp"
 #include "usearch/dense/ram_metric.hpp"
 
 namespace unum {
@@ -100,7 +101,10 @@ inline void invoke_admission(predicate_type_& predicate, std::span<dense_scored_
     if constexpr (requires { predicate(scored, admissions); }) predicate(scored, admissions);
     else
         for (dense_scored_node_t const candidate : scored)
-            if (predicate(candidate.node_id)) admissions.try_push_back(candidate);
+            if (predicate(candidate.node_id)) {
+                // One quad in, four slots of capacity - the buffer cannot refuse.
+                [[maybe_unused]] fu::status_t const admitted = admissions.push_back(candidate);
+            }
 }
 
 /** @brief Per-thread traversal scratch: the candidate queues, the visited set, the link
@@ -157,7 +161,7 @@ struct dense_traversal_context {
     /** @brief Nodes we've already checked and should avoid visiting again. */
     visited_set_t visited;
     /** @brief Pseudo-random generator for picking traversal starting points. */
-    splitmix_u32_t random_generator;
+    splitmix64_t random_generator;
 
     /** @brief Links chosen for the freshly inserted node, with their query distances -
      *      reusable on the reverse side, since every supported metric is symmetric. */
@@ -213,16 +217,17 @@ struct dense_traversal_context {
     /** @brief Sizes every link scratch for @p capacity entries - the frozen connectivity, the
      *      largest selection any path stages - through the context's own allocator. Geometry
      *      freezes once, so the tensors allocate once. */
-    bool reserve_links(std::size_t capacity) noexcept {
-        if (selected_links.capacity() >= capacity) return true;
+    [[nodiscard]] status_t reserve_links(std::size_t capacity) noexcept {
+        if (selected_links.capacity() >= capacity) return status_t::success_k;
         selected_links = selection_t::try_zeros({capacity}, candidates_allocator_t(allocator_));
         refined_links = selection_t::try_zeros({capacity}, candidates_allocator_t(allocator_));
         staged_ids = ids_tensor_t::try_zeros({capacity}, ids_allocator_t(allocator_));
         staged_vectors = views_tensor_t::try_zeros({capacity}, views_allocator_t(allocator_));
         staged_norms = norms_tensor_t::try_zeros({capacity}, norms_allocator_t(allocator_));
         kept_positions = ids_tensor_t::try_zeros({capacity}, ids_allocator_t(allocator_));
-        return !selected_links.empty() && !refined_links.empty() && !staged_ids.empty() && !staged_vectors.empty() &&
-               !staged_norms.empty() && !kept_positions.empty();
+        bool const sized = !selected_links.empty() && !refined_links.empty() && !staged_ids.empty() &&
+                           !staged_vectors.empty() && !staged_norms.empty() && !kept_positions.empty();
+        return sized ? status_t::success_k : status_t::bad_alloc_k;
     }
 
     /** @brief Sizes the pair matrix for a @p capacity -row pool - arriving pre-padded to whole
@@ -230,11 +235,11 @@ struct dense_traversal_context {
      *      kit-specific tile scratch. The matrix's own trailing extent is the row stride, so
      *      tail tiles always write in bounds. The context itself stays agnostic of every
      *      engine's geometry. */
-    bool reserve_tiles(std::size_t capacity, std::size_t scratch_bytes) noexcept {
-        if (pair_distances.extent(0) >= capacity) return true;
+    [[nodiscard]] status_t reserve_tiles(std::size_t capacity, std::size_t scratch_bytes) noexcept {
+        if (pair_distances.extent(0) >= capacity) return status_t::success_k;
         tiles_scratch = bytes_tensor_t::try_zeros({scratch_bytes}, bytes_allocator_t(allocator_));
         pair_distances = distances_matrix_t::try_zeros({capacity, capacity}, distances_allocator_t(allocator_));
-        return !tiles_scratch.empty() && !pair_distances.empty();
+        return !tiles_scratch.empty() && !pair_distances.empty() ? status_t::success_k : status_t::bad_alloc_k;
     }
 
     /** @brief Allocator instance behind every link scratch; the queues hold rebound copies. */
@@ -256,7 +261,7 @@ struct dense_ram_index {
     using candidate_t = dense_scored_node_t;
 
     /** @brief Default integer type to use for loops and indexing at sub-index scale. */
-    using small_size_t = std::uint32_t;
+    using small_size_t = u32_t;
 
     /** @brief Node identifier within this sub-index - the class-local spelling of @c dense_node_id_t. */
     using node_id_t = dense_node_id_t;
@@ -690,8 +695,8 @@ struct dense_ram_index {
         // Size the never-reallocating chunk directories ahead of the very first chunk - safe
         // without any locks, because growth is provably single-threaded via the grower election.
         if (!vectors_chunks_.size() &&
-            (!vectors_chunks_.try_resize(max_chunks_k) || !norms_chunks_.try_resize(max_chunks_k) ||
-             !neighbors_chunks_.try_resize(max_chunks_k)))
+            (fu::failed(vectors_chunks_.resize(max_chunks_k)) || fu::failed(norms_chunks_.resize(max_chunks_k)) ||
+             fu::failed(neighbors_chunks_.resize(max_chunks_k))))
             return {0, status_t::bad_alloc_k};
 
         std::size_t added_capacity = 0;
@@ -792,8 +797,9 @@ struct dense_ram_index {
     /**
      *  @brief Samples one 4-way batch of distinct, unvisited, published landmarks, scores them
      *      against the @p query, and queues them into the frontier & the result pool.
-     *  @return @c true if at least one fresh landmark was queued; @c false when every published
-     *      node is already visited or the scratch structures can't grow.
+     *  @return The landmarks queued; @c 0 on @c success_k means every published node is already
+     *      visited, which ends the walk rather than failing it. A failed status means scratch
+     *      could not grow, which is a different answer the caller may want to report.
      *
      *  Uniform draws that collide with @c visited fall back to cyclic linear probing over the id
      *  space, so every call makes strict progress without retry budgets - the sampler is exact,
@@ -801,9 +807,10 @@ struct dense_ram_index {
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k,
               typename predicate_type_ = no_predicate_t>
-    bool sample_landmarks(vector_view_t query, vector_norms_t query_norms, node_id_t first_invisible_id,
-                          std::size_t expansion_factor, dense_traversal_context_t& context,
-                          predicate_type_&& predicate = predicate_type_ {}) noexcept {
+    [[nodiscard]] expected<std::size_t> sample_landmarks(vector_view_t query, vector_norms_t query_norms,
+                                                         node_id_t first_invisible_id, std::size_t expansion_factor,
+                                                         dense_traversal_context_t& context,
+                                                         predicate_type_&& predicate = predicate_type_ {}) noexcept {
         constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, no_predicate_t>;
 
         results_array_t& results = context.results;
@@ -815,13 +822,14 @@ struct dense_ram_index {
         std::array<vector_norms_t, 4> landmarks_norms;
         small_size_t landmarks_in_batch = 0;
 
-        if (!visited.reserve(visited.size() + landmarks_ids.size())) return false;
+        if (status_t const seen = visited.reserve(visited.size() + landmarks_ids.size()); failed(seen))
+            return {0, seen};
         // `visited` may also hold above-watermark ids discovered through fresh back-links, so the
         // size check is conservative: it can only under-sample, never let the probe loop spin.
         while (landmarks_in_batch != landmarks_ids.size() && visited.size() < first_invisible_id) {
             // Draw uniformly; on collision with an already-visited id, probe forward cyclically -
             // deterministic progress even when the published set is almost fully explored.
-            node_id_t landmark_node_id = context.random_generator.bounded(first_invisible_id);
+            node_id_t landmark_node_id = uniform_below<node_id_t> {first_invisible_id}(context.random_generator);
             while (visited.test(landmark_node_id))
                 landmark_node_id = landmark_node_id + 1 == first_invisible_id ? 0 : landmark_node_id + 1;
 
@@ -831,13 +839,13 @@ struct dense_ram_index {
             if constexpr (synchronization_ == synchronization_t::concurrent_k)
                 if (neighbors_for(landmark_location).peek_first() == dense_node_id_unknown_k) continue;
 
-            visited.set(landmark_node_id);
+            [[maybe_unused]] membership_t const marked = visited.set(landmark_node_id);
             landmarks_ids[landmarks_in_batch] = landmark_node_id;
             landmarks_vectors[landmarks_in_batch] = vector_for(landmark_location);
             landmarks_norms[landmarks_in_batch] = norm_for(landmark_location);
             ++landmarks_in_batch;
         }
-        if (!landmarks_in_batch) return false;
+        if (!landmarks_in_batch) return {0, status_t::success_k};
 
         // Pad the tail lanes with lane zero, so the 4-way kernel streams valid memory;
         // the padded outputs are simply never consumed.
@@ -865,8 +873,9 @@ struct dense_ram_index {
         }
         results.insert(scored, expansion_factor);
         for (small_size_t lane = 0; lane != landmarks_in_batch; ++lane)
-            if (!frontier.insert(dense_scored_node_t(scored[lane]))) return false;
-        return true;
+            if (status_t const queued = frontier.insert(dense_scored_node_t(scored[lane])); failed(queued))
+                return {lane, queued};
+        return {landmarks_in_batch, status_t::success_k};
     }
 
     /**
@@ -874,7 +883,9 @@ struct dense_ram_index {
      *
      *  Read-only on the graph: takes no locks, writes nothing, retries transiently locked nodes.
      *  Scratch allocation failures degrade the walk - keeping the best candidates found so far -
-     *  rather than fail it: callers may already own claimed node ids and must roll forward regardless.
+     *  rather than fail it: callers may already own claimed node ids and must roll forward
+     *  regardless. The returned status says which kind of stop happened, so a read-only caller
+     *  can report a refusal that an insertion caller must swallow.
      *
      *  @param[in] first_invisible_id The caller's watermark snapshot, bounding the readable id space.
      *  @param[in] expansion_factor Breadth of the candidate pool - the walk's stopping radius.
@@ -886,9 +897,10 @@ struct dense_ram_index {
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k,
               typename predicate_type_ = no_predicate_t>
-    void search_around(vector_view_t query, vector_norms_t query_norms, node_id_t first_invisible_id,
-                       std::size_t expansion_factor, dense_traversal_context_t& context,
-                       predicate_type_&& predicate = predicate_type_ {}) noexcept {
+    [[nodiscard]] status_t search_around(vector_view_t query, vector_norms_t query_norms,
+                                         node_id_t first_invisible_id, std::size_t expansion_factor,
+                                         dense_traversal_context_t& context,
+                                         predicate_type_&& predicate = predicate_type_ {}) noexcept {
         constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, no_predicate_t>;
 
         results_array_t& results = context.results;
@@ -899,10 +911,12 @@ struct dense_ram_index {
         // Seed with about as many landmarks as the graph connectivity - a stochastic multi-start,
         // gathered in 4-way batches to amortize the loop overhead over unrolled "gathers".
         small_size_t const landmark_batches = divide_round_up<small_size_t>(node_connectivity, 4);
-        for (small_size_t landmarks_batch = 0; landmarks_batch != landmark_batches; ++landmarks_batch)
-            if (!sample_landmarks<synchronization_>(query, query_norms, first_invisible_id, expansion_factor, context,
-                                                    predicate))
-                break;
+        for (small_size_t landmarks_batch = 0; landmarks_batch != landmark_batches; ++landmarks_batch) {
+            expected<std::size_t> const seeded = sample_landmarks<synchronization_>(
+                query, query_norms, first_invisible_id, expansion_factor, context, predicate);
+            if (failed(seeded.status)) return seeded.status;
+            if (!seeded.value) break; // Everything published is already visited.
+        }
 
         // Greedily walk the frontier nearest-first, keeping the best `expansion_factor` in `results`.
         while (true) {
@@ -918,9 +932,10 @@ struct dense_ram_index {
                 // set's growth toward the published id space.
                 std::size_t const filled = predicated_k ? context.refining_candidates.size() : results.size();
                 if (filled >= expansion_factor) break;
-                if (!sample_landmarks<synchronization_>(query, query_norms, first_invisible_id, expansion_factor,
-                                                        context, predicate))
-                    break;
+                expected<std::size_t> const seeded = sample_landmarks<synchronization_>(
+                    query, query_norms, first_invisible_id, expansion_factor, context, predicate);
+                if (failed(seeded.status)) return seeded.status;
+                if (!seeded.value) break; // Nothing fresh left to restart from.
                 ++context.restarts;
                 continue;
             }
@@ -1028,19 +1043,25 @@ struct dense_ram_index {
 
                 // Grow the visited set ahead of the marks - `set()` itself never rehashes.
                 // Full quads - the hot case - mark all four lanes in one interleaved probe sweep.
-                if (!visited.reserve(visited.size() + gathered_count)) return;
-                if (gathered_count == gathered_ids.size()) visited.set(gathered_ids);
+                if (status_t const seen = visited.reserve(visited.size() + gathered_count); failed(seen)) return seen;
+                if (gathered_count == gathered_ids.size()) {
+                    [[maybe_unused]] u64_t const fresh = visited.set(gathered_ids);
+                }
                 else
-                    for (small_size_t lane = 0; lane != gathered_count; ++lane) visited.set(gathered_ids[lane]);
+                    for (small_size_t lane = 0; lane != gathered_count; ++lane) {
+                        [[maybe_unused]] membership_t const marked = visited.set(gathered_ids[lane]);
+                    }
 
                 // One merge folds the ascending quad into the pool; the accepted entries are
                 // its prefix - the top-expansion-of-the-union truth - and only they enter the
                 // frontier.
                 std::size_t const accepted_count = results.insert(scored, expansion_factor);
                 for (small_size_t lane = 0; lane != accepted_count; ++lane)
-                    if (!frontier.insert(dense_scored_node_t(scored[lane]))) return;
+                    if (status_t const queued = frontier.insert(dense_scored_node_t(scored[lane])); failed(queued))
+                        return queued;
             }
         }
+        return status_t::success_k;
     }
 
     /**
@@ -1107,7 +1128,7 @@ struct dense_ram_index {
             ++kept_count;
         }
         // Shrinking within the reservation never fails - the fill becomes the live shape.
-        (void)out.try_resize({kept_count});
+        [[maybe_unused]] bool const shrunk = out.try_resize({kept_count});
         return computed_distances;
     }
 
@@ -1226,7 +1247,8 @@ struct dense_ram_index {
                 }
             }
         }
-        (void)out.try_resize({kept_count});
+        // Shrinking within the reservation never fails - the fill becomes the live shape.
+        [[maybe_unused]] bool const shrunk = out.try_resize({kept_count});
         return computed_distances;
     }
 
@@ -1329,7 +1351,8 @@ struct dense_ram_index {
             context.kept_positions[kept_count] = position;
             ++kept_count;
         }
-        (void)out.try_resize({kept_count});
+        // Shrinking within the reservation never fails - the fill becomes the live shape.
+        [[maybe_unused]] bool const shrunk = out.try_resize({kept_count});
         return 0; // Decision only - every distance here was already paid for.
     }
 
@@ -1591,9 +1614,13 @@ struct dense_ram_index {
 
     /** @brief Outcome & telemetry of one @c insert() batch. */
     struct insert_result_t {
-        /** @brief @c success_k, or why the whole batch was rejected before claiming ids. */
+        /** @brief @c success_k, or why the whole batch was rejected. A batch is atomic: every
+         *      fallible step runs before the first id is claimed, so a failure publishes no row
+         *      and there is no partial count to report. The residual hole is a thread dying
+         *      between a claim and its publication, which no return value can carry. */
         status_t status = status_t::success_k;
-        /** @brief Index size visible after this batch fully published - the watermark. */
+        /** @brief Index size visible after this batch fully published - the watermark. A
+         *      rejected batch publishes nothing, so this reports the size it left untouched. */
         std::size_t new_size = 0;
         /** @brief Frontier candidates expanded across all per-node walks of the batch. */
         std::size_t visited_members = 0;
@@ -1606,7 +1633,7 @@ struct dense_ram_index {
         /** @brief Starvation restarts across the batch - a graph-connectivity health signal. */
         std::size_t restarts = 0;
 
-        explicit operator bool() const noexcept { return status == status_t::success_k; }
+        explicit operator bool() const noexcept { return succeeded(status); }
     };
 
     /** @brief Optional tuning knobs for @c insert(); zeros mean "derive from connectivity". */
@@ -1637,7 +1664,8 @@ struct dense_ram_index {
         std::size_t const incoming_vectors_count = new_vectors.extent(0); // rows, not scalars
         if (!incoming_vectors_count) return {status_t::success_k, size()};
         bool const report_assigned_ids = assigned_ids.size() != 0;
-        if (report_assigned_ids && assigned_ids.size() != incoming_vectors_count) return {status_t::config_mismatch_k};
+        if (report_assigned_ids && assigned_ids.size() != incoming_vectors_count)
+            return {status_t::config_mismatch_k, size()};
 
         // Snapshot the context's running telemetry, to report this batch's share on return.
         std::size_t const visited_members_before = context.visited_members;
@@ -1652,7 +1680,7 @@ struct dense_ram_index {
         // Geometry is frozen by the first successful `reserve()` - a hard prerequisite here:
         // without it, neither the copy width nor the neighbor-list width is defined.
         packed_geometry_id_t const geometry = geometry_.load(std::memory_order_acquire);
-        if (!geometry) return {status_t::uninitialized_k};
+        if (!geometry) return {status_t::uninitialized_k, size()};
         std::size_t const node_connectivity = geometry_connectivity(geometry);
         std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
                                                                      : node_connectivity * 2;
@@ -1663,12 +1691,12 @@ struct dense_ram_index {
         // `refining_candidates` must fit a full neighbor list plus the newcomer during
         // back-linking; the link scratches hold at most a full list - all sized here from the
         // frozen geometry, never from a compile-time constant.
-        if (!context.results.reserve(expansion_factor) ||                  //
-            !context.refining_candidates.reserve(node_connectivity + 1) || //
-            !context.frontier.reserve(expansion_factor * 4u) ||            //
-            !context.visited.reserve(expansion_factor * 4u) ||             //
-            !context.reserve_links(node_connectivity))
-            return {status_t::bad_alloc_k};
+        if (failed(context.results.reserve(expansion_factor)) ||                  //
+            failed(context.refining_candidates.reserve(node_connectivity + 1)) || //
+            failed(context.frontier.reserve(expansion_factor * 4u)) ||            //
+            failed(context.visited.reserve(expansion_factor * 4u)) ||             //
+            failed(context.reserve_links(node_connectivity)))
+            return {status_t::bad_alloc_k, size()};
 
         // The tile planes size from the same frozen geometry and the kit's own shapes - padded
         // to whole tiles, so the padded pool doubles as the pair-matrix stride, and always wide
@@ -1676,14 +1704,14 @@ struct dense_ram_index {
         if constexpr (has_tiles_k) {
             std::size_t const wanted = max_of<std::size_t>(expansion_factor, node_connectivity + 1);
             std::size_t const pool = divide_round_up<std::size_t>(wanted, tile_span_k) * tile_span_k;
-            if (!context.reserve_tiles(pool, tiles_kit_t::scratch_bytes(pool, geometry_dimensions(geometry))))
-                return {status_t::bad_alloc_k};
+            if (failed(context.reserve_tiles(pool, tiles_kit_t::scratch_bytes(pool, geometry_dimensions(geometry)))))
+                return {status_t::bad_alloc_k, size()};
         }
 
         // Claim storage for the whole batch: from here on enough sentinel-filled rows exist for
         // all our nodes, and this thread must roll forward to publishing every id it dispenses.
         expected<node_id_t> const claimed = claim_capacity(incoming_vectors_count);
-        if (claimed.status != status_t::success_k) return {claimed.status};
+        if (claimed.status != status_t::success_k) return {claimed.status, size()};
 
         // All slots share one contiguous packed row layout, so the copy width is loop-invariant.
         // Sub-byte types pack several dimensions per storage value - count storage bytes, not dimensions.
@@ -1724,8 +1752,11 @@ struct dense_ram_index {
             // nothing to traverse - the node publishes with an empty neighbors list, and the
             // following entries wire back to it as soon as the watermark advances.
             node_id_t const first_invisible_id = last_visible_id_.load(std::memory_order_acquire);
+            // The row is already claimed, so a refused walk wires a thinner node rather than
+            // abandoning an id nothing will ever publish.
             if (first_invisible_id != 0)
-                search_around(owned_vector, new_norms, first_invisible_id, expansion_factor, context);
+                [[maybe_unused]] status_t const walked =
+                    search_around(owned_vector, new_norms, first_invisible_id, expansion_factor, context);
 
             // Select up to `connectivity()` diverse links from the search results and write them
             // into our own still-unpublished list. No locks are needed: no reader can arrive
@@ -1805,7 +1836,7 @@ struct dense_ram_index {
         /** @brief Starvation restarts - a graph-connectivity health signal. */
         std::size_t restarts = 0;
 
-        explicit operator bool() const noexcept { return status == status_t::success_k; }
+        explicit operator bool() const noexcept { return succeeded(status); }
     };
 
     /** @brief The compile-time form of @c search() & @c search_if(): one whole-traversal
@@ -1851,15 +1882,19 @@ struct dense_ram_index {
         std::size_t const restarts_before = context.restarts;
 
         vector_norms_t const query_norms = dense_norms(query_vector);
-        search_around<synchronization_>(query_vector, query_norms, first_invisible_id, expansion_factor, context,
-                                        std::forward<predicate_type_>(predicate));
+        status_t const walked = search_around<synchronization_>(query_vector, query_norms, first_invisible_id,
+                                                                expansion_factor, context, //
+                                                                std::forward<predicate_type_>(predicate));
 
         // The result contract is one pool: matches always land in `context.results`, so a
         // predicated walk swaps its admitted pool into place - both are the same buffer type,
         // and the navigation leftovers get cleared by whichever call reuses that scratch next.
         if constexpr (predicated_k) std::swap(context.results, context.refining_candidates);
 
+        // A refused walk still ranked whatever it reached; the status says the ranking is short
+        // because scratch ran out, not because the graph had nothing better.
         search_result_t result;
+        result.status = walked;
         result.count = context.results.size();
         result.visited_members = context.visited_members - visited_members_before;
         result.computed_distances = context.computed_distances - computed_distances_before;
@@ -1906,7 +1941,7 @@ struct dense_ram_index {
      *  @code{.cpp}
      *  index.search_if(query, [&](std::span<dense_scored_node_t const> scored, auto& admitted) {
      *      for (dense_scored_node_t candidate : scored)
-     *          if (labels[candidate.node_id] == wanted) admitted.try_push_back(candidate);
+     *          if (labels[candidate.node_id] == wanted) [[maybe_unused]] auto kept = admitted.push_back(candidate);
      *  }, context);
      *  @endcode
      *
@@ -2115,10 +2150,10 @@ struct dense_ram_cursor {
 
     /** @brief Sizes the staging for the frozen connectivity through @p allocator - the index's
      *      traversals-side family by default; call once before any @c seek. */
-    bool reserve(allocator_t allocator = {}) noexcept {
-        if (staged_neighbors_.size() >= connectivity_) return true;
+    [[nodiscard]] status_t reserve(allocator_t allocator = {}) noexcept {
+        if (staged_neighbors_.size() >= connectivity_) return status_t::success_k;
         staged_neighbors_ = ids_tensor_t::try_zeros({connectivity_}, ids_allocator_t(allocator));
-        return !staged_neighbors_.empty();
+        return !staged_neighbors_.empty() ? status_t::success_k : status_t::bad_alloc_k;
     }
 
     /** @brief Nodes visible to this cursor; ids strictly below are readable. */

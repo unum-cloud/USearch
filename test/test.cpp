@@ -17,6 +17,5 @@ int main() {
     failures_count += test_ram_buffers();
     failures_count += test_dense_all();
 
-    fmt::println("{}: {} total failures", failures_count ? "FAILED" : "OK", failures_count);
-    return failures_count ? 1 : 0;
+    return report("total", failures_count) ? 1 : 0;
 }

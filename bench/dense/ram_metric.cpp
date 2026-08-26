@@ -36,6 +36,7 @@
 
 #include "usearch/dense/ram_metric.hpp"
 
+namespace bm = benchmark;
 using namespace unum::usearch;
 
 constexpr std::array<std::size_t, 3> dimensions_to_bench = {256, 768, 1536};
@@ -60,7 +61,7 @@ concept quads_in_scope = quads_supported<kernel_, scalar_, nk_cap_serial_k>;
  */
 template <typename scalar_>
 static auto make_scalar(unsigned value) noexcept {
-    if constexpr (nk::dimensions_per_value<scalar_>() > 1) return static_cast<std::int8_t>(value);
+    if constexpr (nk::dimensions_per_value<scalar_>() > 1) return static_cast<i8_t>(value);
     else if constexpr (requires { scalar_::from_f32(0.0f); }) return scalar_::from_f32(static_cast<float>(value));
     else return scalar_(value);
 }
@@ -90,14 +91,14 @@ constexpr std::size_t candidate_pool_target_bytes_k = 1ull << 28; // 256 MiB
 
 /**
  *  @brief Synthetic L1 working-set noise modelling an HNSW worker's per-iteration touches
- *  (neighbor list of @c std::uint32_t IDs, visited bitset, top-K queue). Without this, the
+ *  (neighbor list of @c u32_t IDs, visited bitset, top-K queue). Without this, the
  *  kernel-only microbench has no L1 contestants - the query stays resident and the cache
  *  hints inside the kits (PREFETCHT0 / PREFETCHT2 / CLDEMOTE) have nothing to optimize for.
  *  A pool larger than L1 (32 KiB on most x86) plus a random per-iter pick defeats the HW
  *  prefetcher and forces capacity pressure on the query lines.
  */
 struct adjacency_simulator_t {
-    using node_id_t = std::uint32_t;
+    using node_id_t = u32_t;
     static constexpr std::size_t bytes_per_node_k = 256; // 4 cache lines / iter
     static constexpr std::size_t ids_per_node_k = bytes_per_node_k / sizeof(node_id_t);
     static constexpr std::size_t node_count_k = 256; // 64 KiB pool, > 32 KiB L1
@@ -114,7 +115,7 @@ struct adjacency_simulator_t {
         node_id_t const* node = pool.data() + (random_index & node_index_mask_k) * ids_per_node_k;
         node_id_t accumulator = 0;
         for (std::size_t id_index = 0; id_index < ids_per_node_k; ++id_index) accumulator ^= node[id_index];
-        benchmark::DoNotOptimize(accumulator);
+        bm::DoNotOptimize(accumulator);
     }
 };
 
@@ -153,13 +154,13 @@ static candidate_pool<scalar_> make_candidate_pool(std::size_t dim) {
  *  traffic; query is reused), and gso/s (giga scalar-operations per second; one distance
  *  is approximated as 2*dim multiply-add or bit-op pairs across all five kernels).
  */
-static void set_counters(benchmark::State& state, std::size_t dim, std::size_t distances_per_iter,
+static void set_counters(bm::State& state, std::size_t dim, std::size_t distances_per_iter,
                          std::size_t bytes_loaded_per_iter) noexcept {
     state.SetItemsProcessed(state.iterations() * distances_per_iter);
     state.SetBytesProcessed(state.iterations() * bytes_loaded_per_iter);
     double const scalar_ops_per_iter = 2.0 * static_cast<double>(dim) * static_cast<double>(distances_per_iter);
-    state.counters["gso/s"] = benchmark::Counter(scalar_ops_per_iter, benchmark::Counter::kIsIterationInvariantRate,
-                                                 benchmark::Counter::kIs1000);
+    state.counters["gso/s"] =
+        bm::Counter(scalar_ops_per_iter, bm::Counter::kIsIterationInvariantRate, bm::Counter::kIs1000);
 }
 
 /** @brief Computes a row's contiguous byte width once per cell (used for bytes_processed). */
@@ -170,7 +171,7 @@ static constexpr std::size_t row_bytes_of(std::size_t dim) noexcept {
 
 /** @brief USearch 1-to-1 cell - random row pick per iter so candidates stream from RAM. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-static void bench_distance(benchmark::State& state) {
+static void bench_distance(bm::State& state) {
     auto const dim = static_cast<std::size_t>(state.range(0));
     auto query = nk::vector<scalar_>::try_zeros(dim);
     fill_cyclic(query.span(), 0);
@@ -186,14 +187,14 @@ static void bench_distance(benchmark::State& state) {
         adjacency.touch(random_generator());
         auto candidate_view = pool.matrix.view().row(row).as_vector();
         auto distance_value = distance<kernel_, caps_>(query_view, query_norms, candidate_view, pool.norms[row]);
-        benchmark::DoNotOptimize(distance_value);
+        bm::DoNotOptimize(distance_value);
     }
     set_counters(state, dim, /*distances_per_iter=*/1, /*bytes_loaded_per_iter=*/row_bytes_of<scalar_>(dim));
 }
 
 /** @brief USearch 1-to-4 cell - four random rows per iter; query is amortized 4x. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-static void bench_distances_quad(benchmark::State& state) {
+static void bench_distances_quad(bm::State& state) {
     auto const dim = static_cast<std::size_t>(state.range(0));
     auto query = nk::vector<scalar_>::try_zeros(dim);
     fill_cyclic(query.span(), 0);
@@ -216,7 +217,7 @@ static void bench_distances_quad(benchmark::State& state) {
         std::array<vector_norms<typename scalar_::dot_result_t>, 4> const candidate_norms {
             pool.norms[row0], pool.norms[row1], pool.norms[row2], pool.norms[row3]};
         auto distance_values = distances<kernel_, caps_>(query_view, query_norms, candidate_views, candidate_norms);
-        benchmark::DoNotOptimize(distance_values);
+        bm::DoNotOptimize(distance_values);
     }
     set_counters(state, dim, /*distances_per_iter=*/4, /*bytes_loaded_per_iter=*/4 * row_bytes_of<scalar_>(dim));
 }
@@ -226,7 +227,7 @@ static void bench_distances_quad(benchmark::State& state) {
  *  candidate per loop iter, randomly picked from the same overflowed pool as the USearch cells.
  */
 template <nk_kernel_kind_t kernel_, typename scalar_>
-static void bench_baseline(benchmark::State& state) {
+static void bench_baseline(bm::State& state) {
     auto const dim = static_cast<std::size_t>(state.range(0));
     auto query = nk::vector<scalar_>::try_zeros(dim);
     fill_cyclic(query.span(), 0);
@@ -243,27 +244,27 @@ static void bench_baseline(benchmark::State& state) {
         if constexpr (kernel_ == nk_kernel_dot_k) {
             typename scalar_::dot_result_t result {};
             nk::dot(query_view, candidate_view, dim, &result);
-            benchmark::DoNotOptimize(result);
+            bm::DoNotOptimize(result);
         }
         else if constexpr (kernel_ == nk_kernel_angular_k) {
             typename scalar_::angular_result_t result {};
             nk::angular(query_view, candidate_view, dim, &result);
-            benchmark::DoNotOptimize(result);
+            bm::DoNotOptimize(result);
         }
         else if constexpr (kernel_ == nk_kernel_euclidean_k) {
             typename scalar_::euclidean_result_t result {};
             nk::euclidean(query_view, candidate_view, dim, &result);
-            benchmark::DoNotOptimize(result);
+            bm::DoNotOptimize(result);
         }
         else if constexpr (kernel_ == nk_kernel_hamming_k) {
             typename scalar_::hamming_result_t result {};
             nk::hamming(query_view, candidate_view, dim, &result);
-            benchmark::DoNotOptimize(result);
+            bm::DoNotOptimize(result);
         }
         else if constexpr (kernel_ == nk_kernel_jaccard_k) {
             typename scalar_::jaccard_result_t result {};
             nk::jaccard(query_view, candidate_view, dim, &result);
-            benchmark::DoNotOptimize(result);
+            bm::DoNotOptimize(result);
         }
     }
     set_counters(state, dim, /*distances_per_iter=*/1, /*bytes_loaded_per_iter=*/row_bytes_of<scalar_>(dim));
@@ -281,8 +282,8 @@ static void register_quads(std::string_view kernel_name, std::string_view scalar
                            std::string_view caps_name) noexcept {
     auto register_with = [&](auto* function, std::string_view shape) {
         std::string const label = fmt::format("{}/{}/{}/{}", kernel_name, scalar_name, caps_name, shape);
-        auto* registered = benchmark::RegisterBenchmark(label.c_str(), function);
-        for (std::size_t const dim : dimensions_to_bench) registered->Arg(static_cast<std::int64_t>(dim));
+        auto* registered = bm::RegisterBenchmark(label.c_str(), function);
+        for (std::size_t const dim : dimensions_to_bench) registered->Arg(static_cast<i64_t>(dim));
     };
     register_with(&bench_distance<kernel_, scalar_, caps_>, "1to1");
     register_with(&bench_distances_quad<kernel_, scalar_, caps_>, "1to4");
@@ -301,8 +302,8 @@ template <nk_kernel_kind_t kernel_, typename scalar_>
     requires quads_in_scope<kernel_, scalar_>
 static void register_baseline(std::string_view kernel_name, std::string_view scalar_name) noexcept {
     std::string const label = fmt::format("{}/{}/baseline", kernel_name, scalar_name);
-    auto* registered = benchmark::RegisterBenchmark(label.c_str(), &bench_baseline<kernel_, scalar_>);
-    for (std::size_t const dim : dimensions_to_bench) registered->Arg(static_cast<std::int64_t>(dim));
+    auto* registered = bm::RegisterBenchmark(label.c_str(), &bench_baseline<kernel_, scalar_>);
+    for (std::size_t const dim : dimensions_to_bench) registered->Arg(static_cast<i64_t>(dim));
 }
 
 /** @brief True iff a tile engine is compiled for this tuple - the tiles chain always names
@@ -314,7 +315,7 @@ concept tiles_supported = dense_tiles_chain<kernel_, scalar_, caps_>::has_tiles_
  *      engine's primitive throughput, comparable against 256 quads-path distances. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
     requires tiles_supported<kernel_, scalar_, caps_>
-static void bench_distances_tile(benchmark::State& state) {
+static void bench_distances_tile(bm::State& state) {
     nk_configure_thread(nk_capabilities_available());
     using tiles_kit_t = typename dense_tiles_chain<kernel_, scalar_, caps_>::kit_t;
     constexpr std::size_t rows_k = tiles_kit_t::tile_rows_k;
@@ -344,7 +345,7 @@ static void bench_distances_tile(benchmark::State& state) {
             tiles_kit_t::update_tile(accumulator, a_tile, b_tile);
         }
         tiles_kit_t::finalize_tile(accumulator, norms, norms, tiled.data(), rows_k);
-        benchmark::DoNotOptimize(tiled);
+        bm::DoNotOptimize(tiled);
     }
     set_counters(state, dim, /*distances_per_iter=*/rows_k * rows_k,
                  /*bytes_loaded_per_iter=*/rows_k * row_bytes_of<scalar_>(dim));
@@ -363,8 +364,8 @@ static void register_tiles(std::string_view kernel_name, std::string_view scalar
                            std::string_view caps_name) noexcept {
     if ((nk_capabilities_available() & caps_) != caps_) return;
     std::string const label = fmt::format("{}/{}/{}/16x16", kernel_name, scalar_name, caps_name);
-    auto* registered = benchmark::RegisterBenchmark(label.c_str(), &bench_distances_tile<kernel_, scalar_, caps_>);
-    for (std::size_t const dim : dimensions_to_bench) registered->Arg(static_cast<std::int64_t>(dim));
+    auto* registered = bm::RegisterBenchmark(label.c_str(), &bench_distances_tile<kernel_, scalar_, caps_>);
+    for (std::size_t const dim : dimensions_to_bench) registered->Arg(static_cast<i64_t>(dim));
 }
 
 template <nk_kernel_kind_t kernel_, typename scalar_>
@@ -412,8 +413,8 @@ void register_scalar<nk::u1x8_t>(std::string_view scalar_name) noexcept {
 
 int main(int argc, char** argv) {
 
-    benchmark::Initialize(&argc, argv);
-    if (benchmark::ReportUnrecognizedArguments(argc, argv)) return 1;
+    bm::Initialize(&argc, argv);
+    if (bm::ReportUnrecognizedArguments(argc, argv)) return 1;
 
     register_scalar<nk::f64_t>("f64");
     register_scalar<nk::f32_t>("f32");
@@ -431,7 +432,7 @@ int main(int argc, char** argv) {
     register_scalar<nk::u4x2_t>("u4x2");
     register_scalar<nk::u1x8_t>("u1x8");
 
-    benchmark::RunSpecifiedBenchmarks();
-    benchmark::Shutdown();
+    bm::RunSpecifiedBenchmarks();
+    bm::Shutdown();
     return 0;
 }

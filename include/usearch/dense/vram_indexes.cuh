@@ -7,6 +7,7 @@
  */
 #pragma once
 
+#include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the shard, base & stream tables
 #include "usearch/dense/vram_index.cuh"
 
 namespace unum {
@@ -40,7 +41,7 @@ template <dense_cuda_kit kit_, typename frontier_>
 __device__ __forceinline__ void dense_cuda_merge_one( //
     dense_cuda_build_view<kit_> const& view, u32_t sampling_bound, dense_node_id_t node_id,
     dense_cuda_visited_set_t visited, typename kit_::fragment_t* query_span,
-    dense_cuda_vector_cache<typename kit_::fragment_t> cache, dense_cuda_relink_scratch relink,
+    dense_cuda_vector_cache<typename kit_::fragment_t> cache, dense_cuda_relink_scratch_t relink,
     typename kit_::norms_t (&cache_norms)[dense_cuda_cache_rows_k], u32_t (&gathered_ids)[dense_cuda_cache_rows_k],
     dense_cuda_scored_node_t (&gathered_scored)[32], dense_cuda_warp_context<frontier_>& context, int lane) noexcept {
 
@@ -62,7 +63,7 @@ __device__ __forceinline__ void dense_cuda_merge_one( //
     // Rewrite the own row under its lock: fresh links in, stale component-local tail out.
     dense_cuda_neighbors_ref_t const own_row {planes.neighbors_for(node_id), planes.connectivity};
     dense_node_id_t displaced = dense_node_id_unknown_k;
-    if (lane == 0) displaced = own_row.try_lock(1u << 20, context.random_generator);
+    if (lane == 0) displaced = own_row.lock_if_free(1u << 20, context.random_generator);
     displaced = __shfl_sync(0xFFFFFFFFu, displaced, 0);
     if (displaced == dense_node_id_unknown_k) return; // Beyond the budget - keep the old links.
     for (u32_t slot = lane; slot < planes.connectivity; slot += 32)
@@ -81,7 +82,7 @@ __device__ __forceinline__ void dense_cuda_merge_one( //
  *      since every id in range is long published. */
 template <dense_cuda_kit kit_, u32_t pool_slots_>
 __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, dense_cuda_resident_blocks_per_sm_k)
-    dense_cuda_merge_kernel(dense_cuda_build_view<kit_> view, u32_t sampling_bound) {
+    dense_cuda_merge_shards_kernel(dense_cuda_build_view<kit_> view, u32_t sampling_bound) {
     extern __shared__ std::byte dynamic_scratch[];
     __shared__ typename kit_::norms_t cache_norms[dense_cuda_warps_per_block_k][dense_cuda_cache_rows_k];
     __shared__ u32_t gathered_ids[dense_cuda_warps_per_block_k][dense_cuda_cache_rows_k];
@@ -91,7 +92,7 @@ __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, dense_cuda_
     int const warp = slice.warp, lane = slice.lane;
     typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(slice.scratch);
     dense_cuda_vector_cache<typename kit_::fragment_t> const cache {query_span, view.planes.row_fragments};
-    dense_cuda_relink_scratch const relink = dense_cuda_relink_scratch::carve(
+    dense_cuda_relink_scratch_t const relink = dense_cuda_relink_scratch_t::carve(
         slice.scratch, view.planes.connectivity,
         static_cast<std::size_t>(view.planes.row_fragments) * sizeof(typename kit_::fragment_t) *
             dense_cuda_cache_rows_k);
@@ -102,7 +103,7 @@ __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, dense_cuda_
         if (node_id >= view.end_id) return;
 
         dense_cuda_warp_context<dense_cuda_register_frontier<pool_slots_>> context;
-        context.random_generator = splitmix_u32_t {0xA5A5A5A5ull ^ (static_cast<u64_t>(node_id) * 33 + lane)};
+        context.random_generator = splitmix64_t {0xA5A5A5A5ull ^ (static_cast<u64_t>(node_id) * 33 + lane)};
         dense_cuda_visited_set_t const visited {slice.visited_slots, view.arena_shape.visited_hash_shift,
                                                 view.epoch_base + (node_id - view.first_id) + 1};
         dense_cuda_merge_one<kit_>( //
@@ -116,9 +117,9 @@ __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, dense_cuda_
  *  @brief A group of same-geometry indexes - one shard per memory domain - stitched into
  *      one traversable graph over a shared address space: the multi-GPU capacity tier.
  *
- *  @b try_make adopts shards whose planes already share a transparent address space and
+ *  @b make adopts shards whose planes already share a transparent address space and
  *  whose neighbor ids are already global - the multi-node fabric-handle adoption path.
- *  @b try_merge takes independently built shards on peer devices and does the whole
+ *  @b merge takes independently built shards on peer devices and does the whole
  *  progressive unification: globalize neighbor ids in place, alias every physical slab
  *  into the shared windows via @c cuMemRetainAllocationHandle - zero copies - replicate
  *  the norms per device, then merge each source shard into the target graph. Serial
@@ -136,8 +137,8 @@ __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, dense_cuda_
  *  localized again by subtracting the bases.
  */
 template <nk_dtype_t vector_dtype_, nk_kernel_kind_t kernel_kind_, cuda_arch_t arch_ceiling_ = cuda_arch_blackwell_k,
-          cuda_reservable_allocator vectors_allocator_type_ = cuda_vmm_allocator<std::byte>,
-          cuda_reservable_allocator neighbors_allocator_type_ = cuda_vmm_allocator<std::byte>>
+          cuda_reservable_allocator vectors_allocator_type_ = cuda_virtual_memory_allocator<std::byte>,
+          cuda_reservable_allocator neighbors_allocator_type_ = cuda_virtual_memory_allocator<std::byte>>
 struct dense_vram_indexes {
     using index_t = dense_vram_index<vector_dtype_, kernel_kind_, arch_ceiling_, vectors_allocator_type_,
                                      neighbors_allocator_type_>;
@@ -194,7 +195,7 @@ struct dense_vram_indexes {
 
     /** @brief Adopts shards whose planes already live in one transparent address space with
      *      global neighbor ids - validation and registry only, no re-mapping. */
-    static expected<dense_vram_indexes> try_make(std::span<index_t*> shards) noexcept {
+    [[nodiscard]] static expected<dense_vram_indexes> make(std::span<index_t*> shards) noexcept {
         dense_vram_indexes indexes;
         status_t const status = indexes.adopt(shards);
         return {std::move(indexes), status};
@@ -205,7 +206,8 @@ struct dense_vram_indexes {
      *      zero-copy aliasing, replicate norms, then one source merge per non-first shard.
      *      Synchronous and exclusive: no other work may touch the shards while it runs.
      */
-    static expected<dense_vram_indexes> try_merge(std::span<index_t*> shards, merge_config_t config = {}) noexcept {
+    [[nodiscard]] static expected<dense_vram_indexes> merge(std::span<index_t*> shards,
+                                                            merge_config_t config = {}) noexcept {
         dense_vram_indexes indexes;
         if (status_t status = indexes.adopt(shards); status != status_t::success_k) return {std::move(indexes), status};
         if (status_t status = indexes.globalize(); status != status_t::success_k) return {std::move(indexes), status};
@@ -213,8 +215,9 @@ struct dense_vram_indexes {
         // Staged sampling needs a coherent id prefix, so its phases serialize; free
         // ordering launches every source at once on its own device stream.
         std::size_t const sources = indexes.shards_count() - 1;
-        fu::dynamic_array<merge_scratch_t> scratch;
-        if (sources && !scratch.try_resize(sources)) return {std::move(indexes), status_t::bad_alloc_k};
+        growing_buffer<merge_scratch_t> scratch;
+        if (sources)
+            if (status_t const sized = scratch.resize(sources); failed(sized)) return {std::move(indexes), sized};
         status_t status = status_t::success_k;
         if (config.order == merge_order_t::serial_k) {
             for (std::size_t slot = 1; slot != indexes.shards_count() && status == status_t::success_k; ++slot) {
@@ -236,7 +239,7 @@ struct dense_vram_indexes {
 
     /** @brief The stitched planes for single-walk searches - shard 0's view with the three
      *      pointers swapped to the shared windows; feed the stock search launch with
-     *      @c sampling_bound @c = @c size(). Valid only after a successful @c try_merge. */
+     *      @c sampling_bound @c = @c size(). Valid only after a successful @c merge. */
     planes_view_t planes() const noexcept { return stitched_planes_; }
     /** @brief The stitched planes as seen from group slot @p slot: identical windows, but
      *      the norms pointer is that device's LOCAL replica and the resident range feeds
@@ -255,18 +258,18 @@ struct dense_vram_indexes {
   private:
     /** @brief The adopted shards, never owned; slot @b i owns the global rows
      *      @b [bases_[i],bases_[i+1]). */
-    fu::dynamic_array<index_t*> shards_;
+    growing_buffer<index_t*> shards_;
     /** @brief Prefix row sums, one per shard plus the trailing group total. */
-    fu::dynamic_array<std::size_t> bases_;
+    growing_buffer<std::size_t> bases_;
     planes_view_t stitched_planes_ = {};
     CUdeviceptr vectors_window_ = 0, neighbors_window_ = 0;
     std::size_t vectors_window_bytes_ = 0, neighbors_window_bytes_ = 0;
     /** @brief One full norms replica per group device: every scored candidate reads a
      *      norm, and any shared placement collapses under concurrent readers. */
-    fu::dynamic_array<norms_t*> norms_replicas_;
+    growing_buffer<norms_t*> norms_replicas_;
     /** @brief One non-blocking stream per group device - the group's whole orchestration
      *      plane; kernel launches are asynchronous, so no host threading exists anywhere. */
-    fu::dynamic_array<cudaStream_t> streams_;
+    growing_buffer<cudaStream_t> streams_;
     bool merged_ = false;
 
     /** @brief Device scratch one merge phase owns for its lifetime. */
@@ -298,8 +301,8 @@ struct dense_vram_indexes {
         std::size_t const dimensions = shards.front()->dimensions();
         std::size_t const connectivity = shards.front()->connectivity();
         if (!dimensions) return status_t::uninitialized_k;
-        if (!shards_.try_resize(shards.size()) || !bases_.try_resize(shards.size() + 1) ||
-            !streams_.try_resize(shards.size()))
+        if (failed(shards_.resize(shards.size())) || failed(bases_.resize(shards.size() + 1)) ||
+            failed(streams_.resize(shards.size())))
             return status_t::bad_alloc_k;
         std::size_t rows = 0;
         for (std::size_t slot = 0; slot != shards.size(); ++slot) {
@@ -357,15 +360,15 @@ struct dense_vram_indexes {
         if (cuMemAddressReserve(&vectors_window_, vectors_window_bytes_, 0, 0, 0) != CUDA_SUCCESS ||
             cuMemAddressReserve(&neighbors_window_, neighbors_window_bytes_, 0, 0, 0) != CUDA_SUCCESS)
             return status_t::bad_alloc_k;
-        if (!norms_replicas_.try_resize(shards_count())) return status_t::bad_alloc_k;
+        if (status_t const sized = norms_replicas_.resize(shards_count()); failed(sized)) return sized;
         for (std::size_t slot = 0; slot != shards_count(); ++slot) {
             if (cudaSetDevice(shards_[slot]->device_specs().ordinal) != cudaSuccess) return status_t::device_error_k;
             if (cudaMalloc(&norms_replicas_[slot], size() * sizeof(norms_t)) != cudaSuccess)
                 return status_t::bad_alloc_k;
         }
 
-        fu::dynamic_array<CUmemAccessDesc> access;
-        if (!access.try_resize(shards_count())) return status_t::bad_alloc_k;
+        growing_buffer<CUmemAccessDesc> access;
+        if (status_t const sized = access.resize(shards_count()); failed(sized)) return sized;
         for (std::size_t slot = 0; slot != shards_count(); ++slot) {
             access[slot].location.type = CU_MEM_LOCATION_TYPE_DEVICE;
             access[slot].location.id = shards_[slot]->device_specs().ordinal;
@@ -398,7 +401,7 @@ struct dense_vram_indexes {
     }
 
     static status_t alias(CUdeviceptr window, void* plane_base, std::size_t committed_bytes, std::size_t slab_bytes,
-                          fu::dynamic_array<CUmemAccessDesc> const& access) noexcept {
+                          growing_buffer<CUmemAccessDesc> const& access) noexcept {
         for (std::size_t offset = 0; offset < committed_bytes; offset += slab_bytes) {
             CUmemGenericAllocationHandle handle;
             if (cuMemRetainAllocationHandle(&handle, reinterpret_cast<std::byte*>(plane_base) + offset) != CUDA_SUCCESS)
@@ -448,7 +451,7 @@ struct dense_vram_indexes {
         u32_t const sampling_bound = static_cast<u32_t>(
             config.order == merge_order_t::serial_k ? bases_[slot + 1] : bases_[shards_count()]);
         dense_cuda_with_pool_slots(pool_slots, [&](auto slots) {
-            dense_cuda_launch<dense_cuda_merge_kernel<kit_t, slots.value>>(view, blocks, stream, sampling_bound);
+            dense_cuda_launch<dense_cuda_merge_shards_kernel<kit_t, slots.value>>(view, blocks, stream, sampling_bound);
         });
         return status_t::success_k;
     }

@@ -77,7 +77,7 @@ struct cuda_device_specs_t {
 
     /** @brief Queries the runtime for @p ordinal's specification - fallible like every
      *      probe of external state, so the value is only meaningful on @c success_k. */
-    static expected<cuda_device_specs_t> try_query(int ordinal) noexcept {
+    [[nodiscard]] static expected<cuda_device_specs_t> query(int ordinal) noexcept {
         cudaDeviceProp properties = {};
         if (cudaGetDeviceProperties(&properties, ordinal) != cudaSuccess) return {{ordinal}, status_t::device_error_k};
         return {

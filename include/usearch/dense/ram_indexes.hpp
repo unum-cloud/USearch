@@ -15,10 +15,10 @@
 
 #include <span> // `std::span` - the caller's merged ranking & the adopted shard list
 
-#include <forkunion.h>         // `fu_topology_t`, `fu_local_memory_of` - the placement facts
-#include <forkunion/types.hpp> // `fu::dynamic_array` - the shard & routing tables
+#include <forkunion.h> // `fu_topology_t`, `fu_local_memory_of` - the placement facts
 
 #include "usearch/utilities/types.hpp"
+#include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the shard & routing tables
 #include "usearch/dense/ram_index.hpp"
 
 namespace unum {
@@ -55,13 +55,13 @@ struct dense_ram_indexes {
         /** @brief Starvation restarts - a graph-connectivity health signal. */
         std::size_t restarts = 0;
 
-        explicit operator bool() const noexcept { return status == status_t::success_k; }
+        explicit operator bool() const noexcept { return succeeded(status); }
     };
 
     /** @brief The adopted shards, never owned; one per engaged memory domain. */
-    fu::dynamic_array<index_t*> shards_;
+    growing_buffer<index_t*> shards_;
     /** @brief Routes every prong to the shard local to its compute domain. */
-    fu::dynamic_array<std::size_t> shard_of_compute_domain_;
+    growing_buffer<std::size_t> shard_of_compute_domain_;
 
     std::size_t shards_count() const noexcept { return shards_.size(); }
     index_t& shard(std::size_t slot) noexcept { return *shards_[slot]; }
@@ -82,7 +82,7 @@ struct dense_ram_indexes {
 
     /** @brief Adopts the caller's address-stable shards, replacing any previous adoption. */
     status_t adopt(std::span<index_t* const> shards) noexcept {
-        if (!shards_.try_resize(shards.size())) return status_t::bad_alloc_k;
+        if (status_t const sized = shards_.resize(shards.size()); failed(sized)) return sized;
         for (std::size_t slot = 0; slot != shards.size(); ++slot) shards_[slot] = shards[slot];
         return status_t::success_k;
     }
@@ -96,11 +96,14 @@ struct dense_ram_indexes {
      *      with one shard or fewer domains every compute domain routes to slot 0.
      */
     status_t route(fu_topology_t topology, std::span<fu_memory_domain_id_t const> memory_domains) noexcept {
-        std::size_t const compute_domains = fu_compute_domains_count(topology);
-        if (!shard_of_compute_domain_.try_resize(compute_domains)) return status_t::bad_alloc_k;
+        std::size_t compute_domains = 0;
+        if (fu_compute_domains_count(topology, &compute_domains) != fu_success_k) return status_t::uninitialized_k;
+        if (status_t const sized = shard_of_compute_domain_.resize(compute_domains); failed(sized)) return sized;
         if (memory_domains.size() < 2) return status_t::success_k;
         for (std::size_t compute_domain = 0; compute_domain != compute_domains; ++compute_domain) {
-            std::size_t const local_memory = fu_local_memory_of(topology, compute_domain);
+            std::size_t local_memory = 0;
+            if (fu_local_memory_of(topology, compute_domain, &local_memory) != fu_success_k)
+                return status_t::uninitialized_k;
             for (std::size_t slot = 0; slot != memory_domains.size(); ++slot)
                 if (static_cast<std::size_t>(memory_domains[slot]) == local_memory)
                     shard_of_compute_domain_[compute_domain] = slot;

@@ -47,7 +47,7 @@ USEARCH_DECLARE_CUDA_SHARD(nk_u1_k)
 template <typename dataset_scalar_type_>
 static int open_and_run(bench_options_t const& options, int device, cuda_arch_t arch_ceiling,
                         cuda_address_space_t plane_space) {
-    auto opened = persisted_dataset<dataset_scalar_type_>::try_open(
+    auto opened = persisted_dataset<dataset_scalar_type_>::open(
         options.vectors_path.c_str(), options.queries_path.empty() ? nullptr : options.queries_path.c_str(),
         options.neighbors_path.empty() ? nullptr : options.neighbors_path.c_str());
     if (opened.status != status_t::success_k) {

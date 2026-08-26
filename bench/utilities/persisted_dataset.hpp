@@ -109,29 +109,29 @@ class mmap_view_t {
         data_ = nullptr, size_ = 0, mapping_handle_ = nullptr, file_handle_ = nullptr;
     }
 
-    /** @brief Maps the whole of @p path read-only, or reports @c bad_alloc_k. */
-    static expected<mmap_view_t> try_map(char const* path) noexcept {
+    /** @brief Maps the whole of @p path read-only, or reports @c io_k. */
+    [[nodiscard]] static expected<mmap_view_t> map(char const* path) noexcept {
         mmap_view_t view;
         view.file_handle_ = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                                         FILE_ATTRIBUTE_NORMAL, nullptr);
         if (view.file_handle_ == INVALID_HANDLE_VALUE) {
             view.file_handle_ = nullptr;
-            return {std::move(view), status_t::bad_alloc_k};
+            return {std::move(view), status_t::io_k};
         }
         LARGE_INTEGER file_bytes;
         if (!GetFileSizeEx(view.file_handle_, &file_bytes) || file_bytes.QuadPart == 0) {
             view.reset();
-            return {std::move(view), status_t::bad_alloc_k};
+            return {std::move(view), status_t::io_k};
         }
         view.mapping_handle_ = CreateFileMappingA(view.file_handle_, nullptr, PAGE_READONLY, 0, 0, nullptr);
         if (!view.mapping_handle_) {
             view.reset();
-            return {std::move(view), status_t::bad_alloc_k};
+            return {std::move(view), status_t::io_k};
         }
         view.data_ = static_cast<char const*>(MapViewOfFile(view.mapping_handle_, FILE_MAP_READ, 0, 0, 0));
         if (!view.data_) {
             view.reset();
-            return {std::move(view), status_t::bad_alloc_k};
+            return {std::move(view), status_t::io_k};
         }
         view.size_ = static_cast<std::size_t>(file_bytes.QuadPart);
         return {std::move(view), status_t::success_k};
@@ -145,22 +145,22 @@ class mmap_view_t {
         data_ = nullptr, size_ = 0, file_descriptor_ = -1;
     }
 
-    /** @brief Maps the whole of @p path read-only, or reports @c bad_alloc_k. */
-    static expected<mmap_view_t> try_map(char const* path) noexcept {
+    /** @brief Maps the whole of @p path read-only, or reports @c io_k. */
+    [[nodiscard]] static expected<mmap_view_t> map(char const* path) noexcept {
         mmap_view_t view;
         view.file_descriptor_ = open(path, O_RDONLY);
-        if (view.file_descriptor_ < 0) return {std::move(view), status_t::bad_alloc_k};
+        if (view.file_descriptor_ < 0) return {std::move(view), status_t::io_k};
 
         struct stat file_stats;
         if (fstat(view.file_descriptor_, &file_stats) != 0 || file_stats.st_size == 0) {
             view.reset();
-            return {std::move(view), status_t::bad_alloc_k};
+            return {std::move(view), status_t::io_k};
         }
         std::size_t const file_bytes = static_cast<std::size_t>(file_stats.st_size);
         void* mapping = mmap(nullptr, file_bytes, PROT_READ, MAP_PRIVATE, view.file_descriptor_, 0);
         if (mapping == MAP_FAILED) {
             view.reset();
-            return {std::move(view), status_t::bad_alloc_k};
+            return {std::move(view), status_t::io_k};
         }
         view.data_ = static_cast<char const*>(mapping);
         view.size_ = file_bytes;
@@ -211,8 +211,8 @@ nk::matrix_view<scalar_type_> view_matrix_payload(mmap_view_t const& mapping, st
  *  null path downgrades the run - self-queries and skipped recall respectively - it never
  *  fails it.
  */
-template <typename scalar_type_, typename neighbor_id_type_ = std::uint32_t,
-          typename header_counter_type_ = std::uint32_t>
+template <typename scalar_type_, typename neighbor_id_type_ = u32_t,
+          typename header_counter_type_ = u32_t>
 class persisted_dataset {
     mmap_view_t vectors_mapping_, queries_mapping_, neighbors_mapping_;
     std::size_t vectors_rows_ = 0, queries_rows_ = 0, neighbors_rows_ = 0;
@@ -226,10 +226,10 @@ class persisted_dataset {
     /** @brief Opens the triple, tolerating null @p queries_path / @p neighbors_path, and
      *      failing on dimensionality mismatches between vectors & queries, or row-count
      *      mismatches between queries & ground truth. */
-    static expected<persisted_dataset> try_open(char const* vectors_path, char const* queries_path,
-                                                char const* neighbors_path) noexcept {
+    [[nodiscard]] static expected<persisted_dataset> open(char const* vectors_path, char const* queries_path,
+                                                          char const* neighbors_path) noexcept {
         persisted_dataset dataset;
-        auto vectors = mmap_view_t::try_map(vectors_path);
+        auto vectors = mmap_view_t::map(vectors_path);
         if (vectors.status != status_t::success_k) return {std::move(dataset), vectors.status};
         auto const vectors_extents = parse_matrix_header<scalar_type_, header_counter_type_>(vectors.value);
         if (vectors_extents.status != status_t::success_k) return {std::move(dataset), vectors_extents.status};
@@ -238,7 +238,7 @@ class persisted_dataset {
         dataset.vectors_mapping_ = std::move(vectors.value);
 
         if (queries_path) {
-            auto queries = mmap_view_t::try_map(queries_path);
+            auto queries = mmap_view_t::map(queries_path);
             if (queries.status != status_t::success_k) return {std::move(dataset), queries.status};
             auto const queries_extents = parse_matrix_header<scalar_type_, header_counter_type_>(queries.value);
             if (queries_extents.status != status_t::success_k) return {std::move(dataset), queries_extents.status};
@@ -248,7 +248,7 @@ class persisted_dataset {
             dataset.queries_mapping_ = std::move(queries.value);
         }
         if (neighbors_path) {
-            auto neighbors = mmap_view_t::try_map(neighbors_path);
+            auto neighbors = mmap_view_t::map(neighbors_path);
             if (neighbors.status != status_t::success_k) return {std::move(dataset), neighbors.status};
             auto const neighbors_extents = parse_matrix_header<neighbor_id_type_, header_counter_type_>(
                 neighbors.value);

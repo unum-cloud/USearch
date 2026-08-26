@@ -53,7 +53,7 @@ int run_with_stored_dtype(bench_launch<dataset_scalar_type_> const& launch) {
 /** @brief Opens the dataset with the file-native scalar and enters the typed cascade. */
 template <typename dataset_scalar_type_>
 int open_and_run(bench_options_t const& options, fu_pool_t pool, fu_topology_t topology) {
-    auto opened = persisted_dataset<dataset_scalar_type_>::try_open(
+    auto opened = persisted_dataset<dataset_scalar_type_>::open(
         options.vectors_path.c_str(), options.queries_path.empty() ? nullptr : options.queries_path.c_str(),
         options.neighbors_path.empty() ? nullptr : options.neighbors_path.c_str());
     if (opened.status != status_t::success_k) {

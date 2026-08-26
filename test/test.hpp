@@ -7,13 +7,16 @@
  *  @date July 17, 2026
  *
  *  Checks return their own failure counts and roll up to @c main without global mutable
- *  state. @c expect reports the location alone; @c expect_eq also prints both values, for
- *  the places where diagnosis needs data - ledger balances, sizes, recall ratios.
+ *  state. Four verbs cover every case: @c expect for a condition, @c expect_eq and
+ *  @c expect_near when diagnosis needs the values, and @c report for the verdict column.
+ *  A status becomes a condition through @c succeeded(), so no fifth verb is needed.
  */
 #pragma once
 
-#include <atomic>  // `std::atomic`
+#include <cmath>   // `std::fabs`, `std::fmax` - the relative tolerance of `expect_near`
 #include <cstdlib> // `std::malloc`, `std::free`, `std::abort`
+
+#include <atomic> // `std::atomic`
 
 #include <fmt/format.h>
 
@@ -24,18 +27,43 @@
 
 namespace unum::usearch {
 
-#define expect(cond) expect_((bool)(cond), __FILE__, __LINE__)
-inline std::size_t expect_(bool condition, char const* file, int line) {
-    if (!condition) fmt::print(stderr, "  check failed at {}:{}\n", file, line);
+#define expect(cond) expect_((bool)(cond), #cond, __FILE__, __LINE__)
+inline std::size_t expect_(bool condition, char const* expression, char const* file, int line) {
+    if (!condition) fmt::print(stderr, "  check failed at {}:{}: {}\n", file, line, expression);
     return condition ? 0u : 1u;
 }
 
-#define expect_eq(actual, wanted) expect_eq_((actual), (wanted), __FILE__, __LINE__)
+#define expect_eq(actual, wanted) expect_eq_((actual), (wanted), #actual " == " #wanted, __FILE__, __LINE__)
 template <typename actual_type_, typename wanted_type_>
-inline std::size_t expect_eq_(actual_type_ const& actual, wanted_type_ const& wanted, char const* file, int line) {
+inline std::size_t expect_eq_(actual_type_ const& actual, wanted_type_ const& wanted, char const* expression,
+                              char const* file, int line) {
     if (actual == wanted) return 0;
-    fmt::print(stderr, "  check failed at {}:{}: expected {}, got {}\n", file, line, wanted, actual);
+    fmt::print(stderr, "  check failed at {}:{}: {} - expected {}, got {}\n", file, line, expression, wanted, actual);
     return 1;
+}
+
+/** @brief The @c expect_eq twin for floats, at the 1e-3 relative tolerance a @c -ffast-math
+ *      build needs: it re-derives finalizes per inlining context, so bit-equality is wrong. */
+#define expect_near(actual, wanted) expect_near_((actual), (wanted), #actual " ~ " #wanted, __FILE__, __LINE__)
+inline std::size_t expect_near_(f64_t actual, f64_t wanted, char const* expression, char const* file, int line) {
+    f64_t const scale = std::fmax(std::fmax(std::fabs(actual), std::fabs(wanted)), 1.0);
+    f64_t const difference = std::fabs(actual - wanted);
+    if (difference <= 1e-3 * scale) return 0;
+    fmt::print(stderr, "  check failed at {}:{}: {} - expected {:.6g}, got {:.6g}, off by {:.4g}\n", file, line,
+               expression, wanted, actual, difference);
+    return 1;
+}
+
+/** @brief One verdict column, whichever way the case ended; answers the count it was given,
+ *      so a caller accumulates through it. The @c char-pointer overload names a skip. */
+inline std::size_t report(char const* name, std::size_t failures) {
+    fmt::println("{}  {:<20} : {} failures", failures ? "FAILED" : "passed", name, failures);
+    return failures;
+}
+
+inline std::size_t report(char const* name, char const* skip_reason) {
+    fmt::println("skipped  {:<20} : {}", name, skip_reason);
+    return 0;
 }
 
 /** @brief Shared tally of live bytes & allocation counts, mutated by every @c counting_allocator. */
@@ -97,7 +125,7 @@ constexpr float dimension_amplitude() noexcept {
  *      float wrappers via @c from_f32, byte-or-larger integers via the integral constructor. */
 template <typename scalar_>
 auto make_scalar(unsigned value) noexcept {
-    if constexpr (nk::dimensions_per_value<scalar_>() > 1) return static_cast<std::int8_t>(value);
+    if constexpr (nk::dimensions_per_value<scalar_>() > 1) return static_cast<i8_t>(value);
     else if constexpr (requires { scalar_::from_f32(0.0f); }) return scalar_::from_f32(static_cast<float>(value));
     else return scalar_(value);
 }

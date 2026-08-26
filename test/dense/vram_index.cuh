@@ -88,7 +88,7 @@ std::size_t test_cuda_configuration(char const* name) {
     failures_count += test_save_load_roundtrip<index_t, kernel_>(make_index);
     failures_count += test_concurrent_build<index_t, kernel_>(make_index);
     failures_count += test_concurrent_search<index_t, kernel_>(make_index);
-    return report_scenarios(name, failures_count);
+    return report(name, failures_count);
 }
 
 } // namespace usearch

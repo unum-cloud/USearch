@@ -248,14 +248,8 @@ static std::size_t test_predicated_search(make_index_type_ const& make_index) {
             status_t::success_k);
 
         // The oracle: distances of one query against the whole store, through the very 4-way
-        // kernels the traversal dispatches. Closeness follows the metric suite's convention -
-        // relative 1e-3 - because the fast-math build legally re-derives float finalizes per
-        // inlining context; integer-cored euclidean matches exactly anyway, and a wrong id or
-        // vector diverges by orders of magnitude, which is what this audit exists to catch.
-        auto close_enough = [](dense_distance_t actual, dense_distance_t expected) noexcept {
-            f32_t const scale = std::fmax(std::fmax(std::fabs(actual), std::fabs(expected)), 1.0f);
-            return std::fabs(actual - expected) <= 1e-3f * scale;
-        };
+        // kernels the traversal dispatches. A wrong id or vector diverges by orders of
+        // magnitude, which is what this audit exists to catch.
         auto oracle_distance = [&](std::size_t query_row, dense_node_id_t node_id) noexcept {
             auto query_view = vectors.view().row(query_row).as_vector();
             auto node_view = vectors.view().row(node_id).as_vector();
@@ -327,8 +321,8 @@ static std::size_t test_predicated_search(make_index_type_ const& make_index) {
                 bool self_found = false;
                 for (std::size_t match = 0; match != found.count; ++match) {
                     failures_count += expect(results[match].node_id % modulus == 0);
-                    failures_count += expect(close_enough(results[match].distance, //
-                                                          oracle_distance(sampled_row, results[match].node_id)));
+                    dense_distance_t const oracle = oracle_distance(sampled_row, results[match].node_id);
+                    failures_count += expect_near(results[match].distance, oracle);
                     if (match) failures_count += expect(results[match].distance >= results[match - 1].distance);
                     if (!self_matches) failures_count += expect(results[match].node_id != assigned_ids[sampled_row]);
                     self_found |= results[match].node_id == assigned_ids[sampled_row];
@@ -419,7 +413,7 @@ static std::size_t test_concurrent_build(make_index_type_ const& make_index) {
         std::size_t const nodes_count = lanes_count * lane_nodes_count_k;
 
         fu::flat_pool_t pool;
-        if (!pool.try_spawn(lanes_count)) return expect(false);
+        if (fu::failed(pool.spawn(lanes_count))) return expect(false);
 
         index_type_ index = make_index(ledger);
         failures_count += expect(
@@ -482,7 +476,7 @@ static std::size_t test_concurrent_search(make_index_type_ const& make_index) {
         std::size_t const expansion_bound = static_cast<std::size_t>(connectivity_16_k) * 2;
 
         fu::flat_pool_t pool;
-        if (!pool.try_spawn(writers_count + 1)) return expect(false);
+        if (fu::failed(pool.spawn(writers_count + 1))) return expect(false);
 
         index_type_ index = make_index(ledger);
         failures_count += expect(
@@ -540,12 +534,6 @@ static std::size_t test_concurrent_search(make_index_type_ const& make_index) {
         failures_count += expect_eq(index.size(), nodes_count);
     }
     failures_count += expect_eq(ledger.live_bytes.load(), 0);
-    return failures_count;
-}
-
-/** @brief Prints one verdict line for a cell's summed scenario @p failures_count. */
-inline std::size_t report_scenarios(char const* name, std::size_t failures_count) {
-    fmt::println("{}  {:<20} : {} failures", failures_count ? "FAILED" : "passed", name, failures_count);
     return failures_count;
 }
 

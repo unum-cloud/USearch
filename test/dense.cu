@@ -18,10 +18,7 @@
 int main() {
     int devices_count = 0;
     cudaError_t const probed = cudaGetDeviceCount(&devices_count);
-    if (probed != cudaSuccess || !devices_count) {
-        fmt::println("skipped  {:<20} : no CUDA device reachable", "cuda");
-        return 0;
-    }
+    if (probed != cudaSuccess || !devices_count) return static_cast<int>(report("cuda", "no CUDA device reachable"));
     fmt::println("CUDA devices: {}", devices_count);
     std::size_t failures_count = 0;
     failures_count += test_dense_index_i8_cuda();

@@ -18,6 +18,8 @@
 #include <type_traits> // `std::type_identity_t`
 #include <thread>      // `std::this_thread::yield`
 
+#include "usearch/types.h" // `usearch_status_t`, so the C++ mirror cannot drift from the ABI
+
 /** @brief Pre-announced sister-library namespaces, so the project-wide shortcuts below are
  *      legal before any of their headers is included. */
 namespace ashvardanian {
@@ -47,6 +49,10 @@ using u64_t = std::uint64_t;
 using u32_t = std::uint32_t;
 using u16_t = std::uint16_t;
 using u8_t = std::uint8_t;
+
+/** @brief "usearch3" read as a little-endian word - the one magic fronting every USearch
+ *      payload; the word right after it discriminates the layout. */
+inline constexpr u64_t usearch_magic_k = 0x3368637261657375ull;
 
 /** @brief The 128-bit key default - the SafeGraphs @c bin16 column, one UUID per node. */
 struct uuid_t {
@@ -87,33 +93,89 @@ struct dense_further_scored_node_t {
     }
 };
 
-enum class status_t {
-    success_k,
+/**
+ *  @brief Why a call failed, in the vocabulary the engine and every binding share.
+ *
+ *  Every enumerator takes its value from @c usearch_status_t in @c types.h, so the C++ mirror
+ *  and the ABI cannot drift - there is nothing to keep in step and nothing to assert, and the
+ *  crossing in @c src/ is a cast rather than a table.
+ *
+ *  The set describes the project's failures, not this tier's exits: several enumerators name
+ *  conditions only a binding or a higher layer can see, and are never returned from here.
+ */
+enum class status_t : int {
+    /** @brief The call completed and any paired value is meaningful. */
+    success_k = usearch_success_k,
     /** @brief The underlying allocator failed to provide memory; retrying a smaller batch may succeed. */
-    bad_alloc_k,
-    /** @brief The structure reached a hard design ceiling, like the 2^32 id space; retrying can't help. */
-    overflow_k,
-    /** @brief The operation requires a prior successful @c reserve() -like initialization call. */
-    uninitialized_k,
-    /** @brief The requested configuration contradicts an already-frozen one, like re-reserving
-     *      with a different geometry; pass matching parameters or start a fresh structure. */
-    config_mismatch_k,
+    bad_alloc_k = usearch_error_out_of_memory_k,
+    /** @brief Dimensionality, row counts, or output capacity disagree. */
+    shape_mismatch_k = usearch_error_shape_mismatch_k,
+    /** @brief A stride or packing no traversal can walk. */
+    unsupported_layout_k = usearch_error_unsupported_layout_k,
+    /** @brief A scalar, metric, or residency tag this build does not know. */
+    unknown_kind_k = usearch_error_unknown_kind_k,
+    /** @brief A mutating verb on a structure that opens its checkpoint in place. */
+    read_only_k = usearch_error_read_only_k,
+    /** @brief A file could not be opened, read, written, or parsed. */
+    io_k = usearch_error_io_k,
     /** @brief An accelerator runtime call failed - the device state should be treated as
      *      poisoned and the structure rebuilt. */
-    device_error_k,
+    device_error_k = usearch_error_device_k,
+    /** @brief The serialized payload is truncated or does not describe this structure. */
+    malformed_k = usearch_error_malformed_input_k,
+    /** @brief Neither success nor a named failure was reported - a defect, not a state. */
+    internal_k = usearch_error_internal_k,
+    /** @brief The structure reached a hard design ceiling, like the 2^32 id space; retrying can't help. */
+    overflow_k = usearch_error_overflow_k,
+    /** @brief The operation requires a prior successful @c reserve() -like initialization call. */
+    uninitialized_k = usearch_error_uninitialized_k,
+    /** @brief The requested configuration contradicts an already-frozen one, like re-reserving
+     *      with a different geometry; pass matching parameters or start a fresh structure. */
+    config_mismatch_k = usearch_error_config_mismatch_k,
     /** @brief A certified synchronization contract was violated by a concurrent operation;
      *      discard any produced output and retry in a quieter phase. */
-    contended_k,
-    /** @brief The serialized payload is truncated or does not describe this structure. */
-    malformed_k,
+    contended_k = usearch_error_contended_k,
 };
+
+/** @brief Whether @p status reports success. */
+constexpr bool succeeded(status_t status) noexcept { return status == status_t::success_k; }
+
+/** @brief Whether @p status reports failure. */
+constexpr bool failed(status_t status) noexcept { return status != status_t::success_k; }
+
+/**
+ *  @brief Static, English description of @p status. Never returns @c nullptr, never allocates.
+ *  @note The fall-through sits after the @c switch rather than in a @c default: label, so adding
+ *      an enumerator without a text here is a @c -Wswitch warning instead of silent prose.
+ */
+constexpr char const* status_to_string(status_t status) noexcept {
+    switch (status) {
+    case status_t::success_k: return "success";
+    case status_t::bad_alloc_k: return "an allocation failed";
+    case status_t::shape_mismatch_k: return "dimensions, row counts, or output capacity disagree";
+    case status_t::unsupported_layout_k: return "a stride or packing no traversal can walk";
+    case status_t::unknown_kind_k: return "a scalar, metric, or residency tag this build does not know";
+    case status_t::read_only_k: return "a mutating verb on a structure opened in place";
+    case status_t::io_k: return "a file could not be opened, read, written, or parsed";
+    case status_t::device_error_k: return "an accelerator runtime call failed";
+    case status_t::malformed_k: return "the payload is truncated or describes something else";
+    case status_t::internal_k: return "the library reported neither success nor a failure";
+    case status_t::overflow_k: return "a hard design ceiling was reached";
+    case status_t::uninitialized_k: return "the structure needs a successful reservation first";
+    case status_t::config_mismatch_k: return "the request contradicts the frozen configuration";
+    case status_t::contended_k: return "a synchronization contract was violated concurrently";
+    }
+    return "an unrecognized status";
+}
 
 /** @brief A result paired with the @c status_t explaining it; the value is only meaningful
  *      on @c success_k. */
 template <typename value_type_>
-struct expected {
+struct [[nodiscard]] expected {
     value_type_ value;
     status_t status;
+
+    explicit operator bool() const noexcept { return succeeded(status); }
 };
 
 /** @brief The concurrency environment a caller certifies for one operation. */
@@ -127,7 +189,7 @@ enum class synchronization_t : u32_t {
     exclusive_k,
 };
 
-enum connectivity_t : std::uint32_t {
+enum connectivity_t : u32_t {
     connectivity_unknown_k = 0,
     /**
      *  @brief The minimal recommended graph connectivity level, expanding to 16x 32-bit neighbor IDs,
@@ -231,7 +293,7 @@ constexpr dtype_t dtype_named(std::string_view name) noexcept {
  */
 struct dense_index_header_t {
     /** @brief The expected @c magic contents: "usearch3" read as a little-endian word. */
-    inline static constexpr u64_t magic_k = 0x3368637261657375ull;
+    inline static constexpr u64_t magic_k = usearch_magic_k;
     /** @brief The layout revision this implementation writes and understands. */
     inline static constexpr u32_t version_k = 1;
 
@@ -384,6 +446,11 @@ std::size_t merge_search_results(std::span<entry_type_ const> results, keys_of_i
     }
     return merged_count;
 }
+
+/** @brief Tag: an uncapped monitored wait - the watched word is the only wake source. */
+struct wait_uncapped_t {};
+/** @brief Tag: a capped monitored wait - re-checks on its own after a bounded pause. */
+struct wait_capped_t {};
 
 /**
  *  @brief Portable spin-wait baseline with the same call shape as ForkUnion's hardware wait

@@ -129,8 +129,6 @@
 namespace unum {
 namespace usearch {
 
-using f32_t = float;
-
 /**
  *  @brief Per-vector header carrying L2 norm and row-sum (used by DPBUSD compensation).
  *  Both fields share width @c dot_result_type_ - the lane width every downstream finalize

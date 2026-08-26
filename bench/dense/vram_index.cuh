@@ -14,10 +14,10 @@
  */
 #pragma once
 
+#include <cmath>     // `std::abs`
+
 #include <algorithm> // `std::max`, `std::min`, `std::copy_n`
 #include <chrono>    // `std::chrono::steady_clock`
-#include <cmath>     // `std::abs`
-#include <cstdint>   // `std::uint32_t`
 #include <memory>    // `std::unique_ptr`
 #include <string>    // `std::string`
 #include <vector>    // `std::vector`
@@ -56,7 +56,7 @@ struct cuda_bench_context {
     std::unique_ptr<index_t> index;
     std::unique_ptr<traversal_t> traversal;
     /** @brief Dense node id → global dataset row, the recall bookkeeping. */
-    std::vector<std::uint32_t> id_to_row;
+    std::vector<u32_t> id_to_row;
     /** @brief One accumulation lane - the launches are sequential on one stream. */
     telemetry_lane_t lane;
     bench_results_t results;
@@ -116,7 +116,7 @@ bool prepare(streamed_dataset_type_& streamed) {
     bench.traversal = std::make_unique<traversal_t>(typename traversal_t::allocator_t {nullptr, bench.device});
     std::size_t const search_count = bench.options.self_recall ? streamed.vectors.extent(0)
                                                                : streamed.queries.extent(0);
-    bench.results.hit_rows = nk::matrix<std::uint32_t>::try_zeros({search_count, bench.options.top_k});
+    bench.results.hit_rows = nk::matrix<u32_t>::try_zeros({search_count, bench.options.top_k});
     bench.results.hit_distances = nk::matrix<dense_distance_t>::try_zeros({search_count, bench.options.top_k});
     if (bench.results.hit_rows.empty() || bench.results.hit_distances.empty()) {
         fmt::println("Failed to allocate the per-query hit matrices");
@@ -157,7 +157,7 @@ typename streamed_dataset_type_::bench_t::vectors_view_t stage_batch(
  *      GPU's natural task shape - and keeps the id → row bookkeeping dense. */
 template <typename streamed_dataset_type_>
 bool run_insertion(streamed_dataset_type_& streamed) {
-    using clock_t = std::chrono::steady_clock;
+    using clock_t = stdc::steady_clock;
     using bench_t = typename streamed_dataset_type_::bench_t;
     using index_t = typename bench_t::index_t;
     using node_id_t = typename bench_t::node_id_t;
@@ -189,7 +189,7 @@ bool run_insertion(streamed_dataset_type_& streamed) {
             return false;
         }
         for (std::size_t row = 0; row != batch; ++row)
-            bench.id_to_row[batch_ids[row]] = static_cast<std::uint32_t>(first_row + row);
+            bench.id_to_row[batch_ids[row]] = static_cast<u32_t>(first_row + row);
         bench.lane.visited_members += inserted.visited_members;
         bench.lane.computed_distances += inserted.computed_distances;
         bench.lane.restarts += inserted.restarts;
@@ -197,7 +197,7 @@ bool run_insertion(streamed_dataset_type_& streamed) {
         progress.tick(offset);
     }
     progress.finish();
-    double const seconds = std::chrono::duration<double>(clock_t::now() - started).count();
+    double const seconds = stdc::duration<double>(clock_t::now() - started).count();
 
     fmt::print(header_style(), "\nInsertion\n");
     fmt::println("  shape: {} × {}d", inserted_rows, streamed.vectors.extent(1));
@@ -217,12 +217,12 @@ bool run_insertion(streamed_dataset_type_& streamed) {
  *      bench writes - vectors, neighbors, and the id → row map. */
 template <typename streamed_dataset_type_>
 bool save_index(streamed_dataset_type_& streamed) {
-    using clock_t = std::chrono::steady_clock;
+    using clock_t = stdc::steady_clock;
     auto& bench = streamed.bench;
     auto started = clock_t::now();
     std::size_t const total_bytes = save_checkpoint(bench.options, *bench.index, std::span {bench.id_to_row}, 0, 1);
     if (!total_bytes) return false;
-    double const seconds = std::chrono::duration<double>(clock_t::now() - started).count();
+    double const seconds = stdc::duration<double>(clock_t::now() - started).count();
     fmt::println("Saved the index: {:.2f} GB in {:.2f} s", double(total_bytes) / 1e9, seconds);
     return true;
 }
@@ -233,7 +233,7 @@ bool save_index(streamed_dataset_type_& streamed) {
  *      no per-query clock to read honestly from the host. */
 template <typename streamed_dataset_type_>
 bool run_search(streamed_dataset_type_& streamed) {
-    using clock_t = std::chrono::steady_clock;
+    using clock_t = stdc::steady_clock;
     using bench_t = typename streamed_dataset_type_::bench_t;
     using index_t = typename bench_t::index_t;
     using node_id_t = typename bench_t::node_id_t;
@@ -267,7 +267,7 @@ bool run_search(streamed_dataset_type_& streamed) {
         auto found = bench.index->search(staged, nk::matrix_span<node_id_t> {found_ids.data(), {batch, top_k}},
                                          nk::matrix_span<dense_distance_t> {found_distances.data(), {batch, top_k}},
                                          *bench.traversal, config);
-        double const batch_seconds = std::chrono::duration<double>(clock_t::now() - started).count();
+        double const batch_seconds = stdc::duration<double>(clock_t::now() - started).count();
         if (!found) {
             fmt::println("Search failed at query {}: status {}", offset, int(found.status));
             return false;
@@ -278,7 +278,7 @@ bool run_search(streamed_dataset_type_& streamed) {
         bench.lane.restarts += found.restarts;
 
         for (std::size_t row = 0; row != batch; ++row) {
-            std::uint32_t* const merged_rows = bench.results.hit_rows.row(offset + row).data();
+            u32_t* const merged_rows = bench.results.hit_rows.row(offset + row).data();
             auto* const merged_distances = bench.results.hit_distances.row(offset + row).data();
             auto const found_row_ids = found_ids.view().row(row);
             auto const found_row_distances = found_distances.view().row(row);
@@ -290,7 +290,7 @@ bool run_search(streamed_dataset_type_& streamed) {
                 merged_distances[merged_count] = found_row_distances[rank];
                 ++merged_count;
             }
-            bench.results.hit_counts[offset + row] = static_cast<std::uint32_t>(merged_count);
+            bench.results.hit_counts[offset + row] = static_cast<u32_t>(merged_count);
         }
         offset += batch;
         progress.tick(offset);

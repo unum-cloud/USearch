@@ -34,6 +34,8 @@
 
 namespace unum::usearch {
 
+namespace stdc = std::chrono;
+
 inline bool stdout_is_terminal() noexcept {
 #if defined(_WIN32)
     return false;
@@ -86,19 +88,19 @@ class progress_bar_t {
 
     char const* label_;
     std::size_t total_;
-    std::chrono::steady_clock::time_point started_ {std::chrono::steady_clock::now()};
-    std::chrono::steady_clock::time_point rendered_ {};
+    stdc::steady_clock::time_point started_ {stdc::steady_clock::now()};
+    stdc::steady_clock::time_point rendered_ {};
     std::size_t reported_deciles_ = 0;
 
     double rate_per_second_(std::size_t completed) const noexcept {
-        double const seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started_).count();
+        double const seconds = stdc::duration<double>(stdc::steady_clock::now() - started_).count();
         return seconds > 0 ? static_cast<double>(completed) / seconds : 0;
     }
 
     void render_bar_(std::size_t completed) noexcept {
-        auto const now = std::chrono::steady_clock::now();
+        auto const now = stdc::steady_clock::now();
         bool const final = completed == total_;
-        if (!final && now - rendered_ < std::chrono::milliseconds(100)) return; // The work outruns the terminal.
+        if (!final && now - rendered_ < stdc::milliseconds(100)) return; // The work outruns the terminal.
         rendered_ = now;
         std::size_t const filled_cells = total_ ? bar_cells_k * completed / total_ : bar_cells_k;
         std::string cells;

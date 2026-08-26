@@ -87,14 +87,14 @@ check_host_threads() {
 # STL dynamic containers in the public headers hide allocations, grow behind the caller's back,
 # and sidestep the allocator-threading discipline every index design follows. The house
 # replacements: `fu::dynamic_array` for fixed-once object arrays, `nk::tensor` for numeric &
-# POD storage, and the `traversal_queue.hpp` structures for queues & sets. Non-owning views
-# like `std::span` & `std::string_view` stay welcome.
+# POD storage, `growing_buffer` for owned sequences, and the `ram_buffers.hpp` / `ram_tables.hpp`
+# structures for queues & sets. Non-owning views like `std::span` & `std::string_view` stay welcome.
 check_stl_dynamic_containers() {
     local owners
     owners=$(printf '%s\n' "$added" |
         grep -E '\bstd::(vector|list|forward_list|map|multimap|set|multiset|unordered_[a-z_]+|string|basic_string|priority_queue|stack|queue)\b' || true)
     [ -z "$owners" ] || fail "$owners" \
-        "$file uses an STL dynamic container - use fu::dynamic_array, nk::tensor, or the traversal_queue structures:"
+        "$file uses an STL dynamic container - use growing_buffer, nk::tensor, or the ram_tables structures:"
 }
 
 # Subscripting a call's result chains two accessors where the container offers one:
@@ -227,13 +227,13 @@ check_bare_member_docs() {
 }
 
 # A hand-rolled ceiling division - `(value + divisor - 1) / divisor` - re-derives what the shared
-# vocabulary already names. Use `divide_round_up` from usearch/types.hpp.
+# vocabulary already names. Use `divide_round_up` from usearch/utilities/types.hpp.
 check_hand_ceils() {
     local ceils
     ceils=$(printf '%s\n' "$added" | grep -vE 'divide_round_up|round_up_to_multiple' |
         grep -E '\([^()]+\+[^()]+-[[:space:]]*1[[:space:]]*\)[[:space:]]*/' || true)
     [ -z "$ceils" ] || fail "$ceils" \
-        "$file hand-rolls a ceiling division - use divide_round_up from usearch/types.hpp:"
+        "$file hand-rolls a ceiling division - use divide_round_up from usearch/utilities/types.hpp:"
 }
 
 # A `#pragma region` label must be letters, digits & spaces only. clang-format tokenises the label
@@ -267,7 +267,7 @@ check_stl_streams() {
 check_range_reconstruction() {
     # `types.hpp` hosts `to_span` - the very conversion this check points everyone to - so its
     # own definition is the one legitimate `.data()/.size()` reconstruction site.
-    [ "$file" = "include/usearch/types.hpp" ] && return 0
+    [ "$file" = "include/usearch/utilities/types.hpp" ] && return 0
     local rebuilt
     rebuilt=$(printf '%s\n' "$added" |
         grep -E '\{ *([A-Za-z_][A-Za-z0-9_.]*)\.data\(\), *\1\.size\(\) *\}' || true)
@@ -308,7 +308,8 @@ check_iterator_laundering() {
 # The dependency-free core: include/usearch/utilities/ and include/usearch/basic/ ship as a
 # standalone header-only library - standard-library & OS headers only, no submodules. Angle
 # includes of sibling & third-party libraries are banned outright, and quoted includes may only
-# name headers inside the same two directories.
+# name headers inside the same two directories, plus "usearch/types.h" - the project's own C
+# vocabulary, which types.hpp mirrors so the two enums cannot drift.
 check_dependency_free_core() {
     local foreign
     foreign=$(printf '%s\n' "$added" | grep -E \
@@ -318,7 +319,7 @@ check_dependency_free_core() {
         "            sibling or third-party library - standard & OS headers only:"
     local quoted
     quoted=$(printf '%s\n' "$added" | grep -E '#[[:space:]]*include[[:space:]]*"' |
-        grep -vE '"usearch/(utilities|basic)/' || true)
+        grep -vE '"usearch/((utilities|basic)/|types\.h")' || true)
     [ -z "$quoted" ] || fail "$quoted" \
         "$file lives in the dependency-free core (utilities/ + basic/) but quotes a header" \
         "            outside those two directories:"
@@ -422,7 +423,7 @@ while IFS= read -r -d '' file; do
         check_stl_dynamic_containers
         check_boolean_parameters
         ;;&
-    cpp/*.cpp | cpp/*.hpp | include/*.hpp)
+    src/*.cpp | src/*.cuh | test/*.cpp | test/*.hpp | bench/*.cpp | bench/*.hpp | include/*.hpp)
         check_printf
         check_memcpy
         check_stl_streams

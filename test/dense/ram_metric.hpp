@@ -114,23 +114,6 @@ static f32_t reference_distance(nk::vector_view<scalar_> first_vector,
     }
 }
 
-static bool close_enough(f32_t actual, f32_t expected) noexcept {
-    f32_t const absolute_difference = std::fabs(actual - expected);
-    f32_t const scale = std::fmax(std::fmax(std::fabs(actual), std::fabs(expected)), 1.0f);
-    return absolute_difference <= 1e-3f * scale;
-}
-
-/**
- *  @brief Compares one (actual, expected) pair - prints a structured failure line and
- *  returns 1 on mismatch, 0 on match. Caller accumulates the count.
- */
-static int check_close(f32_t actual, f32_t expected, std::string_view label) noexcept {
-    if (close_enough(actual, expected)) return 0;
-    fmt::print(stderr, "FAIL {:<22}  actual={:>14.6g}  expected={:>14.6g}  diff={:>12.4g}\n", label, actual, expected,
-               std::fabs(actual - expected));
-    return 1;
-}
-
 /**
  *  @brief No-op overload picked when the (kernel, scalar, caps) tuple isn't wired up -
  *  lets the caller enumerate the full capability list without if-constexpr gates inline.
@@ -183,28 +166,29 @@ static int check_quads(std::size_t dim) noexcept {
     f32_t const third_reference = reference_distance<kernel_>(query_view, third_candidate_view);
     f32_t const fourth_reference = reference_distance<kernel_>(query_view, fourth_candidate_view);
 
-    int failures = 0;
-    failures += check_close(
-        distance<kernel_, caps_>(query_view, query_norms, first_candidate_view, first_candidate_norms), first_reference,
-        "1-to-1 lane 0");
-    failures += check_close(
-        distance<kernel_, caps_>(query_view, query_norms, second_candidate_view, second_candidate_norms),
-        second_reference, "1-to-1 lane 1");
-    failures += check_close(
-        distance<kernel_, caps_>(query_view, query_norms, third_candidate_view, third_candidate_norms), third_reference,
-        "1-to-1 lane 2");
-    failures += check_close(
-        distance<kernel_, caps_>(query_view, query_norms, fourth_candidate_view, fourth_candidate_norms),
-        fourth_reference, "1-to-1 lane 3");
+    f32_t const first_measured = distance<kernel_, caps_>(query_view, query_norms, first_candidate_view, //
+                                                          first_candidate_norms);
+    f32_t const second_measured = distance<kernel_, caps_>(query_view, query_norms, second_candidate_view, //
+                                                           second_candidate_norms);
+    f32_t const third_measured = distance<kernel_, caps_>(query_view, query_norms, third_candidate_view, //
+                                                          third_candidate_norms);
+    f32_t const fourth_measured = distance<kernel_, caps_>(query_view, query_norms, fourth_candidate_view, //
+                                                           fourth_candidate_norms);
+
+    std::size_t failures = 0;
+    failures += expect_near(first_measured, first_reference);
+    failures += expect_near(second_measured, second_reference);
+    failures += expect_near(third_measured, third_reference);
+    failures += expect_near(fourth_measured, fourth_reference);
 
     auto distances_array = distances<kernel_, caps_>(
         query_view, query_norms,
         {first_candidate_view, second_candidate_view, third_candidate_view, fourth_candidate_view},
         {first_candidate_norms, second_candidate_norms, third_candidate_norms, fourth_candidate_norms});
-    failures += check_close(distances_array[0], first_reference, "1-to-4 lane 0");
-    failures += check_close(distances_array[1], second_reference, "1-to-4 lane 1");
-    failures += check_close(distances_array[2], third_reference, "1-to-4 lane 2");
-    failures += check_close(distances_array[3], fourth_reference, "1-to-4 lane 3");
+    failures += expect_near(distances_array[0], first_reference);
+    failures += expect_near(distances_array[1], second_reference);
+    failures += expect_near(distances_array[2], third_reference);
+    failures += expect_near(distances_array[3], fourth_reference);
     return failures;
 }
 
@@ -256,12 +240,13 @@ static int check_tiles() noexcept {
     auto tiled = nk::matrix<f32_t>::try_zeros({rows_k, rows_k});
     tiles_kit_t::finalize_tile(accumulator, norms, norms, tiled.data(), rows_k);
 
-    int failures = 0;
+    std::size_t failures = 0;
     for (std::size_t row = 0; row != rows_k; ++row)
-        for (std::size_t column = 0; column != rows_k; ++column)
-            failures += check_close(tiled.row(row)[column],
-                                    distance<kernel_, caps_>(views[row], norms[row], views[column], norms[column]),
-                                    "tiles 16×16 cell");
+        for (std::size_t column = 0; column != rows_k; ++column) {
+            f32_t const cell_reference =
+                distance<kernel_, caps_>(views[row], norms[row], views[column], norms[column]);
+            failures += expect_near(tiled(row, column), cell_reference);
+        }
     return failures;
 }
 

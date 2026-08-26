@@ -16,10 +16,10 @@
  */
 #pragma once
 
-#include <algorithm>   // `std::nth_element`, `std::min`
 #include <cmath>       // `std::abs` for the rescale amplitude
+
+#include <algorithm>   // `std::nth_element`, `std::min`
 #include <atomic>      // `std::atomic`
-#include <cstdint>     // `std::uint32_t`
 #include <span>        // `std::span`
 #include <string>      // `std::string`
 #include <type_traits> // `std::integral_constant` for the dispatch chains
@@ -310,21 +310,21 @@ inline connectivity_t connectivity_of(std::size_t degree) noexcept {
  */
 template <typename index_type_>
 static bool load_checkpoint(bench_options_t const& options, index_type_& index, std::size_t dimensions,
-                            std::span<std::uint32_t> id_to_row, std::size_t slot, std::size_t slot_count) {
+                            std::span<u32_t> id_to_row, std::size_t slot, std::size_t slot_count) {
     using scalar_t = typename index_type_::scalar_t;
     checkpoint_paths_t const paths = checkpoint_paths_of<index_type_>(options, options.load_name, slot, slot_count);
-    auto mapped_vectors = mmap_view_t::try_map(paths.vectors.c_str());
-    auto mapped_neighbors = mmap_view_t::try_map(paths.neighbors.c_str());
-    auto mapped_rows = mmap_view_t::try_map(paths.rows.c_str());
+    auto mapped_vectors = mmap_view_t::map(paths.vectors.c_str());
+    auto mapped_neighbors = mmap_view_t::map(paths.neighbors.c_str());
+    auto mapped_rows = mmap_view_t::map(paths.rows.c_str());
     if (mapped_vectors.status != status_t::success_k || mapped_neighbors.status != status_t::success_k ||
         mapped_rows.status != status_t::success_k) {
         fmt::println("Failed to map the {} checkpoint for slot {}", options.load_name, slot);
         return false;
     }
 
-    auto const vectors_extents = parse_matrix_header<scalar_t, std::uint32_t>(mapped_vectors.value);
-    auto const neighbors_extents = parse_matrix_header<std::uint32_t, std::uint32_t>(mapped_neighbors.value);
-    auto const map_extents = parse_matrix_header<std::uint32_t, std::uint32_t>(mapped_rows.value);
+    auto const vectors_extents = parse_matrix_header<scalar_t, u32_t>(mapped_vectors.value);
+    auto const neighbors_extents = parse_matrix_header<u32_t, u32_t>(mapped_neighbors.value);
+    auto const map_extents = parse_matrix_header<u32_t, u32_t>(mapped_rows.value);
     bool const parsed = vectors_extents.status == status_t::success_k &&
                         neighbors_extents.status == status_t::success_k && map_extents.status == status_t::success_k;
     std::size_t const loaded_nodes = vectors_extents.value.rows;
@@ -336,16 +336,16 @@ static bool load_checkpoint(bench_options_t const& options, index_type_& index, 
         return false;
     }
 
-    nk::matrix_view<scalar_t> const vectors_view = view_matrix_payload<scalar_t, std::uint32_t>(
+    nk::matrix_view<scalar_t> const vectors_view = view_matrix_payload<scalar_t, u32_t>(
         mapped_vectors.value, loaded_nodes, dimensions);
-    nk::matrix_view<std::uint32_t> const neighbors_view = view_matrix_payload<std::uint32_t, std::uint32_t>(
+    nk::matrix_view<u32_t> const neighbors_view = view_matrix_payload<u32_t, u32_t>(
         mapped_neighbors.value, loaded_nodes, options.connectivity);
     status_t const loaded = index.load(vectors_view, neighbors_view, synchronization_t::exclusive_k);
     if (loaded != status_t::success_k) {
         fmt::println("Failed to restore {}: status {}", paths.vectors, int(loaded));
         return false;
     }
-    nk::matrix_view<std::uint32_t> const rows_view = view_matrix_payload<std::uint32_t, std::uint32_t>(
+    nk::matrix_view<u32_t> const rows_view = view_matrix_payload<u32_t, u32_t>(
         mapped_rows.value, loaded_nodes, 1);
     std::copy_n(rows_view.data(), loaded_nodes, id_to_row.data());
     return true;
@@ -367,7 +367,7 @@ static bool load_checkpoint(bench_options_t const& options, index_type_& index, 
  */
 template <typename index_type_>
 static std::size_t save_checkpoint(bench_options_t const& options, index_type_& index,
-                                   std::span<std::uint32_t> id_to_row, std::size_t slot, std::size_t slot_count) {
+                                   std::span<u32_t> id_to_row, std::size_t slot, std::size_t slot_count) {
     using scalar_t = typename index_type_::scalar_t;
     using node_id_t = typename index_type_::node_id_t;
     typename index_type_::saved_shape_t const shape = index.saved_shape();
@@ -384,16 +384,16 @@ static std::size_t save_checkpoint(bench_options_t const& options, index_type_& 
     }
 
     checkpoint_paths_t const paths = checkpoint_paths_of<index_type_>(options, options.save_name, slot, slot_count);
-    nk::matrix_view<std::uint32_t> const rows_map_view {id_to_row.data(), {shape.nodes, 1}};
+    nk::matrix_view<u32_t> const rows_map_view {id_to_row.data(), {shape.nodes, 1}};
     bool const written = matrix_save<scalar_t>(paths.vectors.c_str(), vectors.view()) == status_t::success_k &&
                          matrix_save<node_id_t>(paths.neighbors.c_str(), neighbors.view()) == status_t::success_k &&
-                         matrix_save<std::uint32_t>(paths.rows.c_str(), rows_map_view) == status_t::success_k;
+                         matrix_save<u32_t>(paths.rows.c_str(), rows_map_view) == status_t::success_k;
     if (!written) {
         fmt::println("Failed to write the {} checkpoint for slot {}", options.save_name, slot);
         return 0;
     }
     return shape.nodes * (static_cast<std::size_t>(vectors.view().stride_bytes(0)) + //
-                          shape.connectivity * sizeof(node_id_t) + sizeof(std::uint32_t));
+                          shape.connectivity * sizeof(node_id_t) + sizeof(u32_t));
 }
 
 #pragma endregion
@@ -432,16 +432,16 @@ inline telemetry_lane_t summed_lanes(std::vector<telemetry_lane_t> const& lanes)
  *      Backend contexts embed one and add their own machinery around it. */
 struct bench_results_t {
     /** @brief The @b [indexes,rows] recall bookkeeping: dense node id → global dataset row. */
-    std::vector<std::vector<std::uint32_t>> id_to_row;
+    std::vector<std::vector<u32_t>> id_to_row;
     /** @brief The @b [queries,depth] expected neighbors; empty when absent or truncated
      *      by `--max-vectors`. */
-    nk::matrix_view<std::uint32_t> ground_truth;
+    nk::matrix_view<u32_t> ground_truth;
     /** @brief The @b [queries,top_k] merged global rows of every query's gathered hits. */
-    nk::matrix<std::uint32_t> hit_rows;
+    nk::matrix<u32_t> hit_rows;
     /** @brief The @b [queries,top_k] distances matching @c hit_rows entry-for-entry. */
     nk::matrix<dense_distance_t> hit_distances;
     /** @brief Merged hits per query, sizing each row for the post-clock judgment. */
-    std::vector<std::uint32_t> hit_counts;
+    std::vector<u32_t> hit_counts;
     /** @brief Per-query end-to-end lookup latencies, in microseconds. */
     std::vector<float> latencies_us;
     /** @brief Tasks that returned an error in either phase; any non-zero fails the run. */
@@ -482,10 +482,10 @@ inline void judge_hits(bench_options_t const& options, bench_results_t& results,
         std::size_t found_at_1 = 0, found_at_k = 0;
         for (std::size_t query = 0; query != query_count; ++query) {
             auto const returned = to_span(results.hit_rows.row(query).as_vector()).first(results.hit_counts[query]);
-            std::uint32_t const own_row = static_cast<std::uint32_t>(query);
+            u32_t const own_row = static_cast<u32_t>(query);
             found_at_1 += !returned.empty() && returned.front() == own_row;
             bool within = false;
-            for (std::uint32_t row : returned) within |= row == own_row;
+            for (u32_t row : returned) within |= row == own_row;
             found_at_k += within;
         }
         double const queries = double(query_count);
@@ -498,7 +498,7 @@ inline void judge_hits(bench_options_t const& options, bench_results_t& results,
     }
     else if (!results.ground_truth.empty()) {
         std::size_t const judged_depth = std::min(options.top_k, results.ground_truth.extent(1));
-        std::vector<std::uint32_t> scratch(judged_depth);
+        std::vector<u32_t> scratch(judged_depth);
         std::vector<double> discounts(options.top_k), ideal(options.top_k);
         fill_discounts(discounts, ideal);
 
@@ -508,8 +508,8 @@ inline void judge_hits(bench_options_t const& options, bench_results_t& results,
             auto expected = results.ground_truth.row(query).as_vector();
             auto const returned = to_span(results.hit_rows.row(query).as_vector()).first(results.hit_counts[query]);
             found_at_1 += !returned.empty() && returned.front() == expected[0];
-            auto verdict = judge_ranking(std::span<std::uint32_t const> {returned},
-                                         to_span(expected).first(judged_depth), std::span<std::uint32_t> {scratch},
+            auto verdict = judge_ranking(std::span<u32_t const> {returned},
+                                         to_span(expected).first(judged_depth), std::span<u32_t> {scratch},
                                          std::span<double const> {discounts});
             found_at_k += verdict.found_nearest;
             shared += verdict.overlap;

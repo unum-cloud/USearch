@@ -50,10 +50,10 @@
  */
 #pragma once
 
+#include <cmath>     // `std::abs`
+
 #include <algorithm> // `std::max`, `std::min`, `std::copy_n`
 #include <chrono>    // `std::chrono::steady_clock`
-#include <cmath>     // `std::abs`
-#include <cstdint>   // `std::uint32_t`
 #include <memory>    // `std::unique_ptr`
 #include <string>    // `std::string`
 #include <tuple>     // `std::tuple`, `std::tuple_element_t` for the schedule waiter list
@@ -278,7 +278,7 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
     // Self-recall probes every ingested row, so the per-query buffers follow the larger count.
     std::size_t const search_count = bench.options.self_recall ? streamed.vectors.extent(0)
                                                                : streamed.queries.extent(0);
-    bench.results.hit_rows = nk::matrix<std::uint32_t>::try_zeros({search_count, bench.options.top_k});
+    bench.results.hit_rows = nk::matrix<u32_t>::try_zeros({search_count, bench.options.top_k});
     bench.results.hit_distances = nk::matrix<dense_distance_t>::try_zeros({search_count, bench.options.top_k});
     if (bench.results.hit_rows.empty() || bench.results.hit_distances.empty()) {
         fmt::println("Failed to allocate the per-query hit matrices");
@@ -327,12 +327,12 @@ void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_
     lane.computed_distances_in_refines += inserted.computed_distances_in_refines;
     lane.computed_distances_in_reverse_refines += inserted.computed_distances_in_reverse_refines;
     lane.restarts += inserted.restarts;
-    bench.results.id_to_row[slot][local_id] = static_cast<std::uint32_t>(row);
+    bench.results.id_to_row[slot][local_id] = static_cast<u32_t>(row);
 }
 
 template <typename streamed_dataset_type_>
 bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
-    using clock_t = std::chrono::steady_clock;
+    using clock_t = stdc::steady_clock;
     using scalar_t = typename streamed_dataset_type_::scalar_t;
     auto& bench = streamed.bench;
     std::size_t const rows = streamed.vectors.extent(0);
@@ -345,7 +345,7 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
 
     auto started = clock_t::now();
     fu_pool_for_n_dynamic(pool, inserted_rows, &insertion_callback<streamed_dataset_type_>, &streamed);
-    double const seconds = std::chrono::duration<double>(clock_t::now() - started).count();
+    double const seconds = stdc::duration<double>(clock_t::now() - started).count();
 
     if (std::size_t failures = bench.results.failed_tasks.load(); failures) {
         fmt::println("Insertion failed on {} vectors", failures);
@@ -394,7 +394,7 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
  *      the topping: a 100M experiment then costs an mmap, not a half-hour rebuild. */
 template <typename streamed_dataset_type_>
 bool save_indexes(streamed_dataset_type_& streamed) {
-    using clock_t = std::chrono::steady_clock;
+    using clock_t = stdc::steady_clock;
     auto& bench = streamed.bench;
     auto started = clock_t::now();
     std::size_t const slots = bench.indexes.shards_count();
@@ -405,7 +405,7 @@ bool save_indexes(streamed_dataset_type_& streamed) {
         if (!saved_bytes) return false;
         total_bytes += saved_bytes;
     }
-    double const seconds = std::chrono::duration<double>(clock_t::now() - started).count();
+    double const seconds = stdc::duration<double>(clock_t::now() - started).count();
     fmt::println("Saved {} indexes: {:.2f} GB in {:.2f} s", slots, double(total_bytes) / 1e9, seconds);
     return true;
 }
@@ -420,7 +420,7 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
     using index_t = typename bench_t::index_t;
     using small_size_t = typename bench_t::small_size_t;
     using vector_view_t = typename bench_t::vector_view_t;
-    using clock_t = std::chrono::steady_clock;
+    using clock_t = stdc::steady_clock;
     streamed_dataset_type_& streamed = *static_cast<streamed_dataset_type_*>(punned);
     auto& bench = streamed.bench;
     telemetry_lane_t& lane = bench.lanes[thread];
@@ -437,7 +437,7 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
     if constexpr (streamed_dataset_type_::zero_copy_k) query_vector = source_row.as_vector();
     else query_vector = streamed.stage(source_row.as_vector(), thread, query);
 
-    std::uint32_t* const merged_rows = bench.results.hit_rows.row(query).data();
+    u32_t* const merged_rows = bench.results.hit_rows.row(query).data();
     auto* const merged_distances = bench.results.hit_distances.row(query).data();
 
     auto started = clock_t::now();
@@ -451,20 +451,20 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
     lane.visited_members += found.visited_members;
     lane.computed_distances += found.computed_distances;
     lane.restarts += found.restarts;
-    bench.results.latencies_us[query] = std::chrono::duration<float, std::micro>(clock_t::now() - started).count();
-    bench.results.hit_counts[query] = static_cast<std::uint32_t>(found.count);
+    bench.results.latencies_us[query] = stdc::duration<float, std::micro>(clock_t::now() - started).count();
+    bench.results.hit_counts[query] = static_cast<u32_t>(found.count);
 }
 
 template <typename streamed_dataset_type_>
 bool run_search(streamed_dataset_type_& streamed, fu_pool_t pool) {
-    using clock_t = std::chrono::steady_clock;
+    using clock_t = stdc::steady_clock;
     auto& bench = streamed.bench;
     std::size_t const query_count = bench.options.self_recall ? streamed.vectors.extent(0) : streamed.queries.extent(0);
     for (telemetry_lane_t& lane : bench.lanes) lane = telemetry_lane_t {};
 
     auto started = clock_t::now();
     fu_pool_for_n(pool, query_count, &search_callback<streamed_dataset_type_>, &streamed);
-    double const seconds = std::chrono::duration<double>(clock_t::now() - started).count();
+    double const seconds = stdc::duration<double>(clock_t::now() - started).count();
 
     if (std::size_t failures = bench.results.failed_tasks.load(); failures) {
         fmt::println("Search failed on {} queries", failures);

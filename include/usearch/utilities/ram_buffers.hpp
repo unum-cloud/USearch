@@ -25,6 +25,8 @@
 #include <type_traits> // `std::is_trivially_destructible`, `std::is_integral`
 #include <utility>     // `std::swap`, `std::move`, `std::forward`
 
+#include "usearch/utilities/types.hpp" // `status_t`, `succeeded`, `failed`
+
 namespace unum {
 namespace usearch {
 
@@ -215,16 +217,16 @@ class max_heap {
 
     /**
      *  @brief Ensures the heap has enough capacity for @p new_capacity elements.
-     *  @return @c true if the capacity is available, @c false when the allocation failed.
+     *  @return @c success_k, @c overflow_k when the rounded capacity wraps, @c bad_alloc_k otherwise.
      */
-    bool reserve(std::size_t new_capacity) noexcept {
-        if (new_capacity <= capacity_) return true;
+    [[nodiscard]] status_t reserve(std::size_t new_capacity) noexcept {
+        if (new_capacity <= capacity_) return status_t::success_k;
 
         new_capacity = ceil2(new_capacity);
-        if (new_capacity == 0) return false;
+        if (new_capacity == 0) return status_t::overflow_k;
         new_capacity = (std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u));
         auto new_elements = allocator_.allocate(new_capacity);
-        if (!new_elements) return false;
+        if (!new_elements) return status_t::bad_alloc_k;
 
         if (elements_) {
             std::memcpy(new_elements, elements_, size_ * sizeof(element_t));
@@ -232,18 +234,18 @@ class max_heap {
         }
         elements_ = new_elements;
         capacity_ = new_capacity;
-        return new_elements;
+        return status_t::success_k;
     }
 
     /**
      *  @brief Inserts an element into the heap, growing the storage when needed.
-     *  @return @c true if the element was inserted, @c false when the allocation failed.
+     *  @return @c success_k, or whatever @ref reserve refused with.
      */
-    bool insert(element_t&& element) noexcept {
-        if (!reserve(size_ + 1)) return false;
+    [[nodiscard]] status_t insert(element_t&& element) noexcept {
+        if (status_t const grown = reserve(size_ + 1); failed(grown)) return grown;
 
         insert_reserved(std::move(element));
-        return true;
+        return status_t::success_k;
     }
 
     /**
@@ -257,7 +259,7 @@ class max_heap {
 
     /**
      *  @brief Inserts @p count elements into the heap.
-     *  @return @c true if the elements were successfully inserted, @c false if allocation failed.
+     *  @return @c success_k, or whatever @ref reserve refused with.
      *
      *  Appends the batch at the tail, then heapifies. Picks between two strategies based on
      *  the ratio of new elements to existing size:
@@ -271,9 +273,9 @@ class max_heap {
      *  path (batch of ~32, heap of ~128) incremental @c shift_up wins; for bulk init
      *  from empty, Floyd wins trivially.
      */
-    bool insert_many(element_t const* new_elements, std::size_t count) noexcept {
-        if (count == 0) return true;
-        if (!reserve(size_ + count)) return false;
+    [[nodiscard]] status_t insert_many(element_t const* new_elements, std::size_t count) noexcept {
+        if (count == 0) return status_t::success_k;
+        if (status_t const grown = reserve(size_ + count); failed(grown)) return grown;
         std::memcpy(&elements_[size_], new_elements, count * sizeof(element_t));
         size_ += count;
 
@@ -286,11 +288,11 @@ class max_heap {
             for (std::size_t appended_index = size_ - count; appended_index < size_; ++appended_index)
                 shift_up(appended_index);
         }
-        return true;
+        return status_t::success_k;
     }
 
     template <std::size_t batch_size_>
-    inline bool insert_many(std::array<element_t, batch_size_> const& batch) noexcept {
+    [[nodiscard]] inline status_t insert_many(std::array<element_t, batch_size_> const& batch) noexcept {
         return insert_many(batch.data(), batch_size_);
     }
 
@@ -431,26 +433,27 @@ class max_heap_dary {
      *      assumes binary-heap layout. */
     inline void sort_ascending() noexcept { std::sort(elements_, elements_ + size_, &less); }
 
-    bool reserve(std::size_t new_capacity) noexcept {
-        if (new_capacity <= capacity_) return true;
+    /** @return @c success_k, @c overflow_k when the rounded capacity wraps, @c bad_alloc_k otherwise. */
+    [[nodiscard]] status_t reserve(std::size_t new_capacity) noexcept {
+        if (new_capacity <= capacity_) return status_t::success_k;
         new_capacity = ceil2(new_capacity);
-        if (new_capacity == 0) return false;
+        if (new_capacity == 0) return status_t::overflow_k;
         new_capacity = (std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u));
         auto new_elements = allocator_.allocate(new_capacity);
-        if (!new_elements) return false;
+        if (!new_elements) return status_t::bad_alloc_k;
         if (elements_) {
             std::memcpy(new_elements, elements_, size_ * sizeof(element_t));
             allocator_.deallocate(elements_, capacity_);
         }
         elements_ = new_elements;
         capacity_ = new_capacity;
-        return new_elements;
+        return status_t::success_k;
     }
 
-    bool insert(element_t&& element) noexcept {
-        if (!reserve(size_ + 1)) return false;
+    [[nodiscard]] status_t insert(element_t&& element) noexcept {
+        if (status_t const grown = reserve(size_ + 1); failed(grown)) return grown;
         insert_reserved(std::move(element));
-        return true;
+        return status_t::success_k;
     }
 
     void insert_reserved(element_t&& element) noexcept {
@@ -464,9 +467,9 @@ class max_heap_dary {
      *      @b Floyd bulk rebuild (for batches at least half the existing size) and
      *      incremental @c shift_up (for smaller batches).
      */
-    bool insert_many(element_t const* new_elements, std::size_t count) noexcept {
-        if (count == 0) return true;
-        if (!reserve(size_ + count)) return false;
+    [[nodiscard]] status_t insert_many(element_t const* new_elements, std::size_t count) noexcept {
+        if (count == 0) return status_t::success_k;
+        if (status_t const grown = reserve(size_ + count); failed(grown)) return grown;
         std::memcpy(&elements_[size_], new_elements, count * sizeof(element_t));
         size_ += count;
         bool const use_floyd_rebuild = count >= (size_ - count) / 2 || size_ - count == 0;
@@ -479,11 +482,11 @@ class max_heap_dary {
         else {
             for (std::size_t appended = size_ - count; appended < size_; ++appended) shift_up(appended);
         }
-        return true;
+        return status_t::success_k;
     }
 
     template <std::size_t batch_size_>
-    inline bool insert_many(std::array<element_t, batch_size_> const& batch) noexcept {
+    [[nodiscard]] inline status_t insert_many(std::array<element_t, batch_size_> const& batch) noexcept {
         return insert_many(batch.data(), batch_size_);
     }
 
@@ -597,21 +600,22 @@ class sorted_buffer {
     inline element_t const* end() const noexcept { return elements_ + size_; }
     inline void clear() noexcept { size_ = 0; }
 
-    bool reserve(std::size_t new_capacity) noexcept {
-        if (new_capacity <= capacity_) return true;
+    /** @return @c success_k, @c overflow_k when the rounded capacity wraps, @c bad_alloc_k otherwise. */
+    [[nodiscard]] status_t reserve(std::size_t new_capacity) noexcept {
+        if (new_capacity <= capacity_) return status_t::success_k;
 
         new_capacity = ceil2(new_capacity);
-        if (new_capacity == 0) return false;
+        if (new_capacity == 0) return status_t::overflow_k;
         new_capacity = (std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u));
         auto new_elements = allocator_.allocate(new_capacity);
-        if (!new_elements) return false;
+        if (!new_elements) return status_t::bad_alloc_k;
 
         if (size_) std::memcpy(new_elements, elements_, size_ * sizeof(element_t));
         if (elements_) allocator_.deallocate(elements_, capacity_);
 
         elements_ = new_elements;
         capacity_ = new_capacity;
-        return true;
+        return status_t::success_k;
     }
 
     inline void insert_reserved(element_t&& element) noexcept {
@@ -708,8 +712,17 @@ class sorted_buffer {
 /**
  *  @brief Exception-free flat dynamic array: the unsorted sibling of @c sorted_buffer,
  *      serving both trivial per-thread scratch and arrays of heavier objects, as long as
- *      moves & destruction never throw. Growth is explicit through @c reserve;
- *      @c push_back never allocates.
+ *      moves & destruction never throw.
+ *
+ *  Two roles share one type, and the @c _reserved suffix is what tells them apart. The
+ *  @b sized-once role - @c resize, @c resize_uninitialized, @c reserve, @c reserve_exactly
+ *  and @c push_back - allocates and answers a @c status_t. The @b scratch role -
+ *  @c resize_reserved, @c push_back_reserved, @c pop_back and @c clear - never allocates,
+ *  never fails, and never touches capacity, so a hot loop refills a buffer it reserved once.
+ *
+ *  @c reserve rounds up to a power of two and at least doubles, which amortizes a growing
+ *  loop but over-allocates a table whose extent is known; @c reserve_exactly is the sizing
+ *  form for those, and @c resize is built on it.
  */
 template <                                                    //
     typename element_type_,                                   //
@@ -717,7 +730,7 @@ template <                                                    //
 class growing_buffer {
   public:
     using element_t = element_type_;
-    using allocator_t = allocator_type_;
+    using allocator_t = typename std::allocator_traits<allocator_type_>::template rebind_alloc<element_type_>;
 
     static_assert(std::is_nothrow_move_constructible<element_t>() && std::is_nothrow_destructible<element_t>(),
                   "Elements relocate on growth and die in `reset`, so neither may throw");
@@ -731,8 +744,10 @@ class growing_buffer {
     allocator_t allocator_;
 
   public:
-    growing_buffer(allocator_t allocator = {}) noexcept
-        : elements_(nullptr), size_(0), capacity_(0), allocator_(std::move(allocator)) {}
+    /** @brief Takes the caller's allocator in its own element type; the rebind to @c element_t
+     *      happens here, so no consumer spells @c allocator_traits itself. */
+    growing_buffer(allocator_type_ const& allocator = {}) noexcept
+        : elements_(nullptr), size_(0), capacity_(0), allocator_(allocator) {}
 
     growing_buffer(growing_buffer&& other) noexcept
         : elements_(exchange(other.elements_, nullptr)), size_(exchange(other.size_, 0)),
@@ -777,14 +792,23 @@ class growing_buffer {
     inline element_t* data() noexcept { return elements_; }
     inline element_t const* data() const noexcept { return elements_; }
 
-    bool reserve(std::size_t new_capacity) noexcept {
-        if (new_capacity <= capacity_) return true;
+    /** @brief Grows capacity to at least @p new_capacity, rounding up to a power of two and
+     *      at least doubling, so a repeatedly-growing loop amortizes. Live elements survive.
+     *  @return @c success_k, @c overflow_k when the rounded capacity wraps, @c bad_alloc_k otherwise. */
+    [[nodiscard]] status_t reserve(std::size_t new_capacity) noexcept {
+        if (new_capacity <= capacity_) return status_t::success_k;
 
         new_capacity = ceil2(new_capacity);
-        if (new_capacity == 0) return false;
-        new_capacity = (std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u));
+        if (new_capacity == 0) return status_t::overflow_k;
+        return reserve_exactly((std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u)));
+    }
+
+    /** @brief Grows capacity to exactly @p new_capacity, without the rounding @ref reserve applies -
+     *      the sizing form for a table whose extent the caller already knows and then freezes. */
+    [[nodiscard]] status_t reserve_exactly(std::size_t new_capacity) noexcept {
+        if (new_capacity <= capacity_) return status_t::success_k;
         auto new_elements = allocator_.allocate(new_capacity);
-        if (!new_elements) return false;
+        if (!new_elements) return status_t::bad_alloc_k;
 
         for (std::size_t position = 0; position != size_; ++position) {
             new (new_elements + position) element_t(std::move(elements_[position]));
@@ -794,7 +818,35 @@ class growing_buffer {
 
         elements_ = new_elements;
         capacity_ = new_capacity;
-        return true;
+        return status_t::success_k;
+    }
+
+    /** @brief Reallocates to exactly @p count value-initialized elements, discarding any prior
+     *      contents - the sized-once form. Trivial elements are zero-filled in one @c memset. */
+    [[nodiscard]] status_t resize(std::size_t count) noexcept {
+        reset();
+        if (count == 0) return status_t::success_k;
+        if (status_t const sized = reserve_exactly(count); failed(sized)) return sized;
+        if constexpr (std::is_trivially_default_constructible<element_t>())
+            std::memset(static_cast<void*>(elements_), 0, count * sizeof(element_t));
+        else
+            for (std::size_t position = 0; position != count; ++position) new (elements_ + position) element_t();
+        size_ = count;
+        return status_t::success_k;
+    }
+
+    /** @brief Like @ref resize, but skips the zero fill so the caller owns the first touch.
+     *  @note Trivial element types only - nothing is constructed, so every element must be
+     *      written before it is read. */
+    [[nodiscard]] status_t resize_uninitialized(std::size_t count) noexcept {
+        static_assert(std::is_trivially_default_constructible<element_t>() &&
+                          std::is_trivially_destructible<element_t>(),
+                      "Uninitialized storage is only safe for trivial element types");
+        reset();
+        if (count == 0) return status_t::success_k;
+        if (status_t const sized = reserve_exactly(count); failed(sized)) return sized;
+        size_ = count;
+        return status_t::success_k;
     }
 
     /** @brief Appends @p element into pre-reserved capacity - the hot-path form. */
@@ -803,11 +855,13 @@ class growing_buffer {
         ++size_;
     }
 
-    /** @brief Appends @p element if capacity allows; never allocates. */
-    inline bool push_back(element_t element) noexcept {
-        if (size_ == capacity_) return false;
+    /** @brief Appends @p element, doubling capacity when full. @ref push_back_reserved is the
+     *      form for a loop that reserved its whole extent up front. */
+    [[nodiscard]] inline status_t push_back(element_t element) noexcept {
+        if (size_ == capacity_)
+            if (status_t const grown = reserve(size_ + 1); failed(grown)) return grown;
         push_back_reserved(std::move(element));
-        return true;
+        return status_t::success_k;
     }
 
     inline element_t pop_back() noexcept {
@@ -819,7 +873,7 @@ class growing_buffer {
     /** @brief Moves the live fill to @p count within reserved capacity, value-constructing
      *      growth and destroying shrinkage; never allocates. Instantiates only for
      *      default-constructible elements. */
-    inline void resize(std::size_t count) noexcept {
+    inline void resize_reserved(std::size_t count) noexcept {
         for (; size_ > count; --size_) elements_[size_ - 1].~element_t();
         for (; size_ < count; ++size_) new (elements_ + size_) element_t();
     }

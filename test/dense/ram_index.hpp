@@ -40,10 +40,7 @@ concept index_combo_supported = requires {
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, typename waiter_type_ = dummy_waiter_t,
           nk_capability_t caps_ = nk_cap_serial_k>
     requires(!index_combo_supported<dtype_, kernel_>)
-static std::size_t test_configuration(char const* name) {
-    fmt::println("skipped  {:<20} : serial kernels not adapted yet", name);
-    return 0;
-}
+static std::size_t test_configuration(char const* name) { return report(name, "serial kernels not adapted yet"); }
 
 template <                                       //
     nk_dtype_t dtype_, nk_kernel_kind_t kernel_, //
@@ -54,10 +51,7 @@ static std::size_t test_configuration(char const* name) {
     // SIMD-tier cells execute their intrinsics unconditionally, so they run only where
     // the machine offers every requested bit; the tile permission handshake is per-process.
     if constexpr (caps_ != nk_cap_serial_k) {
-        if ((nk_capabilities_available() & caps_) != caps_) {
-            fmt::println("skipped  {:<20} : capabilities missing at runtime", name);
-            return 0;
-        }
+        if ((nk_capabilities_available() & caps_) != caps_) return report(name, "capabilities missing at runtime");
         nk_configure_thread(nk_capabilities_available());
     }
 
@@ -77,7 +71,7 @@ static std::size_t test_configuration(char const* name) {
     failures_count += test_save_load_roundtrip<index_t, kernel_>(make_index);
     failures_count += test_concurrent_build<index_t, kernel_>(make_index);
     failures_count += test_concurrent_search<index_t, kernel_>(make_index);
-    return report_scenarios(name, failures_count);
+    return report(name, failures_count);
 }
 
 } // namespace usearch

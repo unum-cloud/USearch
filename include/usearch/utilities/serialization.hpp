@@ -199,11 +199,11 @@ expected<safegraphs_header_t> safegraphs_read_header(std::FILE* file, allocator_
 }
 
 /** @brief The path-taking overload: opens @p path read-only, parses its header through the
- *      stream overload, and closes it - @c device_error_k when the file cannot open. */
+ *      stream overload, and closes it - @c io_k when the file cannot open. */
 template <typename allocator_type_ = std::allocator<std::byte>>
 expected<safegraphs_header_t> safegraphs_read_header(char const* path, allocator_type_ allocator = {}) noexcept {
     std::FILE* file = std::fopen(path, "rb");
-    if (!file) return {safegraphs_header_t {}, status_t::device_error_k};
+    if (!file) return {safegraphs_header_t {}, status_t::io_k};
     expected<safegraphs_header_t> const result = safegraphs_read_header(file, allocator);
     std::fclose(file);
     return result;
@@ -227,7 +227,7 @@ struct matrix_extents_t {
  *  @param[in] path Destination file, truncated & rewritten whole.
  *  @param[in] matrix The payload; must be contiguous.
  *  @return @c success_k, @c overflow_k when an extent exceeds the counter range, or
- *      @c device_error_k on any I/O failure.
+ *      @c io_k on any I/O failure.
  */
 template <typename value_type_, typename counter_type_ = u32_t>
 status_t matrix_save(char const* path, nk::matrix_view<value_type_> matrix) noexcept {
@@ -236,11 +236,11 @@ status_t matrix_save(char const* path, nk::matrix_view<value_type_> matrix) noex
     if (counters[0] != matrix.extent(0) || counters[1] != matrix.extent(1)) return status_t::overflow_k;
     std::size_t const payload_bytes = matrix.extent(0) * static_cast<std::size_t>(matrix.stride_bytes(0));
     std::FILE* file = std::fopen(path, "wb");
-    if (!file) return status_t::device_error_k;
+    if (!file) return status_t::io_k;
     bool written = std::fwrite(counters, sizeof(counter_type_), 2, file) == 2;
     written = written && std::fwrite(matrix.data(), 1, payload_bytes, file) == payload_bytes;
     bool const closed = std::fclose(file) == 0;
-    return written && closed ? status_t::success_k : status_t::device_error_k;
+    return written && closed ? status_t::success_k : status_t::io_k;
 }
 
 /** @brief Reads just the two-counter header of @p path - the caller sizes its destination
@@ -249,7 +249,7 @@ template <typename counter_type_ = u32_t>
 expected<matrix_extents_t> matrix_extents(char const* path) noexcept {
     matrix_extents_t extents;
     std::FILE* file = std::fopen(path, "rb");
-    if (!file) return {extents, status_t::device_error_k};
+    if (!file) return {extents, status_t::io_k};
     counter_type_ counters[2];
     bool const read_whole = std::fread(counters, sizeof(counter_type_), 2, file) == 2;
     std::fclose(file);
@@ -265,13 +265,13 @@ expected<matrix_extents_t> matrix_extents(char const* path) noexcept {
  *
  *  @param[in] path A RetriEval-layout matrix file.
  *  @param[out] destination Receives the payload; must be contiguous.
- *  @return @c success_k, @c device_error_k when the file cannot open, @c malformed_k on a
+ *  @return @c success_k, @c io_k when the file cannot open, @c malformed_k on a
  *      short read, or @c config_mismatch_k when the counters disagree with @p destination.
  */
 template <typename value_type_, typename counter_type_ = u32_t>
 status_t matrix_load(char const* path, nk::matrix_span<value_type_> destination) noexcept {
     std::FILE* file = std::fopen(path, "rb");
-    if (!file) return status_t::device_error_k;
+    if (!file) return status_t::io_k;
     counter_type_ counters[2];
     if (std::fread(counters, sizeof(counter_type_), 2, file) != 2) return std::fclose(file), status_t::malformed_k;
     if (counters[0] != destination.extent(0) || counters[1] != destination.extent(1))
