@@ -178,6 +178,18 @@ struct [[nodiscard]] expected {
     explicit operator bool() const noexcept { return succeeded(status); }
 };
 
+/** @brief The borrowing face of @ref expected for reference results: there is no null
+ *      reference, so the borrow is stored as an address and @c value() binds it only on
+ *      @c success_k. */
+template <typename value_type_>
+struct [[nodiscard]] expected<value_type_&> {
+    value_type_* borrowed;
+    status_t status;
+
+    value_type_& value() const noexcept { return *borrowed; }
+    explicit operator bool() const noexcept { return succeeded(status); }
+};
+
 /** @brief The concurrency environment a caller certifies for one operation. */
 enum class synchronization_t : u32_t {
     /** @brief Arbitrary readers & writers may be live - the safe default everywhere. */

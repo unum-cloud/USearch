@@ -785,6 +785,10 @@ class growing_buffer {
 
     inline element_t& operator[](std::size_t position) noexcept { return elements_[position]; }
     inline element_t const& operator[](std::size_t position) const noexcept { return elements_[position]; }
+    inline element_t& front() noexcept { return elements_[0]; }
+    inline element_t const& front() const noexcept { return elements_[0]; }
+    inline element_t& back() noexcept { return elements_[size_ - 1]; }
+    inline element_t const& back() const noexcept { return elements_[size_ - 1]; }
     inline element_t* begin() noexcept { return elements_; }
     inline element_t* end() noexcept { return elements_ + size_; }
     inline element_t const* begin() const noexcept { return elements_; }
@@ -839,9 +843,9 @@ class growing_buffer {
      *  @note Trivial element types only - nothing is constructed, so every element must be
      *      written before it is read. */
     [[nodiscard]] status_t resize_uninitialized(std::size_t count) noexcept {
-        static_assert(std::is_trivially_default_constructible<element_t>() &&
-                          std::is_trivially_destructible<element_t>(),
-                      "Uninitialized storage is only safe for trivial element types");
+        static_assert(
+            std::is_trivially_default_constructible<element_t>() && std::is_trivially_destructible<element_t>(),
+            "Uninitialized storage is only safe for trivial element types");
         reset();
         if (count == 0) return status_t::success_k;
         if (status_t const sized = reserve_exactly(count); failed(sized)) return sized;

@@ -319,6 +319,13 @@ class growing_multimap {
         other.inserted_count_.store(0, std::memory_order_relaxed);
     }
 
+    /** @brief Forgets every entry, keeping the slot array & quota - single-threaded, like
+     *      @c reserve: the caller certifies no concurrent readers or writers for the call. */
+    void clear() noexcept {
+        for (std::size_t position = 0; position != slots_count_; ++position) states_[position] = slot_state_t::empty_k;
+        inserted_count_.store(0, std::memory_order_relaxed);
+    }
+
     void reset() noexcept {
         if (slots_)
             bytes_allocator_t(allocator_)
