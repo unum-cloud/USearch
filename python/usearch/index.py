@@ -1520,17 +1520,34 @@ class Index:
 class Indexes:
     def __init__(
         self,
-        indexes: Iterable[Index] = [],
-        paths: Iterable[os.PathLike] = [],
+        indexes: Iterable[Index] = None,
+        paths: Iterable[os.PathLike] = None,
         view: bool = False,
         threads: int = 0,
     ) -> None:
+        self.indices = list(indexes) if indexes is not None else []
         self._compiled = _CompiledIndexes()
-        for index in indexes:
+        
+        for index in self.indices:
             self._compiled.merge(index._compiled)
-        self._compiled.merge_paths(paths, view=view, threads=threads)
+            
+        paths_list = list(paths) if paths is not None else []
+        self._compiled.merge_paths(paths_list, view=view, threads=threads)
+
+    @property
+    def ndim(self) -> int:
+        return self.indices[0].ndim if self.indices else 0
+
+    @property
+    def dtype(self) -> Union[ScalarKind, None]:
+        return self.indices[0].dtype if self.indices else None
+
+    @property
+    def metric(self) -> Union[MetricKind, CompiledMetric, str]:
+        return self.indices[0].metric if self.indices else "unknown"
 
     def merge(self, index: Index):
+        self.indices.append(index)
         self._compiled.merge(index._compiled)
 
     def merge_path(self, path: os.PathLike):
