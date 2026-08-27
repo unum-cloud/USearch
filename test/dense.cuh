@@ -65,30 +65,6 @@ constexpr float self_match_tolerance_k = 1e-3f;
 /** @brief The reader lane performs at least this many searches, even if writers finish first. */
 constexpr std::size_t reader_minimal_searches_k = 16;
 
-/** @brief Waiter that misbehaves on purpose: mostly yields, but occasionally oversleeps for
- *      hundreds of microseconds, stretching the lock & watermark contention windows far beyond
- *      anything hardware timing produces - a poor man's schedule fuzzer. */
-struct flaky_waiter_t {
-    template <typename value_type_, typename thread_index_type_, typename bound_type_>
-    void operator()(std::atomic<value_type_> const&, value_type_, thread_index_type_, bound_type_) const noexcept {
-        misbehave_();
-    }
-    template <typename value_type_, typename thread_index_type_, typename bound_type_>
-    void operator()(value_type_ const*, value_type_, thread_index_type_, bound_type_) const noexcept {
-        misbehave_();
-    }
-
-  private:
-    static void misbehave_() noexcept {
-        // A deliberate exception to the no-thread-locals rule: the index constructs its
-        // waiter as a stateless temporary at every wait site, so a persistent per-thread
-        // fuzz stream has nowhere else to live until the waiter surface takes instances.
-        static thread_local test_random_t random_generator {0xF1A6ull};
-        if (random_generator.below(64) == 0) std::this_thread::sleep_for(std::chrono::microseconds(200));
-        else std::this_thread::yield();
-    }
-};
-
 /** @brief Per-lane state for the concurrent scenarios: one vector slice & one traversal context each. */
 template <typename index_type_>
 struct test_lanes {

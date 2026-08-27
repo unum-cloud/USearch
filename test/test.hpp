@@ -14,9 +14,12 @@
 #pragma once
 
 #include <cmath>   // `std::fabs`, `std::fmax` - the relative tolerance of `expect_near`
+#include <cstdint> // `PTRDIFF_MAX` - the unbounded allocation budget
 #include <cstdlib> // `std::malloc`, `std::free`, `std::abort`
 
 #include <atomic> // `std::atomic`
+#include <chrono> // `std::chrono::microseconds` - the flaky waiter's oversleep
+#include <thread> // `std::this_thread::yield`, `std::this_thread::sleep_for`
 
 #include <fmt/format.h>
 
@@ -72,6 +75,9 @@ struct allocation_ledger_t {
     std::atomic<std::ptrdiff_t> live_bytes {0};
     /** @brief Lifetime number of @c allocate calls, for coarse allocation-pressure checks. */
     std::atomic<std::size_t> total_allocations {0};
+    /** @brief Allocation ceiling in live bytes; scenarios lower it to drive the all-or-
+     *      nothing refusal paths, so a request past it is refused, never counted. */
+    std::atomic<std::ptrdiff_t> byte_budget {PTRDIFF_MAX};
 };
 
 /**
@@ -100,7 +106,9 @@ struct counting_allocator {
 
     value_type_* allocate(std::size_t count) noexcept {
         if (!ledger_) std::abort(); // A default-constructed instance must never allocate.
-        ledger_->live_bytes.fetch_add(static_cast<std::ptrdiff_t>(count * sizeof(value_type_)));
+        std::ptrdiff_t const wanted = static_cast<std::ptrdiff_t>(count * sizeof(value_type_));
+        if (ledger_->live_bytes.load() + wanted > ledger_->byte_budget.load()) return nullptr;
+        ledger_->live_bytes.fetch_add(wanted);
         ledger_->total_allocations.fetch_add(1);
         return static_cast<value_type_*>(std::malloc(count * sizeof(value_type_)));
     }
@@ -130,19 +138,28 @@ auto make_scalar(unsigned value) noexcept {
     else return scalar_(value);
 }
 
-/** @brief Minimal SplitMix64-based generator for synthetic data - deliberately independent of the
- *      library's internal PRNG, so a generator bug there can never shape the test data. */
-struct test_random_t {
-    u64_t state_;
+/** @brief Waiter that misbehaves on purpose: mostly yields, but occasionally oversleeps for
+ *      hundreds of microseconds, stretching the lock & watermark contention windows far beyond
+ *      anything hardware timing produces - a poor man's schedule fuzzer. */
+struct flaky_waiter_t {
+    template <typename value_type_, typename thread_index_type_, typename bound_type_>
+    void operator()(std::atomic<value_type_> const&, value_type_, thread_index_type_, bound_type_) const noexcept {
+        misbehave_();
+    }
+    template <typename value_type_, typename thread_index_type_, typename bound_type_>
+    void operator()(value_type_ const*, value_type_, thread_index_type_, bound_type_) const noexcept {
+        misbehave_();
+    }
 
-    explicit test_random_t(u64_t seed) noexcept : state_(seed) {}
-
-    /** @brief The next pseudo-random value in [0, @p bound). */
-    unsigned below(unsigned bound) noexcept {
-        u64_t mixed = (state_ += 0x9E3779B97F4A7C15ull);
-        mixed = (mixed ^ (mixed >> 30)) * 0xBF58476D1CE4E5B9ull;
-        mixed = (mixed ^ (mixed >> 27)) * 0x94D049BB133111EBull;
-        return static_cast<unsigned>((mixed ^ (mixed >> 31)) % bound);
+  private:
+    static void misbehave_() noexcept {
+        // A deliberate exception to the no-thread-locals rule: the index constructs its
+        // waiter as a stateless temporary at every wait site, so a persistent per-thread
+        // fuzz stream has nowhere else to live until the waiter surface takes instances.
+        static thread_local splitmix64_t random_generator {0xF1A6ull};
+        if (uniform_below<u32_t> {64}(random_generator) == 0)
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        else std::this_thread::yield();
     }
 };
 
@@ -161,20 +178,23 @@ nk::matrix<scalar_> make_clustered_vectors(std::size_t count, std::size_t dimens
     std::size_t const redrawn_dimensions = divide_round_up<std::size_t>(dimensions, 16);
     auto centroids = nk::matrix<scalar_>::try_zeros({centroids_count_k, dimensions});
     auto vectors = nk::matrix<scalar_>::try_zeros({count, dimensions});
-    test_random_t random_generator(seed);
+    splitmix64_t random_generator {seed};
+    uniform_below<u32_t> component_distribution {8};
+    uniform_below<u32_t> centroid_distribution {centroids_count_k};
+    uniform_below<u32_t> dimension_distribution {static_cast<u32_t>(dimensions)};
     for (std::size_t centroid = 0; centroid != centroids_count_k; ++centroid) {
         auto centroid_span = centroids.row(centroid).as_vector();
         for (std::size_t dimension = 0; dimension != dimensions; ++dimension)
-            centroid_span[dimension] = make_scalar<scalar_>(random_generator.below(8));
+            centroid_span[dimension] = make_scalar<scalar_>(component_distribution(random_generator));
     }
     for (std::size_t row = 0; row != count; ++row) {
         auto row_span = vectors.row(row).as_vector();
-        auto centroid_span = centroids.row(random_generator.below(centroids_count_k)).as_vector();
+        auto centroid_span = centroids.row(centroid_distribution(random_generator)).as_vector();
         for (std::size_t dimension = 0; dimension != dimensions; ++dimension)
             row_span[dimension] = centroid_span[dimension];
         for (std::size_t redraw = 0; redraw != redrawn_dimensions; ++redraw)
-            row_span[random_generator.below(static_cast<unsigned>(dimensions))] = make_scalar<scalar_>(
-                random_generator.below(8));
+            row_span[dimension_distribution(random_generator)] = make_scalar<scalar_>(
+                component_distribution(random_generator));
     }
     return vectors;
 }
@@ -187,23 +207,38 @@ template <typename scalar_>
 nk::matrix<scalar_> make_vectors(std::size_t count, std::size_t dimensions, u64_t seed) {
     if constexpr (std::is_same_v<scalar_, nk::u1x8_t>) return make_clustered_vectors<scalar_>(count, dimensions, seed);
     auto vectors = nk::matrix<scalar_>::try_zeros({count, dimensions});
-    test_random_t random_generator(seed);
+    splitmix64_t random_generator {seed};
+    uniform_below<u32_t> component_distribution {8};
     for (std::size_t row = 0; row != count; ++row) {
         auto row_span = vectors.row(row).as_vector();
         for (std::size_t dimension = 0; dimension != dimensions; ++dimension)
-            row_span[dimension] = make_scalar<scalar_>(random_generator.below(8));
+            row_span[dimension] = make_scalar<scalar_>(component_distribution(random_generator));
     }
     return vectors;
 }
 } // namespace unum::usearch
 
+/** @brief Teaches the expect verbs to print statuses by name - @c status_t is the most
+ *      compared enum in the suite, and {fmt} refuses unknown enums at compile time. */
+template <>
+struct fmt::formatter<unum::usearch::status_t> : fmt::formatter<char const*> {
+    auto format(unum::usearch::status_t status, format_context& context) const {
+        return fmt::formatter<char const*>::format(unum::usearch::status_to_string(status), context);
+    }
+};
+
 #pragma region Suite Entry Points
 
-/** @brief Per-area suite entries the composer translation units define and the suite's
- *      @c main composes explicitly; each returns its area's failure count. The per-dtype
- *      shards below them are named by their own area's header, never here. */
+std::size_t test_ram_buffers();
+
+std::size_t test_ram_tables();
+
 std::size_t test_dense_all();
 
-std::size_t test_ram_buffers();
+std::size_t test_sentences();
+
+std::size_t test_bioinformatics();
+
+std::size_t test_meshes();
 
 #pragma endregion Suite Entry Points

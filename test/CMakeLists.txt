@@ -6,6 +6,10 @@ add_executable(
     test.cpp
     dense.cpp
     utilities/ram_buffers.cpp
+    utilities/ram_tables.cpp
+    basic/sentences.cpp
+    basic/bioinformatics.cpp
+    basic/meshes.cpp
     dense/ram_metric_f64.cpp
     dense/ram_metric_f32.cpp
     dense/ram_metric_bf16.cpp
@@ -30,15 +34,15 @@ add_executable(
 )
 setup_target(usearch_test)
 target_include_directories(usearch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(usearch_test PRIVATE fmt::fmt)
+target_link_libraries(usearch_test PRIVATE fmt::fmt yyjson)
 add_test(NAME usearch_test COMMAND usearch_test)
 
-# The core tier's proof: types.hpp, ram_buffers.hpp, ram_tables.hpp & utilities/ram_hints.hpp compile with the
-# standard library alone - only -Iinclude, no submodule paths, no third-party targets.
-add_executable(usearch_test_core core.cpp)
-target_include_directories(usearch_test_core PRIVATE ${PROJECT_SOURCE_DIR}/include)
-set_target_properties(usearch_test_core PROPERTIES CXX_STANDARD 20)
-add_test(NAME usearch_test_core COMMAND usearch_test_core)
+# The header-only tier's proof: everything under `utilities/` & `basic/` compiles & runs
+# with the standard library alone - only -Iinclude, no submodule paths, no third-party targets.
+add_executable(usearch_test_header_only header_only.cpp)
+target_include_directories(usearch_test_header_only PRIVATE ${PROJECT_SOURCE_DIR}/include)
+set_target_properties(usearch_test_header_only PROPERTIES CXX_STANDARD 20)
+add_test(NAME usearch_test_header_only COMMAND usearch_test_header_only)
 
 # The CUDA suite skips `setup_target`: its host-compiler flags - `-march=native`,
 # `-fmax-errors` - don't survive the CUDA driver, so the target wires the interface

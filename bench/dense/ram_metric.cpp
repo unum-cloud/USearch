@@ -20,7 +20,6 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <random>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -106,8 +105,8 @@ struct adjacency_simulator_t {
     std::vector<node_id_t> pool;
 
     adjacency_simulator_t() : pool(node_count_k * ids_per_node_k, 0) {
-        std::mt19937 seed_rng {0xABCDEF01u};
-        for (auto& id : pool) id = static_cast<node_id_t>(seed_rng());
+        splitmix64_t seed_generator {0xABCDEF01ull};
+        for (auto& id : pool) id = static_cast<node_id_t>(seed_generator());
     }
 
     /** @brief Streaming xor over one "node"'s worth of IDs; one DoNotOptimize per call. */
@@ -159,8 +158,8 @@ static void set_counters(bm::State& state, std::size_t dim, std::size_t distance
     state.SetItemsProcessed(state.iterations() * distances_per_iter);
     state.SetBytesProcessed(state.iterations() * bytes_loaded_per_iter);
     double const scalar_ops_per_iter = 2.0 * static_cast<double>(dim) * static_cast<double>(distances_per_iter);
-    state.counters["gso/s"] =
-        bm::Counter(scalar_ops_per_iter, bm::Counter::kIsIterationInvariantRate, bm::Counter::kIs1000);
+    state.counters["gso/s"] = bm::Counter(scalar_ops_per_iter, bm::Counter::kIsIterationInvariantRate,
+                                          bm::Counter::kIs1000);
 }
 
 /** @brief Computes a row's contiguous byte width once per cell (used for bytes_processed). */
@@ -180,7 +179,7 @@ static void bench_distance(bm::State& state) {
     auto query_norms = dense_norms<caps_>(query_view);
 
     std::size_t const row_index_mask = pool.matrix.extent(0) - 1;
-    std::mt19937 random_generator {0xDEADBEEFu};
+    splitmix64_t random_generator {0xDEADBEEFull};
     adjacency_simulator_t adjacency;
     for (auto _ : state) {
         std::size_t const row = random_generator() & row_index_mask;
@@ -203,7 +202,7 @@ static void bench_distances_quad(bm::State& state) {
     auto query_norms = dense_norms<caps_>(query_view);
 
     std::size_t const row_index_mask = pool.matrix.extent(0) - 1;
-    std::mt19937 random_generator {0xDEADBEEFu};
+    splitmix64_t random_generator {0xDEADBEEFull};
     adjacency_simulator_t adjacency;
     for (auto _ : state) {
         std::size_t const row0 = random_generator() & row_index_mask;
@@ -235,7 +234,7 @@ static void bench_baseline(bm::State& state) {
     auto query_view = query.view();
 
     std::size_t const row_index_mask = pool.matrix.extent(0) - 1;
-    std::mt19937 random_generator {0xDEADBEEFu};
+    splitmix64_t random_generator {0xDEADBEEFull};
     adjacency_simulator_t adjacency;
     for (auto _ : state) {
         std::size_t const row = random_generator() & row_index_mask;

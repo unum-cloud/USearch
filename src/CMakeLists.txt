@@ -4,6 +4,7 @@
 # arms join the variant without the portable library ever seeing the CUDA SDK.
 add_library(
     usearch_indexes STATIC
+    types.cpp
     dense_index.cpp
     dense/ram_index_bf16.cpp
     dense/ram_index_f16.cpp

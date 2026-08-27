@@ -16,8 +16,7 @@ Once included, the high-level C++11 interface is as simple as it gets: `reserve(
 This covers 90% of use cases.
 
 ```cpp
-#include <usearch/index.hpp>
-#include <usearch/index_dense.hpp>
+#include <usearch/dense/ram_index.hpp>
 
 using namespace unum::usearch;
 

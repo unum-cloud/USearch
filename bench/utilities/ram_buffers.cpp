@@ -14,15 +14,13 @@
  *  a single batch call per iteration with the same items. Same per-iteration overhead,
  *  same total work, only the call-site shape differs - so any time gap is real.
  *
- *  PRNG choice: @c std::mt19937 at ~1.6 ns/call - 2.8x faster than @c std::minstd_rand
- *  (which spends ~4.5 ns on a 64-bit modulo in libstdc++) and within 2x of inline
- *  splitmix64. STL-only, no custom code to maintain. The 0.7 ns/call gap vs splitmix64
- *  is invisible against the data-structure work being measured.
+ *  PRNG choice: the library's own @c splitmix64_t - sub-nanosecond raw draws with no
+ *  standard-library engine machinery in the timed loop, so the generator stays invisible
+ *  against the data-structure work being measured.
  */
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <random>
 #include <vector>
 
 #include <benchmark/benchmark.h>
@@ -39,7 +37,7 @@ void bench_sorted_buffer_insert_one(bm::State& state) {
     auto const limit = static_cast<std::size_t>(state.range(0));
     sorted_buffer<u32_t> buffer;
     if (failed(buffer.reserve(limit))) return state.SkipWithError("the buffer refused its reservation");
-    std::mt19937 random_generator {0x5EEDu};
+    splitmix64_t random_generator {0x5EEDull};
     for (std::size_t i = 0; i < limit; ++i) buffer.insert(random_generator(), limit);
 
     for (auto _ : state) bm::DoNotOptimize(buffer.insert(random_generator(), limit));
@@ -52,7 +50,7 @@ void bench_sorted_buffer_insert_n_separate(bm::State& state) {
     auto const limit = static_cast<std::size_t>(state.range(0));
     sorted_buffer<u32_t> buffer;
     if (failed(buffer.reserve(limit))) return state.SkipWithError("the buffer refused its reservation");
-    std::mt19937 random_generator {0x5EEDu};
+    splitmix64_t random_generator {0x5EEDull};
     for (std::size_t i = 0; i < limit; ++i) buffer.insert(random_generator(), limit);
 
     for (auto _ : state) {
@@ -73,7 +71,7 @@ void bench_sorted_buffer_insert_span(bm::State& state) {
     auto const limit = static_cast<std::size_t>(state.range(0));
     sorted_buffer<u32_t> buffer;
     if (failed(buffer.reserve(limit))) return state.SkipWithError("the buffer refused its reservation");
-    std::mt19937 random_generator {0x5EEDu};
+    splitmix64_t random_generator {0x5EEDull};
     for (std::size_t i = 0; i < limit; ++i) buffer.insert(random_generator(), limit);
 
     for (auto _ : state) {
@@ -100,7 +98,7 @@ void bench_hash_set_set_one(bm::State& state) {
     growing_hash_set<u32_t> hash_set;
     if (failed(hash_set.reserve(expected_size * 4))) return state.SkipWithError("the set refused its reservation");
     std::size_t const clear_every = expected_size;
-    std::mt19937 random_generator {0xBEEFu};
+    splitmix64_t random_generator {0xBEEFull};
     std::size_t step_count = 0;
     for (auto _ : state) {
         u32_t const key = random_generator();
@@ -117,7 +115,7 @@ void bench_hash_set_set_n_separate(bm::State& state) {
     growing_hash_set<u32_t> hash_set;
     if (failed(hash_set.reserve(expected_size * 4))) return state.SkipWithError("the set refused its reservation");
     std::size_t const clear_every = expected_size / batch_size_ + 1;
-    std::mt19937 random_generator {0xBEEFu};
+    splitmix64_t random_generator {0xBEEFull};
     std::size_t step_count = 0;
     for (auto _ : state) {
         std::array<u32_t, batch_size_> batch;
@@ -139,7 +137,7 @@ void bench_hash_set_set_one_batch(bm::State& state) {
     growing_hash_set<u32_t> hash_set;
     if (failed(hash_set.reserve(expected_size * 4))) return state.SkipWithError("the set refused its reservation");
     std::size_t const clear_every = expected_size / batch_size_ + 1;
-    std::mt19937 random_generator {0xBEEFu};
+    splitmix64_t random_generator {0xBEEFull};
     std::size_t step_count = 0;
     for (auto _ : state) {
         std::array<u32_t, batch_size_> batch;
@@ -163,7 +161,7 @@ void bench_max_heap_push_pop(bm::State& state) {
     auto const target_size = static_cast<std::size_t>(state.range(0));
     max_heap<u32_t> heap;
     if (failed(heap.reserve(target_size * 4))) return state.SkipWithError("the heap refused its reservation");
-    std::mt19937 random_generator {0xDEADu};
+    splitmix64_t random_generator {0xDEADull};
     for (std::size_t i = 0; i < target_size; ++i) bm::DoNotOptimize(heap.insert(random_generator()));
 
     for (auto _ : state) {
@@ -180,7 +178,7 @@ void bench_max_heap_insert_n_separate(bm::State& state) {
     auto const target_size = static_cast<std::size_t>(state.range(0));
     max_heap<u32_t> heap;
     if (failed(heap.reserve(target_size * 64))) return state.SkipWithError("the heap refused its reservation");
-    std::mt19937 random_generator {0xDEADu};
+    splitmix64_t random_generator {0xDEADull};
     for (std::size_t i = 0; i < target_size; ++i) bm::DoNotOptimize(heap.insert(random_generator()));
 
     for (auto _ : state) {
@@ -203,7 +201,7 @@ void bench_max_heap_insert_one_batch(bm::State& state) {
     auto const target_size = static_cast<std::size_t>(state.range(0));
     max_heap<u32_t> heap;
     if (failed(heap.reserve(target_size * 64))) return state.SkipWithError("the heap refused its reservation");
-    std::mt19937 random_generator {0xDEADu};
+    splitmix64_t random_generator {0xDEADull};
     for (std::size_t i = 0; i < target_size; ++i) bm::DoNotOptimize(heap.insert(random_generator()));
 
     for (auto _ : state) {
@@ -225,7 +223,7 @@ void bench_max_heap_dary_push_pop(bm::State& state) {
     auto const target_size = static_cast<std::size_t>(state.range(0));
     max_heap_dary<arity_, u32_t> heap;
     if (failed(heap.reserve(target_size * 4))) return state.SkipWithError("the heap refused its reservation");
-    std::mt19937 random_generator {0xDEADu};
+    splitmix64_t random_generator {0xDEADull};
     auto draw = [&](void) noexcept { return static_cast<u32_t>(random_generator()); };
     for (std::size_t i = 0; i < target_size; ++i) bm::DoNotOptimize(heap.insert(draw()));
     for (auto _ : state) {
@@ -243,7 +241,7 @@ void bench_max_heap_dary_insert_only(bm::State& state) {
     auto const target_size = static_cast<std::size_t>(state.range(0));
     max_heap_dary<arity_, u32_t> heap;
     if (failed(heap.reserve(target_size * 4))) return state.SkipWithError("the heap refused its reservation");
-    std::mt19937 random_generator {0xDEADu};
+    splitmix64_t random_generator {0xDEADull};
     auto draw = [&](void) noexcept { return static_cast<u32_t>(random_generator()); };
     for (std::size_t i = 0; i < target_size; ++i) bm::DoNotOptimize(heap.insert(draw()));
     for (auto _ : state) {
@@ -260,7 +258,7 @@ void bench_max_heap_insert_only_binary(bm::State& state) {
     auto const target_size = static_cast<std::size_t>(state.range(0));
     max_heap<u32_t> heap;
     if (failed(heap.reserve(target_size * 4))) return state.SkipWithError("the heap refused its reservation");
-    std::mt19937 random_generator {0xDEADu};
+    splitmix64_t random_generator {0xDEADull};
     auto draw = [&](void) noexcept { return static_cast<u32_t>(random_generator()); };
     for (std::size_t i = 0; i < target_size; ++i) bm::DoNotOptimize(heap.insert(draw()));
     for (auto _ : state) {

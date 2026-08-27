@@ -91,7 +91,9 @@ check_host_threads() {
 # structures for queues & sets. Non-owning views like `std::span` & `std::string_view` stay welcome.
 check_stl_dynamic_containers() {
     local owners
+    # Doc & comment lines may name the containers - only code is policed.
     owners=$(printf '%s\n' "$added" |
+        grep -vE '^\+[[:space:]]*(\*|//|/\*)' |
         grep -E '\bstd::(vector|list|forward_list|map|multimap|set|multiset|unordered_[a-z_]+|string|basic_string|priority_queue|stack|queue)\b' || true)
     [ -z "$owners" ] || fail "$owners" \
         "$file uses an STL dynamic container - use growing_buffer, nk::tensor, or the ram_tables structures:"
