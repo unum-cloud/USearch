@@ -190,6 +190,30 @@ struct [[nodiscard]] expected<value_type_&> {
     explicit operator bool() const noexcept { return succeeded(status); }
 };
 
+/** @brief A half-open interval of integer identifiers, iterable like the standard views -
+ *      the unit callers partition work by, one contiguous run per core. */
+template <typename index_type_ = std::size_t>
+struct iota_view {
+    /** @brief The first identifier of the interval. */
+    index_type_ first {0};
+    /** @brief One past the last identifier. */
+    index_type_ bound {0};
+
+    constexpr std::size_t size() const noexcept { return static_cast<std::size_t>(bound - first); }
+    constexpr bool empty() const noexcept { return first == bound; }
+
+    struct iterator {
+        index_type_ value;
+
+        constexpr index_type_ operator*() const noexcept { return value; }
+        constexpr iterator& operator++() noexcept { return ++value, *this; }
+        constexpr bool operator==(iterator const& other) const noexcept { return value == other.value; }
+        constexpr bool operator!=(iterator const& other) const noexcept { return value != other.value; }
+    };
+    constexpr iterator begin() const noexcept { return {first}; }
+    constexpr iterator end() const noexcept { return {bound}; }
+};
+
 /** @brief The concurrency environment a caller certifies for one operation. */
 enum class synchronization_t : u32_t {
     /** @brief Arbitrary readers & writers may be live - the safe default everywhere. */

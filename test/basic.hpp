@@ -66,6 +66,7 @@ constexpr u64_t basic_seed_keys_k = 0x0E750000ull;
 constexpr u64_t basic_seed_wiring_k = 0x11EA711Full;
 constexpr u64_t basic_seed_budget_k = 0xBADA110Cull;
 constexpr u64_t basic_seed_snapshot_k = 0x5AFE5A7Eull;
+constexpr u64_t basic_seed_regions_k = 0x4E610135ull;
 constexpr u64_t basic_seed_hostile_k = 0xDEADBEEFull;
 constexpr u64_t basic_seed_health_k = 0x6EA17700ull;
 constexpr u64_t basic_seed_contract_k = 0xC0478AC7ull;
@@ -923,6 +924,114 @@ std::size_t test_basic_snapshot_hostile(fixture_type_ const& fixture) {
     return failures;
 }
 
+/** @brief Region-scoped serialization: a save plan whose uneven regions run from a pool
+ *      must emit bytes identical to the single-call form, a region-parallel load must
+ *      rebuild a graph whose own re-save is byte-identical, and the misuse rows -
+ *      premature finish, out-of-bounds region, dropped plan - answer their documented
+ *      statuses while the hold blocks & then frees the unique verbs. */
+template <typename fixture_type_>
+std::size_t test_basic_snapshot_regions(fixture_type_ const& fixture) {
+    using index_t = typename fixture_type_::index_t;
+    using node_id_t = typename index_t::node_id_t;
+    using context_t = typename index_t::traversal_context_t;
+    constexpr std::size_t nodes_k = 96;
+    std::size_t failures = 0;
+    allocation_ledger_t ledger;
+    {
+        index_t index = fixture.make_index(ledger);
+        auto metric = fixture.make_metric();
+        auto const codec = fixture.make_codec();
+        context_t context {basic_seed_regions_k, counting_allocator<std::byte> {ledger}};
+        auto values = fixture.make_values(nodes_k, basic_seed_regions_k);
+        failures += expect(bool(index.reserve(nodes_k)));
+        std::vector<node_id_t> assigned_ids;
+        failures += basic_build(fixture, index, metric, values, assigned_ids, context,
+                                basic_keep_diverse_t {basic_connectivity_k});
+
+        auto const bytes = index.snapshot_bytes(codec);
+        failures += expect(bool(bytes));
+        std::vector<std::byte> single_payload(bytes.value);
+        failures += expect_eq(index.save({single_payload}, codec), status_t::success_k);
+
+        // Uneven splits from a pool must land byte-identically to the single call.
+        std::vector<std::byte> pooled_payload(bytes.value, std::byte {0xEE});
+        std::array<iota_view<node_id_t>, 3> const regions {iota_view<node_id_t> {0, 7}, iota_view<node_id_t> {7, 61},
+                                                           iota_view<node_id_t> {61, nodes_k}};
+        {
+            auto planned = index.plan_save({pooled_payload}, codec);
+            failures += expect(bool(planned));
+            failures += expect_eq(planned.value.finish(), status_t::config_mismatch_k); // Nothing covered yet.
+            failures += expect_eq(planned.value.save({0, nodes_k + 1}, codec), status_t::config_mismatch_k);
+            failures += expect_eq(index.snapshot_bytes(codec).status, status_t::contended_k); // The plan holds unique.
+
+            fu::flat_pool_t pool;
+            if (fu::failed(pool.spawn(regions.size()))) return failures + expect(false);
+            std::atomic<std::size_t> region_failures {0};
+            pool.for_threads([&](std::size_t lane) noexcept {
+                if (planned.value.save(regions[lane], codec) != status_t::success_k) region_failures.fetch_add(1);
+            });
+            failures += expect_eq(region_failures.load(), 0u);
+            failures += expect_eq(planned.value.finish(), status_t::success_k);
+        }
+        failures += expect(std::equal(pooled_payload.begin(), pooled_payload.end(), single_payload.begin()));
+        failures += expect(bool(index.snapshot_bytes(codec))); // The finished plan released its hold.
+
+        // A dropped save plan releases the hold without pronouncing anything.
+        {
+            auto planned = index.plan_save({pooled_payload}, codec);
+            failures += expect(bool(planned));
+        }
+        failures += expect(bool(index.snapshot_bytes(codec)));
+
+        // The load mirror: uneven regions decode concurrently, publication waits for finish.
+        index_t restored = fixture.make_index(ledger);
+        failures += expect(bool(restored.reserve(nodes_k)));
+        {
+            auto planned = restored.plan_load({single_payload});
+            failures += expect(bool(planned));
+            failures += expect_eq(planned.value.finish(), status_t::config_mismatch_k); // Nothing covered yet.
+            failures += expect_eq(restored.size(), 0u);                                 // Nothing published either.
+
+            fu::flat_pool_t pool;
+            if (fu::failed(pool.spawn(regions.size()))) return failures + expect(false);
+            std::atomic<std::size_t> region_failures {0};
+            pool.for_threads([&](std::size_t lane) noexcept {
+                if (planned.value.load(regions[lane], codec) != status_t::success_k) region_failures.fetch_add(1);
+            });
+            failures += expect_eq(region_failures.load(), 0u);
+            failures += expect_eq(restored.size(), 0u); // Still unpublished before the finish.
+            failures += expect_eq(planned.value.finish(), status_t::success_k);
+        }
+        failures += expect_eq(restored.size(), index.size());
+        for (std::size_t node = 0; node != nodes_k; ++node) {
+            node_id_t const node_id = static_cast<node_id_t>(node);
+            failures += expect(restored.key_of(node_id).value == index.key_of(node_id).value);
+            failures += expect_eq(restored.degree_of(node_id).value, index.degree_of(node_id).value);
+            failures += expect(fixture.value_equals(restored.published_value_of(node_id), //
+                                                    index.published_value_of(node_id)));
+        }
+
+        // Closure: the region-loaded graph re-saves to the very same bytes.
+        std::vector<std::byte> resaved_payload(bytes.value, std::byte {0x77});
+        failures += expect_eq(restored.save({resaved_payload}, codec), status_t::success_k);
+        failures += expect(std::equal(resaved_payload.begin(), resaved_payload.end(), single_payload.begin()));
+
+        // A dropped load plan publishes nothing and leaves a clean retry behind.
+        index_t abandoned = fixture.make_index(ledger);
+        failures += expect(bool(abandoned.reserve(nodes_k)));
+        {
+            auto planned = abandoned.plan_load({single_payload});
+            failures += expect(bool(planned));
+            failures += expect_eq(planned.value.load(regions[0], codec), status_t::success_k);
+        }
+        failures += expect_eq(abandoned.size(), 0u);
+        failures += expect_eq(abandoned.load({single_payload}, codec), status_t::success_k);
+        failures += expect_eq(abandoned.size(), index.size());
+    }
+    failures += expect_eq(ledger.live_bytes.load(), 0);
+    return failures;
+}
+
 /** @brief The health report on a settled graph, its determinism across repeated calls,
  *      and - through a gated metric parking one insert mid-flight - the settled-past
  *      guard refusing @c health & @c snapshot_bytes with @c contended_k. */
@@ -1699,6 +1808,124 @@ std::size_t test_basic_overflow_race(fixture_type_ const& fixture) {
     return failures;
 }
 
+/** @brief The reader's cursor: id-order iteration over the published prefix, snapshot
+ *      discipline, edge-following, refresh widening, and a lane racing live mutators. */
+template <typename fixture_type_>
+std::size_t test_basic_cursor(fixture_type_ const& fixture) {
+    using index_t = typename fixture_type_::index_t;
+    using node_id_t = typename index_t::node_id_t;
+    using key_t = typename index_t::key_t;
+    using context_t = typename index_t::traversal_context_t;
+    using cursor_t = basic_ram_cursor<index_t, synchronization_t::concurrent_k, counting_allocator<std::byte>>;
+    constexpr std::size_t nodes_k = 64;
+    constexpr std::size_t racing_inserts_k = 8;
+    std::size_t failures = 0;
+    allocation_ledger_t ledger;
+    {
+        index_t index = fixture.make_index(ledger);
+        auto metric = fixture.make_metric();
+        context_t context {basic_seed_wiring_k + 1, counting_allocator<std::byte> {ledger}};
+        auto values = fixture.make_values(nodes_k + 1 + racing_inserts_k, basic_seed_wiring_k + 1);
+        std::vector<typename index_t::value_t> extras;
+        for (std::size_t extra = 0; extra != 1 + racing_inserts_k; ++extra)
+            extras.push_back(std::move(values[nodes_k + extra]));
+        values.resize(nodes_k);
+        failures += expect(bool(index.reserve(nodes_k + 1 + racing_inserts_k)));
+        std::vector<node_id_t> assigned_ids;
+        failures += basic_build(fixture, index, metric, values, assigned_ids, context,
+                                basic_keep_diverse_t {basic_connectivity_k});
+
+        // A fresh cursor stands past the end; seek(0) enters the graph.
+        cursor_t cursor {index, counting_allocator<std::byte> {ledger}};
+        failures += expect(!cursor);
+        failures += expect_eq(static_cast<std::size_t>(cursor.visible_count()), nodes_k);
+        failures += expect_eq(cursor.seek(0), status_t::success_k);
+        std::size_t visited = 0;
+        for (; cursor; ++cursor) {
+            node_id_t const node_id = cursor.id();
+            failures += expect(node_id < cursor.visible_count());
+            failures += expect(cursor.key() == index.key_of(node_id).value);
+            failures += expect(fixture.value_equals(cursor.value(), index.published_value_of(node_id)));
+            ++visited;
+        }
+        failures += expect_eq(visited, nodes_k);
+
+        // Edge-following lands on the staged neighbor, or refuses past the snapshot.
+        failures += expect_eq(cursor.seek(0), status_t::success_k);
+        auto const staged = cursor.neighbors();
+        std::vector<node_id_t> first_row {staged.begin(), staged.end()};
+        failures += expect_eq(first_row.size(), index.degree_of(0).value);
+        for (std::size_t position = 0; position != first_row.size(); ++position) {
+            failures += expect_eq(cursor.seek(0), status_t::success_k);
+            status_t const followed = cursor.follow(position);
+            if (succeeded(followed)) failures += expect_eq(cursor.id(), first_row[position]);
+            else failures += expect_eq(followed, status_t::malformed_k);
+        }
+        failures += expect_eq(cursor.seek(0), status_t::success_k);
+        failures += expect_eq(cursor.follow(cursor.neighbors().size()), status_t::malformed_k);
+
+        // The snapshot is sticky until refreshed.
+        std::array<key_t, 1> const late_key {fixture.make_key(nodes_k)};
+        failures += expect_eq(index.insert({extras.data(), 1}, {late_key}, metric, {}, context).status,
+                              status_t::success_k);
+        failures += expect_eq(static_cast<std::size_t>(cursor.visible_count()), nodes_k);
+        failures += expect_eq(cursor.seek(static_cast<node_id_t>(nodes_k)), status_t::malformed_k);
+        cursor.refresh();
+        failures += expect_eq(static_cast<std::size_t>(cursor.visible_count()), nodes_k + 1);
+        failures += expect_eq(cursor.seek(static_cast<node_id_t>(nodes_k)), status_t::success_k);
+
+        // A cursor lane races an inserting & wiring lane; every visited id stays below
+        // that pass's snapshot, and the final refresh converges on the full prefix.
+        fu::flat_pool_t pool;
+        if (fu::failed(pool.spawn(2))) return failures + expect(false);
+        std::atomic<std::size_t> lane_failures {0};
+        std::atomic<bool> writer_done {false};
+        pool.for_threads([&](std::size_t lane) noexcept {
+            if (lane == 0) {
+                auto lane_metric = fixture.make_metric();
+                context_t lane_context {basic_seed_wiring_k + 2, counting_allocator<std::byte> {ledger}};
+                std::vector<key_t> lane_keys(racing_inserts_k);
+                for (std::size_t ordinal = 0; ordinal != racing_inserts_k; ++ordinal)
+                    lane_keys[ordinal] = fixture.make_key(nodes_k + 1 + ordinal);
+                auto const inserted = index.insert({extras.data() + 1, racing_inserts_k}, {lane_keys}, lane_metric, {},
+                                                   lane_context, basic_keep_diverse_t {basic_connectivity_k});
+                if (inserted.status != status_t::success_k) lane_failures.fetch_add(1);
+                for (std::size_t round = 0; round != 512; ++round) {
+                    [[maybe_unused]] auto const linked = index.link(1, 2 + round % 8);
+                    [[maybe_unused]] status_t const unlinked = index.unlink(1, 2 + round % 8);
+                }
+                writer_done.store(true, std::memory_order_release);
+                return;
+            }
+            if (lane != 1) return;
+            cursor_t racing_cursor {index, counting_allocator<std::byte> {ledger}};
+            do {
+                racing_cursor.refresh();
+                node_id_t const snapshot = racing_cursor.visible_count();
+                if (failed(racing_cursor.seek(0))) {
+                    lane_failures.fetch_add(1);
+                    return;
+                }
+                for (; racing_cursor; ++racing_cursor)
+                    if (racing_cursor.id() >= snapshot) lane_failures.fetch_add(1);
+            } while (!writer_done.load(std::memory_order_acquire));
+        });
+        failures += expect_eq(lane_failures.load(), 0u);
+        cursor.refresh();
+        failures += expect_eq(static_cast<std::size_t>(cursor.visible_count()), index.size());
+
+        // The certified arm agrees with the concurrent one on a settled graph.
+        basic_ram_cursor<index_t, synchronization_t::immutable_k, counting_allocator<std::byte>> settled_cursor {
+            index, counting_allocator<std::byte> {ledger}};
+        failures += expect_eq(settled_cursor.seek(0), status_t::success_k);
+        std::size_t settled_visited = 0;
+        for (; settled_cursor; ++settled_cursor) ++settled_visited;
+        failures += expect_eq(settled_visited, index.size());
+    }
+    failures += expect_eq(ledger.live_bytes.load(), 0);
+    return failures;
+}
+
 /** @brief The SafeGraphs adapter loop: re-frames a saved basic snapshot as a SafeGraphs
  *      monolith - the "SAFEGRPH" magic, a JSON header, and the untouched aligned buffers
  *      re-based to the data segment - then parses it back through the repo's own header
@@ -1802,6 +2029,7 @@ std::size_t test_basic_scenarios(fixture_type_ const& fixture) {
     failures += test_basic_wiring(fixture);
     failures += test_basic_allocation_budget(fixture);
     failures += test_basic_snapshot_roundtrip(fixture);
+    failures += test_basic_snapshot_regions(fixture);
     failures += test_basic_snapshot_hostile(fixture);
     failures += test_basic_health(fixture);
     failures += test_basic_concurrent_build(fixture);
@@ -1812,6 +2040,7 @@ std::size_t test_basic_scenarios(fixture_type_ const& fixture) {
     failures += test_basic_starved(fixture);
     failures += test_basic_wiring_race(fixture);
     failures += test_basic_overflow_race(fixture);
+    failures += test_basic_cursor(fixture);
     return failures;
 }
 
