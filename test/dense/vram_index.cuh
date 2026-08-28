@@ -82,12 +82,12 @@ std::size_t test_cuda_configuration(char const* name) {
     // The suite is composed here, not reflected: every call below is a capability claim
     // this fully-concurrent, serializable category makes about itself.
     std::size_t failures_count = 0;
-    failures_count += test_guards<index_t>(make_index);
-    failures_count += test_three_vectors<index_t, kernel_>(make_index);
-    failures_count += test_growth_and_recall<index_t, kernel_>(make_index);
-    failures_count += test_save_load_roundtrip<index_t, kernel_>(make_index);
-    failures_count += test_concurrent_build<index_t, kernel_>(make_index);
-    failures_count += test_concurrent_search<index_t, kernel_>(make_index);
+    failures_count += test_dense_guards<index_t>(make_index);
+    failures_count += test_dense_three_vectors<index_t, kernel_>(make_index);
+    failures_count += test_dense_growth_and_recall<index_t, kernel_>(make_index);
+    failures_count += test_dense_save_load_roundtrip<index_t, kernel_>(make_index);
+    failures_count += test_dense_concurrent_build<index_t, kernel_>(make_index);
+    failures_count += test_dense_concurrent_search<index_t, kernel_>(make_index);
     return report(name, failures_count);
 }
 

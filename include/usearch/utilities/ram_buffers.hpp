@@ -25,7 +25,8 @@
 #include <type_traits> // `std::is_trivially_destructible`, `std::is_integral`
 #include <utility>     // `std::swap`, `std::move`, `std::forward`
 
-#include "usearch/utilities/types.hpp" // `status_t`, `succeeded`, `failed`
+#include "usearch/utilities/types.hpp"      // `status_t`, `succeeded`, `failed`
+#include "usearch/utilities/sanitizers.hpp" // `annotate_container`
 
 namespace unum {
 namespace usearch {
@@ -768,6 +769,8 @@ class growing_buffer {
 
     void reset() noexcept {
         clear();
+        // The annotation contract: full addressability returns before the storage does.
+        annotate_container(elements_, elements_ + capacity_, elements_, elements_ + capacity_);
         if (elements_) allocator_.deallocate(elements_, capacity_);
         elements_ = nullptr;
         capacity_ = 0;
@@ -776,6 +779,7 @@ class growing_buffer {
     inline void clear() noexcept {
         if constexpr (!std::is_trivially_destructible<element_t>())
             for (std::size_t position = 0; position != size_; ++position) elements_[position].~element_t();
+        annotate_container(elements_, elements_ + capacity_, elements_ + size_, elements_);
         size_ = 0;
     }
 
@@ -814,10 +818,15 @@ class growing_buffer {
         auto new_elements = allocator_.allocate(new_capacity);
         if (!new_elements) return status_t::bad_alloc_k;
 
+        // A fresh region arrives fully addressable, so poison its slack first; the used
+        // prefix stays open for the relocating constructions below.
+        annotate_container(new_elements, new_elements + new_capacity, new_elements + new_capacity,
+                           new_elements + size_);
         for (std::size_t position = 0; position != size_; ++position) {
             new (new_elements + position) element_t(std::move(elements_[position]));
             elements_[position].~element_t();
         }
+        annotate_container(elements_, elements_ + capacity_, elements_ + size_, elements_ + capacity_);
         if (elements_) allocator_.deallocate(elements_, capacity_);
 
         elements_ = new_elements;
@@ -831,6 +840,7 @@ class growing_buffer {
         reset();
         if (count == 0) return status_t::success_k;
         if (status_t const sized = reserve_exactly(count); failed(sized)) return sized;
+        annotate_container(elements_, elements_ + capacity_, elements_ + size_, elements_ + count);
         if constexpr (std::is_trivially_default_constructible<element_t>())
             std::memset(static_cast<void*>(elements_), 0, count * sizeof(element_t));
         else
@@ -849,12 +859,14 @@ class growing_buffer {
         reset();
         if (count == 0) return status_t::success_k;
         if (status_t const sized = reserve_exactly(count); failed(sized)) return sized;
+        annotate_container(elements_, elements_ + capacity_, elements_ + size_, elements_ + count);
         size_ = count;
         return status_t::success_k;
     }
 
     /** @brief Appends @p element into pre-reserved capacity - the hot-path form. */
     inline void push_back_reserved(element_t element) noexcept {
+        annotate_container(elements_, elements_ + capacity_, elements_ + size_, elements_ + size_ + 1);
         new (elements_ + size_) element_t(std::move(element));
         ++size_;
     }
@@ -871,6 +883,7 @@ class growing_buffer {
     inline element_t pop_back() noexcept {
         element_t popped = std::move(elements_[--size_]);
         elements_[size_].~element_t();
+        annotate_container(elements_, elements_ + capacity_, elements_ + size_ + 1, elements_ + size_);
         return popped;
     }
 
@@ -878,7 +891,9 @@ class growing_buffer {
      *      growth and destroying shrinkage; never allocates. Instantiates only for
      *      default-constructible elements. */
     inline void resize_reserved(std::size_t count) noexcept {
+        std::size_t const previous = size_;
         for (; size_ > count; --size_) elements_[size_ - 1].~element_t();
+        annotate_container(elements_, elements_ + capacity_, elements_ + previous, elements_ + count);
         for (; size_ < count; ++size_) new (elements_ + size_) element_t();
     }
 };

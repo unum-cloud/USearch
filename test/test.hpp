@@ -17,9 +17,11 @@
 #include <cstdint> // `PTRDIFF_MAX` - the unbounded allocation budget
 #include <cstdlib> // `std::malloc`, `std::free`, `std::abort`
 
-#include <atomic> // `std::atomic`
-#include <chrono> // `std::chrono::microseconds` - the flaky waiter's oversleep
-#include <thread> // `std::this_thread::yield`, `std::this_thread::sleep_for`
+#include <algorithm> // `std::sort`, `std::unique` - the dispensed-id density check
+#include <atomic>    // `std::atomic`
+#include <chrono>    // `std::chrono::microseconds` - the flaky waiter's oversleep
+#include <thread>    // `std::this_thread::yield`, `std::this_thread::sleep_for`
+#include <vector>    // `std::vector` - the dispensed-id density check
 
 #include <fmt/format.h>
 
@@ -67,6 +69,66 @@ inline std::size_t report(char const* name, std::size_t failures) {
 inline std::size_t report(char const* name, char const* skip_reason) {
     fmt::println("skipped  {:<20} : {}", name, skip_reason);
     return 0;
+}
+
+/** @brief Ids dispensed to racing lanes must land dense & duplicate-free: sorted in
+ *      place, unique, and running from @p first_id through the half-open bound
+ *      @p first_id plus the id count. */
+template <typename node_id_type_>
+inline std::size_t expect_contiguous_ids(std::vector<node_id_type_>& ids, std::size_t first_id) {
+    std::sort(ids.begin(), ids.end());
+    std::size_t failures = expect(std::unique(ids.begin(), ids.end()) == ids.end());
+    failures += expect(!ids.empty() && static_cast<std::size_t>(ids.front()) == first_id &&
+                       static_cast<std::size_t>(ids.back()) == first_id + ids.size() - 1);
+    return failures;
+}
+
+/** @brief Derived-draw salts shared by both scenario libraries. Every scenario family
+ *      owns exactly one named hex-leet seed and never reuses it verbatim: query draws
+ *      XOR @c salt_queries_k, auxiliary value draws - extras, prefills, pairs - XOR
+ *      @c salt_extras_k, per-lane draws add the lane index, and per-context re-seeds add
+ *      small literal offsets. Two salts, disjoint from every lane index and offset, keep
+ *      a family's draws distinct without per-site magic. */
+constexpr u64_t salt_queries_k = 0xFFull;
+/** @brief The auxiliary-draw twin of @ref salt_queries_k. */
+constexpr u64_t salt_extras_k = 0xAAull;
+
+/** @brief Spin ceiling for waits on prompt flags - flags a peer sets within bounded
+ *      work: a gate entry, a hold acquisition, a refusal confirmation. Expiry proves a
+ *      broken rendezvous. Waits on a peer's completion of unbounded-duration work are
+ *      deliberately not hatched at this bound - see @ref attempt_limit_k. */
+constexpr std::size_t spin_limit_k = std::size_t {1} << 28;
+/** @brief Retry ceiling for settle phases & sweep loops: once every racer is done, an
+ *      operation retried this many times without success has provably starved. */
+constexpr std::size_t attempt_limit_k = std::size_t {1} << 20;
+
+/** @brief Spins - yielding - until @p condition holds or @c spin_limit_k expires;
+ *      answers whether the condition held. It never counts failures itself: the caller
+ *      owns the on-expiry story - count & proceed so a hold can die, count & return, or
+ *      open a gate before leaving so the pool cannot deadlock. */
+template <typename condition_type_>
+[[nodiscard]] inline bool spin_until(condition_type_&& condition) noexcept {
+    for (std::size_t spins = 0; spins != spin_limit_k; ++spins) {
+        if (condition()) return true;
+        std::this_thread::yield();
+    }
+    return false;
+}
+
+/** @brief The reader-lane invariants over one search's scored results: every id below
+ *      the watermark sampled after the search, distances ascending, the pool bound
+ *      honored. Answers the violation count silently - racing lanes add it to their
+ *      shared counter, since printing from inside a race would interleave & flood - and
+ *      the status verdict stays at the call site: lanes differ in how they record it. */
+template <typename scored_type_>
+inline std::size_t scored_failures(scored_type_ const* results, std::size_t results_count, std::size_t published_after,
+                                   std::size_t results_bound) noexcept {
+    std::size_t failures = results_count > results_bound;
+    for (std::size_t position = 0; position != results_count; ++position) {
+        failures += static_cast<std::size_t>(results[position].node_id) >= published_after;
+        if (position) failures += results[position].distance < results[position - 1].distance;
+    }
+    return failures;
 }
 
 /** @brief Shared tally of live bytes & allocation counts, mutated by every @c counting_allocator. */

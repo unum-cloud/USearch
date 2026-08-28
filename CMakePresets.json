@@ -89,6 +89,23 @@
             }
         },
         {
+            "name": "tsan",
+            "inherits": "base",
+            "displayName": "TSan - concurrency suites under ThreadSanitizer",
+            "description": "GCC & -fsanitize=thread over RelWithDebInfo - the Debug wiring arms ASan & LSan, which TSan cannot share a process with. -O1 keeps the instrumented suites tolerable, and the mutex annotations in sanitizers.hpp light up under this preset alone. Built with GCC: Clang here ships no compiler-rt.",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "CMAKE_C_COMPILER": "gcc",
+                "CMAKE_CXX_COMPILER": "g++",
+                "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O1 -g -DNDEBUG -fsanitize=thread -fno-omit-frame-pointer",
+                "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O1 -g -DNDEBUG -fsanitize=thread -fno-omit-frame-pointer",
+                "USEARCH_BUILD_TEST_CPP": "ON",
+                "USEARCH_BUILD_BENCH_CPP": "OFF",
+                "USEARCH_BUILD_LIB_C": "OFF",
+                "USEARCH_BUILD_TEST_C": "OFF"
+            }
+        },
+        {
             "name": "dev",
             "inherits": "base",
             "displayName": "Dev - everything, CUDA included",
@@ -153,6 +170,11 @@
             "jobs": 0
         },
         {
+            "name": "tsan",
+            "configurePreset": "tsan",
+            "jobs": 0
+        },
+        {
             "name": "dev",
             "configurePreset": "dev",
             "jobs": 0
@@ -193,6 +215,14 @@
             "name": "release",
             "inherits": "base",
             "configurePreset": "release"
+        },
+        {
+            "name": "tsan",
+            "inherits": "base",
+            "configurePreset": "tsan",
+            "environment": {
+                "TSAN_OPTIONS": "halt_on_error=1 second_deadlock_stack=1"
+            }
         },
         {
             "name": "dev",

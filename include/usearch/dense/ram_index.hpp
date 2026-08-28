@@ -6,7 +6,8 @@
  */
 #pragma once
 
-#include <bit> // `std::bit_width`, `std::bit_floor`
+#include <bit>         // `std::bit_width`, `std::bit_floor`
+#include <type_traits> // `std::has_unique_object_representations_v` - the geometry word's guard
 
 #include <forkunion/capabilities.hpp> // `fu::preferred_yield_t` - the default waiter
 #include <forkunion/types.hpp>
@@ -288,6 +289,10 @@ struct dense_ram_index {
      *      @c wait_type_, reused by external readers waiting out transient lock sentinels. */
     using wait_t = wait_type_;
 
+    /** @brief The strongest @c synchronization_t contract this design honors: arbitrary
+     *      readers and writers may be live, and even snapshots run optimistically. */
+    inline static constexpr synchronization_t synchronization_ceiling_k = synchronization_t::concurrent_k;
+
     template <typename, synchronization_t, typename>
     friend struct dense_ram_cursor;
 
@@ -400,32 +405,37 @@ struct dense_ram_index {
      */
     std::atomic<node_id_t> last_visible_id_ {0};
 
-    /** @brief Packed geometry representation: vector dimensions in the high 32 bits, neighbor-list
-     *      connectivity in the low ones; zero means "not reserved yet". */
-    using packed_geometry_id_t = u64_t;
-
     /**
-     *  @brief Once-frozen geometry of the index. Set exactly once by the first successful
-     *      @c reserve() via a single cold-path compare-exchange - the only CAS in the whole
-     *      index - so concurrent reservations, insertions & searches never race on it.
+     *  @brief Once-frozen geometry: vector dimensions in the high half, neighbor-list
+     *      connectivity in the low one; zero bits means "not reserved yet". Two fields ride
+     *      one word so competing first reservations agree on both through a single cold-path
+     *      compare-exchange - the only CAS in the whole index - and every reader unpacks a
+     *      local acquire-loaded copy, so a torn or half-frozen geometry is unrepresentable.
      *      Connectivity stays a power of two, tiling whole cache lines, with the leading slot
      *      of every neighbor list doubling as the lock without sacrificing a slot.
      */
-    std::atomic<packed_geometry_id_t> geometry_ {0};
+    struct geometry_t {
+        u64_t packed_bits = 0;
 
-    /** @brief Packs @p dimensions & @p connectivity into the @c geometry_ representation. */
-    inline static constexpr packed_geometry_id_t pack_geometry(std::size_t dimensions,
-                                                               connectivity_t connectivity) noexcept {
-        return (static_cast<packed_geometry_id_t>(dimensions) << 32u) | static_cast<packed_geometry_id_t>(connectivity);
-    }
-    /** @brief Extracts the vector dimensions from a packed @p geometry value. */
-    inline static constexpr small_size_t geometry_dimensions(packed_geometry_id_t geometry) noexcept {
-        return static_cast<small_size_t>(geometry >> 32u);
-    }
-    /** @brief Extracts the neighbor-list connectivity from a packed @p geometry value. */
-    inline static constexpr small_size_t geometry_connectivity(packed_geometry_id_t geometry) noexcept {
-        return static_cast<small_size_t>(geometry);
-    }
+        constexpr geometry_t() noexcept = default;
+        /** @brief Packs @p dimensions & @p connectivity - the inverse of the accessors. */
+        constexpr geometry_t(std::size_t dimensions, connectivity_t connectivity) noexcept
+            : packed_bits((static_cast<u64_t>(dimensions) << 32u) | static_cast<u64_t>(connectivity)) {}
+
+        /** @brief Scalar dimensions per vector. */
+        constexpr small_size_t dimensions() const noexcept { return static_cast<small_size_t>(packed_bits >> 32u); }
+        /** @brief Neighbor ids per node's list. */
+        constexpr small_size_t connectivity() const noexcept { return static_cast<small_size_t>(packed_bits); }
+        /** @brief @c true once frozen by the first successful @c reserve(). */
+        constexpr explicit operator bool() const noexcept { return packed_bits != 0; }
+        constexpr bool operator==(geometry_t const&) const noexcept = default;
+    };
+    static_assert(std::has_unique_object_representations_v<geometry_t>,
+                  "The compare-exchange compares object representations, never operator==: " //
+                  "padding would make value-equal geometries spuriously lose the freeze race");
+    static_assert(std::atomic<geometry_t>::is_always_lock_free,
+                  "Every geometry load must stay one plain instruction, never a library call");
+    std::atomic<geometry_t> geometry_ {};
 
     /** @brief Constructed chunks per directory. Deliberately non-atomic: only the one "responsible"
      *      grower thread mutates it, and successive growers are ordered by the acquire/release pair
@@ -541,8 +551,10 @@ struct dense_ram_index {
      *      of @p output - typed element copies, one bulk run per chunk. The row width in
      *      storage values derives from the stride, so sub-byte packing needs no special case.
      *      Templated because the chunk directories are distinct @c fu::dynamic_padded_array
-     *      instantiations. */
-    template <typename chunks_type_, typename value_type_>
+     *      instantiations. Concurrent back-linkers write neighbor words through
+     *      @c std::atomic_ref, so the speculative concurrent arm reads them the same way;
+     *      certified contracts keep the vectorizable bulk copy. */
+    template <synchronization_t synchronization_, typename chunks_type_, typename value_type_>
     static void save_rows_(nk::tensor_span<value_type_, 2> output, chunks_type_ const& chunks,
                            std::size_t count) noexcept {
         std::size_t const row_values = static_cast<std::size_t>(output.stride_bytes(0)) / sizeof(value_type_);
@@ -550,7 +562,15 @@ struct dense_ram_index {
         for (small_size_t chunk = 0; count; ++chunk) {
             std::size_t const chunk_rows = capacity_of_chunks(chunk + 1) - capacity_of_chunks(chunk);
             std::size_t const rows = min_of(chunk_rows, count);
-            destination = std::copy_n(chunks[chunk].data(), rows * row_values, destination);
+            std::size_t const values = rows * row_values;
+            value_type_ const* source = chunks[chunk].data();
+            // The `const_cast` is the pre-P3323 currency for atomics living in const memory.
+            if constexpr (synchronization_ == synchronization_t::concurrent_k)
+                for (std::size_t value = 0; value != values; ++value)
+                    destination[value] = std::atomic_ref<value_type_>(const_cast<value_type_&>(source[value]))
+                                             .load(std::memory_order_relaxed);
+            else std::copy_n(source, values, destination);
+            destination += values;
             count -= rows;
         }
     }
@@ -687,10 +707,10 @@ struct dense_ram_index {
      */
     expected<std::size_t> create_next_chunk(std::size_t minimal_capacity) noexcept {
         // Growing before the geometry is frozen is a usage error, not an allocation failure.
-        packed_geometry_id_t const geometry = geometry_.load(std::memory_order_acquire);
+        geometry_t const geometry = geometry_.load(std::memory_order_acquire);
         if (!geometry) return {0, status_t::uninitialized_k};
-        std::size_t const chunk_dimensions = geometry_dimensions(geometry);
-        std::size_t const chunk_connectivity = geometry_connectivity(geometry);
+        std::size_t const chunk_dimensions = geometry.dimensions();
+        std::size_t const chunk_connectivity = geometry.connectivity();
 
         // Size the never-reallocating chunk directories ahead of the very first chunk - safe
         // without any locks, because growth is provably single-threaded via the grower election.
@@ -897,9 +917,8 @@ struct dense_ram_index {
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k,
               typename predicate_type_ = no_predicate_t>
-    [[nodiscard]] status_t search_around(vector_view_t query, vector_norms_t query_norms,
-                                         node_id_t first_invisible_id, std::size_t expansion_factor,
-                                         dense_traversal_context_t& context,
+    [[nodiscard]] status_t search_around(vector_view_t query, vector_norms_t query_norms, node_id_t first_invisible_id,
+                                         std::size_t expansion_factor, dense_traversal_context_t& context,
                                          predicate_type_&& predicate = predicate_type_ {}) noexcept {
         constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, no_predicate_t>;
 
@@ -1438,8 +1457,9 @@ struct dense_ram_index {
      *      otherwise re-selecting the diverse best among the existing links plus the newcomer.
      *
      *  Locking discipline: at most one neighbor lock is held at any
-     *  moment, and never while spinning on the watermark - callers invoke this only after their
-     *  publication turn. An exchange that returns the sentinel did @b not acquire the lock -
+     *  moment, and never while spinning on the watermark - callers invoke this after wiring
+     *  their own row and before their watermark turn, so every lock is released by the time
+     *  the turn's spin begins. An exchange that returns the sentinel did @b not acquire the lock -
      *  another writer owns it - so we politely retry. All slot writes happen under the lock, and
      *  the unlocking release-store of slot 0 is what republishes the edited list.
      *
@@ -1449,6 +1469,10 @@ struct dense_ram_index {
      */
     void back_link_neighbors(node_id_t new_node_id, vector_view_t new_vector, vector_norms_t new_norms,
                              selection_t const& selected, dense_traversal_context_t& context) noexcept {
+        // Pairs with the acquire fence in the snapshot probe: a save reading any row word
+        // written below - the relaxed tail stores included - proves this node's dispense to
+        // the probe's re-check, so an overlapped copy always reports contention.
+        std::atomic_thread_fence(std::memory_order_release);
 
         results_array_t& refining_candidates = context.refining_candidates;
         std::size_t const node_connectivity = connectivity();
@@ -1543,9 +1567,7 @@ struct dense_ram_index {
     std::size_t size() const noexcept { return last_visible_id_.load(); }
 
     /** @brief Neighbor ids per node's list - its full fixed capacity, none lost to bookkeeping. */
-    std::size_t connectivity() const noexcept {
-        return geometry_connectivity(geometry_.load(std::memory_order_acquire));
-    }
+    std::size_t connectivity() const noexcept { return geometry_.load(std::memory_order_acquire).connectivity(); }
 
     /** @brief Outcome of a @c reserve() call: the capacity & connectivity actually in effect. */
     struct reserve_result_t {
@@ -1582,12 +1604,12 @@ struct dense_ram_index {
     reserve_result_t reserve(reserve_capacity_t config) noexcept {
 
         // Freeze the geometry exactly once; competing first-reservations are decided by one CAS.
-        packed_geometry_id_t const desired_geometry = pack_geometry(config.dimensions, config.connectivity);
-        packed_geometry_id_t expected_geometry = 0;
+        geometry_t const desired_geometry {config.dimensions, config.connectivity};
+        geometry_t expected_geometry {};
         bool const froze_now = geometry_.compare_exchange_strong( //
             expected_geometry, desired_geometry, std::memory_order_acq_rel, std::memory_order_acquire);
-        packed_geometry_id_t const frozen_geometry = froze_now ? desired_geometry : expected_geometry;
-        connectivity_t const frozen_connectivity = static_cast<connectivity_t>(geometry_connectivity(frozen_geometry));
+        geometry_t const frozen_geometry = froze_now ? desired_geometry : expected_geometry;
+        connectivity_t const frozen_connectivity = static_cast<connectivity_t>(frozen_geometry.connectivity());
         if (frozen_geometry != desired_geometry) return {0, frozen_connectivity, status_t::config_mismatch_k};
 
         while (true) {
@@ -1679,9 +1701,9 @@ struct dense_ram_index {
         // enough slack for the neighbor-selection heuristic to prune - unless the caller overrides it.
         // Geometry is frozen by the first successful `reserve()` - a hard prerequisite here:
         // without it, neither the copy width nor the neighbor-list width is defined.
-        packed_geometry_id_t const geometry = geometry_.load(std::memory_order_acquire);
+        geometry_t const geometry = geometry_.load(std::memory_order_acquire);
         if (!geometry) return {status_t::uninitialized_k, size()};
-        std::size_t const node_connectivity = geometry_connectivity(geometry);
+        std::size_t const node_connectivity = geometry.connectivity();
         std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
                                                                      : node_connectivity * 2;
 
@@ -1704,7 +1726,7 @@ struct dense_ram_index {
         if constexpr (has_tiles_k) {
             std::size_t const wanted = max_of<std::size_t>(expansion_factor, node_connectivity + 1);
             std::size_t const pool = divide_round_up<std::size_t>(wanted, tile_span_k) * tile_span_k;
-            if (failed(context.reserve_tiles(pool, tiles_kit_t::scratch_bytes(pool, geometry_dimensions(geometry)))))
+            if (failed(context.reserve_tiles(pool, tiles_kit_t::scratch_bytes(pool, geometry.dimensions()))))
                 return {status_t::bad_alloc_k, size()};
         }
 
@@ -1715,7 +1737,7 @@ struct dense_ram_index {
 
         // All slots share one contiguous packed row layout, so the copy width is loop-invariant.
         // Sub-byte types pack several dimensions per storage value - count storage bytes, not dimensions.
-        std::size_t const vector_bytes = divide_round_up<std::size_t>(geometry_dimensions(geometry),
+        std::size_t const vector_bytes = divide_round_up<std::size_t>(geometry.dimensions(),
                                                                       nk::dimensions_per_value<scalar_t>()) *
                                          sizeof(scalar_t);
 
@@ -1754,9 +1776,9 @@ struct dense_ram_index {
             node_id_t const first_invisible_id = last_visible_id_.load(std::memory_order_acquire);
             // The row is already claimed, so a refused walk wires a thinner node rather than
             // abandoning an id nothing will ever publish.
-            if (first_invisible_id != 0)
-                [[maybe_unused]] status_t const walked =
-                    search_around(owned_vector, new_norms, first_invisible_id, expansion_factor, context);
+            if (first_invisible_id != 0) [[maybe_unused]]
+                status_t const walked = search_around(owned_vector, new_norms, first_invisible_id, expansion_factor,
+                                                      context);
 
             // Select up to `connectivity()` diverse links from the search results and write them
             // into our own still-unpublished list. No locks are needed: no reader can arrive
@@ -1779,6 +1801,13 @@ struct dense_ram_index {
             node_id_t const first_link_id = selected_count ? selected[0].node_id : new_node_id;
             new_neighbors.unlock(first_link_id);
 
+            // Wire the reverse edges before taking the watermark turn: once the watermark
+            // passes this id, no thread edits any published row on its behalf - the
+            // settlement probe in the snapshot rests on exactly that - and the own row
+            // stays unreachable below the watermark, so unlocking it above is harmless.
+            // Every neighbor lock is released inside, so the spin below holds none.
+            back_link_neighbors(new_node_id, owned_vector, new_norms, selected, context);
+
             // Take our watermark turn, strictly in dispensed order, keeping the visible prefix
             // hole-free. Each thread holds at most one unpublished id, so this wait is bounded by
             // one wiring per other in-flight thread - the "publication convoy" is the accepted
@@ -1789,12 +1818,6 @@ struct dense_ram_index {
                 // predecessor's publication store wakes us to re-check.
                 wait_type_ {}(last_visible_id_, watermark, 0u, fu::wait_uncapped_t {});
             last_visible_id_.store(new_node_id + 1, std::memory_order_release);
-
-            // Only now - published, watermark turn behind us, no locks held - wire the reverse
-            // edges. Back-linking after publication keeps every lock acquisition off the
-            // serialized publication chain; readers may briefly see one-directional edges,
-            // which approximate search tolerates by construction.
-            back_link_neighbors(new_node_id, owned_vector, new_norms, selected, context);
         }
 
         insert_result_t result;
@@ -1855,12 +1878,12 @@ struct dense_ram_index {
         // Same load-bearing reservations as in `insert`: the scratch structures never grow on
         // their own mid-traversal. A predicated walk also owns the admitted pool - the
         // re-selection buffer, idle during any search - sized to the same expansion.
-        if (!context.results.reserve(expansion_factor) ||       //
-            !context.frontier.reserve(expansion_factor * 4u) || //
-            !context.visited.reserve(expansion_factor * 4u))
+        if (failed(context.results.reserve(expansion_factor)) ||       //
+            failed(context.frontier.reserve(expansion_factor * 4u)) || //
+            failed(context.visited.reserve(expansion_factor * 4u)))
             return {status_t::bad_alloc_k};
         if constexpr (predicated_k) {
-            if (!context.refining_candidates.reserve(expansion_factor)) return {status_t::bad_alloc_k};
+            if (failed(context.refining_candidates.reserve(expansion_factor))) return {status_t::bad_alloc_k};
             context.refining_candidates.clear();
         }
         context.results.clear();
@@ -1985,52 +2008,70 @@ struct dense_ram_index {
 
     /** @brief The shapes a @c save() of the current contents fills. */
     saved_shape_t saved_shape() const noexcept {
-        packed_geometry_id_t const geometry = geometry_.load(std::memory_order_acquire);
+        geometry_t const geometry = geometry_.load(std::memory_order_acquire);
         std::size_t const count = last_visible_id_.load(std::memory_order_acquire);
-        return {count, geometry_dimensions(geometry), geometry_connectivity(geometry)};
+        return {count, geometry.dimensions(), geometry.connectivity()};
     }
 
     /**
      *  @brief Copies the published prefix into two caller-owned matrices - vectors and
-     *      sentinel-padded neighbor lists. Norms are never serialized: they re-derive from
-     *      the vectors on @c load(). The neighbor rows keep the positional sentinel
-     *      convention - any id at or past the node count names no node - so the matrix is
-     *      interchange-ready as a fixed-degree column without rewriting.
+     *      sentinel-padded neighbor lists - one copy-loop instantiation per contract.
+     *      Norms are never serialized: they re-derive from the vectors on @c load(). The
+     *      neighbor rows keep the positional sentinel convention - any id at or past the
+     *      node count names no node - so the matrix is interchange-ready as a fixed-degree
+     *      column without rewriting.
      *
-     *  A checkpointing reader, not a mutator: concurrent searches keep running, but the caller
-     *  must certify a mutation-free environment - @c immutable_k or @c exclusive_k - since
-     *  back-linking rewrites published rows. The counters are re-checked after the copy, so a
-     *  violated contract surfaces as @c contended_k instead of a silently torn snapshot.
+     *  A checkpointing reader, not a mutator: concurrent searches keep running on every arm.
+     *  The concurrent arm is a speculative copy staging neighbor rows through relaxed
+     *  atomics - formally race-free against live back-linkers - that answers @c contended_k
+     *  whenever any insert overlapped the bracket and @c success_k only over a proven-
+     *  quiescent interval. The certified arms keep plain vectorizable copies, and a violated
+     *  certification still surfaces as @c contended_k instead of a silently torn snapshot.
      *
      *  @param[out] vectors Destination @b [nodes,dimensions] matrix, per @c saved_shape().
      *  @param[out] neighbors Destination @b [nodes,connectivity] matrix, per @c saved_shape().
-     *  @param[in] synchronization The caller's certified environment; never @c concurrent_k.
      *  @return @c success_k, or why the snapshot was not produced.
      */
-    status_t save(nk::matrix_span<scalar_t> vectors, nk::matrix_span<node_id_t> neighbors,
-                  synchronization_t synchronization) const noexcept {
-        if (synchronization == synchronization_t::concurrent_k) return status_t::config_mismatch_k;
-
-        // The seqlock-style guard: snapshot the counters, copy, and re-check. Ordering the
-        // watermark before the dispenser makes the equality below prove a settled past.
+    template <synchronization_t synchronization_>
+    status_t save_typed(nk::matrix_span<scalar_t> vectors, nk::matrix_span<node_id_t> neighbors) const noexcept {
+        // The settlement probe, trailing counter first: the pair is monotone with
+        // visible ≤ dispensed at every instant, so equal reads in this order prove the
+        // pair rested at that value across the whole probe, not one instant. A thread
+        // edits published rows only between its dispense & its watermark turn - reverse
+        // edges land before the turn - so equality means no such thread exists.
         node_id_t const visible_before = last_visible_id_.load(std::memory_order_acquire);
         node_id_t const dispensed_before = next_visible_id_.load(std::memory_order_acquire);
         node_id_t const allocated_before = last_allocated_id_.load(std::memory_order_acquire);
         if (visible_before != dispensed_before) return status_t::contended_k;
 
-        saved_shape_t const shape = saved_shape();
-        if (vectors.extent(0) != shape.nodes || vectors.extent(1) != shape.dimensions ||
-            neighbors.extent(0) != shape.nodes || neighbors.extent(1) != shape.connectivity)
+        geometry_t const geometry = geometry_.load(std::memory_order_acquire);
+        std::size_t const nodes = static_cast<std::size_t>(visible_before);
+        if (vectors.extent(0) != nodes || vectors.extent(1) != geometry.dimensions() || neighbors.extent(0) != nodes ||
+            neighbors.extent(1) != geometry.connectivity())
             return status_t::config_mismatch_k;
 
-        save_rows_(vectors, vectors_chunks_, shape.nodes);
-        save_rows_(neighbors, neighbors_chunks_, shape.nodes);
+        // Vector rows are immutable once published and copy plain on every arm; only the
+        // neighbor rows follow the arm's staging discipline.
+        save_rows_<synchronization_t::immutable_k>(vectors, vectors_chunks_, nodes);
+        save_rows_<synchronization_>(neighbors, neighbors_chunks_, nodes);
 
-        // Re-check in the same order: any movement means the contract was violated mid-copy.
-        bool const settled = last_visible_id_.load(std::memory_order_acquire) == visible_before &&
-                             next_visible_id_.load(std::memory_order_acquire) == dispensed_before &&
-                             last_allocated_id_.load(std::memory_order_acquire) == allocated_before;
+        // Orders the staged reads before the re-reads below; pairs with the release fence
+        // heading @c back_link_neighbors, so any row edit the copy overlapped surfaces here.
+        // The non-monotone allocation counter rides along as a bonus growth sensor.
+        std::atomic_thread_fence(std::memory_order_acquire);
+        bool const settled = last_visible_id_.load(std::memory_order_relaxed) == visible_before &&
+                             next_visible_id_.load(std::memory_order_relaxed) == dispensed_before &&
+                             last_allocated_id_.load(std::memory_order_relaxed) == allocated_before;
         return settled ? status_t::success_k : status_t::contended_k;
+    }
+
+    /** @brief The runtime face of @ref save_typed - @c exclusive_k shares the immutable
+     *      instantiation, exactly as @c search collapses the certified arms. */
+    status_t save(nk::matrix_span<scalar_t> vectors, nk::matrix_span<node_id_t> neighbors,
+                  synchronization_t synchronization) const noexcept {
+        if (synchronization == synchronization_t::concurrent_k)
+            return save_typed<synchronization_t::concurrent_k>(vectors, neighbors);
+        return save_typed<synchronization_t::immutable_k>(vectors, neighbors);
     }
 
     /**
@@ -2050,17 +2091,19 @@ struct dense_ram_index {
     status_t load(nk::matrix_view<scalar_t> vectors, nk::matrix_view<node_id_t> neighbors,
                   synchronization_t synchronization) noexcept {
         if (synchronization != synchronization_t::exclusive_k) return status_t::config_mismatch_k;
-        packed_geometry_id_t const geometry = geometry_.load(std::memory_order_acquire);
+        geometry_t const geometry = geometry_.load(std::memory_order_acquire);
         if (!geometry || last_visible_id_.load(std::memory_order_acquire) != 0) return status_t::config_mismatch_k;
 
         std::size_t const count = vectors.extent(0);
-        if (vectors.extent(1) != geometry_dimensions(geometry) || neighbors.extent(0) != count ||
-            neighbors.extent(1) != geometry_connectivity(geometry))
+        if (vectors.extent(1) != geometry.dimensions() || neighbors.extent(0) != count ||
+            neighbors.extent(1) != geometry.connectivity())
             return status_t::config_mismatch_k;
         if (!count) return status_t::success_k;
 
-        expected<std::size_t> const grown = create_next_chunk(count);
-        if (grown.status != status_t::success_k) return grown.status;
+        // Claim the rows through the ordinary capacity protocol: a preceding `reserve` is
+        // consumed instead of duplicated, and chunks grow only on a genuine deficit.
+        expected<node_id_t> const claimed = claim_capacity(count);
+        if (claimed.status != status_t::success_k) return claimed.status;
 
         load_rows_(vectors, vectors_chunks_, count);
         load_rows_(neighbors, neighbors_chunks_, count);
@@ -2073,11 +2116,9 @@ struct dense_ram_index {
                 norms_chunks_[location.chunk_index][location.index_in_chunk] = dense_norms(vector_for(location));
             }
 
-        // Publish: identity first, then the capacity credit, and the watermark last with a
-        // release - the same order every publication in this design follows.
-        last_allocated_id_.fetch_add(static_cast<node_id_t>(count), std::memory_order_relaxed);
+        // Publish: identity first, and the watermark last with a release - the same order
+        // every publication in this design follows.
         next_visible_id_.fetch_add(static_cast<node_id_t>(count), std::memory_order_relaxed);
-        remaining_capacity_.fetch_add(static_cast<std::ptrdiff_t>(grown.value - count), std::memory_order_release);
         last_visible_id_.store(static_cast<node_id_t>(count), std::memory_order_release);
         return status_t::success_k;
     }
@@ -2089,17 +2130,16 @@ struct dense_ram_index {
  *      staged copy of the current node's neighbor list.
  *
  *  Strictly read-only under every contract - the index is never written through, so readers
- *  can never stall writers or convoy behind them. The watermark acquire behind the cursor's
- *  snapshot already orders every sub-snapshot publication, so the staging copy needs no fences
- *  of its own: under @c concurrent_k a re-linker may interleave with the copy, and each
- *  naturally-aligned id loads whole, so the worst case is the same stale-but-valid mix the
- *  traversal itself tolerates; exact lists come from the @c immutable_k contract, not locks.
- *  The cursor captures the frozen geometry once at construction, starts past the end, and
- *  @c seek(0) enters the graph.
+ *  can never stall writers or convoy behind them. Under @c concurrent_k the staging reads
+ *  neighbor words through relaxed atomics - a re-linker may interleave with the copy, and the
+ *  worst case is the same stale-but-valid mix the traversal itself tolerates; exact lists come
+ *  from the @c immutable_k contract, which reads plain memory. The cursor captures the frozen
+ *  geometry once at construction, starts past the end, and @c seek(0) enters the graph.
  *
  *  The staged list may contain ids at or above this cursor's watermark snapshot, discovered
  *  through fresh back-links; @c seek & @c follow reject those, and @c refresh widens the
- *  snapshot to admit them.
+ *  snapshot to admit them. A cursor standing past the end stays past the end through a
+ *  @c refresh - entering the admitted region takes an explicit @c seek.
  */
 template <typename index_type_, synchronization_t synchronization_, typename allocator_type_>
 struct dense_ram_cursor {
@@ -2124,7 +2164,7 @@ struct dense_ram_cursor {
                                                                       : std::memory_order_relaxed;
 
     /** @brief The traversed index - never written through, under any contract. */
-    index_t const* index_;
+    index_t const& index_;
     /** @brief The staged @b [connectivity] neighbor copy of the current node. */
     ids_tensor_t staged_neighbors_;
     /** @brief Chunk & row of the current node, derived once per @c seek. */
@@ -2140,13 +2180,13 @@ struct dense_ram_cursor {
 
     /** @brief Binds the cursor & captures its snapshots; allocates nothing - call @c reserve(). */
     explicit dense_ram_cursor(index_t const& index) noexcept
-        : index_(&index), visible_count_(index.last_visible_id_.load(watermark_order_k)), current_(visible_count_),
+        : index_(index), visible_count_(index.last_visible_id_.load(watermark_order_k)), current_(visible_count_),
           connectivity_(static_cast<small_size_t>(index.connectivity())) {}
 
     dense_ram_cursor(dense_ram_cursor const&) = delete;
     dense_ram_cursor& operator=(dense_ram_cursor const&) = delete;
     dense_ram_cursor(dense_ram_cursor&&) = default;
-    dense_ram_cursor& operator=(dense_ram_cursor&&) = default;
+    dense_ram_cursor& operator=(dense_ram_cursor&&) = delete;
 
     /** @brief Sizes the staging for the frozen connectivity through @p allocator - the index's
      *      traversals-side family by default; call once before any @c seek. */
@@ -2158,36 +2198,57 @@ struct dense_ram_cursor {
 
     /** @brief Nodes visible to this cursor; ids strictly below are readable. */
     node_id_t visible_count() const noexcept { return visible_count_; }
-    /** @brief Re-snapshots the watermark, admitting nodes published since construction. */
-    void refresh() noexcept { visible_count_ = index_->last_visible_id_.load(watermark_order_k); }
+
+    /** @brief Widens the snapshot to admit nodes published since; a cursor standing past the
+     *      end stays past the end - entering the admitted region takes an explicit @c seek. */
+    void refresh() noexcept {
+        bool const past_end = current_ == visible_count_;
+        visible_count_ = index_.last_visible_id_.load(watermark_order_k);
+        if (past_end) current_ = visible_count_;
+    }
 
     /** @brief The current node's id; equals @c visible_count() past the end. */
     node_id_t id() const noexcept { return current_; }
     /** @brief @c true while the cursor points at a readable node. */
     explicit operator bool() const noexcept { return current_ < visible_count_; }
     /** @brief Immutable view of the current node's vector; meaningless past the end. */
-    vector_view_t vector() const noexcept { return index_->vector_for(location_); }
+    vector_view_t vector() const noexcept { return index_.vector_for(location_); }
     /** @brief The current node's pre-computed norms; meaningless past the end. */
-    vector_norms_t norms() const noexcept { return index_->norm_for(location_); }
+    vector_norms_t norms() const noexcept { return index_.norm_for(location_); }
     /** @brief The staged neighbor ids of the current node - decoded, stable until the next move. */
     std::span<node_id_t const> neighbors() const noexcept { return to_span(staged_neighbors_).first(staged_count_); }
 
-    /** @brief Positions on @p node & stages a copy of its neighbor list; @c false above the
-     *      snapshot. Read-only under every contract - see the class docstring for why the
-     *      copy needs neither locks nor fences. */
-    bool seek(node_id_t node) noexcept {
-        if (node >= visible_count_) return false;
+    /** @brief Positions on @p node & stages a copy of its neighbor list: @c malformed_k at or
+     *      past the snapshot, @c uninitialized_k before @c reserve - the cursor stays where it
+     *      was on either refusal. Read-only under every contract. */
+    [[nodiscard]] status_t seek(node_id_t node) noexcept {
+        if (node >= visible_count_) return status_t::malformed_k;
+        if (staged_neighbors_.size() < connectivity_) return status_t::uninitialized_k;
         current_ = node;
-        location_ = index_->chunked_location(node);
-        node_ids_view_t const row = index_->neighbors_for(location_);
-        // Slot 0 transiently holds the lock sentinel while a writer re-links. Wait it out
-        // through the index's own monitor - its const-pointer API is ForkUnion's documented
-        // pre-P3323 currency for observing atomics in const memory, and the opaque call keeps
-        // the compiler from hoisting the re-check out of the loop.
-        if constexpr (synchronization_ == synchronization_t::concurrent_k)
-            while (row[0] == dense_node_id_unknown_k)
+        location_ = index_.chunked_location(node);
+        node_ids_view_t const row = index_.neighbors_for(location_);
+        // Slot 0 is the lock word: acquire it exactly once - the sentinel means a writer is
+        // mid-edit, waited out through the index's own monitor - and never re-read it, so a
+        // fresh lock sentinel cannot slip into the staging. The `const_cast` is the
+        // pre-P3323 currency for atomics living in const memory.
+        node_id_t first_value = row[0];
+        if constexpr (synchronization_ == synchronization_t::concurrent_k) {
+            first_value = std::atomic_ref<node_id_t>(const_cast<node_id_t&>(row[0])).load(std::memory_order_acquire);
+            while (first_value == dense_node_id_unknown_k) {
                 typename index_t::wait_t {}(row.data(), dense_node_id_unknown_k, small_size_t(0), fu::wait_capped_t {});
-        for (small_size_t slot = 0; slot != connectivity_; ++slot) staged_neighbors_[slot] = row[slot];
+                first_value =
+                    std::atomic_ref<node_id_t>(const_cast<node_id_t&>(row[0])).load(std::memory_order_acquire);
+            }
+        }
+        staged_neighbors_[0] = first_value;
+        // Tail slots may interleave with a live re-linker: relaxed atomics make the
+        // stale-but-valid mix defined; certified contracts read plain memory.
+        if constexpr (synchronization_ == synchronization_t::concurrent_k)
+            for (small_size_t slot = 1; slot != connectivity_; ++slot)
+                staged_neighbors_[slot] =
+                    std::atomic_ref<node_id_t>(const_cast<node_id_t&>(row[slot])).load(std::memory_order_relaxed);
+        else
+            for (small_size_t slot = 1; slot != connectivity_; ++slot) staged_neighbors_[slot] = row[slot];
         // Decode the row's encodings: a self-loop is "published, zero neighbors", and the
         // all-ones sentinel terminates shorter lists.
         if (staged_neighbors_[0] == node) { staged_count_ = 0; }
@@ -2196,14 +2257,20 @@ struct dense_ram_cursor {
             while (live != connectivity_ && staged_neighbors_[live] != dense_node_id_unknown_k) ++live;
             staged_count_ = live;
         }
-        return true;
+        return status_t::success_k;
     }
 
-    /** @brief Moves to the next id below the snapshot, or past the end. */
+    /** @brief Moves to the next id below the snapshot, or past the end; a staging refusal
+     *      parks on the new id with an empty row - a later @c seek to the same id retries. */
     dense_ram_cursor& operator++() noexcept {
-        if (current_ + 1 < visible_count_) { seek(current_ + 1); }
-        else {
+        node_id_t const next = current_ + 1;
+        if (next >= visible_count_) {
             current_ = visible_count_;
+            staged_count_ = 0;
+            return *this;
+        }
+        if (failed(seek(next))) {
+            current_ = next;
             staged_count_ = 0;
         }
         return *this;
@@ -2211,12 +2278,11 @@ struct dense_ram_cursor {
     /** @brief Deleted: it would copy the staging tensor - an allocation in disguise. */
     dense_ram_cursor operator++(int) = delete;
 
-    /** @brief Follows edge @p slot of the staged list; @c false when the slot is beyond the
-     *      live prefix or its target is above this cursor's snapshot. */
-    bool follow(small_size_t slot) noexcept {
-        if (slot >= staged_count_) return false;
-        node_id_t const target = staged_neighbors_[slot];
-        return seek(target);
+    /** @brief Follows edge @p slot of the staged list: @c malformed_k when the slot is beyond
+     *      the live prefix or its target is at or past this cursor's snapshot. */
+    [[nodiscard]] status_t follow(small_size_t slot) noexcept {
+        if (slot >= staged_count_) return status_t::malformed_k;
+        return seek(staged_neighbors_[slot]);
     }
 };
 

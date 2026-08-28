@@ -40,7 +40,9 @@ concept index_combo_supported = requires {
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, typename waiter_type_ = dummy_waiter_t,
           nk_capability_t caps_ = nk_cap_serial_k>
     requires(!index_combo_supported<dtype_, kernel_>)
-static std::size_t test_configuration(char const* name) { return report(name, "serial kernels not adapted yet"); }
+static std::size_t test_configuration(char const* name) {
+    return report(name, "serial kernels not adapted yet");
+}
 
 template <                                       //
     nk_dtype_t dtype_, nk_kernel_kind_t kernel_, //
@@ -64,13 +66,23 @@ static std::size_t test_configuration(char const* name) {
     // The suite is composed here, not reflected: every call below is a capability claim
     // this fully-concurrent, serializable category makes about itself.
     std::size_t failures_count = 0;
-    failures_count += test_guards<index_t>(make_index);
-    failures_count += test_three_vectors<index_t, kernel_>(make_index);
-    failures_count += test_growth_and_recall<index_t, kernel_>(make_index);
-    failures_count += test_predicated_search<index_t, kernel_>(make_index);
-    failures_count += test_save_load_roundtrip<index_t, kernel_>(make_index);
-    failures_count += test_concurrent_build<index_t, kernel_>(make_index);
-    failures_count += test_concurrent_search<index_t, kernel_>(make_index);
+    failures_count += test_dense_guards<index_t>(make_index);
+    failures_count += test_dense_three_vectors<index_t, kernel_>(make_index);
+    failures_count += test_dense_growth_and_recall<index_t, kernel_>(make_index);
+    failures_count += test_dense_predicated_search<index_t, kernel_>(make_index);
+    failures_count += test_dense_save_load_roundtrip<index_t, kernel_>(make_index);
+    failures_count += test_dense_load_hostile<index_t, kernel_>(make_index);
+    failures_count += test_dense_concurrent_build<index_t, kernel_>(make_index);
+    failures_count += test_dense_concurrent_search<index_t, kernel_>(make_index);
+    failures_count += test_dense_save_race<index_t, kernel_>(make_index);
+    failures_count += test_dense_immutable_parity<index_t, kernel_>(make_index);
+    using concurrent_cursor_t = dense_ram_cursor<index_t, synchronization_t::concurrent_k, //
+                                                 counting_allocator<std::byte>>;
+    using immutable_cursor_t = dense_ram_cursor<index_t, synchronization_t::immutable_k, //
+                                                counting_allocator<std::byte>>;
+    failures_count += test_dense_cursor<index_t, concurrent_cursor_t, immutable_cursor_t>(make_index);
+    failures_count += test_dense_allocation_budget<index_t, kernel_>(make_index);
+    failures_count += test_dense_overflow_race<index_t>(make_index);
     return report(name, failures_count);
 }
 

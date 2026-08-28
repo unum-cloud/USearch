@@ -200,7 +200,7 @@ std::size_t check_multimap_concurrent_insert() noexcept {
         failures += expect(succeeded(multimap.reserve(lanes_k * inserts_per_lane_k)));
 
         fu::flat_pool_t pool;
-        if (fu::failed(pool.spawn(lanes_k))) return expect(false);
+        if (fu::failed(pool.spawn(lanes_k))) return failures + expect(false);
         std::atomic<std::size_t> failed_inserts {0};
         pool.for_threads([&](std::size_t lane) noexcept {
             if (lane >= lanes_k) return;
@@ -241,7 +241,7 @@ std::size_t check_multimap_reader_during_writers() noexcept {
     failures += expect(succeeded(multimap.reserve(writers_k * inserts_per_writer_k)));
 
     fu::flat_pool_t pool;
-    if (fu::failed(pool.spawn(writers_k + 1))) return expect(false);
+    if (fu::failed(pool.spawn(writers_k + 1))) return failures + expect(false);
     std::atomic<std::size_t> writers_done {0};
     std::atomic<std::size_t> torn_observations {0};
     std::atomic<std::size_t> shrinking_counts {0};

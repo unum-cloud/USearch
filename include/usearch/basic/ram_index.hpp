@@ -28,6 +28,7 @@
 #include <utility>      // `std::move`, `std::forward`
 
 #include "usearch/utilities/types.hpp"
+#include "usearch/utilities/sanitizers.hpp"
 #include "usearch/utilities/ram_buffers.hpp"
 #include "usearch/utilities/ram_tables.hpp"
 
@@ -223,14 +224,26 @@ struct basic_mutex {
     std::atomic<bool> flag {false};
 
     void lock() noexcept {
+        annotate_lock_started(&flag);
         while (flag.exchange(true, std::memory_order_acquire))
             while (flag.load(std::memory_order_relaxed)) wait_type_ {}(flag, true, 0u, wait_capped_t {});
+        annotate_lock_acquired(&flag);
     }
     /** @brief Takes the lock only if it is free right now - a contention question, never a
      *      failure. Named for the standard @c Lockable requirement, which @c lock, @c unlock
      *      and this together satisfy, so the STL's lock adapters accept this type. */
-    [[nodiscard]] bool try_lock() noexcept { return !flag.exchange(true, std::memory_order_acquire); }
-    void unlock() noexcept { flag.store(false, std::memory_order_release); }
+    [[nodiscard]] bool try_lock() noexcept {
+        annotate_try_lock_started(&flag);
+        bool const acquired = !flag.exchange(true, std::memory_order_acquire);
+        if (acquired) annotate_try_lock_acquired(&flag);
+        else annotate_try_lock_refused(&flag);
+        return acquired;
+    }
+    void unlock() noexcept {
+        annotate_unlock_started(&flag);
+        flag.store(false, std::memory_order_release);
+        annotate_unlock_finished(&flag);
+    }
 };
 
 /**
@@ -264,6 +277,7 @@ struct basic_shared_mutex {
 
     /** @brief Joins the shared side, waiting out a unique holder through the waiter. */
     void lock_shared() noexcept {
+        annotate_lock_shared_started(&word);
         u64_t observed = word.load(std::memory_order_relaxed);
         while (true) {
             if (observed & unique_bit_k) {
@@ -272,27 +286,48 @@ struct basic_shared_mutex {
                 continue;
             }
             if (word.compare_exchange_weak(observed, advanced_(observed) + 1, std::memory_order_acquire,
-                                           std::memory_order_relaxed))
+                                           std::memory_order_relaxed)) {
+                annotate_lock_shared_acquired(&word);
                 return;
+            }
         }
     }
-    void unlock_shared() noexcept { word.fetch_sub(1, std::memory_order_release); }
+
+    void unlock_shared() noexcept {
+        // The raw release precedes the bracket: inside it TSan ignores the word's own
+        // atomics, and the certified probes' acquire would otherwise pair with nothing.
+        annotate_release(&word);
+        annotate_unlock_shared_started(&word);
+        word.fetch_sub(1, std::memory_order_release);
+        annotate_unlock_shared_finished(&word);
+    }
 
     /** @brief Takes the unique side only from a genuinely free word - generation churn
      *      retries, it is not contention - and never waits: a refusal is the answer. */
     [[nodiscard]] bool try_lock() noexcept {
+        annotate_try_lock_started(&word);
         u64_t observed = word.load(std::memory_order_relaxed);
         while ((observed & (holders_mask_k | unique_bit_k)) == 0)
             if (word.compare_exchange_weak(observed, advanced_(observed) | unique_bit_k, std::memory_order_acquire,
-                                           std::memory_order_relaxed))
+                                           std::memory_order_relaxed)) {
+                annotate_try_lock_acquired(&word);
                 return true;
+            }
+        annotate_try_lock_refused(&word);
         return false;
     }
-    void unlock() noexcept { word.fetch_and(~unique_bit_k, std::memory_order_release); }
+
+    void unlock() noexcept {
+        annotate_release(&word);
+        annotate_unlock_started(&word);
+        word.fetch_and(~unique_bit_k, std::memory_order_release);
+        annotate_unlock_finished(&word);
+    }
 
     /** @brief The wait-free probe the certified readers bracket their walks with. */
     snapshot_t snapshot() const noexcept {
         u64_t const observed = word.load(std::memory_order_acquire);
+        annotate_acquire(&word);
         return {observed & generation_mask_k, static_cast<std::size_t>(observed & holders_mask_k),
                 (observed & unique_bit_k) != 0};
     }
@@ -1800,8 +1835,13 @@ struct basic_ram_cursor {
     /** @brief Ids strictly below this snapshot are readable through this cursor. */
     node_id_t visible_count() const noexcept { return visible_count_; }
 
-    /** @brief Widens the snapshot to admit nodes published since construction. */
-    void refresh() noexcept { visible_count_ = index_.last_visible_id_.load(watermark_order_k); }
+    /** @brief Widens the snapshot to admit nodes published since; a cursor standing past the
+     *      end stays past the end - entering the admitted region takes an explicit @c seek. */
+    void refresh() noexcept {
+        bool const past_end = current_ == visible_count_;
+        visible_count_ = index_.last_visible_id_.load(watermark_order_k);
+        if (past_end) current_ = visible_count_;
+    }
 
     /** @brief Whether the cursor stands on a readable node. */
     explicit operator bool() const noexcept { return current_ < visible_count_; }
