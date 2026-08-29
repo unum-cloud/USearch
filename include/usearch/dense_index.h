@@ -18,25 +18,30 @@
  *  layout. A @c .safegraphs path is one monolith: a self-describing file holding one shard's
  *  vectors, neighbor lists, and its key column. A @c .safegraphs.json path is a manifest: a
  *  small JSON catalog of many such monoliths - each with shard-local node ids, so edges
- *  never cross files - with every shard path resolved relative to the manifest. Physical
- *  placement is the filesystem's job: a manifest entry may be a symlink onto another mounted
- *  SSD, and reads & writes follow it, so striping one index across devices needs no extra
- *  API surface. In-memory buffers hold single monoliths only, since a manifest's relative
+ *  never cross files - with every shard path resolved relative to the manifest. A manifest
+ *  records where its shards were written, never where a reader must keep them: loading into a
+ *  handle that names memory domains places them across those domains as it reads, and loading
+ *  into one that names none opens every shard where it already sits and moves no bytes. So a
+ *  checkpoint written from a mounted bucket stripes onto local drives by being loaded, and a
+ *  symlinked manifest entry still works for anyone who would rather arrange files than name
+ *  domains. In-memory buffers hold single monoliths only, since a manifest's relative
  *  paths have nothing to resolve against in memory. Checkpoints are residency-portable: one
  *  file materializes into RAM, uploads to a device, or opens in place on disk.
  *
  *  @section dense_index_gpu_acceleration GPU Acceleration & Constraints
  *
- *  A VRAM handle builds and searches on one device, and its capacity is bound by that
- *  device's memory: the geometry freezes at the first reservation, and rows grow only up to
- *  what the device hosts. Unified addressing lifts the ceiling to host memory through the
- *  pager, trading traversal latency for datasets past the device - the knob for indexes
- *  that fit one machine but not one accelerator.
+ *  A VRAM handle builds and searches on the devices its options name, one shard per device
+ *  and never a replica, so capacity is what those devices host together: the geometry freezes
+ *  at the first reservation, and rows grow only up to that. Planes stay device-resident and
+ *  never migrate, so an index outgrowing its devices fails rather than paging to the host -
+ *  the answer to a dataset past one accelerator is to name more of them.
  *
  *  @section dense_index_nvme_traversals NVME Traversals & Mergers
  *
- *  An NVMe handle opens a checkpoint in place and traverses it through the configured I/O
- *  engine. External-memory graphs are never modified in place, so the handle is read-only,
+ *  An NVMe handle opens a checkpoint and traverses it through whichever I/O engine can reach
+ *  the devices its paths name - a filesystem path selects a kernel engine, a transport
+ *  identifier a userspace one, and a FUSE mount over a bucket reads as an ordinary path.
+ *  External-memory graphs are never modified in place, so the handle is read-only,
  *  and every mutating verb fails on it. Bigger indexes come from merging, never mutating:
  *  shards build in RAM, serialize as monoliths, and join a manifest - the compaction shape
  *  of LSM storage.

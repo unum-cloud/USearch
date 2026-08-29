@@ -202,39 +202,68 @@ USEARCH_EXPORT typedef enum usearch_residency_t {
 } usearch_residency_t;
 
 /**
- *  @brief RAM-residency behavior: CPU threading & memory backing of the volatile index.
- *      Every modality's RAM arm is this struct - the knobs are properties of the engine,
- *      not of what it traverses.
+ *  @brief The host memory domains a RAM-resident index places its shards in - one shard per
+ *      named NUMA node, so a dual-socket box names two and gets two graphs whose traversals
+ *      stay local to the cores that walk them.
+ *
+ *  Names where the index lives, never who walks it: worker threads belong to the pool the
+ *  bulk verbs take. Every modality's RAM arm is this struct.
+ *
+ *  Arenas always claim huge pages, falling back to base pages where no pool is provisioned.
  */
 USEARCH_EXPORT typedef struct usearch_ram_options_t {
-    /** @brief Worker threads for construction & batched search; zero takes 7/8 of the
-     *      logical cores - full occupancy starves the ordered publication path. */
-    size_t threads;
-    /** @brief Expects a provisioned huge-page pool and fails loudly when it is missing,
-     *      rather than silently degrading to base pages. */
-    bool huge_pages;
+    /** @brief NUMA node ids to place shards on, borrowed for the duration of the call;
+     *      @c NULL derives every node the process may allocate on. */
+    int32_t const* memory_domains;
+    /** @brief Number of entries in @c memory_domains; zero derives. */
+    size_t memory_domains_count;
 } usearch_ram_options_t;
 
-/** @brief VRAM-residency behavior: device selection for the GPU-traversed index. */
+/**
+ *  @brief The devices a VRAM-resident index places its shards in - one shard per named
+ *      ordinal, sharded and never replicated, so eight devices host eight slices of one
+ *      graph rather than eight copies of it.
+ *
+ *  Names where the index lives, never who walks it: streams belong to the pool the bulk
+ *  verbs take.
+ *
+ *  Planes are device-resident, never migratable: an index outgrowing the named devices
+ *  fails rather than paging to the host, and the answer is to name more devices.
+ */
 USEARCH_EXPORT typedef struct usearch_vram_options_t {
-    /** @brief CUDA device ordinal; negative picks the first free device. */
-    int32_t device;
-    /** @brief Allows spilling cold shards into host memory over unified addressing. */
-    bool unified_addressing;
+    /** @brief CUDA device ordinals to place shards on, borrowed for the duration of the
+     *      call; @c NULL derives one free device. */
+    int32_t const* devices;
+    /** @brief Number of entries in @c devices; zero derives. */
+    size_t devices_count;
 } usearch_vram_options_t;
 
 /**
- *  @brief NVMe-residency behavior: the I/O engine the handle will traverse checkpoints
- *      with. The checkpoint itself arrives through the modality's @c load verb, never
- *      through these options.
+ *  @brief The devices an NVMe-resident index places its shards on - one shard per named
+ *      path, so striping across four drives names four.
+ *
+ *  Names where the index lives, never who walks it: submission depth belongs to the pool the
+ *  bulk verbs take. Naming nothing opens every shard where its manifest already points and
+ *  moves no bytes; naming devices makes @c load place shards across them as it reads.
+ *
+ *  A path is whatever identifies a device to the engine that can reach it, so the string is
+ *  the extension point rather than a field per transport. A filesystem path names a kernel
+ *  device; a transport identifier like @c trtype:PCIe @c traddr:0000:5e:00.0 names a
+ *  namespace the kernel no longer owns and selects a userspace engine. A FUSE mount is just
+ *  a path too, which is how object storage stages in without an HTTP stack in this library -
+ *  point @c mountpoint-s3 at a bucket and the ordinary engines read it.
+ *
+ *  Transfer geometry is never an input: alignment is probed from the device, and the record
+ *  granularity a checkpoint was written at is read back from its own header.
+ *
+ *  Reads always bypass the page cache where the filesystem admits @c O_DIRECT.
  */
 USEARCH_EXPORT typedef struct usearch_nvme_options_t {
-    /** @brief I/O granularity in bytes; zero probes the device. 512 fits one 256-d i8 row. */
-    uint32_t sector_bytes;
-    /** @brief Submission ring depth; zero derives from the device's queue capabilities. */
-    uint32_t queue_depth;
-    /** @brief O_DIRECT-class page-cache bypass - the default and the point. */
-    bool direct_io;
+    /** @brief Devices or directories to place shards on, borrowed for the duration of the
+     *      call; @c NULL leaves every shard where its manifest points. */
+    usearch_string_t const* paths;
+    /** @brief Number of entries in @c paths; zero derives. */
+    size_t paths_count;
 } usearch_nvme_options_t;
 
 /**
