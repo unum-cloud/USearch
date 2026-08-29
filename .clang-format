@@ -3,6 +3,9 @@ BasedOnStyle: LLVM
 IndentWidth: 4
 TabWidth: 4
 NamespaceIndentation: None
+# Code wraps at 120. Prose wraps at 100 by hand - `@brief` text, `@param` descriptions, and the
+# paragraphs after a tag block - so a docblock reads as a narrower column than the code below it.
+# `ReflowComments` only reflows past the limit, so it never widens prose already inside 100.
 ColumnLimit: 120
 ReflowComments: true
 UseTab: Never

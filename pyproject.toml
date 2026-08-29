@@ -98,6 +98,7 @@ tests = [
 ]
 
 [tool.ruff]
+# Code wraps at 120; prose - docstrings and comments - wraps at 100.
 line-length = 120
 target-version = "py312"
 

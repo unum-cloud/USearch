@@ -7,7 +7,7 @@
  *  @file include/usearch/sequence_index.h
  *
  *  Variable-length payloads cannot ride a strided matrix, so every batch input is a
- *  @b tape: one array of @c usearch_string_t views, each carrying its own base pointer and
+ *  @b tape: one array of @c usearch_bytes_view_t views, each carrying its own base pointer and
  *  byte length - the sequence-modality twin of the dense header's strided-matrix
  *  convention. Two constructors split the metric families: uniform edit distances need no
  *  parameters, weighted alignments take a substitution matrix and gap costs.
@@ -21,6 +21,14 @@
  *  mutate. Serialization is the one exception: saving demands a mutation-free window,
  *  though concurrent readers keep searching throughout. Per-call outputs - counts and the
  *  error pointer - belong to their call and must not be shared between in-flight calls.
+ *
+ *  Entries are permanent. No verb removes one, so an index only ever grows until it is
+ *  cleared wholesale, and a key's entries accumulate up to the @c values_per_key bound its
+ *  options froze.
+ *
+ *  The executor, not the handle, is what serializes: a handle admits any number of
+ *  concurrent callers, while an executor admits @b one driver at a time and reports
+ *  @c usearch_error_contended_k to the second.
  */
 #ifndef UNUM_USEARCH_SEQUENCE_INDEX_H
 #define UNUM_USEARCH_SEQUENCE_INDEX_H
@@ -35,7 +43,7 @@ extern "C" {
  *  @brief Similarity Search Index over variable-length sequences.
  *
  *  @see usearch_sequence_init_uniform For byte-level and UTF-8 @b Levenshtein distances.
- *  @see usearch_sequence_init_weighted For @b Needleman-Wunsch, @b Smith-Waterman, and Gotoh variants.
+ *  @see usearch_sequence_init_weighted For @b Needleman-Wunsch, @b Smith-Waterman and Gotoh.
  */
 USEARCH_EXPORT typedef void* usearch_sequence_index_t;
 
@@ -182,6 +190,8 @@ USEARCH_EXPORT typedef struct usearch_sequence_options_t {
     usearch_sequence_metric_t metric;
     /** @brief The @b optional connections-per-node bound; zero derives. */
     size_t connectivity;
+    /** @brief Upper bound on entries sharing one key; zero derives to one - unique keys. */
+    size_t values_per_key;
     /** @brief Selects the active member of the union below, and the meaning of "load". */
     usearch_residency_t residency;
     union {
@@ -194,8 +204,7 @@ USEARCH_EXPORT typedef struct usearch_sequence_options_t {
  *  @brief Initializes a sequence index for the @b uniform edit-distance metrics - the
  *      byte-level and UTF-8 Levenshtein kinds, needing no scoring parameters.
  *  @param[in] options Pointer to the populated options; its metric must be a Levenshtein kind.
- *  @param[out] error Populated with a status and a static message; the status is
- *      @c usearch_success_k when the call succeeded.
+ *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *  @return A handle to the initialized index, or @c NULL on failure.
  */
 USEARCH_EXPORT usearch_sequence_index_t usearch_sequence_init_uniform( //
@@ -208,8 +217,7 @@ USEARCH_EXPORT usearch_sequence_index_t usearch_sequence_init_uniform( //
  *  @param[in] substitution_matrix Row-major 256×256 signed scores over byte alphabets.
  *  @param[in] gap_open Cost of opening a gap; the linear kind uses it as the flat gap cost.
  *  @param[in] gap_extend Cost of extending an open gap; ignored by the linear kind.
- *  @param[out] error Populated with a status and a static message; the status is
- *      @c usearch_success_k when the call succeeded.
+ *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *  @return A handle to the initialized index, or @c NULL on failure.
  */
 USEARCH_EXPORT usearch_sequence_index_t usearch_sequence_init_weighted( //
@@ -275,21 +283,66 @@ USEARCH_EXPORT typedef struct usearch_sequence_traversal_stats_t {
  *      sequence is a tape of one.
  *
  *  @param[inout] index The handle to be populated.
+ *  @param[in] executor Lanes and scratch to fan out over; its kind must match the residency.
  *  @param[in] keys Array of @p count keys, one per sequence.
  *  @param[in] sequences Array of @p count borrowed views, one per sequence.
  *  @param[in] count Number of sequences in the tape.
  *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
+ *  @param[in] progress The @b optional handler, called with entries admitted and @p count.
+ *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
- *  @param[out] error Populated with a status and a static message; the status is
- *      @c usearch_success_k when the call succeeded.
- *  @return Number of successfully inserted sequences - equal to @p count unless an error
- *      stopped the batch early.
+ *  @param[out] error Status and a static message; @c usearch_success_k on success.
+ *  @return @p count on success, zero on failure.
+ *
+ *  A batch is all-or-nothing. Every fallible step runs before the first entry identity is
+ *  claimed, so a rejected batch publishes nothing - a cancelled one included, which reports
+ *  @c usearch_error_cancelled_k. A second thread driving @p executor reports
+ *  @c usearch_error_contended_k before any work begins.
+ *
+ *  A key already holding @c values_per_key entries rejects the whole batch with
+ *  @c usearch_error_overflow_k, since a smaller retry cannot help.
  */
-USEARCH_EXPORT size_t usearch_sequence_add(                    //
-    usearch_sequence_index_t index, usearch_key_t const* keys, //
-    usearch_string_t const* sequences, size_t count,           //
-    usearch_sequence_expansion_config_t const* config,         //
-    usearch_sequence_traversal_stats_t* stats, usearch_error_t* error);
+USEARCH_EXPORT size_t usearch_sequence_add(                       //
+    usearch_sequence_index_t index, usearch_executor_t executor,  //
+    usearch_key_t const* keys,                                    //
+    usearch_bytes_view_t const* sequences, size_t count,          //
+    usearch_sequence_expansion_config_t const* config,            //
+    usearch_progress_callback_t progress, void* progress_state,   //
+    usearch_sequence_traversal_stats_t* stats,                    //
+    usearch_error_t* error);
+
+/**
+ *  @brief Re-selects the neighbors of every stored entry against the finished graph, improving
+ *      edges that were chosen when the graph around them was still incomplete.
+ *
+ *  @param[inout] index The handle to be refined.
+ *  @param[in] executor Lanes and scratch to fan out over; its kind must match the residency.
+ *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
+ *  @param[in] progress The @b optional handler, called with entries swept; @c NULL skips it.
+ *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
+ *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
+ *  @param[out] error Status and a static message; @c usearch_success_k on success.
+ *  @return Number of entries whose edges changed; zero means the graph has settled.
+ *
+ *  This is a build step rather than a repair. A cheap insertion pass followed by one refinement
+ *  reaches a better graph, in less total time, than a single expensive insertion pass - so a wide
+ *  @c expansion_factor belongs here rather than in @c usearch_sequence_add. It pays most in this
+ *  modality, where a single alignment is quadratic and a stingy insertion pass is tempting.
+ *
+ *  Cancelling is safe, which is what makes a whole-graph sweep affordable. Re-selecting an entry's
+ *  edges is idempotent and claims no identity, so a stopped pass leaves the graph correct and
+ *  merely less improved - nothing unwinds, and no @c usearch_error_cancelled_k is reported. The
+ *  sweep resumes where it stopped, so calling under a time budget converges across calls.
+ *
+ *  Searches may run throughout. A read-only handle refuses with @c usearch_error_read_only_k, like
+ *  every other mutating verb.
+ */
+USEARCH_EXPORT size_t usearch_sequence_refine(                   //
+    usearch_sequence_index_t index, usearch_executor_t executor, //
+    usearch_sequence_expansion_config_t const* config,           //
+    usearch_progress_callback_t progress, void* progress_state,  //
+    usearch_sequence_traversal_stats_t* stats,                   //
+    usearch_error_t* error);
 
 /**
  *  @brief Performs k-Approximate Nearest Neighbors Search for a tape of queries - the
@@ -298,47 +351,62 @@ USEARCH_EXPORT size_t usearch_sequence_add(                    //
  *  @ref sequence_index_concurrency
  *
  *  @param[in] index The handle to be queried.
+ *  @param[in] executor Lanes and scratch to fan out over; its kind must match the residency.
  *  @param[in] queries Array of @p queries_count borrowed query views.
  *  @param[in] queries_count Number of queries in the tape.
  *  @param[in] wanted Upper bound on matches per query - the "k" in "kANN".
  *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
- *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
+ *  @param[in] progress The @b optional handler, called with queries resolved and their count.
+ *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] keys Output matrix of `queries_count × wanted` keys; rows contiguous.
  *  @param[in] keys_stride Number of bytes between starts of consecutive rows in @p keys.
  *  @param[out] distances Output matrix of `queries_count × wanted` scores; rows contiguous.
  *  @param[in] distances_stride Number of bytes between starts of consecutive @p distances rows.
  *  @param[out] counts Output array of @p queries_count per-query match counts.
- *  @param[out] error Populated with a status and a static message; the status is
- *      @c usearch_success_k when the call succeeded.
+ *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
+ *  @param[out] error Status and a static message; @c usearch_success_k on success.
+ *
+ *  A cancelled search reports @c usearch_error_cancelled_k and leaves every output row
+ *  indeterminate. A second thread driving @p executor reports @c usearch_error_contended_k
+ *  before any work begins.
  */
-USEARCH_EXPORT void usearch_sequence_search(                //
-    usearch_sequence_index_t index,                         //
-    usearch_string_t const* queries, size_t queries_count,  //
-    size_t wanted,                                          //
-    usearch_sequence_expansion_config_t const* config,      //
-    usearch_sequence_traversal_stats_t* stats,              //
-    usearch_key_t* keys, size_t keys_stride,                //
-    usearch_distance_t* distances, size_t distances_stride, //
-    size_t* counts, usearch_error_t* error);
+USEARCH_EXPORT void usearch_sequence_search(                     //
+    usearch_sequence_index_t index, usearch_executor_t executor, //
+    usearch_bytes_view_t const* queries, size_t queries_count,   //
+    size_t wanted,                                               //
+    usearch_sequence_expansion_config_t const* config,           //
+    usearch_progress_callback_t progress, void* progress_state,  //
+    usearch_key_t* keys, size_t keys_stride,                     //
+    usearch_distance_t* distances, size_t distances_stride,      //
+    size_t* counts,                                              //
+    usearch_sequence_traversal_stats_t* stats,                   //
+    usearch_error_t* error);
 
 /**
- *  @brief The filtered sibling of @c usearch_sequence_search: identical tape shape,
- *      admitting only entries the @p predicate approves. Non-matching entries still route
- *      the traversal, so recall does not collapse at low selectivity.
+ *  @brief The filtered sibling of @c usearch_sequence_search: identical tape shape, admitting
+ *      only entries the @p predicate approves. Every parameter it shares carries the meaning
+ *      documented there.
  *
  *  @param[in] predicate Per-key admission callback; returns non-zero to admit.
  *  @param[in] predicate_state Opaque pointer forwarded into every @p predicate call.
+ *
+ *  Non-matching entries still route the traversal rather than terminating it, so recall does
+ *  not collapse at low selectivity - the walk crosses rejected regions to reach admitted ones
+ *  behind them. The cost is that @p predicate is called far more often than @p wanted, once
+ *  per scored candidate, so it belongs on the caller's fast path.
  */
-USEARCH_EXPORT void usearch_sequence_search_if(             //
-    usearch_sequence_index_t index,                         //
-    usearch_string_t const* queries, size_t queries_count,  //
-    size_t wanted,                                          //
-    usearch_sequence_expansion_config_t const* config,      //
-    usearch_sequence_traversal_stats_t* stats,              //
-    usearch_predicate_t predicate, void* predicate_state,   //
-    usearch_key_t* keys, size_t keys_stride,                //
-    usearch_distance_t* distances, size_t distances_stride, //
-    size_t* counts, usearch_error_t* error);
+USEARCH_EXPORT void usearch_sequence_search_if(                  //
+    usearch_sequence_index_t index, usearch_executor_t executor, //
+    usearch_bytes_view_t const* queries, size_t queries_count,   //
+    size_t wanted,                                               //
+    usearch_sequence_expansion_config_t const* config,           //
+    usearch_predicate_t predicate, void* predicate_state,        //
+    usearch_progress_callback_t progress, void* progress_state,  //
+    usearch_key_t* keys, size_t keys_stride,                     //
+    usearch_distance_t* distances, size_t distances_stride,      //
+    size_t* counts,                                              //
+    usearch_sequence_traversal_stats_t* stats,                   //
+    usearch_error_t* error);
 
 /** @brief What one key holds, enough to size a buffer before retrieving any of it. */
 USEARCH_EXPORT typedef struct usearch_sequence_key_stats_t {
@@ -358,8 +426,7 @@ USEARCH_EXPORT typedef struct usearch_sequence_key_stats_t {
  *  a stale count under-reports and @c usearch_sequence_get returns the true total - a caller
  *  seeing more than it asked for allocates again and converges.
  *
- *  @param[out] stats The @b optional extent of the key's payload; @c NULL asks for the
- *      count alone.
+ *  @param[out] stats The @b optional payload extent; @c NULL asks for the count alone.
  *  @return The number of entries under @p key, mirroring @c stats->entries.
  */
 USEARCH_EXPORT size_t usearch_sequence_count(          //
@@ -373,28 +440,45 @@ USEARCH_EXPORT size_t usearch_sequence_count(          //
  *  null-terminated, so sizing the buffer takes @c usearch_sequence_count first:
  *  @c entries slots of @c largest_bytes each.
  *
- *  @param[out] sequences Destination for up to @p wanted entries; @c NULL probes the count
- *      without copying.
+ *  @param[out] sequences Destination for up to @p wanted entries; @c NULL probes only.
  *  @param[in] wanted Upper bound on entries to write - the entry capacity of @p sequences.
  *  @param[in] stride Number of bytes between starts of consecutive entries in @p sequences.
- *  @param[out] lengths The @b optional per-entry true byte length, up to @p wanted of them;
- *      @c NULL skips it.
- *  @return The @b true number of entries under @p key, never the number written - a value
- *      above @p wanted means the copy was truncated, so allocate that many and call again.
- *      Zero when the key is absent.
+ *  @param[out] lengths The @b optional per-entry true byte length; @c NULL skips it.
+ *  @return The @b true number of entries under @p key; zero when absent.
+ *
+ *  The return is never the number written. A value above @p wanted means the copy was
+ *  truncated, so allocate that many and call again.
  */
 USEARCH_EXPORT size_t usearch_sequence_get(            //
     usearch_sequence_index_t index, usearch_key_t key, //
     char* sequences, size_t wanted, size_t stride, size_t* lengths, usearch_error_t* error);
 
 /**
- *  @brief Absorbs @p donor into @p index - cheaper than re-inserting its sequences one by
- *      one, wiring cross-links via landmark stitching. The donor handle is consumed and
- *      must not be used afterwards, not even for @c usearch_sequence_free. Readers of
- *      @p index may keep searching throughout: unpublished entries hide behind the watermark.
+ *  @brief Absorbs every handle in @p donors into @p index - cheaper than re-inserting their
+ *      sequences one by one, wiring cross-links via landmark stitching. Donor handles are
+ *      consumed and must not be used afterwards, not even for @c usearch_sequence_free.
+ *
+ *  @param[inout] index The handle absorbing the donors.
+ *  @param[in] executor The lanes and scratch the merge fans out over, one donor per lane.
+ *  @param[in] donors Array of @p donors_count handles, every one of them consumed.
+ *  @param[in] donors_count Number of entries in @p donors.
+ *  @param[in] progress The @b optional handler, called with donors absorbed and their count.
+ *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
+ *  @param[out] error Status and a static message; @c usearch_success_k on success.
+ *
+ *  Readers of @p index may keep searching throughout, since unpublished entries hide behind
+ *  the watermark. Absorbing a group costs the wall clock of its largest source rather than
+ *  the sum of them, because the lanes advance in parallel.
+ *
+ *  Cancellation stops @b between donors, which makes this the one verb where it is not
+ *  all-or-nothing: donors already absorbed stay absorbed, and the rest stay live handles the
+ *  caller still owns and must free.
  */
-USEARCH_EXPORT void usearch_sequence_merge(usearch_sequence_index_t index, usearch_sequence_index_t donor,
-                                           usearch_error_t* error);
+USEARCH_EXPORT void usearch_sequence_merge(                       //
+    usearch_sequence_index_t index, usearch_executor_t executor,  //
+    usearch_sequence_index_t const* donors, size_t donors_count,  //
+    usearch_progress_callback_t progress, void* progress_state,   //
+    usearch_error_t* error);
 
 /**
  *  @brief Opens a snapshot cursor over the current contents; see @c usearch_sequence_cursor_t.
@@ -405,16 +489,21 @@ USEARCH_EXPORT usearch_sequence_cursor_t usearch_sequence_cursor(usearch_sequenc
 
 /**
  *  @brief Copies the next batch of entries out of the cursor.
+ *
+ *  @param[inout] cursor The cursor to advance.
  *  @param[out] keys Output array of up to @p wanted keys.
- *  @param[out] sequences Output array of up to @p wanted views borrowed from the index's
- *      arena, valid until the cursor moves or closes; @c NULL skips payload export.
- *  @param[in] wanted Upper bound on entries to write - the capacity of @p keys and
- *      @p sequences.
+ *  @param[out] sequences Output array of up to @p wanted borrowed views; @c NULL skips.
+ *  @param[in] wanted Upper bound on entries - the capacity of @p keys and @p sequences.
+ *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *  @return Number of entries written; zero when the snapshot is exhausted.
+ *
+ *  The views written into @p sequences borrow the index's own arena rather than copying, so
+ *  they stay valid only until the cursor next advances or is freed. A caller keeping any of
+ *  them past that point must copy the bytes out first.
  */
 USEARCH_EXPORT size_t usearch_sequence_cursor_next(        //
     usearch_sequence_cursor_t cursor, usearch_key_t* keys, //
-    usearch_string_t* sequences, size_t wanted, usearch_error_t* error);
+    usearch_bytes_view_t* sequences, size_t wanted, usearch_error_t* error);
 
 /** @brief Releases the cursor. */
 USEARCH_EXPORT void usearch_sequence_cursor_free(usearch_sequence_cursor_t cursor);
@@ -427,23 +516,51 @@ USEARCH_EXPORT size_t usearch_sequence_serialized_length(usearch_sequence_index_
 /**
  *  @brief Saves the index under @p path. Demands a mutation-free window; concurrent readers
  *      keep searching throughout.
+ *
+ *  @param[in] index The handle to be written.
+ *  @param[in] executor The lanes and scratch the write fans out over, one shard per lane.
+ *  @param[in] path Destination path, whose extension picks the layout.
+ *  @param[in] progress The @b optional handler, called with shards written and their count.
+ *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
+ *  @param[out] error Status and a static message; @c usearch_success_k on success.
+ *
+ *  A cancelled save leaves the shards it already wrote on disk and writes no manifest
+ *  referencing them, so the checkpoint reads as absent rather than half-valid. Those
+ *  leftovers are the caller's to remove.
  */
-USEARCH_EXPORT void usearch_sequence_save(usearch_sequence_index_t index, usearch_string_t path,
-                                          usearch_error_t* error);
+USEARCH_EXPORT void usearch_sequence_save(                       //
+    usearch_sequence_index_t index, usearch_executor_t executor, //
+    usearch_bytes_view_t path,                                   //
+    usearch_progress_callback_t progress, void* progress_state,  //
+    usearch_error_t* error);
 
 /**
  *  @brief Loads a checkpoint into an initialized handle, with the handle's residency
  *      deciding the behavior: materialize into RAM, or open in place on disk - the
  *      read-only form, where mutating verbs fail.
+ *
+ *  @param[inout] index The handle to be populated.
+ *  @param[in] executor The lanes and scratch the read fans out over, one shard per lane.
+ *  @param[in] path Checkpoint path - a monolith, or a manifest naming many.
+ *  @param[in] progress The @b optional handler, called with shards placed and their count.
+ *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
+ *  @param[out] error Status and a static message; @c usearch_success_k on success.
+ *
+ *  Where the shards end up is the handle's own memory domains, never the manifest's. A shard
+ *  carries its own length in its header, so a second load skips whatever already arrived
+ *  whole and cancelling costs the shard in flight rather than everything behind it.
  */
-USEARCH_EXPORT void usearch_sequence_load(usearch_sequence_index_t index, usearch_string_t path,
-                                          usearch_error_t* error);
+USEARCH_EXPORT void usearch_sequence_load(                       //
+    usearch_sequence_index_t index, usearch_executor_t executor, //
+    usearch_bytes_view_t path,                                   //
+    usearch_progress_callback_t progress, void* progress_state,  //
+    usearch_error_t* error);
 
 /**
  *  @brief Reads a checkpoint's metric & geometry metadata into @p options without loading it.
  */
 USEARCH_EXPORT void usearch_sequence_metadata( //
-    usearch_string_t path, usearch_sequence_options_t* options, usearch_error_t* error);
+    usearch_bytes_view_t path, usearch_sequence_options_t* options, usearch_error_t* error);
 
 #ifdef __cplusplus
 }

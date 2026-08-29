@@ -1,5 +1,12 @@
 root = true
 
+# Code wraps at 120 columns in every language. Prose wraps at 100 - documentation comments,
+# their tag descriptions, and Markdown paragraphs - so comment blocks stay a narrower column
+# than the code they sit above. Editors honor `max_line_length`; the per-language formatters
+# carry the same 120 in their own configs.
+[*]
+max_line_length = 120
+
 [*.yml]
 indent_style = space
 indent_size = 2
