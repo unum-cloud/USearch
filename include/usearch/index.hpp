@@ -2084,6 +2084,10 @@ class memory_mapped_file_t {
 
 #if defined(USEARCH_DEFINED_LINUX)
         int descriptor = open(path_, O_RDONLY | O_NOATIME);
+        if (descriptor < 0 && errno == EPERM)
+            // `O_NOATIME` requires owning the file or holding `CAP_FOWNER` (see `open(2)`).
+            // Retry without it instead of failing outright.
+            descriptor = open(path_, O_RDONLY);
 #else
         int descriptor = open(path_, O_RDONLY);
 #endif
