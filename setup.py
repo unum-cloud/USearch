@@ -20,6 +20,7 @@ def get_bool_env_w_name(name: str, preference: bool) -> tuple:
 
 
 # Check the environment variables
+is_android: bool = sys.platform == "android"
 is_linux: bool = sys.platform == "linux"
 is_macos: bool = sys.platform == "darwin"
 is_windows: bool = sys.platform == "win32"
@@ -28,7 +29,7 @@ machine: str = platform.machine().lower()
 
 is_gcc = False
 is_clang = False
-if is_linux:
+if is_linux or is_android:
     cxx = os.environ.get("CXX")
     if cxx:
         try:
@@ -45,10 +46,15 @@ if is_linux:
 # ? Using `ctypes.CDLL(numkong.__file__)` breaks the CI
 # ? with "Windows fatal exception: access violation".
 prefer_numkong: bool = not is_windows
-prefer_openmp: bool = is_linux and is_gcc
+prefer_openmp: bool = (is_linux or is_android) and is_gcc
 
 use_numkong: bool = get_bool_env("USEARCH_USE_NUMKONG", prefer_numkong)
 use_openmp: bool = get_bool_env("USEARCH_USE_OPENMP", prefer_openmp)
+
+# Dynamic LOADING of a separate NumKong library often fails at runtime on Android
+# due to the Bionic linker's behavior with RTLD_GLOBAL and Python extensions.
+# In such cases, we bundle NumKong source files directly into the extension.
+use_numkong_bundle: bool = use_numkong and is_android
 
 # Common arguments for all platforms
 macros_args.append(("USEARCH_USE_OPENMP", "1" if use_openmp else "0"))
@@ -61,7 +67,7 @@ macros_args.append(("USEARCH_USE_NUMKONG", "1" if use_numkong else "0"))
 macros_args.extend(
     [
         ("NK_DYNAMIC_DISPATCH", "1" if use_numkong else "0"),
-        ("NK_TARGET_NEON", "0"),  # ? Hide-out all complex intrinsics
+        ("NK_TARGET_NEON", "1" if is_android and ("arm" in machine or "aarch64" in machine) else "0"),
         ("NK_TARGET_NEONBFDOT", "0"),  # ? Hide-out all complex intrinsics
         ("NK_TARGET_NEONHALF", "0"),  # ? Hide-out all complex intrinsics
         ("NK_TARGET_NEONSDOT", "0"),  # ? Hide-out all complex intrinsics
@@ -98,7 +104,7 @@ macros_args.extend(
     ]
 )
 
-if is_linux:
+if is_linux or is_android:
     compile_args.append("-std=c++17")
     compile_args.append("-O3")  # Maximize performance
     compile_args.append("-ffast-math")  # Maximize floating-point performance
@@ -110,7 +116,10 @@ if is_linux:
 
     # Linking to NumKong
     compile_args.append("-Wl,--unresolved-symbols=ignore-in-shared-libs")
-    link_args.append("-static-libstdc++")
+
+    # On Android we don't usually want to link libstdc++ statically
+    if is_linux:
+        link_args.append("-static-libstdc++")
 
     if use_openmp:
         compile_args.append("-fopenmp")
@@ -133,26 +142,17 @@ if is_macos:
     link_args.append("-undefined")
     link_args.append("dynamic_lookup")
 
-    # Linking OpenMP requires additional preparation in CIBuildWheel.
-    # We must install `brew install llvm` ahead of time.
-    # import subprocess as cli
-    # llvm_base = cli.check_output(["brew", "--prefix", "llvm"]).strip().decode("utf-8")
-    # if len(llvm_base):
-    #     compile_args.append(f"-I{llvm_base}/include")
-    #     compile_args.append("-Xpreprocessor -fopenmp")
-    #     link_args.append(f"-L{llvm_base}/lib")
-    #     link_args.append("-lomp")
-    #     macros_args.append(("USEARCH_USE_OPENMP", "1"))
-
 if is_windows:
     compile_args.append("/std:c++17")
-    compile_args.append("/O2")
-    compile_args.append("/fp:fast")  # Enable fast math for MSVC
+    compile_args.append("/O2")  # Maximize performance
+    compile_args.append("/fp:fast")  # Maximize floating-point performance
     compile_args.append("/W1")  # Reduce warnings verbosity
     link_args.append("/FORCE")  # Force linking with missing NumKong symbols
 
 
 sources = ["python/lib.cpp"]
+if use_numkong_bundle:
+    sources.append("python/numkong_bundle.cpp")
 
 ext_modules = [
     Pybind11Extension(
@@ -184,7 +184,10 @@ install_requires = [
 ]
 if use_numkong:
     include_dirs.append("numkong/include")
-    install_requires.append("numkong")
+    if use_numkong_bundle:
+        include_dirs.append("numkong/c")
+    else:
+        install_requires.append("numkong")
 
 
 # With Clang, `setuptools` doesn't properly use the `language="c++"` argument we pass.

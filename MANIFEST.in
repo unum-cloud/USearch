@@ -1,1 +1,4 @@
 include python/usearch/py.typed
+recursive-include numkong/include *.h *.hpp
+recursive-include numkong/c *.c *.h
+recursive-include stringzilla/include *.h *.hpp
