@@ -111,14 +111,25 @@ USEARCH_EXPORT typedef void* usearch_dense_cursor_t;
  */
 USEARCH_EXPORT typedef void* usearch_dense_finder_t;
 
-/** @brief The dense metric kinds supported out of the box, with SIMD kernels dispatched
- *      by the machine's capabilities. */
+/** @brief The dense metric kinds supported out of the box, with SIMD kernels dispatched by the machine's
+ *      capabilities. The last two read their rows as @c usearch_scalar_u1x8_k bit sets and refuse any other
+ *      quantization; the first four refuse that one. */
 USEARCH_EXPORT typedef enum usearch_dense_metric_t {
+/** @brief No built-in kind - @c metric_callback supplies the scoring and forfeits the SIMD kernel chains. */
     usearch_dense_metric_unknown_k = 0,
+/** @brief Sum of elementwise products, unnormalized and scale-sensitive; the only kind the linear-algebra
+     *      verbs accept, since a product and a softmax both need logits rather than distances. */
     usearch_dense_metric_inner_k = 1,
+/** @brief Cosine distance in [0, 2], zero for identical directions and blind to magnitude, which is
+     *      precomputed once per row at insertion rather than per comparison. */
     usearch_dense_metric_angular_k = 2,
+/** @brief L2 distance, non-negative and zero only for identical rows - the scale-sensitive counterpart to
+     *      angular, where a doubled vector is far from its original rather than identical to it. */
     usearch_dense_metric_euclidean_k = 3,
+/** @brief Count of differing bits, so its range is the dimensionality and every bit weighs the same. */
     usearch_dense_metric_hamming_k = 4,
+/** @brief Differing bits over union bits in [0, 1], ignoring the zeros both rows share - the kind for sparse
+     *      sets, where Hamming would call two nearly-empty rows identical. */
     usearch_dense_metric_jaccard_k = 5,
 } usearch_dense_metric_t;
 

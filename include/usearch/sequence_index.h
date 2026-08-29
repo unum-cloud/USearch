@@ -46,17 +46,131 @@ USEARCH_EXPORT typedef void* usearch_sequence_index_t;
  */
 USEARCH_EXPORT typedef void* usearch_sequence_cursor_t;
 
-/** @brief The sequence scoring kinds supported out of the box. */
+/**
+ *  @brief The sequence scoring kinds supported out of the box.
+ *
+ *  The alignment kinds form a grid: global or local, against linear or affine gaps. All of
+ *  them fill the same @b [|a|+1,|b|+1] table of cell @c D[i,j], the best score for the two
+ *  prefixes ending at @c i and @c j, so every kind here is quadratic in time. Only the width
+ *  in flight differs: the linear kinds carry one row, the affine kinds three.
+ *
+ *  Only the global half can weigh the index's own edges. A local score is blind to everything
+ *  outside its matched window, so every superstring of a sequence scores as that sequence
+ *  does and an index built on one would collapse distinct entries onto a single point. Each
+ *  local kind is therefore served from an index built under its own global counterpart, which
+ *  shares its costs and bounds it - picked by the library and never named by the caller.
+ *
+ *  The global kinds minimize a cost, writing @c c for the substitution cost and @c g, @c o,
+ *  @c e for the flat, opening and extending gap costs. The local kinds maximize a similarity,
+ *  writing @c w for the substitution score, so a matrix admissible for one is not admissible
+ *  for the other with its signs unchanged.
+ */
 USEARCH_EXPORT typedef enum usearch_sequence_metric_t {
     usearch_sequence_metric_unknown_k = 0,
-    /** @brief Levenshtein edit distance over raw bytes. */
-    usearch_sequence_metric_uniform_bytes_k = 1,
-    /** @brief Levenshtein edit distance over UTF-8 code points. */
-    usearch_sequence_metric_uniform_utf8_k = 2,
-    /** @brief Global alignment with linear gap costs - Needleman-Wunsch. */
-    usearch_sequence_metric_weighted_linear_k = 3,
-    /** @brief Local alignment with affine gap costs - Smith-Waterman-Gotoh. */
-    usearch_sequence_metric_weighted_affine_k = 4,
+    /**
+     *  @brief Levenshtein edit distance over raw bytes.
+     *
+     *  The number of single-byte insertions, deletions and substitutions turning one sequence
+     *  into the other, every edit costing one. A true metric, and the cheapest kind here.
+     *
+     *  D[i,j] = min( D[i-1,j] + 1, D[i,j-1] + 1, D[i-1,j-1] + (a[i] ≠ b[j]) )
+     *
+     *  @code{.py}
+     *  row = list(range(len(b) + 1))                # one [|b|+1] row is the whole working set
+     *  for i, x in enumerate(a, 1):
+     *      row, prev = [i] + [0] * len(b), row
+     *      for j, y in enumerate(b, 1):
+     *          row[j] = min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (x != y))
+     *  levenshtein = row[-1]
+     *  @endcode
+     */
+    usearch_sequence_metric_levenshtein_bytes_k = 1,
+    /**
+     *  @brief Levenshtein edit distance over UTF-8 code points.
+     *
+     *  The same recurrence, run over decoded code points rather than bytes, so one accented
+     *  character costs one edit instead of the two or three its encoding occupies.
+     */
+    usearch_sequence_metric_levenshtein_utf8_k = 2,
+    /**
+     *  @brief Global alignment with linear gap costs - Needleman-Wunsch.
+     *
+     *  Levenshtein with the unit costs replaced by a substitution matrix and a flat gap cost,
+     *  so a mismatch between similar symbols can be cheaper than one between dissimilar ones.
+     *  Both sequences are aligned end to end, and every unaligned symbol is charged.
+     *
+     *  D[i,j] = min( D[i-1,j] + g, D[i,j-1] + g, D[i-1,j-1] + c(a[i], b[j]) )
+     *
+     *  @code{.py}
+     *  row = [j * g for j in range(len(b) + 1)]
+     *  for i, x in enumerate(a, 1):
+     *      row, prev = [i * g] + [0] * len(b), row
+     *      for j, y in enumerate(b, 1):
+     *          row[j] = min(prev[j] + g, row[j - 1] + g, prev[j - 1] + c[x][y])
+     *  needleman_wunsch = row[-1]
+     *  @endcode
+     */
+    usearch_sequence_metric_needleman_wunsch_k = 3,
+    /**
+     *  @brief Local alignment with affine gap costs - Smith-Waterman-Gotoh. Ranks only.
+     *
+     *  The affine recurrence under a zero floor, reporting the best cell anywhere in the
+     *  table rather than the corner. The floor is the blindness: a prefix or suffix that
+     *  aligns badly is dropped at no cost instead of being charged.
+     *
+     *  S[i,j] = max( 0, X[i,j], Y[i,j], S[i-1,j-1] + w(a[i], b[j]) ),  score = max_{i,j} S[i,j]
+     *
+     *  @code{.py}
+     *  # the needleman_wunsch_gotoh loop with max for min, w for c, and a 0 floor on S[i][j],
+     *  # returning max(S) over every cell rather than the last one
+     *  @endcode
+     */
+    usearch_sequence_metric_smith_waterman_gotoh_k = 4,
+    /**
+     *  @brief Global alignment with affine gap costs - Needleman-Wunsch-Gotoh.
+     *
+     *  Charges a gap run @c o for opening and @c e for each symbol after, so one long gap is
+     *  cheaper than several short ones - the realistic model for an indel. Needs three tracks
+     *  in flight: the aligned cell and one per gap direction. Both gap tracks reopen from the
+     *  combined cell rather than from the aligned one, which is what lets a deletion become
+     *  an insertion directly and keeps the kind a metric.
+     *
+     *  X[i,j] = min( D[i-1,j] + o, X[i-1,j] + e )
+     *  Y[i,j] = min( D[i,j-1] + o, Y[i,j-1] + e )
+     *  D[i,j] = min( D[i-1,j-1] + c(a[i], b[j]), X[i,j], Y[i,j] )
+     *
+     *  @code{.py}
+     *  D = [0 if j == 0 else o + (j - 1) * e for j in range(len(b) + 1)]
+     *  X = [inf] * (len(b) + 1)                     # gap in b, carried down the column
+     *  for i, x in enumerate(a, 1):
+     *      D, prev, Y = [o + (i - 1) * e] + [0] * len(b), D, inf
+     *      for j, y in enumerate(b, 1):
+     *          X[j] = min(prev[j] + o, X[j] + e)
+     *          Y = min(D[j - 1] + o, Y + e)         # gap in a, carried along the row
+     *          D[j] = min(prev[j - 1] + c[x][y], X[j], Y)
+     *  gotoh = D[-1]
+     *  @endcode
+     */
+    usearch_sequence_metric_needleman_wunsch_gotoh_k = 5,
+    /**
+     *  @brief Local alignment with linear gap costs - Smith-Waterman. Ranks only.
+     *
+     *  Needleman-Wunsch under a zero floor, reporting the best cell anywhere in the table.
+     *  Finds the single best-matching window and charges nothing for what surrounds it.
+     *
+     *  S[i,j] = max( 0, S[i-1,j] − g, S[i,j-1] − g, S[i-1,j-1] + w(a[i], b[j]) )
+     *
+     *  @code{.py}
+     *  best, row = 0, [0] * (len(b) + 1)
+     *  for i, x in enumerate(a, 1):
+     *      row, prev = [0] * (len(b) + 1), row
+     *      for j, y in enumerate(b, 1):
+     *          row[j] = max(0, prev[j] - g, row[j - 1] - g, prev[j - 1] + w[x][y])
+     *          best = max(best, row[j])             # the 0 floor is the blindness
+     *  smith_waterman = best
+     *  @endcode
+     */
+    usearch_sequence_metric_smith_waterman_k = 6,
 } usearch_sequence_metric_t;
 
 /**
@@ -79,7 +193,7 @@ USEARCH_EXPORT typedef struct usearch_sequence_options_t {
 /**
  *  @brief Initializes a sequence index for the @b uniform edit-distance metrics - the
  *      byte-level and UTF-8 Levenshtein kinds, needing no scoring parameters.
- *  @param[in] options Pointer to the populated options; its metric must be a uniform kind.
+ *  @param[in] options Pointer to the populated options; its metric must be a Levenshtein kind.
  *  @param[out] error Populated with a status and a static message; the status is
  *      @c usearch_success_k when the call succeeded.
  *  @return A handle to the initialized index, or @c NULL on failure.
@@ -90,7 +204,7 @@ USEARCH_EXPORT usearch_sequence_index_t usearch_sequence_init_uniform( //
 /**
  *  @brief Initializes a sequence index for the @b weighted alignment metrics - global
  *      Needleman-Wunsch with linear gaps or local Smith-Waterman-Gotoh with affine gaps.
- *  @param[in] options Pointer to the populated options; its metric must be a weighted kind.
+ *  @param[in] options Pointer to the populated options; its metric must be an alignment kind.
  *  @param[in] substitution_matrix Row-major 256×256 signed scores over byte alphabets.
  *  @param[in] gap_open Cost of opening a gap; the linear kind uses it as the flat gap cost.
  *  @param[in] gap_extend Cost of extending an open gap; ignored by the linear kind.

@@ -124,22 +124,47 @@ USEARCH_EXPORT typedef struct usearch_error_t {
  *      Sub-byte types pack several dimensions per byte, as their @c xN suffixes spell.
  */
 USEARCH_EXPORT typedef enum usearch_scalar_t {
+/** @brief No scalar named - an unset field, or a custom metric owning its own storage. */
     usearch_scalar_unknown_k = 0,
 
+/** @brief IEEE-754 binary64: ±1.80e308, epsilon 2.22e-16, subnormals to 4.94e-324,
+     *      with infinities and NaNs. */
     usearch_scalar_f64_k = 1,
+/** @brief IEEE-754 binary32: ±3.40e38, epsilon 1.19e-7, subnormals to 1.40e-45, with
+     *      infinities and NaNs. */
     usearch_scalar_f32_k = 2,
+/** @brief Truncated f32 - 8-bit exponent, 7-bit mantissa: f32's range at ±3.39e38 and
+     *      epsilon 7.81e-3, with infinities and NaNs. */
     usearch_scalar_bf16_k = 3,
+/** @brief IEEE-754 binary16: ±65504, epsilon 9.77e-4, subnormals to 5.96e-8, with
+     *      infinities and NaNs. */
     usearch_scalar_f16_k = 4,
+/** @brief FP8 with a 5-bit exponent: ±57344, epsilon 0.25, with infinities and NaNs -
+     *      f16's dynamic range carried on two mantissa bits. */
     usearch_scalar_e5m2_k = 5,
+/** @brief FP8 with a 4-bit exponent: ±448, epsilon 0.125, no infinities, and two NaN
+     *      codes at 0x7F and 0xFF. */
     usearch_scalar_e4m3_k = 6,
+/** @brief FP6 with a 3-bit exponent, byte-aligned with two padding bits: ±28, no
+     *      infinities or NaNs, so every one of its 64 codes is a number. */
     usearch_scalar_e3m2_k = 7,
+/** @brief FP6 with a 2-bit exponent, byte-aligned with two padding bits: ±7.5, no
+     *      infinities or NaNs, and 72% of its codes outside [-1, 1]. */
     usearch_scalar_e2m3_k = 8,
 
+/** @brief 8-bit signed integer spanning -128 to 127, every code a number. */
     usearch_scalar_i8_k = 10,
+/** @brief Two signed nibbles per byte spanning -8 to 7, even dimensions in the low
+     *      nibble and odd ones in the high. */
     usearch_scalar_i4x2_k = 11,
 
+/** @brief 8-bit unsigned integer spanning 0 to 255, every code a number. */
     usearch_scalar_u8_k = 20,
+/** @brief Two unsigned nibbles per byte spanning 0 to 15, even dimensions in the low
+     *      nibble and odd ones in the high. */
     usearch_scalar_u4x2_k = 21,
+/** @brief Eight single-bit dimensions per byte - the form the Hamming & Jaccard metrics
+     *      score, where only the set-bit count of a XOR or AND carries meaning. */
     usearch_scalar_u1x8_k = 22,
 
 } usearch_scalar_t;

@@ -17,13 +17,23 @@
  *  @section geospatial_index_geometry Internal Geometry
  *
  *  Positions arrive as geodetic degrees and are stored as Earth-Centered Earth-Fixed
- *  metres, optionally with a fourth axis carrying time scaled into metres. The
- *  straight-line chord between two Earth-fixed positions is a strict lower bound on every
- *  path across the surface, and on a sphere it is a strictly increasing function of the
- *  great-circle arc - so ranking by chord and ranking by arc agree exactly, and the
- *  ellipsoid perturbs that agreement only in the second-order term. Traversal therefore
- *  runs on plain Euclidean distance with no transcendental functions, and an accurate
- *  geodesic is paid only when re-ranking the returned candidates.
+ *  metres, optionally with a fourth axis carrying time scaled into metres. Three point
+ *  distances sit on that storage, and they form a ladder rather than a choice:
+ *
+ *  - The straight-line @b chord between two Earth-fixed positions. No transcendental
+ *    functions, and a strict lower bound on every path across the surface.
+ *  - The @b Haversine great-circle arc. On a sphere it is a strictly increasing function of
+ *    the chord, so the two rank identically and the @c arcsin is paid only when a caller
+ *    wants the number in surface metres rather than an ordering.
+ *  - The @b geodesic on the WGS-84 ellipsoid, which is @b not a monotone function of the
+ *    chord: two pairs sharing one chord differ in geodesic length by up to the flattening,
+ *    one part in 298. It can therefore permute what the chord ordered.
+ *
+ *  Traversal runs on the chord and the geodesic is paid only when re-ranking the returned
+ *  candidates, which is what that last line buys. Vincenty's inverse solution is the
+ *  classical route to the geodesic rung and does not always terminate, diverging for nearly
+ *  antipodal pairs; Karney's always converges, which is what a scorer under a determinism
+ *  contract needs.
  *
  *  @section geospatial_index_modes One Graph, Many Modes
  *
@@ -140,34 +150,90 @@ USEARCH_EXPORT typedef enum usearch_geospatial_axes_t {
 } usearch_geospatial_axes_t;
 
 /**
- *  @brief What "close" means for one search. Modes differ in whether a single coincidence
- *      suffices or the whole set must agree, and in whether ordering is respected.
+ *  @brief What "close" means for one search.
+ *
+ *  Writes @c D for the @b [|Q|,|E|] matrix of the point distance between every query point
+ *  and every entry point. Three of the four modes are one-line reductions of @c D and differ
+ *  only in which reduction: the smallest cell, the worst row minimum, or the worst of both.
+ *  Route is not a reduction at all but a walk across the same table, which is why it alone
+ *  cannot ride the edges the others share. Modes differ in whether a single coincidence
+ *  suffices or the whole set must agree, and in whether ordering is respected.
+ *
+ *  Every mode here is composed of @c min and @c max alone, never a sum or a mean, and both
+ *  commute with any strictly increasing function of the point distance. Ranking by chord and
+ *  ranking by Haversine arc are therefore identical rather than merely close, which is what
+ *  makes the cheap rung of @ref geospatial_index_geometry free for all four. A mode built on
+ *  a mean would forfeit that, and that is the standing constraint on what may be added here.
  */
 USEARCH_EXPORT typedef enum usearch_geospatial_mode_t {
     usearch_geospatial_mode_unknown_k = 0,
     /**
      *  @brief Nearest approach - the smallest separation between any query point and any
-     *      entry point. Answers "did these two come close to each other". Paired with
-     *      @c usearch_geospatial_axes_full_k on a timed layout it answers "did they come
-     *      close at the same moment", which is the rendezvous and co-travel query.
+     *      entry point.
+     *
+     *  Answers "did these two come close to each other". Paired with
+     *  @c usearch_geospatial_axes_full_k on a timed layout it answers "did they come close at
+     *  the same moment", which is the rendezvous and co-travel query. One coincidence
+     *  suffices, so everything else about either track is discarded.
+     *
+     *  A(Q,E) = min_i min_j D[i,j]
+     *
+     *  @code{.py}
+     *  D = chord(Q, E)                              # [|Q|,|E|], shared by every mode here
+     *  approach = D.min()
+     *  @endcode
      */
     usearch_geospatial_mode_approach_k = 1,
     /**
-     *  @brief Symmetric Hausdorff - the largest of all nearest approaches, in both
-     *      directions. Answers "are these the same shape everywhere", and is the metric
-     *      the graph itself is built on.
+     *  @brief Symmetric Hausdorff - the largest of all nearest approaches, in both directions.
+     *
+     *  Answers "are these the same shape everywhere", and is the metric the graph itself is
+     *  built on. The whole of both tracks must agree: one query point far from every entry
+     *  point, or one entry point far from every query point, sets the score.
+     *
+     *  H(Q,E) = max( max_i min_j D[i,j], max_j min_i D[i,j] )
+     *
+     *  @code{.py}
+     *  D = chord(Q, E)
+     *  shape = max(D.min(axis=1).max(), D.min(axis=0).max())
+     *  @endcode
      */
     usearch_geospatial_mode_shape_k = 2,
     /**
-     *  @brief Directed Hausdorff from the query onto the entry - the worst-covered query
-     *      point. Answers "does this entry cover the whole of my corridor", and unlike
-     *      the symmetric form it is untroubled by an entry far longer than the query.
+     *  @brief Directed Hausdorff from the query onto the entry - the worst-covered query point.
+     *
+     *  Answers "does this entry cover the whole of my corridor". Reducing over query rows
+     *  alone is what makes it untroubled by an entry far longer than the query, and equally
+     *  what makes it directional: an entry covering the query does not imply the reverse.
+     *
+     *  C(Q,E) = max_i min_j D[i,j]
+     *
+     *  @code{.py}
+     *  D = chord(Q, E)
+     *  coverage = D.min(axis=1).max()               # query rows only; entry length never enters
+     *  @endcode
      */
     usearch_geospatial_mode_coverage_k = 3,
     /**
-     *  @brief Discrete Frechet - the tightest leash for two walkers who may pause but
-     *      never reverse. Answers "same route, same direction". Requires
-     *      @c usearch_geospatial_structure_path_k and Frechet edges.
+     *  @brief Discrete Frechet - the tightest leash for two walkers who may pause but never
+     *      reverse.
+     *
+     *  Answers "same route, same direction". Requires @c usearch_geospatial_structure_path_k
+     *  and Frechet edges. The minimum over three predecessors is what forbids reversing, and
+     *  it is why this mode is a walk rather than a reduction: two tracks covering identical
+     *  ground in opposite orders are Hausdorff-identical and Frechet-far.
+     *
+     *  F[i,j] = max( D[i,j], min( F[i-1,j], F[i,j-1], F[i-1,j-1] ) ),  score = F[|Q|,|E|]
+     *
+     *  @code{.py}
+     *  D, F = chord(Q, E), full((len(Q), len(E)), inf)
+     *  for i in range(len(Q)):
+     *      for j in range(len(E)):
+     *          back = min(F[i - 1, j] if i else inf, F[i, j - 1] if j else inf,
+     *                     F[i - 1, j - 1] if i and j else inf)
+     *          F[i, j] = D[i, j] if i == j == 0 else max(D[i, j], back)
+     *  route = F[-1, -1]                            # a walk, not a reduction
+     *  @endcode
      */
     usearch_geospatial_mode_route_k = 4,
 } usearch_geospatial_mode_t;

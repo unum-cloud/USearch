@@ -94,27 +94,106 @@ USEARCH_EXPORT typedef void* usearch_matrix_cursor_t;
 
 /**
  *  @brief How row-level comparisons become one score for the whole matrix.
- *      @ref matrix_index_scoring
+ *
+ *  Writes @c d for the distance between two individual rows, and @c D for the @b [|A|,|B|]
+ *  matrix of every such distance. The three families differ in what they build: the
+ *  best-partner kinds form @c D once and reduce it twice, the transport kind never forms it
+ *  and compares each side's own @b [|A|,|A|] and @b [|B|,|B|] geometries instead, and the
+ *  superposition kinds form no matrix at all, pairing row @c i with row @c i.
+ *
+ *  Only the symmetric kinds can weigh the index's own edges. A kind that absorbs a scale
+ *  factor onto one argument answers differently when its two sides swap, and an edge has no
+ *  query to be asymmetric about, so such a kind is served from an index built under a
+ *  symmetric neighbour that bounds it - picked by the library and never named by the caller.
+ *  @ref matrix_index_scoring
  */
 USEARCH_EXPORT typedef enum usearch_matrix_metric_t {
     usearch_matrix_metric_unknown_k = 0,
-    /** @brief Mean of each side's best partners, both directions summed. */
+    /**
+     *  @brief Mean of each side's best partners, both directions summed.
+     *
+     *  Every row is charged the distance to the nearest row of the other matrix, and those
+     *  charges are averaged, so a single unpartnered row is diluted rather than decisive.
+     *
+     *  CD(A,B) = mean_i min_j D[i,j]  +  mean_j min_i D[i,j]
+     *
+     *  @code{.py}
+     *  D = cdist(A, B) # [|A|,|B|] - the whole cost
+     *  chamfer = D.min(axis=1).mean() + D.min(axis=0).mean()
+     *  @endcode
+     */
     usearch_matrix_metric_chamfer_k = 1,
     /**
-     *  @brief The worst of all best partners, both directions - the metric of the family,
-     *      and the kind ColBERT-style late interaction runs on. It pairs rows exactly as
-     *      MaxSim does and costs the same, differing only in taking the worst pairing
-     *      rather than their sum, which is what makes it symmetric and usable as an edge
-     *      weight where MaxSim is neither.
+     *  @brief The worst of all best partners, both directions - the metric of the family.
+     *
+     *  The kind ColBERT-style late interaction runs on. It pairs rows exactly as MaxSim does
+     *  and costs the same, differing only in taking the worst pairing rather than their sum,
+     *  which is what makes it symmetric and usable as an edge weight where MaxSim is neither.
+     *  Unforgiving where Chamfer is lenient: one row whose nearest row in the other matrix
+     *  is far away sets the entire score.
+     *
+     *  H(A,B) = max( max_i min_j D[i,j], max_j min_i D[i,j] )
+     *
+     *  @code{.py}
+     *  D = cdist(A, B) # [|A|,|B|] - the same matrix Chamfer forms
+     *  hausdorff = max(D.min(axis=1).max(), D.min(axis=0).max())
+     *  @endcode
      */
     usearch_matrix_metric_hausdorff_k = 2,
-    /** @brief Transport over each side's internal geometry, invariant to any isometry of
-     *      the rows - the ragged-height molecular-shape kind. */
+    /**
+     *  @brief Transport over each side's internal geometry - the molecular-shape kind.
+     *
+     *  Compares how each matrix's own rows sit relative to one another and never their
+     *  absolute coordinates, so a rotated, reflected or row-permuted copy scores zero, no
+     *  shared row order is needed, and ragged heights are natural. @c P is the transport plan
+     *  pairing mass between the two sides, and the objective is quartic in the row counts
+     *  before any solver iterates - far and away the most expensive kind here.
+     *
+     *  GW(A,B) = min_P √( Σ_{i,k,j,l} |D_A[i,k] − D_B[j,l]|² · P[i,j] · P[k,l] )
+     *
+     *  @code{.py}
+     *  DA, DB = cdist(A, A), cdist(B, B) # [|A|,|A|] and [|B|,|B|]; never A vs B
+     *  L = (DA[:, None, :, None] - DB[None, :, None, :]) ** 2 # [|A|,|B|,|A|,|B|]
+     *  gromov = min(sqrt(einsum("ijkl,ij,kl->", L, P, P)) for P in plans)
+     *  @endcode
+     */
     usearch_matrix_metric_gromov_wasserstein_k = 3,
-    /** @brief Residual after the best rotation - Kabsch. Needs a fixed @c rows. */
+    /**
+     *  @brief Residual after the best rotation - Kabsch. Needs a fixed @c rows.
+     *
+     *  Row @c i pairs with row @c i rather than with its nearest neighbour, which is what the
+     *  frozen height buys and what makes this the one family linear in the row count. Both
+     *  sides are centred first, so translation costs nothing and only orientation is solved
+     *  for, out of a covariance no larger than @b [columns,columns].
+     *
+     *  RMSD(A,B) = min_{R ∈ SO(3)} √( 1/n · Σ_i ‖aᵢ − R·bᵢ‖² )
+     *
+     *  @code{.py}
+     *  A, B = A - A.mean(0), B - B.mean(0)          # centring makes translation free
+     *  U, S, Vt = svd(B.T @ A)                      # [3,3] covariance from an O(n) pass
+     *  R = U @ diag([1, 1, sign(det(U @ Vt))]) @ Vt # reflections rejected: enantiomers differ
+     *  kabsch = sqrt(((A - B @ R) ** 2).sum() / len(A))
+     *  @endcode
+     */
     usearch_matrix_metric_kabsch_k = 4,
-    /** @brief Residual after the best rotation and uniform scaling - Umeyama. Needs a
-     *      fixed @c rows. */
+    /**
+     *  @brief Residual after the best rotation and uniform scaling - Umeyama. Ranks only.
+     *
+     *  Needs a fixed @c rows, and is served from its symmetric counterpart: @c s multiplies
+     *  one argument and not the other, so swapping the two sides solves for @c 1/s and a
+     *  different residual, leaving the kind symmetric only where it is identically zero. The
+     *  asymmetry is visible below as the divisor, which reads one side's spread alone.
+     *
+     *  U(A,B) = min_{s>0, R ∈ SO(3)} √( 1/n · Σ_i ‖aᵢ − s·R·bᵢ‖² )
+     *
+     *  @code{.py}
+     *  A, B = A - A.mean(0), B - B.mean(0)
+     *  U, S, Vt = svd(B.T @ A)                      # [3,3] covariance, as Kabsch
+     *  R = U @ diag([1, 1, sign(det(U @ Vt))]) @ Vt
+     *  s = S.sum() / (B ** 2).sum()                 # B's spread alone - hence asymmetric
+     *  umeyama = sqrt(((A - s * (B @ R)) ** 2).sum() / len(A))
+     *  @endcode
+     */
     usearch_matrix_metric_umeyama_k = 5,
 } usearch_matrix_metric_t;
 
