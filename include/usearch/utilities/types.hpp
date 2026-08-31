@@ -71,6 +71,13 @@ using dense_distance_t = f32_t;
  *      lock & empty-slot sentinel in neighbor lists of every index design. */
 inline constexpr dense_node_id_t dense_node_id_unknown_k = 0xFFFFFFFFu;
 
+/** @brief The one project-wide default alignment: 128 bytes covers x86's adjacent-line
+ *      prefetcher, the 128-byte cache lines of Apple's and other Arm cores, and a CUDA
+ *      coalesced transaction alike, where a 64-byte guess serves only one of them.
+ *  @see @c fu::default_alignment_k in ForkUnion's @c types.hpp, which settles on the same
+ *      value and documents why @c std::hardware_destructive_interference_size cannot. */
+inline constexpr std::size_t default_alignment_k = 128;
+
 /** @brief One traversal candidate: a node id paired with its distance to the query. */
 struct dense_scored_node_t {
     /** @brief Identifier of the scored node within its sub-index. */
@@ -142,6 +149,16 @@ constexpr bool succeeded(status_t status) noexcept { return status == status_t::
 
 /** @brief Whether @p status reports failure. */
 constexpr bool failed(status_t status) noexcept { return status != status_t::success_k; }
+
+/** @brief Whether a filtered search admits one candidate or passes over it - rejected nodes
+ *      still route the walk, they just never enter the reported pool. Mirrors
+ *      @c usearch_admission_t value for value, so the two enums cannot drift. */
+enum class admission_t : int {
+    /** @brief Skip the node; the walk still routes through it. */
+    reject_k = usearch_reject_k,
+    /** @brief Report the node among the matches. */
+    admit_k = usearch_admit_k,
+};
 
 /**
  *  @brief Static, English description of @p status. Never returns @c nullptr, never allocates.
@@ -512,6 +529,23 @@ struct dummy_waiter_t {
     template <typename value_type_, typename thread_index_type_, typename bound_type_>
     void operator()(value_type_ const*, value_type_, thread_index_type_, bound_type_) const noexcept {
         std::this_thread::yield();
+    }
+};
+
+/** @brief The compiled-out default for optional callbacks, like an insertion's assigned-id
+ *      observer: accepts any arguments and does nothing. */
+struct dummy_callback_t {
+    template <typename... args_types_>
+    void operator()(args_types_&&...) const noexcept {}
+};
+
+/** @brief The compiled-out default filter: admits anything it is asked about. Walks key on its
+ *      @b type to skip the filtered machinery whole, so passing it explicitly costs nothing and
+ *      answers the same. */
+struct dummy_predicate_t {
+    template <typename... args_types_>
+    constexpr admission_t operator()(args_types_&&...) const noexcept {
+        return admission_t::admit_k;
     }
 };
 

@@ -17,7 +17,8 @@
  *  Allocators are tested by construction: a counting allocator flows through the vectors &
  *  neighbors parameters to prove propagation, tallying live bytes into a ledger that must
  *  balance to zero when each scenario's scope closes. Parallel scenarios use ForkUnion's
- *  default flat pool - no NUMA machinery in tests.
+ *  default flat pool - no NUMA machinery in tests, except the sharded-index scenarios, which
+ *  need a real topology because an executor sites its arenas by asking where its workers run.
  */
 #pragma once
 
@@ -78,6 +79,8 @@ constexpr u64_t dense_seed_roundtrip_k = 0x5AFE10ADull;
 constexpr u64_t dense_seed_load_hostile_k = 0x10ADBADDull;
 constexpr u64_t dense_seed_concurrent_build_k = 0xB111DACEull;
 constexpr u64_t dense_seed_concurrent_search_k = 0x5EA2CACEull;
+constexpr u64_t dense_seed_indexes_add_k = 0x62009ADDull;
+constexpr u64_t dense_seed_indexes_race_k = 0x62009ACEull;
 constexpr u64_t dense_seed_save_race_k = 0x5AFECACEull;
 constexpr u64_t dense_seed_immutable_parity_k = 0x5E771ED0ull;
 constexpr u64_t dense_seed_cursor_k = 0x17E2A702ull;
@@ -301,7 +304,7 @@ std::size_t test_dense_predicated_search(make_index_type_ const& make_index) {
         dense_scored_node_t const* reference = unfiltered_context.results.data();
 
         // The trivially-true predicate walks and reports exactly like the unfiltered sibling.
-        auto all_pass = [](dense_node_id_t) noexcept { return true; };
+        auto all_pass = [](dense_node_id_t) noexcept { return admission_t::admit_k; };
         typename index_type_::dense_traversal_context_t all_pass_context {{}};
         auto with_true = index.search_if(query, all_pass, all_pass_context);
         failures += expect_eq(with_true.count, unfiltered.count);
@@ -311,7 +314,9 @@ std::size_t test_dense_predicated_search(make_index_type_ const& make_index) {
         }
 
         // The batched shape must agree with the per-node shape on the same walk.
-        auto even_only = [](dense_node_id_t node_id) noexcept { return node_id % 2 == 0; };
+        auto even_only = [](dense_node_id_t node_id) noexcept {
+            return node_id % 2 == 0 ? admission_t::admit_k : admission_t::reject_k;
+        };
         auto even_batched = [](std::span<dense_scored_node_t const> scored, auto& admitted) noexcept {
             for (dense_scored_node_t const candidate : scored)
                 if (candidate.node_id % 2 == 0) {
@@ -337,7 +342,9 @@ std::size_t test_dense_predicated_search(make_index_type_ const& make_index) {
         std::size_t const moduli[] = {2, 16, 64};
         std::size_t hits = 0, recall_samples = 0;
         for (std::size_t modulus : moduli) {
-            auto matches = [modulus](dense_node_id_t node_id) noexcept { return node_id % modulus == 0; };
+            auto matches = [modulus](dense_node_id_t node_id) noexcept {
+                return node_id % modulus == 0 ? admission_t::admit_k : admission_t::reject_k;
+            };
             for (std::size_t sample = 0; sample != 8; ++sample) {
                 std::size_t sampled_row = ((sample * 641 + modulus) % dense_growth_nodes_k) / modulus * modulus;
                 if (sample % 2) sampled_row += 1; // An excluded neighbor of a matching row.
@@ -367,7 +374,7 @@ std::size_t test_dense_predicated_search(make_index_type_ const& make_index) {
             failures += expect(hits * 100 >= recall_samples * dense_minimal_recall_percent_k);
 
         // An impossible predicate drains legally: empty result set, successful status.
-        auto none_pass = [](dense_node_id_t) noexcept { return false; };
+        auto none_pass = [](dense_node_id_t) noexcept { return admission_t::reject_k; };
         typename index_type_::dense_traversal_context_t none_context {{}};
         auto with_none = index.search_if(query, none_pass, none_context);
         failures += expect(with_none.status == status_t::success_k);
@@ -628,7 +635,9 @@ std::size_t test_dense_concurrent_search(make_index_type_ const& make_index) {
             // Every other step runs the predicated sibling under the same race: all the
             // unfiltered invariants must hold, plus admission purity - no id the predicate
             // rejects may ever surface, no matter how the writers interleave.
-            auto odd_only = [](dense_node_id_t node_id) noexcept { return node_id % 2 == 1; };
+            auto odd_only = [](dense_node_id_t node_id) noexcept {
+                return node_id % 2 == 1 ? admission_t::admit_k : admission_t::reject_k;
+            };
             for (std::size_t step = 0; step < dense_reader_minimal_searches_k || //
                                        writer_lanes_remaining.load(std::memory_order_acquire) != 0;
                  ++step) {
@@ -656,6 +665,249 @@ std::size_t test_dense_concurrent_search(make_index_type_ const& make_index) {
         failures += expect_eq(index.size(), nodes_count);
     }
     failures += expect_eq(ledger.live_bytes.load(), 0);
+    return failures;
+}
+
+/**
+ *  @brief The sharded index's refusal surface, all deterministic: verbs before placement,
+ *      placement after reservation, geometry drift, mismatched spans, and a doubly-claimed
+ *      executor - every misuse answers with a status, never with a write.
+ */
+template <typename indexes_type_>
+std::size_t test_dense_indexes_guards() {
+    using index_t = typename indexes_type_::index_t;
+    using scalar_t = typename index_t::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    using executor_t = typename indexes_type_::executor_t;
+    std::size_t failures = 0;
+    std::size_t const rows = 64;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_tiny_values_k);
+
+    fu_topology_t topology = nullptr;
+    if (fu_topology_new(&topology) != fu_success_k) return failures + expect(false);
+    {
+        auto spawned = executor_t::spawn(topology, 2);
+        if (failed(spawned.status)) {
+            fu_topology_delete(topology);
+            return failures + expect(false);
+        }
+        executor_t executor = std::move(spawned.value);
+        auto vectors = make_vectors<scalar_t>(rows, dimensions, dense_seed_guards_k);
+        std::vector<key_t> keys(rows);
+        for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+
+        // Verbs before any shard exists refuse rather than write.
+        indexes_type_ indexes;
+        failures += expect_eq(indexes.add(std::span<key_t const> {keys.data(), rows}, vectors.view(), //
+                                          executor)
+                                  .status,
+                              status_t::uninitialized_k);
+        failures += expect_eq(indexes.reserve({rows, connectivity_16_k, dimensions}), status_t::uninitialized_k);
+
+        // Reserving closes the shard set, and the frozen geometry refuses drift.
+        failures += expect(succeeded(indexes.emplace(fu_memory_domain_id_t {-1})));
+        failures += expect(succeeded(indexes.reserve({rows, connectivity_16_k, dimensions})));
+        failures += expect_eq(indexes.emplace(fu_memory_domain_id_t {-1}), status_t::config_mismatch_k);
+        failures += expect_eq(indexes.reserve({rows, connectivity_32_k, dimensions}), status_t::config_mismatch_k);
+        failures += expect(succeeded(indexes.reserve({rows, connectivity_16_k, dimensions})));
+
+        // A keys span disagreeing with the batch's rows refuses before anything is taken.
+        failures += expect_eq(indexes.add(std::span<key_t const> {keys.data(), rows - 1}, vectors.view(), //
+                                          executor)
+                                  .status,
+                              status_t::config_mismatch_k);
+
+        // The executor admits one caller: a live claim turns the second away, and releasing
+        // it restores service - which the closing insertion proves end to end.
+        {
+            auto held = executor.claim();
+            failures += expect(succeeded(held.status));
+            failures += expect_eq(executor.claim().status, status_t::contended_k);
+            failures += expect_eq(indexes.add(std::span<key_t const> {keys.data(), rows}, vectors.view(), //
+                                              executor)
+                                      .status,
+                              status_t::contended_k);
+        }
+        failures += expect(succeeded(indexes.add(std::span<key_t const> {keys.data(), rows}, vectors.view(), //
+                                                 executor)
+                                         .status));
+        failures += expect_eq(indexes.size(), rows);
+    }
+    fu_topology_delete(topology);
+    return failures;
+}
+
+/**
+ *  @brief Two executors drive one sharded index concurrently: disjoint key ranges, one
+ *      batched @c add per executor, both interleaving into the same two shards - asserted
+ *      through the public surface only.
+ *
+ *  This scenario needs a real topology to spawn executors - the one departure from the
+ *  flat-pool rule, since an executor sites its arenas by asking where its workers run.
+ */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+std::size_t test_dense_indexes_concurrent_add() {
+    using index_t = typename indexes_type_::index_t;
+    using scalar_t = typename index_t::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    using executor_t = typename indexes_type_::executor_t;
+    using traversal_t = typename indexes_type_::traversal_t;
+    std::size_t failures = 0;
+
+    std::size_t const executors_count = 2;
+    std::size_t const rows_per_executor = 2 * dense_lane_nodes_k;
+    std::size_t const nodes_count = executors_count * rows_per_executor;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+
+    fu_topology_t topology = nullptr;
+    if (fu_topology_new(&topology) != fu_success_k) return failures + expect(false);
+    {
+        indexes_type_ indexes;
+        failures += expect(succeeded(indexes.emplace(fu_memory_domain_id_t {-1})));
+        failures += expect(succeeded(indexes.emplace(fu_memory_domain_id_t {-1})));
+        failures += expect(succeeded(indexes.reserve({nodes_count, connectivity_16_k, dimensions})));
+
+        std::vector<executor_t> executors;
+        std::vector<nk::matrix<scalar_t>> slices;
+        std::vector<std::vector<key_t>> keys;
+        for (std::size_t which = 0; which != executors_count; ++which) {
+            auto spawned = executor_t::spawn(topology, 2);
+            if (failed(spawned.status)) return failures + expect(false);
+            executors.push_back(std::move(spawned.value));
+            slices.push_back(make_vectors<scalar_t>(rows_per_executor, dimensions, dense_seed_indexes_add_k + which));
+            // Keys never take the value zero, so a stale read of a zero-filled key plane can
+            // never masquerade as a legitimate identity.
+            std::vector<key_t> range(rows_per_executor);
+            for (std::size_t row = 0; row != rows_per_executor; ++row)
+                range[row] = static_cast<key_t>(1 + which * rows_per_executor + row);
+            keys.push_back(std::move(range));
+        }
+
+        fu::flat_pool_t pool;
+        if (fu::failed(pool.spawn(executors_count))) return failures + expect(false);
+        std::atomic<std::size_t> lane_failures {0};
+        pool.for_threads([&](std::size_t lane) noexcept {
+            if (lane >= executors_count) return;
+            auto added = indexes.add(std::span<key_t const> {keys[lane].data(), rows_per_executor},
+                                   slices[lane].view(), executors[lane]);
+            if (added.status != status_t::success_k) lane_failures.fetch_add(1);
+            assert_no_locks_held();
+        });
+        failures += expect_eq(lane_failures.load(), 0u);
+        failures += expect_eq(indexes.size(), nodes_count);
+
+        // Rotation splits every batch evenly, so two shards end exactly half-and-half full.
+        failures += expect_eq(indexes.shard(0).size() + indexes.shard(1).size(), nodes_count);
+        failures += expect_eq(indexes.shard(0).size(), nodes_count / 2);
+
+        // Every key is stored exactly once, and resolvable without naming a shard or an id.
+        std::size_t miscounted = 0;
+        for (std::size_t row = 0; row != nodes_count; ++row)
+            miscounted += indexes.count(static_cast<key_t>(1 + row)) != 1;
+        failures += expect_eq(miscounted, 0u);
+
+        // Sampled self-recall through the merged cross-shard search, judged by distance band.
+        if constexpr (kernel_ != nk_kernel_dot_k) {
+            typename executor_t::thread_arena_t arena;
+            failures += expect(succeeded(arena.reserve_exactly(indexes.shard(0).traversal_memory_usage())));
+            traversal_t context {typename traversal_t::allocator_t {arena}};
+            std::size_t hits = 0;
+            std::size_t const samples_count = 8;
+            std::array<key_t, 8> found_keys {};
+            std::array<typename indexes_type_::distance_t, 8> found_distances {};
+            for (std::size_t sample = 0; sample != samples_count; ++sample) {
+                std::size_t const row = sample * (rows_per_executor / samples_count);
+                auto const found = indexes.search(slices[0].view().row(row).as_vector(), context, {},
+                                                std::span<key_t> {found_keys}, std::span {found_distances});
+                failures += expect(found.status == status_t::success_k && found.count > 0);
+                for (std::size_t match = 0; match != found.count; ++match)
+                    if (found_distances[match] < dense_self_match_tolerance_k &&
+                        found_distances[match] > -dense_self_match_tolerance_k) {
+                        ++hits;
+                        break;
+                    }
+            }
+            failures += expect(hits * 100 >= samples_count * dense_minimal_recall_percent_k);
+        }
+    }
+    fu_topology_delete(topology);
+    return failures;
+}
+
+/**
+ *  @brief A reader lane races one executor-driven batched @c add into two shards, asserting
+ *      the key-visibility invariant: a search may reach a node the moment it publishes, so
+ *      the key it resolves must already be written - never the plane's zero-fill, never
+ *      outside the assigned range.
+ */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+std::size_t test_dense_indexes_search_race() {
+    using index_t = typename indexes_type_::index_t;
+    using scalar_t = typename index_t::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    using executor_t = typename indexes_type_::executor_t;
+    using traversal_t = typename indexes_type_::traversal_t;
+    std::size_t failures = 0;
+
+    std::size_t const nodes_count = 4 * dense_lane_nodes_k;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+
+    fu_topology_t topology = nullptr;
+    if (fu_topology_new(&topology) != fu_success_k) return failures + expect(false);
+    {
+        indexes_type_ indexes;
+        failures += expect(succeeded(indexes.emplace(fu_memory_domain_id_t {-1})));
+        failures += expect(succeeded(indexes.emplace(fu_memory_domain_id_t {-1})));
+        failures += expect(succeeded(indexes.reserve({nodes_count, connectivity_16_k, dimensions})));
+
+        auto spawned = executor_t::spawn(topology, 2);
+        if (failed(spawned.status)) return failures + expect(false);
+        executor_t executor = std::move(spawned.value);
+
+        auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, dense_seed_indexes_race_k);
+        std::vector<key_t> keys(nodes_count);
+        for (std::size_t row = 0; row != nodes_count; ++row) keys[row] = static_cast<key_t>(1 + row);
+
+        fu::flat_pool_t pool;
+        if (fu::failed(pool.spawn(2))) return failures + expect(false);
+        std::atomic<bool> writer_done {false};
+        std::atomic<std::size_t> lane_failures {0};
+        pool.for_threads([&](std::size_t lane) noexcept {
+            if (lane == 0) {
+                auto added = indexes.add(std::span<key_t const> {keys.data(), nodes_count}, vectors.view(), executor);
+                if (added.status != status_t::success_k) lane_failures.fetch_add(1);
+                writer_done.store(true, std::memory_order_release);
+                assert_no_locks_held();
+                return;
+            }
+            typename executor_t::thread_arena_t arena;
+            if (failed(arena.reserve_exactly(indexes.shard(0).traversal_memory_usage()))) {
+                lane_failures.fetch_add(1);
+                writer_done.store(true, std::memory_order_release);
+                return;
+            }
+            traversal_t context {typename traversal_t::allocator_t {arena}};
+            std::array<key_t, 8> found_keys {};
+            std::array<typename indexes_type_::distance_t, 8> found_distances {};
+            std::size_t searches = 0;
+            for (; !writer_done.load(std::memory_order_acquire) || searches < dense_reader_minimal_searches_k;
+                 ++searches) {
+                auto const found = indexes.search(vectors.view().row(searches % nodes_count).as_vector(), context, {},
+                                                std::span<key_t> {found_keys}, std::span {found_distances});
+                if (found.status != status_t::success_k) {
+                    lane_failures.fetch_add(1);
+                    break;
+                }
+                for (std::size_t match = 0; match != found.count; ++match)
+                    if (found_keys[match] < key_t {1} || found_keys[match] > static_cast<key_t>(nodes_count))
+                        lane_failures.fetch_add(1);
+            }
+            assert_no_locks_held();
+        });
+        failures += expect_eq(lane_failures.load(), 0u);
+        failures += expect_eq(indexes.size(), nodes_count);
+    }
+    fu_topology_delete(topology);
     return failures;
 }
 

@@ -10,6 +10,7 @@
  */
 #include "dense/ram_metric.hpp"
 #include "dense/ram_index.hpp"
+#include "dense/ram_indexes.hpp"
 
 std::size_t test_dense_all() {
     std::size_t failures_count = 0;
@@ -36,6 +37,8 @@ std::size_t test_dense_all() {
     failures_count += test_dense_index_i4();
     failures_count += test_dense_index_u8();
     failures_count += test_dense_index_u1();
+
+    failures_count += test_dense_indexes();
 
     return failures_count;
 }

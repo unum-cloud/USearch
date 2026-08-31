@@ -79,10 +79,6 @@ template <                                                          //
     >
 struct dense_ram_index;
 
-/** @brief The compiled-out default predicate of @c search_if: every check disappears, so the
- *      unfiltered paths pay nothing for the predicate axis existing. */
-struct no_predicate_t {};
-
 /** @brief One quad's worth of predicate-admitted candidates - the output buffer handed to
  *      batched @c search_if predicates, bounded by the distance kernels' fan-out. */
 using dense_admissions_t = fu::limited_array<dense_scored_node_t, 4>;
@@ -93,8 +89,9 @@ using dense_admissions_t = fu::limited_array<dense_scored_node_t, 4>;
  *  Callables come in two shapes, detected by signature: batched functors receive the whole
  *  @p scored span and push admitted entries themselves - amortizing expensive external
  *  checks across the 4-way gathers the scan already stages, with distances in view - while
- *  per-node @c bool(dense_node_id_t) functors are walked lane by lane. @c no_predicate_t
- *  never reaches here: its callers are compiled out whole.
+ *  per-node @c admission_t(dense_node_id_t) functors are walked lane by lane, the named verdict
+ *  leaving no doubt which way the answer cuts. @c dummy_predicate_t never reaches here: its
+ *  callers are compiled out whole.
  */
 template <typename predicate_type_>
 inline void invoke_admission(predicate_type_& predicate, std::span<dense_scored_node_t const> scored,
@@ -102,7 +99,7 @@ inline void invoke_admission(predicate_type_& predicate, std::span<dense_scored_
     if constexpr (requires { predicate(scored, admissions); }) predicate(scored, admissions);
     else
         for (dense_scored_node_t const candidate : scored)
-            if (predicate(candidate.node_id)) {
+            if (predicate(candidate.node_id) == admission_t::admit_k) {
                 // One quad in, four slots of capacity - the buffer cannot refuse.
                 [[maybe_unused]] fu::status_t const admitted = admissions.push_back(candidate);
             }
@@ -826,12 +823,12 @@ struct dense_ram_index {
      *  not heuristic. Only transiently locked nodes are re-rolled, mirroring the traversal policy.
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k,
-              typename predicate_type_ = no_predicate_t>
+              typename predicate_type_ = dummy_predicate_t>
     [[nodiscard]] expected<std::size_t> sample_landmarks(vector_view_t query, vector_norms_t query_norms,
                                                          node_id_t first_invisible_id, std::size_t expansion_factor,
                                                          dense_traversal_context_t& context,
                                                          predicate_type_&& predicate = predicate_type_ {}) noexcept {
-        constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, no_predicate_t>;
+        constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, dummy_predicate_t>;
 
         results_array_t& results = context.results;
         frontier_queue_t& frontier = context.frontier;
@@ -916,11 +913,11 @@ struct dense_ram_index {
      *      whose radius governs termination once that pool fills.
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k,
-              typename predicate_type_ = no_predicate_t>
+              typename predicate_type_ = dummy_predicate_t>
     [[nodiscard]] status_t search_around(vector_view_t query, vector_norms_t query_norms, node_id_t first_invisible_id,
                                          std::size_t expansion_factor, dense_traversal_context_t& context,
                                          predicate_type_&& predicate = predicate_type_ {}) noexcept {
-        constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, no_predicate_t>;
+        constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, dummy_predicate_t>;
 
         results_array_t& results = context.results;
         frontier_queue_t& frontier = context.frontier;
@@ -1569,6 +1566,18 @@ struct dense_ram_index {
     /** @brief Neighbor ids per node's list - its full fixed capacity, none lost to bookkeeping. */
     std::size_t connectivity() const noexcept { return geometry_.load(std::memory_order_acquire).connectivity(); }
 
+    /** @brief Scalar dimensions per stored vector; zero until the first reservation freezes it. */
+    std::size_t dimensions() const noexcept { return geometry_.load(std::memory_order_acquire).dimensions(); }
+
+    /** @brief Rows hosted without growing again - claimed plus unclaimed, the invariant tying the
+     *      two counters together. A transient dip while a grower is mid-flight only makes the
+     *      estimate conservative, which is what @c reserve compares against. */
+    std::size_t capacity() const noexcept {
+        std::size_t const claimed_rows = last_allocated_id_.load(std::memory_order_acquire);
+        std::ptrdiff_t const unclaimed_rows = remaining_capacity_.load(std::memory_order_acquire);
+        return claimed_rows + static_cast<std::size_t>(unclaimed_rows > 0 ? unclaimed_rows : 0);
+    }
+
     /** @brief Outcome of a @c reserve() call: the capacity & connectivity actually in effect. */
     struct reserve_result_t {
         /** @brief Total rows the index can now host without growing again. */
@@ -1629,8 +1638,7 @@ struct dense_ram_index {
             std::size_t const deficit_rows = config.capacity - total_rows;
             expected<node_id_t> const claimed = claim_capacity(deficit_rows);
             if (claimed.status != status_t::success_k) return {total_rows, frozen_connectivity, claimed.status};
-            last_allocated_id_.fetch_sub(static_cast<node_id_t>(deficit_rows), std::memory_order_relaxed);
-            remaining_capacity_.fetch_add(static_cast<std::ptrdiff_t>(deficit_rows), std::memory_order_release);
+            release_capacity(deficit_rows);
         }
     }
 
@@ -1673,9 +1681,9 @@ struct dense_ram_index {
      *
      *  @param[in] new_vectors The batch to insert, one row per vector, in the frozen geometry.
      *  @param[out] assigned_ids Caller-owned output: either empty, or exactly one slot per incoming
-     *      vector, receiving that vector's dispensed node id. The index stores no keys - ids are
+     *      vector, receiving that vector's assigned node id. The index stores no keys - ids are
      *      dense, so callers park keys in a flat id-indexed array of the outer layer. One batch's
-     *      ids are generally @b not contiguous: identity is dispensed per node, interleaved
+     *      ids are generally @b not contiguous: identity is assigned per node, interleaved
      *      across concurrently inserting threads.
      *  @param[inout] context The calling thread's scratch & telemetry, reused across batches.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
@@ -1707,33 +1715,348 @@ struct dense_ram_index {
         std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
                                                                      : node_connectivity * 2;
 
-        // Size the reusable scratch structures before claiming any capacity, while failing is still free.
-        // `sorted_buffer::insert(.., limit)` never grows on its own, and `growing_hash_set::set` never
-        // rehashes, so these reservations are load-bearing, not a fast-path optimization.
-        // `refining_candidates` must fit a full neighbor list plus the newcomer during
-        // back-linking; the link scratches hold at most a full list - all sized here from the
-        // frozen geometry, never from a compile-time constant.
+        // Rows narrower than the frozen geometry would be over-read by the copy below, which takes
+        // its width from the geometry rather than from the caller's matrix.
+        if (new_vectors.extent(1) != stored_row_values(geometry)) return {status_t::config_mismatch_k, size()};
+
+        if (status_t const sized = reserve_traversal(context, config); failed(sized)) return {sized, size()};
+
+        // Claim storage for the whole batch: from here on enough sentinel-filled rows exist for
+        // all our nodes, and this thread must roll forward to publishing every id it claims.
+        expected<capacity_claim_t> claimed = claim(incoming_vectors_count);
+        if (claimed.status != status_t::success_k) return {claimed.status, size()};
+        insert_reserved(new_vectors, assigned_ids, context, std::move(claimed.value), config);
+
+        insert_result_t result;
+        result.new_size = size();
+        result.visited_members = context.visited_members - visited_members_before;
+        result.computed_distances = context.computed_distances - computed_distances_before;
+        result.computed_distances_in_refines = context.computed_distances_in_refines - refines_before;
+        result.computed_distances_in_reverse_refines = context.computed_distances_in_reverse_refines -
+                                                       reverse_refines_before;
+        result.restarts = context.restarts - restarts_before;
+        return result;
+    }
+
+    /**
+     *  @brief Entry removals are explicitly banned to simplify concurrency management.
+     */
+    status_t remove(node_ids_view_t, dense_traversal_context_t&) noexcept = delete;
+
+    /** @brief Optional tuning knobs for @c search(); zeros mean "derive from connectivity". */
+    struct search_config_t {
+        /** @brief Breadth of the candidate pool; defaults to twice the connectivity.
+         *      Raise it to trade latency for recall - the caller reranks anyway. */
+        small_size_t expansion_factor = 0;
+        /** @brief Reader contract; @c immutable_k - or stronger - drops every atomic in the
+         *      traversal when the caller certifies no concurrent mutators. */
+        synchronization_t synchronization = synchronization_t::concurrent_k;
+    };
+
+    /** @brief Outcome & telemetry of one @c search() call; matches stay in the caller's context. */
+    struct search_result_t {
+        /** @brief @c success_k, or why the search could not run at all. */
+        status_t status = status_t::success_k;
+        /** @brief Matches left in `context.results`, ascending by distance to the query. */
+        std::size_t count = 0;
+        /** @brief Frontier candidates expanded during the walk. */
+        std::size_t visited_members = 0;
+        /** @brief Total distance computations, with padding lanes of 4-way kernels excluded. */
+        std::size_t computed_distances = 0;
+        /** @brief Starvation restarts - a graph-connectivity health signal. */
+        std::size_t restarts = 0;
+
+        explicit operator bool() const noexcept { return succeeded(status); }
+    };
+
+    /**
+     *  @brief Finds the nearest published neighbors of @p query_vector - the caller reranks or
+     *      trims the prefix it needs.
+     *
+     *  Under the default @c concurrent_k contract it is safe to call concurrently with
+     *  insertions and other searches: the traversal reads only nodes below the visibility
+     *  watermark, acquire-loads every slot-0 lock before scanning a list, retries transiently
+     *  locked nodes, and never writes to the graph. Freshly inserted nodes become reachable the
+     *  moment their publisher advances the watermark; reverse-edge ids above this query's
+     *  watermark snapshot are skipped by the translation-frontier invariant, and picked up by
+     *  any later query with a fresher snapshot. Under @c immutable_k - or stronger - the caller
+     *  certifies no mutators and the traversal runs atomics-free. @ref dense_ram_index_concurrency
+     *
+     *  @param[in] query_vector The query, in the index's own dtype & frozen dimensionality.
+     *  @param[inout] context The calling thread's scratch & telemetry: the matches end up in
+     *      @c context.results, ascending by distance - the nearest first.
+     *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
+     */
+    search_result_t search(vector_view_t query_vector, dense_traversal_context_t& context,
+                           search_config_t config = {}) noexcept {
+        if (config.synchronization != synchronization_t::concurrent_k)
+            return search_typed<synchronization_t::immutable_k>(query_vector, context, config);
+        return search_typed<synchronization_t::concurrent_k>(query_vector, context, config);
+    }
+
+    /**
+     *  @brief Finds the nearest published neighbors of @p query_vector that satisfy
+     *      @p predicate - the filtered sibling of @c search, sharing its whole contract.
+     *
+     *  Non-matching nodes still score and route the walk - filtering navigation itself would
+     *  strand it in disconnected islands - but only matching nodes enter the reported pool,
+     *  whose radius governs termination once it holds @c expansion_factor entries; until then
+     *  the ordinary navigation radius bounds the frontier. Predicates come in two shapes,
+     *  detected by signature: per-node @c admission_t(dense_node_id_t), or batched - receiving
+     *  the scored quad and an admissions buffer, pushing what it admits:
+     *
+     *  @code{.cpp}
+     *  index.search_if(query, [&](std::span<dense_scored_node_t const> scored, auto& admitted) {
+     *      for (dense_scored_node_t candidate : scored)
+     *          if (labels[candidate.node_id] == wanted) [[maybe_unused]] auto kept = admitted.push_back(candidate);
+     *  }, context);
+     *  @endcode
+     *
+     *  The batch amortizes expensive external checks across the 4-way gathers the scan
+     *  already stages, with distances in view - so radius cut-offs are just predicates.
+     *  Each node is tested at most once per query: the exact visited set is the predicate's
+     *  memoization. With a trivially-true predicate the results match @c search exactly.
+     *
+     *  @param[in] query_vector The query, in the index's own dtype & frozen dimensionality.
+     *  @param[in] predicate The admission filter, called with published node ids only.
+     *  @param[inout] context The calling thread's scratch & telemetry: the matches end up in
+     *      @c context.results, ascending by distance - the nearest first.
+     *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
+     */
+    template <typename predicate_type_>
+    search_result_t search_if(vector_view_t query_vector, predicate_type_&& predicate,
+                              dense_traversal_context_t& context, search_config_t config = {}) noexcept {
+        if (config.synchronization != synchronization_t::concurrent_k)
+            return search_typed<synchronization_t::immutable_k>(query_vector, context, config,
+                                                                std::forward<predicate_type_>(predicate));
+        return search_typed<synchronization_t::concurrent_k>(query_vector, context, config,
+                                                             std::forward<predicate_type_>(predicate));
+    }
+
+    /** @brief The compile-time form of @c search() & @c search_if(): one whole-traversal
+     *      instantiation per @p synchronization_ contract, so the exclusive form carries no
+     *      atomics at all, and per predicate type, so @c dummy_predicate_t compiles every
+     *      admission check out of the unfiltered paths. */
+    template <synchronization_t synchronization_, typename predicate_type_ = dummy_predicate_t>
+    search_result_t search_typed(vector_view_t query_vector, dense_traversal_context_t& context,
+                                 search_config_t config = {},
+                                 predicate_type_&& predicate = predicate_type_ {}) noexcept {
+        constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, dummy_predicate_t>;
+
+        std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
+                                                                     : connectivity() * 2;
+
+        // Same load-bearing reservations as in `insert`: the scratch structures never grow on
+        // their own mid-traversal. A predicated walk also owns the admitted pool - the
+        // re-selection buffer, idle during any search - sized to the same expansion.
+        if (failed(context.results.reserve(expansion_factor)) ||       //
+            failed(context.frontier.reserve(expansion_factor * 4u)) || //
+            failed(context.visited.reserve(expansion_factor * 4u)))
+            return {status_t::bad_alloc_k};
+        if constexpr (predicated_k) {
+            if (failed(context.refining_candidates.reserve(expansion_factor))) return {status_t::bad_alloc_k};
+            context.refining_candidates.clear();
+        }
+        context.results.clear();
+        context.frontier.clear();
+        context.visited.clear();
+
+        // Snapshot the watermark once: everything strictly below it is published and readable.
+        // An empty index legitimately yields an empty result set. A mutation-free contract needs
+        // no acquire - the caller's own synchronization already ordered every publication first.
+        constexpr std::memory_order watermark_order_k = synchronization_ == synchronization_t::concurrent_k
+                                                            ? std::memory_order_acquire
+                                                            : std::memory_order_relaxed;
+        node_id_t const first_invisible_id = last_visible_id_.load(watermark_order_k);
+        if (first_invisible_id == 0) return {status_t::success_k};
+
+        // Snapshot the context's running telemetry, to report this query's share on return.
+        std::size_t const visited_members_before = context.visited_members;
+        std::size_t const computed_distances_before = context.computed_distances;
+        std::size_t const restarts_before = context.restarts;
+
+        vector_norms_t const query_norms = dense_norms(query_vector);
+        status_t const walked = search_around<synchronization_>(query_vector, query_norms, first_invisible_id,
+                                                                expansion_factor, context, //
+                                                                std::forward<predicate_type_>(predicate));
+
+        // The result contract is one pool: matches always land in `context.results`, so a
+        // predicated walk swaps its admitted pool into place - both are the same buffer type,
+        // and the navigation leftovers get cleared by whichever call reuses that scratch next.
+        if constexpr (predicated_k) std::swap(context.results, context.refining_candidates);
+
+        // A refused walk still ranked whatever it reached; the status says the ranking is short
+        // because scratch ran out, not because the graph had nothing better.
+        search_result_t result;
+        result.status = walked;
+        result.count = context.results.size();
+        result.visited_members = context.visited_members - visited_members_before;
+        result.computed_distances = context.computed_distances - computed_distances_before;
+        result.restarts = context.restarts - restarts_before;
+        return result;
+    }
+
+    /**
+     *  @brief Storage claimed in this index and not yet inserted against - the fallible half of an
+     *      insertion, hoisted so a caller spanning several indexes commits or refuses as a whole.
+     *
+     *  Releasing is automatic and two-sided, so an abandoned claim leaves the physical-rows sum as
+     *  it found it. Rows an id was dispensed against never come back, which is why consuming a
+     *  claim and dispensing against it are the same step. @ref dense_ram_index_concurrency
+     */
+    struct capacity_claim_t {
+        capacity_claim_t() noexcept = default;
+        /** @brief The granting index and the rows it granted; only @ref claim ever calls it. */
+        capacity_claim_t(dense_ram_index& index, std::size_t rows) noexcept : index_(&index), rows_(rows) {}
+        capacity_claim_t(capacity_claim_t&& other) noexcept { swap(other); }
+        capacity_claim_t& operator=(capacity_claim_t&& other) noexcept { return swap(other), *this; }
+        capacity_claim_t(capacity_claim_t const&) = delete;
+        capacity_claim_t& operator=(capacity_claim_t const&) = delete;
+        /** @brief Credits back whatever was never consumed; a consumed claim releases nothing. */
+        ~capacity_claim_t() noexcept {
+            if (index_ && rows_) index_->release_capacity(rows_);
+        }
+
+        void swap(capacity_claim_t& other) noexcept {
+            std::swap(index_, other.index_);
+            std::swap(rows_, other.rows_);
+        }
+
+        /** @brief Rows this claim still holds; zero once an insertion has taken it. */
+        std::size_t rows() const noexcept { return rows_; }
+        explicit operator bool() const noexcept { return rows_ != 0; }
+
+        /** @brief Marks the rows as taken, so destruction credits nothing back - what an insertion
+         *      spread over several threads calls once every one of its rows has claimed an id. */
+        void consume() noexcept { rows_ = 0; }
+
+      private:
+        /** @brief The granting index, reached only to credit back; null marks the empty state a
+         *      default construction and a move-out both leave behind. */
+        dense_ram_index* index_ = nullptr;
+        /** @brief Rows still held; zero once consumed, so destruction credits nothing. */
+        std::size_t rows_ = 0;
+    };
+
+    /** @brief Claims storage for @p count rows without assigning any identity - the step a batch
+     *      spanning several indexes runs on every one of them before touching any. */
+    [[nodiscard]] expected<capacity_claim_t> claim(std::size_t count) noexcept {
+        expected<node_id_t> const claimed = claim_capacity(count);
+        if (claimed.status != status_t::success_k) return {capacity_claim_t {}, claimed.status};
+        return {capacity_claim_t {*this, count}, status_t::success_k};
+    }
+
+    /** @brief Returns @p count rows no id was dispensed against. Deflating the claim watermark
+     *      before crediting the capacity is load-bearing: it keeps the physical-rows sum
+     *      conservative, so a concurrent reservation can only over-grow. */
+    void release_capacity(std::size_t count) noexcept {
+        last_allocated_id_.fetch_sub(static_cast<node_id_t>(count), std::memory_order_relaxed);
+        remaining_capacity_.fetch_add(static_cast<std::ptrdiff_t>(count), std::memory_order_release);
+    }
+
+    /**
+     *  @brief Storage values per row under the frozen @p geometry - what a caller's matrix must be
+     *      as wide as, since the copy width comes from here rather than from the matrix.
+     */
+    static std::size_t stored_row_values(geometry_t geometry) noexcept {
+        return divide_round_up<std::size_t>(geometry.dimensions(), nk::dimensions_per_value<scalar_t>());
+    }
+
+    /**
+     *  @brief Bytes one context carves for @p config under the frozen geometry - what an arena
+     *      backing a traversal must hold, since an arena never grows and a walk never allocates
+     *      twice.
+     *
+     *  Mirrors @ref reserve_traversal reservation for reservation, and sits beside it so the two
+     *  drift only under a reviewer's eye. Zero before the geometry freezes.
+     */
+    std::size_t traversal_memory_usage(insert_config_t config = {}) const noexcept {
+        geometry_t const geometry = geometry_.load(std::memory_order_acquire);
+        if (!geometry) return 0;
+        std::size_t const node_connectivity = geometry.connectivity();
+        std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
+                                                                     : node_connectivity * 2;
+        // Every carve starts on its own cache line, so each reservation is rounded the way an
+        // arena would round it, one term per reservation.
+        constexpr std::size_t alignment = arena_allocator<std::byte>::alignment_k;
+        auto lined = [](std::size_t bytes) noexcept {
+            return divide_round_up<std::size_t>(bytes, alignment) * alignment;
+        };
+        using context_t = dense_traversal_context_t;
+        std::size_t const links = node_connectivity;
+        std::size_t bytes = lined(context_t::results_array_t::memory_usage(expansion_factor)) +
+                            lined(context_t::results_array_t::memory_usage(links + 1)) +
+                            lined(context_t::frontier_queue_t::memory_usage(expansion_factor * 4u)) +
+                            lined(context_t::visited_set_t::memory_usage(expansion_factor * 4u)) +
+                            2u * lined(links * sizeof(dense_scored_node_t)) +
+                            2u * lined(links * sizeof(node_id_t)) + lined(links * sizeof(vector_view_t)) +
+                            lined(links * sizeof(vector_norms_t));
+
+        if constexpr (has_tiles_k) {
+            std::size_t const wanted = max_of<std::size_t>(expansion_factor, links + 1);
+            std::size_t const pool = divide_round_up<std::size_t>(wanted, tile_span_k) * tile_span_k;
+            bytes += lined(tiles_kit_t::scratch_bytes(pool, geometry.dimensions())) +
+                     lined(pool * pool * sizeof(dense_distance_t));
+        }
+        return bytes;
+    }
+
+    /**
+     *  @brief Sizes @p context 's scratch for the frozen geometry and @p config, so no walk
+     *      allocates mid-flight - the other fallible half of an insertion, hoistable ahead of a
+     *      fan-out. Idempotent and monotone: a context already wide enough answers in six compares.
+     */
+    [[nodiscard]] status_t reserve_traversal(dense_traversal_context_t& context,
+                                             insert_config_t config = {}) noexcept {
+        geometry_t const geometry = geometry_.load(std::memory_order_acquire);
+        if (!geometry) return status_t::uninitialized_k;
+        std::size_t const node_connectivity = geometry.connectivity();
+        std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
+                                                                     : node_connectivity * 2;
+
+        // `sorted_buffer::insert(.., limit)` never grows on its own, and `growing_hash_set::set`
+        // never rehashes, so these reservations are load-bearing rather than an optimization.
+        // `refining_candidates` must fit a full neighbor list plus the newcomer during back-linking.
         if (failed(context.results.reserve(expansion_factor)) ||                  //
             failed(context.refining_candidates.reserve(node_connectivity + 1)) || //
             failed(context.frontier.reserve(expansion_factor * 4u)) ||            //
             failed(context.visited.reserve(expansion_factor * 4u)) ||             //
             failed(context.reserve_links(node_connectivity)))
-            return {status_t::bad_alloc_k, size()};
+            return status_t::bad_alloc_k;
 
-        // The tile planes size from the same frozen geometry and the kit's own shapes - padded
-        // to whole tiles, so the padded pool doubles as the pair-matrix stride, and always wide
-        // enough for the reverse re-selection's list-plus-newcomer.
+        // The tile planes size from the same frozen geometry and the kit's own shapes - padded to
+        // whole tiles, so the padded pool doubles as the pair-matrix stride.
         if constexpr (has_tiles_k) {
             std::size_t const wanted = max_of<std::size_t>(expansion_factor, node_connectivity + 1);
             std::size_t const pool = divide_round_up<std::size_t>(wanted, tile_span_k) * tile_span_k;
             if (failed(context.reserve_tiles(pool, tiles_kit_t::scratch_bytes(pool, geometry.dimensions()))))
-                return {status_t::bad_alloc_k, size()};
+                return status_t::bad_alloc_k;
         }
+        return status_t::success_k;
+    }
 
-        // Claim storage for the whole batch: from here on enough sentinel-filled rows exist for
-        // all our nodes, and this thread must roll forward to publishing every id it dispenses.
-        expected<node_id_t> const claimed = claim_capacity(incoming_vectors_count);
-        if (claimed.status != status_t::success_k) return {claimed.status, size()};
+
+    /**
+     *  @brief Inserts against capacity @p claim already obtained and scratch already reserved - the
+     *      half of an insertion that cannot fail, so a batch spanning several indexes commits or is
+     *      refused as a whole. Consumes @p claim; telemetry accrues in @p context.
+     *
+     *  @p on_assigned fires per row with the assigned node id, before the walk and before
+     *  publication - so an outer layer's per-id state, like a key plane, is written ahead of the
+     *  watermark turn and no reachable node can be observed without it.
+     */
+    template <typename callback_type_ = dummy_callback_t>
+    void insert_reserved(vectors_view_t new_vectors, node_ids_span_t assigned_ids,
+                         dense_traversal_context_t& context, capacity_claim_t&& claim,
+                         insert_config_t config = {}, callback_type_&& on_assigned = {}) noexcept {
+        // Consumed: from here every row dispenses an id, and a dispensed id is never returnable.
+        claim.consume();
+        std::size_t const incoming_vectors_count = new_vectors.extent(0);
+        bool const report_assigned_ids = assigned_ids.size() != 0;
+        geometry_t const geometry = geometry_.load(std::memory_order_acquire);
+        std::size_t const node_connectivity = geometry.connectivity();
+        std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
+                                                                     : node_connectivity * 2;
 
         // All slots share one contiguous packed row layout, so the copy width is loop-invariant.
         // Sub-byte types pack several dimensions per storage value - count storage bytes, not dimensions.
@@ -1752,6 +2075,7 @@ struct dense_ram_index {
             node_id_t const new_node_id = next_visible_id_.fetch_add(1, std::memory_order_acq_rel);
             chunked_location_t const new_location = chunked_location(new_node_id);
             if (report_assigned_ids) assigned_ids[incoming_index] = new_node_id;
+            on_assigned(new_node_id);
 
             // The scratch structures persist across iterations and calls - reset them for this node.
             context.results.clear();
@@ -1819,174 +2143,6 @@ struct dense_ram_index {
                 wait_type_ {}(last_visible_id_, watermark, 0u, fu::wait_uncapped_t {});
             last_visible_id_.store(new_node_id + 1, std::memory_order_release);
         }
-
-        insert_result_t result;
-        result.new_size = size();
-        result.visited_members = context.visited_members - visited_members_before;
-        result.computed_distances = context.computed_distances - computed_distances_before;
-        result.computed_distances_in_refines = context.computed_distances_in_refines - refines_before;
-        result.computed_distances_in_reverse_refines = context.computed_distances_in_reverse_refines -
-                                                       reverse_refines_before;
-        result.restarts = context.restarts - restarts_before;
-        return result;
-    }
-
-    /**
-     *  @brief Entry removals are explicitly banned to simplify concurrency management.
-     */
-    status_t remove(node_ids_view_t, dense_traversal_context_t&) noexcept = delete;
-
-    /** @brief Optional tuning knobs for @c search(); zeros mean "derive from connectivity". */
-    struct search_config_t {
-        /** @brief Breadth of the candidate pool; defaults to twice the connectivity.
-         *      Raise it to trade latency for recall - the caller reranks anyway. */
-        small_size_t expansion_factor = 0;
-        /** @brief Reader contract; @c immutable_k - or stronger - drops every atomic in the
-         *      traversal when the caller certifies no concurrent mutators. */
-        synchronization_t synchronization = synchronization_t::concurrent_k;
-    };
-
-    /** @brief Outcome & telemetry of one @c search() call; matches stay in the caller's context. */
-    struct search_result_t {
-        /** @brief @c success_k, or why the search could not run at all. */
-        status_t status = status_t::success_k;
-        /** @brief Matches left in `context.results`, ascending by distance to the query. */
-        std::size_t count = 0;
-        /** @brief Frontier candidates expanded during the walk. */
-        std::size_t visited_members = 0;
-        /** @brief Total distance computations, with padding lanes of 4-way kernels excluded. */
-        std::size_t computed_distances = 0;
-        /** @brief Starvation restarts - a graph-connectivity health signal. */
-        std::size_t restarts = 0;
-
-        explicit operator bool() const noexcept { return succeeded(status); }
-    };
-
-    /** @brief The compile-time form of @c search() & @c search_if(): one whole-traversal
-     *      instantiation per @p synchronization_ contract, so the exclusive form carries no
-     *      atomics at all, and per predicate type, so @c no_predicate_t compiles every
-     *      admission check out of the unfiltered paths. */
-    template <synchronization_t synchronization_, typename predicate_type_ = no_predicate_t>
-    search_result_t search_typed(vector_view_t query_vector, dense_traversal_context_t& context,
-                                 search_config_t config = {},
-                                 predicate_type_&& predicate = predicate_type_ {}) noexcept {
-        constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, no_predicate_t>;
-
-        std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
-                                                                     : connectivity() * 2;
-
-        // Same load-bearing reservations as in `insert`: the scratch structures never grow on
-        // their own mid-traversal. A predicated walk also owns the admitted pool - the
-        // re-selection buffer, idle during any search - sized to the same expansion.
-        if (failed(context.results.reserve(expansion_factor)) ||       //
-            failed(context.frontier.reserve(expansion_factor * 4u)) || //
-            failed(context.visited.reserve(expansion_factor * 4u)))
-            return {status_t::bad_alloc_k};
-        if constexpr (predicated_k) {
-            if (failed(context.refining_candidates.reserve(expansion_factor))) return {status_t::bad_alloc_k};
-            context.refining_candidates.clear();
-        }
-        context.results.clear();
-        context.frontier.clear();
-        context.visited.clear();
-
-        // Snapshot the watermark once: everything strictly below it is published and readable.
-        // An empty index legitimately yields an empty result set. A mutation-free contract needs
-        // no acquire - the caller's own synchronization already ordered every publication first.
-        constexpr std::memory_order watermark_order_k = synchronization_ == synchronization_t::concurrent_k
-                                                            ? std::memory_order_acquire
-                                                            : std::memory_order_relaxed;
-        node_id_t const first_invisible_id = last_visible_id_.load(watermark_order_k);
-        if (first_invisible_id == 0) return {status_t::success_k};
-
-        // Snapshot the context's running telemetry, to report this query's share on return.
-        std::size_t const visited_members_before = context.visited_members;
-        std::size_t const computed_distances_before = context.computed_distances;
-        std::size_t const restarts_before = context.restarts;
-
-        vector_norms_t const query_norms = dense_norms(query_vector);
-        status_t const walked = search_around<synchronization_>(query_vector, query_norms, first_invisible_id,
-                                                                expansion_factor, context, //
-                                                                std::forward<predicate_type_>(predicate));
-
-        // The result contract is one pool: matches always land in `context.results`, so a
-        // predicated walk swaps its admitted pool into place - both are the same buffer type,
-        // and the navigation leftovers get cleared by whichever call reuses that scratch next.
-        if constexpr (predicated_k) std::swap(context.results, context.refining_candidates);
-
-        // A refused walk still ranked whatever it reached; the status says the ranking is short
-        // because scratch ran out, not because the graph had nothing better.
-        search_result_t result;
-        result.status = walked;
-        result.count = context.results.size();
-        result.visited_members = context.visited_members - visited_members_before;
-        result.computed_distances = context.computed_distances - computed_distances_before;
-        result.restarts = context.restarts - restarts_before;
-        return result;
-    }
-
-    /**
-     *  @brief Finds the nearest published neighbors of @p query_vector - the caller reranks or
-     *      trims the prefix it needs.
-     *
-     *  Under the default @c concurrent_k contract it is safe to call concurrently with
-     *  insertions and other searches: the traversal reads only nodes below the visibility
-     *  watermark, acquire-loads every slot-0 lock before scanning a list, retries transiently
-     *  locked nodes, and never writes to the graph. Freshly inserted nodes become reachable the
-     *  moment their publisher advances the watermark; reverse-edge ids above this query's
-     *  watermark snapshot are skipped by the translation-frontier invariant, and picked up by
-     *  any later query with a fresher snapshot. Under @c immutable_k - or stronger - the caller
-     *  certifies no mutators and the traversal runs atomics-free. @ref dense_ram_index_concurrency
-     *
-     *  @param[in] query_vector The query, in the index's own dtype & frozen dimensionality.
-     *  @param[inout] context The calling thread's scratch & telemetry: the matches end up in
-     *      @c context.results, ascending by distance - the nearest first.
-     *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
-     */
-    search_result_t search(vector_view_t query_vector, dense_traversal_context_t& context,
-                           search_config_t config = {}) noexcept {
-        if (config.synchronization != synchronization_t::concurrent_k)
-            return search_typed<synchronization_t::immutable_k>(query_vector, context, config);
-        return search_typed<synchronization_t::concurrent_k>(query_vector, context, config);
-    }
-
-    /**
-     *  @brief Finds the nearest published neighbors of @p query_vector that satisfy
-     *      @p predicate - the filtered sibling of @c search, sharing its whole contract.
-     *
-     *  Non-matching nodes still score and route the walk - filtering navigation itself would
-     *  strand it in disconnected islands - but only matching nodes enter the reported pool,
-     *  whose radius governs termination once it holds @c expansion_factor entries; until then
-     *  the ordinary navigation radius bounds the frontier. Predicates come in two shapes,
-     *  detected by signature: per-node @c bool(dense_node_id_t), or batched - receiving the
-     *  scored quad and an admissions buffer, pushing what it admits:
-     *
-     *  @code{.cpp}
-     *  index.search_if(query, [&](std::span<dense_scored_node_t const> scored, auto& admitted) {
-     *      for (dense_scored_node_t candidate : scored)
-     *          if (labels[candidate.node_id] == wanted) [[maybe_unused]] auto kept = admitted.push_back(candidate);
-     *  }, context);
-     *  @endcode
-     *
-     *  The batch amortizes expensive external checks across the 4-way gathers the scan
-     *  already stages, with distances in view - so radius cut-offs are just predicates.
-     *  Each node is tested at most once per query: the exact visited set is the predicate's
-     *  memoization. With a trivially-true predicate the results match @c search exactly.
-     *
-     *  @param[in] query_vector The query, in the index's own dtype & frozen dimensionality.
-     *  @param[in] predicate The admission filter, called with published node ids only.
-     *  @param[inout] context The calling thread's scratch & telemetry: the matches end up in
-     *      @c context.results, ascending by distance - the nearest first.
-     *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
-     */
-    template <typename predicate_type_>
-    search_result_t search_if(vector_view_t query_vector, predicate_type_&& predicate,
-                              dense_traversal_context_t& context, search_config_t config = {}) noexcept {
-        if (config.synchronization != synchronization_t::concurrent_k)
-            return search_typed<synchronization_t::immutable_k>(query_vector, context, config,
-                                                                std::forward<predicate_type_>(predicate));
-        return search_typed<synchronization_t::concurrent_k>(query_vector, context, config,
-                                                             std::forward<predicate_type_>(predicate));
     }
 
     /** @brief The class-local spelling of the shared, template-independent

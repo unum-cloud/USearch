@@ -9,6 +9,9 @@
  *  - Implicit @b binary-heaps
  *  - @b Sorted-arrays
  *  - Unsorted flat @b scratch-arrays
+ *
+ *  Plus the @b arena allocator they wear when their storage is a slice of one shared run rather
+ *  than an allocation of their own, and the concepts pinning both faces.
  */
 #pragma once
 
@@ -18,6 +21,7 @@
 
 #include <algorithm>   // `std::lower_bound`, `std::sort_heap`, `std::min`, `std::max`
 #include <array>       // `std::array` - batch-of-four overloads
+#include <concepts>    // `std::constructible_from` - the acquiring-allocator constraint
 #include <span>        // `std::span` - the sorted-batch insert argument
 #include <functional>  // `std::less`
 #include <memory>      // `std::allocator`
@@ -63,6 +67,18 @@ inline std::size_t ceil2(std::size_t value) noexcept {
     value++;
     return value;
 }
+
+/** @brief The allocator surface these containers use; narrower than the standard's, since none of
+ *      them constructs or destroys through it. */
+template <typename allocator_>
+concept buffer_allocator =
+    requires(allocator_ allocator, typename allocator_::value_type* pointer, std::size_t count) {
+        typename allocator_::value_type;
+        { allocator.allocate(count) } -> std::same_as<typename allocator_::value_type*>;
+        allocator.deallocate(pointer, count);
+    };
+
+static_assert(buffer_allocator<std::allocator<std::byte>>);
 
 /**
  *  @brief Sorts up to four @p values ascending by @p comparator_type_ through fully-unrolled
@@ -412,6 +428,26 @@ class max_heap_dary {
     max_heap_dary(max_heap_dary const&) = delete;
     max_heap_dary& operator=(max_heap_dary const&) = delete;
 
+    /** @brief Bytes @p capacity entries occupy. */
+    static constexpr std::size_t memory_usage(std::size_t capacity) noexcept {
+        return capacity * sizeof(element_t);
+    }
+
+    /** @brief Bytes this heap currently occupies. */
+    std::size_t memory_usage() const noexcept { return memory_usage(capacity_); }
+
+    /** @brief Takes @p region as a heap of at most @p capacity entries; @p growth serves any later
+     *      block, and a default-constructed one refuses, making the carve exact. */
+    [[nodiscard]] static max_heap_dary acquire(std::span<std::byte> region, std::size_t capacity,
+                                               allocator_t growth) noexcept {
+        max_heap_dary heap;
+        heap.capacity_ = min_of(capacity, region.size() / sizeof(element_t));
+        heap.elements_ = heap.capacity_ ? reinterpret_cast<element_t*>(region.data()) : nullptr;
+        heap.size_ = 0;
+        heap.allocator_ = std::move(growth);
+        return heap;
+    }
+
     ~max_heap_dary() noexcept { reset(); }
 
     void reset() noexcept {
@@ -583,6 +619,26 @@ class sorted_buffer {
     sorted_buffer(sorted_buffer const&) = delete;
     sorted_buffer& operator=(sorted_buffer const&) = delete;
 
+    /** @brief Bytes @p capacity entries occupy. */
+    static constexpr std::size_t memory_usage(std::size_t capacity) noexcept {
+        return capacity * sizeof(element_t);
+    }
+
+    /** @brief Bytes this buffer currently occupies. */
+    std::size_t memory_usage() const noexcept { return memory_usage(capacity_); }
+
+    /** @brief Takes @p region as a buffer of at most @p capacity entries; @p growth serves any
+     *      later block, and a default-constructed one refuses, making the carve exact. */
+    [[nodiscard]] static sorted_buffer acquire(std::span<std::byte> region, std::size_t capacity,
+                                               allocator_t growth) noexcept {
+        sorted_buffer buffer;
+        buffer.capacity_ = min_of(capacity, region.size() / sizeof(element_t));
+        buffer.elements_ = buffer.capacity_ ? reinterpret_cast<element_t*>(region.data()) : nullptr;
+        buffer.size_ = 0;
+        buffer.allocator_ = std::move(growth);
+        return buffer;
+    }
+
     ~sorted_buffer() noexcept { reset(); }
 
     void reset() noexcept {
@@ -750,9 +806,11 @@ class growing_buffer {
     growing_buffer(allocator_type_ const& allocator = {}) noexcept
         : elements_(nullptr), size_(0), capacity_(0), allocator_(allocator) {}
 
+    /** @brief Qualified, since an element type from @c std drags @c std::exchange into the
+     *      overload set through argument-dependent lookup and makes the call ambiguous. */
     growing_buffer(growing_buffer&& other) noexcept
-        : elements_(exchange(other.elements_, nullptr)), size_(exchange(other.size_, 0)),
-          capacity_(exchange(other.capacity_, 0)), allocator_(std::move(other.allocator_)) {}
+        : elements_(usearch::exchange(other.elements_, nullptr)), size_(usearch::exchange(other.size_, 0)),
+          capacity_(usearch::exchange(other.capacity_, 0)), allocator_(std::move(other.allocator_)) {}
 
     growing_buffer& operator=(growing_buffer&& other) noexcept {
         std::swap(elements_, other.elements_);
@@ -853,15 +911,22 @@ class growing_buffer {
      *  @note Trivial element types only - nothing is constructed, so every element must be
      *      written before it is read. */
     [[nodiscard]] status_t resize_uninitialized(std::size_t count) noexcept {
-        static_assert(
-            std::is_trivially_default_constructible<element_t>() && std::is_trivially_destructible<element_t>(),
-            "Uninitialized storage is only safe for trivial element types");
         reset();
         if (count == 0) return status_t::success_k;
         if (status_t const sized = reserve_exactly(count); failed(sized)) return sized;
+        extend_uninitialized(count);
+        return status_t::success_k;
+    }
+
+    /** @brief Moves the fill to @p count within reserved capacity, leaving the bytes untouched -
+     *      never allocates, never fails. This is the carve an arena performs, where value-
+     *      constructing the run would cost a pass over every slice handed out. */
+    inline void extend_uninitialized(std::size_t count) noexcept {
+        static_assert(
+            std::is_trivially_default_constructible<element_t>() && std::is_trivially_destructible<element_t>(),
+            "Uninitialized storage is only safe for trivial element types");
         annotate_container(elements_, elements_ + capacity_, elements_ + size_, elements_ + count);
         size_ = count;
-        return status_t::success_k;
     }
 
     /** @brief Appends @p element into pre-reserved capacity - the hot-path form. */
@@ -897,6 +962,61 @@ class growing_buffer {
         for (; size_ < count; ++size_) new (elements_ + size_) element_t();
     }
 };
+
+/** @brief Hands out slices of one arena - a @ref growing_buffer of bytes it points at but does not
+ *      own, whose @c size is what has been carved and @c capacity the run. Copies share the arena
+ *      by pointer, so containers built from one carve disjoint slices; a spent one answers
+ *      @c nullptr, and releasing a slice does nothing. Every carve starts on an @p alignment_
+ *      boundary, since the arena's raw bytes promise only what @c malloc does and the containers
+ *      built over a slice issue the widest loads their kernels know. */
+template <typename value_type_ = std::byte, typename upstream_allocator_ = std::allocator<std::byte>,
+          std::size_t alignment_ = default_alignment_k>
+struct arena_allocator {
+    using value_type = value_type_;
+    using size_type = std::size_t;
+    using arena_t = growing_buffer<std::byte, upstream_allocator_>;
+
+    /** @brief Spelled out because the alignment's non-type parameter defeats the traits'
+     *      automatic first-argument replacement; the upstream and the alignment ride along. */
+    template <typename other_type_>
+    struct rebind {
+        using other = arena_allocator<other_type_, upstream_allocator_, alignment_>;
+    };
+
+    /** @brief The boundary every carve starts on; echoes the template argument. */
+    inline static constexpr std::size_t alignment_k = alignment_;
+
+    /** @brief The arena every rebound copy shares; null refuses every request. */
+    arena_t* arena = nullptr;
+
+    constexpr arena_allocator() noexcept = default;
+    explicit constexpr arena_allocator(arena_t& arena) noexcept : arena(&arena) {}
+
+    /** @brief The rebinding conversion @c std::allocator_traits performs - the upstream rides
+     *      along, and the arena is shared rather than copied. */
+    template <typename other_type_>
+    constexpr arena_allocator(arena_allocator<other_type_, upstream_allocator_, alignment_> const& other) noexcept
+        : arena(other.arena) {}
+
+    value_type_* allocate(std::size_t count) noexcept {
+        if (!arena) return nullptr;
+        // Aligned by address, not by offset: the upstream only promises what `malloc` does.
+        std::uintptr_t const cursor = reinterpret_cast<std::uintptr_t>(arena->data() + arena->size());
+        std::size_t const padding_bytes = static_cast<std::size_t>(
+            divide_round_up<std::uintptr_t>(cursor, alignment_k) * alignment_k - cursor);
+        std::size_t const wanted_bytes = count * sizeof(value_type_);
+        if (arena->capacity() - arena->size() < padding_bytes + wanted_bytes) return nullptr;
+        std::byte* const carved = arena->data() + arena->size() + padding_bytes;
+        arena->extend_uninitialized(arena->size() + padding_bytes + wanted_bytes);
+        return reinterpret_cast<value_type_*>(carved);
+    }
+    void deallocate(value_type_*, std::size_t) noexcept {}
+    bool operator==(arena_allocator const& other) const noexcept { return arena == other.arena; }
+};
+
+static_assert(buffer_allocator<arena_allocator<std::byte>>);
+static_assert(std::same_as<std::allocator_traits<arena_allocator<std::byte>>::rebind_alloc<int>, //
+                           arena_allocator<int>>);
 
 } // namespace usearch
 } // namespace unum

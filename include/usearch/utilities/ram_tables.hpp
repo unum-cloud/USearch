@@ -20,6 +20,7 @@
 #include <functional>  // `std::hash`
 #include <limits>      // `std::numeric_limits` - the all-ones sentinel
 #include <memory>      // `std::allocator`
+#include <span>        // `std::span` - the arena region an acquired set is built over
 #include <type_traits> // `std::is_integral`, `std::is_trivially_copyable_v`
 #include <utility>     // `std::swap`, `std::move`
 
@@ -111,11 +112,29 @@ class growing_hash_set {
         count_ = 0;
     }
 
-    growing_hash_set(std::size_t capacity, allocator_t allocator = {}) noexcept : allocator_(std::move(allocator)) {
-        slots_ = (element_t*)allocator_.allocate(ceil2(capacity) * sizeof(element_t));
-        capacity_ = slots_ ? ceil2(capacity) : 0u;
-        count_ = 0u;
-        clear();
+    /** @brief Slots @p capacity elements probe over; sized to the bare count a table fills, and a
+     *      full linear probe never terminates. */
+    static std::size_t slots_for(std::size_t capacity) noexcept { return ceil2(capacity * 5u / 3u); }
+
+    /** @brief Bytes @p capacity elements occupy, the load headroom included. */
+    static std::size_t memory_usage(std::size_t capacity) noexcept {
+        return slots_for(capacity) * sizeof(element_t);
+    }
+
+    /** @brief Bytes this set currently occupies. */
+    std::size_t memory_usage() const noexcept { return capacity_ * sizeof(element_t); }
+
+    /** @brief Takes @p region as a set over @p capacity elements; @p growth serves any later
+     *      rehash, and a default-constructed one refuses, making the carve exact. */
+    [[nodiscard]] static growing_hash_set acquire(std::span<std::byte> region, std::size_t capacity,
+                                                  allocator_t growth) noexcept {
+        growing_hash_set table;
+        table.capacity_ = std::bit_floor(min_of(slots_for(capacity), region.size() / sizeof(element_t)));
+        table.slots_ = table.capacity_ ? reinterpret_cast<element_t*>(region.data()) : nullptr;
+        table.count_ = 0;
+        table.allocator_ = std::move(growth);
+        table.clear();
+        return table;
     }
 
     growing_hash_set(growing_hash_set&& other) noexcept {
@@ -317,6 +336,21 @@ class growing_multimap {
           inserted_count_(other.inserted_count_.load(std::memory_order_relaxed)), hash_(std::move(other.hash_)),
           allocator_(std::move(other.allocator_)) {
         other.inserted_count_.store(0, std::memory_order_relaxed);
+    }
+
+    /** @brief Swap-based, so the displaced table dies with @p other rather than here; the count is
+     *      moved by hand, since an atomic is not swappable. Single-threaded, like @ref clear. */
+    growing_multimap& operator=(growing_multimap&& other) noexcept {
+        std::swap(slots_, other.slots_);
+        std::swap(states_, other.states_);
+        std::swap(slots_count_, other.slots_count_);
+        std::swap(entries_quota_, other.entries_quota_);
+        std::size_t const inserted = inserted_count_.load(std::memory_order_relaxed);
+        inserted_count_.store(other.inserted_count_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        other.inserted_count_.store(inserted, std::memory_order_relaxed);
+        std::swap(hash_, other.hash_);
+        std::swap(allocator_, other.allocator_);
+        return *this;
     }
 
     /** @brief Forgets every entry, keeping the slot array & quota - single-threaded, like
