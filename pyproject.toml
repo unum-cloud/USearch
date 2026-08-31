@@ -12,8 +12,7 @@ build-backend = "setuptools.build_meta"
 requires = [
   "setuptools>=42",
   "wheel",
-  "cmake>=3.22",
-  "pybind11>=2.13.6",
+  "pybind11>=3.0.0",
   "numpy",
   "numkong>=7.5.0",
 ]
@@ -95,38 +94,35 @@ before-build = [
 ]
 
 [dependency-groups]
-lint = [
-  "ruff>=0.15.8",
-]
-tests = [
-  "numpy>=1.21",
-  "pytest>=9.0.2",
-  "pytest-repeat>=0.9.4",
-]
+lint = ["ruff>=0.16.5"]
+tests = ["numpy>=1.21", "pytest>=9.1.1", "pytest-repeat>=0.9.4"]
 
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+extend-exclude = ["*.md"]
 
 [tool.ruff.format]
 quote-style = "double"
 
 [tool.ruff.lint]
 select = [
-  "E",     # pycodestyle errors
-  "W",     # pycodestyle warnings
-  "F",     # pyflakes
-  "I",     # isort (import ordering)
-  "UP",    # pyupgrade (modernize syntax)
+  "E",  # pycodestyle errors
+  "W",  # pycodestyle warnings
+  "F",  # pyflakes
+  "I",  # isort (import ordering)
+  "UP", # pyupgrade (modernize syntax)
 ]
 ignore = [
-  "E501",  # line too long (handled by formatter)
-  "E741",  # ambiguous variable names (l, O, I)
-  "UP007", # Union[X, Y] -> X | Y (deferred to v3, requires annotation refactor)
+  "E501", # line too long (handled by formatter)
+  "E741", # ambiguous variable names (l, O, I)
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"python/usearch/__init__.py" = ["F401", "E402"]  # re-exports and conditional imports
+"python/usearch/__init__.py" = [
+  "F401",
+  "E402",
+] # re-exports and conditional imports
 
 [tool.ruff.lint.isort]
 known-first-party = ["usearch"]

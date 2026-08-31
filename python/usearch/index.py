@@ -14,7 +14,6 @@ from typing import (
     Any,
     NamedTuple,
     TypeAlias,
-    Union,
 )
 
 import numpy as np
@@ -76,17 +75,17 @@ Key: TypeAlias = np.uint64
 
 NoneType: TypeAlias = type(None)
 
-KeyOrKeysLike = Union[Key, Iterable[Key], int, Iterable[int], np.ndarray, memoryview]
+KeyOrKeysLike = Key | Iterable[Key] | int | Iterable[int] | np.ndarray | memoryview
 
-VectorOrVectorsLike = Union[np.ndarray, Iterable[np.ndarray], memoryview]
+VectorOrVectorsLike = np.ndarray | Iterable[np.ndarray] | memoryview
 
-DTypeLike = Union[str, ScalarKind]
+DTypeLike = str | ScalarKind
 
-MetricLike = Union[str, MetricKind, CompiledMetric]
+MetricLike = str | MetricKind | CompiledMetric
 
-BytesLike = Union[bytes, bytearray, memoryview]
+BytesLike = bytes | bytearray | memoryview
 
-PathOrBuffer = Union[str, os.PathLike, BytesLike]
+PathOrBuffer = str | os.PathLike | BytesLike
 
 ProgressCallback = Callable[[int, int], bool]
 

@@ -199,6 +199,7 @@ def test_concurrent_access_serializes_safely():
                 target(*args)
             except Exception as e:
                 errors.append(f"{type(e).__name__}: {e}")
+
         return threading.Thread(target=wrapped)
 
     def adder(tid: int):

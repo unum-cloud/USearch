@@ -20,6 +20,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #define PY_SSIZE_T_CLEAN
 #include <pybind11/functional.h>
+#include <pybind11/native_enum.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -1142,11 +1143,12 @@ PYBIND11_MODULE(compiled, m, py::mod_gil_not_used()) {
     m.attr("VERSION_MINOR") = py::int_(USEARCH_VERSION_MINOR);
     m.attr("VERSION_PATCH") = py::int_(USEARCH_VERSION_PATCH);
 
-    py::enum_<metric_punned_signature_t>(m, "MetricSignature", py::arithmetic())
+    py::native_enum<metric_punned_signature_t>(m, "MetricSignature", "enum.Enum")
         .value("ArrayArray", metric_punned_signature_t::array_array_k)
-        .value("ArrayArraySize", metric_punned_signature_t::array_array_size_k);
+        .value("ArrayArraySize", metric_punned_signature_t::array_array_size_k)
+        .finalize();
 
-    py::enum_<metric_kind_t>(m, "MetricKind", py::arithmetic())
+    py::native_enum<metric_kind_t>(m, "MetricKind", "enum.Enum")
         .value("Unknown", metric_kind_t::unknown_k)
 
         .value("IP", metric_kind_t::ip_k)
@@ -1162,9 +1164,10 @@ PYBIND11_MODULE(compiled, m, py::mod_gil_not_used()) {
         .value("Sorensen", metric_kind_t::sorensen_k)
 
         .value("Cosine", metric_kind_t::cos_k)
-        .value("InnerProduct", metric_kind_t::ip_k);
+        .value("InnerProduct", metric_kind_t::ip_k)
+        .finalize();
 
-    py::enum_<scalar_kind_t>(m, "ScalarKind", py::arithmetic())
+    py::native_enum<scalar_kind_t>(m, "ScalarKind", "enum.Enum")
         .value("Unknown", scalar_kind_t::unknown_k)
         .value("F64", scalar_kind_t::f64_k)
         .value("F32", scalar_kind_t::f32_k)
@@ -1184,7 +1187,8 @@ PYBIND11_MODULE(compiled, m, py::mod_gil_not_used()) {
         .value("U16", scalar_kind_t::u16_k)
         .value("I64", scalar_kind_t::i64_k)
         .value("I32", scalar_kind_t::i32_k)
-        .value("I16", scalar_kind_t::i16_k);
+        .value("I16", scalar_kind_t::i16_k)
+        .finalize();
 
     m.def("index_dense_metadata_from_path", [](std::string const& path) -> py::dict {
         index_dense_metadata_result_t meta = index_dense_metadata_from_path(path.c_str());
