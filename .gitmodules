@@ -1,7 +1,7 @@
 [submodule "numkong"]
 	path = numkong
 	url = https://github.com/ashvardanian/NumKong
-	branch = v7.6.0
+	branch = v7.8.1
 [submodule "stringzilla"]
 	path = stringzilla
 	url = https://github.com/ashvardanian/stringzilla
