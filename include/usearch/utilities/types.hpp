@@ -71,6 +71,15 @@ using dense_distance_t = f32_t;
  *      lock & empty-slot sentinel in neighbor lists of every index design. */
 inline constexpr dense_node_id_t dense_node_id_unknown_k = 0xFFFFFFFFu;
 
+/** @brief The single-byte scalar every allocator deals in - the unit of raw storage. */
+using byte_t = std::byte;
+
+/** @brief A mutable run of raw bytes - the staging & carve currency of writers. */
+using bytes_span_t = std::span<byte_t>;
+
+/** @brief A read-only run of raw bytes - the currency of readers & mapped payloads. */
+using bytes_view_t = std::span<byte_t const>;
+
 /** @brief The one project-wide default alignment: 128 bytes covers x86's adjacent-line
  *      prefetcher, the 128-byte cache lines of Apple's and other Arm cores, and a CUDA
  *      coalesced transaction alike, where a 64-byte guess serves only one of them.
@@ -142,6 +151,9 @@ enum class [[nodiscard]] status_t : int {
     /** @brief A certified synchronization contract was violated by a concurrent operation;
      *      discard any produced output and retry in a quieter phase. */
     contended_k = usearch_error_contended_k,
+    /** @brief A progress callback asked the operation to stop; it unwound without publishing,
+     *      so the structure carries whatever it did before the call. */
+    cancelled_k = usearch_error_cancelled_k,
 };
 
 /** @brief Whether @p status reports success. */
@@ -158,6 +170,15 @@ enum class admission_t : int {
     reject_k = usearch_reject_k,
     /** @brief Report the node among the matches. */
     admit_k = usearch_admit_k,
+};
+
+/** @brief Whether the operation a progress callback is watching carries on or unwinds.
+ *      Mirrors @c usearch_continuation_t value for value, so the two enums cannot drift. */
+enum class continuation_t : int {
+    /** @brief Carry on to the next unit of work. */
+    continue_k = usearch_continue_k,
+    /** @brief Unwind: the verb publishes nothing further and reports @c cancelled_k. */
+    cancel_k = usearch_cancel_k,
 };
 
 /**
@@ -181,6 +202,7 @@ constexpr char const* status_to_string(status_t status) noexcept {
     case status_t::uninitialized_k: return "the structure needs a successful reservation first";
     case status_t::config_mismatch_k: return "the request contradicts the frozen configuration";
     case status_t::contended_k: return "a synchronization contract was violated concurrently";
+    case status_t::cancelled_k: return "a progress callback asked the operation to stop";
     }
     return "an unrecognized status";
 }
@@ -546,6 +568,15 @@ struct dummy_predicate_t {
     template <typename... args_types_>
     constexpr admission_t operator()(args_types_&&...) const noexcept {
         return admission_t::admit_k;
+    }
+};
+
+/** @brief The compiled-out default progress watcher: always carries on, so an unwatched long
+ *      verb runs to completion with no cancellation checks surviving inlining. */
+struct dummy_progress_t {
+    template <typename... args_types_>
+    constexpr continuation_t operator()(args_types_&&...) const noexcept {
+        return continuation_t::continue_k;
     }
 };
 

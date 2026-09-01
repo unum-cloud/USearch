@@ -109,8 +109,8 @@ concept basic_query = (std::same_as<query_type_, value_type_> || transparent_met
  *      of @c save & @c load, supplied by the caller because values are arbitrary objects. */
 template <typename codec_type_, typename value_type_>
 concept basic_value_codec = requires(codec_type_ const& codec, value_type_ const& immutable_value,
-                                     value_type_& mutable_value, std::span<std::byte> output,
-                                     std::span<std::byte const> input) {
+                                     value_type_& mutable_value, bytes_span_t output,
+                                     bytes_view_t input) {
     { codec.saved_bytes(immutable_value) } noexcept -> std::same_as<std::size_t>;
     { codec.save(immutable_value, output) } noexcept -> std::same_as<status_t>;
     { codec.load(input, mutable_value) } noexcept -> std::same_as<status_t>;
@@ -1077,7 +1077,7 @@ struct basic_ram_index {
         /** @brief The measured header, frozen at planning. */
         basic_snapshot_header_t header;
         /** @brief The caller-owned destination every region writes disjoint slices of. */
-        std::span<std::byte> output {};
+        bytes_span_t output {};
         /** @brief Nodes the regions covered so far, mutated through @c std::atomic_ref. */
         std::size_t covered = 0;
         /** @brief The unique hold spanning the plan's whole lifetime. */
@@ -1145,7 +1145,7 @@ struct basic_ram_index {
      *      construction. */
     template <typename value_codec_type_>
         requires basic_value_codec<value_codec_type_, value_t>
-    expected<save_plan_t> plan_save(std::span<std::byte> output, value_codec_type_ const& codec) const noexcept {
+    expected<save_plan_t> plan_save(bytes_span_t output, value_codec_type_ const& codec) const noexcept {
         save_plan_t plan {*this};
         plan.hold = unique_lock_t {shared_mutex_, std::try_to_lock};
         if (!plan.hold) return {std::move(plan), status_t::contended_k};
@@ -1210,7 +1210,7 @@ struct basic_ram_index {
      *  @param[in] codec Encodes each stored value into its section slice. */
     template <typename value_codec_type_>
         requires basic_value_codec<value_codec_type_, value_t>
-    status_t save(std::span<std::byte> output, value_codec_type_ const& codec) const noexcept {
+    status_t save(bytes_span_t output, value_codec_type_ const& codec) const noexcept {
         expected<save_plan_t> planned = plan_save(output, codec);
         if (failed(planned.status)) return planned.status;
         node_id_t const node_count = static_cast<node_id_t>(planned.value.header.node_count);
@@ -1228,7 +1228,7 @@ struct basic_ram_index {
         /** @brief The vetted header of the payload being decoded. */
         basic_snapshot_header_t header;
         /** @brief The caller-owned source every region decodes disjoint slices of. */
-        std::span<std::byte const> payload {};
+        bytes_view_t payload {};
         /** @brief Nodes the regions covered so far, mutated through @c std::atomic_ref. */
         std::size_t covered = 0;
         /** @brief The unique hold spanning the plan's whole lifetime. */
@@ -1276,7 +1276,7 @@ struct basic_ram_index {
                 previous_neighbors = next_neighbors;
 
                 i64_t const next_values = read_bytes_<i64_t>(payload, vsums_cursor);
-                std::span<std::byte const> const slice = payload.subspan(
+                bytes_view_t const slice = payload.subspan(
                     layout.values_offset + static_cast<std::size_t>(previous_values),
                     static_cast<std::size_t>(next_values - previous_values));
                 if (status_t const decoded = codec.load(slice, record.value); failed(decoded)) return decoded;
@@ -1311,7 +1311,7 @@ struct basic_ram_index {
      *      then decode the per-node bulk, and nothing publishes until its @c finish.
      *
      *  @param[in] payload The bytes a prior @c save emitted. */
-    expected<load_plan_t> plan_load(std::span<std::byte const> payload) noexcept {
+    expected<load_plan_t> plan_load(bytes_view_t payload) noexcept {
         load_plan_t plan {*this};
         std::size_t const capacity = capacity_.load(std::memory_order_acquire);
         if (!capacity) return {std::move(plan), status_t::uninitialized_k};
@@ -1343,7 +1343,7 @@ struct basic_ram_index {
      *  @param[in] codec Decodes each value slice into its record. */
     template <typename value_codec_type_>
         requires basic_value_codec<value_codec_type_, value_t>
-    status_t load(std::span<std::byte const> payload, value_codec_type_ const& codec) noexcept {
+    status_t load(bytes_view_t payload, value_codec_type_ const& codec) noexcept {
         expected<load_plan_t> planned = plan_load(payload);
         if (failed(planned.status)) return planned.status;
         node_id_t const node_count = static_cast<node_id_t>(planned.value.header.node_count);
@@ -1369,7 +1369,7 @@ struct basic_ram_index {
      *      selections never allocate mid-walk; the visited set and frontier may still
      *      grow past deep expansions, degrading the walk gracefully when they cannot. */
     static status_t reserve_scratch_(traversal_context_t& context, std::size_t expansion_factor,
-                                                   std::size_t fan_out, std::size_t connectivity) noexcept {
+                                     std::size_t fan_out, std::size_t connectivity) noexcept {
         std::size_t const round_capacity = max_of(fan_out * connectivity, connectivity + 1);
         if (status_t const sized = context.results.reserve(max_of(expansion_factor, connectivity + 1)); failed(sized))
             return sized;
@@ -1412,9 +1412,9 @@ struct basic_ram_index {
      *      than a failure. A failed status means scratch could not grow, which is. */
     template <typename metric_type_, typename query_type_>
     expected<std::size_t> sample_landmarks_(query_type_ const& query, metric_type_& metric,
-                                                          node_id_t first_invisible_id, std::size_t wanted,
-                                                          std::size_t expansion_factor,
-                                                          traversal_context_t& context) const noexcept {
+                                            node_id_t first_invisible_id, std::size_t wanted,
+                                            std::size_t expansion_factor,
+                                            traversal_context_t& context) const noexcept {
         if (status_t const seen = context.visited.reserve(context.visited.size() + wanted); failed(seen))
             return {0, seen};
         context.staged_ids.clear();
@@ -1503,8 +1503,8 @@ struct basic_ram_index {
      */
     template <synchronization_t synchronization_, typename metric_type_, typename query_type_>
     status_t search_around_(query_type_ const& query, metric_type_& metric, node_id_t first_invisible_id,
-                                          std::size_t expansion_factor, std::size_t fan_out, std::size_t connectivity,
-                                          traversal_context_t& context) const noexcept {
+                            std::size_t expansion_factor, std::size_t fan_out, std::size_t connectivity,
+                            traversal_context_t& context) const noexcept {
         expected<std::size_t> seeded = sample_landmarks_(query, metric, first_invisible_id, connectivity,
                                                          expansion_factor, context);
         if (failed(seeded.status)) return seeded.status;
@@ -1658,7 +1658,7 @@ struct basic_ram_index {
 
     /** @brief Parses & bounds an untrusted payload's header and both prefix-sum sections
      *      in full, so the region decoders can trust every extent they read back. */
-    static status_t loaded_header_(std::span<std::byte const> payload, std::size_t capacity,
+    static status_t loaded_header_(bytes_view_t payload, std::size_t capacity,
                                    basic_snapshot_header_t& header) noexcept {
         if (payload.size() < sizeof(basic_snapshot_header_t)) return status_t::malformed_k;
         std::size_t cursor = 0;
@@ -1743,13 +1743,13 @@ struct basic_ram_index {
     }
 
     /** @brief Zero-fills @p output up to @p target, so section pads are deterministic. */
-    static void pad_until_(std::span<std::byte> output, std::size_t& cursor, std::size_t target) noexcept {
+    static void pad_until_(bytes_span_t output, std::size_t& cursor, std::size_t target) noexcept {
         for (; cursor != target; ++cursor) output[cursor] = std::byte {};
     }
 
     /** @brief Appends @p object's bytes at @p cursor - unaligned-safe - and advances it. */
     template <typename object_type_>
-    static void write_bytes_(std::span<std::byte> output, std::size_t& cursor, object_type_ const& object) noexcept {
+    static void write_bytes_(bytes_span_t output, std::size_t& cursor, object_type_ const& object) noexcept {
         auto const bytes = std::bit_cast<std::array<std::byte, sizeof(object_type_)>>(object);
         for (std::size_t position = 0; position != bytes.size(); ++position)
             output[cursor + position] = bytes[position];
@@ -1758,7 +1758,7 @@ struct basic_ram_index {
 
     /** @brief Reads one @p object_type_ at @p cursor - unaligned-safe - and advances it. */
     template <typename object_type_>
-    static object_type_ read_bytes_(std::span<std::byte const> input, std::size_t& cursor) noexcept {
+    static object_type_ read_bytes_(bytes_view_t input, std::size_t& cursor) noexcept {
         std::array<std::byte, sizeof(object_type_)> bytes;
         for (std::size_t position = 0; position != bytes.size(); ++position) bytes[position] = input[cursor + position];
         cursor += bytes.size();

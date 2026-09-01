@@ -18,7 +18,7 @@
 #include <atomic>      // `std::atomic_flag` - the executor's one-caller gate
 #include <memory>      // `std::allocator_traits` - the rebinding conversions
 #include <type_traits> // `std::true_type` - the propagation traits
-#include <utility>     // `std::swap`, `std::move`
+#include <utility>     // `std::swap`, `std::move`, `std::exchange`
 
 #include <forkunion.h> // `fu_allocate_on_domain_id`, `fu_pool_spawn`, `fu_local_memory_of`
 
@@ -69,9 +69,7 @@ struct forkunion_allocator {
         fu_free_on_domain_id(memory_domain, pointer, count * sizeof(value_type_));
     }
 
-    bool operator==(forkunion_allocator const& other) const noexcept {
-        return memory_domain == other.memory_domain;
-    }
+    bool operator==(forkunion_allocator const& other) const noexcept { return memory_domain == other.memory_domain; }
 };
 
 static_assert(buffer_allocator<forkunion_allocator<std::byte>>);
@@ -99,8 +97,10 @@ struct forkunion_executor_t {
     forkunion_executor_t& operator=(forkunion_executor_t&& other) noexcept { return swap(other), *this; }
     forkunion_executor_t(forkunion_executor_t const&) = delete;
     forkunion_executor_t& operator=(forkunion_executor_t const&) = delete;
-    /** @brief Deletes the pool and every domain's scratch - the executor owns both outright. */
-    ~forkunion_executor_t() noexcept { release(); }
+    /** @brief Deletes the pool and every arena, unless @ref release reclaimed the pool first. */
+    ~forkunion_executor_t() noexcept {
+        if (pool_) fu_pool_delete(pool_);
+    }
 
     void swap(forkunion_executor_t& other) noexcept {
         std::swap(arenas_per_thread_, other.arenas_per_thread_);
@@ -108,18 +108,40 @@ struct forkunion_executor_t {
         std::swap(topology_, other.topology_);
     }
 
-    /** @brief Takes over @p pool, which this executor owns and deletes from here on, so the caller
-     *      must not delete or re-spawn it. Nothing here can fail - the pool already exists. */
-    [[nodiscard]] static forkunion_executor_t acquire(fu_topology_t topology, fu_pool_t pool) noexcept {
+    /** @brief Takes over @p pool, which this executor owns and deletes from here on - even on
+     *      failure - so the caller must not delete or re-spawn it. Colocates one arena with each
+     *      worker's own memory domain, so an executor is fully usable the moment it exists and no
+     *      fan-out ever waits on a first reservation. */
+    static expected<forkunion_executor_t> acquire(fu_topology_t topology, fu_pool_t pool) noexcept {
         forkunion_executor_t executor;
         executor.pool_ = pool;
         executor.topology_ = topology;
-        return executor;
+        std::size_t threads = 0;
+        if (fu_pool_threads_count(pool, &threads) != fu_success_k)
+            return {std::move(executor), status_t::uninitialized_k};
+        if (failed(executor.arenas_per_thread_.resize(threads))) return {std::move(executor), status_t::bad_alloc_k};
+        status_t const status = executor.for_threads([&](std::size_t thread, std::size_t compute_domain) noexcept {
+            std::size_t memory_index = 0;
+            fu_memory_domain_id_t memory_domain = -1;
+            if (fu_local_memory_of(topology, compute_domain, &memory_index) != fu_success_k ||
+                fu_memory_domain_id_at_index(topology, memory_index, &memory_domain) != fu_success_k)
+                return;
+            executor.arenas_per_thread_[thread] = thread_arena_t {forkunion_allocator<std::byte>(memory_domain)};
+        });
+        return {std::move(executor), status};
+    }
+
+    /** @brief Relinquishes the pool without deleting it - the inverse of @ref acquire, so the
+     *      same pool can back a different executor next; the arenas drop and this empties. */
+    fu_pool_t release() noexcept {
+        arenas_per_thread_.clear();
+        topology_ = nullptr;
+        return std::exchange(pool_, nullptr);
     }
 
     /** @brief Spawns @p threads workers over @p topology and takes the pool; zero takes seven
      *      eighths of the cores, since full occupancy starves the ordered publication path. */
-    [[nodiscard]] static expected<forkunion_executor_t> spawn(fu_topology_t topology, std::size_t threads) noexcept {
+    static expected<forkunion_executor_t> spawn(fu_topology_t topology, std::size_t threads) noexcept {
         fu_pool_t pool = nullptr;
         if (fu_pool_new("usearch", fu_capabilities_all_k, &pool) != fu_success_k)
             return {forkunion_executor_t {}, status_t::bad_alloc_k};
@@ -129,7 +151,7 @@ struct forkunion_executor_t {
         std::size_t const wanted = threads ? threads : cores - cores / 8;
         if (fu_pool_spawn(topology, pool, wanted, fu_caller_exclusive_k) != fu_success_k)
             return fu_pool_delete(pool), expected<forkunion_executor_t> {{}, status_t::uninitialized_k};
-        return {acquire(topology, pool), status_t::success_k};
+        return acquire(topology, pool);
     }
 
     /** @brief One call's exclusive hold on the executor, released on destruction - like a capacity
@@ -158,7 +180,7 @@ struct forkunion_executor_t {
     /** @brief Claims the executor for one call, reporting @c contended_k to a second concurrent
      *      caller - the executor serializes, never the indexes it drives, so genuine concurrency
      *      is one executor per calling thread. */
-    [[nodiscard]] expected<executor_claim_t> claim() noexcept {
+    expected<executor_claim_t> claim() noexcept {
         if (held_.test_and_set(std::memory_order_acquire)) return {executor_claim_t {}, status_t::contended_k};
         return {executor_claim_t {*this}, status_t::success_k};
     }
@@ -170,36 +192,12 @@ struct forkunion_executor_t {
      *  Monotone: the runs grow to the widest ask and are kept between calls, so a steady workload
      *  allocates once and a narrower later call costs one compare per thread.
      */
-    [[nodiscard]] status_t reserve(std::size_t bytes_per_thread) noexcept {
-        if (!pool_ || !topology_) return status_t::uninitialized_k;
-        std::size_t threads = 0;
-        if (fu_pool_threads_count(pool_, &threads) != fu_success_k) return status_t::uninitialized_k;
-
-        // One dispatch asks every worker where it runs, and each sites its own run there - once,
-        // since the pool's thread count froze at spawn and re-siting would drop the grown runs.
-        if (arenas_per_thread_.size() != threads) {
-            if (failed(arenas_per_thread_.resize(threads))) return status_t::bad_alloc_k;
-            fu_topology_t const topology = topology_;
-            growing_buffer<thread_arena_t>& arenas = arenas_per_thread_;
-            auto site = [&](std::size_t thread, std::size_t compute_domain) noexcept {
-                std::size_t memory_index = 0;
-                fu_memory_domain_id_t memory_domain = -1;
-                if (fu_local_memory_of(topology, compute_domain, &memory_index) != fu_success_k ||
-                    fu_memory_domain_id_at_index(topology, memory_index, &memory_domain) != fu_success_k)
-                    return;
-                arenas[thread] = thread_arena_t {forkunion_allocator<std::byte>(memory_domain)};
-            };
-            fu_for_threads_t const trampoline = [](fu_lambda_context_t context, std::size_t thread,
-                                                   std::size_t compute_domain) {
-                (*static_cast<decltype(site)*>(context))(thread, compute_domain);
-            };
-            if (fu_pool_for_threads(pool_, trampoline, &site) != fu_success_k) return status_t::uninitialized_k;
-        }
-
+    status_t reserve(std::size_t bytes_per_thread) noexcept {
+        if (arenas_per_thread_.empty()) return status_t::uninitialized_k;
         // Rewind before growing: a relocation moves only dead carves, never live ones.
-        for (std::size_t thread = 0; thread != threads; ++thread) {
-            arenas_per_thread_[thread].clear();
-            if (failed(arenas_per_thread_[thread].reserve_exactly(bytes_per_thread))) return status_t::bad_alloc_k;
+        for (thread_arena_t& arena : arenas_per_thread_) {
+            arena.clear();
+            if (failed(arena.reserve_exactly(bytes_per_thread))) return status_t::bad_alloc_k;
         }
         return status_t::success_k;
     }
@@ -216,7 +214,7 @@ struct forkunion_executor_t {
      *      domain - for per-thread setup the OS demands, like the AMX tile-permission
      *      handshake; must be @c noexcept. */
     template <typename callback_type_>
-    [[nodiscard]] status_t for_threads(callback_type_&& callback) noexcept {
+    status_t for_threads(callback_type_&& callback) noexcept {
         if (!pool_) return status_t::uninitialized_k;
         fu_for_threads_t const trampoline = [](fu_lambda_context_t context, std::size_t thread,
                                                std::size_t compute_domain) {
@@ -233,8 +231,8 @@ struct forkunion_executor_t {
      *      thread's compute domain, in that order; must be @c noexcept.
      */
     template <typename callback_type_>
-    [[nodiscard]] status_t for_tasks(std::size_t tasks, callback_type_&& callback) noexcept {
-        if (!pool_ || arenas_per_thread_.empty()) return status_t::uninitialized_k;
+    status_t for_tasks(std::size_t tasks, callback_type_&& callback) noexcept {
+        if (!pool_) return status_t::uninitialized_k;
         if (!tasks) return status_t::success_k;
         fu_for_task_t const trampoline = [](fu_lambda_context_t context, std::size_t task, std::size_t thread,
                                             std::size_t compute_domain) {
@@ -246,14 +244,7 @@ struct forkunion_executor_t {
     }
 
   private:
-    void release() noexcept {
-        arenas_per_thread_.clear();
-        if (pool_) fu_pool_delete(pool_);
-        pool_ = nullptr;
-        topology_ = nullptr;
-    }
-
-    /** @brief One arena per worker thread, sited once at the first @ref reserve - a context's
+    /** @brief One arena per worker thread, colocated with it once at @ref acquire - a context's
      *      rebound allocators point at the cursor inside its entry, so relocating this dangles. */
     growing_buffer<thread_arena_t> arenas_per_thread_;
     /** @brief The one-caller gate @ref claim spins on; never swapped, since a move with a call in

@@ -11,11 +11,12 @@
  */
 #pragma once
 
-#include <array>       // `std::array` - batched membership inserts
-#include <bit>         // `std::countr_zero` - first-empty lane of a probe group
 #include <cstddef>     // `std::size_t`
 #include <cstdint>     // `std::uint64_t` - batched membership masks
 #include <cstring>     // `std::memset` - the all-ones sentinel fill
+
+#include <array>       // `std::array` - batched membership inserts
+#include <bit>         // `std::countr_zero` - first-empty lane of a probe group
 #include <atomic>      // `std::atomic`, `std::atomic_ref`
 #include <functional>  // `std::hash`
 #include <limits>      // `std::numeric_limits` - the all-ones sentinel
@@ -33,11 +34,6 @@
 
 namespace unum {
 namespace usearch {
-
-/**
- *  @brief Single-byte scalar used as the default allocation unit for @ref growing_hash_set.
- */
-using byte_t = char;
 
 /**
  *  @brief Returns the sentinel that marks an unused slot in @ref growing_hash_set.
@@ -126,7 +122,7 @@ class growing_hash_set {
 
     /** @brief Takes @p region as a set over @p capacity elements; @p growth serves any later
      *      rehash, and a default-constructed one refuses, making the carve exact. */
-    [[nodiscard]] static growing_hash_set acquire(std::span<std::byte> region, std::size_t capacity,
+    [[nodiscard]] static growing_hash_set acquire(bytes_span_t region, std::size_t capacity,
                                                   allocator_t growth) noexcept {
         growing_hash_set table;
         table.capacity_ = std::bit_floor(min_of(slots_for(capacity), region.size() / sizeof(element_t)));
@@ -360,10 +356,19 @@ class growing_multimap {
         inserted_count_.store(0, std::memory_order_relaxed);
     }
 
+    /** @brief Bytes @p slots_count slots occupy - one allocation carrying both planes: the
+     *      slots, then the control bytes. */
+    static std::size_t memory_usage(std::size_t slots_count) noexcept {
+        return slots_count * (sizeof(slot_t) + sizeof(slot_state_t));
+    }
+
+    /** @brief Bytes this multimap currently occupies. */
+    std::size_t memory_usage() const noexcept { return memory_usage(slots_count_); }
+
     void reset() noexcept {
         if (slots_)
             bytes_allocator_t(allocator_)
-                .deallocate(reinterpret_cast<std::byte*>(slots_), carved_bytes_of(slots_count_));
+                .deallocate(reinterpret_cast<std::byte*>(slots_), memory_usage(slots_count_));
         slots_ = nullptr;
         states_ = nullptr;
         slots_count_ = 0;
@@ -378,7 +383,7 @@ class growing_multimap {
         if (capacity <= entries_quota_) return status_t::success_k;
 
         std::size_t const new_slots_count = ceil2(max_of<std::size_t>(capacity * 2u, 16u));
-        std::byte* const new_bytes = bytes_allocator_t(allocator_).allocate(carved_bytes_of(new_slots_count));
+        std::byte* const new_bytes = bytes_allocator_t(allocator_).allocate(memory_usage(new_slots_count));
         if (!new_bytes) return status_t::bad_alloc_k;
         slot_t* const new_slots = reinterpret_cast<slot_t*>(new_bytes);
         slot_state_t* const new_states = reinterpret_cast<slot_state_t*>(new_bytes + //
@@ -398,7 +403,7 @@ class growing_multimap {
 
         if (slots_)
             bytes_allocator_t(allocator_)
-                .deallocate(reinterpret_cast<std::byte*>(slots_), carved_bytes_of(slots_count_));
+                .deallocate(reinterpret_cast<std::byte*>(slots_), memory_usage(slots_count_));
         slots_ = new_slots;
         states_ = new_states;
         slots_count_ = new_slots_count;
@@ -479,11 +484,6 @@ class growing_multimap {
     };
 
     using bytes_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<std::byte>;
-
-    /** @brief One allocation carries both planes: the slots, then the control bytes. */
-    static std::size_t carved_bytes_of(std::size_t slots_count) noexcept {
-        return slots_count * (sizeof(slot_t) + sizeof(slot_state_t));
-    }
 
     /** @brief Avalanches the hash through @ref mix_bits before masking, so the identity
      *      hashes of sequential integer keys still scatter across the table. */

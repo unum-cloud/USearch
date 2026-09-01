@@ -16,7 +16,9 @@
 #include <cstdint> // `std::uint32_t`
 #include <cstring> // `std::memcpy`
 
-#include <utility> // `std::exchange`
+#include <memory>      // `std::allocator_traits` - the paths' transient termination
+#include <string_view> // `std::string_view`
+#include <utility>     // `std::exchange`
 
 #if defined(_WIN32)
 #define NOMINMAX
@@ -54,7 +56,7 @@ inline nk_dtype_t dtype_of_extension(sz::string_view path) noexcept {
  *      separate POSIX (`mmap`) and Windows (`MapViewOfFile`) implementations picked by macro.
  */
 class mmap_view_t {
-    char const* data_ = nullptr;
+    byte_t const* data_ = nullptr;
     std::size_t size_ = 0;
 #if defined(_WIN32)
     void* file_handle_ = nullptr;
@@ -96,8 +98,8 @@ class mmap_view_t {
 
     ~mmap_view_t() noexcept { reset(); }
 
-    char const* data() const noexcept { return data_; }
-    std::size_t size() const noexcept { return size_; }
+    /** @brief The whole mapped file as read-only bytes. */
+    bytes_view_t view() const noexcept { return {data_, size_}; }
     explicit operator bool() const noexcept { return data_ != nullptr; }
 
 #if defined(_WIN32)
@@ -109,11 +111,34 @@ class mmap_view_t {
         data_ = nullptr, size_ = 0, mapping_handle_ = nullptr, file_handle_ = nullptr;
     }
 
-    /** @brief Maps the whole of @p path read-only, or reports @c io_k. */
-    static expected<mmap_view_t> map(char const* path) noexcept {
+#else
+
+    void reset() noexcept {
+        if (data_) munmap(const_cast<byte_t*>(data_), size_);
+        if (file_descriptor_ >= 0) close(file_descriptor_);
+        data_ = nullptr, size_ = 0, file_descriptor_ = -1;
+    }
+
+#endif
+
+    /** @brief Maps the whole of @p path read-only, or reports @c io_k. The OS file APIs demand
+     *      NUL-terminated strings, so the length-aware view gains its terminator in one
+     *      transient allocation through @p allocator, released right after the opening call -
+     *      the only step that reads the path. */
+    template <typename allocator_type_ = std::allocator<std::byte>>
+    static expected<mmap_view_t> map(std::string_view path, allocator_type_ allocator = {}) noexcept {
+        using chars_allocator_t = typename std::allocator_traits<allocator_type_>::template rebind_alloc<char>;
+        chars_allocator_t chars {allocator};
+        char* terminated = chars.allocate(path.size() + 1);
+        if (!terminated) return {mmap_view_t {}, status_t::bad_alloc_k};
+        std::memcpy(terminated, path.data(), path.size());
+        terminated[path.size()] = '\0';
+
         mmap_view_t view;
-        view.file_handle_ = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+#if defined(_WIN32)
+        view.file_handle_ = CreateFileA(terminated, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                                         FILE_ATTRIBUTE_NORMAL, nullptr);
+        chars.deallocate(terminated, path.size() + 1);
         if (view.file_handle_ == INVALID_HANDLE_VALUE) {
             view.file_handle_ = nullptr;
             return {std::move(view), status_t::io_k};
@@ -128,27 +153,16 @@ class mmap_view_t {
             view.reset();
             return {std::move(view), status_t::io_k};
         }
-        view.data_ = static_cast<char const*>(MapViewOfFile(view.mapping_handle_, FILE_MAP_READ, 0, 0, 0));
+        view.data_ = static_cast<byte_t const*>(MapViewOfFile(view.mapping_handle_, FILE_MAP_READ, 0, 0, 0));
         if (!view.data_) {
             view.reset();
             return {std::move(view), status_t::io_k};
         }
         view.size_ = static_cast<std::size_t>(file_bytes.QuadPart);
         return {std::move(view), status_t::success_k};
-    }
-
 #else
-
-    void reset() noexcept {
-        if (data_) munmap(const_cast<char*>(data_), size_);
-        if (file_descriptor_ >= 0) close(file_descriptor_);
-        data_ = nullptr, size_ = 0, file_descriptor_ = -1;
-    }
-
-    /** @brief Maps the whole of @p path read-only, or reports @c io_k. */
-    static expected<mmap_view_t> map(char const* path) noexcept {
-        mmap_view_t view;
-        view.file_descriptor_ = open(path, O_RDONLY);
+        view.file_descriptor_ = open(terminated, O_RDONLY);
+        chars.deallocate(terminated, path.size() + 1);
         if (view.file_descriptor_ < 0) return {std::move(view), status_t::io_k};
 
         struct stat file_stats;
@@ -162,12 +176,11 @@ class mmap_view_t {
             view.reset();
             return {std::move(view), status_t::io_k};
         }
-        view.data_ = static_cast<char const*>(mapping);
+        view.data_ = static_cast<byte_t const*>(mapping);
         view.size_ = file_bytes;
         return {std::move(view), status_t::success_k};
-    }
-
 #endif
+    }
 };
 
 /** @brief Splits a mapped matrix file into its extents, validating that the payload holds
@@ -175,7 +188,7 @@ class mmap_view_t {
  *      little-endian @p counter_type_ counters, so both `u32`-headed RetriEval files and
  *      `u64`-headed billion-scale exports parse with the right instantiation. */
 template <typename scalar_type_, typename counter_type_>
-expected<matrix_extents_t> parse_matrix_header(mmap_view_t const& mapping) noexcept {
+expected<matrix_extents_t> parse_matrix_header(bytes_view_t mapping) noexcept {
     matrix_extents_t extents;
     constexpr std::size_t header_bytes_k = 2 * sizeof(counter_type_);
     if (mapping.size() < header_bytes_k) return {extents, status_t::config_mismatch_k};
@@ -195,9 +208,9 @@ expected<matrix_extents_t> parse_matrix_header(mmap_view_t const& mapping) noexc
 
 /** @brief Views the payload behind a parsed matrix header as a NumKong matrix. */
 template <typename scalar_type_, typename counter_type_>
-nk::matrix_view<scalar_type_> view_matrix_payload(mmap_view_t const& mapping, std::size_t rows,
+nk::matrix_view<scalar_type_> view_matrix_payload(bytes_view_t mapping, std::size_t rows,
                                                   std::size_t columns) noexcept {
-    if (!mapping) return {};
+    if (mapping.empty()) return {};
     return {reinterpret_cast<scalar_type_ const*>(mapping.data() + 2 * sizeof(counter_type_)), rows, columns};
 }
 
@@ -223,35 +236,37 @@ class persisted_dataset {
     using neighbor_id_t = neighbor_id_type_;
     using header_counter_t = header_counter_type_;
 
-    /** @brief Opens the triple, tolerating null @p queries_path / @p neighbors_path, and
+    /** @brief Opens the triple, tolerating empty @p queries_path / @p neighbors_path, and
      *      failing on dimensionality mismatches between vectors & queries, or row-count
      *      mismatches between queries & ground truth. */
-    static expected<persisted_dataset> open(char const* vectors_path, char const* queries_path,
-                                                          char const* neighbors_path) noexcept {
+    template <typename allocator_type_ = std::allocator<std::byte>>
+    static expected<persisted_dataset> open(std::string_view vectors_path, std::string_view queries_path,
+                                            std::string_view neighbors_path, allocator_type_ allocator = {}) noexcept {
         persisted_dataset dataset;
-        auto vectors = mmap_view_t::map(vectors_path);
+        auto vectors = mmap_view_t::map(vectors_path, allocator);
         if (vectors.status != status_t::success_k) return {std::move(dataset), vectors.status};
-        auto const vectors_extents = parse_matrix_header<scalar_type_, header_counter_type_>(vectors.value);
+        auto const vectors_extents = parse_matrix_header<scalar_type_, header_counter_type_>(vectors.value.view());
         if (vectors_extents.status != status_t::success_k) return {std::move(dataset), vectors_extents.status};
         dataset.vectors_rows_ = vectors_extents.value.rows;
         dataset.dimensions_ = vectors_extents.value.columns;
         dataset.vectors_mapping_ = std::move(vectors.value);
 
-        if (queries_path) {
-            auto queries = mmap_view_t::map(queries_path);
+        if (!queries_path.empty()) {
+            auto queries = mmap_view_t::map(queries_path, allocator);
             if (queries.status != status_t::success_k) return {std::move(dataset), queries.status};
-            auto const queries_extents = parse_matrix_header<scalar_type_, header_counter_type_>(queries.value);
+            auto const queries_extents =
+                parse_matrix_header<scalar_type_, header_counter_type_>(queries.value.view());
             if (queries_extents.status != status_t::success_k) return {std::move(dataset), queries_extents.status};
             if (queries_extents.value.columns != dataset.dimensions_)
                 return {std::move(dataset), status_t::config_mismatch_k};
             dataset.queries_rows_ = queries_extents.value.rows;
             dataset.queries_mapping_ = std::move(queries.value);
         }
-        if (neighbors_path) {
-            auto neighbors = mmap_view_t::map(neighbors_path);
+        if (!neighbors_path.empty()) {
+            auto neighbors = mmap_view_t::map(neighbors_path, allocator);
             if (neighbors.status != status_t::success_k) return {std::move(dataset), neighbors.status};
             auto const neighbors_extents = parse_matrix_header<neighbor_id_type_, header_counter_type_>(
-                neighbors.value);
+                neighbors.value.view());
             if (neighbors_extents.status != status_t::success_k) return {std::move(dataset), neighbors_extents.status};
             if (dataset.queries_mapping_ && neighbors_extents.value.rows != dataset.queries_rows_)
                 return {std::move(dataset), status_t::config_mismatch_k};
@@ -263,14 +278,16 @@ class persisted_dataset {
     }
 
     nk::matrix_view<scalar_type_> vectors() const noexcept {
-        return view_matrix_payload<scalar_type_, header_counter_type_>(vectors_mapping_, vectors_rows_, dimensions_);
+        return view_matrix_payload<scalar_type_, header_counter_type_>(vectors_mapping_.view(), vectors_rows_,
+                                                                       dimensions_);
     }
     nk::matrix_view<scalar_type_> queries() const noexcept {
-        return view_matrix_payload<scalar_type_, header_counter_type_>(queries_mapping_, queries_rows_, dimensions_);
+        return view_matrix_payload<scalar_type_, header_counter_type_>(queries_mapping_.view(), queries_rows_,
+                                                                       dimensions_);
     }
     nk::matrix_view<neighbor_id_type_> neighbors() const noexcept {
-        return view_matrix_payload<neighbor_id_type_, header_counter_type_>(neighbors_mapping_, neighbors_rows_,
-                                                                            neighbors_depth_);
+        return view_matrix_payload<neighbor_id_type_, header_counter_type_>(neighbors_mapping_.view(),
+                                                                            neighbors_rows_, neighbors_depth_);
     }
 
     bool has_queries() const noexcept { return static_cast<bool>(queries_mapping_); }

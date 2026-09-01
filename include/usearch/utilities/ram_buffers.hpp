@@ -438,7 +438,7 @@ class max_heap_dary {
 
     /** @brief Takes @p region as a heap of at most @p capacity entries; @p growth serves any later
      *      block, and a default-constructed one refuses, making the carve exact. */
-    [[nodiscard]] static max_heap_dary acquire(std::span<std::byte> region, std::size_t capacity,
+    [[nodiscard]] static max_heap_dary acquire(bytes_span_t region, std::size_t capacity,
                                                allocator_t growth) noexcept {
         max_heap_dary heap;
         heap.capacity_ = min_of(capacity, region.size() / sizeof(element_t));
@@ -629,7 +629,7 @@ class sorted_buffer {
 
     /** @brief Takes @p region as a buffer of at most @p capacity entries; @p growth serves any
      *      later block, and a default-constructed one refuses, making the carve exact. */
-    [[nodiscard]] static sorted_buffer acquire(std::span<std::byte> region, std::size_t capacity,
+    [[nodiscard]] static sorted_buffer acquire(bytes_span_t region, std::size_t capacity,
                                                allocator_t growth) noexcept {
         sorted_buffer buffer;
         buffer.capacity_ = min_of(capacity, region.size() / sizeof(element_t));
@@ -824,6 +824,9 @@ class growing_buffer {
     growing_buffer& operator=(growing_buffer const&) = delete;
 
     ~growing_buffer() noexcept { reset(); }
+
+    /** @brief Bytes this buffer currently occupies. */
+    std::size_t memory_usage() const noexcept { return capacity_ * sizeof(element_t); }
 
     void reset() noexcept {
         clear();

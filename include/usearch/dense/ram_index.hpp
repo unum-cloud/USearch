@@ -825,9 +825,9 @@ struct dense_ram_index {
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k,
               typename predicate_type_ = dummy_predicate_t>
     expected<std::size_t> sample_landmarks(vector_view_t query, vector_norms_t query_norms,
-                                                         node_id_t first_invisible_id, std::size_t expansion_factor,
-                                                         dense_traversal_context_t& context,
-                                                         predicate_type_&& predicate = predicate_type_ {}) noexcept {
+                                           node_id_t first_invisible_id, std::size_t expansion_factor,
+                                           dense_traversal_context_t& context,
+                                           predicate_type_&& predicate = predicate_type_ {}) noexcept {
         constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, dummy_predicate_t>;
 
         results_array_t& results = context.results;
@@ -915,8 +915,8 @@ struct dense_ram_index {
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k,
               typename predicate_type_ = dummy_predicate_t>
     status_t search_around(vector_view_t query, vector_norms_t query_norms, node_id_t first_invisible_id,
-                                         std::size_t expansion_factor, dense_traversal_context_t& context,
-                                         predicate_type_&& predicate = predicate_type_ {}) noexcept {
+                           std::size_t expansion_factor, dense_traversal_context_t& context,
+                           predicate_type_&& predicate = predicate_type_ {}) noexcept {
         constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, dummy_predicate_t>;
 
         results_array_t& results = context.results;
@@ -1578,6 +1578,28 @@ struct dense_ram_index {
         return claimed_rows + static_cast<std::size_t>(unclaimed_rows > 0 ? unclaimed_rows : 0);
     }
 
+    /** @brief Bytes the materialized chunks span - vectors, norms & neighbor lists - derived from
+     *      the hosted capacity and the growth schedule rather than read from the chunk
+     *      directories, so it stays safe under concurrent growth. A reservation materializes its
+     *      chunks up front, so reserved-but-empty rows count from the moment they are granted. */
+    std::size_t memory_usage() const noexcept {
+        geometry_t const geometry = geometry_.load(std::memory_order_acquire);
+        if (!geometry) return sizeof(dense_ram_index);
+        std::size_t const hosted_rows = capacity();
+        small_size_t chunks = 0;
+        while (chunks != max_chunks_k && capacity_of_chunks(chunks) < hosted_rows) ++chunks;
+        std::size_t const rows = capacity_of_chunks(chunks);
+        std::size_t bytes = sizeof(dense_ram_index);
+        bytes += rows * stored_row_values(geometry) * sizeof(scalar_t);
+        if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>) bytes += rows * sizeof(vector_norms_t);
+        bytes += rows * geometry.connectivity() * sizeof(node_id_t);
+        return bytes;
+    }
+
+    /** @brief The stored bytes of one node's vector - the id-addressed read a key lookup or an
+     *      export resolves through; ids at or above @ref size() name unpublished rows. */
+    vector_view_t vector(node_id_t node) const noexcept { return vector_for(chunked_location(node)); }
+
     /** @brief Outcome of a @c reserve() call: the capacity & connectivity actually in effect. */
     struct reserve_result_t {
         /** @brief Total rows the index can now host without growing again. */
@@ -1636,8 +1658,8 @@ struct dense_ram_index {
             // physical-rows sum conservative for concurrent observers, so a racing reservation
             // can only over-grow, never report capacity that does not exist.
             std::size_t const deficit_rows = config.capacity - total_rows;
-            expected<node_id_t> const claimed = claim_capacity(deficit_rows);
-            if (claimed.status != status_t::success_k) return {total_rows, frozen_connectivity, claimed.status};
+            auto const [first_row, granted] = claim_capacity(deficit_rows);
+            if (failed(granted)) return {total_rows, frozen_connectivity, granted};
             release_capacity(deficit_rows);
         }
     }
@@ -1704,16 +1726,10 @@ struct dense_ram_index {
         std::size_t const reverse_refines_before = context.computed_distances_in_reverse_refines;
         std::size_t const restarts_before = context.restarts;
 
-        // NSW and HNSW use an "ef" expansion factor controlling the breadth of the candidate pool,
-        // tunable independently at insertion and search time. Default it to twice the connectivity -
-        // enough slack for the neighbor-selection heuristic to prune - unless the caller overrides it.
         // Geometry is frozen by the first successful `reserve()` - a hard prerequisite here:
         // without it, neither the copy width nor the neighbor-list width is defined.
         geometry_t const geometry = geometry_.load(std::memory_order_acquire);
         if (!geometry) return {status_t::uninitialized_k, size()};
-        std::size_t const node_connectivity = geometry.connectivity();
-        std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
-                                                                     : node_connectivity * 2;
 
         // Rows narrower than the frozen geometry would be over-read by the copy below, which takes
         // its width from the geometry rather than from the caller's matrix.
@@ -1723,9 +1739,9 @@ struct dense_ram_index {
 
         // Claim storage for the whole batch: from here on enough sentinel-filled rows exist for
         // all our nodes, and this thread must roll forward to publishing every id it claims.
-        expected<capacity_claim_t> claimed = claim(incoming_vectors_count);
-        if (claimed.status != status_t::success_k) return {claimed.status, size()};
-        insert_reserved(new_vectors, assigned_ids, context, std::move(claimed.value), config);
+        auto [batch_claim, granted] = claim(incoming_vectors_count);
+        if (failed(granted)) return {granted, size()};
+        insert_reserved(new_vectors, assigned_ids, context, std::move(batch_claim), config);
 
         insert_result_t result;
         result.new_size = size();
@@ -1940,9 +1956,9 @@ struct dense_ram_index {
 
     /** @brief Claims storage for @p count rows without assigning any identity - the step a batch
      *      spanning several indexes runs on every one of them before touching any. */
-    [[nodiscard]] expected<capacity_claim_t> claim(std::size_t count) noexcept {
-        expected<node_id_t> const claimed = claim_capacity(count);
-        if (claimed.status != status_t::success_k) return {capacity_claim_t {}, claimed.status};
+    expected<capacity_claim_t> claim(std::size_t count) noexcept {
+        auto const [first_row, granted] = claim_capacity(count);
+        if (failed(granted)) return {capacity_claim_t {}, granted};
         return {capacity_claim_t {*this, count}, status_t::success_k};
     }
 
@@ -2006,8 +2022,7 @@ struct dense_ram_index {
      *      allocates mid-flight - the other fallible half of an insertion, hoistable ahead of a
      *      fan-out. Idempotent and monotone: a context already wide enough answers in six compares.
      */
-    [[nodiscard]] status_t reserve_traversal(dense_traversal_context_t& context,
-                                             insert_config_t config = {}) noexcept {
+    status_t reserve_traversal(dense_traversal_context_t& context, insert_config_t config = {}) noexcept {
         geometry_t const geometry = geometry_.load(std::memory_order_acquire);
         if (!geometry) return status_t::uninitialized_k;
         std::size_t const node_connectivity = geometry.connectivity();
@@ -2258,8 +2273,8 @@ struct dense_ram_index {
 
         // Claim the rows through the ordinary capacity protocol: a preceding `reserve` is
         // consumed instead of duplicated, and chunks grow only on a genuine deficit.
-        expected<node_id_t> const claimed = claim_capacity(count);
-        if (claimed.status != status_t::success_k) return claimed.status;
+        auto const [first_row, granted] = claim_capacity(count);
+        if (failed(granted)) return granted;
 
         load_rows_(vectors, vectors_chunks_, count);
         load_rows_(neighbors, neighbors_chunks_, count);
