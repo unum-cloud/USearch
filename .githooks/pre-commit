@@ -99,6 +99,19 @@ check_stl_dynamic_containers() {
         "$file uses an STL dynamic container - use growing_buffer, nk::tensor, or the ram_tables structures:"
 }
 
+# Redundant result annotations in C++ sources - `status_t` and `expected` carry a type-level
+# `[[nodiscard]]`, so repeating it on a signature returning them is noise the type already
+# enforces; the attribute on a function should mean something the type cannot say.
+check_redundant_nodiscard() {
+    local redundant
+    redundant=$(printf '%s\n' "$added" |
+        grep -E '\[\[nodiscard\]\][[:space:]]+((static|inline|constexpr|virtual)[[:space:]]+)*(status_t|expected<)' |
+        grep -vE 'struct|enum' || true)
+    [ -z "$redundant" ] || fail "$redundant" \
+        "$file repeats [[nodiscard]] on a status_t/expected signature - both types are" \
+        "            marked [[nodiscard]] themselves, so drop the annotation:"
+}
+
 # Subscripting a call's result chains two accessors where the container offers one:
 # `matrix.row(i)[j]`, `pool.begin()[i]`, and `.data()[i]` all hide the same raw-pointer hop.
 # Use the multi-index `operator()` - `matrix(i, j)` - or the container's own `operator[]`;
@@ -428,6 +441,7 @@ while IFS= read -r -d '' file; do
     src/*.cpp | src/*.cuh | test/*.cpp | test/*.hpp | bench/*.cpp | bench/*.hpp | include/*.hpp)
         check_printf
         check_memcpy
+        check_redundant_nodiscard
         check_stl_streams
         check_deque
         check_range_reconstruction

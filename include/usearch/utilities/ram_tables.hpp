@@ -261,7 +261,7 @@ class growing_hash_set {
      *  @brief Extends the capacity of the hash-set, rehashing every present element.
      *  @return @c success_k when the capacity is available, @c bad_alloc_k otherwise.
      */
-    [[nodiscard]] status_t reserve(std::size_t new_capacity) noexcept {
+    status_t reserve(std::size_t new_capacity) noexcept {
         new_capacity = (new_capacity * 5u) / 3u;
         if (new_capacity <= capacity_) return status_t::success_k;
 
@@ -374,7 +374,7 @@ class growing_multimap {
     /** @brief Sizes the slot array for @p capacity entries at a load factor of at most one
      *      half. Repeatable: a larger @p capacity rehashes into a fresh array, single-
      *      threaded - the caller certifies no concurrent readers or writers for the call. */
-    [[nodiscard]] status_t reserve(std::size_t capacity) noexcept {
+    status_t reserve(std::size_t capacity) noexcept {
         if (capacity <= entries_quota_) return status_t::success_k;
 
         std::size_t const new_slots_count = ceil2(max_of<std::size_t>(capacity * 2u, 16u));
@@ -408,7 +408,7 @@ class growing_multimap {
 
     /** @brief Claims one slot along the probe path of @p key - safe under arbitrary
      *      concurrent inserts & lookups; fails with @c overflow_k once the quota is spent. */
-    [[nodiscard]] status_t insert(key_t const& key, value_t value) noexcept {
+    status_t insert(key_t const& key, value_t value) noexcept {
         if (!slots_count_) return status_t::uninitialized_k;
         // Claim quota before touching any slot, so probe chains stay bounded by construction.
         if (inserted_count_.fetch_add(1, std::memory_order_relaxed) >= entries_quota_) {
@@ -433,7 +433,7 @@ class growing_multimap {
 
     /** @brief One value stored under @p key, or @c malformed_k when absent. Duplicates
      *      surface in an unspecified order - use @c find_each to see them all. */
-    [[nodiscard]] expected<value_t> find(key_t const& key) const noexcept {
+    expected<value_t> find(key_t const& key) const noexcept {
         expected<value_t> result {value_t {}, status_t::malformed_k};
         find_each(key, [&](value_t value) noexcept { result = {value, status_t::success_k}; });
         return result;

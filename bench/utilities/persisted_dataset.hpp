@@ -110,7 +110,7 @@ class mmap_view_t {
     }
 
     /** @brief Maps the whole of @p path read-only, or reports @c io_k. */
-    [[nodiscard]] static expected<mmap_view_t> map(char const* path) noexcept {
+    static expected<mmap_view_t> map(char const* path) noexcept {
         mmap_view_t view;
         view.file_handle_ = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                                         FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -146,7 +146,7 @@ class mmap_view_t {
     }
 
     /** @brief Maps the whole of @p path read-only, or reports @c io_k. */
-    [[nodiscard]] static expected<mmap_view_t> map(char const* path) noexcept {
+    static expected<mmap_view_t> map(char const* path) noexcept {
         mmap_view_t view;
         view.file_descriptor_ = open(path, O_RDONLY);
         if (view.file_descriptor_ < 0) return {std::move(view), status_t::io_k};
@@ -226,7 +226,7 @@ class persisted_dataset {
     /** @brief Opens the triple, tolerating null @p queries_path / @p neighbors_path, and
      *      failing on dimensionality mismatches between vectors & queries, or row-count
      *      mismatches between queries & ground truth. */
-    [[nodiscard]] static expected<persisted_dataset> open(char const* vectors_path, char const* queries_path,
+    static expected<persisted_dataset> open(char const* vectors_path, char const* queries_path,
                                                           char const* neighbors_path) noexcept {
         persisted_dataset dataset;
         auto vectors = mmap_view_t::map(vectors_path);

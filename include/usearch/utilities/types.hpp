@@ -110,7 +110,7 @@ struct dense_further_scored_node_t {
  *  The set describes the project's failures, not this tier's exits: several enumerators name
  *  conditions only a binding or a higher layer can see, and are never returned from here.
  */
-enum class status_t : int {
+enum class [[nodiscard]] status_t : int {
     /** @brief The call completed and any paired value is meaningful. */
     success_k = usearch_success_k,
     /** @brief The underlying allocator failed to provide memory; retrying a smaller batch may succeed. */

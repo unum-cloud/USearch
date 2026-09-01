@@ -406,7 +406,7 @@ struct dense_io_completions {
         queue = completions_tensor_t(completions_allocator_t(allocator));
         return queue.reserve(queue_depth) ? status_t::success_k : status_t::bad_alloc_k;
     }
-    [[nodiscard]] inline status_t complete(dense_io_completion_t completion) noexcept {
+    inline status_t complete(dense_io_completion_t completion) noexcept {
         std::size_t fill = queue.extent(0);
         if (!queue.try_resize({fill + 1})) return status_t::overflow_k;
         queue[fill] = completion;
@@ -442,13 +442,13 @@ struct dense_io_staging {
         if (!pending.reserve(queue_depth)) return status_t::bad_alloc_k;
         return completions.reserve(queue_depth, allocator);
     }
-    [[nodiscard]] inline status_t push(dense_io_request_t request) noexcept {
+    inline status_t push(dense_io_request_t request) noexcept {
         std::size_t fill = pending.extent(0);
         if (!pending.try_resize({fill + 1})) return status_t::overflow_k;
         pending[fill] = request;
         return status_t::success_k;
     }
-    [[nodiscard]] inline status_t complete(dense_io_completion_t completion) noexcept {
+    inline status_t complete(dense_io_completion_t completion) noexcept {
         return completions.complete(completion);
     }
     inline bool pop(dense_io_completion_t& completion) noexcept { return completions.pop(completion); }
@@ -494,7 +494,7 @@ struct dense_posix_sync_engine {
     }
 
     inline std::byte* buffer(dense_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
-    [[nodiscard]] inline status_t push(dense_io_request_t request) noexcept { return staging_.push(request); }
+    inline status_t push(dense_io_request_t request) noexcept { return staging_.push(request); }
 
     inline status_t pump([[maybe_unused]] dense_io_wait_t wait) noexcept {
         // Every pending request completes synchronously, so waiting is implicit.
@@ -584,7 +584,7 @@ struct dense_linux_aio_engine {
     /** @brief Encodes the control block in place at push - matching the ring engines'
      *      encode-at-push discipline - so pump only submits; the staged fill is the
      *      control-block tensor's live shape. */
-    [[nodiscard]] inline status_t push(dense_io_request_t request) noexcept {
+    inline status_t push(dense_io_request_t request) noexcept {
         std::size_t staged = control_blocks_.extent(0);
         if (in_flight_ + staged == events_.extent(0)) return status_t::overflow_k;
         if (!control_blocks_.try_resize({staged + 1}) || !control_pointers_.try_resize({staged + 1}))
@@ -979,7 +979,7 @@ struct dense_linux_uring_read_engine {
 
     inline std::byte* buffer(dense_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
 
-    [[nodiscard]] inline status_t push(dense_io_request_t request) noexcept {
+    inline status_t push(dense_io_request_t request) noexcept {
         struct io_uring_sqe* entry = ring_.next_submission();
         if (!entry) return status_t::overflow_k;
         *entry = io_uring_sqe {};
@@ -1035,7 +1035,7 @@ struct dense_linux_uring_fixed_engine {
 
     inline std::byte* buffer(dense_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
 
-    [[nodiscard]] inline status_t push(dense_io_request_t request) noexcept {
+    inline status_t push(dense_io_request_t request) noexcept {
         struct io_uring_sqe* entry = ring_.next_submission();
         if (!entry) return status_t::overflow_k;
         *entry = io_uring_sqe {};
@@ -1099,7 +1099,7 @@ struct dense_linux_uring_polled_engine {
 
     inline std::byte* buffer(dense_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
 
-    [[nodiscard]] inline status_t push(dense_io_request_t request) noexcept {
+    inline status_t push(dense_io_request_t request) noexcept {
         struct io_uring_sqe* entry = ring_.next_submission();
         if (!entry) return status_t::overflow_k;
         *entry = io_uring_sqe {};
@@ -1186,7 +1186,7 @@ struct dense_linux_uring_nvme_engine {
 
     inline std::byte* buffer(dense_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
 
-    [[nodiscard]] inline status_t push(dense_io_request_t request) noexcept {
+    inline status_t push(dense_io_request_t request) noexcept {
         struct io_uring_sqe* entry = ring_.next_submission();
         if (!entry) return status_t::overflow_k;
         u64_t* entry_words = reinterpret_cast<u64_t*>(entry);
@@ -1287,7 +1287,7 @@ struct dense_windows_ioring_engine {
 
     inline std::byte* buffer(dense_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
 
-    [[nodiscard]] inline status_t push(dense_io_request_t request) noexcept {
+    inline status_t push(dense_io_request_t request) noexcept {
         IORING_BUFFER_REF buffer_ref = IoRingBufferRefFromIndexAndOffset(request.buffer, 0);
         IORING_HANDLE_REF handle_ref = IoRingHandleRefFromIndex(0);
         HRESULT built = BuildIoRingReadFile(ring_, handle_ref, buffer_ref, request.length, request.offset, request.tag,

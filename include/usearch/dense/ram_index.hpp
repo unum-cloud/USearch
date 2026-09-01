@@ -215,7 +215,7 @@ struct dense_traversal_context {
     /** @brief Sizes every link scratch for @p capacity entries - the frozen connectivity, the
      *      largest selection any path stages - through the context's own allocator. Geometry
      *      freezes once, so the tensors allocate once. */
-    [[nodiscard]] status_t reserve_links(std::size_t capacity) noexcept {
+    status_t reserve_links(std::size_t capacity) noexcept {
         if (selected_links.capacity() >= capacity) return status_t::success_k;
         selected_links = selection_t::try_zeros({capacity}, candidates_allocator_t(allocator_));
         refined_links = selection_t::try_zeros({capacity}, candidates_allocator_t(allocator_));
@@ -233,7 +233,7 @@ struct dense_traversal_context {
      *      kit-specific tile scratch. The matrix's own trailing extent is the row stride, so
      *      tail tiles always write in bounds. The context itself stays agnostic of every
      *      engine's geometry. */
-    [[nodiscard]] status_t reserve_tiles(std::size_t capacity, std::size_t scratch_bytes) noexcept {
+    status_t reserve_tiles(std::size_t capacity, std::size_t scratch_bytes) noexcept {
         if (pair_distances.extent(0) >= capacity) return status_t::success_k;
         tiles_scratch = bytes_tensor_t::try_zeros({scratch_bytes}, bytes_allocator_t(allocator_));
         pair_distances = distances_matrix_t::try_zeros({capacity, capacity}, distances_allocator_t(allocator_));
@@ -824,7 +824,7 @@ struct dense_ram_index {
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k,
               typename predicate_type_ = dummy_predicate_t>
-    [[nodiscard]] expected<std::size_t> sample_landmarks(vector_view_t query, vector_norms_t query_norms,
+    expected<std::size_t> sample_landmarks(vector_view_t query, vector_norms_t query_norms,
                                                          node_id_t first_invisible_id, std::size_t expansion_factor,
                                                          dense_traversal_context_t& context,
                                                          predicate_type_&& predicate = predicate_type_ {}) noexcept {
@@ -914,7 +914,7 @@ struct dense_ram_index {
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k,
               typename predicate_type_ = dummy_predicate_t>
-    [[nodiscard]] status_t search_around(vector_view_t query, vector_norms_t query_norms, node_id_t first_invisible_id,
+    status_t search_around(vector_view_t query, vector_norms_t query_norms, node_id_t first_invisible_id,
                                          std::size_t expansion_factor, dense_traversal_context_t& context,
                                          predicate_type_&& predicate = predicate_type_ {}) noexcept {
         constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, dummy_predicate_t>;
@@ -2346,7 +2346,7 @@ struct dense_ram_cursor {
 
     /** @brief Sizes the staging for the frozen connectivity through @p allocator - the index's
      *      traversals-side family by default; call once before any @c seek. */
-    [[nodiscard]] status_t reserve(allocator_t allocator = {}) noexcept {
+    status_t reserve(allocator_t allocator = {}) noexcept {
         if (staged_neighbors_.size() >= connectivity_) return status_t::success_k;
         staged_neighbors_ = ids_tensor_t::try_zeros({connectivity_}, ids_allocator_t(allocator));
         return !staged_neighbors_.empty() ? status_t::success_k : status_t::bad_alloc_k;
@@ -2377,7 +2377,7 @@ struct dense_ram_cursor {
     /** @brief Positions on @p node & stages a copy of its neighbor list: @c malformed_k at or
      *      past the snapshot, @c uninitialized_k before @c reserve - the cursor stays where it
      *      was on either refusal. Read-only under every contract. */
-    [[nodiscard]] status_t seek(node_id_t node) noexcept {
+    status_t seek(node_id_t node) noexcept {
         if (node >= visible_count_) return status_t::malformed_k;
         if (staged_neighbors_.size() < connectivity_) return status_t::uninitialized_k;
         current_ = node;
@@ -2436,7 +2436,7 @@ struct dense_ram_cursor {
 
     /** @brief Follows edge @p slot of the staged list: @c malformed_k when the slot is beyond
      *      the live prefix or its target is at or past this cursor's snapshot. */
-    [[nodiscard]] status_t follow(small_size_t slot) noexcept {
+    status_t follow(small_size_t slot) noexcept {
         if (slot >= staged_count_) return status_t::malformed_k;
         return seek(staged_neighbors_[slot]);
     }

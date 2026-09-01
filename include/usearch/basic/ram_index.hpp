@@ -1368,7 +1368,7 @@ struct basic_ram_index {
     /** @brief Sizes every context container for one traversal, so the staging surfaces &
      *      selections never allocate mid-walk; the visited set and frontier may still
      *      grow past deep expansions, degrading the walk gracefully when they cannot. */
-    [[nodiscard]] static status_t reserve_scratch_(traversal_context_t& context, std::size_t expansion_factor,
+    static status_t reserve_scratch_(traversal_context_t& context, std::size_t expansion_factor,
                                                    std::size_t fan_out, std::size_t connectivity) noexcept {
         std::size_t const round_capacity = max_of(fan_out * connectivity, connectivity + 1);
         if (status_t const sized = context.results.reserve(max_of(expansion_factor, connectivity + 1)); failed(sized))
@@ -1411,7 +1411,7 @@ struct basic_ram_index {
      *      exhausted or staging was refused, which is a reason to stop restarting rather
      *      than a failure. A failed status means scratch could not grow, which is. */
     template <typename metric_type_, typename query_type_>
-    [[nodiscard]] expected<std::size_t> sample_landmarks_(query_type_ const& query, metric_type_& metric,
+    expected<std::size_t> sample_landmarks_(query_type_ const& query, metric_type_& metric,
                                                           node_id_t first_invisible_id, std::size_t wanted,
                                                           std::size_t expansion_factor,
                                                           traversal_context_t& context) const noexcept {
@@ -1502,7 +1502,7 @@ struct basic_ram_index {
      *  improved the results pool, or the frontier would otherwise be empty - the seedings.
      */
     template <synchronization_t synchronization_, typename metric_type_, typename query_type_>
-    [[nodiscard]] status_t search_around_(query_type_ const& query, metric_type_& metric, node_id_t first_invisible_id,
+    status_t search_around_(query_type_ const& query, metric_type_& metric, node_id_t first_invisible_id,
                                           std::size_t expansion_factor, std::size_t fan_out, std::size_t connectivity,
                                           traversal_context_t& context) const noexcept {
         expected<std::size_t> seeded = sample_landmarks_(query, metric, first_invisible_id, connectivity,
@@ -1854,7 +1854,7 @@ struct basic_ram_cursor {
     /** @brief Positions on @p node & stages its row: @c malformed_k at or past the
      *      snapshot, @c bad_alloc_k when the staging buffer refused to grow - the cursor
      *      stays where it was on either refusal. */
-    [[nodiscard]] status_t seek(node_id_t node) noexcept {
+    status_t seek(node_id_t node) noexcept {
         if (static_cast<std::size_t>(node) >= static_cast<std::size_t>(visible_count_)) return status_t::malformed_k;
         typename index_t::node_t const& record = index_.nodes_array_[node];
         if constexpr (synchronization_ == synchronization_t::concurrent_k) record.mutex.lock();
@@ -1891,7 +1891,7 @@ struct basic_ram_cursor {
 
     /** @brief Hops to the staged row's @p position -th neighbor: @c malformed_k past the
      *      staged degree or when the neighbor sits at or past the snapshot. */
-    [[nodiscard]] status_t follow(std::size_t position) noexcept {
+    status_t follow(std::size_t position) noexcept {
         if (position >= staged_row_.size()) return status_t::malformed_k;
         return seek(staged_row_[position]);
     }
