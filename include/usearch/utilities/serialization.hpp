@@ -75,14 +75,16 @@ struct file_t {
         file_t file;
         file.stream_ = std::fopen(terminated, mode == file_mode_t::read_k ? "rb" : "wb");
         chars.deallocate(terminated, path.size() + 1);
-        return {std::move(file), file ? status_t::success_k : status_t::io_k};
+        status_t const opened = file ? status_t::success_k : status_t::io_k;
+        return {std::move(file), opened};
     }
 
     /** @brief An anonymous read-write file the OS unlinks on close. */
     static expected<file_t> temporary() noexcept {
         file_t file;
         file.stream_ = std::tmpfile();
-        return {std::move(file), file ? status_t::success_k : status_t::io_k};
+        status_t const opened = file ? status_t::success_k : status_t::io_k;
+        return {std::move(file), opened};
     }
 
     /** @brief Positions the cursor at @p offset through the 64-bit seek; @c std::fseek takes
