@@ -228,6 +228,15 @@ struct dense_traversal_context {
         return sized ? status_t::success_k : status_t::bad_alloc_k;
     }
 
+    /** @brief Bytes @c reserve_links reserves for @p capacity links, each tensor on its own arena line. */
+    static std::size_t links_memory_usage(std::size_t capacity) noexcept {
+        using arena_t = arena_allocator<std::byte>;
+        return 2u * arena_t::reserved_bytes(capacity * sizeof(dense_scored_node_t)) +
+               2u * arena_t::reserved_bytes(capacity * sizeof(dense_node_id_t)) +
+               arena_t::reserved_bytes(capacity * sizeof(vector_view_t)) +
+               arena_t::reserved_bytes(capacity * sizeof(vector_norms_t));
+    }
+
     /** @brief Sizes the pair matrix for a @p capacity -row pool - arriving pre-padded to whole
      *      tiles by the caller, which knows its kit's shapes - plus @p scratch_bytes of
      *      kit-specific tile scratch. The matrix's own trailing extent is the row stride, so
@@ -399,17 +408,16 @@ struct dense_ram_index {
      *  @brief Constructs an empty index, remembering the allocators to hand to every future chunk.
      *
      *  The chunk directories receive a stride padding every chunk header to a multiple of
-     *  @c fu::default_alignment_k, so the grower's half-built header never shares a cache line
+     *  @c default_alignment_k, so the grower's half-built header never shares a cache line
      *  with the ones readers dereference. Their storage is allocated lazily, ahead of the first chunk.
      */
     dense_ram_index(vectors_allocator_type_ const& vectors_allocator = {},
                     neighbors_allocator_type_ const& neighbors_allocator = {}) noexcept
         : vectors_allocator_(vectors_allocator), neighbors_allocator_(neighbors_allocator),
-          vectors_chunks_(vectors_allocator,
-                          fu::round_up_to_multiple(sizeof(vectors_chunk_t), fu::default_alignment_k)),
-          norms_chunks_(vectors_allocator, fu::round_up_to_multiple(sizeof(norms_chunk_t), fu::default_alignment_k)),
-          neighbors_chunks_(neighbors_allocator,
-                            fu::round_up_to_multiple(sizeof(neighbors_chunk_t), fu::default_alignment_k)) {}
+          vectors_chunks_(vectors_allocator, round_up_to_multiple(sizeof(vectors_chunk_t), default_alignment_k)),
+          norms_chunks_(vectors_allocator, round_up_to_multiple(sizeof(norms_chunk_t), default_alignment_k)),
+          neighbors_chunks_(neighbors_allocator, round_up_to_multiple(sizeof(neighbors_chunk_t), default_alignment_k)) {
+    }
 
 #pragma endregion Placement
 
@@ -557,7 +565,7 @@ struct dense_ram_index {
     }
 
     /**
-     *  @brief Bytes one context carves for @p config under the frozen geometry - what an arena
+     *  @brief Bytes one context reserves for @p config under the frozen geometry - what an arena
      *      backing a traversal must hold, since an arena never grows and a walk never allocates
      *      twice.
      *
@@ -570,26 +578,20 @@ struct dense_ram_index {
         std::size_t const node_connectivity = geometry.connectivity();
         std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
                                                                      : node_connectivity * 2;
-        // Every carve starts on its own cache line, so each reservation is rounded the way an
-        // arena would round it, one term per reservation.
-        constexpr std::size_t alignment = arena_allocator<std::byte>::alignment_k;
-        auto lined = [](std::size_t bytes) noexcept {
-            return divide_round_up<std::size_t>(bytes, alignment) * alignment;
-        };
+        // One term per reservation, each occupying what the arena will hand out for it.
         using context_t = dense_traversal_context_t;
+        using arena_t = arena_allocator<std::byte>;
         std::size_t const links = node_connectivity;
-        std::size_t bytes = lined(context_t::results_array_t::memory_usage(expansion_factor)) +
-                            lined(context_t::results_array_t::memory_usage(links + 1)) +
-                            lined(context_t::frontier_queue_t::memory_usage(expansion_factor * 4u)) +
-                            lined(context_t::visited_set_t::memory_usage(expansion_factor * 4u)) +
-                            2u * lined(links * sizeof(dense_scored_node_t)) + 2u * lined(links * sizeof(node_id_t)) +
-                            lined(links * sizeof(vector_view_t)) + lined(links * sizeof(vector_norms_t));
+        std::size_t bytes = arena_t::reserved_bytes(context_t::results_array_t::memory_usage(expansion_factor)) +
+                            arena_t::reserved_bytes(context_t::results_array_t::memory_usage(links + 1)) +
+                            arena_t::reserved_bytes(context_t::frontier_queue_t::memory_usage(expansion_factor * 4u)) +
+                            arena_t::reserved_bytes(context_t::visited_set_t::memory_usage(expansion_factor * 4u)) +
+                            context_t::links_memory_usage(links);
 
         if constexpr (has_tiles_k) {
-            std::size_t const wanted = max_of<std::size_t>(expansion_factor, links + 1);
-            std::size_t const pool = divide_round_up<std::size_t>(wanted, tile_span_k) * tile_span_k;
-            bytes += lined(tiles_kit_t::scratch_bytes(pool, geometry.dimensions())) +
-                     lined(pool * pool * sizeof(dense_distance_t));
+            std::size_t const pool = tiles_pool_(expansion_factor, links);
+            bytes += arena_t::reserved_bytes(tiles_kit_t::scratch_bytes(pool, geometry.dimensions())) +
+                     arena_t::reserved_bytes(pool * pool * sizeof(dense_distance_t));
         }
         return bytes;
     }
@@ -616,11 +618,10 @@ struct dense_ram_index {
             failed(context.reserve_links(node_connectivity)))
             return status_t::bad_alloc_k;
 
-        // The tile planes size from the same frozen geometry and the kit's own shapes - padded to
+        // The tile scratch sizes from the same frozen geometry and the kit's own shapes - padded to
         // whole tiles, so the padded pool doubles as the pair-matrix stride.
         if constexpr (has_tiles_k) {
-            std::size_t const wanted = max_of<std::size_t>(expansion_factor, node_connectivity + 1);
-            std::size_t const pool = divide_round_up<std::size_t>(wanted, tile_span_k) * tile_span_k;
+            std::size_t const pool = tiles_pool_(expansion_factor, node_connectivity);
             if (failed(context.reserve_tiles(pool, tiles_kit_t::scratch_bytes(pool, geometry.dimensions()))))
                 return status_t::bad_alloc_k;
         }
@@ -803,9 +804,7 @@ struct dense_ram_index {
 
         // All slots share one contiguous packed row layout, so the copy width is loop-invariant.
         // Sub-byte types pack several dimensions per storage value - count storage bytes, not dimensions.
-        std::size_t const vector_bytes = divide_round_up<std::size_t>(geometry.dimensions(),
-                                                                      nk::dimensions_per_value<scalar_t>()) *
-                                         sizeof(scalar_t);
+        std::size_t const vector_bytes = stored_row_values(geometry) * sizeof(scalar_t);
 
         // Go through the vectors and inject them one-by-one.
         for (small_size_t incoming_index = 0; incoming_index != incoming_vectors_count; ++incoming_index) {
@@ -1167,6 +1166,11 @@ struct dense_ram_index {
 #pragma endregion Checkpoints
 
   private:
+    /** @brief The tile pool one refinement scores: the wider candidate set, padded to whole tiles. */
+    static std::size_t tiles_pool_(std::size_t expansion_factor, std::size_t node_connectivity) noexcept {
+        return round_up_to_multiple(max_of<std::size_t>(expansion_factor, node_connectivity + 1), tile_span_k);
+    }
+
 #pragma region Storage
 
     /** @brief Trampoline for the kernel-aware @c usearch::dense_norms with hardened types -
@@ -1570,18 +1574,14 @@ struct dense_ram_index {
         std::size_t const count = candidates.size();
         dense_scored_node_t const* candidates_data = candidates.data();
 
-        // The scratch splits like the reverse path's: the packed kept tiles first, then the
-        // span's A-tiles - the same alignment fix-up into the margin `scratch_bytes` reserved.
+        // The packed kept tiles first, then the span's A-tiles, on the tiles' own alignment.
         std::size_t const dimensions = vector_for(chunked_location(candidates_data[0].node_id)).size();
-        std::size_t const depth_tiles = divide_round_up<std::size_t>(dimensions, depth_k);
-        std::uintptr_t const raw_base = reinterpret_cast<std::uintptr_t>(context.tiles_scratch.data());
-        constexpr std::uintptr_t tile_alignment = alignof(typename tiles_kit_t::a_tile_t);
-        std::uintptr_t const aligned_base = (raw_base + tile_alignment - 1u) & ~(tile_alignment - 1u);
-        typename tiles_kit_t::b_tile_t* const kept_tiles = reinterpret_cast<typename tiles_kit_t::b_tile_t*>( //
-            aligned_base);
-        std::size_t const kept_tiles_capacity = divide_round_up<std::size_t>(limit, columns_k);
-        typename tiles_kit_t::a_tile_t* const a_tiles = reinterpret_cast<typename tiles_kit_t::a_tile_t*>(
-            kept_tiles + kept_tiles_capacity * depth_tiles);
+        std::size_t const depth_tiles = tiles_kit_t::depth_tiles(dimensions);
+        std::size_t const kept_tiles_capacity = tiles_kit_t::column_tiles(limit);
+        typename tiles_kit_t::scratch_t const scratch = tiles_kit_t::scratch_of(context.tiles_scratch.data(),
+                                                                                kept_tiles_capacity * depth_tiles);
+        typename tiles_kit_t::b_tile_t* const kept_tiles = scratch.b_tiles;
+        typename tiles_kit_t::a_tile_t* const a_tiles = scratch.a_tiles;
         tiles_kit_t::configure_tiles();
 
         typename tiles_kit_t::accumulator_tile_t accumulator;
@@ -1685,16 +1685,12 @@ struct dense_ram_index {
         // finalize per tile pair. Tail tiles pad by repeating the last valid row, like the
         // 4-way tails; their lanes finalize into the padded stride and are never read.
         std::size_t const dimensions = rows[0].size();
-        std::size_t const row_tiles = divide_round_up<std::size_t>(count, rows_k);
-        std::size_t const depth_tiles = divide_round_up<std::size_t>(dimensions, depth_k);
-        // Generic byte allocators promise 16-byte alignment while the tile loads demand the
-        // tiles' own - align the base up into the margin @c scratch_bytes reserved.
-        std::uintptr_t const raw_base = reinterpret_cast<std::uintptr_t>(context.tiles_scratch.data());
-        constexpr std::uintptr_t tile_alignment = alignof(typename tiles_kit_t::a_tile_t);
-        std::uintptr_t const aligned_base = (raw_base + tile_alignment - 1u) & ~(tile_alignment - 1u);
-        typename tiles_kit_t::b_tile_t* const b_tiles = reinterpret_cast<typename tiles_kit_t::b_tile_t*>(aligned_base);
-        typename tiles_kit_t::a_tile_t* const a_tiles = reinterpret_cast<typename tiles_kit_t::a_tile_t*>(
-            b_tiles + row_tiles * depth_tiles);
+        std::size_t const row_tiles = tiles_kit_t::row_tiles(count);
+        std::size_t const depth_tiles = tiles_kit_t::depth_tiles(dimensions);
+        typename tiles_kit_t::scratch_t const scratch = tiles_kit_t::scratch_of(context.tiles_scratch.data(),
+                                                                                row_tiles * depth_tiles);
+        typename tiles_kit_t::b_tile_t* const b_tiles = scratch.b_tiles;
+        typename tiles_kit_t::a_tile_t* const a_tiles = scratch.a_tiles;
         tiles_kit_t::configure_tiles();
 
         std::array<vector_view_t, rows_k> tile_rows;
@@ -1718,6 +1714,11 @@ struct dense_ram_index {
             }
             for (std::size_t depth_tile = 0; depth_tile != depth_tiles; ++depth_tile)
                 tiles_kit_t::gather_a_tile(a_tiles[depth_tile], tile_rows, depth_tile * depth_k);
+            // The Gram never reads these rows again, so their lines leave the private caches now.
+            [[maybe_unused]] typename tiles_kit_t::demote_candidate_t const demote_candidate {};
+            for (std::size_t row = 0; row != rows_k; ++row)
+                for (std::size_t depth_tile = 0; depth_tile != depth_tiles; ++depth_tile)
+                    demote_candidate(tile_rows[row].data() + depth_tile * depth_k);
             for (std::size_t column_tile = 0; column_tile != row_tiles; ++column_tile) {
                 for (std::size_t column = 0; column != columns_k; ++column)
                     column_norms[column] = norms[min_of(column_tile * columns_k + column, count - 1)];
@@ -2281,7 +2282,7 @@ struct dense_ram_index {
      *  Each directory is sized once to @c max_chunks_k entries in @c reserve() and never reallocates
      *  after that, so readers can dereference chunk headers with zero synchronization while a single
      *  writer default-constructs the next one in place. The stride pads every header to
-     *  @c fu::default_alignment_k, keeping the writer's half-built entry off the readers' cache lines.
+     *  @c default_alignment_k, keeping the writer's half-built entry off the readers' cache lines.
      *  @ref dense_ram_index_malloc
      */
     fu::dynamic_padded_array<vectors_chunk_t, vectors_allocator_type_> vectors_chunks_;

@@ -10,7 +10,7 @@ namespace unum {
 namespace usearch {
 
 /** @brief No-op fallback used as the primary-template base for every role. */
-struct memory_hint_t {
+struct dummy_memory_hint_t {
     inline void operator()(void const*) const noexcept {}
 };
 

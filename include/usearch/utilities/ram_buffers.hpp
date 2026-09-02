@@ -54,7 +54,7 @@ inline value_type_ exchange(value_type_& old_value, other_type_&& new_value) noe
  *  substitute for the otherwise costlier modulo. Branchless bit trick from
  *  Henry S. Warren Jr., "Hacker's Delight", 2nd ed., §3-2.
  */
-inline std::size_t ceil2(std::size_t value) noexcept {
+constexpr std::size_t ceil2(std::size_t value) noexcept {
     value--;
     value |= value >> 1;
     value |= value >> 2;
@@ -68,15 +68,19 @@ inline std::size_t ceil2(std::size_t value) noexcept {
     return value;
 }
 
+/** @brief The capacity a fresh reservation of @p capacity entries rounds up to: a power of two, sixteen at least. */
+constexpr std::size_t reserved_capacity(std::size_t capacity) noexcept {
+    return max_of<std::size_t>(ceil2(capacity), 16u);
+}
+
 /** @brief The allocator surface these containers use; narrower than the standard's, since none of
  *      them constructs or destroys through it. */
 template <typename allocator_>
-concept buffer_allocator =
-    requires(allocator_ allocator, typename allocator_::value_type* pointer, std::size_t count) {
-        typename allocator_::value_type;
-        { allocator.allocate(count) } -> std::same_as<typename allocator_::value_type*>;
-        allocator.deallocate(pointer, count);
-    };
+concept buffer_allocator = requires(allocator_ allocator, typename allocator_::value_type* pointer, std::size_t count) {
+    typename allocator_::value_type;
+    { allocator.allocate(count) } -> std::same_as<typename allocator_::value_type*>;
+    allocator.deallocate(pointer, count);
+};
 
 static_assert(buffer_allocator<std::allocator<std::byte>>);
 
@@ -239,9 +243,8 @@ class max_heap {
     status_t reserve(std::size_t new_capacity) noexcept {
         if (new_capacity <= capacity_) return status_t::success_k;
 
-        new_capacity = ceil2(new_capacity);
-        if (new_capacity == 0) return status_t::overflow_k;
-        new_capacity = (std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u));
+        if (ceil2(new_capacity) == 0) return status_t::overflow_k;
+        new_capacity = max_of<std::size_t>(reserved_capacity(new_capacity), capacity_ * 2u);
         auto new_elements = allocator_.allocate(new_capacity);
         if (!new_elements) return status_t::bad_alloc_k;
 
@@ -428,9 +431,9 @@ class max_heap_dary {
     max_heap_dary(max_heap_dary const&) = delete;
     max_heap_dary& operator=(max_heap_dary const&) = delete;
 
-    /** @brief Bytes @p capacity entries occupy. */
+    /** @brief Bytes a fresh reservation of @p capacity entries occupies. */
     static constexpr std::size_t memory_usage(std::size_t capacity) noexcept {
-        return capacity * sizeof(element_t);
+        return reserved_capacity(capacity) * sizeof(element_t);
     }
 
     /** @brief Bytes this heap currently occupies. */
@@ -438,8 +441,7 @@ class max_heap_dary {
 
     /** @brief Takes @p region as a heap of at most @p capacity entries; @p growth serves any later
      *      block, and a default-constructed one refuses, making the carve exact. */
-    [[nodiscard]] static max_heap_dary acquire(bytes_span_t region, std::size_t capacity,
-                                               allocator_t growth) noexcept {
+    [[nodiscard]] static max_heap_dary acquire(bytes_span_t region, std::size_t capacity, allocator_t growth) noexcept {
         max_heap_dary heap;
         heap.capacity_ = min_of(capacity, region.size() / sizeof(element_t));
         heap.elements_ = heap.capacity_ ? reinterpret_cast<element_t*>(region.data()) : nullptr;
@@ -473,9 +475,8 @@ class max_heap_dary {
     /** @return @c success_k, @c overflow_k when the rounded capacity wraps, @c bad_alloc_k otherwise. */
     status_t reserve(std::size_t new_capacity) noexcept {
         if (new_capacity <= capacity_) return status_t::success_k;
-        new_capacity = ceil2(new_capacity);
-        if (new_capacity == 0) return status_t::overflow_k;
-        new_capacity = (std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u));
+        if (ceil2(new_capacity) == 0) return status_t::overflow_k;
+        new_capacity = max_of<std::size_t>(reserved_capacity(new_capacity), capacity_ * 2u);
         auto new_elements = allocator_.allocate(new_capacity);
         if (!new_elements) return status_t::bad_alloc_k;
         if (elements_) {
@@ -619,9 +620,9 @@ class sorted_buffer {
     sorted_buffer(sorted_buffer const&) = delete;
     sorted_buffer& operator=(sorted_buffer const&) = delete;
 
-    /** @brief Bytes @p capacity entries occupy. */
+    /** @brief Bytes a fresh reservation of @p capacity entries occupies. */
     static constexpr std::size_t memory_usage(std::size_t capacity) noexcept {
-        return capacity * sizeof(element_t);
+        return reserved_capacity(capacity) * sizeof(element_t);
     }
 
     /** @brief Bytes this buffer currently occupies. */
@@ -629,8 +630,7 @@ class sorted_buffer {
 
     /** @brief Takes @p region as a buffer of at most @p capacity entries; @p growth serves any
      *      later block, and a default-constructed one refuses, making the carve exact. */
-    [[nodiscard]] static sorted_buffer acquire(bytes_span_t region, std::size_t capacity,
-                                               allocator_t growth) noexcept {
+    [[nodiscard]] static sorted_buffer acquire(bytes_span_t region, std::size_t capacity, allocator_t growth) noexcept {
         sorted_buffer buffer;
         buffer.capacity_ = min_of(capacity, region.size() / sizeof(element_t));
         buffer.elements_ = buffer.capacity_ ? reinterpret_cast<element_t*>(region.data()) : nullptr;
@@ -661,9 +661,8 @@ class sorted_buffer {
     status_t reserve(std::size_t new_capacity) noexcept {
         if (new_capacity <= capacity_) return status_t::success_k;
 
-        new_capacity = ceil2(new_capacity);
-        if (new_capacity == 0) return status_t::overflow_k;
-        new_capacity = (std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u));
+        if (ceil2(new_capacity) == 0) return status_t::overflow_k;
+        new_capacity = max_of<std::size_t>(reserved_capacity(new_capacity), capacity_ * 2u);
         auto new_elements = allocator_.allocate(new_capacity);
         if (!new_elements) return status_t::bad_alloc_k;
 
@@ -867,9 +866,8 @@ class growing_buffer {
     status_t reserve(std::size_t new_capacity) noexcept {
         if (new_capacity <= capacity_) return status_t::success_k;
 
-        new_capacity = ceil2(new_capacity);
-        if (new_capacity == 0) return status_t::overflow_k;
-        return reserve_exactly((std::max<std::size_t>)(new_capacity, (std::max<std::size_t>)(capacity_ * 2u, 16u)));
+        if (ceil2(new_capacity) == 0) return status_t::overflow_k;
+        return reserve_exactly(max_of<std::size_t>(reserved_capacity(new_capacity), capacity_ * 2u));
     }
 
     /** @brief Grows capacity to exactly @p new_capacity, without the rounding @ref reserve applies -
@@ -986,8 +984,13 @@ struct arena_allocator {
         using other = arena_allocator<other_type_, upstream_allocator_, alignment_>;
     };
 
-    /** @brief The boundary every carve starts on; echoes the template argument. */
+    /** @brief The boundary every reservation starts on; echoes the template argument. */
     inline static constexpr std::size_t alignment_k = alignment_;
+
+    /** @brief Bytes a reservation of @p bytes occupies here, the next one starting on its own boundary. */
+    static constexpr std::size_t reserved_bytes(std::size_t bytes) noexcept {
+        return round_up_to_multiple(bytes, alignment_k);
+    }
 
     /** @brief The arena every rebound copy shares; null refuses every request. */
     arena_t* arena = nullptr;

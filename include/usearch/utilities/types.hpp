@@ -435,6 +435,12 @@ constexpr value_type_ divide_round_up(value_type_ value, value_type_ divisor) no
     return (value + divisor - value_type_(1)) / divisor;
 }
 
+/** @brief The smallest multiple of @p multiple at or above @p value; @p multiple must be non-zero. */
+template <typename value_type_>
+constexpr value_type_ round_up_to_multiple(value_type_ value, value_type_ multiple) noexcept {
+    return divide_round_up(value, multiple) * multiple;
+}
+
 /** @brief The smaller of @p first & @p second - @c std::min without the <algorithm> tax,
  *      named to also dodge the @c min macro of Windows headers. */
 template <typename value_type_>

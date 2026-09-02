@@ -507,9 +507,9 @@ struct bf16_serial_inner_kit_t {
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x8_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_bf16x8_init_serial;
@@ -541,7 +541,7 @@ struct bf16_haswell_inner_kit_t {
     using step_vec_t = nk_b256_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_bf16x16_init_haswell;
@@ -574,7 +574,7 @@ struct bf16_skylake_inner_kit_t {
     using step_vec_t = nk_b512_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_bf16x32_init_skylake;
@@ -607,7 +607,7 @@ struct bf16_genoa_inner_kit_t {
     using step_vec_t = nk_b512_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_bf16x32_init_genoa;
@@ -639,9 +639,9 @@ struct bf16_neon_inner_kit_t {
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x8_state_neon_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_bf16x8_init_neon;
@@ -675,9 +675,9 @@ struct bf16_neonbfdot_inner_kit_t {
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x8_state_neonbfdot_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_bf16x8_init_neonbfdot;
@@ -710,9 +710,9 @@ struct bf16_v128relaxed_inner_kit_t {
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x8_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_bf16x8_init_v128relaxed;
@@ -746,9 +746,9 @@ struct bf16_powervsx_inner_kit_t {
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x8_state_powervsx_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_bf16x8_init_powervsx;
@@ -778,9 +778,9 @@ struct f16_serial_inner_kit_t {
     using scalar_t = nk::f16_t;
     using accumulator_t = nk_dot_f16x8_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_f16x8_init_serial;
@@ -819,7 +819,7 @@ struct f16_haswell_inner_kit_t {
     using step_vec_t = nk_b256_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_through_f32_init_haswell_;
@@ -852,7 +852,7 @@ struct f16_skylake_inner_kit_t {
     using step_vec_t = nk_b512_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_through_f32_init_skylake_;
@@ -883,9 +883,9 @@ struct f16_neon_inner_kit_t {
     using scalar_t = nk::f16_t;
     using accumulator_t = nk_dot_f16x8_state_neon_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_f16x8_init_neon;
@@ -919,9 +919,9 @@ struct f16_neonfhm_inner_kit_t {
     using scalar_t = nk::f16_t;
     using accumulator_t = nk_dot_f16x8_state_neonfhm_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_f16x8_init_neonfhm;
@@ -955,9 +955,9 @@ struct f16_v128relaxed_inner_kit_t {
     using scalar_t = nk::f16_t;
     using accumulator_t = nk_dot_through_f32x4_state_v128relaxed_t_;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_through_f32x4_init_v128relaxed_;
@@ -991,9 +991,9 @@ struct f16_powervsx_inner_kit_t {
     using scalar_t = nk::f16_t;
     using accumulator_t = nk_dot_f16x8_state_powervsx_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_f16x8_init_powervsx;
@@ -1023,9 +1023,9 @@ struct e5m2_serial_inner_kit_t {
     using scalar_t = nk::e5m2_t;
     using accumulator_t = nk_dot_e5m2x16_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e5m2x16_init_serial;
@@ -1062,7 +1062,7 @@ struct e5m2_haswell_inner_kit_t {
     using step_vec_t = nk_b256_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_through_f32_init_haswell_;
@@ -1095,7 +1095,7 @@ struct e5m2_skylake_inner_kit_t {
     using step_vec_t = nk_b512_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_through_f32_init_skylake_;
@@ -1169,7 +1169,7 @@ struct e5m2_genoa_inner_kit_t {
     using step_vec_t = nk_b512_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_through_bf16_init_genoa_;
@@ -1200,9 +1200,9 @@ struct e5m2_neonfhm_inner_kit_t {
     using scalar_t = nk::e5m2_t;
     using accumulator_t = nk_dot_e5m2x16_state_neonfhm_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e5m2x16_init_neonfhm;
@@ -1236,9 +1236,9 @@ struct e5m2_neonfp8_inner_kit_t {
     using scalar_t = nk::e5m2_t;
     using accumulator_t = nk_dot_e5m2x16_state_neonfp8_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e5m2x16_init_neonfp8;
@@ -1272,9 +1272,9 @@ struct e5m2_v128relaxed_inner_kit_t {
     using scalar_t = nk::e5m2_t;
     using accumulator_t = nk_dot_e5m2x4_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_through_f32x4_init_v128relaxed_;
@@ -1304,9 +1304,9 @@ struct e4m3_serial_inner_kit_t {
     using scalar_t = nk::e4m3_t;
     using accumulator_t = nk_dot_e4m3x16_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e4m3x16_init_serial;
@@ -1338,7 +1338,7 @@ struct e4m3_haswell_inner_kit_t {
     using step_vec_t = nk_b256_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_through_f32_init_haswell_;
@@ -1371,7 +1371,7 @@ struct e4m3_skylake_inner_kit_t {
     using step_vec_t = nk_b512_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_through_f32_init_skylake_;
@@ -1445,7 +1445,7 @@ struct e4m3_genoa_inner_kit_t {
     using step_vec_t = nk_b512_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_through_bf16_init_genoa_;
@@ -1476,9 +1476,9 @@ struct e4m3_neonfhm_inner_kit_t {
     using scalar_t = nk::e4m3_t;
     using accumulator_t = nk_dot_e4m3x16_state_neonfhm_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e4m3x16_init_neonfhm;
@@ -1512,9 +1512,9 @@ struct e4m3_neonfp8_inner_kit_t {
     using scalar_t = nk::e4m3_t;
     using accumulator_t = nk_dot_e4m3x16_state_neonfp8_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e4m3x16_init_neonfp8;
@@ -1548,9 +1548,9 @@ struct e4m3_v128relaxed_inner_kit_t {
     using scalar_t = nk::e4m3_t;
     using accumulator_t = nk_dot_e4m3x4_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_through_f32x4_init_v128relaxed_;
@@ -1586,9 +1586,9 @@ struct e3m2_serial_inner_kit_t {
     using scalar_t = nk::e3m2_t;
     using accumulator_t = nk_dot_e3m2x16_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e3m2x16_init_serial;
@@ -1620,7 +1620,7 @@ struct e3m2_haswell_inner_kit_t {
     using step_vec_t = nk_b256_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e3m2x32_init_haswell;
@@ -1653,7 +1653,7 @@ struct e3m2_skylake_inner_kit_t {
     using step_vec_t = nk_b512_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e3m2x64_init_skylake;
@@ -1687,9 +1687,9 @@ struct e3m2_neonsdot_inner_kit_t {
     using scalar_t = nk::e3m2_t;
     using accumulator_t = nk_dot_e3m2x16_state_neonsdot_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e3m2x16_init_neonsdot;
@@ -1723,9 +1723,9 @@ struct e3m2_neonfp8_inner_kit_t {
     using scalar_t = nk::e3m2_t;
     using accumulator_t = nk_dot_e3m2x16_state_neonfp8_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e3m2x16_init_neonfp8;
@@ -1756,9 +1756,9 @@ struct e3m2_v128relaxed_inner_kit_t {
     using scalar_t = nk::e3m2_t;
     using accumulator_t = nk_dot_e3m2x16_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e3m2x16_init_v128relaxed;
@@ -1788,9 +1788,9 @@ struct e2m3_serial_inner_kit_t {
     using scalar_t = nk::e2m3_t;
     using accumulator_t = nk_dot_e2m3x16_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e2m3x16_init_serial;
@@ -1822,7 +1822,7 @@ struct e2m3_haswell_inner_kit_t {
     using step_vec_t = nk_b256_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e2m3x32_init_haswell;
@@ -1855,7 +1855,7 @@ struct e2m3_skylake_inner_kit_t {
     using step_vec_t = nk_b512_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e2m3x64_init_skylake;
@@ -1888,7 +1888,7 @@ struct e2m3_alder_inner_kit_t {
     using step_vec_t = nk_b256_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e2m3x32_init_alder;
@@ -1952,9 +1952,9 @@ struct e2m3_neonsdot_inner_kit_t {
     using scalar_t = nk::e2m3_t;
     using accumulator_t = nk_dot_e2m3x16_state_neonsdot_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e2m3x16_init_neonsdot;
@@ -1985,9 +1985,9 @@ struct e2m3_neonfp8_inner_kit_t {
     using scalar_t = nk::e2m3_t;
     using accumulator_t = nk_dot_e2m3x16_state_neonfp8_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e2m3x16_init_neonfp8;
@@ -2018,9 +2018,9 @@ struct e2m3_v128relaxed_inner_kit_t {
     using scalar_t = nk::e2m3_t;
     using accumulator_t = nk_dot_e2m3x16_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e2m3x16_init_v128relaxed;
@@ -2050,9 +2050,9 @@ struct u8_serial_inner_kit_t {
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x16_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_u8x16_init_serial;
@@ -2087,7 +2087,7 @@ struct u8_haswell_inner_kit_t {
     using step_vec_t = nk_b128_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_u8x16_init_haswell;
@@ -2122,7 +2122,7 @@ struct u8_icelake_inner_kit_t {
     using step_vec_t = nk_b512_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_u8x64_init_icelake;
@@ -2157,7 +2157,7 @@ struct u8_alder_inner_kit_t {
     using step_vec_t = nk_b256_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_u8x32_init_alder;
@@ -2226,9 +2226,9 @@ struct u8_neonsdot_inner_kit_t {
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x16_state_neonsdot_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_u8x16_init_neonsdot;
@@ -2261,9 +2261,9 @@ struct u8_v128relaxed_inner_kit_t {
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x16_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_u8x16_init_v128relaxed;
@@ -2296,9 +2296,9 @@ struct u8_powervsx_inner_kit_t {
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x16_state_powervsx_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_u8x16_init_powervsx;
@@ -2330,9 +2330,9 @@ struct i8_serial_inner_kit_t {
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x16_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_i8x16_init_serial;
@@ -2366,7 +2366,7 @@ struct i8_haswell_inner_kit_t {
     using step_vec_t = nk_b128_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_i8x16_init_haswell;
@@ -2401,7 +2401,7 @@ struct i8_icelake_inner_kit_t {
     using step_vec_t = nk_b512_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_i8x64_init_icelake;
@@ -2440,7 +2440,7 @@ struct i8_alder_inner_kit_t {
     using step_vec_t = nk_b256_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_i8x32_init_alder;
@@ -2509,9 +2509,9 @@ struct i8_neonsdot_inner_kit_t {
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x16_state_neonsdot_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_i8x16_init_neonsdot;
@@ -2544,9 +2544,9 @@ struct i8_v128relaxed_inner_kit_t {
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x16_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_i8x16_init_v128relaxed;
@@ -2579,9 +2579,9 @@ struct i8_powervsx_inner_kit_t {
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x16_state_powervsx_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_i8x16_init_powervsx;
@@ -2617,9 +2617,9 @@ struct u4x2_serial_inner_kit_t {
     using scalar_t = nk::u4x2_t;
     using accumulator_t = nk_dot_u4x16_state_serial_t;
     using step_vec_t = nk_b64_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_u4x16_init_serial;
@@ -2653,7 +2653,7 @@ struct u4x2_haswell_inner_kit_t {
     using step_vec_t = nk_b128_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_u4x32_init_haswell;
@@ -2688,7 +2688,7 @@ struct u4x2_icelake_inner_kit_t {
     using step_vec_t = nk_b512_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_u4x128_init_icelake;
@@ -2721,9 +2721,9 @@ struct u4x2_neonsdot_inner_kit_t {
     using scalar_t = nk::u4x2_t;
     using accumulator_t = nk_dot_u4x32_state_neonsdot_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_u4x32_init_neonsdot;
@@ -2756,9 +2756,9 @@ struct u4x2_v128relaxed_inner_kit_t {
     using scalar_t = nk::u4x2_t;
     using accumulator_t = nk_dot_u4x32_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_u4x32_init_v128relaxed;
@@ -2790,9 +2790,9 @@ struct i4x2_serial_inner_kit_t {
     using scalar_t = nk::i4x2_t;
     using accumulator_t = nk_dot_i4x16_state_serial_t;
     using step_vec_t = nk_b64_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_i4x16_init_serial;
@@ -2831,7 +2831,7 @@ struct i4x2_haswell_inner_kit_t {
     using step_vec_t = nk_b128_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_i4x32_init_haswell;
@@ -2871,7 +2871,7 @@ struct i4x2_icelake_inner_kit_t {
     using step_vec_t = nk_b512_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_i4x128_init_icelake;
@@ -2905,9 +2905,9 @@ struct i4x2_neonsdot_inner_kit_t {
     using scalar_t = nk::i4x2_t;
     using accumulator_t = nk_dot_i4x32_state_neonsdot_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_i4x32_init_neonsdot;
@@ -2943,9 +2943,9 @@ struct i4x2_v128relaxed_inner_kit_t {
     using scalar_t = nk::i4x2_t;
     using accumulator_t = nk_dot_i4x32_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_i4x32_init_v128relaxed;
@@ -2977,9 +2977,9 @@ struct u1x8_serial_inner_kit_t {
     using scalar_t = nk::u1x8_t;
     using accumulator_t = nk_dot_u1x128_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_u1x128_init_serial;
@@ -3013,7 +3013,7 @@ struct u1x8_haswell_inner_kit_t {
     using step_vec_t = nk_b128_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_u1x128_init_haswell;
@@ -3048,7 +3048,7 @@ struct u1x8_icelake_inner_kit_t {
     using step_vec_t = nk_b512_vec_t;
     using prefetch_query_t = prefetch_query_sse_t;
     using prefetch_candidate_t = prefetch_candidate_sse_t;
-    using demote_candidate_t = demote_candidate_cldemote_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_u1x512_init_icelake;
@@ -3081,9 +3081,9 @@ struct u1x8_neon_inner_kit_t {
     using scalar_t = nk::u1x8_t;
     using accumulator_t = nk_dot_u1x128_state_neon_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_u1x128_init_neon;
@@ -3119,9 +3119,9 @@ struct u1x8_v128relaxed_inner_kit_t {
     using scalar_t = nk::u1x8_t;
     using accumulator_t = nk_dot_u1x128_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_u1x128_init_v128relaxed;
@@ -3157,9 +3157,9 @@ struct u1x8_powervsx_inner_kit_t {
     using scalar_t = nk::u1x8_t;
     using accumulator_t = nk_dot_u1x128_state_powervsx_t;
     using step_vec_t = nk_b128_vec_t;
-    using prefetch_query_t = memory_hint_t;
-    using prefetch_candidate_t = memory_hint_t;
-    using demote_candidate_t = memory_hint_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_u1x128_init_powervsx;
@@ -3952,6 +3952,10 @@ struct no_tiles_kit_t {
 
 template <typename finalize_kit_type_>
 struct u8_sapphireamx_tiles_kit;
+template <typename finalize_kit_type_>
+struct i8_sapphireamx_tiles_kit;
+template <typename finalize_kit_type_>
+struct bf16_sapphireamx_tiles_kit;
 
 #if NK_TARGET_SAPPHIREAMX
 
@@ -3971,19 +3975,47 @@ struct u8_sapphireamx_tiles_kit {
     using a_tile_t = nk_dots_u8_a16x64_sapphireamx_t;
     using b_tile_t = nk_dots_u8_b64x16_sapphireamx_t;
     using accumulator_tile_t = nk_dots_u8_state_sapphireamx_t;
+    /** @brief Demotes a gathered strip once the Gram has read it for the last time; every target
+     *      compiling this kit carries CLDEMOTE. */
+    using demote_candidate_t = demote_candidate_cldemote_t;
     inline static constexpr std::size_t tile_rows_k = 16;
     inline static constexpr std::size_t tile_columns_k = 16;
     inline static constexpr std::size_t tile_depth_k = 64;
 
+    /** @brief Row tiles covering @p count rows. */
+    static constexpr std::size_t row_tiles(std::size_t count) noexcept { return divide_round_up(count, tile_rows_k); }
+    /** @brief Column tiles covering @p count columns. */
+    static constexpr std::size_t column_tiles(std::size_t count) noexcept {
+        return divide_round_up(count, tile_columns_k);
+    }
+    /** @brief Depth tiles covering @p dimensions. */
+    static constexpr std::size_t depth_tiles(std::size_t dimensions) noexcept {
+        return divide_round_up(dimensions, tile_depth_k);
+    }
+
     /** @brief Bytes of tile scratch one Gram over @p count rows of @p dimensions needs -
      *      the packed B-tiles plus one row-tile of A-strips - derived from this kit's own
      *      tile types, so every dtype & engine sizes itself. Includes one alignment margin:
-     *      generic byte allocators promise 16, the tile loads demand 64, and the consumer
-     *      aligns the base up before carving. */
+     *      generic byte allocators promise 16, the tile loads demand 64, and @c scratch_of
+     *      aligns the base up. */
     static constexpr std::size_t scratch_bytes(std::size_t count, std::size_t dimensions) noexcept {
-        std::size_t const row_tiles = divide_round_up<std::size_t>(count, tile_rows_k);
-        std::size_t const depth_tiles = divide_round_up<std::size_t>(dimensions, tile_depth_k);
-        return row_tiles * depth_tiles * sizeof(b_tile_t) + depth_tiles * sizeof(a_tile_t) + alignof(a_tile_t);
+        return row_tiles(count) * depth_tiles(dimensions) * sizeof(b_tile_t) +
+               depth_tiles(dimensions) * sizeof(a_tile_t) + alignof(a_tile_t);
+    }
+
+    /** @brief The two regions of one Gram's scratch: the packed B-tiles first, the A-strips after. */
+    struct scratch_t {
+        b_tile_t* b_tiles;
+        a_tile_t* a_tiles;
+    };
+
+    /** @brief Lays @p packed_tiles B-tiles and the A-strips after them over @p scratch, from its first
+     *      address on the tiles' own alignment. */
+    static scratch_t scratch_of(byte_t* scratch, std::size_t packed_tiles) noexcept {
+        std::uintptr_t const base = round_up_to_multiple(reinterpret_cast<std::uintptr_t>(scratch),
+                                                         std::uintptr_t {alignof(a_tile_t)});
+        b_tile_t* const b_tiles = reinterpret_cast<b_tile_t*>(base);
+        return {b_tiles, reinterpret_cast<a_tile_t*>(b_tiles + packed_tiles)};
     }
 
     /** @brief One palette programming per refinement - never per tile. */
@@ -4050,6 +4082,250 @@ struct u8_sapphireamx_tiles_kit {
     }
 };
 
+/**
+ *  @brief i8 tile kit for Sapphire Rapids AMX - the signed twin of the u8 kit, @c TDPBSSD
+ *      over the same 16×64 strips and 16×16 accumulator tiles. Finalizes through
+ *      @p finalize_kit_type_ - the very kit the lazy path picked - so eager & lazy distances
+ *      agree bit-for-bit.
+ */
+template <typename finalize_kit_type_>
+struct i8_sapphireamx_tiles_kit {
+    inline static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    using finalize_kit_t = finalize_kit_type_;
+    using scalar_t = nk::i8_t;
+    using norms_t = vector_norms<typename scalar_t::dot_result_t>;
+    using a_tile_t = nk_dots_i8_a16x64_sapphireamx_t;
+    using b_tile_t = nk_dots_i8_b64x16_sapphireamx_t;
+    using accumulator_tile_t = nk_dots_i8_state_sapphireamx_t;
+    /** @brief Demotes a gathered strip once the Gram has read it for the last time; every target
+     *      compiling this kit carries CLDEMOTE. */
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    inline static constexpr std::size_t tile_rows_k = 16;
+    inline static constexpr std::size_t tile_columns_k = 16;
+    inline static constexpr std::size_t tile_depth_k = 64;
+
+    /** @brief Row tiles covering @p count rows. */
+    static constexpr std::size_t row_tiles(std::size_t count) noexcept { return divide_round_up(count, tile_rows_k); }
+    /** @brief Column tiles covering @p count columns. */
+    static constexpr std::size_t column_tiles(std::size_t count) noexcept {
+        return divide_round_up(count, tile_columns_k);
+    }
+    /** @brief Depth tiles covering @p dimensions. */
+    static constexpr std::size_t depth_tiles(std::size_t dimensions) noexcept {
+        return divide_round_up(dimensions, tile_depth_k);
+    }
+
+    /** @brief Bytes of tile scratch one Gram over @p count rows of @p dimensions needs -
+     *      the packed B-tiles plus one row-tile of A-strips - derived from this kit's own
+     *      tile types, so every dtype & engine sizes itself. Includes one alignment margin:
+     *      generic byte allocators promise 16, the tile loads demand 64, and @c scratch_of
+     *      aligns the base up. */
+    static constexpr std::size_t scratch_bytes(std::size_t count, std::size_t dimensions) noexcept {
+        return row_tiles(count) * depth_tiles(dimensions) * sizeof(b_tile_t) +
+               depth_tiles(dimensions) * sizeof(a_tile_t) + alignof(a_tile_t);
+    }
+
+    /** @brief The two regions of one Gram's scratch: the packed B-tiles first, the A-strips after. */
+    struct scratch_t {
+        b_tile_t* b_tiles;
+        a_tile_t* a_tiles;
+    };
+
+    /** @brief Lays @p packed_tiles B-tiles and the A-strips after them over @p scratch, from its first
+     *      address on the tiles' own alignment. */
+    static scratch_t scratch_of(byte_t* scratch, std::size_t packed_tiles) noexcept {
+        std::uintptr_t const base = round_up_to_multiple(reinterpret_cast<std::uintptr_t>(scratch),
+                                                         std::uintptr_t {alignof(a_tile_t)});
+        b_tile_t* const b_tiles = reinterpret_cast<b_tile_t*>(base);
+        return {b_tiles, reinterpret_cast<a_tile_t*>(b_tiles + packed_tiles)};
+    }
+
+    /** @brief One palette programming per refinement - never per tile. */
+    static void configure_tiles() noexcept { nk_amx_tile_configure_sapphireamx_(); }
+
+    /** @brief Gathers one @c tile_depth_k -deep strip of all 16 @p rows - scattered views,
+     *      each touched once per depth sweep: the tile @b is the staging, no contiguous
+     *      matrix ever exists. Row pads repeat valid views, like the 4-way tails; the
+     *      depth tail zero-fills, adding nothing to any dot. */
+    static void gather_a_tile(a_tile_t& a_tile, std::array<nk::vector_view<nk::i8_t>, tile_rows_k> const& rows,
+                              std::size_t depth_offset) noexcept {
+        std::size_t const remaining = rows[0].size() - depth_offset;
+        __mmask64 const depth_mask = remaining >= tile_depth_k ? ~__mmask64 {0} : (__mmask64 {1} << remaining) - 1u;
+        for (std::size_t row = 0; row != tile_rows_k; ++row) {
+            __m512i const strip = _mm512_maskz_loadu_epi8(
+                depth_mask, reinterpret_cast<nk_i8_t const*>(rows[row].data()) + depth_offset);
+            _mm512_store_si512(a_tile.data[row], strip);
+        }
+    }
+
+    /** @brief The transpose network NumKong packs with: a gathered A-tile becomes its own
+     *      quad-interleaved B-tile - the Gram symmetry in one call. */
+    static void pack_b_tile(a_tile_t const& a_tile, b_tile_t& b_tile) noexcept {
+        nk_dots_pack_i8_transposed_sapphireamx_(&a_tile, &b_tile);
+    }
+
+    /** @brief Zeroes the accumulator ahead of a depth walk. */
+    static void init_tile(accumulator_tile_t& tile) noexcept { nk_dots_i8_init_sapphireamx_(&tile); }
+
+    /** @brief tile += A × B for one depth step - @c TDPBSSD here. Deliberately single-step:
+     *      callers interleave the next tile's gather & pack between updates, hiding fetch
+     *      latency behind the matrix op - progressive fetching outweighs the accumulator's
+     *      per-step round-trip through memory. */
+    static void update_tile(accumulator_tile_t& tile, a_tile_t const& a_tile, b_tile_t const& b_tile) noexcept {
+        nk_compiler_barrier_sapphireamx_();
+        _tile_loadd(0, tile.data, 64);
+        _tile_loadd(1, a_tile.data, 64);
+        _tile_loadd(2, b_tile.data, 64);
+        _tile_dpbssd(0, 1, 2);
+        _tile_stored(0, tile.data, 64);
+        nk_compiler_barrier_sapphireamx_();
+    }
+
+    /** @brief Distances through the stored norms for all 16×16 lanes: 4-lane groups through
+     *      the finalize kit's own @c convert_to_distances - the epilogue of
+     *      @c invoke_distances_, tiled. Pad lanes finalize too and are simply never read. */
+    static void finalize_tile(accumulator_tile_t const& tile, std::array<norms_t, tile_rows_k> const& a_norms,
+                              std::array<norms_t, tile_columns_k> const& b_norms, f32_t* distances,
+                              std::size_t stride) noexcept {
+        using finalized_vec_t = typename finalize_kit_t::finalized_vec_t;
+        using dot_result_t = typename scalar_t::dot_result_t;
+        alignas(64) dot_result_t column_sumsqs[tile_columns_k];
+        for (std::size_t column = 0; column != tile_columns_k; ++column) column_sumsqs[column] = b_norms[column].sumsq;
+        for (std::size_t row = 0; row != tile_rows_k; ++row) {
+            f32_t* const distances_row = distances + row * stride;
+            for (std::size_t group = 0; group != tile_columns_k / 4; ++group) {
+                finalized_vec_t dots_vec, sumsqs_vec, distances_vec;
+                dots_vec.xmm = _mm_load_si128(reinterpret_cast<__m128i const*>(&tile.data[row][group * 4]));
+                sumsqs_vec.xmm = _mm_load_si128(reinterpret_cast<__m128i const*>(&column_sumsqs[group * 4]));
+                finalize_kit_t::convert_to_distances(&dots_vec, a_norms[row].sumsq, &sumsqs_vec, &distances_vec);
+                _mm_storeu_ps(reinterpret_cast<float*>(distances_row + group * 4), distances_vec.xmm_ps);
+            }
+        }
+    }
+};
+
+/**
+ *  @brief bf16 tile kit for Sapphire Rapids AMX - @c TDPBF16PS over 16×32 strips, pair-interleaved
+ *      B-tiles and f32 accumulator tiles, half the depth of the byte kits per step. Finalizes
+ *      through @p finalize_kit_type_ - the very kit the lazy path picked - so eager & lazy
+ *      distances agree bit-for-bit.
+ */
+template <typename finalize_kit_type_>
+struct bf16_sapphireamx_tiles_kit {
+    inline static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    using finalize_kit_t = finalize_kit_type_;
+    using scalar_t = nk::bf16_t;
+    using norms_t = vector_norms<typename scalar_t::dot_result_t>;
+    using a_tile_t = nk_dots_bf16_a16x32_sapphireamx_t;
+    using b_tile_t = nk_dots_bf16_b32x16_sapphireamx_t;
+    using accumulator_tile_t = nk_dots_bf16_state_sapphireamx_t;
+    /** @brief Demotes a gathered strip once the Gram has read it for the last time; every target
+     *      compiling this kit carries CLDEMOTE. */
+    using demote_candidate_t = demote_candidate_cldemote_t;
+    inline static constexpr std::size_t tile_rows_k = 16;
+    inline static constexpr std::size_t tile_columns_k = 16;
+    inline static constexpr std::size_t tile_depth_k = 32;
+
+    /** @brief Row tiles covering @p count rows. */
+    static constexpr std::size_t row_tiles(std::size_t count) noexcept { return divide_round_up(count, tile_rows_k); }
+    /** @brief Column tiles covering @p count columns. */
+    static constexpr std::size_t column_tiles(std::size_t count) noexcept {
+        return divide_round_up(count, tile_columns_k);
+    }
+    /** @brief Depth tiles covering @p dimensions. */
+    static constexpr std::size_t depth_tiles(std::size_t dimensions) noexcept {
+        return divide_round_up(dimensions, tile_depth_k);
+    }
+
+    /** @brief Bytes of tile scratch one Gram over @p count rows of @p dimensions needs -
+     *      the packed B-tiles plus one row-tile of A-strips - derived from this kit's own
+     *      tile types, so every dtype & engine sizes itself. Includes one alignment margin:
+     *      generic byte allocators promise 16, the tile loads demand 64, and @c scratch_of
+     *      aligns the base up. */
+    static constexpr std::size_t scratch_bytes(std::size_t count, std::size_t dimensions) noexcept {
+        return row_tiles(count) * depth_tiles(dimensions) * sizeof(b_tile_t) +
+               depth_tiles(dimensions) * sizeof(a_tile_t) + alignof(a_tile_t);
+    }
+
+    /** @brief The two regions of one Gram's scratch: the packed B-tiles first, the A-strips after. */
+    struct scratch_t {
+        b_tile_t* b_tiles;
+        a_tile_t* a_tiles;
+    };
+
+    /** @brief Lays @p packed_tiles B-tiles and the A-strips after them over @p scratch, from its first
+     *      address on the tiles' own alignment. */
+    static scratch_t scratch_of(byte_t* scratch, std::size_t packed_tiles) noexcept {
+        std::uintptr_t const base = round_up_to_multiple(reinterpret_cast<std::uintptr_t>(scratch),
+                                                         std::uintptr_t {alignof(a_tile_t)});
+        b_tile_t* const b_tiles = reinterpret_cast<b_tile_t*>(base);
+        return {b_tiles, reinterpret_cast<a_tile_t*>(b_tiles + packed_tiles)};
+    }
+
+    /** @brief One palette programming per refinement - never per tile. */
+    static void configure_tiles() noexcept { nk_amx_tile_configure_sapphireamx_(); }
+
+    /** @brief Gathers one @c tile_depth_k -deep strip of all 16 @p rows - scattered views,
+     *      each touched once per depth sweep: the tile @b is the staging, no contiguous
+     *      matrix ever exists. Row pads repeat valid views, like the 4-way tails; the
+     *      depth tail zero-fills, adding nothing to any dot. */
+    static void gather_a_tile(a_tile_t& a_tile, std::array<nk::vector_view<nk::bf16_t>, tile_rows_k> const& rows,
+                              std::size_t depth_offset) noexcept {
+        std::size_t const remaining = rows[0].size() - depth_offset;
+        __mmask32 const depth_mask = remaining >= tile_depth_k ? ~__mmask32 {0} : (__mmask32 {1} << remaining) - 1u;
+        for (std::size_t row = 0; row != tile_rows_k; ++row) {
+            __m512i const strip = _mm512_maskz_loadu_epi16(
+                depth_mask, reinterpret_cast<nk_bf16_t const*>(rows[row].data()) + depth_offset);
+            _mm512_store_si512(a_tile.data[row], strip);
+        }
+    }
+
+    /** @brief The transpose network NumKong packs with: a gathered A-tile becomes its own
+     *      pair-interleaved B-tile - the Gram symmetry in one call. */
+    static void pack_b_tile(a_tile_t const& a_tile, b_tile_t& b_tile) noexcept {
+        nk_dots_pack_bf16_transposed_sapphireamx_(&a_tile, &b_tile);
+    }
+
+    /** @brief Zeroes the accumulator ahead of a depth walk. */
+    static void init_tile(accumulator_tile_t& tile) noexcept { nk_dots_bf16_init_sapphireamx_(&tile); }
+
+    /** @brief tile += A × B for one depth step - @c TDPBF16PS here. Deliberately single-step:
+     *      callers interleave the next tile's gather & pack between updates, hiding fetch
+     *      latency behind the matrix op - progressive fetching outweighs the accumulator's
+     *      per-step round-trip through memory. */
+    static void update_tile(accumulator_tile_t& tile, a_tile_t const& a_tile, b_tile_t const& b_tile) noexcept {
+        nk_compiler_barrier_sapphireamx_();
+        _tile_loadd(0, tile.data, 64);
+        _tile_loadd(1, a_tile.data, 64);
+        _tile_loadd(2, b_tile.data, 64);
+        _tile_dpbf16ps(0, 1, 2);
+        _tile_stored(0, tile.data, 64);
+        nk_compiler_barrier_sapphireamx_();
+    }
+
+    /** @brief Distances through the stored norms for all 16×16 lanes: 4-lane groups through
+     *      the finalize kit's own @c convert_to_distances - the epilogue of
+     *      @c invoke_distances_, tiled. Pad lanes finalize too and are simply never read. */
+    static void finalize_tile(accumulator_tile_t const& tile, std::array<norms_t, tile_rows_k> const& a_norms,
+                              std::array<norms_t, tile_columns_k> const& b_norms, f32_t* distances,
+                              std::size_t stride) noexcept {
+        using finalized_vec_t = typename finalize_kit_t::finalized_vec_t;
+        using dot_result_t = typename scalar_t::dot_result_t;
+        alignas(64) dot_result_t column_sumsqs[tile_columns_k];
+        for (std::size_t column = 0; column != tile_columns_k; ++column) column_sumsqs[column] = b_norms[column].sumsq;
+        for (std::size_t row = 0; row != tile_rows_k; ++row) {
+            f32_t* const distances_row = distances + row * stride;
+            for (std::size_t group = 0; group != tile_columns_k / 4; ++group) {
+                finalized_vec_t dots_vec, sumsqs_vec, distances_vec;
+                dots_vec.xmm = _mm_load_si128(reinterpret_cast<__m128i const*>(&tile.data[row][group * 4]));
+                sumsqs_vec.xmm = _mm_load_si128(reinterpret_cast<__m128i const*>(&column_sumsqs[group * 4]));
+                finalize_kit_t::convert_to_distances(&dots_vec, a_norms[row].sumsq, &sumsqs_vec, &distances_vec);
+                _mm_storeu_ps(reinterpret_cast<float*>(distances_row + group * 4), distances_vec.xmm_ps);
+            }
+        }
+    }
+};
+
 #endif // NK_TARGET_SAPPHIREAMX
 
 /**
@@ -4085,6 +4361,54 @@ struct dense_tiles_chain<nk_kernel_angular_k, nk::u8_t, caps_> {
         chain_layer<
             NK_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
             u8_sapphireamx_tiles_kit<typename dense_quads_chain<nk_kernel_angular_k, nk::u8_t, caps_>::kit_t>>> //
+        ::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+    static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
+};
+
+template <nk_capability_t caps_>
+struct dense_tiles_chain<nk_kernel_euclidean_k, nk::i8_t, caps_> {
+    using kit_t = typename first_available_kit< //
+        no_tiles_kit_t,                         //
+        chain_layer<
+            NK_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
+            i8_sapphireamx_tiles_kit<typename dense_quads_chain<nk_kernel_euclidean_k, nk::i8_t, caps_>::kit_t>>> //
+        ::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+    static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
+};
+
+template <nk_capability_t caps_>
+struct dense_tiles_chain<nk_kernel_angular_k, nk::i8_t, caps_> {
+    using kit_t = typename first_available_kit< //
+        no_tiles_kit_t,                         //
+        chain_layer<
+            NK_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
+            i8_sapphireamx_tiles_kit<typename dense_quads_chain<nk_kernel_angular_k, nk::i8_t, caps_>::kit_t>>> //
+        ::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+    static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
+};
+
+template <nk_capability_t caps_>
+struct dense_tiles_chain<nk_kernel_euclidean_k, nk::bf16_t, caps_> {
+    using kit_t = typename first_available_kit< //
+        no_tiles_kit_t,                         //
+        chain_layer<
+            NK_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
+            bf16_sapphireamx_tiles_kit<typename dense_quads_chain<nk_kernel_euclidean_k, nk::bf16_t, caps_>::kit_t>>> //
+        ::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+    static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
+};
+
+template <nk_capability_t caps_>
+struct dense_tiles_chain<nk_kernel_angular_k, nk::bf16_t, caps_> {
+    using kit_t = typename first_available_kit< //
+        no_tiles_kit_t,                         //
+        chain_layer<
+            NK_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
+            bf16_sapphireamx_tiles_kit<typename dense_quads_chain<nk_kernel_angular_k, nk::bf16_t, caps_>::kit_t>>> //
         ::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
