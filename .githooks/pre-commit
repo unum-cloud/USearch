@@ -61,14 +61,19 @@ check_printf() {
         "$file prints through the C stdio family - C++ sources print through fmt:::"
 }
 
-# Byte-blind copies in C++ sources - a `std::memcpy` hides what the type system or the vector
-# unit can state outright: same-type copies are assignments or explicit vector moves, and
-# reinterpretations are `std::bit_cast`. The C bindings under c/ keep their memcpy.
+
+
+# Reinterpreting copies in C++ sources - a `memcpy` between two objects whose byte count is one
+# object's `sizeof` is a type pun, and `std::bit_cast` states it outright. Byte moves keep their
+# memcpy: a runtime-sized bulk copy, or one object serialized into or out of a byte run.
 check_memcpy() {
-    local copies
-    copies=$(printf '%s\n' "$added" | grep -E '\bmemcpy[[:space:]]*\(' || true)
-    [ -z "$copies" ] || fail "$copies" \
-        "$file copies through memcpy - use explicit instructions, assignment, or std::bit_cast:"
+    local puns
+    # A pun takes the address of both objects and a lone `sizeof(...)` byte count; a copy whose
+    # source or destination is a byte pointer is a serialization and passes.
+    puns=$(printf '%s\n' "$added" | grep -E '\bmemcpy[[:space:]]*\([[:space:]]*&[^,]*,[[:space:]]*&' |
+        grep -E ',[[:space:]]*sizeof[[:space:]]*\([^)]*\)[[:space:]]*\)' || true)
+    [ -z "$puns" ] || fail "$puns" \
+        "$file reinterprets one object through memcpy - spell the pun as std::bit_cast:"
 }
 
 # Host threads managing GPUs in CUDA sources - fleets of NVLink-resident devices are
@@ -97,6 +102,42 @@ check_stl_dynamic_containers() {
         grep -E '\bstd::(vector|list|forward_list|map|multimap|set|multiset|unordered_[a-z_]+|string|basic_string|priority_queue|stack|queue)\b' || true)
     [ -z "$owners" ] || fail "$owners" \
         "$file uses an STL dynamic container - use growing_buffer, nk::tensor, or the ram_tables structures:"
+}
+
+# Spelled-out byte spans in C++ sources - `types.hpp` names them once: `bytes_span_t` for
+# mutable runs, `bytes_view_t` for read-only ones, over the house `byte_t = std::byte`.
+check_spelled_byte_spans() {
+    local spelled
+    spelled=$(printf '%s\n' "$added" |
+        grep -vE 'using bytes_(span|view)_t =' |
+        grep -E 'std::span<(std::byte|byte_t)( const)?>' || true)
+    [ -z "$spelled" ] || fail "$spelled" \
+        "$file spells out a byte span - use bytes_span_t / bytes_view_t from types.hpp:"
+}
+
+# Template type parameters carry a trailing underscore - `typename variant_type_`, never
+# `typename multi_t` - a special case of the underscore marking internal symbols: a
+# parameter is internal to its template, exists only to be materialized, and must never
+# collide with the public `_t` aliases and `_k` constants it produces. Dependent-name uses
+# (`typename foo_::bar`) never match, since the `::` breaks the identifier early.
+check_template_parameter_underscores() {
+    local bare
+    bare=$(printf '%s\n' "$added" |
+        grep -vE '^\+[[:space:]]*(\*|//|/\*)' |
+        grep -E 'typename ?(\.\.\.)? +([A-Za-z][A-Za-z_0-9]*[A-Za-z0-9]|[A-Za-z]) *(,|>|=|$)' || true)
+    [ -z "$bare" ] || fail "$bare" \
+        "$file declares a template type parameter without the trailing underscore:"
+}
+
+# Function-like ALL_CAPS macros - every macro here is object-like: include guards, config
+# flags, platform shims. Preprocessor codegen hides the very lines a reader greps for, so
+# write the expansion out; a truly unavoidable file-local generator is snake_case_ + #undef.
+check_function_like_macros() {
+    local generators
+    generators=$(printf '%s\n' "$added" | grep -E '^\+[[:space:]]*#[[:space:]]*define[[:space:]]+[A-Z][A-Z0-9_]*\(' || true)
+    [ -z "$generators" ] || fail "$generators" \
+        "$file defines a function-like ALL_CAPS macro - write the expansion out, or name a" \
+        "            file-local generator snake_case_ and #undef it after use:"
 }
 
 # Redundant result annotations in C++ sources - `status_t` and `expected` carry a type-level
@@ -251,6 +292,17 @@ check_hand_ceils() {
         "$file hand-rolls a ceiling division - use divide_round_up from usearch/utilities/types.hpp:"
 }
 
+# `std::min` / `std::max` re-derive what the shared vocabulary already names, and the parenthesized
+# `(std::min<...>)` spelling exists only to dodge the `windows.h` min/max macros - a ritual that
+# `min_of` / `max_of` remove outright. Library code says what it means; tests and benches, where the
+# standard algorithms are the subject rather than the tool, are dispatched elsewhere.
+check_hand_minmax() {
+    local rolled
+    rolled=$(printf '%s\n' "$added" | grep -nE '\(?std::(min|max)[<(]' || true)
+    [ -z "$rolled" ] || fail "$rolled" \
+        "$file uses std::min/std::max - use min_of/max_of from usearch/utilities/types.hpp:"
+}
+
 # A `#pragma region` label must be letters, digits & spaces only. clang-format tokenises the label
 # as code, so a dash, ampersand, colon, or any other symbol makes it reflow the marker and the
 # regions drift out of place on the next format run. Keep the label a plain phrase:
@@ -320,24 +372,47 @@ check_iterator_laundering() {
         "$file launders an iterator through &* - use the container's data() or address the element:"
 }
 
-# The dependency-free core: include/usearch/utilities/ and include/usearch/basic/ ship as a
-# standalone header-only library - standard-library & OS headers only, no submodules. Angle
-# includes of sibling & third-party libraries are banned outright, and quoted includes may only
-# name headers inside the same two directories, plus "usearch/types.h" - the project's own C
-# vocabulary, which types.hpp mirrors so the two enums cannot drift.
+# The dependency-free core: include/usearch/basic/ and its transitive utilities/ suppliers ship
+# as a standalone header-only library - standard-library & OS headers only, no submodules. The
+# supplier set is computed from the includes themselves, so a new supplier joins the checked set
+# the moment basic/ names it, and hardware wrappers like utilities/vram_device.hpp or
+# utilities/ram_device.hpp - which legitimately include CUDA or ForkUnion - never enter it.
+dependency_free_core_files() {
+    local closure frontier next supplier fresh
+    # Space-separated throughout: the membership probes below match " $file " against this list.
+    closure=$(ls include/usearch/basic/*.hpp 2>/dev/null | tr '\n' ' ')
+    frontier=$closure
+    while [ -n "$frontier" ]; do
+        next=$(grep -h '#[[:space:]]*include[[:space:]]*"usearch/utilities/' $frontier 2>/dev/null |
+            sed 's/.*"\(usearch\/utilities\/[^"]*\)".*/include\/\1/' | sort -u)
+        fresh=""
+        for supplier in $next; do
+            case " $closure " in
+            *" $supplier "*) ;;
+            *)
+                closure="$closure $supplier"
+                fresh="$fresh $supplier"
+                ;;
+            esac
+        done
+        frontier=$fresh
+    done
+    printf '%s' "$closure"
+}
+
 check_dependency_free_core() {
     local foreign
     foreign=$(printf '%s\n' "$added" | grep -E \
         '#[[:space:]]*include[[:space:]]*<(numkong|forkunion|stringzilla|smashtable|yyjson|fmt|benchmark|cuda|thrust|cub)[/.>]' || true)
     [ -z "$foreign" ] || fail "$foreign" \
-        "$file lives in the dependency-free core (utilities/ + basic/) but includes a" \
-        "            sibling or third-party library - standard & OS headers only:"
+        "$file lives in the dependency-free core (basic/ + its utilities/ suppliers) but includes" \
+        "            a sibling or third-party library - standard & OS headers only:"
     local quoted
     quoted=$(printf '%s\n' "$added" | grep -E '#[[:space:]]*include[[:space:]]*"' |
         grep -vE '"usearch/((utilities|basic)/|types\.h")' || true)
     [ -z "$quoted" ] || fail "$quoted" \
-        "$file lives in the dependency-free core (utilities/ + basic/) but quotes a header" \
-        "            outside those two directories:"
+        "$file lives in the dependency-free core (basic/ + its utilities/ suppliers) but quotes" \
+        "            a header outside those two directories:"
 }
 
 # A design justified by another project's design ages into a lie the moment that project moves,
@@ -411,12 +486,15 @@ check_workflow_names() {
 
 # One pass: enumerate the staged files once, diff each once, and dispatch by extension. The list is
 # NUL-delimited so a filename with spaces can never split.
+core_files=$(dependency_free_core_files)
 while IFS= read -r -d '' file; do
     added=$(git diff --cached --unified=0 -- "$file" | grep '^+' | grep -v '^+++' || true)
-    case "$file" in
-    include/usearch/utilities/* | include/usearch/basic/*)
+    case " $core_files " in
+    *" $file "*)
         check_dependency_free_core
-        ;;&
+        ;;
+    esac
+    case "$file" in
     *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.cu | *.cuh)
         check_ascii_arrows
         check_glued_arrows
@@ -438,10 +516,16 @@ while IFS= read -r -d '' file; do
         check_stl_dynamic_containers
         check_boolean_parameters
         ;;&
+    include/*.hpp | include/*.cuh | src/*.cpp | src/*.cuh)
+        check_hand_minmax
+        ;;&
     src/*.cpp | src/*.cuh | test/*.cpp | test/*.hpp | bench/*.cpp | bench/*.hpp | include/*.hpp)
         check_printf
         check_memcpy
+        check_function_like_macros
+        check_template_parameter_underscores
         check_redundant_nodiscard
+        check_spelled_byte_spans
         check_stl_streams
         check_deque
         check_range_reconstruction
