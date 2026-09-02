@@ -14,6 +14,6 @@ The RAM residency is the portable default every platform owns; the VRAM and NVMe
 The plural follows the sibling idiom - `ram_indexes.hpp` reads as "many `ram_index` viewed as one":
 
 - `ram_indexes.hpp` - typed multi-shard views with compute-domain routing and merged cross-shard search, one shard per memory domain.
-- `vram_indexes.cuh` - multi-GPU placement over a shared address space, hosting the mergers & stitching machinery too.
+- `vram_indexes.cuh` - typed multi-shard groups with round-robin ingestion and merged cross-shard search, one shard per device.
 
 Capability files split beside the residency pairs as they grow - `icelake.hpp`, `sapphireamx.hpp`, `hopper.cuh`, and their siblings.

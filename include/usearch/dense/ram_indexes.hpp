@@ -14,11 +14,14 @@
  */
 #pragma once
 
-#include <cstdio>  // `std::snprintf` - stamping shard indexes into monolith names
-#include <cstring> // `std::memcpy`, `std::strlen` - row copies & the kernel token's length
+#include <cstring> // `std::memcpy` - row copies
 
-#include <memory> // `std::unique_ptr` - an index holds atomics and never moves
-#include <span>   // `std::span` - the callers' key batches & merged rankings
+#include <array>       // `std::array` - the monoliths' custom fields
+#include <atomic>      // `std::atomic` - the admission word & fan-out outcomes
+#include <memory>      // `std::unique_ptr` - an index holds atomics and never moves
+#include <span>        // `std::span` - the callers' key batches & merged rankings
+#include <string_view> // `std::string_view` - the checkpoint paths
+#include <type_traits> // `std::is_same_v` - detecting the compiled-out default predicate
 
 #include <forkunion.h> // `fu_memory_domain_id_t` - the placement argument of `emplace`
 
@@ -35,19 +38,10 @@ namespace usearch {
 /**
  *  @brief The sharded index: same-geometry CPU-resident shards viewed as one.
  *
- *  It owns its shards outright, which is what makes a destructor, a donor-consuming merge,
- *  and clearing expressible at all. Shards arrive one at a time through @ref emplace, so the
- *  index grows as domains are engaged rather than being declared whole. The shard's configs,
- *  views and results are re-exported verbatim, so a batched call and a single one read the
- *  same and no second insertion or search vocabulary exists.
- *
- *  The split between template parameters and runtime arguments follows what costs anything. The
- *  quantization, metric, capability tier, the ForkUnion waiter, and the key hash resolve at
- *  compile time because each sits inside a hot loop - a runtime waiter would be an indirect
- *  call per contended word, a runtime hash one per reverse-plane probe. Topology and placement
- *  stay runtime arguments because they are read once per shard and once per fan-out, so nothing
- *  is bought by burning them into the type, and a great deal is lost: a domain count in the
- *  type multiplies every instantiation the C surface compiles.
+ *  It owns its shards outright, so a destructor, a consuming merge and @ref clear are
+ *  expressible. Shards arrive one at a time through @ref emplace, so the index grows as domains
+ *  are engaged rather than being declared whole. The shard's configs, views and results are
+ *  re-exported verbatim, so a batched call and a single one read the same.
  */
 template <                                               //
     typename key_type_ = uuid_t,                         //
@@ -55,27 +49,49 @@ template <                                               //
     nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k, //
     nk_capability_t capability_ = nk_cap_icelake_k,      //
     typename wait_type_ = fu::preferred_yield_t,         //
-typename key_hash_type_ = std::hash<key_type_>       //
+    typename key_hash_type_ = std::hash<key_type_>       //
     >
 struct dense_ram_indexes {
     /** @brief The caller-visible identity, opaque to every shard - indexes store no keys, so the
      *      whole key vocabulary begins here. */
     using key_t = key_type_;
 
-    /** @brief The shard type this index is a plural of - the geometry parameters in the shard's
-     *      own order, so the plural and its shards can never disagree on either. Placement is not a
-     *      choice: graph storage lands on the shard's memory domain, and traversal scratch is
-     *      carved from the walking thread's own run. */
-    using index_t = dense_ram_index<vector_dtype_, kernel_kind_, capability_, wait_type_, //
-                                    forkunion_allocator<std::byte>,                       //
-                                    forkunion_allocator<std::byte>,                       //
-                                    arena_allocator<std::byte, forkunion_allocator<std::byte>>>;
+    /** @brief Where one entry lives: the shard, and its shard-local ID - the index's only
+     *      address for an entry. */
+    struct key_locator_t {
+        /** @brief The shard holding the entry, positional in placement order. */
+        std::size_t shard = 0;
+        /** @brief The entry's ID inside that shard's own space. */
+        dense_node_id_t node = 0;
+    };
 
-    /** @brief The threads and per-thread scratch every bulk verb runs on; it knows nothing of what
-     *      walks, so one executor serves every instantiation the surface compiles. */
+    /** @brief Keys of one shard's rows, indexed by that shard's own node IDs. */
+    using keys_plane_t = growing_buffer<key_t, forkunion_allocator<byte_t>>;
+    /** @brief Key to every entry stored under it; insert-only, wait-free for readers. */
+    using locators_plane_t = growing_multimap<key_t, key_locator_t, key_hash_type_, //
+                                              forkunion_allocator<byte_t>>;
+
+    /** @brief The shard type - geometry parameters in the shard's own order, so the two can
+     *      never disagree. */
+    using index_t = dense_ram_index<vector_dtype_, kernel_kind_, capability_, wait_type_, //
+                                    forkunion_allocator<byte_t>,                          //
+                                    forkunion_allocator<byte_t>,                          //
+                                    arena_allocator<byte_t, forkunion_allocator<byte_t>>>;
+
+    /** @brief One shard: the graph, and the keys of its rows. Placement is not repeated - the
+     *      index's own allocator carries it. */
+    struct shard_t {
+        /** @brief The graph; an index holds atomics and never moves. */
+        std::unique_ptr<index_t> index;
+        /** @brief The key of each of this shard's rows, indexed by node ID. */
+        keys_plane_t keys;
+    };
+
+    /** @brief The threads and their scratch every bulk verb runs on; it names no index, so one
+     *      executor serves every instantiation. */
     using executor_t = forkunion_executor_t;
     using distance_t = typename index_t::distance_t;
-using scalar_t = typename index_t::scalar_t;
+    using scalar_t = typename index_t::scalar_t;
     using vectors_span_t = nk::matrix_span<scalar_t>;
     using traversal_t = typename index_t::dense_traversal_context_t;
     using vector_view_t = typename index_t::vector_view_t;
@@ -85,6 +101,15 @@ using scalar_t = typename index_t::scalar_t;
     using insert_result_t = typename index_t::insert_result_t;
     using search_result_t = typename index_t::search_result_t;
     using reserve_capacity_t = typename index_t::reserve_capacity_t;
+
+    /** @brief The stored scalar vocabulary, re-exported for dispatchers gating crossing rows. */
+    inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
+    /** @brief The distance kernel this instantiation walks with. */
+    inline static constexpr nk_kernel_kind_t kernel_kind_k = kernel_kind_;
+    /** @brief The compute-capability mask the kernels compiled under. */
+    inline static constexpr nk_capability_t capability_k = capability_;
+
+#pragma region Placement
 
     dense_ram_indexes() = default;
     dense_ram_indexes(dense_ram_indexes&& other) noexcept { swap(other); }
@@ -102,98 +127,82 @@ using scalar_t = typename index_t::scalar_t;
         other.admitted_rows_.store(admitted, std::memory_order_relaxed);
     }
 
+    /** @brief Appends one shard built here on @p memory_domain, for callers with none to hand over. */
+    status_t emplace(fu_memory_domain_id_t memory_domain) noexcept {
+        std::unique_ptr<index_t> shard = build_(memory_domain);
+        if (!shard) return status_t::bad_alloc_k;
+        return emplace(std::move(shard));
+    }
+
+    /** @brief Appends one shard the caller already built, consuming it; refuses any whose frozen
+     *      geometry differs from the shards already here, and any already reserved. Refused once
+     *      storage exists - @ref reserve closes the shard set. */
+    status_t emplace(std::unique_ptr<index_t>&& shard) noexcept {
+        if (!shard) return status_t::config_mismatch_k;
+        if (capacity()) return status_t::config_mismatch_k;
+        if (shard->capacity()) return status_t::config_mismatch_k;
+        if (!shards_.empty() && (shard->dimensions() != dimensions() || shard->connectivity() != connectivity()))
+            return status_t::config_mismatch_k;
+        keys_plane_t keys {forkunion_allocator<byte_t>(shard->vectors_allocator_.memory_domain)};
+        return shards_.push_back(shard_t {std::move(shard), std::move(keys)});
+    }
+
+    /** @brief Empties every shard in place, keeping its memory domain, geometry and capacity.
+     *      Demands the same quiescence as @ref reserve. */
+    status_t clear() noexcept {
+        reserve_capacity_t const geometry {capacity(), static_cast<connectivity_t>(connectivity()), dimensions()};
+        for (shard_t& one : shards_) {
+            std::unique_ptr<index_t> fresh = build_(one.index->vectors_allocator_.memory_domain);
+            if (!fresh) return status_t::bad_alloc_k;
+            one.index = std::move(fresh);
+            one.keys.clear();
+        }
+        locators_of_key_.clear();
+        admitted_rows_.store(0, std::memory_order_relaxed);
+        return geometry.capacity ? reserve(geometry) : status_t::success_k;
+    }
+
+#pragma endregion Placement
+
+#pragma region Measures
+
+    /** @brief Shards in the index, one per engaged memory domain. */
     std::size_t shards_count() const noexcept { return shards_.size(); }
+    /** @brief The shard at @p shard, in placement order. */
     index_t& shard(std::size_t shard) noexcept { return *shards_[shard].index; }
+    /** @brief The read-only shard at @p shard. */
     index_t const& shard(std::size_t shard) const noexcept { return *shards_[shard].index; }
 
-    /** @brief The frozen geometry, taken from the first shard - @c emplace refused any that differ. */
+    /** @brief The frozen geometry, taken from the first shard - @ref emplace refused any that differ. */
     std::size_t dimensions() const noexcept { return shards_.empty() ? 0 : shards_[0].index->dimensions(); }
+    /** @brief Connections per node, frozen with the geometry. */
     std::size_t connectivity() const noexcept { return shards_.empty() ? 0 : shards_[0].index->connectivity(); }
 
-    /** @brief Published entries across every shard. */
+    /** @brief Entries across every shard - each shard's own @c size, summed. */
     std::size_t size() const noexcept {
         std::size_t total = 0;
         for (shard_t const& one : shards_) total += one.index->size();
         return total;
     }
 
-    /** @brief Rows the admission gate can let in - the key planes' total, split at @ref reserve
-     *      and never grown, so no second word can disagree with what an id can actually record.
-     *      Non-zero exactly once @ref reserve has run, which is what closes the shard set. */
+    /** @brief Rows the admission gate can let in - the key planes' total, sized once at @ref reserve. */
     std::size_t capacity() const noexcept {
         std::size_t total = 0;
         for (shard_t const& one : shards_) total += one.keys.size();
         return total;
     }
 
-    /** @brief Entries stored under @p key; zero means the index holds none. A row lands here only
-     *      after it published, so a concurrent insertion can make a stale count under-report,
-     *      never claim a row a search cannot reach. */
-    std::size_t count(key_t const& key) const noexcept { return locators_of_key_.count(key); }
-
-    /** @brief Whether at least one entry is stored under @p key. */
-    bool contains(key_t const& key) const noexcept { return locators_of_key_.contains(key); }
-
-    /**
-     *  @brief Copies up to @p wanted rows stored under @p key into @p vectors and reports the
-     *      @b true total under that key - a return above @p wanted means the copy truncated, so
-     *      the caller resizes and asks again; zero means absent.
-     *
-     *  Safe against concurrent insertions, which can only make it under-report a row still in
-     *  flight - the same benign direction @ref count documents.
-     */
-    std::size_t get(key_t const& key, vectors_span_t vectors, std::size_t wanted) const noexcept {
-        std::size_t const row_bytes = divide_round_up<std::size_t>(dimensions(), nk::dimensions_per_value<scalar_t>()) *
-                                      sizeof(scalar_t);
-        std::size_t total = 0;
-        locators_of_key_.find_each(key, [&](key_locator_t locator) noexcept {
-            if (total < wanted && total < vectors.extent(0)) {
-                vector_view_t const stored = shards_[locator.shard].index->vector(locator.node);
-                std::memcpy(vectors.row(total).as_vector().byte_data(), stored.byte_data(), row_bytes);
-            }
-            ++total;
-        });
-        return total;
-    }
-
-    /** @brief Bytes the whole sharded index occupies - every shard's graph storage, its key
-     *      plane, and the shared reverse plane; traversal scratch belongs to executors and
-     *      contexts, so their owners count it. */
+    /** @brief Bytes the index occupies - every shard's storage, its key plane, and the shared
+     *      reverse plane; traversal scratch is the executor's. */
     std::size_t memory_usage() const noexcept {
         std::size_t bytes = sizeof(dense_ram_indexes) + locators_of_key_.memory_usage();
         for (shard_t const& one : shards_) bytes += one.index->memory_usage() + one.keys.memory_usage();
         return bytes;
     }
 
-    /** @brief Drops every shard, so the index is placeable again. */
-    void clear() noexcept {
-        shards_.clear();
-        locators_of_key_.clear();
-        admitted_rows_.store(0, std::memory_order_relaxed);
-    }
+#pragma endregion Measures
 
-    /** @brief Appends one shard built here on @p memory_domain, for callers with none to hand over. */
-    status_t emplace(fu_memory_domain_id_t memory_domain) noexcept {
-        forkunion_allocator<std::byte> const allocator {memory_domain};
-        std::unique_ptr<index_t> shard(new (std::nothrow) index_t(allocator, allocator));
-        if (!shard) return status_t::bad_alloc_k;
-        return emplace(std::move(shard));
-    }
-
-    /** @brief Appends one shard the caller already built, consuming it; refuses any whose frozen
-     *      geometry differs from the shards already here. Its key plane lands wherever the shard's
-     *      own allocator places its graph, so the two never end up on different nodes.
-     *
-     *      Refused once storage exists: @ref reserve closes the shard set, so every batched verb
-     *      walks a directory that cannot move under it and needs no synchronization to read. */
-    status_t emplace(std::unique_ptr<index_t>&& shard) noexcept {
-        if (!shard) return status_t::config_mismatch_k;
-        if (capacity()) return status_t::config_mismatch_k;
-        if (!shards_.empty() && (shard->dimensions() != dimensions() || shard->connectivity() != connectivity()))
-            return status_t::config_mismatch_k;
-        keys_plane_t keys {forkunion_allocator<std::byte>(shard->vectors_allocator_.memory_domain)};
-        return shards_.push_back(shard_t {std::move(shard), std::move(keys)});
-    }
+#pragma region Reservation
 
     /**
      *  @brief Reserves @p config.capacity rows, split evenly over the shards.
@@ -212,21 +221,19 @@ using scalar_t = typename index_t::scalar_t;
         reserve_capacity_t per_shard = config;
         per_shard.capacity = divide_round_up(config.capacity, shards_.size());
 
-        // A shard's key plane sizes to the same split as its graph and is never grown afterwards:
-        // a search resolves a ranking through it while rows are still landing, so moving it would
-        // strand a reader mid-translation. The reverse plane is sized never to rehash.
+        // Key planes never grow: a search resolves through them while rows land.
         for (shard_t& one : shards_) {
             if (auto const reserved = one.index->reserve(per_shard); reserved.status != status_t::success_k)
                 return reserved.status;
-            // Sized to the logical split, not to the shard's chunk-rounded grant: the plane is
-            // what the admission gate measures against, so its length IS the shard's ceiling.
             if (failed(one.keys.resize(per_shard.capacity))) return status_t::bad_alloc_k;
         }
-
-        // The quota covers every row the admission gate can let in - the key planes' total - so
-        // recording an inserted row's locator is infallible by construction, not by checking.
+        // The quota covers every admissible row, so recording a locator is infallible by construction.
         return locators_of_key_.reserve(capacity());
     }
+
+#pragma endregion Reservation
+
+#pragma region Insertion
 
     /**
      *  @brief Inserts one row under @p key into whichever shard the rotation names next - the
@@ -243,12 +250,11 @@ using scalar_t = typename index_t::scalar_t;
      */
     insert_result_t add(key_t const& key, vector_view_t new_vector, traversal_t& traversal,
                         insert_config_t config = {}) noexcept {
-                insert_result_t result;
+        insert_result_t result;
         result.new_size = size();
         if (shards_.empty()) return result.status = status_t::uninitialized_k, result;
 
-        // Admission before anything is taken: past the ceiling, an id would land beyond its
-        // shard's key plane, so the row is refused here rather than recorded nowhere.
+        // Admission before anything is taken: past the ceiling, an ID has no key-plane slot.
         std::size_t const rows_ceiling = capacity();
         std::size_t routing_base = admitted_rows_.load(std::memory_order_relaxed);
         do {
@@ -269,9 +275,7 @@ using scalar_t = typename index_t::scalar_t;
         std::size_t const reverse_refines_before = traversal.computed_distances_in_reverse_refines;
         std::size_t const restarts_before = traversal.restarts;
 
-        // The key lands where the id is assigned, ahead of publication, so a search that reaches
-        // the node always reads it; the reverse plane follows publication, so a key only becomes
-        // countable for a node that is already searchable - stale counts under-report, never lie.
+        // The key lands before publication, so a reachable node always reads one.
         dense_node_id_t assigned = 0;
         vectors_view_t const row {new_vector.data(), 1u, new_vector.size()};
         one.index->insert_reserved(row, {}, traversal, std::move(claim), config,
@@ -279,15 +283,14 @@ using scalar_t = typename index_t::scalar_t;
                                        assigned = assigned_id;
                                        one.keys[assigned_id] = key;
                                    });
-        // The reverse plane's quota covers the whole reservation, so a row that won a claim has a
-        // slot waiting for it and this insert cannot fail.
+        // The reverse plane's quota covers the reservation, so recording cannot fail.
         [[maybe_unused]] status_t const recorded = locators_of_key_.insert(key, key_locator_t {shard, assigned});
 
         result.visited_members = traversal.visited_members - visited_before;
         result.computed_distances = traversal.computed_distances - computed_before;
         result.computed_distances_in_refines = traversal.computed_distances_in_refines - refines_before;
         result.computed_distances_in_reverse_refines = traversal.computed_distances_in_reverse_refines -
-reverse_refines_before;
+                                                       reverse_refines_before;
         result.restarts = traversal.restarts - restarts_before;
         result.new_size = size();
         return result;
@@ -297,23 +300,16 @@ reverse_refines_before;
      *  @brief Inserts a whole matrix of rows under @p keys, split across the shards from a rotating
      *      start so they fill evenly - the executor-driven sibling of one insertion.
      *
-     *  Node ids never cross this boundary: they are shard-local, and which shard a row landed in
-     *  is the index's own business. The keys are what the caller gets its rows back by.
+     *  Node IDs never cross this boundary: they are shard-local, and which shard a row landed in
+     *  is the index's business. The keys are what the caller gets its rows back by.
      *
-     *  The batch is all-or-nothing across every shard, and @ref reserve is the ceiling: a batch
-     *  the remaining admission cannot house is refused whole with @c overflow_k before any claim
-     *  is taken. Routing is decided at admission, so every shard's demand is known and claimed up
-     *  front, and refused claims credit themselves back on the way out. Past that point nothing
-     *  can fail - the walk itself has no failure exit - so two executors calling here
-     *  concurrently interleave their rows without either one tearing.
-     *
-     *  One executor drives one call at a time: the arenas rewind here, so sharing an executor
-     *  between two concurrent calls would let one call carve over the other's scratch.
+     *  All-or-nothing across shards: admission is checked and every claim taken before any row
+     *  lands, and past that point nothing can fail. One executor drives one call at a time.
      *
      *  @param[in] keys One caller identity per row; several rows may share one.
      *  @param[in] new_vectors The batch, one row per entry, in the shards' stored scalar type.
      *  @param[inout] executor The threads and their scratch.
-     *  @param[in] config The per-shard insertion configuration.
+     *  @param[in] config The per-shard insertion configuration, applied uniformly.
      */
     insert_result_t add(std::span<key_t const> keys, vectors_view_t new_vectors, executor_t& executor,
                         insert_config_t config = {}) noexcept {
@@ -333,38 +329,29 @@ reverse_refines_before;
         if (status_t const sized = executor.reserve(shards_[0].index->traversal_memory_usage(config)); failed(sized))
             return result.status = sized, result;
 
-        // Rotating the split by the rows admitted so far is what keeps the shards even: the
-        // remainder rows land on a different shard every batch, so a stream of small batches
-        // cannot drift onto shard zero. Admission is also the ceiling - the key planes split at
-        // reserve() and never grow, so a row past them would have nowhere to record its key. One
-        // relaxed read-modify-write for the whole batch.
+        // Rotating by rows admitted keeps a stream of small batches from drifting onto shard zero;
+        // admission is also the ceiling, one relaxed read-modify-write for the whole batch.
         std::size_t const rows_ceiling = capacity();
         std::size_t routing_base = admitted_rows_.load(std::memory_order_relaxed);
         do {
             if (rows_ceiling - routing_base < rows) return result.status = status_t::overflow_k, result;
         } while (!admitted_rows_.compare_exchange_weak(routing_base, routing_base + rows, std::memory_order_relaxed));
         std::size_t const rotation = routing_base % shards;
-        std::size_t const rows_per_shard = rows / shards;
-        std::size_t const remainder = rows % shards;
 
         growing_buffer<claim_t> claims;
         if (failed(claims.reserve_exactly(shards))) return result.status = status_t::bad_alloc_k, result;
         for (std::size_t shard = 0; shard != shards; ++shard) {
-            std::size_t const turn = (shard + shards - rotation) % shards;
-            auto [claim, granted] = shards_[shard].index->claim(rows_per_shard + (turn < remainder));
+            std::size_t const taking = rows_from_(rows, first_row_of_shard_(shard, shards, rotation), shards);
+            auto [claim, granted] = shards_[shard].index->claim(taking);
             if (failed(granted)) return result.status = granted, result;
-            if (failed(claims.push_back(std::move(claim)))) return result.status = status_t::bad_alloc_k, result;
+            claims.push_back_reserved(std::move(claim));
         }
 
         growing_buffer<traversal_t> traversals;
-        if (status_t const ready = reserve_traversals(traversals, executor, config); failed(ready))
+        if (status_t const ready = reserve_traversals_(traversals, executor, config); failed(ready))
             return result.status = ready, result;
 
-        // The key lands where the id is assigned, ahead of publication, so a search that reaches
-        // the node always reads it; the reverse plane follows publication, so a key only becomes
-        // countable for a node that is already searchable - stale counts under-report, never lie.
-        // The reverse plane's quota covers the whole reservation, so a row that won a claim has a
-        // slot waiting for it and recording cannot fail.
+        // The key lands before publication; the reverse plane's quota covers every claimed row.
         auto insert_row = [&](std::size_t task, std::size_t thread, std::size_t) noexcept {
             std::size_t const shard = (routing_base + task) % shards;
             shard_t& one = shards_[shard];
@@ -375,7 +362,7 @@ reverse_refines_before;
                                            one.keys[assigned_id] = keys[task];
                                        });
             [[maybe_unused]] status_t const recorded = locators_of_key_.insert(keys[task],
-key_locator_t {shard, assigned});
+                                                                               key_locator_t {shard, assigned});
         };
         if (status_t const fanned = executor.for_tasks(rows, insert_row); failed(fanned))
             return result.status = fanned, result;
@@ -394,16 +381,19 @@ key_locator_t {shard, assigned});
         return result;
     }
 
+#pragma endregion Insertion
+
+#pragma region Search
+
     /**
      *  @brief Scatters one query over every shard and gathers the rankings into one, ascending by
-     *      distance - the honest end-to-end multi-domain lookup.
+     *      distance - the end-to-end multi-shard lookup.
      *
      *  @param[in] query_vector The query, in the shards' stored scalar type.
      *  @param[inout] traversal The calling thread's traversal context, reused per shard.
      *  @param[in] config The per-shard search configuration, applied uniformly.
      *  @param[inout] keys Keys of the merged ranking; its length is the capacity. Resolved through
-     *      the index's own forward plane, which is why shards with colliding id spaces still land
-     *      in one shared ranking.
+     *      the shards' key planes, so colliding ID spaces still land in one ranking.
      *  @param[inout] distances Distances of the same ranking, parallel to @p keys.
      *
      *  A failing shard stops the scatter but keeps whatever earlier shards already merged, so the
@@ -435,16 +425,21 @@ key_locator_t {shard, assigned});
      *  @param[in] queries The batch, one query per row, in the shards' stored scalar type.
      *  @param[inout] executor The threads and their scratch; one query occupies one at a time.
      *  @param[in] config The per-shard search configuration, applied uniformly.
+     *  @param[in] wanted Matches kept per query - the row width of @p keys and @p distances.
      *  @param[out] keys Merged rankings, @b [queries,wanted] row-major.
      *  @param[out] distances Distances of the same rankings, parallel to @p keys.
      *  @param[out] counts Per-query merged hit counts, one per query row.
+     *  @param[in] predicate Optional per-key admission filter; the default admits everything
+     *      and compiles the filtered machinery out. Shards test node ids, so each one's keys
+     *      plane translates before the predicate sees a candidate.
      *
      *  A thread that fails stops its own query and leaves the rest to finish; the first failure is
      *  what the merged result reports, and every other query's outputs stand.
      */
+    template <typename predicate_type_ = dummy_predicate_t>
     search_result_t search(vectors_view_t queries, executor_t& executor, search_config_t config, std::size_t wanted,
-                           std::span<key_t> keys, std::span<distance_t> distances,
-                           std::span<std::size_t> counts) noexcept {
+                           std::span<key_t> keys, std::span<distance_t> distances, std::span<std::size_t> counts,
+                           predicate_type_&& predicate = {}) noexcept {
         search_result_t merged;
         std::size_t const queries_count = queries.extent(0);
         if (shards_.empty()) return merged.status = status_t::uninitialized_k, merged;
@@ -462,7 +457,7 @@ key_locator_t {shard, assigned});
             return merged.status = sized, merged;
 
         growing_buffer<traversal_t> traversals;
-        if (status_t const ready = reserve_traversals(traversals, executor, insert_config_t {config.expansion_factor});
+        if (status_t const ready = reserve_traversals_(traversals, executor, insert_config_t {config.expansion_factor});
             failed(ready))
             return merged.status = ready, merged;
 
@@ -473,7 +468,13 @@ key_locator_t {shard, assigned});
             std::span<distance_t> const distances_row {distances.data() + query * wanted, wanted};
             std::size_t found_count = 0;
             for (shard_t const& one : shards_) {
-                search_result_t const found = one.index->search(queries.row(query).as_vector(), traversal, config);
+                search_result_t found;
+                if constexpr (std::is_same_v<std::decay_t<predicate_type_>, dummy_predicate_t>)
+                    found = one.index->search(queries.row(query).as_vector(), traversal, config);
+                else {
+                    auto keyed = [&](dense_node_id_t node) noexcept { return predicate(one.keys[node]); };
+                    found = one.index->search_if(queries.row(query).as_vector(), keyed, traversal, config);
+                }
                 if (!found) {
                     status_t expected_status = status_t::success_k;
                     first_refusal.compare_exchange_strong(expected_status, found.status, std::memory_order_relaxed);
@@ -497,43 +498,243 @@ key_locator_t {shard, assigned});
         return merged;
     }
 
-  private:
-    /** @brief Where one entry lives: the shard, and its shard-local id. A shard-local id alone
-     *      names nothing, so this pair is the index's only address for an entry. */
-    struct key_locator_t {
-        std::size_t shard = 0;
-        dense_node_id_t node = 0;
-    };
+#pragma endregion Search
 
-    /** @brief Keys of one shard's rows, indexed by that shard's own node ids. */
-    using keys_plane_t = growing_buffer<key_t, forkunion_allocator<std::byte>>;
-    /** @brief Key to every entry stored under it; insert-only, wait-free for readers. */
-    using locators_plane_t = growing_multimap<key_t, key_locator_t, key_hash_type_, //
-                                              forkunion_allocator<std::byte>>;
+#pragma region Checkpoints
 
-    /** @brief One shard of the plural: the graph, and the keys of its rows. An index holds atomics
-     *      and never moves, so the indirection is what keeps it address-stable; the memory domain
-     *      is not repeated here, since the index's own allocator already carries it. */
-    struct shard_t {
-        std::unique_ptr<index_t> index;
-        keys_plane_t keys;
-    };
+    /** @brief Bytes the shard monoliths of a @ref save occupy; the manifest's own bytes are not
+     *      counted. */
+    std::size_t serialized_length() const noexcept {
+        std::size_t total = 0;
+        for (shard_t const& one : shards_) total += monolith_bytes_(one.index->size());
+        return total;
+    }
 
     /**
-     *  @brief Builds one traversal context per worker over that worker's own arena, so a fan-out
-     *      never allocates, never shares scratch and never draws the same landmarks twice.
+     *  @brief Serializes every shard as a SafeGraphs monolith and, past one shard, the manifest
+     *      last - the commit record, so a failed or cancelled save leaves orphan shard files and
+     *      a checkpoint that reads as absent rather than half-valid.
      *
-     *  Sized to the whole executor rather than to the task count: which workers a dynamic
-     *  fan-out hands tasks to is not knowable here. The executor's @c reserve already rewound the
-     *  arenas, so the previous call's carves are reusable rather than cumulative.
+     *  @param[in] path A @c .safegraphs.json manifest path, or a bare @c .safegraphs monolith
+     *      path for a single-shard index - several shards refuse the monolith form.
+     *  @param[inout] executor The threads the shard writes fan out over, one shard per task.
+     *  @param[in] on_saved Fires per finished shard with its index; answering @c cancel_k stops
+     *      the remaining shards and reports @c cancelled_k.
+     *
+     *  Contention is detected, not excluded: a row landing mid-save reports @c contended_k.
      */
-    status_t reserve_traversals(growing_buffer<traversal_t>& traversals, executor_t& executor,
-                                              insert_config_t config) noexcept {
+    template <typename progress_type_ = dummy_progress_t>
+    status_t save(std::string_view path, executor_t& executor, progress_type_&& on_saved = {}) noexcept {
+        static_assert(key_dtype_k != dtype_t::unknown_k, "The key type has no interchange token");
+        std::size_t const shards = shards_.size();
+        if (!shards || !dimensions()) return status_t::uninitialized_k;
+        if (value_column_dtype_k == dtype_t::unknown_k) return status_t::unknown_kind_k;
+        bool const manifested = path.ends_with(".json");
+        if (!manifested && shards != 1) return status_t::config_mismatch_k;
+
+        auto [held, claimed] = executor.claim();
+        if (failed(claimed)) return claimed;
+
+        // One cut for the whole checkpoint - a shard that moves past it fails its settlement probe.
+        growing_buffer<std::size_t> saved_nodes;
+        if (failed(saved_nodes.resize(shards))) return status_t::bad_alloc_k;
+        for (std::size_t shard = 0; shard != shards; ++shard) saved_nodes[shard] = shards_[shard].index->size();
+
+        std::string_view const stem = safegraphs_stem(path);
+        std::atomic<status_t> outcome {status_t::success_k};
+        auto save_shard = [&](std::size_t shard, std::size_t, std::size_t) noexcept {
+            if (failed(outcome.load(std::memory_order_relaxed))) return;
+            growing_buffer<char> shard_path;
+            auto const [file_path, formatted] = manifested ? safegraphs_shard_path(shard_path, stem, shard)
+                                                           : expected<std::string_view> {path, status_t::success_k};
+            status_t saved = failed(formatted) ? formatted : save_monolith_(shard, file_path, saved_nodes[shard]);
+            if (succeeded(saved) && on_saved(shard) == continuation_t::cancel_k) saved = status_t::cancelled_k;
+            status_t expected_status = status_t::success_k;
+            if (failed(saved)) outcome.compare_exchange_strong(expected_status, saved, std::memory_order_relaxed);
+        };
+        if (status_t const fanned = executor.for_tasks(shards, save_shard); failed(fanned)) return fanned;
+        if (status_t const settled = outcome.load(std::memory_order_relaxed); failed(settled)) return settled;
+        if (!manifested) return status_t::success_k;
+
+        // The manifest commits the checkpoint; entries name their monoliths relative to it.
+        safegraphs_metadata_t metadata;
+        metadata.metric = safegraphs_name_t {nk_kernel_name(kernel_kind_)};
+        metadata.quantization = safegraphs_name_t {nk_dtype_name(vector_dtype_)};
+        metadata.value_dtype = value_column_dtype_k;
+        metadata.key_dtype = key_dtype_k;
+        metadata.value_length = monolith_header_(0).value.shape;
+        for (std::size_t const nodes : saved_nodes) metadata.nodes += nodes;
+        metadata.files = shards;
+        std::string_view const base = safegraphs_basename(stem);
+        growing_buffer<char> entry_path;
+        // Sized once for the widest shard index, so the entries below never allocate again.
+        if (auto const [widest, formatted] = safegraphs_shard_path(entry_path, base, shards - 1); failed(formatted))
+            return formatted;
+        auto shard_at = [&](std::size_t shard) noexcept {
+            auto const [name, formatted] = safegraphs_shard_path(entry_path, base, shard);
+            return safegraphs_shard_t {name, monolith_bytes_(saved_nodes[shard]), saved_nodes[shard]};
+        };
+        return safegraphs_write_manifest(path, metadata, shard_at);
+    }
+
+    /**
+     *  @brief Restores a checkpoint into freshly placed shards: the metadata sizes the
+     *      reservation first - the reverse plane never rehashes - then every shard's columns land
+     *      in parallel and the reverse plane rebuilds by re-insertion.
+     *
+     *  @param[in] path The manifest a @ref save wrote, or a lone monolith for one shard.
+     *  @param[inout] executor The threads the shard reads fan out over, one shard per task.
+     *  @param[in] on_loaded Fires per finished shard; answering @c cancel_k stops the rest.
+     *
+     *  Shards must already be placed, one per manifest entry in order, and the index empty; a
+     *  checkpoint whose dtype, kernel or shard count disagrees refuses before any byte lands.
+     */
+    template <typename progress_type_ = dummy_progress_t>
+    status_t load(std::string_view path, executor_t& executor, progress_type_&& on_loaded = {}) noexcept {
+        std::size_t const shards = shards_.size();
+        if (!shards) return status_t::uninitialized_k;
+        if (size()) return status_t::config_mismatch_k;
+
+        auto [held, claimed] = executor.claim();
+        if (failed(claimed)) return claimed;
+
+        // The metadata decides the reservation; the entries decide what each shard reads.
+        growing_buffer<char> paths_arena;
+        growing_buffer<manifest_entry_t> entries;
+        safegraphs_metadata_t metadata;
+        std::size_t widest = 0;
+        if (path.ends_with(".json")) {
+            status_t kept = status_t::success_k;
+            auto per_shard = [&](safegraphs_shard_t shard) noexcept {
+                std::size_t const offset = paths_arena.size();
+                for (char const character : shard.path)
+                    if (failed(paths_arena.push_back(character))) return kept = status_t::bad_alloc_k, void();
+                if (failed(entries.push_back(manifest_entry_t {offset, shard.path.size(), shard.nodes})))
+                    kept = status_t::bad_alloc_k;
+                widest = max_of(widest, shard.nodes);
+            };
+            auto const [read, listed] = safegraphs_read_manifest(path, {}, per_shard);
+            if (failed(listed)) return listed;
+            if (failed(kept)) return kept;
+            metadata = read;
+            if (entries.size() != metadata.files) return status_t::malformed_k;
+        }
+        else {
+            auto const [read, parsed] = safegraphs_read_metadata(path);
+            if (failed(parsed)) return parsed;
+            metadata = read;
+            widest = metadata.nodes;
+        }
+        if (metadata.files != shards) return status_t::config_mismatch_k;
+        if (metadata.value_dtype != value_column_dtype_k || metadata.key_dtype != key_dtype_k)
+            return status_t::config_mismatch_k;
+        if (!metadata.quantization.empty() &&
+            nk_dtype_named(metadata.quantization.characters, metadata.quantization.view().size()) != vector_dtype_)
+            return status_t::config_mismatch_k;
+        if (nk_kernel_named(metadata.metric.characters, metadata.metric.view().size()) != kernel_kind_)
+            return status_t::config_mismatch_k;
+        connectivity_t const connectivity = static_cast<connectivity_t>(metadata.connectivity);
+        if (connectivity != connectivity_16_k && connectivity != connectivity_32_k &&
+            connectivity != connectivity_128_k)
+            return status_t::malformed_k;
+        // Reserved to the widest entry: every shard's key plane must cover the entry it reads.
+        if (status_t const reserved = reserve({widest * shards, connectivity, metadata.dimensions}); failed(reserved))
+            return reserved;
+
+        std::atomic<status_t> outcome {status_t::success_k};
+        auto load_shard = [&](std::size_t shard, std::size_t, std::size_t) noexcept {
+            if (failed(outcome.load(std::memory_order_relaxed))) return;
+            growing_buffer<char> shard_path;
+            auto const [file_path, resolved] = entries.empty()
+                                                   ? expected<std::string_view> {path, status_t::success_k}
+                                                   : safegraphs_sibling_path(
+                                                         shard_path, path,
+                                                         std::string_view {paths_arena.data() + entries[shard].offset,
+                                                                           entries[shard].length});
+            std::size_t const nodes = entries.empty() ? metadata.nodes : entries[shard].nodes;
+            status_t loaded = failed(resolved) ? resolved : load_monolith_(shard, file_path, nodes);
+            if (succeeded(loaded) && on_loaded(shard) == continuation_t::cancel_k) loaded = status_t::cancelled_k;
+            status_t expected_status = status_t::success_k;
+            if (failed(loaded)) outcome.compare_exchange_strong(expected_status, loaded, std::memory_order_relaxed);
+        };
+        if (status_t const fanned = executor.for_tasks(shards, load_shard); failed(fanned)) return fanned;
+        if (status_t const settled = outcome.load(std::memory_order_relaxed); failed(settled)) return settled;
+        // The rotation resumes past the loaded fills, so the next batch lands where a save left off.
+        admitted_rows_.store(widest * shards, std::memory_order_relaxed);
+        return status_t::success_k;
+    }
+
+    /** @brief The checkpoint's metadata without opening a shard - @ref safegraphs_read_metadata. */
+    static expected<safegraphs_metadata_t> metadata(std::string_view path) noexcept {
+        return safegraphs_read_metadata(path);
+    }
+
+#pragma endregion Checkpoints
+
+#pragma region Key Planes
+
+    /** @brief Entries stored under @p key; a concurrent insertion can only make it under-report. */
+    std::size_t count(key_t const& key) const noexcept { return locators_of_key_.count(key); }
+
+    /** @brief Whether at least one entry is stored under @p key. */
+    bool contains(key_t const& key) const noexcept { return locators_of_key_.contains(key); }
+
+    /**
+     *  @brief Copies up to @p wanted rows stored under @p key into @p vectors and reports the
+     *      @b true total under that key - a return above @p wanted means the copy truncated, so
+     *      the caller resizes and asks again; zero means absent.
+     *
+     *  Safe against concurrent insertions, which only ever add.
+     */
+    std::size_t get(key_t const& key, vectors_span_t vectors, std::size_t wanted) const noexcept {
+        std::size_t const row_bytes = row_values_() * sizeof(scalar_t);
+        std::size_t total = 0;
+        locators_of_key_.find_each(key, [&](key_locator_t locator) noexcept {
+            if (total < wanted && total < vectors.extent(0)) {
+                vector_view_t const stored = shards_[locator.shard].index->vector(locator.node);
+                std::memcpy(vectors.row(total).as_vector().byte_data(), stored.byte_data(), row_bytes);
+            }
+            ++total;
+        });
+        return total;
+    }
+
+#pragma endregion Key Planes
+
+  private:
+#pragma region Placement
+
+    /** @brief One unreserved shard placed on @p memory_domain; null when the allocation fails. */
+    static std::unique_ptr<index_t> build_(fu_memory_domain_id_t memory_domain) noexcept {
+        forkunion_allocator<byte_t> const allocator {memory_domain};
+        return std::unique_ptr<index_t>(new (std::nothrow) index_t(allocator, allocator));
+    }
+
+#pragma endregion Placement
+
+#pragma region Insertion
+
+    /** @brief The first row of a batch that @p shard takes under @p rotation - a bijection over
+     *      the shards, so the residue classes it names partition the batch exactly. */
+    static std::size_t first_row_of_shard_(std::size_t shard, std::size_t shards, std::size_t rotation) noexcept {
+        return (shard + shards - rotation) % shards;
+    }
+
+    /** @brief How many of @p rows a shard starting at @p first takes, stepping by @p shards. */
+    static std::size_t rows_from_(std::size_t rows, std::size_t first, std::size_t shards) noexcept {
+        return first < rows ? divide_round_up(rows - first, shards) : 0;
+    }
+
+    /** @brief Builds one traversal context per thread over its own arena, so a fan-out never
+     *      allocates and never shares scratch. Sized to the executor, since a dynamic fan-out
+     *      picks its threads. */
+    status_t reserve_traversals_(growing_buffer<traversal_t>& traversals, executor_t& executor,
+                                 insert_config_t config) noexcept {
         std::size_t const threads = executor.size();
         if (!threads) return status_t::uninitialized_k;
         if (failed(traversals.reserve_exactly(threads))) return status_t::bad_alloc_k;
         for (std::size_t thread = 0; thread != threads; ++thread) {
-            traversal_t traversal {arena_allocator<std::byte, forkunion_allocator<std::byte>>(executor.arena(thread))};
+            traversal_t traversal {arena_allocator<byte_t, forkunion_allocator<byte_t>>(executor.arena(thread))};
             // Apart, and apart across calls: identically seeded contexts would send every
             // concurrent inserter through the same entry points.
             traversal.random_generator.state = admitted_rows_.load(std::memory_order_relaxed) + thread;
@@ -544,17 +745,156 @@ key_locator_t {shard, assigned});
         return status_t::success_k;
     }
 
+#pragma endregion Insertion
+
+#pragma region Checkpoints
+
+    /** @brief One parsed manifest entry, its path parked in the shared arena by offset. */
+    struct manifest_entry_t {
+        /** @brief Where this entry's relative path starts inside the arena. */
+        std::size_t offset = 0;
+        /** @brief The relative path's length. */
+        std::size_t length = 0;
+        /** @brief Nodes the entry's monolith declares. */
+        std::size_t nodes = 0;
+    };
+
+    /** @brief The interchange token of one key - the monolith's key column dtype. */
+    inline static constexpr dtype_t key_dtype_k = sizeof(key_t) == 4    ? dtype_t::u32_k
+                                                  : sizeof(key_t) == 8  ? dtype_t::u64_k
+                                                  : sizeof(key_t) == 16 ? dtype_t::bin16_k
+                                                                        : dtype_t::unknown_k;
+
+    /** @brief The interchange token of one stored scalar; the sub-byte families carry none. */
+    inline static constexpr dtype_t value_dtype_k = dtype_named(scalar_t::dtype_name());
+    /** @brief Whether one storage word packs several dimensions - the sub-byte families. */
+    inline static constexpr bool packed_scalars_k = nk::dimensions_per_value<scalar_t>() > 1;
+    /** @brief The value column's dtype: packed bytes ride as @c u8 with the logical width in
+     *      @c shape_effective, every byte-wide scalar as its own token. */
+    inline static constexpr dtype_t value_column_dtype_k = packed_scalars_k ? dtype_t::u8_k : value_dtype_k;
+
+    /** @brief The custom fields every monolith carries: the metric, and the stored scalar by
+     *      its own name - what a packed @c u8 column cannot say. */
+    static std::array<safegraphs_custom_field_t, 2> custom_fields_() noexcept {
+        return {{{"metric", nk_kernel_name(kernel_kind_)}, {"quantization", nk_dtype_name(vector_dtype_)}}};
+    }
+
+    /** @brief Storage values per stored row - the copy width of every column plane. */
+    std::size_t row_values_() const noexcept {
+        return divide_round_up<std::size_t>(dimensions(), nk::dimensions_per_value<scalar_t>());
+    }
+
+    /** @brief The monolith header for @p nodes rows: three regular columns at aligned starts, and
+     *      the data offset they follow. */
+    safegraphs_header_t monolith_header_(std::size_t nodes) const noexcept {
+        safegraphs_header_t header;
+        header.nodes = nodes;
+        header.key = {key_dtype_k, dtype_t::unknown_k, 1, 1, 0, nodes * sizeof(key_t), 0, 0};
+        std::size_t const value_start = divide_round_up<std::size_t>(header.key.values_length, header.alignment) * //
+                                        header.alignment;
+        std::size_t const value_shape = packed_scalars_k ? row_values_() * sizeof(scalar_t) : dimensions();
+        header.value = {value_column_dtype_k,
+                        dtype_t::unknown_k,
+                        value_shape,
+                        dimensions(),
+                        value_start,
+                        nodes * row_values_() * sizeof(scalar_t),
+                        0,
+                        0};
+        std::size_t const neighbors_start =
+            divide_round_up<std::size_t>(value_start + header.value.values_length, header.alignment) * header.alignment;
+        header.neighbors = {dtype_t::u32_k,
+                            dtype_t::unknown_k,
+                            connectivity(),
+                            connectivity(),
+                            neighbors_start,
+                            nodes * connectivity() * sizeof(dense_node_id_t),
+                            0,
+                            0};
+        header.data_offset = safegraphs_data_offset(header, custom_fields_());
+        return header;
+    }
+
+    /** @brief Bytes a monolith of @p nodes rows occupies: the header segment and the three columns. */
+    std::size_t monolith_bytes_(std::size_t nodes) const noexcept {
+        safegraphs_header_t const header = monolith_header_(nodes);
+        return header.data_offset + header.neighbors.values_start + header.neighbors.values_length;
+    }
+
+    /** @brief Writes shard @p shard 's monolith at @p file_path: the header, then the key, value
+     *      and neighbors columns. @p nodes is the watermark cut every column speaks. */
+    status_t save_monolith_(std::size_t shard, std::string_view file_path, std::size_t nodes) noexcept {
+        index_t& one = *shards_[shard].index;
+        nk::matrix<scalar_t> vectors = nk::matrix<scalar_t>::try_zeros({nodes, dimensions()});
+        nk::matrix<dense_node_id_t> neighbors = nk::matrix<dense_node_id_t>::try_zeros({nodes, connectivity()});
+        if (nodes && (vectors.empty() || neighbors.empty())) return status_t::bad_alloc_k;
+        // A mismatch here is a row published since the cut - contention by another name.
+        if (status_t const settled = one.save(vectors.span(), neighbors.span(), synchronization_t::concurrent_k);
+            failed(settled))
+            return settled == status_t::config_mismatch_k ? status_t::contended_k : settled;
+
+        safegraphs_header_t const header = monolith_header_(nodes);
+        auto [file, opened] = file_t::open(file_path, file_mode_t::write_k);
+        if (failed(opened)) return opened;
+        if (status_t const wrote = safegraphs_write_header(file, header, custom_fields_()); failed(wrote)) return wrote;
+        if (status_t const wrote = safegraphs_write_columns(file, header,                                    //
+                                                            bytes_of(shards_[shard].keys.data(), nodes),     //
+                                                            bytes_of(vectors.data(), nodes * row_values_()), //
+                                                            bytes_of(neighbors.data(), nodes * connectivity()));
+            failed(wrote))
+            return wrote;
+        return file.close();
+    }
+
+    /** @brief Reads one monolith into shard @p shard: the columns land in the index, the key
+     *      plane in place, and the reverse plane rebuilds by re-insertion. */
+    status_t load_monolith_(std::size_t shard, std::string_view file_path, std::size_t nodes) noexcept {
+        auto [file, opened] = file_t::open(file_path, file_mode_t::read_k);
+        if (failed(opened)) return opened;
+        auto const [header, parsed] = safegraphs_read_header(file);
+        if (failed(parsed)) return parsed;
+        // Declared counts re-derive before a byte lands, so a crafted monolith never outruns its buffers.
+        if (header.nodes != nodes) return status_t::malformed_k;
+        if (header.value.shape_effective != dimensions() || header.neighbors.shape != connectivity())
+            return status_t::config_mismatch_k;
+        if (header.key.dtype != key_dtype_k || header.value.dtype != value_column_dtype_k)
+            return status_t::config_mismatch_k;
+        if (nodes > shards_[shard].keys.size()) return status_t::malformed_k;
+
+        index_t& one = *shards_[shard].index;
+        nk::matrix<scalar_t> vectors = nk::matrix<scalar_t>::try_zeros({nodes, dimensions()});
+        nk::matrix<dense_node_id_t> neighbors = nk::matrix<dense_node_id_t>::try_zeros({nodes, connectivity()});
+        if (nodes && (vectors.empty() || neighbors.empty())) return status_t::bad_alloc_k;
+        if (status_t const read = safegraphs_read_columns(file, header,                                    //
+                                                          bytes_of(shards_[shard].keys.data(), nodes),     //
+                                                          bytes_of(vectors.data(), nodes * row_values_()), //
+                                                          bytes_of(neighbors.data(), nodes * connectivity()));
+            failed(read))
+            return read;
+        // Any out-of-range ID is "no edge" in the interchange; the traversals know one sentinel.
+        safegraphs_canonicalize_neighbors(std::span {neighbors.data(), nodes * connectivity()}, nodes,
+                                          dense_node_id_unknown_k);
+
+        if (status_t const landed = one.load(vectors.view(), neighbors.view(), synchronization_t::exclusive_k);
+            failed(landed))
+            return landed;
+        // The reverse plane's quota covers the reservation, so recording cannot fail.
+        for (std::size_t row = 0; row != nodes; ++row) [[maybe_unused]]
+            status_t const recorded = locators_of_key_.insert(shards_[shard].keys[row],
+                                                              key_locator_t {shard, static_cast<dense_node_id_t>(row)});
+        return status_t::success_k;
+    }
+
+#pragma endregion Checkpoints
+
     /** @brief The owned shards, graph and keys together. A shard's key plane is sized at
      *      @ref reserve and never grown, since a search reads it while rows are still landing. */
     growing_buffer<shard_t> shards_;
     /** @brief Every key's entries. Duplicates coexist as separate slots, which is exactly what
      *      several values under one key means, and costs one slot per row rather than per key. */
     locators_plane_t locators_of_key_;
-    /** @brief Admission grants so far - the gate against @ref capacity and the rotation base. A
-     *      batch refused at the gate takes nothing; one that fails past it leaves its grant
-     *      spent, so the word stays monotone and the round-robin split can never route a shard
-     *      past its key plane. Nothing publishes through this word - one relaxed read-modify-write
-     *      per batch, never per row. */
+    /** @brief Rows admitted so far - the gate against @ref capacity and the next batch's
+     *      rotation base. */
     std::atomic<std::size_t> admitted_rows_ {0};
 };
 
