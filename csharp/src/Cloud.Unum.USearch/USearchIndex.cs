@@ -23,6 +23,7 @@ public class USearchIndex : IDisposable
     /// <param name="expansionAdd">The optional expansion factor used for index construction when adding vectors.</param>
     /// <param name="expansionSearch">The optional expansion factor used for index construction during search operations.</param>
     /// <param name="multi">When set allows multiple vectors to map to the same key.</param>
+    /// <param name="reserve">Reserves memory for a specified number of incoming vectors.</param>
     public USearchIndex(
         MetricKind metricKind,
         ScalarKind quantization,
@@ -30,7 +31,8 @@ public class USearchIndex : IDisposable
         ulong connectivity = 0,
         ulong expansionAdd = 0,
         ulong expansionSearch = 0,
-        bool multi = false
+        bool multi = false,
+        ulong reserve = 0
     )
     {
         IndexOptions initOptions = new()
@@ -48,17 +50,28 @@ public class USearchIndex : IDisposable
         this._index = usearch_init(ref initOptions, out IntPtr error);
         HandleError(error);
         this._cachedDimensions = dimensions;
+
+        if (reserve > 0)
+        {
+            this.IncreaseCapacity(reserve);
+        }
     }
 
     /// <summary>
     /// Initializes a new instance of the USearchIndex class with specified options.
     /// </summary>
     /// <param name="options">The options structure containing initialization parameters.</param>
-    public USearchIndex(IndexOptions options)
+    /// <param name="reserve">Reserves memory for a specified number of incoming vectors.</param>
+    public USearchIndex(IndexOptions options, ulong reserve = 0)
     {
         this._index = usearch_init(ref options, out IntPtr error);
         HandleError(error);
         this._cachedDimensions = options.dimensions;
+
+        if (reserve > 0)
+        {
+            this.IncreaseCapacity(reserve);
+        }
     }
 
     /// <summary>
@@ -66,7 +79,8 @@ public class USearchIndex : IDisposable
     /// </summary>
     /// <param name="path">The file path from where the index will be loaded or viewed.</param>
     /// <param name="view">If true, creates a view of the index without copying it into memory.</param>
-    public USearchIndex(string path, bool view = false)
+    /// <param name="reserve">Reserves memory for a specified number of incoming vectors.</param>
+    public USearchIndex(string path, bool view = false, ulong reserve = 0)
     {
         IndexOptions initOptions = new();
         this._index = usearch_init(ref initOptions, out IntPtr error);
@@ -84,6 +98,11 @@ public class USearchIndex : IDisposable
         HandleError(error);
 
         this._cachedDimensions = this.Dimensions();
+
+        if (reserve > 0)
+        {
+            this.IncreaseCapacity(reserve);
+        }
     }
 
     /// <summary>
