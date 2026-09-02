@@ -1519,7 +1519,6 @@ std::size_t test_basic_health(fixture_type_ const& fixture) {
 template <typename fixture_type_>
 std::size_t test_basic_certified(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
-    using node_id_t = typename index_t::node_id_t;
     using key_t = typename index_t::key_t;
     using context_t = typename index_t::traversal_context_t;
     using metric_t = decltype(fixture.make_metric());
@@ -1831,8 +1830,6 @@ template <typename fixture_type_>
 std::size_t test_basic_concurrent_build(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
     using node_id_t = typename index_t::node_id_t;
-    using key_t = typename index_t::key_t;
-    using context_t = typename index_t::traversal_context_t;
     std::size_t const nodes_count = basic_lanes_k * basic_lane_nodes_k;
     std::size_t failures = 0;
     allocation_ledger_t ledger;
@@ -1884,7 +1881,6 @@ template <typename fixture_type_>
 std::size_t test_basic_concurrent_search(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
     using node_id_t = typename index_t::node_id_t;
-    using key_t = typename index_t::key_t;
     using context_t = typename index_t::traversal_context_t;
     constexpr std::size_t writer_lanes_k = basic_lanes_k - 1;
     constexpr std::size_t prefill_k = 32;
@@ -2131,7 +2127,6 @@ std::size_t test_basic_overflow_race(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
     using node_id_t = typename index_t::node_id_t;
     using key_t = typename index_t::key_t;
-    using context_t = typename index_t::traversal_context_t;
     constexpr std::size_t lanes_k = 4;
     constexpr std::size_t per_lane_k = 32;
     constexpr std::size_t capacity_k = 2 * per_lane_k;
@@ -2321,8 +2316,8 @@ std::size_t test_basic_cursor(fixture_type_ const& fixture) {
  *      re-based to the data segment - then parses it back through the repo's own header
  *      reader and asserts every field survives the trip. Composed per unit, never by
  *      @c test_basic_scenarios: the key dtype's SafeGraphs name is unit knowledge -
- *      sentences passes "u64", bioinformatics "bin16", and meshes, whose key carries no
- *      stable SafeGraphs dtype, legitimately omits the call. */
+ *      sentences passes "u64", while bioinformatics and meshes both carry the @c uuid_t
+ *      key and pass "bin16". */
 template <typename fixture_type_>
 std::size_t test_basic_safegraphs_adapter(fixture_type_ const& fixture, char const* key_dtype_name) {
     using index_t = typename fixture_type_::index_t;
@@ -2363,11 +2358,11 @@ std::size_t test_basic_safegraphs_adapter(fixture_type_ const& fixture, char con
             R"("key":{{"dtype":"{}","values_start":{},"values_length":{}}})", key_dtype_name, 0,
             node_count * sizeof(key_t));
         std::string const value_json = fmt::format(
-            R"("value":{{"dtype":"u8","values_start":{},"values_length":{},"offsets_dtype":"u64","offsets_start":{},"offsets_length":{}}})",
+            R"("value":{{"dtype":"u8","values_start":{},"values_length":{},"offsets_dtype":"i64","offsets_start":{},"offsets_length":{}}})",
             sections.values_offset - data_origin, static_cast<std::size_t>(header.value_bytes),
             sections.value_sums_offset - data_origin, (node_count + 1) * sizeof(i64_t));
         std::string const neighbors_json = fmt::format(
-            R"("neighbors":{{"dtype":"{}","values_start":{},"values_length":{},"offsets_dtype":"u64","offsets_start":{},"offsets_length":{}}})",
+            R"("neighbors":{{"dtype":"{}","values_start":{},"values_length":{},"offsets_dtype":"i64","offsets_start":{},"offsets_length":{}}})",
             node_id_dtype_name, sections.neighbor_ids_offset - data_origin,
             static_cast<std::size_t>(header.neighbors_count) * sizeof(node_id_t),
             sections.neighbor_sums_offset - data_origin, (node_count + 1) * sizeof(i64_t));
@@ -2387,11 +2382,11 @@ std::size_t test_basic_safegraphs_adapter(fixture_type_ const& fixture, char con
         for (std::size_t position = data_origin; position != payload.size(); ++position)
             monolith[16 + header_bytes + position - data_origin] = payload[position];
 
-        std::FILE* const file = std::tmpfile();
-        failures += expect(file != nullptr);
-        if (file) {
-            failures += expect_eq(std::fwrite(monolith.data(), 1, monolith.size(), file), monolith.size());
-            std::rewind(file);
+        auto [file, opened] = file_t::temporary();
+        failures += expect(succeeded(opened));
+        if (succeeded(opened)) {
+            failures += expect_eq(file.write(monolith.data(), monolith.size()), status_t::success_k);
+            failures += expect_eq(file.seek(0), status_t::success_k);
             auto const parsed = safegraphs_read_header(file);
             failures += expect(bool(parsed));
             if (parsed) {
@@ -2407,7 +2402,6 @@ std::size_t test_basic_safegraphs_adapter(fixture_type_ const& fixture, char con
                 failures += expect(!parsed.value.value.is_regular());
                 failures += expect_eq(parsed.value.value.values_length, static_cast<std::size_t>(header.value_bytes));
             }
-            std::fclose(file);
         }
     }
     failures += expect_eq(ledger.live_bytes.load(), 0);

@@ -54,13 +54,13 @@ struct header_only_transparent_metric_t : header_only_metric_t {
 /** @brief Identity-bytes codec for the fixed-width tags. */
 struct header_only_codec_t {
     std::size_t saved_bytes(std::array<char, 8> const&) const noexcept { return 8; }
-    status_t save(std::array<char, 8> const& value, std::span<std::byte> output) const noexcept {
+    status_t save(std::array<char, 8> const& value, bytes_span_t output) const noexcept {
         if (output.size() < value.size()) return status_t::overflow_k;
         for (std::size_t position = 0; position != value.size(); ++position)
             output[position] = static_cast<std::byte>(value[position]);
         return status_t::success_k;
     }
-    status_t load(std::span<std::byte const> input, std::array<char, 8>& value) const noexcept {
+    status_t load(bytes_view_t input, std::array<char, 8>& value) const noexcept {
         if (input.size() != value.size()) return status_t::malformed_k;
         for (std::size_t position = 0; position != value.size(); ++position)
             value[position] = static_cast<char>(input[position]);

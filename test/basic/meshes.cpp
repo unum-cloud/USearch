@@ -102,7 +102,7 @@ struct mesh_codec_t {
     std::size_t saved_bytes(mesh_t const& value) const noexcept {
         return sizeof(u32_t) + value.points.size() * sizeof(point3_t);
     }
-    status_t save(mesh_t const& value, std::span<std::byte> output) const noexcept {
+    status_t save(mesh_t const& value, bytes_span_t output) const noexcept {
         if (output.size() < saved_bytes(value)) return status_t::overflow_k;
         auto const count_bytes = std::bit_cast<std::array<std::byte, sizeof(u32_t)>>(
             static_cast<u32_t>(value.points.size()));
@@ -115,7 +115,7 @@ struct mesh_codec_t {
         }
         return status_t::success_k;
     }
-    status_t load(std::span<std::byte const> input, mesh_t& value) const noexcept {
+    status_t load(bytes_view_t input, mesh_t& value) const noexcept {
         if (input.size() < sizeof(u32_t)) return status_t::malformed_k;
         std::array<std::byte, sizeof(u32_t)> count_bytes;
         for (std::size_t position = 0; position != count_bytes.size(); ++position)
@@ -276,5 +276,6 @@ std::size_t test_meshes() {
     failures += test_basic_scenarios(fixture);
     failures += check_meshes_rigid_invariance();
     failures += check_meshes_kernel_parity();
+    failures += test_basic_safegraphs_adapter(fixture, "bin16"); // The uuid key column.
     return report("meshes", failures);
 }

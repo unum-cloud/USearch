@@ -12,6 +12,7 @@
 
 #include <atomic>      // `std::atomic`
 #include <bit>         // `std::bit_cast` - hashing `uuid_t` as two words
+#include <concepts>    // `std::convertible_to` - the string-view conversion's constraint
 #include <functional>  // `std::hash` - specialized for `uuid_t` below
 #include <span>        // `std::span`
 #include <string_view> // `std::string_view`
@@ -79,6 +80,18 @@ using bytes_span_t = std::span<byte_t>;
 
 /** @brief A read-only run of raw bytes - the currency of readers & mapped payloads. */
 using bytes_view_t = std::span<byte_t const>;
+
+/** @brief The bytes behind @p count typed elements at @p data, read-only. */
+template <typename value_type_>
+bytes_view_t bytes_of(value_type_ const* data, std::size_t count) noexcept {
+    return std::as_bytes(std::span {data, count});
+}
+
+/** @brief The bytes behind @p count typed elements at @p data, writable. */
+template <typename value_type_>
+bytes_span_t bytes_of(value_type_* data, std::size_t count) noexcept {
+    return std::as_writable_bytes(std::span {data, count});
+}
 
 /** @brief The one project-wide default alignment: 128 bytes covers x86's adjacent-line
  *      prefetcher, the 128-byte cache lines of Apple's and other Arm cores, and a CUDA
@@ -179,6 +192,15 @@ enum class continuation_t : int {
     continue_k = usearch_continue_k,
     /** @brief Unwind: the verb publishes nothing further and reports @c cancelled_k. */
     cancel_k = usearch_cancel_k,
+};
+
+/** @brief Whether a verb returns when its work is done, or once it is merely queued on the
+ *      executor. Mirrors @c usearch_completion_t value for value, so the two enums cannot drift. */
+enum class completion_t : int {
+    /** @brief Return once the work is finished and its outputs are readable. */
+    blocking_k = usearch_completion_blocking_k,
+    /** @brief Return once the work is queued; outputs stay indeterminate until a drain. */
+    deferred_k = usearch_completion_deferred_k,
 };
 
 /**
@@ -309,6 +331,8 @@ enum class dtype_t : u32_t {
     f16_k,
     e5m2_k,
     e4m3_k,
+    e3m2_k,
+    e2m3_k,
     /* Non-numeric payloads interchange formats carry. */
     bin16_k,
     utf8_k,
@@ -331,6 +355,8 @@ constexpr char const* dtype_name(dtype_t dtype) noexcept {
     case dtype_t::f16_k: return "f16";
     case dtype_t::e5m2_k: return "e5m2";
     case dtype_t::e4m3_k: return "e4m3";
+    case dtype_t::e3m2_k: return "e3m2";
+    case dtype_t::e2m3_k: return "e2m3";
     case dtype_t::bin16_k: return "bin16";
     case dtype_t::utf8_k: return "utf8";
     case dtype_t::unknown_k: return "unknown";
@@ -355,6 +381,8 @@ constexpr dtype_t dtype_named(std::string_view name) noexcept {
     if (name == "f16") return dtype_t::f16_k;
     if (name == "e5m2") return dtype_t::e5m2_k;
     if (name == "e4m3") return dtype_t::e4m3_k;
+    if (name == "e3m2") return dtype_t::e3m2_k;
+    if (name == "e2m3") return dtype_t::e2m3_k;
     if (name == "bin16") return dtype_t::bin16_k;
     if (name == "utf8") return dtype_t::utf8_k;
     return dtype_t::unknown_k;
@@ -472,6 +500,16 @@ constexpr auto to_span(vector_type_ const& vector) noexcept {
     if constexpr (requires { vector.stride_bytes(); })
         assert(static_cast<std::size_t>(vector.stride_bytes()) == sizeof(value_t));
     return std::span<value_t> {vector.data(), vector.size()};
+}
+
+/** @brief The character sibling of @ref to_span: any contiguous run of @c char as a view. */
+template <typename characters_type_>
+    requires requires(characters_type_ const& characters) {
+        { characters.data() } -> std::convertible_to<char const*>;
+        characters.size();
+    }
+constexpr std::string_view to_string_view(characters_type_ const& characters) noexcept {
+    return std::string_view {characters.data(), characters.size()};
 }
 
 /** @brief Any entry pairing a graph-local @c node_id with a @c distance - the shape that

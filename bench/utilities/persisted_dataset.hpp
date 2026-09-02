@@ -1,5 +1,5 @@
 /**
- *  @brief Read-only memory-mapped datasets in the RetriEval binary layout.
+ *  @brief Datasets in the RetriEval binary layout: memory-mapped reads and dense writes.
  *
  *  @author Ash Vardanian
  *  @file bench/utilities/persisted_dataset.hpp
@@ -9,6 +9,13 @@
  *  by the row-major payload. The scalar type is not stored in the file; it is inferred
  *  from the extension: `.fbin` for f32, `.i8bin` / `.u8bin` / `.bf16bin` accordingly, and
  *  `.ibin` for `u32` neighbor ids in ground-truth files.
+ *
+ *  The layout is the big-ANN-benchmarks `*bin` convention of the NeurIPS'21 billion-scale
+ *  challenge and the DiskANN ecosystem, as codified by RetriEval - counter width, endianness,
+ *  and the extension-to-dtype table pinned down. Benchmark checkpoints, dataset files, and
+ *  ground-truth ids all share this one shape; @ref matrix_save writes it.
+ *
+ *  @see https://github.com/ashvardanian/RetriEval
  */
 #pragma once
 
@@ -183,10 +190,34 @@ class mmap_view_t {
     }
 };
 
+/** @brief Row and column counts of one matrix file - logical dimensions, sub-byte packing
+ *      included. */
+struct matrix_extents_t {
+    /** @brief Rows of the payload matrix. */
+    std::size_t rows = 0;
+    /** @brief Logical values per row - what the producing model emitted, not storage words. */
+    std::size_t columns = 0;
+};
+
+/** @brief Writes @p matrix as two little-endian @p counter_type_ counters - rows, then
+ *      columns - and the dense row-major payload; the file extension names the element type. */
+template <typename value_type_, typename counter_type_ = u32_t>
+status_t matrix_save(std::string_view path, nk::matrix_view<value_type_> matrix) noexcept {
+    counter_type_ const counters[2] = {static_cast<counter_type_>(matrix.extent(0)),
+                                       static_cast<counter_type_>(matrix.extent(1))};
+    if (counters[0] != matrix.extent(0) || counters[1] != matrix.extent(1)) return status_t::overflow_k;
+    std::size_t const payload_bytes = matrix.extent(0) * static_cast<std::size_t>(matrix.stride_bytes(0));
+    auto [file, opened] = file_t::open(path, file_mode_t::write_k);
+    if (failed(opened)) return opened;
+    if (failed(file.write(counters, sizeof(counters)))) return status_t::io_k;
+    if (failed(file.write(matrix.data(), payload_bytes))) return status_t::io_k;
+    return file.close();
+}
+
 /** @brief Splits a mapped matrix file into its extents, validating that the payload holds
  *      enough @p scalar_type_ values - sub-byte packing included. The header is two
- *      little-endian @p counter_type_ counters, so both `u32`-headed RetriEval files and
- *      `u64`-headed billion-scale exports parse with the right instantiation. */
+ *      little-endian @p counter_type_ counters, so both `u32`-headed and `u64`-headed
+ *      exports parse with the right instantiation. */
 template <typename scalar_type_, typename counter_type_>
 expected<matrix_extents_t> parse_matrix_header(bytes_view_t mapping) noexcept {
     matrix_extents_t extents;
@@ -224,8 +255,7 @@ nk::matrix_view<scalar_type_> view_matrix_payload(bytes_view_t mapping, std::siz
  *  null path downgrades the run - self-queries and skipped recall respectively - it never
  *  fails it.
  */
-template <typename scalar_type_, typename neighbor_id_type_ = u32_t,
-          typename header_counter_type_ = u32_t>
+template <typename scalar_type_, typename neighbor_id_type_ = u32_t, typename header_counter_type_ = u32_t>
 class persisted_dataset {
     mmap_view_t vectors_mapping_, queries_mapping_, neighbors_mapping_;
     std::size_t vectors_rows_ = 0, queries_rows_ = 0, neighbors_rows_ = 0;
@@ -254,8 +284,7 @@ class persisted_dataset {
         if (!queries_path.empty()) {
             auto queries = mmap_view_t::map(queries_path, allocator);
             if (queries.status != status_t::success_k) return {std::move(dataset), queries.status};
-            auto const queries_extents =
-                parse_matrix_header<scalar_type_, header_counter_type_>(queries.value.view());
+            auto const queries_extents = parse_matrix_header<scalar_type_, header_counter_type_>(queries.value.view());
             if (queries_extents.status != status_t::success_k) return {std::move(dataset), queries_extents.status};
             if (queries_extents.value.columns != dataset.dimensions_)
                 return {std::move(dataset), status_t::config_mismatch_k};
@@ -286,8 +315,8 @@ class persisted_dataset {
                                                                        dimensions_);
     }
     nk::matrix_view<neighbor_id_type_> neighbors() const noexcept {
-        return view_matrix_payload<neighbor_id_type_, header_counter_type_>(neighbors_mapping_.view(),
-                                                                            neighbors_rows_, neighbors_depth_);
+        return view_matrix_payload<neighbor_id_type_, header_counter_type_>(neighbors_mapping_.view(), neighbors_rows_,
+                                                                            neighbors_depth_);
     }
 
     bool has_queries() const noexcept { return static_cast<bool>(queries_mapping_); }

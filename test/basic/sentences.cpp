@@ -66,13 +66,13 @@ struct levenshtein_metric_t {
  *      byte - impossible in generated ASCII - is the unit's poison marker on load. */
 struct sentence_codec_t {
     std::size_t saved_bytes(std::string const& value) const noexcept { return value.size(); }
-    status_t save(std::string const& value, std::span<std::byte> output) const noexcept {
+    status_t save(std::string const& value, bytes_span_t output) const noexcept {
         if (output.size() < value.size()) return status_t::overflow_k;
         for (std::size_t position = 0; position != value.size(); ++position)
             output[position] = static_cast<std::byte>(value[position]);
         return status_t::success_k;
     }
-    status_t load(std::span<std::byte const> input, std::string& value) const noexcept {
+    status_t load(bytes_view_t input, std::string& value) const noexcept {
         for (std::byte const byte : input)
             if (byte == std::byte {0xFF}) return status_t::malformed_k;
         value.assign(reinterpret_cast<char const*>(input.data()), input.size());
