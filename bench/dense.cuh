@@ -20,6 +20,7 @@
 
 #include <algorithm>   // `std::nth_element`, `std::min`
 #include <atomic>      // `std::atomic`
+#include <ranges>      // `std::views::iota`, `std::views::filter`, `std::views::transform`
 #include <span>        // `std::span`
 #include <string>      // `std::string`
 #include <type_traits> // `std::integral_constant` for the dispatch chains
@@ -27,6 +28,7 @@
 
 #include <fmt/color.h>
 #include <fmt/format.h>
+#include <fmt/ranges.h> // `fmt::join`
 
 #include <forkunion.h>
 #include <forkunion/capabilities.hpp>
@@ -102,6 +104,20 @@ constexpr capability_type_ prefix_mask(std::span<capability_choice<capability_ty
     for (std::size_t choice = 0; choice <= index && choice < choices.size(); ++choice)
         mask = static_cast<capability_type_>(mask | choices[choice].bit);
     return mask;
+}
+
+/** @brief The @p floor name, then every choice of @p choices whose bit @p mask covers - a view
+ *      the report joins in one print. */
+template <typename capability_type_>
+auto named_choices(char const* floor, std::span<capability_choice<capability_type_> const> choices,
+                   capability_type_ mask) noexcept {
+    return std::views::iota(std::size_t {0}, choices.size() + 1) |
+           std::views::filter([choices, mask](std::size_t position) noexcept {
+               return position == 0 || (choices[position - 1].bit & mask) != 0;
+           }) |
+           std::views::transform([floor, choices](std::size_t position) noexcept {
+               return position ? choices[position - 1].name : floor;
+           });
 }
 
 /** @brief Names a single capability bit of @p choices; the unlisted @p floor backs them all. */
@@ -500,6 +516,7 @@ inline void report_search_metrics(bench_options_t const& options, std::size_t qu
     fmt::println("  distances/query: {}", humanize(double(sums.computed_distances) / double(query_count)));
     fmt::println("  visited/query: {}", humanize(double(sums.visited_members) / double(query_count)));
     fmt::println("  restarts: {}", sums.restarts);
+    fmt::println("  saturated: {}", fmt::styled(sums.saturated_walks, verdict_style(sums.saturated_walks == 0)));
 }
 
 /** @brief Judges the merged hits after the clocks stopped - self-recall against own rows, or
@@ -519,10 +536,8 @@ inline void judge_hits(bench_options_t const& options, bench_results_t& results,
         double const queries = double(query_count);
         double const self_at_1 = 100.0 * double(found_at_1) / queries;
         double const self_at_k = 100.0 * double(found_at_k) / queries;
-        fmt::print("  self-recall@1: ");
-        fmt::print(verdict_style(self_at_1 >= 99.0), "{:.2f}%\n", self_at_1);
-        fmt::print("  self-recall@{}: ", options.top_k);
-        fmt::print(verdict_style(self_at_k >= 99.0), "{:.2f}%\n", self_at_k);
+        fmt::println("  self-recall@1: {:.2f}%", fmt::styled(self_at_1, verdict_style(self_at_1 >= 99.0)));
+        fmt::println("  self-recall@{}: {:.2f}%", options.top_k, fmt::styled(self_at_k, verdict_style(self_at_k >= 99.0)));
     }
     else if (!results.ground_truth.empty()) {
         std::size_t const judged_depth = std::min(options.top_k, results.ground_truth.extent(1));
@@ -548,10 +563,8 @@ inline void judge_hits(bench_options_t const& options, bench_results_t& results,
         double const recall_at_k = 100.0 * double(found_at_k) / queries;
         double const overlap_at_k = 100.0 * double(shared) / (queries * double(judged_depth));
         double const gain_at_k = 100.0 * gain / (queries * ideal[judged_depth - 1]);
-        fmt::print("  recall@1: ");
-        fmt::print(verdict_style(recall_at_1 >= 90.0), "{:.1f}%\n", recall_at_1);
-        fmt::print("  recall@{}: ", judged_depth);
-        fmt::print(verdict_style(recall_at_k >= 99.0), "{:.1f}%\n", recall_at_k);
+        fmt::println("  recall@1: {:.1f}%", fmt::styled(recall_at_1, verdict_style(recall_at_1 >= 90.0)));
+        fmt::println("  recall@{}: {:.1f}%", judged_depth, fmt::styled(recall_at_k, verdict_style(recall_at_k >= 99.0)));
         fmt::println("  overlap@{}: {:.1f}%", judged_depth, overlap_at_k);
         fmt::println("  ndcg@{}: {:.1f}%", judged_depth, gain_at_k);
     }
@@ -668,12 +681,9 @@ inline void print_machine(fu_topology_t topology, fu_fabric_t fabric, bench_opti
         fmt::println("  memory domain {}: fabric level {}, huge pages {:.2f} GB", domain, fabric_level,
                      double(huge_pages_bytes) / 1e9);
     }
-    if (!options.memory_domains.empty()) {
-        fmt::print("  engaged memory domains:");
-        for (fu_memory_domain_id_t domain : options.memory_domains) fmt::print(" {}", domain);
-        fmt::println("");
-    }
-    fmt::println("  threads engaged: {}", threads);
+    if (!options.memory_domains.empty())
+        fmt::println("  engaged memory domains: {}", fmt::join(options.memory_domains, " "));
+        fmt::println("  threads engaged: {}", threads);
 
     char scheduling_names[256] = {0};
     std::size_t scheduling_names_length = 0;
@@ -682,17 +692,14 @@ inline void print_machine(fu_topology_t topology, fu_fabric_t fabric, bench_opti
     fmt::println("  scheduling detected: {}", scheduling_names);
 
     nk_capability_t const available = nk_capabilities_available();
-    fmt::print("  compute detected: serial");
-    for (capability_choice<nk_capability_t> const& choice : compute_choices_k)
-        if (available & choice.bit) fmt::print(" {}", choice.name);
-    fmt::println("");
+    fmt::println("  compute detected: {}", fmt::join(named_choices("serial", compute_span_k, available), " "));
     fmt::println("  compute ceiling: {}",
                  bit_name(compute_span_k, highest_bit(compute_span_k, options.max_compute & available, nk_cap_serial_k),
                           "serial"));
-    fmt::print(
-        "  scheduling ceiling: {}\n",
+    fmt::println("  scheduling ceiling: {}",
         bit_name(schedule_span_k,
-                 highest_bit(schedule_span_k, effective_schedule(options.max_schedule), fu_capabilities_unknown_k),
+                 highest_bit(schedule_span_k, effective_schedule(options.max_schedule), //
+fu_capabilities_unknown_k),
                  "standard"));
     fmt::println("  kernels requested: {} · {}", dtype_name(options.stored_dtype), nk_kernel_name(options.kernel));
 }

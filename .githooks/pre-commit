@@ -61,6 +61,16 @@ check_printf() {
         "$file prints through the C stdio family - C++ sources print through fmt:::"
 }
 
+# A `fmt::print` whose literal does not end in a newline is half a line, and the other half
+# arrives in a second call - `fmt::styled` and `fmt::join` fold both halves into one `println`.
+# A literal opening with a carriage return is a redraw, never a fragment.
+check_partial_prints() {
+    local partial
+    partial=$(printf '%s\n' "$added" | grep -E 'fmt::print\(' | grep -vE '\\n"' | grep -vE 'fmt::print\("\\r' || true)
+    [ -z "$partial" ] || fail "$partial" \
+        "$file prints half a line - fold it into one fmt::println, with fmt::styled or fmt::join:"
+}
+
 
 
 # Reinterpreting copies in C++ sources - a `memcpy` between two objects whose byte count is one
@@ -510,6 +520,7 @@ while IFS= read -r -d '' file; do
         ;;&
     *.cu | *.cuh)
         check_host_threads
+        check_partial_prints
         ;;&
     include/*.hpp | *.h)
         check_bare_member_docs
@@ -521,6 +532,7 @@ while IFS= read -r -d '' file; do
         ;;&
     src/*.cpp | src/*.cuh | test/*.cpp | test/*.hpp | bench/*.cpp | bench/*.hpp | include/*.hpp)
         check_printf
+        check_partial_prints
         check_memcpy
         check_function_like_macros
         check_template_parameter_underscores

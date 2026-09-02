@@ -149,9 +149,10 @@ int main(int argc, char** argv) {
     else if (!max_compute_name.empty()) {
         std::size_t const named = index_of_name(compute_span_k, max_compute_name);
         if (named == compute_choices_count_k) {
-            fmt::print("Unknown --max-compute {}; this table offers: serial", max_compute_name);
-            for (capability_choice<nk_capability_t> const& choice : compute_choices_k) fmt::print(" {}", choice.name);
-            fmt::println("");
+            fmt::println("Unknown --max-compute {}; this table offers: {}", max_compute_name,
+                         fmt::join(named_choices("serial", compute_span_k, //
+                                                 prefix_mask(compute_span_k, compute_choices_count_k)),
+                                   " "));
             return 1;
         }
         options.max_compute = nk_cap_serial_k | prefix_mask(compute_span_k, named);
@@ -165,10 +166,10 @@ int main(int argc, char** argv) {
     else if (!max_schedule_name.empty()) {
         std::size_t const named = index_of_name(schedule_span_k, max_schedule_name);
         if (named == schedule_choices_count_k) {
-            fmt::print("Unknown --max-schedule {}; this table offers: standard", max_schedule_name);
-            for (capability_choice<fu_capabilities_t> const& choice : schedule_choices_k)
-                fmt::print(" {}", choice.name);
-            fmt::println("");
+            fmt::println("Unknown --max-schedule {}; this table offers: {}", max_schedule_name,
+                         fmt::join(named_choices("standard", schedule_span_k, //
+                                                 prefix_mask(schedule_span_k, schedule_choices_count_k)),
+                                   " "));
             return 1;
         }
         options.max_schedule = static_cast<fu_capabilities_t>(schedule_floor_k | prefix_mask(schedule_span_k, named));

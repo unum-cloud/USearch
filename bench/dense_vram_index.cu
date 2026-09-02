@@ -110,9 +110,9 @@ static int open_and_run(bench_options_t const& options, int device, cuda_arch_t 
                                                                             plane_space);
         },
         [&](auto dtype) {
-            fmt::print("Stored dtype {} has no device kits; " //
-                       "override with --f32, --bf16, --f16, --i8, --i4, --u8, or --u1\n",
-                       dtype_name(dtype));
+            fmt::println("Stored dtype {} has no device kits; " //
+                         "override with --f32, --bf16, --f16, --i8, --i4, --u8, or --u1",
+                         dtype_name(dtype));
             return 1;
         });
 }

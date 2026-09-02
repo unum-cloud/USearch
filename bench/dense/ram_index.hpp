@@ -331,8 +331,8 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     fmt::println("  distances: {} ({:.1f}% refines, {:.1f}% reverse)", humanize(double(sums.computed_distances)),
                  refine_share, reverse_share);
     fmt::println("  visited: {}", humanize(double(sums.visited_members)));
-    fmt::print("  restarts: ");
-    fmt::print(verdict_style(sums.restarts < inserted_rows / 100 + 1), "{}\n", sums.restarts);
+    fmt::println("  restarts: {}", fmt::styled(sums.restarts, verdict_style(sums.restarts < inserted_rows / 100 + 1)));
+    fmt::println("  saturated: {}", fmt::styled(sums.saturated_walks, verdict_style(sums.saturated_walks == 0)));
     if (std::size_t resident = peak_resident_bytes(); resident)
         fmt::println("  peak resident: {:.2f} GB", double(resident) / 1e9);
     return true;

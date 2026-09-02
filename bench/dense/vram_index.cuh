@@ -209,8 +209,10 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     fmt::println("  throughput: {} IPS", humanize(double(inserted_rows) / seconds));
     fmt::println("  distances: {}", humanize(double(bench.lane.computed_distances)));
     fmt::println("  visited: {}", humanize(double(bench.lane.visited_members)));
-    fmt::print("  restarts: ");
-    fmt::print(verdict_style(bench.lane.restarts < inserted_rows / 100 + 1), "{}\n", bench.lane.restarts);
+    fmt::println("  restarts: {}",
+                 fmt::styled(bench.lane.restarts, verdict_style(bench.lane.restarts < inserted_rows / 100 + 1)));
+    fmt::println("  saturated: {}",
+                 fmt::styled(bench.lane.saturated_walks, verdict_style(bench.lane.saturated_walks == 0)));
     return true;
 }
 

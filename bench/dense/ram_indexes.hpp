@@ -288,17 +288,17 @@ bool run_insertion(streamed_dataset_type_& streamed) {
         (bench.options.max_compute & nk_capabilities_available() & ~nk_cap_serial_k))
         fmt::print(verdict_style(false), "  ⚠ scalar fallback: no SIMD kit is adapted for this dtype & metric\n");
     fmt::println("  threads: {}", bench.executor.size());
-    fmt::print("  shards: {}, one per memory domain, filled", bench.indexes.shards_count());
-    for (std::size_t shard = 0; shard != bench.indexes.shards_count(); ++shard)
-        fmt::print(" {}", bench.indexes.shard(shard).size());
-    fmt::println("");
+    auto shard_sizes = std::views::iota(std::size_t {0}, bench.indexes.shards_count()) |
+                       std::views::transform([&](std::size_t shard) { return bench.indexes.shard(shard).size(); });
+        fmt::println("  shards: {}, one per memory domain, filled {}", bench.indexes.shards_count(),
+    fmt::join(shard_sizes, " "));
     fmt::println("  wall: {:.2f} s", seconds);
     fmt::println("  throughput: {} IPS", humanize(double(rows) / seconds));
     fmt::println("  distances: {} ({:.1f}% refines, {:.1f}% reverse)", humanize(double(sums.computed_distances)),
                  refine_share, reverse_share);
     fmt::println("  visited: {}", humanize(double(sums.visited_members)));
-    fmt::print("  restarts: ");
-    fmt::print(verdict_style(sums.restarts < rows / 100 + 1), "{}\n", sums.restarts);
+    fmt::println("  restarts: {}", fmt::styled(sums.restarts, verdict_style(sums.restarts < rows / 100 + 1)));
+    fmt::println("  saturated: {}", fmt::styled(sums.saturated_walks, verdict_style(sums.saturated_walks == 0)));
     if (std::size_t resident = peak_resident_bytes(); resident)
         fmt::println("  peak resident: {:.2f} GB", double(resident) / 1e9);
     return true;
