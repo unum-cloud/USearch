@@ -441,7 +441,7 @@ jobs:
             -DUSEARCH_BUILD_BENCH_CPP=0 \
             -DUSEARCH_BUILD_LIB_C=0 \
             -DUSEARCH_USE_NUMKONG=1 \
-            -DNK_DYNAMIC_DISPATCH=1
+            -DNK_RUNTIME_DISPATCH=1
 
           cmake --build build_artifacts --config Release -j
 
@@ -495,7 +495,7 @@ jobs:
             -DUSEARCH_BUILD_BENCH_CPP=0 `
             -DUSEARCH_BUILD_LIB_C=0 `
             -DUSEARCH_USE_NUMKONG=1 `
-            -DNK_DYNAMIC_DISPATCH=1
+            -DNK_RUNTIME_DISPATCH=1
 
           cmake --build build_artifacts --config Release
 
@@ -545,7 +545,7 @@ jobs:
             -DUSEARCH_BUILD_BENCH_CPP=0 \
             -DUSEARCH_BUILD_LIB_C=0 \
             -DUSEARCH_USE_NUMKONG=1 \
-            -DNK_DYNAMIC_DISPATCH=1
+            -DNK_RUNTIME_DISPATCH=1
 
           cmake --build build_artifacts --config Release
 
@@ -610,7 +610,7 @@ jobs:
             -DNK_TARGET_NEONBFDOT=1 \
             -DNK_TARGET_NEONHALF=1 \
             -DNK_TARGET_NEONSDOT=1 \
-            -DNK_DYNAMIC_DISPATCH=1
+            -DNK_RUNTIME_DISPATCH=1
 
           cmake --build build_artifacts --config Release
 

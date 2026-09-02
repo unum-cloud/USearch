@@ -31,7 +31,7 @@ macros_args.append(("USEARCH_USE_STRINGZILLA", "1"))
 #! install it separately!
 macros_args.extend(
     [
-        ("NK_DYNAMIC_DISPATCH", "1"),
+        ("NK_RUNTIME_DISPATCH", "1"),
         ("NK_TARGET_NEON", "0"),  # ? Hide-out all complex intrinsics
         ("NK_TARGET_NEONBFDOT", "0"),  # ? Hide-out all complex intrinsics
         ("NK_TARGET_NEONHALF", "0"),  # ? Hide-out all complex intrinsics

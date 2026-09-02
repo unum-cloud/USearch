@@ -391,10 +391,9 @@ function (setup_target TARGET_NAME)
                 "USEARCH_USE_STRINGZILLA=$<BOOL:${USEARCH_USE_STRINGZILLA}>"
     )
 
-    # Link NumKong: the `nk_shared` target carries its own include paths, compile definitions (NK_DYNAMIC_DISPATCH,
-    # NK_TARGET_*), and ISA probes.
+    # Link NumKong's shared library, which answers the capability queries and punned kernels for the host CPU.
     if (USEARCH_USE_NUMKONG AND TARGET nk_shared)
-        target_compile_definitions(${TARGET_NAME} PRIVATE "NK_DYNAMIC_DISPATCH=1")
+        target_compile_definitions(${TARGET_NAME} PRIVATE "NK_RUNTIME_DISPATCH=1")
         target_link_libraries(${TARGET_NAME} PRIVATE nk_shared)
     endif ()
 
