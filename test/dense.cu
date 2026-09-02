@@ -14,11 +14,13 @@
 #include <fmt/format.h>
 
 #include "dense/vram_index.cuh"
+#include "dense/vram_indexes.cuh"
 
 int main() {
     int devices_count = 0;
     cudaError_t const probed = cudaGetDeviceCount(&devices_count);
-    if (probed != cudaSuccess || !devices_count) return static_cast<int>(report("cuda", "no CUDA device reachable"));
+    if (probed != cudaSuccess || !devices_count)
+        return static_cast<int>(unum::usearch::report("cuda", "no CUDA device reachable"));
     fmt::println("CUDA devices: {}", devices_count);
     std::size_t failures_count = 0;
     failures_count += test_dense_index_i8_cuda();
@@ -27,5 +29,6 @@ int main() {
     failures_count += test_dense_index_bf16_cuda();
     failures_count += test_dense_index_i4_cuda();
     failures_count += test_dense_index_u1_cuda();
+    failures_count += test_dense_indexes_cuda();
     return failures_count ? 1 : 0;
 }

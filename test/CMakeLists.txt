@@ -23,6 +23,7 @@ add_executable(
     dense/ram_metric_u8.cpp
     dense/ram_metric_u4.cpp
     dense/ram_metric_u1.cpp
+    dense/ram_indexes.cpp
     dense/ram_index_f32.cpp
     dense/ram_index_bf16.cpp
     dense/ram_index_f16.cpp
@@ -34,7 +35,7 @@ add_executable(
 )
 setup_target(usearch_test)
 target_include_directories(usearch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(usearch_test PRIVATE fmt::fmt yyjson)
+target_link_libraries(usearch_test PRIVATE fmt::fmt yyjson ${USEARCH_FORKUNION_LIBRARY})
 add_test(NAME usearch_test COMMAND usearch_test)
 
 # The header-only tier's proof: everything under `utilities/` & `basic/` compiles & runs
@@ -60,6 +61,7 @@ if (USEARCH_BUILD_CUDA)
         dense/vram_index_bf16.cu
         dense/vram_index_i4.cu
         dense/vram_index_u1.cu
+        dense/vram_indexes.cu
     )
     target_include_directories(
         usearch_test_cuda PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
@@ -72,5 +74,5 @@ if (USEARCH_BUILD_CUDA)
                    CUDA_ARCHITECTURES "${USEARCH_CUDA_ARCHITECTURES}"
     )
     target_compile_options(usearch_test_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
-    target_link_libraries(usearch_test_cuda PRIVATE fmt::fmt CUDA::cuda_driver)
+    target_link_libraries(usearch_test_cuda PRIVATE fmt::fmt yyjson CUDA::cuda_driver ${USEARCH_FORKUNION_LIBRARY})
 endif ()

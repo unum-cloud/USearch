@@ -74,7 +74,8 @@ static_assert(cuda_reservable_allocator<counting_cuda_allocator<std::byte>>);
 template <nk_kernel_kind_t kernel_, nk_dtype_t dtype_ = nk_i8_k>
 std::size_t test_cuda_configuration(char const* name) {
     using allocator_t = counting_cuda_allocator<std::byte>;
-    using index_t = dense_vram_index<dtype_, kernel_, cuda_arch_blackwell_k, allocator_t, allocator_t>;
+    using index_t = dense_vram_index<dtype_, kernel_, cuda_arch_blackwell_k, allocator_t, allocator_t,
+                                     cuda_device_allocator<byte_t>>;
     auto make_index = [](allocation_ledger_t& ledger) {
         return index_t {allocator_t {counting_allocator<std::byte>(ledger)},
                         allocator_t {counting_allocator<std::byte>(ledger)}};
