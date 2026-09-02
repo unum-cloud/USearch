@@ -324,7 +324,8 @@ USEARCH_EXPORT typedef usearch_admission_t (*usearch_predicate_t)(usearch_key_t,
 USEARCH_EXPORT typedef enum usearch_continuation_t {
     /** @brief Carry on to the next unit of work. */
     usearch_continue_k = 0,
-    /** @brief Unwind: the verb publishes nothing and reports @c usearch_error_cancelled_k. */
+    /** @brief Stop and report @c usearch_error_cancelled_k; whether finished increments stand
+     *      is each verb's own contract. */
     usearch_cancel_k = 1,
 } usearch_continuation_t;
 
@@ -333,8 +334,8 @@ USEARCH_EXPORT typedef enum usearch_continuation_t {
  *      Counts are in whatever units the verb consumes - rows for an insertion, queries for a
  *      search, shards for a checkpoint - so one handler serves every one of them.
  *
- *  Invoked from a single thread however many perform the work, so the handler needs no
- *  synchronization of its own, and never after the verb it was passed to has returned.
+ *  Never invoked concurrently, however many threads perform the work, so the handler needs no
+ *  synchronization of its own - and never after the verb it was passed to has returned.
  *
  *  Arguments, in order:
  *  - @c completed: units finished so far, never decreasing across one call's reports.
@@ -345,22 +346,22 @@ USEARCH_EXPORT typedef usearch_continuation_t (*usearch_progress_callback_t)( //
     size_t completed, size_t total, void* state);
 
 /**
- *  @brief Everything a call needs to run but an index does not own: the lanes that advance the
- *      work - host threads or device streams - and the per-lane traversal scratch they walk with.
+ *  @brief Everything a call needs to run but an index does not own: the host threads or device
+ *      streams that advance the work, and the traversal scratch each of them walks with.
  *
  *  One executor serves any number of index handles, so separate categories of indexes share one
  *  machine's cores or devices instead of each claiming a private set. Its kind is fixed by the
  *  constructor that produced it and must match the residency of every handle it drives; a mismatch
  *  reports @c usearch_error_device_k on the first call.
  *
- *  Scratch is a byte arena carved one slice per lane, sized from geometry rather than from the
+ *  Scratch is a byte arena carved one slice per thread or stream, sized from geometry rather than from the
  *  scalar type, which is what lets a single executor drive indexes of different quantizations and
  *  metrics. It grows to the widest geometry asked of it and is kept between calls, so a steady
  *  workload allocates once.
  *
  *  An executor admits @b one driver at a time: a second concurrent call reports
  *  @c usearch_error_contended_k rather than corrupting the dispatch already in flight. Handles
- *  stay freely concurrent - it is the executor that serializes, never the index. A single-lane
+ *  stay freely concurrent - it is the executor that serializes, never the index. A single-thread
  *  executor spawns no operating-system threads, so "just use my thread" is one executor per caller
  *  thread rather than a special case in the verbs.
  */
@@ -371,7 +372,7 @@ USEARCH_EXPORT typedef void* usearch_executor_t;
  *      local to the named memory domains.
  *
  *  @param[in] ram The same options the indexes were initialized with; copied, not borrowed.
- *  @param[in] lanes Worker threads; zero takes 7/8 of the cores those domains carry.
+ *  @param[in] threads Worker threads; zero takes 7/8 of the cores those domains carry.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *  @return A handle to the spawned executor, or @c NULL on failure.
  *
@@ -383,40 +384,39 @@ USEARCH_EXPORT typedef void* usearch_executor_t;
  *  path.
  */
 USEARCH_EXPORT usearch_executor_t usearch_executor_for_ram( //
-    usearch_ram_options_t const* ram, size_t lanes, usearch_error_t* error);
+    usearch_ram_options_t const* ram, size_t threads, usearch_error_t* error);
 
 /**
  *  @brief Spawns host workers for NVMe-resident indexes, one submission ring apiece, interleaved
  *      across the compute domains local to the devices the paths name.
  *
  *  @param[in] nvme The same options the indexes were initialized with; copied, not borrowed.
- *  @param[in] lanes Worker threads; zero derives from the devices' queue capabilities.
+ *  @param[in] threads Worker threads; zero derives from the devices' queue capabilities.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *  @return A handle to the spawned executor, or @c NULL on failure.
  *
- *  One ring per lane is what keeps submission lock-free: a lane owns its queue outright, so an
- *  external-memory walk never coordinates with a sibling to issue a read.
+ *  One ring per thread is what keeps submission lock-free: a thread owns its queue outright, so
+ *  an external-memory walk never coordinates with a sibling to issue a read.
  */
 USEARCH_EXPORT usearch_executor_t usearch_executor_for_nvme( //
-    usearch_nvme_options_t const* nvme, size_t lanes, usearch_error_t* error);
+    usearch_nvme_options_t const* nvme, size_t threads, usearch_error_t* error);
 
 /**
- *  @brief Opens submission lanes on the named devices, several per device so one host thread keeps
- *      every one of them fed.
+ *  @brief Opens one submission stream on every named device, all of them driven by the one host
+ *      thread that calls the verbs.
  *
  *  @param[in] vram The same options the indexes were initialized with; copied, not borrowed.
- *  @param[in] lanes Streams per device; zero derives from the devices' occupancy.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *  @return A handle to the opened executor, or @c NULL on failure.
  *
- *  Lanes here are streams rather than threads, so a single host thread drives every device the
- *  options name. Adding host threads buys nothing, since the work has already left for the
- *  accelerator by the time one would return.
+ *  One stream per device is the whole design: a single host thread keeps every device fed, and
+ *  adding host threads would buy nothing, since the work has already left for the accelerator
+ *  by the time one of them would return.
  */
 USEARCH_EXPORT usearch_executor_t usearch_executor_for_vram( //
-    usearch_vram_options_t const* vram, size_t lanes, usearch_error_t* error);
+    usearch_vram_options_t const* vram, usearch_error_t* error);
 
-/** @brief What an executor does with its lanes once a call's work is done. */
+/** @brief What an executor does with its threads or streams once a call's work is done. */
 USEARCH_EXPORT typedef enum usearch_mood_t {
     /** @brief Park them; the next call pays a wake-up. */
     usearch_mood_chill_k = 0,
@@ -441,7 +441,7 @@ USEARCH_EXPORT typedef enum usearch_completion_t {
  *  until @c usearch_executor_drain returns.
  */
 USEARCH_EXPORT typedef struct usearch_execution_config_t {
-    /** @brief What the lanes do between calls. */
+    /** @brief What the threads or streams do between calls. */
     usearch_mood_t mood;
     /** @brief Whether the verb waits for its own work. */
     usearch_completion_t completion;
@@ -455,7 +455,7 @@ USEARCH_EXPORT typedef struct usearch_execution_config_t {
 USEARCH_EXPORT void usearch_executor_drain(usearch_executor_t executor, usearch_error_t* error);
 
 /**
- *  @brief Drains every lane, releases the scratch arena, and frees the executor; cannot fail,
+ *  @brief Drains every thread or stream, releases the scratch arena, and frees the executor; cannot fail,
  *      so takes no error.
  *  @param[inout] executor The handle to be freed; invalid afterwards.
  */

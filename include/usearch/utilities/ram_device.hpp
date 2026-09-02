@@ -6,21 +6,20 @@
  *
  *  Everything a RAM-resident index needs from the machine and nothing it stores: the
  *  ForkUnion-backed allocator binding storage to one memory domain, and the executor holding
- *  the worker threads with one byte arena apiece. The executor knows nothing of what walks -
- *  a thread's scratch is a run of bytes, so one executor drives indexes of any quantization,
- *  metric or capability tier, where a typed context could only ever serve the one
- *  instantiation it was declared for.
+ *  the threads with one byte arena apiece. A thread's scratch is a run of bytes, so one
+ *  executor drives indexes of any quantization, metric or capability tier.
  */
 #pragma once
 
-#include <cstdlib> // `std::malloc`, `std::free` - the heap fallback of a domainless allocator
+#include <cstdlib> // `std::aligned_alloc`, `std::free` - the heap fallback of a domainless allocator
 
-#include <atomic>      // `std::atomic_flag` - the executor's one-caller gate
-#include <memory>      // `std::allocator_traits` - the rebinding conversions
-#include <type_traits> // `std::true_type` - the propagation traits
+#include <mutex>       // `std::unique_lock`, `std::adopt_lock` - the executor's one-caller hold
+#include <type_traits> // `std::remove_reference_t` - the trampolines' callback recovery
 #include <utility>     // `std::swap`, `std::move`, `std::exchange`
 
-#include <forkunion.h> // `fu_allocate_on_domain_id`, `fu_pool_spawn`, `fu_local_memory_of`
+#include <forkunion.h>                // `fu_allocate_on_domain_id`, `fu_pool_spawn`, `fu_local_memory_of`
+#include <forkunion/capabilities.hpp> // `fu::preferred_yield_t` - the hold's spin policy
+#include <forkunion/types.hpp>        // `fu::spin_mutex`
 
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the arenas' storage
 #include "usearch/utilities/types.hpp"       // `status_t`, `expected`
@@ -30,22 +29,17 @@ namespace usearch {
 
 #pragma region Placement
 
-/**
- *  @brief Allocates on one ForkUnion memory domain, so storage lands where the threads that walk
- *      it run. A negative domain names no node and falls back to the plain heap, which is what a
- *      machine without NUMA reports for every domain.
- */
-template <typename value_type_ = std::byte>
+/** @brief The domain ID of a machine without NUMA; ForkUnion asserts on it, so the heap serves. */
+inline constexpr fu_memory_domain_id_t no_memory_domain_k = -1;
+
+/** @brief Allocates on one ForkUnion memory domain, so storage lands beside the threads that walk
+ *      it; @c no_memory_domain_k means the plain heap. */
+template <typename value_type_ = byte_t>
 struct forkunion_allocator {
     using value_type = value_type_;
-    using size_type = std::size_t;
-    using propagate_on_container_copy_assignment = std::true_type;
-    using propagate_on_container_move_assignment = std::true_type;
-    using propagate_on_container_swap = std::true_type;
-    using is_always_equal = std::false_type;
 
-    /** @brief The OS memory-domain id storage is claimed on; @c -1 is the heap. */
-    fu_memory_domain_id_t memory_domain = -1;
+    /** @brief The OS memory-domain ID storage is claimed on. */
+    fu_memory_domain_id_t memory_domain = no_memory_domain_k;
 
     constexpr forkunion_allocator() noexcept = default;
     explicit constexpr forkunion_allocator(fu_memory_domain_id_t memory_domain) noexcept
@@ -56,41 +50,50 @@ struct forkunion_allocator {
     constexpr forkunion_allocator(forkunion_allocator<other_type_> const& other) noexcept
         : memory_domain(other.memory_domain) {}
 
+    /** @brief Every run starts on @c default_alignment_k: arenas carve on that boundary and size
+     *      themselves assuming an aligned base, so the heap fallback aligns like the domains do. */
     value_type_* allocate(std::size_t count) noexcept {
-        std::size_t const bytes = count * sizeof(value_type_);
-        if (memory_domain < 0) return static_cast<value_type_*>(std::malloc(bytes));
+        std::size_t const bytes = aligned_bytes_(count);
+        if (memory_domain == no_memory_domain_k)
+            return static_cast<value_type_*>(std::aligned_alloc(default_alignment_k, bytes));
         void* memory = nullptr;
         if (fu_allocate_on_domain_id(memory_domain, bytes, &memory) != fu_success_k) return nullptr;
         return static_cast<value_type_*>(memory);
     }
 
     void deallocate(value_type_* pointer, std::size_t count) noexcept {
-        if (memory_domain < 0) return std::free(pointer);
-        fu_free_on_domain_id(memory_domain, pointer, count * sizeof(value_type_));
+        if (memory_domain == no_memory_domain_k) return std::free(pointer);
+        fu_free_on_domain_id(memory_domain, pointer, aligned_bytes_(count));
     }
 
     bool operator==(forkunion_allocator const& other) const noexcept { return memory_domain == other.memory_domain; }
+
+  private:
+    /** @brief The byte count a run of @p count elements is claimed and released with. */
+    static std::size_t aligned_bytes_(std::size_t count) noexcept {
+        return divide_round_up<std::size_t>(count * sizeof(value_type_), default_alignment_k) * default_alignment_k;
+    }
 };
 
-static_assert(buffer_allocator<forkunion_allocator<std::byte>>);
+static_assert(buffer_allocator<forkunion_allocator<byte_t>>);
 
 #pragma endregion Placement
 
 #pragma region Executor
 
-/**
- *  @brief The worker threads a bulk verb advances on and the per-thread scratch they walk with -
- *      everything a call needs that an index does not own.
- *
- *  One thread holds one run, so the thread index @b is the scratch index and a fan-out never
- *  leases, never locks, and never waits for scratch. Each run is claimed on the memory domain
- *  local to the thread that carves it. The executor admits one caller at a time - @ref claim
- *  reports @c contended_k to a second - while the indexes it drives stay freely concurrent.
- */
+/** @brief The threads a bulk verb advances on and the scratch they walk with - one arena per
+ *      thread, so a fan-out never leases or waits. Admits one caller at a time. */
 struct forkunion_executor_t {
-    /** @brief One thread's run of scratch, claimed on the memory domain that thread runs closest
-     *      to; its @c size is what has been carved and its @c capacity is the run. */
-    using thread_arena_t = growing_buffer<std::byte, forkunion_allocator<std::byte>>;
+    /** @brief One thread's run of scratch on its own memory domain; @c size is carved, @c capacity
+     *      is the run. */
+    using arena_t = growing_buffer<byte_t, forkunion_allocator<byte_t>>;
+    /** @brief One call's hold on the executor, released when it dies. */
+    using claim_t = std::unique_lock<fu::spin_mutex<fu::preferred_yield_t>>;
+
+    /** @brief The label the pool's threads carry in the OS. */
+    inline static constexpr char const pool_name_k[] = "usearch";
+    /** @brief One core in this many stays idle on a zero ask, for the ordered publication path. */
+    inline static constexpr std::size_t idle_cores_denominator_k = 8;
 
     forkunion_executor_t() = default;
     forkunion_executor_t(forkunion_executor_t&& other) noexcept { swap(other); }
@@ -108,10 +111,8 @@ struct forkunion_executor_t {
         std::swap(topology_, other.topology_);
     }
 
-    /** @brief Takes over @p pool, which this executor owns and deletes from here on - even on
-     *      failure - so the caller must not delete or re-spawn it. Colocates one arena with each
-     *      worker's own memory domain, so an executor is fully usable the moment it exists and no
-     *      fan-out ever waits on a first reservation. */
+    /** @brief Takes over @p pool, owned and deleted here from now on - even on failure. Colocates
+     *      one arena with each thread's memory domain. */
     static expected<forkunion_executor_t> acquire(fu_topology_t topology, fu_pool_t pool) noexcept {
         forkunion_executor_t executor;
         executor.pool_ = pool;
@@ -122,11 +123,11 @@ struct forkunion_executor_t {
         if (failed(executor.arenas_per_thread_.resize(threads))) return {std::move(executor), status_t::bad_alloc_k};
         status_t const status = executor.for_threads([&](std::size_t thread, std::size_t compute_domain) noexcept {
             std::size_t memory_index = 0;
-            fu_memory_domain_id_t memory_domain = -1;
+            fu_memory_domain_id_t memory_domain = no_memory_domain_k;
             if (fu_local_memory_of(topology, compute_domain, &memory_index) != fu_success_k ||
                 fu_memory_domain_id_at_index(topology, memory_index, &memory_domain) != fu_success_k)
                 return;
-            executor.arenas_per_thread_[thread] = thread_arena_t {forkunion_allocator<std::byte>(memory_domain)};
+            executor.arenas_per_thread_[thread] = arena_t {forkunion_allocator<byte_t>(memory_domain)};
         });
         return {std::move(executor), status};
     }
@@ -139,80 +140,57 @@ struct forkunion_executor_t {
         return std::exchange(pool_, nullptr);
     }
 
-    /** @brief Spawns @p threads workers over @p topology and takes the pool; zero takes seven
-     *      eighths of the cores, since full occupancy starves the ordered publication path. */
-    static expected<forkunion_executor_t> spawn(fu_topology_t topology, std::size_t threads) noexcept {
-        fu_pool_t pool = nullptr;
-        if (fu_pool_new("usearch", fu_capabilities_all_k, &pool) != fu_success_k)
-            return {forkunion_executor_t {}, status_t::bad_alloc_k};
+    /** @brief The thread count a zero ask means: every core but one in @ref idle_cores_denominator_k. */
+    static expected<std::size_t> default_threads(fu_topology_t topology) noexcept {
         std::size_t cores = 0;
-        if (!threads && fu_logical_cores_count(topology, &cores) != fu_success_k)
-            return fu_pool_delete(pool), expected<forkunion_executor_t> {{}, status_t::uninitialized_k};
-        std::size_t const wanted = threads ? threads : cores - cores / 8;
-        if (fu_pool_spawn(topology, pool, wanted, fu_caller_exclusive_k) != fu_success_k)
+        if (fu_logical_cores_count(topology, &cores) != fu_success_k) return {0, status_t::uninitialized_k};
+        return {cores - cores / idle_cores_denominator_k, status_t::success_k};
+    }
+
+    /** @brief Spawns @p threads over @p topology and takes the pool; zero means @ref default_threads. */
+    static expected<forkunion_executor_t> spawn(fu_topology_t topology, std::size_t threads) noexcept {
+        if (!threads) {
+            expected<std::size_t> const defaulted = default_threads(topology);
+            if (failed(defaulted.status)) return {{}, defaulted.status};
+            threads = defaulted.value;
+        }
+        fu_pool_t pool = nullptr;
+        if (fu_pool_new(pool_name_k, fu_capabilities_all_k, &pool) != fu_success_k) return {{}, status_t::bad_alloc_k};
+        if (fu_pool_spawn(topology, pool, threads, fu_caller_exclusive_k) != fu_success_k)
             return fu_pool_delete(pool), expected<forkunion_executor_t> {{}, status_t::uninitialized_k};
         return acquire(topology, pool);
     }
 
-    /** @brief One call's exclusive hold on the executor, released on destruction - like a capacity
-     *      claim, so an early exit from a bulk verb can never leave the executor held. */
-    struct executor_claim_t {
-        executor_claim_t() noexcept = default;
-        /** @brief The granted hold on @p executor; only @ref claim ever calls it. */
-        explicit executor_claim_t(forkunion_executor_t& executor) noexcept : executor_(&executor) {}
-        executor_claim_t(executor_claim_t&& other) noexcept { swap(other); }
-        executor_claim_t& operator=(executor_claim_t&& other) noexcept { return swap(other), *this; }
-        executor_claim_t(executor_claim_t const&) = delete;
-        executor_claim_t& operator=(executor_claim_t const&) = delete;
-        ~executor_claim_t() noexcept {
-            if (executor_) executor_->held_.clear(std::memory_order_release);
-        }
-
-        void swap(executor_claim_t& other) noexcept { std::swap(executor_, other.executor_); }
-        explicit operator bool() const noexcept { return executor_ != nullptr; }
-
-      private:
-        /** @brief The held executor, reached only to release the gate; null marks the empty state
-         *      a default construction and a move-out both leave behind. */
-        forkunion_executor_t* executor_ = nullptr;
-    };
-
-    /** @brief Claims the executor for one call, reporting @c contended_k to a second concurrent
-     *      caller - the executor serializes, never the indexes it drives, so genuine concurrency
-     *      is one executor per calling thread. */
-    expected<executor_claim_t> claim() noexcept {
-        if (held_.test_and_set(std::memory_order_acquire)) return {executor_claim_t {}, status_t::contended_k};
-        return {executor_claim_t {*this}, status_t::success_k};
+    /** @brief Claims the executor for one call; a second concurrent caller gets @c contended_k. */
+    expected<claim_t> claim() noexcept {
+        if (!held_.lock_if_free()) return {{}, status_t::contended_k};
+        return {claim_t {held_, std::adopt_lock}, status_t::success_k};
     }
 
-    /**
-     *  @brief Claims at least @p bytes_per_thread of scratch for every worker, each run on the
-     *      memory domain local to it, so a run and the thread using it share a node.
-     *
-     *  Monotone: the runs grow to the widest ask and are kept between calls, so a steady workload
-     *  allocates once and a narrower later call costs one compare per thread.
-     */
+    /** @brief Claims at least @p bytes_per_thread of scratch on every thread's own domain; runs
+     *      grow to the widest ask and persist between calls. */
     status_t reserve(std::size_t bytes_per_thread) noexcept {
         if (arenas_per_thread_.empty()) return status_t::uninitialized_k;
         // Rewind before growing: a relocation moves only dead carves, never live ones.
-        for (thread_arena_t& arena : arenas_per_thread_) {
+        for (arena_t& arena : arenas_per_thread_) {
             arena.clear();
             if (failed(arena.reserve_exactly(bytes_per_thread))) return status_t::bad_alloc_k;
         }
         return status_t::success_k;
     }
 
-    /** @brief Worker @p thread 's own arena; no two ever share one, so a traversal context built
-     *      over it needs no synchronization at all. */
-    thread_arena_t& arena(std::size_t thread) noexcept { return arenas_per_thread_[thread]; }
+    /** @brief Thread @p thread 's own arena; no two threads share one. */
+    arena_t& arena(std::size_t thread) noexcept { return arenas_per_thread_[thread]; }
 
-    /** @brief Threads this executor drives - one worker, one arena, one scratch index. */
+    /** @brief Threads this executor drives. */
     std::size_t size() const noexcept { return arenas_per_thread_.size(); }
+    /** @brief The topology the pool was spawned over; borrowed, never owned. */
     fu_topology_t topology() const noexcept { return topology_; }
+    /** @brief Nothing is ever pending: every fan-out blocks inside, so a drain is a no-op. */
+    status_t drain() noexcept { return status_t::success_k; }
 
-    /** @brief Runs @p callback once on every worker, with the thread index and its compute
-     *      domain - for per-thread setup the OS demands, like the AMX tile-permission
-     *      handshake; must be @c noexcept. */
+    /** @brief Runs @p callback on every thread with the thread index and its compute domain; must
+     *      be @c noexcept. */
     template <typename callback_type_>
     status_t for_threads(callback_type_&& callback) noexcept {
         if (!pool_) return status_t::uninitialized_k;
@@ -224,12 +202,8 @@ struct forkunion_executor_t {
         return status_t::success_k;
     }
 
-    /**
-     *  @brief Runs @p callback over @p tasks items, stolen dynamically.
-     *  @param[in] tasks Work items to distribute; zero is a legal no-op.
-     *  @param[in] callback Invoked on a worker with the task index, the thread index and that
-     *      thread's compute domain, in that order; must be @c noexcept.
-     */
+    /** @brief Runs @p callback over @p tasks items, stolen dynamically, with the task index, the
+     *      thread index and its compute domain; must be @c noexcept. */
     template <typename callback_type_>
     status_t for_tasks(std::size_t tasks, callback_type_&& callback) noexcept {
         if (!pool_) return status_t::uninitialized_k;
@@ -244,14 +218,14 @@ struct forkunion_executor_t {
     }
 
   private:
-    /** @brief One arena per worker thread, colocated with it once at @ref acquire - a context's
-     *      rebound allocators point at the cursor inside its entry, so relocating this dangles. */
-    growing_buffer<thread_arena_t> arenas_per_thread_;
-    /** @brief The one-caller gate @ref claim spins on; never swapped, since a move with a call in
-     *      flight is already misuse. */
-    std::atomic_flag held_;
+    /** @brief One arena per thread, colocated with it once at @ref acquire; contexts point into it,
+     *      so it never relocates. */
+    growing_buffer<arena_t> arenas_per_thread_;
+    /** @brief Held by the one caller driving the threads; never swapped. */
+    fu::spin_mutex<fu::preferred_yield_t> held_;
     /** @brief The pool every fan-out dispatches on, owned outright and deleted here. */
     fu_pool_t pool_ = nullptr;
+    /** @brief The topology the pool was spawned over; borrowed, never owned. */
     fu_topology_t topology_ = nullptr;
 };
 

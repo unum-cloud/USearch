@@ -7,8 +7,8 @@
  *  @file include/usearch/dense_index.h
  *
  *  Every batch input and output is a strided matrix: a base pointer, a row count, and a byte
- *  stride between consecutive rows - packed layouts pass their natural row width, and a single row
- *  passes a count of one with any stride. Handles are created against one residency - RAM, VRAM,
+ *  stride between consecutive rows - a zero stride means contiguous rows of the natural width, and
+ *  a single row passes a count of one with any stride. Handles are created against one residency - RAM, VRAM,
  *  or NVMe - picked by the tagged options union, which also decides how loading behaves.
  *
  *  @section dense_index_serialization Serialization
@@ -61,7 +61,7 @@
  *  The executor, not the handle, is what serializes: a handle admits any number of concurrent
  *  callers, while an executor admits @b one driver at a time and reports
  *  @c usearch_error_contended_k to the second. Callers wanting genuine concurrency give each
- *  thread its own executor - a single-lane one spawns no operating-system threads, so "use my
+ *  thread its own executor - a single-thread one spawns no operating-system threads, so "use my
  *  thread" needs no special case - or share one and let it serialize them.
  *
  *  @section dense_index_linear_algebra Approximate Products & Attention
@@ -123,7 +123,7 @@ USEARCH_EXPORT typedef void* usearch_dense_cursor_t;
  *      finder owns a live frontier & visited set and yields matches lazily.
  *
  *  Callers that post-filter aggressively pull until satisfied instead of guessing "k" upfront, at
- *  the price of pinning one of the executor's lanes until freed.
+ *  the price of pinning one of the executor's threads until freed.
  */
 USEARCH_EXPORT typedef void* usearch_dense_finder_t;
 
@@ -221,7 +221,8 @@ USEARCH_EXPORT void usearch_dense_free(usearch_dense_index_t index);
 USEARCH_EXPORT void usearch_dense_reserve(usearch_dense_index_t index, size_t capacity, usearch_error_t* error);
 
 /**
- *  @brief Erases all entries, keeping the reserved capacity and frozen geometry.
+ *  @brief Erases all entries, keeping the reserved capacity and frozen geometry. Never invoked
+ *      concurrently with any other verb on the same handle.
  *  @param[inout] index The handle to be cleared.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  */
@@ -269,7 +270,7 @@ USEARCH_EXPORT typedef struct usearch_dense_traversal_stats_t {
  *      @ref dense_index_concurrency
  *
  *  @param[inout] index The handle to be populated.
- *  @param[in] executor Lanes and scratch for the batch; its kind must match the handle's residency.
+ *  @param[in] executor The executor driving the batch; its kind must match the handle's residency.
  *  @param[in] keys Array of @p count keys, one per row.
  *  @param[in] vectors Base pointer of the first row of vector data.
  *  @param[in] count Number of rows in @p vectors and entries in @p keys.
@@ -280,25 +281,27 @@ USEARCH_EXPORT typedef struct usearch_dense_traversal_stats_t {
  *  @param[in] progress The @b optional handler, called with rows admitted; @c NULL skips it.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
- *  @return @p count on success, zero on failure.
+ *  @return @p count on success; on a failure or cancellation, the rows already published.
  *
- *  A batch is all-or-nothing. Every fallible step runs before the first entry identity is claimed,
- *  so a rejected batch leaves the index untouched and publishes no row - a cancelled one included,
- *  which reports @c usearch_error_cancelled_k having published nothing. A second thread driving
+ *  A batch without a handler is all-or-nothing. Every fallible step runs before the first entry
+ *  identity is claimed, so a rejected batch leaves the index untouched and publishes no row. With
+ *  a handler the batch advances in increments: a cancellation stops at an increment boundary,
+ *  keeps the rows already published, reports @c usearch_error_cancelled_k, and the return counts
+ *  what stands - as it does for a failure past the first increment. A second thread driving
  *  @p executor reports @c usearch_error_contended_k before any work begins.
  *
  *  One exception survives that rule: an accelerator fault severe enough to poison the device
  *  context reports @c usearch_error_device_k and latches the index unusable rather than partially
  *  applied.
  */
-USEARCH_EXPORT size_t usearch_dense_add(                                          //
-    usearch_dense_index_t index, usearch_executor_t executor,                     //
-    usearch_key_t const* keys,                                                    //
-    void const* vectors, size_t count, size_t stride,                             //
-    usearch_scalar_t scalar_kind,                                                 //
-    usearch_dense_expansion_config_t const* config,                               //
-    usearch_progress_callback_t progress, void* progress_state,                   //
-    usearch_dense_traversal_stats_t* stats,                                       //
+USEARCH_EXPORT size_t usearch_dense_add(                        //
+    usearch_dense_index_t index, usearch_executor_t executor,   //
+    usearch_key_t const* keys,                                  //
+    void const* vectors, size_t count, size_t stride,           //
+    usearch_scalar_t scalar_kind,                               //
+    usearch_dense_expansion_config_t const* config,             //
+    usearch_progress_callback_t progress, void* progress_state, //
+    usearch_dense_traversal_stats_t* stats,                     //
     usearch_error_t* error);
 
 /**
@@ -306,7 +309,7 @@ USEARCH_EXPORT size_t usearch_dense_add(                                        
  *      edges that were chosen when the graph around them was still incomplete.
  *
  *  @param[inout] index The handle to be refined.
- *  @param[in] executor Lanes and scratch to fan out over; its kind must match the residency.
+ *  @param[in] executor The executor to fan out over; its kind must match the residency.
  *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
  *  @param[in] progress The @b optional handler, called with nodes swept; @c NULL skips it.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
@@ -343,7 +346,7 @@ USEARCH_EXPORT size_t usearch_dense_refine(                     //
  *  @ref dense_index_concurrency
  *
  *  @param[in] index The handle to be queried.
- *  @param[in] executor Lanes and scratch for the batch; its kind must match the handle's residency.
+ *  @param[in] executor The executor driving the batch; its kind must match the handle's residency.
  *  @param[in] queries Base pointer of the first query row.
  *  @param[in] queries_count Number of query rows.
  *  @param[in] queries_stride Number of bytes between starts of consecutive query rows.
@@ -388,7 +391,8 @@ USEARCH_EXPORT void usearch_dense_search(                             //
  *  Non-matching entries still route the traversal rather than terminating it, so recall does not
  *  collapse at low selectivity - the walk crosses rejected regions to reach admitted ones behind
  *  them. The cost is that @p predicate is called far more often than @p wanted, once per scored
- *  candidate, so it belongs on the caller's fast path.
+ *  candidate, so it belongs on the caller's fast path - and it is invoked concurrently from the
+ *  executor's threads, so it must tolerate that.
  *
  *  @code{.c}
  *  static usearch_admission_t admits_tenant(usearch_key_t key, void* state) {
@@ -461,7 +465,7 @@ USEARCH_EXPORT size_t usearch_dense_get(            //
  *      and must not be used afterwards, not even for @c usearch_dense_free.
  *
  *  @param[inout] index The handle absorbing the donors.
- *  @param[in] executor The lanes and scratch the merge fans out over, one donor per lane.
+ *  @param[in] executor The executor the merge fans out over, one donor per thread or stream.
  *  @param[inout] donors Array of @p donors_count handles, every one of them consumed.
  *  @param[in] donors_count Number of entries in @p donors.
  *  @param[in] progress The @b optional handler, called with donors absorbed; @c NULL skips it.
@@ -470,7 +474,7 @@ USEARCH_EXPORT size_t usearch_dense_get(            //
  *
  *  Readers of @p index may keep searching throughout, since unpublished rows hide behind the
  *  watermark. Absorbing a group costs the wall clock of its largest source rather than the sum of
- *  them, because the lanes advance in parallel.
+ *  them, because the executor advances the donors in parallel.
  *
  *  Cancellation stops @b between donors, which makes this the one verb where it is not
  *  all-or-nothing: donors already absorbed stay absorbed, and the rest stay live handles the
@@ -519,13 +523,13 @@ USEARCH_EXPORT void usearch_dense_cursor_free(usearch_dense_cursor_t cursor);
  *  @brief Opens a resumable nearest-neighbor stream for one query; see @c usearch_dense_finder_t.
  *
  *  @param[in] index The handle to be queried.
- *  @param[in] executor Lanes and scratch the stream draws from; one lane stays pinned until freed.
+ *  @param[in] executor The executor the stream draws from; one of its threads stays pinned until freed.
  *  @param[in] query Base pointer of the single query row.
  *  @param[in] scalar_kind The scalar type of @p query.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *  @return The finder, or @c NULL on failure.
  *
- *  A live finder holds its lane for as long as it exists, so an executor with few lanes and many
+ *  A live finder holds its thread for as long as it exists, so an executor with few threads and many
  *  open finders starves. Free each one the moment its caller stops pulling, rather than at the end
  *  of the enclosing scope.
  */
@@ -569,7 +573,7 @@ USEARCH_EXPORT size_t usearch_dense_serialized_length(usearch_dense_index_t inde
  *  @ref dense_index_serialization
  *
  *  @param[in] index The handle to be written.
- *  @param[in] executor The lanes and scratch the write fans out over, one shard per lane.
+ *  @param[in] executor The executor the write fans out over, one shard per thread or stream.
  *  @param[in] path Destination path, whose extension picks the layout.
  *  @param[in] progress The @b optional handler, called with shards written; @c NULL skips it.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
@@ -592,7 +596,7 @@ USEARCH_EXPORT void usearch_dense_save(                         //
  *  @ref dense_index_serialization
  *
  *  @param[inout] index The handle to be populated.
- *  @param[in] executor The lanes and scratch the read fans out over, one shard per lane.
+ *  @param[in] executor The executor the read fans out over, one shard per thread or stream.
  *  @param[in] path The manifest of a sharded checkpoint, or a single @c .safegraphs monolith.
  *  @param[in] progress The @b optional handler, called with shards placed; @c NULL skips it.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
@@ -613,8 +617,8 @@ USEARCH_EXPORT void usearch_dense_save(                         //
  *
  *  Moving a checkpoint of any size is therefore resumable. A shard carries its own length in its
  *  header, so a second load skips whatever already arrived whole, and cancelling costs the shard
- *  in flight rather than everything behind it. A cancelled load publishes nothing and reports
- *  @c usearch_error_cancelled_k, leaving the handle as it was.
+ *  in flight rather than everything behind it. A cancelled or failed load reports its status and
+ *  leaves the shards already placed populated - clear or free the handle before loading again.
  */
 USEARCH_EXPORT void usearch_dense_load(                         //
     usearch_dense_index_t index, usearch_executor_t executor,   //
@@ -642,7 +646,7 @@ USEARCH_EXPORT void usearch_dense_metadata( //
  *  @ref dense_index_serialization
  *
  *  @param[in] index The handle to be written.
- *  @param[in] executor Lanes and scratch to fan out over; its kind must match the residency.
+ *  @param[in] executor The executor to fan out over; its kind must match the residency.
  *  @param[out] buffer Destination of at least @c usearch_dense_serialized_length bytes.
  *  @param[in] progress The @b optional handler, called with bytes written; @c NULL skips it.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
@@ -666,7 +670,7 @@ USEARCH_EXPORT void usearch_dense_save_buffer(                  //
  *      residency deciding the behavior like @c usearch_dense_load.
  *
  *  @param[inout] index The handle to be populated.
- *  @param[in] executor Lanes and scratch to fan out over; its kind must match the residency.
+ *  @param[in] executor The executor to fan out over; its kind must match the residency.
  *  @param[in] buffer Source holding one serialized monolith.
  *  @param[in] progress The @b optional handler, called with bytes placed; @c NULL skips it.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
@@ -699,7 +703,7 @@ USEARCH_EXPORT void usearch_dense_metadata_buffer( //
  *      instead of only the nearest. @ref dense_index_linear_algebra
  *
  *  @param[in] index The handle supplying the right-hand rows.
- *  @param[in] executor Lanes and scratch for the batch; its kind must match the handle's residency.
+ *  @param[in] executor The executor driving the batch; its kind must match the handle's residency.
  *  @param[in] rows Base pointer of the first left-hand row.
  *  @param[in] rows_count Number of left-hand rows.
  *  @param[in] rows_stride Number of bytes between starts of consecutive left-hand rows.
@@ -790,7 +794,7 @@ USEARCH_EXPORT typedef struct usearch_dense_attention_config_t {
  *  @ref dense_index_linear_algebra
  *
  *  @param[in] index The handle holding one layer's keys for one key-value head.
- *  @param[in] executor Lanes and scratch for the batch; its kind must match the handle's residency.
+ *  @param[in] executor The executor driving the batch; its kind must match the handle's residency.
  *  @param[in] queries Base pointer of the first query row; every query head is one more row.
  *  @param[in] queries_count Number of query rows.
  *  @param[in] queries_stride Number of bytes between starts of consecutive query rows.
@@ -866,7 +870,7 @@ USEARCH_EXPORT void usearch_dense_attend(                                       
  *  @ref dense_index_linear_algebra
  *
  *  @param[in] index The handle holding one token row per entry, several sharing a key.
- *  @param[in] executor Lanes and scratch to fan out over; its kind must match the residency.
+ *  @param[in] executor The executor to fan out over; its kind must match the residency.
  *  @param[in] queries Base pointer of the first query row, queries laid end to end.
  *  @param[in] queries_count Number of queries, each occupying @p rows_per_query rows.
  *  @param[in] rows_per_query Rows in every query; uniform, so ColBERT's padding applies as is.
