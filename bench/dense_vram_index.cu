@@ -2,10 +2,10 @@
  *  @brief The CLI entry of the CUDA dense-index benchmark: option parsing, the device
  *      probe, and the dataset-scalar & stored-dtype hops into the per-dtype shards.
  *  @author Ash Vardanian
- *  @file bench/dense.cu
+ *  @file bench/dense_vram_index.cu
  *  @date July 22, 2026
  *
- *  The CUDA pipeline and its compile-time cascade live in @c dense_index_cuda.cuh; this
+ *  The CUDA pipeline and its compile-time cascade live in @c dense/vram_index.cuh; this
  *  translation unit stays dtype-free by extern-declaring the @c run_with_stored_dtype
  *  instantiations the per-dtype shards carry, so the heavy device instantiation grids
  *  build in parallel and this unit recompiles in seconds.
@@ -21,41 +21,89 @@
 using namespace unum::usearch;
 namespace us = unum::usearch;
 
-#define USEARCH_DECLARE_CUDA_SHARD(dtype)                                                                         \
-    extern template int us::run_with_stored_dtype<nk::f32_t, dtype>(us::persisted_dataset<nk::f32_t> const&,      \
-                                                                    us::bench_options_t const&, int, cuda_arch_t, \
-                                                                    us::cuda_address_space_t);                    \
-    extern template int us::run_with_stored_dtype<nk::i8_t, dtype>(us::persisted_dataset<nk::i8_t> const&,        \
-                                                                   us::bench_options_t const&, int, cuda_arch_t,  \
-                                                                   us::cuda_address_space_t);                     \
-    extern template int us::run_with_stored_dtype<nk::u8_t, dtype>(us::persisted_dataset<nk::u8_t> const&,        \
-                                                                   us::bench_options_t const&, int, cuda_arch_t,  \
-                                                                   us::cuda_address_space_t);
-
-USEARCH_DECLARE_CUDA_SHARD(nk_f32_k)
-USEARCH_DECLARE_CUDA_SHARD(nk_bf16_k)
-USEARCH_DECLARE_CUDA_SHARD(nk_f16_k)
-USEARCH_DECLARE_CUDA_SHARD(nk_i8_k)
-USEARCH_DECLARE_CUDA_SHARD(nk_i4_k)
-USEARCH_DECLARE_CUDA_SHARD(nk_u8_k)
-USEARCH_DECLARE_CUDA_SHARD(nk_u1_k)
-
-#undef USEARCH_DECLARE_CUDA_SHARD
+extern template int us::run_with_stored_dtype<nk::f32_t, nk_f32_k>( //
+    us::persisted_dataset<nk::f32_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::bf16_t, nk_f32_k>( //
+    us::persisted_dataset<nk::bf16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::i8_t, nk_f32_k>( //
+    us::persisted_dataset<nk::i8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::u8_t, nk_f32_k>( //
+    us::persisted_dataset<nk::u8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::f32_t, nk_bf16_k>( //
+    us::persisted_dataset<nk::f32_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::bf16_t, nk_bf16_k>( //
+    us::persisted_dataset<nk::bf16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::i8_t, nk_bf16_k>( //
+    us::persisted_dataset<nk::i8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::u8_t, nk_bf16_k>( //
+    us::persisted_dataset<nk::u8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::f32_t, nk_f16_k>( //
+    us::persisted_dataset<nk::f32_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::bf16_t, nk_f16_k>( //
+    us::persisted_dataset<nk::bf16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::i8_t, nk_f16_k>( //
+    us::persisted_dataset<nk::i8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::u8_t, nk_f16_k>( //
+    us::persisted_dataset<nk::u8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::f32_t, nk_i8_k>( //
+    us::persisted_dataset<nk::f32_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::bf16_t, nk_i8_k>( //
+    us::persisted_dataset<nk::bf16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::i8_t, nk_i8_k>( //
+    us::persisted_dataset<nk::i8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::u8_t, nk_i8_k>( //
+    us::persisted_dataset<nk::u8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::f32_t, nk_i4_k>( //
+    us::persisted_dataset<nk::f32_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::bf16_t, nk_i4_k>( //
+    us::persisted_dataset<nk::bf16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::i8_t, nk_i4_k>( //
+    us::persisted_dataset<nk::i8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::u8_t, nk_i4_k>( //
+    us::persisted_dataset<nk::u8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::f32_t, nk_u8_k>( //
+    us::persisted_dataset<nk::f32_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::bf16_t, nk_u8_k>( //
+    us::persisted_dataset<nk::bf16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::i8_t, nk_u8_k>( //
+    us::persisted_dataset<nk::i8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::u8_t, nk_u8_k>( //
+    us::persisted_dataset<nk::u8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::f32_t, nk_u1_k>( //
+    us::persisted_dataset<nk::f32_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::bf16_t, nk_u1_k>( //
+    us::persisted_dataset<nk::bf16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::i8_t, nk_u1_k>( //
+    us::persisted_dataset<nk::i8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
+extern template int us::run_with_stored_dtype<nk::u8_t, nk_u1_k>( //
+    us::persisted_dataset<nk::u8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
 
 /** @brief Opens the dataset with the file-native scalar and lowers the stored dtype onto
  *      the shard-carried cascade - or reports the dtypes that carry device kits. */
 template <typename dataset_scalar_type_>
 static int open_and_run(bench_options_t const& options, int device, cuda_arch_t arch_ceiling,
                         cuda_address_space_t plane_space) {
-    auto opened = persisted_dataset<dataset_scalar_type_>::open(
-        options.vectors_path.c_str(), options.queries_path.empty() ? nullptr : options.queries_path.c_str(),
-        options.neighbors_path.empty() ? nullptr : options.neighbors_path.c_str());
+    auto opened = persisted_dataset<dataset_scalar_type_>::open(options.vectors_path, options.queries_path,
+                                                                options.neighbors_path);
     if (opened.status != status_t::success_k) {
         fmt::println("Failed to open the dataset: {}", options.vectors_path);
         return 1;
     }
-    // Sorted by decreasing dynamic range, grouped floats, signed integers, unsigned.
-    return dispatch_value<nk_f32_k, nk_bf16_k, nk_f16_k, nk_i8_k, nk_i4_k, nk_u8_k, nk_u1_k>(
+    return dispatch_stored_dtype(
         options.stored_dtype,
         [&](auto dtype) {
             return run_with_stored_dtype<dataset_scalar_type_, dtype.value>(opened.value, options, device, arch_ceiling,
@@ -91,7 +139,6 @@ int main(int argc, char** argv) {
             "kit-generation ceiling: ampere, ada, hopper, or blackwell; newest by default",
         clipp::option("--managed-memory").set(plane_space, cuda_address_space_t::managed_k) % //
             "managed-memory planes: oversubscribe VRAM through the pager, host-RAM ceiling",
-        // Sorted by decreasing dynamic range, grouped floats, signed integers, unsigned.
         (clipp::option("--f32").set(options.stored_dtype, nk_f32_k) |
          clipp::option("--bf16").set(options.stored_dtype, nk_bf16_k) |
          clipp::option("--f16").set(options.stored_dtype, nk_f16_k) |
@@ -105,14 +152,14 @@ int main(int argc, char** argv) {
          clipp::option("--euclidean").set(options.kernel, nk_kernel_euclidean_k) |
          clipp::option("--hamming").set(options.kernel, nk_kernel_hamming_k) |
          clipp::option("--jaccard").set(options.kernel, nk_kernel_jaccard_k)) %
-            "metric; angular by default, the binary pair for --u1",
+            "metric; angular by default, hamming and jaccard for --u1",
         (clipp::option("--batch") & clipp::value("rows", options.batch)) %
             "rows & queries per launch; 65536 by default",
         (clipp::option("--connectivity") & clipp::value("degree", options.connectivity)) % "16, 32, or 128",
         (clipp::option("--expansion-add") & clipp::value("breadth", options.expansion_add)) %
-            "insertion candidate pool",
+            "insertion candidate pool; 256 by default",
         (clipp::option("--expansion-search") & clipp::value("breadth", options.expansion_search)) %
-            "search candidate pool",
+            "search candidate pool; 96 by default",
         (clipp::option("--top-k") & clipp::value("count", options.top_k)) % "matches per query to judge",
         (clipp::option("--max-vectors") & clipp::value("count", options.max_vectors)) % "cap on ingested rows",
         clipp::option("--self-recall").set(options.self_recall, true) % //
@@ -128,7 +175,7 @@ int main(int argc, char** argv) {
         clipp::option("--help").set(options.help) % "print this message");
 
     if (!clipp::parse(argc, argv, cli) || options.help || options.vectors_path.empty()) {
-        for (auto const& section : clipp::make_man_page(cli, "usearch_bench_cuda"))
+        for (auto const& section : clipp::make_man_page(cli, "usearch_bench_dense_vram_index"))
             fmt::println("{}\n{}\n", section.title(), section.content());
         return options.help ? 0 : 1;
     }
@@ -164,11 +211,11 @@ int main(int argc, char** argv) {
         return 1;
     }
     fmt::println("  kernels requested: {} · {} · up to {} kits", dtype_name(options.stored_dtype),
-                 kernel_name(options.kernel), max_arch_name.empty() ? "blackwell" : max_arch_name.c_str());
+                 nk_kernel_name(options.kernel), max_arch_name.empty() ? "blackwell" : max_arch_name.c_str());
 
     // File-scalar axis: lower the file's dtype to the C++ wrapper the run is instantiated over,
     // through NumKong's own `type_for` - the same paradigm the typed cascade rides.
-    return dispatch_value<nk_f32_k, nk_i8_k, nk_u8_k>(
+    return dispatch_file_dtype(
         file_dtype,
         [&](auto dtype) {
             return open_and_run<typename nk::type_for<dtype.value>::type>(options, device, arch_ceiling, plane_space);

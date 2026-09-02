@@ -124,7 +124,7 @@
             "name": "Benchmark CUDA on Deep 10M",
             "type": "cuda-gdb",
             "request": "launch",
-            "program": "${workspaceFolder}/build_dev/bench/usearch_bench_cuda",
+            "program": "${workspaceFolder}/build_dev/bench/usearch_bench_dense_vram_index",
             "cwd": "${workspaceFolder}",
             "args": [
                 "--vectors",

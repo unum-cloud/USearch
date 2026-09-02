@@ -1,66 +1,76 @@
 /**
- *  @brief The CLI entry of the CPU dense-index benchmark: option parsing, the pool &
+ *  @brief The CLI entry of the single-index CPU benchmark: option parsing, the pool &
  *      topology setup, and the dataset-scalar hop into the per-dtype shards.
  *  @author Ash Vardanian
- *  @file bench/dense.cpp
+ *  @file bench/dense_ram_index.cpp
  *  @date July 23, 2026
  *
- *  The compile-time cascade lives in @c dense_index.hpp; this translation unit stays
- *  dtype-free by extern-declaring the @c run_with_compute instantiations the per-dtype
- *  shards - @c dense_index_bf16.cpp, @c dense_index_i8.cpp, @c dense_index_u8.cpp, and
- *  @c dense_index_i4.cpp - carry, so the heavy kernel grids build in parallel and this
- *  unit recompiles in seconds.
+ *  The compile-time cascade lives in @c dense/ram_index.hpp; this translation unit stays
+ *  dtype-free by extern-declaring the @c run_with_stored_dtype instantiations the per-dtype
+ *  shards - one per stored dtype: @c f32, @c bf16, @c f16, @c i8, @c i4, @c u8, and @c u1 -
+ *  carry, so the heavy kernel grids build in parallel and this unit recompiles in seconds.
  */
 #include "dense/ram_index.hpp"
 
 using namespace unum::usearch;
 namespace us = unum::usearch;
 
-extern template int us::run_with_compute<nk::f32_t, nk_bf16_k>(bench_launch<nk::f32_t> const&);
-extern template int us::run_with_compute<nk::bf16_t, nk_bf16_k>(bench_launch<nk::bf16_t> const&);
-extern template int us::run_with_compute<nk::i8_t, nk_bf16_k>(bench_launch<nk::i8_t> const&);
-extern template int us::run_with_compute<nk::u8_t, nk_bf16_k>(bench_launch<nk::u8_t> const&);
+extern template int us::run_with_stored_dtype<nk::f32_t, nk_f32_k>(bench_launch<nk::f32_t> const&);
+extern template int us::run_with_stored_dtype<nk::bf16_t, nk_f32_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_stored_dtype<nk::i8_t, nk_f32_k>(bench_launch<nk::i8_t> const&);
+extern template int us::run_with_stored_dtype<nk::u8_t, nk_f32_k>(bench_launch<nk::u8_t> const&);
 
-extern template int us::run_with_compute<nk::f32_t, nk_i8_k>(bench_launch<nk::f32_t> const&);
-extern template int us::run_with_compute<nk::bf16_t, nk_i8_k>(bench_launch<nk::bf16_t> const&);
-extern template int us::run_with_compute<nk::i8_t, nk_i8_k>(bench_launch<nk::i8_t> const&);
-extern template int us::run_with_compute<nk::u8_t, nk_i8_k>(bench_launch<nk::u8_t> const&);
+extern template int us::run_with_stored_dtype<nk::f32_t, nk_bf16_k>(bench_launch<nk::f32_t> const&);
+extern template int us::run_with_stored_dtype<nk::bf16_t, nk_bf16_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_stored_dtype<nk::i8_t, nk_bf16_k>(bench_launch<nk::i8_t> const&);
+extern template int us::run_with_stored_dtype<nk::u8_t, nk_bf16_k>(bench_launch<nk::u8_t> const&);
 
-extern template int us::run_with_compute<nk::f32_t, nk_u8_k>(bench_launch<nk::f32_t> const&);
-extern template int us::run_with_compute<nk::bf16_t, nk_u8_k>(bench_launch<nk::bf16_t> const&);
-extern template int us::run_with_compute<nk::i8_t, nk_u8_k>(bench_launch<nk::i8_t> const&);
-extern template int us::run_with_compute<nk::u8_t, nk_u8_k>(bench_launch<nk::u8_t> const&);
+extern template int us::run_with_stored_dtype<nk::f32_t, nk_f16_k>(bench_launch<nk::f32_t> const&);
+extern template int us::run_with_stored_dtype<nk::bf16_t, nk_f16_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_stored_dtype<nk::i8_t, nk_f16_k>(bench_launch<nk::i8_t> const&);
+extern template int us::run_with_stored_dtype<nk::u8_t, nk_f16_k>(bench_launch<nk::u8_t> const&);
 
-extern template int us::run_with_compute<nk::f32_t, nk_i4_k>(bench_launch<nk::f32_t> const&);
-extern template int us::run_with_compute<nk::bf16_t, nk_i4_k>(bench_launch<nk::bf16_t> const&);
-extern template int us::run_with_compute<nk::i8_t, nk_i4_k>(bench_launch<nk::i8_t> const&);
-extern template int us::run_with_compute<nk::u8_t, nk_i4_k>(bench_launch<nk::u8_t> const&);
+extern template int us::run_with_stored_dtype<nk::f32_t, nk_i8_k>(bench_launch<nk::f32_t> const&);
+extern template int us::run_with_stored_dtype<nk::bf16_t, nk_i8_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_stored_dtype<nk::i8_t, nk_i8_k>(bench_launch<nk::i8_t> const&);
+extern template int us::run_with_stored_dtype<nk::u8_t, nk_i8_k>(bench_launch<nk::u8_t> const&);
 
-/** @brief Stored-dtype axis: the CLI's chosen store instantiates the compute chain, or reports
- *      the dtypes that carry adapted CPU kits. */
-template <typename dataset_scalar_type_>
-int run_with_stored_dtype(bench_launch<dataset_scalar_type_> const& launch) {
-    return dispatch_value<nk_bf16_k, nk_i8_k, nk_u8_k, nk_i4_k>(
-        launch.options.stored_dtype,
-        [&](auto dtype) { return run_with_compute<dataset_scalar_type_, dtype.value>(launch); },
-        [&](auto dtype) {
-            fmt::println("Stored dtype {} has no adapted kernels; override with --bf16, --i8, --u8, or --i4",
-                         dtype_name(dtype));
-            return 1;
-        });
-}
+extern template int us::run_with_stored_dtype<nk::f32_t, nk_i4_k>(bench_launch<nk::f32_t> const&);
+extern template int us::run_with_stored_dtype<nk::bf16_t, nk_i4_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_stored_dtype<nk::i8_t, nk_i4_k>(bench_launch<nk::i8_t> const&);
+extern template int us::run_with_stored_dtype<nk::u8_t, nk_i4_k>(bench_launch<nk::u8_t> const&);
+
+extern template int us::run_with_stored_dtype<nk::f32_t, nk_u8_k>(bench_launch<nk::f32_t> const&);
+extern template int us::run_with_stored_dtype<nk::bf16_t, nk_u8_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_stored_dtype<nk::i8_t, nk_u8_k>(bench_launch<nk::i8_t> const&);
+extern template int us::run_with_stored_dtype<nk::u8_t, nk_u8_k>(bench_launch<nk::u8_t> const&);
+
+extern template int us::run_with_stored_dtype<nk::f32_t, nk_u1_k>(bench_launch<nk::f32_t> const&);
+extern template int us::run_with_stored_dtype<nk::bf16_t, nk_u1_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_stored_dtype<nk::i8_t, nk_u1_k>(bench_launch<nk::i8_t> const&);
+extern template int us::run_with_stored_dtype<nk::u8_t, nk_u1_k>(bench_launch<nk::u8_t> const&);
 
 /** @brief Opens the dataset with the file-native scalar and enters the typed cascade. */
 template <typename dataset_scalar_type_>
 int open_and_run(bench_options_t const& options, fu_pool_t pool, fu_topology_t topology) {
-    auto opened = persisted_dataset<dataset_scalar_type_>::open(
-        options.vectors_path.c_str(), options.queries_path.empty() ? nullptr : options.queries_path.c_str(),
-        options.neighbors_path.empty() ? nullptr : options.neighbors_path.c_str());
+    auto opened = persisted_dataset<dataset_scalar_type_>::open(options.vectors_path, options.queries_path,
+                                                                options.neighbors_path);
     if (opened.status != status_t::success_k) {
         fmt::println("Failed to open the dataset: {}", options.vectors_path);
         return 1;
     }
-    return run_with_stored_dtype(bench_launch<dataset_scalar_type_> {opened.value, options, pool, topology});
+    return dispatch_stored_dtype(
+        options.stored_dtype,
+        [&](auto dtype) {
+            return run_with_stored_dtype<dataset_scalar_type_, dtype.value>(
+                bench_launch<dataset_scalar_type_> {opened.value, options, pool, topology});
+        },
+        [&](auto dtype) {
+            fmt::println(
+                "Stored dtype {} has no adapted kernels; override with --f32, --bf16, --f16, --i8, --i4, --u8, or --u1",
+                dtype_name(dtype));
+            return 1;
+        });
 }
 
 int main(int argc, char** argv) {
@@ -71,10 +81,13 @@ int main(int argc, char** argv) {
         (clipp::option("--vectors") & clipp::value("path", options.vectors_path)) % "base vectors, `.fbin` family",
         (clipp::option("--queries") & clipp::value("path", options.queries_path)) % "query vectors, same dtype",
         (clipp::option("--neighbors") & clipp::value("path", options.neighbors_path)) % "ground truth, `.ibin`",
-        (clipp::option("--bf16").set(options.stored_dtype, nk_bf16_k) |
+        (clipp::option("--f32").set(options.stored_dtype, nk_f32_k) |
+         clipp::option("--bf16").set(options.stored_dtype, nk_bf16_k) |
+         clipp::option("--f16").set(options.stored_dtype, nk_f16_k) |
          clipp::option("--i8").set(options.stored_dtype, nk_i8_k) |
+         clipp::option("--i4").set(options.stored_dtype, nk_i4_k) |
          clipp::option("--u8").set(options.stored_dtype, nk_u8_k) |
-         clipp::option("--i4").set(options.stored_dtype, nk_i4_k)) %
+         clipp::option("--u1").set(options.stored_dtype, nk_u1_k)) %
             "stored dtype override, staging `nk::cast` on ingest",
         (clipp::option("--max-compute") & clipp::value("name", max_compute_name)) %
             "compute ceiling by microarchitecture, like `icelake`, or `serial`; newest detected by default",
@@ -82,21 +95,25 @@ int main(int argc, char** argv) {
             "scheduling ceiling by wait instruction, like `tpause`, or `standard`; newest offered by default",
         (clipp::option("--dot").set(options.kernel, nk_kernel_dot_k) |
          clipp::option("--angular").set(options.kernel, nk_kernel_angular_k) |
-         clipp::option("--euclidean").set(options.kernel, nk_kernel_euclidean_k)) %
-            "metric; angular by default",
+         clipp::option("--euclidean").set(options.kernel, nk_kernel_euclidean_k) |
+         clipp::option("--hamming").set(options.kernel, nk_kernel_hamming_k) |
+         clipp::option("--jaccard").set(options.kernel, nk_kernel_jaccard_k)) %
+            "metric; angular by default, hamming and jaccard for --u1",
         (clipp::option("--threads") & clipp::value("count", options.threads)) %
-            "worker threads; 7/8 of the logical cores by default",
+            "threads; 7/8 of the logical cores by default",
         (clipp::option("--memory-domain") & clipp::value("id", memory_domain_name)) %
-            "pin memory & threads to one NUMA domain, or `all` for one index per domain",
+            "pin memory & threads to one NUMA domain; the heap otherwise",
         (clipp::option("--batch") & clipp::value("rows", options.batch)) %
             "staging trampoline rows shared by all threads; 4 × threads by default",
         (clipp::option("--connectivity") & clipp::value("degree", options.connectivity)) % "16, 32, or 128",
         (clipp::option("--expansion-add") & clipp::value("breadth", options.expansion_add)) %
-            "insertion candidate pool; 128 by default, tuned for 99% recall@10",
+            "insertion candidate pool; 256 by default",
         (clipp::option("--expansion-search") & clipp::value("breadth", options.expansion_search)) %
-            "search candidate pool; 192 by default, tuned for 99% recall@10",
+            "search candidate pool; 96 by default",
         (clipp::option("--top-k") & clipp::value("count", options.top_k)) % "matches per query to judge",
         (clipp::option("--max-vectors") & clipp::value("count", options.max_vectors)) % "cap on ingested rows",
+        (clipp::option("--first-vector") & clipp::value("row", options.first_vector)) %
+            "first dataset row to view; slices one file across independent runs",
         clipp::option("--self-recall").set(options.self_recall, true) % //
             "query every stored vector for itself instead of the query file",
         (clipp::option("--save") & clipp::value("name", options.save_name)) % //
@@ -112,7 +129,7 @@ int main(int argc, char** argv) {
         clipp::option("--help").set(options.help) % "print this message");
 
     if (!clipp::parse(argc, argv, cli) || options.help || options.vectors_path.empty()) {
-        for (auto const& section : clipp::make_man_page(cli, "usearch_bench"))
+        for (auto const& section : clipp::make_man_page(cli, "usearch_bench_dense_ram_index"))
             fmt::println("{}\n{}\n", section.title(), section.content());
         return options.help ? 0 : 1;
     }
@@ -161,7 +178,7 @@ int main(int argc, char** argv) {
     fu_fabric_t fabric = nullptr;
     fu_pool_t pool = nullptr;
     if (fu_topology_new(&topology) != fu_success_k || fu_fabric_new(&fabric) != fu_success_k ||
-        fu_pool_new("usearch_bench", options.max_schedule, &pool) != fu_success_k) {
+        fu_pool_new("usearch_bench_dense_ram_index", options.max_schedule, &pool) != fu_success_k) {
         fmt::println("Failed to inspect the topology or create the pool");
         return 1;
     }
@@ -172,13 +189,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Resolve `--memory-domain` into the engaged-domain list: empty means one machine-wide
-    // heap index, a single id pins memory & threads to that domain, and `all` builds one
-    // index per memory domain - the list IS the placement, no modes.
-    if (memory_domain_name == "all")
-        for (std::size_t domain = 0; domain != memory_domains; ++domain)
-            options.memory_domains.push_back(static_cast<fu_memory_domain_id_t>(domain));
-    else if (!memory_domain_name.empty()) {
+    // Resolve `--memory-domain`: empty means one machine-wide heap index, and a single id
+    // pins memory & threads to that domain. This benchmark measures exactly one index - the
+    // multi-domain arrangement is `usearch_bench_dense_ram_indexes`, driving the sharded index.
+    if (!memory_domain_name.empty()) {
         fu_memory_domain_id_t const domain = static_cast<fu_memory_domain_id_t>(
             std::strtol(memory_domain_name.c_str(), nullptr, 10));
         if (domain < 0 || static_cast<std::size_t>(domain) >= memory_domains) {
@@ -191,8 +205,8 @@ int main(int argc, char** argv) {
 
     // Default to 7/8 of the available logical cores: at full occupancy the strictly-ordered
     // publication convoy serializes on scheduler latency, and throughput collapses by an order
-    // of magnitude. A single pinned domain carves both the core budget and the spawn from the
-    // compute domain whose local memory it is.
+    // of magnitude. A single pinned domain carves the core budget from every compute domain
+    // whose local memory it is - several clusters can share one NUMA node.
     bool spawned = false;
     std::size_t threads = options.threads;
     if (options.memory_domains.size() == 1) {
@@ -201,17 +215,19 @@ int main(int argc, char** argv) {
             fmt::println("Failed to count the compute domains");
             return 1;
         }
-        for (std::size_t compute_domain = 0; compute_domain != compute_domains && !spawned; ++compute_domain) {
-            std::size_t local_memory = 0;
-            if (fu_local_memory_of(topology, compute_domain, &local_memory) != fu_success_k) continue;
-            if (local_memory != static_cast<std::size_t>(options.memory_domains.front())) continue;
-            if (!threads) {
-                std::size_t local_cores = 0;
-                if (fu_logical_cores_count_in(topology, compute_domain, &local_cores) != fu_success_k) continue;
-                threads = std::max<std::size_t>(1, local_cores * 7 / 8);
+        if (!threads) {
+            std::size_t local_cores = 0;
+            for (std::size_t compute_domain = 0; compute_domain != compute_domains; ++compute_domain) {
+                std::size_t local_memory = 0, domain_cores = 0;
+                if (fu_local_memory_of(topology, compute_domain, &local_memory) != fu_success_k) continue;
+                if (local_memory != static_cast<std::size_t>(options.memory_domains.front())) continue;
+                if (fu_logical_cores_count_in(topology, compute_domain, &domain_cores) != fu_success_k) continue;
+                local_cores += domain_cores;
             }
-            spawned = fu_pool_spawn_on(topology, pool, compute_domain, threads, fu_caller_inclusive_k) == fu_success_k;
+            threads = std::max<std::size_t>(1, local_cores * 7 / 8);
         }
+        spawned = fu_pool_spawn_near_memory_domain(topology, pool, options.memory_domains.front(), threads,
+                                                   fu_caller_inclusive_k) == fu_success_k;
     }
     else {
         if (!threads) {
@@ -248,7 +264,7 @@ int main(int argc, char** argv) {
 
     // File-scalar axis: the newest hop of the compile-time cascade, lowering the file's dtype
     // to the C++ wrapper the whole run is instantiated over through NumKong's own `type_for`.
-    int const exit_code = dispatch_value<nk_f32_k, nk_bf16_k, nk_i8_k, nk_u8_k>(
+    int const exit_code = dispatch_file_dtype(
         file_dtype,
         [&](auto dtype) { return open_and_run<typename nk::type_for<dtype.value>::type>(options, pool, topology); },
         [&](auto dtype) {

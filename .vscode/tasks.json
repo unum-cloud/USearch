@@ -24,7 +24,7 @@
         },
         {
             "label": "Build Profile",
-            "detail": "The benchmark configuration BENCHMARKS.md measures",
+            "detail": "The profiling configuration bench/README.md measures with",
             "command": "cmake --preset profile && cmake --build --preset profile",
             "args": [],
             "type": "shell",

@@ -260,7 +260,6 @@ function (setup_target TARGET_NAME)
                     -Wextra
                     -Wno-conversion
                     -Wno-unknown-pragmas
-                    -march=native
                     -fmax-errors=1
                     -pedantic
                     -fdiagnostics-color=always

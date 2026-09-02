@@ -143,19 +143,6 @@ inline char const* dtype_name(nk_dtype_t dtype) noexcept {
     }
 }
 
-/** @brief Names the benchmarked kernel subset; NumKong exposes no C-level name table yet. */
-inline char const* kernel_name(nk_kernel_kind_t kernel) noexcept {
-    switch (kernel) {
-    case nk_kernel_dot_k: return "dot";
-    case nk_kernel_angular_k: return "angular";
-    case nk_kernel_euclidean_k: return "euclidean";
-    case nk_kernel_sqeuclidean_k: return "sqeuclidean";
-    case nk_kernel_hamming_k: return "hamming";
-    case nk_kernel_jaccard_k: return "jaccard";
-    default: return "unknown";
-    }
-}
-
 /**
  *  @brief Precomputes the position-discount tables shared by every query's judgment, so
  *      per-query normalization is one lookup instead of a chain of @c log2 calls.

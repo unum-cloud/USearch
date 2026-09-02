@@ -54,7 +54,7 @@ cmake --build build_relwithdebinfo --config RelWithDebInfo
 build_relwithdebinfo/usearch_test
 ```
 
-Those three configurations, and the benchmarking one from [BENCHMARKS.md](BENCHMARKS.md), are also packaged as CMake presets, so the flag soup below is optional:
+Those three configurations, and the benchmarking one from [bench/README.md](bench/README.md), are also packaged as CMake presets, so the flag soup below is optional:
 
 ```sh
 cmake --list-presets              # debug, relwithdebinfo, release, profile, dev, trace, fleet

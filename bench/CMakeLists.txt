@@ -1,28 +1,52 @@
-# One benchmark executable: the dtype-free CLI unit beside the per-dtype shards, each
-# carrying its slice of the instantiation grid in a parallel LLVM backend.
+# Every benchmark is named after the index type it drives, and its dtype shards, ordered by shrinking
+# dynamic range, each carry one stored dtype's instantiation grid so the grids build in parallel.
 add_executable(
-    usearch_bench
-    dense.cpp
+    usearch_bench_dense_ram_index
+    dense_ram_index.cpp
+    dense/ram_index_f32.cpp
     dense/ram_index_bf16.cpp
+    dense/ram_index_f16.cpp
     dense/ram_index_i8.cpp
-    dense/ram_index_u8.cpp
     dense/ram_index_i4.cpp
+    dense/ram_index_u8.cpp
+    dense/ram_index_u1.cpp
 )
-setup_target(usearch_bench)
-target_include_directories(usearch_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/test)
+setup_target(usearch_bench_dense_ram_index)
+target_compile_options(usearch_bench_dense_ram_index PRIVATE -march=native)
+target_include_directories(usearch_bench_dense_ram_index PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/test)
 target_link_libraries(
-    usearch_bench PRIVATE clipp fmt::fmt yyjson ${USEARCH_FORKUNION_LIBRARY} ${USEARCH_STRINGZILLA_LIBRARY}
+    usearch_bench_dense_ram_index PRIVATE clipp fmt::fmt yyjson ${USEARCH_FORKUNION_LIBRARY}
+                                          ${USEARCH_STRINGZILLA_LIBRARY}
 )
 
-# The CUDA bench skips `setup_target`: its host-compiler flags don't survive the CUDA
-# driver, so the target wires the interface includes directly.
+add_executable(
+    usearch_bench_dense_ram_indexes
+    dense_ram_indexes.cpp
+    dense/ram_indexes_f32.cpp
+    dense/ram_indexes_bf16.cpp
+    dense/ram_indexes_f16.cpp
+    dense/ram_indexes_i8.cpp
+    dense/ram_indexes_i4.cpp
+    dense/ram_indexes_u8.cpp
+    dense/ram_indexes_u1.cpp
+)
+setup_target(usearch_bench_dense_ram_indexes)
+target_compile_options(usearch_bench_dense_ram_indexes PRIVATE -march=native)
+target_include_directories(usearch_bench_dense_ram_indexes PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/test)
+target_link_libraries(
+    usearch_bench_dense_ram_indexes PRIVATE clipp fmt::fmt yyjson ${USEARCH_FORKUNION_LIBRARY}
+                                            ${USEARCH_STRINGZILLA_LIBRARY}
+)
+
+# The CUDA bench skips `setup_target`: its host-compiler flags don't survive the CUDA driver, so the
+# target wires the interface includes directly.
 if (USEARCH_BUILD_CUDA)
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
 
     add_executable(
-        usearch_bench_cuda
-        dense.cu
+        usearch_bench_dense_vram_index
+        dense_vram_index.cu
         dense/vram_index_f32.cu
         dense/vram_index_bf16.cu
         dense/vram_index_f16.cu
@@ -32,18 +56,18 @@ if (USEARCH_BUILD_CUDA)
         dense/vram_index_u1.cu
     )
     target_include_directories(
-        usearch_bench_cuda PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
-                                   ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/test
+        usearch_bench_dense_vram_index PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
+                                               ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/test
     )
     set_target_properties(
-        usearch_bench_cuda
+        usearch_bench_dense_vram_index
         PROPERTIES CXX_STANDARD 20
                    CUDA_STANDARD 20
                    CUDA_ARCHITECTURES "${USEARCH_CUDA_ARCHITECTURES}"
     )
-    target_compile_options(usearch_bench_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
+    target_compile_options(usearch_bench_dense_vram_index PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
     target_link_libraries(
-        usearch_bench_cuda PRIVATE clipp fmt::fmt yyjson CUDA::cuda_driver ${USEARCH_FORKUNION_LIBRARY}
-                                   ${USEARCH_STRINGZILLA_LIBRARY}
+        usearch_bench_dense_vram_index PRIVATE clipp fmt::fmt yyjson CUDA::cuda_driver ${USEARCH_FORKUNION_LIBRARY}
+                                               ${USEARCH_STRINGZILLA_LIBRARY}
     )
 endif ()

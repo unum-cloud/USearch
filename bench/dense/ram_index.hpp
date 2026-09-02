@@ -7,7 +7,7 @@
  *  @date July 17, 2026
  *
  *  The backend-neutral surface - options, checkpoints, dataset streaming, telemetry, result
- *  judgment, and the machine report - lives in @c dense_index.cuh; this header owns
+ *  judgment, and the machine report - lives in @c dense.cuh; this header owns
  *  everything CPU: the ForkUnion run loops streaming one row or query per task, the
  *  NUMA-domain placement, the waiter dispatch, and the compile-time cascade resolving
  *  the CLI into one concrete @c dense_ram_index instantiation - sharded per stored dtype,
@@ -19,7 +19,7 @@
  *      wget -nc https://huggingface.co/datasets/unum-cloud/ann-wiki-1m/resolve/main/base.1M.fbin &&
  *      wget -nc https://huggingface.co/datasets/unum-cloud/ann-wiki-1m/resolve/main/query.public.100K.fbin &&
  *      wget -nc https://huggingface.co/datasets/unum-cloud/ann-wiki-1m/resolve/main/groundtruth.public.100K.ibin
- *  usearch_bench --vectors ~/datasets/wiki_1M/base.1M.fbin \
+ *  usearch_bench_dense_ram_index --vectors ~/datasets/wiki_1M/base.1M.fbin \
  *      --queries ~/datasets/wiki_1M/query.public.100K.fbin \
  *      --neighbors ~/datasets/wiki_1M/groundtruth.public.100K.ibin --bf16
  *  @endcode
@@ -34,13 +34,25 @@
  *
  *  @code{.sh}
  *  sudo sysctl vm.nr_hugepages=16384        # 32 GB of 2 MB pages, split across the domains
- *  usearch_bench --huge-pages 16384 \
- *      --vectors ~/datasets/sift_10M/base.10M.u8bin --memory-domain all
+ *  usearch_bench_dense_ram_index --huge-pages 16384 \
+ *      --vectors ~/datasets/sift_10M/base.10M.u8bin --memory-domain 0
+ *  @endcode
+ *
+ *  This binary holds exactly one index; plurality belongs to the operating system or to the
+ *  sharded sibling. The zero-cross-traffic upper bound - N independent builds, one per memory
+ *  domain, each pinned to every compute domain local to it and ingesting its own slice of one
+ *  dataset - is an invocation rather than a code path:
+ *
+ *  @code{.sh}
+ *  for domain in 0 1; do
+ *      usearch_bench_dense_ram_index --memory-domain $domain --vectors base.10M.bf16bin \
+ *          --first-vector $((domain * 5000000)) --max-vectors 5000000 --self-recall &
+ *  done; wait
  *  @endcode
  *
  *  Defaults are inferred and each is overridable:
- *  - the stored dtype matches the dataset file, unless `--bf16`, `--i8`, `--u8`, or `--i4`
- *    asks for a streaming `nk::cast` through a `--batch`-row trampoline on ingest;
+ *  - the stored dtype matches the dataset file, unless `--f32`, `--bf16`, `--f16`, `--i8`, `--i4`,
+ *    `--u8`, or `--u1` asks for a streaming `nk::cast` through a `--batch`-row trampoline on ingest;
  *  - the newest runtime compute capability drives the distance kernels, unless
  *    `--max-compute` caps it by NumKong's microarchitecture names, like `icelake`;
  *  - the strongest offered wait instruction parks stalled threads, unless `--max-schedule`
@@ -50,7 +62,7 @@
  */
 #pragma once
 
-#include <cmath>     // `std::abs`
+#include <cmath> // `std::abs`
 
 #include <algorithm> // `std::max`, `std::min`, `std::copy_n`
 #include <chrono>    // `std::chrono::steady_clock`
@@ -63,7 +75,7 @@
 #include <fmt/format.h>
 
 #include <usearch/dense/ram_index.hpp>
-#include <usearch/dense/ram_indexes.hpp>
+#include <usearch/utilities/ram_device.hpp>
 
 #include "dense.cuh"
 #include "utilities/persisted_dataset.hpp"
@@ -96,57 +108,18 @@ using monitor_waiter_t = fu::standard_yield_t;
 using schedule_waiters_t = std::tuple<hint_waiter_t, monitor_waiter_t>;
 
 /**
- *  @brief Allocates on a ForkUnion memory domain when one is chosen at runtime, and on the
- *      plain heap otherwise - one type either way, so the index instantiation grid doesn't
- *      double and a single binary serves both placements.
- */
-template <typename value_type_>
-struct domain_or_default_allocator {
-    using value_type = value_type_;
-    using propagate_on_container_move_assignment = std::true_type;
-    using propagate_on_container_copy_assignment = std::true_type;
-    using propagate_on_container_swap = std::true_type;
-    using is_always_equal = std::false_type;
-
-    /** @brief The pinned ForkUnion memory domain; negative means "plain heap". */
-    fu_memory_domain_id_t memory_domain = -1;
-
-    domain_or_default_allocator() noexcept = default;
-    explicit domain_or_default_allocator(fu_memory_domain_id_t domain) noexcept : memory_domain(domain) {}
-    template <typename other_type_>
-    domain_or_default_allocator(domain_or_default_allocator<other_type_> const& other) noexcept
-        : memory_domain(other.memory_domain) {}
-
-    value_type_* allocate(std::size_t count) noexcept {
-        if (memory_domain < 0) return static_cast<value_type_*>(std::malloc(count * sizeof(value_type_)));
-        void* memory = nullptr;
-        if (fu_allocate_on_domain_id(memory_domain, count * sizeof(value_type_), &memory) != fu_success_k)
-            return nullptr;
-        return static_cast<value_type_*>(memory);
-    }
-    void deallocate(value_type_* pointer, std::size_t count) noexcept {
-        if (memory_domain < 0) return std::free(pointer);
-        fu_free_on_domain_id(memory_domain, pointer, count * sizeof(value_type_));
-    }
-    bool operator==(domain_or_default_allocator const& other) const noexcept {
-        return memory_domain == other.memory_domain;
-    }
-};
-
-/**
- *  @brief The CPU-side state one fully-typed benchmark run shares between its phases: the
- *      indexes - one per engaged memory domain - their per-thread traversal contexts, and
- *      the embedded backend-neutral judgment results.
+ *  @brief The CPU-side state one fully-typed benchmark run shares between its phases: the one
+ *      index, its per-thread traversal contexts, and the embedded backend-neutral judgment
+ *      results.
  *
  *  The dataset never appears here - the data side lives in @c streamed_dataset, which
- *  bridges the file's scalar into the stored one vector-by-vector. In the default and
- *  pinned placements exactly one index exists; under `--memory-domain all` every memory
- *  domain owns one, every prong routes to its local index through
- *  @c index_of_compute_domain, and searches gather through @c merge_into.
+ *  bridges the file's scalar into the stored one vector-by-vector. One index, on one memory
+ *  domain or the plain heap - the multi-domain arrangement is a different benchmark category
+ *  with a different binary, driving @c dense_ram_indexes instead.
  */
 template <typename index_type_>
 struct bench_context {
-    using allocator_t = domain_or_default_allocator<std::byte>;
+    using allocator_t = forkunion_allocator<std::byte>;
     using index_t = index_type_;
     using scalar_t = typename index_t::scalar_t;
     using small_size_t = typename index_t::small_size_t;
@@ -158,12 +131,9 @@ struct bench_context {
     static constexpr nk_kernel_kind_t kernel_kind_k = index_t::kernel_kind_k;
 
     bench_options_t const& options;
-    /** @brief Owns one shard per engaged memory domain; the indirection buys address
-     *      stability, as an index holds atomics and never moves. */
-    std::vector<std::unique_ptr<index_t>> shards;
-    /** @brief The adopted multi-shard view: the compute-domain routing and the merged
-     *      cross-shard search. */
-    dense_ram_indexes<index_t> indexes;
+    /** @brief The one index under measurement; the indirection buys address stability, as an
+     *      index holds atomics and never moves. */
+    std::unique_ptr<index_t> index;
     /** @brief One graph-walking context per pool thread, built by that thread itself with
      *      its local memory domain's allocator. */
     std::vector<std::unique_ptr<traversal_t>> traversals;
@@ -175,11 +145,11 @@ struct bench_context {
     bench_context(bench_options_t const& options) noexcept : options(options) {}
 };
 
-/** @brief Builds one index per engaged memory domain, reserves each for the viewed rows, and
+/** @brief Builds the index on the chosen memory domain, reserves it for the viewed rows, and
  *      sizes all per-thread state off the pool's actual thread count - everything fallible,
  *      before any clock starts. */
 template <typename streamed_dataset_type_>
-bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t topology) {
+bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool) {
     using bench_t = typename streamed_dataset_type_::bench_t;
     using index_t = typename bench_t::index_t;
     using allocator_t = typename bench_t::allocator_t;
@@ -187,9 +157,8 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
     auto& bench = streamed.bench;
     std::size_t const rows = streamed.vectors.extent(0);
     std::size_t const dimensions = streamed.vectors.extent(1);
-    std::size_t threads = 0, compute_domains = 0;
-    if (fu_pool_threads_count(pool, &threads) != fu_success_k ||
-        fu_compute_domains_count(topology, &compute_domains) != fu_success_k) {
+    std::size_t threads = 0;
+    if (fu_pool_threads_count(pool, &threads) != fu_success_k) {
         fmt::println("Failed to read the pool's shape");
         return false;
     }
@@ -200,55 +169,42 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
         return false;
     }
 
-    // Placement: one index per memory domain under `--memory-domain all`, one otherwise -
-    // pinned to the chosen domain or on the plain heap. Every index is reserved for the full
-    // row count: capacity is a counter and chunk storage allocates lazily, so the slack costs
-    // directory slots, not memory.
-    std::vector<fu_memory_domain_id_t> const& memory_domains = bench.options.memory_domains;
-    std::size_t const indexes_count = std::max<std::size_t>(1, memory_domains.size());
-    if (bench.indexes.route(topology, std::span {memory_domains}) != status_t::success_k) return false;
-
     if (bench.options.skip_vectors > rows) {
         fmt::println("--skip-vectors {} exceeds the {} viewed rows", bench.options.skip_vectors, rows);
         return false;
     }
-    bench.shards.reserve(indexes_count);
-    bench.results.id_to_row.resize(indexes_count);
-    for (std::size_t slot = 0; slot != indexes_count; ++slot) {
-        fu_memory_domain_id_t const domain = memory_domains.empty() ? -1 : memory_domains[slot];
-        bench.shards.push_back(std::make_unique<index_t>(allocator_t {domain}, allocator_t {domain}));
-        index_t& index = *bench.shards.back();
-        bench.results.id_to_row[slot].resize(rows);
 
-        // Reserving first freezes the CLI geometry and pre-grows capacity; a checkpoint then
-        // loads against that frozen geometry, so a header mismatch fails loudly below instead
-        // of restoring an incompatible graph.
-        auto reserved = index.reserve({rows, connectivity, dimensions});
-        if (reserved.status != status_t::success_k) {
-            fmt::println("Failed to reserve {} × {}d", rows, dimensions);
-            return false;
-        }
+    // Placement: the chosen memory domain, or the plain heap. The index is reserved for the
+    // full row count: capacity is a counter and chunk storage allocates lazily, so the slack
+    // costs directory slots, not memory.
+    fu_memory_domain_id_t const domain = bench.options.memory_domains.empty() //
+                                             ? fu_memory_domain_id_t {-1}
+                                             : bench.options.memory_domains.front();
+    bench.index = std::make_unique<index_t>(allocator_t {domain}, allocator_t {domain});
+    bench.results.id_to_row.resize(rows);
 
-        // Three RetriEval-layout matrix dumps per slot: the file name's dtype-kernel-
-        // connectivity stamp carries compatibility across backends, the two-counter headers
-        // carry the shapes, and any dataset tool opens them. The id → row map restores the
-        // recall bookkeeping the index itself never stores.
-        if (!bench.options.load_name.empty() &&
-            !load_checkpoint(bench.options, index, dimensions, std::span {bench.results.id_to_row[slot]}, slot,
-                             indexes_count))
-            return false;
+    // Reserving first freezes the CLI geometry and pre-grows capacity; a checkpoint then
+    // loads against that frozen geometry, so a header mismatch fails loudly below instead
+    // of restoring an incompatible graph.
+    auto reserved = bench.index->reserve({rows, connectivity, dimensions});
+    if (reserved.status != status_t::success_k) {
+        fmt::println("Failed to reserve {} × {}d", rows, dimensions);
+        return false;
     }
 
-    // The view adopts the owned shards once they all exist and stop moving.
-    std::vector<index_t*> adopted(indexes_count);
-    for (std::size_t slot = 0; slot != indexes_count; ++slot) adopted[slot] = bench.shards[slot].get();
-    if (bench.indexes.adopt(std::span {adopted}) != status_t::success_k) return false;
+    // Three RetriEval-layout matrix dumps: the file name's dtype-kernel-connectivity stamp
+    // carries compatibility across backends, the two-counter headers carry the shapes, and
+    // any dataset tool opens them. The id → row map restores the recall bookkeeping the
+    // index itself never stores.
+    if (!bench.options.load_name.empty() &&
+        !load_checkpoint(bench.options, *bench.index, dimensions, std::span {bench.results.id_to_row}, 0, 1))
+        return false;
 
     // The loaded base must cover exactly the skipped prefix - anything else would judge
     // recall against rows the graph never saw.
-    std::size_t const loaded_rows = bench.indexes.size();
+    std::size_t const loaded_rows = bench.index->size();
     if (loaded_rows != bench.options.skip_vectors) {
-        fmt::println("Loaded indexes cover {} rows, but --skip-vectors says {}", loaded_rows,
+        fmt::println("Loaded index covers {} rows, but --skip-vectors says {}", loaded_rows,
                      bench.options.skip_vectors);
         return false;
     }
@@ -256,15 +212,14 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
     // Every pool thread constructs its own traversal context, so the scratch - results,
     // frontier, visited set - lands on the thread's local memory domain, not the caller's.
     bench.traversals.resize(threads);
-    auto traversals_init = [](fu_lambda_context_t punned, std::size_t thread, std::size_t compute_domain) noexcept {
+    auto traversals_init = [](fu_lambda_context_t punned, std::size_t thread, std::size_t) noexcept {
         auto& bench = *static_cast<bench_t*>(punned);
         // AMX tile state needs a per-thread OS permission handshake before first use;
         // NumKong's thread configurator performs it and no-ops everywhere else.
         nk_configure_thread(nk_capabilities_available());
-        fu_memory_domain_id_t const domain =
-            bench.options.memory_domains.empty()
-                ? fu_memory_domain_id_t {-1}
-                : bench.options.memory_domains[bench.indexes.local_slot(compute_domain)];
+        fu_memory_domain_id_t const domain = bench.options.memory_domains.empty()
+                                                 ? fu_memory_domain_id_t {-1}
+                                                 : bench.options.memory_domains.front();
         bench.traversals[thread] = std::make_unique<traversal_t>(
             typename traversal_t::allocator_t {allocator_t {domain}});
     };
@@ -290,11 +245,9 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool, fu_topology_t top
 }
 
 /** @brief One vector per task, streamed: viewed in place when the scalars match, or cast
- *      through the thread's staging area, then inserted into the prong's own memory-domain
- *      index - sharding is emergent, memory follows the worker that pulled the row. */
+ *      through the thread's staging area, then inserted into the one index under measurement. */
 template <typename streamed_dataset_type_>
-void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_t thread,
-                        std::size_t compute_domain) noexcept {
+void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_t thread, std::size_t) noexcept {
     using bench_t = typename streamed_dataset_type_::bench_t;
     using index_t = typename bench_t::index_t;
     using small_size_t = typename bench_t::small_size_t;
@@ -311,11 +264,9 @@ void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_
     if constexpr (streamed_dataset_type_::zero_copy_k) vector = streamed.vectors.row(row).as_vector();
     else vector = streamed.stage(streamed.vectors.row(row).as_vector(), thread, task);
 
-    std::size_t const slot = bench.indexes.local_slot(compute_domain);
-    index_t& index = bench.indexes.shard(slot);
     dense_node_id_t local_id = 0;
     vectors_view_t const one_row {vector.data(), 1, streamed.vectors.extent(1)};
-    auto inserted = index.insert(one_row, {&local_id, std::size_t {1}}, *bench.traversals[thread], config);
+    auto inserted = bench.index->insert(one_row, {&local_id, std::size_t {1}}, *bench.traversals[thread], config);
     if (!inserted) {
         bench.results.failed_tasks.fetch_add(1, std::memory_order_relaxed);
         return;
@@ -327,7 +278,7 @@ void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_
     lane.computed_distances_in_refines += inserted.computed_distances_in_refines;
     lane.computed_distances_in_reverse_refines += inserted.computed_distances_in_reverse_refines;
     lane.restarts += inserted.restarts;
-    bench.results.id_to_row[slot][local_id] = static_cast<u32_t>(row);
+    bench.results.id_to_row[local_id] = static_cast<u32_t>(row);
 }
 
 template <typename streamed_dataset_type_>
@@ -338,7 +289,7 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     std::size_t const rows = streamed.vectors.extent(0);
     std::size_t const inserted_rows = rows - bench.options.skip_vectors;
     if (!inserted_rows) {
-        fmt::print(header_style(), "\nInsertion\n");
+        fmt::print(header_style(), "\nInsertions\n");
         fmt::println("  skipped: the loaded base already covers all {} rows", rows);
         return true;
     }
@@ -360,11 +311,11 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     double const reverse_share = sums.computed_distances ? 100.0 * double(sums.computed_distances_in_reverse_refines) /
                                                                double(sums.computed_distances)
                                                          : 0.0;
-    fmt::print(header_style(), "\nInsertion\n");
+    fmt::print(header_style(), "\nInsertions\n");
     fmt::println("  shape: {} × {}d", inserted_rows, streamed.vectors.extent(1));
     if (bench.options.skip_vectors) fmt::println("  topping: {} loaded rows", bench.options.skip_vectors);
     fmt::println("  quads: {} · {} · {} kit", scalar_t::dtype_name(),
-                 kernel_name(streamed_dataset_type_::bench_t::kernel_kind_k),
+                 nk_kernel_name(streamed_dataset_type_::bench_t::kernel_kind_k),
                  bit_name(compute_span_k, index_t::picked_quads_capability_k, "serial"));
     if constexpr (index_t::has_tiles_k)
         fmt::println("  tiles: {} · reverse refinement",
@@ -375,10 +326,8 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     std::size_t reported_threads = 0;
     [[maybe_unused]] fu_status_t const counted = fu_pool_threads_count(pool, &reported_threads);
     fmt::println("  threads: {}", reported_threads);
-    if (bench.indexes.shards_count() > 1)
-        fmt::println("  indexes: {}, one per memory domain", bench.indexes.shards_count());
     fmt::println("  wall: {:.2f} s", seconds);
-    fmt::println("  throughput: {}/s", humanize(double(inserted_rows) / seconds));
+    fmt::println("  throughput: {} IPS", humanize(double(inserted_rows) / seconds));
     fmt::println("  distances: {} ({:.1f}% refines, {:.1f}% reverse)", humanize(double(sums.computed_distances)),
                  refine_share, reverse_share);
     fmt::println("  visited: {}", humanize(double(sums.visited_members)));
@@ -389,31 +338,25 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     return true;
 }
 
-/** @brief Serializes every domain index as three RetriEval-layout matrices - vectors,
- *      neighbors, and the id → row map - so later runs @c --load the base and stream only
- *      the topping: a 100M experiment then costs an mmap, not a half-hour rebuild. */
+/** @brief Serializes the index as three RetriEval-layout matrices - vectors, neighbors, and
+ *      the id → row map - so later runs @c --load the base and stream only the topping: a
+ *      100M experiment then costs an mmap, not a half-hour rebuild. */
 template <typename streamed_dataset_type_>
-bool save_indexes(streamed_dataset_type_& streamed) {
+bool save_index(streamed_dataset_type_& streamed) {
     using clock_t = stdc::steady_clock;
     auto& bench = streamed.bench;
     auto started = clock_t::now();
-    std::size_t const slots = bench.indexes.shards_count();
-    std::size_t total_bytes = 0;
-    for (std::size_t slot = 0; slot != slots; ++slot) {
-        std::size_t const saved_bytes = save_checkpoint(bench.options, bench.indexes.shard(slot),
-                                                        std::span {bench.results.id_to_row[slot]}, slot, slots);
-        if (!saved_bytes) return false;
-        total_bytes += saved_bytes;
-    }
+    std::size_t const saved_bytes = save_checkpoint(bench.options, *bench.index, std::span {bench.results.id_to_row}, 0,
+                                                    1);
+    if (!saved_bytes) return false;
     double const seconds = stdc::duration<double>(clock_t::now() - started).count();
-    fmt::println("Saved {} indexes: {:.2f} GB in {:.2f} s", slots, double(total_bytes) / 1e9, seconds);
+    fmt::println("Saved the index: {:.2f} GB in {:.2f} s", double(saved_bytes) / 1e9, seconds);
     return true;
 }
 
 /** @brief Every query is one task: cast through the thread's staging area if needed - before
- *      the clock - then scattered over all memory-domain indexes, gathered through
- *      `merge_into` with the id → row translation, and judged on the merged hits. The clock
- *      covers the whole multi-domain lookup - the honest end-to-end latency. */
+ *      the clock - then searched and translated through the id → row map into the judged
+ *      hits. The clock covers the whole lookup - the honest end-to-end latency. */
 template <typename streamed_dataset_type_>
 void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t thread, std::size_t) noexcept {
     using bench_t = typename streamed_dataset_type_::bench_t;
@@ -440,10 +383,13 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
     u32_t* const merged_rows = bench.results.hit_rows.row(query).data();
     auto* const merged_distances = bench.results.hit_distances.row(query).data();
 
+    // The dense ids of the matches translate through the id → row map on the way out, since
+    // the index stores no keys and recall is judged in dataset rows.
+    typename bench_t::traversal_t& traversal = *bench.traversals[thread];
+    std::span<u32_t> const rows_span {merged_rows, bench.options.top_k};
+    std::span<dense_distance_t> const distances_span {merged_distances, bench.options.top_k};
     auto started = clock_t::now();
-    auto found = bench.indexes.search(query_vector, *bench.traversals[thread], config, bench.results.id_to_row,
-                                      std::span {merged_rows, bench.options.top_k},
-                                      std::span {merged_distances, bench.options.top_k});
+    auto const found = bench.index->search(query_vector, traversal, config);
     if (!found) {
         bench.results.failed_tasks.fetch_add(1, std::memory_order_relaxed);
         return;
@@ -451,8 +397,10 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
     lane.visited_members += found.visited_members;
     lane.computed_distances += found.computed_distances;
     lane.restarts += found.restarts;
+    std::size_t const merged_count = merge_search_results(to_span(traversal.results), bench.results.id_to_row.data(),
+                                                          rows_span, distances_span, std::size_t {0});
     bench.results.latencies_us[query] = stdc::duration<float, std::micro>(clock_t::now() - started).count();
-    bench.results.hit_counts[query] = static_cast<u32_t>(found.count);
+    bench.results.hit_counts[query] = static_cast<u32_t>(merged_count);
 }
 
 template <typename streamed_dataset_type_>
@@ -492,6 +440,23 @@ struct bench_launch {
     fu_topology_t topology;
 };
 
+/** @brief Gate: a (stored dtype, kernel) cell is runnable once its kit chain is adapted in
+ *      @c usearch/dense/ram_metric.hpp - unadapted combinations report as skipped and light up
+ *      automatically when their kits land, exactly like the CUDA cascade. */
+template <nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, nk_capability_t capability_>
+concept ram_kit_adapted = requires {
+    sizeof(dense_quads_chain<kernel_, typename nk::type_for<stored_dtype_>::type, capability_>);
+};
+
+/** @brief No-op sibling picked when the cell's CPU kit chain is not adapted yet. */
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_,
+          nk_capability_t capability_, typename wait_type_>
+    requires(!ram_kit_adapted<stored_dtype_, kernel_, capability_>)
+int stage_and_run(bench_launch<dataset_scalar_type_> const&) {
+    fmt::println("skipped: no CPU kit adapted for {} · {}", dtype_name(stored_dtype_), nk_kernel_name(kernel_));
+    return 0;
+}
+
 /**
  *  @brief The innermost hop: binds the concrete volatile-index instantiation, wires the
  *      typed source views and the bounded staging trampoline into a @c streamed_dataset,
@@ -504,8 +469,9 @@ struct bench_launch {
  */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_,
           nk_capability_t capability_, typename wait_type_>
+    requires(ram_kit_adapted<stored_dtype_, kernel_, capability_>)
 int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
-    using allocator_t = domain_or_default_allocator<std::byte>;
+    using allocator_t = forkunion_allocator<std::byte>;
     using index_t =
         dense_ram_index<stored_dtype_, kernel_, capability_, wait_type_, allocator_t, allocator_t, allocator_t>;
     using bench_context_type_ = bench_context<index_t>;
@@ -514,21 +480,29 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
 
     persisted_dataset<dataset_scalar_type_> const& dataset = launch.dataset;
     std::size_t const dimensions = dataset.dimensions();
-    std::size_t rows = dataset.vectors().extent(0);
+    std::size_t const total_rows = dataset.vectors().extent(0);
+    std::size_t const first_row = launch.options.first_vector;
+    if (first_row >= total_rows) {
+        fmt::println("--first-vector {} exceeds the {} dataset rows", first_row, total_rows);
+        return 1;
+    }
+    std::size_t rows = total_rows - first_row;
     if (launch.options.max_vectors) rows = std::min(rows, launch.options.max_vectors);
+    nk::matrix_view<dataset_scalar_type_> const sliced_vectors = dataset.vectors()(
+        nk::range {first_row, first_row + rows}, nk::slice);
 
     // Self-queries keep the harness usable on a lone vectors file, without recall.
     nk::matrix_view<dataset_scalar_type_> const source_queries =
-        dataset.has_queries() ? dataset.queries()
-                              : nk::matrix_view<dataset_scalar_type_> {dataset.vectors().data(),
-                                                                       std::min<std::size_t>(1000, rows), dimensions};
+        dataset.has_queries()
+            ? dataset.queries()
+            : sliced_vectors(nk::range {std::size_t {0}, std::min<std::size_t>(1000, rows)}, nk::slice);
 
     bench_context_type_ bench {launch.options};
-    streamed_t streamed {bench, {dataset.vectors().data(), rows, dimensions}, source_queries};
+    streamed_t streamed {bench, sliced_vectors, source_queries};
 
-    /** @brief Owns the staging trampoline planes for the whole run. */
+    // Owns the staging trampoline planes for the whole run.
     nk::tensor<scalar_t, std::allocator<scalar_t>, 3> staging;
-    /** @brief Owns the rescaling planes @c streamed_dataset::rescaling views. */
+    // Owns the rescaling planes `streamed_dataset::rescaling` views.
     nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3> rescaling_planes;
     if constexpr (!streamed_t::zero_copy_k) {
         std::size_t threads = 0;
@@ -558,13 +532,14 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
         }
     }
 
-    if (dataset.has_ground_truth() && !launch.options.max_vectors) bench.results.ground_truth = dataset.neighbors();
+    if (dataset.has_ground_truth() && !launch.options.max_vectors && !first_row)
+        bench.results.ground_truth = dataset.neighbors();
     else if (dataset.has_ground_truth())
-        fmt::println("Ground truth ignored: --max-vectors truncates the graph it was computed for");
+        fmt::println("Ground truth ignored: --max-vectors or --first-vector reshapes the graph it was computed for");
 
-    if (!prepare(streamed, launch.pool, launch.topology)) return 1;
+    if (!prepare(streamed, launch.pool)) return 1;
     if (!run_insertion(streamed, launch.pool)) return 1;
-    if (!launch.options.save_name.empty() && !save_indexes(streamed)) return 1;
+    if (!launch.options.save_name.empty() && !save_index(streamed)) return 1;
     if (!run_search(streamed, launch.pool)) return 1;
     return 0;
 }
@@ -573,13 +548,13 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
  *      hop into @ref stage_and_run. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename wait_type_>
 int run_with_metric(bench_launch<dataset_scalar_type_> const& launch) {
-    return dispatch_value<nk_kernel_dot_k, nk_kernel_angular_k, nk_kernel_euclidean_k>(
+    return dispatch_kernel<stored_dtype_>(
         launch.options.kernel,
         [&](auto kernel) {
             return stage_and_run<dataset_scalar_type_, stored_dtype_, kernel.value, capability_, wait_type_>(launch);
         },
         [&](auto metric) {
-            fmt::println("Unsupported metric {}", kernel_name(metric));
+            fmt::println("Unsupported metric {} for {} vectors", nk_kernel_name(metric), dtype_name(stored_dtype_));
             return 1;
         });
 }
@@ -613,6 +588,13 @@ int run_with_compute(bench_launch<dataset_scalar_type_> const& launch) {
                 launch);
         },
         [&] { return run_with_schedule<dataset_scalar_type_, stored_dtype_, nk_cap_serial_k>(launch); });
+}
+
+/** @brief The shard hop: everything below one stored dtype, so a per-dtype shard translation unit
+ *      carries the whole instantiation grid of its dtype. */
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
+int run_with_stored_dtype(bench_launch<dataset_scalar_type_> const& launch) {
+    return run_with_compute<dataset_scalar_type_, stored_dtype_>(launch);
 }
 
 #pragma endregion

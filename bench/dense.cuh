@@ -16,7 +16,7 @@
  */
 #pragma once
 
-#include <cmath>       // `std::abs` for the rescale amplitude
+#include <cmath> // `std::abs` for the rescale amplitude
 
 #include <algorithm>   // `std::nth_element`, `std::min`
 #include <atomic>      // `std::atomic`
@@ -186,6 +186,31 @@ int dispatch_value(decltype(value_) runtime, auto on_value, auto on_unknown) {
     else return dispatch_value<rest_...>(runtime, on_value, on_unknown);
 }
 
+/** @brief The file scalars the harness opens: what the RetriEval extensions name. */
+int dispatch_file_dtype(nk_dtype_t dtype, auto on_dtype, auto on_unknown) {
+    return dispatch_value<nk_f32_k, nk_bf16_k, nk_i8_k, nk_u8_k>(dtype, on_dtype, on_unknown);
+}
+
+/** @brief The stored dtypes every benchmark carries, by shrinking dynamic range. */
+int dispatch_stored_dtype(nk_dtype_t dtype, auto on_dtype, auto on_unknown) {
+    return dispatch_value<nk_f32_k, nk_bf16_k, nk_f16_k, nk_i8_k, nk_i4_k, nk_u8_k, nk_u1_k>(dtype, on_dtype,
+                                                                                             on_unknown);
+}
+
+/** @brief The kernels one stored dtype adapts: bit-packed vectors take the bit kernels. */
+template <nk_dtype_t stored_dtype_>
+    requires(stored_dtype_ == nk_u1_k)
+int dispatch_kernel(nk_kernel_kind_t kernel, auto on_kernel, auto on_unknown) {
+    return dispatch_value<nk_kernel_dot_k, nk_kernel_hamming_k, nk_kernel_jaccard_k>(kernel, on_kernel, on_unknown);
+}
+
+/** @brief The kernels one stored dtype adapts: every other dtype takes the metric trio. */
+template <nk_dtype_t stored_dtype_>
+    requires(stored_dtype_ != nk_u1_k)
+int dispatch_kernel(nk_kernel_kind_t kernel, auto on_kernel, auto on_unknown) {
+    return dispatch_value<nk_kernel_dot_k, nk_kernel_angular_k, nk_kernel_euclidean_k>(kernel, on_kernel, on_unknown);
+}
+
 /** @brief Everything the CLI can configure; zeroes mean "infer from the dataset & machine". */
 struct bench_options_t {
     /** @brief The base vectors file, in the RetriEval `.fbin` extension family. */
@@ -239,6 +264,9 @@ struct bench_options_t {
     std::size_t skip_vectors = 0;
     /** @brief Cap on ingested rows; zero ingests the whole file. */
     std::size_t max_vectors = 0;
+    /** @brief First dataset row to view - slices one file across independent runs, so N
+     *      processes can each build their own memory domain's share of a shared dataset. */
+    std::size_t first_vector = 0;
     /** @brief Huge pages the launcher provisioned before starting the process; zero expects
      *      none, any other value is enforced - a run that silently fell back to base pages
      *      must never masquerade as a huge-page result. */
@@ -274,9 +302,9 @@ struct checkpoint_paths_t {
 template <typename index_type_>
 static checkpoint_paths_t checkpoint_paths_of(bench_options_t const& options, std::string_view name, std::size_t slot,
                                               std::size_t slot_count) {
-    std::string const prefix = fmt::format("{}/{}-{}-{}-c{}-{}-{}", options.checkpoints_dir, name,
-                                           index_type_::scalar_t::dtype_name(), kernel_name(index_type_::kernel_kind_k),
-                                           options.connectivity, slot, slot_count);
+    std::string const prefix = fmt::format(
+        "{}/{}-{}-{}-c{}-{}-{}", options.checkpoints_dir, name, index_type_::scalar_t::dtype_name(),
+        nk_kernel_name(index_type_::kernel_kind_k), options.connectivity, slot, slot_count);
     return {fmt::format("{}.vectors.{}bin", prefix, index_type_::scalar_t::dtype_name()), //
             prefix + ".neighbors.ibin", prefix + ".rows.ibin"};
 }
@@ -313,18 +341,18 @@ static bool load_checkpoint(bench_options_t const& options, index_type_& index, 
                             std::span<u32_t> id_to_row, std::size_t slot, std::size_t slot_count) {
     using scalar_t = typename index_type_::scalar_t;
     checkpoint_paths_t const paths = checkpoint_paths_of<index_type_>(options, options.load_name, slot, slot_count);
-    auto mapped_vectors = mmap_view_t::map(paths.vectors.c_str());
-    auto mapped_neighbors = mmap_view_t::map(paths.neighbors.c_str());
-    auto mapped_rows = mmap_view_t::map(paths.rows.c_str());
+    auto mapped_vectors = mmap_view_t::map(paths.vectors);
+    auto mapped_neighbors = mmap_view_t::map(paths.neighbors);
+    auto mapped_rows = mmap_view_t::map(paths.rows);
     if (mapped_vectors.status != status_t::success_k || mapped_neighbors.status != status_t::success_k ||
         mapped_rows.status != status_t::success_k) {
         fmt::println("Failed to map the {} checkpoint for slot {}", options.load_name, slot);
         return false;
     }
 
-    auto const vectors_extents = parse_matrix_header<scalar_t, u32_t>(mapped_vectors.value);
-    auto const neighbors_extents = parse_matrix_header<u32_t, u32_t>(mapped_neighbors.value);
-    auto const map_extents = parse_matrix_header<u32_t, u32_t>(mapped_rows.value);
+    auto const vectors_extents = parse_matrix_header<scalar_t, u32_t>(mapped_vectors.value.view());
+    auto const neighbors_extents = parse_matrix_header<u32_t, u32_t>(mapped_neighbors.value.view());
+    auto const map_extents = parse_matrix_header<u32_t, u32_t>(mapped_rows.value.view());
     bool const parsed = vectors_extents.status == status_t::success_k &&
                         neighbors_extents.status == status_t::success_k && map_extents.status == status_t::success_k;
     std::size_t const loaded_nodes = vectors_extents.value.rows;
@@ -336,17 +364,17 @@ static bool load_checkpoint(bench_options_t const& options, index_type_& index, 
         return false;
     }
 
-    nk::matrix_view<scalar_t> const vectors_view = view_matrix_payload<scalar_t, u32_t>(
-        mapped_vectors.value, loaded_nodes, dimensions);
-    nk::matrix_view<u32_t> const neighbors_view = view_matrix_payload<u32_t, u32_t>(
-        mapped_neighbors.value, loaded_nodes, options.connectivity);
+    nk::matrix_view<scalar_t> const vectors_view = view_matrix_payload<scalar_t, u32_t>(mapped_vectors.value.view(),
+                                                                                        loaded_nodes, dimensions);
+    nk::matrix_view<u32_t> const neighbors_view = view_matrix_payload<u32_t, u32_t>(mapped_neighbors.value.view(),
+                                                                                    loaded_nodes, options.connectivity);
     status_t const loaded = index.load(vectors_view, neighbors_view, synchronization_t::exclusive_k);
     if (loaded != status_t::success_k) {
         fmt::println("Failed to restore {}: status {}", paths.vectors, int(loaded));
         return false;
     }
-    nk::matrix_view<u32_t> const rows_view = view_matrix_payload<u32_t, u32_t>(
-        mapped_rows.value, loaded_nodes, 1);
+    nk::matrix_view<u32_t> const rows_view = view_matrix_payload<u32_t, u32_t>(mapped_rows.value.view(), loaded_nodes,
+                                                                               1);
     std::copy_n(rows_view.data(), loaded_nodes, id_to_row.data());
     return true;
 }
@@ -366,8 +394,8 @@ static bool load_checkpoint(bench_options_t const& options, index_type_& index, 
  *  @return The serialized byte volume, or zero on failure - a real checkpoint never is.
  */
 template <typename index_type_>
-static std::size_t save_checkpoint(bench_options_t const& options, index_type_& index,
-                                   std::span<u32_t> id_to_row, std::size_t slot, std::size_t slot_count) {
+static std::size_t save_checkpoint(bench_options_t const& options, index_type_& index, std::span<u32_t> id_to_row,
+                                   std::size_t slot, std::size_t slot_count) {
     using scalar_t = typename index_type_::scalar_t;
     using node_id_t = typename index_type_::node_id_t;
     typename index_type_::saved_shape_t const shape = index.saved_shape();
@@ -431,8 +459,8 @@ inline telemetry_lane_t summed_lanes(std::vector<telemetry_lane_t> const& lanes)
  *      bookkeeping, the merged hits with their distances & latencies, and the failure tally.
  *      Backend contexts embed one and add their own machinery around it. */
 struct bench_results_t {
-    /** @brief The @b [indexes,rows] recall bookkeeping: dense node id → global dataset row. */
-    std::vector<std::vector<u32_t>> id_to_row;
+    /** @brief The @b [rows] recall bookkeeping: dense node id → global dataset row. */
+    std::vector<u32_t> id_to_row;
     /** @brief The @b [queries,depth] expected neighbors; empty when absent or truncated
      *      by `--max-vectors`. */
     nk::matrix_view<u32_t> ground_truth;
@@ -457,7 +485,7 @@ inline void report_search_metrics(bench_options_t const& options, std::size_t qu
         std::nth_element(latencies_us.begin(), latencies_us.begin() + rank, latencies_us.end());
         return latencies_us[rank];
     };
-    fmt::print(header_style(), "\nSearch\n");
+    fmt::print(header_style(), "\nQueries\n");
     fmt::println("  queries: {} at top-{}{}", query_count, options.top_k, options.self_recall ? " · self-recall" : "");
     fmt::println("  threads: {}", threads);
     fmt::println("  wall: {:.2f} s", seconds);
@@ -508,9 +536,8 @@ inline void judge_hits(bench_options_t const& options, bench_results_t& results,
             auto expected = results.ground_truth.row(query).as_vector();
             auto const returned = to_span(results.hit_rows.row(query).as_vector()).first(results.hit_counts[query]);
             found_at_1 += !returned.empty() && returned.front() == expected[0];
-            auto verdict = judge_ranking(std::span<u32_t const> {returned},
-                                         to_span(expected).first(judged_depth), std::span<u32_t> {scratch},
-                                         std::span<double const> {discounts});
+            auto verdict = judge_ranking(std::span<u32_t const> {returned}, to_span(expected).first(judged_depth),
+                                         std::span<u32_t> {scratch}, std::span<double const> {discounts});
             found_at_k += verdict.found_nearest;
             shared += verdict.overlap;
             gain += verdict.gain;
@@ -667,7 +694,7 @@ inline void print_machine(fu_topology_t topology, fu_fabric_t fabric, bench_opti
         bit_name(schedule_span_k,
                  highest_bit(schedule_span_k, effective_schedule(options.max_schedule), fu_capabilities_unknown_k),
                  "standard"));
-    fmt::println("  kernels requested: {} · {}", dtype_name(options.stored_dtype), kernel_name(options.kernel));
+    fmt::println("  kernels requested: {} · {}", dtype_name(options.stored_dtype), nk_kernel_name(options.kernel));
 }
 
 } // namespace unum::usearch

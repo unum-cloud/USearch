@@ -34,6 +34,7 @@ add_executable(
     dense/ram_index_u1.cpp
 )
 setup_target(usearch_test)
+target_compile_options(usearch_test PRIVATE -march=native)
 target_include_directories(usearch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(usearch_test PRIVATE fmt::fmt yyjson ${USEARCH_FORKUNION_LIBRARY})
 add_test(NAME usearch_test COMMAND usearch_test)

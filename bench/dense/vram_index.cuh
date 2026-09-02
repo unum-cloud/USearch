@@ -14,7 +14,7 @@
  */
 #pragma once
 
-#include <cmath>     // `std::abs`
+#include <cmath> // `std::abs`
 
 #include <algorithm> // `std::max`, `std::min`, `std::copy_n`
 #include <chrono>    // `std::chrono::steady_clock`
@@ -167,7 +167,7 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     std::size_t const rows = streamed.vectors.extent(0);
     std::size_t const inserted_rows = rows - bench.options.skip_vectors;
     if (!inserted_rows) {
-        fmt::print(header_style(), "\nInsertion\n");
+        fmt::print(header_style(), "\nInsertions\n");
         fmt::println("  skipped: the loaded base already covers all {} rows", rows);
         return true;
     }
@@ -199,13 +199,14 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     progress.finish();
     double const seconds = stdc::duration<double>(clock_t::now() - started).count();
 
-    fmt::print(header_style(), "\nInsertion\n");
+    fmt::print(header_style(), "\nInsertions\n");
     fmt::println("  shape: {} × {}d", inserted_rows, streamed.vectors.extent(1));
     if (bench.options.skip_vectors) fmt::println("  topping: {} loaded rows", bench.options.skip_vectors);
-    fmt::println("  kit: {} · {} · device {}", scalar_t::dtype_name(), kernel_name(bench.options.kernel), bench.device);
+    fmt::println("  kit: {} · {} · device {}", scalar_t::dtype_name(), nk_kernel_name(bench.options.kernel),
+                 bench.device);
     fmt::println("  batch: {} rows per launch", batch_rows);
     fmt::println("  wall: {:.2f} s", seconds);
-    fmt::println("  throughput: {}/s", humanize(double(inserted_rows) / seconds));
+    fmt::println("  throughput: {} IPS", humanize(double(inserted_rows) / seconds));
     fmt::println("  distances: {}", humanize(double(bench.lane.computed_distances)));
     fmt::println("  visited: {}", humanize(double(bench.lane.visited_members)));
     fmt::print("  restarts: ");
@@ -312,40 +313,29 @@ bool run_search(streamed_dataset_type_& streamed) {
  *      in @c dense/vram_metric.cuh - unadapted combinations report as skipped and light up
  *      automatically when their kits land, exactly like the CPU cascade. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
-concept cuda_combo_supported = requires { typename dense_cuda_kit_for<dtype_, kernel_>::kit_t; };
+concept cuda_kit_adapted = requires { typename dense_cuda_kit_for<dtype_, kernel_>::kit_t; };
 
 /** @brief No-op sibling picked when the pair's device kit is not adapted yet. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t arch_ceiling_,
           typename plane_allocator_>
-    requires(!cuda_combo_supported<stored_dtype_, kernel_>)
+    requires(!cuda_kit_adapted<stored_dtype_, kernel_>)
 int stage_and_run(persisted_dataset<dataset_scalar_type_> const&, bench_options_t const& options, int) {
     fmt::println("skipped: no device kit adapted for {} · {}", dtype_name(options.stored_dtype),
-                 kernel_name(options.kernel));
+                 nk_kernel_name(options.kernel));
     return 0;
 }
-
-/** @brief The multi-GPU pipeline over an index group - the cascade only needs its shape
- *      to route `--devices` runs; the definition follows the group machinery. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t arch_ceiling_>
-int run_indexes(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options);
 
 /** @brief The innermost hop: binds the concrete CUDA-index instantiation, wires the typed
  *      source views and the staging trampoline, and runs the phases in checkpoint order. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t arch_ceiling_,
           typename plane_allocator_>
-    requires(cuda_combo_supported<stored_dtype_, kernel_>)
+    requires(cuda_kit_adapted<stored_dtype_, kernel_>)
 int stage_and_run(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options, int device) {
-    using index_t = dense_vram_index<stored_dtype_, kernel_, arch_ceiling_, plane_allocator_, plane_allocator_>;
+    using index_t = dense_vram_index<stored_dtype_, kernel_, arch_ceiling_, plane_allocator_, plane_allocator_,
+                                     cuda_device_allocator<byte_t>>;
     using bench_context_t = cuda_bench_context<index_t>;
     using streamed_t = streamed_dataset<dataset_scalar_type_, bench_context_t>;
     using scalar_t = typename bench_context_t::scalar_t;
-
-    if (options.devices.size() > 1) {
-        if constexpr (std::is_same_v<plane_allocator_, cuda_virtual_memory_allocator<std::byte>>)
-            return run_indexes<dataset_scalar_type_, stored_dtype_, kernel_, arch_ceiling_>(dataset, options);
-        fmt::println("skipped: the multi-index pipeline needs virtual-memory planes; drop --managed-memory");
-        return 0;
-    }
 
     std::size_t const dimensions = dataset.dimensions();
     std::size_t rows = dataset.vectors().extent(0);
@@ -360,7 +350,7 @@ int stage_and_run(persisted_dataset<dataset_scalar_type_> const& dataset, bench_
     bench_context_t bench {options, device};
     streamed_t streamed {bench, {dataset.vectors().data(), rows, dimensions}, source_queries};
 
-    /** @brief Owns the staging trampoline plane - `[1, batch, dimensions]`, one lane. */
+    // Owns the staging trampoline plane, `[1, batch, dimensions]`.
     nk::tensor<scalar_t, std::allocator<scalar_t>, 3> staging;
     nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3> rescaling_planes;
     if constexpr (!streamed_t::zero_copy_k) {
@@ -403,16 +393,14 @@ int stage_and_run(persisted_dataset<dataset_scalar_type_> const& dataset, bench_
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, cuda_arch_t arch_ceiling_, typename plane_allocator_>
 int run_with_metric(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
                     int device) {
-    return dispatch_value<nk_kernel_dot_k, nk_kernel_angular_k, nk_kernel_euclidean_k, nk_kernel_hamming_k,
-                          nk_kernel_jaccard_k>(
+    return dispatch_kernel<stored_dtype_>(
         options.kernel,
         [&](auto kernel) {
             return stage_and_run<dataset_scalar_type_, stored_dtype_, kernel.value, arch_ceiling_, plane_allocator_>(
                 dataset, options, device);
         },
         [&](auto metric) {
-            fmt::println("Unsupported metric {}; pick --angular, --euclidean, --hamming, or --jaccard",
-                         kernel_name(metric));
+            fmt::println("Unsupported metric {} for {} vectors", nk_kernel_name(metric), dtype_name(stored_dtype_));
             return 1;
         });
 }

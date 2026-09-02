@@ -77,7 +77,7 @@
             "name": "profile",
             "inherits": "base",
             "displayName": "Profile - benchmarks under perf",
-            "description": "What every number in BENCHMARKS.md is measured with: full optimization, plus the symbols `perf` needs to attribute samples.",
+            "description": "The profiling tree behind bench/README.md: full optimization, plus the symbols `perf` needs to attribute samples.",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo",
                 "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O3 -g -DNDEBUG",
