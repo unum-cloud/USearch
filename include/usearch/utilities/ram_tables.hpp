@@ -11,6 +11,7 @@
  */
 #pragma once
 
+#include <cassert>     // `assert` - every `set` follows a `reserve`
 #include <cstddef>     // `std::size_t`
 #include <cstdint>     // `std::uint64_t` - batched membership masks
 #include <cstring>     // `std::memset` - the all-ones sentinel fill
@@ -21,7 +22,6 @@
 #include <functional>  // `std::hash`
 #include <limits>      // `std::numeric_limits` - the all-ones sentinel
 #include <memory>      // `std::allocator`
-#include <span>        // `std::span` - the arena region an acquired set is built over
 #include <type_traits> // `std::is_integral`, `std::is_trivially_copyable_v`
 #include <utility>     // `std::swap`, `std::move`
 
@@ -64,9 +64,10 @@ enum class membership_t : bool {
  *      traversal - a sparse alternative to a bit-set in our primary use case.
  *
  *  It doesn't support deleting individual elements, but supports @c clear -ing all at once.
- *  It expects @c reserve to be called ahead of all insertions, so no mid-insert resizes are
- *  needed, and it treats all-ones slots as unused, to simplify the design. The slot count
- *  stays a power of two, and bucket collisions resolve by linear probing.
+ *  Every @c set follows a @c reserve for the same count, so no mid-insert resize is ever
+ *  needed and a full linear probe never runs: a refused @c reserve leaves the table as it
+ *  was, and the caller stops marking. All-ones slots are unused, to simplify the design; the
+ *  slot count stays a power of two, and bucket collisions resolve by linear probing.
  */
 template <                                            //
     typename element_type_,                           //
@@ -119,19 +120,6 @@ class growing_hash_set {
 
     /** @brief Bytes this set currently occupies. */
     std::size_t memory_usage() const noexcept { return capacity_ * sizeof(element_t); }
-
-    /** @brief Takes @p region as a set over @p capacity elements; @p growth serves any later
-     *      rehash, and a default-constructed one refuses, making the carve exact. */
-    [[nodiscard]] static growing_hash_set acquire(bytes_span_t region, std::size_t capacity,
-                                                  allocator_t growth) noexcept {
-        growing_hash_set table;
-        table.capacity_ = std::bit_floor(min_of(slots_for(capacity), region.size() / sizeof(element_t)));
-        table.slots_ = table.capacity_ ? reinterpret_cast<element_t*>(region.data()) : nullptr;
-        table.count_ = 0;
-        table.allocator_ = std::move(growth);
-        table.clear();
-        return table;
-    }
 
     growing_hash_set(growing_hash_set&& other) noexcept {
         slots_ = exchange(other.slots_, nullptr);
@@ -227,6 +215,7 @@ class growing_hash_set {
      *  @return The membership the element had @b before this call.
      */
     [[nodiscard]] inline membership_t set(element_t const& elem) noexcept {
+        assert(slots_ && (count_ + 1) * 5u / 3u <= capacity_);
         element_t* slot = locate_(slots_, capacity_, hasher_, elem);
         if (*slot == elem) return membership_t::present_k;
         *slot = elem;

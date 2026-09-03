@@ -456,6 +456,9 @@ struct alignas(64) telemetry_lane_t {
     std::size_t computed_distances_in_reverse_refines = 0;
     /** @brief Starvation restarts - a graph-connectivity health signal. */
     std::size_t restarts = 0;
+    /** @brief Walks a scratch refusal ended early on the CPU; the GPU folds its starved visited-set
+     *      claims here, the receipt of the same degradation. */
+    std::size_t saturated_walks = 0;
 };
 
 /** @brief Sums the per-thread telemetry after a phase; the lanes stay untouched. */
@@ -467,6 +470,7 @@ inline telemetry_lane_t summed_lanes(std::vector<telemetry_lane_t> const& lanes)
         sums.computed_distances_in_refines += lane.computed_distances_in_refines;
         sums.computed_distances_in_reverse_refines += lane.computed_distances_in_reverse_refines;
         sums.restarts += lane.restarts;
+        sums.saturated_walks += lane.saturated_walks;
     }
     return sums;
 }
@@ -683,7 +687,7 @@ inline void print_machine(fu_topology_t topology, fu_fabric_t fabric, bench_opti
     }
     if (!options.memory_domains.empty())
         fmt::println("  engaged memory domains: {}", fmt::join(options.memory_domains, " "));
-        fmt::println("  threads engaged: {}", threads);
+    fmt::println("  threads engaged: {}", threads);
 
     char scheduling_names[256] = {0};
     std::size_t scheduling_names_length = 0;
@@ -697,10 +701,10 @@ inline void print_machine(fu_topology_t topology, fu_fabric_t fabric, bench_opti
                  bit_name(compute_span_k, highest_bit(compute_span_k, options.max_compute & available, nk_cap_serial_k),
                           "serial"));
     fmt::println("  scheduling ceiling: {}",
-        bit_name(schedule_span_k,
-                 highest_bit(schedule_span_k, effective_schedule(options.max_schedule), //
-fu_capabilities_unknown_k),
-                 "standard"));
+                 bit_name(schedule_span_k,
+                          highest_bit(schedule_span_k, effective_schedule(options.max_schedule), //
+                                      fu_capabilities_unknown_k),
+                          "standard"));
     fmt::println("  kernels requested: {} · {}", dtype_name(options.stored_dtype), nk_kernel_name(options.kernel));
 }
 

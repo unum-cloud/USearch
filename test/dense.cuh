@@ -91,6 +91,9 @@ constexpr u64_t dense_seed_immutable_parity_k = 0x5E771ED0ull;
 constexpr u64_t dense_seed_cursor_k = 0x17E2A702ull;
 constexpr u64_t dense_seed_allocation_budget_k = 0xB0D6E7EDull;
 constexpr u64_t dense_seed_overflow_race_k = 0xF100DED0ull;
+constexpr u64_t dense_seed_shedding_k = 0x5EDD1EF0ull;
+constexpr u64_t dense_seed_saturated_k = 0x5A7A7EDDull;
+constexpr u64_t dense_seed_upstream_k = 0x0957EA30ull;
 
 #pragma endregion Constants and Seeds
 
@@ -149,6 +152,15 @@ std::size_t dense_expect_self_recall(index_type_& index, vectors_view_type_ vect
         }
     }
     failures += expect(hits * 100 >= samples_count * dense_minimal_recall_percent_k);
+    return failures;
+}
+
+/** @brief The ranking in @p context ascends by distance - the pool's invariant after any walk. */
+template <typename context_type_>
+std::size_t dense_expect_ascending(context_type_ const& context) noexcept {
+    std::size_t failures = 0;
+    for (std::size_t rank = 1; rank < context.results.size(); ++rank)
+        failures += expect(!(context.results[rank].distance < context.results[rank - 1].distance));
     return failures;
 }
 
@@ -815,9 +827,14 @@ std::size_t test_dense_indexes_guards() {
                           status_t::overflow_k);
 
     // A dropped capacity claim credits itself back two-sidedly: the exact-fit insertion
-    // below cannot succeed unless these rows returned in full.
+    // below cannot succeed unless these rows returned in full - and neither can it unless a
+    // batch admitted at the gate but refused at a shard's claim handed its admission back.
     if constexpr (requires { indexes.shard(0).claim(rows / 4); }) {
         [[maybe_unused]] auto claimed = indexes.shard(0).claim(rows / 4);
+        failures += expect(failed(indexes
+                                      .add(std::span<key_t const> {keys.data(), rows}, vectors.view(), //
+                                           executor)
+                                      .status));
     }
 
     failures += expect(succeeded(indexes
@@ -828,6 +845,53 @@ std::size_t test_dense_indexes_guards() {
     std::size_t rows_in_shards = 0;
     for (std::size_t shard = 0; shard != indexes.shards_count(); ++shard) rows_in_shards += indexes.shard(shard).size();
     failures += expect_eq(rows_in_shards, rows);
+    return failures;
+}
+
+/**
+ *  @brief Executor arenas seeded at exactly the first-size estimate serve every walk: a re-table
+ *      past the seed chunk lands in a chunk the arena opens beside it, so no walk saturates and
+ *      every query ranks. A predicate admitting fewer keys than the pool holds makes every walk
+ *      exhaust its shard, so every thread's visited set outgrows its first size.
+ */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+std::size_t test_dense_indexes_arena_growth() {
+    using index_t = typename indexes_type_::index_t;
+    using scalar_t = typename index_t::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    std::size_t failures = 0;
+    std::size_t const rows = 8 * dense_thread_nodes_k;
+    std::size_t const queries = 16;
+    std::size_t const wanted = 8;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+
+    dense_indexes_executor<indexes_type_> driver;
+    if (failed(driver.status)) return failures + expect(false);
+    auto& executor = driver.executor;
+    indexes_type_ indexes;
+    failures += expect(succeeded(place_shards(indexes)));
+    failures += expect(succeeded(indexes.reserve({rows, connectivity_16_k, dimensions})));
+
+    auto vectors = make_vectors<scalar_t>(rows + queries, dimensions, dense_seed_upstream_k);
+    std::vector<key_t> keys(rows);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    auto const added = indexes.add(std::span<key_t const> {keys}, vectors.view()(nk::range(0, rows), nk::slice), //
+                                   executor);
+    failures += expect(succeeded(added.status));
+    failures += expect_eq(added.saturated_walks, 0u);
+
+    // Sixteen keys match, the pool holds thirty-two: every walk visits its whole shard.
+    auto sparse = [](key_t key) noexcept { return key % 128 == 0 ? admission_t::admit_k : admission_t::reject_k; };
+    std::vector<key_t> found_keys(queries * wanted);
+    std::vector<typename indexes_type_::distance_t> found_distances(queries * wanted);
+    std::vector<std::size_t> counts(queries);
+    auto const found = indexes.search(vectors.view()(nk::range(rows, rows + queries), nk::slice), executor, {}, wanted,
+                                      std::span {found_keys}, std::span {found_distances}, std::span {counts}, sparse);
+    failures += expect(succeeded(found.status));
+    failures += expect_eq(found.saturated_walks, 0u);
+    for (std::size_t const count : counts) failures += expect_eq(count, wanted);
+    // The seed chunk is exactly the estimate, so a re-table can only have opened another.
+    failures += expect(executor.arena(0).capacity() > indexes.shard(0).traversal_memory_usage());
     return failures;
 }
 
@@ -1546,6 +1610,91 @@ std::size_t test_dense_allocation_budget(make_index_type_ const& make_index) {
         failures += expect_eq(restored.size(), nodes_count);
         if constexpr (kernel_ != nk_kernel_dot_k)
             failures += dense_expect_self_recall(restored, vectors.view(), nodes_count, 16);
+    }
+    failures += expect_eq(ledger.live_bytes.load(), 0);
+    return failures;
+}
+
+/** @brief Shedding the frontier past a full pool's radius is lossless: a walk whose frontier
+ *      never fills ranks the same nodes, and the shedding frontier never outgrows its reservation. */
+template <typename index_type_, typename make_index_type_>
+std::size_t test_dense_frontier_shedding(make_index_type_ const& make_index) {
+    using scalar_t = typename index_type_::scalar_t;
+    std::size_t failures = 0;
+    allocation_ledger_t ledger;
+    {
+        std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+        index_type_ index = make_index(ledger);
+        typename index_type_::dense_traversal_context_t context {{}};
+        failures += expect(succeeded(index.reserve({dense_growth_nodes_k, connectivity_16_k, dimensions}).status));
+        auto vectors = make_vectors<scalar_t>(dense_growth_nodes_k + 1, dimensions, dense_seed_shedding_k);
+        auto rows = vectors.view()(nk::range(0, dense_growth_nodes_k), nk::slice);
+        failures += expect(succeeded(index.insert(rows, {}, context).status));
+
+        // Same query, same seeds, two contexts: one sheds within `4 × ef`, the other holds every
+        // node and never fills.
+        typename index_type_::insert_config_t wide;
+        wide.expansion_factor = 64;
+        typename index_type_::search_config_t config;
+        config.expansion_factor = wide.expansion_factor;
+        typename index_type_::dense_traversal_context_t shedding {{}};
+        typename index_type_::dense_traversal_context_t unbounded {{}};
+        failures += expect(succeeded(index.reserve_traversal(shedding, wide)));
+        failures += expect(succeeded(unbounded.frontier.reserve(dense_growth_nodes_k)));
+        std::size_t const frontier_capacity = shedding.frontier.capacity();
+        auto const query = vectors.view().row(dense_growth_nodes_k).as_vector();
+        auto const shed = index.search(query, shedding, config);
+        auto const kept = index.search(query, unbounded, config);
+        failures += expect(succeeded(shed.status) && succeeded(kept.status));
+        failures += expect_eq(shed.count, kept.count);
+        for (std::size_t rank = 0; rank < shed.count && rank < kept.count; ++rank)
+            failures += expect_eq(shedding.results[rank].node_id, unbounded.results[rank].node_id);
+        failures += dense_expect_ascending(shedding);
+        failures += expect_eq(shedding.frontier.capacity(), frontier_capacity);
+        failures += expect_eq(shed.saturated_walks, 0u);
+    }
+    failures += expect_eq(ledger.live_bytes.load(), 0);
+    return failures;
+}
+
+/** @brief A refused re-table saturates the walk, it never fails it: under a frozen budget a
+ *      search answers @c success_k with a short ascending ranking and one saturated walk, and
+ *      an insertion still publishes its row, wired thinner. The one-wide pool makes the first
+ *      expansion's quad the re-table that is refused. */
+template <typename index_type_, typename make_index_type_>
+std::size_t test_dense_saturated(make_index_type_ const& make_index) {
+    using scalar_t = typename index_type_::scalar_t;
+    std::size_t failures = 0;
+    allocation_ledger_t ledger;
+    {
+        std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+        index_type_ index = make_index(ledger);
+        failures += expect(succeeded(index.reserve({dense_growth_nodes_k + 1, connectivity_16_k, dimensions}).status));
+        auto vectors = make_vectors<scalar_t>(dense_growth_nodes_k + 2, dimensions, dense_seed_saturated_k);
+        typename index_type_::dense_traversal_context_t warm {counting_allocator<std::byte>(ledger)};
+        auto rows = vectors.view()(nk::range(0, dense_growth_nodes_k), nk::slice);
+        failures += expect(succeeded(index.insert(rows, {}, warm).status));
+
+        typename index_type_::insert_config_t narrow;
+        narrow.expansion_factor = 1;
+        typename index_type_::search_config_t config;
+        config.expansion_factor = narrow.expansion_factor;
+        typename index_type_::dense_traversal_context_t starved {counting_allocator<std::byte>(ledger)};
+        failures += expect(succeeded(index.reserve_traversal(starved, narrow)));
+        ledger.byte_budget.store(ledger.live_bytes.load());
+
+        auto const found = index.search(vectors.view().row(dense_growth_nodes_k).as_vector(), starved, config);
+        failures += expect_eq(found.status, status_t::success_k);
+        failures += expect(found.count > 0);
+        failures += expect_eq(found.saturated_walks, 1u);
+        failures += dense_expect_ascending(starved);
+
+        auto extra = vectors.view()(nk::range(dense_growth_nodes_k, dense_growth_nodes_k + 1), nk::slice);
+        auto const inserted = index.insert(extra, {}, starved, narrow);
+        failures += expect_eq(inserted.status, status_t::success_k);
+        failures += expect_eq(inserted.saturated_walks, 1u);
+        failures += expect_eq(index.size(), dense_growth_nodes_k + 1);
+        ledger.byte_budget.store(PTRDIFF_MAX);
     }
     failures += expect_eq(ledger.live_bytes.load(), 0);
     return failures;

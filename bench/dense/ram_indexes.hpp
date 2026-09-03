@@ -187,13 +187,11 @@ bool prepare(streamed_dataset_type_& streamed, fu_topology_t topology) {
         return false;
     }
 
-    // Warming the arenas here moves every allocation ahead of the clocks; walks grow their visited
-    // sets past the estimate, so every thread keeps a megabyte of headroom the exact asks never shrink.
+    // Warming the arenas here moves every allocation ahead of the clocks; a walk that outgrows the
+    // estimate re-tables into a chunk the arena grows by, so the estimate is the whole ask.
     typename index_t::insert_config_t warm_config;
     warm_config.expansion_factor = static_cast<small_size_t>(bench.options.expansion_add);
-    std::size_t const warm_bytes = max_of<std::size_t>(bench.indexes.shard(0).traversal_memory_usage(warm_config),
-                                                       1u << 20);
-    if (failed(bench.executor.reserve(warm_bytes))) {
+    if (failed(bench.executor.reserve(bench.indexes.shard(0).traversal_memory_usage(warm_config)))) {
         fmt::println("Failed to reserve the executor's per-thread arenas");
         return false;
     }
@@ -266,6 +264,7 @@ bool run_insertion(streamed_dataset_type_& streamed) {
         sums.computed_distances_in_refines += added.computed_distances_in_refines;
         sums.computed_distances_in_reverse_refines += added.computed_distances_in_reverse_refines;
         sums.restarts += added.restarts;
+        sums.saturated_walks += added.saturated_walks;
         base += count;
     }
     double const seconds = stdc::duration<double>(clock_t::now() - started).count();
@@ -290,8 +289,8 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     fmt::println("  threads: {}", bench.executor.size());
     auto shard_sizes = std::views::iota(std::size_t {0}, bench.indexes.shards_count()) |
                        std::views::transform([&](std::size_t shard) { return bench.indexes.shard(shard).size(); });
-        fmt::println("  shards: {}, one per memory domain, filled {}", bench.indexes.shards_count(),
-    fmt::join(shard_sizes, " "));
+    fmt::println("  shards: {}, one per memory domain, filled {}", bench.indexes.shards_count(),
+                 fmt::join(shard_sizes, " "));
     fmt::println("  wall: {:.2f} s", seconds);
     fmt::println("  throughput: {} IPS", humanize(double(rows) / seconds));
     fmt::println("  distances: {} ({:.1f}% refines, {:.1f}% reverse)", humanize(double(sums.computed_distances)),
@@ -362,6 +361,7 @@ bool run_search(streamed_dataset_type_& streamed) {
         sums.visited_members += found.visited_members;
         sums.computed_distances += found.computed_distances;
         sums.restarts += found.restarts;
+        sums.saturated_walks += found.saturated_walks;
         for (std::size_t query = 0; query != count; ++query)
             bench.results.hit_counts[base + query] = static_cast<u32_t>(counts[query]);
         base += count;

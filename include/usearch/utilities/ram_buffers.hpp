@@ -21,10 +21,10 @@
 
 #include <algorithm>   // `std::lower_bound`, `std::sort_heap`, `std::min`, `std::max`
 #include <array>       // `std::array` - batch-of-four overloads
-#include <concepts>    // `std::constructible_from` - the acquiring-allocator constraint
+#include <concepts>    // `std::same_as` - the buffer-allocator concept
 #include <span>        // `std::span` - the sorted-batch insert argument
 #include <functional>  // `std::less`
-#include <memory>      // `std::allocator`
+#include <memory>      // `std::allocator`, `std::unique_ptr` - the arena's chunk chain
 #include <new>         // `new (ptr) element_t(value)` for "placement-new"
 #include <type_traits> // `std::is_trivially_destructible`, `std::is_integral`
 #include <utility>     // `std::swap`, `std::move`, `std::forward`
@@ -439,17 +439,6 @@ class max_heap_dary {
     /** @brief Bytes this heap currently occupies. */
     std::size_t memory_usage() const noexcept { return memory_usage(capacity_); }
 
-    /** @brief Takes @p region as a heap of at most @p capacity entries; @p growth serves any later
-     *      block, and a default-constructed one refuses, making the carve exact. */
-    [[nodiscard]] static max_heap_dary acquire(bytes_span_t region, std::size_t capacity, allocator_t growth) noexcept {
-        max_heap_dary heap;
-        heap.capacity_ = min_of(capacity, region.size() / sizeof(element_t));
-        heap.elements_ = heap.capacity_ ? reinterpret_cast<element_t*>(region.data()) : nullptr;
-        heap.size_ = 0;
-        heap.allocator_ = std::move(growth);
-        return heap;
-    }
-
     ~max_heap_dary() noexcept { reset(); }
 
     void reset() noexcept {
@@ -511,21 +500,26 @@ class max_heap_dary {
         std::memcpy(&elements_[size_], new_elements, count * sizeof(element_t));
         size_ += count;
         bool const use_floyd_rebuild = count >= (size_ - count) / 2 || size_ - count == 0;
-        if (use_floyd_rebuild) {
-            if (size_ > 1) {
-                std::size_t const last_parent = (size_ - 2) / arity_;
-                for (std::size_t parent = last_parent + 1; parent-- > 0;) shift_down(parent);
-            }
-        }
-        else {
+        if (use_floyd_rebuild) rebuild_();
+        else
             for (std::size_t appended = size_ - count; appended < size_; ++appended) shift_up(appended);
-        }
         return status_t::success_k;
     }
 
     template <std::size_t batch_size_>
     inline status_t insert_many(std::array<element_t, batch_size_> const& batch) noexcept {
         return insert_many(batch.data(), batch_size_);
+    }
+
+    /** @brief Drops every entry the comparator orders below @p bar and re-heapifies what remains in
+     *      one pass - a frontier keyed further-first sheds everything further than @p bar. */
+    std::size_t erase_below(element_t const& bar) noexcept {
+        auto below = [&bar](element_t const& entry) noexcept { return less(entry, bar); };
+        std::size_t const kept = static_cast<std::size_t>(std::remove_if(elements_, elements_ + size_, below) - elements_);
+        std::size_t const erased = size_ - kept;
+        size_ = kept;
+        rebuild_();
+        return erased;
     }
 
     element_t pop() noexcept {
@@ -548,6 +542,12 @@ class max_heap_dary {
     static std::size_t parent_idx(std::size_t i) noexcept { return (i - 1u) / arity_; }
     static std::size_t first_child_idx(std::size_t i) noexcept { return arity_ * i + 1u; }
     static bool less(element_t const& a, element_t const& b) noexcept { return comparator_t {}(a, b); }
+
+    /** @brief Floyd's bottom-up heapify over the whole fill. */
+    void rebuild_() noexcept {
+        if (size_ < 2) return;
+        for (std::size_t parent = (size_ - 2) / arity_ + 1; parent-- > 0;) shift_down(parent);
+    }
 
     void shift_up(std::size_t i) noexcept {
         for (; i && less(elements_[parent_idx(i)], elements_[i]); i = parent_idx(i))
@@ -627,17 +627,6 @@ class sorted_buffer {
 
     /** @brief Bytes this buffer currently occupies. */
     std::size_t memory_usage() const noexcept { return memory_usage(capacity_); }
-
-    /** @brief Takes @p region as a buffer of at most @p capacity entries; @p growth serves any
-     *      later block, and a default-constructed one refuses, making the carve exact. */
-    [[nodiscard]] static sorted_buffer acquire(bytes_span_t region, std::size_t capacity, allocator_t growth) noexcept {
-        sorted_buffer buffer;
-        buffer.capacity_ = min_of(capacity, region.size() / sizeof(element_t));
-        buffer.elements_ = buffer.capacity_ ? reinterpret_cast<element_t*>(region.data()) : nullptr;
-        buffer.size_ = 0;
-        buffer.allocator_ = std::move(growth);
-        return buffer;
-    }
 
     ~sorted_buffer() noexcept { reset(); }
 
@@ -920,7 +909,7 @@ class growing_buffer {
     }
 
     /** @brief Moves the fill to @p count within reserved capacity, leaving the bytes untouched -
-     *      never allocates, never fails. This is the carve an arena performs, where value-
+     *      never allocates, never fails. This is the slice an arena hands out, where value-
      *      constructing the run would cost a pass over every slice handed out. */
     inline void extend_uninitialized(std::size_t count) noexcept {
         static_assert(
@@ -964,18 +953,100 @@ class growing_buffer {
     }
 };
 
-/** @brief Hands out slices of one arena - a @ref growing_buffer of bytes it points at but does not
- *      own, whose @c size is what has been carved and @c capacity the run. Copies share the arena
- *      by pointer, so containers built from one carve disjoint slices; a spent one answers
- *      @c nullptr, and releasing a slice does nothing. Every carve starts on an @p alignment_
- *      boundary, since the arena's raw bytes promise only what @c malloc does and the containers
- *      built over a slice issue the widest loads their kernels know. */
+/** @brief Per-thread bump arena: reservations bump inside the newest chunk, and one that cannot
+ *      fit them stays alive under its slices while a chunk at least twice as wide opens - so
+ *      addresses never move and slices outlive growth. The rewind keeps the widest chunk and
+ *      drops the ones it outgrew; releasing a slice does nothing, the rewind is the release. */
+template <typename upstream_allocator_ = std::allocator<std::byte>>
+class growing_arena {
+    using upstream_t = typename std::allocator_traits<upstream_allocator_>::template rebind_alloc<std::byte>;
+    using run_t = growing_buffer<std::byte, upstream_t>;
+
+    /** @brief One chunk: its run, and the chunk it outgrew. */
+    struct chunk_t {
+        run_t run;
+        std::unique_ptr<chunk_t> previous;
+    };
+
+    /** @brief The newest chunk, the one reservations bump; null before the first reservation. */
+    std::unique_ptr<chunk_t> newest_;
+    /** @brief Places every run - the thread's memory domain. */
+    upstream_t upstream_;
+
+  public:
+    explicit growing_arena(upstream_t upstream = {}) noexcept : upstream_(upstream) {}
+    growing_arena(growing_arena&&) noexcept = default;
+    growing_arena& operator=(growing_arena&&) noexcept = default;
+
+    /** @brief Bytes across chunks. */
+    std::size_t capacity() const noexcept {
+        std::size_t bytes = 0;
+        for (chunk_t const* chunk = newest_.get(); chunk; chunk = chunk->previous.get()) bytes += chunk->run.capacity();
+        return bytes;
+    }
+
+    /** @brief Opens the seed chunk at @p bytes, the width every later chunk doubles from; a
+     *      seeded arena answers in one compare. */
+    status_t reserve_exactly(std::size_t bytes) noexcept {
+        if (newest_) return status_t::success_k;
+        return grow_(bytes);
+    }
+
+    /** @brief Hands out @p bytes on an @p alignment boundary from the newest chunk, growing by one
+     *      at least twice as wide when it cannot fit them; null when the upstream refuses. */
+    std::byte* allocate(std::size_t bytes, std::size_t alignment) noexcept {
+        if (newest_)
+            if (std::byte* const slice = slice_(newest_->run, bytes, alignment)) return slice;
+        std::size_t const last_width = newest_ ? newest_->run.capacity() : 0;
+        if (failed(grow_(max_of(last_width * 2u, bytes + alignment)))) return nullptr;
+        return slice_(newest_->run, bytes, alignment);
+    }
+
+    /** @brief Rewinds the newest chunk and drops the ones it outgrew, so the next call starts at
+     *      the high-water mark. */
+    void clear() noexcept {
+        if (!newest_) return;
+        newest_->previous.reset();
+        newest_->run.clear();
+    }
+
+    /** @brief Releases every chunk. */
+    void reset() noexcept { newest_.reset(); }
+
+  private:
+    /** @brief Grows by a chunk of @p width bytes, the newest from now on, the old one chained behind. */
+    status_t grow_(std::size_t width) noexcept {
+        std::unique_ptr<chunk_t> grown {new (std::nothrow) chunk_t {run_t {upstream_}, nullptr}};
+        if (!grown) return status_t::bad_alloc_k;
+        if (status_t const sized = grown->run.reserve_exactly(width); failed(sized)) return sized;
+        grown->previous = std::move(newest_);
+        newest_ = std::move(grown);
+        return status_t::success_k;
+    }
+
+    /** @brief The address-aligned slice at the end of @p run, or null when it cannot fit @p bytes. */
+    static std::byte* slice_(run_t& run, std::size_t bytes, std::size_t alignment) noexcept {
+        // Aligned by address, not by offset: the upstream only promises what `malloc` does.
+        std::uintptr_t const cursor = reinterpret_cast<std::uintptr_t>(run.data() + run.size());
+        std::size_t const padding =
+            static_cast<std::size_t>(divide_round_up<std::uintptr_t>(cursor, alignment) * alignment - cursor);
+        if (run.capacity() - run.size() < padding + bytes) return nullptr;
+        run.extend_uninitialized(run.size() + padding + bytes);
+        return run.data() + run.size() - bytes;
+    }
+};
+
+/** @brief Hands out slices of one @ref growing_arena it points at but does not own. Copies share
+ *      the arena by pointer, so containers built from one reserve disjoint slices; releasing a
+ *      slice does nothing - the arena's rewind is the release. Every slice starts on an
+ *      @p alignment_ boundary, since the arena's raw bytes promise only what @c malloc does and
+ *      the containers built over a slice issue the widest loads their kernels know. */
 template <typename value_type_ = std::byte, typename upstream_allocator_ = std::allocator<std::byte>,
           std::size_t alignment_ = default_alignment_k>
 struct arena_allocator {
     using value_type = value_type_;
     using size_type = std::size_t;
-    using arena_t = growing_buffer<std::byte, upstream_allocator_>;
+    using arena_t = growing_arena<upstream_allocator_>;
 
     /** @brief Spelled out because the alignment's non-type parameter defeats the traits'
      *      automatic first-argument replacement; the upstream and the alignment ride along. */
@@ -1006,15 +1077,7 @@ struct arena_allocator {
 
     value_type_* allocate(std::size_t count) noexcept {
         if (!arena) return nullptr;
-        // Aligned by address, not by offset: the upstream only promises what `malloc` does.
-        std::uintptr_t const cursor = reinterpret_cast<std::uintptr_t>(arena->data() + arena->size());
-        std::size_t const padding_bytes = static_cast<std::size_t>(
-            divide_round_up<std::uintptr_t>(cursor, alignment_k) * alignment_k - cursor);
-        std::size_t const wanted_bytes = count * sizeof(value_type_);
-        if (arena->capacity() - arena->size() < padding_bytes + wanted_bytes) return nullptr;
-        std::byte* const carved = arena->data() + arena->size() + padding_bytes;
-        arena->extend_uninitialized(arena->size() + padding_bytes + wanted_bytes);
-        return reinterpret_cast<value_type_*>(carved);
+        return reinterpret_cast<value_type_*>(arena->allocate(count * sizeof(value_type_), alignment_k));
     }
     void deallocate(value_type_*, std::size_t) noexcept {}
     bool operator==(arena_allocator const& other) const noexcept { return arena == other.arena; }

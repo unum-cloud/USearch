@@ -19,5 +19,8 @@ std::size_t test_dense_index_u8() {
         nk_cap_serial_k | nk_cap_icelake_k | nk_cap_sapphireamx_k);
     failures_count += test_configuration<nk_u8_k, nk_kernel_euclidean_k, dummy_waiter_t, tiles_caps_k>( //
         "u8+euclidean+tiles");
+
+    // The starved u8 cell: ledgered scratch, so a refused re-table has somewhere to come from.
+    failures_count += test_starved_configuration<nk_u8_k, nk_kernel_euclidean_k>("u8+euclidean+starved");
     return failures_count;
 }

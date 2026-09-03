@@ -50,7 +50,7 @@ struct forkunion_allocator {
     constexpr forkunion_allocator(forkunion_allocator<other_type_> const& other) noexcept
         : memory_domain(other.memory_domain) {}
 
-    /** @brief Every run starts on @c default_alignment_k: arenas carve on that boundary and size
+    /** @brief Every run starts on @c default_alignment_k: arenas slice on that boundary and size
      *      themselves assuming an aligned base, so the heap fallback aligns like the domains do. */
     value_type_* allocate(std::size_t count) noexcept {
         std::size_t const bytes = aligned_bytes_(count);
@@ -84,9 +84,9 @@ static_assert(buffer_allocator<forkunion_allocator<byte_t>>);
 /** @brief The threads a bulk verb advances on and the scratch they walk with - one arena per
  *      thread, so a fan-out never leases or waits. Admits one caller at a time. */
 struct forkunion_executor_t {
-    /** @brief One thread's run of scratch on its own memory domain; @c size is carved, @c capacity
-     *      is the run. */
-    using arena_t = growing_buffer<byte_t, forkunion_allocator<byte_t>>;
+    /** @brief One thread's scratch on its own memory domain: chunks that double and never move,
+     *      rewound between calls. */
+    using arena_t = growing_arena<forkunion_allocator<byte_t>>;
     /** @brief One call's hold on the executor, released when it dies. */
     using claim_t = std::unique_lock<fu::spin_mutex<fu::preferred_yield_t>>;
 
@@ -167,11 +167,11 @@ struct forkunion_executor_t {
         return {claim_t {held_, std::adopt_lock}, status_t::success_k};
     }
 
-    /** @brief Claims at least @p bytes_per_thread of scratch on every thread's own domain; runs
-     *      grow to the widest ask and persist between calls. */
+    /** @brief Rewinds every thread's arena and seeds it at @p bytes_per_thread, the first chunk's
+     *      width; the widest chunk an earlier call opened stays, so the next call starts at its
+     *      high-water mark. */
     status_t reserve(std::size_t bytes_per_thread) noexcept {
         if (arenas_per_thread_.empty()) return status_t::uninitialized_k;
-        // Rewind before growing: a relocation moves only dead carves, never live ones.
         for (arena_t& arena : arenas_per_thread_) {
             arena.clear();
             if (failed(arena.reserve_exactly(bytes_per_thread))) return status_t::bad_alloc_k;
@@ -219,7 +219,7 @@ struct forkunion_executor_t {
 
   private:
     /** @brief One arena per thread, colocated with it once at @ref acquire; contexts point into it,
-     *      so it never relocates. */
+     *      so its chunks never move. */
     growing_buffer<arena_t> arenas_per_thread_;
     /** @brief Held by the one caller driving the threads; never swapped. */
     fu::spin_mutex<fu::preferred_yield_t> held_;

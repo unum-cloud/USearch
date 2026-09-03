@@ -82,8 +82,22 @@ static std::size_t test_configuration(char const* name) {
                                                 counting_allocator<std::byte>>;
     failures_count += test_dense_cursor<index_t, concurrent_cursor_t, immutable_cursor_t>(make_index);
     failures_count += test_dense_allocation_budget<index_t, kernel_>(make_index);
+    failures_count += test_dense_frontier_shedding<index_t>(make_index);
     failures_count += test_dense_overflow_race<index_t>(make_index);
     return report(name, failures_count);
+}
+
+/** @brief The starved cell: the same index over ledgered traversal scratch, so a refused re-table
+ *      has somewhere to come from, walked by the saturation scenario alone. */
+template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
+    requires(index_combo_supported<dtype_, kernel_>)
+static std::size_t test_starved_configuration(char const* name) {
+    using index_t = dense_ram_index<dtype_, kernel_, nk_cap_serial_k, dummy_waiter_t, counting_allocator<std::byte>,
+                                    counting_allocator<std::byte>, counting_allocator<std::byte>>;
+    auto make_index = [](allocation_ledger_t& ledger) {
+        return index_t {counting_allocator<std::byte>(ledger), counting_allocator<std::byte>(ledger)};
+    };
+    return report(name, test_dense_saturated<index_t>(make_index));
 }
 
 } // namespace usearch

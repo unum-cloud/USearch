@@ -116,7 +116,7 @@ concept basic_value_codec = requires(codec_type_ const& codec, value_type_ const
     { codec.load(input, mutable_value) } noexcept -> std::same_as<status_t>;
 };
 
-/** @brief The three per-walk counters every traversal accumulates; results report one
+/** @brief The four per-walk counters every traversal accumulates; results report one
  *      call's share as the difference of two snapshots. */
 struct basic_traversal_telemetry_t {
     /** @brief Metric invocations, batched rounds counted once per scored candidate. */
@@ -125,10 +125,12 @@ struct basic_traversal_telemetry_t {
     std::size_t visited_members = 0;
     /** @brief Re-seedings after the frontier drained prematurely - a connectivity signal. */
     std::size_t restarts = 0;
+    /** @brief Walks a scratch refusal ended early - ranked short, and on insertion wired thinner. */
+    std::size_t saturated_walks = 0;
 
     basic_traversal_telemetry_t operator-(basic_traversal_telemetry_t const& before) const noexcept {
         return {computed_distances - before.computed_distances, visited_members - before.visited_members,
-                restarts - before.restarts};
+                restarts - before.restarts, saturated_walks - before.saturated_walks};
     }
 };
 
@@ -664,9 +666,9 @@ struct basic_ram_index {
             node_id_t const first_invisible_id = last_visible_id_.load(std::memory_order_acquire);
             // Capacity for this row is already claimed, so a refused walk wires a thinner
             // node rather than abandoning an id nothing will ever publish.
-            if (first_invisible_id) [[maybe_unused]]
-                status_t const walked = search_around_<synchronization_>(
-                    incoming, metric, first_invisible_id, expansion_factor, fan_out, connectivity, context);
+            if (first_invisible_id)
+                search_around_<synchronization_>(incoming, metric, first_invisible_id, expansion_factor, fan_out,
+                                                 connectivity, context);
             selector(*this, metric, context);
 
             // Identity is dispensed here, after the metric-bound walk, so one slow scorer
@@ -844,13 +846,12 @@ struct basic_ram_index {
         if (!first_invisible_id) return {};
 
         basic_traversal_telemetry_t const telemetry_before = context.telemetry;
-        status_t const walked = search_around_<synchronization_>(query, metric, first_invisible_id, expansion_factor,
-                                                                 fan_out, connectivity_32_k, context);
+        search_around_<synchronization_>(query, metric, first_invisible_id, expansion_factor, fan_out,
+                                         connectivity_32_k, context);
 
-        // A refused walk still ranked whatever it reached; the status says the ranking is
+        // A refused walk still ranked whatever it reached; the telemetry says the ranking is
         // short because scratch ran out, not because the graph had nothing better.
         search_result_t result;
-        result.status = walked;
         result.count = context.results.size();
         result.telemetry = context.telemetry - telemetry_before;
         if constexpr (synchronization_ != synchronization_t::concurrent_k) {
@@ -1365,9 +1366,10 @@ struct basic_ram_index {
         return max_of<std::size_t>(divide_round_up(expansion_factor, connectivity), 1);
     }
 
-    /** @brief Sizes every context container for one traversal, so the staging surfaces &
-     *      selections never allocate mid-walk; the visited set and frontier may still
-     *      grow past deep expansions, degrading the walk gracefully when they cannot. */
+    /** @brief Sizes every context container for one walk from the frozen geometry: the pools,
+     *      the staging surfaces and the selections never allocate again, the frontier sheds
+     *      within its reservation, and the visited set alone may re-table as a walk widens -
+     *      once per doubling per context lifetime, which a context kept across walks amortizes. */
     static status_t reserve_scratch_(traversal_context_t& context, std::size_t expansion_factor,
                                      std::size_t fan_out, std::size_t connectivity) noexcept {
         std::size_t const round_capacity = max_of(fan_out * connectivity, connectivity + 1);
@@ -1407,16 +1409,15 @@ struct basic_ram_index {
     /** @brief Scores up to @p wanted fresh stochastic landmarks in one builder round,
      *      seeding the results & frontier. Visited collisions probe forward cyclically,
      *      staying exact.
-     *  @return The landmarks scored; @c 0 on @c success_k means the published set is
-     *      exhausted or staging was refused, which is a reason to stop restarting rather
-     *      than a failure. A failed status means scratch could not grow, which is. */
+     *  @return The landmarks scored; zero means the published set is exhausted, staging was
+     *      refused, or scratch could not grow - the last counted as a saturated walk - and is
+     *      the reason to stop. */
     template <typename metric_type_, typename query_type_>
-    expected<std::size_t> sample_landmarks_(query_type_ const& query, metric_type_& metric,
-                                            node_id_t first_invisible_id, std::size_t wanted,
-                                            std::size_t expansion_factor,
-                                            traversal_context_t& context) const noexcept {
-        if (status_t const seen = context.visited.reserve(context.visited.size() + wanted); failed(seen))
-            return {0, seen};
+    std::size_t sample_landmarks_(query_type_ const& query, metric_type_& metric, node_id_t first_invisible_id,
+                                  std::size_t wanted, std::size_t expansion_factor,
+                                  traversal_context_t& context) const noexcept {
+        if (failed(context.visited.reserve(context.visited.size() + wanted)))
+            return ++context.telemetry.saturated_walks, 0;
         context.staged_ids.clear();
         metric.reset(query);
         while (context.staged_ids.size() != wanted &&
@@ -1429,15 +1430,14 @@ struct basic_ram_index {
             context.staged_ids.push_back_reserved(draw);
         }
         std::size_t const staged_count = context.staged_ids.size();
-        if (!staged_count) return {0, status_t::success_k};
+        if (!staged_count) return 0;
         drain_round(metric, staged_count, context);
         for (std::size_t lane = 0; lane != staged_count; ++lane) {
             scored_node_t const scored {context.staged_ids[lane], context.staged_distances[lane]};
             [[maybe_unused]] bool const ranked = context.results.insert(scored_node_t {scored}, expansion_factor);
-            if (status_t const queued = context.frontier.insert(scored_node_t {scored}); failed(queued))
-                return {lane, queued};
+            if (failed(context.frontier.insert(scored_node_t {scored}))) return ++context.telemetry.saturated_walks, lane;
         }
-        return {staged_count, status_t::success_k};
+        return staged_count;
     }
 
     /** @brief One round's expansion half: peels up to @p fan_out frontier entries within
@@ -1463,6 +1463,7 @@ struct basic_ram_index {
                 // Drop the raw row copy: only pushed, filtered ids may reach the drain.
                 // The entry stays on the frontier - nothing is lost, only postponed.
                 context.staged_ids.resize_reserved(segment_start);
+                ++context.telemetry.saturated_walks;
                 return basic_expansion_round_t::saturated_k;
             }
             std::size_t const degree = copied.value;
@@ -1493,50 +1494,58 @@ struct basic_ram_index {
      *  @brief The shared walk of @c search & @c insert: seed, then per round expand the
      *      nearest frontier entries and score the staged union in one builder round.
      *
-     *  The walk itself never fails hard: an exhausted published set or a refused staging
-     *  ends it normally, and a scratch refusal ends it early but leaves whatever was
-     *  already ranked intact. The status says which happened, so a read-only caller can
-     *  report the refusal while an insertion caller - already holding claimed capacity -
-     *  finishes regardless. Frontier starvation with an unfilled pool re-seeds and counts
-     *  a restart. The frontier-admission rule: a candidate enters the frontier iff it
-     *  improved the results pool, or the frontier would otherwise be empty - the seedings.
+     *  The walk never fails hard: an exhausted published set or a refused staging ends it
+     *  normally, and a refused re-table ends it early with the ranking it has and counts a
+     *  saturated walk - an insertion wires the thinner row regardless, and a search reports
+     *  the count so the caller can widen the scratch. Frontier starvation with an unfilled
+     *  pool re-seeds and counts a restart. The frontier-admission rule: a candidate enters
+     *  the frontier iff it improved the results pool, or the frontier would otherwise be
+     *  empty - the seedings.
      */
     template <synchronization_t synchronization_, typename metric_type_, typename query_type_>
-    status_t search_around_(query_type_ const& query, metric_type_& metric, node_id_t first_invisible_id,
-                            std::size_t expansion_factor, std::size_t fan_out, std::size_t connectivity,
-                            traversal_context_t& context) const noexcept {
-        expected<std::size_t> seeded = sample_landmarks_(query, metric, first_invisible_id, connectivity,
-                                                         expansion_factor, context);
-        if (failed(seeded.status)) return seeded.status;
-        if (!seeded.value) return status_t::success_k; // Nothing published to walk from.
-
+    void search_around_(query_type_ const& query, metric_type_& metric, node_id_t first_invisible_id,
+                        std::size_t expansion_factor, std::size_t fan_out, std::size_t connectivity,
+                        traversal_context_t& context) const noexcept {
         while (true) {
+            // An empty frontier seeds: the first round, or a restart after it drained before the
+            // pool filled. Nothing left to seed from ends the walk.
             if (context.frontier.empty()) {
-                if (context.results.size() >= expansion_factor) return status_t::success_k;
-                seeded = sample_landmarks_(query, metric, first_invisible_id, connectivity, expansion_factor, context);
-                if (failed(seeded.status)) return seeded.status;
-                if (!seeded.value) return status_t::success_k;
-                ++context.telemetry.restarts;
+                if (context.results.size() >= expansion_factor) return;
+                bool const restarting = !context.results.empty();
+                if (!sample_landmarks_(query, metric, first_invisible_id, connectivity, expansion_factor, context)) return;
+                context.telemetry.restarts += restarting;
                 continue;
             }
-
-            basic_expansion_round_t const round = expand_frontier_<synchronization_>(query, metric, first_invisible_id,
-                                                                                     expansion_factor, fan_out, //
-                                                                                     context);
-            if (round == basic_expansion_round_t::converged_k) return status_t::success_k;
-
-            std::size_t const staged_count = context.staged_ids.size();
-            if (staged_count) {
-                drain_round(metric, staged_count, context);
-                for (std::size_t lane = 0; lane != staged_count; ++lane) {
-                    scored_node_t const scored {context.staged_ids[lane], context.staged_distances[lane]};
-                    if (context.results.insert(scored_node_t {scored}, expansion_factor))
-                        if (status_t const queued = context.frontier.insert(scored_node_t {scored}); failed(queued))
-                            return queued;
-                }
-            }
-            if (round == basic_expansion_round_t::saturated_k) return status_t::success_k;
+            basic_expansion_round_t const expanded = expand_frontier_<synchronization_>(
+                query, metric, first_invisible_id, expansion_factor, fan_out, context);
+            if (expanded == basic_expansion_round_t::converged_k) return;
+            basic_expansion_round_t const ranked = rank_round_(metric, expansion_factor, context);
+            if (expanded == basic_expansion_round_t::saturated_k || ranked == basic_expansion_round_t::saturated_k)
+                return;
         }
+    }
+
+    /** @brief One round's scoring half: drains the staged union through the metric and pushes what
+     *      improved the pool into the frontier, shedding the frontier past a full pool's radius
+     *      first so the pushes fit. */
+    template <typename metric_type_>
+    basic_expansion_round_t rank_round_(metric_type_& metric, std::size_t expansion_factor,
+                                        traversal_context_t& context) const noexcept {
+        std::size_t const staged_count = context.staged_ids.size();
+        if (!staged_count) return basic_expansion_round_t::advanced_k;
+        drain_round(metric, staged_count, context);
+        if (context.results.size() == expansion_factor &&
+            context.frontier.capacity() - context.frontier.size() < staged_count)
+            context.frontier.erase_below(context.results.top());
+        for (std::size_t lane = 0; lane != staged_count; ++lane) {
+            scored_node_t const scored {context.staged_ids[lane], context.staged_distances[lane]};
+            if (!context.results.insert(scored_node_t {scored}, expansion_factor)) continue;
+            if (failed(context.frontier.insert(scored_node_t {scored}))) {
+                ++context.telemetry.saturated_walks;
+                return basic_expansion_round_t::saturated_k;
+            }
+        }
+        return basic_expansion_round_t::advanced_k;
     }
 
     /**

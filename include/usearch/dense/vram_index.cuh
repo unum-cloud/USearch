@@ -66,6 +66,9 @@ struct dense_cuda_telemetry_block_t {
     /** @brief Scored candidates split by plane residency; zero unless the planes view names a
      *      resident range. */
     u64_t local_scored, remote_scored;
+    /** @brief Frontier tail entries shed past their slice, and visited-set claims that ran out of
+     *      probes - the two ways a walk sized ahead degrades. */
+    u64_t tail_drops, visited_saturations;
 };
 
 #if defined(__CUDACC__)
@@ -202,6 +205,7 @@ struct dense_cuda_neighbors_ref_t {
 struct dense_cuda_telemetry_t {
     u32_t hops = 0, scored = 0, lock_attempts = 0, lock_skips = 0, full_lists = 0, restarts = 0, locked_drops = 0;
     u32_t local_scored = 0, remote_scored = 0;
+    u32_t tail_drops = 0, visited_saturations = 0;
 
     /** @brief Folds the live counters into the device block; the search path never touches
      *      the lock or list counters, so its instantiation skips four dead atomics. */
@@ -218,6 +222,11 @@ struct dense_cuda_telemetry_t {
         if (local_scored | remote_scored) {
             atomicAdd(reinterpret_cast<wide_t*>(&counters->local_scored), static_cast<wide_t>(local_scored));
             atomicAdd(reinterpret_cast<wide_t*>(&counters->remote_scored), static_cast<wide_t>(remote_scored));
+        }
+        if (tail_drops | visited_saturations) {
+            atomicAdd(reinterpret_cast<wide_t*>(&counters->tail_drops), static_cast<wide_t>(tail_drops));
+            atomicAdd(reinterpret_cast<wide_t*>(&counters->visited_saturations),
+                      static_cast<wide_t>(visited_saturations));
         }
         if constexpr (!inserting_) return;
         atomicAdd(reinterpret_cast<wide_t*>(&counters->lock_attempts), static_cast<wide_t>(lock_attempts));
@@ -338,7 +347,7 @@ __device__ __forceinline__ void dense_cuda_score_into_frontier( //
  */
 template <dense_cuda_kit kit_>
 __device__ __forceinline__ u32_t dense_cuda_sample_landmarks( //
-    dense_cuda_planes_view<kit_> const& planes, dense_node_id_t sampling_bound, dense_cuda_visited_set_t visited,
+    dense_cuda_planes_view<kit_> const& planes, dense_node_id_t sampling_bound, dense_cuda_visited_set_t& visited,
     splitmix64_t& random_generator, u32_t (&gathered_ids)[dense_cuda_cache_rows_k], int lane) noexcept {
 
     dense_node_id_t draw = uniform_below<dense_node_id_t> {sampling_bound}(random_generator);
@@ -366,7 +375,7 @@ template <dense_cuda_kit kit_, u32_t resident_blocks_ = dense_cuda_resident_bloc
           typename frontier_>
 __device__ __forceinline__ void dense_cuda_search_ahead( //
     dense_cuda_planes_view<kit_> const& planes, typename kit_::fragment_t const* query_span,
-    typename kit_::query_state_t query_state, dense_node_id_t sampling_bound, dense_cuda_visited_set_t visited,
+    typename kit_::query_state_t query_state, dense_node_id_t sampling_bound, dense_cuda_visited_set_t& visited,
     u32_t (&gathered_ids)[dense_cuda_cache_rows_k], dense_cuda_scored_node_t (&gathered_scored)[32],
     dense_cuda_warp_context<frontier_>& context, int lane) noexcept {
 
@@ -455,7 +464,7 @@ template <dense_cuda_kit kit_, u32_t resident_blocks_ = dense_cuda_resident_bloc
           typename frontier_>
 __device__ __forceinline__ void dense_cuda_search_around( //
     dense_cuda_planes_view<kit_> const& planes, typename kit_::fragment_t const* query_span,
-    typename kit_::query_state_t query_state, dense_node_id_t sampling_bound, dense_cuda_visited_set_t visited,
+    typename kit_::query_state_t query_state, dense_node_id_t sampling_bound, dense_cuda_visited_set_t& visited,
     u32_t (&gathered_ids)[dense_cuda_cache_rows_k], dense_cuda_scored_node_t (&gathered_scored)[32],
     dense_cuda_warp_context<frontier_>& context, int lane) noexcept {
     context.frontier.reset(lane);
@@ -907,7 +916,7 @@ void dense_cuda_with_pool_slots(u32_t pool_slots, callback_type_&& callback) noe
  *      the reverse edges - one warp per node. */
 template <dense_cuda_kit kit_, typename frontier_>
 __device__ __forceinline__ void dense_cuda_insert_one( //
-    dense_cuda_build_view<kit_> const& view, dense_node_id_t new_node_id, dense_cuda_visited_set_t visited,
+    dense_cuda_build_view<kit_> const& view, dense_node_id_t new_node_id, dense_cuda_visited_set_t& visited,
     typename kit_::fragment_t* query_span, dense_cuda_vector_cache<typename kit_::fragment_t> cache,
     dense_cuda_relink_scratch_t relink, typename kit_::norms_t (&cache_norms)[dense_cuda_cache_rows_k],
     u32_t (&gathered_ids)[dense_cuda_cache_rows_k], dense_cuda_scored_node_t (&gathered_scored)[32],
@@ -1008,11 +1017,13 @@ __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, dense_cuda_
 
         dense_cuda_warp_context<dense_cuda_register_frontier<pool_slots_>> context;
         context.random_generator = splitmix64_t {0xA5A5A5A5ull ^ (static_cast<u64_t>(new_node_id) * 33 + lane)};
-        dense_cuda_visited_set_t const visited {visited_slots, view.arena_shape.visited_hash_shift,
+        dense_cuda_visited_set_t visited {visited_slots, view.arena_shape.visited_hash_shift,
                                                 view.epoch_base + (new_node_id - view.first_id) + 1};
         dense_cuda_insert_one<kit_>( //
             view, new_node_id, visited, query_span, cache, relink, cache_norms[warp], gathered_ids[warp],
             gathered_scored[warp], context, lane);
+        context.telemetry.tail_drops = context.frontier.dropped();
+        context.telemetry.visited_saturations = visited.saturations_;
         context.telemetry.flush<true>(view.telemetry, lane);
     }
 }
@@ -1054,7 +1065,7 @@ struct dense_cuda_refine_view {
  *      selection lands in the shadow row. Read-only on the live planes. */
 template <dense_cuda_kit kit_, typename frontier_>
 __device__ __forceinline__ void dense_cuda_refine_one( //
-    dense_cuda_refine_view<kit_> const& view, dense_node_id_t node_id, dense_cuda_visited_set_t visited,
+    dense_cuda_refine_view<kit_> const& view, dense_node_id_t node_id, dense_cuda_visited_set_t& visited,
     typename kit_::fragment_t* query_span, dense_cuda_vector_cache<typename kit_::fragment_t> cache,
     dense_cuda_relink_scratch_t relink, typename kit_::norms_t (&cache_norms)[dense_cuda_cache_rows_k],
     u32_t (&gathered_ids)[dense_cuda_cache_rows_k], dense_cuda_scored_node_t (&gathered_scored)[32],
@@ -1139,11 +1150,13 @@ __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, dense_cuda_
 
         dense_cuda_warp_context<dense_cuda_register_frontier<pool_slots_>> context;
         context.random_generator = splitmix64_t {0xA5A5A5A5ull ^ (static_cast<u64_t>(node_id) * 33 + lane)};
-        dense_cuda_visited_set_t const visited {visited_slots, view.arena_shape.visited_hash_shift,
+        dense_cuda_visited_set_t visited {visited_slots, view.arena_shape.visited_hash_shift,
                                                 view.epoch_base + offset + 1};
         dense_cuda_refine_one<kit_>( //
             view, node_id, visited, query_span, cache, relink, cache_norms[warp], gathered_ids[warp],
             gathered_scored[warp], context, lane);
+        context.telemetry.tail_drops = context.frontier.dropped();
+        context.telemetry.visited_saturations = visited.saturations_;
         context.telemetry.flush<false>(view.telemetry, lane);
     }
 }
@@ -1164,7 +1177,7 @@ __device__ __forceinline__ void dense_cuda_shadow_self_loop(dense_cuda_refine_vi
  *      propagates candidates one hop further. */
 template <dense_cuda_kit kit_, typename frontier_>
 __device__ __forceinline__ void dense_cuda_join_one( //
-    dense_cuda_refine_view<kit_> const& view, dense_node_id_t node_id, dense_cuda_visited_set_t visited,
+    dense_cuda_refine_view<kit_> const& view, dense_node_id_t node_id, dense_cuda_visited_set_t& visited,
     typename kit_::fragment_t* query_span, dense_cuda_vector_cache<typename kit_::fragment_t> cache,
     dense_cuda_relink_scratch_t relink, typename kit_::norms_t (&cache_norms)[dense_cuda_cache_rows_k],
     u32_t (&gathered_ids)[dense_cuda_cache_rows_k], dense_cuda_scored_node_t (&gathered_scored)[32],
@@ -1275,11 +1288,13 @@ __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, dense_cuda_
 
         dense_cuda_warp_context<dense_cuda_register_frontier<2>> context;
         context.random_generator = splitmix64_t {0xA5A5A5A5ull ^ (static_cast<u64_t>(node_id) * 33 + lane)};
-        dense_cuda_visited_set_t const visited {visited_slots, view.arena_shape.visited_hash_shift,
+        dense_cuda_visited_set_t visited {visited_slots, view.arena_shape.visited_hash_shift,
                                                 view.epoch_base + (node_id - view.first_id) + 1};
         dense_cuda_join_one<kit_>( //
             view, node_id, visited, query_span, cache, relink, cache_norms[warp], gathered_ids[warp],
             gathered_scored[warp], context, lane);
+        context.telemetry.tail_drops = context.frontier.dropped();
+        context.telemetry.visited_saturations = visited.saturations_;
         context.telemetry.flush<false>(view.telemetry, lane);
     }
 }
@@ -1484,7 +1499,7 @@ __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, dense_cuda_
 template <dense_cuda_kit kit_, u32_t resident_blocks_, typename frontier_>
 __device__ __forceinline__ void dense_cuda_search_one( //
     dense_cuda_search_view<kit_> const& view, u32_t query_index, typename kit_::fragment_t* query_span,
-    dense_cuda_visited_set_t visited, frontier_ frontier, u32_t (&gathered_ids)[dense_cuda_cache_rows_k],
+    dense_cuda_visited_set_t& visited, frontier_ frontier, u32_t (&gathered_ids)[dense_cuda_cache_rows_k],
     dense_cuda_scored_node_t (&gathered_scored)[32], int lane) noexcept {
 
     typename kit_::fragment_t const* query_row = view.queries +
@@ -1519,6 +1534,8 @@ __device__ __forceinline__ void dense_cuda_search_one( //
             if (view.result_distances) view.result_distances[slot] = kit_::convert_to_distance(ranked_entry.distance());
         }
     }
+    context.telemetry.tail_drops = context.frontier.dropped();
+    context.telemetry.visited_saturations = visited.saturations_;
     context.telemetry.flush<false>(view.telemetry, lane);
 }
 
@@ -1537,7 +1554,7 @@ __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, pool_slots_
     typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(slice.scratch);
     for (u32_t query_index = static_cast<u32_t>(warp_index); query_index < view.queries_count;
          query_index += gridDim.x * dense_cuda_warps_per_block_k) {
-        dense_cuda_visited_set_t const visited {visited_slots, view.arena_shape.visited_hash_shift,
+        dense_cuda_visited_set_t visited {visited_slots, view.arena_shape.visited_hash_shift,
                                                 view.epoch_base + query_index + 1};
         dense_cuda_search_one<kit_, (pool_slots_ <= 4 ? 4u : 3u)>( //
             view, query_index, query_span, visited, dense_cuda_register_frontier<pool_slots_> {}, gathered_ids[warp],
@@ -1566,7 +1583,7 @@ __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, 4)
     frontier.expansion_target_ = view.expansion;
     for (u32_t query_index = static_cast<u32_t>(warp_index); query_index < view.queries_count;
          query_index += gridDim.x * dense_cuda_warps_per_block_k) {
-        dense_cuda_visited_set_t const visited {visited_slots, view.arena_shape.visited_hash_shift,
+        dense_cuda_visited_set_t visited {visited_slots, view.arena_shape.visited_hash_shift,
                                                 view.epoch_base + query_index + 1};
         dense_cuda_search_one<kit_, 4u>(view, query_index, query_span, visited, frontier, gathered_ids[warp],
                                         gathered_scored[warp], lane);
@@ -2149,6 +2166,10 @@ struct dense_vram_index {
         std::size_t restarts = 0;
         /** @brief Reverse edges abandoned after the bounded lock budget - GPU-only telemetry. */
         std::size_t abandoned_back_links = 0;
+        /** @brief Frontier tail entries shed past their arena slice - GPU-only telemetry. */
+        std::size_t tail_drops = 0;
+        /** @brief Visited-set claims that ran out of probes and starved a walk - GPU-only telemetry. */
+        std::size_t visited_saturations = 0;
         /** @brief The CPU splits refine-side distance work out of @c computed_distances;
          *      the GPU folds it all into one counter, so these report zero. */
         std::size_t computed_distances_in_refines = 0;
@@ -2171,6 +2192,8 @@ struct dense_vram_index {
         inserted.computed_distances = spent.scored;
         inserted.restarts = spent.restarts;
         inserted.abandoned_back_links = spent.lock_skips;
+        inserted.tail_drops = spent.tail_drops;
+        inserted.visited_saturations = spent.visited_saturations;
         return inserted;
     }
 
@@ -2196,6 +2219,8 @@ struct dense_vram_index {
         std::size_t visited_members = 0;
         std::size_t computed_distances = 0;
         std::size_t restarts = 0;
+        std::size_t tail_drops = 0;
+        std::size_t visited_saturations = 0;
         explicit operator bool() const noexcept { return succeeded(status); }
     };
 
@@ -2244,6 +2269,8 @@ struct dense_vram_index {
         searched.visited_members = spent.hops;
         searched.computed_distances = spent.scored;
         searched.restarts = spent.restarts;
+        searched.tail_drops = spent.tail_drops;
+        searched.visited_saturations = spent.visited_saturations;
         return searched;
     }
 

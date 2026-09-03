@@ -197,6 +197,8 @@ struct dense_traversal_context {
     /** @brief Starvation restarts: re-seedings after the frontier drained prematurely -
      *      a graph-connectivity health signal unique to the flat NSW design. */
     std::size_t restarts = 0;
+    /** @brief Walks a scratch refusal ended early - ranked short, and on insertion wired thinner. */
+    std::size_t saturated_walks = 0;
 
     dense_traversal_context() noexcept = delete;
     dense_traversal_context(dense_traversal_context const&) noexcept = delete;
@@ -564,10 +566,36 @@ struct dense_ram_index {
         }
     }
 
+    /** @brief The four queue reservations a walk starts from, for one expansion factor and link count. */
+    struct queue_sizes_t {
+        /** @brief The navigation pool - the expansion factor. */
+        std::size_t results;
+        /** @brief A full neighbor list plus the newcomer while back-linking, or the admitted pool while filtering. */
+        std::size_t refining_candidates;
+        /** @brief Four expansions' worth, refilled by shedding rather than growth. */
+        std::size_t frontier;
+        /** @brief One neighbor list per expansion - the first size a re-table doubles from. */
+        std::size_t visited;
+    };
+
+    static constexpr queue_sizes_t queue_sizes_(std::size_t expansion_factor, std::size_t links) noexcept {
+        return {expansion_factor, max_of<std::size_t>(links + 1, expansion_factor), expansion_factor * 4u,
+                expansion_factor * links};
+    }
+
+    static status_t reserve_queues_(dense_traversal_context_t& context, queue_sizes_t sizes) noexcept {
+        if (status_t const sized = context.results.reserve(sizes.results); failed(sized)) return sized;
+        if (status_t const sized = context.refining_candidates.reserve(sizes.refining_candidates); failed(sized))
+            return sized;
+        if (status_t const sized = context.frontier.reserve(sizes.frontier); failed(sized)) return sized;
+        return context.visited.reserve(sizes.visited);
+    }
+
     /**
-     *  @brief Bytes one context reserves for @p config under the frozen geometry - what an arena
-     *      backing a traversal must hold, since an arena never grows and a walk never allocates
-     *      twice.
+     *  @brief Bytes one context reserves for @p config under the frozen geometry - the first size
+     *      of every structure a walk touches. The visited set may still re-table as a walk widens,
+     *      which a context kept across walks amortizes, and which the arena behind an executor
+     *      grows for.
      *
      *  Mirrors @ref reserve_traversal reservation for reservation, and sits beside it so the two
      *  drift only under a reviewer's eye. Zero before the geometry freezes.
@@ -582,10 +610,11 @@ struct dense_ram_index {
         using context_t = dense_traversal_context_t;
         using arena_t = arena_allocator<std::byte>;
         std::size_t const links = node_connectivity;
-        std::size_t bytes = arena_t::reserved_bytes(context_t::results_array_t::memory_usage(expansion_factor)) +
-                            arena_t::reserved_bytes(context_t::results_array_t::memory_usage(links + 1)) +
-                            arena_t::reserved_bytes(context_t::frontier_queue_t::memory_usage(expansion_factor * 4u)) +
-                            arena_t::reserved_bytes(context_t::visited_set_t::memory_usage(expansion_factor * 4u)) +
+        queue_sizes_t const sizes = queue_sizes_(expansion_factor, links);
+        std::size_t bytes = arena_t::reserved_bytes(context_t::results_array_t::memory_usage(sizes.results)) +
+                            arena_t::reserved_bytes(context_t::results_array_t::memory_usage(sizes.refining_candidates)) +
+                            arena_t::reserved_bytes(context_t::frontier_queue_t::memory_usage(sizes.frontier)) +
+                            arena_t::reserved_bytes(context_t::visited_set_t::memory_usage(sizes.visited)) +
                             context_t::links_memory_usage(links);
 
         if constexpr (has_tiles_k) {
@@ -597,9 +626,14 @@ struct dense_ram_index {
     }
 
     /**
-     *  @brief Sizes @p context 's scratch for the frozen geometry and @p config, so no walk
-     *      allocates mid-flight - the other fallible half of an insertion, hoistable ahead of a
-     *      fan-out. Idempotent and monotone: a context already wide enough answers in six compares.
+     *  @brief Sizes @p context 's scratch for the frozen geometry and @p config - the other fallible
+     *      half of an insertion, hoistable ahead of a fan-out. Idempotent and monotone: a context
+     *      already wide enough answers in six compares.
+     *
+     *  Every container is sized for one walk from the frozen geometry: the pools and the link
+     *  scratch never allocate again, the frontier sheds within its reservation, and the visited
+     *  set alone may re-table as a walk widens - once per doubling per context lifetime, which a
+     *  context kept across walks amortizes and the arena behind an executor grows for.
      */
     status_t reserve_traversal(dense_traversal_context_t& context, insert_config_t config = {}) noexcept {
         geometry_t const geometry = geometry_.load(std::memory_order_acquire);
@@ -610,13 +644,10 @@ struct dense_ram_index {
 
         // `sorted_buffer::insert(.., limit)` never grows on its own, and `growing_hash_set::set`
         // never rehashes, so these reservations are load-bearing rather than an optimization.
-        // `refining_candidates` must fit a full neighbor list plus the newcomer during back-linking.
-        if (failed(context.results.reserve(expansion_factor)) ||                  //
-            failed(context.refining_candidates.reserve(node_connectivity + 1)) || //
-            failed(context.frontier.reserve(expansion_factor * 4u)) ||            //
-            failed(context.visited.reserve(expansion_factor * 4u)) ||             //
-            failed(context.reserve_links(node_connectivity)))
-            return status_t::bad_alloc_k;
+        if (status_t const sized = reserve_queues_(context, queue_sizes_(expansion_factor, node_connectivity));
+            failed(sized))
+            return sized;
+        if (status_t const sized = context.reserve_links(node_connectivity); failed(sized)) return sized;
 
         // The tile scratch sizes from the same frozen geometry and the kit's own shapes - padded to
         // whole tiles, so the padded pool doubles as the pair-matrix stride.
@@ -652,6 +683,8 @@ struct dense_ram_index {
         std::size_t computed_distances_in_reverse_refines = 0;
         /** @brief Starvation restarts across the batch - a graph-connectivity health signal. */
         std::size_t restarts = 0;
+        /** @brief Walks a scratch refusal ended early; their rows published with thinner links. */
+        std::size_t saturated_walks = 0;
 
         explicit operator bool() const noexcept { return succeeded(status); }
     };
@@ -687,6 +720,7 @@ struct dense_ram_index {
         std::size_t const refines_before = context.computed_distances_in_refines;
         std::size_t const reverse_refines_before = context.computed_distances_in_reverse_refines;
         std::size_t const restarts_before = context.restarts;
+        std::size_t const saturated_walks_before = context.saturated_walks;
 
         // Geometry is frozen by the first successful `reserve()` - a hard prerequisite here:
         // without it, neither the copy width nor the neighbor-list width is defined.
@@ -714,6 +748,7 @@ struct dense_ram_index {
         result.computed_distances_in_reverse_refines = context.computed_distances_in_reverse_refines -
                                                        reverse_refines_before;
         result.restarts = context.restarts - restarts_before;
+        result.saturated_walks = context.saturated_walks - saturated_walks_before;
         return result;
     }
 
@@ -842,9 +877,9 @@ struct dense_ram_index {
             node_id_t const first_invisible_id = last_visible_id_.load(std::memory_order_acquire);
             // The row is already claimed, so a refused walk wires a thinner node rather than
             // abandoning an id nothing will ever publish.
-            if (first_invisible_id != 0) [[maybe_unused]]
-                status_t const walked = search_around(owned_vector, new_norms, first_invisible_id, expansion_factor,
-                                                      context);
+            if (first_invisible_id != 0 &&
+                failed(search_around(owned_vector, new_norms, first_invisible_id, expansion_factor, context)))
+                ++context.saturated_walks;
 
             // Select up to `connectivity()` diverse links from the search results and write them
             // into our own still-unpublished list. No locks are needed: no reader can arrive
@@ -913,6 +948,8 @@ struct dense_ram_index {
         std::size_t computed_distances = 0;
         /** @brief Starvation restarts - a graph-connectivity health signal. */
         std::size_t restarts = 0;
+        /** @brief One when a scratch refusal ended the walk early, leaving the ranking short. */
+        std::size_t saturated_walks = 0;
 
         explicit operator bool() const noexcept { return succeeded(status); }
     };
@@ -994,17 +1031,13 @@ struct dense_ram_index {
         std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
                                                                      : connectivity() * 2;
 
-        // Same load-bearing reservations as in `insert`: the scratch structures never grow on
-        // their own mid-traversal. A predicated walk also owns the admitted pool - the
-        // re-selection buffer, idle during any search - sized to the same expansion.
-        if (failed(context.results.reserve(expansion_factor)) ||       //
-            failed(context.frontier.reserve(expansion_factor * 4u)) || //
-            failed(context.visited.reserve(expansion_factor * 4u)))
-            return {status_t::bad_alloc_k};
-        if constexpr (predicated_k) {
-            if (failed(context.refining_candidates.reserve(expansion_factor))) return {status_t::bad_alloc_k};
-            context.refining_candidates.clear();
-        }
+        // Same reservations as in `insert`, the first size of each structure; the visited set may
+        // still re-table as the walk widens. A predicated walk also owns the admitted pool - the
+        // re-selection buffer, idle during any search - which the same sizes cover.
+        if (status_t const sized = reserve_queues_(context, queue_sizes_(expansion_factor, connectivity()));
+            failed(sized))
+            return {sized};
+        if constexpr (predicated_k) context.refining_candidates.clear();
         context.results.clear();
         context.frontier.clear();
         context.visited.clear();
@@ -1022,6 +1055,7 @@ struct dense_ram_index {
         std::size_t const visited_members_before = context.visited_members;
         std::size_t const computed_distances_before = context.computed_distances;
         std::size_t const restarts_before = context.restarts;
+        std::size_t const saturated_walks_before = context.saturated_walks;
 
         vector_norms_t const query_norms = dense_norms(query_vector);
         status_t const walked = search_around<synchronization_>(query_vector, query_norms, first_invisible_id,
@@ -1033,14 +1067,15 @@ struct dense_ram_index {
         // and the navigation leftovers get cleared by whichever call reuses that scratch next.
         if constexpr (predicated_k) std::swap(context.results, context.refining_candidates);
 
-        // A refused walk still ranked whatever it reached; the status says the ranking is short
+        // A refused walk still ranked whatever it reached; the counter says the ranking is short
         // because scratch ran out, not because the graph had nothing better.
+        if (failed(walked)) ++context.saturated_walks;
         search_result_t result;
-        result.status = walked;
         result.count = context.results.size();
         result.visited_members = context.visited_members - visited_members_before;
         result.computed_distances = context.computed_distances - computed_distances_before;
         result.restarts = context.restarts - restarts_before;
+        result.saturated_walks = context.saturated_walks - saturated_walks_before;
         return result;
     }
 
@@ -2041,14 +2076,26 @@ struct dense_ram_index {
         return {landmarks_in_batch, status_t::success_k};
     }
 
+    /** @brief The pool whose radius governs a walk's termination: the admitted one once it fills,
+     *      since matches are sparser than nodes and that radius is the wider one, the navigation
+     *      one until then. */
+    template <typename predicate_type_>
+    static results_array_t const& governing_pool_(dense_traversal_context_t const& context,
+                                                  std::size_t expansion_factor) noexcept {
+        constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, dummy_predicate_t>;
+        if constexpr (predicated_k)
+            if (context.refining_candidates.size() == expansion_factor) return context.refining_candidates;
+        return context.results;
+    }
+
     /**
      *  @brief Greedy best-first NSW walk from random published landmarks toward the @p query.
      *
      *  Read-only on the graph: takes no locks, writes nothing, retries transiently locked nodes.
-     *  Scratch allocation failures degrade the walk - keeping the best candidates found so far -
-     *  rather than fail it: callers may already own claimed node ids and must roll forward
-     *  regardless. The returned status says which kind of stop happened, so a read-only caller
-     *  can report a refusal that an insertion caller must swallow.
+     *  The walk never fails hard: a refused re-table ends it early with the ranking it has, and
+     *  the returned status says so, which the callers count as a saturated walk - an insertion
+     *  wires the thinner row regardless, and a search reports the count so the caller can widen
+     *  the scratch.
      *
      *  @param[in] first_invisible_id The caller's watermark snapshot, bounding the readable id space.
      *  @param[in] expansion_factor Breadth of the candidate pool - the walk's stopping radius.
@@ -2105,24 +2152,14 @@ struct dense_ram_index {
             // Peek - don't pop yet: the chosen node's neighbor list may be locked, in which case
             // we retry the selection rather than dropping it from the frontier.
             dense_scored_node_t const candidate = frontier.top();
-            if constexpr (predicated_k) {
-                // A predicated walk switches to the admitted pool's radius once that pool
-                // fills: matches are sparser than nodes, so that radius is the wider one and
-                // the walk runs deeper; until it fills, the navigation radius keeps the
-                // frontier honest.
-                results_array_t const& matches = context.refining_candidates;
-                bool const matches_full = matches.size() == expansion_factor;
-                if (matches_full && candidate.distance > matches.top().distance) break;
-                if (!matches_full && results.size() == expansion_factor && candidate.distance > results.top().distance)
-                    break;
-            }
-            else {
-                // `results` stays sorted ascending, so its back is the furthest kept - our search radius.
-                distance_t const radius = results.top().distance;
-                // Once the nearest unexpanded node is past that radius and `results` is full,
-                // nothing deeper can improve the answer.
-                if (candidate.distance > radius && results.size() == expansion_factor) break;
-            }
+            results_array_t const& pool = governing_pool_<predicate_type_>(context, expansion_factor);
+            bool const pool_full = pool.size() == expansion_factor;
+            // Once the nearest unexpanded node is past a full pool's radius, nothing deeper can
+            // improve the answer.
+            if (pool_full && candidate.distance > pool.top().distance) break;
+            // Every other entry past that radius is never popped either: shed them when the coming
+            // expansion, at most one neighbor list, would not fit.
+            if (pool_full && frontier.capacity() - frontier.size() < node_connectivity) frontier.erase_below(pool.top());
 
             chunked_location_t const candidate_location = chunked_location(candidate.node_id);
             neighbors_list_ref<synchronization_> const candidate_neighbors = neighbors_for<synchronization_>( //
@@ -2203,6 +2240,11 @@ struct dense_ram_index {
                     context.refining_candidates.insert(std::span(admissions), expansion_factor);
                 }
 
+                // One merge folds the ascending quad into the pool; the accepted entries are
+                // its prefix - the top-expansion-of-the-union truth - and only they enter the
+                // frontier. The merge precedes the marks, so a refused re-table keeps the quad.
+                std::size_t const accepted_count = results.insert(scored, expansion_factor);
+
                 // Grow the visited set ahead of the marks - `set()` itself never rehashes.
                 // Full quads - the hot case - mark all four lanes in one interleaved probe sweep.
                 if (status_t const seen = visited.reserve(visited.size() + gathered_count); failed(seen)) return seen;
@@ -2214,10 +2256,6 @@ struct dense_ram_index {
                         [[maybe_unused]] membership_t const marked = visited.set(gathered_ids[lane]);
                     }
 
-                // One merge folds the ascending quad into the pool; the accepted entries are
-                // its prefix - the top-expansion-of-the-union truth - and only they enter the
-                // frontier.
-                std::size_t const accepted_count = results.insert(scored, expansion_factor);
                 for (small_size_t lane = 0; lane != accepted_count; ++lane)
                     if (status_t const queued = frontier.insert(dense_scored_node_t(scored[lane])); failed(queued))
                         return queued;

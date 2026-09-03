@@ -193,6 +193,7 @@ bool run_insertion(streamed_dataset_type_& streamed) {
         bench.lane.visited_members += inserted.visited_members;
         bench.lane.computed_distances += inserted.computed_distances;
         bench.lane.restarts += inserted.restarts;
+        bench.lane.saturated_walks += inserted.visited_saturations;
         offset += batch;
         progress.tick(offset);
     }
@@ -279,6 +280,7 @@ bool run_search(streamed_dataset_type_& streamed) {
         bench.lane.visited_members += found.visited_members;
         bench.lane.computed_distances += found.computed_distances;
         bench.lane.restarts += found.restarts;
+        bench.lane.saturated_walks += found.visited_saturations;
 
         for (std::size_t row = 0; row != batch; ++row) {
             u32_t* const merged_rows = bench.results.hit_rows.row(offset + row).data();

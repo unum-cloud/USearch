@@ -278,6 +278,7 @@ void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_
     lane.computed_distances_in_refines += inserted.computed_distances_in_refines;
     lane.computed_distances_in_reverse_refines += inserted.computed_distances_in_reverse_refines;
     lane.restarts += inserted.restarts;
+    lane.saturated_walks += inserted.saturated_walks;
     bench.results.id_to_row[local_id] = static_cast<u32_t>(row);
 }
 
@@ -397,6 +398,7 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
     lane.visited_members += found.visited_members;
     lane.computed_distances += found.computed_distances;
     lane.restarts += found.restarts;
+    lane.saturated_walks += found.saturated_walks;
     std::size_t const merged_count = merge_search_results(to_span(traversal.results), bench.results.id_to_row.data(),
                                                           rows_span, distances_span, std::size_t {0});
     bench.results.latencies_us[query] = stdc::duration<float, std::micro>(clock_t::now() - started).count();

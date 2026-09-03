@@ -61,6 +61,7 @@ static std::size_t test_configuration(char const* name) {
     failures_count += test_dense_indexes_save_load<indexes_t, kernel_>();
     failures_count += test_dense_indexes_concurrent_add<indexes_t, kernel_>();
     failures_count += test_dense_indexes_search_race<indexes_t, kernel_>();
+    failures_count += test_dense_indexes_arena_growth<indexes_t, kernel_>();
     return report(name, failures_count);
 }
 

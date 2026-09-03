@@ -199,6 +199,46 @@ std::size_t check_hash_set_batch_parity(unsigned seed) noexcept {
     return failures;
 }
 
+/** @brief A set over a spent arena re-tables into a chunk the arena opens beside the seed, keeps
+ *      its table where a refusing upstream stops it, and the rewind keeps only the widest chunk. */
+std::size_t check_hash_set_arena_growth() noexcept {
+    std::size_t failures = 0;
+    allocation_ledger_t ledger;
+    {
+        using upstream_t = counting_allocator<std::byte>;
+        using arena_t = growing_arena<upstream_t>;
+        using set_t = growing_hash_set<u32_t, std::hash<u32_t>, arena_allocator<std::byte, upstream_t>>;
+        arena_t arena {upstream_t(ledger)};
+        failures += expect(succeeded(arena.reserve_exactly(1024)));
+        std::ptrdiff_t const seed_bytes = ledger.live_bytes.load();
+
+        set_t set {arena_allocator<std::byte, upstream_t>(arena)};
+        failures += expect(succeeded(set.reserve(16)));
+        failures += expect_eq(ledger.live_bytes.load(), seed_bytes); // The seed chunk served it.
+        for (u32_t value = 0; value != 16; ++value) failures += expect(set.set(value) == membership_t::fresh_k);
+
+        failures += expect(succeeded(set.reserve(4'096)));
+        failures += expect(ledger.live_bytes.load() > seed_bytes); // A wider chunk opened beside the seed.
+        failures += expect(arena.capacity() > 1024u);
+        for (u32_t value = 0; value != 16; ++value) failures += expect(set.test(value));
+        for (u32_t value = 16; value != 4'096; ++value) failures += expect(set.set(value) == membership_t::fresh_k);
+
+        ledger.byte_budget.store(ledger.live_bytes.load());
+        failures += expect_eq(set.reserve(1u << 20), status_t::bad_alloc_k);
+        failures += expect_eq(set.size(), 4'096u);
+        failures += expect(set.test(4'095));
+
+        std::ptrdiff_t const grown_bytes = ledger.live_bytes.load();
+        set.reset();
+        arena.clear();
+        // The rewind drops the seed and keeps the widest chunk, so the next reservation lands in it.
+        failures += expect(ledger.live_bytes.load() < grown_bytes && ledger.live_bytes.load() > seed_bytes);
+        failures += expect(arena.capacity() > 1024u);
+    }
+    failures += expect_eq(ledger.live_bytes.load(), 0);
+    return failures;
+}
+
 // max_heap
 
 std::size_t check_max_heap_push_pop() noexcept {
@@ -235,6 +275,30 @@ std::size_t check_max_heap_dary_push_pop(unsigned seed, std::size_t element_coun
             return ++failures;
         }
     }
+    return failures;
+}
+
+/** @brief `erase_below` sheds exactly the entries under the bar; what remains still pops in order. */
+template <std::size_t arity_>
+std::size_t check_max_heap_dary_erase_below(unsigned seed, std::size_t element_count) noexcept {
+    max_heap_dary<arity_, u32_t> heap;
+    std::size_t failures = expect(succeeded(heap.reserve(element_count)));
+    std::mt19937 random_generator {seed};
+    std::uniform_int_distribution<u32_t> distribution(0, 1'000'000);
+    u32_t const bar = 500'000;
+    std::vector<u32_t> kept;
+    kept.reserve(element_count);
+    for (std::size_t index = 0; index != element_count; ++index) {
+        u32_t const value = distribution(random_generator);
+        failures += expect(succeeded(heap.insert(u32_t(value))));
+        if (value >= bar) kept.push_back(value);
+    }
+    std::size_t const erased = heap.erase_below(bar);
+    failures += expect_eq(erased, element_count - kept.size());
+    failures += expect_eq(heap.size(), kept.size());
+    std::sort(kept.begin(), kept.end(), std::greater<u32_t> {});
+    for (std::size_t index = 0; index != kept.size(); ++index) failures += expect_eq(heap.pop(), kept[index]);
+    failures += expect(heap.empty());
     return failures;
 }
 
@@ -357,12 +421,15 @@ std::size_t test_ram_buffers() {
     failures += check_hash_set_growth_parity(0xAB5EEDEDu);
     failures += check_hash_set_batch_parity<4>(0xFEEDFACEu);
     failures += check_hash_set_batch_parity<16>(0x01234567u);
+    failures += check_hash_set_arena_growth();
 
     failures += check_max_heap_push_pop();
     failures += check_max_heap_dary_parity_with_binary(0xD2U, 256);
     failures += check_max_heap_dary_push_pop<4>(0xD4U, 256);
     failures += check_max_heap_dary_push_pop<8>(0xD8U, 256);
     failures += check_max_heap_dary_push_pop<16>(0xD16U, 256);
+    failures += check_max_heap_dary_erase_below<4>(0xE4U, 256);
+    failures += check_max_heap_dary_erase_below<8>(0xE8U, 256);
     failures += check_max_heap_dary_insert_many<4>(0xDA10U, 0, 32);   // Floyd path
     failures += check_max_heap_dary_insert_many<4>(0xDA11U, 128, 32); // shift_up path
     failures += check_max_heap_dary_insert_many<8>(0xDA20U, 0, 32);

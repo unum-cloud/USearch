@@ -330,14 +330,8 @@ struct dense_ram_indexes {
             return result.status = sized, result;
 
         // Rotating by rows admitted keeps a stream of small batches from drifting onto shard zero;
-        // admission is also the ceiling, one relaxed read-modify-write for the whole batch.
-        std::size_t const rows_ceiling = capacity();
-        std::size_t routing_base = admitted_rows_.load(std::memory_order_relaxed);
-        do {
-            if (rows_ceiling - routing_base < rows) return result.status = status_t::overflow_k, result;
-        } while (!admitted_rows_.compare_exchange_weak(routing_base, routing_base + rows, std::memory_order_relaxed));
-        std::size_t const rotation = routing_base % shards;
-
+        // a snapshot serves, since the split only has to agree with the claims it sizes.
+        std::size_t const rotation = admitted_rows_.load(std::memory_order_relaxed) % shards;
         growing_buffer<claim_t> claims;
         if (failed(claims.reserve_exactly(shards))) return result.status = status_t::bad_alloc_k, result;
         for (std::size_t shard = 0; shard != shards; ++shard) {
@@ -351,9 +345,17 @@ struct dense_ram_indexes {
         if (status_t const ready = reserve_traversals_(traversals, executor, config); failed(ready))
             return result.status = ready, result;
 
+        // Admission is the ceiling and the next batch's rotation base, one CAS for the whole batch;
+        // a refusal here drops the claims above unconsumed, so the rows credit themselves back.
+        std::size_t const rows_ceiling = capacity();
+        std::size_t admitted = admitted_rows_.load(std::memory_order_relaxed);
+        do {
+            if (rows_ceiling - admitted < rows) return result.status = status_t::overflow_k, result;
+        } while (!admitted_rows_.compare_exchange_weak(admitted, admitted + rows, std::memory_order_relaxed));
+
         // The key lands before publication; the reverse plane's quota covers every claimed row.
         auto insert_row = [&](std::size_t task, std::size_t thread, std::size_t) noexcept {
-            std::size_t const shard = (routing_base + task) % shards;
+            std::size_t const shard = (rotation + task) % shards;
             shard_t& one = shards_[shard];
             dense_node_id_t assigned = 0;
             one.index->insert_reserved(new_vectors(nk::range {task, task + 1}, nk::slice), {}, traversals[thread],
@@ -364,8 +366,11 @@ struct dense_ram_indexes {
             [[maybe_unused]] status_t const recorded = locators_of_key_.insert(keys[task],
                                                                                key_locator_t {shard, assigned});
         };
-        if (status_t const fanned = executor.for_tasks(rows, insert_row); failed(fanned))
+        // ForkUnion runs every task or none, so a refused fan-out hands the admission back whole.
+        if (status_t const fanned = executor.for_tasks(rows, insert_row); failed(fanned)) {
+            admitted_rows_.fetch_sub(rows, std::memory_order_relaxed);
             return result.status = fanned, result;
+        }
 
         // Every row dispensed an id, so the claims are spent rather than credited back.
         for (claim_t& claimed : claims) claimed.consume();
@@ -376,6 +381,7 @@ struct dense_ram_indexes {
             result.computed_distances_in_refines += traversal.computed_distances_in_refines;
             result.computed_distances_in_reverse_refines += traversal.computed_distances_in_reverse_refines;
             result.restarts += traversal.restarts;
+            result.saturated_walks += traversal.saturated_walks;
         }
         result.new_size = size();
         return result;
@@ -411,6 +417,7 @@ struct dense_ram_indexes {
             merged.visited_members += found.visited_members;
             merged.computed_distances += found.computed_distances;
             merged.restarts += found.restarts;
+            merged.saturated_walks += found.saturated_walks;
             merged.count = merge_search_results(to_span(traversal.results), shards_[shard].keys, keys, distances,
                                                 merged.count);
         }
@@ -493,6 +500,7 @@ struct dense_ram_indexes {
             merged.visited_members += traversal.visited_members;
             merged.computed_distances += traversal.computed_distances;
             merged.restarts += traversal.restarts;
+            merged.saturated_walks += traversal.saturated_walks;
         }
         for (std::size_t const count : counts) merged.count += count;
         return merged;

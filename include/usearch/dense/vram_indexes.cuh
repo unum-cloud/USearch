@@ -326,6 +326,8 @@ struct dense_vram_indexes {
             merged.visited_members += found.visited_members;
             merged.computed_distances += found.computed_distances;
             merged.restarts += found.restarts;
+            merged.tail_drops += found.tail_drops;
+            merged.visited_saturations += found.visited_saturations;
             merged.count = merge_search_results(to_span(traversal.results), shards_[shard].keys, keys, distances,
                                                 merged.count);
         }
@@ -440,6 +442,8 @@ struct dense_vram_indexes {
             merged.visited_members += spent.hops;
             merged.computed_distances += spent.scored;
             merged.restarts += spent.restarts;
+            merged.tail_drops += spent.tail_drops;
+            merged.visited_saturations += spent.visited_saturations;
         }
         for (std::size_t const count : counts) merged.count += count;
         return merged;
@@ -760,6 +764,8 @@ struct dense_vram_indexes {
             result.computed_distances += spent.scored;
             result.restarts += spent.restarts;
             result.abandoned_back_links += spent.lock_skips;
+            result.tail_drops += spent.tail_drops;
+            result.visited_saturations += spent.visited_saturations;
         }
         result.new_size = size();
         return result;

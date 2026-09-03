@@ -233,8 +233,9 @@ struct dense_cuda_sorted_pool {
 
 /** @brief One warp's slice of the global traversal arena: an append-only span of scored
  *      entries spilled from the register head, consumed by refills on frontier drain.
- *      Appends past @p capacity_ are counted, never written - the nearest candidates
- *      always reach the head first, so drops only ever shed the farthest tail. */
+ *      Sized ahead by the host and never grown: appends past @p capacity_ are counted,
+ *      never written - the nearest candidates always reach the head first, so drops only
+ *      ever shed the farthest tail - and the count is the receipt the telemetry reports. */
 struct dense_cuda_tail_pool_t {
     dense_cuda_scored_node_t* entries_;
     u32_t size_ = 0;
@@ -266,6 +267,8 @@ struct dense_cuda_register_frontier {
 
     __device__ __forceinline__ void reset(int) noexcept { ranks_.clear(); }
     __device__ __forceinline__ u32_t hops_budget() const noexcept { return ranks_.capacity() * 4; }
+    /** @brief Nothing to shed: the pool keeps the nearest of every union by construction. */
+    __device__ __forceinline__ u32_t dropped() const noexcept { return 0; }
     __device__ __forceinline__ void push_batch(dense_cuda_scored_node_t staged, int lane) noexcept {
         // A full pool keeps the nearest of the union, so a batch with no entry inside the
         // radius is a guaranteed no-op - one ballot skips the whole bitonic merge. Only
@@ -315,6 +318,8 @@ struct dense_cuda_arena_frontier_t {
         expansions_ = 0;
     }
     __device__ __forceinline__ u32_t hops_budget() const noexcept { return expansion_target_ * 4; }
+    /** @brief Tail entries shed past the slice's capacity - the walk's one lossy step, receipted. */
+    __device__ __forceinline__ u32_t dropped() const noexcept { return tail_.dropped_; }
     __device__ __forceinline__ void push_batch(dense_cuda_scored_node_t staged, int lane) noexcept {
         // When every staged entry sits at or past the head's radius the merge displaces
         // nothing - the batch goes straight to the tail, which by construction only holds
@@ -403,7 +408,8 @@ struct dense_cuda_arena_frontier_t {
  *  compare-exchange only arbitrates two distinct ids landing on one empty slot -
  *  scratch bookkeeping, not part of the graph's all-RMW protocol. A saturated set - the
  *  probe budget exhausted on a full neighborhood - reports ids as already visited, so an
- *  under-provisioned walk starves and retires deterministically instead of looping.
+ *  under-provisioned walk starves and retires deterministically instead of looping, and
+ *  counts every such claim as the receipt the telemetry reports.
  */
 struct dense_cuda_visited_set_t {
     /** @brief Packed @b {epoch,id} slots: an entry is live only when its epoch matches
@@ -415,6 +421,9 @@ struct dense_cuda_visited_set_t {
      *      @b 0xFFFFFFFF>>hash_shift_ and no capacity is stored. */
     u32_t hash_shift_;
     u32_t epoch_;
+    /** @brief Claims that ran out of probes and starved their walk; warp-uniform, so lane zero
+     *      reports it. */
+    u32_t saturations_ = 0;
 
     inline static constexpr u32_t probe_budget_k = 64;
 
@@ -442,7 +451,9 @@ struct dense_cuda_visited_set_t {
             if (claiming && (rivals & ((1u << lane) - 1)) == 0) slots_[slot] = claim, probing = false;
             __syncwarp();
         }
-        if (probing) fresh = false; // Saturation: claim "visited", starve, retire.
+        // Saturation: claim "visited", starve, retire - and count it, warp-uniformly.
+        saturations_ += __popc(__ballot_sync(0xFFFFFFFFu, probing));
+        if (probing) fresh = false;
         __syncwarp();
         return fresh;
     }
