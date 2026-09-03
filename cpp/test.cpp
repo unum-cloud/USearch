@@ -20,6 +20,7 @@
 #include <limits>  // `std::numeric_limits`
 
 #include <algorithm>     // `std::shuffle`
+#include <atomic>        // `std::atomic`
 #include <random>        // `std::default_random_engine`
 #include <stdexcept>     // `std::terminate`
 #include <unordered_map> // `std::unordered_map`
@@ -54,6 +55,24 @@
 
 #define SZ_USE_X86_AVX512 0            // Sanitizers hate AVX512
 #include <stringzilla/stringzilla.hpp> // Levenshtein distance implementation
+
+/**
+ *  Counters for the cosine norm cache diagnostic hook in `index_dense.hpp`. They let the tests assert that the
+ *  sidecar route is actually taken, not just that results are correct, which a fallback would also deliver.
+ */
+struct cosine_cache_diagnostics_t {
+    // Atomic so that the concurrent add/search test is race-free under ThreadSanitizer.
+    std::atomic<std::size_t> cache_hit_{0}, invalid_fallback_{0}, population_{0}, route_bypass_{0},
+        query_preparation_{0};
+    std::size_t cache_hit() const { return cache_hit_.load(); }
+    std::size_t invalid_fallback() const { return invalid_fallback_.load(); }
+    std::size_t population() const { return population_.load(); }
+    std::size_t route_bypass() const { return route_bypass_.load(); }
+    std::size_t query_preparation() const { return query_preparation_.load(); }
+    void reset() { cache_hit_ = invalid_fallback_ = population_ = route_bypass_ = query_preparation_ = 0; }
+};
+static cosine_cache_diagnostics_t cosine_cache_diagnostics;
+#define USEARCH_COSINE_NORM_CACHE_DIAGNOSTIC(event) (++cosine_cache_diagnostics.event##_)
 
 #include <usearch/index.hpp>
 #include <usearch/index_dense.hpp>
@@ -1374,6 +1393,291 @@ static void install_crash_handlers() {
 }
 
 /**
+ *  @brief  Cosine norm sidecar: verifies through the diagnostic hook that the fast route is taken exactly when it
+ *          should be, that every lifecycle path keeps the sidecar populated, and that distances match the reference
+ *          `metric_cos_gt` kernel within floating-point noise.
+ */
+template <typename scalar_at> void test_cosine_norm_cache(std::size_t count, std::size_t dimensions) {
+
+    using vector_key_t = std::int64_t;
+    using slot_t = std::uint32_t;
+    using index_t = index_dense_gt<vector_key_t, slot_t>;
+    cosine_cache_diagnostics_t& diag = cosine_cache_diagnostics;
+
+    scalar_kind_t const kind = scalar_kind<scalar_at>();
+    bool const with_bf16 = kind == scalar_kind_t::bf16_k;
+    float const tolerance = with_bf16 ? 2e-3f : 2e-5f;
+
+    // Deterministic data with mixed signs and magnitudes, plus one zero vector.
+    std::vector<std::vector<scalar_at>> vectors(count, std::vector<scalar_at>(dimensions));
+    std::mt19937 generator(42);
+    std::uniform_real_distribution<float> distribution(-1.f, 1.f);
+    for (std::size_t i = 0; i != count; ++i)
+        for (std::size_t d = 0; d != dimensions; ++d)
+            vectors[i][d] = static_cast<scalar_at>(i + 1 == count ? 0.f : distribution(generator) * float(1 + i % 7));
+    std::vector<scalar_at> const& query = vectors[0];
+
+    metric_punned_t const builtin(dimensions, metric_kind_t::cos_k, kind);
+    metric_punned_t const l2(dimensions, metric_kind_t::l2sq_k, kind);
+    // The sidecar applies to the built-in auto-vectorized cosine kernels only. Without NumKong they are the
+    // built-in kernels, so the route must be active; with NumKong the kernels come from NumKong and it must not.
+    bool const sidecar_expected = builtin.supports_cosine_norm_cache();
+    if (!USEARCH_USE_NUMKONG)
+        expect(sidecar_expected);
+
+    // Two references. `true_cosine` is the reference kernel `metric_cos_gt`, independent of how the index computes
+    // distances; it is the right yardstick whenever the sidecar route is active (the route must reproduce true
+    // cosine) and for the user-kernel index below, whose kernel is exactly `metric_cos_gt`. When the route is
+    // inactive (NumKong builds), the only guarantee is pass-through of the configured kernel, whose bf16 results
+    // legitimately differ from `metric_cos_gt` by more than the tolerance, so the configured metric is the
+    // reference there.
+    auto true_cosine = [&](scalar_at const* a, scalar_at const* b) -> float {
+        return metric_cos_gt<scalar_at, float>{}(a, b, dimensions);
+    };
+    auto configured = [&](scalar_at const* a, scalar_at const* b) -> float {
+        return builtin(reinterpret_cast<byte_t const*>(a), reinterpret_cast<byte_t const*>(b));
+    };
+    float const self_tolerance = sidecar_expected ? tolerance : 10 * tolerance;
+    // Exact search scores every live member through the same proxy that approximate search uses. Members are
+    // resolved by key against the original data, since the sidecar is addressed by slot and slots move on `compact`.
+    std::vector<scalar_at> replacement(dimensions);
+    for (std::size_t d = 0; d != dimensions; ++d)
+        replacement[d] = static_cast<scalar_at>(d % 2 ? 1.f : -1.f);
+    // `replaced` says whether key 1 holds `replacement` in the index being checked (the primary index and its
+    // copies do, after the re-insertion below; every other index keeps the original vector).
+    auto expect_matches_reference = [&](index_t const& index, std::vector<scalar_at> const& q, bool replaced,
+                                        bool independent_reference) {
+        auto result = index.search(q.data(), index.size(), 0, true);
+        expect(result);
+        expect_eq(result.size(), index.size());
+        for (std::size_t i = 0; i != result.size(); ++i) {
+            auto match = result[i];
+            vector_key_t key = vector_key_t(match.member.key);
+            scalar_at const* member = replaced && key == 1 ? replacement.data() : vectors[std::size_t(key)].data();
+            float expected = independent_reference ? true_cosine(q.data(), member) : configured(q.data(), member);
+            expect(std::abs(match.distance - expected) <= tolerance);
+            if (i)
+                expect(result[i - 1].distance <= match.distance + tolerance);
+        }
+    };
+    auto expect_route = [&](bool used) {
+        expect_eq(diag.query_preparation() > 0, used);
+        expect_eq(diag.cache_hit() > 0, used);
+        expect_eq(diag.invalid_fallback(), std::size_t(0));
+    };
+
+    // --- Reference L2 twin, measured right after `reserve`, before any vectors are copied in. ---
+    auto l2_made = index_t::make(l2);
+    expect(l2_made);
+    index_t& l2_index = l2_made.index;
+    expect(l2_index.try_reserve(count));
+    std::size_t const l2_reserved_memory = l2_index.memory_usage();
+    std::size_t const sidecar_bytes = sidecar_expected ? l2_index.capacity() * sizeof(std::uint32_t) : 0;
+
+    // --- Fresh cosine index: exactly 4 bytes per capacity slot, populated on insertion, served from the sidecar. ---
+    auto made = index_t::make(builtin);
+    expect(made);
+    index_t& index = made.index;
+    expect(index.try_reserve(count));
+    expect_eq(index.capacity(), l2_index.capacity());
+    expect_eq(index.memory_usage(), l2_reserved_memory + sidecar_bytes);
+    diag.reset();
+    for (std::size_t i = 0; i != count; ++i)
+        expect(index.add(vector_key_t(i), vectors[i].data()));
+    expect_eq(diag.population(), sidecar_expected ? count : std::size_t(0));
+    diag.reset();
+    expect_matches_reference(index, query, false, sidecar_expected);
+    expect_route(sidecar_expected);
+    diag.reset();
+    {
+        auto approximate = index.search(query.data(), 5);
+        expect(approximate);
+        expect_eq(approximate.size(), std::size_t(5));
+        expect_eq(vector_key_t(approximate[0].member.key), vector_key_t(0));
+        expect(std::abs(approximate[0].distance) <= self_tolerance);
+    }
+    expect_route(sidecar_expected);
+
+    // --- Metric change L2 -> cosine must populate; cosine -> L2 must release; equivalent cosine preserves. ---
+    for (std::size_t i = 0; i != count; ++i)
+        expect(l2_index.add(vector_key_t(i), vectors[i].data()));
+    std::size_t const l2_memory = l2_index.memory_usage();
+    diag.reset();
+    expect(l2_index.try_change_metric(metric_punned_t(dimensions, metric_kind_t::cos_k, kind)));
+    expect_eq(diag.population(), sidecar_expected ? count : std::size_t(0));
+    expect_eq(l2_index.memory_usage(), l2_memory + sidecar_bytes);
+    diag.reset();
+    expect_matches_reference(l2_index, query, false, sidecar_expected);
+    expect_route(sidecar_expected);
+    expect(l2_index.try_change_metric(metric_punned_t(dimensions, metric_kind_t::l2sq_k, kind)));
+    expect_eq(l2_index.memory_usage(), l2_memory);
+    expect(l2_index.try_change_metric(metric_punned_t(dimensions, metric_kind_t::cos_k, kind)));
+    diag.reset();
+    expect(l2_index.try_change_metric(metric_punned_t(dimensions, metric_kind_t::cos_k, kind)));
+    expect_eq(diag.population(), std::size_t(0));
+    diag.reset();
+    expect_matches_reference(l2_index, query, false, sidecar_expected);
+    expect_route(sidecar_expected);
+
+    // --- Remove and re-insert a key: the slot is invalidated, then repopulated with the new norm. ---
+    expect(index.remove(vector_key_t(1)));
+    diag.reset();
+    expect(index.add(vector_key_t(1), replacement.data()));
+    expect_eq(diag.population(), sidecar_expected ? std::size_t(1) : std::size_t(0));
+    diag.reset();
+    expect_matches_reference(index, replacement, true, sidecar_expected);
+    expect_route(sidecar_expected);
+    {
+        auto top = index.search(replacement.data(), 1);
+        expect_eq(top.size(), std::size_t(1));
+        expect_eq(vector_key_t(top[0].member.key), vector_key_t(1));
+        expect(std::abs(top[0].distance) <= self_tolerance);
+    }
+
+    // --- Compaction rebuilds the sidecar for the remapped slots. ---
+    expect(index.remove(vector_key_t(2)));
+    diag.reset();
+    expect(index.compact());
+    expect_eq(diag.population(), sidecar_expected ? index.size() : std::size_t(0));
+    diag.reset();
+    expect_matches_reference(index, query, true, sidecar_expected);
+    expect_route(sidecar_expected);
+
+    // --- Copy duplicates a valid sidecar instead of recomputing it. ---
+    diag.reset();
+    auto copied = index.copy();
+    expect(copied);
+    expect_eq(diag.population(), std::size_t(0));
+    diag.reset();
+    expect_matches_reference(copied.index, query, true, sidecar_expected);
+    expect_route(sidecar_expected);
+
+    // --- Serialization: the sidecar is never written, rebuilt on load, absent for memory-mapped views. ---
+    char const* path = "tmp_cosine_norm_cache.usearch";
+    expect(index.save(path));
+    auto loaded = index_t::make(builtin);
+    expect(loaded);
+    diag.reset();
+    expect(loaded.index.load(path));
+    expect_eq(diag.population(), sidecar_expected ? index.size() : std::size_t(0));
+    diag.reset();
+    expect_matches_reference(loaded.index, query, true, sidecar_expected);
+    expect_route(sidecar_expected);
+    auto viewed = index_t::make(builtin);
+    expect(viewed);
+    expect(viewed.index.view(path));
+    diag.reset();
+    expect_matches_reference(viewed.index, query, true, sidecar_expected);
+    expect_route(false);
+    expect(diag.route_bypass() > 0);
+    std::remove(path);
+
+    // --- Indexes that don't own their vectors never allocate a sidecar. ---
+    index_dense_config_t external_config;
+    external_config.exclude_vectors = true;
+    auto external = index_t::make(builtin, external_config);
+    expect(external);
+    expect(external.index.try_reserve(count));
+    expect_eq(external.index.memory_usage(), l2_reserved_memory);
+    diag.reset();
+    for (std::size_t i = 0; i != count; ++i)
+        expect(external.index.add(vector_key_t(i), vectors[i].data()));
+    expect_eq(diag.population(), std::size_t(0));
+    diag.reset();
+    expect_matches_reference(external.index, query, false, sidecar_expected);
+    expect_route(false);
+
+    // --- A cosine-labelled user callback with the three-argument signature must not be captured, even when an
+    //     identical-code-folding linker merges the trampolines: provenance is the kernel address, not the trampoline.
+    {
+        static std::size_t user_calls = 0;
+        user_calls = 0;
+        auto user_kernel = +[](std::uintptr_t a_ptr, std::uintptr_t b_ptr, std::uintptr_t n) -> distance_punned_t {
+            ++user_calls;
+            return metric_cos_gt<scalar_at, float>{}((scalar_at const*)a_ptr, (scalar_at const*)b_ptr, n);
+        };
+        metric_punned_t user_metric = metric_punned_t::stateless(dimensions, (std::uintptr_t)user_kernel,
+                                                                 metric_punned_signature_t::array_array_size_k,
+                                                                 metric_kind_t::cos_k, kind);
+        expect(!user_metric.supports_cosine_norm_cache());
+        auto user_made = index_t::make(user_metric);
+        expect(user_made);
+        expect(user_made.index.try_reserve(count));
+        expect_eq(user_made.index.memory_usage(), l2_reserved_memory);
+        for (std::size_t i = 0; i != count; ++i)
+            expect(user_made.index.add(vector_key_t(i), vectors[i].data()));
+        diag.reset();
+        user_calls = 0;
+        expect_matches_reference(user_made.index, query, false, true);
+        expect_route(false);
+        expect(user_calls >= count);
+    }
+
+    // --- Non-finite members fall back per comparison; a non-finite query bypasses the route entirely. ---
+    if (!with_bf16) {
+        std::vector<scalar_at> nan_vector(dimensions, static_cast<scalar_at>(1.f));
+        nan_vector[0] = static_cast<scalar_at>(std::numeric_limits<float>::quiet_NaN());
+        auto nonfinite = index_t::make(builtin);
+        expect(nonfinite);
+        expect(nonfinite.index.try_reserve(count + 1));
+        for (std::size_t i = 0; i != count; ++i)
+            expect(nonfinite.index.add(vector_key_t(i), vectors[i].data()));
+        diag.reset();
+        expect(nonfinite.index.add(vector_key_t(count), nan_vector.data()));
+        expect_eq(diag.population(), std::size_t(0));
+        diag.reset();
+        auto result = nonfinite.index.search(query.data(), count + 1, 0, true);
+        expect(result);
+        expect_eq(result.size(), count + 1);
+        expect_eq(diag.invalid_fallback(), sidecar_expected ? std::size_t(1) : std::size_t(0));
+        expect_eq(diag.cache_hit(), sidecar_expected ? count : std::size_t(0));
+        diag.reset();
+        auto nan_result = nonfinite.index.search(nan_vector.data(), count + 1, 0, true);
+        expect(nan_result);
+        expect_eq(nan_result.size(), count + 1);
+        expect_eq(diag.query_preparation(), std::size_t(0));
+        expect_eq(diag.cache_hit(), std::size_t(0));
+        // The rejected query norm is reported once as a fallback, then the whole search bypasses the route.
+        expect_eq(diag.invalid_fallback(), sidecar_expected ? std::size_t(1) : std::size_t(0));
+        expect(diag.route_bypass() > 0);
+    }
+
+    // --- Concurrent insertions and searches share the sidecar without locks; every result must stay finite and
+    //     ordered, and once the writers finish every slot must be populated. ---
+    {
+        auto concurrent = index_t::make(builtin);
+        expect(concurrent);
+        std::size_t const threads = 8;
+        expect(concurrent.index.try_reserve({count, threads}));
+        for (std::size_t i = 0; i != count / 2; ++i)
+            expect(concurrent.index.add(vector_key_t(i), vectors[i].data(), i % threads));
+        diag.reset();
+        executor_default_t executor(threads);
+        std::atomic<std::size_t> searches_done{0};
+        executor.fixed(count, [&](std::size_t thread, std::size_t task) {
+            if (task < count / 2) {
+                auto result = concurrent.index.search(vectors[task].data(), 5, thread);
+                expect(result);
+                for (std::size_t i = 0; i != result.size(); ++i) {
+                    auto match = result[i];
+                    expect(match.distance >= -tolerance && match.distance <= 2 + tolerance);
+                    if (i)
+                        expect(result[i - 1].distance <= match.distance + tolerance);
+                }
+                ++searches_done;
+            } else
+                expect(concurrent.index.add(vector_key_t(task), vectors[task].data(), thread));
+        });
+        expect_eq(searches_done.load(), count / 2);
+        expect_eq(concurrent.index.size(), count);
+        expect_eq(diag.population(), sidecar_expected ? count - count / 2 : std::size_t(0));
+        diag.reset();
+        expect_matches_reference(concurrent.index, query, false, sidecar_expected);
+        expect_route(sidecar_expected);
+    }
+}
+
+/**
  *  @brief  Regression test: `make(metric, config)` must return an index that is
  *          immediately usable - no explicit `reserve` required before `load` /
  *          `view` / `search`. Previously the typed graph's `{0, 0}` thread
@@ -1584,6 +1888,9 @@ int main(int, char**) {
 
     test_filtered_search();
     test_isolate();
+    std::printf("Testing cosine norm cache\n");
+    test_cosine_norm_cache<f32_t>(64, 33);
+    test_cosine_norm_cache<bf16_t>(64, 33);
     test_load_after_metric_make();
     test_view_of_truncated_file();
     return 0;

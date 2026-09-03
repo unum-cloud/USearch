@@ -3016,6 +3016,123 @@ class metric_punned_t {
         return divide_round_up(dimensions_ * bits_per_scalar(scalar_kind_), bits_per_scalar_word(scalar_kind_));
     }
 
+    /**
+     *  @brief  Whether this metric is the built-in auto-vectorized f32/bf16 cosine kernel, for which the
+     *          `index_dense_gt` norm cache is applicable.
+     *
+     *  Provenance is established by the identity of the routed kernel itself: `metric_ptr_` must be the address of
+     *  the exact `metric_cos_gt` instantiation that `configure_with_autovec` installs, and the third argument must be
+     *  the dimensions count that kernel expects. This deliberately does not rely on the identity of the
+     *  member-function trampoline (`metric_routed_`): trampolines with identical bodies can be folded to one address
+     *  by identical-code-folding linkers (MSVC `/OPT:ICF`, `gold`/`lld` `--icf=all`), which would make a cosine-labelled
+     *  user callback with the `array_array_size` signature indistinguishable from the built-in kernel. The two cosine
+     *  kernels compared against here have distinct bodies from every other kernel, so they cannot be folded into
+     *  anything else. User callbacks and NumKong kernels never satisfy this predicate.
+     */
+    inline bool supports_cosine_norm_cache() const noexcept {
+        if (metric_kind_ != metric_kind_t::cos_k || !metric_ptr_ || metric_third_arg_ != dimensions_)
+            return false;
+        if (scalar_kind_ == scalar_kind_t::f32_k)
+            return metric_ptr_ == (uptr_t)&equidimensional_<metric_cos_gt<f32_t>>;
+        if (scalar_kind_ == scalar_kind_t::bf16_k)
+            return metric_ptr_ == (uptr_t)&equidimensional_<metric_cos_gt<bf16_t, f32_t>>;
+        return false;
+    }
+
+    /**
+     *  @brief  Computes the f32 L2 norm (square root of the sum of squares) of a vector and exports its raw bits.
+     *  @return `false` for unsupported metrics, non-finite inputs, or an overflowing sum of squares.
+     *
+     *  The square root is taken once here, so that searches only pay one multiply and one division per comparison,
+     *  and the resulting expression `1 - ab / (a_norm * b_norm)` is algebraically the same as `metric_cos_gt`'s
+     *  `1 - ab / (sqrt(a2) * sqrt(b2))`. All classification is performed on integer bit patterns. This is important
+     *  in translation units compiled with `-ffast-math`, where floating-point finiteness predicates aren't reliable
+     *  correctness guards.
+     */
+    inline bool try_compute_cosine_norm(byte_t const* vector, std::uint32_t& norm_bits) const noexcept {
+        norm_bits = 0x7fc00000u;
+        if (!supports_cosine_norm_cache() || !vector)
+            return false;
+
+        f32_t squared_norm = 0;
+        if (scalar_kind_ == scalar_kind_t::f32_k) {
+            f32_t const* typed = reinterpret_cast<f32_t const*>(vector);
+            if (!cosine_all_finite_(typed, dimensions_))
+                return false;
+            squared_norm = cosine_squared_norm_(typed, dimensions_);
+        } else {
+            bf16_t const* typed = reinterpret_cast<bf16_t const*>(vector);
+            if (!cosine_all_finite_(typed, dimensions_))
+                return false;
+            squared_norm = cosine_squared_norm_(typed, dimensions_);
+        }
+
+        // Launder the accumulator through a volatile object before inspecting its representation: the volatile
+        // store and the volatile read-back are both observable side effects, so a fast-math build can neither
+        // assume the value is finite nor forward the (possibly poisoned) register value past this point.
+        volatile f32_t stored_norm = squared_norm;
+        f32_t laundered_norm = stored_norm;
+        std::uint32_t squared_bits = 0;
+        std::memcpy(&squared_bits, &laundered_norm, sizeof(squared_bits));
+        if ((squared_bits & 0x7f800000u) == 0x7f800000u || (squared_bits & 0x80000000u))
+            return false;
+
+        // The square root of a finite non-negative value is finite and non-negative, so no further checks apply.
+        volatile f32_t stored_root = std::sqrt(laundered_norm);
+        f32_t laundered_root = stored_root;
+        std::memcpy(&norm_bits, &laundered_root, sizeof(norm_bits));
+        return true;
+    }
+
+    /**
+     *  @brief  Whether a bit pattern produced by `try_compute_cosine_norm` (or the invalid sentinel) denotes a usable
+     *          norm. Exactly the values `try_compute_cosine_norm` can export pass this test.
+     */
+    inline static bool is_valid_cosine_norm_bits(std::uint32_t norm_bits) noexcept {
+        return (norm_bits & 0x7f800000u) != 0x7f800000u && !(norm_bits & 0x80000000u);
+    }
+
+    /**
+     *  @brief  Cosine distance using norms already computed by `try_compute_cosine_norm`. Precondition: both norms
+     *          passed `is_valid_cosine_norm_bits` and `supports_cosine_norm_cache()` holds; no checks are repeated.
+     *
+     *  Zero handling exactly matches `metric_cos_gt`: two zero vectors have distance zero and exactly one zero
+     *  vector has distance one.
+     */
+    inline result_t cosine_distance_with_valid_norms(byte_t const* a, byte_t const* b, f32_t a_norm,
+                                                     f32_t b_norm) const noexcept {
+        f32_t ab = scalar_kind_ == scalar_kind_t::f32_k
+                       ? cosine_dot_(reinterpret_cast<f32_t const*>(a), reinterpret_cast<f32_t const*>(b), dimensions_)
+                       : cosine_dot_(reinterpret_cast<bf16_t const*>(a), reinterpret_cast<bf16_t const*>(b),
+                                     dimensions_);
+        // Zero tests on the bit patterns, so that `-ffast-math` can't turn them into something else.
+        std::uint32_t a_bits = 0, b_bits = 0;
+        std::memcpy(&a_bits, &a_norm, sizeof(a_bits));
+        std::memcpy(&b_bits, &b_norm, sizeof(b_bits));
+        bool a_is_zero = (a_bits & 0x7fffffffu) == 0;
+        bool b_is_zero = (b_bits & 0x7fffffffu) == 0;
+        if (a_is_zero)
+            return b_is_zero ? 0 : 1;
+        if (b_is_zero)
+            return 1;
+        return 1 - ab / (a_norm * b_norm);
+    }
+
+    /**
+     *  @brief  Checked convenience wrapper over `cosine_distance_with_valid_norms`, falling back to the full metric
+     *          for unsupported metrics or invalid norm bits.
+     */
+    inline result_t cosine_distance_with_norms(byte_t const* a, byte_t const* b, std::uint32_t a_norm_bits,
+                                               std::uint32_t b_norm_bits) const noexcept {
+        if (!supports_cosine_norm_cache() || !is_valid_cosine_norm_bits(a_norm_bits) ||
+            !is_valid_cosine_norm_bits(b_norm_bits))
+            return (*this)(a, b);
+        f32_t a_norm = 0, b_norm = 0;
+        std::memcpy(&a_norm, &a_norm_bits, sizeof(a_norm));
+        std::memcpy(&b_norm, &b_norm_bits, sizeof(b_norm));
+        return cosine_distance_with_valid_norms(a, b, a_norm, b_norm);
+    }
+
   private:
 #if USEARCH_USE_NUMKONG
     /**
@@ -3105,6 +3222,85 @@ class metric_punned_t {
         result_t result = function_pointer(a, b);
         return result;
     }
+    /// @brief Integer-only finiteness scan; vectorizable, unlike an early-exit loop.
+    inline static bool cosine_all_finite_(f32_t const* vector, std::size_t dimensions) noexcept {
+        std::uint32_t nonfinite = 0;
+        for (std::size_t i = 0; i != dimensions; ++i) {
+            std::uint32_t scalar_bits = 0;
+            std::memcpy(&scalar_bits, vector + i, sizeof(scalar_bits));
+            nonfinite |= (scalar_bits & 0x7f800000u) == 0x7f800000u;
+        }
+        return !nonfinite;
+    }
+
+    inline static bool cosine_all_finite_(bf16_t const* vector, std::size_t dimensions) noexcept {
+        std::uint32_t nonfinite = 0;
+        for (std::size_t i = 0; i != dimensions; ++i) {
+            std::uint16_t scalar_bits = 0;
+            std::memcpy(&scalar_bits, vector + i, sizeof(scalar_bits));
+            nonfinite |= (scalar_bits & 0x7f80u) == 0x7f80u;
+        }
+        return !nonfinite;
+    }
+
+    inline static f32_t cosine_squared_norm_(f32_t const* vector, std::size_t dimensions) noexcept {
+        f32_t norm = 0;
+#if USEARCH_USE_OPENMP
+#pragma omp simd reduction(+ : norm)
+#elif defined(USEARCH_DEFINED_CLANG)
+#pragma clang loop vectorize(enable)
+#elif defined(USEARCH_DEFINED_GCC)
+#pragma GCC ivdep
+#endif
+        for (std::size_t i = 0; i != dimensions; ++i)
+            norm += vector[i] * vector[i];
+        return norm;
+    }
+
+    inline static f32_t cosine_squared_norm_(bf16_t const* vector, std::size_t dimensions) noexcept {
+        f32_t norm = 0;
+#if USEARCH_USE_OPENMP
+#pragma omp simd reduction(+ : norm)
+#elif defined(USEARCH_DEFINED_CLANG)
+#pragma clang loop vectorize(enable)
+#elif defined(USEARCH_DEFINED_GCC)
+#pragma GCC ivdep
+#endif
+        for (std::size_t i = 0; i != dimensions; ++i) {
+            f32_t scalar = static_cast<f32_t>(vector[i]);
+            norm += scalar * scalar;
+        }
+        return norm;
+    }
+
+    inline static f32_t cosine_dot_(f32_t const* a, f32_t const* b, std::size_t dimensions) noexcept {
+        f32_t dot = 0;
+#if USEARCH_USE_OPENMP
+#pragma omp simd reduction(+ : dot)
+#elif defined(USEARCH_DEFINED_CLANG)
+#pragma clang loop vectorize(enable)
+#elif defined(USEARCH_DEFINED_GCC)
+#pragma GCC ivdep
+#endif
+        for (std::size_t i = 0; i != dimensions; ++i)
+            dot += a[i] * b[i];
+        return dot;
+    }
+
+    inline static f32_t cosine_dot_(bf16_t const* a, bf16_t const* b, std::size_t dimensions) noexcept {
+        f32_t dot = 0;
+#if USEARCH_USE_OPENMP
+#pragma omp simd reduction(+ : dot)
+#elif defined(USEARCH_DEFINED_CLANG)
+#pragma clang loop vectorize(enable)
+#elif defined(USEARCH_DEFINED_GCC)
+#pragma GCC ivdep
+#endif
+        for (std::size_t i = 0; i != dimensions; ++i)
+            dot += static_cast<f32_t>(a[i]) * static_cast<f32_t>(b[i]);
+        return dot;
+    }
+
     void configure_with_autovec() noexcept {
         switch (metric_kind_) {
         case metric_kind_t::ip_k: {
