@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <memory> // `std::allocator` - every container names its allocator
 #include <random>
 #include <unordered_set> // The reference oracle of the hash-set growth-parity audit
 #include <vector>
@@ -37,7 +38,7 @@ using namespace unum::usearch;
 
 std::size_t check_sorted_buffer_single_element() noexcept {
     std::size_t failures = 0;
-    sorted_buffer<u32_t> buffer;
+    sorted_buffer<u32_t> buffer {global_allocator};
     failures += expect(succeeded(buffer.reserve(16)));
 
     buffer.insert(u32_t {5}, 4);
@@ -66,7 +67,7 @@ template <std::size_t batch_size_>
 std::size_t check_sorted_buffer_batch_parity(unsigned seed) noexcept {
     constexpr std::size_t limit_k = 64;
     constexpr int steps_k = 400;
-    sorted_buffer<u32_t> tested;
+    sorted_buffer<u32_t> tested {global_allocator};
     std::vector<u32_t> oracle_flat;
     oracle_flat.reserve(2 * limit_k);
 
@@ -104,7 +105,7 @@ std::size_t check_sorted_buffer_batch_parity(unsigned seed) noexcept {
 
 std::size_t check_hash_set_single_element() noexcept {
     std::size_t failures = 0;
-    growing_hash_set<u32_t> hash_set;
+    growing_hash_set<u32_t> hash_set {global_allocator};
     failures += expect(succeeded(hash_set.reserve(16)));
     failures += expect(hash_set.set(42) == membership_t::fresh_k);
     failures += expect(hash_set.set(42) == membership_t::present_k);
@@ -120,7 +121,7 @@ std::size_t check_hash_set_single_element() noexcept {
  */
 std::size_t check_hash_set_growth_parity(unsigned seed) noexcept {
     constexpr int rounds_k = 12, inserts_per_round_k = 700;
-    growing_hash_set<u32_t> tested;
+    growing_hash_set<u32_t> tested {global_allocator};
     std::unordered_set<u32_t> oracle;
 
     std::mt19937 random_generator {seed};
@@ -162,8 +163,8 @@ std::size_t check_hash_set_growth_parity(unsigned seed) noexcept {
 template <std::size_t batch_size_>
 std::size_t check_hash_set_batch_parity(unsigned seed) noexcept {
     constexpr int steps_k = 200;
-    growing_hash_set<u32_t> tested;
-    growing_hash_set<u32_t> oracle;
+    growing_hash_set<u32_t> tested {global_allocator};
+    growing_hash_set<u32_t> oracle {global_allocator};
     std::size_t reserve_failures = expect(succeeded(tested.reserve(1024)));
     reserve_failures += expect(succeeded(oracle.reserve(1024)));
 
@@ -243,10 +244,9 @@ std::size_t check_hash_set_arena_growth() noexcept {
 
 std::size_t check_max_heap_push_pop() noexcept {
     std::size_t failures = 0;
-    max_heap<u32_t> heap;
+    max_heap<u32_t> heap {global_allocator};
     failures += expect(succeeded(heap.reserve(32)));
-    for (u32_t value : {5u, 3u, 7u, 1u, 9u, 4u})
-        failures += expect(succeeded(heap.insert(u32_t(value))));
+    for (u32_t value : {5u, 3u, 7u, 1u, 9u, 4u}) failures += expect(succeeded(heap.insert(u32_t(value))));
     std::array<u32_t, 6> const expected = {9, 7, 5, 4, 3, 1};
     for (std::size_t i = 0; i < expected.size(); ++i) failures += expect_eq(heap.pop(), expected[i]);
     failures += expect(heap.empty());
@@ -256,7 +256,7 @@ std::size_t check_max_heap_push_pop() noexcept {
 /** @brief D-ary heap pops in descending order, parameterised by arity. */
 template <std::size_t arity_>
 std::size_t check_max_heap_dary_push_pop(unsigned seed, std::size_t element_count) noexcept {
-    max_heap_dary<arity_, u32_t> heap;
+    max_heap_dary<arity_, u32_t> heap {global_allocator};
     std::size_t failures = expect(succeeded(heap.reserve(element_count)));
     std::mt19937 random_generator {seed};
     std::uniform_int_distribution<u32_t> distribution(0, 1'000'000);
@@ -281,7 +281,7 @@ std::size_t check_max_heap_dary_push_pop(unsigned seed, std::size_t element_coun
 /** @brief `erase_below` sheds exactly the entries under the bar; what remains still pops in order. */
 template <std::size_t arity_>
 std::size_t check_max_heap_dary_erase_below(unsigned seed, std::size_t element_count) noexcept {
-    max_heap_dary<arity_, u32_t> heap;
+    max_heap_dary<arity_, u32_t> heap {global_allocator};
     std::size_t failures = expect(succeeded(heap.reserve(element_count)));
     std::mt19937 random_generator {seed};
     std::uniform_int_distribution<u32_t> distribution(0, 1'000'000);
@@ -304,8 +304,8 @@ std::size_t check_max_heap_dary_erase_below(unsigned seed, std::size_t element_c
 
 /** @brief D=2 d-ary heap must agree with the binary heap pop-by-pop on the same input. */
 std::size_t check_max_heap_dary_parity_with_binary(unsigned seed, std::size_t element_count) noexcept {
-    max_heap<u32_t> binary;
-    max_heap_dary<2, u32_t> dary;
+    max_heap<u32_t> binary {global_allocator};
+    max_heap_dary<2, u32_t> dary {global_allocator};
     std::size_t failures = expect(succeeded(binary.reserve(element_count)));
     failures += expect(succeeded(dary.reserve(element_count)));
     std::mt19937 random_generator {seed};
@@ -330,8 +330,8 @@ std::size_t check_max_heap_dary_parity_with_binary(unsigned seed, std::size_t el
 template <std::size_t arity_>
 std::size_t check_max_heap_dary_insert_many(unsigned seed, std::size_t initial_count,
                                             std::size_t batch_count) noexcept {
-    max_heap_dary<arity_, u32_t> bulk;
-    max_heap_dary<arity_, u32_t> sequential;
+    max_heap_dary<arity_, u32_t> bulk {global_allocator};
+    max_heap_dary<arity_, u32_t> sequential {global_allocator};
     std::size_t failures = expect(succeeded(bulk.reserve(initial_count + batch_count)));
     failures += expect(succeeded(sequential.reserve(initial_count + batch_count)));
     std::mt19937 random_generator {seed};
@@ -360,8 +360,8 @@ std::size_t check_max_heap_dary_insert_many(unsigned seed, std::size_t initial_c
 /** @brief Bulk @c insert_many(std::array) must pop in the same descending order as single inserts. */
 template <std::size_t batch_size_>
 std::size_t check_max_heap_insert_many(unsigned seed, std::size_t initial_size) noexcept {
-    max_heap<u32_t> bulk;
-    max_heap<u32_t> sequential;
+    max_heap<u32_t> bulk {global_allocator};
+    max_heap<u32_t> sequential {global_allocator};
     std::size_t failures = expect(succeeded(bulk.reserve(initial_size + batch_size_)));
     failures += expect(succeeded(sequential.reserve(initial_size + batch_size_)));
 
@@ -395,7 +395,7 @@ std::size_t check_max_heap_insert_many(unsigned seed, std::size_t initial_size) 
 /** @brief @c pop_many<N> must return the same sequence as N sequential @c pop calls. */
 template <std::size_t batch_size_>
 std::size_t check_max_heap_pop_many() noexcept {
-    max_heap<u32_t> heap;
+    max_heap<u32_t> heap {global_allocator};
     std::size_t failures = expect(succeeded(heap.reserve(32)));
     for (u32_t value : {5u, 3u, 7u, 1u, 9u, 4u, 8u, 2u, 6u, 10u})
         failures += expect(succeeded(heap.insert(u32_t(value))));

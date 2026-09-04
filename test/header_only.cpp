@@ -1,8 +1,8 @@
 /**
- *  @brief The header-only tier's proof: everything under @c utilities/ & @c basic/
- *      compiles & runs with the standard library alone - only @c -Iinclude, no submodule
- *      paths, no third-party targets - and this translation unit instantiates the whole
- *      public surface to witness it.
+ *  @brief The header-only tier's proof: everything under @c utilities/, @c basic/ &
+ *      @c geospatial/ compiles & runs with the standard library alone - only @c -Iinclude,
+ *      no submodule paths, no third-party targets - and this translation unit instantiates
+ *      the whole public surface to witness it.
  *  @author Ash Vardanian
  *  @file test/header_only.cpp
  *  @date August 27, 2026
@@ -17,14 +17,22 @@
 #include "usearch/utilities/ram_tables.hpp"
 #include "usearch/utilities/ram_hints.hpp"
 #include "usearch/basic/ram_index.hpp"
+#include "usearch/geospatial/ram_index.hpp"
 
 #include <array>       // `std::array` - stored tags & batch overloads
 #include <bit>         // `std::bit_cast` - uuid keys from words
+#include <memory>      // `std::allocator` - every container names its allocator
 #include <span>        // `std::span` - metric & codec surfaces
 #include <string_view> // `std::string_view` - the status vocabulary probe
-#include <vector>      // `std::vector` - snapshot buffers
+#include <type_traits> // `std::is_same_v` - the columns' witness
+#include <vector>      // `std::vector` - the five snapshot columns
 
 using namespace unum::usearch;
+
+/** @brief The geospatial tier's witnesses: its metric, codec & index alias satisfy the basic concepts. */
+static_assert(basic_metric<chord_metric_t, earth_fixed_t, i64_t>);
+static_assert(basic_value_codec<earth_fixed_codec_t, earth_fixed_t>);
+static_assert(basic_selector<surface_keep_octants_t, geospatial_ram_index_t, chord_metric_t>);
 
 /** @brief Hamming distance over eight-byte tags - the smallest metric the concept admits. */
 struct header_only_metric_t {
@@ -53,7 +61,7 @@ struct header_only_transparent_metric_t : header_only_metric_t {
 
 /** @brief Identity-bytes codec for the fixed-width tags. */
 struct header_only_codec_t {
-    std::size_t saved_bytes(std::array<char, 8> const&) const noexcept { return 8; }
+    std::size_t storage_requirements(std::array<char, 8> const&) const noexcept { return 8; }
     status_t save(std::array<char, 8> const& value, bytes_span_t output) const noexcept {
         if (output.size() < value.size()) return status_t::overflow_k;
         for (std::size_t position = 0; position != value.size(); ++position)
@@ -80,7 +88,9 @@ static_assert(basic_value_codec<header_only_codec_t, std::array<char, 8>>);
 static_assert(basic_selector<basic_keep_closest_t, narrow_index_t, header_only_metric_t>);
 static_assert(basic_selector<basic_keep_diverse_t, wide_index_t, header_only_metric_t>);
 static_assert(basic_expansion_round_t::converged_k != basic_expansion_round_t::advanced_k);
-static_assert(sizeof(basic_snapshot_header_t) == 56);
+static_assert(std::is_same_v<narrow_index_t::columns_t, basic_columns<u64_t, u32_t, byte_t, u64_t>>);
+static_assert(
+    std::is_same_v<wide_index_t::columns_view_t, basic_columns<uuid_t const, u64_t const, byte_t const, u64_t const>>);
 
 /** @brief The tags the index probes store: distinct leading letters, shared tails. */
 static std::array<char, 8> make_tag(std::size_t ordinal) noexcept {
@@ -100,7 +110,7 @@ int main() {
     if (mix_bits(1) == mix_bits(2)) return 1;
     if (multiply_high(u64_t {1} << 32, u64_t {1} << 32) != 1) return 1;
     if (dtype_named("u64") != dtype_t::u64_k) return 1;
-    if (std::string_view {dtype_name(dtype_t::bin16_k)} != "bin16") return 1;
+    if (std::string_view {dtype_name(dtype_t::uuid_k)} != "uuid") return 1;
 
     // The engine & distribution split, at both widths.
     splitmix64_t random_generator {7};
@@ -109,7 +119,7 @@ int main() {
     if (ceil2(3) != 4) return 1;
 
     // Sequential containers: the growing buffer's whole accessor family.
-    growing_buffer<u32_t> sequence;
+    growing_buffer<u32_t> sequence {global_allocator};
     if (failed(sequence.reserve(4))) return 1;
     sequence.push_back_reserved(3), sequence.push_back_reserved(1), sequence.push_back_reserved(2);
     if (sequence.front() != 3 || sequence.back() != 2) return 1;
@@ -120,31 +130,31 @@ int main() {
     network_sort(std::span<u32_t, 4> {quad});
     if (quad[0] != 1 || quad[3] != 4) return 1;
 
-    max_heap<dense_scored_node_t, dense_further_scored_node_t> frontier;
+    max_heap<dense_scored_node_t, dense_further_scored_node_t> frontier {global_allocator};
     if (failed(frontier.reserve(64))) return 1;
     if (failed(frontier.insert({dense_node_id_t {1}, dense_distance_t {0.5f}}))) return 1;
     if (failed(frontier.insert({dense_node_id_t {2}, dense_distance_t {0.25f}}))) return 1;
     if (frontier.top().node_id != 2) return 1; // The furthest-first comparator surfaces the nearest.
     frontier.pop();
 
-    max_heap_dary<8, dense_scored_node_t, dense_further_scored_node_t> wide_frontier;
+    max_heap_dary<8, dense_scored_node_t, dense_further_scored_node_t> wide_frontier {global_allocator};
     if (failed(wide_frontier.reserve(64))) return 1;
     if (failed(wide_frontier.insert({dense_node_id_t {3}, dense_distance_t {0.75f}}))) return 1;
     if (wide_frontier.top().node_id != 3) return 1;
 
-    sorted_buffer<dense_scored_node_t, dense_closer_scored_node_t> results;
+    sorted_buffer<dense_scored_node_t, dense_closer_scored_node_t> results {global_allocator};
     if (failed(results.reserve(4))) return 1;
     results.insert({dense_node_id_t {3}, dense_distance_t {0.75f}}, 4);
     if (results.top().node_id != 3) return 1;
 
     // Associative containers: the visited set & the concurrent multimap.
-    growing_hash_set<dense_node_id_t> visited;
+    growing_hash_set<dense_node_id_t> visited {global_allocator};
     if (failed(visited.reserve(64))) return 1;
     if (visited.set(42) != membership_t::fresh_k) return 1;
     if (!visited.test(42) || visited.test(43)) return 1;
     if (visited.set(std::array<dense_node_id_t, 4> {42, 43, 44, 45}) != 0b1110u) return 1;
 
-    growing_multimap<u64_t, u32_t> multimap;
+    growing_multimap<u64_t, u32_t> multimap {global_allocator};
     if (failed(multimap.reserve(8))) return 1;
     if (failed(multimap.insert(7, 42)) || failed(multimap.insert(7, 43))) return 1;
     if (multimap.count(7) != 2 || !multimap.contains(7)) return 1;
@@ -203,14 +213,19 @@ int main() {
     auto const health = index.health(context);
     if (failed(health.status) || !health.connected_components) return 1;
 
-    // The snapshot round-trip needs nothing outside the tier either.
-    auto const bytes = index.snapshot_bytes(codec);
-    if (failed(bytes.status)) return 1;
-    std::vector<std::byte> payload(bytes.value);
-    if (index.save({payload}, codec) != status_t::success_k) return 1;
+    // The snapshot round-trip needs nothing outside the tier either: five columns in vectors.
+    auto const extents = index.columns_extents(codec);
+    if (failed(extents.status)) return 1;
+    std::vector<u64_t> keys_column(extents.value.nodes);
+    std::vector<u64_t> neighbor_offsets(extents.value.nodes + 1);
+    std::vector<u32_t> neighbor_ids(extents.value.neighbors);
+    std::vector<u64_t> value_offsets(extents.value.nodes + 1);
+    std::vector<std::byte> values(extents.value.value_bytes);
+    narrow_index_t::columns_t const columns {keys_column, neighbor_offsets, neighbor_ids, value_offsets, values};
+    if (index.save(columns, codec) != status_t::success_k) return 1;
     narrow_index_t restored;
     if (failed(restored.reserve(16).status)) return 1;
-    if (restored.load({payload}, codec) != status_t::success_k) return 1;
+    if (restored.load(columns.view(), codec) != status_t::success_k) return 1;
     if (restored.size() != index.size()) return 1;
     if (restored.key_of(0).value != index.key_of(0).value) return 1;
     if (restored.degree_of(3).value != index.degree_of(3).value) return 1;

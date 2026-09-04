@@ -96,37 +96,34 @@ struct spectra_metric_t {
     }
 };
 
-/** @brief Serializes the points behind a @c u32_t count - never the spectrum, which the
- *      load path re-derives, the way norms re-derive in the dense tiers. */
+/** @brief Serializes the points back to back - never the spectrum, which the load path
+ *      re-derives, the way norms re-derive in the dense tiers. The slice length is the point
+ *      count, so nothing is self-delimited, and the interchange sees a ragged @c f32 cloud of
+ *      @c [*,3] rows. */
 struct mesh_codec_t {
-    std::size_t saved_bytes(mesh_t const& value) const noexcept {
-        return sizeof(u32_t) + value.points.size() * sizeof(point3_t);
+    inline static constexpr dtype_t value_dtype_k = dtype_t::f32_k;
+    inline static constexpr column_shape_t value_shape_k = matrix_shape_t {0, 3};
+
+    std::size_t storage_requirements(mesh_t const& value) const noexcept {
+        return value.points.size() * sizeof(point3_t);
     }
     status_t save(mesh_t const& value, bytes_span_t output) const noexcept {
-        if (output.size() < saved_bytes(value)) return status_t::overflow_k;
-        auto const count_bytes = std::bit_cast<std::array<std::byte, sizeof(u32_t)>>(
-            static_cast<u32_t>(value.points.size()));
-        for (std::size_t position = 0; position != count_bytes.size(); ++position)
-            output[position] = count_bytes[position];
+        if (output.size() < storage_requirements(value)) return status_t::overflow_k;
         for (std::size_t point = 0; point != value.points.size(); ++point) {
             auto const point_bytes = std::bit_cast<std::array<std::byte, sizeof(point3_t)>>(value.points[point]);
             for (std::size_t position = 0; position != point_bytes.size(); ++position)
-                output[sizeof(u32_t) + point * sizeof(point3_t) + position] = point_bytes[position];
+                output[point * sizeof(point3_t) + position] = point_bytes[position];
         }
         return status_t::success_k;
     }
     status_t load(bytes_view_t input, mesh_t& value) const noexcept {
-        if (input.size() < sizeof(u32_t)) return status_t::malformed_k;
-        std::array<std::byte, sizeof(u32_t)> count_bytes;
-        for (std::size_t position = 0; position != count_bytes.size(); ++position)
-            count_bytes[position] = input[position];
-        std::size_t const points_count = std::bit_cast<u32_t>(count_bytes);
-        if (input.size() != sizeof(u32_t) + points_count * sizeof(point3_t)) return status_t::malformed_k;
+        if (input.size() % sizeof(point3_t)) return status_t::malformed_k;
+        std::size_t const points_count = input.size() / sizeof(point3_t);
         value.points.clear();
         for (std::size_t point = 0; point != points_count; ++point) {
             std::array<std::byte, sizeof(point3_t)> point_bytes;
             for (std::size_t position = 0; position != point_bytes.size(); ++position)
-                point_bytes[position] = input[sizeof(u32_t) + point * sizeof(point3_t) + position];
+                point_bytes[position] = input[point * sizeof(point3_t) + position];
             value.points.push_back(std::bit_cast<point3_t>(point_bytes));
         }
         refresh_spectrum(value);
@@ -164,7 +161,6 @@ struct meshes_handmade_t {
 
 struct meshes_fixture_t {
     using index_t = basic_ram_index<mesh_t, uuid_t, u64_t, f64_t, dummy_waiter_t, counting_allocator<std::byte>>;
-    static constexpr bool exact_distances_k = false;
 
     static index_t make_index(allocation_ledger_t& ledger) { return index_t {counting_allocator<std::byte> {ledger}}; }
     static spectra_metric_t make_metric() { return {}; }
@@ -276,6 +272,8 @@ std::size_t test_meshes() {
     failures += test_basic_scenarios(fixture);
     failures += check_meshes_rigid_invariance();
     failures += check_meshes_kernel_parity();
-    failures += test_basic_safegraphs_adapter(fixture, "bin16"); // The uuid key column.
+    failures += test_basic_safegraphs_roundtrip(fixture, "uuid", "rmsd"); // The uuid key column.
+    failures += test_basic_safegraphs_hostile(fixture, "rmsd");
+    failures += test_basic_safegraphs_distributed(fixture, "rmsd");
     return report("meshes", failures);
 }

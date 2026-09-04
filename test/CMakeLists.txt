@@ -7,6 +7,7 @@ add_executable(
     dense.cpp
     utilities/ram_buffers.cpp
     utilities/ram_tables.cpp
+    utilities/safegraphs_format.cpp
     basic/sentences.cpp
     basic/bioinformatics.cpp
     basic/meshes.cpp

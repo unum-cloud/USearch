@@ -442,7 +442,7 @@ struct cuda_executor_t {
     /** @brief Opens one stream per named device, binding each first, since a stream is born on
      *      the current device. */
     static expected<cuda_executor_t> spawn(std::span<int const> devices) noexcept {
-        growing_buffer<stream_t> streams;
+        growing_buffer<stream_t> streams {global_allocator};
         if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
         for (int device : devices) {
             if (cudaSetDevice(device) != cudaSuccess) return {{}, status_t::device_error_k};
@@ -480,7 +480,7 @@ struct cuda_executor_t {
 
   private:
     /** @brief One stream per named device, in the caller's order. */
-    growing_buffer<stream_t> streams_;
+    growing_buffer<stream_t> streams_ {global_allocator};
     /** @brief Held by the one caller driving the streams; never swapped. */
     fu::spin_mutex<fu::preferred_yield_t> held_;
 };

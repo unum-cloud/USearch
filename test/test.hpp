@@ -295,6 +295,8 @@ std::size_t test_ram_buffers();
 
 std::size_t test_ram_tables();
 
+std::size_t test_safegraphs_format();
+
 std::size_t test_dense_all();
 
 std::size_t test_sentences();

@@ -21,10 +21,12 @@
 
 using namespace unum::usearch;
 
-/** @brief Unit-cost Levenshtein through the classic two-row Wagner-Fischer recurrence -
- *      both the metric's kernel and the scenarios' oracle, so the two always agree. */
-static u64_t levenshtein_distance(std::string_view first, std::string_view second) noexcept {
-    std::vector<u64_t> previous_row(second.size() + 1), current_row(second.size() + 1);
+/** @brief Unit-cost Levenshtein through the classic two-row Wagner-Fischer recurrence - both
+ *      the metric's kernel and the scenarios' oracle, so the two always agree; the caller owns
+ *      the rows, so a whole batch scores without allocating. */
+static u64_t levenshtein_distance(std::string_view first, std::string_view second, std::vector<u64_t>& previous_row,
+                                  std::vector<u64_t>& current_row) noexcept {
+    previous_row.assign(second.size() + 1, 0), current_row.assign(second.size() + 1, 0);
     for (std::size_t column = 0; column <= second.size(); ++column) previous_row[column] = column;
     for (std::size_t row = 1; row <= first.size(); ++row) {
         current_row[0] = row;
@@ -48,6 +50,8 @@ struct levenshtein_metric_t {
 
     std::string_view query_;
     std::vector<std::string_view> staged_;
+    std::vector<u64_t> previous_row_;
+    std::vector<u64_t> current_row_;
 
     void reset(std::string_view query) noexcept { query_ = query, staged_.clear(); }
     void reset(std::string const& query) noexcept { reset(std::string_view {query}); }
@@ -57,15 +61,18 @@ struct levenshtein_metric_t {
     }
     void drain(std::span<u64_t> distances) noexcept {
         for (std::size_t lane = 0; lane != distances.size(); ++lane)
-            distances[lane] = levenshtein_distance(query_, staged_[lane]);
+            distances[lane] = levenshtein_distance(query_, staged_[lane], previous_row_, current_row_);
         staged_.clear();
     }
 };
 
-/** @brief Identity-bytes codec: the payload is the string's own characters, and a @c 0xFF
- *      byte - impossible in generated ASCII - is the unit's poison marker on load. */
+/** @brief Identity-bytes codec: the payload is the string's own characters, a @c utf8
+ *      column in the interchange, and a @c 0xFF byte - impossible in generated ASCII - is
+ *      the unit's poison marker on load. */
 struct sentence_codec_t {
-    std::size_t saved_bytes(std::string const& value) const noexcept { return value.size(); }
+    inline static constexpr dtype_t value_dtype_k = dtype_t::utf8_k;
+
+    std::size_t storage_requirements(std::string const& value) const noexcept { return value.size(); }
     status_t save(std::string const& value, bytes_span_t output) const noexcept {
         if (output.size() < value.size()) return status_t::overflow_k;
         for (std::size_t position = 0; position != value.size(); ++position)
@@ -88,14 +95,14 @@ struct sentences_handmade_t {
 
 struct sentences_fixture_t {
     using index_t = basic_ram_index<std::string, u64_t, u32_t, u64_t, flaky_waiter_t, counting_allocator<std::byte>>;
-    static constexpr bool exact_distances_k = true;
 
     static index_t make_index(allocation_ledger_t& ledger) { return index_t {counting_allocator<std::byte> {ledger}}; }
     static levenshtein_metric_t make_metric() { return {}; }
     static sentence_codec_t make_codec() { return {}; }
     static u64_t make_key(std::size_t ordinal) { return 0xC0FFEE00000000ull + ordinal; }
     static u64_t oracle(std::string const& query, std::string const& stored) noexcept {
-        return levenshtein_distance(query, stored);
+        std::vector<u64_t> previous_row, current_row;
+        return levenshtein_distance(query, stored, previous_row, current_row);
     }
     static bool value_equals(std::string const& first, std::string const& second) noexcept { return first == second; }
 
@@ -191,15 +198,13 @@ static std::size_t check_sentences_codec_poison() {
         std::vector<u32_t> assigned_ids;
         failures += basic_build(fixture, index, metric, values, assigned_ids, context, basic_keep_diverse_t {4});
 
-        auto const bytes = index.snapshot_bytes(codec);
-        failures += expect(bool(bytes));
-        std::vector<std::byte> payload(bytes.value);
-        failures += expect_eq(index.save({payload}, codec), status_t::success_k);
-        payload.back() = std::byte {0xFF}; // The values section is last, so this poisons one value.
+        auto saved = basic_saved_columns(index, codec);
+        failures += expect(bool(saved));
+        saved.value.values.back() = std::byte {0xFF}; // Poisons the last value's final byte.
 
         auto poisoned = sentences_fixture_t::make_index(ledger);
         failures += expect(bool(poisoned.reserve(values.size())));
-        failures += expect_eq(poisoned.load({payload}, codec), status_t::malformed_k);
+        failures += expect_eq(poisoned.load(saved.value.view(), codec), status_t::malformed_k);
     }
     failures += expect_eq(ledger.live_bytes.load(), 0);
     return failures;
@@ -238,13 +243,16 @@ static u64_t myers_levenshtein_distance(std::string_view first, std::string_view
  *      form's 64-character bound. */
 static std::size_t check_sentences_independent_oracle() {
     std::size_t failures = 0;
+    std::vector<u64_t> previous_row, current_row;
     auto values = sentences_fixture_t::make_values(24, basic_seed_contract_k ^ 0x0Bull);
     for (std::size_t pair = 0; pair + 1 < values.size(); pair += 2) {
         std::string_view const first = std::string_view {values[pair]}.substr(0, 64);
         std::string_view const second = std::string_view {values[pair + 1]}.substr(0, 64);
-        failures += expect_eq(levenshtein_distance(first, second), myers_levenshtein_distance(first, second));
+        failures += expect_eq(levenshtein_distance(first, second, previous_row, current_row),
+                              myers_levenshtein_distance(first, second));
     }
-    failures += expect_eq(levenshtein_distance("kitten", "sitting"), myers_levenshtein_distance("kitten", "sitting"));
+    failures += expect_eq(levenshtein_distance("kitten", "sitting", previous_row, current_row),
+                          myers_levenshtein_distance("kitten", "sitting"));
     return failures;
 }
 
@@ -255,6 +263,8 @@ std::size_t test_sentences() {
     failures += check_sentences_transparent_search();
     failures += check_sentences_codec_poison();
     failures += check_sentences_independent_oracle();
-    failures += test_basic_safegraphs_adapter(fixture, "u64");
+    failures += test_basic_safegraphs_roundtrip(fixture, "u64", "levenshtein");
+    failures += test_basic_safegraphs_hostile(fixture, "levenshtein");
+    failures += test_basic_safegraphs_distributed(fixture, "levenshtein");
     return report("sentences", failures);
 }

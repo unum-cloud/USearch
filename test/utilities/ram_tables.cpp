@@ -12,6 +12,7 @@
  */
 #include <algorithm>     // `std::sort`
 #include <atomic>        // `std::atomic`
+#include <memory>        // `std::allocator` - every map names its allocator
 #include <unordered_map> // The reference oracle of the growth-parity audit
 #include <vector>        // `std::vector`
 
@@ -31,7 +32,7 @@ struct colliding_hash_t {
 
 std::size_t check_multimap_uninitialized() noexcept {
     std::size_t failures = 0;
-    growing_multimap<u64_t, u32_t> multimap;
+    growing_multimap<u64_t, u32_t> multimap {global_allocator};
     failures += expect_eq(multimap.insert(42, 7), status_t::uninitialized_k);
     failures += expect_eq(multimap.find(42).status, status_t::malformed_k);
     failures += expect(!multimap.contains(42));
@@ -44,7 +45,7 @@ std::size_t check_multimap_uninitialized() noexcept {
 
 std::size_t check_multimap_single_key() noexcept {
     std::size_t failures = 0;
-    growing_multimap<u64_t, u32_t> multimap;
+    growing_multimap<u64_t, u32_t> multimap {global_allocator};
     failures += expect(succeeded(multimap.reserve(8)));
     for (u32_t entry = 0; entry != 8; ++entry) failures += expect(succeeded(multimap.insert(100 + entry, entry)));
     failures += expect_eq(multimap.size(), 8u);
@@ -63,7 +64,7 @@ std::size_t check_multimap_single_key() noexcept {
 std::size_t check_multimap_duplicate_keys() noexcept {
     constexpr std::size_t multiplicity_k = 12;
     std::size_t failures = 0;
-    growing_multimap<u64_t, u32_t> multimap;
+    growing_multimap<u64_t, u32_t> multimap {global_allocator};
     failures += expect(succeeded(multimap.reserve(multiplicity_k + 2)));
     for (u32_t duplicate = 0; duplicate != multiplicity_k; ++duplicate)
         failures += expect(succeeded(multimap.insert(7, duplicate)));
@@ -86,7 +87,7 @@ std::size_t check_multimap_duplicate_keys() noexcept {
 std::size_t check_multimap_quota_overflow() noexcept {
     constexpr std::size_t quota_k = 16;
     std::size_t failures = 0;
-    growing_multimap<u64_t, u32_t> multimap;
+    growing_multimap<u64_t, u32_t> multimap {global_allocator};
     failures += expect(succeeded(multimap.reserve(quota_k)));
     std::size_t const capacity = multimap.capacity();
     for (u32_t entry = 0; entry != capacity; ++entry) failures += expect(succeeded(multimap.insert(entry, entry)));
@@ -107,7 +108,7 @@ std::size_t check_multimap_quota_overflow() noexcept {
 std::size_t check_multimap_clear_retry() noexcept {
     constexpr std::size_t quota_k = 24;
     std::size_t failures = 0;
-    growing_multimap<u64_t, u32_t> multimap;
+    growing_multimap<u64_t, u32_t> multimap {global_allocator};
     failures += expect(succeeded(multimap.reserve(quota_k)));
     std::size_t const capacity = multimap.capacity();
     for (u32_t entry = 0; entry != capacity; ++entry) failures += expect(succeeded(multimap.insert(entry, entry)));
@@ -173,7 +174,7 @@ std::size_t check_multimap_growth_parity(unsigned seed) noexcept {
 std::size_t check_multimap_probe_termination() noexcept {
     constexpr std::size_t quota_k = 32;
     std::size_t failures = 0;
-    growing_multimap<u64_t, u32_t, colliding_hash_t> multimap;
+    growing_multimap<u64_t, u32_t, colliding_hash_t> multimap {global_allocator};
     failures += expect(succeeded(multimap.reserve(quota_k)));
     std::size_t const capacity = multimap.capacity();
     for (u32_t entry = 0; entry != capacity; ++entry) failures += expect(succeeded(multimap.insert(entry, entry)));
@@ -237,7 +238,7 @@ std::size_t check_multimap_reader_during_writers() noexcept {
     constexpr unsigned keys_alphabet_k = 8;
     constexpr std::size_t reader_minimal_sweeps_k = 16;
     std::size_t failures = 0;
-    growing_multimap<u64_t, u32_t> multimap;
+    growing_multimap<u64_t, u32_t> multimap {global_allocator};
     failures += expect(succeeded(multimap.reserve(writers_k * inserts_per_writer_k)));
 
     fu::flat_pool_t pool;
@@ -307,7 +308,7 @@ std::size_t check_multimap_starved_rehash() noexcept {
 std::size_t check_multimap_move() noexcept {
     constexpr std::size_t quota_k = 16;
     std::size_t failures = 0;
-    growing_multimap<u64_t, u32_t> source;
+    growing_multimap<u64_t, u32_t> source {global_allocator};
     failures += expect(succeeded(source.reserve(quota_k)));
     for (u32_t entry = 0; entry != quota_k; ++entry) failures += expect(succeeded(source.insert(entry, entry)));
 

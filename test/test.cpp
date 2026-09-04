@@ -16,6 +16,7 @@ int main() {
 
     failures_count += test_ram_buffers();
     failures_count += test_ram_tables();
+    failures_count += test_safegraphs_format();
     failures_count += test_sentences();
     failures_count += test_bioinformatics();
     failures_count += test_meshes();

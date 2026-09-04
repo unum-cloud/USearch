@@ -192,6 +192,10 @@ class max_heap {
   public:
     /** @brief Every heap names its allocator; nothing is placed by default. */
     max_heap() = delete;
+    /** @brief The process-wide allocator, for a heap no arena or domain owns. */
+    explicit max_heap(global_allocator_t) noexcept
+        requires std::default_initializable<allocator_t>
+        : max_heap(allocator_t {}) {}
     explicit max_heap(allocator_t allocator) noexcept
         : elements_(nullptr), size_(0), capacity_(0), allocator_(std::move(allocator)) {}
 
@@ -347,7 +351,9 @@ class max_heap {
     static std::size_t parent_idx(std::size_t i) noexcept { return (i - 1u) / 2u; }
     static std::size_t left_child_idx(std::size_t i) noexcept { return (i * 2u) + 1u; }
     static std::size_t right_child_idx(std::size_t i) noexcept { return (i * 2u) + 2u; }
-    static bool less(element_t const& a, element_t const& b) noexcept { return comparator_t {}(a, b); }
+    static bool less(element_t const& first, element_t const& second) noexcept {
+        return comparator_t {}(first, second);
+    }
 
     /** @brief Moves the element at @p i up until the heap property is restored - the
      *      companion of appending at the tail. */
@@ -417,6 +423,10 @@ class max_heap_dary {
   public:
     /** @brief Every heap names its allocator; nothing is placed by default. */
     max_heap_dary() = delete;
+    /** @brief The process-wide allocator, for a heap no arena or domain owns. */
+    explicit max_heap_dary(global_allocator_t) noexcept
+        requires std::default_initializable<allocator_t>
+        : max_heap_dary(allocator_t {}) {}
     explicit max_heap_dary(allocator_t allocator) noexcept
         : elements_(nullptr), size_(0), capacity_(0), allocator_(std::move(allocator)) {}
 
@@ -519,7 +529,8 @@ class max_heap_dary {
      *      one pass - a frontier keyed further-first sheds everything further than @p bar. */
     std::size_t erase_below(element_t const& bar) noexcept {
         auto below = [&bar](element_t const& entry) noexcept { return less(entry, bar); };
-        std::size_t const kept = static_cast<std::size_t>(std::remove_if(elements_, elements_ + size_, below) - elements_);
+        std::size_t const kept = static_cast<std::size_t>(std::remove_if(elements_, elements_ + size_, below) -
+                                                          elements_);
         std::size_t const erased = size_ - kept;
         size_ = kept;
         rebuild_();
@@ -545,7 +556,9 @@ class max_heap_dary {
   private:
     static std::size_t parent_idx(std::size_t i) noexcept { return (i - 1u) / arity_; }
     static std::size_t first_child_idx(std::size_t i) noexcept { return arity_ * i + 1u; }
-    static bool less(element_t const& a, element_t const& b) noexcept { return comparator_t {}(a, b); }
+    static bool less(element_t const& first, element_t const& second) noexcept {
+        return comparator_t {}(first, second);
+    }
 
     /** @brief Floyd's bottom-up heapify over the whole fill. */
     void rebuild_() noexcept {
@@ -608,6 +621,10 @@ class sorted_buffer {
   public:
     /** @brief Every buffer names its allocator; nothing is placed by default. */
     sorted_buffer() = delete;
+    /** @brief The process-wide allocator, for a buffer no arena or domain owns. */
+    explicit sorted_buffer(global_allocator_t) noexcept
+        requires std::default_initializable<allocator_t>
+        : sorted_buffer(allocator_t {}) {}
     explicit sorted_buffer(allocator_t allocator) noexcept
         : elements_(nullptr), size_(0), capacity_(0), allocator_(std::move(allocator)) {}
 
@@ -749,7 +766,9 @@ class sorted_buffer {
     inline element_t const* data() const noexcept { return elements_; }
 
   private:
-    static bool less(element_t const& a, element_t const& b) noexcept { return comparator_t {}(a, b); }
+    static bool less(element_t const& first, element_t const& second) noexcept {
+        return comparator_t {}(first, second);
+    }
 
     /** @brief Opens a slot at @p slot by moving the [@p slot, @p tail) range one position
      *      right, back to front, so the overlap never clobbers unread elements. */
@@ -797,6 +816,10 @@ class growing_buffer {
   public:
     /** @brief Every buffer names its allocator; nothing is placed by default. */
     growing_buffer() = delete;
+    /** @brief The process-wide allocator, for a buffer no arena or domain owns. */
+    explicit growing_buffer(global_allocator_t) noexcept
+        requires std::default_initializable<allocator_type_>
+        : growing_buffer(allocator_type_ {}) {}
     /** @brief Takes the caller's allocator in its own element type; the rebind to @c element_t
      *      happens here, so no consumer spells @c allocator_traits itself. */
     explicit growing_buffer(allocator_type_ const& allocator) noexcept
@@ -984,6 +1007,10 @@ class growing_arena {
   public:
     /** @brief Every arena names its upstream allocator; nothing is placed by default. */
     growing_arena() = delete;
+    /** @brief The process-wide allocator, for an arena no memory domain owns. */
+    explicit growing_arena(global_allocator_t) noexcept
+        requires std::default_initializable<upstream_t>
+        : growing_arena(upstream_t {}) {}
     explicit growing_arena(upstream_t upstream) noexcept : upstream_(upstream) {}
 
     /** @brief The allocator every chunk of this arena comes from. */
@@ -1041,8 +1068,8 @@ class growing_arena {
     static std::byte* slice_(run_t& run, std::size_t bytes, std::size_t alignment) noexcept {
         // Aligned by address, not by offset: the upstream only promises what `malloc` does.
         std::uintptr_t const cursor = reinterpret_cast<std::uintptr_t>(run.data() + run.size());
-        std::size_t const padding =
-            static_cast<std::size_t>(divide_round_up<std::uintptr_t>(cursor, alignment) * alignment - cursor);
+        std::size_t const padding = static_cast<std::size_t>(
+            divide_round_up<std::uintptr_t>(cursor, alignment) * alignment - cursor);
         if (run.capacity() - run.size() < padding + bytes) return nullptr;
         run.extend_uninitialized(run.size() + padding + bytes);
         return run.data() + run.size() - bytes;

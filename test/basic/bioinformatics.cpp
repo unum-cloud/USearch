@@ -34,11 +34,13 @@ static u64_t substitution_cost(char first, char second) noexcept {
     return is_purine(first) == is_purine(second) ? 1u : 2u;
 }
 
-/** @brief Global alignment distance under the weighted substitutions & unit-gap cost of
- *      two - both the metric's kernel and the scenarios' oracle. */
-static u64_t alignment_distance(std::string_view first, std::string_view second) noexcept {
+/** @brief Global alignment distance under the weighted substitutions & unit-gap cost of two -
+ *      both the metric's kernel and the scenarios' oracle; the caller owns the rows, so a whole
+ *      batch scores without allocating. */
+static u64_t alignment_distance(std::string_view first, std::string_view second, std::vector<u64_t>& previous_row,
+                                std::vector<u64_t>& current_row) noexcept {
     constexpr u64_t gap_cost_k = 2;
-    std::vector<u64_t> previous_row(second.size() + 1), current_row(second.size() + 1);
+    previous_row.assign(second.size() + 1, 0), current_row.assign(second.size() + 1, 0);
     for (std::size_t column = 0; column <= second.size(); ++column) previous_row[column] = column * gap_cost_k;
     for (std::size_t row = 1; row <= first.size(); ++row) {
         current_row[0] = row * gap_cost_k;
@@ -58,6 +60,8 @@ static u64_t alignment_distance(std::string_view first, std::string_view second)
 struct alignment_metric_t {
     std::string_view query_;
     std::vector<std::string_view> staged_;
+    std::vector<u64_t> previous_row_;
+    std::vector<u64_t> current_row_;
 
     void reset(dna_t const& query) noexcept { query_ = query, staged_.clear(); }
     basic_metric_staging_t push(dna_t const& value) noexcept {
@@ -65,14 +69,17 @@ struct alignment_metric_t {
     }
     void drain(std::span<u64_t> distances) noexcept {
         for (std::size_t lane = 0; lane != distances.size(); ++lane)
-            distances[lane] = alignment_distance(query_, staged_[lane]);
+            distances[lane] = alignment_distance(query_, staged_[lane], previous_row_, current_row_);
         staged_.clear();
     }
 };
 
 /** @brief Packs nucleotides two bits each behind a @c u32_t base count, so the payload is
- *      about a quarter of the in-RAM form and @c load provably decodes. */
+ *      about a quarter of the in-RAM form and @c load provably decodes; the count stays,
+ *      since padding hides it from the byte length, so the bytes ride as opaque @c u8. */
 struct packed_dna_codec_t {
+    inline static constexpr dtype_t value_dtype_k = dtype_t::u8_k;
+
     static std::size_t packed_bytes(std::size_t bases) noexcept { return divide_round_up<std::size_t>(bases, 4); }
     static u32_t code_of(char nucleotide) noexcept {
         switch (nucleotide) {
@@ -83,9 +90,11 @@ struct packed_dna_codec_t {
         }
     }
 
-    std::size_t saved_bytes(dna_t const& value) const noexcept { return sizeof(u32_t) + packed_bytes(value.size()); }
+    std::size_t storage_requirements(dna_t const& value) const noexcept {
+        return sizeof(u32_t) + packed_bytes(value.size());
+    }
     status_t save(dna_t const& value, bytes_span_t output) const noexcept {
-        if (output.size() < saved_bytes(value)) return status_t::overflow_k;
+        if (output.size() < storage_requirements(value)) return status_t::overflow_k;
         auto const count_bytes = std::bit_cast<std::array<std::byte, sizeof(u32_t)>>(static_cast<u32_t>(value.size()));
         for (std::size_t position = 0; position != count_bytes.size(); ++position)
             output[position] = count_bytes[position];
@@ -121,7 +130,6 @@ struct bioinformatics_handmade_t {
 
 struct bioinformatics_fixture_t {
     using index_t = basic_ram_index<dna_t, uuid_t, u64_t, u64_t, dummy_waiter_t, counting_allocator<std::byte>>;
-    static constexpr bool exact_distances_k = true;
 
     static index_t make_index(allocation_ledger_t& ledger) { return index_t {counting_allocator<std::byte> {ledger}}; }
     static alignment_metric_t make_metric() { return {}; }
@@ -129,7 +137,10 @@ struct bioinformatics_fixture_t {
     static uuid_t make_key(std::size_t ordinal) {
         return std::bit_cast<uuid_t>(std::array<u64_t, 2> {mix_bits(ordinal), 0xB10B10B1ull ^ ordinal});
     }
-    static u64_t oracle(dna_t const& query, dna_t const& stored) noexcept { return alignment_distance(query, stored); }
+    static u64_t oracle(dna_t const& query, dna_t const& stored) noexcept {
+        std::vector<u64_t> previous_row, current_row;
+        return alignment_distance(query, stored, previous_row, current_row);
+    }
     static bool value_equals(dna_t const& first, dna_t const& second) noexcept { return first == second; }
 
     static bioinformatics_handmade_t make_handmade() {
@@ -182,7 +193,7 @@ static std::size_t check_bioinformatics_codec() {
     for (std::size_t bases = 0; bases != 9; ++bases) {
         dna_t original;
         for (std::size_t base = 0; base != bases; ++base) original += "ACGT"[(base * 7 + bases) % 4];
-        std::vector<std::byte> encoded(codec.saved_bytes(original));
+        std::vector<std::byte> encoded(codec.storage_requirements(original));
         failures += expect_eq(codec.save(original, {encoded}), status_t::success_k);
         dna_t decoded;
         failures += expect_eq(codec.load({encoded}, decoded), status_t::success_k);
@@ -213,11 +224,13 @@ static u64_t exhaustive_alignment_distance(std::string_view first, std::string_v
  *      exhaustive search, plus the handmade triple at full length. */
 static std::size_t check_bioinformatics_independent_oracle() {
     std::size_t failures = 0;
+    std::vector<u64_t> previous_row, current_row;
     auto values = bioinformatics_fixture_t::make_values(16, basic_seed_contract_k ^ 0x0Cull);
     for (std::size_t pair = 0; pair + 1 < values.size(); pair += 2) {
         std::string_view const first = std::string_view {values[pair]}.substr(0, 6);
         std::string_view const second = std::string_view {values[pair + 1]}.substr(0, 6);
-        failures += expect_eq(alignment_distance(first, second), exhaustive_alignment_distance(first, second));
+        failures += expect_eq(alignment_distance(first, second, previous_row, current_row),
+                              exhaustive_alignment_distance(first, second));
     }
     auto const handmade = bioinformatics_fixture_t::make_handmade();
     for (std::size_t row = 0; row != 3; ++row)
@@ -233,6 +246,8 @@ std::size_t test_bioinformatics() {
     failures += test_basic_scenarios(fixture);
     failures += check_bioinformatics_codec();
     failures += check_bioinformatics_independent_oracle();
-    failures += test_basic_safegraphs_adapter(fixture, "bin16"); // The uuid key column.
+    failures += test_basic_safegraphs_roundtrip(fixture, "uuid", "needleman-wunsch"); // The uuid key column.
+    failures += test_basic_safegraphs_hostile(fixture, "needleman-wunsch");
+    failures += test_basic_safegraphs_distributed(fixture, "needleman-wunsch");
     return report("bioinformatics", failures);
 }

@@ -11,10 +11,10 @@
  */
 #pragma once
 
-#include <cassert>     // `assert` - every `set` follows a `reserve`
-#include <cstddef>     // `std::size_t`
-#include <cstdint>     // `std::uint64_t` - batched membership masks
-#include <cstring>     // `std::memset` - the all-ones sentinel fill
+#include <cassert> // `assert` - every `set` follows a `reserve`
+#include <cstddef> // `std::size_t`
+#include <cstdint> // `std::uint64_t` - batched membership masks
+#include <cstring> // `std::memset` - the all-ones sentinel fill
 
 #include <array>       // `std::array` - batched membership inserts
 #include <bit>         // `std::countr_zero` - first-empty lane of a probe group
@@ -93,6 +93,10 @@ class growing_hash_set {
   public:
     /** @brief Every set names its allocator; nothing is placed by default. */
     growing_hash_set() = delete;
+    /** @brief The process-wide allocator, for a set no arena or domain owns. */
+    explicit growing_hash_set(global_allocator_t) noexcept
+        requires std::default_initializable<allocator_t>
+        : growing_hash_set(allocator_t {}) {}
     explicit growing_hash_set(allocator_t allocator) noexcept : allocator_(std::move(allocator)) {}
     ~growing_hash_set() noexcept { reset(); }
 
@@ -116,9 +120,7 @@ class growing_hash_set {
     static std::size_t slots_for(std::size_t capacity) noexcept { return ceil2(capacity * 5u / 3u); }
 
     /** @brief Bytes @p capacity elements occupy, the load headroom included. */
-    static std::size_t memory_usage(std::size_t capacity) noexcept {
-        return slots_for(capacity) * sizeof(element_t);
-    }
+    static std::size_t memory_usage(std::size_t capacity) noexcept { return slots_for(capacity) * sizeof(element_t); }
 
     /** @brief Bytes this set currently occupies. */
     std::size_t memory_usage() const noexcept { return capacity_ * sizeof(element_t); }
@@ -152,16 +154,16 @@ class growing_hash_set {
 
     /**
      *  @brief The one probe walk behind @c test, @c set, and the rehash: returns the slot
-     *      holding @p elem, or the empty slot where it belongs. A single shared algorithm is
+     *      holding @p element, or the empty slot where it belongs. A single shared algorithm is
      *      what keeps placement and lookup coherent - a rehash placing elements any other
      *      way would strand them unreachable.
      */
     static inline element_t* locate_(element_t* slots, std::size_t capacity, hasher_t const& hasher,
-                                     element_t elem) noexcept
+                                     element_t element) noexcept
         requires(!simd_groups_k)
     {
-        std::size_t index = hasher(elem) & (capacity - 1);
-        while (slots[index] != default_free_value<element_t>() && slots[index] != elem)
+        std::size_t index = hasher(element) & (capacity - 1);
+        while (slots[index] != default_free_value<element_t>() && slots[index] != element)
             index = (index + 1) & (capacity - 1);
         return slots + index;
     }
@@ -180,18 +182,18 @@ class growing_hash_set {
      *  the scalar walk below.
      */
     static inline element_t* locate_(element_t* slots, std::size_t capacity, hasher_t const& hasher,
-                                     element_t elem) noexcept
+                                     element_t element) noexcept
         requires(simd_groups_k)
     {
         if (capacity < 16) {
-            std::size_t index = hasher(elem) & (capacity - 1);
-            while (slots[index] != default_free_value<element_t>() && slots[index] != elem)
+            std::size_t index = hasher(element) & (capacity - 1);
+            while (slots[index] != default_free_value<element_t>() && slots[index] != element)
                 index = (index + 1) & (capacity - 1);
             return slots + index;
         }
-        __m512i const key = _mm512_set1_epi32(static_cast<int>(elem));
+        __m512i const key = _mm512_set1_epi32(static_cast<int>(element));
         __m512i const empty = _mm512_set1_epi32(static_cast<int>(default_free_value<element_t>()));
-        std::size_t group = (hasher(elem) & (capacity - 1)) & ~std::size_t {15};
+        std::size_t group = (hasher(element) & (capacity - 1)) & ~std::size_t {15};
         while (true) {
             __m512i const block = _mm512_loadu_si512(slots + group);
             __mmask16 const key_lanes = _mm512_cmpeq_epi32_mask(block, key);
@@ -208,19 +210,19 @@ class growing_hash_set {
      *  @brief Checks if the element is already in the hash-set.
      *  @return @c true if the element is present.
      */
-    inline bool test(element_t const& elem) const noexcept {
-        return *locate_(slots_, capacity_, hasher_, elem) == elem;
+    inline bool test(element_t const& element) const noexcept {
+        return *locate_(slots_, capacity_, hasher_, element) == element;
     }
 
     /**
      *  @brief Inserts an element into the hash-set.
      *  @return The membership the element had @b before this call.
      */
-    [[nodiscard]] inline membership_t set(element_t const& elem) noexcept {
+    [[nodiscard]] inline membership_t set(element_t const& element) noexcept {
         assert(slots_ && (count_ + 1) * 5u / 3u <= capacity_);
-        element_t* slot = locate_(slots_, capacity_, hasher_, elem);
-        if (*slot == elem) return membership_t::present_k;
-        *slot = elem;
+        element_t* slot = locate_(slots_, capacity_, hasher_, element);
+        if (*slot == element) return membership_t::present_k;
+        *slot = element;
         ++count_;
         return membership_t::fresh_k;
     }
@@ -316,6 +318,10 @@ class growing_multimap {
 
     /** @brief Every map names its allocator; nothing is placed by default. */
     growing_multimap() = delete;
+    /** @brief The process-wide allocator, for a map no arena or domain owns. */
+    explicit growing_multimap(global_allocator_t) noexcept
+        requires std::default_initializable<allocator_t>
+        : growing_multimap(allocator_t {}) {}
     explicit growing_multimap(allocator_t allocator) noexcept : allocator_(std::move(allocator)) {}
     ~growing_multimap() noexcept { reset(); }
 
@@ -360,8 +366,7 @@ class growing_multimap {
 
     void reset() noexcept {
         if (slots_)
-            bytes_allocator_t(allocator_)
-                .deallocate(reinterpret_cast<std::byte*>(slots_), memory_usage(slots_count_));
+            bytes_allocator_t(allocator_).deallocate(reinterpret_cast<std::byte*>(slots_), memory_usage(slots_count_));
         slots_ = nullptr;
         states_ = nullptr;
         slots_count_ = 0;
@@ -395,8 +400,7 @@ class growing_multimap {
         }
 
         if (slots_)
-            bytes_allocator_t(allocator_)
-                .deallocate(reinterpret_cast<std::byte*>(slots_), memory_usage(slots_count_));
+            bytes_allocator_t(allocator_).deallocate(reinterpret_cast<std::byte*>(slots_), memory_usage(slots_count_));
         slots_ = new_slots;
         states_ = new_states;
         slots_count_ = new_slots_count;

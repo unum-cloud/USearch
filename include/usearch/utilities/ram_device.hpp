@@ -120,16 +120,24 @@ struct forkunion_executor_t {
         std::size_t threads = 0;
         if (fu_pool_threads_count(pool, &threads) != fu_success_k)
             return {std::move(executor), status_t::uninitialized_k};
-        if (failed(executor.arenas_per_thread_.resize(threads))) return {std::move(executor), status_t::bad_alloc_k};
+        // Each thread names its own memory domain; the arenas are then placed on those in order.
+        growing_buffer<fu_memory_domain_id_t> domains {global_allocator};
+        if (failed(domains.resize(threads))) return {std::move(executor), status_t::bad_alloc_k};
+        for (fu_memory_domain_id_t& domain : domains) domain = no_memory_domain_k;
         status_t const status = executor.for_threads([&](std::size_t thread, std::size_t compute_domain) noexcept {
             std::size_t memory_index = 0;
             fu_memory_domain_id_t memory_domain = no_memory_domain_k;
             if (fu_local_memory_of(topology, compute_domain, &memory_index) != fu_success_k ||
                 fu_memory_domain_id_at_index(topology, memory_index, &memory_domain) != fu_success_k)
                 return;
-            executor.arenas_per_thread_[thread] = arena_t {forkunion_allocator<byte_t>(memory_domain)};
+            domains[thread] = memory_domain;
         });
-        return {std::move(executor), status};
+        if (failed(status)) return {std::move(executor), status};
+        if (failed(executor.arenas_per_thread_.reserve_exactly(threads)))
+            return {std::move(executor), status_t::bad_alloc_k};
+        for (fu_memory_domain_id_t const domain : domains)
+            executor.arenas_per_thread_.push_back_reserved(arena_t {forkunion_allocator<byte_t>(domain)});
+        return {std::move(executor), status_t::success_k};
     }
 
     /** @brief Relinquishes the pool without deleting it - the inverse of @ref acquire, so the
@@ -182,6 +190,12 @@ struct forkunion_executor_t {
     /** @brief Thread @p thread 's own arena; no two threads share one. */
     arena_t& arena(std::size_t thread) noexcept { return arenas_per_thread_[thread]; }
 
+    /** @brief The memory domain thread @p thread 's arena sits on - the thread's home, which a
+     *      fan-out serves first. */
+    fu_memory_domain_id_t memory_domain(std::size_t thread) const noexcept {
+        return arenas_per_thread_[thread].upstream().memory_domain;
+    }
+
     /** @brief Threads this executor drives. */
     std::size_t size() const noexcept { return arenas_per_thread_.size(); }
     /** @brief The topology the pool was spawned over; borrowed, never owned. */
@@ -220,7 +234,7 @@ struct forkunion_executor_t {
   private:
     /** @brief One arena per thread, colocated with it once at @ref acquire; contexts point into it,
      *      so its chunks never move. */
-    growing_buffer<arena_t> arenas_per_thread_;
+    growing_buffer<arena_t> arenas_per_thread_ {global_allocator};
     /** @brief Held by the one caller driving the threads; never swapped. */
     fu::spin_mutex<fu::preferred_yield_t> held_;
     /** @brief The pool every fan-out dispatches on, owned outright and deleted here. */

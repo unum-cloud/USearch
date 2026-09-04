@@ -16,9 +16,7 @@
 #include <cstddef> // `std::size_t`
 #include <cstdint> // `std::uint64_t`
 
-#include <array>        // `std::array` - the byte images of serialized words
 #include <atomic>       // `std::atomic`
-#include <bit>          // `std::bit_cast` - unaligned-safe snapshot reads & writes
 #include <limits>       // `std::numeric_limits` - the id-space ceiling in `reserve`
 #include <memory>       // `std::allocator`, `std::allocator_traits`
 #include <mutex>        // `std::unique_lock` - the try-only unique side's guard
@@ -109,9 +107,8 @@ concept basic_query = (std::same_as<query_type_, value_type_> || transparent_met
  *      of @c save & @c load, supplied by the caller because values are arbitrary objects. */
 template <typename codec_type_, typename value_type_>
 concept basic_value_codec = requires(codec_type_ const& codec, value_type_ const& immutable_value,
-                                     value_type_& mutable_value, bytes_span_t output,
-                                     bytes_view_t input) {
-    { codec.saved_bytes(immutable_value) } noexcept -> std::same_as<std::size_t>;
+                                     value_type_& mutable_value, bytes_span_t output, bytes_view_t input) {
+    { codec.storage_requirements(immutable_value) } noexcept -> std::same_as<std::size_t>;
     { codec.save(immutable_value, output) } noexcept -> std::same_as<status_t>;
     { codec.load(input, mutable_value) } noexcept -> std::same_as<status_t>;
 };
@@ -392,47 +389,40 @@ struct basic_traversal_context {
           staged_distances(allocator), selected_neighbors(allocator), reverse_ids(allocator) {}
 };
 
-/**
- *  @brief Fixed descriptor fronting every basic-tier snapshot. Sections follow in order -
- *      keys, neighbor prefix sums, neighbor ids, value prefix sums, codec value bytes -
- *      each starting on an @c alignment boundary, so an interchange adapter re-frames the
- *      payload without relocating a single buffer.
- */
-struct basic_snapshot_header_t {
-    /** @brief The shared USearch payload magic. @ref usearch_magic_k */
-    inline static constexpr u64_t magic_k = usearch_magic_k;
-    /** @brief "bsic" read as a little-endian word - discriminates this layout from the
-     *      dense payloads, whose word after the magic is a small version number. */
-    inline static constexpr u32_t layout_k = 0x63697362u;
-    /** @brief The layout revision this implementation writes and understands. */
-    inline static constexpr u32_t version_k = 1;
-    /** @brief The smallest legal section alignment. */
-    inline static constexpr u32_t alignment_floor_k = 64u;
-
-    /** @brief Identifies USearch payloads; must equal @c magic_k. */
-    u64_t magic = magic_k;
-    /** @brief Identifies the basic-tier layout; must equal @c layout_k. */
-    u32_t layout = layout_k;
-    /** @brief Layout revision of the sections that follow. */
-    u32_t version = version_k;
-    /** @brief Section alignment in bytes - a power of two, at least the floor. */
-    u32_t alignment = 4096;
-    /** @brief The constant per-node degree, or zero when degrees vary - the interchange
-     *      convention for non-constant connectivity. */
-    u32_t connectivity = 0;
-    /** @brief Width of one serialized node id; must match the loading instantiation. */
-    u32_t node_id_bytes = 0;
-    /** @brief Width of one serialized key; must match the loading instantiation. */
-    u32_t key_bytes = 0;
-    /** @brief Published nodes in the payload. */
-    u64_t node_count = 0;
-    /** @brief Total neighbor ids across all rows. */
-    u64_t neighbors_count = 0;
-    /** @brief Total codec-encoded value bytes. */
-    u64_t value_bytes = 0;
+/** @brief Row & element counts of the five columns a snapshot needs - what a container sizes. */
+struct basic_columns_extents_t {
+    /** @brief Published nodes, the row count of every node-sized column. */
+    std::size_t nodes = 0;
+    /** @brief Neighbor ids across every row. */
+    std::size_t neighbors = 0;
+    /** @brief Codec bytes across every value. */
+    std::size_t value_bytes = 0;
 };
-static_assert(sizeof(basic_snapshot_header_t) == 56 && std::is_trivially_copyable_v<basic_snapshot_header_t>,
-              "The header is the serialized preamble, so its size & layout are contractual");
+
+/**
+ *  @brief The five caller-placed columns a basic-tier snapshot is: keys, neighbor prefix sums,
+ *      neighbor ids, value prefix sums, and codec bytes - each an independent buffer, so a
+ *      container lays them out wherever it likes. Both prefix-sum columns hold @b nodes+1 sums
+ *      from zero, so row @c i owns the slice between sums @c i and @c i+1.
+ */
+template <typename key_type_, typename node_id_type_, typename byte_type_, typename offset_type_ = u64_t>
+struct basic_columns {
+    /** @brief One key per row. */
+    std::span<key_type_> keys;
+    /** @brief @b nodes+1 sums of neighbor ids, from zero. */
+    std::span<offset_type_> neighbor_offsets;
+    /** @brief Every row's neighbor ids, back to back. */
+    std::span<node_id_type_> neighbor_ids;
+    /** @brief @b nodes+1 sums of codec bytes, from zero. */
+    std::span<offset_type_> value_offsets;
+    /** @brief Every row's codec bytes, back to back. */
+    std::span<byte_type_> values;
+
+    /** @brief The read-only view of the same columns, so a saved set loads as it is. */
+    basic_columns<key_type_ const, node_id_type_ const, byte_type_ const, offset_type_ const> view() const noexcept {
+        return {keys, neighbor_offsets, neighbor_ids, value_offsets, values};
+    }
+};
 
 template <typename index_type_, synchronization_t synchronization_ = synchronization_t::concurrent_k,
           typename allocator_type_ = typename index_type_::allocator_t>
@@ -485,6 +475,10 @@ struct basic_ram_index {
 
     using scored_node_t = basic_scored_node<node_id_t, distance_t>;
     using traversal_context_t = basic_traversal_context<node_id_t, distance_t, allocator_t>;
+    /** @brief The five caller-placed columns a save fills. */
+    using columns_t = basic_columns<key_t, node_id_t, byte_t, u64_t>;
+    /** @brief The read-only columns a load consumes. */
+    using columns_view_t = basic_columns<key_t const, node_id_t const, byte_t const, u64_t const>;
 
   private:
     template <typename cursor_index_type_, synchronization_t cursor_synchronization_, typename cursor_allocator_type_>
@@ -841,7 +835,9 @@ struct basic_ram_index {
             auto const entry_probe = shared_mutex_.snapshot();
             if (!entry_probe.unlocked()) return {status_t::contended_k, 0, {}};
             entry_generation = entry_probe.generation;
-            if (!fully_published_(first_invisible_id)) return {status_t::contended_k, 0, {}};
+            auto const [published, settled] = published_prefix_();
+            if (failed(settled)) return {settled, 0, {}};
+            first_invisible_id = published;
         }
         if (!first_invisible_id) return {};
 
@@ -981,9 +977,9 @@ struct basic_ram_index {
             report.status = status_t::contended_k;
             return report;
         }
-        node_id_t visible = 0;
-        if (!fully_published_(visible)) {
-            report.status = status_t::contended_k;
+        auto const [visible, settled] = published_prefix_();
+        if (failed(settled)) {
+            report.status = settled;
             return report;
         }
         std::size_t const node_count = static_cast<std::size_t>(visible);
@@ -1069,68 +1065,57 @@ struct basic_ram_index {
 
 #pragma region Serialization
 
-    /** @brief One region-parallel save in flight: the frozen header, the caller's
-     *      destination, the covered-node tally, and the shared mutex's unique hold -
-     *      released when the plan dies or @c finish pronounces the payload complete. */
+    /** @brief One region-parallel save in flight: the caller's five columns, the covered-node
+     *      tally, and the shared mutex's unique hold - released when the plan dies or @c finish
+     *      pronounces the columns complete. */
     struct [[nodiscard]] save_plan_t {
-        /** @brief The index being serialized, whose unique side @c hold occupies. */
-        basic_ram_index const& index;
-        /** @brief The measured header, frozen at planning. */
-        basic_snapshot_header_t header;
-        /** @brief The caller-owned destination every region writes disjoint slices of. */
-        bytes_span_t output {};
+        /** @brief The index being serialized, whose unique side @c hold occupies; null in the
+         *      empty plan a refused @ref plan_save hands back. */
+        basic_ram_index const* index = nullptr;
+        /** @brief The caller-placed columns every region writes disjoint slices of. */
+        columns_t columns {};
         /** @brief Nodes the regions covered so far, mutated through @c std::atomic_ref. */
         std::size_t covered = 0;
         /** @brief The unique hold spanning the plan's whole lifetime. */
         unique_lock_t hold;
 
-        /** @brief Copies one id region's keys, neighbor ids & encoded values into the
-         *      plan's buffer - disjoint slices, so any number of caller threads run their
-         *      regions concurrently; byte bounds come from the sums the plan wrote. */
+        /** @brief Copies one id region's keys, neighbor ids & encoded values into the columns -
+         *      disjoint slices, so any number of caller threads run their regions concurrently;
+         *      every slice starts where the plan's prefix sums say. */
         template <typename value_codec_type_>
             requires basic_value_codec<value_codec_type_, value_t>
         status_t save(iota_view<node_id_t> region, value_codec_type_ const& codec) noexcept {
-            if (!hold) return status_t::uninitialized_k;
-            std::size_t const node_count = static_cast<std::size_t>(header.node_count);
+            if (!index) return status_t::uninitialized_k;
+            std::size_t const node_count = columns.keys.size();
             if (region.bound < region.first || static_cast<std::size_t>(region.bound) > node_count)
                 return status_t::config_mismatch_k;
-            snapshot_layout_t const layout = snapshot_layout_(header);
 
-            std::size_t keys_cursor = layout.keys_offset + static_cast<std::size_t>(region.first) * sizeof(key_t);
-            for (node_id_t const node : region) write_bytes_(output, keys_cursor, index.nodes_array_[node].key);
+            for (node_id_t const node : region) columns.keys[node] = index->nodes_array_[node].key;
 
-            std::size_t sums_cursor = layout.neighbor_sums_offset +
-                                      static_cast<std::size_t>(region.first) * sizeof(i64_t);
-            i64_t const ids_before = read_bytes_<i64_t>(output, sums_cursor);
-            std::size_t ids_cursor = layout.neighbor_ids_offset +
-                                     static_cast<std::size_t>(ids_before) * sizeof(node_id_t);
+            std::size_t ids_cursor = columns.neighbor_offsets[region.first];
             for (node_id_t const node : region) {
-                neighbors_buffer_t const& row = index.nodes_array_[node].neighbors;
-                for (std::size_t link = 0; link != row.size(); ++link) write_bytes_(output, ids_cursor, row[link]);
+                neighbors_buffer_t const& row = index->nodes_array_[node].neighbors;
+                for (std::size_t link = 0; link != row.size(); ++link) columns.neighbor_ids[ids_cursor++] = row[link];
             }
 
-            std::size_t vsums_cursor = layout.value_sums_offset +
-                                       static_cast<std::size_t>(region.first) * sizeof(i64_t);
-            i64_t const values_before = read_bytes_<i64_t>(output, vsums_cursor);
-            std::size_t values_cursor = layout.values_offset + static_cast<std::size_t>(values_before);
+            // Each value fills exactly the slice its sum reserved; a codec needing more refuses itself.
             for (node_id_t const node : region) {
-                value_t const& value = index.nodes_array_[node].value;
-                std::size_t const encoded = codec.saved_bytes(value);
-                status_t const status = codec.save(value, output.subspan(values_cursor, encoded));
-                if (status != status_t::success_k) return status;
-                values_cursor += encoded;
+                std::size_t const first = columns.value_offsets[node];
+                std::size_t const bound = columns.value_offsets[node + 1];
+                status_t const encoded = codec.save(index->nodes_array_[node].value,
+                                                    columns.values.subspan(first, bound - first));
+                if (failed(encoded)) return encoded;
             }
             std::atomic_ref<std::size_t> {covered}.fetch_add(region.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
-        /** @brief Pronounces the payload complete & releases the hold: @c config_mismatch_k
-         *      unless the regions' sizes sum to the published prefix - overlapping regions
-         *      that still sum right are the caller's own lie. */
+        /** @brief Pronounces the columns complete & releases the hold: @c config_mismatch_k
+         *      unless the regions' sizes sum to the row count - overlapping regions that still
+         *      sum right are the caller's own lie. */
         status_t finish() noexcept {
-            if (!hold) return status_t::uninitialized_k;
-            if (std::atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) !=
-                static_cast<std::size_t>(header.node_count))
+            if (!index) return status_t::uninitialized_k;
+            if (std::atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != columns.keys.size())
                 return status_t::config_mismatch_k;
             hold.unlock();
             return status_t::success_k;
@@ -1138,98 +1123,93 @@ struct basic_ram_index {
     };
 
     /** @brief Opens a region-parallel save: takes the shared mutex's unique side - held
-     *      inside the returned plan until its @c finish or its death - measures the
-     *      header, and writes the cheap single-threaded parts up front: the file header,
-     *      both prefix-sum sections, and every alignment pad. The plan's own @c save
-     *      calls then copy the per-node bulk. Live mutators answer @c contended_k; a
-     *      mutator call from the plan-holding thread deadlocks on its own hold, by
-     *      construction. */
+     *      inside the returned plan until its @c finish or its death - sizes the columns
+     *      against the published prefix, and writes both prefix-sum columns up front, so the
+     *      plan's own @c save calls copy the per-node bulk into slices already named. Live
+     *      mutators answer @c contended_k; a mutator call from the plan-holding thread
+     *      deadlocks on its own hold, by construction.
+     *
+     *  A column shorter than its count answers @c overflow_k and a longer one
+     *  @c config_mismatch_k, so the key column's length always names the row count. */
     template <typename value_codec_type_>
         requires basic_value_codec<value_codec_type_, value_t>
-    expected<save_plan_t> plan_save(bytes_span_t output, value_codec_type_ const& codec) const noexcept {
-        save_plan_t plan {*this};
-        plan.hold = unique_lock_t {shared_mutex_, std::try_to_lock};
-        if (!plan.hold) return {std::move(plan), status_t::contended_k};
-        if (status_t const measured = saved_header_(codec, plan.header); failed(measured)) {
-            plan.hold.unlock();
-            return {std::move(plan), measured};
-        }
-        snapshot_layout_t const layout = snapshot_layout_(plan.header);
-        if (output.size() < layout.total_bytes) {
-            plan.hold.unlock();
-            return {std::move(plan), status_t::overflow_k};
-        }
-        plan.output = output;
-        std::size_t const node_count = static_cast<std::size_t>(plan.header.node_count);
+    expected<save_plan_t> plan_save(columns_t columns, value_codec_type_ const& codec) const noexcept {
+        unique_lock_t hold {shared_mutex_, std::try_to_lock};
+        if (!hold) return {{}, status_t::contended_k};
+        auto const [visible, settled] = published_prefix_();
+        if (failed(settled)) return {{}, settled};
+        std::size_t const node_count = static_cast<std::size_t>(visible);
+        if (status_t const sized = sized_exactly_(columns.keys.size(), node_count); failed(sized)) return {{}, sized};
+        if (status_t const sized = sized_exactly_(columns.neighbor_offsets.size(), node_count + 1); failed(sized))
+            return {{}, sized};
+        if (status_t const sized = sized_exactly_(columns.value_offsets.size(), node_count + 1); failed(sized))
+            return {{}, sized};
 
-        std::size_t cursor = 0;
-        write_bytes_(output, cursor, plan.header);
-        pad_until_(output, cursor, layout.keys_offset);
-        cursor = layout.keys_offset + node_count * sizeof(key_t);
-        pad_until_(output, cursor, layout.neighbor_sums_offset);
-        i64_t running_neighbors = 0;
-        write_bytes_(output, cursor, running_neighbors);
+        // One walk writes both prefix sums, sizing every value exactly once.
+        u64_t running_neighbors = 0;
+        u64_t running_values = 0;
+        columns.neighbor_offsets[0] = 0;
+        columns.value_offsets[0] = 0;
         for (std::size_t node = 0; node != node_count; ++node) {
-            running_neighbors += static_cast<i64_t>(nodes_array_[node].neighbors.size());
-            write_bytes_(output, cursor, running_neighbors);
+            node_t const& record = nodes_array_[node];
+            running_neighbors += record.neighbors.size();
+            running_values += codec.storage_requirements(record.value);
+            columns.neighbor_offsets[node + 1] = running_neighbors;
+            columns.value_offsets[node + 1] = running_values;
         }
-        pad_until_(output, cursor, layout.neighbor_ids_offset);
-        cursor = layout.neighbor_ids_offset + static_cast<std::size_t>(plan.header.neighbors_count) * sizeof(node_id_t);
-        pad_until_(output, cursor, layout.value_sums_offset);
-        i64_t running_values = 0;
-        write_bytes_(output, cursor, running_values);
-        for (std::size_t node = 0; node != node_count; ++node) {
-            running_values += static_cast<i64_t>(codec.saved_bytes(nodes_array_[node].value));
-            write_bytes_(output, cursor, running_values);
-        }
-        pad_until_(output, cursor, layout.values_offset);
-        return {std::move(plan), status_t::success_k};
+        if (status_t const sized = sized_exactly_(columns.neighbor_ids.size(), running_neighbors); failed(sized))
+            return {{}, sized};
+        if (status_t const sized = sized_exactly_(columns.values.size(), running_values); failed(sized))
+            return {{}, sized};
+        return {save_plan_t {this, columns, 0, std::move(hold)}, status_t::success_k};
     }
 
-    /** @brief Bytes a @c save would emit right now - the raw snapshot adapters build
-     *      interchange formats from. Takes the shared mutex's unique side for the header
-     *      measurement; live mutators answer @c contended_k at entry.
+    /** @brief Row & element counts a save needs right now. Takes the shared mutex's unique
+     *      side for the tally; live mutators and open plans answer @c contended_k at entry.
      *
      *  @param[in] codec Sizes each stored value's encoded form. */
     template <typename value_codec_type_>
         requires basic_value_codec<value_codec_type_, value_t>
-    expected<std::size_t> snapshot_bytes(value_codec_type_ const& codec) const noexcept {
-        basic_snapshot_header_t header;
+    expected<basic_columns_extents_t> columns_extents(value_codec_type_ const& codec) const noexcept {
         unique_lock_t unique_lock {shared_mutex_, std::try_to_lock};
-        if (!unique_lock) return {0, status_t::contended_k};
-        status_t const tallied = saved_header_(codec, header);
-        if (tallied != status_t::success_k) return {0, tallied};
-        return {snapshot_layout_(header).total_bytes, status_t::success_k};
+        if (!unique_lock) return {{}, status_t::contended_k};
+        auto const [visible, settled] = published_prefix_();
+        if (failed(settled)) return {{}, settled};
+        basic_columns_extents_t extents {static_cast<std::size_t>(visible), 0, 0};
+        for (std::size_t node = 0; node != extents.nodes; ++node) {
+            node_t const& record = nodes_array_[node];
+            extents.neighbors += record.neighbors.size();
+            extents.value_bytes += codec.storage_requirements(record.value);
+        }
+        return {extents, status_t::success_k};
     }
 
-    /** @brief Serializes the snapshot into @p output as one plan with a single region.
+    /** @brief Serializes the snapshot into @p columns as one plan with a single region.
      *      Takes the shared mutex's unique side for the whole copy - live mutators answer
-     *      @c contended_k at entry, none can start until the payload is complete, and
+     *      @c contended_k at entry, none can start until the columns are complete, and
      *      searches keep running throughout.
      *
-     *  @param[out] output Caller-owned destination, at least @c snapshot_bytes large.
-     *  @param[in] codec Encodes each stored value into its section slice. */
+     *  @param[out] columns Caller-placed destinations sized from @ref columns_extents.
+     *  @param[in] codec Encodes each stored value into its slice. */
     template <typename value_codec_type_>
         requires basic_value_codec<value_codec_type_, value_t>
-    status_t save(bytes_span_t output, value_codec_type_ const& codec) const noexcept {
-        expected<save_plan_t> planned = plan_save(output, codec);
+    status_t save(columns_t columns, value_codec_type_ const& codec) const noexcept {
+        expected<save_plan_t> planned = plan_save(columns, codec);
         if (failed(planned.status)) return planned.status;
-        node_id_t const node_count = static_cast<node_id_t>(planned.value.header.node_count);
+        node_id_t const node_count = static_cast<node_id_t>(planned.value.columns.keys.size());
         if (status_t const copied = planned.value.save({0, node_count}, codec); failed(copied)) return copied;
         return planned.value.finish();
     }
 
     /** @brief One region-parallel load in flight - the mirror of @ref save_plan_t: the
-     *      vetted header, the caller's source bytes, the covered-node tally, and the
-     *      shared mutex's unique hold, released when the plan dies or @c finish
-     *      publishes the loaded graph. */
+     *      vetted columns, the covered-node tally, and the shared mutex's unique hold,
+     *      released when the plan dies or @c finish publishes the loaded graph. */
     struct [[nodiscard]] load_plan_t {
-        /** @brief The index being repopulated, whose unique side @c hold occupies. */
-        basic_ram_index& index;
-        /** @brief The vetted header of the payload being decoded. */
-        basic_snapshot_header_t header;
-        /** @brief The caller-owned source every region decodes disjoint slices of. */
-        bytes_view_t payload {};
+        /** @brief The index being repopulated, whose unique side @c hold occupies; null in the
+         *      empty plan a refused @ref plan_load hands back. */
+        basic_ram_index* index = nullptr;
+        /** @brief The vetted columns being decoded. */
+        columns_view_t columns {};
         /** @brief Nodes the regions covered so far, mutated through @c std::atomic_ref. */
         std::size_t covered = 0;
         /** @brief The unique hold spanning the plan's whole lifetime. */
@@ -1241,49 +1221,32 @@ struct basic_ram_index {
         template <typename value_codec_type_>
             requires basic_value_codec<value_codec_type_, value_t>
         status_t load(iota_view<node_id_t> region, value_codec_type_ const& codec) noexcept {
-            if (!hold) return status_t::uninitialized_k;
-            std::size_t const node_count = static_cast<std::size_t>(header.node_count);
+            if (!index) return status_t::uninitialized_k;
+            std::size_t const node_count = columns.keys.size();
             if (region.bound < region.first || static_cast<std::size_t>(region.bound) > node_count)
                 return status_t::config_mismatch_k;
-            snapshot_layout_t const layout = snapshot_layout_(header);
 
-            std::size_t keys_cursor = layout.keys_offset + static_cast<std::size_t>(region.first) * sizeof(key_t);
-            std::size_t sums_cursor = layout.neighbor_sums_offset +
-                                      static_cast<std::size_t>(region.first) * sizeof(i64_t);
-            i64_t previous_neighbors = read_bytes_<i64_t>(payload, sums_cursor);
-            std::size_t ids_cursor = layout.neighbor_ids_offset +
-                                     static_cast<std::size_t>(previous_neighbors) * sizeof(node_id_t);
-            std::size_t vsums_cursor = layout.value_sums_offset +
-                                       static_cast<std::size_t>(region.first) * sizeof(i64_t);
-            i64_t previous_values = read_bytes_<i64_t>(payload, vsums_cursor);
-
+            // The plan vetted both prefix-sum columns and every id, so the slices are trusted.
             for (node_id_t const node : region) {
-                node_t& record = index.nodes_array_[node];
-                record.key = read_bytes_<key_t>(payload, keys_cursor);
+                node_t& record = index->nodes_array_[node];
+                record.key = columns.keys[node];
 
-                // The plan already vetted both sum sections, so the deltas are trusted;
-                // only the neighbor ids themselves still need their bounds check.
-                i64_t const next_neighbors = read_bytes_<i64_t>(payload, sums_cursor);
+                std::size_t const ids_first = columns.neighbor_offsets[node];
+                std::size_t const ids_bound = columns.neighbor_offsets[node + 1];
                 neighbors_buffer_t& row = record.neighbors;
                 row.clear();
-                if (status_t const grown = row.reserve(static_cast<std::size_t>(next_neighbors - previous_neighbors));
-                    failed(grown))
-                    return grown;
-                for (i64_t link = previous_neighbors; link != next_neighbors; ++link) {
-                    node_id_t const neighbor_id = read_bytes_<node_id_t>(payload, ids_cursor);
-                    if (static_cast<std::size_t>(neighbor_id) >= node_count) return status_t::malformed_k;
-                    row.push_back_reserved(neighbor_id);
-                }
-                previous_neighbors = next_neighbors;
+                if (status_t const grown = row.reserve(ids_bound - ids_first); failed(grown)) return grown;
+                for (std::size_t link = ids_first; link != ids_bound; ++link)
+                    row.push_back_reserved(columns.neighbor_ids[link]);
 
-                i64_t const next_values = read_bytes_<i64_t>(payload, vsums_cursor);
-                bytes_view_t const slice = payload.subspan(
-                    layout.values_offset + static_cast<std::size_t>(previous_values),
-                    static_cast<std::size_t>(next_values - previous_values));
-                if (status_t const decoded = codec.load(slice, record.value); failed(decoded)) return decoded;
-                previous_values = next_values;
+                std::size_t const bytes_first = columns.value_offsets[node];
+                std::size_t const bytes_bound = columns.value_offsets[node + 1];
+                if (status_t const decoded = codec.load(columns.values.subspan(bytes_first, bytes_bound - bytes_first),
+                                                        record.value);
+                    failed(decoded))
+                    return decoded;
 
-                if (status_t const keyed = index.key_map_.insert(record.key, node); failed(keyed)) return keyed;
+                if (status_t const keyed = index->key_map_.insert(record.key, node); failed(keyed)) return keyed;
             }
             std::atomic_ref<std::size_t> {covered}.fetch_add(region.size(), std::memory_order_acq_rel);
             return status_t::success_k;
@@ -1291,15 +1254,15 @@ struct basic_ram_index {
 
         /** @brief Publishes the loaded graph in the tier-wide order - claims, identity,
          *      watermark last - and releases the hold: @c config_mismatch_k unless the
-         *      regions' sizes sum to the header's node count. */
+         *      regions' sizes sum to the row count. */
         status_t finish() noexcept {
-            if (!hold) return status_t::uninitialized_k;
-            std::size_t const node_count = static_cast<std::size_t>(header.node_count);
+            if (!index) return status_t::uninitialized_k;
+            std::size_t const node_count = columns.keys.size();
             if (std::atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != node_count)
                 return status_t::config_mismatch_k;
-            index.claimed_count_.store(node_count, std::memory_order_relaxed);
-            index.next_dispensed_id_.store(static_cast<node_id_t>(node_count), std::memory_order_relaxed);
-            index.last_visible_id_.store(static_cast<node_id_t>(node_count), std::memory_order_release);
+            index->claimed_count_.store(node_count, std::memory_order_relaxed);
+            index->next_dispensed_id_.store(static_cast<node_id_t>(node_count), std::memory_order_relaxed);
+            index->last_visible_id_.store(static_cast<node_id_t>(node_count), std::memory_order_release);
             hold.unlock();
             return status_t::success_k;
         }
@@ -1307,47 +1270,41 @@ struct basic_ram_index {
 
     /** @brief Opens a region-parallel load into this reserved, empty index: takes the
      *      shared mutex's unique side - held inside the returned plan until its
-     *      @c finish or its death - vets the untrusted header and both prefix-sum
-     *      sections in full, and wipes the key multimap. The plan's own @c load calls
-     *      then decode the per-node bulk, and nothing publishes until its @c finish.
+     *      @c finish or its death - vets both prefix-sum columns and every neighbor id
+     *      in full, and wipes the key multimap. The plan's own @c load calls then decode
+     *      the per-node bulk, and nothing publishes until its @c finish.
      *
-     *  @param[in] payload The bytes a prior @c save emitted. */
-    expected<load_plan_t> plan_load(bytes_view_t payload) noexcept {
-        load_plan_t plan {*this};
+     *  @param[in] columns The five columns a prior @c save filled; the key column's length
+     *      is the row count. */
+    expected<load_plan_t> plan_load(columns_view_t columns) noexcept {
         std::size_t const capacity = capacity_.load(std::memory_order_acquire);
-        if (!capacity) return {std::move(plan), status_t::uninitialized_k};
+        if (!capacity) return {{}, status_t::uninitialized_k};
         // The gate excludes mutators & flips certified probes to refusal; the exclusivity
         // contract against readers stays the caller's - key lookups race the map rebuild.
-        plan.hold = unique_lock_t {shared_mutex_, std::try_to_lock};
-        if (!plan.hold) return {std::move(plan), status_t::contended_k};
-        if (last_visible_id_.load(std::memory_order_acquire) != 0) {
-            plan.hold.unlock();
-            return {std::move(plan), status_t::config_mismatch_k};
-        }
-        if (status_t const vetted = loaded_header_(payload, capacity, plan.header); failed(vetted)) {
-            plan.hold.unlock();
-            return {std::move(plan), vetted};
-        }
-        plan.payload = payload;
+        unique_lock_t hold {shared_mutex_, std::try_to_lock};
+        if (!hold) return {{}, status_t::contended_k};
+        if (last_visible_id_.load(std::memory_order_acquire) != 0) return {{}, status_t::config_mismatch_k};
+        if (columns.keys.size() > capacity) return {{}, status_t::overflow_k};
+        if (status_t const vetted = vetted_columns_(columns); failed(vetted)) return {{}, vetted};
         // A failed prior attempt burned key-map quota; wiping first keeps every entry
         // unique and the quota whole, so failed loads stay genuinely retryable.
         key_map_.clear();
-        return {std::move(plan), status_t::success_k};
+        return {load_plan_t {this, columns, 0, std::move(hold)}, status_t::success_k};
     }
 
     /** @brief Loads a snapshot into this reserved, empty index as one plan with a single
      *      region - exclusive: decodes each value into its pre-constructed record,
      *      rebuilds the key multimap, and publishes the watermark last. The key map is
-     *      wiped at planning, so a failed attempt may be retried with a corrected payload.
+     *      wiped at planning, so a failed attempt may be retried with corrected columns.
      *
-     *  @param[in] payload The bytes a prior @c save emitted.
+     *  @param[in] columns The five columns a prior @c save filled.
      *  @param[in] codec Decodes each value slice into its record. */
     template <typename value_codec_type_>
         requires basic_value_codec<value_codec_type_, value_t>
-    status_t load(bytes_view_t payload, value_codec_type_ const& codec) noexcept {
-        expected<load_plan_t> planned = plan_load(payload);
+    status_t load(columns_view_t columns, value_codec_type_ const& codec) noexcept {
+        expected<load_plan_t> planned = plan_load(columns);
         if (failed(planned.status)) return planned.status;
-        node_id_t const node_count = static_cast<node_id_t>(planned.value.header.node_count);
+        node_id_t const node_count = static_cast<node_id_t>(planned.value.columns.keys.size());
         if (status_t const decoded = planned.value.load({0, node_count}, codec); failed(decoded)) return decoded;
         return planned.value.finish();
     }
@@ -1370,8 +1327,8 @@ struct basic_ram_index {
      *      the staging surfaces and the selections never allocate again, the frontier sheds
      *      within its reservation, and the visited set alone may re-table as a walk widens -
      *      once per doubling per context lifetime, which a context kept across walks amortizes. */
-    static status_t reserve_scratch_(traversal_context_t& context, std::size_t expansion_factor,
-                                     std::size_t fan_out, std::size_t connectivity) noexcept {
+    static status_t reserve_scratch_(traversal_context_t& context, std::size_t expansion_factor, std::size_t fan_out,
+                                     std::size_t connectivity) noexcept {
         std::size_t const round_capacity = max_of(fan_out * connectivity, connectivity + 1);
         if (status_t const sized = context.results.reserve(max_of(expansion_factor, connectivity + 1)); failed(sized))
             return sized;
@@ -1435,7 +1392,8 @@ struct basic_ram_index {
         for (std::size_t lane = 0; lane != staged_count; ++lane) {
             scored_node_t const scored {context.staged_ids[lane], context.staged_distances[lane]};
             [[maybe_unused]] bool const ranked = context.results.insert(scored_node_t {scored}, expansion_factor);
-            if (failed(context.frontier.insert(scored_node_t {scored}))) return ++context.telemetry.saturated_walks, lane;
+            if (failed(context.frontier.insert(scored_node_t {scored})))
+                return ++context.telemetry.saturated_walks, lane;
         }
         return staged_count;
     }
@@ -1512,7 +1470,8 @@ struct basic_ram_index {
             if (context.frontier.empty()) {
                 if (context.results.size() >= expansion_factor) return;
                 bool const restarting = !context.results.empty();
-                if (!sample_landmarks_(query, metric, first_invisible_id, connectivity, expansion_factor, context)) return;
+                if (!sample_landmarks_(query, metric, first_invisible_id, connectivity, expansion_factor, context))
+                    return;
                 context.telemetry.restarts += restarting;
                 continue;
             }
@@ -1633,145 +1592,49 @@ struct basic_ram_index {
         }
     }
 
-    /** @brief The dispenser-equals-watermark tripwire at unique acquisition: with the
-     *      gate held, only an exclusive-certified mutator lying mid-turn can break it. */
-    bool fully_published_(node_id_t& visible) const noexcept {
-        visible = last_visible_id_.load(std::memory_order_acquire);
-        return visible == next_dispensed_id_.load(std::memory_order_acquire);
+    /** @brief The published prefix at unique acquisition; @c contended_k when the dispenser has
+     *      run ahead of the watermark, which only an exclusive-certified mutator lying mid-turn
+     *      can do with the gate held. */
+    expected<node_id_t> published_prefix_() const noexcept {
+        node_id_t const visible = last_visible_id_.load(std::memory_order_acquire);
+        return {visible, visible == next_dispensed_id_.load(std::memory_order_acquire) //
+                             ? status_t::success_k
+                             : status_t::contended_k};
     }
 
-    /** @brief Walks the graph once, filling the header's extents - the caller holds the
-     *      shared mutex's unique side, so plain reads are sound. */
-    template <typename value_codec_type_>
-    status_t saved_header_(value_codec_type_ const& codec, basic_snapshot_header_t& header) const noexcept {
-        node_id_t visible = 0;
-        if (!fully_published_(visible)) return status_t::contended_k;
-        header.node_id_bytes = sizeof(node_id_t);
-        header.key_bytes = sizeof(key_t);
-        header.node_count = static_cast<u64_t>(visible);
-        std::size_t degree_min = (std::numeric_limits<std::size_t>::max)();
-        std::size_t degree_max = 0;
-        for (std::size_t node = 0; node != static_cast<std::size_t>(visible); ++node) {
-            node_t const& record = nodes_array_[node];
-            std::size_t const degree = record.neighbors.size();
-            degree_min = min_of(degree_min, degree);
-            degree_max = max_of(degree_max, degree);
-            header.neighbors_count += degree;
-            header.value_bytes += codec.saved_bytes(record.value);
-        }
-        // The constant degree when there is one; zero - the interchange convention - when
-        // degrees vary or nothing is published.
-        header.connectivity = visible && degree_min == degree_max ? static_cast<u32_t>(degree_max) : 0u;
+    /** @brief Refuses a column of @p size that is not exactly @p wanted elements: a short one
+     *      overflows, a long one disagrees about the row count. */
+    static status_t sized_exactly_(std::size_t size, std::size_t wanted) noexcept {
+        if (size < wanted) return status_t::overflow_k;
+        if (size > wanted) return status_t::config_mismatch_k;
         return status_t::success_k;
     }
 
-    /** @brief Parses & bounds an untrusted payload's header and both prefix-sum sections
-     *      in full, so the region decoders can trust every extent they read back. */
-    static status_t loaded_header_(bytes_view_t payload, std::size_t capacity,
-                                   basic_snapshot_header_t& header) noexcept {
-        if (payload.size() < sizeof(basic_snapshot_header_t)) return status_t::malformed_k;
-        std::size_t cursor = 0;
-        header = read_bytes_<basic_snapshot_header_t>(payload, cursor);
-        if (header.magic != basic_snapshot_header_t::magic_k || header.layout != basic_snapshot_header_t::layout_k ||
-            header.version != basic_snapshot_header_t::version_k)
-            return status_t::malformed_k;
-        if (header.alignment < basic_snapshot_header_t::alignment_floor_k ||
-            (header.alignment & (header.alignment - 1)) != 0)
-            return status_t::malformed_k;
-        if (header.node_id_bytes != sizeof(node_id_t) || header.key_bytes != sizeof(key_t))
-            return status_t::config_mismatch_k;
-        std::size_t const node_count = static_cast<std::size_t>(header.node_count);
-        if (node_count > capacity) return status_t::overflow_k;
-        // Bound the untrusted extents before any size arithmetic, so nothing can wrap; a
-        // zero header connectivity means variable degrees, bounded by the node count.
-        u64_t const degree_ceiling = header.connectivity ? header.connectivity : static_cast<u64_t>(node_count);
-        if (degree_ceiling > static_cast<u64_t>(node_count) ||
-            header.neighbors_count > static_cast<u64_t>(node_count) * degree_ceiling ||
-            header.value_bytes > payload.size())
-            return status_t::malformed_k;
-        snapshot_layout_t const layout = snapshot_layout_(header);
-        if (payload.size() < layout.total_bytes) return status_t::malformed_k;
-
-        std::size_t sums_cursor = layout.neighbor_sums_offset;
-        i64_t previous_neighbors = read_bytes_<i64_t>(payload, sums_cursor);
-        if (previous_neighbors != 0) return status_t::malformed_k;
-        for (std::size_t node = 0; node != node_count; ++node) {
-            i64_t const next_neighbors = read_bytes_<i64_t>(payload, sums_cursor);
-            if (next_neighbors < previous_neighbors ||
-                next_neighbors - previous_neighbors > static_cast<i64_t>(degree_ceiling))
-                return status_t::malformed_k;
-            previous_neighbors = next_neighbors;
+    /** @brief Whether @p sums start at zero, never fall, never pass @p total, and end at it. */
+    static status_t monotone_sums_(std::span<u64_t const> sums, std::size_t total) noexcept {
+        if (sums.empty() || sums.front() != 0) return status_t::malformed_k;
+        u64_t previous = 0;
+        for (u64_t const next : sums.subspan(1)) {
+            if (next < previous || next > total) return status_t::malformed_k;
+            previous = next;
         }
-        if (previous_neighbors != static_cast<i64_t>(header.neighbors_count)) return status_t::malformed_k;
+        return previous == total ? status_t::success_k : status_t::malformed_k;
+    }
 
-        sums_cursor = layout.value_sums_offset;
-        i64_t previous_values = read_bytes_<i64_t>(payload, sums_cursor);
-        if (previous_values != 0) return status_t::malformed_k;
-        for (std::size_t node = 0; node != node_count; ++node) {
-            i64_t const next_values = read_bytes_<i64_t>(payload, sums_cursor);
-            if (next_values < previous_values || next_values > static_cast<i64_t>(header.value_bytes))
-                return status_t::malformed_k;
-            previous_values = next_values;
-        }
-        if (previous_values != static_cast<i64_t>(header.value_bytes)) return status_t::malformed_k;
+    /** @brief Vets untrusted columns in full - both prefix-sum columns sized to the rows and
+     *      monotone over their element columns, every neighbor id naming a row - so the region
+     *      decoders trust every slice they read. */
+    static status_t vetted_columns_(columns_view_t columns) noexcept {
+        std::size_t const node_count = columns.keys.size();
+        if (columns.neighbor_offsets.size() != node_count + 1 || columns.value_offsets.size() != node_count + 1)
+            return status_t::malformed_k;
+        if (status_t const sums = monotone_sums_(columns.neighbor_offsets, columns.neighbor_ids.size()); failed(sums))
+            return sums;
+        if (status_t const sums = monotone_sums_(columns.value_offsets, columns.values.size()); failed(sums))
+            return sums;
+        for (node_id_t const neighbor : columns.neighbor_ids)
+            if (static_cast<std::size_t>(neighbor) >= node_count) return status_t::malformed_k;
         return status_t::success_k;
-    }
-
-    /** @brief Byte offsets of the five aligned snapshot sections. @ref basic_snapshot_header_t */
-    struct snapshot_layout_t {
-        std::size_t keys_offset = 0;
-        std::size_t neighbor_sums_offset = 0;
-        std::size_t neighbor_ids_offset = 0;
-        std::size_t value_sums_offset = 0;
-        std::size_t values_offset = 0;
-        std::size_t total_bytes = 0;
-    };
-
-    /** @brief Lays the sections out on the header's alignment; callers bound the header's
-     *      extents first, so none of the arithmetic can wrap. */
-    static snapshot_layout_t snapshot_layout_(basic_snapshot_header_t const& header) noexcept {
-        std::size_t const alignment = header.alignment;
-        std::size_t const node_count = static_cast<std::size_t>(header.node_count);
-        snapshot_layout_t layout;
-        layout.keys_offset = divide_round_up<std::size_t>(sizeof(basic_snapshot_header_t), alignment) * alignment;
-        layout.neighbor_sums_offset =
-            divide_round_up<std::size_t>(layout.keys_offset + node_count * sizeof(key_t), alignment) * alignment;
-        layout.neighbor_ids_offset = divide_round_up<std::size_t>(
-                                         layout.neighbor_sums_offset + (node_count + 1) * sizeof(i64_t), alignment) *
-                                     alignment;
-        layout.value_sums_offset = divide_round_up<std::size_t>(
-                                       layout.neighbor_ids_offset +
-                                           static_cast<std::size_t>(header.neighbors_count) * sizeof(node_id_t),
-                                       alignment) *
-                                   alignment;
-        layout.values_offset = divide_round_up<std::size_t>(layout.value_sums_offset + (node_count + 1) * sizeof(i64_t),
-                                                            alignment) *
-                               alignment;
-        layout.total_bytes = layout.values_offset + static_cast<std::size_t>(header.value_bytes);
-        return layout;
-    }
-
-    /** @brief Zero-fills @p output up to @p target, so section pads are deterministic. */
-    static void pad_until_(bytes_span_t output, std::size_t& cursor, std::size_t target) noexcept {
-        for (; cursor != target; ++cursor) output[cursor] = std::byte {};
-    }
-
-    /** @brief Appends @p object's bytes at @p cursor - unaligned-safe - and advances it. */
-    template <typename object_type_>
-    static void write_bytes_(bytes_span_t output, std::size_t& cursor, object_type_ const& object) noexcept {
-        auto const bytes = std::bit_cast<std::array<std::byte, sizeof(object_type_)>>(object);
-        for (std::size_t position = 0; position != bytes.size(); ++position)
-            output[cursor + position] = bytes[position];
-        cursor += bytes.size();
-    }
-
-    /** @brief Reads one @p object_type_ at @p cursor - unaligned-safe - and advances it. */
-    template <typename object_type_>
-    static object_type_ read_bytes_(bytes_view_t input, std::size_t& cursor) noexcept {
-        std::array<std::byte, sizeof(object_type_)> bytes;
-        for (std::size_t position = 0; position != bytes.size(); ++position) bytes[position] = input[cursor + position];
-        cursor += bytes.size();
-        return std::bit_cast<object_type_>(bytes);
     }
 
 #pragma endregion Internals

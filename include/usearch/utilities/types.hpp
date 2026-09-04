@@ -8,7 +8,7 @@
 #include <cassert> // `assert` on the `to_span` contiguity contract
 #include <cstddef> // `std::byte`
 #include <cstdint> // `std::uint32_t`, `std::uint64_t`
-#include <cstring> // `std::memmove`, `std::memcmp`
+#include <cstring> // `std::memmove`, `std::memcmp`, `std::memcpy`
 
 #include <atomic>      // `std::atomic`
 #include <bit>         // `std::bit_cast` - hashing `uuid_t` as two words
@@ -55,7 +55,7 @@ using u8_t = std::uint8_t;
  *      payload; the word right after it discriminates the layout. */
 inline constexpr u64_t usearch_magic_k = 0x3368637261657375ull;
 
-/** @brief The 128-bit key default - the SafeGraphs @c bin16 column, one UUID per node. */
+/** @brief The 128-bit key default - the SafeGraphs @c uuid column, one UUID per node. */
 struct uuid_t {
     std::byte bytes[16];
 
@@ -93,6 +93,12 @@ bytes_span_t bytes_of(value_type_* data, std::size_t count) noexcept {
     return std::as_writable_bytes(std::span {data, count});
 }
 
+/** @brief The process-wide allocator, named rather than defaulted: a container takes this when
+ *      no arena, memory domain or device owns its bytes, so every such placement is one grep
+ *      away instead of hiding in an omitted argument. */
+struct global_allocator_t {};
+inline constexpr global_allocator_t global_allocator {};
+
 /** @brief The one project-wide default alignment: 128 bytes covers x86's adjacent-line
  *      prefetcher, the 128-byte cache lines of Apple's and other Arm cores, and a CUDA
  *      coalesced transaction alike, where a 64-byte guess serves only one of them.
@@ -110,15 +116,15 @@ struct dense_scored_node_t {
 
 /** @brief Orders scored nodes nearest-first; the comparator of the sorted results pool. */
 struct dense_closer_scored_node_t {
-    inline bool operator()(dense_scored_node_t a, dense_scored_node_t b) const noexcept {
-        return a.distance < b.distance;
+    inline bool operator()(dense_scored_node_t first, dense_scored_node_t second) const noexcept {
+        return first.distance < second.distance;
     }
 };
 
 /** @brief Orders scored nodes furthest-first; the comparator of the max-heap frontier. */
 struct dense_further_scored_node_t {
-    inline bool operator()(dense_scored_node_t a, dense_scored_node_t b) const noexcept {
-        return a.distance > b.distance;
+    inline bool operator()(dense_scored_node_t first, dense_scored_node_t second) const noexcept {
+        return first.distance > second.distance;
     }
 };
 
@@ -174,6 +180,13 @@ constexpr bool succeeded(status_t status) noexcept { return status == status_t::
 
 /** @brief Whether @p status reports failure. */
 constexpr bool failed(status_t status) noexcept { return status != status_t::success_k; }
+
+/** @brief Copies @p source over @p destination; the sizes must agree. */
+inline status_t copy_bytes(bytes_span_t destination, bytes_view_t source) noexcept {
+    if (destination.size() != source.size()) return status_t::config_mismatch_k;
+    if (!source.empty()) std::memcpy(destination.data(), source.data(), source.size());
+    return status_t::success_k;
+}
 
 /** @brief Whether a filtered search admits one candidate or passes over it - rejected nodes
  *      still route the walk, they just never enter the reported pool. Mirrors
@@ -275,6 +288,18 @@ struct iota_view {
     constexpr iterator end() const noexcept { return {bound}; }
 };
 
+/** @brief Moves neighbor IDs between id spaces: an ID inside @p source_range lands at
+ *      @c id-source_range.first+shift, every other ID folds onto @p sentinel, which a walk
+ *      reads as naming no node. */
+template <std::unsigned_integral id_type_>
+constexpr void rebase_neighbors(std::span<id_type_> neighbors, iota_view<id_type_> source_range, id_type_ shift,
+                                id_type_ sentinel) noexcept {
+    for (id_type_& neighbor : neighbors)
+        neighbor = source_range.first <= neighbor && neighbor < source_range.bound //
+                       ? static_cast<id_type_>(neighbor - source_range.first + shift)
+                       : sentinel;
+}
+
 /** @brief The concurrency environment a caller certifies for one operation. */
 enum class synchronization_t : u32_t {
     /** @brief Arbitrary readers & writers may be live - the safe default everywhere. */
@@ -308,22 +333,14 @@ enum connectivity_t : u32_t {
 
 /**
  *  @brief Element types USearch speaks when exchanging payloads - NumKong's numeric dtypes
- *      plus the @c bin16_k identities and @c utf8_k strings that interchange formats carry
- *      and a compute library has no place for. Interchange formats themselves only name
- *      types as strings over raw blobs; this enum is the USearch-side vocabulary every
- *      reader parses those spellings into.
+ *      plus the packed, opaque, identity and text families that interchange formats carry
+ *      and a compute library has no place for. Every storage width also has a neutral
+ *      spelling naming that many opaque bits, and every other spelling is an alias adding
+ *      a reading to the same width; this enum is the USearch-side vocabulary every reader
+ *      parses those spellings into.
  */
 enum class dtype_t : u32_t {
     unknown_k = 0,
-    /* Integers, by shrinking dynamic range. */
-    u64_k,
-    i64_k,
-    u32_k,
-    i32_k,
-    u16_k,
-    i16_k,
-    u8_k,
-    i8_k,
     /* Floats, by shrinking dynamic range. */
     f64_k,
     f32_k,
@@ -333,22 +350,33 @@ enum class dtype_t : u32_t {
     e4m3_k,
     e3m2_k,
     e2m3_k,
-    /* Non-numeric payloads interchange formats carry. */
-    bin16_k,
+    /* Signed integers, by shrinking dynamic range; the packed pair is two nibbles to the byte. */
+    i64_k,
+    i32_k,
+    i16_k,
+    i8_k,
+    i4x2_k,
+    /* Unsigned integers, by shrinking dynamic range; the packed families ride two or eight to the byte. */
+    u64_k,
+    u32_k,
+    u16_k,
+    u8_k,
+    u4x2_k,
+    u1x8_k,
+    /* Opaque widths, naming bits and nothing else. */
+    b128_k,
+    b64_k,
+    b32_k,
+    b16_k,
+    b8_k,
+    /* A sixteen-byte identity, and bytes a reader may assume are valid text. */
+    uuid_k,
     utf8_k,
 };
 
 /** @brief The canonical spelling of @p dtype - the very strings interchange headers carry. */
 constexpr char const* dtype_name(dtype_t dtype) noexcept {
     switch (dtype) {
-    case dtype_t::u64_k: return "u64";
-    case dtype_t::i64_k: return "i64";
-    case dtype_t::u32_k: return "u32";
-    case dtype_t::i32_k: return "i32";
-    case dtype_t::u16_k: return "u16";
-    case dtype_t::i16_k: return "i16";
-    case dtype_t::u8_k: return "u8";
-    case dtype_t::i8_k: return "i8";
     case dtype_t::f64_k: return "f64";
     case dtype_t::f32_k: return "f32";
     case dtype_t::bf16_k: return "bf16";
@@ -357,7 +385,23 @@ constexpr char const* dtype_name(dtype_t dtype) noexcept {
     case dtype_t::e4m3_k: return "e4m3";
     case dtype_t::e3m2_k: return "e3m2";
     case dtype_t::e2m3_k: return "e2m3";
-    case dtype_t::bin16_k: return "bin16";
+    case dtype_t::i64_k: return "i64";
+    case dtype_t::i32_k: return "i32";
+    case dtype_t::i16_k: return "i16";
+    case dtype_t::i8_k: return "i8";
+    case dtype_t::i4x2_k: return "i4x2";
+    case dtype_t::u64_k: return "u64";
+    case dtype_t::u32_k: return "u32";
+    case dtype_t::u16_k: return "u16";
+    case dtype_t::u8_k: return "u8";
+    case dtype_t::u4x2_k: return "u4x2";
+    case dtype_t::u1x8_k: return "u1x8";
+    case dtype_t::b128_k: return "b128";
+    case dtype_t::b64_k: return "b64";
+    case dtype_t::b32_k: return "b32";
+    case dtype_t::b16_k: return "b16";
+    case dtype_t::b8_k: return "b8";
+    case dtype_t::uuid_k: return "uuid";
     case dtype_t::utf8_k: return "utf8";
     case dtype_t::unknown_k: return "unknown";
     }
@@ -367,14 +411,6 @@ constexpr char const* dtype_name(dtype_t dtype) noexcept {
 /** @brief Parses a canonical dtype spelling - the reverse of @ref dtype_name - mapping
  *      anything unrecognized onto @c unknown_k. */
 constexpr dtype_t dtype_named(std::string_view name) noexcept {
-    if (name == "u64") return dtype_t::u64_k;
-    if (name == "i64") return dtype_t::i64_k;
-    if (name == "u32") return dtype_t::u32_k;
-    if (name == "i32") return dtype_t::i32_k;
-    if (name == "u16") return dtype_t::u16_k;
-    if (name == "i16") return dtype_t::i16_k;
-    if (name == "u8") return dtype_t::u8_k;
-    if (name == "i8") return dtype_t::i8_k;
     if (name == "f64") return dtype_t::f64_k;
     if (name == "f32") return dtype_t::f32_k;
     if (name == "bf16") return dtype_t::bf16_k;
@@ -383,9 +419,67 @@ constexpr dtype_t dtype_named(std::string_view name) noexcept {
     if (name == "e4m3") return dtype_t::e4m3_k;
     if (name == "e3m2") return dtype_t::e3m2_k;
     if (name == "e2m3") return dtype_t::e2m3_k;
-    if (name == "bin16") return dtype_t::bin16_k;
+    if (name == "i64") return dtype_t::i64_k;
+    if (name == "i32") return dtype_t::i32_k;
+    if (name == "i16") return dtype_t::i16_k;
+    if (name == "i8") return dtype_t::i8_k;
+    if (name == "i4x2") return dtype_t::i4x2_k;
+    if (name == "u64") return dtype_t::u64_k;
+    if (name == "u32") return dtype_t::u32_k;
+    if (name == "u16") return dtype_t::u16_k;
+    if (name == "u8") return dtype_t::u8_k;
+    if (name == "u4x2") return dtype_t::u4x2_k;
+    if (name == "u1x8") return dtype_t::u1x8_k;
+    if (name == "b128") return dtype_t::b128_k;
+    if (name == "b64") return dtype_t::b64_k;
+    if (name == "b32") return dtype_t::b32_k;
+    if (name == "b16") return dtype_t::b16_k;
+    if (name == "b8") return dtype_t::b8_k;
+    if (name == "uuid") return dtype_t::uuid_k;
     if (name == "utf8") return dtype_t::utf8_k;
     return dtype_t::unknown_k;
+}
+
+/** @brief Bits one element of @p dtype occupies - eight for a byte-wide scalar, four or one
+ *      for the packed families, zero for the variable-length and unknown ones. */
+constexpr std::size_t dtype_bits(dtype_t dtype) noexcept {
+    switch (dtype) {
+    case dtype_t::f64_k:
+    case dtype_t::i64_k:
+    case dtype_t::u64_k:
+    case dtype_t::b64_k: return 64;
+    case dtype_t::f32_k:
+    case dtype_t::i32_k:
+    case dtype_t::u32_k:
+    case dtype_t::b32_k: return 32;
+    case dtype_t::bf16_k:
+    case dtype_t::f16_k:
+    case dtype_t::i16_k:
+    case dtype_t::u16_k:
+    case dtype_t::b16_k: return 16;
+    case dtype_t::e5m2_k:
+    case dtype_t::e4m3_k:
+    case dtype_t::e3m2_k:
+    case dtype_t::e2m3_k:
+    case dtype_t::i8_k:
+    case dtype_t::u8_k:
+    case dtype_t::b8_k:
+    case dtype_t::utf8_k: return 8;
+    case dtype_t::i4x2_k:
+    case dtype_t::u4x2_k: return 4;
+    case dtype_t::u1x8_k: return 1;
+    case dtype_t::uuid_k:
+    case dtype_t::b128_k: return 128;
+    case dtype_t::unknown_k: return 0;
+    }
+    return 0;
+}
+
+/** @brief Bytes one element of @p dtype occupies; zero for the packed families, whose elements
+ *      share a byte, and for the unknown one. */
+constexpr std::size_t dtype_bytes(dtype_t dtype) noexcept {
+    std::size_t const bits = dtype_bits(dtype);
+    return bits && bits % 8 == 0 ? bits / 8 : 0;
 }
 
 /**
@@ -687,12 +781,8 @@ enum class io_capability_t : u32_t {
     lba_addressing_k = 1u << 2,
 };
 
-inline constexpr io_capability_t operator|(io_capability_t a, io_capability_t b) noexcept {
-    return static_cast<io_capability_t>(static_cast<u32_t>(a) | static_cast<u32_t>(b));
-}
-
-inline constexpr bool operator&(io_capability_t a, io_capability_t b) noexcept {
-    return (static_cast<u32_t>(a) & static_cast<u32_t>(b)) != 0;
+inline constexpr io_capability_t operator|(io_capability_t first, io_capability_t second) noexcept {
+    return static_cast<io_capability_t>(static_cast<u32_t>(first) | static_cast<u32_t>(second));
 }
 
 /**
