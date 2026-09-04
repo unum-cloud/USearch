@@ -91,7 +91,9 @@ class growing_hash_set {
     allocator_t allocator_ {};
 
   public:
-    growing_hash_set(allocator_t allocator = {}) noexcept : allocator_(std::move(allocator)) {}
+    /** @brief Every set names its allocator; nothing is placed by default. */
+    growing_hash_set() = delete;
+    explicit growing_hash_set(allocator_t allocator) noexcept : allocator_(std::move(allocator)) {}
     ~growing_hash_set() noexcept { reset(); }
 
     explicit operator bool() const noexcept { return slots_; }
@@ -312,7 +314,9 @@ class growing_multimap {
     growing_multimap(growing_multimap const&) noexcept = delete;
     growing_multimap& operator=(growing_multimap const&) noexcept = delete;
 
-    explicit growing_multimap(allocator_t allocator = {}) noexcept : allocator_(std::move(allocator)) {}
+    /** @brief Every map names its allocator; nothing is placed by default. */
+    growing_multimap() = delete;
+    explicit growing_multimap(allocator_t allocator) noexcept : allocator_(std::move(allocator)) {}
     ~growing_multimap() noexcept { reset(); }
 
     growing_multimap(growing_multimap&& other) noexcept

@@ -190,7 +190,9 @@ class max_heap {
     allocator_t allocator_;
 
   public:
-    max_heap(allocator_t allocator = {}) noexcept
+    /** @brief Every heap names its allocator; nothing is placed by default. */
+    max_heap() = delete;
+    explicit max_heap(allocator_t allocator) noexcept
         : elements_(nullptr), size_(0), capacity_(0), allocator_(std::move(allocator)) {}
 
     max_heap(max_heap&& other) noexcept
@@ -413,7 +415,9 @@ class max_heap_dary {
     allocator_t allocator_;
 
   public:
-    max_heap_dary(allocator_t allocator = {}) noexcept
+    /** @brief Every heap names its allocator; nothing is placed by default. */
+    max_heap_dary() = delete;
+    explicit max_heap_dary(allocator_t allocator) noexcept
         : elements_(nullptr), size_(0), capacity_(0), allocator_(std::move(allocator)) {}
 
     max_heap_dary(max_heap_dary&& other) noexcept
@@ -602,7 +606,9 @@ class sorted_buffer {
     allocator_t allocator_;
 
   public:
-    sorted_buffer(allocator_t allocator = {}) noexcept
+    /** @brief Every buffer names its allocator; nothing is placed by default. */
+    sorted_buffer() = delete;
+    explicit sorted_buffer(allocator_t allocator) noexcept
         : elements_(nullptr), size_(0), capacity_(0), allocator_(std::move(allocator)) {}
 
     sorted_buffer(sorted_buffer&& other) noexcept
@@ -789,9 +795,11 @@ class growing_buffer {
     allocator_t allocator_;
 
   public:
+    /** @brief Every buffer names its allocator; nothing is placed by default. */
+    growing_buffer() = delete;
     /** @brief Takes the caller's allocator in its own element type; the rebind to @c element_t
      *      happens here, so no consumer spells @c allocator_traits itself. */
-    growing_buffer(allocator_type_ const& allocator = {}) noexcept
+    explicit growing_buffer(allocator_type_ const& allocator) noexcept
         : elements_(nullptr), size_(0), capacity_(0), allocator_(allocator) {}
 
     /** @brief Qualified, since an element type from @c std drags @c std::exchange into the
@@ -974,7 +982,12 @@ class growing_arena {
     upstream_t upstream_;
 
   public:
-    explicit growing_arena(upstream_t upstream = {}) noexcept : upstream_(upstream) {}
+    /** @brief Every arena names its upstream allocator; nothing is placed by default. */
+    growing_arena() = delete;
+    explicit growing_arena(upstream_t upstream) noexcept : upstream_(upstream) {}
+
+    /** @brief The allocator every chunk of this arena comes from. */
+    upstream_t const& upstream() const noexcept { return upstream_; }
     growing_arena(growing_arena&&) noexcept = default;
     growing_arena& operator=(growing_arena&&) noexcept = default;
 
