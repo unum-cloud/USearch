@@ -1,9 +1,9 @@
-# The brute-force stand-in for the C interface: a separate library defining the same symbols a different way, so a
-# binding suite runs in seconds against the ABI instead of waiting on a build of the engine - the fast way to separate
-# an SDK's own bugs from the library's. It needs the headers and nothing else - no submodules, no instantiation grid, no
-# engine sources - so it skips `setup_target` deliberately and sets by hand the few properties bindings depend on. The
-# one runtime it does resolve is the platform's threads, since the stand-ins keep the headers' concurrency promises with
-# a `std::shared_mutex` rather than a comment.
+# The brute-force stand-in for the C interface: a separate library defining the same symbols a different way, so any
+# consumer - a binding suite, a downstream SDK, a bisect - runs in seconds against the ABI instead of waiting on a build
+# of the engine. It needs the headers and nothing else - no submodules, no instantiation grid, no engine sources - so it
+# skips `setup_target` deliberately and sets by hand the few properties consumers depend on. The one runtime it does
+# resolve is the platform's threads, since the stand-ins keep the headers' concurrency promises with a
+# `std::shared_mutex` rather than a comment.
 #
 # The file names match what `c/` produces, because the SDKs hardcode them: `libusearch_c` in the C# `NativeMethods`,
 # `-lusearch_c` in the Go directives, `usearch_c` in `Package.swift`. They land in a directory of their own, so a suite
@@ -34,8 +34,8 @@ endforeach ()
 set_target_properties(usearch_c_stub PROPERTIES OUTPUT_NAME "usearch_c")
 set_target_properties(usearch_static_c_stub PROPERTIES OUTPUT_NAME "usearch_static_c")
 
-# A test double is not part of the published package, so it stays out of the export set and installs under a
-# subdirectory of its own, where it cannot shadow the engine's library.
+# A stand-in is not part of the published package, so it stays out of the export set and installs under a subdirectory
+# of its own, where it cannot shadow the engine's library.
 if (USEARCH_INSTALL)
     install(
         TARGETS usearch_c_stub usearch_static_c_stub

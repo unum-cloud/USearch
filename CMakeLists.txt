@@ -52,7 +52,7 @@ option(USEARCH_BUILD_TEST_CPP "Compile a native unit test in C++" ${USEARCH_IS_M
 option(USEARCH_BUILD_BENCH_CPP "Compile a native benchmark in C++" ${USEARCH_IS_MAIN_PROJECT})
 option(USEARCH_BUILD_LIB_C "Compile a native library for the C 99 interface" OFF)
 option(USEARCH_BUILD_TEST_C "Compile a test for the C 99 interface" OFF)
-option(USEARCH_BUILD_TEST_STUB "Compile a brute-force stand-in for the C interface, to validate bindings" OFF)
+option(USEARCH_BUILD_LIB_C_STUB "Compile a brute-force stand-in for the C 99 interface" OFF)
 option(USEARCH_BUILD_JNI "Compile JNI library for Java bindings" OFF)
 option(USEARCH_BUILD_WOLFRAM "Compile Wolfram Language bindings" OFF)
 option(USEARCH_BUILD_SQLITE "Compile separate SQLite extension" OFF)
@@ -547,12 +547,12 @@ if (${USEARCH_BUILD_TEST_CPP}
     add_subdirectory(src)
 endif ()
 
-if (${USEARCH_BUILD_TEST_CPP})
-    add_subdirectory(test)
+if (${USEARCH_BUILD_LIB_C_STUB})
+    add_subdirectory(src_stub)
 endif ()
 
-if (${USEARCH_BUILD_TEST_STUB})
-    add_subdirectory(test/stub)
+if (${USEARCH_BUILD_TEST_CPP})
+    add_subdirectory(test)
 endif ()
 
 if (${USEARCH_BUILD_BENCH_CPP})

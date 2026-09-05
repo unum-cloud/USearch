@@ -2,7 +2,7 @@
  *  @brief Machinery every modality's stand-in shares - errors, scalars, files, and the
  *      append-only store that keeps the headers' thread-safety promises.
  *
- *  @file test/stub/lib.hpp
+ *  @file src_stub/lib.hpp
  *
  *  Nothing here is part of the C ABI: each @c <modality>.cpp owns its verbs and includes this
  *  for the parts that have nothing to do with which modality it answers. The one shared lock is
@@ -23,7 +23,6 @@
 #include <cmath>   // `std::ldexp`
 #include <cstddef> // `std::byte`, `std::size_t`
 #include <cstdint> // `SIZE_MAX`
-#include <cstdio>  // `std::fopen`, `std::fread`, `std::fwrite`
 #include <cstring> // `std::memcmp`
 
 #include <algorithm>     // `std::copy`, `std::sort`, `std::stable_sort`
@@ -41,6 +40,7 @@
 #include <vector>        // `std::vector`
 
 #include "usearch/types.h"
+#include "usearch/utilities/blocking_files.hpp" // `seekable_file_t` - the checkpoints' resource handle
 #include "usearch/utilities/types.hpp"
 
 namespace unum {
@@ -53,15 +53,16 @@ inline void propagate_success(usearch_error_t* error) {
     if (error) { error->status = usearch_success_k, error->message = nullptr; }
 }
 
-inline void propagate_error(usearch_error_t* error, usearch_status_t status, char const* message) {
-    if (error) { error->status = status, error->message = message; }
+/** @brief The one write path to @p error; the message is null exactly on success. */
+inline void propagate_error(usearch_status_t status, usearch_error_t* error, char const* message) {
+    if (error) *error = usearch_error_t {status, status == usearch_success_k ? nullptr : message};
 }
 
 /** @brief Reports @p status through @p error when @p wrong, and answers whether it did - the
  *      one shape every guard below takes, so a caller reads `if (reject_if(...)) return;`. */
 inline bool reject_if(bool wrong, usearch_status_t status, char const* message, usearch_error_t* error) {
     if (!wrong) return false;
-    propagate_error(error, status, message);
+    propagate_error(status, error, message);
     return true;
 }
 
@@ -72,6 +73,40 @@ void reset(stats_* stats) {
 }
 
 #pragma endregion Errors
+
+#pragma region Executors
+
+/**
+ *  @brief A stand-in's executor: a handle that exists, remembers what was asked for, and drives
+ *      nothing - every verb runs on the thread that called it.
+ *
+ *  Keeping the handle real rather than ignoring the parameter is what lets a binding suite
+ *  exercise the lifetime it will meet against the engine - spawn, pass, drain, free - and see a
+ *  null or wrong-kind executor refused at the same place.
+ */
+struct executor_t {
+    /** @brief Worker threads the caller asked for; honoured by remembering, never by spawning. */
+    std::size_t threads = 1;
+};
+
+/** @brief Refuses an executor a verb cannot run on, reporting where the engine's dispatch does. */
+inline bool reject_executor(usearch_executor_t executor, usearch_error_t* error) {
+    return reject_if(!executor, usearch_error_device_k, "The executor's kind must match the handle's residency",
+                     error);
+}
+
+/** @brief Ticks the caller's handler and answers whether to carry on; a null handler always does. */
+inline bool keep_going(usearch_progress_callback_t progress, void* progress_state, std::size_t completed,
+                       std::size_t total) {
+    return !progress || progress(completed, total, progress_state) == usearch_continue_k;
+}
+
+/** @brief Reports a handler's cancellation once a loop stopped short, and answers whether it did. */
+inline bool reject_cancelled(std::size_t completed, std::size_t total, usearch_error_t* error) {
+    return reject_if(completed < total, usearch_error_cancelled_k, "The caller's handler stopped the work", error);
+}
+
+#pragma endregion Executors
 
 #pragma region Scalars
 
@@ -92,7 +127,7 @@ inline std::size_t scalar_bytes(usearch_scalar_t kind) {
  *      row-byte computation would otherwise pass. */
 inline bool reject_scalar(usearch_scalar_t kind, usearch_error_t* error) {
     return reject_if(!scalar_bytes(kind), usearch_error_unknown_kind_k,
-                     "the stand-in implements f64, f32, bf16, f16, i8 and u8 only", error);
+                     "The stand-in implements f64, f32, bf16, f16, i8 and u8 only", error);
 }
 
 inline double read_half(u16_t bits) {
@@ -100,107 +135,115 @@ inline double read_half(u16_t bits) {
     int const exponent = (bits >> 10) & 0x1F;
     int const mantissa = bits & 0x3FF;
     double value;
-    if (exponent == 0) { value = std::ldexp((double)mantissa, -24); }
+    if (exponent == 0) { value = std::ldexp(static_cast<double>(mantissa), -24); }
     else if (exponent == 31) { value = mantissa ? NAN : INFINITY; }
     else { value = std::ldexp(1024.0 + mantissa, exponent - 25); }
     return sign ? -value : value;
 }
 
 inline u16_t write_half(double value) {
-    u32_t const bits = std::bit_cast<u32_t>((float)value);
+    u32_t const bits = std::bit_cast<u32_t>(static_cast<float>(value));
     u32_t const sign = (bits >> 16) & 0x8000;
-    i32_t const exponent = (i32_t)((bits >> 23) & 0xFF) - 127 + 15;
+    i32_t const exponent = static_cast<i32_t>((bits >> 23) & 0xFF) - 127 + 15;
     u32_t const mantissa = (bits >> 13) & 0x3FF;
-    if (exponent <= 0) return (u16_t)sign;
-    if (exponent >= 31) return (u16_t)(sign | 0x7C00);
-    return (u16_t)(sign | ((u32_t)exponent << 10) | mantissa);
+    if (exponent <= 0) return static_cast<u16_t>(sign);
+    if (exponent >= 31) return static_cast<u16_t>(sign | 0x7C00);
+    return static_cast<u16_t>(sign | (static_cast<u32_t>(exponent) << 10) | mantissa);
 }
 
 /** @brief A brain float is the high half of a single, so widening is a shift. */
-inline double read_brain(u16_t bits) { return std::bit_cast<float>((u32_t)bits << 16); }
+inline double read_brain(u16_t bits) { return std::bit_cast<float>(static_cast<u32_t>(bits) << 16); }
 
 /** @brief Narrows to the high half, rounding half to even and keeping a NaN a NaN. */
 inline u16_t write_brain(double value) {
-    u32_t const bits = std::bit_cast<u32_t>((float)value);
+    u32_t const bits = std::bit_cast<u32_t>(static_cast<float>(value));
     bool const is_nan = (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu);
-    if (is_nan) return (u16_t)((bits >> 16) | 0x0040u);
+    if (is_nan) return static_cast<u16_t>((bits >> 16) | 0x0040u);
     // The tie-breaking increment carries into the exponent on its own, so an overflow
     // saturates to infinity without a branch.
     u32_t const rounded = bits + 0x7FFFu + ((bits >> 16) & 1u);
-    return (u16_t)(rounded >> 16);
+    return static_cast<u16_t>(rounded >> 16);
 }
 
-/** @brief The @p position -th element of @p row read as @c scalar_. */
+/** @brief Widens a whole row stored as @c scalar_, converting each element to a double. */
 template <typename scalar_>
-scalar_ element_at(std::span<std::byte const> row, std::size_t position) {
-    scalar_ const* typed = (scalar_ const*)row.data();
-    return typed[position];
+void widen_into(bytes_view_t row, std::span<double> values) {
+    scalar_ const* typed = static_cast<scalar_ const*>(static_cast<void const*>(row.data()));
+    for (std::size_t position = 0; position != values.size(); ++position) values[position] = typed[position];
 }
 
-/** @brief Assigns the @p position -th element of @p row written as @c scalar_. */
+/** @brief Narrows a whole row of doubles back into storage as @c scalar_. */
 template <typename scalar_>
-void element_to(std::span<std::byte> row, std::size_t position, scalar_ value) {
-    scalar_* typed = (scalar_*)row.data();
-    typed[position] = value;
-}
-
-/** @brief Widens one stored scalar. Callers gate on @c scalar_bytes first, so the unreachable
- *      arms return zero rather than silently reinterpreting the row as another width. */
-inline double read_scalar(std::span<std::byte const> row, std::size_t position, usearch_scalar_t kind) {
-    switch (kind) {
-    case usearch_scalar_f64_k: return element_at<double>(row, position);
-    case usearch_scalar_f32_k: return element_at<float>(row, position);
-    case usearch_scalar_bf16_k: return read_brain(element_at<u16_t>(row, position));
-    case usearch_scalar_f16_k: return read_half(element_at<u16_t>(row, position));
-    case usearch_scalar_i8_k: return element_at<i8_t>(row, position);
-    case usearch_scalar_u8_k: return element_at<u8_t>(row, position);
-    default: return 0;
-    }
-}
-
-inline void write_scalar(std::span<std::byte> row, std::size_t position, usearch_scalar_t kind, double value) {
-    switch (kind) {
-    case usearch_scalar_f64_k: element_to<double>(row, position, value); break;
-    case usearch_scalar_f32_k: element_to<float>(row, position, (float)value); break;
-    case usearch_scalar_bf16_k: element_to<u16_t>(row, position, write_brain(value)); break;
-    case usearch_scalar_f16_k: element_to<u16_t>(row, position, write_half(value)); break;
-    case usearch_scalar_i8_k: element_to<i8_t>(row, position, (i8_t)value); break;
-    case usearch_scalar_u8_k: element_to<u8_t>(row, position, (u8_t)value); break;
-    default: break;
-    }
-}
-
-/** @brief Widens one stored row into @p values, whose extent decides how much is read. */
-inline void read_row(std::span<std::byte const> row, usearch_scalar_t kind, std::span<double> values) {
+void narrow_from(bytes_span_t row, std::span<double const> values) {
+    scalar_* typed = static_cast<scalar_*>(static_cast<void*>(row.data()));
     for (std::size_t position = 0; position != values.size(); ++position)
-        values[position] = read_scalar(row, position, kind);
+        typed[position] = static_cast<scalar_>(values[position]);
 }
 
-/** @brief Quantizes @p values back into one stored row. */
-inline void write_row(std::span<std::byte> row, usearch_scalar_t kind, std::span<double const> values) {
+/**
+ *  @brief Widens one stored row into @p values, whose extent decides how much is read. The kind is
+ *      fixed for the whole row, so it is switched on once here rather than once per element.
+ *      Callers gate on @c scalar_bytes first, so an unreachable arm leaves @p values untouched
+ *      rather than silently reinterpreting the row as another width.
+ */
+inline void read_row(bytes_view_t row, usearch_scalar_t kind, std::span<double> values) {
+    switch (kind) {
+    case usearch_scalar_f64_k: return widen_into<double>(row, values);
+    case usearch_scalar_f32_k: return widen_into<float>(row, values);
+    case usearch_scalar_i8_k: return widen_into<i8_t>(row, values);
+    case usearch_scalar_u8_k: return widen_into<u8_t>(row, values);
+    case usearch_scalar_bf16_k:
+    case usearch_scalar_f16_k: break;
+    default: return;
+    }
+    // The half kinds decode rather than load, so they convert element by element.
+    u16_t const* typed = static_cast<u16_t const*>(static_cast<void const*>(row.data()));
     for (std::size_t position = 0; position != values.size(); ++position)
-        write_scalar(row, position, kind, values[position]);
+        values[position] = kind == usearch_scalar_bf16_k ? read_brain(typed[position]) : read_half(typed[position]);
+}
+
+/** @brief Quantizes @p values back into one stored row, switching on the kind once. */
+inline void write_row(bytes_span_t row, usearch_scalar_t kind, std::span<double const> values) {
+    switch (kind) {
+    case usearch_scalar_f64_k: return narrow_from<double>(row, values);
+    case usearch_scalar_f32_k: return narrow_from<float>(row, values);
+    case usearch_scalar_i8_k: return narrow_from<i8_t>(row, values);
+    case usearch_scalar_u8_k: return narrow_from<u8_t>(row, values);
+    case usearch_scalar_bf16_k:
+    case usearch_scalar_f16_k: break;
+    default: return;
+    }
+    u16_t* typed = static_cast<u16_t*>(static_cast<void*>(row.data()));
+    for (std::size_t position = 0; position != values.size(); ++position)
+        typed[position] = kind == usearch_scalar_bf16_k ? write_brain(values[position]) : write_half(values[position]);
 }
 
 /** @brief The @p row -th row of a strided matrix, as @p count elements of @c value_type_. */
 template <typename value_type_>
 std::span<value_type_> row_at(void* base, std::size_t row, std::size_t stride, std::size_t count) {
-    return std::span<value_type_>((value_type_*)((std::byte*)base + row * stride), count);
+    std::byte* const at = static_cast<std::byte*>(base) + row * stride;
+    return std::span<value_type_>(static_cast<value_type_*>(static_cast<void*>(at)), count);
 }
 
 /** @brief The read-only sibling, for the matrices the ABI hands over as pure inputs. */
 template <typename value_type_>
 std::span<value_type_ const> row_at(void const* base, std::size_t row, std::size_t stride, std::size_t count) {
-    return std::span<value_type_ const>((value_type_ const*)((std::byte const*)base + row * stride), count);
-}
-
-inline bool same_key(usearch_key_t const& first, usearch_key_t const& second) {
-    return std::memcmp(first.bytes, second.bytes, sizeof(first.bytes)) == 0;
+    std::byte const* const at = static_cast<std::byte const*>(base) + row * stride;
+    return std::span<value_type_ const>(static_cast<value_type_ const*>(static_cast<void const*>(at)), count);
 }
 
 #pragma endregion Scalars
 
 #pragma region Storage
+
+/**
+ *  @brief Unwraps one of the ABI's opaque handles. Every verb's first act, and the only place a
+ *      handle's cast is written - the C headers declare all of them as @c void*.
+ */
+template <typename handle_type_>
+handle_type_& borrowed(void* handle) noexcept {
+    return *static_cast<handle_type_*>(handle);
+}
 
 /** @brief One stored row: its key, and whatever the modality calls a payload. */
 template <typename payload_>
@@ -209,22 +252,11 @@ struct entry {
     payload_ payload;
 };
 
-/** @brief Hashes the sixteen opaque bytes, which the C struct carries no hasher for. */
-struct key_hash_t {
-    std::size_t operator()(usearch_key_t const& key) const noexcept {
-        std::size_t mixed = 1469598103934665603ull;
-        for (std::size_t position = 0; position != sizeof(key.bytes); ++position)
-            mixed = (mixed ^ key.bytes[position]) * 1099511628211ull;
-        return mixed;
-    }
-};
-
-/** @brief Compares the sixteen opaque bytes, which the C struct carries no @c operator== for. */
-struct key_equal_t {
-    bool operator()(usearch_key_t const& first, usearch_key_t const& second) const noexcept {
-        return same_key(first, second);
-    }
-};
+/**
+ *  @brief The project's own key type, which already knows how to hash and compare itself.
+ *      Layout-identical to @c usearch_key_t, so the conversion is a reinterpretation.
+ */
+inline uuid_t keyed(usearch_key_t const& key) noexcept { return std::bit_cast<uuid_t>(key); }
 
 /**
  *  @brief One handle's whole state. Readers hold @c mutex shared and writers exclusively, which
@@ -241,7 +273,7 @@ struct handle {
     /** @brief The rows themselves, in insertion order. */
     std::vector<entry<payload_>> entries;
     /** @brief Row positions under each key, so a lookup is not a scan; keys need not be unique. */
-    std::unordered_multimap<usearch_key_t, std::size_t, key_hash_t, key_equal_t> by_key;
+    std::unordered_multimap<uuid_t, std::size_t> by_key;
     /** @brief Held shared by every reader, exclusively by every mutation. */
     mutable std::shared_mutex mutex;
 
@@ -262,7 +294,7 @@ struct handle {
 
     /** @brief Appends one row and indexes its key, the only way a row is ever added. */
     void append(usearch_key_t key, payload_ payload) {
-        by_key.emplace(key, entries.size());
+        by_key.emplace(keyed(key), entries.size());
         entries.push_back({key, std::move(payload)});
     }
 };
@@ -275,7 +307,7 @@ struct handle {
 template <typename handle_>
 std::vector<std::size_t> rows_under(handle_ const& index, usearch_key_t key) {
     std::vector<std::size_t> rows;
-    auto const range = index.by_key.equal_range(key);
+    auto const range = index.by_key.equal_range(keyed(key));
     for (auto position = range.first; position != range.second; ++position) rows.push_back(position->second);
     std::sort(rows.begin(), rows.end());
     return rows;
@@ -285,22 +317,17 @@ std::vector<std::size_t> rows_under(handle_ const& index, usearch_key_t key) {
 
 /** @brief Writes @p value's own bytes at the head of @p target - the serializer's one primitive. */
 template <typename value_>
-void write_pod(std::span<std::byte> target, value_ const& value) {
+void write_pod(bytes_span_t target, value_ const& value) {
     std::array<std::byte, sizeof(value_)> const raw = std::bit_cast<std::array<std::byte, sizeof(value_)>>(value);
     std::copy(raw.begin(), raw.end(), target.begin());
 }
 
 /** @brief Reads one @c value_ back from the head of @p source. */
 template <typename value_>
-value_ read_pod(std::span<std::byte const> source) {
+value_ read_pod(bytes_view_t source) {
     std::array<std::byte, sizeof(value_)> raw {};
     std::copy_n(source.begin(), sizeof(value_), raw.begin());
     return std::bit_cast<value_>(raw);
-}
-
-/** @brief Copies every byte of @p source to the head of @p target. */
-inline void copy_bytes(std::span<std::byte> target, std::span<std::byte const> source) {
-    std::copy(source.begin(), source.end(), target.begin());
 }
 
 #pragma region Ranking
@@ -354,49 +381,47 @@ inline std::optional<std::size_t> blob_bytes(std::size_t prefix, std::size_t cou
     return prefix + count * each;
 }
 
-/** @brief Owns a @c FILE* so an early return closes it; the stand-ins' only resource handle. */
-class file_t {
-    std::FILE* handle_ = nullptr;
+/**
+ *  @brief Whether @p blob is long enough for @p count records of @p each bytes past @p header,
+ *      reporting through @p error which way it fell short. Every modality's @c parse_prefix
+ *      ends in this check; only the extent it computes differs.
+ */
+inline bool fits_blob(bytes_view_t blob, std::size_t header, std::size_t count, std::size_t each,
+                      usearch_error_t* error) {
+    std::optional<std::size_t> const needed = blob_bytes(header, count, each);
+    if (reject_if(!needed, usearch_error_overflow_k, "The checkpoint claims more than can be addressed", error))
+        return false;
+    return !reject_if(blob.size() < *needed, usearch_error_malformed_input_k,
+                      "The checkpoint is shorter than the entries it claims", error);
+}
 
-  public:
-    file_t(std::string const& path, char const* mode) : handle_(std::fopen(path.c_str(), mode)) {}
-    file_t(file_t const&) = delete;
-    file_t& operator=(file_t const&) = delete;
-    ~file_t() {
-        if (handle_) std::fclose(handle_);
-    }
-
-    explicit operator bool() const noexcept { return handle_ != nullptr; }
-    std::FILE* stream() const noexcept { return handle_; }
-};
-
-inline std::string path_string(usearch_string_t path) { return std::string(path.data, path.length); }
-
-inline bool read_file(usearch_string_t path, std::vector<std::byte>& blob, usearch_error_t* error) {
-    file_t file(path_string(path), "rb");
-    if (!file) {
-        propagate_error(error, usearch_error_io_k, "the checkpoint could not be opened for reading");
+inline bool read_file(usearch_bytes_view_t path, std::vector<std::byte>& blob, usearch_error_t* error) {
+    auto [file, opened] = seekable_file_t::open({path.data, path.length}, file_mode_t::read_k);
+    if (failed(opened)) {
+        propagate_error(usearch_error_io_k, error, "The checkpoint could not be opened for reading");
         return false;
     }
-    std::byte buffer[4096];
-    for (std::size_t read = std::fread(buffer, 1, sizeof(buffer), file.stream()); read;
-         read = std::fread(buffer, 1, sizeof(buffer), file.stream()))
-        blob.insert(blob.end(), buffer, buffer + read);
-    if (std::ferror(file.stream())) {
-        propagate_error(error, usearch_error_io_k, "the checkpoint could not be read");
+    auto const [bytes, measured] = file.length();
+    if (failed(measured)) {
+        propagate_error(usearch_error_io_k, error, "The checkpoint could not be read");
+        return false;
+    }
+    blob.resize(bytes);
+    if (failed(file.read_at(0, bytes_span_t {blob}))) {
+        propagate_error(usearch_error_io_k, error, "The checkpoint could not be read");
         return false;
     }
     return true;
 }
 
-inline bool write_file(usearch_string_t path, std::span<std::byte const> blob, usearch_error_t* error) {
-    file_t file(path_string(path), "wb");
-    if (!file) {
-        propagate_error(error, usearch_error_io_k, "the checkpoint could not be opened for writing");
+inline bool write_file(usearch_bytes_view_t path, bytes_view_t blob, usearch_error_t* error) {
+    auto [file, opened] = seekable_file_t::open({path.data, path.length}, file_mode_t::write_k);
+    if (failed(opened)) {
+        propagate_error(usearch_error_io_k, error, "The checkpoint could not be opened for writing");
         return false;
     }
-    if (std::fwrite(blob.data(), 1, blob.size(), file.stream()) != blob.size() || std::fflush(file.stream()) != 0) {
-        propagate_error(error, usearch_error_io_k, "the checkpoint could not be written");
+    if (failed(file.write_at(0, blob)) || failed(file.close())) {
+        propagate_error(usearch_error_io_k, error, "The checkpoint could not be written");
         return false;
     }
     return true;
