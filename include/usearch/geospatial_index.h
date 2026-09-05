@@ -1,7 +1,7 @@
 /**
- *  @brief The geospatial-modality C interface: similarity search over point sets on and
+ *  @brief The geospatial-modality C interface: similarity search over positions on and
  *      above the ellipsoid, in space and in time - single positions, time-ordered tracks,
- *      and closed boundaries - under nearest-approach, whole-shape, coverage, and
+ *      and closed boundaries - under nearest, overlap, whole-shape, coverage, and
  *      order-respecting scoring.
  *
  *  @author Ash Vardanian
@@ -16,49 +16,39 @@
  *
  *  @section geospatial_index_geometry Internal Geometry
  *
- *  Positions arrive as geodetic degrees and are stored as Earth-Centered Earth-Fixed
- *  metres, optionally with a fourth axis carrying time scaled into metres. Three point
- *  distances sit on that storage, and they form a ladder rather than a choice:
- *
- *  - The straight-line @b chord between two Earth-fixed positions. No transcendental
- *    functions, and a strict lower bound on every path across the surface.
- *  - The @b Haversine great-circle arc. On a sphere it is a strictly increasing function of
- *    the chord, so the two rank identically and the @c arcsin is paid only when a caller
- *    wants the number in surface metres rather than an ordering.
- *  - The @b geodesic on the WGS-84 ellipsoid, which is @b not a monotone function of the
- *    chord: two pairs sharing one chord differ in geodesic length by up to the flattening,
- *    one part in 298. It can therefore permute what the chord ordered.
- *
- *  Traversal runs on the chord and the geodesic is paid only when re-ranking the returned
- *  candidates, which is what that last line buys. Vincenty's inverse solution is the
- *  classical route to the geodesic rung and does not always terminate, diverging for nearly
- *  antipodal pairs; Karney's always converges, which is what a scorer under a determinism
- *  contract needs.
+ *  Positions arrive as geodetic degrees and are stored as Earth-centred, Earth-fixed
+ *  @b integer @b centimetres, projected onto the ellipsoid's surface; altitude and time
+ *  are attributes of a point rather than axes of its position. The coordinates are
+ *  Euclidean: every ordering inside the index is the straight-line @b chord between two
+ *  such positions, three subtractions and three wide multiply-adds with no rounding. On a
+ *  sphere the chord is a strictly increasing function of the great-circle arc, so the two
+ *  rank identically and no transcendental is ever evaluated on the walk. The @b geodesic
+ *  on the WGS-84 ellipsoid is not a monotone function of the chord - two pairs sharing one
+ *  chord differ in geodesic length by up to the flattening, one part in 298 - so it is
+ *  computed only for the candidates that are reported, through Karney's always-converging
+ *  solution rather than Vincenty's.
  *
  *  @section geospatial_index_modes One Graph, Many Modes
  *
- *  The graph is built on symmetric @b Hausdorff distance over the widest axis set the
- *  layout carries. Three of the four scoring modes are then one-Lipschitz against those
- *  edge weights - for any query set @c Q and entries @c A and @c B,
- *
- *      | nearest_approach(Q, A) - nearest_approach(Q, B) |  <=  hausdorff(A, B)
- *
- *  and the same bound holds for coverage and for Hausdorff itself. Because the ground
- *  metric only shrinks when axes are dropped, and Hausdorff is monotone in its ground
- *  metric, a graph built on the full four-axis distance also bounds every projection of
- *  it. One graph therefore serves every combination of @c usearch_geospatial_mode_t and
- *  @c usearch_geospatial_axes_t, with descent guaranteed to converge in each.
- *
- *  Route scoring is the exception. Frechet distance is unbounded relative to Hausdorff -
- *  a track and its reverse are Hausdorff-identical and Frechet-far - so it earns a second
- *  edge family, selected at construction through @c usearch_geospatial_edges_t.
+ *  One node is one point, and a set is its points under one key. The graph is a
+ *  single-layer navigable small world over the surface chord, wired by the nearest
+ *  neighbor in each of eight tangent-plane cones plus four long-range links, and every
+ *  scoring mode is answered from one primitive: a radius walk around each query point,
+ *  bounded by the call's @c usearch_geospatial_tolerance_t, returning the entry points
+ *  inside it. Nearest needs no radius. Overlap is computed during that walk, folding each
+ *  query point's best entry point per key into a running sum. The set-shaped modes rerank
+ *  the keys the walk found with an exact set metric, which is complete because an entry
+ *  scoring within the tolerance under any of them has a point within it of some query
+ *  point. Narrowing @c usearch_geospatial_axes_t only widens a candidate set, since the
+ *  surface chord never exceeds a distance that adds altitude or time, so one graph serves
+ *  every mode and axis combination.
  *
  *  @section geospatial_index_emplacement Emplaced Queries
  *
  *  Alone among the modalities, search consumes a prepared object rather than a raw tape.
- *  That is deliberate, not drift: the geodetic conversion and time scaling are the expensive
- *  half of a point query, and one emplaced set is reused across every mode and axis
- *  combination a caller asks of it.
+ *  That is deliberate, not drift: the geodetic conversion is the expensive half of a point
+ *  query, and one emplaced set is reused across every mode, tolerance and axis combination
+ *  a caller asks of it.
  *
  *  @section geospatial_index_concurrency Concurrency & Thread Safety
  *
@@ -143,9 +133,10 @@ USEARCH_EXPORT typedef enum usearch_geospatial_structure_t {
 } usearch_geospatial_structure_t;
 
 /**
- *  @brief Which axes participate in one search. Narrowing the axes narrows the ground
- *      metric, which only shrinks Hausdorff distance, so every setting is served by the
- *      graph built on the layout's widest form.
+ *  @brief Which axes participate in one search. The graph walks the surface chord alone;
+ *      altitude and time enter when the candidates it found are scored, and a distance
+ *      that adds them never falls below the surface chord, so narrowing the axes only
+ *      widens the candidate set.
  */
 USEARCH_EXPORT typedef enum usearch_geospatial_axes_t {
     usearch_geospatial_axes_unknown_k = 0,
@@ -161,17 +152,15 @@ USEARCH_EXPORT typedef enum usearch_geospatial_axes_t {
  *  @brief What "close" means for one search.
  *
  *  Writes @c D for the @b [|Q|,|E|] matrix of the point distance between every query point
- *  and every entry point. Three of the four modes are one-line reductions of @c D and differ
- *  only in which reduction: the smallest cell, the worst row minimum, or the worst of both.
- *  Route is not a reduction at all but a walk across the same table, which is why it alone
- *  cannot ride the edges the others share. Modes differ in whether a single coincidence
- *  suffices or the whole set must agree, and in whether ordering is respected.
+ *  and every entry point. Nearest and the two Hausdorff forms are reductions of @c D by
+ *  @c min and @c max alone; overlap is a count; route is a walk across the same table.
+ *  Every one of them is computed over the keys a radius walk around each query point found,
+ *  so none rides an edge family of its own.
  *
- *  Every mode here is composed of @c min and @c max alone, never a sum or a mean, and both
- *  commute with any strictly increasing function of the point distance. Ranking by chord and
- *  ranking by Haversine arc are therefore identical rather than merely close, which is what
- *  makes the cheap rung of @ref geospatial_index_geometry free for all four. A mode built on
- *  a mean would forfeit that, and that is the standing constraint on what may be added here.
+ *  Reductions by @c min and @c max commute with any strictly increasing function of the
+ *  point distance, so ranking by chord and by great-circle arc are identical for them. A
+ *  sum does not commute, and overlap's indicator kernel is affected only exactly at the
+ *  tolerance boundary; that is the standing constraint on what may be added here.
  */
 USEARCH_EXPORT typedef enum usearch_geospatial_mode_t {
     usearch_geospatial_mode_unknown_k = 0,
@@ -180,9 +169,10 @@ USEARCH_EXPORT typedef enum usearch_geospatial_mode_t {
      *      entry point.
      *
      *  Answers "did these two come close to each other". Paired with
-     *  @c usearch_geospatial_axes_full_k on a timed layout it answers "did they come close at
-     *  the same moment", which is the rendezvous and co-travel query. One coincidence
-     *  suffices, so everything else about either track is discarded.
+     *  @c usearch_geospatial_axes_full_k and a tolerance carrying seconds it answers "did
+     *  they come close at the same moment", which is the rendezvous query. One coincidence
+     *  suffices, so everything else about either track is discarded. The one mode that
+     *  needs no radius: a zeroed tolerance ranks by the nearest point alone.
      *
      *  A(Q,E) = min_i min_j D[i,j]
      *
@@ -193,11 +183,30 @@ USEARCH_EXPORT typedef enum usearch_geospatial_mode_t {
      */
     usearch_geospatial_mode_approach_k = 1,
     /**
+     *  @brief Overlap - how many query points have an entry point within the tolerance,
+     *      at the same moment when the tolerance carries seconds.
+     *
+     *  Answers "how much of my route did this entry share", and with time "how long were we
+     *  together": co-travel, shared stops, visited places. A count rather than a worst case,
+     *  so one stray point costs one unit instead of deciding the score. Computed while the
+     *  radius walk runs, folding each query point's best entry point per key into a sum, and
+     *  exact whenever that walk enumerates everything inside the tolerance. Scores rank
+     *  descending: the largest overlap is the best match.
+     *
+     *  O(Q,E) = sum_i [ min_j D[i,j] <= r ]
+     *
+     *  @code{.py}
+     *  D = chord(Q, E)
+     *  overlap = (D.min(axis=1) <= r).sum()         # a count, never a distance
+     *  @endcode
+     */
+    usearch_geospatial_mode_overlap_k = 2,
+    /**
      *  @brief Symmetric Hausdorff - the largest of all nearest approaches, in both directions.
      *
-     *  Answers "are these the same shape everywhere", and is the metric the graph itself is
-     *  built on. The whole of both tracks must agree: one query point far from every entry
-     *  point, or one entry point far from every query point, sets the score.
+     *  Answers "are these the same shape everywhere". The whole of both tracks must agree:
+     *  one query point far from every entry point, or one entry point far from every query
+     *  point, sets the score.
      *
      *  H(Q,E) = max( max_i min_j D[i,j], max_j min_i D[i,j] )
      *
@@ -206,7 +215,7 @@ USEARCH_EXPORT typedef enum usearch_geospatial_mode_t {
      *  shape = max(D.min(axis=1).max(), D.min(axis=0).max())
      *  @endcode
      */
-    usearch_geospatial_mode_shape_k = 2,
+    usearch_geospatial_mode_shape_k = 3,
     /**
      *  @brief Directed Hausdorff from the query onto the entry - the worst-covered query point.
      *
@@ -221,15 +230,15 @@ USEARCH_EXPORT typedef enum usearch_geospatial_mode_t {
      *  coverage = D.min(axis=1).max()               # query rows only; entry length never enters
      *  @endcode
      */
-    usearch_geospatial_mode_coverage_k = 3,
+    usearch_geospatial_mode_coverage_k = 4,
     /**
      *  @brief Discrete Frechet - the tightest leash for two walkers who may pause but never
      *      reverse.
      *
-     *  Answers "same route, same direction". Requires @c usearch_geospatial_structure_path_k
-     *  and Frechet edges. The minimum over three predecessors is what forbids reversing, and
-     *  it is why this mode is a walk rather than a reduction: two tracks covering identical
-     *  ground in opposite orders are Hausdorff-identical and Frechet-far.
+     *  Answers "same route, same direction". Requires @c usearch_geospatial_structure_path_k.
+     *  The minimum over three predecessors is what forbids reversing, and it is why this
+     *  mode is a walk rather than a reduction: two tracks covering identical ground in
+     *  opposite orders are Hausdorff-identical and Frechet-far.
      *
      *  F[i,j] = max( D[i,j], min( F[i-1,j], F[i,j-1], F[i-1,j-1] ) ),  score = F[|Q|,|E|]
      *
@@ -243,21 +252,8 @@ USEARCH_EXPORT typedef enum usearch_geospatial_mode_t {
      *  route = F[-1, -1]                            # a walk, not a reduction
      *  @endcode
      */
-    usearch_geospatial_mode_route_k = 4,
+    usearch_geospatial_mode_route_k = 5,
 } usearch_geospatial_mode_t;
-
-/**
- *  @brief Which edge families the graph carries. Hausdorff edges serve approach, shape,
- *      and coverage in every axis setting; route scoring is not Lipschitz against them
- *      and needs its own.
- */
-USEARCH_EXPORT typedef enum usearch_geospatial_edges_t {
-    usearch_geospatial_edges_unknown_k = 0,
-    /** @brief One family over Hausdorff - the smaller, faster graph. */
-    usearch_geospatial_edges_hausdorff_k = 1,
-    /** @brief A second family over Frechet, unioned into the same neighbor lists. */
-    usearch_geospatial_edges_hausdorff_and_frechet_k = 2,
-} usearch_geospatial_edges_t;
 
 /**
  *  @brief Construction & loading options of a geospatial index. The @c residency field
@@ -267,26 +263,13 @@ USEARCH_EXPORT typedef struct usearch_geospatial_options_t {
 
     /** @brief Which axes incoming positions carry. */
     usearch_geospatial_layout_t layout;
-    /** @brief What ordering within a point set means. */
+    /** @brief What ordering within a point set means; paths carry a successor per point. */
     usearch_geospatial_structure_t structure;
-    /** @brief Which edge families to construct. */
-    usearch_geospatial_edges_t edges;
 
-    /**
-     *  @brief Metres of horizontal separation carrying as much information as one second
-     *      of temporal separation - the exchange rate that lets one distance mix both.
-     *
-     *  Part of index @b identity, not a search parameter: it is fixed at construction and
-     *  changing it changes every ranking, exactly as a scalar type would. Zero derives it
-     *  as the median speed between consecutive points of the inserted corpus, which for
-     *  road vehicles lands near 13, for merchant shipping near 6, and for airliners near
-     *  250. Ignored by layouts without a time axis.
-     */
-    double characteristic_speed;
-
-    /** @brief The @b optional connections-per-node bound; zero derives. */
+    /** @brief The @b optional connections-per-node bound; zero derives to twelve - eight
+     *      tangent-plane cones and four long-range links. */
     size_t connectivity;
-    /** @brief Upper bound on entries sharing one key; zero derives to one - unique keys. */
+    /** @brief Upper bound on points sharing one key; zero derives to one - unique keys. */
     size_t values_per_key;
 
     /** @brief Selects the active member of the union below, and the meaning of "load". */
@@ -338,13 +321,6 @@ USEARCH_EXPORT size_t usearch_geospatial_memory_usage(usearch_geospatial_index_t
 USEARCH_EXPORT char const* usearch_geospatial_capabilities(usearch_geospatial_index_t index, usearch_error_t* error);
 
 /**
- *  @brief Reports the characteristic speed in force, whether supplied or derived.
- *      Zero for layouts without a time axis.
- */
-USEARCH_EXPORT double usearch_geospatial_characteristic_speed( //
-    usearch_geospatial_index_t index, usearch_error_t* error);
-
-/**
  *  @brief Optional per-call settings, shared by insertion and every search form - a pure
  *      input, never written. Passing @c NULL derives every setting.
  */
@@ -353,6 +329,23 @@ USEARCH_EXPORT typedef struct usearch_geospatial_expansion_config_t {
      *      derives. */
     size_t expansion_factor;
 } usearch_geospatial_expansion_config_t;
+
+/**
+ *  @brief What "close" means numerically for one search: the radius the walk around each
+ *      query point enumerates, and the time window a match must fall in.
+ *
+ *  Zero @c metres means no radius was chosen: nearest ranks by distance alone, and every
+ *  other mode doubles the radius until @c wanted keys survive its scoring. Zero @c seconds
+ *  ignores time even on a timed layout. Position uncertainty widens @c metres at the
+ *  walk by three combined deviations, so the candidate set stays a superset at 98.9 %
+ *  confidence, and the scoring tightens back to the pair's own.
+ */
+USEARCH_EXPORT typedef struct usearch_geospatial_tolerance_t {
+    /** @brief Radius in metres; zero derives as described above. */
+    double metres;
+    /** @brief Half-width of the time window in seconds; zero ignores time. */
+    double seconds;
+} usearch_geospatial_tolerance_t;
 
 /**
  *  @brief Traversal telemetry, shared by insertion and every search form - a pure output,
@@ -377,6 +370,8 @@ USEARCH_EXPORT typedef struct usearch_geospatial_traversal_stats_t {
  *  @param[in] keys Array of @p count keys, one per point set.
  *  @param[in] point_sets Array of @p count base pointers, one per set.
  *  @param[in] point_counts Array of @p count point counts, index-aligned with @p point_sets.
+ *  @param[in] deviations The @b optional array of @p count base pointers to per-point position
+ *      uncertainties in metres, index-aligned with @p point_sets; @c NULL records none.
  *  @param[in] count Number of point sets in the tape.
  *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
  *  @param[in] progress The @b optional handler, called with entries admitted and @p count.
@@ -386,7 +381,8 @@ USEARCH_EXPORT typedef struct usearch_geospatial_traversal_stats_t {
  *  @return @p count on success, zero on failure.
  *
  *  Set @c i points at `point_counts[i] * layout_width` coordinates, row-major, in the index's
- *  layout order - degrees for the angular axes, metres for altitude, seconds for time.
+ *  layout order - degrees for the angular axes, metres for altitude, seconds for time - and,
+ *  when @p deviations is given, at `point_counts[i]` uncertainties in metres.
  *
  *  A batch is all-or-nothing. Every fallible step runs before the first entry identity is
  *  claimed, so a rejected batch publishes nothing - a cancelled one included, which reports
@@ -400,6 +396,7 @@ USEARCH_EXPORT size_t usearch_geospatial_add(                      //
     usearch_geospatial_index_t index, usearch_executor_t executor, //
     usearch_key_t const* keys,                                     //
     double const* const* point_sets, size_t const* point_counts,   //
+    double const* const* deviations,                               //
     size_t count,                                                  //
     usearch_geospatial_expansion_config_t const* config,           //
     usearch_progress_callback_t progress, void* progress_state,    //
@@ -442,7 +439,7 @@ USEARCH_EXPORT size_t usearch_geospatial_refine(                   //
  *  @brief Converts a query point set into the index's internal geometry, returning a
  *      handle reusable across searches of differing mode and axis selection.
  *
- *  @param[in] index The handle whose layout and characteristic speed govern conversion.
+ *  @param[in] index The handle whose layout governs conversion.
  *  @param[in] points Base pointer to `point_count * layout_width` coordinates.
  *  @param[in] point_count Number of positions; one is legal and is the point query.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
@@ -468,6 +465,7 @@ USEARCH_EXPORT void usearch_geospatial_release( //
  *  @param[in] queries_count Number of emplaced queries in the batch.
  *  @param[in] mode What "close" means for this search.
  *  @param[in] axes Which axes participate; narrowing never invalidates the graph.
+ *  @param[in] tolerance The @b optional radius and time window; @c NULL derives both as zero.
  *  @param[in] wanted Upper bound on matches per query - the "k" in "kANN".
  *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
  *  @param[in] progress The @b optional handler, called with queries resolved and their count.
@@ -480,7 +478,8 @@ USEARCH_EXPORT void usearch_geospatial_release( //
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *
- *  Scores are metres: route scores are leash lengths, the rest are separations.
+ *  Scores are metres, except overlap, which is a count of query points: route scores are
+ *  leash lengths, the rest are separations.
  *
  *  A cancelled search reports @c usearch_error_cancelled_k and leaves every output row
  *  indeterminate. A second thread driving @p executor reports @c usearch_error_contended_k
@@ -490,6 +489,7 @@ USEARCH_EXPORT void usearch_geospatial_search(                          //
     usearch_geospatial_index_t index, usearch_executor_t executor,      //
     usearch_geospatial_emplaced_t const* queries, size_t queries_count, //
     usearch_geospatial_mode_t mode, usearch_geospatial_axes_t axes,     //
+    usearch_geospatial_tolerance_t const* tolerance,                    //
     size_t wanted,                                                      //
     usearch_geospatial_expansion_config_t const* config,                //
     usearch_progress_callback_t progress, void* progress_state,         //
@@ -500,14 +500,16 @@ USEARCH_EXPORT void usearch_geospatial_search(                          //
     usearch_error_t* error);
 
 /**
- *  @brief Reports every entry scoring within @p radius metres of one emplaced query -
- *      the containment counterpart of the ranked search, unbounded in result count.
+ *  @brief Reports every entry scoring within the tolerance of one emplaced query - the
+ *      containment counterpart of the ranked search, unbounded in result count.
  *
- *  Exact only up to the graph's reachability: a candidate the traversal never visits is
- *  never reported. Callers needing certainty over a small radius are better served by a
- *  cell-keyed posting list, which answers containment without approximation.
+ *  Complete on the converged graph: the walk widens its pool by the cone graph's spanner
+ *  bound before trusting it, so every candidate inside the tolerance is enumerated, at
+ *  about thirty times the cost of the ball it reports. A tolerance of zero metres is
+ *  rejected here, since containment needs a radius.
  *
  *  @param[in] executor Lanes and scratch to fan out over; its kind must match the residency.
+ *  @param[in] tolerance The radius and time window; @c metres must be positive.
  *  @param[in] progress The @b optional handler, called with entries written and @p capacity.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[in] capacity Number of slots available in @p keys and @p distances.
@@ -522,7 +524,7 @@ USEARCH_EXPORT size_t usearch_geospatial_within(                    //
     usearch_geospatial_index_t index, usearch_executor_t executor,  //
     usearch_geospatial_emplaced_t query,                            //
     usearch_geospatial_mode_t mode, usearch_geospatial_axes_t axes, //
-    double radius,                                                  //
+    usearch_geospatial_tolerance_t const* tolerance,                //
     usearch_progress_callback_t progress, void* progress_state,     //
     usearch_key_t* keys, usearch_distance_t* distances,             //
     size_t capacity,                                                //
@@ -543,6 +545,7 @@ USEARCH_EXPORT void usearch_geospatial_search_if(                       //
     usearch_geospatial_index_t index, usearch_executor_t executor,      //
     usearch_geospatial_emplaced_t const* queries, size_t queries_count, //
     usearch_geospatial_mode_t mode, usearch_geospatial_axes_t axes,     //
+    usearch_geospatial_tolerance_t const* tolerance,                    //
     size_t wanted,                                                      //
     usearch_geospatial_expansion_config_t const* config,                //
     usearch_predicate_t predicate, void* predicate_state,               //
@@ -605,7 +608,7 @@ USEARCH_EXPORT size_t usearch_geospatial_get(                               //
  *      consumed and must not be used afterwards, not even for @c usearch_geospatial_free.
  *
  *  @param[inout] index The handle absorbing the donors.
- *  @param[in] executor The lanes and scratch the merge fans out over, one donor per lane.
+ *  @param[in] executor The threads and scratch the merge fans out over, one donor per thread.
  *  @param[in] donors Array of @p donors_count handles, every one of them consumed.
  *  @param[in] donors_count Number of entries in @p donors.
  *  @param[in] progress The @b optional handler, called with donors absorbed and their count.
@@ -614,7 +617,7 @@ USEARCH_EXPORT size_t usearch_geospatial_get(                               //
  *
  *  Readers of @p index may keep searching throughout, since unpublished entries hide behind
  *  the watermark. Absorbing a group costs the wall clock of its largest source rather than
- *  the sum of them, because the lanes advance in parallel.
+ *  the sum of them, because the threads advance in parallel.
  *
  *  Cancellation stops @b between donors, which makes this the one verb where it is not
  *  all-or-nothing: donors already absorbed stay absorbed, and the rest stay live handles the
@@ -643,35 +646,32 @@ USEARCH_EXPORT usearch_geospatial_cursor_t usearch_geospatial_cursor(usearch_geo
  *  @return Number of entries written; zero when the snapshot is exhausted.
  *
  *  The borrowed pointers reach into the index's arena and stay valid until the cursor moves
- *  or closes. Their coordinates are the internal Earth-fixed metres, not the geodetic degrees
- *  inserted.
+ *  or closes. Their coordinates are the internal Earth-fixed integer centimetres, three per
+ *  point, not the geodetic degrees inserted.
  */
 USEARCH_EXPORT size_t usearch_geospatial_cursor_next(        //
     usearch_geospatial_cursor_t cursor, usearch_key_t* keys, //
-    float const** point_sets, size_t* point_counts, size_t wanted, usearch_error_t* error);
+    int32_t const** point_sets, size_t* point_counts, size_t wanted, usearch_error_t* error);
 
 /** @brief Releases the cursor. */
 USEARCH_EXPORT void usearch_geospatial_cursor_free(usearch_geospatial_cursor_t cursor);
 
-/**
- *  @brief Reports the expected serialized size of the index in bytes.
- */
-USEARCH_EXPORT size_t usearch_geospatial_serialized_length(usearch_geospatial_index_t index, usearch_error_t* error);
+/** @brief Bytes one monolith takes under the default layout; a manifest's parts sum to about the same. */
+USEARCH_EXPORT size_t usearch_geospatial_storage_requirements(usearch_geospatial_index_t index, usearch_error_t* error);
 
 /**
  *  @brief Saves the index under @p path. Demands a mutation-free window; concurrent readers
  *      keep searching throughout.
  *
  *  @param[in] index The handle to be written.
- *  @param[in] executor The lanes and scratch the write fans out over, one shard per lane.
+ *  @param[in] executor The threads and scratch the write fans out over, one shard per thread.
  *  @param[in] path Destination path, whose extension picks the layout.
- *  @param[in] progress The @b optional handler, called with shards written and their count.
+ *  @param[in] progress The @b optional handler, called with parts written and their count.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *
- *  A cancelled save leaves the shards it already wrote on disk and writes no manifest
- *  referencing them, so the checkpoint reads as absent rather than half-valid. Those
- *  leftovers are the caller's to remove.
+ *  A cancelled save leaves the parts it already wrote and no manifest referencing them, so the
+ *  checkpoint reads as absent rather than half-valid. Those leftovers are the caller's to remove.
  */
 USEARCH_EXPORT void usearch_geospatial_save(                       //
     usearch_geospatial_index_t index, usearch_executor_t executor, //
@@ -683,19 +683,18 @@ USEARCH_EXPORT void usearch_geospatial_save(                       //
  *  @brief Loads a checkpoint into an initialized handle, with the handle's residency
  *      deciding the behavior: materialize into RAM, upload to the device, or open in place
  *      on disk - the read-only form, where mutating verbs fail. A handle whose geometry was
- *      left zeroed freezes it here, from the checkpoint's own headers, characteristic speed
- *      included.
+ *      left zeroed freezes it here, from the checkpoint's own headers.
  *
  *  @param[inout] index The handle to be populated.
- *  @param[in] executor The lanes and scratch the read fans out over, one shard per lane.
+ *  @param[in] executor The threads and scratch the read fans out over, one shard per thread.
  *  @param[in] path Checkpoint path - a monolith, or a manifest naming many.
- *  @param[in] progress The @b optional handler, called with shards placed and their count.
+ *  @param[in] progress The @b optional handler, called with parts placed and their count.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *
- *  Where the shards end up is the handle's own memory domains, never the manifest's. A shard
+ *  Where the parts end up is the handle's own memory domains, never the manifest's. A part
  *  carries its own length in its header, so a second load skips whatever already arrived
- *  whole and cancelling costs the shard in flight rather than everything behind it.
+ *  whole and cancelling costs the part in flight rather than everything behind it.
  */
 USEARCH_EXPORT void usearch_geospatial_load(                       //
     usearch_geospatial_index_t index, usearch_executor_t executor, //

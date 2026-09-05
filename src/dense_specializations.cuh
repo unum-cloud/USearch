@@ -194,7 +194,7 @@ inline constexpr gpu_class_name_t gpu_class_names_k[] = {
 #if USEARCH_BUILD_CUDA
 /** @brief Lowers one GPU class onto the CUDA architecture ceiling its kits compile up to;
  *      Rubin rides the newest compiled ceiling until its own kits land. */
-consteval cuda_arch_t cuda_arch_of(gpu_class_t gpu_class) noexcept {
+constexpr cuda_arch_t cuda_arch_of(gpu_class_t gpu_class) noexcept {
     switch (gpu_class) {
     case gpu_class_t::nvidia_hopper_k: return cuda_arch_hopper_k;
     case gpu_class_t::nvidia_blackwell_k:
@@ -337,7 +337,7 @@ struct specialized_index {
     std::size_t size() const noexcept { return index.size(); }
     std::size_t capacity() const noexcept { return index.capacity(); }
     std::size_t memory_usage() const noexcept { return index.memory_usage(); }
-    std::size_t serialized_length() const noexcept { return index.serialized_length(); }
+    std::size_t storage_requirements() const noexcept { return index.storage_requirements(save_config_t {}).value; }
     std::size_t count(key_t const& key) const noexcept { return index.count(key); }
     std::size_t get(key_t const& key, vectors_span_t vectors, std::size_t wanted) const noexcept {
         return index.get(key, vectors, wanted);
@@ -360,10 +360,25 @@ struct specialized_index {
         return index.search(queries, executor, config, wanted, keys, distances, counts, predicate);
     }
     status_t save(std::string_view path, executor_t& executor, shard_ticks_t& ticks) noexcept {
-        return index.save(path, executor, ticks);
+        return index.save(path, save_config_of(path), executor, ticks);
+    }
+    status_t save(bytes_span_t buffer, executor_t& executor, shard_ticks_t& ticks) noexcept {
+        return index.save(buffer, save_config_of({}), executor, ticks);
     }
     status_t load(std::string_view path, executor_t& executor, shard_ticks_t& ticks) noexcept {
-        return index.load(path, executor, ticks);
+        return index.load(path, load_config_t {}, executor, ticks);
+    }
+    status_t load(bytes_view_t buffer, executor_t& executor, shard_ticks_t& ticks) noexcept {
+        return index.load(buffer, load_config_t {}, executor, ticks);
+    }
+
+    /** @brief The C layer's save config: the path's suffix picks the layout, the residency the
+     *      contract - device planes cannot be settlement-probed, so a GPU handle certifies. */
+    static save_config_t save_config_of(std::string_view path) noexcept {
+        save_config_t config;
+        config.layout = path.ends_with(".json") ? checkpoint_layout_t::distributed_k : checkpoint_layout_t::monolith_k;
+        if constexpr (is_vram_index<index_type_>) config.synchronization = synchronization_t::immutable_k;
+        return config;
     }
 };
 

@@ -14,18 +14,20 @@
  *  @section dense_index_serialization Serialization
  *
  *  Checkpoints ride the SafeGraphs interchange format, and the path extension picks the layout. A
- *  @c .safegraphs path is one monolith: a self-describing file holding one shard's vectors,
- *  neighbor lists, and its key column. A @c .safegraphs.json path is a manifest: a small JSON
- *  catalog of many such monoliths - each with shard-local node ids, so edges never cross files -
- *  with every shard path resolved relative to the manifest. A manifest records where its shards
- *  were written, never where a reader must keep them: loading into a handle that names memory
- *  domains places them across those domains as it reads, and loading into one that names none
- *  opens every shard where it already sits and moves no bytes. So a checkpoint written from a
- *  mounted bucket stripes onto local drives by being loaded, and a symlinked manifest entry still
- *  works for anyone who would rather arrange files than name domains. In-memory buffers hold single
- *  monoliths only, since a manifest's relative paths have nothing to resolve against in memory.
- *  Checkpoints are residency-portable: one file materializes into RAM, uploads to a device, or
- *  opens in place on disk.
+ *  @c .safegraphs path is one monolith: a self-describing file holding every shard's vectors,
+ *  neighbor lists and keys as one graph, rows in placement order and node ids rebased. A
+ *  @c .safegraphs.json path is a manifest: a small JSON catalog of one monolith per shard - each
+ *  with shard-local node ids, so edges never cross files - with every part resolved relative to
+ *  the manifest. Loading reads the content, never the extension, so either form loads into any
+ *  shard count: part @c p lands whole on shard @c p modulo the shard count. A manifest records
+ *  where its parts were written, never where a reader must keep them, so a checkpoint written
+ *  from a mounted bucket lands across a handle's own memory domains as it loads. In-memory
+ *  buffers hold single monoliths only, since a manifest's relative paths have nothing to resolve
+ *  against in memory. A cancelled or failed save leaves a file without its header, which every
+ *  reader rejects, and a cancelled or failed load publishes nothing.
+ *
+ *  A file is read through a memory mapping, so a path and a buffer are the same bytes reached two
+ *  ways, and a checkpoint larger than memory costs only the pages a traversal touches.
  *
  *  @section dense_index_gpu_acceleration GPU Acceleration & Constraints
  *
@@ -561,10 +563,11 @@ USEARCH_EXPORT size_t usearch_dense_find_next(                         //
 USEARCH_EXPORT void usearch_dense_find_free(usearch_dense_finder_t finder);
 
 /**
- *  @brief Reports the expected serialized size in bytes: every shard file, plus the
- *      manifest when the index spans more than one.
+ *  @brief Reports the bytes one monolith of the index takes under the default layout - what
+ *      @c usearch_dense_save_buffer needs; a manifest checkpoint's parts sum to about the same,
+ *      plus the manifest.
  */
-USEARCH_EXPORT size_t usearch_dense_serialized_length(usearch_dense_index_t index, usearch_error_t* error);
+USEARCH_EXPORT size_t usearch_dense_storage_requirements(usearch_dense_index_t index, usearch_error_t* error);
 
 /**
  *  @brief Saves the index under @p path in the layout its extension picks - one monolith, or a
@@ -579,9 +582,9 @@ USEARCH_EXPORT size_t usearch_dense_serialized_length(usearch_dense_index_t inde
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *
- *  A cancelled save leaves the shards it already wrote on disk and writes no manifest referencing
- *  them, so the checkpoint reads as absent rather than half-valid. Those leftovers are the
- *  caller's to remove.
+ *  A cancelled or failed monolith save leaves a file without its header, which every reader
+ *  rejects; a cancelled manifest save leaves the parts it already wrote and no manifest, so the
+ *  checkpoint reads as absent rather than half-valid. Those leftovers are the caller's to remove.
  */
 USEARCH_EXPORT void usearch_dense_save(                         //
     usearch_dense_index_t index, usearch_executor_t executor,   //
@@ -602,23 +605,21 @@ USEARCH_EXPORT void usearch_dense_save(                         //
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *
- *  A handle whose geometry was left zeroed freezes it here, from the checkpoint's own headers.
+ *  A handle whose geometry was left zeroed freezes it here, from the checkpoint's own headers; a
+ *  handle already reserved must fit every shard's rows.
  *
- *  Point @p path at the @c .safegraphs.json manifest, never at one of the shards it enumerates.
+ *  Point @p path at the @c .safegraphs.json manifest, never at one of the parts it enumerates.
  *  The manifest is a small catalog that names every part and resolves each one relative to itself,
- *  so a checkpoint spread over a hundred files is opened by naming a single one. Naming a shard
- *  directly is legal and loads exactly that shard, which is a fragment of the index rather than
- *  the index.
+ *  so a checkpoint spread over a hundred files is opened by naming a single one. Naming a part
+ *  directly is legal and loads exactly that part as a monolith, which is a fragment of the index
+ *  rather than the index.
  *
- *  Where the shards end up is the handle's own memory domains, never the manifest's: a checkpoint
- *  written from a mounted bucket and loaded by a handle naming four drives places its shards
- *  across those four as it reads, while a handle naming no domains opens every shard where the
- *  manifest already points and moves nothing.
+ *  Where the parts end up is the handle's own memory domains, never the manifest's: part @c p
+ *  lands whole on shard @c p modulo the shard count, so a checkpoint written from a mounted bucket
+ *  and loaded by a handle naming four domains places its parts across those four as it reads.
  *
- *  Moving a checkpoint of any size is therefore resumable. A shard carries its own length in its
- *  header, so a second load skips whatever already arrived whole, and cancelling costs the shard
- *  in flight rather than everything behind it. A cancelled or failed load reports its status and
- *  leaves the shards already placed populated - clear or free the handle before loading again.
+ *  A cancelled or failed load reports its status and publishes nothing: the handle is empty
+ *  afterwards and loads cleanly again.
  */
 USEARCH_EXPORT void usearch_dense_load(                         //
     usearch_dense_index_t index, usearch_executor_t executor,   //
@@ -633,7 +634,7 @@ USEARCH_EXPORT void usearch_dense_load(                         //
  *  @param[out] options Receives the geometry and metric the checkpoint froze; placement untouched.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *
- *  A manifest answers from its own summary, so no shard is opened and the cost does not grow with
+ *  A manifest answers from its summary and its first part's header, so the cost does not grow with
  *  the index. The placement fields stay untouched because a checkpoint records where it was
  *  written, never where a reader must keep it - those remain the caller's to fill before
  *  @c usearch_dense_init.
@@ -647,17 +648,18 @@ USEARCH_EXPORT void usearch_dense_metadata( //
  *
  *  @param[in] index The handle to be written.
  *  @param[in] executor The executor to fan out over; its kind must match the residency.
- *  @param[out] buffer Destination of at least @c usearch_dense_serialized_length bytes.
+ *  @param[out] buffer Destination of at least @c usearch_dense_storage_requirements bytes.
  *  @param[in] progress The @b optional handler, called with bytes written; @c NULL skips it.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *
- *  Buffers hold single monoliths only, so an index spanning several shards refuses here and wants
- *  the path form, whose manifest has somewhere to resolve relative paths against.
+ *  The buffer holds one monolith of every shard - rows in placement order, node ids rebased - so
+ *  it reads as one graph and loads into any shard count. It is the same shape the path-taking
+ *  sibling writes into its own mapping, so the two produce identical bytes.
  *
  *  Writing to memory is not writing quickly. A terabyte monolith on a handful of cores runs for
  *  minutes, so this reports and cancels like its path-taking sibling, and a cancelled call leaves
- *  @p buffer holding an incomplete monolith no load will accept.
+ *  @p buffer without the header, which no load will accept.
  */
 USEARCH_EXPORT void usearch_dense_save_buffer(                  //
     usearch_dense_index_t index, usearch_executor_t executor,   //
@@ -676,10 +678,10 @@ USEARCH_EXPORT void usearch_dense_save_buffer(                  //
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *
- *  A residency that opens its checkpoint in place demands @p buffer outlive the handle, since
- *  nothing is copied - and for that residency the call is bounded by parsing a header rather than
- *  by the monolith's size. Every other residency materializes the bytes, so it reports and cancels
- *  like its path-taking sibling, publishing nothing when stopped.
+ *  The bytes materialize into the handle's own shards, the monolith landing whole on the first,
+ *  so this reports and cancels like its path-taking sibling and publishes nothing when stopped.
+ *  That sibling reaches the same bytes through a mapping, so @p buffer needs no file behind it
+ *  and a mapped file needs no copy into one.
  */
 USEARCH_EXPORT void usearch_dense_load_buffer(                  //
     usearch_dense_index_t index, usearch_executor_t executor,   //

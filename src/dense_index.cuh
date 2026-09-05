@@ -30,6 +30,7 @@
 #include <numkong/cast.h>         // `nk_cast` - converting foreign scalar rows at the boundary
 
 #include "dense_specializations.cuh"
+#include "usearch/utilities/ram_device.hpp" // `forkunion_allocator`, `no_memory_domain_k` - the multi-indexes' host tables
 
 #pragma region Multi Index
 
@@ -287,7 +288,8 @@ struct punned_dense_index_t {
     char capabilities_string[128] = {};
 
     template <typename variant_type_>
-    explicit punned_dense_index_t(std::in_place_type_t<variant_type_> tag) noexcept : variants(tag) {}
+    explicit punned_dense_index_t(std::in_place_type_t<variant_type_> tag, forkunion_allocator_t allocator) noexcept
+        : variants(tag, allocator) {}
 };
 
 /** @brief The arms' explicit instantiation declarations: every body compiles in its dtype's shard TU,
@@ -601,12 +603,23 @@ static void compose_capabilities(punned_dense_index_t& handle, multi_type_& vari
 }
 #endif
 
+/** @brief The host allocator a multi-index keeps its tables on: the first named memory domain
+ *      on RAM, the heap's domain otherwise. */
+template <typename multi_type_>
+static forkunion_allocator_t host_allocator_of(usearch_dense_options_t const& options) noexcept {
+    if constexpr (is_ram_index<multi_type_>)
+        if (options.ram.memory_domains && options.ram.memory_domains_count)
+            return forkunion_allocator_t {static_cast<fu_memory_domain_id_t>(options.ram.memory_domains[0])};
+    return forkunion_allocator_t {no_memory_domain_k};
+}
+
 /** @brief Allocates the handle holding @p variant_type_, places its shards, and publishes the
  *      opaque pointer. */
 template <typename variant_type_>
 static usearch_dense_index_t make_punned_dense_index(usearch_dense_options_t const* options,
                                                      usearch_error_t* error) noexcept {
-    punned_dense_index_t* const handle = new (std::nothrow) punned_dense_index_t(std::in_place_type_t<variant_type_>());
+    punned_dense_index_t* const handle = new (std::nothrow)
+        punned_dense_index_t(std::in_place_type_t<variant_type_>(), host_allocator_of<variant_type_>(*options));
     if (!handle) return propagate_error(usearch_error_out_of_memory_k, error, "Failed to allocate the index"), nullptr;
     handle->requested_dimensions = options->dimensions;
     handle->requested_connectivity = options->connectivity ? static_cast<connectivity_t>(options->connectivity)
@@ -888,8 +901,8 @@ static void search_dense_rows(usearch_dense_index_t index, usearch_executor_t pu
                 // The engines score in f32 and the ABI in double, so every ranking is staged and
                 // scattered; queries in a foreign scalar type convert chunk by chunk.
                 std::size_t const chunk = min_of(queries_count, increment_rows_k);
-                growing_buffer<key_t> staged_keys;
-                growing_buffer<distance_t> staged_distances;
+                growing_buffer<key_t> staged_keys {global_allocator};
+                growing_buffer<distance_t> staged_distances {global_allocator};
                 if (failed(staged_keys.resize(chunk * wanted)) || failed(staged_distances.resize(chunk * wanted)))
                     return propagate_error(usearch_error_out_of_memory_k, error, "Failed to stage the output planes"),
                            void();
@@ -1160,11 +1173,22 @@ USEARCH_EXPORT size_t usearch_dense_get(            //
 
 #pragma region Serialization
 
-USEARCH_EXPORT size_t usearch_dense_serialized_length(usearch_dense_index_t index, usearch_error_t* error) {
+USEARCH_EXPORT size_t usearch_dense_storage_requirements(usearch_dense_index_t index, usearch_error_t* error) {
     auto* punned_index = reinterpret_cast<punned_dense_index_t*>(index);
     return propagate_success(error),
-           std::visit([](auto& variant) { return specialized_index {variant}.serialized_length(); },
+           std::visit([](auto& variant) { return specialized_index {variant}.storage_requirements(); },
                       punned_index->variants);
+}
+
+/** @brief Fills the geometry and metric a checkpoint froze into @p options; placement stays. */
+static void adopt_metadata(safegraphs_metadata_t const& metadata, usearch_dense_options_t* options) noexcept {
+    options->dimensions = regular_width(metadata.value_shape).value_or(0);
+    options->connectivity = metadata.connectivity;
+    // Our own checkpoints name the stored scalar outright; a foreign file speaks only its column dtype.
+    std::string_view const quantization = metadata.quantization.empty() ? dtype_name(metadata.value_dtype)
+                                                                        : metadata.quantization.view();
+    options->quantization = usearch_scalar_of(nk_dtype_named(quantization.data(), quantization.size()));
+    options->metric = usearch_metric_of(metadata.metric.view());
 }
 
 USEARCH_EXPORT void usearch_dense_save(                              //
@@ -1211,13 +1235,60 @@ USEARCH_EXPORT void usearch_dense_metadata( //
         return propagate_error(usearch_error_malformed_input_k, error, "The path and options must not be null"), void();
     auto const [metadata, read] = safegraphs_read_metadata(std::string_view {path.data, path.length});
     if (failed(read)) return propagate_error(read, error), void();
-    options->dimensions = metadata.dimensions;
-    options->connectivity = metadata.connectivity;
-    // Our own checkpoints name the stored scalar outright; a foreign file speaks only its column dtype.
-    std::string_view const quantization = metadata.quantization.empty() ? dtype_name(metadata.value_dtype)
-                                                                        : metadata.quantization.view();
-    options->quantization = usearch_scalar_of(nk_dtype_named(quantization.data(), quantization.size()));
-    options->metric = usearch_metric_of(metadata.metric.view());
+    adopt_metadata(metadata, options);
+    propagate_success(error);
+}
+
+USEARCH_EXPORT void usearch_dense_save_buffer(                       //
+    usearch_dense_index_t index, usearch_executor_t punned_executor, //
+    usearch_bytes_span_t buffer,                                     //
+    usearch_progress_callback_t progress, void* progress_state,      //
+    usearch_error_t* error) {
+    auto* punned_index = reinterpret_cast<punned_dense_index_t*>(index);
+    if (!buffer.data && buffer.length)
+        return propagate_error(usearch_error_malformed_input_k, error, "The buffer must not be null"), void();
+    std::visit(
+        [&]<typename variant_type_>(variant_type_& variant) {
+            typename variant_type_::executor_t* const executor = executor_of<variant_type_>(punned_executor, error);
+            if (!executor) return;
+            shard_ticks_t ticks {progress, progress_state, specialized_index {variant}.shards_count()};
+            propagate_error(specialized_index {variant}.save(
+                                bytes_span_t {reinterpret_cast<byte_t*>(buffer.data), buffer.length}, *executor, ticks),
+                            error);
+        },
+        punned_index->variants);
+}
+
+USEARCH_EXPORT void usearch_dense_load_buffer(                       //
+    usearch_dense_index_t index, usearch_executor_t punned_executor, //
+    usearch_bytes_view_t buffer,                                     //
+    usearch_progress_callback_t progress, void* progress_state,      //
+    usearch_error_t* error) {
+    auto* punned_index = reinterpret_cast<punned_dense_index_t*>(index);
+    if (!buffer.data || !buffer.length)
+        return propagate_error(usearch_error_malformed_input_k, error, "The buffer must not be empty"), void();
+    std::visit(
+        [&]<typename variant_type_>(variant_type_& variant) {
+            typename variant_type_::executor_t* const executor = executor_of<variant_type_>(punned_executor, error);
+            if (!executor) return;
+            shard_ticks_t ticks {progress, progress_state, specialized_index {variant}.shards_count()};
+            propagate_error(
+                specialized_index {variant}.load(
+                    bytes_view_t {reinterpret_cast<byte_t const*>(buffer.data), buffer.length}, *executor, ticks),
+                error);
+        },
+        punned_index->variants);
+}
+
+USEARCH_EXPORT void usearch_dense_metadata_buffer( //
+    usearch_bytes_view_t buffer, usearch_dense_options_t* options, usearch_error_t* error) {
+    if (!buffer.data || !buffer.length || !options)
+        return propagate_error(usearch_error_malformed_input_k, error, "The buffer and options must not be null"),
+               void();
+    auto const [metadata, read] = safegraphs_read_metadata(
+        bytes_view_t {reinterpret_cast<byte_t const*>(buffer.data), buffer.length});
+    if (failed(read)) return propagate_error(read, error), void();
+    adopt_metadata(metadata, options);
     propagate_success(error);
 }
 

@@ -453,7 +453,7 @@ def test_save_load_roundtrip(tmp_path):
 def test_save_load_through_buffers():
     """A `memoryview` is a checkpoint; a `bytes` path is a path."""
     index, _ = build_index(64, 16, quantization="f32")
-    buffer = memoryview(bytearray(index.serialized_length))
+    buffer = memoryview(bytearray(index.storage_requirements))
     index.save(buffer)
 
     reloaded = DenseIndex(**DenseIndex.metadata(buffer))

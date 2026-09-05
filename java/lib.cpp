@@ -216,7 +216,7 @@ enum measure_t {
     measure_dimensions_k = 2,
     measure_connectivity_k = 3,
     measure_memory_usage_k = 4,
-    measure_serialized_length_k = 5,
+    measure_storage_requirements_k = 5,
 };
 
 /** @brief How many traversal counters one call reports. */
@@ -361,7 +361,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_cloud_unum_usearch_DenseIndex_nativeProb
     case measure_dimensions_k: reading = usearch_dense_dimensions(index, &error); break;
     case measure_connectivity_k: reading = usearch_dense_connectivity(index, &error); break;
     case measure_memory_usage_k: reading = usearch_dense_memory_usage(index, &error); break;
-    case measure_serialized_length_k: reading = usearch_dense_serialized_length(index, &error); break;
+    case measure_storage_requirements_k: reading = usearch_dense_storage_requirements(index, &error); break;
     default: raise(environment, usearch_error_unknown_kind_k, "the probe names no measure"); return 0;
     }
     if (raised(environment, error)) return 0;

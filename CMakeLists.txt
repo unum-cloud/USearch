@@ -21,6 +21,20 @@ if (POLICY CMP0077)
     cmake_policy(SET CMP0077 NEW)
 endif ()
 
+# Probed only to default `USEARCH_BUILD_CUDA`: `check_language` caches the host compiler it paired with, which would
+# then outrank a caller's own `CMAKE_CUDA_HOST_COMPILER`.
+include(CheckLanguage)
+set(USEARCH_CAN_BUILD_CUDA OFF)
+if (NOT DEFINED USEARCH_BUILD_CUDA)
+    check_language(CUDA)
+    if (CMAKE_CUDA_COMPILER)
+        set(USEARCH_CAN_BUILD_CUDA ON)
+        message(STATUS "CUDA compiler available: ${CMAKE_CUDA_COMPILER}")
+    else ()
+        message(STATUS "CUDA compiler not available - the `.cu` units stay out of the build")
+    endif ()
+endif ()
+
 # Options
 option(USEARCH_INSTALL "Install CMake targets" OFF)
 
@@ -43,7 +57,7 @@ option(USEARCH_BUILD_JNI "Compile JNI library for Java bindings" OFF)
 option(USEARCH_BUILD_WOLFRAM "Compile Wolfram Language bindings" OFF)
 option(USEARCH_BUILD_SQLITE "Compile separate SQLite extension" OFF)
 option(USEARCH_BUILD_WASM "Compile WebAssembly bindings" OFF)
-option(USEARCH_BUILD_CUDA "Compile CUDA index tests & benchmarks" OFF)
+option(USEARCH_BUILD_CUDA "Compile CUDA index tests & benchmarks" ${USEARCH_CAN_BUILD_CUDA})
 
 # One list feeds every CUDA target, so a fat binary from this tree runs on the whole fleet. Ampere is the floor: its
 # cubins stay loadable on every later 8.x part, so "80" alone covers 86 and 89. Hopper and both Blackwell lines are

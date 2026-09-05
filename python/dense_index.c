@@ -357,10 +357,10 @@ static PyObject* DenseIndex_get_memory_usage(DenseIndex* self, void* closure) {
     return measure(self, usearch_dense_memory_usage);
 }
 
-static char const doc_DenseIndex_serialized_length[] = "Bytes a checkpoint of this index would take.";
+static char const doc_DenseIndex_storage_requirements[] = "Bytes one monolith checkpoint of this index takes.";
 
-static PyObject* DenseIndex_get_serialized_length(DenseIndex* self, void* closure) {
-    return measure(self, usearch_dense_serialized_length);
+static PyObject* DenseIndex_get_storage_requirements(DenseIndex* self, void* closure) {
+    return measure(self, usearch_dense_storage_requirements);
 }
 
 static char const doc_DenseIndex_capabilities[] = "The kernel family dispatch picked for this geometry.";
@@ -1590,13 +1590,13 @@ static PyObject* DenseIndex_find(PyObject* self, PyObject* const* args, Py_ssize
 
 #pragma region Serialization
 
-static char const doc_DenseIndex_save[] =                                                  //
-    "save(target) -> None\n"                                                               //
-    "\n"                                                                                   //
-    "Write the index to a path, or into a writable buffer of `serialized_length` bytes.\n" //
-    "Demands a mutation-free window; concurrent readers keep searching throughout.\n"      //
-    "\n"                                                                                   //
-    "Args:\n"                                                                              //
+static char const doc_DenseIndex_save[] =                                                     //
+    "save(target) -> None\n"                                                                  //
+    "\n"                                                                                      //
+    "Write the index to a path, or into a writable buffer of `storage_requirements` bytes.\n" //
+    "Demands a mutation-free window; concurrent readers keep searching throughout.\n"         //
+    "\n"                                                                                      //
+    "Args:\n"                                                                                 //
     "  target (str | os.PathLike | buffer): Where the checkpoint goes.";
 
 /** @brief Where a checkpoint lives, as the argument's own type spells it. */
@@ -1773,13 +1773,14 @@ static PyMethodDef DenseIndex_methods[] = {
 };
 
 static PyGetSetDef DenseIndex_getset[] = {
-    {"size", (getter)DenseIndex_get_size, NULL, doc_DenseIndex_size, NULL},                                        //
-    {"capacity", (getter)DenseIndex_get_capacity, NULL, doc_DenseIndex_capacity, NULL},                            //
-    {"dimensions", (getter)DenseIndex_get_dimensions, NULL, doc_DenseIndex_dimensions, NULL},                      //
-    {"connectivity", (getter)DenseIndex_get_connectivity, NULL, doc_DenseIndex_connectivity, NULL},                //
-    {"memory_usage", (getter)DenseIndex_get_memory_usage, NULL, doc_DenseIndex_memory_usage, NULL},                //
-    {"serialized_length", (getter)DenseIndex_get_serialized_length, NULL, doc_DenseIndex_serialized_length, NULL}, //
-    {"capabilities", (getter)DenseIndex_get_capabilities, NULL, doc_DenseIndex_capabilities, NULL},                //
+    {"size", (getter)DenseIndex_get_size, NULL, doc_DenseIndex_size, NULL},                         //
+    {"capacity", (getter)DenseIndex_get_capacity, NULL, doc_DenseIndex_capacity, NULL},             //
+    {"dimensions", (getter)DenseIndex_get_dimensions, NULL, doc_DenseIndex_dimensions, NULL},       //
+    {"connectivity", (getter)DenseIndex_get_connectivity, NULL, doc_DenseIndex_connectivity, NULL}, //
+    {"memory_usage", (getter)DenseIndex_get_memory_usage, NULL, doc_DenseIndex_memory_usage, NULL}, //
+    {"storage_requirements", (getter)DenseIndex_get_storage_requirements, NULL, doc_DenseIndex_storage_requirements,
+     NULL},                                                                                         //
+    {"capabilities", (getter)DenseIndex_get_capabilities, NULL, doc_DenseIndex_capabilities, NULL}, //
     {NULL, NULL, NULL, NULL, NULL},
 };
 

@@ -491,7 +491,7 @@ USEARCH_EXPORT size_t usearch_matrix_get(                             //
  *      consumed and must not be used afterwards, not even for @c usearch_matrix_free.
  *
  *  @param[inout] index The handle absorbing the donors.
- *  @param[in] executor The lanes and scratch the merge fans out over, one donor per lane.
+ *  @param[in] executor The threads and scratch the merge fans out over, one donor per thread.
  *  @param[in] donors Array of @p donors_count handles, every one of them consumed.
  *  @param[in] donors_count Number of entries in @p donors.
  *  @param[in] progress The @b optional handler, called with donors absorbed and their count.
@@ -500,7 +500,7 @@ USEARCH_EXPORT size_t usearch_matrix_get(                             //
  *
  *  Readers of @p index may keep searching throughout, since unpublished entries hide behind
  *  the watermark. Absorbing a group costs the wall clock of its largest source rather than
- *  the sum of them, because the lanes advance in parallel.
+ *  the sum of them, because the threads advance in parallel.
  *
  *  Cancellation stops @b between donors, which makes this the one verb where it is not
  *  all-or-nothing: donors already absorbed stay absorbed, and the rest stay live handles the
@@ -536,25 +536,22 @@ USEARCH_EXPORT size_t usearch_matrix_cursor_next(        //
 /** @brief Releases the cursor. */
 USEARCH_EXPORT void usearch_matrix_cursor_free(usearch_matrix_cursor_t cursor);
 
-/**
- *  @brief Reports the expected serialized size of the index in bytes.
- */
-USEARCH_EXPORT size_t usearch_matrix_serialized_length(usearch_matrix_index_t index, usearch_error_t* error);
+/** @brief Bytes one monolith takes under the default layout; a manifest's parts sum to about the same. */
+USEARCH_EXPORT size_t usearch_matrix_storage_requirements(usearch_matrix_index_t index, usearch_error_t* error);
 
 /**
  *  @brief Saves the index under @p path. Demands a mutation-free window; concurrent readers
  *      keep searching throughout.
  *
  *  @param[in] index The handle to be written.
- *  @param[in] executor The lanes and scratch the write fans out over, one shard per lane.
+ *  @param[in] executor The threads and scratch the write fans out over, one shard per thread.
  *  @param[in] path Destination path, whose extension picks the layout.
- *  @param[in] progress The @b optional handler, called with shards written and their count.
+ *  @param[in] progress The @b optional handler, called with parts written and their count.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *
- *  A cancelled save leaves the shards it already wrote on disk and writes no manifest
- *  referencing them, so the checkpoint reads as absent rather than half-valid. Those
- *  leftovers are the caller's to remove.
+ *  A cancelled save leaves the parts it already wrote and no manifest referencing them, so the
+ *  checkpoint reads as absent rather than half-valid. Those leftovers are the caller's to remove.
  */
 USEARCH_EXPORT void usearch_matrix_save(                        //
     usearch_matrix_index_t index, usearch_executor_t executor,  //
@@ -569,15 +566,15 @@ USEARCH_EXPORT void usearch_matrix_save(                        //
  *      left zeroed freezes it here, from the checkpoint's own headers.
  *
  *  @param[inout] index The handle to be populated.
- *  @param[in] executor The lanes and scratch the read fans out over, one shard per lane.
+ *  @param[in] executor The threads and scratch the read fans out over, one shard per thread.
  *  @param[in] path Checkpoint path - a monolith, or a manifest naming many.
- *  @param[in] progress The @b optional handler, called with shards placed and their count.
+ *  @param[in] progress The @b optional handler, called with parts placed and their count.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *
- *  Where the shards end up is the handle's own memory domains, never the manifest's. A shard
+ *  Where the parts end up is the handle's own memory domains, never the manifest's. A part
  *  carries its own length in its header, so a second load skips whatever already arrived
- *  whole and cancelling costs the shard in flight rather than everything behind it.
+ *  whole and cancelling costs the part in flight rather than everything behind it.
  */
 USEARCH_EXPORT void usearch_matrix_load(                        //
     usearch_matrix_index_t index, usearch_executor_t executor,  //
