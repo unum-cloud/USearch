@@ -12,7 +12,7 @@ add_executable(
     dense/ram_index_u1.cpp
 )
 setup_target(usearch_bench_dense_ram_index)
-target_compile_options(usearch_bench_dense_ram_index PRIVATE -march=native)
+target_compile_options(usearch_bench_dense_ram_index PRIVATE ${USEARCH_HOST_TUNING})
 target_include_directories(usearch_bench_dense_ram_index PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/test)
 target_link_libraries(
     usearch_bench_dense_ram_index PRIVATE clipp fmt::fmt yyjson ${USEARCH_FORKUNION_LIBRARY}
@@ -31,7 +31,7 @@ add_executable(
     dense/ram_indexes_u1.cpp
 )
 setup_target(usearch_bench_dense_ram_indexes)
-target_compile_options(usearch_bench_dense_ram_indexes PRIVATE -march=native)
+target_compile_options(usearch_bench_dense_ram_indexes PRIVATE ${USEARCH_HOST_TUNING})
 target_include_directories(usearch_bench_dense_ram_indexes PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/test)
 target_link_libraries(
     usearch_bench_dense_ram_indexes PRIVATE clipp fmt::fmt yyjson ${USEARCH_FORKUNION_LIBRARY}

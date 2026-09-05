@@ -263,6 +263,21 @@ if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif ()
 
+# Host tuning for the tests & benches only - never the distributable libraries - and only where the host is the target
+# and the compiler has a spelling for it; elsewhere the suite runs on its serial floor and the SIMD cells report
+# themselves skipped. Apple Clang's `-march=native` advertises only a subset of the host's features - no FP16 arithmetic
+# & FML, no SME - leaving NumKong's f16 kits serial; `-mcpu=native` is the complete AArch64 knob, as NumKong's own build
+# concludes.
+if (MSVC OR CMAKE_CROSSCOMPILING)
+    set(USEARCH_HOST_TUNING "")
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+    set(USEARCH_HOST_TUNING -mcpu=native)
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    set(USEARCH_HOST_TUNING -march=native)
+else ()
+    set(USEARCH_HOST_TUNING "")
+endif ()
+
 # Shared wiring for every target this project builds. Optimization and debug level are deliberately absent: they live in
 # `CMAKE_<LANG>_FLAGS_<CONFIG>`, where a preset or a command-line switch can move them. Only what the code actually
 # depends on - fast math, the diagnostics, the sanitizers - is pinned here.
@@ -527,6 +542,8 @@ if (USEARCH_BUILD_TEST_CPP OR USEARCH_BUILD_BENCH_CPP)
     if (NOT TARGET clipp)
         add_library(clipp INTERFACE)
         target_include_directories(clipp INTERFACE "$<BUILD_INTERFACE:${clipp_SOURCE_DIR}/include>")
+        # clipp still spells `std::result_of`, gone from libc++ in C++20 mode.
+        target_compile_definitions(clipp INTERFACE _LIBCPP_ENABLE_CXX20_REMOVED_TYPE_TRAITS)
     endif ()
 endif ()
 
