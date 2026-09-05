@@ -135,14 +135,12 @@ jobs:
             -DCMAKE_SYSTEM_NAME=Linux \
             -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.arch }} \
             -DUSEARCH_BUILD_LIB_C=1 \
-            -DUSEARCH_BUILD_SQLITE=1 \
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0
 
           cmake --build build_release --config Release
 
           cp build_release/libusearch_c.so "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.so"
-          cp build_release/libusearch_sqlite.so "usearch_sqlite_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.so"
 
           mkdir -p "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/DEBIAN"
           touch "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/DEBIAN/control"
@@ -214,7 +212,7 @@ jobs:
       - name: Build library (MinGW)
         if: matrix.arch != 'arm64'
         run: |
-          cmake -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_SQLITE=0 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 -B ./build_release
+          cmake -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 -B ./build_release
           cmake --build ./build_release --config Release
           mkdir pkg
           copy .\build_release\libusearch_c.dll pkg\
@@ -224,7 +222,7 @@ jobs:
       - name: Build library (MSVC ARM64)
         if: matrix.arch == 'arm64'
         run: |
-          cmake -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_SQLITE=0 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 -B ./build_release
+          cmake -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 -B ./build_release
           cmake --build ./build_release --config Release
           mkdir pkg
           copy .\build_release\libusearch_c.dll pkg\
@@ -278,7 +276,6 @@ jobs:
         run: |
           cmake -DCMAKE_BUILD_TYPE=Release \
                 -DUSEARCH_BUILD_LIB_C=1 \
-                -DUSEARCH_BUILD_SQLITE=1 \
                 -DUSEARCH_BUILD_TEST_CPP=0 \
                 -DUSEARCH_BUILD_BENCH_CPP=0 \
                 -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
@@ -288,7 +285,6 @@ jobs:
           cp build_release/libusearch_c.dylib pkg/
           cp -r include/usearch pkg/
           (cd pkg && zip -r ../usearch_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip libusearch_c.dylib usearch)
-          mv build_release/libusearch_sqlite.dylib usearch_sqlite_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.dylib
 
       - name: Upload native library for Java
         uses: actions/upload-artifact@v5
@@ -652,7 +648,6 @@ jobs:
             -DUSEARCH_BUILD_TEST_CPP=OFF \
             -DUSEARCH_BUILD_TEST_C=OFF \
             -DUSEARCH_BUILD_BENCH_CPP=OFF \
-            -DUSEARCH_BUILD_SQLITE=OFF \
             -DUSEARCH_USE_NUMKONG=ON \
             -DUSEARCH_USE_JEMALLOC=OFF
 

@@ -26,7 +26,6 @@ Overview
    contributing
    benchmarks
    format
-   sqlite/index
 
 .. toctree::
    :hidden:

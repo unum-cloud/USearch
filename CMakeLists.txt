@@ -55,7 +55,6 @@ option(USEARCH_BUILD_TEST_C "Compile a test for the C 99 interface" OFF)
 option(USEARCH_BUILD_LIB_C_STUB "Compile a brute-force stand-in for the C 99 interface" OFF)
 option(USEARCH_BUILD_JNI "Compile JNI library for Java bindings" OFF)
 option(USEARCH_BUILD_WOLFRAM "Compile Wolfram Language bindings" OFF)
-option(USEARCH_BUILD_SQLITE "Compile separate SQLite extension" OFF)
 option(USEARCH_BUILD_WASM "Compile WebAssembly bindings" OFF)
 option(USEARCH_BUILD_CUDA "Compile CUDA index tests & benchmarks" ${USEARCH_CAN_BUILD_CUDA})
 
@@ -573,8 +572,4 @@ endif ()
 
 if (${USEARCH_BUILD_JNI})
     add_subdirectory(java)
-endif ()
-
-if (${USEARCH_BUILD_SQLITE})
-    add_subdirectory(sqlite)
 endif ()

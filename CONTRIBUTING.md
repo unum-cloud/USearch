@@ -95,7 +95,6 @@ The CMakeLists.txt file has a number of options you can pass:
   - `USEARCH_BUILD_BENCH_CPP` - build the C++ benchmark suite
   - `USEARCH_BUILD_LIB_C` - build the C library
   - `USEARCH_BUILD_TEST_C` - build the C test suite
-  - `USEARCH_BUILD_SQLITE` - build the SQLite extension ([no Windows](https://gist.github.com/zeljic/d8b542788b225b1bcb5fce169ee28c55))
   - `USEARCH_BUILD_CUDA` - build the CUDA test & benchmark suites
 - Which GPUs to target:
   - `USEARCH_CUDA_ARCHITECTURES` - the architectures baked into the CUDA targets, `80;90a;100a;120a` by default: the Ampere floor, whose cubins stay loadable on every later 8.x part, then Hopper and both Blackwell lines, each architecture-specific because the kernels reach for instructions with no forward-compatible PTX. Set it to `native` while iterating on one machine.
@@ -112,7 +111,7 @@ The language bindings compile all three siblings in unconditionally, taking thei
 Putting all of this together, compiling all targets on most platforms should work with the following snippet:
 
 ```sh
-cmake -D CMAKE_BUILD_TYPE=Release -D USEARCH_USE_JEMALLOC=1 -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_BENCH_CPP=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1 -D USEARCH_BUILD_SQLITE=0 -B build_release
+cmake -D CMAKE_BUILD_TYPE=Release -D USEARCH_USE_JEMALLOC=1 -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_BENCH_CPP=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1 -B build_release
 
 cmake --build build_release --config Release
 build_release/usearch_test
