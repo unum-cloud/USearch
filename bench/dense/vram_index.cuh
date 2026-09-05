@@ -336,7 +336,7 @@ template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kin
     requires(cuda_kit_adapted<stored_dtype_, kernel_>)
 int stage_and_run(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options, int device) {
     using index_t = dense_vram_index<stored_dtype_, kernel_, arch_ceiling_, plane_allocator_, plane_allocator_,
-                                     cuda_device_allocator<byte_t>>;
+                                     cuda_device_allocator_t>;
     using bench_context_t = cuda_bench_context<index_t>;
     using streamed_t = streamed_dataset<dataset_scalar_type_, bench_context_t>;
     using scalar_t = typename bench_context_t::scalar_t;

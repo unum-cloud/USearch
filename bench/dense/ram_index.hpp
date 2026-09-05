@@ -347,11 +347,11 @@ bool save_index(streamed_dataset_type_& streamed) {
     using clock_t = stdc::steady_clock;
     auto& bench = streamed.bench;
     auto started = clock_t::now();
-    std::size_t const saved_bytes = save_checkpoint(bench.options, *bench.index, std::span {bench.results.id_to_row}, 0,
-                                                    1);
-    if (!saved_bytes) return false;
+    std::size_t const checkpoint_bytes = save_checkpoint(bench.options, *bench.index,
+                                                         std::span {bench.results.id_to_row}, 0, 1);
+    if (!checkpoint_bytes) return false;
     double const seconds = stdc::duration<double>(clock_t::now() - started).count();
-    fmt::println("Saved the index: {:.2f} GB in {:.2f} s", double(saved_bytes) / 1e9, seconds);
+    fmt::println("Saved the index: {:.2f} GB in {:.2f} s", double(checkpoint_bytes) / 1e9, seconds);
     return true;
 }
 

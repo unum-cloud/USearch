@@ -16,7 +16,8 @@
  */
 #pragma once
 
-#include <cmath> // `std::abs` for the rescale amplitude
+#include <cmath>   // `std::abs` for the rescale amplitude
+#include <cstring> // `std::memcpy` - the checkpoint runs
 
 #include <algorithm>   // `std::nth_element`, `std::min`
 #include <atomic>      // `std::atomic`
@@ -36,10 +37,10 @@
 #include <numkong/numkong.hpp>
 #include <stringzilla/stringzilla.hpp>
 
-#include "usearch/utilities/serialization.hpp"
+#include "usearch/utilities/safegraphs_format.hpp"
 
 #include "bench.hpp"
-#include "utilities/persisted_dataset.hpp" // `mmap_view_t`, `parse_matrix_header`, `matrix_save`
+#include "utilities/persisted_dataset.hpp" // `mapped_file_t`, `parse_matrix_header`, `matrix_save`
 #include "test.hpp"
 
 namespace unum::usearch {
@@ -325,6 +326,24 @@ static checkpoint_paths_t checkpoint_paths_of(bench_options_t const& options, st
             prefix + ".neighbors.ibin", prefix + ".rows.ibin"};
 }
 
+/** @brief Whether an index lives on a device, so its plans take a stream. */
+template <typename index_type_>
+constexpr bool device_resident_k = requires(index_type_ const& index) { index.device_specs(); };
+
+/** @brief Opens a save plan on either residency, the device one on the null stream. */
+template <typename index_type_>
+static auto plan_save_of(index_type_ const& index, synchronization_t synchronization) noexcept {
+    if constexpr (device_resident_k<index_type_>) return index.plan_save(synchronization, nullptr);
+    else return index.plan_save(synchronization);
+}
+
+/** @brief Opens a load plan of @p rows on either residency, the device one on the null stream. */
+template <typename index_type_>
+static auto plan_load_of(index_type_& index, std::size_t rows) noexcept {
+    if constexpr (device_resident_k<index_type_>) return index.plan_load(rows, nullptr);
+    else return index.plan_load(rows);
+}
+
 /** @brief Maps the CLI neighbor-list degree onto the closed @c connectivity_t tiling set. */
 inline connectivity_t connectivity_of(std::size_t degree) noexcept {
     if (degree == 16) return connectivity_16_k;
@@ -357,9 +376,9 @@ static bool load_checkpoint(bench_options_t const& options, index_type_& index, 
                             std::span<u32_t> id_to_row, std::size_t slot, std::size_t slot_count) {
     using scalar_t = typename index_type_::scalar_t;
     checkpoint_paths_t const paths = checkpoint_paths_of<index_type_>(options, options.load_name, slot, slot_count);
-    auto mapped_vectors = mmap_view_t::map(paths.vectors);
-    auto mapped_neighbors = mmap_view_t::map(paths.neighbors);
-    auto mapped_rows = mmap_view_t::map(paths.rows);
+    auto mapped_vectors = mapped_file_t::read(paths.vectors);
+    auto mapped_neighbors = mapped_file_t::read(paths.neighbors);
+    auto mapped_rows = mapped_file_t::read(paths.rows);
     if (mapped_vectors.status != status_t::success_k || mapped_neighbors.status != status_t::success_k ||
         mapped_rows.status != status_t::success_k) {
         fmt::println("Failed to map the {} checkpoint for slot {}", options.load_name, slot);
@@ -384,7 +403,27 @@ static bool load_checkpoint(bench_options_t const& options, index_type_& index, 
                                                                                         loaded_nodes, dimensions);
     nk::matrix_view<u32_t> const neighbors_view = view_matrix_payload<u32_t, u32_t>(mapped_neighbors.value.view(),
                                                                                     loaded_nodes, options.connectivity);
-    status_t const loaded = index.load(vectors_view, neighbors_view, synchronization_t::exclusive_k);
+    // The index fills its own chunks straight from the mapped dumps, both dense, one byte move each.
+    std::size_t const vectors_row_bytes = static_cast<std::size_t>(vectors_view.stride_bytes(0));
+    std::size_t const neighbors_row_bytes = static_cast<std::size_t>(neighbors_view.stride_bytes(0));
+    bytes_view_t const vectors_source {reinterpret_cast<byte_t const*>(vectors_view.byte_data()),
+                                       loaded_nodes * vectors_row_bytes};
+    bytes_view_t const neighbors_source {reinterpret_cast<byte_t const*>(neighbors_view.byte_data()),
+                                         loaded_nodes * neighbors_row_bytes};
+    auto planned = plan_load_of(index, loaded_nodes);
+    using node_id_t = typename index_type_::node_id_t;
+    iota_view<node_id_t> const local {0, static_cast<node_id_t>(loaded_nodes)};
+    status_t loaded = planned.status;
+    for (auto const step : planned.value.steps()) {
+        if (failed(loaded)) break;
+        std::size_t const first_row = step.source_rows.first;
+        loaded = planned.value.load_vectors(step,
+                                            vectors_source.subspan(first_row * vectors_row_bytes, step.vectors_bytes));
+        if (succeeded(loaded))
+            loaded = planned.value.load_neighbors(
+                step, neighbors_source.subspan(first_row * neighbors_row_bytes, step.neighbors_bytes), local);
+    }
+    if (succeeded(loaded)) loaded = planned.value.finish();
     if (loaded != status_t::success_k) {
         fmt::println("Failed to restore {}: status {}", paths.vectors, int(loaded));
         return false;
@@ -421,7 +460,29 @@ static std::size_t save_checkpoint(bench_options_t const& options, index_type_& 
         fmt::println("Failed to stage {} rows for serialization", shape.nodes);
         return 0;
     }
-    status_t const saved = index.save(vectors.span(), neighbors.span(), synchronization_t::immutable_k);
+    // The index hands out its chunks; the staged matrices are dense, so a chunk is one byte move each.
+    std::size_t const vectors_row_bytes = static_cast<std::size_t>(vectors.stride_bytes(0));
+    std::size_t const neighbors_row_bytes = static_cast<std::size_t>(neighbors.stride_bytes(0));
+    bytes_span_t const vectors_target {reinterpret_cast<byte_t*>(vectors.data()), shape.nodes * vectors_row_bytes};
+    bytes_span_t const neighbors_target {reinterpret_cast<byte_t*>(neighbors.data()),
+                                         shape.nodes * neighbors_row_bytes};
+    auto planned = plan_save_of(index, synchronization_t::immutable_k);
+    status_t saved = planned.status;
+    std::size_t widest = 0;
+    for (auto const step : planned.value.steps()) widest = std::max(widest, step.index_rows.size());
+    auto scratch = nk::matrix<node_id_t>::try_zeros({widest, shape.connectivity});
+    if (succeeded(saved) && widest && scratch.empty()) saved = status_t::bad_alloc_k;
+    for (auto const step : planned.value.steps()) {
+        if (failed(saved)) break;
+        std::size_t const first_row = step.source_rows.first;
+        saved = planned.value.save_vectors(step,
+                                           vectors_target.subspan(first_row * vectors_row_bytes, step.vectors_bytes));
+        if (succeeded(saved))
+            saved = planned.value.save_neighbors(
+                step, neighbors_target.subspan(first_row * neighbors_row_bytes, step.neighbors_bytes), node_id_t {0},
+                scratch.span());
+    }
+    if (succeeded(saved)) saved = planned.value.finish();
     if (saved != status_t::success_k) {
         fmt::println("Failed to serialize index {}: status {}", slot, int(saved));
         return 0;
@@ -541,7 +602,8 @@ inline void judge_hits(bench_options_t const& options, bench_results_t& results,
         double const self_at_1 = 100.0 * double(found_at_1) / queries;
         double const self_at_k = 100.0 * double(found_at_k) / queries;
         fmt::println("  self-recall@1: {:.2f}%", fmt::styled(self_at_1, verdict_style(self_at_1 >= 99.0)));
-        fmt::println("  self-recall@{}: {:.2f}%", options.top_k, fmt::styled(self_at_k, verdict_style(self_at_k >= 99.0)));
+        fmt::println("  self-recall@{}: {:.2f}%", options.top_k,
+                     fmt::styled(self_at_k, verdict_style(self_at_k >= 99.0)));
     }
     else if (!results.ground_truth.empty()) {
         std::size_t const judged_depth = std::min(options.top_k, results.ground_truth.extent(1));
@@ -568,7 +630,8 @@ inline void judge_hits(bench_options_t const& options, bench_results_t& results,
         double const overlap_at_k = 100.0 * double(shared) / (queries * double(judged_depth));
         double const gain_at_k = 100.0 * gain / (queries * ideal[judged_depth - 1]);
         fmt::println("  recall@1: {:.1f}%", fmt::styled(recall_at_1, verdict_style(recall_at_1 >= 90.0)));
-        fmt::println("  recall@{}: {:.1f}%", judged_depth, fmt::styled(recall_at_k, verdict_style(recall_at_k >= 99.0)));
+        fmt::println("  recall@{}: {:.1f}%", judged_depth,
+                     fmt::styled(recall_at_k, verdict_style(recall_at_k >= 99.0)));
         fmt::println("  overlap@{}: {:.1f}%", judged_depth, overlap_at_k);
         fmt::println("  ndcg@{}: {:.1f}%", judged_depth, gain_at_k);
     }

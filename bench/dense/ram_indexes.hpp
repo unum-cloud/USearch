@@ -89,7 +89,11 @@ struct bench_indexes_context {
     /** @brief The backend-neutral judgment state both phases fill. */
     bench_results_t results;
 
-    bench_indexes_context(bench_options_t const& options) noexcept : options(options) {}
+    /** @brief The host tables follow the first named memory domain, or the heap when none is named. */
+    bench_indexes_context(bench_options_t const& options) noexcept
+        : options(options),
+          indexes(forkunion_allocator_t {options.memory_domains.empty() ? no_memory_domain_k
+                                                                        : options.memory_domains.front()}) {}
 };
 
 /** @brief The checkpoint manifest path: dtype, kernel & connectivity stamped into the name, so
@@ -109,14 +113,16 @@ bool save_indexes(streamed_dataset_type_& streamed) {
     using bench_t = typename streamed_dataset_type_::bench_t;
     auto& bench = streamed.bench;
     std::string const path = checkpoint_path_of<typename bench_t::indexes_t>(bench.options, bench.options.save_name);
+    save_config_t config;
+    config.layout = checkpoint_layout_t::distributed_k;
     auto started = clock_t::now();
-    if (status_t const saved = bench.indexes.save(path, bench.executor); failed(saved)) {
+    if (status_t const saved = bench.indexes.save(path, config, bench.executor); failed(saved)) {
         fmt::println("Failed to save {}: {}", path, status_to_string(saved));
         return false;
     }
     double const seconds = stdc::duration<double>(clock_t::now() - started).count();
     fmt::println("Saved {} shards: {:.2f} GB in {:.2f} s", bench.indexes.shards_count(),
-                 double(bench.indexes.serialized_length()) / 1e9, seconds);
+                 double(bench.indexes.storage_requirements(config).value) / 1e9, seconds);
     return true;
 }
 
@@ -173,7 +179,7 @@ bool prepare(streamed_dataset_type_& streamed, fu_topology_t topology) {
     if (!bench.options.load_name.empty()) {
         std::string const path = checkpoint_path_of<typename bench_t::indexes_t>(bench.options,
                                                                                  bench.options.load_name);
-        if (status_t const restored = bench.indexes.load(path, bench.executor); failed(restored)) {
+        if (status_t const restored = bench.indexes.load(path, load_config_t {}, bench.executor); failed(restored)) {
             fmt::println("Failed to load {}: {}", path, status_to_string(restored));
             return false;
         }
