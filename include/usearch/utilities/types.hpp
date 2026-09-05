@@ -301,19 +301,13 @@ struct indexed_range {
 
     constexpr std::size_t size() const noexcept { return count; }
     constexpr bool empty() const noexcept { return !count; }
-    constexpr auto operator[](std::size_t position) const noexcept {
-        owner_type_ const& indexed = *owner;
-        return indexed[position];
-    }
+    constexpr auto operator[](std::size_t position) const noexcept { return (*owner)[position]; }
 
     struct iterator {
         owner_type_ const* owner = nullptr;
         std::size_t position = 0;
 
-        constexpr auto operator*() const noexcept {
-            owner_type_ const& indexed = *owner;
-            return indexed[position];
-        }
+        constexpr auto operator*() const noexcept { return (*owner)[position]; }
         constexpr iterator& operator++() noexcept { return ++position, *this; }
         constexpr bool operator==(iterator const& other) const noexcept { return position == other.position; }
         constexpr bool operator!=(iterator const& other) const noexcept { return position != other.position; }

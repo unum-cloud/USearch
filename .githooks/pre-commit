@@ -6,6 +6,8 @@
 # schedule while no new violation sneaks in, and each prints the specific reason when it fires.
 # The dispatch loop at the bottom diffs every staged file exactly once and hands the added lines
 # to each check through the `file` / `added` globals - the checks themselves are grep one-liners.
+# A check that needs scope reads the staged file whole and keeps only the hits whose line number
+# is in `added_lines`, which is the same contract reached from the other side.
 # Configuring the CMake build arms these hooks; see the `core.hooksPath` block in CMakeLists.txt.
 #
 # Bypass knowingly (you almost never should) with: git commit --no-verify
@@ -23,6 +25,18 @@ fail() { # fail <matches> <message-line>...
     for line in "$@"; do echo "pre-commit: $line"; done
     printf '%s\n' "$matches" | head -5
     failed=1
+}
+
+# The line numbers a staged file gained, read off the `@@ -a,b +c,d @@` headers of a zero-context
+# diff: the hunk adds lines `c` through `c + d - 1`, and a missing `,d` adds exactly one.
+added_line_numbers() { # added_line_numbers <path>
+    git diff --cached --unified=0 -- "$1" | awk '
+        /^@@/ {
+            split($3, range, ",")
+            start = substr(range[1], 2) + 0
+            count = (range[2] == "") ? 1 : range[2] + 0
+            for (line = start; line < start + count; ++line) print line
+        }'
 }
 
 # ASCII "->" arrows inside comments & docstrings - prose uses the Unicode arrow (→). The pattern
@@ -169,7 +183,9 @@ check_redundant_nodiscard() {
 # a bare `.data()` pointer is reserved for one-time lifts handed to syscalls and SIMD kernels.
 check_call_chained_subscript() {
     local chained
-    chained=$(printf '%s\n' "$added" | grep -E '\)\[' || true)
+    # An identifier must sit against the opening parenthesis, so a dereference `(*owner)[i]` and
+    # an array-reference parameter `(&ids)[width]` stay out of it - neither is a call.
+    chained=$(printf '%s\n' "$added" | grep -E '[A-Za-z0-9_>]\([^()]*\)\[' || true)
     [ -z "$chained" ] || fail "$chained" \
         "$file subscripts a call result - use operator()(i, j) or the container's operator[]:"
 }
@@ -257,36 +273,65 @@ check_doxygen_glued() {
 }
 
 # An `@section` line reads as a heading only when air surrounds it: the comment lines directly
-# above and below must be empty (`*` alone). Spacing is context, not a line, so like the workflow
-# check this validates the whole staged file - the tree already conforms.
+# above and below must be empty (`*` alone). Spacing is context, not a line, so this reads the
+# whole staged file and reports only the headings the commit itself added.
 check_section_spacing() {
     git show ":$file" | grep -q '@section' || return 0
     local cramped
-    cramped=$(git show ":$file" | awk '
-        { lines[NR] = $0 }
+    cramped=$(awk '
+        NR == FNR { added[$1 + 0]; next }
+        { lines[FNR] = $0; last = FNR }
         END {
-            for (i = 1; i <= NR; ++i)
-                if (lines[i] ~ /@section/) {
+            for (i = 1; i <= last; ++i)
+                if (lines[i] ~ /@section/ && (i in added)) {
                     if (lines[i - 1] !~ /^[[:space:]]*\*[[:space:]]*$/) printf "line %d: no empty comment line above the @section\n", i
                     if (lines[i + 1] !~ /^[[:space:]]*\*[[:space:]]*$/) printf "line %d: no empty comment line below the @section\n", i
                 }
-        }')
+        }' <(printf '%s\n' "$added_lines") <(git show ":$file"))
     [ -z "$cramped" ] || fail "$cramped" \
         "$file crams an @section against its neighbors - keep one empty comment line" \
         "            above and below every @section heading:"
 }
 
 # Member documentation is Doxygen: a bare `//` line directly above a declaration (a member or a type)
-# is the banned doc style - those entities get `/** @brief ... */`. Scoped to headers, and bounded to
-# at most 4 spaces of indentation: class members live there, while the same `Type name = ...;` shape
-# deeper inside a function body is a local variable, and a `//` note above it is a legal
-# implementation note - this library is header-only, so headers carry function bodies too.
+# is the banned doc style - those entities get `/** @brief ... */`. The same `Type name = ...;` shape
+# inside a function body is a local variable and its `//` note is a legal implementation note, and
+# this library is header-only so headers carry both - so the staged file is read whole and the brace
+# stack says which scope each declaration sits in, with only the added pairings reported.
 check_bare_member_docs() {
     local member_docs
-    member_docs=$(printf '%s\n' "$added" |
-        awk '/^\+? {0,4}\/\/[^\/]/ { pending=$0; next } \
-             /^\+? {0,4}[A-Za-z_][A-Za-z0-9_:<>,* ]* [A-Za-z_][A-Za-z0-9_]* *([={;]|$)/ && pending { print pending; pending="" ; next } \
-             { pending="" }' || true)
+    member_docs=$(awk '
+        NR == FNR { added[$1 + 0]; next }
+        {
+            line = $0
+            # Block comments are stripped first, so a brace inside a docblock never moves the stack.
+            if (in_comment) { if (match(line, /\*\//)) { line = substr(line, RSTART + 2); in_comment = 0 } else next }
+            gsub(/\/\*([^*]|\*[^\/])*\*\//, " ", line)
+            if (match(line, /\/\*/)) { line = substr(line, 1, RSTART - 1); in_comment = 1 }
+            comment_at = index(line, "//")
+            code = comment_at ? substr(line, 1, comment_at - 1) : line
+            if (comment_at && substr(line, comment_at + 2, 1) != "/" && code ~ /^[[:space:]]*$/) { pending = $0; pending_line = FNR }
+            else if (kind[depth] == "record" && pending &&
+                     code ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_:<>,* ]* [A-Za-z_][A-Za-z0-9_]* *([={;]|$)/) {
+                if ((pending_line in added) || (FNR in added)) printf "line %d:%s\n", pending_line, pending
+                pending = ""
+            }
+            else if (code !~ /^[[:space:]]*$/) pending = ""
+            # `statement` holds the declaration text since the last terminator, so a class whose
+            # brace sits on a continuation line still opens a record scope.
+            statement = statement " " code
+            for (position = 1; position <= length(code); ++position) {
+                character = substr(code, position, 1)
+                if (character == "{") {
+                    ++depth
+                    kind[depth] = (kind[depth - 1] == "code") ? "code" \
+                        : (statement ~ /(^|[^A-Za-z0-9_])(class|struct|union|enum)([^A-Za-z0-9_]|$)/) ? "record" \
+                        : (statement ~ /(^|[^A-Za-z0-9_])namespace([^A-Za-z0-9_]|$)/) ? "namespace" : "code"
+                    statement = ""
+                } else if (character == "}") { if (depth > 0) delete kind[depth--]; statement = "" }
+                else if (character == ";") statement = ""
+            }
+        }' <(printf '%s\n' "$added_lines") <(git show ":$file") || true)
     [ -z "$member_docs" ] || fail "$member_docs" \
         "$file documents a declaration with a bare \`//\` comment - docs are" \
         "            /** @brief ... */ blocks; \`//\` is for implementation notes inside bodies:"
@@ -499,6 +544,7 @@ check_workflow_names() {
 core_files=$(dependency_free_core_files)
 while IFS= read -r -d '' file; do
     added=$(git diff --cached --unified=0 -- "$file" | grep '^+' | grep -v '^+++' || true)
+    added_lines=$(added_line_numbers "$file")
     case " $core_files " in
     *" $file "*)
         check_dependency_free_core
@@ -580,10 +626,15 @@ while IFS= read -r -d '' file; do
     *) continue ;;
     esac
     # Abbreviated identifiers are banned in favor of whole words: lo/hi/bot must be
-    # low/high/bottom. Word-boundary match on the staged content, code files only.
-    if git show ":$file" | grep -nE '\b(lo|hi|bot)\b' | grep -v '@' > /dev/null; then
+    # low/high/bottom. Word-boundary match on the staged content, added lines only.
+    added_lines=$(added_line_numbers "$file")
+    abbreviations=$(awk '
+        NR == FNR { added[$1 + 0]; next }
+        (FNR in added) && $0 !~ /@/ && $0 ~ /(^|[^A-Za-z0-9_])(lo|hi|bot)([^A-Za-z0-9_]|$)/ { printf "%d:%s\n", FNR, $0 }' \
+        <(printf '%s\n' "$added_lines") <(git show ":$file"))
+    if [ -n "$abbreviations" ]; then
         echo "pre-commit: $file uses an abbreviated identifier (lo/hi/bot) - spell it out:"
-        git show ":$file" | grep -nE '\b(lo|hi|bot)\b' | grep -v '@' | head -3
+        printf '%s\n' "$abbreviations" | head -3
         failed=1
     fi
 done < <(git diff --cached --name-only --diff-filter=ACM -z)

@@ -291,9 +291,9 @@ class growing_hash_set {
  *  they fail with @c overflow_k when the quota is spent. The slot count stays at least
  *  twice the entry quota, so every probe chain terminates.
  */
-template <typename key_type_, typename value_type_,             //
-          typename hash_type_ = std::hash<key_type_>,           //
-          typename allocator_type_ = std::allocator<std::byte>> //
+template <typename key_type_, typename value_type_,          //
+          typename hash_type_ = std::hash<key_type_>,        //
+          typename allocator_type_ = std::allocator<byte_t>> //
 class growing_multimap {
     static_assert(std::is_trivially_copyable_v<key_type_> && std::is_trivially_copyable_v<value_type_>);
 

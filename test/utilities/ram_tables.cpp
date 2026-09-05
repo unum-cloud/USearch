@@ -138,8 +138,7 @@ std::size_t check_multimap_growth_parity(unsigned seed) noexcept {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        growing_multimap<u64_t, u32_t, std::hash<u64_t>, counting_allocator<std::byte>> multimap {
-            counting_allocator<std::byte> {ledger}};
+        growing_multimap<u64_t, u32_t, std::hash<u64_t>, counting_allocator_t> multimap {counting_allocator_t {ledger}};
         std::unordered_multimap<u64_t, u32_t> oracle;
         splitmix64_t random_generator {seed};
         uniform_below<u32_t> key_distribution {keys_alphabet_k};
@@ -196,8 +195,7 @@ std::size_t check_multimap_concurrent_insert() noexcept {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        growing_multimap<u64_t, u32_t, std::hash<u64_t>, counting_allocator<std::byte>> multimap {
-            counting_allocator<std::byte> {ledger}};
+        growing_multimap<u64_t, u32_t, std::hash<u64_t>, counting_allocator_t> multimap {counting_allocator_t {ledger}};
         failures += expect(succeeded(multimap.reserve(lanes_k * inserts_per_lane_k)));
 
         fu::flat_pool_t pool;
@@ -286,8 +284,7 @@ std::size_t check_multimap_starved_rehash() noexcept {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        growing_multimap<u64_t, u32_t, std::hash<u64_t>, counting_allocator<std::byte>> multimap {
-            counting_allocator<std::byte> {ledger}};
+        growing_multimap<u64_t, u32_t, std::hash<u64_t>, counting_allocator_t> multimap {counting_allocator_t {ledger}};
         failures += expect(succeeded(multimap.reserve(quota_k)));
         for (u32_t entry = 0; entry != quota_k; ++entry) failures += expect(succeeded(multimap.insert(entry, entry)));
 

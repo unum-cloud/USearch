@@ -206,7 +206,7 @@ std::size_t check_hash_set_arena_growth() noexcept {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        using upstream_t = counting_allocator<std::byte>;
+        using upstream_t = counting_allocator_t;
         using arena_t = growing_arena<upstream_t>;
         using set_t = growing_hash_set<u32_t, std::hash<u32_t>, arena_allocator<std::byte, upstream_t>>;
         arena_t arena {upstream_t(ledger)};

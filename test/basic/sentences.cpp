@@ -94,9 +94,9 @@ struct sentences_handmade_t {
 };
 
 struct sentences_fixture_t {
-    using index_t = basic_ram_index<std::string, u64_t, u32_t, u64_t, flaky_waiter_t, counting_allocator<std::byte>>;
+    using index_t = basic_ram_index<std::string, u64_t, u32_t, u64_t, flaky_waiter_t, counting_allocator_t>;
 
-    static index_t make_index(allocation_ledger_t& ledger) { return index_t {counting_allocator<std::byte> {ledger}}; }
+    static index_t make_index(allocation_ledger_t& ledger) { return index_t {counting_allocator_t {ledger}}; }
     static levenshtein_metric_t make_metric() { return {}; }
     static sentence_codec_t make_codec() { return {}; }
     static u64_t make_key(std::size_t ordinal) { return 0xC0FFEE00000000ull + ordinal; }
@@ -164,8 +164,7 @@ static std::size_t check_sentences_transparent_search() {
         sentences_fixture_t const fixture;
         auto index = sentences_fixture_t::make_index(ledger);
         auto metric = fixture.make_metric();
-        sentences_fixture_t::index_t::traversal_context_t context {basic_seed_guards_k,
-                                                                   counting_allocator<std::byte> {ledger}};
+        sentences_fixture_t::index_t::traversal_context_t context {basic_seed_guards_k, counting_allocator_t {ledger}};
         auto values = fixture.make_values(16, basic_seed_guards_k ^ 0x11ull);
         std::string const copied_value = values[0];
         failures += expect(bool(index.reserve(values.size())));
@@ -191,8 +190,7 @@ static std::size_t check_sentences_codec_poison() {
         auto index = sentences_fixture_t::make_index(ledger);
         auto metric = fixture.make_metric();
         auto const codec = fixture.make_codec();
-        sentences_fixture_t::index_t::traversal_context_t context {basic_seed_hostile_k,
-                                                                   counting_allocator<std::byte> {ledger}};
+        sentences_fixture_t::index_t::traversal_context_t context {basic_seed_hostile_k, counting_allocator_t {ledger}};
         auto values = fixture.make_values(8, basic_seed_hostile_k ^ 0x22ull);
         failures += expect(bool(index.reserve(values.size())));
         std::vector<u32_t> assigned_ids;

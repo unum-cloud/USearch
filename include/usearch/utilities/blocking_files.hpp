@@ -80,7 +80,7 @@ struct seekable_file_t {
 
     /** @brief Opens @p path; the NUL terminator the OS demands is one transient allocation
      *      through @p allocator. */
-    template <typename allocator_type_ = std::allocator<std::byte>>
+    template <typename allocator_type_ = std::allocator<byte_t>>
     static expected<seekable_file_t> open(std::string_view path, file_mode_t mode,
                                           allocator_type_ allocator = {}) noexcept {
         using chars_allocator_t = typename std::allocator_traits<allocator_type_>::template rebind_alloc<char>;

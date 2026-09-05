@@ -36,7 +36,7 @@ extern "C" {
 
 /**
  *  @brief User-facing 128-bit key identifying one entry of any index - sixteen opaque bytes,
- *      rendered canonically as a lowercase dashed UUID, matching SafeGraphs' @c bin16 key column.
+ *      rendered canonically as a lowercase dashed UUID, matching SafeGraphs' @c uuid key column.
  *
  *  Keys need not be unique: several entries may share one, and count-like functions report how
  *  many. Integer identities park in the low bytes with the rest zeroed.

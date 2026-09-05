@@ -129,9 +129,9 @@ struct bioinformatics_handmade_t {
 };
 
 struct bioinformatics_fixture_t {
-    using index_t = basic_ram_index<dna_t, uuid_t, u64_t, u64_t, dummy_waiter_t, counting_allocator<std::byte>>;
+    using index_t = basic_ram_index<dna_t, uuid_t, u64_t, u64_t, dummy_waiter_t, counting_allocator_t>;
 
-    static index_t make_index(allocation_ledger_t& ledger) { return index_t {counting_allocator<std::byte> {ledger}}; }
+    static index_t make_index(allocation_ledger_t& ledger) { return index_t {counting_allocator_t {ledger}}; }
     static alignment_metric_t make_metric() { return {}; }
     static packed_dna_codec_t make_codec() { return {}; }
     static uuid_t make_key(std::size_t ordinal) {

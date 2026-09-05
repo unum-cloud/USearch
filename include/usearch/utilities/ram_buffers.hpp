@@ -82,7 +82,7 @@ concept buffer_allocator = requires(allocator_ allocator, typename allocator_::v
     allocator.deallocate(pointer, count);
 };
 
-static_assert(buffer_allocator<std::allocator<std::byte>>);
+static_assert(buffer_allocator<std::allocator<byte_t>>);
 
 /**
  *  @brief Sorts up to four @p values ascending by @p comparator_type_ through fully-unrolled
@@ -988,7 +988,7 @@ class growing_buffer {
  *      fit them stays alive under its slices while a chunk at least twice as wide opens - so
  *      addresses never move and slices outlive growth. The rewind keeps the widest chunk and
  *      drops the ones it outgrew; releasing a slice does nothing, the rewind is the release. */
-template <typename upstream_allocator_ = std::allocator<std::byte>>
+template <typename upstream_allocator_ = std::allocator<byte_t>>
 class growing_arena {
     using upstream_t = typename std::allocator_traits<upstream_allocator_>::template rebind_alloc<std::byte>;
     using run_t = growing_buffer<std::byte, upstream_t>;
@@ -1081,7 +1081,7 @@ class growing_arena {
  *      slice does nothing - the arena's rewind is the release. Every slice starts on an
  *      @p alignment_ boundary, since the arena's raw bytes promise only what @c malloc does and
  *      the containers built over a slice issue the widest loads their kernels know. */
-template <typename value_type_ = std::byte, typename upstream_allocator_ = std::allocator<std::byte>,
+template <typename value_type_ = std::byte, typename upstream_allocator_ = std::allocator<byte_t>,
           std::size_t alignment_ = default_alignment_k>
 struct arena_allocator {
     using value_type = value_type_;
