@@ -18,22 +18,25 @@ Similarity Search & Clustering Engine for <a href="https://github.com/ashvardani
 </p>
 
 <p align="center">
-Spatial • Binary • Probabilistic • User-Defined Metrics
+Dense Vectors • Strings • Geo-Spatial • Meshes • User-Defined Metrics
 <br/>
-<a href="https://unum-cloud.github.io/USearch/cpp">C++11</a> •
-<a href="https://unum-cloud.github.io/USearch/python">Python 3</a> •
-<a href="https://unum-cloud.github.io/USearch/javascript">JavaScript</a> •
-<a href="https://unum-cloud.github.io/USearch/java">Java</a> •
+<a href="https://unum-cloud.github.io/USearch/cpp">C++</a> •
+<a href="https://unum-cloud.github.io/USearch/c">C</a> •
+<a href="https://unum-cloud.github.io/USearch/python">Python</a> •
 <a href="https://unum-cloud.github.io/USearch/rust">Rust</a> •
-<a href="https://unum-cloud.github.io/USearch/c">C99</a> •
-<a href="https://unum-cloud.github.io/USearch/objective-c">Objective-C</a> •
+<a href="https://unum-cloud.github.io/USearch/zig">Zig</a> •
+<a href="https://unum-cloud.github.io/USearch/mojo">Mojo</a> •
+<a href="https://unum-cloud.github.io/USearch/java">Java</a> •
+<a href="https://unum-cloud.github.io/USearch/javascript">JavaScript</a> •
 <a href="https://unum-cloud.github.io/USearch/swift">Swift</a> •
 <a href="https://unum-cloud.github.io/USearch/csharp">C#</a> •
 <a href="https://unum-cloud.github.io/USearch/golang">Go</a> •
+<a href="https://unum-cloud.github.io/USearch/kotlin">Kotlin</a> •
 <a href="https://unum-cloud.github.io/USearch/wolfram">Wolfram</a>
 <br/>
-Linux • macOS • Windows • iOS • Android • WebAssembly •
-<a href="https://unum-cloud.github.io/USearch/sqlite">SQLite</a>
+Linux • macOS • Windows • FreeBSD • iOS • Android • Browser
+<br/>
+x86 • Arm • WASM • RISC-V • LoongArch • Power • CUDA • ROCm • Metal
 </p>
 
 <div align="center">
@@ -47,23 +50,22 @@ Linux • macOS • Windows • iOS • Android • WebAssembly •
 
 ---
 
-- ✅ __[10x faster][faster-than-faiss]__ [HNSW][hnsw-algorithm] implementation than [FAISS][faiss].
-- ✅ Simple and extensible [single C++11 header][usearch-header] __library__.
-- ✅ [Trusted](#integrations) by giants like Google and DBs like [ClickHouse][clickhouse-docs] & [DuckDB][duckdb-docs].
-- ✅ [SIMD][simd]-optimized and [user-defined metrics](#user-defined-functions) with JIT compilation.
+- ✅ __[10-100x faster][faster-than-faiss]__ indexing & search than [FAISS][faiss].
+- ✅ Powers SpGEMM and Sparse Attention for billion-scale transformer LLM context lengths.
+- ✅ Simple and extensible [C++20 header-only][usearch-header] __library__.
+- ✅ [Trusted](#integrations) by most dabases like [ClickHouse][clickhouse-docs] & [DuckDB][duckdb-docs] & AI Frontier labs.
+- ✅ [SIMD][simd]- and [GPU][gpgpu]-optimized and [user-defined metrics](#user-defined-functions) with JIT compilation.
 - ✅ Hardware-agnostic `bf16`, `e5m2`, & `i8` - [half-precision & quarter-precision support](#memory-efficiency-downcasting-and-quantization).
 - ✅ [View large indexes from disk](#serialization--serving-index-from-disk) without loading into RAM.
-- ✅ Heterogeneous lookups, renaming/relabeling, and on-the-fly deletions.
+- ✅ Heterogeneous lookups and 128-bit keys, with several entries free to share one.
 - ✅ Binary Tanimoto and Sorensen coefficients for [Genomics and Chemistry applications](#usearch--rdkit--molecular-search).
 - ✅ Space-efficient point-clouds with `uint40_t`, accommodating 4B+ size.
-- ✅ Compatible with OpenMP and custom "executors" for fine-grained parallelism.
-- ✅ [Semantic Search](#usearch--uform--ucall--multimodal-semantic-search) and [Joins](#joins-one-to-one-one-to-many-and-many-to-many-mappings).
-- 🔄 Near-real-time [clustering and sub-clustering](#clustering) for Tens or Millions of clusters.
+- ✅ Fine-grained parallelism through ForkUnion thread pools and custom "executors".
+- ✅ [Semantic Search](#usearch--uform--ucall--multimodal-semantic-search) and approximate products & attention for LLM context.
 
 [faiss]: https://github.com/facebookresearch/faiss
-[usearch-header]: https://github.com/unum-cloud/USearch/blob/main/include/usearch/index.hpp
+[usearch-header]: https://github.com/unum-cloud/USearch/blob/main/include/usearch/dense/ram_index.hpp
 [obscure-use-cases]: https://ashvardanian.com/posts/abusing-vector-search
-[hnsw-algorithm]: https://arxiv.org/abs/1603.09320
 [simd]: https://en.wikipedia.org/wiki/Single_instruction,_multiple_data
 [faster-than-faiss]: https://www.unum.cloud/blog/2023-11-07-scaling-vector-search-with-intel
 [clickhouse-docs]: https://clickhouse.com/docs/en/engines/table-engines/mergetree-family/annindexes#usearch
@@ -119,115 +121,106 @@ Base functionality is identical to FAISS, and the interface must be familiar if 
 # pip install usearch
 
 import numpy as np
-from usearch.index import Index
+from usearch import DenseIndex
 
-index = Index(ndim=3)               # Default settings for 3D vectors
-vector = np.array([0.2, 0.6, 0.4])  # Can be a matrix for batch operations
-index.add(42, vector)               # Add one or many vectors in parallel
-matches = index.search(vector, 10)  # Find 10 nearest neighbors
+index = DenseIndex(dimensions=3)            # Default settings for 3D vectors
+vectors = np.array([[0.2, 0.6, 0.4]], dtype=np.float32)
+index.reserve(1)                            # Freeze the geometry and size the arenas
+index.add([42], vectors)                    # Every verb is a batch; one vector is one row
+matches = index.search(vectors, 10)         # Find 10 nearest neighbors per query row
 
-assert matches[0].key == 42
-assert matches[0].distance <= 0.001
-assert np.allclose(index[42], vector, atol=0.1) # Ensure high tolerance in mixed-precision comparisons
+assert int(matches[0][0].key) == 42
+assert matches[0][0].distance <= 0.001
+assert np.allclose(index[42], vectors, atol=0.1) # High tolerance for mixed-precision comparisons
 ```
 
 More settings are always available, and the API is designed to be as flexible as possible.
 The default storage/quantization level is hardware-dependant for efficiency, but `bf16` is recommended for most modern CPUs.
 
 ```py
-index = Index(
-    ndim=3, # Define the number of dimensions in input vectors
-    metric='cos', # Choose 'l2sq', 'ip', 'haversine' or other metric, default = 'cos'
-    dtype='bf16', # Store as 'f64', 'f32', 'bf16', 'f16', 'e5m2', 'e4m3', 'e3m2', 'e2m3', 'u8', 'i8', 'b1'..., default = None
+index = DenseIndex(
+    dimensions=3, # Scalars per vector; 0 defers the geometry to a later `load`
+    metric='angular', # Or 'inner', 'euclidean', 'hamming', 'jaccard'
+    quantization='bf16', # Store as 'f64', 'f32', 'bf16', 'f16', 'e5m2', 'e4m3', 'e3m2', 'e2m3', 'i8', 'u8', 'u1x8'
     connectivity=16, # Optional: Limit number of neighbors per graph node
-    expansion_add=128, # Optional: Control the recall of indexing
-    expansion_search=64, # Optional: Control the quality of the search
-    multi=False, # Optional: Allow multiple vectors per key, default = False
+    residency='ram', # Optional: Or 'vram' on a GPU, 'nvme' for external memory
 )
 ```
 
-## Serialization & Serving `Index` from Disk
+The candidate-pool breadth is no longer a property of the handle: it rides each `add` and
+`search` call as `expansion_factor`, so one immutable index serves a whole recall sweep.
+Keys are 128 bits wide and need not be unique, so `multi` has no counterpart either.
 
-USearch supports multiple forms of serialization:
+## Serialization & Serving An Index from Disk
 
-- Into a __file__ defined with a path.
-- Into a __stream__ defined with a callback, serializing or reconstructing incrementally.
-- Into a __buffer__ of fixed length or a memory-mapped file that supports random access.
+USearch checkpoints ride the [SafeGraphs](https://github.com/safegraphs/SafeGraphs) interchange format, in two forms:
 
-The latter allows you to serve indexes from external memory, enabling you to optimize your server choices for indexing speed and serving costs.
+- Into a __monolith__, one `.safegraphs` file or a buffer of `storage_requirements` bytes, holding every shard as one graph.
+- Into a __manifest__, a `.safegraphs.json` catalog beside one monolith per shard, for billion-scale indexes spread over drives.
+
+Either form loads into any shard count, and an external-memory residency opens a monolith in place, enabling you to optimize your server choices for indexing speed and serving costs.
 This can result in __20x cost reduction__ on AWS and other public clouds.
 
 ```py
-index.save("index.usearch")
+index.save("index.safegraphs")
+index.load("index.safegraphs")
 
-index.load("index.usearch")
-view = Index.restore("index.usearch", view=True, ...)
+# A checkpoint's geometry without opening a shard; the keys are the constructor's own.
+reader = DenseIndex(**DenseIndex.metadata("index.safegraphs"))
+reader.load("index.safegraphs")
 
-other_view = Index(ndim=..., metric=...)
-other_view.view("index.usearch")
+# Serving from external memory is a residency, not a separate verb.
+external = DenseIndex(residency="nvme")
+external.load("index.safegraphs")
 ```
+
+Where the payload lives decides what loading means: materialize into RAM, upload to a device,
+or open in place on disk. An external-memory handle is read-only, and bigger indexes come from
+`merge` rather than from further insertion.
 
 ## Exact vs. Approximate Search
 
 Approximate search methods, such as HNSW, are predominantly used when an exact brute-force search becomes too resource-intensive.
 This typically occurs when you have millions of entries in a collection.
-For smaller collections, we offer a more direct approach with the `search` method.
+For smaller collections, reach for [NumKong](https://github.com/ashvardanian/numkong) directly:
+its `cdist` is the same SIMD kernel family the index dispatches to, without a graph in the way.
 
 ```py
-from usearch.index import search, MetricKind, Matches, BatchMatches
+import numkong as nk
 import numpy as np
 
-# Generate 10'000 random vectors with 1024 dimensions
 vectors = np.random.rand(10_000, 1024).astype(np.float32)
-vector = np.random.rand(1024).astype(np.float32)
-
-one_in_many: Matches = search(vectors, vector, 50, MetricKind.L2sq, exact=True)
-many_in_many: BatchMatches = search(vectors, vectors, 50, MetricKind.L2sq, exact=True)
+queries = np.random.rand(10, 1024).astype(np.float32)
+distances = nk.cdist(queries, vectors, "angular")
 ```
 
-If you pass the `exact=True` argument, the system bypasses indexing altogether and performs a brute-force search through the entire dataset using SIMD-optimized similarity metrics from [NumKong](https://github.com/ashvardanian/numkong).
-When compared to FAISS's `IndexFlatL2` in Google Colab, __[USearch may offer up to a 20x performance improvement](https://github.com/unum-cloud/USearch/issues/176#issuecomment-1666650778)__:
+When compared to FAISS's `IndexFlatL2` in Google Colab, __[those kernels may offer up to a 20x performance improvement](https://github.com/unum-cloud/USearch/issues/176#issuecomment-1666650778)__:
 
 - `faiss.IndexFlatL2`: __55.3 ms__.
-- `usearch.index.search`: __2.54 ms__.
+- NumKong's `cdist`: __2.54 ms__.
 
-## User-Defined Metrics
+USearch itself reads the same walk as arithmetic through `multiply_into`, an approximate
+`A × Bᵀ` that reports every pair the traversal scored, and `attend_into`, which folds a softmax
+over that walk for LLM context.
 
-While most vector search packages concentrate on just two metrics, "Inner Product distance" and "Euclidean distance", USearch allows arbitrary user-defined metrics.
-This flexibility allows you to customize your search for various applications, from computing geospatial coordinates with the rare [Haversine][haversine] distance to creating custom metrics for composite embeddings from multiple AI models, like joint image-text embeddings.
-You can use [Numba][numba], [Cppyy][cppyy], or [PeachPy][peachpy] to define your [custom metric even in Python](https://unum-cloud.github.io/USearch/python#user-defined-metrics-and-jit-in-python):
+## One Modality per Domain
 
-```py
-from numba import cfunc, types, carray
-from usearch.index import Index, MetricKind, MetricSignature, CompiledMetric
+Rather than one index taking an arbitrary distance function, each modality carries the measures
+its domain actually needs, with SIMD kernels dispatched by the machine's capabilities:
 
-ndim = 256
+| Modality   | Header                       | Measures                                                |
+| ---------- | ---------------------------- | ------------------------------------------------------- |
+| Dense      | `usearch/dense_index.h`      | Inner, Angular, Euclidean, Hamming, Jaccard             |
+| Sequence   | `usearch/sequence_index.h`   | Levenshtein, Needleman-Wunsch, Smith-Waterman           |
+| Matrix     | `usearch/matrix_index.h`     | Chamfer, Hausdorff, Gromov-Wasserstein, Kabsch, Umeyama |
+| Geospatial | `usearch/geospatial_index.h` | Karney geodesics, trajectory and boundary similarity    |
 
-@cfunc(types.float32(types.CPointer(types.float32), types.CPointer(types.float32)))
-def python_inner_product(a, b):
-    a_array = carray(a, ndim)
-    b_array = carray(b, ndim)
-    c = 0.0
-    for i in range(ndim):
-        c += a_array[i] * b_array[i]
-    return 1 - c
-
-metric = CompiledMetric(pointer=python_inner_product.address, kind=MetricKind.IP, signature=MetricSignature.ArrayArray)
-index = Index(ndim=ndim, metric=metric, dtype=np.float32)
-```
-
-Similar effect is even easier to achieve in C, C++, and Rust interfaces.
 Moreover, unlike older approaches indexing high-dimensional spaces, like KD-Trees and Locality Sensitive Hashing, HNSW doesn't require vectors to be identical in length.
 They only have to be comparable.
 So you can apply it in [obscure][obscure] applications, like searching for similar sets or fuzzy text matching, using [GZip][gzip-similarity] compression-ratio as a distance function.
 
-[haversine]: https://ashvardanian.com/posts/abusing-vector-search#geo-spatial-indexing
 [obscure]: https://ashvardanian.com/posts/abusing-vector-search
 [gzip-similarity]: https://twitter.com/LukeGessler/status/1679211291292889100?s=20
-
-[numba]: https://numba.readthedocs.io/en/stable/reference/jit-compilation.html#c-callbacks
-[cppyy]: https://cppyy.readthedocs.io/en/latest/
-[peachpy]: https://github.com/Maratyszcza/PeachPy
 
 ## Filtering and Predicate Functions
 
@@ -255,9 +248,9 @@ The same index, and `add` and `search` operations will automatically down-cast o
 You can use the following command to check, if hardware acceleration is enabled:
 
 ```sh
-$ python -c 'from usearch.index import Index; print(Index(ndim=768, metric="cos", dtype="f16").hardware_acceleration)'
+$ python -c 'from usearch import DenseIndex; print(DenseIndex(dimensions=768, metric="angular", quantization="f16").capabilities)'
 > sapphire
-$ python -c 'from usearch.index import Index; print(Index(ndim=166, metric="tanimoto").hardware_acceleration)'
+$ python -c 'from usearch import DenseIndex; print(DenseIndex(dimensions=166, metric="jaccard").capabilities)'
 > ice
 ```
 
@@ -275,79 +268,6 @@ As part of the quantization process, the scalar components greater than zero are
 Using smaller numeric types will save you RAM needed to store the vectors, but you can also compress the neighbors lists forming our proximity graphs.
 By default, 32-bit `uint32_t` is used to enumerate those, which is not enough if you need to address over 4 Billion entries.
 For such cases we provide a custom `uint40_t` type, that will still be 37.5% more space-efficient than the commonly used 8-byte integers, and will scale up to 1 Trillion entries.
-
-
-## `Indexes` for Multi-Index Lookups
-
-For larger workloads targeting billions or even trillions of vectors, parallel multi-index lookups become invaluable.
-Instead of constructing one extensive index, you can build multiple smaller ones and view them together.
-
-```py
-from usearch.index import Indexes
-
-multi_index = Indexes(
-    indexes: Iterable[usearch.index.Index] = [...],
-    paths: Iterable[os.PathLike] = [...],
-    view: bool = False,
-    threads: int = 0,
-)
-multi_index.search(...)
-```
-
-## Clustering
-
-Once the index is constructed, USearch can perform K-Nearest Neighbors Clustering much faster than standalone clustering libraries, like SciPy, 
-UMap, and tSNE.
-Same for dimensionality reduction with PCA. 
-Essentially, the `Index` itself can be seen as a clustering, allowing iterative deepening.
-
-```py
-clustering = index.cluster(
-    min_count=10, # Optional
-    max_count=15, # Optional
-    threads=..., # Optional
-)
-
-# Get the clusters and their sizes
-centroid_keys, sizes = clustering.centroids_popularity
-
-# Use Matplotlib to draw a histogram
-clustering.plot_centroids_popularity()
-
-# Export a NetworkX graph of the clusters
-g = clustering.network
-
-# Get members of a specific cluster
-first_members = clustering.members_of(centroid_keys[0])
-
-# Deepen into that cluster, splitting it into more parts, all the same arguments supported
-sub_clustering = clustering.subcluster(min_count=..., max_count=...)
-```
-
-The resulting clustering isn't identical to K-Means or other conventional approaches but serves the same purpose.
-Alternatively, using Scikit-Learn on a 1 Million point dataset, one may expect queries to take anywhere from minutes to hours, depending on the number of clusters you want to highlight.
-For 50'000 clusters, the performance difference between USearch and conventional clustering methods may easily reach 100x.
-
-## Joins, One-to-One, One-to-Many, and Many-to-Many Mappings
-
-One of the big questions these days is how AI will change the world of databases and data management.
-Most databases are still struggling to implement high-quality fuzzy search, and the only kind of joins they know are deterministic.
-A `join` differs from searching for every entry, requiring a one-to-one mapping banning collisions among separate search results.
-
-| Exact Search | Fuzzy Search | Semantic Search ? |
-| :----------: | :----------: | :---------------: |
-|  Exact Join  | Fuzzy Join ? | Semantic Join ??  |
-
-Using USearch, one can implement sub-quadratic complexity approximate, fuzzy, and semantic joins.
-This can be useful in any fuzzy-matching tasks common to Database Management Software.
-
-```py
-men = Index(...)
-women = Index(...)
-pairs: dict = men.join(women, max_proposals=0, exact=False)
-```
-
-> Read more in the post: [Combinatorial Stable Marriages for Semantic Search 💍](https://ashvardanian.com/posts/searching-stable-marriages)
 
 
 ## Functionality
@@ -377,7 +297,7 @@ One can take an encoder model, like the multi-modal [UForm](https://github.com/u
 ```python
 from ucall import Server
 from uform import get_model, Modality
-from usearch.index import Index
+from usearch import DenseIndex
 
 import numpy as np
 import PIL as pil
@@ -389,20 +309,21 @@ processor_text = processors[Modality.TEXT_ENCODER]
 processor_image = processors[Modality.IMAGE_ENCODER]
 
 server = Server()
-index = Index(ndim=256)
+index = DenseIndex(dimensions=256)
+index.reserve(1_000_000)
 
 @server
 def add(key: int, photo: pil.Image.Image):
     image = processor_image(photo)
     vector = model_image(image)
-    index.add(key, vector.flatten(), copy=True)
+    index.add([key], vector.reshape(1, -1))
 
 @server
 def search(query: str) -> np.ndarray:
     tokens = processor_text(query)
     vector = model_text(tokens)
-    matches = index.search(vector.flatten(), 3)
-    return matches.keys
+    matches = index.search(vector.reshape(1, -1), 3)
+    return np.asarray(matches.keys)
 
 server.run()
 ```
@@ -448,7 +369,7 @@ The latter are searchable with binary similarity metrics, like the Tanimoto coef
 Below is an example using the RDKit package.
 
 ```python
-from usearch.index import Index, MetricKind
+from usearch import DenseIndex
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
@@ -460,7 +381,8 @@ encoder = AllChem.GetRDKitFPGenerator()
 fingerprints = np.vstack([encoder.GetFingerprint(x) for x in molecules])
 fingerprints = np.packbits(fingerprints, axis=1)
 
-index = Index(ndim=2048, metric=MetricKind.Tanimoto)
+index = DenseIndex(dimensions=2048, metric="jaccard", quantization="u1x8")
+index.reserve(len(molecules))
 keys = np.arange(len(molecules))
 
 index.add(keys, fingerprints)
@@ -474,54 +396,24 @@ That method was used to build the ["USearch Molecules"](https://github.com/ashva
 
 ### USearch + POI Coordinates = GIS Applications
 
-Similar to Vector and Molecule search, USearch can be used for Geospatial Information Systems.
-The Haversine distance is available out of the box, but you can also define more complex relationships, like the Vincenty formula, that accounts for the Earth's oblateness.
+Space and time get their own modality rather than a user-supplied distance function.
+`geospatial_index.h` carries Karney geodesics - which account for the Earth's oblateness, where
+the Haversine formula does not - alongside trajectory and boundary similarities.
 
 ```py
-from numba import cfunc, types, carray
-import math
+from usearch import GeospatialIndex
 
-ndim = 2
-semi_major, flattening = 6378137.0, 1 / 298.257223563
-semi_minor = (1 - flattening) * semi_major
-
-def vincenty_distance(first_ptr, second_ptr):
-    first, second = carray(first_ptr, ndim), carray(second_ptr, ndim)
-    lat1, lon1, lat2, lon2 = first[0], first[1], second[0], second[1]
-    diff_lon = lon2 - lon1
-    rlat1, rlat2 = math.atan((1 - flattening) * math.tan(lat1)), math.atan((1 - flattening) * math.tan(lat2))
-    sin_rlat1, cos_rlat1 = math.sin(rlat1), math.cos(rlat1)
-    sin_rlat2, cos_rlat2 = math.sin(rlat2), math.cos(rlat2)
-    lon_on_sphere = diff_lon
-    for _ in range(100):
-        sin_lon, cos_lon = math.sin(lon_on_sphere), math.cos(lon_on_sphere)
-        sin_ang = math.sqrt((cos_rlat2 * sin_lon) ** 2 + (cos_rlat1 * sin_rlat2 - sin_rlat1 * cos_rlat2 * cos_lon) ** 2)
-        if sin_ang == 0: return 0.0
-        cos_ang = sin_rlat1 * sin_rlat2 + cos_rlat1 * cos_rlat2 * cos_lon
-        ang = math.atan2(sin_ang, cos_ang)
-        sin_az = cos_rlat1 * cos_rlat2 * sin_lon / sin_ang
-        cos2_az = 1 - sin_az ** 2
-        cos2_mid = cos_ang - 2 * sin_rlat1 * sin_rlat2 / cos2_az if cos2_az != 0 else 0.0
-        corr = flattening / 16 * cos2_az * (4 + flattening * (4 - 3 * cos2_az))
-        prev = lon_on_sphere
-        lon_on_sphere = diff_lon + (1 - corr) * flattening * (
-            sin_az * (ang + corr * sin_ang * (cos2_mid + corr * cos_ang * (-1 + 2 * cos2_mid ** 2))))
-        if abs(lon_on_sphere - prev) <= 1e-12: break
-    else:
-        return float('nan')
-    u_sq = cos2_az * (semi_major ** 2 - semi_minor ** 2) / (semi_minor ** 2)
-    ca = 1 + u_sq / 16384 * (4096 + u_sq * (-768 + u_sq * (320 - 175 * u_sq)))
-    cb = u_sq / 1024 * (256 + u_sq * (-128 + u_sq * (74 - 47 * u_sq)))
-    delta = cb * sin_ang * (cos2_mid + cb / 4 * (cos_ang * (-1 + 2 * cos2_mid ** 2)
-        - cb / 6 * cos2_mid * (-3 + 4 * sin_ang ** 2) * (-3 + 4 * cos2_mid ** 2)))
-    return semi_minor * ca * (ang - delta) / 1000.0
-
-index = Index(ndim=ndim, metric=CompiledMetric(
-    pointer=vincenty_distance.address,
-    kind=MetricKind.Haversine,
-    signature=MetricSignature.ArrayArray,
-))
+index = GeospatialIndex(layout="elevated_timed")
+index.add(keys, trajectories)
+matches = index.search(trajectory, 10, mode="route")
 ```
+
+The layout names which axes a position carries - latitude and longitude, optionally altitude and
+a timestamp - and the mode names what a comparison means, from nearest approach between two point
+sets to the shape of a whole route.
+A tolerance supplies the exchange rate between metres and seconds per call, so the same index
+answers both a tight spatial query and a loose temporal one.
+
 
 ## Integrations & Users
 

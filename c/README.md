@@ -56,35 +56,36 @@ int main() {
 
 ## Serialization
 
-To save and load the index from disk, use the following methods:
+Checkpoints ride the SafeGraphs interchange format, and the path's extension picks the layout: a `.safegraphs` path is one monolith of every shard, a `.safegraphs.json` path is a manifest beside one monolith per shard.
+Every checkpoint verb takes the executor its work fans out over and an optional progress handler that may cancel.
 
 ```c
-usearch_save(index, "index.usearch", &error);
-usearch_load(index, "index.usearch", &error);
-usearch_view(index, "index.usearch", &error);
+usearch_bytes_view_t path = {"index.safegraphs", 16};
+usearch_dense_save(index, executor, path, NULL, NULL, &error);
+usearch_dense_load(index, executor, path, NULL, NULL, &error);
 ```
 
-Before saving to disk, you can determine exactly how much disk space the index will take:
+Before saving, you can ask how many bytes one monolith of the index takes:
 
 ```c
-size_t bytes = usearch_serialized_length(index, &error);
+size_t bytes = usearch_dense_storage_requirements(index, &error);
 ```
 
-With a known size, you can serialize the index into an in-memory buffer:
+With a known size, you can serialize the index into an in-memory buffer holding one monolith of every shard:
 
 ```c
-void* buffer = malloc(bytes);
-usearch_save_buffer(index, buffer, bytes, &error);
-usearch_load_buffer(index, buffer, bytes, &error);
-usearch_view_buffer(index, buffer, bytes, &error);
+usearch_bytes_span_t buffer = {malloc(bytes), bytes};
+usearch_dense_save_buffer(index, executor, buffer, NULL, NULL, &error);
+usearch_bytes_view_t view = {buffer.data, buffer.length};
+usearch_dense_load_buffer(index, executor, view, NULL, NULL, &error);
 ```
 
-One can also retrieve index metadata from the buffer or from disk:
+One can also read a checkpoint's geometry and metric from the buffer or from disk, into the options a fresh handle is built from:
 
 ```c
-usearch_init_options_t opts;
-usearch_metadata("index.usearch", &opts, &error);
-usearch_metadata_buffer(buffer, bytes, &opts, &error);
+usearch_dense_options_t options;
+usearch_dense_metadata(path, &options, &error);
+usearch_dense_metadata_buffer(view, &options, &error);
 ```
 
 ## Metrics

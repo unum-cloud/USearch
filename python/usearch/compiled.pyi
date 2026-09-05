@@ -292,17 +292,17 @@ class DenseIndex:
 # region: Other Modalities
 
 class SequenceIndex:
-    """Similarity search over variable-length sequences; not yet instantiated in this build."""
+    """Similarity search over variable-length sequences."""
 
     def __init__(self, *args: object, **keywords: object) -> None: ...
 
 class MatrixIndex:
-    """Similarity search over rank-2 tensors; not yet instantiated in this build."""
+    """Similarity search over rank-2 tensors."""
 
     def __init__(self, *args: object, **keywords: object) -> None: ...
 
 class GeospatialIndex:
-    """Similarity search over space and time; not yet instantiated in this build."""
+    """Similarity search over space and time."""
 
     def __init__(self, *args: object, **keywords: object) -> None: ...
 

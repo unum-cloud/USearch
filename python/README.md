@@ -138,7 +138,7 @@ index = DenseIndex(**DenseIndex.metadata("index.safegraphs"))
 index.load("index.safegraphs")
 ```
 
-Both verbs also accept a buffer of `serialized_length` bytes in place of a path.
+Both verbs also accept a buffer of `storage_requirements` bytes in place of a path, holding one monolith of every shard.
 
 ## Residency
 
