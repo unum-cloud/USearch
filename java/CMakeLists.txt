@@ -4,7 +4,7 @@
 find_package(JNI REQUIRED)
 
 add_library(usearch_jni SHARED lib.cpp)
-setup_target(usearch_jni)
+usearch_setup_target(usearch_jni)
 
 target_link_libraries(usearch_jni PRIVATE usearch_indexes)
 target_include_directories(usearch_jni PRIVATE ${JNI_INCLUDE_DIRS})

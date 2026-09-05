@@ -14,9 +14,7 @@
 
 #include <usearch/types.h>
 
-#if USEARCH_USE_NUMKONG
 #include <numkong/numkong.h>
-#endif
 
 namespace {
 
@@ -28,8 +26,6 @@ char const* rendered_version() {
                       USEARCH_VERSION_PATCH);
     return rendered;
 }
-
-#if USEARCH_USE_NUMKONG
 
 /** @brief The kernel families a capability mask can name, newest class last. */
 constexpr struct {
@@ -56,8 +52,6 @@ char const* render_capabilities(char* rendered, size_t capacity, nk_capability_t
     return rendered;
 }
 
-#endif
-
 } // namespace
 
 extern "C" {
@@ -65,21 +59,13 @@ extern "C" {
 USEARCH_EXPORT char const* usearch_version(void) { return rendered_version(); }
 
 USEARCH_EXPORT char const* usearch_capabilities_compiled(void) {
-#if USEARCH_USE_NUMKONG
     static char rendered[256] = {0};
     return render_capabilities(rendered, sizeof(rendered), nk_capabilities_compiled());
-#else
-    return "serial";
-#endif
 }
 
 USEARCH_EXPORT char const* usearch_capabilities_available(void) {
-#if USEARCH_USE_NUMKONG
     static char rendered[256] = {0};
     return render_capabilities(rendered, sizeof(rendered), nk_capabilities_available());
-#else
-    return "serial";
-#endif
 }
 
 } // extern "C"

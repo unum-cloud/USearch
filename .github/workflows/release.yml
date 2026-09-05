@@ -43,7 +43,6 @@ jobs:
             package.json:"version": "(\d+\.\d+\.\d+)"
             CITATION.cff:^version: (\d+\.\d+\.\d+)
             Cargo.toml:^version = "(\d+\.\d+\.\d+)"
-            wasmer.toml:^version = "(\d+\.\d+\.\d+)"
             conanfile.py:version = "(\d+\.\d+\.\d+)"
             java/README.md:usearchVersion = '(\d+\.\d+\.\d+)'
             java/README.md:version: '(\d+\.\d+\.\d+)'
@@ -432,11 +431,10 @@ jobs:
             -DCMAKE_CXX_COMPILER_TARGET=${{ matrix.target }} \
             -DCMAKE_SYSTEM_NAME=Linux \
             -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.cmake_processor }} \
-            -DUSEARCH_BUILD_JNI=1 \
+            -DUSEARCH_BUILD_LIB_JAVA=1 \
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0 \
             -DUSEARCH_BUILD_LIB_C=0 \
-            -DUSEARCH_USE_NUMKONG=1 \
             -DNK_RUNTIME_DISPATCH=1
 
           cmake --build build_artifacts --config Release -j
@@ -486,11 +484,10 @@ jobs:
         run: |
           cmake -B build_artifacts -A ${{ matrix.cmake_arch }} `
             -DCMAKE_BUILD_TYPE=Release `
-            -DUSEARCH_BUILD_JNI=1 `
+            -DUSEARCH_BUILD_LIB_JAVA=1 `
             -DUSEARCH_BUILD_TEST_CPP=0 `
             -DUSEARCH_BUILD_BENCH_CPP=0 `
             -DUSEARCH_BUILD_LIB_C=0 `
-            -DUSEARCH_USE_NUMKONG=1 `
             -DNK_RUNTIME_DISPATCH=1
 
           cmake --build build_artifacts --config Release
@@ -536,11 +533,10 @@ jobs:
             -DCMAKE_OSX_ARCHITECTURES=${{ matrix.cmake_arch }} \
             -DCMAKE_SYSTEM_NAME=Darwin \
             -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.cmake_arch }} \
-            -DUSEARCH_BUILD_JNI=1 \
+            -DUSEARCH_BUILD_LIB_JAVA=1 \
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0 \
             -DUSEARCH_BUILD_LIB_C=0 \
-            -DUSEARCH_USE_NUMKONG=1 \
             -DNK_RUNTIME_DISPATCH=1
 
           cmake --build build_artifacts --config Release
@@ -597,11 +593,10 @@ jobs:
             -DCMAKE_ANDROID_STL_TYPE=c++_static \
             -DANDROID_PLATFORM=${{ env.ANDROID_SDK_VERSION }} \
             -DANDROID_ABI=${{ matrix.abi }} \
-            -DUSEARCH_BUILD_JNI=1 \
+            -DUSEARCH_BUILD_LIB_JAVA=1 \
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0 \
             -DUSEARCH_BUILD_LIB_C=0 \
-            -DUSEARCH_USE_NUMKONG=1 \
             -DNK_TARGET_NEON=1 \
             -DNK_TARGET_NEONBFDOT=1 \
             -DNK_TARGET_NEONHALF=1 \
@@ -648,7 +643,6 @@ jobs:
             -DUSEARCH_BUILD_TEST_CPP=OFF \
             -DUSEARCH_BUILD_TEST_C=OFF \
             -DUSEARCH_BUILD_BENCH_CPP=OFF \
-            -DUSEARCH_USE_NUMKONG=ON \
             -DUSEARCH_USE_JEMALLOC=OFF
 
           emmake cmake --build build_wasm --config Release
@@ -1122,7 +1116,7 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=1
+          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_JEMALLOC=1
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_c.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
@@ -1132,7 +1126,7 @@ jobs:
         run: |
           brew update
           brew reinstall cmake
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=0
+          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_JEMALLOC=0
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_c.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
@@ -1141,7 +1135,7 @@ jobs:
         if: matrix.os == 'windows-2022'
         run: |
           choco install cmake
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_NUMKONG=0 -DUSEARCH_USE_JEMALLOC=0
+          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_JEMALLOC=0
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
           cp "${{ github.workspace }}\build_artifacts\libusearch_c.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"

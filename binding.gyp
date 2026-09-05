@@ -29,12 +29,7 @@
                 "forkunion/include",
                 "stringzilla/include",
             ],
-            "defines": [
-                "USEARCH_USE_NUMKONG=1",
-                "NK_DYNAMIC_DISPATCH=1",
-                "USEARCH_USE_FORKUNION=1",
-                "USEARCH_USE_STRINGZILLA=1",
-            ],
+            "defines": ["NK_DYNAMIC_DISPATCH=1"],
             "xcode_settings": {
                 "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
                 "CLANG_CXX_LIBRARY": "libc++",

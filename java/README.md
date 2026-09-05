@@ -160,6 +160,6 @@ gradle -PusearchLibraryPath=$PWD/build_release test
 CMake can also build the JNI library itself, alongside every other target:
 
 ```sh
-cmake -B build_release -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_JNI=1
+cmake -B build_release -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_JAVA=1
 cmake --build build_release --target usearch_jni
 ```

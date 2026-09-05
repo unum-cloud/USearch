@@ -14,18 +14,18 @@ add_library(
     dense/ram_indexes_u4.cpp
     dense/ram_indexes_u1.cpp
 )
-setup_target(usearch_dense_ram_indexes)
+usearch_setup_target(usearch_dense_ram_indexes)
 target_include_directories(usearch_dense_ram_indexes PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(usearch_dense_ram_indexes PRIVATE "USEARCH_BUILD_CUDA=0")
-target_link_libraries(usearch_dense_ram_indexes PRIVATE yyjson ${USEARCH_FORKUNION_LIBRARY})
+target_link_libraries(usearch_dense_ram_indexes PRIVATE yyjson forkunion::static)
 
 add_library(usearch_indexes STATIC types.cpp dense_index.cpp sequence.cpp $<TARGET_OBJECTS:usearch_dense_ram_indexes>)
-setup_target(usearch_indexes)
+usearch_setup_target(usearch_indexes)
 target_include_directories(usearch_indexes PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(usearch_indexes PRIVATE "USEARCH_BUILD_CUDA=0")
-target_link_libraries(usearch_indexes PRIVATE yyjson ${USEARCH_FORKUNION_LIBRARY} ${USEARCH_STRINGZILLA_LIBRARY})
+target_link_libraries(usearch_indexes PRIVATE yyjson forkunion::static stringzilla::stringzilla_header)
 
-# The CUDA library skips `setup_target`: its host-compiler flags don't survive the CUDA driver,
+# The CUDA library skips `usearch_setup_target`: its host-compiler flags don't survive the CUDA driver,
 # so the target wires the interface includes directly.
 if (USEARCH_BUILD_CUDA)
     enable_language(CUDA)
@@ -55,5 +55,5 @@ if (USEARCH_BUILD_CUDA)
                    POSITION_INDEPENDENT_CODE ON
     )
     target_compile_options(usearch_indexes_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
-    target_link_libraries(usearch_indexes_cuda PRIVATE yyjson CUDA::cuda_driver ${USEARCH_FORKUNION_LIBRARY})
+    target_link_libraries(usearch_indexes_cuda PRIVATE yyjson CUDA::cuda_driver forkunion::static)
 endif ()

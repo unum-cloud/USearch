@@ -1,7 +1,7 @@
 # The brute-force stand-in for the C interface: a separate library defining the same symbols a different way, so any
 # consumer - a binding suite, a downstream SDK, a bisect - runs in seconds against the ABI instead of waiting on a build
 # of the engine. It needs the headers and nothing else - no submodules, no instantiation grid, no engine sources - so it
-# skips `setup_target` deliberately and sets by hand the few properties consumers depend on. The one runtime it does
+# skips `usearch_setup_target` deliberately and sets by hand the few properties consumers depend on. The one runtime it does
 # resolve is the platform's threads, since the stand-ins keep the headers' concurrency promises with a
 # `std::shared_mutex` rather than a comment.
 #

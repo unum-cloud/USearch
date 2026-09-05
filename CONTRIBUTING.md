@@ -98,15 +98,12 @@ The CMakeLists.txt file has a number of options you can pass:
   - `USEARCH_BUILD_CUDA` - build the CUDA test & benchmark suites
 - Which GPUs to target:
   - `USEARCH_CUDA_ARCHITECTURES` - the architectures baked into the CUDA targets, `80;90a;100a;120a` by default: the Ampere floor, whose cubins stay loadable on every later 8.x part, then Hopper and both Blackwell lines, each architecture-specific because the kernels reach for instructions with no forward-compatible PTX. Set it to `native` while iterating on one machine.
-- Which sibling libraries to use, one switch each, all defaulting to `ON`. Every one is fetched at the pinned commit when its submodule isn't checked out, and defines `USEARCH_USE_<NAME>` for the headers either way:
-  - `USEARCH_USE_NUMKONG` - hardware-accelerated metrics
-  - `USEARCH_USE_FORKUNION` - thread pools and NUMA topology
-  - `USEARCH_USE_STRINGZILLA` - string kernels and parsing
 - Which other dependencies to use:
   - `USEARCH_USE_JEMALLOC` - use Jemalloc for memory management
 
-Those switches govern the CMake build only.
-The language bindings compile all three siblings in unconditionally, taking their headers from `numkong/include`, `forkunion/include`, and `stringzilla/include` in the checkout - so `setup.py`, `binding.gyp`, `build.rs`, and `Package.swift` each name the same three roots and define the same three `USEARCH_USE_<NAME>=1` macros, and none of them builds from a non-recursive clone.
+The sibling libraries carry no switches.
+NumKong, ForkUnion, StringZilla and SmashTable are what the headers are written against, so every build acquires all four - from the submodule when a recursive clone provides one, and from the pinned commit otherwise.
+The language bindings take their headers from `numkong/include`, `forkunion/include`, and `stringzilla/include` in the checkout, so `setup.py`, `binding.gyp`, `build.rs`, and `Package.swift` each name the same roots, and none of them builds from a non-recursive clone.
 
 Putting all of this together, compiling all targets on most platforms should work with the following snippet:
 
@@ -215,8 +212,7 @@ cmake -B build_artifacts \
   -D CMAKE_BUILD_TYPE=RelWithDebInfo \
   -D USEARCH_BUILD_LIB_C=1 \
   -D USEARCH_BUILD_TEST_CPP=0 \
-  -D USEARCH_BUILD_BENCH_CPP=0 \
-  -D USEARCH_USE_NUMKONG=0
+  -D USEARCH_BUILD_BENCH_CPP=0
 
 cmake --build build_artifacts --config RelWithDebInfo
 file build_artifacts/libusearch_c.so # Verify the output
@@ -318,7 +314,6 @@ RUN npm init -y
 RUN yum install tar git python3 cmake gcc-c++ -y && yum groupinstall "Development Tools" -y
 
 # Assuming AWS Linux 2 uses old compilers:
-ENV USEARCH_USE_NUMKONG 1
 ENV NK_TARGET_HASWELL 1
 ENV NK_TARGET_SKYLAKE 0
 ENV NK_TARGET_ICELAKE 0
@@ -505,7 +500,7 @@ java -cp java -Djava.library.path="java/cloud/unum/usearch" cloud.unum.usearch.I
 Or using CMake:
 
 ```bash
-cmake -B build_artifacts -D USEARCH_BUILD_JNI=1
+cmake -B build_artifacts -D USEARCH_BUILD_LIB_JAVA=1
 cmake --build build_artifacts --config Release -j
 ```
 

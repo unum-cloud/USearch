@@ -639,6 +639,34 @@ while IFS= read -r -d '' file; do
     fi
 done < <(git diff --cached --name-only --diff-filter=ACM -z)
 
+# A `usearch_sibling` pin and the submodule's gitlink name the same commit, or a recursive clone and a plain one
+# build different code - the pin is what `FetchContent` uses when the submodule is absent. Both sides are read from
+# the index, so the comparison is against what this commit will actually record.
+if ! git diff --cached --quiet -- CMakeLists.txt numkong forkunion stringzilla smashtable 2> /dev/null; then
+    while read -r sibling pinned; do
+        recorded=$(git ls-files --stage -- "$sibling" | awk '$1 == "160000" { print $2 }')
+        [ -n "$recorded" ] || continue
+        if [ "$recorded" != "$pinned" ]; then
+            echo "pre-commit: $sibling pin has drifted - CMakeLists.txt says ${pinned:0:12}, the submodule records ${recorded:0:12}"
+            failed=1
+        fi
+    done < <(git show :CMakeLists.txt 2> /dev/null | awk '
+        /usearch_sibling\(/ { inside = 1; record = ""; sub(/.*usearch_sibling\(/, "") }
+        inside { record = record " " $0 }
+        inside && /\)/ {
+            sub(/\).*/, "", record)
+            count = split(record, fields, /[ \t]+/)
+            name = ""; pin = ""
+            for (i = 1; i <= count; ++i) {
+                if (fields[i] == "") continue
+                if (name == "") name = fields[i]
+                if (fields[i] ~ /^[0-9a-f]{40}$/) pin = fields[i]
+            }
+            if (name != "" && pin != "") print name, pin
+            inside = 0
+        }')
+fi
+
 if command -v cmake-format > /dev/null 2>&1 && [ -f .cmake-format.py ]; then
     while IFS= read -r -d '' file; do
         case "$file" in

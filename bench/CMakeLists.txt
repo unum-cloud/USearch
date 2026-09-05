@@ -11,12 +11,12 @@ add_executable(
     dense/ram_index_u8.cpp
     dense/ram_index_u1.cpp
 )
-setup_target(usearch_bench_dense_ram_index)
+usearch_setup_target(usearch_bench_dense_ram_index)
 target_compile_options(usearch_bench_dense_ram_index PRIVATE ${USEARCH_HOST_TUNING})
 target_include_directories(usearch_bench_dense_ram_index PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/test)
 target_link_libraries(
-    usearch_bench_dense_ram_index PRIVATE clipp fmt::fmt yyjson ${USEARCH_FORKUNION_LIBRARY}
-                                          ${USEARCH_STRINGZILLA_LIBRARY}
+    usearch_bench_dense_ram_index PRIVATE clipp fmt::fmt yyjson forkunion::static
+                                          stringzilla::stringzilla_header
 )
 
 add_executable(
@@ -30,15 +30,15 @@ add_executable(
     dense/ram_indexes_u8.cpp
     dense/ram_indexes_u1.cpp
 )
-setup_target(usearch_bench_dense_ram_indexes)
+usearch_setup_target(usearch_bench_dense_ram_indexes)
 target_compile_options(usearch_bench_dense_ram_indexes PRIVATE ${USEARCH_HOST_TUNING})
 target_include_directories(usearch_bench_dense_ram_indexes PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/test)
 target_link_libraries(
-    usearch_bench_dense_ram_indexes PRIVATE clipp fmt::fmt yyjson ${USEARCH_FORKUNION_LIBRARY}
-                                            ${USEARCH_STRINGZILLA_LIBRARY}
+    usearch_bench_dense_ram_indexes PRIVATE clipp fmt::fmt yyjson forkunion::static
+                                            stringzilla::stringzilla_header
 )
 
-# The CUDA bench skips `setup_target`: its host-compiler flags don't survive the CUDA driver, so the
+# The CUDA bench skips `usearch_setup_target`: its host-compiler flags don't survive the CUDA driver, so the
 # target wires the interface includes directly.
 if (USEARCH_BUILD_CUDA)
     enable_language(CUDA)
@@ -67,7 +67,7 @@ if (USEARCH_BUILD_CUDA)
     )
     target_compile_options(usearch_bench_dense_vram_index PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
     target_link_libraries(
-        usearch_bench_dense_vram_index PRIVATE clipp fmt::fmt yyjson CUDA::cuda_driver ${USEARCH_FORKUNION_LIBRARY}
-                                               ${USEARCH_STRINGZILLA_LIBRARY}
+        usearch_bench_dense_vram_index PRIVATE clipp fmt::fmt yyjson CUDA::cuda_driver forkunion::static
+                                               stringzilla::stringzilla_header
     )
 endif ()

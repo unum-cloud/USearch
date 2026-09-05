@@ -4,7 +4,7 @@
 
 if (USEARCH_BUILD_TEST_C)
     add_executable(test_c test.c)
-    setup_target(test_c)
+    usearch_setup_target(test_c)
     target_link_libraries(test_c PRIVATE usearch_indexes)
     include(CTest)
     enable_testing()
@@ -35,7 +35,7 @@ if (USEARCH_BUILD_LIB_C)
         target_link_options(usearch_static_c PRIVATE -static)
     endif ()
 
-    setup_target(usearch_c)
-    setup_target(usearch_static_c)
+    usearch_setup_target(usearch_c)
+    usearch_setup_target(usearch_static_c)
 
 endif ()

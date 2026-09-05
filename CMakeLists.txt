@@ -38,14 +38,6 @@ endif ()
 # Options
 option(USEARCH_INSTALL "Install CMake targets" OFF)
 
-# One switch per sibling library, same shape for each: ON acquires the dependency and defines `USEARCH_USE_<NAME>=1`,
-# OFF leaves the tree buildable without it. Defaults are ON because the headers currently reach for all three; they
-# become OFF-able as the guards land.
-option(USEARCH_USE_NUMKONG "Use NumKong hardware-accelerated metrics" ON)
-option(USEARCH_USE_FORKUNION "Use ForkUnion thread pools and NUMA topology" ON)
-option(USEARCH_USE_STRINGZILLA "Use StringZilla string kernels and parsing" ON)
-option(USEARCH_USE_SMASHTABLE "Use SmashTable concurrent hash tables for key mappings" ON)
-
 option(USEARCH_USE_JEMALLOC "Use JeMalloc for faster memory allocations" OFF)
 
 option(USEARCH_BUILD_TEST_CPP "Compile a native unit test in C++" ${USEARCH_IS_MAIN_PROJECT})
@@ -53,9 +45,8 @@ option(USEARCH_BUILD_BENCH_CPP "Compile a native benchmark in C++" ${USEARCH_IS_
 option(USEARCH_BUILD_LIB_C "Compile a native library for the C 99 interface" OFF)
 option(USEARCH_BUILD_TEST_C "Compile a test for the C 99 interface" OFF)
 option(USEARCH_BUILD_LIB_C_STUB "Compile a brute-force stand-in for the C 99 interface" OFF)
-option(USEARCH_BUILD_JNI "Compile JNI library for Java bindings" OFF)
-option(USEARCH_BUILD_WOLFRAM "Compile Wolfram Language bindings" OFF)
-option(USEARCH_BUILD_WASM "Compile WebAssembly bindings" OFF)
+option(USEARCH_BUILD_LIB_JAVA "Compile a native library for the Java bindings" OFF)
+option(USEARCH_BUILD_LIB_WOLFRAM "Compile a native library for the Wolfram Language bindings" OFF)
 option(USEARCH_BUILD_CUDA "Compile CUDA index tests & benchmarks" ${USEARCH_CAN_BUILD_CUDA})
 
 # One list feeds every CUDA target, so a fat binary from this tree runs on the whole fleet. Ampere is the floor: its
@@ -68,24 +59,24 @@ set(USEARCH_CUDA_ARCHITECTURES
     CACHE STRING "GPU architectures baked into the CUDA targets: Ampere floor, Hopper, Blackwell datacenter & consumer"
 )
 
+# Three-digit "a" entries are only understood from CMake 3.31 onward, while the CPU-only build stays on the 3.28 floor
+# that stock Ubuntu 24.04 ships. The floor follows the architectures actually asked for, so a single-architecture build
+# on a distribution CMake is never refused for a capability it does not use.
+if (USEARCH_BUILD_CUDA AND CMAKE_VERSION VERSION_LESS 3.31)
+    string(REGEX MATCH "1[0-9][0-9]a" architectures_needing_cmake_331 "${USEARCH_CUDA_ARCHITECTURES}")
+    if (architectures_needing_cmake_331)
+        message(
+            FATAL_ERROR
+                "USEARCH_CUDA_ARCHITECTURES names \"${architectures_needing_cmake_331}\", which needs CMake 3.31 or newer, found ${CMAKE_VERSION} - override with a single architecture or \"native\""
+        )
+    endif ()
+endif ()
+
 # One diagnostic is what an iteration wants; surveying a tree that has drifted wants the whole list at once.
 set(USEARCH_MAX_ERRORS
     "1"
     CACHE STRING "Diagnostics a compiler emits before giving up on a translation unit"
 )
-
-# Blackwell entries ("100a", "120a") are only understood from CMake 3.31 onward, while the CPU-only build stays on the
-# 3.28 floor that stock Ubuntu 24.04 ships. The floor follows the architectures actually asked for, so a single-
-# architecture build on a distribution CMake is never refused for a capability it does not use.
-if (USEARCH_BUILD_CUDA AND CMAKE_VERSION VERSION_LESS 3.31)
-    string(REGEX MATCH "1[0-9][0-9]a" USEARCH_BLACKWELL_ARCHITECTURE "${USEARCH_CUDA_ARCHITECTURES}")
-    if (USEARCH_BLACKWELL_ARCHITECTURE)
-        message(
-            FATAL_ERROR
-                "The Blackwell architectures in USEARCH_CUDA_ARCHITECTURES need CMake 3.31 or newer, found ${CMAKE_VERSION} - override with a single architecture or \"native\""
-        )
-    endif ()
-endif ()
 
 # Enable the in-repo Git hooks. Git will not auto-run hooks shipped inside a clone (that would let any cloned repo
 # execute code), so point `core.hooksPath` at `.githooks` here - configuring the build arms the `pre-commit` checks.
@@ -281,7 +272,7 @@ endif ()
 # Shared wiring for every target this project builds. Optimization and debug level are deliberately absent: they live in
 # `CMAKE_<LANG>_FLAGS_<CONFIG>`, where a preset or a command-line switch can move them. Only what the code actually
 # depends on - fast math, the diagnostics, the sanitizers - is pinned here.
-function (setup_target TARGET_NAME)
+function (usearch_setup_target TARGET_NAME)
     # Compiler-specific options List of all possible compiler IDs:
     # https://cmake.org/cmake/help/latest/variable/CMAKE_LANG_COMPILER_ID.html
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -419,17 +410,8 @@ function (setup_target TARGET_NAME)
         set_target_properties(${TARGET_NAME} PROPERTIES PREFIX "lib")
     endif ()
 
-    # The same switches the interface target carries, repeated here because these targets copy header paths off that
-    # target rather than linking it - see `usearch_use_sibling`.
-    target_compile_definitions(
-        ${TARGET_NAME}
-        PRIVATE "USEARCH_USE_NUMKONG=$<BOOL:${USEARCH_USE_NUMKONG}>"
-                "USEARCH_USE_FORKUNION=$<BOOL:${USEARCH_USE_FORKUNION}>"
-                "USEARCH_USE_STRINGZILLA=$<BOOL:${USEARCH_USE_STRINGZILLA}>"
-    )
-
     # Link NumKong's shared library, which answers the capability queries and punned kernels for the host CPU.
-    if (USEARCH_USE_NUMKONG AND TARGET nk_shared)
+    if (TARGET nk_shared)
         target_compile_definitions(${TARGET_NAME} PRIVATE "NK_RUNTIME_DISPATCH=1")
         target_link_libraries(${TARGET_NAME} PRIVATE nk_shared)
     endif ()
@@ -441,21 +423,11 @@ endfunction ()
 # `FetchContent` of it from another project, still configures. Pins match the submodule commits.
 include(FetchContent)
 
-# One switch per sibling, and the switch decides everything about it: whether it is acquired, whether the interface
-# target links it, and what `USEARCH_USE_<NAME>` expands to in the headers. The macro is defined either way, so the
-# guards compile without the library present. Include directories are also copied onto the interface target, because
-# `setup_target` reads `INTERFACE_INCLUDE_DIRECTORIES` directly - a genex that sees only what this target declares, not
-# what its link interface would carry - to keep the C++20 feature requirement off the pure-C targets.
-function (usearch_use_sibling NAME LINK_TARGET REPOSITORY TAG)
-    string(TOUPPER ${NAME} SWITCH)
-    target_compile_definitions(
-        ${USEARCH_TARGET_NAME} INTERFACE "USEARCH_USE_${SWITCH}=$<BOOL:${USEARCH_USE_${SWITCH}}>"
-    )
-
-    if (NOT USEARCH_USE_${SWITCH})
-        return()
-    endif ()
-
+# The siblings are the engine rather than an option: every header reaches for them unguarded, so there is no build
+# without them and no switch pretending otherwise. Include directories are copied onto the interface target, because
+# `usearch_setup_target` reads `INTERFACE_INCLUDE_DIRECTORIES` directly - a genex that sees only what this target
+# declares, not what its link interface would carry - to keep the C++20 feature requirement off the pure-C targets.
+function (usearch_sibling NAME LINK_TARGET REPOSITORY TAG)
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${NAME}/CMakeLists.txt")
         add_subdirectory(${NAME})
     else ()
@@ -476,26 +448,24 @@ function (usearch_use_sibling NAME LINK_TARGET REPOSITORY TAG)
 endfunction ()
 
 # NumKong wants its shared library built for runtime ISA dispatch, so the flag is set before the subdirectory lands.
-if (USEARCH_USE_NUMKONG)
-    set(NK_BUILD_SHARED
-        ON
-        CACHE BOOL "" FORCE
-    )
-endif ()
+set(NK_BUILD_SHARED
+    ON
+    CACHE BOOL "" FORCE
+)
 
-usearch_use_sibling(
-    numkong numkong::numkong https://github.com/ashvardanian/NumKong a51b52f7468d86227f5ae24df4049a19046b5267
+usearch_sibling(
+    numkong numkong::numkong https://github.com/ashvardanian/NumKong 35b2b6b037c4987c05ec07fc699f9d2d524c98e3
 )
-usearch_use_sibling(
-    forkunion forkunion::header https://github.com/ashvardanian/ForkUnion 9f1d91c3529fc735f0ab60cbc895f449c7139d28
+usearch_sibling(
+    forkunion forkunion::header https://github.com/ashvardanian/ForkUnion 42fe67cc8dc1faf80a77d3b24b606468265bab20
 )
-usearch_use_sibling(
+usearch_sibling(
     stringzilla stringzilla::stringzilla_header https://github.com/ashvardanian/StringZilla
-    a6402dd71d01a8967a62bcc45a900477e0232f60
+    a5ac71758f177eb8a27883cd1bbae75698ff2c78
 )
-usearch_use_sibling(
+usearch_sibling(
     smashtable smashtable::smashtable https://github.com/ashvardanian/SmashTable
-    1c0629cb94bf26f5d843c0d19009765e647eea44
+    cf6dfc559867d222522d5ec0b15a4218034626ee
 )
 
 # The dispatch library exports symbols the pre-loaded metrics resolve against at runtime.
@@ -503,40 +473,38 @@ if (TARGET nk_shared)
     set_target_properties(nk_shared PROPERTIES ENABLE_EXPORTS ON)
 endif ()
 
-# Executables needing the compiled halves - the ForkUnion pool, the StringZilla kernels - name these instead of the
-# targets, so a switched-off sibling leaves an empty entry rather than a reference to a target that was never defined.
-set(USEARCH_FORKUNION_LIBRARY "")
-set(USEARCH_STRINGZILLA_LIBRARY "")
-if (USEARCH_USE_FORKUNION)
-    set(USEARCH_FORKUNION_LIBRARY forkunion::static)
-endif ()
-if (USEARCH_USE_STRINGZILLA)
-    set(USEARCH_STRINGZILLA_LIBRARY stringzilla::stringzilla_header)
+# Only `safegraphs_format.hpp` reaches for yyjson, and only a compiled target ever includes it - so it is acquired under
+# the same condition as `src/`, leaving the header-only target consumable without it.
+if (USEARCH_BUILD_TEST_CPP
+    OR USEARCH_BUILD_BENCH_CPP
+    OR USEARCH_BUILD_LIB_C
+    OR USEARCH_BUILD_TEST_C
+)
+    FetchContent_Declare(
+        yyjson
+        GIT_REPOSITORY https://github.com/ibireme/yyjson.git
+        GIT_TAG 0.12.0
+    )
+    FetchContent_MakeAvailable(yyjson)
 endif ()
 
-# Third-party dependencies, every pin in one place, fetched only when something actually links them: {fmt} for the C++
-# smoke tests (libstdc++ doesn't ship `std::print` yet on our toolchain), clipp for the benchmark CLIs, and yyjson for
-# the SafeGraphs header reader. `FIND_PACKAGE_ARGS` lets a system-provided {fmt} satisfy the dependency without touching
-# the network, but only from the pinned version up - the copies distributions ship predate `fmt::println` and would fail
-# deep in the suites rather than here.
+# Pins for what only the suites link: {fmt} for the C++ smoke tests (libstdc++ doesn't ship `std::print` yet on our
+# toolchain) and clipp for the benchmark CLIs. `FIND_PACKAGE_ARGS` lets a system-provided {fmt} satisfy the dependency
+# without touching the network, but only from the pinned version up - the copies distributions ship predate
+# `fmt::println` and would fail deep in the suites rather than here.
 if (USEARCH_BUILD_TEST_CPP OR USEARCH_BUILD_BENCH_CPP)
     FetchContent_Declare(
         fmt
         GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-        GIT_TAG 12.0.0
-        FIND_PACKAGE_ARGS 12.0.0
+        GIT_TAG 12.2.0
+        FIND_PACKAGE_ARGS 12.2.0
     )
     FetchContent_Declare(
         clipp
         GIT_REPOSITORY https://github.com/muellan/clipp
         GIT_TAG v1.2.3
     )
-    FetchContent_Declare(
-        yyjson
-        GIT_REPOSITORY https://github.com/ibireme/yyjson.git
-        GIT_TAG 0.12.0
-    )
-    FetchContent_MakeAvailable(fmt clipp yyjson)
+    FetchContent_MakeAvailable(fmt clipp)
 
     # Upstream clipp ships no usable CMake target — just a single header — so wrap it in one.
     if (NOT TARGET clipp)
@@ -575,18 +543,14 @@ if (${USEARCH_BUILD_BENCH_CPP})
     add_subdirectory(bench)
 endif ()
 
-if (${USEARCH_BUILD_WOLFRAM})
+if (${USEARCH_BUILD_LIB_WOLFRAM})
     add_subdirectory(wolfram)
-endif ()
-
-if (${USEARCH_BUILD_WASM})
-    add_subdirectory(wasm)
 endif ()
 
 if (${USEARCH_BUILD_LIB_C} OR ${USEARCH_BUILD_TEST_C})
     add_subdirectory(c)
 endif ()
 
-if (${USEARCH_BUILD_JNI})
+if (${USEARCH_BUILD_LIB_JAVA})
     add_subdirectory(java)
 endif ()

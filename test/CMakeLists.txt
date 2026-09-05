@@ -34,10 +34,10 @@ add_executable(
     dense/ram_index_u8.cpp
     dense/ram_index_u1.cpp
 )
-setup_target(usearch_test)
+usearch_setup_target(usearch_test)
 target_compile_options(usearch_test PRIVATE ${USEARCH_HOST_TUNING})
 target_include_directories(usearch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(usearch_test PRIVATE fmt::fmt yyjson ${USEARCH_FORKUNION_LIBRARY})
+target_link_libraries(usearch_test PRIVATE fmt::fmt yyjson forkunion::static)
 add_test(NAME usearch_test COMMAND usearch_test)
 
 # The header-only tier's proof: everything under `utilities/` & `basic/` compiles & runs with the standard library alone
@@ -47,7 +47,7 @@ target_include_directories(usearch_test_header_only PRIVATE ${PROJECT_SOURCE_DIR
 set_target_properties(usearch_test_header_only PROPERTIES CXX_STANDARD 20)
 add_test(NAME usearch_test_header_only COMMAND usearch_test_header_only)
 
-# The CUDA suite skips `setup_target`: its host-compiler flags - `-march=native`, `-fmax-errors` - don't survive the
+# The CUDA suite skips `usearch_setup_target`: its host-compiler flags - `-march=native`, `-fmax-errors` - don't survive the
 # CUDA driver, so the target wires the interface includes directly.
 if (USEARCH_BUILD_CUDA)
     enable_language(CUDA)
@@ -75,5 +75,5 @@ if (USEARCH_BUILD_CUDA)
                    CUDA_ARCHITECTURES "${USEARCH_CUDA_ARCHITECTURES}"
     )
     target_compile_options(usearch_test_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
-    target_link_libraries(usearch_test_cuda PRIVATE fmt::fmt yyjson CUDA::cuda_driver ${USEARCH_FORKUNION_LIBRARY})
+    target_link_libraries(usearch_test_cuda PRIVATE fmt::fmt yyjson CUDA::cuda_driver forkunion::static)
 endif ()

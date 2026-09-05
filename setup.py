@@ -19,13 +19,6 @@ is_windows: bool = sys.platform == "win32"
 machine: str = platform.machine().lower()
 
 
-# Sibling libraries come from the submodules, and every wheel compiles all three in - the switches the
-# CMake build exposes have no equivalent here, so the macros are constants.
-macros_args.append(("USEARCH_USE_NUMKONG", "1"))
-macros_args.append(("USEARCH_USE_FORKUNION", "1"))
-macros_args.append(("USEARCH_USE_STRINGZILLA", "1"))
-
-
 #! NumKong uses dynamic dispatch, and will not build the library as part of `usearch` package.
 #! It relies on the fact that NumKong ships its own bindings for most platforms, and the user should
 #! install it separately!

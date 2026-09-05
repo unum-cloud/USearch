@@ -80,7 +80,6 @@
                     "package.json",
                     "Cargo.toml",
                     "Cargo.lock",
-                    "wasmer.toml",
                     "./include/usearch/types.h",
                     "./csharp/nuget/nuget-package.props",
                     "CITATION.cff"
