@@ -75,7 +75,10 @@ struct forkunion_allocator {
     }
 };
 
-static_assert(buffer_allocator<forkunion_allocator<byte_t>>);
+/** @brief The byte specialization every container and index places its storage through. */
+using forkunion_allocator_t = forkunion_allocator<byte_t>;
+
+static_assert(buffer_allocator<forkunion_allocator_t>);
 
 #pragma endregion Placement
 
@@ -86,7 +89,7 @@ static_assert(buffer_allocator<forkunion_allocator<byte_t>>);
 struct forkunion_executor_t {
     /** @brief One thread's scratch on its own memory domain: chunks that double and never move,
      *      rewound between calls. */
-    using arena_t = growing_arena<forkunion_allocator<byte_t>>;
+    using arena_t = growing_arena<forkunion_allocator_t>;
     /** @brief One call's hold on the executor, released when it dies. */
     using claim_t = std::unique_lock<fu::spin_mutex<fu::preferred_yield_t>>;
 
@@ -136,7 +139,7 @@ struct forkunion_executor_t {
         if (failed(executor.arenas_per_thread_.reserve_exactly(threads)))
             return {std::move(executor), status_t::bad_alloc_k};
         for (fu_memory_domain_id_t const domain : domains)
-            executor.arenas_per_thread_.push_back_reserved(arena_t {forkunion_allocator<byte_t>(domain)});
+            executor.arenas_per_thread_.push_back_reserved(arena_t {forkunion_allocator_t(domain)});
         return {std::move(executor), status_t::success_k};
     }
 

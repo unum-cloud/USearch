@@ -1018,7 +1018,7 @@ __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, dense_cuda_
         dense_cuda_warp_context<dense_cuda_register_frontier<pool_slots_>> context;
         context.random_generator = splitmix64_t {0xA5A5A5A5ull ^ (static_cast<u64_t>(new_node_id) * 33 + lane)};
         dense_cuda_visited_set_t visited {visited_slots, view.arena_shape.visited_hash_shift,
-                                                view.epoch_base + (new_node_id - view.first_id) + 1};
+                                          view.epoch_base + (new_node_id - view.first_id) + 1};
         dense_cuda_insert_one<kit_>( //
             view, new_node_id, visited, query_span, cache, relink, cache_norms[warp], gathered_ids[warp],
             gathered_scored[warp], context, lane);
@@ -1151,7 +1151,7 @@ __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, dense_cuda_
         dense_cuda_warp_context<dense_cuda_register_frontier<pool_slots_>> context;
         context.random_generator = splitmix64_t {0xA5A5A5A5ull ^ (static_cast<u64_t>(node_id) * 33 + lane)};
         dense_cuda_visited_set_t visited {visited_slots, view.arena_shape.visited_hash_shift,
-                                                view.epoch_base + offset + 1};
+                                          view.epoch_base + offset + 1};
         dense_cuda_refine_one<kit_>( //
             view, node_id, visited, query_span, cache, relink, cache_norms[warp], gathered_ids[warp],
             gathered_scored[warp], context, lane);
@@ -1289,7 +1289,7 @@ __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, dense_cuda_
         dense_cuda_warp_context<dense_cuda_register_frontier<2>> context;
         context.random_generator = splitmix64_t {0xA5A5A5A5ull ^ (static_cast<u64_t>(node_id) * 33 + lane)};
         dense_cuda_visited_set_t visited {visited_slots, view.arena_shape.visited_hash_shift,
-                                                view.epoch_base + (node_id - view.first_id) + 1};
+                                          view.epoch_base + (node_id - view.first_id) + 1};
         dense_cuda_join_one<kit_>( //
             view, node_id, visited, query_span, cache, relink, cache_norms[warp], gathered_ids[warp],
             gathered_scored[warp], context, lane);
@@ -1555,7 +1555,7 @@ __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, pool_slots_
     for (u32_t query_index = static_cast<u32_t>(warp_index); query_index < view.queries_count;
          query_index += gridDim.x * dense_cuda_warps_per_block_k) {
         dense_cuda_visited_set_t visited {visited_slots, view.arena_shape.visited_hash_shift,
-                                                view.epoch_base + query_index + 1};
+                                          view.epoch_base + query_index + 1};
         dense_cuda_search_one<kit_, (pool_slots_ <= 4 ? 4u : 3u)>( //
             view, query_index, query_span, visited, dense_cuda_register_frontier<pool_slots_> {}, gathered_ids[warp],
             gathered_scored[warp], lane);
@@ -1584,20 +1584,21 @@ __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, 4)
     for (u32_t query_index = static_cast<u32_t>(warp_index); query_index < view.queries_count;
          query_index += gridDim.x * dense_cuda_warps_per_block_k) {
         dense_cuda_visited_set_t visited {visited_slots, view.arena_shape.visited_hash_shift,
-                                                view.epoch_base + query_index + 1};
+                                          view.epoch_base + query_index + 1};
         dense_cuda_search_one<kit_, 4u>(view, query_index, query_span, visited, frontier, gathered_ids[warp],
                                         gathered_scored[warp], lane);
     }
 }
 
-/** @brief Rebuilds the norms plane from the vector plane, one warp per row; norms are derived
- *      state, never serialized, so every load recomputes them on the device. */
+/** @brief Rebuilds the norms plane from the vector plane for rows @c [first_row,first_row+rows_count),
+ *      one warp per row; norms are derived state, never serialized, so every load recomputes
+ *      them on the device. */
 template <dense_cuda_kit kit_>
-__global__ void dense_cuda_derive_norms_kernel(dense_cuda_planes_view<kit_> planes, u32_t rows_count) {
+__global__ void dense_cuda_derive_norms_kernel(dense_cuda_planes_view<kit_> planes, u32_t first_row, u32_t rows_count) {
     std::size_t const warp_index = (blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x) / 32;
     int const lane = threadIdx.x % 32;
     std::size_t const warps = gridDim.x * static_cast<std::size_t>(blockDim.x) / 32;
-    for (std::size_t row = warp_index; row < rows_count; row += warps) {
+    for (std::size_t row = first_row + warp_index; row < first_row + rows_count; row += warps) {
         typename kit_::norms_accumulator_t accumulator = kit_::zero_norms_accumulator();
         for (u32_t fragment = lane; fragment < planes.row_fragments; fragment += 32)
             accumulator = kit_::accumulate_norms(planes.vector_for(static_cast<dense_node_id_t>(row), fragment),
@@ -1744,7 +1745,7 @@ struct dense_vram_index;
  *      never opening one. Two contexts on one index share only the planes and the published
  *      counter, so an insert stream and a search stream never alias scratch.
  */
-template <cuda_allocator allocator_type_ = cuda_device_allocator<byte_t>>
+template <cuda_allocator allocator_type_ = cuda_device_allocator_t>
 struct dense_cuda_traversal_context {
     using allocator_t = allocator_type_;
 
@@ -1857,7 +1858,7 @@ template <                                                                      
     cuda_arch_t arch_ceiling_ = cuda_arch_blackwell_k,                          //
     typename vectors_allocator_type_ = cuda_virtual_memory_allocator<byte_t>,   //
     typename neighbors_allocator_type_ = cuda_virtual_memory_allocator<byte_t>, //
-    typename traversals_allocator_type_ = cuda_arena_allocator<byte_t>>         //
+    typename traversals_allocator_type_ = cuda_arena_allocator_t>               //
 struct dense_vram_index {
 
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
@@ -1876,8 +1877,13 @@ struct dense_vram_index {
     using node_ids_span_t = nk::vector_span<node_id_t>;
     using distance_t = dense_distance_t;
     using small_size_t = u32_t;
-    using header_t = dense_index_header_t;
     using planes_view_t = dense_cuda_planes_view<kit_t>;
+    /** @brief The page-locked host bytes a checkpoint moves through, one batch at a time. */
+    using bounce_t = growing_buffer<byte_t, cuda_pinned_allocator_t>;
+
+    /** @brief Rows one checkpoint batch carries between a plane and the caller: one slab, the
+     *      row granularity the RAM residency grows by. */
+    inline static constexpr std::size_t bounce_rows_log2_k = 20;
     using dense_traversal_context_t = dense_cuda_traversal_context<traversals_allocator_t>;
 
     /** @brief The strongest @c synchronization_t contract this design honors; nothing routes on
@@ -2468,60 +2474,310 @@ struct dense_vram_index {
 
 #pragma region Checkpoints
 
-    /** @brief Fills the caller's matrices with the two serialized planes: vectors as logical
-     *      @b [nodes,dimensions] rows with the fragment padding stripped, and neighbors verbatim,
-     *      already speaking the positional sentinel convention. Norms are never serialized. */
-    status_t save(nk::matrix_span<scalar_t> vectors, nk::matrix_span<node_id_t> neighbors,
-                  synchronization_t synchronization) const noexcept {
-        if (synchronization == synchronization_t::concurrent_k) return status_t::config_mismatch_k;
-        saved_shape_t const shape = saved_shape();
-        if (vectors.extent(0) != shape.nodes || vectors.extent(1) != shape.dimensions ||
-            neighbors.extent(0) != shape.nodes || neighbors.extent(1) != shape.connectivity)
-            return status_t::config_mismatch_k;
-        if (!shape.nodes) return status_t::success_k;
-        std::size_t const scalar_row_bytes = packed_row_bytes();
-        std::size_t const neighbors_row_bytes = shape.connectivity * sizeof(node_id_t);
-        if (cudaMemcpy2D(vectors.data(), vectors.stride_bytes(0), vectors_plane_.base(), row_bytes(), scalar_row_bytes,
-                         shape.nodes, cudaMemcpyDeviceToHost) != cudaSuccess)
-            return status_t::device_error_k;
-        if (cudaMemcpy2D(neighbors.data(), neighbors.stride_bytes(0), neighbors_plane_.base(), neighbors_row_bytes,
-                         neighbors_row_bytes, shape.nodes, cudaMemcpyDeviceToHost) != cudaSuccess)
-            return status_t::device_error_k;
-        return status_t::success_k;
+    /**
+     *  @brief One save in flight: the cut it took, the stream its copies ride, and the batches it
+     *      hands out - one pinned bounce of rows at a time, since a device plane cannot be read
+     *      in place. Vectors travel as logical rows with the fragment padding stripped, neighbors
+     *      verbatim under the positional sentinel convention; norms re-derive on load.
+     *
+     *  The device planes cannot be settlement-probed, so only a certified contract walks them;
+     *  one host thread drives a device, so batches are taken one after another, though the
+     *  tallies keep the shape a threaded caller expects.
+     */
+    struct [[nodiscard]] save_plan_t {
+        /** @brief The index being snapshotted. */
+        dense_vram_index const& index;
+        /** @brief The stream every device-to-host copy queues on, drained before its bytes move. */
+        cudaStream_t stream = nullptr;
+        /** @brief Page-locked host bytes: one batch of packed vector rows, then its neighbor ids. */
+        bounce_t bounce;
+        /** @brief Rows under the cut - the claimed rows at planning. */
+        node_id_t visible = 0;
+        /** @brief Rows one batch carries - a bounce's worth, or every row when fewer. */
+        std::size_t batch_rows = 0;
+        /** @brief Rows whose vectors landed, tallied through @c std::atomic_ref. */
+        std::size_t covered_vectors = 0;
+        /** @brief Rows whose neighbors landed, tallied through @c std::atomic_ref. */
+        std::size_t covered_neighbors = 0;
+
+        /** @brief One step of the plan: one bounce-sized batch of the rows under the cut. */
+        struct step_t {
+            /** @brief The step's position in the plan - what a fan-out hands to a stream. */
+            std::size_t position = 0;
+            /** @brief Where the rows sit in the index, in its own id space. */
+            iota_view<node_id_t> index_rows;
+            /** @brief Where they sit in the caller's buffer, counted from its first row. */
+            iota_view<node_id_t> source_rows;
+            /** @brief Bytes this step's vector rows occupy - what @ref save_vectors demands. */
+            std::size_t vectors_bytes = 0;
+            /** @brief Bytes this step's neighbor rows occupy - what @ref save_neighbors demands. */
+            std::size_t neighbors_bytes = 0;
+        };
+
+        /** @brief Step @p position of the plan; an empty one past the last. */
+        step_t operator[](std::size_t position) const noexcept {
+            step_t step;
+            if (position >= steps().size()) return step;
+            std::size_t const first = position * batch_rows;
+            std::size_t const bound = min_of(first + batch_rows, static_cast<std::size_t>(visible));
+            step.position = position;
+            step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
+            step.source_rows = step.index_rows;
+            step.vectors_bytes = step.index_rows.size() * index.packed_row_bytes();
+            step.neighbors_bytes = step.index_rows.size() * index.connectivity() * sizeof(node_id_t);
+            return step;
+        }
+
+        /** @brief The steps the cut spans - one bounce-sized batch each. */
+        indexed_range<save_plan_t> steps() const noexcept {
+            return {this, batch_rows ? divide_round_up<std::size_t>(visible, batch_rows) : 0};
+        }
+
+        /** @brief Copies step @p step 's vector rows off the device with the fragment padding
+         *      stripped, into @p destination.
+         *
+         *  @param[in] step The step to copy, as @ref steps hands them out.
+         *  @param[out] destination The step's own bytes, sized by @c step.vectors_bytes.
+         */
+        status_t save_vectors(step_t const& step, bytes_span_t destination) noexcept {
+            iota_view<node_id_t> const rows = step.index_rows;
+            if (rows.empty()) return status_t::config_mismatch_k;
+            std::size_t const scalar_row_bytes = index.packed_row_bytes();
+            if (destination.size() != rows.size() * scalar_row_bytes) return status_t::config_mismatch_k;
+            if (cudaMemcpy2DAsync(
+                    bounce.data(), scalar_row_bytes,
+                    index.vectors_plane_.base() + static_cast<std::size_t>(rows.first) * index.row_bytes(),
+                    index.row_bytes(), scalar_row_bytes, rows.size(), cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+                return status_t::device_error_k;
+            if (cudaStreamSynchronize(stream) != cudaSuccess) return status_t::device_error_k;
+            [[maybe_unused]] status_t const copied = copy_bytes(destination,
+                                                                bytes_of(bounce.data(), destination.size()));
+            std::atomic_ref<std::size_t> {covered_vectors}.fetch_add(rows.size(), std::memory_order_acq_rel);
+            return status_t::success_k;
+        }
+
+        /** @brief Copies step @p step 's neighbor rows off the device into @p destination,
+         *      every id under the cut shifted by @p id_shift and every other folded to the
+         *      sentinel.
+         *
+         *  @param[in] step The step to copy, as @ref steps hands them out.
+         *  @param[out] destination The step's own bytes, sized by @c step.neighbors_bytes.
+         *  @param[in] id_shift What an id under the cut moves by - the row this shard starts at.
+         *  @param[inout] scratch Unused here, since the bounce is already host memory; it rides
+         *      in the signature so a caller drives a device plan exactly as it drives a host one.
+         */
+        status_t save_neighbors(step_t const& step, bytes_span_t destination, node_id_t id_shift,
+                                nk::matrix_span<node_id_t> scratch) noexcept {
+            [[maybe_unused]] nk::matrix_span<node_id_t> const unused_scratch = scratch;
+            iota_view<node_id_t> const rows = step.index_rows;
+            if (rows.empty()) return status_t::config_mismatch_k;
+            std::size_t const connectivity = index.connectivity();
+            std::size_t const neighbors_row_bytes = connectivity * sizeof(node_id_t);
+            std::size_t const words = rows.size() * connectivity;
+            if (destination.size() != words * sizeof(node_id_t)) return status_t::config_mismatch_k;
+            byte_t* const bounce_neighbors = bounce.data() + batch_rows * index.packed_row_bytes();
+            if (cudaMemcpyAsync(
+                    bounce_neighbors,
+                    index.neighbors_plane_.base() + static_cast<std::size_t>(rows.first) * neighbors_row_bytes,
+                    rows.size() * neighbors_row_bytes, cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+                return status_t::device_error_k;
+            if (cudaStreamSynchronize(stream) != cudaSuccess) return status_t::device_error_k;
+            node_id_t* const landed = reinterpret_cast<node_id_t*>(bounce_neighbors);
+            for (std::size_t word = 0; word != words; ++word)
+                landed[word] = landed[word] < visible ? static_cast<node_id_t>(landed[word] + id_shift)
+                                                      : dense_node_id_unknown_k;
+            [[maybe_unused]] status_t const copied = copy_bytes(destination, bytes_of(landed, words));
+            std::atomic_ref<std::size_t> {covered_neighbors}.fetch_add(rows.size(), std::memory_order_acq_rel);
+            return status_t::success_k;
+        }
+
+        /** @brief Pronounces the snapshot complete: every batch's vectors and neighbors landed. */
+        status_t finish() noexcept {
+            std::size_t const nodes = static_cast<std::size_t>(visible);
+            if (std::atomic_ref<std::size_t> {covered_vectors}.load(std::memory_order_acquire) != nodes ||
+                std::atomic_ref<std::size_t> {covered_neighbors}.load(std::memory_order_acquire) != nodes)
+                return status_t::config_mismatch_k;
+            return status_t::success_k;
+        }
+    };
+
+    /**
+     *  @brief Opens a save under @p synchronization on @p stream: takes the cut and sizes one
+     *      bounce for it. @c concurrent_k answers @c config_mismatch_k, since the device planes
+     *      cannot be probed for settlement; @c exclusive_k reads like @c immutable_k.
+     */
+    expected<save_plan_t> plan_save(synchronization_t synchronization, cudaStream_t stream) const noexcept {
+        save_plan_t plan {*this, stream, bounce_t {cuda_pinned_allocator_t {stream, device_.ordinal}}};
+        if (synchronization == synchronization_t::concurrent_k) return {std::move(plan), status_t::config_mismatch_k};
+        if (!vectors_plane_.reserved_bytes()) return {std::move(plan), status_t::uninitialized_k};
+        plan.visible = static_cast<node_id_t>(size());
+        plan.batch_rows = min_of(static_cast<std::size_t>(plan.visible), power_of_two<std::size_t>(bounce_rows_log2_k));
+        std::size_t const batch_bytes = plan.batch_rows * (packed_row_bytes() + connectivity() * sizeof(node_id_t));
+        if (batch_bytes && failed(plan.bounce.resize_uninitialized(batch_bytes)))
+            return {std::move(plan), status_t::bad_alloc_k};
+        return {std::move(plan), status_t::success_k};
     }
 
-    /** @brief Rebuilds an empty, geometry-frozen index from serialized planes under an exclusive
-     *      caller: re-pads the vectors into fragment rows, whose fresh tails arrive zeroed,
-     *      re-derives the norms on the device, and publishes the counters last. */
-    status_t load(nk::matrix_view<scalar_t> vectors, nk::matrix_view<node_id_t> neighbors,
-                  synchronization_t synchronization) noexcept {
-        if (synchronization != synchronization_t::exclusive_k) return status_t::config_mismatch_k;
-        if (!vectors_plane_.reserved_bytes()) return status_t::uninitialized_k;
-        if (size()) return status_t::config_mismatch_k;
-        if (status_t const kept = status(); failed(kept)) return kept;
-        std::size_t const nodes = vectors.extent(0);
-        if (vectors.extent(1) != dimensions() || neighbors.extent(0) != nodes ||
-            neighbors.extent(1) != connectivity() || nodes > max_node_count_k)
-            return status_t::config_mismatch_k;
-        if (!nodes) return status_t::success_k;
-        if (status_t grown = grow_rows_(nodes, nullptr); grown != status_t::success_k) return grown;
-        std::size_t const scalar_row_bytes = packed_row_bytes();
-        std::size_t const neighbors_row_bytes = connectivity() * sizeof(node_id_t);
-        if (cudaMemcpy2D(vectors_plane_.base(), row_bytes(), vectors.data(), vectors.stride_bytes(0), scalar_row_bytes,
-                         nodes, cudaMemcpyHostToDevice) != cudaSuccess)
-            return status_t::device_error_k;
-        if (cudaMemcpy2D(neighbors_plane_.base(), neighbors_row_bytes, neighbors.data(), neighbors.stride_bytes(0),
-                         neighbors_row_bytes, nodes, cudaMemcpyHostToDevice) != cudaSuccess)
-            return status_t::device_error_k;
-        u32_t const blocks = static_cast<u32_t>(device_.multiprocessor_count) * search_blocks_per_multiprocessor_k;
-        dense_cuda_derive_norms_kernel<kit_t><<<blocks, block_threads_k>>>(planes(), static_cast<u32_t>(nodes));
-        // Publish the row count last, once every plane byte is in place.
-        u32_t const restored = static_cast<u32_t>(nodes);
-        if (cudaMemcpy(published_rows_.get(), &restored, sizeof(restored), cudaMemcpyHostToDevice) != cudaSuccess ||
-            cudaDeviceSynchronize() != cudaSuccess)
-            return status_t::device_error_k;
-        claimed_rows_.store(nodes, std::memory_order_release);
-        return status_t::success_k;
+    /**
+     *  @brief One load in flight: the rows claimed after the published ones, the planes grown to
+     *      hold them, and the batches they span, each filled through one pinned bounce and
+     *      uploaded on the stream; @ref finish derives the norms and publishes.
+     *
+     *  Holds the claim for its whole life, so nothing else claims rows while it runs. A source's
+     *  ids are local to the rows it delivers, so every batch shifts them onto the appended range
+     *  and folds every other id onto the sentinel. Repeated plans append, which is how several
+     *  parts land in one shard. A failed load leaves the claimed rows unpublished.
+     */
+    struct [[nodiscard]] load_plan_t {
+        /** @brief The index being repopulated. */
+        dense_vram_index& index;
+        /** @brief The stream every host-to-device copy and the norms kernel queue on. */
+        cudaStream_t stream = nullptr;
+        /** @brief Page-locked host bytes: one batch of packed vector rows, then its neighbor ids. */
+        bounce_t bounce;
+        /** @brief The claim held from planning to publication. */
+        std::unique_lock<fu::spin_mutex<fu::preferred_yield_t>> claiming;
+        /** @brief The first appended id - the row the claim landed at. */
+        node_id_t base = 0;
+        /** @brief Rows the plan appends. */
+        std::size_t rows = 0;
+        /** @brief Rows one batch carries - a bounce's worth, or every row when fewer. */
+        std::size_t batch_rows = 0;
+        /** @brief Rows whose vectors landed, tallied through @c std::atomic_ref. */
+        std::size_t covered_vectors = 0;
+        /** @brief Rows whose neighbors landed, tallied through @c std::atomic_ref. */
+        std::size_t covered_neighbors = 0;
+
+        /** @brief One step of the plan: one bounce-sized batch of the appended rows. */
+        struct step_t {
+            /** @brief The step's position in the plan - what a fan-out hands to a stream. */
+            std::size_t position = 0;
+            /** @brief Where the rows land in the index, in its own id space, from @c base. */
+            iota_view<node_id_t> index_rows;
+            /** @brief Where they come from in the caller's buffer, from its first row. */
+            iota_view<node_id_t> source_rows;
+            /** @brief Bytes this step's vector rows occupy - what @ref load_vectors demands. */
+            std::size_t vectors_bytes = 0;
+            /** @brief Bytes this step's neighbor rows occupy - what @ref load_neighbors demands. */
+            std::size_t neighbors_bytes = 0;
+        };
+
+        /** @brief Step @p position of the plan; an empty one past the last. */
+        step_t operator[](std::size_t position) const noexcept {
+            step_t step;
+            if (position >= steps().size()) return step;
+            std::size_t const first = static_cast<std::size_t>(base) + position * batch_rows;
+            std::size_t const bound = min_of(first + batch_rows, static_cast<std::size_t>(base) + rows);
+            step.position = position;
+            step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
+            step.source_rows = {static_cast<node_id_t>(first - base), static_cast<node_id_t>(bound - base)};
+            step.vectors_bytes = step.index_rows.size() * index.packed_row_bytes();
+            step.neighbors_bytes = step.index_rows.size() * index.connectivity() * sizeof(node_id_t);
+            return step;
+        }
+
+        /** @brief The steps the append spans - one bounce-sized batch each. */
+        indexed_range<load_plan_t> steps() const noexcept {
+            return {this, batch_rows ? divide_round_up(rows, batch_rows) : 0};
+        }
+
+        /** @brief Copies step @p step 's vector rows out of @p source through the bounce into
+         *      the fragment-padded plane rows, whose fresh tails arrive zeroed.
+         *
+         *  @param[in] step The step to fill, as @ref steps hands them out.
+         *  @param[in] source The step's own bytes, sized by @c step.vectors_bytes.
+         */
+        status_t load_vectors(step_t const& step, bytes_view_t source) noexcept {
+            iota_view<node_id_t> const range = step.index_rows;
+            if (range.empty()) return status_t::config_mismatch_k;
+            std::size_t const scalar_row_bytes = index.packed_row_bytes();
+            if (source.size() != range.size() * scalar_row_bytes) return status_t::config_mismatch_k;
+            [[maybe_unused]] status_t const staged = copy_bytes(bytes_of(bounce.data(), source.size()), source);
+            if (cudaMemcpy2DAsync(
+                    index.vectors_plane_.base() + static_cast<std::size_t>(range.first) * index.row_bytes(),
+                    index.row_bytes(), bounce.data(), scalar_row_bytes, scalar_row_bytes, range.size(),
+                    cudaMemcpyHostToDevice, stream) != cudaSuccess)
+                return index.fail_(status_t::device_error_k);
+            if (cudaStreamSynchronize(stream) != cudaSuccess) return index.fail_(status_t::device_error_k);
+            std::atomic_ref<std::size_t> {covered_vectors}.fetch_add(range.size(), std::memory_order_acq_rel);
+            return status_t::success_k;
+        }
+
+        /** @brief Copies step @p step 's neighbor rows out of @p source through the bounce,
+         *      folding every id inside @p source_range onto the appended range and every other
+         *      onto the sentinel, then uploads them.
+         *
+         *  @param[in] step The step to fill, as @ref steps hands them out.
+         *  @param[in] source The step's own bytes, sized by @c step.neighbors_bytes.
+         *  @param[in] source_range The id space the source's rows speak.
+         */
+        status_t load_neighbors(step_t const& step, bytes_view_t source, iota_view<node_id_t> source_range) noexcept {
+            iota_view<node_id_t> const range = step.index_rows;
+            if (range.empty()) return status_t::config_mismatch_k;
+            std::size_t const connectivity = index.connectivity();
+            std::size_t const neighbors_row_bytes = connectivity * sizeof(node_id_t);
+            std::size_t const words = range.size() * connectivity;
+            if (source.size() != words * sizeof(node_id_t)) return status_t::config_mismatch_k;
+            byte_t* const bounce_neighbors = bounce.data() + batch_rows * index.packed_row_bytes();
+            [[maybe_unused]] status_t const staged = copy_bytes(bytes_of(bounce_neighbors, source.size()), source);
+            node_id_t* const landed = reinterpret_cast<node_id_t*>(bounce_neighbors);
+            rebase_neighbors(std::span<node_id_t> {landed, words}, source_range, static_cast<node_id_t>(base),
+                             dense_node_id_unknown_k);
+            compact_neighbors(std::span<node_id_t> {landed, words}, index.connectivity(), range.first,
+                              dense_node_id_unknown_k);
+            if (cudaMemcpyAsync(
+                    index.neighbors_plane_.base() + static_cast<std::size_t>(range.first) * neighbors_row_bytes,
+                    bounce_neighbors, range.size() * neighbors_row_bytes, cudaMemcpyHostToDevice,
+                    stream) != cudaSuccess)
+                return index.fail_(status_t::device_error_k);
+            if (cudaStreamSynchronize(stream) != cudaSuccess) return index.fail_(status_t::device_error_k);
+            std::atomic_ref<std::size_t> {covered_neighbors}.fetch_add(range.size(), std::memory_order_acq_rel);
+            return status_t::success_k;
+        }
+
+        /** @brief Publishes the appended rows once every batch's vectors and neighbors landed:
+         *      the norms derive on the device, the row count lands last, and the claim lifts. */
+        status_t finish() noexcept {
+            if (std::atomic_ref<std::size_t> {covered_vectors}.load(std::memory_order_acquire) != rows ||
+                std::atomic_ref<std::size_t> {covered_neighbors}.load(std::memory_order_acquire) != rows)
+                return status_t::config_mismatch_k;
+            if (!rows) return status_t::success_k;
+            u32_t const blocks = static_cast<u32_t>(index.device_.multiprocessor_count) *
+                                 search_blocks_per_multiprocessor_k;
+            dense_cuda_derive_norms_kernel<kit_t><<<blocks, block_threads_k, 0, stream>>>( //
+                index.planes(), static_cast<u32_t>(base), static_cast<u32_t>(rows));
+            u32_t const restored = static_cast<u32_t>(base + rows);
+            if (cudaMemcpyAsync(index.published_rows_.get(), &restored, sizeof(restored), cudaMemcpyHostToDevice,
+                                stream) != cudaSuccess ||
+                cudaStreamSynchronize(stream) != cudaSuccess)
+                return index.fail_(status_t::device_error_k);
+            index.claimed_rows_.store(base + rows, std::memory_order_release);
+            claiming.unlock();
+            return status_t::success_k;
+        }
+    };
+
+    /**
+     *  @brief Opens a load of @p rows after the published ones on @p stream: takes the claim,
+     *      grows the planes to hold them - the fresh neighbor rows arrive sentinel-filled - and
+     *      sizes one bounce. Refuses an unreserved index, a kept failure, a claim already held,
+     *      and rows past the id space.
+     */
+    expected<load_plan_t> plan_load(std::size_t rows, cudaStream_t stream) noexcept {
+        load_plan_t plan {*this, stream, bounce_t {cuda_pinned_allocator_t {stream, device_.ordinal}}, {}};
+        if (!vectors_plane_.reserved_bytes()) return {std::move(plan), status_t::uninitialized_k};
+        if (status_t const kept = status(); failed(kept)) return {std::move(plan), kept};
+        plan.base = static_cast<node_id_t>(size());
+        if (!rows) return {std::move(plan), status_t::success_k};
+        if (!claiming_.lock_if_free()) return {std::move(plan), status_t::contended_k};
+        plan.claiming = std::unique_lock<fu::spin_mutex<fu::preferred_yield_t>> {claiming_, std::adopt_lock};
+        if (rows > max_node_count_k - plan.base) return {std::move(plan), status_t::overflow_k};
+        plan.batch_rows = min_of(rows, power_of_two<std::size_t>(bounce_rows_log2_k));
+        std::size_t const batch_bytes = plan.batch_rows * (packed_row_bytes() + connectivity() * sizeof(node_id_t));
+        if (failed(plan.bounce.resize_uninitialized(batch_bytes))) return {std::move(plan), status_t::bad_alloc_k};
+        if (status_t const grown = grow_rows_(plan.base + rows, stream); failed(grown)) return {std::move(plan), grown};
+        plan.rows = rows;
+        return {std::move(plan), status_t::success_k};
     }
 
 #pragma endregion Checkpoints

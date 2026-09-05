@@ -14,8 +14,8 @@ const SOURCES: &[&str] = &[
     "src/types.cpp",
     "src/dense_index.cpp",
     "src/dense/ram_index_bf16.cpp",
-    "src/dense/ram_index_i4.cpp",
     "src/dense/ram_index_i8.cpp",
+    "src/dense/ram_index_i4.cpp",
     "src/dense/ram_index_u8.cpp",
     "src/sequence.cpp",
 ];

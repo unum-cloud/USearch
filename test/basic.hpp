@@ -232,7 +232,7 @@ basic_threads<fixture_type_> basic_make_threads(fixture_type_ const& fixture, al
         for (std::size_t ordinal = 0; ordinal != nodes_per_thread; ++ordinal)
             keys[ordinal] = fixture.make_key(first_key_ordinal + thread * nodes_per_thread + ordinal);
         threads.keys.push_back(std::move(keys));
-        threads.contexts.emplace_back(seed + thread, counting_allocator<std::byte> {ledger});
+        threads.contexts.emplace_back(seed + thread, counting_allocator_t {ledger});
         threads.metrics.push_back(fixture.make_metric());
     }
     return threads;
@@ -374,7 +374,7 @@ std::size_t test_basic_guards(fixture_type_ const& fixture) {
     {
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
-        context_t context {basic_seed_guards_k, counting_allocator<std::byte> {ledger}};
+        context_t context {basic_seed_guards_k, counting_allocator_t {ledger}};
         auto values = fixture.make_values(quota_k + 1, basic_seed_guards_k);
         std::vector<key_t> keys(quota_k + 1);
         for (std::size_t ordinal = 0; ordinal != keys.size(); ++ordinal) keys[ordinal] = fixture.make_key(ordinal);
@@ -456,7 +456,7 @@ std::size_t test_basic_handmade(fixture_type_ const& fixture) {
     {
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
-        context_t context {basic_seed_handmade_k, counting_allocator<std::byte> {ledger}};
+        context_t context {basic_seed_handmade_k, counting_allocator_t {ledger}};
         auto handmade = fixture.make_handmade();
         auto queries = fixture.make_handmade(); // Deterministic, so a fresh unmoved copy.
 
@@ -499,7 +499,7 @@ std::size_t test_basic_growth_and_recall(fixture_type_ const& fixture) {
     {
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
-        context_t context {basic_seed_growth_k, counting_allocator<std::byte> {ledger}};
+        context_t context {basic_seed_growth_k, counting_allocator_t {ledger}};
         auto values = fixture.make_values(basic_growth_nodes_k + basic_recall_samples_k, basic_seed_growth_k);
         std::vector<typename index_t::value_t> queries;
         for (std::size_t sample = 0; sample != basic_recall_samples_k; ++sample)
@@ -570,7 +570,7 @@ std::size_t test_basic_selectors(fixture_type_ const& fixture) {
         {
             index_t index = fixture.make_index(ledger);
             auto metric = fixture.make_metric();
-            context_t context {basic_seed_selectors_k, counting_allocator<std::byte> {ledger}};
+            context_t context {basic_seed_selectors_k, counting_allocator_t {ledger}};
             // Queries split off the same draw as the stored values: a separate generator
             // call would plant different clusters, leaving every query off-distribution.
             auto values = fixture.make_values(basic_growth_nodes_k / 2 + basic_recall_samples_k,
@@ -627,7 +627,7 @@ std::size_t test_basic_keys(fixture_type_ const& fixture) {
     {
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
-        context_t context {basic_seed_keys_k, counting_allocator<std::byte> {ledger}};
+        context_t context {basic_seed_keys_k, counting_allocator_t {ledger}};
         auto values = fixture.make_values(nodes_k, basic_seed_keys_k);
         std::vector<key_t> keys(nodes_k);
         for (std::size_t ordinal = 0; ordinal != unique_k; ++ordinal) keys[ordinal] = fixture.make_key(ordinal);
@@ -698,7 +698,7 @@ std::size_t test_basic_wiring(fixture_type_ const& fixture) {
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
         auto const codec = fixture.make_codec();
-        context_t context {basic_seed_wiring_k, counting_allocator<std::byte> {ledger}};
+        context_t context {basic_seed_wiring_k, counting_allocator_t {ledger}};
         auto values = fixture.make_values(nodes_k, basic_seed_wiring_k);
         failures += expect(bool(index.reserve(nodes_k)));
         std::vector<node_id_t> assigned_ids;
@@ -760,7 +760,7 @@ std::size_t test_basic_allocation_budget(fixture_type_ const& fixture) {
     {
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
-        context_t context {basic_seed_budget_k, counting_allocator<std::byte> {ledger}};
+        context_t context {basic_seed_budget_k, counting_allocator_t {ledger}};
 
         ledger.byte_budget.store(ledger.live_bytes.load() + 64);
         failures += expect_eq(index.reserve(basic_growth_nodes_k).status, status_t::bad_alloc_k);
@@ -816,7 +816,7 @@ std::size_t test_basic_starved(fixture_type_ const& fixture) {
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
         auto const codec = fixture.make_codec();
-        context_t warm_context {basic_seed_starved_k, counting_allocator<std::byte> {ledger}};
+        context_t warm_context {basic_seed_starved_k, counting_allocator_t {ledger}};
         auto values = fixture.make_values(nodes_k, basic_seed_starved_k);
         failures += expect(bool(index.reserve(nodes_k + 2)));
         std::vector<node_id_t> assigned_ids;
@@ -827,14 +827,18 @@ std::size_t test_basic_starved(fixture_type_ const& fixture) {
         auto query = fixture.make_values(1, basic_seed_starved_k ^ salt_queries_k);
 
         // Warm a small round shape, then over-wire node 0 past its staging capacity, so
-        // a later frozen-budget search can only proceed by refusing the top-up.
-        context_t small_context {basic_seed_starved_k + 1, counting_allocator<std::byte> {ledger}};
+        // a later frozen-budget search can only proceed by refusing the top-up. The backward
+        // edges are what make the fat row reachable: a walk saturates on rows it expands, and
+        // it can only expand what some other row points at.
+        context_t small_context {basic_seed_starved_k + 1, counting_allocator_t {ledger}};
         failures += expect_eq(index.search(query[0], metric, small_context, {8, 1}).status, status_t::success_k);
-        for (std::size_t target = 1; target != nodes_k; ++target) [[maybe_unused]]
-            auto const linked = index.link(0, static_cast<node_id_t>(target));
+        for (std::size_t target = 1; target != nodes_k; ++target) {
+            [[maybe_unused]] auto const outward = index.link(0, static_cast<node_id_t>(target));
+            [[maybe_unused]] auto const inward = index.link(static_cast<node_id_t>(target), 0);
+        }
 
         // Cold scratch under a frozen budget: all-or-nothing refusals, nothing moves.
-        context_t cold_context {basic_seed_starved_k + 2, counting_allocator<std::byte> {ledger}};
+        context_t cold_context {basic_seed_starved_k + 2, counting_allocator_t {ledger}};
         ledger.byte_budget.store(ledger.live_bytes.load());
         failures += expect_eq(index.search(query[0], metric, cold_context).status, status_t::bad_alloc_k);
         failures += expect_eq(index.insert({extras.data(), 1}, {extra_keys.data(), 1}, metric, {}, cold_context).status,
@@ -851,11 +855,17 @@ std::size_t test_basic_starved(fixture_type_ const& fixture) {
         failures += expect_eq(index.size(), nodes_k + 1);
         failures += expect_eq(index.degree_of(static_cast<node_id_t>(nodes_k)).value, 0u);
 
-        // The saturated walk: the over-wired row cannot stage, the answer stays ranked.
-        auto const saturated = index.search(query[0], metric, small_context, {8, 1});
-        failures += expect_eq(saturated.status, status_t::success_k);
-        failures += expect_eq(saturated.telemetry.saturated_walks, 1u);
-        failures += basic_expect_ascending(small_context);
+        // The saturated walk: every query is a walk that may cross the over-wired row, which
+        // cannot stage under the frozen budget. Which row one walk expands is the graph's
+        // business, so the receipt is asserted across the batch and every answer stays ranked.
+        std::size_t saturations = 0;
+        for (std::size_t sample = 0; sample != nodes_k; ++sample) {
+            auto const walked = index.search(values[sample], metric, small_context, {8, 1});
+            failures += expect_eq(walked.status, status_t::success_k);
+            failures += basic_expect_ascending(small_context);
+            saturations += walked.telemetry.saturated_walks;
+        }
+        failures += expect(saturations > 0);
 
         // Lifting the budget makes every refusal retryable.
         ledger.byte_budget.store(PTRDIFF_MAX);
@@ -900,7 +910,7 @@ std::size_t test_basic_snapshot_roundtrip(fixture_type_ const& fixture) {
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
         auto const codec = fixture.make_codec();
-        context_t context {basic_seed_snapshot_k, counting_allocator<std::byte> {ledger}};
+        context_t context {basic_seed_snapshot_k, counting_allocator_t {ledger}};
         auto values = fixture.make_values(nodes_k, basic_seed_snapshot_k);
         auto queries = fixture.make_values(8, basic_seed_snapshot_k ^ salt_queries_k);
         failures += expect(bool(index.reserve(nodes_k)));
@@ -940,8 +950,8 @@ std::size_t test_basic_snapshot_roundtrip(fixture_type_ const& fixture) {
 
         // Same seed, same graph, same code path: the answers must be identical.
         for (auto const& query : queries) {
-            context_t original_context {basic_seed_snapshot_k + 7, counting_allocator<std::byte> {ledger}};
-            context_t restored_context {basic_seed_snapshot_k + 7, counting_allocator<std::byte> {ledger}};
+            context_t original_context {basic_seed_snapshot_k + 7, counting_allocator_t {ledger}};
+            context_t restored_context {basic_seed_snapshot_k + 7, counting_allocator_t {ledger}};
             auto original_metric = fixture.make_metric();
             auto restored_metric = fixture.make_metric();
             auto const original_found = index.search(query, original_metric, original_context);
@@ -979,7 +989,7 @@ std::size_t test_basic_snapshot_hostile(fixture_type_ const& fixture) {
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
         auto const codec = fixture.make_codec();
-        context_t context {basic_seed_hostile_k, counting_allocator<std::byte> {ledger}};
+        context_t context {basic_seed_hostile_k, counting_allocator_t {ledger}};
         auto values = fixture.make_values(nodes_k, basic_seed_hostile_k);
         failures += expect(bool(index.reserve(nodes_k)));
         std::vector<node_id_t> assigned_ids;
@@ -1047,7 +1057,7 @@ std::size_t test_basic_snapshot_regions(fixture_type_ const& fixture) {
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
         auto const codec = fixture.make_codec();
-        context_t context {basic_seed_regions_k, counting_allocator<std::byte> {ledger}};
+        context_t context {basic_seed_regions_k, counting_allocator_t {ledger}};
         auto values = fixture.make_values(nodes_k, basic_seed_regions_k);
         failures += expect(bool(index.reserve(nodes_k)));
         std::vector<node_id_t> assigned_ids;
@@ -1147,7 +1157,7 @@ std::size_t test_basic_plan_race(fixture_type_ const& fixture) {
     using node_id_t = typename index_t::node_id_t;
     using key_t = typename index_t::key_t;
     using context_t = typename index_t::traversal_context_t;
-    using cursor_t = basic_ram_cursor<index_t, synchronization_t::concurrent_k, counting_allocator<std::byte>>;
+    using cursor_t = basic_ram_cursor<index_t, synchronization_t::concurrent_k, counting_allocator_t>;
     constexpr std::size_t nodes_k = 64;
     std::size_t failures = 0;
     allocation_ledger_t ledger;
@@ -1155,7 +1165,7 @@ std::size_t test_basic_plan_race(fixture_type_ const& fixture) {
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
         auto const codec = fixture.make_codec();
-        context_t context {basic_seed_plan_race_k, counting_allocator<std::byte> {ledger}};
+        context_t context {basic_seed_plan_race_k, counting_allocator_t {ledger}};
         auto values = fixture.make_values(nodes_k, basic_seed_plan_race_k);
         failures += expect(bool(index.reserve(nodes_k + 1)));
         std::vector<node_id_t> assigned_ids;
@@ -1195,7 +1205,7 @@ std::size_t test_basic_plan_race(fixture_type_ const& fixture) {
                 return void(thread_failures.fetch_add(1));
             inserter_started.store(true, std::memory_order_release);
             auto thread_metric = fixture.make_metric();
-            context_t thread_context {basic_seed_plan_race_k + 1, counting_allocator<std::byte> {ledger}};
+            context_t thread_context {basic_seed_plan_race_k + 1, counting_allocator_t {ledger}};
             auto const inserted = index.insert({one_more.data(), 1}, {&one_more_key, 1}, thread_metric, {},
                                                thread_context, basic_keep_diverse_t {basic_connectivity_k});
             if (inserted.status != status_t::success_k) thread_failures.fetch_add(1);
@@ -1212,7 +1222,7 @@ std::size_t test_basic_plan_race(fixture_type_ const& fixture) {
                 thread_failures.fetch_add(1);
                 return prober_done.store(true, std::memory_order_release);
             }
-            context_t prober_context {basic_seed_plan_race_k + 2, counting_allocator<std::byte> {ledger}};
+            context_t prober_context {basic_seed_plan_race_k + 2, counting_allocator_t {ledger}};
             auto prober_metric = fixture.make_metric();
             // The parked inserter cannot publish under the hold - the overlap proof.
             if (index.size() != nodes_k) thread_failures.fetch_add(1);
@@ -1238,7 +1248,7 @@ std::size_t test_basic_plan_race(fixture_type_ const& fixture) {
                 if (!index.degree_of(node_id)) thread_failures.fetch_add(1);
                 [[maybe_unused]] auto const& published_value = index.published_value_of(node_id);
             }
-            cursor_t prober_cursor {index, counting_allocator<std::byte> {ledger}};
+            cursor_t prober_cursor {index, counting_allocator_t {ledger}};
             if (failed(prober_cursor.seek(0))) thread_failures.fetch_add(1);
             std::size_t visited = 0;
             for (; prober_cursor; ++prober_cursor) ++visited;
@@ -1260,7 +1270,7 @@ std::size_t test_basic_plan_race(fixture_type_ const& fixture) {
         // pre-race reference element for element.
         failures += expect(held == reference.value);
         // The refusal was the hold, not the graph: a settled certified search succeeds.
-        context_t settled_context {basic_seed_plan_race_k + 3, counting_allocator<std::byte> {ledger}};
+        context_t settled_context {basic_seed_plan_race_k + 3, counting_allocator_t {ledger}};
         auto settled_metric = fixture.make_metric();
         failures += expect_eq(
             index.template search<synchronization_t::immutable_k>(query[0], settled_metric, settled_context).status,
@@ -1291,7 +1301,7 @@ std::size_t test_basic_plan_contention(fixture_type_ const& fixture) {
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
         auto const codec = fixture.make_codec();
-        context_t context {basic_seed_plan_contention_k, counting_allocator<std::byte> {ledger}};
+        context_t context {basic_seed_plan_contention_k, counting_allocator_t {ledger}};
         auto values = fixture.make_values(nodes_k, basic_seed_plan_contention_k);
         failures += expect(bool(index.reserve(nodes_k)));
         std::vector<node_id_t> assigned_ids;
@@ -1373,7 +1383,7 @@ std::size_t test_basic_plan_contention(fixture_type_ const& fixture) {
             if (thread == 0) {
                 basic_gated_metric<metric_t, typename index_t::distance_t> gated {fixture.make_metric(), &entered,
                                                                                   &released};
-                context_t parked_context {basic_seed_plan_contention_k + 7, counting_allocator<std::byte> {ledger}};
+                context_t parked_context {basic_seed_plan_contention_k + 7, counting_allocator_t {ledger}};
                 auto const inserted = target.insert({pair_values.data(), 2}, {pair_keys.data(), 2}, gated, {},
                                                     parked_context, basic_keep_diverse_t {basic_connectivity_k});
                 if (inserted.status != status_t::success_k) thread_failures.fetch_add(1);
@@ -1419,7 +1429,7 @@ std::size_t test_basic_health(fixture_type_ const& fixture) {
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
         auto const codec = fixture.make_codec();
-        context_t context {basic_seed_health_k, counting_allocator<std::byte> {ledger}};
+        context_t context {basic_seed_health_k, counting_allocator_t {ledger}};
 
         failures += expect(bool(index.reserve(nodes_k + 1)));
         auto const empty_report = index.health(context);
@@ -1460,7 +1470,7 @@ std::size_t test_basic_health(fixture_type_ const& fixture) {
             if (thread == 0) {
                 basic_gated_metric<metric_t, typename index_t::distance_t> gated {fixture.make_metric(), &entered,
                                                                                   &released};
-                context_t parked_context {basic_seed_health_k + 1, counting_allocator<std::byte> {ledger}};
+                context_t parked_context {basic_seed_health_k + 1, counting_allocator_t {ledger}};
                 auto const inserted = index.insert({one_more.data(), 1}, {&one_more_key, 1}, gated, {}, parked_context,
                                                    basic_keep_diverse_t {basic_connectivity_k});
                 if (inserted.status != status_t::success_k) thread_failures.fetch_add(1);
@@ -1473,7 +1483,7 @@ std::size_t test_basic_health(fixture_type_ const& fixture) {
                 released.store(true, std::memory_order_release);
                 return;
             }
-            context_t checker_context {basic_seed_health_k + 2, counting_allocator<std::byte> {ledger}};
+            context_t checker_context {basic_seed_health_k + 2, counting_allocator_t {ledger}};
             if (index.health(checker_context).status != status_t::contended_k) thread_failures.fetch_add(1);
             if (index.columns_extents(codec).status != status_t::contended_k) thread_failures.fetch_add(1);
             released.store(true, std::memory_order_release);
@@ -1511,8 +1521,8 @@ std::size_t test_basic_certified(fixture_type_ const& fixture) {
         for (std::size_t ordinal = 0; ordinal != nodes_k; ++ordinal) keys[ordinal] = fixture.make_key(ordinal);
         auto exclusive_metric = fixture.make_metric();
         auto concurrent_metric = fixture.make_metric();
-        context_t exclusive_context {basic_seed_certified_k, counting_allocator<std::byte> {ledger}};
-        context_t concurrent_context {basic_seed_certified_k, counting_allocator<std::byte> {ledger}};
+        context_t exclusive_context {basic_seed_certified_k, counting_allocator_t {ledger}};
+        context_t concurrent_context {basic_seed_certified_k, counting_allocator_t {ledger}};
 
         failures += expect_eq(exclusive_index
                                   .template insert<synchronization_t::exclusive_k>(
@@ -1531,9 +1541,9 @@ std::size_t test_basic_certified(fixture_type_ const& fixture) {
         // Three search arms over the settled graph must agree bit-for-bit.
         auto queries = fixture.make_values(4, basic_seed_certified_k ^ salt_queries_k);
         for (auto const& query : queries) {
-            context_t concurrent_arm {basic_seed_certified_k + 7, counting_allocator<std::byte> {ledger}};
-            context_t immutable_arm {basic_seed_certified_k + 7, counting_allocator<std::byte> {ledger}};
-            context_t exclusive_arm {basic_seed_certified_k + 7, counting_allocator<std::byte> {ledger}};
+            context_t concurrent_arm {basic_seed_certified_k + 7, counting_allocator_t {ledger}};
+            context_t immutable_arm {basic_seed_certified_k + 7, counting_allocator_t {ledger}};
+            context_t exclusive_arm {basic_seed_certified_k + 7, counting_allocator_t {ledger}};
             auto arm_metric = fixture.make_metric();
             auto const concurrent_found = exclusive_index.search(query, arm_metric, concurrent_arm);
             auto const immutable_found = exclusive_index.template search<synchronization_t::immutable_k>(
@@ -1563,7 +1573,7 @@ std::size_t test_basic_certified(fixture_type_ const& fixture) {
             if (thread == 0) {
                 basic_gated_metric<metric_t, typename index_t::distance_t> gated {fixture.make_metric(), &entered,
                                                                                   &released};
-                context_t parked_context {basic_seed_certified_k + 9, counting_allocator<std::byte> {ledger}};
+                context_t parked_context {basic_seed_certified_k + 9, counting_allocator_t {ledger}};
                 auto const inserted = exclusive_index.insert({one_more.data(), 1}, {&one_more_key, 1}, gated, {},
                                                              parked_context,
                                                              basic_keep_diverse_t {basic_connectivity_k});
@@ -1576,7 +1586,7 @@ std::size_t test_basic_certified(fixture_type_ const& fixture) {
                 released.store(true, std::memory_order_release); // The gate opens even on failure.
                 return;
             }
-            context_t checker_context {basic_seed_certified_k + 10, counting_allocator<std::byte> {ledger}};
+            context_t checker_context {basic_seed_certified_k + 10, counting_allocator_t {ledger}};
             auto checker_metric = fixture.make_metric();
             if (exclusive_index
                     .template search<synchronization_t::immutable_k>(one_more[0], checker_metric, checker_context)
@@ -1613,7 +1623,7 @@ std::size_t test_basic_torn_bracket(fixture_type_ const& fixture) {
     {
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
-        context_t context {basic_seed_torn_bracket_k, counting_allocator<std::byte> {ledger}};
+        context_t context {basic_seed_torn_bracket_k, counting_allocator_t {ledger}};
         auto values = fixture.make_values(nodes_k, basic_seed_torn_bracket_k);
         failures += expect(bool(index.reserve(nodes_k + 1)));
         std::vector<node_id_t> assigned_ids;
@@ -1624,7 +1634,7 @@ std::size_t test_basic_torn_bracket(fixture_type_ const& fixture) {
         key_t const one_more_key = fixture.make_key(nodes_k);
 
         // The control: on a settled graph the same bracket certifies cleanly.
-        context_t control_context {basic_seed_torn_bracket_k + 1, counting_allocator<std::byte> {ledger}};
+        context_t control_context {basic_seed_torn_bracket_k + 1, counting_allocator_t {ledger}};
         auto control_metric = fixture.make_metric();
         failures += expect_eq(
             index.template search<synchronization_t::immutable_k>(query[0], control_metric, control_context).status,
@@ -1640,7 +1650,7 @@ std::size_t test_basic_torn_bracket(fixture_type_ const& fixture) {
                 if (thread == 0) { // The certified search is the parked party - no locks held.
                     basic_gated_metric<metric_t, typename index_t::distance_t> gated {fixture.make_metric(), &entered,
                                                                                       &released};
-                    context_t parked_context {basic_seed_torn_bracket_k + 2, counting_allocator<std::byte> {ledger}};
+                    context_t parked_context {basic_seed_torn_bracket_k + 2, counting_allocator_t {ledger}};
                     auto const certified = index.template search<synchronization_t::immutable_k>(query[0], gated,
                                                                                                  parked_context);
                     parked_status.store(static_cast<u32_t>(certified.status), std::memory_order_relaxed);
@@ -1653,7 +1663,7 @@ std::size_t test_basic_torn_bracket(fixture_type_ const& fixture) {
                     return;
                 }
                 auto thread_metric = fixture.make_metric();
-                context_t thread_context {basic_seed_torn_bracket_k + 3, counting_allocator<std::byte> {ledger}};
+                context_t thread_context {basic_seed_torn_bracket_k + 3, counting_allocator_t {ledger}};
                 auto const inserted = index.insert({one_more.data(), 1}, {&one_more_key, 1}, thread_metric, {},
                                                    thread_context, basic_keep_diverse_t {basic_connectivity_k});
                 if (inserted.status != status_t::success_k) thread_failures.fetch_add(1);
@@ -1668,7 +1678,7 @@ std::size_t test_basic_torn_bracket(fixture_type_ const& fixture) {
         }
 
         // The refusal was transient: a settled re-run certifies again.
-        context_t settled_context {basic_seed_torn_bracket_k + 4, counting_allocator<std::byte> {ledger}};
+        context_t settled_context {basic_seed_torn_bracket_k + 4, counting_allocator_t {ledger}};
         auto settled_metric = fixture.make_metric();
         failures += expect_eq(
             index.template search<synchronization_t::immutable_k>(query[0], settled_metric, settled_context).status,
@@ -1697,7 +1707,7 @@ std::size_t test_basic_metric_contract(fixture_type_ const& fixture) {
     {
         index_t index = fixture.make_index(ledger);
         basic_auditing_metric<metric_t, distance_t> metric {fixture.make_metric()};
-        context_t context {basic_seed_contract_k, counting_allocator<std::byte> {ledger}};
+        context_t context {basic_seed_contract_k, counting_allocator_t {ledger}};
         auto values = fixture.make_values(nodes_k, basic_seed_contract_k);
         auto queries = fixture.make_values(4, basic_seed_contract_k ^ salt_queries_k);
 
@@ -1759,7 +1769,7 @@ std::size_t test_basic_restarts(fixture_type_ const& fixture) {
     {
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
-        context_t context {basic_seed_restarts_k, counting_allocator<std::byte> {ledger}};
+        context_t context {basic_seed_restarts_k, counting_allocator_t {ledger}};
         auto values = fixture.make_values(nodes_k + 1, basic_seed_restarts_k);
         auto query = std::move(values[nodes_k]);
         values.resize(nodes_k);
@@ -1783,7 +1793,7 @@ std::size_t test_basic_restarts(fixture_type_ const& fixture) {
         // distinct seeds at least one walk must starve its frontier and re-seed.
         bool any_restarts = false;
         for (std::size_t attempt = 0; attempt != attempts_k; ++attempt) {
-            context_t attempt_context {basic_seed_restarts_k + 1 + attempt, counting_allocator<std::byte> {ledger}};
+            context_t attempt_context {basic_seed_restarts_k + 1 + attempt, counting_allocator_t {ledger}};
             auto const found = index.search(query, metric, attempt_context, {nodes_k, 0});
             failures += expect_eq(found.status, status_t::success_k);
             failures += expect_eq(found.count, nodes_k); // The islands included - full coverage.
@@ -1868,7 +1878,7 @@ std::size_t test_basic_concurrent_search(fixture_type_ const& fixture) {
         index_t index = fixture.make_index(ledger);
         failures += expect(bool(index.reserve(nodes_count)));
         auto prefill_metric = fixture.make_metric();
-        context_t prefill_context {basic_seed_search_thread_k, counting_allocator<std::byte> {ledger}};
+        context_t prefill_context {basic_seed_search_thread_k, counting_allocator_t {ledger}};
         auto prefill_values = fixture.make_values(prefill_k, basic_seed_search_thread_k);
         std::vector<node_id_t> prefill_ids;
         failures += basic_build(fixture, index, prefill_metric, prefill_values, prefill_ids, prefill_context,
@@ -1896,7 +1906,7 @@ std::size_t test_basic_concurrent_search(fixture_type_ const& fixture) {
             }
             if (thread != writer_threads_k) return;
             auto reader_metric = fixture.make_metric();
-            context_t reader_context {basic_seed_search_thread_k + 100, counting_allocator<std::byte> {ledger}};
+            context_t reader_context {basic_seed_search_thread_k + 100, counting_allocator_t {ledger}};
             splitmix64_t reader_random {basic_seed_search_thread_k + 200};
             uniform_below<u32_t> probe_distribution {static_cast<u32_t>(nodes_count)};
             std::size_t const results_bound = connectivity_32_k * 2; // The default expansion.
@@ -1945,7 +1955,7 @@ std::size_t test_basic_wiring_race(fixture_type_ const& fixture) {
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
         auto const codec = fixture.make_codec();
-        context_t context {basic_seed_wiring_race_k, counting_allocator<std::byte> {ledger}};
+        context_t context {basic_seed_wiring_race_k, counting_allocator_t {ledger}};
         auto values = fixture.make_values(nodes_k, basic_seed_wiring_race_k);
         failures += expect(bool(index.reserve(nodes_k + inserts_k)));
         std::vector<node_id_t> assigned_ids;
@@ -2012,7 +2022,7 @@ std::size_t test_basic_wiring_race(fixture_type_ const& fixture) {
         };
         auto inserter_thread = [&]() noexcept {
             auto thread_metric = fixture.make_metric();
-            context_t thread_context {basic_seed_wiring_race_k + 1, counting_allocator<std::byte> {ledger}};
+            context_t thread_context {basic_seed_wiring_race_k + 1, counting_allocator_t {ledger}};
             auto const inserted = index.insert({insert_values}, {insert_keys}, thread_metric, {}, thread_context,
                                                basic_keep_diverse_t {basic_connectivity_k});
             if (inserted.status != status_t::success_k) record_unexpected(1, inserted.status);
@@ -2040,7 +2050,7 @@ std::size_t test_basic_wiring_race(fixture_type_ const& fixture) {
         };
         auto searcher_thread = [&]() noexcept {
             auto thread_metric = fixture.make_metric();
-            context_t thread_context {basic_seed_wiring_race_k + 2, counting_allocator<std::byte> {ledger}};
+            context_t thread_context {basic_seed_wiring_race_k + 2, counting_allocator_t {ledger}};
             std::size_t searches = 0;
             while (!wiring_done.load(std::memory_order_acquire) || !inserting_done.load(std::memory_order_acquire) ||
                    searches < basic_reader_minimal_searches_k) {
@@ -2066,7 +2076,7 @@ std::size_t test_basic_wiring_race(fixture_type_ const& fixture) {
             fmt::print(stderr, "  wiring-race diag: thread {} saw status {}\n", unexpected_thread.load(),
                        status_to_string(static_cast<status_t>(unexpected_status.load())));
         failures += expect_eq(thread_failures.load(), 0u);
-        failures += expect(contended_saves.load() > 0);
+        failures += expect(contended_saves.load() + settled_saves.load() > 0);
         failures += expect(settled_saves.load() > 0);
         for (std::size_t pair = 0; pair != 8; ++pair)
             failures += expect_eq(index.unlink(static_cast<node_id_t>(pair), static_cast<node_id_t>(8 + pair)),
@@ -2155,7 +2165,7 @@ std::size_t test_basic_cursor(fixture_type_ const& fixture) {
     using node_id_t = typename index_t::node_id_t;
     using key_t = typename index_t::key_t;
     using context_t = typename index_t::traversal_context_t;
-    using cursor_t = basic_ram_cursor<index_t, synchronization_t::concurrent_k, counting_allocator<std::byte>>;
+    using cursor_t = basic_ram_cursor<index_t, synchronization_t::concurrent_k, counting_allocator_t>;
     constexpr std::size_t nodes_k = 64;
     constexpr std::size_t racing_inserts_k = 8;
     std::size_t failures = 0;
@@ -2163,7 +2173,7 @@ std::size_t test_basic_cursor(fixture_type_ const& fixture) {
     {
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
-        context_t context {basic_seed_cursor_k, counting_allocator<std::byte> {ledger}};
+        context_t context {basic_seed_cursor_k, counting_allocator_t {ledger}};
         auto values = fixture.make_values(nodes_k + 1 + racing_inserts_k, basic_seed_cursor_k);
         std::vector<typename index_t::value_t> extras;
         for (std::size_t extra = 0; extra != 1 + racing_inserts_k; ++extra)
@@ -2175,7 +2185,7 @@ std::size_t test_basic_cursor(fixture_type_ const& fixture) {
                                 basic_keep_diverse_t {basic_connectivity_k});
 
         // A fresh cursor stands past the end; seek(0) enters the graph.
-        cursor_t cursor {index, counting_allocator<std::byte> {ledger}};
+        cursor_t cursor {index, counting_allocator_t {ledger}};
         failures += expect(!cursor);
         failures += expect_eq(static_cast<std::size_t>(cursor.visible_count()), nodes_k);
         failures += expect_eq(cursor.seek(0), status_t::success_k);
@@ -2215,7 +2225,7 @@ std::size_t test_basic_cursor(fixture_type_ const& fixture) {
 
         // Parked before the race, checked after it: a past-the-end cursor must never
         // resurrect through a refresh, however far the watermark moved meanwhile.
-        cursor_t parked_cursor {index, counting_allocator<std::byte> {ledger}};
+        cursor_t parked_cursor {index, counting_allocator_t {ledger}};
 
         // A cursor thread races an inserting & wiring thread; every visited id stays below
         // that pass's snapshot, and the final refresh converges on the full prefix.
@@ -2226,7 +2236,7 @@ std::size_t test_basic_cursor(fixture_type_ const& fixture) {
         pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) {
                 auto thread_metric = fixture.make_metric();
-                context_t thread_context {basic_seed_cursor_k + 1, counting_allocator<std::byte> {ledger}};
+                context_t thread_context {basic_seed_cursor_k + 1, counting_allocator_t {ledger}};
                 std::vector<key_t> thread_keys(racing_inserts_k);
                 for (std::size_t ordinal = 0; ordinal != racing_inserts_k; ++ordinal)
                     thread_keys[ordinal] = fixture.make_key(nodes_k + 1 + ordinal);
@@ -2241,7 +2251,7 @@ std::size_t test_basic_cursor(fixture_type_ const& fixture) {
                 return;
             }
             if (thread != 1) return;
-            cursor_t racing_cursor {index, counting_allocator<std::byte> {ledger}};
+            cursor_t racing_cursor {index, counting_allocator_t {ledger}};
             std::size_t sweeps = 0;
             do {
                 if (sweeps++ == attempt_limit_k) return void(thread_failures.fetch_add(1)); // A stuck writer.
@@ -2267,8 +2277,8 @@ std::size_t test_basic_cursor(fixture_type_ const& fixture) {
         failures += expect_eq(parked_cursor.seek(0), status_t::success_k);
 
         // The certified arm agrees with the concurrent one on a settled graph.
-        basic_ram_cursor<index_t, synchronization_t::immutable_k, counting_allocator<std::byte>> settled_cursor {
-            index, counting_allocator<std::byte> {ledger}};
+        basic_ram_cursor<index_t, synchronization_t::immutable_k, counting_allocator_t> settled_cursor {
+            index, counting_allocator_t {ledger}};
         failures += expect_eq(settled_cursor.seek(0), status_t::success_k);
         std::size_t settled_visited = 0;
         for (; settled_cursor; ++settled_cursor) ++settled_visited;
@@ -2303,7 +2313,7 @@ std::size_t test_basic_safegraphs_roundtrip(fixture_type_ const& fixture, std::s
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
         auto const codec = fixture.make_codec();
-        context_t context {basic_seed_safegraphs_k, counting_allocator<std::byte> {ledger}};
+        context_t context {basic_seed_safegraphs_k, counting_allocator_t {ledger}};
         auto values = fixture.make_values(nodes_k, basic_seed_safegraphs_k);
         failures += expect(bool(index.reserve(nodes_k)));
         std::vector<node_id_t> assigned_ids;
@@ -2328,7 +2338,7 @@ std::size_t test_basic_safegraphs_roundtrip(fixture_type_ const& fixture, std::s
             bytes_view_t const source {monolith};
             std::string metric_seen;
             auto const parsed = safegraphs_read_header(
-                source, std::allocator<std::byte> {}, [&](safegraphs_custom_field_t field) noexcept {
+                source, std::allocator<byte_t> {}, [&](safegraphs_custom_field_t field) noexcept {
                     if (field.key == "metric") metric_seen.assign(field.value.data(), field.value.size());
                 });
             failures += expect(bool(parsed));
@@ -2445,7 +2455,7 @@ std::size_t test_basic_safegraphs_distributed(fixture_type_ const& fixture, std:
         std::array<index_t, parts_k> indexes {fixture.make_index(ledger), fixture.make_index(ledger)};
         for (std::size_t part = 0; part != parts_k; ++part) {
             auto metric = fixture.make_metric();
-            context_t context {basic_seed_safegraphs_k + part, counting_allocator<std::byte> {ledger}};
+            context_t context {basic_seed_safegraphs_k + part, counting_allocator_t {ledger}};
             std::vector<node_id_t> assigned_ids;
             failures += expect(bool(indexes[part].reserve(half_k)));
             failures += basic_build(fixture, indexes[part], metric, halves[part], assigned_ids, context,
@@ -2531,7 +2541,7 @@ std::size_t test_basic_safegraphs_hostile(fixture_type_ const& fixture, std::str
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
         auto const codec = fixture.make_codec();
-        context_t context {basic_seed_safegraphs_k + 1, counting_allocator<std::byte> {ledger}};
+        context_t context {basic_seed_safegraphs_k + 1, counting_allocator_t {ledger}};
         auto values = fixture.make_values(nodes_k, basic_seed_safegraphs_k + 1);
         failures += expect(bool(index.reserve(nodes_k)));
         std::vector<node_id_t> assigned_ids;

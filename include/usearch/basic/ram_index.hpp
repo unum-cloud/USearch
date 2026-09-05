@@ -343,7 +343,7 @@ struct basic_shared_mutex {
  *      the staging surfaces of batched metric rounds, and running telemetry.
  */
 template <typename node_id_type_ = u64_t, typename distance_type_ = f64_t,
-          typename allocator_type_ = std::allocator<std::byte>>
+          typename allocator_type_ = std::allocator<byte_t>>
 struct basic_traversal_context {
 
     using scored_node_t = basic_scored_node<node_id_type_, distance_type_>;
@@ -455,13 +455,13 @@ struct basic_ram_cursor;
  *  @tparam wait_type_ the monitored-wait engaged on contended words.
  *  @tparam allocator_type_ places the node records, neighbor buffers & key multimap.
  */
-template <                                               //
-    typename value_type_,                                //
-    typename key_type_ = uuid_t,                         //
-    typename node_id_type_ = u64_t,                      //
-    typename distance_type_ = f64_t,                     //
-    typename wait_type_ = dummy_waiter_t,                //
-    typename allocator_type_ = std::allocator<std::byte> //
+template <                                            //
+    typename value_type_,                             //
+    typename key_type_ = uuid_t,                      //
+    typename node_id_type_ = u64_t,                   //
+    typename distance_type_ = f64_t,                  //
+    typename wait_type_ = dummy_waiter_t,             //
+    typename allocator_type_ = std::allocator<byte_t> //
     >
     requires basic_value<value_type_> && (std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>)
 struct basic_ram_index {
@@ -1157,9 +1157,9 @@ struct basic_ram_index {
             columns.neighbor_offsets[node + 1] = running_neighbors;
             columns.value_offsets[node + 1] = running_values;
         }
-        if (status_t const sized = sized_exactly_(columns.neighbor_ids.size(), running_neighbors); failed(sized))
+        if (status_t const sized = sized_at_least_(columns.neighbor_ids.size(), running_neighbors); failed(sized))
             return {{}, sized};
-        if (status_t const sized = sized_exactly_(columns.values.size(), running_values); failed(sized))
+        if (status_t const sized = sized_at_least_(columns.values.size(), running_values); failed(sized))
             return {{}, sized};
         return {save_plan_t {this, columns, 0, std::move(hold)}, status_t::success_k};
     }
@@ -1603,11 +1603,19 @@ struct basic_ram_index {
     }
 
     /** @brief Refuses a column of @p size that is not exactly @p wanted elements: a short one
-     *      overflows, a long one disagrees about the row count. */
+     *      overflows, a long one disagrees about the row count. For the three node-sized columns,
+     *      whose length is what names the row count. */
     static status_t sized_exactly_(std::size_t size, std::size_t wanted) noexcept {
         if (size < wanted) return status_t::overflow_k;
         if (size > wanted) return status_t::config_mismatch_k;
         return status_t::success_k;
+    }
+
+    /** @brief Refuses a column of @p size shorter than @p wanted elements. For the two bulk
+     *      columns, whose content the prefix sums delimit, so spare room is unused rather than
+     *      wrong - and a graph that sheds edges between sizing and planning still saves. */
+    static status_t sized_at_least_(std::size_t size, std::size_t wanted) noexcept {
+        return size < wanted ? status_t::overflow_k : status_t::success_k;
     }
 
     /** @brief Whether @p sums start at zero, never fall, never pass @p total, and end at it. */

@@ -298,6 +298,9 @@ struct cuda_device_allocator {
     int device_ = 0;
 };
 
+/** @brief The byte specialization device storage is placed through. */
+using cuda_device_allocator_t = cuda_device_allocator<byte_t>;
+
 /**
  *  @brief The device twin of @ref arena_allocator: carves device bytes from one stream's run.
  *
@@ -309,7 +312,7 @@ struct cuda_device_allocator {
 template <typename value_type_ = byte_t>
 struct cuda_arena_allocator {
     using value_type = value_type_;
-    using arena_t = growing_buffer<byte_t, cuda_device_allocator<byte_t>>;
+    using arena_t = growing_arena<cuda_device_allocator_t>;
     inline static constexpr cuda_address_space_t address_space_k = cuda_address_space_t::device_k;
     template <typename other_>
     struct rebind {
@@ -326,7 +329,7 @@ struct cuda_arena_allocator {
 
     value_type* allocate(std::size_t count) noexcept {
         // Host-side pointer arithmetic over device bytes: the carve never touches them.
-        return arena_allocator<value_type_, cuda_device_allocator<byte_t>> {arena_}.allocate(count);
+        return arena_allocator<value_type_, cuda_device_allocator_t> {arena_}.allocate(count);
     }
     /** @brief A carve is never returned; the run's owner rewinds it between calls. */
     void deallocate(value_type*, std::size_t) noexcept {}
@@ -342,6 +345,9 @@ struct cuda_arena_allocator {
     cudaStream_t stream_ = nullptr;
     int device_ = 0;
 };
+
+/** @brief The byte specialization a walk carves its scratch through. */
+using cuda_arena_allocator_t = cuda_arena_allocator<byte_t>;
 
 /** @brief Page-locked host allocator - the DMA source and sink; pinning is synchronous, the
  *      stream is identity only. */
@@ -375,6 +381,9 @@ struct cuda_pinned_allocator {
     int device_ = 0;
 };
 
+/** @brief The byte specialization a host bounce is pinned through. */
+using cuda_pinned_allocator_t = cuda_pinned_allocator<byte_t>;
+
 /** @brief Owned non-blocking stream; destruction drains it first. */
 struct cuda_stream_t {
     cuda_stream_t() noexcept { cudaStreamCreateWithFlags(&handle_, cudaStreamNonBlocking); }
@@ -394,9 +403,9 @@ struct cuda_stream_t {
 /** @brief The streams a bulk verb advances on and the scratch they walk with - one of each per
  *      device. Work is queued, never waited on, so one host thread drives every device. */
 struct cuda_executor_t {
-    /** @brief One device's run of scratch; sized once by @ref reserve, since relocation would be
-     *      a host loop over device bytes. */
-    using arena_t = growing_buffer<byte_t, cuda_device_allocator<byte_t>>;
+    /** @brief One device's run of scratch, carved and rewound between calls; sized once by
+     *      @ref reserve, since relocation would be a host loop over device bytes. */
+    using arena_t = growing_arena<cuda_device_allocator_t>;
     /** @brief One call's hold on the executor, released when it dies. */
     using claim_t = std::unique_lock<fu::spin_mutex<fu::preferred_yield_t>>;
 
@@ -411,8 +420,7 @@ struct cuda_executor_t {
         arena_t arena;
 
         /** @brief Opens a stream on the current device and binds the arena to it. */
-        explicit stream_t(int device) noexcept
-            : device(device), arena(cuda_device_allocator<byte_t> {handle, device}) {}
+        explicit stream_t(int device) noexcept : device(device), arena(cuda_device_allocator_t {handle, device}) {}
     };
 
     cuda_executor_t() = default;
@@ -508,9 +516,9 @@ cuda_unique_ptr<typename allocator_::value_type, allocator_> cuda_make_unique(al
 
 static_assert(cuda_reservable_allocator<cuda_virtual_memory_allocator<byte_t>>);
 static_assert(cuda_reservable_allocator<cuda_managed_allocator<byte_t>>);
-static_assert(cuda_allocator<cuda_device_allocator<byte_t>>);
-static_assert(cuda_allocator<cuda_arena_allocator<byte_t>>);
-static_assert(cuda_allocator<cuda_pinned_allocator<byte_t>>);
+static_assert(cuda_allocator<cuda_device_allocator_t>);
+static_assert(cuda_allocator<cuda_arena_allocator_t>);
+static_assert(cuda_allocator<cuda_pinned_allocator_t>);
 
 } // namespace usearch
 } // namespace unum

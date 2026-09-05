@@ -55,13 +55,23 @@ set(USEARCH_CUDA_ARCHITECTURES
     CACHE STRING "GPU architectures baked into the CUDA targets: Ampere floor, Hopper, Blackwell datacenter & consumer"
 )
 
+# One diagnostic is what an iteration wants; surveying a tree that has drifted wants the whole list at once.
+set(USEARCH_MAX_ERRORS
+    "1"
+    CACHE STRING "Diagnostics a compiler emits before giving up on a translation unit"
+)
+
 # Blackwell entries ("100a", "120a") are only understood from CMake 3.31 onward, while the CPU-only build stays on the
-# 3.28 floor that stock Ubuntu 24.04 ships. Demanding the newer CMake only when CUDA is requested keeps the library
-# consumable by distributions whose CMake predates the Blackwell tables.
+# 3.28 floor that stock Ubuntu 24.04 ships. The floor follows the architectures actually asked for, so a single-
+# architecture build on a distribution CMake is never refused for a capability it does not use.
 if (USEARCH_BUILD_CUDA AND CMAKE_VERSION VERSION_LESS 3.31)
-    message(
-        FATAL_ERROR "USEARCH_BUILD_CUDA needs CMake 3.31 or newer for Blackwell architectures, found ${CMAKE_VERSION}"
-    )
+    string(REGEX MATCH "1[0-9][0-9]a" USEARCH_BLACKWELL_ARCHITECTURE "${USEARCH_CUDA_ARCHITECTURES}")
+    if (USEARCH_BLACKWELL_ARCHITECTURE)
+        message(
+            FATAL_ERROR
+                "The Blackwell architectures in USEARCH_CUDA_ARCHITECTURES need CMake 3.31 or newer, found ${CMAKE_VERSION} - override with a single architecture or \"native\""
+        )
+    endif ()
 endif ()
 
 # Enable the in-repo Git hooks. Git will not auto-run hooks shipped inside a clone (that would let any cloned repo
@@ -260,7 +270,7 @@ function (setup_target TARGET_NAME)
                     -Wextra
                     -Wno-conversion
                     -Wno-unknown-pragmas
-                    -fmax-errors=1
+                    -fmax-errors=${USEARCH_MAX_ERRORS}
                     -pedantic
                     -fdiagnostics-color=always
         )
@@ -327,7 +337,7 @@ function (setup_target TARGET_NAME)
         set_target_properties(${TARGET_NAME} PROPERTIES CUDA_ARCHITECTURES "${USEARCH_CUDA_ARCHITECTURES}")
 
     elseif (CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-        target_compile_options(${TARGET_NAME} PRIVATE -w -ferror-limit=1)
+        target_compile_options(${TARGET_NAME} PRIVATE -w -ferror-limit=${USEARCH_MAX_ERRORS})
 
     elseif (CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
         # MSVC has no O3 optimization level

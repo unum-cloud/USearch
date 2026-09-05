@@ -181,6 +181,9 @@ struct counting_allocator {
     bool operator==(counting_allocator const& other) const noexcept { return ledger_ == other.ledger_; }
 };
 
+/** @brief The byte specialization every fixture places its index through. */
+using counting_allocator_t = counting_allocator<byte_t>;
+
 /** @brief The largest magnitude one stored dimension can carry - per component for the
  *      packed types, the finite maximum for the plain ones. The conditional papers over a
  *      NumKong asymmetry: plain scalars name their @c component_t but only the packed ones
@@ -189,6 +192,16 @@ template <typename scalar_>
 constexpr float dimension_amplitude() noexcept {
     if constexpr (requires { scalar_::component_max(); }) return float(scalar_::component_max());
     else return float(scalar_::finite_max());
+}
+
+/** @brief Distinct levels one component of @p scalar_ draws from: a packed bit has two, since
+ *      its proxy sets the bit for any nonzero and a wider draw would bias it toward ones; every
+ *      other type keeps the eight levels the fixtures are built around.
+ *  @see @c nk::fill_uniform, which ranges every dtype by its own @c finite_min & @c finite_max. */
+template <typename scalar_>
+constexpr u32_t random_component_levels() noexcept {
+    if constexpr (std::is_same_v<scalar_, nk::u1x8_t>) return 2;
+    else return 8;
 }
 
 /** @brief Builds a scalar from a small unsigned - sub-byte types go through the raw nibble path,
@@ -241,7 +254,7 @@ nk::matrix<scalar_> make_clustered_vectors(std::size_t count, std::size_t dimens
     auto centroids = nk::matrix<scalar_>::try_zeros({centroids_count_k, dimensions});
     auto vectors = nk::matrix<scalar_>::try_zeros({count, dimensions});
     splitmix64_t random_generator {seed};
-    uniform_below<u32_t> component_distribution {8};
+    uniform_below<u32_t> component_distribution {random_component_levels<scalar_>()};
     uniform_below<u32_t> centroid_distribution {centroids_count_k};
     uniform_below<u32_t> dimension_distribution {static_cast<u32_t>(dimensions)};
     for (std::size_t centroid = 0; centroid != centroids_count_k; ++centroid) {
@@ -270,7 +283,7 @@ nk::matrix<scalar_> make_vectors(std::size_t count, std::size_t dimensions, u64_
     if constexpr (std::is_same_v<scalar_, nk::u1x8_t>) return make_clustered_vectors<scalar_>(count, dimensions, seed);
     auto vectors = nk::matrix<scalar_>::try_zeros({count, dimensions});
     splitmix64_t random_generator {seed};
-    uniform_below<u32_t> component_distribution {8};
+    uniform_below<u32_t> component_distribution {random_component_levels<scalar_>()};
     for (std::size_t row = 0; row != count; ++row) {
         auto row_span = vectors.row(row).as_vector();
         for (std::size_t dimension = 0; dimension != dimensions; ++dimension)

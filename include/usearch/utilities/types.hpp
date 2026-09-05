@@ -288,6 +288,40 @@ struct iota_view {
     constexpr iterator end() const noexcept { return {bound}; }
 };
 
+/**
+ *  @brief A range over an indexed accessor: @c owner[position] for every position below @p count,
+ *      so a caller reads @c for(auto element : range) rather than counting positions itself.
+ */
+template <typename owner_type_>
+struct indexed_range {
+    /** @brief What the positions are read from; borrowed, never owned. */
+    owner_type_ const* owner = nullptr;
+    /** @brief Positions the range covers, from zero. */
+    std::size_t count = 0;
+
+    constexpr std::size_t size() const noexcept { return count; }
+    constexpr bool empty() const noexcept { return !count; }
+    constexpr auto operator[](std::size_t position) const noexcept {
+        owner_type_ const& indexed = *owner;
+        return indexed[position];
+    }
+
+    struct iterator {
+        owner_type_ const* owner = nullptr;
+        std::size_t position = 0;
+
+        constexpr auto operator*() const noexcept {
+            owner_type_ const& indexed = *owner;
+            return indexed[position];
+        }
+        constexpr iterator& operator++() noexcept { return ++position, *this; }
+        constexpr bool operator==(iterator const& other) const noexcept { return position == other.position; }
+        constexpr bool operator!=(iterator const& other) const noexcept { return position != other.position; }
+    };
+    constexpr iterator begin() const noexcept { return {owner, 0}; }
+    constexpr iterator end() const noexcept { return {owner, count}; }
+};
+
 /** @brief Moves neighbor IDs between id spaces: an ID inside @p source_range lands at
  *      @c id-source_range.first+shift, every other ID folds onto @p sentinel, which a walk
  *      reads as naming no node. */
@@ -298,6 +332,29 @@ constexpr void rebase_neighbors(std::span<id_type_> neighbors, iota_view<id_type
         neighbor = source_range.first <= neighbor && neighbor < source_range.bound //
                        ? static_cast<id_type_>(neighbor - source_range.first + shift)
                        : sentinel;
+}
+
+/**
+ *  @brief Packs the surviving ids of each row of @p rows to its front and pads the tail with
+ *      @p sentinel, writing @p first_row + row as a self-loop for a row nothing survived in.
+ *
+ *  A rebase folds every foreign id onto the sentinel wherever it sat, and a concurrent walk
+ *  reads a sentinel in slot 0 as a node locked by a live writer - which a loaded graph has none
+ *  of, so it would spin forever. Compacting restores what a live index maintains: slot 0 is a
+ *  real id, and the sentinel only ever ends a row.
+ */
+template <std::unsigned_integral id_type_>
+constexpr void compact_neighbors(std::span<id_type_> rows, std::size_t connectivity, id_type_ first_row,
+                                 id_type_ sentinel) noexcept {
+    if (!connectivity) return;
+    for (std::size_t row = 0; row * connectivity != rows.size(); ++row) {
+        std::span<id_type_> const slots = rows.subspan(row * connectivity, connectivity);
+        std::size_t kept = 0;
+        for (std::size_t slot = 0; slot != connectivity; ++slot)
+            if (slots[slot] != sentinel) slots[kept++] = slots[slot];
+        if (!kept) slots[kept++] = static_cast<id_type_>(first_row + row);
+        for (std::size_t slot = kept; slot != connectivity; ++slot) slots[slot] = sentinel;
+    }
 }
 
 /** @brief The concurrency environment a caller certifies for one operation. */
@@ -599,6 +656,20 @@ constexpr auto to_span(vector_type_ const& vector) noexcept {
             "dimensions, not storage values, so they cannot form a span");
     if constexpr (requires { vector.stride_bytes(); })
         assert(static_cast<std::size_t>(vector.stride_bytes()) == sizeof(value_t));
+    return std::span<value_t> {vector.data(), vector.size()};
+}
+
+/** @brief The writable sibling of @ref to_span, for a run the caller owns and fills; named
+ *      apart rather than overloaded, since an overload would silently hand a mutable span to
+ *      every existing caller holding a non-const run.
+ *  @see @c std::as_bytes and @c std::as_writable_bytes, which separate the same pair. */
+template <typename vector_type_>
+    requires requires(vector_type_& vector) {
+        vector.data();
+        vector.size();
+    }
+constexpr auto to_writable_span(vector_type_& vector) noexcept {
+    using value_t = std::remove_pointer_t<decltype(vector.data())>;
     return std::span<value_t> {vector.data(), vector.size()};
 }
 

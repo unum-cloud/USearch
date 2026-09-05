@@ -360,7 +360,7 @@ inline expected<safegraphs_column_t> safegraphs_parse_column_(yyjson_val* object
  *  @param[in] per_custom_field Fires once per string-valued `__metadata__` entry; its views
  *      die with this call.
  */
-template <typename allocator_type_ = std::allocator<std::byte>, typename callback_type_ = dummy_callback_t>
+template <typename allocator_type_ = std::allocator<byte_t>, typename callback_type_ = dummy_callback_t>
 expected<safegraphs_header_t> safegraphs_read_header(bytes_view_t monolith, allocator_type_ allocator = {},
                                                      callback_type_&& per_custom_field = {}) noexcept {
     safegraphs_header_t header;
@@ -400,7 +400,7 @@ expected<safegraphs_header_t> safegraphs_read_header(bytes_view_t monolith, allo
 }
 
 /** @brief Maps @p path read-only and parses its header. */
-template <typename allocator_type_ = std::allocator<std::byte>, typename callback_type_ = dummy_callback_t>
+template <typename allocator_type_ = std::allocator<byte_t>, typename callback_type_ = dummy_callback_t>
 expected<safegraphs_header_t> safegraphs_read_header(std::string_view path, allocator_type_ allocator = {},
                                                      callback_type_&& per_custom_field = {}) noexcept {
     auto [mapping, mapped] = mapped_file_t::read(path);
@@ -472,7 +472,7 @@ status_t safegraphs_print_(yyjson_mut_doc* document, yyjson_alc const& allocator
 
 /** @brief Where a header lands its data segment: the prefix and JSON rounded up to the declared
  *      alignment. */
-template <typename allocator_type_ = std::allocator<std::byte>>
+template <typename allocator_type_ = std::allocator<byte_t>>
 expected<std::size_t> safegraphs_data_offset(safegraphs_header_t const& header,
                                              std::span<safegraphs_custom_field_t const> custom_fields = {},
                                              allocator_type_ allocator = {}) noexcept {
@@ -491,7 +491,7 @@ expected<std::size_t> safegraphs_data_offset(safegraphs_header_t const& header,
 /** @brief Writes the prefix, the JSON, and space padding up to @c header.data_offset over the
  *      front of @p monolith - exactly the bytes @ref safegraphs_read_header consumes. Written
  *      last, it is what turns a run of bytes into a checkpoint. */
-template <typename bytes_type_, typename allocator_type_ = std::allocator<std::byte>>
+template <typename bytes_type_, typename allocator_type_ = std::allocator<byte_t>>
 status_t safegraphs_write_header(bytes_type_ monolith, safegraphs_header_t const& header,
                                  std::span<safegraphs_custom_field_t const> custom_fields = {},
                                  allocator_type_ allocator = {}) noexcept {
@@ -499,7 +499,7 @@ status_t safegraphs_write_header(bytes_type_ monolith, safegraphs_header_t const
     if (monolith.size() < header.data_offset) return status_t::overflow_k;
     safegraphs_yyjson_allocator_<allocator_type_> trampoline {allocator};
     yyjson_alc const allocator_abi = trampoline.c_abi();
-    growing_buffer<char, allocator_type_> image {allocator};
+    growing_buffer<byte_t, allocator_type_> image {allocator};
     if (failed(image.resize_uninitialized(header.data_offset))) return status_t::bad_alloc_k;
     safegraphs_prefix_t prefix;
     prefix.header_length = header.data_offset - sizeof(prefix);
@@ -507,9 +507,12 @@ status_t safegraphs_write_header(bytes_type_ monolith, safegraphs_header_t const
         safegraphs_header_document_(header, custom_fields, allocator_abi), allocator_abi,
         [&](std::string_view json) noexcept {
             if (json.size() > prefix.header_length) return status_t::config_mismatch_k;
-            auto const prefix_bytes = std::bit_cast<std::array<char, sizeof(safegraphs_prefix_t)>>(prefix);
-            std::copy_n(prefix_bytes.data(), prefix_bytes.size(), image.data());
-            std::copy_n(json.data(), json.size(), image.data() + sizeof(prefix));
+            auto const prefix_bytes = std::bit_cast<std::array<byte_t, sizeof(safegraphs_prefix_t)>>(prefix);
+            bytes_span_t const staging = to_writable_span(image);
+            [[maybe_unused]] status_t const framed = copy_bytes(staging.subspan(0, prefix_bytes.size()),
+                                                                bytes_of(prefix_bytes.data(), prefix_bytes.size()));
+            [[maybe_unused]] status_t const printed = copy_bytes(staging.subspan(sizeof(prefix), json.size()),
+                                                                 std::as_bytes(std::span {json}));
             std::memset(image.data() + sizeof(prefix) + json.size(), ' ',
                         static_cast<std::size_t>(prefix.header_length) - json.size());
             return status_t::success_k;
@@ -566,7 +569,7 @@ struct safegraphs_regular_shape_t {
 
 /** @brief A header of three regular columns at aligned starts - keys, fixed-width values, and
  *      fixed-degree neighbors - with the data offset they follow. */
-template <typename allocator_type_ = std::allocator<std::byte>>
+template <typename allocator_type_ = std::allocator<byte_t>>
 expected<safegraphs_header_t> safegraphs_regular_header(safegraphs_regular_shape_t const& shape, std::size_t alignment,
                                                         std::span<safegraphs_custom_field_t const> custom_fields = {},
                                                         allocator_type_ allocator = {}) noexcept {
@@ -761,7 +764,7 @@ yyjson_mut_doc* safegraphs_manifest_document_(std::size_t parts, callback_type_&
 }
 
 /** @brief Bytes a manifest over @p parts entries from @p part_at occupies. */
-template <typename callback_type_, typename allocator_type_ = std::allocator<std::byte>>
+template <typename callback_type_, typename allocator_type_ = std::allocator<byte_t>>
 expected<std::size_t> safegraphs_manifest_bytes(std::size_t parts, callback_type_&& part_at,
                                                 std::span<safegraphs_custom_field_t const> custom_fields = {},
                                                 allocator_type_ allocator = {}) noexcept {
@@ -795,7 +798,7 @@ inline safegraphs_metadata_t safegraphs_metadata_of_(safegraphs_header_t const& 
  *      with this call, and the metadata comes from the first part's header, the one place a
  *      schema is written. Node counts sum over the entries that declare one.
  */
-template <typename allocator_type_ = std::allocator<std::byte>, typename callback_type_ = dummy_callback_t>
+template <typename allocator_type_ = std::allocator<byte_t>, typename callback_type_ = dummy_callback_t>
 expected<safegraphs_metadata_t> safegraphs_read_manifest(std::string_view path, allocator_type_ allocator = {},
                                                          callback_type_&& per_part = {}) noexcept {
     safegraphs_metadata_t metadata;
@@ -843,7 +846,7 @@ expected<safegraphs_metadata_t> safegraphs_read_manifest(std::string_view path, 
 
 /** @brief Writes a manifest over @p parts entries drawn from @p part_at in order - the commit
  *      record a distributed save writes last. */
-template <typename callback_type_, typename allocator_type_ = std::allocator<std::byte>>
+template <typename callback_type_, typename allocator_type_ = std::allocator<byte_t>>
 status_t safegraphs_write_manifest(std::string_view path, std::size_t parts, callback_type_&& part_at,
                                    std::span<safegraphs_custom_field_t const> custom_fields = {},
                                    allocator_type_ allocator = {}) noexcept {
@@ -861,7 +864,7 @@ status_t safegraphs_write_manifest(std::string_view path, std::size_t parts, cal
 }
 
 /** @brief The metadata of a monolith held in @p monolith. */
-template <typename allocator_type_ = std::allocator<std::byte>>
+template <typename allocator_type_ = std::allocator<byte_t>>
 expected<safegraphs_metadata_t> safegraphs_read_metadata(bytes_view_t monolith,
                                                          allocator_type_ allocator = {}) noexcept {
     safegraphs_name_t metric;
@@ -877,7 +880,7 @@ expected<safegraphs_metadata_t> safegraphs_read_metadata(bytes_view_t monolith,
 
 /** @brief The metadata of a manifest or of a lone monolith at @p path - told apart by content,
  *      the monolith's magic, never by the extension. */
-template <typename allocator_type_ = std::allocator<std::byte>>
+template <typename allocator_type_ = std::allocator<byte_t>>
 expected<safegraphs_metadata_t> safegraphs_read_metadata(std::string_view path,
                                                          allocator_type_ allocator = {}) noexcept {
     auto [mapping, mapped] = mapped_file_t::read(path);
@@ -933,7 +936,7 @@ struct safegraphs_index_layout_t {
  *      index's byte count, so a codec cannot claim a width its values do not have.
  */
 template <typename key_type_, typename node_id_type_, typename codec_type_,
-          typename allocator_type_ = std::allocator<std::byte>>
+          typename allocator_type_ = std::allocator<byte_t>>
     requires interchange_value_codec<codec_type_>
 expected<safegraphs_index_layout_t> safegraphs_index_layout(std::size_t nodes, std::size_t neighbors,
                                                             std::size_t value_bytes, save_config_t const& config,
@@ -1009,7 +1012,7 @@ std::span<element_type_> safegraphs_typed_span_(std::span<byte_type_> segment, s
 }
 
 /** @brief Bytes a save of @p index under @p config writes; @c contended_k while a plan is open. */
-template <typename index_type_, typename codec_type_, typename allocator_type_ = std::allocator<std::byte>>
+template <typename index_type_, typename codec_type_, typename allocator_type_ = std::allocator<byte_t>>
     requires interchange_value_codec<codec_type_>
 expected<std::size_t> safegraphs_storage_requirements(index_type_ const& index, codec_type_ const& codec,
                                                       save_config_t const& config, std::string_view metric,
@@ -1043,7 +1046,7 @@ expected<std::size_t> safegraphs_storage_requirements(index_type_ const& index, 
  *  @param[in] progress Fires per finished region; answering @c cancel_k stops the rest.
  */
 template <typename index_type_, typename codec_type_, typename executor_type_,
-          typename progress_type_ = dummy_progress_t, typename allocator_type_ = std::allocator<std::byte>>
+          typename progress_type_ = dummy_progress_t, typename allocator_type_ = std::allocator<byte_t>>
     requires interchange_value_codec<codec_type_>
 status_t safegraphs_write_index(bytes_span_t monolith, index_type_ const& index, codec_type_ const& codec,
                                 executor_type_& executor, save_config_t const& config, std::string_view metric,
@@ -1150,7 +1153,7 @@ struct safegraphs_index_metadata_t {
 };
 
 /** @brief Reads a columned index's header from @p source into its metadata. */
-template <typename allocator_type_ = std::allocator<std::byte>>
+template <typename allocator_type_ = std::allocator<byte_t>>
 expected<safegraphs_index_metadata_t> safegraphs_read_index_metadata(bytes_view_t monolith,
                                                                      allocator_type_ allocator = {}) noexcept {
     safegraphs_index_metadata_t metadata;
@@ -1190,7 +1193,7 @@ expected<safegraphs_index_metadata_t> safegraphs_read_index_metadata(bytes_view_
  *  @param[in] progress Fires per finished region; answering @c cancel_k stops the rest.
  */
 template <typename index_type_, typename codec_type_, typename executor_type_,
-          typename progress_type_ = dummy_progress_t, typename allocator_type_ = std::allocator<std::byte>>
+          typename progress_type_ = dummy_progress_t, typename allocator_type_ = std::allocator<byte_t>>
     requires interchange_value_codec<codec_type_>
 status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_type_ const& codec,
                                executor_type_& executor, load_config_t const& config, progress_type_&& progress = {},

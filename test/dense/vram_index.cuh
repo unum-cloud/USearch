@@ -36,7 +36,7 @@ struct counting_cuda_allocator {
     std::size_t tallied_bytes_ = 0;
 
     counting_cuda_allocator() noexcept = default;
-    counting_cuda_allocator(counting_allocator<std::byte> const& host) noexcept : ledger_(host.ledger_) {}
+    counting_cuda_allocator(counting_allocator_t const& host) noexcept : ledger_(host.ledger_) {}
     counting_cuda_allocator(counting_cuda_allocator const& other) noexcept
         : virtual_memory_(other.virtual_memory_), ledger_(other.ledger_) {}
     template <typename other_>
@@ -68,17 +68,19 @@ struct counting_cuda_allocator {
     }
 };
 
-static_assert(cuda_reservable_allocator<counting_cuda_allocator<std::byte>>);
+/** @brief The byte specialization every CUDA fixture places its index through. */
+using counting_cuda_allocator_t = counting_cuda_allocator<byte_t>;
+
+static_assert(cuda_reservable_allocator<counting_cuda_allocator_t>);
 
 /** @brief Composes one (dtype, kernel) cell's suite over the ledgered device allocator. */
 template <nk_kernel_kind_t kernel_, nk_dtype_t dtype_ = nk_i8_k>
 std::size_t test_cuda_configuration(char const* name) {
-    using allocator_t = counting_cuda_allocator<std::byte>;
-    using index_t = dense_vram_index<dtype_, kernel_, cuda_arch_blackwell_k, allocator_t, allocator_t,
-                                     cuda_device_allocator<byte_t>>;
+    using allocator_t = counting_cuda_allocator_t;
+    using index_t =
+        dense_vram_index<dtype_, kernel_, cuda_arch_blackwell_k, allocator_t, allocator_t, cuda_device_allocator_t>;
     auto make_index = [](allocation_ledger_t& ledger) {
-        return index_t {allocator_t {counting_allocator<std::byte>(ledger)},
-                        allocator_t {counting_allocator<std::byte>(ledger)}};
+        return index_t {allocator_t {counting_allocator_t(ledger)}, allocator_t {counting_allocator_t(ledger)}};
     };
     // The suite is composed here, not reflected: every call below is a capability claim
     // this fully-concurrent, serializable category makes about itself.
@@ -87,6 +89,7 @@ std::size_t test_cuda_configuration(char const* name) {
     failures_count += test_dense_three_vectors<index_t, kernel_>(make_index);
     failures_count += test_dense_growth_and_recall<index_t, kernel_>(make_index);
     failures_count += test_dense_save_load_roundtrip<index_t, kernel_>(make_index);
+    failures_count += test_dense_load_append<index_t, kernel_>(make_index);
     failures_count += test_dense_concurrent_build<index_t, kernel_>(make_index);
     failures_count += test_dense_concurrent_search<index_t, kernel_>(make_index);
     return report(name, failures_count);
@@ -99,11 +102,11 @@ std::size_t test_cuda_configuration(char const* name) {
 
 /** @brief Per-dtype CUDA suite entries the shard translation units define and the suite's
  *      @c main composes explicitly; each returns its shard's failure count. */
-std::size_t test_dense_index_i8_cuda();
-std::size_t test_dense_index_u8_cuda();
-std::size_t test_dense_index_f16_cuda();
 std::size_t test_dense_index_bf16_cuda();
+std::size_t test_dense_index_f16_cuda();
+std::size_t test_dense_index_i8_cuda();
 std::size_t test_dense_index_i4_cuda();
+std::size_t test_dense_index_u8_cuda();
 std::size_t test_dense_index_u1_cuda();
 
 #pragma endregion Suite Entry Points

@@ -57,10 +57,10 @@ static std::size_t test_configuration(char const* name) {
         nk_configure_thread(nk_capabilities_available());
     }
 
-    using index_t = dense_ram_index<dtype_, kernel_, caps_, waiter_type_, counting_allocator<std::byte>,
-                                    counting_allocator<std::byte>, std::allocator<std::byte>>;
+    using index_t = dense_ram_index<dtype_, kernel_, caps_, waiter_type_, counting_allocator_t, counting_allocator_t,
+                                    std::allocator<byte_t>>;
     auto make_index = [](allocation_ledger_t& ledger) {
-        return index_t {counting_allocator<std::byte>(ledger), counting_allocator<std::byte>(ledger)};
+        return index_t {counting_allocator_t(ledger), counting_allocator_t(ledger)};
     };
 
     // The suite is composed here, not reflected: every call below is a capability claim
@@ -72,14 +72,15 @@ static std::size_t test_configuration(char const* name) {
     failures_count += test_dense_predicated_search<index_t, kernel_>(make_index);
     failures_count += test_dense_save_load_roundtrip<index_t, kernel_>(make_index);
     failures_count += test_dense_load_hostile<index_t, kernel_>(make_index);
+    failures_count += test_dense_load_append<index_t, kernel_>(make_index);
     failures_count += test_dense_concurrent_build<index_t, kernel_>(make_index);
     failures_count += test_dense_concurrent_search<index_t, kernel_>(make_index);
     failures_count += test_dense_save_race<index_t, kernel_>(make_index);
     failures_count += test_dense_immutable_parity<index_t, kernel_>(make_index);
     using concurrent_cursor_t = dense_ram_cursor<index_t, synchronization_t::concurrent_k, //
-                                                 counting_allocator<std::byte>>;
+                                                 counting_allocator_t>;
     using immutable_cursor_t = dense_ram_cursor<index_t, synchronization_t::immutable_k, //
-                                                counting_allocator<std::byte>>;
+                                                counting_allocator_t>;
     failures_count += test_dense_cursor<index_t, concurrent_cursor_t, immutable_cursor_t>(make_index);
     failures_count += test_dense_allocation_budget<index_t, kernel_>(make_index);
     failures_count += test_dense_frontier_shedding<index_t>(make_index);
@@ -92,10 +93,10 @@ static std::size_t test_configuration(char const* name) {
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
     requires(index_combo_supported<dtype_, kernel_>)
 static std::size_t test_starved_configuration(char const* name) {
-    using index_t = dense_ram_index<dtype_, kernel_, nk_cap_serial_k, dummy_waiter_t, counting_allocator<std::byte>,
-                                    counting_allocator<std::byte>, counting_allocator<std::byte>>;
+    using index_t = dense_ram_index<dtype_, kernel_, nk_cap_serial_k, dummy_waiter_t, counting_allocator_t,
+                                    counting_allocator_t, counting_allocator_t>;
     auto make_index = [](allocation_ledger_t& ledger) {
-        return index_t {counting_allocator<std::byte>(ledger), counting_allocator<std::byte>(ledger)};
+        return index_t {counting_allocator_t(ledger), counting_allocator_t(ledger)};
     };
     return report(name, test_dense_saturated<index_t>(make_index));
 }

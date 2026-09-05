@@ -57,11 +57,11 @@ if (USEARCH_BUILD_CUDA)
     add_executable(
         usearch_test_cuda
         dense.cu
-        dense/vram_index_i8.cu
-        dense/vram_index_u8.cu
-        dense/vram_index_f16.cu
         dense/vram_index_bf16.cu
+        dense/vram_index_f16.cu
+        dense/vram_index_i8.cu
         dense/vram_index_i4.cu
+        dense/vram_index_u8.cu
         dense/vram_index_u1.cu
         dense/vram_indexes.cu
     )
