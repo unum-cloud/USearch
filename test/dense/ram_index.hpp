@@ -36,29 +36,32 @@ concept index_combo_supported = requires {
     typename dense_quads_chain<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>::kit_t;
 };
 
-/** @brief No-op sibling picked when the tuple's serial kernels are not adapted yet. */
-template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, typename waiter_type_ = dummy_waiter_t,
-          nk_capability_t caps_ = nk_cap_serial_k>
-    requires(!index_combo_supported<dtype_, kernel_>)
+/** @brief No-op sibling picked when the cell cannot be compiled on this target: its serial
+ *      kernels are not adapted yet, or the requested kit is absent from the build. */
+template <                                       //
+    nk_dtype_t dtype_, nk_kernel_kind_t kernel_, //
+    typename waiter_type_ = dummy_waiter_t,      //
+    nk_capability_t caps_ = nk_cap_serial_k,     //
+    template <typename> class atomic_ref_ = fu::standard_atomic_ref>
+    requires(!index_combo_supported<dtype_, kernel_> || !dense_cell_compiled<dtype_, kernel_, caps_>)
 static std::size_t test_configuration(char const* name) {
-    return report(name, "serial kernels not adapted yet");
+    if constexpr (!index_combo_supported<dtype_, kernel_>) return report(name, "serial kernels not adapted yet");
+    else return report(name, "kit not compiled for this target");
 }
 
 template <                                       //
     nk_dtype_t dtype_, nk_kernel_kind_t kernel_, //
-    typename waiter_type_ = dummy_waiter_t, nk_capability_t caps_ = nk_cap_serial_k>
-    requires(index_combo_supported<dtype_, kernel_>)
+    typename waiter_type_ = dummy_waiter_t,      //
+    nk_capability_t caps_ = nk_cap_serial_k,     //
+    template <typename> class atomic_ref_ = fu::standard_atomic_ref>
+    requires(index_combo_supported<dtype_, kernel_> && dense_cell_compiled<dtype_, kernel_, caps_>)
 static std::size_t test_configuration(char const* name) {
 
-    // SIMD-tier cells execute their intrinsics unconditionally, so they run only where
-    // the machine offers every requested bit; the tile permission handshake is per-process.
-    if constexpr (caps_ != nk_cap_serial_k) {
-        if ((nk_capabilities_available() & caps_) != caps_) return report(name, "capabilities missing at runtime");
-        nk_configure_thread(nk_capabilities_available());
-    }
+    using index_t = dense_ram_index<dtype_, kernel_, caps_, waiter_type_, atomic_ref_, counting_allocator_t,
+                                    counting_allocator_t, std::allocator<byte_t>>;
 
-    using index_t = dense_ram_index<dtype_, kernel_, caps_, waiter_type_, counting_allocator_t, counting_allocator_t,
-                                    std::allocator<byte_t>>;
+    if (!dense_cell_admitted<caps_, atomic_ref_>()) return report(name, "capabilities missing at runtime");
+
     auto make_index = [](allocation_ledger_t& ledger) {
         return index_t {counting_allocator_t(ledger), counting_allocator_t(ledger)};
     };
@@ -93,8 +96,8 @@ static std::size_t test_configuration(char const* name) {
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
     requires(index_combo_supported<dtype_, kernel_>)
 static std::size_t test_starved_configuration(char const* name) {
-    using index_t = dense_ram_index<dtype_, kernel_, nk_cap_serial_k, dummy_waiter_t, counting_allocator_t,
-                                    counting_allocator_t, counting_allocator_t>;
+    using index_t = dense_ram_index<dtype_, kernel_, nk_cap_serial_k, dummy_waiter_t, fu::standard_atomic_ref,
+                                    counting_allocator_t, counting_allocator_t, counting_allocator_t>;
     auto make_index = [](allocation_ledger_t& ledger) {
         return index_t {counting_allocator_t(ledger), counting_allocator_t(ledger)};
     };

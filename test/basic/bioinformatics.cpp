@@ -1,7 +1,7 @@
 /**
  *  @brief The bioinformatics unit of the basic-index suite: ACGT reads under an
  *      alignment distance with transition/transversion-weighted substitutions - the
- *      non-transparent, integer-exact, wide-id, @c uuid_t-keyed corner, and the only
+ *      non-transparent, integer-exact, wide-id, @c unum::usearch::uuid_t-keyed corner, and the only
  *      unit whose serialized bytes differ from the in-RAM form.
  *
  *  @author Ash Vardanian
@@ -129,13 +129,14 @@ struct bioinformatics_handmade_t {
 };
 
 struct bioinformatics_fixture_t {
-    using index_t = basic_ram_index<dna_t, uuid_t, u64_t, u64_t, dummy_waiter_t, counting_allocator_t>;
+    using index_t =
+        basic_ram_index<dna_t, us::uuid_t, u64_t, u64_t, dummy_waiter_t, std::atomic_ref, counting_allocator_t>;
 
     static index_t make_index(allocation_ledger_t& ledger) { return index_t {counting_allocator_t {ledger}}; }
     static alignment_metric_t make_metric() { return {}; }
     static packed_dna_codec_t make_codec() { return {}; }
-    static uuid_t make_key(std::size_t ordinal) {
-        return std::bit_cast<uuid_t>(std::array<u64_t, 2> {mix_bits(ordinal), 0xB10B10B1ull ^ ordinal});
+    static us::uuid_t make_key(std::size_t ordinal) {
+        return std::bit_cast<us::uuid_t>(std::array<u64_t, 2> {mix_bits(ordinal), 0xB10B10B1ull ^ ordinal});
     }
     static u64_t oracle(dna_t const& query, dna_t const& stored) noexcept {
         std::vector<u64_t> previous_row, current_row;

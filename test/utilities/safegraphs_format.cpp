@@ -80,7 +80,8 @@ struct embedding_codec_t {
 };
 
 struct embeddings_fixture_t {
-    using index_t = basic_ram_index<embedding_t, u64_t, u32_t, f32_t, dummy_waiter_t, counting_allocator_t>;
+    using index_t =
+        basic_ram_index<embedding_t, u64_t, u32_t, f32_t, dummy_waiter_t, std::atomic_ref, counting_allocator_t>;
     static constexpr char const* metric_k = "angular";
     static constexpr char const* key_dtype_k = "u64";
 

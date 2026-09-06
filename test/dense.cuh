@@ -30,7 +30,7 @@
 #include <algorithm> // `std::sort`, `std::unique`
 #include <array>     // `std::array`
 #include <atomic>    // `std::atomic`
-#include <bit>       // `std::bit_cast` - the ULP distance of the oracle audits
+#include <bit>       // `std::bit_cast` - the ULP distance of the oracle audits; `std::bit_floor` - a cell's ceiling
 #include <chrono>    // `std::chrono::microseconds`
 #include <memory>    // `std::allocator` - the part path buffer
 #include <thread>    // `std::this_thread::sleep_for`
@@ -100,6 +100,27 @@ constexpr u64_t dense_seed_upstream_k = 0x0957EA30ull;
 #pragma endregion Constants and Seeds
 
 #pragma region Shared Helpers
+
+/** @brief Gate: a cell's kit is compiled once its requested ceiling is a bit some chain actually
+ *      picked - a build without the kit must not pass its serial floor under a SIMD name. */
+template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, nk_capability_t caps_>
+concept dense_cell_compiled =
+    caps_ == nk_cap_serial_k ||
+    std::bit_floor(caps_) == dense_quads_chain<kernel_, typename nk::type_for<dtype_>::type, caps_>::picked_k ||
+    std::bit_floor(caps_) == dense_tiles_chain<kernel_, typename nk::type_for<dtype_>::type, caps_>::picked_k;
+
+/** @brief Whether this machine offers every bit a cell's kit and atomic reference declare - both
+ *      execute their instructions unconditionally - arming the per-process tile handshake on the way. */
+template <nk_capability_t caps_, template <typename> class atomic_ref_>
+static bool dense_cell_admitted() noexcept {
+    constexpr fu::capabilities_t atomics_k = atomic_ref_<u32_t>::capabilities_k;
+    if ((fu::runtime_capabilities() & atomics_k) != atomics_k) return false;
+    if constexpr (caps_ != nk_cap_serial_k) {
+        if ((nk_capabilities_available() & caps_) != caps_) return false;
+        nk_configure_thread(nk_capabilities_available());
+    }
+    return true;
+}
 
 /** @brief Per-thread state for the concurrent scenarios: one vector slice & one traversal context each. */
 template <typename index_type_>

@@ -160,13 +160,14 @@ struct meshes_handmade_t {
 };
 
 struct meshes_fixture_t {
-    using index_t = basic_ram_index<mesh_t, uuid_t, u64_t, f64_t, dummy_waiter_t, counting_allocator_t>;
+    using index_t =
+        basic_ram_index<mesh_t, us::uuid_t, u64_t, f64_t, dummy_waiter_t, std::atomic_ref, counting_allocator_t>;
 
     static index_t make_index(allocation_ledger_t& ledger) { return index_t {counting_allocator_t {ledger}}; }
     static spectra_metric_t make_metric() { return {}; }
     static mesh_codec_t make_codec() { return {}; }
-    static uuid_t make_key(std::size_t ordinal) {
-        return std::bit_cast<uuid_t>(std::array<u64_t, 2> {mix_bits(ordinal ^ 0x3D3D3Dull), ordinal});
+    static us::uuid_t make_key(std::size_t ordinal) {
+        return std::bit_cast<us::uuid_t>(std::array<u64_t, 2> {mix_bits(ordinal ^ 0x3D3D3Dull), ordinal});
     }
     static f64_t oracle(mesh_t const& query, mesh_t const& stored) noexcept {
         return scalar_spectra_distance(query.spectrum, stored.spectrum);

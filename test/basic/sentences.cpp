@@ -94,7 +94,8 @@ struct sentences_handmade_t {
 };
 
 struct sentences_fixture_t {
-    using index_t = basic_ram_index<std::string, u64_t, u32_t, u64_t, flaky_waiter_t, counting_allocator_t>;
+    using index_t =
+        basic_ram_index<std::string, u64_t, u32_t, u64_t, flaky_waiter_t, std::atomic_ref, counting_allocator_t>;
 
     static index_t make_index(allocation_ledger_t& ledger) { return index_t {counting_allocator_t {ledger}}; }
     static levenshtein_metric_t make_metric() { return {}; }

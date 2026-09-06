@@ -421,7 +421,8 @@ template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kin
           nk_capability_t capability_, typename wait_type_>
     requires(ram_kit_adapted<stored_dtype_, kernel_, capability_>)
 int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
-    using indexes_t = dense_ram_indexes<u32_t, stored_dtype_, kernel_, capability_, wait_type_>;
+    using indexes_t =
+        dense_ram_indexes<u32_t, stored_dtype_, kernel_, capability_, wait_type_, fu::preferred_atomic_ref>;
     using bench_context_type_ = bench_indexes_context<indexes_t>;
     using streamed_t = streamed_dataset<dataset_scalar_type_, bench_context_type_>;
     using scalar_t = typename bench_context_type_::scalar_t;

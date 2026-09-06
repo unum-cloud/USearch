@@ -113,6 +113,22 @@ check_host_threads() {
         "            non-blocking cudaStream_t + cudaEvent_t from one host thread:"
 }
 
+# The full `unum::usearch::` spelling belongs to two places: the alias and `using` lines, and the
+# specializations of foreign templates - `std::hash<unum::usearch::uuid_t>`, `fmt::formatter<...>` -
+# which have to name the type from outside. Everything else in the tests, benches and sources reaches
+# the namespace through `us::` or the directive its translation unit opened with.
+check_qualified_namespace() {
+    local spelled
+    spelled=$(printf '%s\n' "$added" |
+        grep -vE '^\+[[:space:]]*(\*|//|/\*)' |
+        grep -vE 'namespace us = unum::usearch;|using namespace unum::usearch;' |
+        grep -vE 'struct (std|fmt)::[A-Za-z_]+<unum::usearch::' |
+        grep -E 'unum::usearch::' || true)
+    [ -z "$spelled" ] || fail "$spelled" \
+        "$file spells unum::usearch:: in full - reach it through the \`us\` alias or the \`using\` directive;" \
+        "            only a foreign template's specialization, like std::hash<unum::usearch::uuid_t>, earns the full name:"
+}
+
 # STL dynamic containers in the public headers hide allocations, grow behind the caller's back,
 # and sidestep the allocator-threading discipline every index design follows. The house
 # replacements: `fu::dynamic_array` for fixed-once object arrays, `nk::tensor` for numeric &
@@ -575,6 +591,9 @@ while IFS= read -r -d '' file; do
         ;;&
     include/*.hpp | include/*.cuh | src/*.cpp | src/*.cuh)
         check_hand_minmax
+        ;;&
+    src/*.cpp | src/*.cuh | test/*.cpp | test/*.hpp | test/*.cu | test/*.cuh | bench/*.cpp | bench/*.hpp | bench/*.cuh | c/*.cpp)
+        check_qualified_namespace
         ;;&
     src/*.cpp | src/*.cuh | test/*.cpp | test/*.hpp | bench/*.cpp | bench/*.hpp | include/*.hpp)
         check_printf
