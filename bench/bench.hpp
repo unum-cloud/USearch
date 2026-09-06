@@ -133,6 +133,8 @@ inline char const* dtype_name(nk_dtype_t dtype) noexcept {
     case nk_f16_k: return "f16";
     case nk_e5m2_k: return "e5m2";
     case nk_e4m3_k: return "e4m3";
+    case nk_e3m2_k: return "e3m2";
+    case nk_e2m3_k: return "e2m3";
     case nk_i8_k: return "i8";
     case nk_i4_k: return "i4";
     case nk_u32_k: return "u32";

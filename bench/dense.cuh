@@ -205,13 +205,13 @@ int dispatch_value(decltype(value_) runtime, auto on_value, auto on_unknown) {
 
 /** @brief The file scalars the harness opens: what the RetriEval extensions name. */
 int dispatch_file_dtype(nk_dtype_t dtype, auto on_dtype, auto on_unknown) {
-    return dispatch_value<nk_f32_k, nk_bf16_k, nk_i8_k, nk_u8_k>(dtype, on_dtype, on_unknown);
+    return dispatch_value<nk_f32_k, nk_bf16_k, nk_f16_k, nk_i8_k, nk_u8_k>(dtype, on_dtype, on_unknown);
 }
 
 /** @brief The stored dtypes every benchmark carries, by shrinking dynamic range. */
 int dispatch_stored_dtype(nk_dtype_t dtype, auto on_dtype, auto on_unknown) {
-    return dispatch_value<nk_f32_k, nk_bf16_k, nk_f16_k, nk_i8_k, nk_i4_k, nk_u8_k, nk_u1_k>(dtype, on_dtype,
-                                                                                             on_unknown);
+    return dispatch_value<nk_f32_k, nk_bf16_k, nk_f16_k, nk_e5m2_k, nk_e4m3_k, nk_e3m2_k, nk_e2m3_k, nk_i8_k, nk_i4_k,
+                          nk_u8_k, nk_u4_k, nk_u1_k>(dtype, on_dtype, on_unknown);
 }
 
 /** @brief The kernels one stored dtype adapts: bit-packed vectors take the bit kernels. */

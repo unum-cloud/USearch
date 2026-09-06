@@ -84,10 +84,15 @@ struct numkong_capability_name_t {
     char const* name;
 };
 inline constexpr numkong_capability_name_t numkong_capability_names_k[] = {
-    {nk_cap_serial_k, "serial"},       {nk_cap_neon_k, "neon"},         {nk_cap_neonsdot_k, "neonsdot"},
-    {nk_cap_neonbfdot_k, "neonbfdot"}, {nk_cap_neonfhm_k, "neonfhm"},   {nk_cap_neonfp8_k, "neonfp8"},
-    {nk_cap_haswell_k, "haswell"},     {nk_cap_skylake_k, "skylake"},   {nk_cap_icelake_k, "icelake"},
-    {nk_cap_genoa_k, "genoa"},         {nk_cap_sapphire_k, "sapphire"}, {nk_cap_sapphireamx_k, "sapphireamx"},
+    {nk_cap_serial_k, "serial"},     {nk_cap_neon_k, "neon"},
+    {nk_cap_neonsdot_k, "neonsdot"}, {nk_cap_neonbfdot_k, "neonbfdot"},
+    {nk_cap_neonfhm_k, "neonfhm"},   {nk_cap_neonfp8_k, "neonfp8"},
+    {nk_cap_haswell_k, "haswell"},   {nk_cap_skylake_k, "skylake"},
+    {nk_cap_icelake_k, "icelake"},   {nk_cap_genoa_k, "genoa"},
+    {nk_cap_sapphire_k, "sapphire"}, {nk_cap_sapphireamx_k, "sapphireamx"},
+    {nk_cap_alder_k, "alder"},       {nk_cap_sierra_k, "sierra"},
+    {nk_cap_diamond_k, "diamond"},   {nk_cap_rvv_k, "rvv"},
+    {nk_cap_rvvbb_k, "rvvbb"},
 };
 
 #pragma region CPU Classes
@@ -97,43 +102,44 @@ inline constexpr numkong_capability_name_t numkong_capability_names_k[] = {
 constexpr nk_capability_t numkong_capabilities_of(cpu_class_t cpu_class) noexcept {
     switch (cpu_class) {
     case cpu_class_t::intel_haswell_k: return nk_cap_serial_k | nk_cap_haswell_k;
+    case cpu_class_t::intel_sierra_k:
+        return numkong_capabilities_of(cpu_class_t::intel_haswell_k) | nk_cap_alder_k | nk_cap_sierra_k;
     case cpu_class_t::intel_skylake_k: return numkong_capabilities_of(cpu_class_t::intel_haswell_k) | nk_cap_skylake_k;
     case cpu_class_t::intel_icelake_k: return numkong_capabilities_of(cpu_class_t::intel_skylake_k) | nk_cap_icelake_k;
     case cpu_class_t::amd_genoa_k: return numkong_capabilities_of(cpu_class_t::intel_icelake_k) | nk_cap_genoa_k;
+    case cpu_class_t::intel_diamond_k:
+        return numkong_capabilities_of(cpu_class_t::amd_genoa_k) | nk_cap_alder_k | nk_cap_sierra_k | nk_cap_diamond_k;
     case cpu_class_t::aws_g2_k: return nk_cap_serial_k | nk_cap_neon_k;
     case cpu_class_t::apple_m2_k:
     case cpu_class_t::aws_g5_k:
         return numkong_capabilities_of(cpu_class_t::aws_g2_k) | nk_cap_neonsdot_k | nk_cap_neonbfdot_k |
                nk_cap_neonfhm_k;
     case cpu_class_t::nvidia_vera_k: return numkong_capabilities_of(cpu_class_t::aws_g5_k) | nk_cap_neonfp8_k;
+    case cpu_class_t::alibaba_c930_k: return nk_cap_serial_k | nk_cap_rvv_k | nk_cap_rvvbb_k;
     default: return nk_cap_serial_k;
     }
 }
 
-/** @brief Lowers one CPU class onto ForkUnion's schedule mask - the bits the runtime must
- *      confirm before the class's monitored waiter is trusted; empty for spinning classes. */
-constexpr fu_capabilities_t forkunion_capabilities_of(cpu_class_t cpu_class) noexcept {
+/** @brief The class a refused rung degrades to - the next one down its own lineage, which is the
+ *      class an arm must be distinct from to earn instantiation. Two lineages share the Haswell
+ *      floor on x86: the AVX-512 P-cores and the AVX-VNNI E-cores. */
+constexpr cpu_class_t parent_class_of(cpu_class_t cpu_class) noexcept {
     switch (cpu_class) {
-    case cpu_class_t::aws_g5_k:
-    case cpu_class_t::nvidia_vera_k: return fu_capability_arm64_wfet_k;
-    default: return fu_capabilities_unknown_k;
+    case cpu_class_t::intel_diamond_k: return cpu_class_t::amd_genoa_k;
+    case cpu_class_t::amd_genoa_k: return cpu_class_t::intel_icelake_k;
+    case cpu_class_t::intel_icelake_k: return cpu_class_t::intel_skylake_k;
+    case cpu_class_t::intel_skylake_k: return cpu_class_t::intel_haswell_k;
+    case cpu_class_t::intel_sierra_k: return cpu_class_t::intel_haswell_k;
+    case cpu_class_t::nvidia_vera_k: return cpu_class_t::aws_g5_k;
+    case cpu_class_t::aws_g5_k: return cpu_class_t::apple_m2_k;
+    case cpu_class_t::apple_m2_k: return cpu_class_t::aws_g2_k;
+    default: return cpu_class_t::serial_k;
     }
 }
 
-/** @brief Whether every compute bit one CPU class lowers onto is present in @p available. */
-inline bool has_all(nk_capability_t available, cpu_class_t cpu_class) noexcept {
-    nk_capability_t const wanted = numkong_capabilities_of(cpu_class);
-    return (available & wanted) == wanted;
-}
-
-/** @brief Whether the runtime schedule mask confirms one CPU class's wait instruction. */
-inline bool schedule_admits(cpu_class_t cpu_class) noexcept {
-    fu_capabilities_t const wanted = forkunion_capabilities_of(cpu_class);
-    return (fu_runtime_capabilities() & wanted) == wanted;
-}
-
-/** @brief The wait instruction one CPU class pairs: x86 spins PAUSE, monitored Arm classes
- *      arm WFET, everything else yields - the floor takes the standard one. */
+/** @brief The wait instruction one CPU class pairs: x86 spins PAUSE, the WAITPKG Xeons and the
+ *      monitored Arm & RISC-V classes arm TPAUSE, WFET & WRS, everything else yields - the floor
+ *      takes the standard one. */
 template <cpu_class_t cpu_class_>
 struct waiter_for_cpu_class {
     using type = fu::standard_yield_t;
@@ -155,6 +161,14 @@ template <>
 struct waiter_for_cpu_class<cpu_class_t::amd_genoa_k> {
     using type = fu::x86_pause_t;
 };
+template <>
+struct waiter_for_cpu_class<cpu_class_t::intel_sierra_k> {
+    using type = fu::x86_tpause_t;
+};
+template <>
+struct waiter_for_cpu_class<cpu_class_t::intel_diamond_k> {
+    using type = fu::x86_tpause_t;
+};
 #elif NK_TARGET_ARM64_
 template <>
 struct waiter_for_cpu_class<cpu_class_t::aws_g2_k> {
@@ -172,11 +186,87 @@ template <>
 struct waiter_for_cpu_class<cpu_class_t::nvidia_vera_k> {
     using type = fu::arm64_wfet_t;
 };
+#elif NK_TARGET_RISCV64_
+template <>
+struct waiter_for_cpu_class<cpu_class_t::alibaba_c930_k> {
+    using type = fu::risc5_wrs_t;
+};
 #endif
 
 /** @brief The waiter a CPU class pairs, spelled short for the arms' explicit instantiations. */
 template <cpu_class_t cpu_class_>
 using waiter_of = typename waiter_for_cpu_class<cpu_class_>::type;
+
+/** @brief The atomic reference one CPU class pairs: single-instruction LSE read-modify-writes
+ *      under RCpc acquiring loads on the Armv8.3+ classes, conditional adds on the CMPCCXADD
+ *      Xeons, `amocas` on Zacas RISC-V - the floors and the older classes take the standard one,
+ *      as does every class where the ISA-specific spelling needs inline assembly the compiler lacks. */
+template <cpu_class_t cpu_class_>
+struct atomic_ref_for_cpu_class {
+    template <typename value_type_>
+    using type = fu::standard_atomic_ref<value_type_>;
+};
+#if NK_TARGET_X8664_ && FU_DETECT_INLINE_ASM_SUPPORT_
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::intel_sierra_k> {
+    template <typename value_type_>
+    using type = fu::x86_cmpccxadd_atomic_ref<value_type_>;
+};
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::intel_diamond_k> {
+    template <typename value_type_>
+    using type = fu::x86_cmpccxadd_atomic_ref<value_type_>;
+};
+#elif NK_TARGET_ARM64_ && FU_DETECT_INLINE_ASM_SUPPORT_
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::apple_m2_k> {
+    template <typename value_type_>
+    using type = fu::arm64_rcpc_atomic_ref<value_type_>;
+};
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::aws_g5_k> {
+    template <typename value_type_>
+    using type = fu::arm64_rcpc_atomic_ref<value_type_>;
+};
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::nvidia_vera_k> {
+    template <typename value_type_>
+    using type = fu::arm64_rcpc_atomic_ref<value_type_>;
+};
+#elif NK_TARGET_RISCV64_ && FU_DETECT_INLINE_ASM_SUPPORT_
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::alibaba_c930_k> {
+    template <typename value_type_>
+    using type = fu::risc5_zacas_atomic_ref<value_type_>;
+};
+#endif
+
+/** @brief The spin hints every core of an architecture carries - PAUSE, YIELD, Zihintpause: the
+ *      runtime confirms nothing about them, and a class differing by one alone earns no rung. */
+inline constexpr fu::capabilities_t baseline_hints_k = fu::capability_x86_pause_k | fu::capability_arm64_yield_k |
+                                                       fu::capability_risc5_pause_k;
+
+/** @brief Lowers one CPU class onto ForkUnion's mask - the bits the runtime must confirm before
+ *      the class's waiter and atomic reference are trusted, read off the two types themselves. */
+template <cpu_class_t cpu_class_>
+constexpr fu::capabilities_t forkunion_capabilities_of() noexcept {
+    constexpr fu::capabilities_t waits_k = waiter_of<cpu_class_>::capability_k;
+    constexpr fu::capabilities_t atomics_k = atomic_ref_for_cpu_class<cpu_class_>::template type<u32_t>::capabilities_k;
+    return static_cast<fu::capabilities_t>((waits_k | atomics_k) & ~baseline_hints_k);
+}
+
+/** @brief Whether every compute bit one CPU class lowers onto is present in @p available. */
+inline bool numkong_admits(nk_capability_t available, cpu_class_t cpu_class) noexcept {
+    nk_capability_t const wanted = numkong_capabilities_of(cpu_class);
+    return (available & wanted) == wanted;
+}
+
+/** @brief Whether the runtime confirms every ForkUnion bit one CPU class needs. */
+template <cpu_class_t cpu_class_>
+inline bool forkunion_admits() noexcept {
+    constexpr fu::capabilities_t wanted = forkunion_capabilities_of<cpu_class_>();
+    return (fu::runtime_capabilities() & wanted) == wanted;
+}
 
 #pragma endregion CPU Classes
 
@@ -252,10 +342,11 @@ template <typename multi_type_>
 inline constexpr bool is_vram_index = false;
 #endif
 
-/** One RAM alternative: the CPU class alone names the rung, lowering onto its NumKong mask and its waiter. */
+/** One RAM alternative: the CPU class alone names the rung, lowering onto its NumKong mask, its waiter
+ *  and its atomic reference. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, cpu_class_t cpu_class_>
 using ram_index = dense_ram_indexes<uuid_t, dtype_, kernel_, numkong_capabilities_of(cpu_class_), waiter_of<cpu_class_>,
-                                    uuid_slice_hash_t>;
+                                    atomic_ref_for_cpu_class<cpu_class_>::template type, uuid_slice_hash_t>;
 #if USEARCH_BUILD_CUDA
 /** One VRAM alternative: the GPU class is a compilation ceiling, not a target, since the index dispatches
  *  by the actual device's generation at runtime, so the newest class serves the whole fleet. */

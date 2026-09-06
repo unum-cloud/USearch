@@ -194,12 +194,18 @@ USEARCH_EXPORT typedef enum usearch_cpu_class_t {
     usearch_cpu_class_serial_k,
     /** @brief Haswell-class x86: AVX2 & FMA, the 256-bit floor. */
     usearch_cpu_class_intel_haswell_k,
+    /** @brief Sierra Forest-class x86 - the E-core Xeons: AVX-VNNI and its successors without
+     *      AVX-512, TPAUSE waits, CMPCCXADD conditional adds. */
+    usearch_cpu_class_intel_sierra_k,
     /** @brief Skylake-class x86: the AVX-512 foundation tier. */
     usearch_cpu_class_intel_skylake_k,
     /** @brief Icelake-class x86: AVX-512 VNNI & VPOPCNT - the integer & bit workhorse. */
     usearch_cpu_class_intel_icelake_k,
     /** @brief Genoa-class x86 - Zen 4 and newer: native bf16 dot products over AVX-512. */
     usearch_cpu_class_amd_genoa_k,
+    /** @brief Diamond Rapids-class x86: the AVX-512 lineage plus AVX10.2's FP8 conversions,
+     *      TPAUSE waits, CMPCCXADD conditional adds. */
+    usearch_cpu_class_intel_diamond_k,
     /** @brief Graviton2-class Arm - Neoverse N1, the bare NEON floor; phones predating
      *      Armv8.6 land here too. */
     usearch_cpu_class_aws_g2_k,
@@ -210,6 +216,9 @@ USEARCH_EXPORT typedef enum usearch_cpu_class_t {
     usearch_cpu_class_aws_g5_k,
     /** @brief Vera-class Arm - NVIDIA's Armv9.2-generation cores with FP8 dot products. */
     usearch_cpu_class_nvidia_vera_k,
+    /** @brief Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23: vectors with Zvbb, Zawrs
+     *      monitored waits, Zacas single-instruction compare-and-swap. */
+    usearch_cpu_class_alibaba_c930_k,
 } usearch_cpu_class_t;
 
 /**

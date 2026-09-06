@@ -6,9 +6,14 @@ add_executable(
     dense/ram_index_f32.cpp
     dense/ram_index_bf16.cpp
     dense/ram_index_f16.cpp
+    dense/ram_index_e5m2.cpp
+    dense/ram_index_e4m3.cpp
+    dense/ram_index_e3m2.cpp
+    dense/ram_index_e2m3.cpp
     dense/ram_index_i8.cpp
     dense/ram_index_i4.cpp
     dense/ram_index_u8.cpp
+    dense/ram_index_u4.cpp
     dense/ram_index_u1.cpp
 )
 usearch_setup_target(usearch_bench_dense_ram_index)
@@ -25,9 +30,14 @@ add_executable(
     dense/ram_indexes_f32.cpp
     dense/ram_indexes_bf16.cpp
     dense/ram_indexes_f16.cpp
+    dense/ram_indexes_e5m2.cpp
+    dense/ram_indexes_e4m3.cpp
+    dense/ram_indexes_e3m2.cpp
+    dense/ram_indexes_e2m3.cpp
     dense/ram_indexes_i8.cpp
     dense/ram_indexes_i4.cpp
     dense/ram_indexes_u8.cpp
+    dense/ram_indexes_u4.cpp
     dense/ram_indexes_u1.cpp
 )
 usearch_setup_target(usearch_bench_dense_ram_indexes)
