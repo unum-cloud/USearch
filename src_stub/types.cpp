@@ -53,4 +53,81 @@ void usearch_executor_drain(usearch_executor_t executor, usearch_error_t* error)
 
 void usearch_executor_free(usearch_executor_t executor) { delete static_cast<executor_t*>(executor); }
 
+#pragma region Vocabulary
+
+char const* usearch_status_name(usearch_status_t status) {
+    switch (status) {
+    case usearch_success_k: return "success";
+    case usearch_error_out_of_memory_k: return "out-of-memory";
+    case usearch_error_shape_mismatch_k: return "shape-mismatch";
+    case usearch_error_unsupported_layout_k: return "unsupported-layout";
+    case usearch_error_unknown_kind_k: return "unknown-kind";
+    case usearch_error_read_only_k: return "read-only";
+    case usearch_error_io_k: return "io";
+    case usearch_error_device_k: return "device";
+    case usearch_error_malformed_input_k: return "malformed-input";
+    case usearch_error_internal_k: return "internal";
+    case usearch_error_overflow_k: return "overflow";
+    case usearch_error_uninitialized_k: return "uninitialized";
+    case usearch_error_config_mismatch_k: return "config-mismatch";
+    case usearch_error_contended_k: return "contended";
+    case usearch_error_cancelled_k: return "cancelled";
+    default: return "unrecognized";
+    }
+}
+
+usearch_status_t usearch_status_from_name(usearch_bytes_view_t name) {
+    for (int code = usearch_success_k; code <= usearch_error_cancelled_k; ++code) {
+        usearch_status_t const status = static_cast<usearch_status_t>(code);
+        if (named(name, usearch_status_name(status))) return status;
+    }
+    return usearch_error_internal_k;
+}
+
+char const* usearch_scalar_name(usearch_scalar_t scalar_kind) {
+    switch (scalar_kind) {
+    case usearch_scalar_f64_k: return "f64";
+    case usearch_scalar_f32_k: return "f32";
+    case usearch_scalar_bf16_k: return "bf16";
+    case usearch_scalar_f16_k: return "f16";
+    case usearch_scalar_e5m2_k: return "e5m2";
+    case usearch_scalar_e4m3_k: return "e4m3";
+    case usearch_scalar_e3m2_k: return "e3m2";
+    case usearch_scalar_e2m3_k: return "e2m3";
+    case usearch_scalar_i8_k: return "i8";
+    case usearch_scalar_i4x2_k: return "i4x2";
+    case usearch_scalar_u8_k: return "u8";
+    case usearch_scalar_u4x2_k: return "u4x2";
+    case usearch_scalar_u1x8_k: return "u1x8";
+    default: return "unknown";
+    }
+}
+
+usearch_scalar_t usearch_scalar_from_name(usearch_bytes_view_t name) {
+    for (int code = usearch_scalar_f64_k; code <= usearch_scalar_u1x8_k; ++code) {
+        usearch_scalar_t const scalar_kind = static_cast<usearch_scalar_t>(code);
+        if (named(name, usearch_scalar_name(scalar_kind))) return scalar_kind;
+    }
+    return usearch_scalar_unknown_k;
+}
+
+char const* usearch_residency_name(usearch_residency_t residency) {
+    switch (residency) {
+    case usearch_residency_vram_k: return "vram";
+    case usearch_residency_nvme_k: return "nvme";
+    default: return "ram";
+    }
+}
+
+usearch_residency_t usearch_residency_from_name(usearch_bytes_view_t name) {
+    if (named(name, "vram")) return usearch_residency_vram_k;
+    if (named(name, "nvme")) return usearch_residency_nvme_k;
+    return usearch_residency_ram_k;
+}
+
+char const* usearch_cpu_class_name(usearch_cpu_class_t) { return "serial"; }
+char const* usearch_gpu_class_name(usearch_gpu_class_t) { return "none"; }
+
+#pragma endregion Vocabulary
+
 } // extern "C"

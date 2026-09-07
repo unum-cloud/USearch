@@ -74,6 +74,60 @@ struct finder_t {
     std::size_t position;
 };
 
+/**
+ *  @brief Resolves an input matrix against the frozen geometry, answering whether to refuse it.
+ *
+ *  The width the caller believes a row has is the one thing the loose parameters never carried,
+ *  so this is where a narrower row becomes an error rather than an over-read. A zero stride
+ *  resolves to the natural pitch, as the descriptor's docblock promises.
+ */
+bool reject_view(usearch_dense_matrix_view_t const* matrix, index_t const& index, std::size_t& stride,
+                 usearch_error_t* error) {
+    if (reject_if(!matrix || !matrix->data, usearch_error_malformed_input_k, "The matrix must name storage", error))
+        return true;
+    if (reject_scalar(matrix->scalar_kind, error)) return true;
+    if (reject_if(matrix->columns != index.options.dimensions, usearch_error_shape_mismatch_k,
+                  "The matrix rows are not as wide as the index", error))
+        return true;
+    std::size_t const natural = matrix->columns * scalar_bytes(matrix->scalar_kind);
+    if (reject_if(matrix->stride_bytes && matrix->stride_bytes < natural, usearch_error_unsupported_layout_k,
+                  "The stride is shorter than one row", error))
+        return true;
+    stride = matrix->stride_bytes ? matrix->stride_bytes : natural;
+    return false;
+}
+
+/** @brief The output twin of @c reject_view, whose width the caller chooses rather than the index. */
+bool reject_span(usearch_dense_matrix_span_t const* matrix, std::size_t columns, std::size_t& stride,
+                 usearch_error_t* error) {
+    if (reject_if(!matrix || !matrix->data, usearch_error_malformed_input_k, "The matrix must name storage", error))
+        return true;
+    if (reject_scalar(matrix->scalar_kind, error)) return true;
+    if (reject_if(matrix->columns != columns, usearch_error_shape_mismatch_k,
+                  "The output rows are not as wide as the rows they receive", error))
+        return true;
+    std::size_t const natural = matrix->columns * scalar_bytes(matrix->scalar_kind);
+    if (reject_if(matrix->stride_bytes && matrix->stride_bytes < natural, usearch_error_unsupported_layout_k,
+                  "The stride is shorter than one row", error))
+        return true;
+    stride = matrix->stride_bytes ? matrix->stride_bytes : natural;
+    return false;
+}
+
+/** @brief Refuses a ranked-output triple that names no storage, resolving its two pitches. */
+bool reject_matches(usearch_dense_matches_span_t const* matches, std::size_t& keys_stride, std::size_t& scores_stride,
+                    usearch_error_t* error) {
+    if (reject_if(!matches || !matches->keys || !matches->scores || !matches->counts, usearch_error_malformed_input_k,
+                  "The matches span must name all three outputs", error))
+        return true;
+    if (reject_if(!matches->wanted, usearch_error_shape_mismatch_k, "A run must want at least one match", error))
+        return true;
+    keys_stride = matches->keys_stride_bytes ? matches->keys_stride_bytes : matches->wanted * sizeof(usearch_key_t);
+    scores_stride = matches->scores_stride_bytes ? matches->scores_stride_bytes
+                                                 : matches->wanted * sizeof(usearch_distance_t);
+    return false;
+}
+
 /** @brief Whether the geometry is frozen; a zeroed width makes every derived extent zero. */
 bool reject_unfrozen(index_t const& index, usearch_error_t* error) {
     return reject_if(!index.options.dimensions, usearch_error_uninitialized_k, "The geometry was never frozen", error);
@@ -186,6 +240,8 @@ struct prefix_t {
     std::size_t entries;
     /** @brief What entries are compared by. */
     usearch_dense_metric_t metric;
+    /** @brief The scalar kind the rows were frozen at, which metadata reports back. */
+    usearch_scalar_t quantization;
 };
 
 std::size_t stored_row_bytes(std::size_t dimensions) { return sizeof(usearch_key_t) + dimensions * sizeof(double); }
@@ -198,6 +254,7 @@ std::optional<std::size_t> serialized_bytes(index_t const& index, std::size_t ro
 void write_into(index_t const& index, std::size_t rows, bytes_span_t target) {
     prefix_t prefix {};
     prefix.dimensions = index.options.dimensions;
+    prefix.quantization = index.options.quantization;
     prefix.connectivity = index.options.connectivity;
     prefix.entries = rows;
     prefix.metric = index.options.metric;
@@ -209,8 +266,8 @@ void write_into(index_t const& index, std::size_t rows, bytes_span_t target) {
         std::size_t const payload_bytes = entry.payload.size() * sizeof(double);
         write_pod(cursor, entry.key);
         cursor = cursor.subspan(sizeof(usearch_key_t));
-        [[maybe_unused]] status_t const copied =
-            copy_bytes(cursor.first(payload_bytes), bytes_of(entry.payload.data(), entry.payload.size()));
+        [[maybe_unused]] status_t const copied = copy_bytes(cursor.first(payload_bytes),
+                                                            bytes_of(entry.payload.data(), entry.payload.size()));
         cursor = cursor.subspan(payload_bytes);
     }
 }
@@ -229,6 +286,7 @@ bool adopt(usearch_dense_options_t& options, prefix_t const& prefix) {
     options.dimensions = prefix.dimensions;
     options.metric = prefix.metric;
     options.connectivity = prefix.connectivity;
+    options.quantization = prefix.quantization;
     return true;
 }
 
@@ -253,8 +311,8 @@ bool read_from(index_t& index, bytes_view_t blob, usearch_error_t* error) {
     for (std::size_t row = 0; row != rows; ++row) {
         usearch_key_t const key = read_pod<usearch_key_t>(cursor);
         cursor = cursor.subspan(sizeof(usearch_key_t));
-        [[maybe_unused]] status_t const copied =
-            copy_bytes(bytes_of(payload.data(), payload.size()), cursor.first(dimensions * sizeof(double)));
+        [[maybe_unused]] status_t const copied = copy_bytes(bytes_of(payload.data(), payload.size()),
+                                                            cursor.first(dimensions * sizeof(double)));
         cursor = cursor.subspan(dimensions * sizeof(double));
         index.append(key, payload);
     }
@@ -349,8 +407,7 @@ char const* usearch_dense_capabilities([[maybe_unused]] usearch_dense_index_t ha
 }
 
 std::size_t usearch_dense_add(usearch_dense_index_t handle, usearch_executor_t executor, usearch_key_t const* keys,
-                              void const* vectors, std::size_t count, std::size_t stride,
-                              usearch_scalar_t scalar_kind,
+                              usearch_dense_matrix_view_t const* vectors,
                               [[maybe_unused]] usearch_dense_expansion_config_t const* config,
                               usearch_progress_callback_t progress, void* progress_state,
                               usearch_dense_traversal_stats_t* stats, usearch_error_t* error) {
@@ -359,7 +416,10 @@ std::size_t usearch_dense_add(usearch_dense_index_t handle, usearch_executor_t e
     index_t& index = borrowed<index_t>(handle);
     if (reject_executor(executor, error)) return 0;
     if (reject_unfrozen(index, error)) return 0;
-    if (reject_scalar(scalar_kind, error)) return 0;
+    std::size_t stride = 0;
+    if (reject_view(vectors, index, stride, error)) return 0;
+    std::size_t const count = vectors->rows;
+    usearch_scalar_t const scalar_kind = vectors->scalar_kind;
 
     // Sizing precedes the first append, so a batch that cannot be accommodated adds nothing -
     // the all-or-nothing insertion this modality alone promises.
@@ -374,7 +434,7 @@ std::size_t usearch_dense_add(usearch_dense_index_t handle, usearch_executor_t e
     std::vector<double> payload(dimensions);
     std::size_t published = 0;
     for (std::size_t row = 0; row != count; ++row) {
-        read_row(row_at<std::byte>(vectors, row, stride, row_bytes), scalar_kind, payload);
+        read_row(row_at<std::byte>(vectors->data, row, stride, row_bytes), scalar_kind, payload);
         index.append(keys[row], payload);
         ++published;
         if (!keep_going(progress, progress_state, published, count)) break;
@@ -406,43 +466,43 @@ std::size_t usearch_dense_refine(usearch_dense_index_t handle, usearch_executor_
     return 0;
 }
 
-void usearch_dense_search(usearch_dense_index_t handle, usearch_executor_t executor, void const* queries,
-                          std::size_t queries_count, std::size_t queries_stride, usearch_scalar_t scalar_kind,
-                          std::size_t wanted, usearch_dense_expansion_config_t const* config,
-                          usearch_progress_callback_t progress, void* progress_state, usearch_key_t* keys,
-                          std::size_t keys_stride, usearch_distance_t* distances, std::size_t distances_stride,
-                          std::size_t* counts, usearch_dense_traversal_stats_t* stats, usearch_error_t* error) {
+/** @brief The shared body of both search doors; the unfiltered one admits with a null predicate. */
+void search_matrix(usearch_dense_index_t handle, usearch_executor_t executor,
+                   usearch_dense_matrix_view_t const* queries, usearch_dense_matches_span_t const* matches,
+                   usearch_dense_expansion_config_t const* config, usearch_predicate_t predicate, void* predicate_state,
+                   usearch_progress_callback_t progress, void* progress_state, usearch_dense_traversal_stats_t* stats,
+                   usearch_error_t* error) {
     propagate_success(error);
     reset(stats);
     index_t& index = borrowed<index_t>(handle);
     if (reject_executor(executor, error)) return;
     if (reject_unfrozen(index, error)) return;
-    if (reject_scalar(scalar_kind, error)) return;
+    std::size_t queries_stride = 0, keys_stride = 0, scores_stride = 0;
+    if (reject_view(queries, index, queries_stride, error)) return;
+    if (reject_matches(matches, keys_stride, scores_stride, error)) return;
+
     std::shared_lock readers(index.mutex);
-    std::size_t const answered = search_rows(index, queries, queries_count, queries_stride, scalar_kind, wanted,
-                                             config, stats, nullptr, nullptr, progress, progress_state, keys,
-                                             keys_stride, distances, distances_stride, {counts, queries_count});
-    reject_cancelled(answered, queries_count, error);
+    std::size_t const answered = search_rows(index, queries->data, queries->rows, queries_stride, queries->scalar_kind,
+                                             matches->wanted, config, stats, predicate, predicate_state, progress,
+                                             progress_state, matches->keys, keys_stride, matches->scores, scores_stride,
+                                             {matches->counts, queries->rows});
+    reject_cancelled(answered, queries->rows, error);
 }
 
-void usearch_dense_search_if(usearch_dense_index_t handle, usearch_executor_t executor, void const* queries,
-                             std::size_t queries_count, std::size_t queries_stride, usearch_scalar_t scalar_kind,
-                             std::size_t wanted, usearch_dense_expansion_config_t const* config,
-                             usearch_predicate_t predicate, void* predicate_state,
-                             usearch_progress_callback_t progress, void* progress_state, usearch_key_t* keys,
-                             std::size_t keys_stride, usearch_distance_t* distances, std::size_t distances_stride,
-                             std::size_t* counts, usearch_dense_traversal_stats_t* stats, usearch_error_t* error) {
-    propagate_success(error);
-    reset(stats);
-    index_t& index = borrowed<index_t>(handle);
-    if (reject_executor(executor, error)) return;
-    if (reject_unfrozen(index, error)) return;
-    if (reject_scalar(scalar_kind, error)) return;
-    std::shared_lock readers(index.mutex);
-    std::size_t const answered = search_rows(index, queries, queries_count, queries_stride, scalar_kind, wanted,
-                                             config, stats, predicate, predicate_state, progress, progress_state,
-                                             keys, keys_stride, distances, distances_stride, {counts, queries_count});
-    reject_cancelled(answered, queries_count, error);
+void usearch_dense_search(usearch_dense_index_t handle, usearch_executor_t executor,
+                          usearch_dense_matrix_view_t const* queries, usearch_dense_matches_span_t const* matches,
+                          usearch_dense_expansion_config_t const* config, usearch_progress_callback_t progress,
+                          void* progress_state, usearch_dense_traversal_stats_t* stats, usearch_error_t* error) {
+    search_matrix(handle, executor, queries, matches, config, nullptr, nullptr, progress, progress_state, stats, error);
+}
+
+void usearch_dense_search_if(usearch_dense_index_t handle, usearch_executor_t executor,
+                             usearch_dense_matrix_view_t const* queries, usearch_dense_matches_span_t const* matches,
+                             usearch_dense_expansion_config_t const* config, usearch_predicate_t predicate,
+                             void* predicate_state, usearch_progress_callback_t progress, void* progress_state,
+                             usearch_dense_traversal_stats_t* stats, usearch_error_t* error) {
+    search_matrix(handle, executor, queries, matches, config, predicate, predicate_state, progress, progress_state,
+                  stats, error);
 }
 
 std::size_t usearch_dense_count(usearch_dense_index_t handle, usearch_key_t key, usearch_error_t* error) {
@@ -452,23 +512,26 @@ std::size_t usearch_dense_count(usearch_dense_index_t handle, usearch_key_t key,
     return index.by_key.count(keyed(key));
 }
 
-std::size_t usearch_dense_get(usearch_dense_index_t handle, usearch_key_t key, void* vectors, std::size_t wanted,
-                              std::size_t stride, usearch_scalar_t scalar_kind, usearch_error_t* error) {
+std::size_t usearch_dense_get(usearch_dense_index_t handle, usearch_key_t key,
+                              usearch_dense_matrix_span_t const* vectors, usearch_error_t* error) {
     propagate_success(error);
     index_t& index = borrowed<index_t>(handle);
-    if (vectors && reject_scalar(scalar_kind, error)) return 0;
+    std::size_t stride = 0;
+    if (vectors && reject_span(vectors, index.options.dimensions, stride, error)) return 0;
     std::shared_lock readers(index.mutex);
-    std::size_t const row_bytes = index.options.dimensions * scalar_bytes(scalar_kind);
     std::vector<std::size_t> const rows = rows_under(index, key);
-    for (std::size_t found = 0; found != rows.size() && vectors && found < wanted; ++found)
-        write_row(row_at<std::byte>(vectors, found, stride, row_bytes), scalar_kind,
-                  index.entries[rows[found]].payload);
+    if (vectors) {
+        std::size_t const row_bytes = vectors->columns * scalar_bytes(vectors->scalar_kind);
+        for (std::size_t found = 0; found != rows.size() && found < vectors->capacity; ++found)
+            write_row(row_at<std::byte>(vectors->data, found, stride, row_bytes), vectors->scalar_kind,
+                      index.entries[rows[found]].payload);
+    }
     return rows.size();
 }
 
-void usearch_dense_merge(usearch_dense_index_t handle, usearch_executor_t executor,
-                         usearch_dense_index_t const* donors, std::size_t donors_count,
-                         usearch_progress_callback_t progress, void* progress_state, usearch_error_t* error) {
+void usearch_dense_merge(usearch_dense_index_t handle, usearch_executor_t executor, usearch_dense_index_t* donors,
+                         std::size_t donors_count, usearch_progress_callback_t progress, void* progress_state,
+                         usearch_error_t* error) {
     propagate_success(error);
     index_t& index = borrowed<index_t>(handle);
     if (reject_executor(executor, error)) return;
@@ -484,9 +547,12 @@ void usearch_dense_merge(usearch_dense_index_t handle, usearch_executor_t execut
         ++merged;
         if (!keep_going(progress, progress_state, merged, donors_count)) break;
     }
-    // Consumed whether merged or not; the ABI forbids the caller freeing them.
-    for (std::size_t position = 0; position != donors_count; ++position)
+    // Consumed whether merged or not, and nulled as each goes, so a caller reading the array
+    // back sees exactly which handles the engine still left it holding - none, here.
+    for (std::size_t position = 0; position != donors_count; ++position) {
         delete static_cast<index_t*>(donors[position]);
+        donors[position] = nullptr;
+    }
     if (!accommodated)
         return propagate_error(usearch_error_out_of_memory_k, error, "The donor's rows could not be accommodated");
     reject_cancelled(merged, donors_count, error);
@@ -501,21 +567,24 @@ usearch_dense_cursor_t usearch_dense_cursor(usearch_dense_index_t handle, usearc
     return cursor;
 }
 
-std::size_t usearch_dense_cursor_next(usearch_dense_cursor_t handle, usearch_key_t* keys, void* vectors,
-                                      std::size_t wanted, std::size_t stride, usearch_scalar_t scalar_kind,
-                                      usearch_error_t* error) {
+std::size_t usearch_dense_cursor_next(usearch_dense_cursor_t handle, usearch_key_t* keys,
+                                      usearch_dense_matrix_span_t const* vectors, usearch_error_t* error) {
     propagate_success(error);
     cursor_t& cursor = borrowed<cursor_t>(handle);
-    if (vectors && reject_scalar(scalar_kind, error)) return 0;
     index_t& index = *cursor.index;
+    std::size_t stride = 0;
+    if (vectors && reject_span(vectors, index.options.dimensions, stride, error)) return 0;
     std::shared_lock readers(index.mutex);
-    std::size_t const row_bytes = index.options.dimensions * scalar_bytes(scalar_kind);
+    std::size_t const wanted = vectors ? vectors->capacity : cursor.limit - cursor.position;
     std::size_t const written = std::min(wanted, cursor.limit - cursor.position);
     std::span<usearch_key_t> const keys_row {keys, written};
     for (std::size_t row = 0; row != written; ++row) {
         entry_t const& entry = index.entries[cursor.position + row];
         keys_row[row] = entry.key;
-        if (vectors) write_row(row_at<std::byte>(vectors, row, stride, row_bytes), scalar_kind, entry.payload);
+        if (vectors) {
+            std::size_t const row_bytes = vectors->columns * scalar_bytes(vectors->scalar_kind);
+            write_row(row_at<std::byte>(vectors->data, row, stride, row_bytes), vectors->scalar_kind, entry.payload);
+        }
     }
     cursor.position += written;
     return written;
@@ -524,21 +593,25 @@ std::size_t usearch_dense_cursor_next(usearch_dense_cursor_t handle, usearch_key
 void usearch_dense_cursor_free(usearch_dense_cursor_t handle) { delete static_cast<cursor_t*>(handle); }
 
 usearch_dense_finder_t usearch_dense_find(usearch_dense_index_t handle, usearch_executor_t executor,
-                                          void const* query, usearch_scalar_t scalar_kind, usearch_error_t* error) {
+                                          usearch_dense_matrix_view_t const* query, usearch_error_t* error) {
     propagate_success(error);
     index_t& index = borrowed<index_t>(handle);
     if (reject_executor(executor, error)) return nullptr;
     if (reject_unfrozen(index, error)) return nullptr;
-    if (reject_scalar(scalar_kind, error)) return nullptr;
+    std::size_t stride = 0;
+    if (reject_view(query, index, stride, error)) return nullptr;
+    if (reject_if(query->rows != 1, usearch_error_shape_mismatch_k, "A finder takes exactly one query row", error))
+        return nullptr;
     finder_t* finder = new (std::nothrow) finder_t();
     if (!finder) {
         propagate_error(usearch_error_out_of_memory_k, error, "The finder could not be allocated");
         return nullptr;
     }
+    usearch_scalar_t const scalar_kind = query->scalar_kind;
     std::size_t const dimensions = index.options.dimensions;
     std::vector<double> query_row(dimensions);
     std::shared_lock readers(index.mutex);
-    read_row(row_at<std::byte>(query, 0, 0, dimensions * scalar_bytes(scalar_kind)), scalar_kind, query_row);
+    read_row(row_at<std::byte>(query->data, 0, stride, dimensions * scalar_bytes(scalar_kind)), scalar_kind, query_row);
     rank<payload_t>(
         index.entries, admitting(nullptr, nullptr),
         [&](payload_t const& payload) { return distance(index.options.metric, query_row, payload); }, finder->ranked);
@@ -619,9 +692,8 @@ void usearch_dense_metadata(usearch_bytes_view_t path, usearch_dense_options_t* 
         propagate_error(usearch_error_unknown_kind_k, error, "The checkpoint names a metric this build lacks");
 }
 
-void usearch_dense_save_buffer(usearch_dense_index_t handle, usearch_executor_t executor,
-                               usearch_bytes_span_t buffer, usearch_progress_callback_t progress,
-                               void* progress_state, usearch_error_t* error) {
+void usearch_dense_save_buffer(usearch_dense_index_t handle, usearch_executor_t executor, usearch_bytes_span_t buffer,
+                               usearch_progress_callback_t progress, void* progress_state, usearch_error_t* error) {
     propagate_success(error);
     index_t& index = borrowed<index_t>(handle);
     if (reject_executor(executor, error)) return;
@@ -639,9 +711,8 @@ void usearch_dense_save_buffer(usearch_dense_index_t handle, usearch_executor_t 
     keep_going(progress, progress_state, 1, 1);
 }
 
-void usearch_dense_load_buffer(usearch_dense_index_t handle, usearch_executor_t executor,
-                               usearch_bytes_view_t buffer, usearch_progress_callback_t progress,
-                               void* progress_state, usearch_error_t* error) {
+void usearch_dense_load_buffer(usearch_dense_index_t handle, usearch_executor_t executor, usearch_bytes_view_t buffer,
+                               usearch_progress_callback_t progress, void* progress_state, usearch_error_t* error) {
     propagate_success(error);
     index_t& index = borrowed<index_t>(handle);
     if (reject_executor(executor, error)) return;
@@ -661,37 +732,44 @@ void usearch_dense_metadata_buffer(usearch_bytes_view_t buffer, usearch_dense_op
         propagate_error(usearch_error_unknown_kind_k, error, "The checkpoint names a metric this build lacks");
 }
 
-void usearch_dense_multiply(usearch_dense_index_t handle, usearch_executor_t executor, void const* rows,
-                            std::size_t rows_count, std::size_t rows_stride, usearch_scalar_t scalar_kind,
-                            std::size_t wanted, [[maybe_unused]] usearch_dense_expansion_config_t const* config,
-                            usearch_progress_callback_t progress, void* progress_state, usearch_key_t* columns,
-                            std::size_t columns_stride, usearch_distance_t* products, std::size_t products_stride,
-                            std::size_t* counts, usearch_dense_traversal_stats_t* stats, usearch_error_t* error) {
+void usearch_dense_multiply(usearch_dense_index_t handle, usearch_executor_t executor,
+                            usearch_dense_matrix_view_t const* left, usearch_dense_matches_span_t const* products,
+                            [[maybe_unused]] usearch_dense_expansion_config_t const* config,
+                            usearch_progress_callback_t progress, void* progress_state,
+                            usearch_dense_traversal_stats_t* stats, usearch_error_t* error) {
     propagate_success(error);
     reset(stats);
     index_t& index = borrowed<index_t>(handle);
     if (reject_executor(executor, error)) return;
     if (reject_unfrozen(index, error)) return;
-    if (reject_scalar(scalar_kind, error)) return;
+    if (reject_if(index.options.metric != usearch_dense_metric_inner_k, usearch_error_config_mismatch_k,
+                  "A product is a logit, so the kind must be inner product", error))
+        return;
+    std::size_t left_stride = 0, keys_stride = 0, scores_stride = 0;
+    if (reject_view(left, index, left_stride, error)) return;
+    if (reject_matches(products, keys_stride, scores_stride, error)) return;
+    usearch_scalar_t const scalar_kind = left->scalar_kind;
+    std::size_t const rows_count = left->rows, wanted = products->wanted;
+
     std::shared_lock readers(index.mutex);
     std::size_t const indexed = index.entries.size();
     std::size_t const dimensions = index.options.dimensions;
     std::size_t const row_bytes = dimensions * scalar_bytes(scalar_kind);
-    std::span<std::size_t> const counts_column {counts, rows_count};
+    std::span<std::size_t> const counts_column {products->counts, rows_count};
 
     std::fill(counts_column.begin(), counts_column.end(), 0);
-    std::vector<double> left(dimensions);
+    std::vector<double> left_row(dimensions);
     std::size_t multiplied = 0;
     for (std::size_t row = 0; row != rows_count; ++row) {
-        read_row(row_at<std::byte>(rows, row, rows_stride, row_bytes), scalar_kind, left);
-        std::span<usearch_key_t> const keys_row = row_at<usearch_key_t>(columns, row, columns_stride, wanted);
-        std::span<usearch_distance_t> const products_row = row_at<usearch_distance_t>(products, row, products_stride,
-                                                                                      wanted);
+        read_row(row_at<std::byte>(left->data, row, left_stride, row_bytes), scalar_kind, left_row);
+        std::span<usearch_key_t> const keys_row = row_at<usearch_key_t>(products->keys, row, keys_stride, wanted);
+        std::span<usearch_distance_t> const products_row = row_at<usearch_distance_t>(products->scores, row,
+                                                                                      scores_stride, wanted);
         std::size_t const written = std::min(wanted, indexed);
         for (std::size_t column = 0; column != written; ++column) {
             entry_t const& entry = index.entries[column];
             keys_row[column] = entry.key;
-            products_row[column] = dot_product(left, entry.payload);
+            products_row[column] = dot_product(left_row, entry.payload);
         }
         // The true count, which the header allows to exceed `wanted` to signal truncation.
         counts_column[row] = indexed;
@@ -702,22 +780,43 @@ void usearch_dense_multiply(usearch_dense_index_t handle, usearch_executor_t exe
     reject_cancelled(multiplied, rows_count, error);
 }
 
-void usearch_dense_attend(usearch_dense_index_t handle, usearch_executor_t executor, void const* queries,
-                          std::size_t queries_count, std::size_t queries_stride,
-                          usearch_scalar_t queries_scalar_kind, void const* values, std::size_t value_dimensions,
-                          std::size_t values_stride, usearch_scalar_t values_scalar_kind,
+void usearch_dense_attend(usearch_dense_index_t handle, usearch_executor_t executor,
+                          usearch_dense_matrix_view_t const* queries, usearch_dense_matrix_view_t const* values,
+                          usearch_dense_matrix_span_t const* outputs, usearch_dense_softmax_state_t* carry,
                           usearch_dense_attention_config_t const* config, usearch_progress_callback_t progress,
-                          void* progress_state, void* outputs, std::size_t outputs_stride,
-                          usearch_scalar_t outputs_scalar_kind, float* maximum_scores, float* partitions,
-                          usearch_dense_traversal_stats_t* stats, usearch_error_t* error) {
+                          void* progress_state, usearch_dense_traversal_stats_t* stats, usearch_error_t* error) {
     propagate_success(error);
     reset(stats);
     index_t& index = borrowed<index_t>(handle);
     if (reject_executor(executor, error)) return;
     if (reject_unfrozen(index, error)) return;
-    if (reject_scalar(queries_scalar_kind, error)) return;
-    if (reject_scalar(values_scalar_kind, error)) return;
-    if (reject_scalar(outputs_scalar_kind, error)) return;
+    if (reject_if(index.options.metric != usearch_dense_metric_inner_k, usearch_error_config_mismatch_k,
+                  "A softmax weighs logits, so the kind must be inner product", error))
+        return;
+
+    // The value table answers to no frozen width - its rows are addressed by key, and its own
+    // width is the value dimensionality - so it is checked for storage and pitch, not geometry.
+    std::size_t queries_stride = 0, values_stride = 0, outputs_stride = 0;
+    if (reject_view(queries, index, queries_stride, error)) return;
+    if (reject_if(!values || !values->data, usearch_error_malformed_input_k, "The values must name storage", error))
+        return;
+    if (reject_scalar(values->scalar_kind, error)) return;
+    std::size_t const value_dimensions = values->columns;
+    if (reject_span(outputs, value_dimensions, outputs_stride, error)) return;
+    if (reject_if(outputs->capacity < queries->rows, usearch_error_shape_mismatch_k,
+                  "The outputs hold fewer rows than there are queries", error))
+        return;
+    std::size_t const values_natural = value_dimensions * scalar_bytes(values->scalar_kind);
+    if (reject_if(values->stride_bytes && values->stride_bytes < values_natural, usearch_error_unsupported_layout_k,
+                  "The values stride is shorter than one row", error))
+        return;
+    values_stride = values->stride_bytes ? values->stride_bytes : values_natural;
+
+    usearch_scalar_t const queries_scalar_kind = queries->scalar_kind;
+    usearch_scalar_t const values_scalar_kind = values->scalar_kind;
+    usearch_scalar_t const outputs_scalar_kind = outputs->scalar_kind;
+    std::size_t const queries_count = queries->rows;
+
     std::shared_lock readers(index.mutex);
     std::size_t const indexed = index.entries.size();
     std::size_t const dimensions = index.options.dimensions;
@@ -730,16 +829,20 @@ void usearch_dense_attend(usearch_dense_index_t handle, usearch_executor_t execu
     std::vector<double> query_row(dimensions), value(value_dimensions), accumulated(value_dimensions);
     std::size_t attended = 0;
     for (std::size_t query = 0; query != queries_count; ++query) {
-        read_row(row_at<std::byte>(queries, query, queries_stride, query_bytes), queries_scalar_kind, query_row);
+        read_row(row_at<std::byte>(queries->data, query, queries_stride, query_bytes), queries_scalar_kind, query_row);
         // The online-softmax recurrence: a running maximum, a partition, and a weighted sum.
         double maximum = -INFINITY, partition = 0;
         std::fill(accumulated.begin(), accumulated.end(), 0.0);
         for (std::size_t member = 0; member != indexed; ++member) {
             entry_t const& entry = index.entries[member];
+            // The table now carries its own height, so a key past it is a wrong softmax rather
+            // than a smaller one - refuse it instead of skipping the row.
             std::size_t const offset = value_offset(entry.key);
-            if (offset >= value_rows_limit_k) continue;
+            if (reject_if(offset >= values->rows, usearch_error_shape_mismatch_k,
+                          "An entry's key addresses a row past the value table", error))
+                return;
             double const score = dot_product(query_row, entry.payload) * scale;
-            read_row(row_at<std::byte>(values, offset, values_stride, value_bytes), values_scalar_kind, value);
+            read_row(row_at<std::byte>(values->data, offset, values_stride, value_bytes), values_scalar_kind, value);
 
             double const shifted = std::max(maximum, score);
             double const rescale = std::exp(maximum - shifted);
@@ -751,9 +854,9 @@ void usearch_dense_attend(usearch_dense_index_t handle, usearch_executor_t execu
         }
         for (std::size_t position = 0; position != value_dimensions; ++position)
             accumulated[position] = partition > 0 ? accumulated[position] / partition : 0.0;
-        write_row(row_at<std::byte>(outputs, query, outputs_stride, output_bytes), outputs_scalar_kind, accumulated);
-        if (maximum_scores) maximum_scores[query] = static_cast<float>(maximum);
-        if (partitions) partitions[query] = static_cast<float>(partition);
+        write_row(row_at<std::byte>(outputs->data, query, outputs_stride, output_bytes), outputs_scalar_kind,
+                  accumulated);
+        if (carry) carry[query] = {static_cast<float>(maximum), static_cast<float>(partition)};
         if (stats) stats->computed_distances += indexed;
         ++attended;
         if (!keep_going(progress, progress_state, attended, queries_count)) break;
@@ -761,27 +864,34 @@ void usearch_dense_attend(usearch_dense_index_t handle, usearch_executor_t execu
     reject_cancelled(attended, queries_count, error);
 }
 
-void usearch_dense_maxsim(usearch_dense_index_t handle, usearch_executor_t executor, void const* queries,
-                          std::size_t queries_count, std::size_t rows_per_query, std::size_t queries_stride,
-                          usearch_scalar_t scalar_kind, std::size_t wanted,
+void usearch_dense_maxsim(usearch_dense_index_t handle, usearch_executor_t executor,
+                          usearch_dense_matrix_view_t const* queries, std::size_t rows_per_query,
+                          usearch_dense_matches_span_t const* matches,
                           [[maybe_unused]] usearch_dense_expansion_config_t const* config,
-                          usearch_progress_callback_t progress, void* progress_state, usearch_key_t* keys,
-                          std::size_t keys_stride, usearch_distance_t* scores, std::size_t scores_stride,
-                          std::size_t* counts, usearch_dense_traversal_stats_t* stats, usearch_error_t* error) {
+                          usearch_progress_callback_t progress, void* progress_state,
+                          usearch_dense_traversal_stats_t* stats, usearch_error_t* error) {
     propagate_success(error);
     reset(stats);
     index_t& index = borrowed<index_t>(handle);
     if (reject_executor(executor, error)) return;
     if (reject_unfrozen(index, error)) return;
-    if (reject_scalar(scalar_kind, error)) return;
     if (reject_if(index.options.metric != usearch_dense_metric_inner_k, usearch_error_config_mismatch_k,
                   "Late interaction sums maxima over logits, so the kind must be inner product", error))
         return;
+    std::size_t queries_stride = 0, keys_stride = 0, scores_stride = 0;
+    if (reject_view(queries, index, queries_stride, error)) return;
+    if (reject_matches(matches, keys_stride, scores_stride, error)) return;
+    if (reject_if(!rows_per_query || queries->rows % rows_per_query, usearch_error_shape_mismatch_k,
+                  "The query rows do not divide into whole queries", error))
+        return;
+    usearch_scalar_t const scalar_kind = queries->scalar_kind;
+    std::size_t const queries_count = queries->rows / rows_per_query, wanted = matches->wanted;
+
     std::shared_lock readers(index.mutex);
 
     std::size_t const dimensions = index.options.dimensions;
     std::size_t const row_bytes = dimensions * scalar_bytes(scalar_kind);
-    std::span<std::size_t> const counts_column {counts, queries_count};
+    std::span<std::size_t> const counts_column {matches->counts, queries_count};
     std::fill(counts_column.begin(), counts_column.end(), 0);
 
     // A document is one key holding its token rows, so the grouping happens here rather than in
@@ -800,8 +910,8 @@ void usearch_dense_maxsim(usearch_dense_index_t handle, usearch_executor_t execu
     std::size_t answered = 0;
     for (std::size_t query = 0; query != queries_count; ++query) {
         for (std::size_t row = 0; row != rows_per_query; ++row)
-            read_row(row_at<std::byte>(queries, query * rows_per_query + row, queries_stride, row_bytes), scalar_kind,
-                     std::span<double>(query_rows).subspan(row * dimensions, dimensions));
+            read_row(row_at<std::byte>(queries->data, query * rows_per_query + row, queries_stride, row_bytes),
+                     scalar_kind, std::span<double>(query_rows).subspan(row * dimensions, dimensions));
 
         ranked.clear();
         for (std::size_t document = 0; document != documents.size(); ++document) {
@@ -819,9 +929,9 @@ void usearch_dense_maxsim(usearch_dense_index_t handle, usearch_executor_t execu
         std::stable_sort(ranked.begin(), ranked.end(),
                          [](match_t const& first, match_t const& second) { return first.distance > second.distance; });
 
-        std::span<usearch_key_t> const keys_row = row_at<usearch_key_t>(keys, query, keys_stride, wanted);
-        std::span<usearch_distance_t> const scores_row = row_at<usearch_distance_t>(scores, query, scores_stride,
-                                                                                    wanted);
+        std::span<usearch_key_t> const keys_row = row_at<usearch_key_t>(matches->keys, query, keys_stride, wanted);
+        std::span<usearch_distance_t> const scores_row = row_at<usearch_distance_t>(matches->scores, query,
+                                                                                    scores_stride, wanted);
         std::size_t const found = std::min(wanted, ranked.size());
         for (std::size_t match = 0; match != found; ++match)
             keys_row[match] = ranked[match].key, scores_row[match] = ranked[match].distance;

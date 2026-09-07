@@ -47,6 +47,16 @@ namespace unum {
 namespace usearch {
 namespace stub {
 
+#pragma region Vocabulary
+
+/** @brief Whether @p name spells @p spelling exactly, with no terminator assumed on either side. */
+inline bool named(usearch_bytes_view_t name, char const* spelling) {
+    std::size_t const length = std::strlen(spelling);
+    return name.data && name.length == length && std::memcmp(name.data, spelling, length) == 0;
+}
+
+#pragma endregion Vocabulary
+
 #pragma region Errors
 
 inline void propagate_success(usearch_error_t* error) {
@@ -91,8 +101,7 @@ struct executor_t {
 
 /** @brief Refuses an executor a verb cannot run on, reporting where the engine's dispatch does. */
 inline bool reject_executor(usearch_executor_t executor, usearch_error_t* error) {
-    return reject_if(!executor, usearch_error_device_k, "The executor's kind must match the handle's residency",
-                     error);
+    return reject_if(!executor, usearch_error_device_k, "The executor's kind must match the handle's residency", error);
 }
 
 /** @brief Ticks the caller's handler and answers whether to carry on; a null handler always does. */

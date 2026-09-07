@@ -462,6 +462,37 @@ USEARCH_EXPORT void usearch_executor_drain(usearch_executor_t executor, usearch_
 USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor);
 
 /**
+ *  @brief The canonical lowercase, dash-separated spelling of each closed set's enumerators,
+ *      and the inverse that reads one back.
+ *
+ *  Every binding that touches user text otherwise writes these tables itself, against a header
+ *  that nothing checks it against. The names are static storage and are never deallocated; an
+ *  unrecognized name reads back as the set's own unknown enumerator.
+ */
+USEARCH_EXPORT char const* usearch_status_name(usearch_status_t status);
+
+/** @brief Reads a status back from its canonical spelling. */
+USEARCH_EXPORT usearch_status_t usearch_status_from_name(usearch_bytes_view_t name);
+
+/** @brief The canonical spelling of a scalar kind, as @c usearch_scalar_f32_k spells "f32". */
+USEARCH_EXPORT char const* usearch_scalar_name(usearch_scalar_t scalar_kind);
+
+/** @brief Reads a scalar kind back; @c usearch_scalar_unknown_k when unrecognized. */
+USEARCH_EXPORT usearch_scalar_t usearch_scalar_from_name(usearch_bytes_view_t name);
+
+/** @brief The canonical spelling of a residency, as @c usearch_residency_ram_k spells "ram". */
+USEARCH_EXPORT char const* usearch_residency_name(usearch_residency_t residency);
+
+/** @brief Reads a residency back; @c usearch_residency_ram_k when unrecognized. */
+USEARCH_EXPORT usearch_residency_t usearch_residency_from_name(usearch_bytes_view_t name);
+
+/** @brief The canonical spelling of a CPU class, as the dispatch ladder names its rungs. */
+USEARCH_EXPORT char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class);
+
+/** @brief The canonical spelling of a GPU class, as the dispatch ladder names its rungs. */
+USEARCH_EXPORT char const* usearch_gpu_class_name(usearch_gpu_class_t gpu_class);
+
+/**
  *  @brief Retrieves the version of the library.
  *  @return The version of the library as a static null-terminated string.
  */
