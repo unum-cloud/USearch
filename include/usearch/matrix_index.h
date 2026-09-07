@@ -280,13 +280,22 @@ USEARCH_EXPORT size_t usearch_matrix_memory_usage(usearch_matrix_index_t index, 
 USEARCH_EXPORT char const* usearch_matrix_capabilities(usearch_matrix_index_t index, usearch_error_t* error);
 
 /**
- *  @brief Optional per-call settings, shared by insertion and both search forms - a pure
- *      input, never written. Passing @c NULL derives every setting.
+ *  @brief Optional per-call settings of @c usearch_matrix_add and @c usearch_matrix_refine - a
+ *      pure input, never written. Passing @c NULL derives every setting.
  */
-USEARCH_EXPORT typedef struct usearch_matrix_expansion_config_t {
-    /** @brief The @b optional candidate-pool breadth; zero derives. */
+USEARCH_EXPORT typedef struct usearch_matrix_insertion_options_t {
+    /** @brief The @b optional candidate-pool breadth the build walk explores; zero derives. */
     size_t expansion_factor;
-} usearch_matrix_expansion_config_t;
+} usearch_matrix_insertion_options_t;
+
+/**
+ *  @brief Optional per-call settings of @c usearch_matrix_search and @c usearch_matrix_search_if -
+ *      a pure input, never written. Passing @c NULL derives every setting.
+ */
+USEARCH_EXPORT typedef struct usearch_matrix_search_options_t {
+    /** @brief The @b optional candidate-pool breadth the walk explores; zero derives. */
+    size_t expansion_factor;
+} usearch_matrix_search_options_t;
 
 /**
  *  @brief Traversal telemetry, shared by insertion and both search forms - a pure output,
@@ -309,17 +318,17 @@ USEARCH_EXPORT typedef struct usearch_matrix_traversal_stats_t {
  *
  *  @param[inout] index The handle to be populated.
  *  @param[in] executor Lanes and scratch to fan out over; its kind must match the residency.
- *  @param[in] keys Array of @p count keys, one per matrix; keys need not be unique.
- *  @param[in] matrices Array of @p count base pointers, one per entry. @ref matrix_index_tape
- *  @param[in] row_counts Array of @p count row counts, index-aligned with @p matrices.
- *  @param[in] count Number of matrices in the tape.
+ *  @param[in] keys The identities to admit the matrices under, one per entry and not necessarily
+ *      unique; its count is the length of the tape.
+ *  @param[in] matrices Array of @c keys.count base pointers, one per entry. @ref matrix_index_tape
+ *  @param[in] row_counts Array of @c keys.count row counts, index-aligned with @p matrices.
  *  @param[in] scalar_kind The incoming row scalar type, converted when it differs from storage.
- *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
- *  @param[in] progress The @b optional handler, called with entries admitted and @p count.
+ *  @param[in] options The @b optional per-call settings; @c NULL derives every setting.
+ *  @param[in] progress The @b optional handler, called with entries admitted and the tape length.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
- *  @return @p count on success, zero on failure.
+ *  @return @c keys.count on success, zero on failure.
  *
  *  A batch is all-or-nothing. Every fallible step runs before the first entry identity is
  *  claimed, so a rejected batch publishes nothing - a cancelled one included, which reports
@@ -331,10 +340,10 @@ USEARCH_EXPORT typedef struct usearch_matrix_traversal_stats_t {
  */
 USEARCH_EXPORT size_t usearch_matrix_add(                       //
     usearch_matrix_index_t index, usearch_executor_t executor,  //
-    usearch_key_t const* keys,                                  //
+    usearch_keys_view_t keys,                                   //
     void const* const* matrices, size_t const* row_counts,      //
-    size_t count, usearch_scalar_t scalar_kind,                 //
-    usearch_matrix_expansion_config_t const* config,            //
+    usearch_scalar_t scalar_kind,                               //
+    usearch_matrix_insertion_options_t const* options,          //
     usearch_progress_callback_t progress, void* progress_state, //
     usearch_matrix_traversal_stats_t* stats,                    //
     usearch_error_t* error);
@@ -345,7 +354,7 @@ USEARCH_EXPORT size_t usearch_matrix_add(                       //
  *
  *  @param[inout] index The handle to be refined.
  *  @param[in] executor Lanes and scratch to fan out over; its kind must match the residency.
- *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
+ *  @param[in] options The @b optional per-call settings; @c NULL derives every setting.
  *  @param[in] progress The @b optional handler, called with entries swept; @c NULL skips it.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
@@ -367,7 +376,7 @@ USEARCH_EXPORT size_t usearch_matrix_add(                       //
  */
 USEARCH_EXPORT size_t usearch_matrix_refine(                    //
     usearch_matrix_index_t index, usearch_executor_t executor,  //
-    usearch_matrix_expansion_config_t const* config,            //
+    usearch_matrix_insertion_options_t const* options,          //
     usearch_progress_callback_t progress, void* progress_state, //
     usearch_matrix_traversal_stats_t* stats,                    //
     usearch_error_t* error);
@@ -385,15 +394,10 @@ USEARCH_EXPORT size_t usearch_matrix_refine(                    //
  *  @param[in] row_counts Array of @p queries_count query row counts.
  *  @param[in] queries_count Number of query matrices in the tape.
  *  @param[in] scalar_kind The scalar type of the query rows.
- *  @param[in] wanted Upper bound on matches per query - the "k" in "kANN".
- *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
+ *  @param[out] matches Where the run lands, sized for @p queries_count rows of @c matches->wanted.
+ *  @param[in] options The @b optional per-call settings; @c NULL derives every setting.
  *  @param[in] progress The @b optional handler, called with queries resolved and their count.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
- *  @param[out] keys Output matrix of `queries_count × wanted` keys; rows contiguous.
- *  @param[in] keys_stride Number of bytes between starts of consecutive rows in @p keys.
- *  @param[out] distances Output matrix of `queries_count × wanted` scores; rows contiguous.
- *  @param[in] distances_stride Number of bytes between starts of consecutive @p distances rows.
- *  @param[out] counts Output array of @p queries_count per-query match counts.
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *
@@ -405,12 +409,9 @@ USEARCH_EXPORT void usearch_matrix_search(                      //
     usearch_matrix_index_t index, usearch_executor_t executor,  //
     void const* const* queries, size_t const* row_counts,       //
     size_t queries_count, usearch_scalar_t scalar_kind,         //
-    size_t wanted,                                              //
-    usearch_matrix_expansion_config_t const* config,            //
+    usearch_matches_span_t const* matches,                      //
+    usearch_matrix_search_options_t const* options,             //
     usearch_progress_callback_t progress, void* progress_state, //
-    usearch_key_t* keys, size_t keys_stride,                    //
-    usearch_distance_t* distances, size_t distances_stride,     //
-    size_t* counts,                                             //
     usearch_matrix_traversal_stats_t* stats,                    //
     usearch_error_t* error);
 
@@ -429,13 +430,10 @@ USEARCH_EXPORT void usearch_matrix_search_if(                   //
     usearch_matrix_index_t index, usearch_executor_t executor,  //
     void const* const* queries, size_t const* row_counts,       //
     size_t queries_count, usearch_scalar_t scalar_kind,         //
-    size_t wanted,                                              //
-    usearch_matrix_expansion_config_t const* config,            //
+    usearch_matches_span_t const* matches,                      //
+    usearch_matrix_search_options_t const* options,             //
     usearch_predicate_t predicate, void* predicate_state,       //
     usearch_progress_callback_t progress, void* progress_state, //
-    usearch_key_t* keys, size_t keys_stride,                    //
-    usearch_distance_t* distances, size_t distances_stride,     //
-    size_t* counts,                                             //
     usearch_matrix_traversal_stats_t* stats,                    //
     usearch_error_t* error);
 
@@ -520,18 +518,19 @@ USEARCH_EXPORT usearch_matrix_cursor_t usearch_matrix_cursor(usearch_matrix_inde
 
 /**
  *  @brief Copies the next batch of entries out of the cursor.
- *  @param[out] keys Output array of up to @p wanted keys.
- *  @param[out] matrices Output array of up to @p wanted borrowed base pointers; @c NULL skips.
- *  @param[out] row_counts Output array of up to @p wanted row counts.
- *  @param[in] wanted Upper bound on entries to write - the capacity of every output array.
+ *  @param[inout] cursor The cursor to advance.
+ *  @param[out] keys Where the identities land; its capacity bounds the batch.
+ *  @param[out] matrices Output array of up to @c keys.capacity borrowed base pointers; @c NULL skips.
+ *  @param[out] row_counts Output array of up to @c keys.capacity row counts.
+ *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *  @return Number of entries written; zero when the snapshot is exhausted.
  *
  *  The borrowed pointers reach into the index's arena and stay valid until the cursor moves
  *  or closes.
  */
-USEARCH_EXPORT size_t usearch_matrix_cursor_next(        //
-    usearch_matrix_cursor_t cursor, usearch_key_t* keys, //
-    void const** matrices, size_t* row_counts, size_t wanted, usearch_error_t* error);
+USEARCH_EXPORT size_t usearch_matrix_cursor_next(             //
+    usearch_matrix_cursor_t cursor, usearch_keys_span_t keys, //
+    void const** matrices, size_t* row_counts, usearch_error_t* error);
 
 /** @brief Releases the cursor. */
 USEARCH_EXPORT void usearch_matrix_cursor_free(usearch_matrix_cursor_t cursor);

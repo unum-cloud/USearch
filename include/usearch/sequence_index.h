@@ -255,14 +255,25 @@ USEARCH_EXPORT size_t usearch_sequence_memory_usage(usearch_sequence_index_t ind
 USEARCH_EXPORT char const* usearch_sequence_capabilities(usearch_sequence_index_t index, usearch_error_t* error);
 
 /**
- *  @brief Optional per-call settings, shared by insertion and both search forms - a pure
- *      input, never written. Passing @c NULL derives every setting.
+ *  @brief Optional per-call settings of @c usearch_sequence_add and @c usearch_sequence_refine -
+ *      a pure input, never written. Passing @c NULL derives every setting.
  */
-USEARCH_EXPORT typedef struct usearch_sequence_expansion_config_t {
-    /** @brief The @b optional candidate-pool breadth - the `ef` of the literature; zero
-     *      derives. */
+USEARCH_EXPORT typedef struct usearch_sequence_insertion_options_t {
+    /** @brief The @b optional candidate-pool breadth the build walk explores - the @c ef of the
+     *      literature; zero derives. */
     size_t expansion_factor;
-} usearch_sequence_expansion_config_t;
+} usearch_sequence_insertion_options_t;
+
+/**
+ *  @brief Optional per-call settings of @c usearch_sequence_search and
+ *      @c usearch_sequence_search_if - a pure input, never written. Passing @c NULL derives
+ *      every setting.
+ */
+USEARCH_EXPORT typedef struct usearch_sequence_search_options_t {
+    /** @brief The @b optional candidate-pool breadth the walk explores - the @c ef of the
+     *      literature; zero derives. */
+    size_t expansion_factor;
+} usearch_sequence_search_options_t;
 
 /**
  *  @brief Traversal telemetry, shared by insertion and both search forms - a pure output,
@@ -284,15 +295,15 @@ USEARCH_EXPORT typedef struct usearch_sequence_traversal_stats_t {
  *
  *  @param[inout] index The handle to be populated.
  *  @param[in] executor Lanes and scratch to fan out over; its kind must match the residency.
- *  @param[in] keys Array of @p count keys, one per sequence.
- *  @param[in] sequences Array of @p count borrowed views, one per sequence.
- *  @param[in] count Number of sequences in the tape.
- *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
- *  @param[in] progress The @b optional handler, called with entries admitted and @p count.
+ *  @param[in] keys The identities to admit the sequences under, one per sequence; its count is
+ *      the length of the tape.
+ *  @param[in] sequences Array of @c keys.count borrowed views, one per sequence.
+ *  @param[in] options The @b optional per-call settings; @c NULL derives every setting.
+ *  @param[in] progress The @b optional handler, called with entries admitted and the tape length.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
- *  @return @p count on success, zero on failure.
+ *  @return @c keys.count on success, zero on failure.
  *
  *  A batch is all-or-nothing. Every fallible step runs before the first entry identity is
  *  claimed, so a rejected batch publishes nothing - a cancelled one included, which reports
@@ -304,9 +315,9 @@ USEARCH_EXPORT typedef struct usearch_sequence_traversal_stats_t {
  */
 USEARCH_EXPORT size_t usearch_sequence_add(                      //
     usearch_sequence_index_t index, usearch_executor_t executor, //
-    usearch_key_t const* keys,                                   //
-    usearch_bytes_view_t const* sequences, size_t count,         //
-    usearch_sequence_expansion_config_t const* config,           //
+    usearch_keys_view_t keys,                                    //
+    usearch_bytes_view_t const* sequences,                       //
+    usearch_sequence_insertion_options_t const* options,         //
     usearch_progress_callback_t progress, void* progress_state,  //
     usearch_sequence_traversal_stats_t* stats,                   //
     usearch_error_t* error);
@@ -317,7 +328,7 @@ USEARCH_EXPORT size_t usearch_sequence_add(                      //
  *
  *  @param[inout] index The handle to be refined.
  *  @param[in] executor Lanes and scratch to fan out over; its kind must match the residency.
- *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
+ *  @param[in] options The @b optional per-call settings; @c NULL derives every setting.
  *  @param[in] progress The @b optional handler, called with entries swept; @c NULL skips it.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
@@ -339,7 +350,7 @@ USEARCH_EXPORT size_t usearch_sequence_add(                      //
  */
 USEARCH_EXPORT size_t usearch_sequence_refine(                   //
     usearch_sequence_index_t index, usearch_executor_t executor, //
-    usearch_sequence_expansion_config_t const* config,           //
+    usearch_sequence_insertion_options_t const* options,         //
     usearch_progress_callback_t progress, void* progress_state,  //
     usearch_sequence_traversal_stats_t* stats,                   //
     usearch_error_t* error);
@@ -354,15 +365,10 @@ USEARCH_EXPORT size_t usearch_sequence_refine(                   //
  *  @param[in] executor Lanes and scratch to fan out over; its kind must match the residency.
  *  @param[in] queries Array of @p queries_count borrowed query views.
  *  @param[in] queries_count Number of queries in the tape.
- *  @param[in] wanted Upper bound on matches per query - the "k" in "kANN".
- *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
+ *  @param[out] matches Where the run lands, sized for @p queries_count rows of @c matches->wanted.
+ *  @param[in] options The @b optional per-call settings; @c NULL derives every setting.
  *  @param[in] progress The @b optional handler, called with queries resolved and their count.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
- *  @param[out] keys Output matrix of `queries_count × wanted` keys; rows contiguous.
- *  @param[in] keys_stride Number of bytes between starts of consecutive rows in @p keys.
- *  @param[out] distances Output matrix of `queries_count × wanted` scores; rows contiguous.
- *  @param[in] distances_stride Number of bytes between starts of consecutive @p distances rows.
- *  @param[out] counts Output array of @p queries_count per-query match counts.
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *
@@ -373,12 +379,9 @@ USEARCH_EXPORT size_t usearch_sequence_refine(                   //
 USEARCH_EXPORT void usearch_sequence_search(                     //
     usearch_sequence_index_t index, usearch_executor_t executor, //
     usearch_bytes_view_t const* queries, size_t queries_count,   //
-    size_t wanted,                                               //
-    usearch_sequence_expansion_config_t const* config,           //
+    usearch_matches_span_t const* matches,                       //
+    usearch_sequence_search_options_t const* options,            //
     usearch_progress_callback_t progress, void* progress_state,  //
-    usearch_key_t* keys, size_t keys_stride,                     //
-    usearch_distance_t* distances, size_t distances_stride,      //
-    size_t* counts,                                              //
     usearch_sequence_traversal_stats_t* stats,                   //
     usearch_error_t* error);
 
@@ -392,19 +395,16 @@ USEARCH_EXPORT void usearch_sequence_search(                     //
  *
  *  Non-matching entries still route the traversal rather than terminating it, so recall does
  *  not collapse at low selectivity - the walk crosses rejected regions to reach admitted ones
- *  behind them. The cost is that @p predicate is called far more often than @p wanted, once
- *  per scored candidate, so it belongs on the caller's fast path.
+ *  behind them. The cost is that @p predicate is called far more often than @c matches->wanted,
+ *  once per scored candidate, so it belongs on the caller's fast path.
  */
 USEARCH_EXPORT void usearch_sequence_search_if(                  //
     usearch_sequence_index_t index, usearch_executor_t executor, //
     usearch_bytes_view_t const* queries, size_t queries_count,   //
-    size_t wanted,                                               //
-    usearch_sequence_expansion_config_t const* config,           //
+    usearch_matches_span_t const* matches,                       //
+    usearch_sequence_search_options_t const* options,            //
     usearch_predicate_t predicate, void* predicate_state,        //
     usearch_progress_callback_t progress, void* progress_state,  //
-    usearch_key_t* keys, size_t keys_stride,                     //
-    usearch_distance_t* distances, size_t distances_stride,      //
-    size_t* counts,                                              //
     usearch_sequence_traversal_stats_t* stats,                   //
     usearch_error_t* error);
 
@@ -491,9 +491,8 @@ USEARCH_EXPORT usearch_sequence_cursor_t usearch_sequence_cursor(usearch_sequenc
  *  @brief Copies the next batch of entries out of the cursor.
  *
  *  @param[inout] cursor The cursor to advance.
- *  @param[out] keys Output array of up to @p wanted keys.
- *  @param[out] sequences Output array of up to @p wanted borrowed views; @c NULL skips.
- *  @param[in] wanted Upper bound on entries - the capacity of @p keys and @p sequences.
+ *  @param[out] keys Where the identities land; its capacity bounds the batch.
+ *  @param[out] sequences Output array of up to @c keys.capacity borrowed views; @c NULL skips.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *  @return Number of entries written; zero when the snapshot is exhausted.
  *
@@ -501,9 +500,9 @@ USEARCH_EXPORT usearch_sequence_cursor_t usearch_sequence_cursor(usearch_sequenc
  *  they stay valid only until the cursor next advances or is freed. A caller keeping any of
  *  them past that point must copy the bytes out first.
  */
-USEARCH_EXPORT size_t usearch_sequence_cursor_next(        //
-    usearch_sequence_cursor_t cursor, usearch_key_t* keys, //
-    usearch_bytes_view_t* sequences, size_t wanted, usearch_error_t* error);
+USEARCH_EXPORT size_t usearch_sequence_cursor_next(             //
+    usearch_sequence_cursor_t cursor, usearch_keys_span_t keys, //
+    usearch_bytes_view_t* sequences, usearch_error_t* error);
 
 /** @brief Releases the cursor. */
 USEARCH_EXPORT void usearch_sequence_cursor_free(usearch_sequence_cursor_t cursor);

@@ -200,6 +200,13 @@ USEARCH_EXPORT typedef struct usearch_dense_options_t {
     };
 } usearch_dense_options_t;
 
+/** @brief The canonical spelling of a metric kind, as @c usearch_dense_metric_inner_k spells
+ *      "inner"; the same lifts @c usearch_scalar_name and its kin provide for the shared sets. */
+USEARCH_EXPORT char const* usearch_dense_metric_name(usearch_dense_metric_t metric);
+
+/** @brief Reads a metric kind back; @c usearch_dense_metric_unknown_k when unrecognized. */
+USEARCH_EXPORT usearch_dense_metric_t usearch_dense_metric_from_name(usearch_bytes_view_t name);
+
 /**
  *  @brief Initializes a new dense index for the residency the options select.
  *  @param[in] options Pointer to the populated options structure.
@@ -244,77 +251,25 @@ USEARCH_EXPORT size_t usearch_dense_memory_usage(usearch_dense_index_t index, us
 USEARCH_EXPORT char const* usearch_dense_capabilities(usearch_dense_index_t index, usearch_error_t* error);
 
 /**
- *  @brief A borrowed strided matrix - the batch currency every dense verb reads.
- *
- *  One vector is a one-row matrix, so a caller never packs a special case. The row count and
- *  the column count are scalars; @c stride_bytes alone is a byte count, which is why it says
- *  so in its name. A zero @c stride_bytes means rows sit contiguously at their natural width.
- *
- *  @c columns is what the engine checks the frozen geometry against, so a matrix whose width
- *  disagrees with the index is refused with @c usearch_error_shape_mismatch_k rather than read
- *  past its end.
+ *  @brief Optional per-call settings of @c usearch_dense_add and @c usearch_dense_refine - a
+ *      pure input, never written. Passing @c NULL derives every setting.
  */
-USEARCH_EXPORT typedef struct usearch_dense_matrix_view_t {
-    /** @brief Base pointer of the first row. */
-    void const* data;
-    /** @brief Rows the matrix carries. */
-    size_t rows;
-    /** @brief Logical scalars per row, as the caller counts them. */
-    size_t columns;
-    /** @brief Bytes between the starts of consecutive rows; zero means contiguous. */
-    size_t stride_bytes;
-    /** @brief The scalar type the rows hold, converted on the way in where it differs. */
-    usearch_scalar_t scalar_kind;
-} usearch_dense_matrix_view_t;
-
-/** @brief The writable twin of @c usearch_dense_matrix_view_t, carried by every verb that
- *      lands rows in a matrix the caller allocated. */
-USEARCH_EXPORT typedef struct usearch_dense_matrix_span_t {
-    /** @brief Base pointer of the first row. */
-    void* data;
-    /** @brief Rows the matrix can hold, which a verb writes up to and reports back. */
-    size_t capacity;
-    /** @brief Logical scalars per row, as the caller counts them. */
-    size_t columns;
-    /** @brief Bytes between the starts of consecutive rows; zero means contiguous. */
-    size_t stride_bytes;
-    /** @brief The scalar type to write, converted on the way out where it differs. */
-    usearch_scalar_t scalar_kind;
-} usearch_dense_matrix_span_t;
-
-/**
- *  @brief Where a ranked run lands - three caller-owned outputs sharing the queries' row count.
- *
- *  Carries no row count of its own: the queries view already fixed it, and a second copy is a
- *  second thing to disagree. The strides stay because a caller may land results inside a wider
- *  host matrix, which @c wanted alone cannot express.
- *
- *  @c scores are nearest-first, whichever kind the index froze - the inner kind reaches the
- *  ranking as @c 1 @c - @c dot, like every other distance.
- */
-USEARCH_EXPORT typedef struct usearch_dense_matches_span_t {
-    /** @brief First row of the key output. */
-    usearch_key_t* keys;
-    /** @brief Bytes between the starts of consecutive key rows; zero packs them. */
-    size_t keys_stride_bytes;
-    /** @brief First row of the score output, positionally paired with @c keys. */
-    usearch_distance_t* scores;
-    /** @brief Bytes between the starts of consecutive score rows; zero packs them. */
-    size_t scores_stride_bytes;
-    /** @brief Matches written per query row - one entry per row, never strided. */
-    size_t* counts;
-    /** @brief Columns per row, and the upper bound on matches - the "k" in "kANN". */
-    size_t wanted;
-} usearch_dense_matches_span_t;
-
-/**
- *  @brief Optional per-call settings, shared by insertion and both search forms - a pure
- *      input, never written. Passing @c NULL derives every setting.
- */
-USEARCH_EXPORT typedef struct usearch_dense_expansion_config_t {
-    /** @brief The @b optional candidate-pool breadth; zero derives. */
+USEARCH_EXPORT typedef struct usearch_dense_insertion_options_t {
+    /** @brief The @b optional candidate-pool breadth the build walk explores; zero derives. */
     size_t expansion_factor;
-} usearch_dense_expansion_config_t;
+} usearch_dense_insertion_options_t;
+
+/**
+ *  @brief Optional per-call settings of the read-only walks - a pure input, never written.
+ *      Passing @c NULL derives every setting.
+ *
+ *  @c usearch_dense_multiply and @c usearch_dense_maxsim take these alongside the two search
+ *  forms: their knob is the same breadth, read as emitted-pair density rather than as recall.
+ */
+USEARCH_EXPORT typedef struct usearch_dense_search_options_t {
+    /** @brief The @b optional candidate-pool breadth the walk explores; zero derives. */
+    size_t expansion_factor;
+} usearch_dense_search_options_t;
 
 /**
  *  @brief Traversal telemetry, shared by insertion and both search forms - a pure output,
@@ -337,14 +292,15 @@ USEARCH_EXPORT typedef struct usearch_dense_traversal_stats_t {
  *
  *  @param[inout] index The handle to be populated.
  *  @param[in] executor The executor driving the batch; its kind must match the handle's residency.
- *  @param[in] keys Array of @c vectors->rows keys, one per row.
+ *  @param[in] keys The identities to admit the rows under, one per row.
  *  @param[in] vectors The rows to admit, converted on ingest to the stored type.
- *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
+ *  @param[in] options The @b optional per-call settings; @c NULL derives every setting.
  *  @param[in] progress The @b optional handler, called with rows admitted; @c NULL skips it.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
- *  @retval usearch_error_shape_mismatch_k @c vectors->columns disagrees with the frozen geometry.
+ *  @retval usearch_error_shape_mismatch_k @c vectors->columns disagrees with the frozen geometry,
+ *      or @c keys.count disagrees with @c vectors->rows.
  *  @return @c vectors->rows on success; on a failure or cancellation, the rows already published.
  *
  *  A batch without a handler is all-or-nothing. Every fallible step runs before the first entry
@@ -360,9 +316,9 @@ USEARCH_EXPORT typedef struct usearch_dense_traversal_stats_t {
  */
 USEARCH_EXPORT size_t usearch_dense_add(                        //
     usearch_dense_index_t index, usearch_executor_t executor,   //
-    usearch_key_t const* keys,                                  //
-    usearch_dense_matrix_view_t const* vectors,                 //
-    usearch_dense_expansion_config_t const* config,             //
+    usearch_keys_view_t keys,                                   //
+    usearch_matrix_view_t const* vectors,                       //
+    usearch_dense_insertion_options_t const* options,           //
     usearch_progress_callback_t progress, void* progress_state, //
     usearch_dense_traversal_stats_t* stats,                     //
     usearch_error_t* error);
@@ -373,7 +329,7 @@ USEARCH_EXPORT size_t usearch_dense_add(                        //
  *
  *  @param[inout] index The handle to be refined.
  *  @param[in] executor The executor to fan out over; its kind must match the residency.
- *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
+ *  @param[in] options The @b optional per-call settings; @c NULL derives every setting.
  *  @param[in] progress The @b optional handler, called with nodes swept; @c NULL skips it.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
@@ -397,7 +353,7 @@ USEARCH_EXPORT size_t usearch_dense_add(                        //
  */
 USEARCH_EXPORT size_t usearch_dense_refine(                     //
     usearch_dense_index_t index, usearch_executor_t executor,   //
-    usearch_dense_expansion_config_t const* config,             //
+    usearch_dense_insertion_options_t const* options,           //
     usearch_progress_callback_t progress, void* progress_state, //
     usearch_dense_traversal_stats_t* stats,                     //
     usearch_error_t* error);
@@ -412,7 +368,7 @@ USEARCH_EXPORT size_t usearch_dense_refine(                     //
  *  @param[in] executor The executor driving the batch; its kind must match the handle's residency.
  *  @param[in] queries The rows to resolve, one query apiece.
  *  @param[out] matches Where the run lands, sized for @c queries->rows rows of @c matches->wanted.
- *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
+ *  @param[in] options The @b optional per-call settings; @c NULL derives every setting.
  *  @param[in] progress The @b optional handler, called with queries resolved; @c NULL skips it.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
@@ -425,16 +381,16 @@ USEARCH_EXPORT size_t usearch_dense_refine(                     //
  *  begins.
  *
  *  @code{.c}
- *  usearch_dense_matrix_view_t const queries = {rows_base, 32, 256, 0, usearch_scalar_f32_k};
- *  usearch_dense_matches_span_t const matches = {keys, 0, distances, 0, counts, 10};
+ *  usearch_matrix_view_t const queries = {rows_base, 32, 256, 0, usearch_scalar_f32_k};
+ *  usearch_matches_span_t const matches = {keys, 0, distances, 0, counts, 10};
  *  usearch_dense_search(index, executor, &queries, &matches, NULL, NULL, NULL, NULL, &error);
  *  @endcode
  */
 USEARCH_EXPORT void usearch_dense_search(                       //
     usearch_dense_index_t index, usearch_executor_t executor,   //
-    usearch_dense_matrix_view_t const* queries,                 //
-    usearch_dense_matches_span_t const* matches,                //
-    usearch_dense_expansion_config_t const* config,             //
+    usearch_matrix_view_t const* queries,                       //
+    usearch_matches_span_t const* matches,                      //
+    usearch_dense_search_options_t const* options,              //
     usearch_progress_callback_t progress, void* progress_state, //
     usearch_dense_traversal_stats_t* stats,                     //
     usearch_error_t* error);
@@ -460,17 +416,17 @@ USEARCH_EXPORT void usearch_dense_search(                       //
  *  }
  *
  *  uint8_t tenant = 7;
- *  usearch_dense_matrix_view_t const queries = {rows_base, 32, 256, 0, usearch_scalar_f32_k};
- *  usearch_dense_matches_span_t const matches = {keys, 0, distances, 0, counts, 10};
+ *  usearch_matrix_view_t const queries = {rows_base, 32, 256, 0, usearch_scalar_f32_k};
+ *  usearch_matches_span_t const matches = {keys, 0, distances, 0, counts, 10};
  *  usearch_dense_search_if(index, executor, &queries, &matches, NULL,
  *                          admits_tenant, &tenant, NULL, NULL, NULL, &error);
  *  @endcode
  */
 USEARCH_EXPORT void usearch_dense_search_if(                    //
     usearch_dense_index_t index, usearch_executor_t executor,   //
-    usearch_dense_matrix_view_t const* queries,                 //
-    usearch_dense_matches_span_t const* matches,                //
-    usearch_dense_expansion_config_t const* config,             //
+    usearch_matrix_view_t const* queries,                       //
+    usearch_matches_span_t const* matches,                      //
+    usearch_dense_search_options_t const* options,              //
     usearch_predicate_t predicate, void* predicate_state,       //
     usearch_progress_callback_t progress, void* progress_state, //
     usearch_dense_traversal_stats_t* stats,                     //
@@ -503,13 +459,13 @@ USEARCH_EXPORT size_t usearch_dense_count(usearch_dense_index_t index, usearch_k
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *  @return The @b true number of entries under @p key, never the number written; zero when absent.
  *
- *  A return above @p wanted means the copy was truncated, so allocate that many rows and call
- *  again. Probing with a @c NULL @p vectors is the same call with the copy skipped, which is why
- *  it reports the same number.
+ *  A return above @c vectors->capacity means the copy was truncated, so allocate that many rows
+ *  and call again. Probing with a @c NULL @p vectors is the same call with the copy skipped,
+ *  which is why it reports the same number.
  */
 USEARCH_EXPORT size_t usearch_dense_get(            //
     usearch_dense_index_t index, usearch_key_t key, //
-    usearch_dense_matrix_span_t const* vectors,     //
+    usearch_matrix_span_t const* vectors,           //
     usearch_error_t* error);
 
 /**
@@ -556,17 +512,18 @@ USEARCH_EXPORT usearch_dense_cursor_t usearch_dense_cursor(usearch_dense_index_t
  *  @brief Copies the next batch of entries out of the cursor into strided outputs.
  *
  *  @param[inout] cursor The cursor to advance.
- *  @param[out] keys Output array of up to @p wanted keys.
- *  @param[out] vectors Output matrix of up to @p wanted rows; @c NULL skips vector export.
- *  @param[in] wanted Upper bound on rows to write - the capacity of @p keys and @p vectors.
- *  @param[in] stride Number of bytes between starts of consecutive output vector rows.
- *  @param[in] scalar_kind The scalar type to export vectors as.
+ *  @param[out] keys Where the identities land; its capacity bounds the batch.
+ *  @param[out] vectors Output matrix of up to @c keys.capacity rows; @c NULL skips vector export.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
+ *  @retval usearch_error_shape_mismatch_k @c vectors->capacity is below @c keys.capacity.
  *  @return Number of rows written; zero when the snapshot is exhausted.
+ *
+ *  The keys are what every batch carries, so their capacity is the batch size and a vector export
+ *  must have room for as many - which is what lets the key-only form bound itself.
  */
-USEARCH_EXPORT size_t usearch_dense_cursor_next(        //
-    usearch_dense_cursor_t cursor, usearch_key_t* keys, //
-    usearch_dense_matrix_span_t const* vectors,         //
+USEARCH_EXPORT size_t usearch_dense_cursor_next(             //
+    usearch_dense_cursor_t cursor, usearch_keys_span_t keys, //
+    usearch_matrix_span_t const* vectors,                    //
     usearch_error_t* error);
 
 /** @brief Releases the cursor. */
@@ -577,8 +534,7 @@ USEARCH_EXPORT void usearch_dense_cursor_free(usearch_dense_cursor_t cursor);
  *
  *  @param[in] index The handle to be queried.
  *  @param[in] executor The executor the stream draws from; one of its threads stays pinned until freed.
- *  @param[in] query Base pointer of the single query row.
- *  @param[in] scalar_kind The scalar type of @p query.
+ *  @param[in] query The single query row, whose @c rows must be one.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *  @return The finder, or @c NULL on failure.
  *
@@ -588,16 +544,15 @@ USEARCH_EXPORT void usearch_dense_cursor_free(usearch_dense_cursor_t cursor);
  */
 USEARCH_EXPORT usearch_dense_finder_t usearch_dense_find(     //
     usearch_dense_index_t index, usearch_executor_t executor, //
-    usearch_dense_matrix_view_t const* query,                 //
+    usearch_matrix_view_t const* query,                       //
     usearch_error_t* error);
 
 /**
- *  @brief Pulls up to @p wanted next-nearest matches from the stream.
+ *  @brief Pulls the next-nearest matches from the stream, up to @c keys.capacity of them.
  *
  *  @param[inout] finder The stream to advance.
- *  @param[out] keys Output array of up to @p wanted keys.
- *  @param[out] distances Output array of up to @p wanted distances, paired with @p keys.
- *  @param[in] wanted Upper bound on matches to write - the capacity of @p keys and @p distances.
+ *  @param[out] keys Where the identities land; its capacity bounds the pull.
+ *  @param[out] distances Output array of as many distances, positionally paired with @p keys.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *  @return Number of matches written; zero when the traversal is drained.
  *
@@ -605,9 +560,9 @@ USEARCH_EXPORT usearch_dense_finder_t usearch_dense_find(     //
  *  caller pulling far past the breadth it configured sees the ranking degrade rather than the
  *  stream end.
  */
-USEARCH_EXPORT size_t usearch_dense_find_next(                         //
-    usearch_dense_finder_t finder,                                     //
-    usearch_key_t* keys, usearch_distance_t* distances, size_t wanted, //
+USEARCH_EXPORT size_t usearch_dense_find_next(               //
+    usearch_dense_finder_t finder,                           //
+    usearch_keys_span_t keys, usearch_distance_t* distances, //
     usearch_error_t* error);
 
 /** @brief Releases the finder and the traversal context it pinned. */
@@ -760,7 +715,7 @@ USEARCH_EXPORT void usearch_dense_metadata_buffer( //
  *  @param[in] left The left-hand rows, multiplied against every indexed row the walk reaches.
  *  @param[out] products Where the scored pairs land; @c keys names each pair's indexed row and
  *      @c scores carries their product.
- *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
+ *  @param[in] options The @b optional per-call settings; @c NULL derives every setting.
  *  @param[in] progress The @b optional handler, called with rows resolved; @c NULL skips it.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
@@ -770,12 +725,12 @@ USEARCH_EXPORT void usearch_dense_metadata_buffer( //
  *  A walk scores many times the pairs a search reports, and each of them is an exact product the
  *  caller would otherwise recompute - this verb hands them all back. Pairs arrive in traversal
  *  order rather than sorted, and carry no duplicates: the traversal's visited set admits each
- *  indexed row at most once per left-hand row. A wider expansion factor in @p config widens the
+ *  indexed row at most once per left-hand row. A wider expansion factor in @p options widens the
  *  emitted pattern, that breadth being what decides how much the walk touches.
  *
- *  Each entry of @p counts reports the @b true number of pairs scored, never the number written.
- *  A value above @p wanted means that row was truncated to its nearest pairs, so raise @p wanted
- *  and call again.
+ *  Each entry of @c products->counts reports the @b true number of pairs scored, never the number
+ *  written. A value above @c products->wanted means that row was truncated to its nearest pairs,
+ *  so raise @c wanted and call again.
  *
  *  Cost is not `O(m·n·k)` but roughly `O(rows_count × expansion × connectivity × dimensions)`,
  *  sublinear in the indexed rows, which is the whole point of reading a product off a graph. The
@@ -794,11 +749,9 @@ USEARCH_EXPORT void usearch_dense_metadata_buffer( //
  *
  *  // Here: B was built once and is the index, C is `m x wanted` and magnitude-sparse,
  *  // and the executor carries what a cuBLAS handle plus its stream would.
- *  usearch_dense_multiply(index, executor, a, m, a_stride, usearch_scalar_f32_k, 64,
- *                         NULL, NULL, NULL, NULL,
- *                         columns, 64 * sizeof(usearch_key_t),
- *                         products, 64 * sizeof(usearch_distance_t),
- *                         counts, NULL, &error);
+ *  usearch_matrix_view_t const left = {a, m, k, a_stride, usearch_scalar_f32_k};
+ *  usearch_matches_span_t const pairs = {columns, 0, products, 0, counts, 64};
+ *  usearch_dense_multiply(index, executor, &left, &pairs, NULL, NULL, NULL, NULL, &error);
  *  for (size_t row = 0; row != m; ++row)
  *      for (size_t pair = 0; pair != counts[row] && pair != 64; ++pair)
  *          accumulate(row, columns[row * 64 + pair], products[row * 64 + pair]);
@@ -809,9 +762,9 @@ USEARCH_EXPORT void usearch_dense_metadata_buffer( //
  */
 USEARCH_EXPORT void usearch_dense_multiply(                     //
     usearch_dense_index_t index, usearch_executor_t executor,   //
-    usearch_dense_matrix_view_t const* left,                    //
-    usearch_dense_matches_span_t const* products,               //
-    usearch_dense_expansion_config_t const* config,             //
+    usearch_matrix_view_t const* left,                          //
+    usearch_matches_span_t const* products,                     //
+    usearch_dense_search_options_t const* options,              //
     usearch_progress_callback_t progress, void* progress_state, //
     usearch_dense_traversal_stats_t* stats,                     //
     usearch_error_t* error);
@@ -834,7 +787,7 @@ USEARCH_EXPORT typedef struct usearch_dense_softmax_state_t {
  *  @brief Optional per-call settings of @c usearch_dense_attend - a pure input, never written.
  *      Passing @c NULL derives every setting.
  */
-USEARCH_EXPORT typedef struct usearch_dense_attention_config_t {
+USEARCH_EXPORT typedef struct usearch_dense_attention_options_t {
     /** @brief The @b optional candidate-pool breadth; zero derives. */
     size_t expansion_factor;
     /** @brief The @b optional logit scale, conventionally the inverse square root of the head
@@ -843,7 +796,7 @@ USEARCH_EXPORT typedef struct usearch_dense_attention_config_t {
     /** @brief The @b optional residual-mass threshold the walk stops at, the mass-denominated
      *      sibling of the radius a search terminates on; zero derives. */
     float mass_tolerance;
-} usearch_dense_attention_config_t;
+} usearch_dense_attention_options_t;
 
 /**
  *  @brief Softmax-weighted attention of a strided query matrix over the indexed keys, folded
@@ -859,7 +812,7 @@ USEARCH_EXPORT typedef struct usearch_dense_attention_config_t {
  *      the index froze.
  *  @param[out] outputs Where the attended rows land, @c queries->rows of @c values->columns.
  *  @param[out] carry The @b optional online-softmax state, one per query row; @c NULL skips it.
- *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
+ *  @param[in] options The @b optional per-call settings; @c NULL derives every setting.
  *  @param[in] progress The @b optional handler, called with queries resolved; @c NULL skips it.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
@@ -894,24 +847,24 @@ USEARCH_EXPORT typedef struct usearch_dense_attention_config_t {
  *
  *  @code{.c}
  *  // One layer, one key-value head; grouped-query heads are just more rows of `queries`.
- *  usearch_dense_attend(index, executor, queries, heads, queries_stride, usearch_scalar_bf16_k,
- *                       values, value_dimensions, values_stride, usearch_scalar_bf16_k,
- *                       NULL, NULL, NULL, NULL,
- *                       outputs, outputs_stride, usearch_scalar_bf16_k,
- *                       maxima, partitions, &error);
+ *  usearch_matrix_view_t const queries = {query_rows, heads, key_dimensions, 0, usearch_scalar_bf16_k};
+ *  usearch_matrix_view_t const values = {value_rows, tokens, value_dimensions, 0, usearch_scalar_bf16_k};
+ *  usearch_matrix_span_t const outputs = {attended, heads, value_dimensions, 0, usearch_scalar_bf16_k};
+ *  usearch_dense_attend(index, executor, &queries, &values, &outputs, carry,
+ *                       NULL, NULL, NULL, NULL, &error);
  *
- *  // `maxima` and `partitions` are Flash Attention's `m` and `l`, so a second branch over the
+ *  // `carry` holds Flash Attention's `m` and `l` per query row, so a second branch over the
  *  // same queries folds in by the usual partial-softmax rescaling.
- *  rescale_against_recent_window(outputs, maxima, partitions, heads, value_dimensions);
+ *  rescale_against_recent_window(attended, carry, heads, value_dimensions);
  *  @endcode
  */
 USEARCH_EXPORT void usearch_dense_attend(                       //
     usearch_dense_index_t index, usearch_executor_t executor,   //
-    usearch_dense_matrix_view_t const* queries,                 //
-    usearch_dense_matrix_view_t const* values,                  //
-    usearch_dense_matrix_span_t const* outputs,                 //
+    usearch_matrix_view_t const* queries,                       //
+    usearch_matrix_view_t const* values,                        //
+    usearch_matrix_span_t const* outputs,                       //
     usearch_dense_softmax_state_t* carry,                       //
-    usearch_dense_attention_config_t const* config,             //
+    usearch_dense_attention_options_t const* options,           //
     usearch_progress_callback_t progress, void* progress_state, //
     usearch_dense_traversal_stats_t* stats,                     //
     usearch_error_t* error);
@@ -928,7 +881,7 @@ USEARCH_EXPORT void usearch_dense_attend(                       //
  *      @c queries->rows must be a whole multiple of it, and the quotient is the query count.
  *  @param[out] matches Where the scored keys land - @c wanted is the "k" over documents, not rows,
  *      and @c scores carries each key's summed maxima.
- *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
+ *  @param[in] options The @b optional per-call settings; @c NULL derives every setting.
  *  @param[in] progress The @b optional handler, called with queries resolved; @c NULL skips it.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
@@ -952,17 +905,17 @@ USEARCH_EXPORT void usearch_dense_attend(                       //
  *
  *  @code{.c}
  *  // 4 queries of 32 padded token rows each, scored against documents of any length.
- *  usearch_dense_matrix_view_t const queries = {query_tokens, 128, 128, 0, usearch_scalar_f32_k};
- *  usearch_dense_matches_span_t const matches = {keys, 0, scores, 0, counts, 10};
+ *  usearch_matrix_view_t const queries = {query_tokens, 128, 128, 0, usearch_scalar_f32_k};
+ *  usearch_matches_span_t const matches = {keys, 0, scores, 0, counts, 10};
  *  usearch_dense_maxsim(index, executor, &queries, 32, &matches, NULL, NULL, NULL, NULL, &error);
  *  @endcode
  */
 USEARCH_EXPORT void usearch_dense_maxsim(                       //
     usearch_dense_index_t index, usearch_executor_t executor,   //
-    usearch_dense_matrix_view_t const* queries,                 //
+    usearch_matrix_view_t const* queries,                       //
     size_t rows_per_query,                                      //
-    usearch_dense_matches_span_t const* matches,                //
-    usearch_dense_expansion_config_t const* config,             //
+    usearch_matches_span_t const* matches,                      //
+    usearch_dense_search_options_t const* options,              //
     usearch_progress_callback_t progress, void* progress_state, //
     usearch_dense_traversal_stats_t* stats,                     //
     usearch_error_t* error);

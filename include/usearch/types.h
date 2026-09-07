@@ -59,7 +59,9 @@ USEARCH_EXPORT typedef double usearch_distance_t;
  *  manufacturing a terminator none of them keeps.
  */
 USEARCH_EXPORT typedef struct usearch_bytes_view_t {
-    char const* data;
+    /** @brief First byte of the run; text is bytes that happen to decode. */
+    uint8_t const* data;
+    /** @brief Bytes the run spans, with no terminator assumed or written. */
     size_t length;
 } usearch_bytes_view_t;
 
@@ -71,9 +73,38 @@ USEARCH_EXPORT typedef struct usearch_bytes_view_t {
  *  unrepresentable, where two loose arguments only made it unlikely.
  */
 USEARCH_EXPORT typedef struct usearch_bytes_span_t {
-    char* data;
+    /** @brief First byte of the run; text is bytes that happen to decode. */
+    uint8_t* data;
+    /** @brief Bytes the run can hold, with no terminator assumed or written. */
     size_t length;
 } usearch_bytes_span_t;
+
+/**
+ *  @brief A borrowed run of keys and its length - how a batch names the identities it carries.
+ *
+ *  One key per row of the matrix it accompanies, so the two counts are checked against each other
+ *  rather than assumed equal, which is the check every binding otherwise writes for itself.
+ */
+USEARCH_EXPORT typedef struct usearch_keys_view_t {
+    /** @brief First key of the run. */
+    usearch_key_t const* data;
+    /** @brief Keys the run spans. */
+    size_t count;
+} usearch_keys_view_t;
+
+/**
+ *  @brief A caller-owned, writable run of keys - the mutable twin of @c usearch_keys_view_t,
+ *      carried by every verb that fills a key array the caller allocated.
+ *
+ *  Its capacity is the only bound a streaming verb has on how much it may write, so the pointer
+ *  and that bound travel as one argument rather than as two a caller could contradict.
+ */
+USEARCH_EXPORT typedef struct usearch_keys_span_t {
+    /** @brief First key of the run. */
+    usearch_key_t* data;
+    /** @brief Keys the run can hold. */
+    size_t capacity;
+} usearch_keys_span_t;
 
 /**
  *  @brief What went wrong, in a vocabulary shared by the engine and by every binding that
@@ -182,6 +213,70 @@ USEARCH_EXPORT typedef enum usearch_scalar_t {
     usearch_scalar_u1x8_k = 22,
 
 } usearch_scalar_t;
+
+/**
+ *  @brief A borrowed strided matrix - the batch currency every modality's row inputs take.
+ *
+ *  One row is a one-row matrix, so a caller never packs a special case. The row count and
+ *  the column count are scalars; @c stride_bytes alone is a byte count, which is why it says
+ *  so in its name. A zero @c stride_bytes means rows sit contiguously at their natural width.
+ *
+ *  @c columns is what the engine checks the frozen geometry against, so a matrix whose width
+ *  disagrees with the index is refused with @c usearch_error_shape_mismatch_k rather than read
+ *  past its end.
+ */
+USEARCH_EXPORT typedef struct usearch_matrix_view_t {
+    /** @brief Base pointer of the first row. */
+    void const* data;
+    /** @brief Rows the matrix carries. */
+    size_t rows;
+    /** @brief Logical scalars per row, as the caller counts them. */
+    size_t columns;
+    /** @brief Bytes between the starts of consecutive rows; zero means contiguous. */
+    size_t stride_bytes;
+    /** @brief The scalar type the rows hold, converted on the way in where it differs. */
+    usearch_scalar_t scalar_kind;
+} usearch_matrix_view_t;
+
+/** @brief The writable twin of @c usearch_matrix_view_t, carried by every verb that
+ *      lands rows in a matrix the caller allocated. */
+USEARCH_EXPORT typedef struct usearch_matrix_span_t {
+    /** @brief Base pointer of the first row. */
+    void* data;
+    /** @brief Rows the matrix can hold, which a verb writes up to and reports back. */
+    size_t capacity;
+    /** @brief Logical scalars per row, as the caller counts them. */
+    size_t columns;
+    /** @brief Bytes between the starts of consecutive rows; zero means contiguous. */
+    size_t stride_bytes;
+    /** @brief The scalar type to write, converted on the way out where it differs. */
+    usearch_scalar_t scalar_kind;
+} usearch_matrix_span_t;
+
+/**
+ *  @brief Where a ranked run lands - three caller-owned outputs sharing the queries' count.
+ *
+ *  Carries no query count of its own: the queries the call took already fixed it, and a second
+ *  copy is a second thing to disagree. The strides stay because a caller may land results inside
+ *  a wider host matrix, which @c wanted alone cannot express.
+ *
+ *  @c scores are nearest-first, whichever kind the index froze - the inner kind reaches the
+ *  ranking as @c 1 @c - @c dot, like every other distance.
+ */
+USEARCH_EXPORT typedef struct usearch_matches_span_t {
+    /** @brief First row of the key output. */
+    usearch_key_t* keys;
+    /** @brief Bytes between the starts of consecutive key rows; zero packs them. */
+    size_t keys_stride_bytes;
+    /** @brief First row of the score output, positionally paired with @c keys. */
+    usearch_distance_t* scores;
+    /** @brief Bytes between the starts of consecutive score rows; zero packs them. */
+    size_t scores_stride_bytes;
+    /** @brief Matches written per query - one entry per query, never strided. */
+    size_t* counts;
+    /** @brief Columns per row, and the upper bound on matches - the "k" in "kANN". */
+    size_t wanted;
+} usearch_matches_span_t;
 
 /**
  *  @brief The CPU families USearch ships tuned variants for - dispatch reports its pick in
@@ -440,12 +535,12 @@ USEARCH_EXPORT typedef enum usearch_completion_t {
  *  Nothing a deferred verb writes may be read, and no error it would have reported is known,
  *  until @c usearch_executor_drain returns.
  */
-USEARCH_EXPORT typedef struct usearch_execution_config_t {
+USEARCH_EXPORT typedef struct usearch_execution_options_t {
     /** @brief What the threads or streams do between calls. */
     usearch_mood_t mood;
     /** @brief Whether the verb waits for its own work. */
     usearch_completion_t completion;
-} usearch_execution_config_t;
+} usearch_execution_options_t;
 
 /**
  *  @brief Waits for every deferred call on @p executor to finish.

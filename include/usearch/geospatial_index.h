@@ -321,14 +321,29 @@ USEARCH_EXPORT size_t usearch_geospatial_memory_usage(usearch_geospatial_index_t
 USEARCH_EXPORT char const* usearch_geospatial_capabilities(usearch_geospatial_index_t index, usearch_error_t* error);
 
 /**
- *  @brief Optional per-call settings, shared by insertion and every search form - a pure
- *      input, never written. Passing @c NULL derives every setting.
+ *  @brief Optional per-call settings of @c usearch_geospatial_add and
+ *      @c usearch_geospatial_refine - a pure input, never written. Passing @c NULL derives
+ *      every setting.
  */
-USEARCH_EXPORT typedef struct usearch_geospatial_expansion_config_t {
-    /** @brief The @b optional candidate-pool breadth - the `ef` of the literature; zero
-     *      derives. */
+USEARCH_EXPORT typedef struct usearch_geospatial_insertion_options_t {
+    /** @brief The @b optional candidate-pool breadth the build walk explores - the @c ef of
+     *      the literature; zero derives. */
     size_t expansion_factor;
-} usearch_geospatial_expansion_config_t;
+} usearch_geospatial_insertion_options_t;
+
+/**
+ *  @brief Optional per-call settings of @c usearch_geospatial_search and
+ *      @c usearch_geospatial_search_if - a pure input, never written. Passing @c NULL derives
+ *      every setting.
+ *
+ *  @c usearch_geospatial_within takes none: containment sizes its own pool from the cone
+ *  graph's spanner bound, so a caller-chosen breadth would only make the report incomplete.
+ */
+USEARCH_EXPORT typedef struct usearch_geospatial_search_options_t {
+    /** @brief The @b optional candidate-pool breadth the walk explores - the @c ef of the
+     *      literature; zero derives. */
+    size_t expansion_factor;
+} usearch_geospatial_search_options_t;
 
 /**
  *  @brief What "close" means numerically for one search: the radius the walk around each
@@ -367,18 +382,18 @@ USEARCH_EXPORT typedef struct usearch_geospatial_traversal_stats_t {
  *
  *  @param[inout] index The handle to be populated.
  *  @param[in] executor Lanes and scratch to fan out over; its kind must match the residency.
- *  @param[in] keys Array of @p count keys, one per point set.
- *  @param[in] point_sets Array of @p count base pointers, one per set.
- *  @param[in] point_counts Array of @p count point counts, index-aligned with @p point_sets.
- *  @param[in] deviations The @b optional array of @p count base pointers to per-point position
- *      uncertainties in metres, index-aligned with @p point_sets; @c NULL records none.
- *  @param[in] count Number of point sets in the tape.
- *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
- *  @param[in] progress The @b optional handler, called with entries admitted and @p count.
+ *  @param[in] keys The identities to admit the point sets under, one per set; its count is the
+ *      length of the tape.
+ *  @param[in] point_sets Array of @c keys.count base pointers, one per set.
+ *  @param[in] point_counts Array of @c keys.count point counts, index-aligned with @p point_sets.
+ *  @param[in] deviations The @b optional array of @c keys.count base pointers to per-point
+ *      position uncertainties in metres, index-aligned with @p point_sets; @c NULL records none.
+ *  @param[in] options The @b optional per-call settings; @c NULL derives every setting.
+ *  @param[in] progress The @b optional handler, called with entries admitted and the tape length.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
- *  @return @p count on success, zero on failure.
+ *  @return @c keys.count on success, zero on failure.
  *
  *  Set @c i points at `point_counts[i] * layout_width` coordinates, row-major, in the index's
  *  layout order - degrees for the angular axes, metres for altitude, seconds for time - and,
@@ -394,11 +409,10 @@ USEARCH_EXPORT typedef struct usearch_geospatial_traversal_stats_t {
  */
 USEARCH_EXPORT size_t usearch_geospatial_add(                      //
     usearch_geospatial_index_t index, usearch_executor_t executor, //
-    usearch_key_t const* keys,                                     //
+    usearch_keys_view_t keys,                                      //
     double const* const* point_sets, size_t const* point_counts,   //
     double const* const* deviations,                               //
-    size_t count,                                                  //
-    usearch_geospatial_expansion_config_t const* config,           //
+    usearch_geospatial_insertion_options_t const* options,         //
     usearch_progress_callback_t progress, void* progress_state,    //
     usearch_geospatial_traversal_stats_t* stats,                   //
     usearch_error_t* error);
@@ -409,7 +423,7 @@ USEARCH_EXPORT size_t usearch_geospatial_add(                      //
  *
  *  @param[inout] index The handle to be refined.
  *  @param[in] executor Lanes and scratch to fan out over; its kind must match the residency.
- *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
+ *  @param[in] options The @b optional per-call settings; @c NULL derives every setting.
  *  @param[in] progress The @b optional handler, called with entries swept; @c NULL skips it.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
@@ -430,7 +444,7 @@ USEARCH_EXPORT size_t usearch_geospatial_add(                      //
  */
 USEARCH_EXPORT size_t usearch_geospatial_refine(                   //
     usearch_geospatial_index_t index, usearch_executor_t executor, //
-    usearch_geospatial_expansion_config_t const* config,           //
+    usearch_geospatial_insertion_options_t const* options,         //
     usearch_progress_callback_t progress, void* progress_state,    //
     usearch_geospatial_traversal_stats_t* stats,                   //
     usearch_error_t* error);
@@ -466,15 +480,10 @@ USEARCH_EXPORT void usearch_geospatial_release( //
  *  @param[in] mode What "close" means for this search.
  *  @param[in] axes Which axes participate; narrowing never invalidates the graph.
  *  @param[in] tolerance The @b optional radius and time window; @c NULL derives both as zero.
- *  @param[in] wanted Upper bound on matches per query - the "k" in "kANN".
- *  @param[in] config The @b optional per-call settings; @c NULL derives every setting.
+ *  @param[out] matches Where the run lands, sized for @p queries_count rows of @c matches->wanted.
+ *  @param[in] options The @b optional per-call settings; @c NULL derives every setting.
  *  @param[in] progress The @b optional handler, called with queries resolved and their count.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
- *  @param[out] keys Output matrix of `queries_count × wanted` keys; rows contiguous.
- *  @param[in] keys_stride Number of bytes between starts of consecutive rows in @p keys.
- *  @param[out] distances Output matrix of `queries_count × wanted` scores; rows contiguous.
- *  @param[in] distances_stride Number of bytes between starts of consecutive @p distances rows.
- *  @param[out] counts Output array of @p queries_count per-query match counts.
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *
@@ -490,12 +499,9 @@ USEARCH_EXPORT void usearch_geospatial_search(                          //
     usearch_geospatial_emplaced_t const* queries, size_t queries_count, //
     usearch_geospatial_mode_t mode, usearch_geospatial_axes_t axes,     //
     usearch_geospatial_tolerance_t const* tolerance,                    //
-    size_t wanted,                                                      //
-    usearch_geospatial_expansion_config_t const* config,                //
+    usearch_matches_span_t const* matches,                              //
+    usearch_geospatial_search_options_t const* options,                 //
     usearch_progress_callback_t progress, void* progress_state,         //
-    usearch_key_t* keys, size_t keys_stride,                            //
-    usearch_distance_t* distances, size_t distances_stride,             //
-    size_t* counts,                                                     //
     usearch_geospatial_traversal_stats_t* stats,                        //
     usearch_error_t* error);
 
@@ -508,13 +514,18 @@ USEARCH_EXPORT void usearch_geospatial_search(                          //
  *  about thirty times the cost of the ball it reports. A tolerance of zero metres is
  *  rejected here, since containment needs a radius.
  *
+ *  @param[in] index The handle to be queried.
  *  @param[in] executor Lanes and scratch to fan out over; its kind must match the residency.
+ *  @param[in] query The emplaced query the containment is measured from.
+ *  @param[in] mode What "close" means for this walk.
+ *  @param[in] axes Which axes participate; narrowing never invalidates the graph.
  *  @param[in] tolerance The radius and time window; @c metres must be positive.
- *  @param[in] progress The @b optional handler, called with entries written and @p capacity.
+ *  @param[in] progress The @b optional handler, called with entries written and @c keys.capacity.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
- *  @param[in] capacity Number of slots available in @p keys and @p distances.
+ *  @param[out] keys Where the identities land; its capacity bounds the walk's report.
+ *  @param[out] distances Output array of as many scores, positionally paired with @p keys.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
- *  @return Number of entries written, saturating at @p capacity.
+ *  @return Number of entries written, saturating at @c keys.capacity.
  *
  *  A cancelled walk reports @c usearch_error_cancelled_k and leaves every output slot
  *  indeterminate. A second thread driving @p executor reports @c usearch_error_contended_k
@@ -526,8 +537,7 @@ USEARCH_EXPORT size_t usearch_geospatial_within(                    //
     usearch_geospatial_mode_t mode, usearch_geospatial_axes_t axes, //
     usearch_geospatial_tolerance_t const* tolerance,                //
     usearch_progress_callback_t progress, void* progress_state,     //
-    usearch_key_t* keys, usearch_distance_t* distances,             //
-    size_t capacity,                                                //
+    usearch_keys_span_t keys, usearch_distance_t* distances,        //
     usearch_error_t* error);
 
 /**
@@ -546,13 +556,10 @@ USEARCH_EXPORT void usearch_geospatial_search_if(                       //
     usearch_geospatial_emplaced_t const* queries, size_t queries_count, //
     usearch_geospatial_mode_t mode, usearch_geospatial_axes_t axes,     //
     usearch_geospatial_tolerance_t const* tolerance,                    //
-    size_t wanted,                                                      //
-    usearch_geospatial_expansion_config_t const* config,                //
+    usearch_matches_span_t const* matches,                              //
+    usearch_geospatial_search_options_t const* options,                 //
     usearch_predicate_t predicate, void* predicate_state,               //
     usearch_progress_callback_t progress, void* progress_state,         //
-    usearch_key_t* keys, size_t keys_stride,                            //
-    usearch_distance_t* distances, size_t distances_stride,             //
-    size_t* counts,                                                     //
     usearch_geospatial_traversal_stats_t* stats,                        //
     usearch_error_t* error);
 
@@ -639,19 +646,20 @@ USEARCH_EXPORT usearch_geospatial_cursor_t usearch_geospatial_cursor(usearch_geo
 
 /**
  *  @brief Copies the next batch of entries out of the cursor.
- *  @param[out] keys Output array of up to @p wanted keys.
- *  @param[out] point_sets Output array of up to @p wanted borrowed base pointers; @c NULL skips.
- *  @param[out] point_counts Output array of up to @p wanted position counts.
- *  @param[in] wanted Upper bound on entries to write - the capacity of every output array.
+ *  @param[inout] cursor The cursor to advance.
+ *  @param[out] keys Where the identities land; its capacity bounds the batch.
+ *  @param[out] point_sets Output array of up to @c keys.capacity borrowed base pointers; @c NULL skips.
+ *  @param[out] point_counts Output array of up to @c keys.capacity position counts.
+ *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *  @return Number of entries written; zero when the snapshot is exhausted.
  *
  *  The borrowed pointers reach into the index's arena and stay valid until the cursor moves
  *  or closes. Their coordinates are the internal Earth-fixed integer centimetres, three per
  *  point, not the geodetic degrees inserted.
  */
-USEARCH_EXPORT size_t usearch_geospatial_cursor_next(        //
-    usearch_geospatial_cursor_t cursor, usearch_key_t* keys, //
-    int32_t const** point_sets, size_t* point_counts, size_t wanted, usearch_error_t* error);
+USEARCH_EXPORT size_t usearch_geospatial_cursor_next(             //
+    usearch_geospatial_cursor_t cursor, usearch_keys_span_t keys, //
+    int32_t const** point_sets, size_t* point_counts, usearch_error_t* error);
 
 /** @brief Releases the cursor. */
 USEARCH_EXPORT void usearch_geospatial_cursor_free(usearch_geospatial_cursor_t cursor);
