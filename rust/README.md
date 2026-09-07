@@ -11,16 +11,17 @@ cargo add usearch
 The crate links the pre-instantiated C library and consumes it through its stable C headers, so no index template is instantiated in your build.
 [NumKong](https://github.com/ashvardanian/NumKong) is a hard dependency rather than a feature: its matrices, scalar types, and traits _are_ this crate's vocabulary, and it supplies the SIMD kernels.
 
-Building from a source checkout compiles `c/lib.cpp` and the `src/` shards, so the submodules must be present.
-Pointing `USEARCH_LIB_DIR` at a CMake build directory skips that and links the library already there.
+The crate compiles no C or C++ of its own: CMake builds the engine, and `build.rs` only links it.
+Point `USEARCH_LIB_DIR` at the directory holding `libusearch_indexes`; it defaults to `build_release/src`, where an in-tree CMake build leaves it.
 
 ## Quickstart
 
 Every batch input and output is a NumKong matrix - a base pointer, a row count, and a byte stride - so a memory-mapped dataset feeds the index with no reshape and no copy.
+An index owns rows; an `Executor` owns the threads or streams a fanned-out verb runs on, and every batch verb takes one.
 
 ```rust
 use usearch::dense::{Metric, Options, Outputs, Stats};
-use usearch::{rows, DenseIndex, Distance, Key, ScalarKind};
+use usearch::{rows, DenseIndex, Distance, Executor, Key, Residency, ScalarKind};
 
 let index = DenseIndex::new(&Options {
     dimensions: 4,
@@ -30,15 +31,20 @@ let index = DenseIndex::new(&Options {
 })?;
 index.reserve(1_000)?;
 
+let executor = Executor::new(&Residency::default(), 0)?;
+
 let keys = [Key::from(42u64), Key::from(43u64)];
 let slab: [f32; 8] = [0.2, 0.1, 0.2, 0.1, 0.1, 0.2, 0.1, 0.2];
-index.add(&keys, rows(&slab, 4), 0, None)?;
+index.add(&executor, &keys, rows(&slab, 4), 0, None)?;
 
 let query: [f32; 4] = [0.2, 0.1, 0.2, 0.1];
 let (mut found, mut scores, mut counts) = ([Key::NIL; 10], [0.0 as Distance; 10], [0usize; 1]);
 let mut outputs = Outputs::packed(&mut found, &mut scores, &mut counts, 10);
-index.search_into(rows(&query, 4), 0, &mut outputs, None)?;
+index.search_into(&executor, rows(&query, 4), 0, &mut outputs, None)?;
 ```
+
+One executor serves any number of indexes, and its residency must match the one their handles were built for.
+It admits a single driver at a time, so two threads that genuinely overlap take one apiece; index handles stay freely shared.
 
 `rows` borrows a packed slab; a dataset whose rows are padded to a wider pitch passes `MatrixView::from_raw_parts` instead, which takes the byte stride directly.
 The scalar type of the input is independent of the stored quantization - the `f32` slab above lands in an `i8` index - so nothing needs converting before insertion.
@@ -55,7 +61,7 @@ let mut counts = vec![0usize; queries_count];
 let mut outputs = Outputs::packed(&mut keys, &mut distances, &mut counts, 10);
 let mut stats = Stats::default();
 
-index.search_into(rows(&queries, 768), 128, &mut outputs, Some(&mut stats))?;
+index.search_into(&executor, rows(&queries, 768), 128, &mut outputs, Some(&mut stats))?;
 println!("{} distances computed", stats.computed_distances);
 ```
 
@@ -65,13 +71,17 @@ The candidate-pool breadth rides the call rather than the handle, so a recall sw
 
 Where the payload lives is an enum, not a flag, and it decides what loading a checkpoint means: materialize into RAM, upload to a device, or open in place on disk.
 
-```rust
-use usearch::{Addressing, Device, HugePages, IoMode, Residency};
+A residency also names the hardware its shards are placed across - one shard per memory domain, device, or path - and an empty list derives one from the machine.
 
-Residency::Ram { threads: 0, huge_pages: HugePages::RequireHugePages };
-Residency::Vram { device: Device::Ordinal(0), addressing: Addressing::DeviceOnly };
-Residency::Nvme { sector_bytes: 512, queue_depth: 0, io: IoMode::Direct };
+```rust
+use usearch::Residency;
+
+Residency::Ram { memory_domains: vec![0, 1] };          // one graph per socket
+Residency::Vram { devices: vec![0, 1, 2, 3] };          // sharded, never replicated
+Residency::Nvme { paths: vec!["/mnt/nvme0".into()] };   // striped across the drives named
 ```
+
+The same value constructs the executor that drives the handle, which is what keeps compute and memory domains in agreement.
 
 An NVMe handle opens a checkpoint in place and is read-only, so every mutating verb fails on it.
 Bigger indexes come from merging, never mutating: shards build in RAM, serialize, and join a manifest.
@@ -81,8 +91,8 @@ Bigger indexes come from merging, never mutating: shards build in RAM, serialize
 The path extension picks the layout - a `.safegraphs` path is one monolith, a `.safegraphs.json` path is a manifest cataloging many.
 
 ```rust
-index.save("index.safegraphs")?;
-index.load("index.safegraphs")?;
+index.save(&executor, "index.safegraphs")?;
+index.load(&executor, "index.safegraphs")?;
 
 let options = DenseIndex::metadata("index.safegraphs")?; // geometry without loading a shard
 ```
@@ -107,7 +117,7 @@ Non-matching entries still route the traversal, so recall does not collapse at l
 
 ```rust
 let is_odd = |key: Key| key.as_u64().is_some_and(|value| value % 2 == 1);
-index.search_if_into(rows(&query, 768), 0, &mut outputs, None, &is_odd)?;
+index.search_if_into(&executor, rows(&query, 768), 0, &mut outputs, None, &is_odd)?;
 ```
 
 ## Scalar Types
@@ -133,7 +143,7 @@ let index = DenseIndex::new(&Options {
 })?;
 
 let slab = [u1x8(0b0000_1111), u1x8(0b1111_0000)];
-index.add(&keys, rows(&slab, 8), 0, None)?;
+index.add(&executor, &keys, rows(&slab, 8), 0, None)?;
 ```
 
 ## Streaming and Iteration
@@ -141,7 +151,7 @@ index.add(&keys, rows(&slab, 8), 0, None)?;
 A finder is a resumable best-first traversal, so callers that post-filter aggressively pull until satisfied instead of guessing "k" upfront.
 
 ```rust
-for found in index.find(&query)? {
+for found in index.find(&executor, &query)? {
     let found = found?;
     if found.distance > 0.3 { break; }
     println!("{} at {}", found.key, found.distance);

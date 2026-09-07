@@ -5,16 +5,17 @@
 //! boundary. One module per modality, named after the header it mirrors.
 //!
 //! ```no_run
-//! use usearch::{DenseIndex, ScalarKind};
+//! use usearch::{DenseIndex, Executor, Residency, ScalarKind};
 //! use usearch::dense::{Metric, Options};
 //!
-//! let index = DenseIndex::new(&Options {
-//!     dimensions: 768,
-//!     metric: Metric::Angular,
-//!     quantization: ScalarKind::I8,
-//!     ..Options::default()
-//! })?;
+//! let mut options = Options::default();
+//! options.dimensions = 768;
+//! options.metric = Metric::Angular;
+//! options.quantization = ScalarKind::I8;
+//!
+//! let index = DenseIndex::new(&options)?;
 //! index.reserve(1_000_000)?;
+//! let executor = Executor::new(&Residency::default(), 0)?;
 //! # Ok::<(), usearch::Error>(())
 //! ```
 
@@ -23,8 +24,8 @@ pub mod types;
 #[path = "dense_index.rs"]
 pub mod dense;
 
-pub use dense::Index as DenseIndex;
+pub use dense::DenseIndex;
 pub use types::{
-    capabilities_available, capabilities_compiled, rows, rows_mut, version, Addressing, Device, Distance, Error,
-    HugePages, IoMode, Key, Residency, Result, Scalar, ScalarKind, Status,
+    capabilities_available, capabilities_compiled, rows, rows_mut, version, Distance, Error, Executor, Key, Residency,
+    Result, Scalar, ScalarKind, Status,
 };

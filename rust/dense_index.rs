@@ -11,26 +11,30 @@
 
 use core::ffi::{c_int, c_void};
 use core::marker::PhantomData;
-use core::mem::ManuallyDrop;
 use core::ptr;
 use std::path::Path;
 
 use numkong::{MatrixSpan, MatrixView, StorageElement, TensorRef};
 
 use crate::types::ffi::{usearch_distance_t, usearch_error_t, usearch_key_t};
-use crate::types::{check, fail, static_string, Distance, Key, Residency, Result, ScalarKind, Status, PATH_NOT_UTF8};
+use crate::types::{
+    check, fail, static_string, Distance, Executor, Key, Residency, Result, ScalarKind, Status, PATH_NOT_UTF8,
+};
 
 // region: Raw Declarations
 
 /// One-to-one mirror of `include/usearch/dense_index.h`.
 mod ffi {
     #![allow(non_camel_case_types)]
+    // A one-to-one mirror declares every verb, including the ones no method drives yet.
+    #![allow(dead_code)]
 
     use core::ffi::{c_char, c_void};
 
     pub use crate::types::ffi::{
-        usearch_distance_t, usearch_enum_t, usearch_error_t, usearch_key_t, usearch_predicate_t,
-        usearch_residency_options_t, usearch_string_t,
+        usearch_bytes_span_t, usearch_bytes_view_t, usearch_distance_t, usearch_enum_t, usearch_error_t,
+        usearch_executor_t, usearch_key_t, usearch_predicate_t, usearch_progress_callback_t,
+        usearch_residency_options_t,
     };
 
     pub type usearch_dense_index_t = *mut c_void;
@@ -48,16 +52,62 @@ mod ffi {
         pub metric_callback_state: *mut c_void,
         pub quantization: usearch_enum_t,
         pub dimensions: usize,
-        pub pad_dimensions: bool,
         pub connectivity: usize,
+        pub values_per_key: usize,
         pub residency: usearch_enum_t,
         pub residency_options: usearch_residency_options_t,
     }
 
     #[repr(C)]
     #[derive(Clone, Copy)]
+    pub struct usearch_dense_matrix_view_t {
+        pub data: *const c_void,
+        pub rows: usize,
+        pub columns: usize,
+        pub stride_bytes: usize,
+        pub scalar_kind: usearch_enum_t,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct usearch_dense_matrix_span_t {
+        pub data: *mut c_void,
+        pub capacity: usize,
+        pub columns: usize,
+        pub stride_bytes: usize,
+        pub scalar_kind: usearch_enum_t,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct usearch_dense_matches_span_t {
+        pub keys: *mut usearch_key_t,
+        pub keys_stride_bytes: usize,
+        pub scores: *mut usearch_distance_t,
+        pub scores_stride_bytes: usize,
+        pub counts: *mut usize,
+        pub wanted: usize,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct usearch_dense_softmax_state_t {
+        pub maximum_score: f32,
+        pub partition: f32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
     pub struct usearch_dense_expansion_config_t {
         pub expansion_factor: usize,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct usearch_dense_attention_config_t {
+        pub expansion_factor: usize,
+        pub score_scale: f32,
+        pub mass_tolerance: f32,
     }
 
     #[repr(C)]
@@ -86,49 +136,88 @@ mod ffi {
 
         pub fn usearch_dense_add(
             index: usearch_dense_index_t,
+            executor: usearch_executor_t,
             keys: *const usearch_key_t,
-            vectors: *const c_void,
-            count: usize,
-            stride: usize,
-            scalar_kind: usearch_enum_t,
+            vectors: *const usearch_dense_matrix_view_t,
             config: *const usearch_dense_expansion_config_t,
+            progress: usearch_progress_callback_t,
+            progress_state: *mut c_void,
             stats: *mut usearch_dense_traversal_stats_t,
             error: *mut usearch_error_t,
         ) -> usize;
 
         pub fn usearch_dense_search(
             index: usearch_dense_index_t,
-            queries: *const c_void,
-            queries_count: usize,
-            queries_stride: usize,
-            scalar_kind: usearch_enum_t,
-            wanted: usize,
+            executor: usearch_executor_t,
+            queries: *const usearch_dense_matrix_view_t,
+            matches: *const usearch_dense_matches_span_t,
             config: *const usearch_dense_expansion_config_t,
+            progress: usearch_progress_callback_t,
+            progress_state: *mut c_void,
             stats: *mut usearch_dense_traversal_stats_t,
-            keys: *mut usearch_key_t,
-            keys_stride: usize,
-            distances: *mut usearch_distance_t,
-            distances_stride: usize,
-            counts: *mut usize,
             error: *mut usearch_error_t,
         );
 
         pub fn usearch_dense_search_if(
             index: usearch_dense_index_t,
-            queries: *const c_void,
-            queries_count: usize,
-            queries_stride: usize,
-            scalar_kind: usearch_enum_t,
-            wanted: usize,
+            executor: usearch_executor_t,
+            queries: *const usearch_dense_matrix_view_t,
+            matches: *const usearch_dense_matches_span_t,
             config: *const usearch_dense_expansion_config_t,
-            stats: *mut usearch_dense_traversal_stats_t,
             predicate: usearch_predicate_t,
             predicate_state: *mut c_void,
-            keys: *mut usearch_key_t,
-            keys_stride: usize,
-            distances: *mut usearch_distance_t,
-            distances_stride: usize,
-            counts: *mut usize,
+            progress: usearch_progress_callback_t,
+            progress_state: *mut c_void,
+            stats: *mut usearch_dense_traversal_stats_t,
+            error: *mut usearch_error_t,
+        );
+
+        pub fn usearch_dense_refine(
+            index: usearch_dense_index_t,
+            executor: usearch_executor_t,
+            config: *const usearch_dense_expansion_config_t,
+            progress: usearch_progress_callback_t,
+            progress_state: *mut c_void,
+            stats: *mut usearch_dense_traversal_stats_t,
+            error: *mut usearch_error_t,
+        ) -> usize;
+
+        pub fn usearch_dense_multiply(
+            index: usearch_dense_index_t,
+            executor: usearch_executor_t,
+            left: *const usearch_dense_matrix_view_t,
+            products: *const usearch_dense_matches_span_t,
+            config: *const usearch_dense_expansion_config_t,
+            progress: usearch_progress_callback_t,
+            progress_state: *mut c_void,
+            stats: *mut usearch_dense_traversal_stats_t,
+            error: *mut usearch_error_t,
+        );
+
+        pub fn usearch_dense_maxsim(
+            index: usearch_dense_index_t,
+            executor: usearch_executor_t,
+            queries: *const usearch_dense_matrix_view_t,
+            rows_per_query: usize,
+            matches: *const usearch_dense_matches_span_t,
+            config: *const usearch_dense_expansion_config_t,
+            progress: usearch_progress_callback_t,
+            progress_state: *mut c_void,
+            stats: *mut usearch_dense_traversal_stats_t,
+            error: *mut usearch_error_t,
+        );
+
+        pub fn usearch_dense_attend(
+            index: usearch_dense_index_t,
+            executor: usearch_executor_t,
+            queries: *const usearch_dense_matrix_view_t,
+            values: *const usearch_dense_matrix_view_t,
+            outputs: *const usearch_dense_matrix_span_t,
+            carry: *mut usearch_dense_softmax_state_t,
+            config: *const usearch_dense_attention_config_t,
+            progress: usearch_progress_callback_t,
+            progress_state: *mut c_void,
+            stats: *mut usearch_dense_traversal_stats_t,
             error: *mut usearch_error_t,
         );
 
@@ -140,16 +229,17 @@ mod ffi {
         pub fn usearch_dense_get(
             index: usearch_dense_index_t,
             key: usearch_key_t,
-            vectors: *mut c_void,
-            wanted: usize,
-            stride: usize,
-            scalar_kind: usearch_enum_t,
+            vectors: *const usearch_dense_matrix_span_t,
             error: *mut usearch_error_t,
         ) -> usize;
 
         pub fn usearch_dense_merge(
             index: usearch_dense_index_t,
-            donor: usearch_dense_index_t,
+            executor: usearch_executor_t,
+            donors: *mut usearch_dense_index_t,
+            donors_count: usize,
+            progress: usearch_progress_callback_t,
+            progress_state: *mut c_void,
             error: *mut usearch_error_t,
         );
 
@@ -160,18 +250,15 @@ mod ffi {
         pub fn usearch_dense_cursor_next(
             cursor: usearch_dense_cursor_t,
             keys: *mut usearch_key_t,
-            vectors: *mut c_void,
-            wanted: usize,
-            stride: usize,
-            scalar_kind: usearch_enum_t,
+            vectors: *const usearch_dense_matrix_span_t,
             error: *mut usearch_error_t,
         ) -> usize;
         pub fn usearch_dense_cursor_free(cursor: usearch_dense_cursor_t);
 
         pub fn usearch_dense_find(
             index: usearch_dense_index_t,
-            query: *const c_void,
-            scalar_kind: usearch_enum_t,
+            executor: usearch_executor_t,
+            query: *const usearch_dense_matrix_view_t,
             error: *mut usearch_error_t,
         ) -> usearch_dense_finder_t;
         pub fn usearch_dense_find_next(
@@ -183,29 +270,46 @@ mod ffi {
         ) -> usize;
         pub fn usearch_dense_find_free(finder: usearch_dense_finder_t);
 
-        pub fn usearch_dense_serialized_length(index: usearch_dense_index_t, error: *mut usearch_error_t) -> usize;
-        pub fn usearch_dense_save(index: usearch_dense_index_t, path: usearch_string_t, error: *mut usearch_error_t);
-        pub fn usearch_dense_load(index: usearch_dense_index_t, path: usearch_string_t, error: *mut usearch_error_t);
+        pub fn usearch_dense_storage_requirements(index: usearch_dense_index_t, error: *mut usearch_error_t) -> usize;
+        pub fn usearch_dense_save(
+            index: usearch_dense_index_t,
+            executor: usearch_executor_t,
+            path: usearch_bytes_view_t,
+            progress: usearch_progress_callback_t,
+            progress_state: *mut c_void,
+            error: *mut usearch_error_t,
+        );
+        pub fn usearch_dense_load(
+            index: usearch_dense_index_t,
+            executor: usearch_executor_t,
+            path: usearch_bytes_view_t,
+            progress: usearch_progress_callback_t,
+            progress_state: *mut c_void,
+            error: *mut usearch_error_t,
+        );
         pub fn usearch_dense_metadata(
-            path: usearch_string_t,
+            path: usearch_bytes_view_t,
             options: *mut usearch_dense_options_t,
             error: *mut usearch_error_t,
         );
         pub fn usearch_dense_save_buffer(
             index: usearch_dense_index_t,
-            buffer: *mut c_void,
-            length: usize,
+            executor: usearch_executor_t,
+            buffer: usearch_bytes_span_t,
+            progress: usearch_progress_callback_t,
+            progress_state: *mut c_void,
             error: *mut usearch_error_t,
         );
         pub fn usearch_dense_load_buffer(
             index: usearch_dense_index_t,
-            buffer: *const c_void,
-            length: usize,
+            executor: usearch_executor_t,
+            buffer: usearch_bytes_view_t,
+            progress: usearch_progress_callback_t,
+            progress_state: *mut c_void,
             error: *mut usearch_error_t,
         );
         pub fn usearch_dense_metadata_buffer(
-            buffer: *const c_void,
-            length: usize,
+            buffer: usearch_bytes_view_t,
             options: *mut usearch_dense_options_t,
             error: *mut usearch_error_t,
         );
@@ -248,31 +352,24 @@ impl Metric {
     }
 }
 
-/// Whether stored rows are rounded up to the SIMD step quantum.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
-pub enum DimensionPadding {
-    /// Rows keep their natural width.
-    #[default]
-    Natural,
-    /// Cache-line-aligned rows and tail-free unrolled kernels, at slightly larger arenas.
-    SimdQuantum,
-}
-
 /// Construction and loading options of a dense index.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+///
+/// Stored rows always round up to the SIMD step quantum, so rows stay cache-line aligned and
+/// every kernel runs tail-free; the arena is slightly larger for it, and that is not a knob.
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
+#[non_exhaustive]
 pub struct Options {
     /// The number of indexed dimensions; zero defers the geometry to a later load, which
     /// reads it off the checkpoint.
     pub dimensions: usize,
-    /// Whether stored rows round up to the SIMD step quantum - a property of the layout, so
-    /// it applies whichever residency traverses it.
-    pub dimension_padding: DimensionPadding,
     /// The metric kind used for distance calculations.
     pub metric: Metric,
     /// The scalar type vectors are stored and quantized into.
     pub quantization: ScalarKind,
     /// The connections-per-node bound of the graph; zero derives.
     pub connectivity: usize,
+    /// Upper bound on entries sharing one key; zero derives to one - unique keys.
+    pub values_per_key: usize,
     /// Where the payload lives, and what loading a checkpoint means.
     pub residency: Residency,
 }
@@ -281,44 +378,46 @@ impl Default for Options {
     fn default() -> Self {
         Options {
             dimensions: 0,
-            dimension_padding: DimensionPadding::Natural,
             metric: Metric::Angular,
             quantization: ScalarKind::BF16,
             connectivity: 0,
+            values_per_key: 0,
             residency: Residency::default(),
         }
     }
 }
 
 impl Options {
-    fn to_raw(self) -> ffi::usearch_dense_options_t {
-        let (residency, residency_options) = self.residency.to_raw();
+    /// Marshals into the C structure, borrowing this one's placement lists.
+    ///
+    /// `path_views` receives the byte views an NVMe placement needs, so it must outlive the
+    /// call the result is passed to.
+    fn to_raw(&self, path_views: &mut Vec<crate::types::ffi::usearch_bytes_view_t>) -> ffi::usearch_dense_options_t {
         ffi::usearch_dense_options_t {
             metric: self.metric as i32,
             metric_callback: None,
             metric_callback_state: ptr::null_mut(),
             quantization: self.quantization as i32,
             dimensions: self.dimensions,
-            pad_dimensions: self.dimension_padding == DimensionPadding::SimdQuantum,
             connectivity: self.connectivity,
-            residency,
-            residency_options,
+            values_per_key: self.values_per_key,
+            residency: self.residency.tag(),
+            residency_options: self.residency.to_raw(path_views),
         }
     }
 
+    /// Reads back the geometry and metric a checkpoint froze; the placement comes back empty,
+    /// since a checkpoint records where it was written rather than where a reader must keep it.
     fn from_raw(raw: &ffi::usearch_dense_options_t) -> Result<Self> {
         Ok(Options {
             dimensions: raw.dimensions,
-            dimension_padding: match raw.pad_dimensions {
-                true => DimensionPadding::SimdQuantum,
-                false => DimensionPadding::Natural,
-            },
             metric: Metric::from_raw(raw.metric)
                 .ok_or(fail(Status::UnknownKind, "the checkpoint names an unknown metric"))?,
             quantization: ScalarKind::from_raw(raw.quantization)
                 .ok_or(fail(Status::UnknownKind, "the checkpoint names an unknown scalar kind"))?,
             connectivity: raw.connectivity,
-            residency: unsafe { Residency::from_raw(raw.residency, &raw.residency_options) }?,
+            values_per_key: raw.values_per_key,
+            residency: Residency::from_raw(raw.residency)?,
         })
     }
 }
@@ -327,8 +426,77 @@ impl Options {
 
 // region: Per-Call Settings & Telemetry
 
+/// Optional per-call settings, shared by insertion and both search forms.
+///
+/// A default derives every setting, which is what a null config means to the C interface - so
+/// there is one spelling of "decide for me" rather than an `Option` around a type that already
+/// has one. Extensible, so construct from [`Default`] and set what matters.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
+#[non_exhaustive]
+pub struct ExpansionConfig {
+    /// Candidate-pool breadth; zero derives it from the geometry.
+    pub expansion_factor: usize,
+}
+
+impl ExpansionConfig {
+    /// The settings a given candidate-pool breadth names, with everything else derived.
+    pub fn with_expansion_factor(expansion_factor: usize) -> Self {
+        ExpansionConfig { expansion_factor }
+    }
+
+    /// Lowers into the struct the C interface reads.
+    fn lower(self) -> ffi::usearch_dense_expansion_config_t {
+        ffi::usearch_dense_expansion_config_t {
+            expansion_factor: self.expansion_factor,
+        }
+    }
+}
+
+/// Optional per-call settings of [`DenseIndex::attend`].
+///
+/// A default derives every setting. Extensible, so construct from [`Default`] and set what
+/// matters rather than naming every field.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+#[non_exhaustive]
+pub struct AttentionConfig {
+    /// Candidate-pool breadth; zero derives it from the geometry.
+    pub expansion_factor: usize,
+    /// The logit scale, conventionally the inverse square root of the head dimensionality;
+    /// zero derives it from the index's frozen geometry.
+    pub score_scale: f32,
+    /// The residual-mass threshold the walk stops at - the mass-denominated sibling of the
+    /// radius a search terminates on; zero derives.
+    pub mass_tolerance: f32,
+}
+
+impl AttentionConfig {
+    /// Lowers into the struct the C interface reads.
+    fn lower(self) -> ffi::usearch_dense_attention_config_t {
+        ffi::usearch_dense_attention_config_t {
+            expansion_factor: self.expansion_factor,
+            score_scale: self.score_scale,
+            mass_tolerance: self.mass_tolerance,
+        }
+    }
+}
+
+/// The online-softmax carry of one query row - Flash Attention's running maximum and partition.
+///
+/// The two are one concept: a maximum without its partition is a number nothing can rescale, so
+/// they travel as one element rather than as two arrays a caller could supply half of. Carrying
+/// them is what folds one attention call into another over the same queries.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+#[repr(C)]
+pub struct SoftmaxState {
+    /// The largest logit seen so far - the recurrence's `m`.
+    pub maximum_score: f32,
+    /// The sum of exponentials taken against that maximum - the recurrence's `l`.
+    pub partition: f32,
+}
+
 /// Traversal telemetry, fully overwritten by the call it is passed to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[non_exhaustive]
 pub struct Stats {
     /// Graph members visited by the call.
     pub visited_members: usize,
@@ -365,7 +533,6 @@ pub struct Match {
 ///
 /// The keys matrix decides how many matches each query may report: its width is the "k" in
 /// "kANN", so the wanted count cannot disagree with the space reserved for it.
-#[derive(Debug)]
 pub struct Outputs<'buffers> {
     /// Matrix of `queries × wanted` keys.
     pub keys: MatrixSpan<'buffers, Key>,
@@ -393,55 +560,59 @@ impl<'buffers> Outputs<'buffers> {
 
 // endregion: Results
 
-// region: Index
+// region: Dense Index
 
 /// Vector Search Index over equidimensional dense representations.
 ///
 /// ```no_run
-/// use usearch::dense::{Index, Metric, Options, Outputs};
-/// use usearch::{rows, Distance, Key, ScalarKind};
+/// use usearch::dense::{DenseIndex, ExpansionConfig, Metric, Options, Outputs};
+/// use usearch::{rows, Distance, Executor, Key, Residency, ScalarKind};
 ///
-/// let index = Index::new(&Options {
-///     dimensions: 4,
-///     metric: Metric::Angular,
-///     quantization: ScalarKind::I8,
-///     ..Options::default()
-/// })?;
+/// let mut options = Options::default();
+/// options.dimensions = 4;
+/// options.metric = Metric::Angular;
+/// options.quantization = ScalarKind::I8;
+///
+/// let index = DenseIndex::new(&options)?;
 /// index.reserve(1_000)?;
+/// let executor = Executor::new(&Residency::default(), 0)?;
 ///
 /// let keys = [Key::from(0u64), Key::from(1u64)];
 /// let slab: [f32; 8] = [0.2, 0.1, 0.2, 0.1, 0.1, 0.2, 0.1, 0.2];
-/// index.add(&keys, rows(&slab, 4), 0, None)?;
+/// index.add(&executor, &keys, rows(&slab, 4), ExpansionConfig::default(), None)?;
 ///
 /// let query: [f32; 4] = [0.2, 0.1, 0.2, 0.1];
 /// let (mut found, mut scores, mut counts) = ([Key::NIL; 10], [0.0 as Distance; 10], [0usize; 1]);
 /// let mut outputs = Outputs::packed(&mut found, &mut scores, &mut counts, 10);
-/// index.search_into(rows(&query, 4), 0, &mut outputs, None)?;
+/// index.search_into(&executor, rows(&query, 4), ExpansionConfig::default(), &mut outputs, None)?;
 /// println!("{} matches", counts[0]);
 /// # Ok::<(), usearch::Error>(())
 /// ```
 #[derive(Debug)]
-pub struct Index {
+pub struct DenseIndex {
     handle: ffi::usearch_dense_index_t,
 }
 
 // Safety: the library documents a handle as shareable across threads - searches never write to
 // the graph, and insertions synchronize through per-node locks and publish in order.
-unsafe impl Send for Index {}
-unsafe impl Sync for Index {}
+unsafe impl Send for DenseIndex {}
+unsafe impl Sync for DenseIndex {}
 
-impl Drop for Index {
-    fn drop(&mut self) { unsafe { ffi::usearch_dense_free(self.handle) } }
+impl Drop for DenseIndex {
+    fn drop(&mut self) {
+        unsafe { ffi::usearch_dense_free(self.handle) }
+    }
 }
 
-impl Index {
+impl DenseIndex {
     /// Initializes a new index for the residency the options select.
     pub fn new(options: &Options) -> Result<Self> {
-        let raw = options.to_raw();
+        let mut path_views = Vec::new();
+        let raw = options.to_raw(&mut path_views);
         let mut error = usearch_error_t::default();
         let handle = unsafe { ffi::usearch_dense_init(&raw, &mut error) };
         check(error)?;
-        Ok(Index { handle: owned(handle)? })
+        Ok(DenseIndex { handle: owned(handle)? })
     }
 
     /// Reads a checkpoint's geometry and metric metadata without loading it; a manifest path
@@ -459,9 +630,7 @@ impl Index {
     pub fn metadata_buffer(buffer: &[u8]) -> Result<Options> {
         let mut raw = unsafe { core::mem::zeroed() };
         let mut error = usearch_error_t::default();
-        unsafe {
-            ffi::usearch_dense_metadata_buffer(buffer.as_ptr() as *const c_void, buffer.len(), &mut raw, &mut error)
-        };
+        unsafe { ffi::usearch_dense_metadata_buffer(view_of(buffer), &mut raw, &mut error) };
         check(error)?;
         Options::from_raw(&raw)
     }
@@ -481,23 +650,35 @@ impl Index {
     }
 
     /// The number of stored entries.
-    pub fn size(&self) -> Result<usize> { self.measure(ffi::usearch_dense_size) }
+    pub fn size(&self) -> Result<usize> {
+        self.measure(ffi::usearch_dense_size)
+    }
 
     /// The reserved capacity in entries.
-    pub fn capacity(&self) -> Result<usize> { self.measure(ffi::usearch_dense_capacity) }
+    pub fn capacity(&self) -> Result<usize> {
+        self.measure(ffi::usearch_dense_capacity)
+    }
 
     /// The frozen dimensionality of the stored vectors, zero while the geometry is deferred.
-    pub fn dimensions(&self) -> Result<usize> { self.measure(ffi::usearch_dense_dimensions) }
+    pub fn dimensions(&self) -> Result<usize> {
+        self.measure(ffi::usearch_dense_dimensions)
+    }
 
     /// The frozen connections-per-node bound of the graph.
-    pub fn connectivity(&self) -> Result<usize> { self.measure(ffi::usearch_dense_connectivity) }
+    pub fn connectivity(&self) -> Result<usize> {
+        self.measure(ffi::usearch_dense_connectivity)
+    }
 
     /// The memory usage of the index in bytes.
-    pub fn memory_usage(&self) -> Result<usize> { self.measure(ffi::usearch_dense_memory_usage) }
+    pub fn memory_usage(&self) -> Result<usize> {
+        self.measure(ffi::usearch_dense_memory_usage)
+    }
 
-    /// The expected serialized size in bytes: every shard file, plus the manifest when the
-    /// index spans more than one.
-    pub fn serialized_length(&self) -> Result<usize> { self.measure(ffi::usearch_dense_serialized_length) }
+    /// The bytes one monolith of the index takes under the default layout - what
+    /// [`DenseIndex::save_buffer`] needs.
+    pub fn storage_requirements(&self) -> Result<usize> {
+        self.measure(ffi::usearch_dense_storage_requirements)
+    }
 
     /// The capability codename the index dispatched to on this machine.
     pub fn capabilities(&self) -> Result<&'static str> {
@@ -531,30 +712,31 @@ impl Index {
     /// of the stored quantization - the library converts on ingest.
     pub fn add<Scalar: crate::types::Scalar>(
         &self,
+        executor: &Executor,
         keys: &[Key],
         vectors: MatrixView<'_, Scalar>,
-        expansion_factor: usize,
+        config: ExpansionConfig,
         stats: Option<&mut Stats>,
     ) -> Result<usize> {
-        let (count, stride) = rows_of(&vectors, self.dimensions()?)?;
-        if keys.len() != count {
+        let view = ffi::usearch_dense_matrix_view_t::of(&vectors)?;
+        if keys.len() != view.rows {
             return Err(fail(
                 Status::ShapeMismatch,
                 "the key count does not match the vector row count",
             ));
         }
-        let config = ffi::usearch_dense_expansion_config_t { expansion_factor };
+        let config = config.lower();
         let mut raw_stats = ffi::usearch_dense_traversal_stats_t::default();
         let mut error = usearch_error_t::default();
         let added = unsafe {
             ffi::usearch_dense_add(
                 self.handle,
+                executor.handle(),
                 keys.as_ptr() as *const usearch_key_t,
-                vectors.as_ptr() as *const c_void,
-                count,
-                stride,
-                Scalar::KIND as i32,
+                &view,
                 &config,
+                None,
+                ptr::null_mut(),
                 &mut raw_stats,
                 &mut error,
             )
@@ -569,22 +751,25 @@ impl Index {
     /// Never writes to the graph, so any number of these may overlap with concurrent insertions.
     pub fn search_into<Scalar: crate::types::Scalar>(
         &self,
+        executor: &Executor,
         queries: MatrixView<'_, Scalar>,
-        expansion_factor: usize,
+        config: ExpansionConfig,
         outputs: &mut Outputs<'_>,
         stats: Option<&mut Stats>,
     ) -> Result<()> {
-        self.search_dispatch(queries, expansion_factor, outputs, stats, None, ptr::null_mut())
+        self.search_dispatch(executor, queries, config, outputs, stats, None, ptr::null_mut())
     }
 
-    /// The filtered sibling of [`Index::search_into`], admitting only keys the predicate approves.
+    /// The filtered sibling of [`DenseIndex::search_into`], admitting only keys the predicate
+    /// approves.
     ///
     /// Non-matching entries still route the traversal, so recall does not collapse at low
-    /// selectivity. The predicate runs on the library's worker threads, hence `Sync`.
+    /// selectivity. The predicate runs on the executor's threads, hence `Sync`.
     pub fn search_if_into<Scalar: crate::types::Scalar, Predicate: Fn(Key) -> bool + Sync>(
         &self,
+        executor: &Executor,
         queries: MatrixView<'_, Scalar>,
-        expansion_factor: usize,
+        config: ExpansionConfig,
         outputs: &mut Outputs<'_>,
         stats: Option<&mut Stats>,
         predicate: &Predicate,
@@ -596,8 +781,9 @@ impl Index {
             (*(state as *const Predicate))(Key::from_raw(key)) as c_int
         }
         self.search_dispatch(
+            executor,
             queries,
-            expansion_factor,
+            config,
             outputs,
             stats,
             Some(trampoline::<Predicate>),
@@ -607,67 +793,48 @@ impl Index {
 
     fn search_dispatch<Scalar: crate::types::Scalar>(
         &self,
+        executor: &Executor,
         queries: MatrixView<'_, Scalar>,
-        expansion_factor: usize,
+        config: ExpansionConfig,
         outputs: &mut Outputs<'_>,
         stats: Option<&mut Stats>,
         predicate: crate::types::ffi::usearch_predicate_t,
         predicate_state: *mut c_void,
     ) -> Result<()> {
-        let (queries_count, queries_stride) = rows_of(&queries, self.dimensions()?)?;
-        let (keys_rows, keys_stride) = rows_of(&outputs.keys, 0)?;
-        let wanted = outputs.keys.shape()[1];
-        let (distances_rows, distances_stride) = rows_of(&outputs.distances, wanted)?;
-        if keys_rows < queries_count || distances_rows < queries_count || outputs.counts.len() < queries_count {
-            return Err(fail(
-                Status::ShapeMismatch,
-                "the outputs hold fewer rows than there are queries",
-            ));
-        }
-
-        let config = ffi::usearch_dense_expansion_config_t { expansion_factor };
+        let queries_view = ffi::usearch_dense_matrix_view_t::of(&queries)?;
+        let matches = ffi::usearch_dense_matches_span_t::of(outputs, queries_view.rows)?;
+        let config = config.lower();
         let mut raw_stats = ffi::usearch_dense_traversal_stats_t::default();
         let mut error = usearch_error_t::default();
-        let queries_pointer = queries.as_ptr() as *const c_void;
-        let keys_pointer = outputs.keys.as_mut_ptr() as *mut usearch_key_t;
-        let distances_pointer = outputs.distances.as_mut_ptr() as *mut usearch_distance_t;
-        let counts_pointer = outputs.counts.as_mut_ptr();
+
+        // One method per C verb: an unfiltered search is its own entry point, not the filtered
+        // one handed a null predicate.
         match predicate {
             None => unsafe {
                 ffi::usearch_dense_search(
                     self.handle,
-                    queries_pointer,
-                    queries_count,
-                    queries_stride,
-                    Scalar::KIND as i32,
-                    wanted,
+                    executor.handle(),
+                    &queries_view,
+                    &matches,
                     &config,
+                    None,
+                    ptr::null_mut(),
                     &mut raw_stats,
-                    keys_pointer,
-                    keys_stride,
-                    distances_pointer,
-                    distances_stride,
-                    counts_pointer,
                     &mut error,
                 )
             },
             admits => unsafe {
                 ffi::usearch_dense_search_if(
                     self.handle,
-                    queries_pointer,
-                    queries_count,
-                    queries_stride,
-                    Scalar::KIND as i32,
-                    wanted,
+                    executor.handle(),
+                    &queries_view,
+                    &matches,
                     &config,
-                    &mut raw_stats,
                     admits,
                     predicate_state,
-                    keys_pointer,
-                    keys_stride,
-                    distances_pointer,
-                    distances_stride,
-                    counts_pointer,
+                    None,
+                    ptr::null_mut(),
+                    &mut raw_stats,
                     &mut error,
                 )
             },
@@ -686,52 +853,230 @@ impl Index {
     }
 
     /// Whether the index holds at least one entry under `key`.
-    pub fn contains(&self, key: Key) -> Result<bool> { Ok(self.count(key)? != 0) }
+    pub fn contains(&self, key: Key) -> Result<bool> {
+        Ok(self.count(key)? != 0)
+    }
 
     /// Retrieves the vectors stored under `key`, one row per entry, in insertion order.
     ///
     /// Returns the true number of entries, never the number written: a count above the
     /// matrix's row capacity means the copy was truncated, so allocate that many and call
-    /// again. [`Index::count`] is the same number without the copy.
+    /// again. [`DenseIndex::count`] is the same number without the copy.
     pub fn get<Scalar: crate::types::Scalar>(&self, key: Key, vectors: &mut MatrixSpan<'_, Scalar>) -> Result<usize> {
-        let (wanted, stride) = rows_of(vectors, self.dimensions()?)?;
+        let span = ffi::usearch_dense_matrix_span_t::of(vectors)?;
         let mut error = usearch_error_t::default();
-        let entries = unsafe {
-            ffi::usearch_dense_get(
-                self.handle,
-                key.to_raw(),
-                vectors.as_mut_ptr() as *mut c_void,
-                wanted,
-                stride,
-                Scalar::KIND as i32,
-                &mut error,
-            )
-        };
+        let entries = unsafe { ffi::usearch_dense_get(self.handle, key.to_raw(), &span, &mut error) };
         check(error)?;
         Ok(entries)
     }
 
-    /// Absorbs `donor` into this index, wiring cross-links via landmark stitching.
+    /// Re-selects the neighbors of every stored entry against the finished graph.
     ///
-    /// Cheaper than re-inserting the donor's vectors one by one, and readers may keep searching
-    /// throughout. The donor is consumed whether or not the merge succeeds.
-    pub fn merge(&self, donor: Index) -> Result<()> {
-        let donor = ManuallyDrop::new(donor);
+    /// A build step rather than a repair: a cheap insertion pass followed by one refinement
+    /// reaches a better graph, in less total time, than a single expensive insertion pass - so a
+    /// wide expansion factor belongs here rather than in [`DenseIndex::add`]. Returns the number
+    /// of nodes whose edges changed, so a caller loops until that falls below whatever change
+    /// rate they consider settled. Searches may run throughout; insertions may not.
+    pub fn refine(&self, executor: &Executor, config: ExpansionConfig, stats: Option<&mut Stats>) -> Result<usize> {
+        let lowered = config.lower();
+        let mut raw_stats = ffi::usearch_dense_traversal_stats_t::default();
         let mut error = usearch_error_t::default();
-        unsafe { ffi::usearch_dense_merge(self.handle, donor.handle, &mut error) };
+        let changed = unsafe {
+            ffi::usearch_dense_refine(
+                self.handle,
+                executor.handle(),
+                &lowered,
+                None,
+                ptr::null_mut(),
+                &mut raw_stats,
+                &mut error,
+            )
+        };
+        check(error)?;
+        report(stats, raw_stats);
+        Ok(changed)
+    }
+
+    /// Approximate sparse product of a matrix against the indexed rows.
+    ///
+    /// The linear-algebra sibling of [`DenseIndex::search_into`], reporting every pair the
+    /// traversal scored rather than only the nearest, so `outputs.keys` names each pair's indexed
+    /// row and `outputs.distances` carries their product. Pairs arrive in traversal order rather
+    /// than sorted. Runs on an inner-product index alone, since a product is a logit.
+    pub fn multiply_into<Scalar: crate::types::Scalar>(
+        &self,
+        executor: &Executor,
+        left: MatrixView<'_, Scalar>,
+        config: ExpansionConfig,
+        outputs: &mut Outputs<'_>,
+        stats: Option<&mut Stats>,
+    ) -> Result<()> {
+        let view = ffi::usearch_dense_matrix_view_t::of(&left)?;
+        let products = ffi::usearch_dense_matches_span_t::of(outputs, view.rows)?;
+        let lowered = config.lower();
+        let mut raw_stats = ffi::usearch_dense_traversal_stats_t::default();
+        let mut error = usearch_error_t::default();
+        unsafe {
+            ffi::usearch_dense_multiply(
+                self.handle,
+                executor.handle(),
+                &view,
+                &products,
+                &lowered,
+                None,
+                ptr::null_mut(),
+                &mut raw_stats,
+                &mut error,
+            )
+        };
+        check(error)?;
+        report(stats, raw_stats);
+        Ok(())
+    }
+
+    /// Late-interaction scoring of multi-row queries against multi-row entries.
+    ///
+    /// Every query row takes its best match within a key, and those maxima sum to that key's
+    /// score - so `rows_per_query` is the token count each query occupies, `queries` holds them
+    /// end to end, and the "k" the outputs size is over documents rather than rows. This is what
+    /// `values_per_key` above one exists for. Runs on an inner-product index alone.
+    ///
+    /// See <https://arxiv.org/abs/2004.12832> - ColBERT, which introduced this scoring.
+    pub fn maxsim_into<Scalar: crate::types::Scalar>(
+        &self,
+        executor: &Executor,
+        queries: MatrixView<'_, Scalar>,
+        rows_per_query: usize,
+        config: ExpansionConfig,
+        outputs: &mut Outputs<'_>,
+        stats: Option<&mut Stats>,
+    ) -> Result<()> {
+        let view = ffi::usearch_dense_matrix_view_t::of(&queries)?;
+        if rows_per_query == 0 || view.rows % rows_per_query != 0 {
+            return Err(fail(
+                Status::ShapeMismatch,
+                "the query rows do not divide into whole queries",
+            ));
+        }
+        let matches = ffi::usearch_dense_matches_span_t::of(outputs, view.rows / rows_per_query)?;
+        let lowered = config.lower();
+        let mut raw_stats = ffi::usearch_dense_traversal_stats_t::default();
+        let mut error = usearch_error_t::default();
+        unsafe {
+            ffi::usearch_dense_maxsim(
+                self.handle,
+                executor.handle(),
+                &view,
+                rows_per_query,
+                &matches,
+                &lowered,
+                None,
+                ptr::null_mut(),
+                &mut raw_stats,
+                &mut error,
+            )
+        };
+        check(error)?;
+        report(stats, raw_stats);
+        Ok(())
+    }
+
+    /// Softmax-weighted attention over the indexed keys, folded into the graph walk in one pass.
+    ///
+    /// The index holds the keys and `values` holds the value rows, addressed by key: an entry's
+    /// key is its row offset into `values`, so a context inserted in position order needs no
+    /// mapping. No match list is materialized, and each value row is gathered exactly once.
+    /// `outputs` comes back already divided by its partition.
+    ///
+    /// Passing a `carry` asks for the online-softmax state, one entry per query row, which folds
+    /// this branch into another over the same queries by partial-softmax rescaling. Runs on an
+    /// inner-product index alone, since a softmax needs logits.
+    ///
+    /// See <https://arxiv.org/abs/2205.14135> - Flash Attention, whose recurrence this reuses.
+    pub fn attend_into<Query: crate::types::Scalar, Value: crate::types::Scalar>(
+        &self,
+        executor: &Executor,
+        queries: MatrixView<'_, Query>,
+        values: MatrixView<'_, Value>,
+        config: AttentionConfig,
+        outputs: &mut MatrixSpan<'_, Value>,
+        carry: Option<&mut [SoftmaxState]>,
+        stats: Option<&mut Stats>,
+    ) -> Result<()> {
+        let queries_view = ffi::usearch_dense_matrix_view_t::of(&queries)?;
+        let values_view = ffi::usearch_dense_matrix_view_t::of(&values)?;
+        let outputs_span = ffi::usearch_dense_matrix_span_t::of(outputs)?;
+        if outputs_span.capacity < queries_view.rows || outputs_span.columns != values_view.columns {
+            return Err(fail(
+                Status::ShapeMismatch,
+                "the outputs hold fewer rows than there are queries, or are not as wide as a value",
+            ));
+        }
+        let carry_pointer = match carry {
+            None => ptr::null_mut(),
+            Some(state) if state.len() < queries_view.rows => {
+                return Err(fail(
+                    Status::ShapeMismatch,
+                    "the softmax carry holds fewer entries than there are queries",
+                ))
+            }
+            Some(state) => state.as_mut_ptr() as *mut ffi::usearch_dense_softmax_state_t,
+        };
+        let lowered = config.lower();
+        let mut raw_stats = ffi::usearch_dense_traversal_stats_t::default();
+        let mut error = usearch_error_t::default();
+        unsafe {
+            ffi::usearch_dense_attend(
+                self.handle,
+                executor.handle(),
+                &queries_view,
+                &values_view,
+                &outputs_span,
+                carry_pointer,
+                &lowered,
+                None,
+                ptr::null_mut(),
+                &mut raw_stats,
+                &mut error,
+            )
+        };
+        check(error)?;
+        report(stats, raw_stats);
+        Ok(())
+    }
+
+    /// Absorbs every donor into this index, wiring cross-links via landmark stitching.
+    ///
+    /// Cheaper than re-inserting the donors' vectors one by one, and readers may keep searching
+    /// throughout. The donors are consumed whether or not the merge succeeds.
+    pub fn merge(&self, executor: &Executor, donors: Vec<DenseIndex>) -> Result<()> {
+        // The array the C interface reads has to be contiguous, and the donors are consumed by
+        // the call, so their Rust destructors are dropped once the handles are copied out.
+        let mut handles: Vec<ffi::usearch_dense_index_t> = donors.iter().map(|donor| donor.handle).collect();
+        donors.into_iter().for_each(core::mem::forget);
+        let mut error = usearch_error_t::default();
+        unsafe {
+            ffi::usearch_dense_merge(
+                self.handle,
+                executor.handle(),
+                handles.as_mut_ptr(),
+                handles.len(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
         check(error)
     }
 
     /// Opens a snapshot cursor over the current contents, capturing the publication watermark
     /// so concurrent inserts never appear mid-iteration.
     pub fn cursor<Scalar: crate::types::Scalar>(&self) -> Result<Cursor<'_, Scalar>> {
-        let dimensions = self.dimensions()?;
         let mut error = usearch_error_t::default();
         let cursor = unsafe { ffi::usearch_dense_cursor(self.handle, &mut error) };
         check(error)?;
         Ok(Cursor {
             cursor: owned(cursor)?,
-            dimensions,
             index: PhantomData,
         })
     }
@@ -741,30 +1086,21 @@ impl Index {
     /// Best-first traversal is naturally pausable, so callers that post-filter aggressively pull
     /// until satisfied instead of guessing "k" upfront. Each open finder pins one traversal
     /// context's memory - drop it promptly.
-    pub fn find<Scalar: crate::types::Scalar>(&self, query: &[Scalar]) -> Result<Finder<'_>> {
-        let dimensions = self.dimensions()?;
-        if dimensions != 0 && query.len() != Scalar::dims_to_values(dimensions) {
-            return Err(fail(
-                Status::ShapeMismatch,
-                "the query width does not match the index dimensionality",
-            ));
-        }
+    pub fn find<'borrow, Scalar: crate::types::Scalar>(
+        &'borrow self,
+        executor: &'borrow Executor,
+        query: &[Scalar],
+    ) -> Result<Finder<'borrow>> {
+        let view = ffi::usearch_dense_matrix_view_t::of_row(query);
         let mut error = usearch_error_t::default();
-        let finder = unsafe {
-            ffi::usearch_dense_find(
-                self.handle,
-                query.as_ptr() as *const c_void,
-                Scalar::KIND as i32,
-                &mut error,
-            )
-        };
+        let finder = unsafe { ffi::usearch_dense_find(self.handle, executor.handle(), &view, &mut error) };
         check(error)?;
         Ok(Finder {
             finder: owned(finder)?,
             batch: [Match {
                 key: Key::NIL,
                 distance: 0.0,
-            }; BATCH],
+            }; MATCHES_PER_PULL],
             filled: 0,
             position: 0,
             drained: false,
@@ -776,10 +1112,19 @@ impl Index {
     /// `.safegraphs.json` manifest beside its shards.
     ///
     /// Demands a mutation-free window; concurrent readers keep searching throughout.
-    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+    pub fn save(&self, executor: &Executor, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref().to_str().ok_or(fail(Status::Io, PATH_NOT_UTF8))?;
         let mut error = usearch_error_t::default();
-        unsafe { ffi::usearch_dense_save(self.handle, path.into(), &mut error) };
+        unsafe {
+            ffi::usearch_dense_save(
+                self.handle,
+                executor.handle(),
+                path.into(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
         check(error)
     }
 
@@ -787,54 +1132,65 @@ impl Index {
     /// RAM, upload to the device, or open in place on disk.
     ///
     /// A handle whose geometry was left derived freezes it here, from the checkpoint's headers.
-    pub fn load(&self, path: impl AsRef<Path>) -> Result<()> {
+    pub fn load(&self, executor: &Executor, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref().to_str().ok_or(fail(Status::Io, PATH_NOT_UTF8))?;
         let mut error = usearch_error_t::default();
-        unsafe { ffi::usearch_dense_load(self.handle, path.into(), &mut error) };
-        check(error)
-    }
-
-    /// Saves the index into a caller-owned buffer as one monolith.
-    pub fn save_buffer(&self, buffer: &mut [u8]) -> Result<()> {
-        let mut error = usearch_error_t::default();
         unsafe {
-            ffi::usearch_dense_save_buffer(
+            ffi::usearch_dense_load(
                 self.handle,
-                buffer.as_mut_ptr() as *mut c_void,
-                buffer.len(),
+                executor.handle(),
+                path.into(),
+                None,
+                ptr::null_mut(),
                 &mut error,
             )
         };
         check(error)
     }
 
-    /// Loads a monolith from a buffer; a residency that opens in place demands the buffer
-    /// outlive the handle.
-    pub fn load_buffer(&self, buffer: &[u8]) -> Result<()> {
+    /// Saves the index into a caller-owned buffer as one monolith.
+    pub fn save_buffer(&self, executor: &Executor, buffer: &mut [u8]) -> Result<()> {
+        let span = ffi::usearch_bytes_span_t {
+            data: buffer.as_mut_ptr(),
+            length: buffer.len(),
+        };
         let mut error = usearch_error_t::default();
         unsafe {
-            ffi::usearch_dense_load_buffer(self.handle, buffer.as_ptr() as *const c_void, buffer.len(), &mut error)
+            ffi::usearch_dense_save_buffer(self.handle, executor.handle(), span, None, ptr::null_mut(), &mut error)
+        };
+        check(error)
+    }
+
+    /// Loads a monolith from a buffer; a residency that opens in place demands the buffer
+    /// outlive the handle.
+    pub fn load_buffer(&self, executor: &Executor, buffer: &[u8]) -> Result<()> {
+        let mut error = usearch_error_t::default();
+        unsafe {
+            ffi::usearch_dense_load_buffer(
+                self.handle,
+                executor.handle(),
+                view_of(buffer),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
         };
         check(error)
     }
 }
 
-// endregion: Index
+// endregion: Dense Index
 
 // region: Cursors & Finders
 
-/// How many matches a finder pulls per crossing into the library.
-const BATCH: usize = 64;
-
-/// A snapshot cursor over the index contents; see [`Index::cursor`].
+/// A snapshot cursor over the index contents; see [`DenseIndex::cursor`].
 ///
 /// The walk is a sequential row scan, so it stays a batch operation: export, migration, and
 /// visualization all move whole slabs.
 #[derive(Debug)]
 pub struct Cursor<'index, Scalar: crate::types::Scalar> {
     cursor: ffi::usearch_dense_cursor_t,
-    dimensions: usize,
-    index: PhantomData<(&'index Index, Scalar)>,
+    index: PhantomData<(&'index DenseIndex, Scalar)>,
 }
 
 impl<'index, Scalar: crate::types::Scalar> Cursor<'index, Scalar> {
@@ -843,22 +1199,17 @@ impl<'index, Scalar: crate::types::Scalar> Cursor<'index, Scalar> {
     ///
     /// Passing `None` for the vectors walks the key column alone.
     pub fn next_batch(&mut self, keys: &mut [Key], vectors: Option<&mut MatrixSpan<'_, Scalar>>) -> Result<usize> {
-        let (pointer, wanted, stride) = match vectors {
-            None => (ptr::null_mut(), keys.len(), 0),
-            Some(matrix) => {
-                let (rows, stride) = rows_of(matrix, self.dimensions)?;
-                (matrix.as_mut_ptr() as *mut c_void, rows.min(keys.len()), stride)
-            }
+        // A key-only walk names no matrix, and the row count is then the key slab's own length.
+        let span = match vectors {
+            None => None,
+            Some(matrix) => Some(ffi::usearch_dense_matrix_span_t::of(matrix)?),
         };
         let mut error = usearch_error_t::default();
         let written = unsafe {
             ffi::usearch_dense_cursor_next(
                 self.cursor,
                 keys.as_mut_ptr() as *mut usearch_key_t,
-                pointer,
-                wanted,
-                stride,
-                Scalar::KIND as i32,
+                span.as_ref().map_or(ptr::null(), |span| span as *const _),
                 &mut error,
             )
         };
@@ -868,34 +1219,39 @@ impl<'index, Scalar: crate::types::Scalar> Cursor<'index, Scalar> {
 }
 
 impl<'index, Scalar: crate::types::Scalar> Drop for Cursor<'index, Scalar> {
-    fn drop(&mut self) { unsafe { ffi::usearch_dense_cursor_free(self.cursor) } }
+    fn drop(&mut self) {
+        unsafe { ffi::usearch_dense_cursor_free(self.cursor) }
+    }
 }
 
-/// A resumable nearest-neighbor stream; see [`Index::find`].
+/// Matches a finder pulls per crossing into the library, amortising the call over a run of them.
+const MATCHES_PER_PULL: usize = 64;
+
+/// A resumable nearest-neighbor stream; see [`DenseIndex::find`].
 ///
 /// Ordering beyond the expansion horizon is best-effort nearest, not globally exact. Matches
 /// arrive in batches and are yielded one at a time, so nothing allocates per item.
 #[derive(Debug)]
 pub struct Finder<'index> {
     finder: ffi::usearch_dense_finder_t,
-    batch: [Match; BATCH],
+    batch: [Match; MATCHES_PER_PULL],
     filled: usize,
     position: usize,
     drained: bool,
-    index: PhantomData<&'index Index>,
+    index: PhantomData<(&'index DenseIndex, &'index Executor)>,
 }
 
 impl<'index> Finder<'index> {
     fn refill(&mut self) -> Result<()> {
-        let mut keys = [Key::NIL; BATCH];
-        let mut distances = [0.0; BATCH];
+        let mut keys = [Key::NIL; MATCHES_PER_PULL];
+        let mut distances = [0.0; MATCHES_PER_PULL];
         let mut error = usearch_error_t::default();
         let written = unsafe {
             ffi::usearch_dense_find_next(
                 self.finder,
                 keys.as_mut_ptr() as *mut usearch_key_t,
                 distances.as_mut_ptr(),
-                BATCH,
+                MATCHES_PER_PULL,
                 &mut error,
             )
         };
@@ -938,35 +1294,123 @@ impl<'index> Iterator for Finder<'index> {
 impl<'index> core::iter::FusedIterator for Finder<'index> {}
 
 impl<'index> Drop for Finder<'index> {
-    fn drop(&mut self) { unsafe { ffi::usearch_dense_find_free(self.finder) } }
+    fn drop(&mut self) {
+        unsafe { ffi::usearch_dense_find_free(self.finder) }
+    }
 }
 
 // endregion: Cursors & Finders
 
 // region: Helpers
 
-/// Row count and byte pitch of a matrix crossing the boundary, validated on the way.
-///
-/// A `dimensions` of zero skips the width check, for the outputs whose width is the wanted
-/// count rather than the geometry.
-fn rows_of<Element: StorageElement>(matrix: &impl TensorRef<Element, 2>, dimensions: usize) -> Result<(usize, usize)> {
-    if !matrix.has_contiguous_rows() {
-        return Err(fail(
-            Status::UnsupportedLayout,
-            "expected a matrix whose rows are contiguous; only the pitch may stride",
-        ));
+/// What a matrix supplies to a descriptor, once the layout it must satisfy is checked.
+struct MatrixLayout {
+    /// Rows the matrix spans, which a span reports as its capacity.
+    rows: usize,
+    /// Logical scalars per row, which the engine checks against the frozen geometry.
+    columns: usize,
+    /// Bytes between the starts of consecutive rows.
+    stride_bytes: usize,
+}
+
+impl MatrixLayout {
+    /// Reads a matrix's shape, refusing the layouts the C interface cannot traverse.
+    ///
+    /// Only the layout question stays on this side - whether rows are contiguous and ascend in
+    /// memory, which NumKong can answer and a bare pointer cannot. The width crosses in the
+    /// descriptor and is checked against the frozen geometry by the engine.
+    fn of<Element: StorageElement>(matrix: &impl TensorRef<Element, 2>) -> Result<Self> {
+        if !matrix.has_contiguous_rows() {
+            return Err(fail(
+                Status::UnsupportedLayout,
+                "expected a matrix whose rows are contiguous; only the pitch may stride",
+            ));
+        }
+        let pitch = matrix.stride_bytes(0);
+        if pitch < 0 {
+            return Err(fail(Status::UnsupportedLayout, "matrix rows must ascend in memory"));
+        }
+        Ok(MatrixLayout {
+            rows: matrix.shape()[0],
+            columns: matrix.shape()[1],
+            stride_bytes: pitch as usize,
+        })
     }
-    if dimensions != 0 && matrix.shape()[1] != dimensions {
-        return Err(fail(
-            Status::ShapeMismatch,
-            "the matrix row width does not match the index dimensionality",
-        ));
+}
+
+impl ffi::usearch_dense_matrix_view_t {
+    /// Borrows a matrix as the input descriptor every batch verb reads.
+    fn of<Scalar: crate::types::Scalar>(matrix: &MatrixView<'_, Scalar>) -> Result<Self> {
+        let layout = MatrixLayout::of(matrix)?;
+        Ok(ffi::usearch_dense_matrix_view_t {
+            data: matrix.as_ptr() as *const c_void,
+            rows: layout.rows,
+            columns: layout.columns,
+            stride_bytes: layout.stride_bytes,
+            scalar_kind: Scalar::KIND as i32,
+        })
     }
-    let pitch = matrix.stride_bytes(0);
-    if pitch < 0 {
-        return Err(fail(Status::UnsupportedLayout, "matrix rows must ascend in memory"));
+
+    /// The one-row descriptor a finder takes, whose width is the slab's whole length.
+    fn of_row<Scalar: crate::types::Scalar>(row: &[Scalar]) -> Self {
+        ffi::usearch_dense_matrix_view_t {
+            data: row.as_ptr() as *const c_void,
+            rows: 1,
+            columns: crate::types::dimensions_of::<Scalar>(row.len()),
+            stride_bytes: 0,
+            scalar_kind: Scalar::KIND as i32,
+        }
     }
-    Ok((matrix.shape()[0], pitch as usize))
+}
+
+impl ffi::usearch_dense_matrix_span_t {
+    /// Lends a caller-owned matrix as the output descriptor a copying verb writes into.
+    fn of<Scalar: crate::types::Scalar>(matrix: &mut MatrixSpan<'_, Scalar>) -> Result<Self> {
+        let layout = MatrixLayout::of(matrix)?;
+        Ok(ffi::usearch_dense_matrix_span_t {
+            data: matrix.as_mut_ptr() as *mut c_void,
+            capacity: layout.rows,
+            columns: layout.columns,
+            stride_bytes: layout.stride_bytes,
+            scalar_kind: Scalar::KIND as i32,
+        })
+    }
+}
+
+impl ffi::usearch_dense_matches_span_t {
+    /// Lends the three ranked outputs, refusing a set that cannot hold @p queries rows.
+    fn of(outputs: &mut Outputs<'_>, queries: usize) -> Result<Self> {
+        let keys = MatrixLayout::of(&outputs.keys)?;
+        let distances = MatrixLayout::of(&outputs.distances)?;
+        if distances.columns != keys.columns {
+            return Err(fail(
+                Status::ShapeMismatch,
+                "the key and distance outputs disagree on how many matches a row holds",
+            ));
+        }
+        if keys.rows < queries || distances.rows < queries || outputs.counts.len() < queries {
+            return Err(fail(
+                Status::ShapeMismatch,
+                "the outputs hold fewer rows than there are queries",
+            ));
+        }
+        Ok(ffi::usearch_dense_matches_span_t {
+            keys: outputs.keys.as_mut_ptr() as *mut usearch_key_t,
+            keys_stride_bytes: keys.stride_bytes,
+            scores: outputs.distances.as_mut_ptr() as *mut usearch_distance_t,
+            scores_stride_bytes: distances.stride_bytes,
+            counts: outputs.counts.as_mut_ptr(),
+            wanted: keys.columns,
+        })
+    }
+}
+
+/// Borrows a byte slab as the view the C interface accepts.
+fn view_of(bytes: &[u8]) -> ffi::usearch_bytes_view_t {
+    ffi::usearch_bytes_view_t {
+        data: bytes.as_ptr(),
+        length: bytes.len(),
+    }
 }
 
 /// Rejects a null handle the library returned without reporting an error.
@@ -1001,7 +1445,7 @@ mod tests {
     use rand::{RngExt, SeedableRng};
 
     use super::*;
-    use crate::types::{rows, rows_mut, Addressing, Device, HugePages, IoMode};
+    use crate::types::{rows, rows_mut};
 
     const SEED: u64 = 42;
 
@@ -1029,10 +1473,17 @@ mod tests {
         slab
     }
 
-    fn sequential_keys(count: usize) -> Vec<Key> { (0..count as u64).map(Key::from).collect() }
+    fn sequential_keys(count: usize) -> Vec<Key> {
+        (0..count as u64).map(Key::from).collect()
+    }
 
-    fn empty_index(dimensions: usize, metric: Metric, quantization: ScalarKind) -> Index {
-        let index = Index::new(&Options {
+    /// One executor per test, since an executor admits a single driver at a time.
+    fn executor() -> Executor {
+        Executor::new(&Residency::default(), 0).expect("the executor must spawn")
+    }
+
+    fn empty_index(dimensions: usize, metric: Metric, quantization: ScalarKind) -> DenseIndex {
+        let index = DenseIndex::new(&Options {
             dimensions,
             metric,
             quantization,
@@ -1048,26 +1499,38 @@ mod tests {
         dimensions: usize,
         metric: Metric,
         quantization: ScalarKind,
-    ) -> (Index, Vec<Key>, Vec<f32>) {
+    ) -> (DenseIndex, Vec<Key>, Vec<f32>) {
         let index = empty_index(dimensions, metric, quantization);
         index.reserve(count).expect("the reservation must succeed");
         let keys = sequential_keys(count);
         let slab = seeded_rows(count, dimensions, SEED);
         let added = index
-            .add(&keys, rows(&slab, dimensions), 0, None)
+            .add(
+                &executor(),
+                &keys,
+                rows(&slab, dimensions),
+                ExpansionConfig::default(),
+                None,
+            )
             .expect("the batch must insert");
         assert_eq!(added, count);
         (index, keys, slab)
     }
 
     /// The three-buffer dance collapsed into one call - the shape most assertions want.
-    fn top_one(index: &Index, query: &[f32], dimensions: usize) -> Option<Match> {
+    fn top_one(index: &DenseIndex, query: &[f32], dimensions: usize) -> Option<Match> {
         let mut keys = [Key::NIL; 1];
         let mut distances = [0.0 as Distance; 1];
         let mut counts = [0usize; 1];
         let mut outputs = Outputs::packed(&mut keys, &mut distances, &mut counts, 1);
         index
-            .search_into(rows(query, dimensions), 0, &mut outputs, None)
+            .search_into(
+                &executor(),
+                rows(query, dimensions),
+                ExpansionConfig::default(),
+                &mut outputs,
+                None,
+            )
             .expect("the search must run");
         match counts[0] {
             0 => None,
@@ -1083,9 +1546,13 @@ mod tests {
         std::env::temp_dir().join(format!("usearch-rust-{name}-{}.safegraphs", std::process::id()))
     }
 
-    fn remove_quietly(path: &std::path::Path) { let _ = std::fs::remove_file(path); }
+    fn remove_quietly(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+    }
 
-    fn close(left: f64, right: f64, tolerance: f64) -> bool { (left - right).abs() <= tolerance }
+    fn close(left: f64, right: f64, tolerance: f64) -> bool {
+        (left - right).abs() <= tolerance
+    }
 
     fn requires_send_sync<Subject: Send + Sync>() {}
 
@@ -1111,77 +1578,74 @@ mod tests {
     }
 
     /// Packs one byte per element, LSB first, as NumKong's bit vectors are laid out.
-    fn bit_rows(bytes: &[u8]) -> Vec<u1x8> { bytes.iter().map(|&byte| u1x8(byte)).collect() }
+    fn bit_rows(bytes: &[u8]) -> Vec<u1x8> {
+        bytes.iter().map(|&byte| u1x8(byte)).collect()
+    }
 
     // endregion: Helpers
 
     // region: Options Round Trip
 
     #[test]
-    fn options_survive_the_raw_round_trip_for_ram() {
+    fn options_survive_the_raw_round_trip() {
+        let mut path_views = Vec::new();
         let pinned = Options {
             dimensions: 768,
-            dimension_padding: DimensionPadding::SimdQuantum,
             metric: Metric::Euclidean,
             quantization: ScalarKind::I8,
             connectivity: 32,
-            residency: Residency::Ram {
-                threads: 7,
-                huge_pages: HugePages::RequireHugePages,
-            },
+            values_per_key: 4,
+            residency: Residency::default(),
         };
         assert_eq!(
-            Options::from_raw(&pinned.to_raw()).expect("the tags must be known"),
+            Options::from_raw(&pinned.to_raw(&mut path_views)).expect("the tags must be known"),
             pinned
         );
 
         let derived = Options::default();
         assert_eq!(
-            Options::from_raw(&derived.to_raw()).expect("the tags must be known"),
+            Options::from_raw(&derived.to_raw(&mut path_views)).expect("the tags must be known"),
             derived
         );
     }
 
     #[test]
-    fn options_survive_the_raw_round_trip_for_vram() {
-        // Ordinal zero is the trap: it must not come back as `FirstFree`, which marshals as -1.
-        for device in [Device::FirstFree, Device::Ordinal(0), Device::Ordinal(3)] {
-            for addressing in [Addressing::DeviceOnly, Addressing::Unified] {
-                let options = Options {
-                    residency: Residency::Vram { device, addressing },
-                    ..Options::default()
-                };
-                assert_eq!(
-                    Options::from_raw(&options.to_raw()).expect("the tags must be known"),
-                    options
-                );
-            }
-        }
-    }
+    fn options_carry_the_placement_a_residency_names() {
+        let mut path_views = Vec::new();
 
-    #[test]
-    fn options_survive_the_raw_round_trip_for_nvme() {
-        for (sector_bytes, queue_depth) in [(0u32, 0u32), (512, 128), (4096, 1)] {
-            for io in [IoMode::Direct, IoMode::PageCached] {
-                let options = Options {
-                    residency: Residency::Nvme {
-                        sector_bytes,
-                        queue_depth,
-                        io,
-                    },
-                    ..Options::default()
-                };
-                assert_eq!(
-                    Options::from_raw(&options.to_raw()).expect("the tags must be known"),
-                    options
-                );
-            }
-        }
+        let sockets = Options {
+            residency: Residency::Ram {
+                memory_domains: vec![0, 1],
+            },
+            ..Options::default()
+        };
+        let raw = sockets.to_raw(&mut path_views);
+        assert_eq!(raw.residency, 0);
+        assert_eq!(unsafe { raw.residency_options.ram.memory_domains_count }, 2);
+
+        let devices = Options {
+            residency: Residency::Vram {
+                devices: vec![0, 1, 2, 3],
+            },
+            ..Options::default()
+        };
+        let raw = devices.to_raw(&mut path_views);
+        assert_eq!(raw.residency, 1);
+        assert_eq!(unsafe { raw.residency_options.vram.devices_count }, 4);
+
+        // A checkpoint records where it was written, never where a reader must keep it, so the
+        // placement comes back empty while the tag survives.
+        assert_eq!(
+            Options::from_raw(&raw).expect("the tags must be known").residency,
+            Residency::Vram { devices: Vec::new() }
+        );
     }
 
     #[test]
     fn options_reject_unknown_enum_tags() {
-        let mut raw = Options::default().to_raw();
+        let mut path_views = Vec::new();
+
+        let mut raw = Options::default().to_raw(&mut path_views);
         raw.residency = 9;
         assert_eq!(
             Options::from_raw(&raw).unwrap_err().status,
@@ -1189,7 +1653,7 @@ mod tests {
             "an unknown residency must not be guessed"
         );
 
-        let mut raw = Options::default().to_raw();
+        let mut raw = Options::default().to_raw(&mut path_views);
         raw.metric = 99;
         assert_eq!(
             Options::from_raw(&raw).unwrap_err().status,
@@ -1197,7 +1661,7 @@ mod tests {
             "an unknown metric must not be guessed"
         );
 
-        let mut raw = Options::default().to_raw();
+        let mut raw = Options::default().to_raw(&mut path_views);
         raw.quantization = 77;
         assert_eq!(
             Options::from_raw(&raw).unwrap_err().status,
@@ -1208,7 +1672,8 @@ mod tests {
 
     #[test]
     fn options_carry_no_metric_callback() {
-        let raw = Options::default().to_raw();
+        let mut path_views = Vec::new();
+        let raw = Options::default().to_raw(&mut path_views);
         assert!(raw.metric_callback.is_none(), "this binding exposes no custom metric");
         assert!(raw.metric_callback_state.is_null());
     }
@@ -1236,7 +1701,7 @@ mod tests {
 
     #[test]
     fn does_not_preallocate_members() {
-        let index = Index::new(&Options {
+        let index = DenseIndex::new(&Options {
             dimensions: 16,
             ..Options::default()
         })
@@ -1250,8 +1715,10 @@ mod tests {
     }
 
     #[test]
-    fn defers_geometry_until_frozen() {
-        let index = Index::new(&Options {
+    fn defers_geometry_to_a_checkpoint() {
+        // A zeroed width defers the geometry to a later load, which reads it off the checkpoint -
+        // never to the first batch, which has no width to freeze from that the index would trust.
+        let index = DenseIndex::new(&Options {
             dimensions: 0,
             quantization: ScalarKind::F32,
             ..Options::default()
@@ -1261,15 +1728,34 @@ mod tests {
 
         index.reserve(4).expect("the reservation must succeed");
         let slab = seeded_rows(1, 12, SEED);
-        index
-            .add(&sequential_keys(1), rows(&slab, 12), 0, None)
-            .expect("the first batch freezes the geometry");
+        assert_eq!(
+            index
+                .add(
+                    &executor(),
+                    &sequential_keys(1),
+                    rows(&slab, 12),
+                    ExpansionConfig::default(),
+                    None
+                )
+                .unwrap_err()
+                .status,
+            Status::Uninitialized,
+            "an unfrozen geometry admits no rows"
+        );
+
+        let written = populated_index(4, 12, Metric::Angular, ScalarKind::F32).0;
+        let checkpoint = scratch_path("defers_geometry_to_a_checkpoint");
+        written
+            .save(&executor(), &checkpoint)
+            .expect("the checkpoint must write");
+        index.load(&executor(), &checkpoint).expect("the checkpoint must load");
+        let _ = std::fs::remove_file(&checkpoint);
         assert_eq!(index.dimensions().expect("the geometry must report"), 12);
     }
 
     #[test]
     fn survives_box_and_arc_moves() {
-        requires_send_sync::<Index>();
+        requires_send_sync::<DenseIndex>();
         const DIMENSIONS: usize = 8;
         let (index, keys, slab) = populated_index(4, DIMENSIONS, Metric::Angular, ScalarKind::F32);
 
@@ -1286,15 +1772,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reports_growing_memory_usage() {
-        const DIMENSIONS: usize = 32;
-        let empty = empty_index(DIMENSIONS, Metric::Angular, ScalarKind::F32);
-        let baseline = empty.memory_usage().expect("the usage must report");
-        let (full, _, _) = populated_index(256, DIMENSIONS, Metric::Angular, ScalarKind::F32);
-        assert!(full.memory_usage().expect("the usage must report") > baseline);
-    }
-
     // endregion: Construction & Geometry
 
     // region: Ingest & Retrieval
@@ -1307,7 +1784,13 @@ mod tests {
         let slab: [f32; 8] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
         assert_eq!(
             index
-                .add(&keys, rows(&slab, DIMENSIONS), 0, None)
+                .add(
+                    &executor(),
+                    &keys,
+                    rows(&slab, DIMENSIONS),
+                    ExpansionConfig::default(),
+                    None
+                )
                 .expect("the batch must insert"),
             2
         );
@@ -1325,7 +1808,13 @@ mod tests {
         let index = empty_index(DIMENSIONS, Metric::Angular, ScalarKind::F32);
         let slab = seeded_rows(2, DIMENSIONS, SEED);
         let failure = index
-            .add(&sequential_keys(3), rows(&slab, DIMENSIONS), 0, None)
+            .add(
+                &executor(),
+                &sequential_keys(3),
+                rows(&slab, DIMENSIONS),
+                ExpansionConfig::default(),
+                None,
+            )
             .unwrap_err();
         assert_eq!(failure.status, Status::ShapeMismatch);
     }
@@ -1337,7 +1826,13 @@ mod tests {
         let narrow = seeded_rows(1, DIMENSIONS - 1, SEED);
 
         let failure = index
-            .add(&sequential_keys(1), rows(&narrow, DIMENSIONS - 1), 0, None)
+            .add(
+                &executor(),
+                &sequential_keys(1),
+                rows(&narrow, DIMENSIONS - 1),
+                ExpansionConfig::default(),
+                None,
+            )
             .unwrap_err();
         assert_eq!(failure.status, Status::ShapeMismatch);
 
@@ -1350,12 +1845,18 @@ mod tests {
         let mut counts = [0usize; 1];
         let mut outputs = Outputs::packed(&mut found, &mut scores, &mut counts, 1);
         let failure = index
-            .search_into(rows(&narrow, DIMENSIONS - 1), 0, &mut outputs, None)
+            .search_into(
+                &executor(),
+                rows(&narrow, DIMENSIONS - 1),
+                ExpansionConfig::default(),
+                &mut outputs,
+                None,
+            )
             .unwrap_err();
         assert_eq!(failure.status, Status::ShapeMismatch);
 
         assert_eq!(
-            index.find(&narrow[..]).unwrap_err().status,
+            index.find(&executor(), &narrow[..]).unwrap_err().status,
             Status::ShapeMismatch,
             "the query width is checked too"
         );
@@ -1370,7 +1871,15 @@ mod tests {
         // A column stride of two elements interleaves the rows, which the boundary forbids.
         let interleaved: MatrixView<'_, f32> =
             unsafe { MatrixView::from_raw_parts(slab.as_ptr(), &[2, DIMENSIONS], &[element * 8, element * 2]) };
-        let failure = index.add(&sequential_keys(2), interleaved, 0, None).unwrap_err();
+        let failure = index
+            .add(
+                &executor(),
+                &sequential_keys(2),
+                interleaved,
+                ExpansionConfig::default(),
+                None,
+            )
+            .unwrap_err();
         assert_eq!(
             failure.status,
             Status::UnsupportedLayout,
@@ -1391,7 +1900,15 @@ mod tests {
                 &[-(element * DIMENSIONS as isize), element],
             )
         };
-        let failure = index.add(&sequential_keys(2), descending, 0, None).unwrap_err();
+        let failure = index
+            .add(
+                &executor(),
+                &sequential_keys(2),
+                descending,
+                ExpansionConfig::default(),
+                None,
+            )
+            .unwrap_err();
         assert_eq!(failure.status, Status::UnsupportedLayout);
     }
 
@@ -1412,7 +1929,7 @@ mod tests {
         let keys = sequential_keys(2);
         assert_eq!(
             index
-                .add(&keys, strided, 0, None)
+                .add(&executor(), &keys, strided, ExpansionConfig::default(), None)
                 .expect("the padded batch must insert"),
             2
         );
@@ -1432,7 +1949,13 @@ mod tests {
         let keys = sequential_keys(1);
         let slab = seeded_rows(1, DIMENSIONS, SEED);
         index
-            .add(&keys, rows(&slab, DIMENSIONS), 0, None)
+            .add(
+                &executor(),
+                &keys,
+                rows(&slab, DIMENSIONS),
+                ExpansionConfig::default(),
+                None,
+            )
             .expect("an f32 batch lands in a bf16 index");
 
         let mut wide = [0.0f64; DIMENSIONS];
@@ -1450,7 +1973,13 @@ mod tests {
         let shared = Key::from(7u64);
         let slab = seeded_rows(2, DIMENSIONS, SEED);
         index
-            .add(&[shared, shared], rows(&slab, DIMENSIONS), 0, None)
+            .add(
+                &executor(),
+                &[shared, shared],
+                rows(&slab, DIMENSIONS),
+                ExpansionConfig::default(),
+                None,
+            )
             .expect("two rows may share one key");
 
         assert_eq!(index.count(shared).expect("the count must report"), 2);
@@ -1469,7 +1998,13 @@ mod tests {
         let shared = Key::from(3u64);
         let slab = seeded_rows(3, DIMENSIONS, SEED);
         index
-            .add(&[shared; 3], rows(&slab, DIMENSIONS), 0, None)
+            .add(
+                &executor(),
+                &[shared; 3],
+                rows(&slab, DIMENSIONS),
+                ExpansionConfig::default(),
+                None,
+            )
             .expect("three rows may share one key");
 
         // A one-row span cannot hold them, and the count says so rather than reporting one.
@@ -1499,7 +2034,13 @@ mod tests {
         let narrow = Key::from(9u64);
         let slab = seeded_rows(2, DIMENSIONS, SEED);
         index
-            .add(&[wide, narrow], rows(&slab, DIMENSIONS), 0, None)
+            .add(
+                &executor(),
+                &[wide, narrow],
+                rows(&slab, DIMENSIONS),
+                ExpansionConfig::default(),
+                None,
+            )
             .expect("wide keys insert like any other");
 
         assert_eq!(index.count(wide).expect("the count must report"), 1);
@@ -1510,6 +2051,187 @@ mod tests {
             Some(wide)
         );
     }
+
+    // region: Refinement & Linear Algebra
+
+    #[test]
+    fn refinement_settles() {
+        const DIMENSIONS: usize = 8;
+        let (index, _, _) = populated_index(64, DIMENSIONS, Metric::Angular, ScalarKind::F32);
+        let executor = executor();
+        let mut stats = Stats::default();
+
+        // The return is a change count, not a status, so a caller loops until the graph settles.
+        let changed = index
+            .refine(&executor, ExpansionConfig::with_expansion_factor(64), Some(&mut stats))
+            .expect("the sweep must run");
+        assert!(changed <= 64, "a sweep cannot change more nodes than the index holds");
+        assert!(stats.visited_members > 0, "the sweep reports the nodes it swept");
+    }
+
+    #[test]
+    fn multiplication_reports_every_scored_pair() {
+        const DIMENSIONS: usize = 4;
+        const ROWS: usize = 3;
+        const WANTED: usize = 2;
+        // A product is a logit, so the linear-algebra verbs take the inner kind alone.
+        let index = empty_index(DIMENSIONS, Metric::Inner, ScalarKind::F32);
+        let slab = seeded_rows(ROWS, DIMENSIONS, SEED);
+        let keys = sequential_keys(ROWS);
+        index
+            .add(
+                &executor(),
+                &keys,
+                rows(&slab, DIMENSIONS),
+                ExpansionConfig::default(),
+                None,
+            )
+            .expect("the rows must insert");
+
+        let (mut columns, mut products, mut counts) = (
+            vec![Key::NIL; ROWS * WANTED],
+            vec![0.0; ROWS * WANTED],
+            vec![0usize; ROWS],
+        );
+        let mut outputs = Outputs::packed(&mut columns, &mut products, &mut counts, WANTED);
+        index
+            .multiply_into(
+                &executor(),
+                rows(&slab, DIMENSIONS),
+                ExpansionConfig::default(),
+                &mut outputs,
+                None,
+            )
+            .expect("the product must resolve");
+
+        // The count is the true number of scored pairs, which may exceed the column capacity.
+        assert!(counts.iter().all(|&scored| scored > 0), "every row scores something");
+        // A row against itself is its own squared norm, which is the largest product it can make.
+        let self_product: f64 = slab[..DIMENSIONS]
+            .iter()
+            .map(|value| (*value as f64) * (*value as f64))
+            .sum();
+        assert!(products[..counts[0].min(WANTED)]
+            .iter()
+            .any(|scored| close(*scored, self_product, 1e-3)));
+    }
+
+    #[test]
+    fn late_interaction_sums_per_token_maxima() {
+        const DIMENSIONS: usize = 4;
+        const TOKENS: usize = 2;
+        const DOCUMENTS: usize = 3;
+        let mut options = Options::default();
+        options.dimensions = DIMENSIONS;
+        options.metric = Metric::Inner;
+        options.quantization = ScalarKind::F32;
+        // A document is one key holding its token rows, which is what `values_per_key` is for.
+        options.values_per_key = TOKENS;
+        let index = DenseIndex::new(&options).expect("the index must initialize");
+        index.reserve(DOCUMENTS * TOKENS).expect("the reservation must succeed");
+
+        let slab = seeded_rows(DOCUMENTS * TOKENS, DIMENSIONS, SEED);
+        let mut keys = Vec::with_capacity(DOCUMENTS * TOKENS);
+        for document in 0..DOCUMENTS {
+            keys.extend(core::iter::repeat_n(Key::from(document as u64), TOKENS));
+        }
+        index
+            .add(
+                &executor(),
+                &keys,
+                rows(&slab, DIMENSIONS),
+                ExpansionConfig::default(),
+                None,
+            )
+            .expect("the token rows must insert");
+
+        let (mut found, mut scores, mut counts) = (vec![Key::NIL; DOCUMENTS], vec![0.0; DOCUMENTS], vec![0usize; 1]);
+        let mut outputs = Outputs::packed(&mut found, &mut scores, &mut counts, DOCUMENTS);
+        index
+            .maxsim_into(
+                &executor(),
+                rows(&slab[..TOKENS * DIMENSIONS], DIMENSIONS),
+                TOKENS,
+                ExpansionConfig::default(),
+                &mut outputs,
+                None,
+            )
+            .expect("the late interaction must resolve");
+
+        assert_eq!(counts[0], DOCUMENTS, "every document is scored");
+        // The query is document zero's own tokens, so it sums the largest maxima of any document.
+        assert_eq!(found[0], Key::from(0u64), "a document scores highest against itself");
+        assert!(scores[0] >= scores[1], "summed maxima arrive best-first");
+    }
+
+    #[test]
+    fn attention_weights_values_by_softmax() {
+        const DIMENSIONS: usize = 4;
+        const VALUE_WIDTH: usize = 2;
+        const ENTRIES: usize = 4;
+        let index = empty_index(DIMENSIONS, Metric::Inner, ScalarKind::F32);
+        let slab = seeded_rows(ENTRIES, DIMENSIONS, SEED);
+        // An entry's key is its row offset into the value table, so positions insert in order.
+        let keys = sequential_keys(ENTRIES);
+        index
+            .add(
+                &executor(),
+                &keys,
+                rows(&slab, DIMENSIONS),
+                ExpansionConfig::default(),
+                None,
+            )
+            .expect("the rows must insert");
+
+        let values = seeded_rows(ENTRIES, VALUE_WIDTH, SEED + 1);
+        let mut attended = vec![0.0f32; VALUE_WIDTH];
+        let mut carry = vec![SoftmaxState::default(); 1];
+        let mut outputs = rows_mut(&mut attended, VALUE_WIDTH);
+        index
+            .attend_into(
+                &executor(),
+                rows(&slab[..DIMENSIONS], DIMENSIONS),
+                rows(&values, VALUE_WIDTH),
+                AttentionConfig::default(),
+                &mut outputs,
+                Some(&mut carry),
+                None,
+            )
+            .expect("the attention must resolve");
+
+        // The output is a convex combination of the value rows, so it lies within their range.
+        for column in 0..VALUE_WIDTH {
+            let column_values: Vec<f32> = (0..ENTRIES).map(|row| values[row * VALUE_WIDTH + column]).collect();
+            let low = column_values.iter().cloned().fold(f32::INFINITY, f32::min);
+            let high = column_values.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            assert!(attended[column] >= low - 1e-3 && attended[column] <= high + 1e-3);
+        }
+        assert!(carry[0].partition > 0.0, "the carry reports the softmax denominator");
+    }
+
+    #[test]
+    fn linear_algebra_refuses_a_distance_kind() {
+        const DIMENSIONS: usize = 4;
+        // A product and a softmax both need logits, so a graph frozen under a distance refuses.
+        let (index, _, slab) = populated_index(4, DIMENSIONS, Metric::Angular, ScalarKind::F32);
+        let (mut columns, mut products, mut counts) = (vec![Key::NIL; 2], vec![0.0; 2], vec![0usize; 1]);
+        let mut outputs = Outputs::packed(&mut columns, &mut products, &mut counts, 2);
+        assert_eq!(
+            index
+                .multiply_into(
+                    &executor(),
+                    rows(&slab[..DIMENSIONS], DIMENSIONS),
+                    ExpansionConfig::default(),
+                    &mut outputs,
+                    None,
+                )
+                .unwrap_err()
+                .status,
+            Status::ConfigMismatch
+        );
+    }
+
+    // endregion: Refinement & Linear Algebra
 
     // endregion: Ingest & Retrieval
 
@@ -1535,7 +2257,13 @@ mod tests {
         let mut counts = vec![0usize; QUERIES];
         let mut outputs = Outputs::packed(&mut found, &mut scores, &mut counts, WANTED);
         index
-            .search_into(rows(&slab[..QUERIES * DIMENSIONS], DIMENSIONS), 64, &mut outputs, None)
+            .search_into(
+                &executor(),
+                rows(&slab[..QUERIES * DIMENSIONS], DIMENSIONS),
+                ExpansionConfig::with_expansion_factor(64),
+                &mut outputs,
+                None,
+            )
             .expect("the batch must resolve");
 
         for query in 0..QUERIES {
@@ -1552,7 +2280,13 @@ mod tests {
         let row = [0.5f32; DIMENSIONS];
         let slab: Vec<f32> = row.iter().chain(row.iter()).copied().collect();
         index
-            .add(&sequential_keys(2), rows(&slab, DIMENSIONS), 0, None)
+            .add(
+                &executor(),
+                &sequential_keys(2),
+                rows(&slab, DIMENSIONS),
+                ExpansionConfig::default(),
+                None,
+            )
             .expect("identical rows insert");
 
         let found = top_one(&index, &row, DIMENSIONS).expect("a match must come back");
@@ -1564,14 +2298,23 @@ mod tests {
         const DIMENSIONS: usize = 8;
         const QUERIES: usize = 4;
         let (index, _, slab) = populated_index(16, DIMENSIONS, Metric::Angular, ScalarKind::F32);
-        let queries = rows(&slab[..QUERIES * DIMENSIONS], DIMENSIONS);
+        let executor = executor();
 
         let mut found = vec![Key::NIL; (QUERIES - 1) * 2];
         let mut scores = vec![0.0 as Distance; (QUERIES - 1) * 2];
         let mut counts = vec![0usize; QUERIES];
         let mut outputs = Outputs::packed(&mut found, &mut scores, &mut counts, 2);
         assert_eq!(
-            index.search_into(queries, 0, &mut outputs, None).unwrap_err().status,
+            index
+                .search_into(
+                    &executor,
+                    rows(&slab[..QUERIES * DIMENSIONS], DIMENSIONS),
+                    ExpansionConfig::default(),
+                    &mut outputs,
+                    None,
+                )
+                .unwrap_err()
+                .status,
             Status::ShapeMismatch,
             "too few output rows"
         );
@@ -1581,7 +2324,16 @@ mod tests {
         let mut counts = vec![0usize; QUERIES - 1];
         let mut outputs = Outputs::packed(&mut found, &mut scores, &mut counts, 2);
         assert_eq!(
-            index.search_into(queries, 0, &mut outputs, None).unwrap_err().status,
+            index
+                .search_into(
+                    &executor,
+                    rows(&slab[..QUERIES * DIMENSIONS], DIMENSIONS),
+                    ExpansionConfig::default(),
+                    &mut outputs,
+                    None,
+                )
+                .unwrap_err()
+                .status,
             Status::ShapeMismatch,
             "too few counts"
         );
@@ -1596,7 +2348,13 @@ mod tests {
 
         let mut inserting = Stats::default();
         index
-            .add(&keys, rows(&slab, DIMENSIONS), 0, Some(&mut inserting))
+            .add(
+                &executor(),
+                &keys,
+                rows(&slab, DIMENSIONS),
+                ExpansionConfig::default(),
+                Some(&mut inserting),
+            )
             .expect("the batch must insert");
         assert!(inserting.computed_distances > 0);
 
@@ -1607,8 +2365,9 @@ mod tests {
         let mut outputs = Outputs::packed(&mut found, &mut scores, &mut counts, 4);
         index
             .search_into(
+                &executor(),
                 rows(&slab[..DIMENSIONS], DIMENSIONS),
-                0,
+                ExpansionConfig::default(),
                 &mut outputs,
                 Some(&mut searching),
             )
@@ -1618,8 +2377,9 @@ mod tests {
 
         index
             .search_into(
+                &executor(),
                 rows(&slab[..DIMENSIONS], DIMENSIONS),
-                0,
+                ExpansionConfig::default(),
                 &mut outputs,
                 Some(&mut searching),
             )
@@ -1647,7 +2407,14 @@ mod tests {
         let mut counts = [0usize; 1];
         let mut outputs = Outputs::packed(&mut found, &mut scores, &mut counts, WANTED);
         index
-            .search_if_into(rows(&slab[..DIMENSIONS], DIMENSIONS), 64, &mut outputs, None, &is_even)
+            .search_if_into(
+                &executor(),
+                rows(&slab[..DIMENSIONS], DIMENSIONS),
+                ExpansionConfig::with_expansion_factor(64),
+                &mut outputs,
+                None,
+                &is_even,
+            )
             .expect("the filtered search must run");
 
         let admitted = counts[0];
@@ -1671,8 +2438,9 @@ mod tests {
         let mut outputs = Outputs::packed(&mut found, &mut scores, &mut counts, WANTED);
         index
             .search_if_into(
+                &executor(),
                 rows(&slab[..DIMENSIONS], DIMENSIONS),
-                64,
+                ExpansionConfig::with_expansion_factor(64),
                 &mut outputs,
                 None,
                 &is_allowed,
@@ -1697,8 +2465,9 @@ mod tests {
         let mut outputs = Outputs::packed(&mut found, &mut scores, &mut counts, 4);
         index
             .search_if_into(
+                &executor(),
                 rows(&slab[..DIMENSIONS], DIMENSIONS),
-                64,
+                ExpansionConfig::with_expansion_factor(64),
                 &mut outputs,
                 None,
                 &admits_nothing,
@@ -1746,7 +2515,13 @@ mod tests {
         let stored = bit_rows(&[0b0000_1111, 0b1111_0000]);
         let keys = [Key::from(42u64), Key::from(43u64)];
         index
-            .add(&keys, rows(&stored, DIMENSIONS), 0, None)
+            .add(
+                &executor(),
+                &keys,
+                rows(&stored, DIMENSIONS),
+                ExpansionConfig::default(),
+                None,
+            )
             .expect("bit rows insert");
 
         let query = bit_rows(&[0b0111_1000]);
@@ -1755,7 +2530,13 @@ mod tests {
         let mut counts = [0usize; 1];
         let mut outputs = Outputs::packed(&mut found, &mut scores, &mut counts, 2);
         index
-            .search_into(rows(&query, DIMENSIONS), 0, &mut outputs, None)
+            .search_into(
+                &executor(),
+                rows(&query, DIMENSIONS),
+                ExpansionConfig::default(),
+                &mut outputs,
+                None,
+            )
             .expect("the search must run");
 
         assert_eq!(counts[0], 2);
@@ -1772,7 +2553,13 @@ mod tests {
         let stored = bit_rows(&[0b0000_1111]);
         let keys = [Key::from(1u64)];
         index
-            .add(&keys, rows(&stored, DIMENSIONS), 0, None)
+            .add(
+                &executor(),
+                &keys,
+                rows(&stored, DIMENSIONS),
+                ExpansionConfig::default(),
+                None,
+            )
             .expect("bit rows insert");
 
         // 0b00001111 against 0b00000111: three bits shared, four in the union.
@@ -1782,13 +2569,19 @@ mod tests {
     }
 
     /// The bit-vector sibling of [`top_one`], which is written against `f32` queries.
-    fn top_one_bits(index: &Index, query: &[u1x8], dimensions: usize) -> Option<Match> {
+    fn top_one_bits(index: &DenseIndex, query: &[u1x8], dimensions: usize) -> Option<Match> {
         let mut keys = [Key::NIL; 1];
         let mut distances = [0.0 as Distance; 1];
         let mut counts = [0usize; 1];
         let mut outputs = Outputs::packed(&mut keys, &mut distances, &mut counts, 1);
         index
-            .search_into(rows(query, dimensions), 0, &mut outputs, None)
+            .search_into(
+                &executor(),
+                rows(query, dimensions),
+                ExpansionConfig::default(),
+                &mut outputs,
+                None,
+            )
             .expect("the search must run");
         match counts[0] {
             0 => None,
@@ -1808,16 +2601,16 @@ mod tests {
         const DIMENSIONS: usize = 16;
         let path = scratch_path("saves_and_loads_a_file");
         let (index, keys, slab) = populated_index(32, DIMENSIONS, Metric::Angular, ScalarKind::F32);
-        index.save(&path).expect("the checkpoint must write");
+        index.save(&executor(), &path).expect("the checkpoint must write");
 
         // A derived geometry freezes from the checkpoint's own headers.
-        let restored = Index::new(&Options {
+        let restored = DenseIndex::new(&Options {
             dimensions: 0,
             quantization: ScalarKind::F32,
             ..Options::default()
         })
         .expect("the index must initialize");
-        restored.load(&path).expect("the checkpoint must load");
+        restored.load(&executor(), &path).expect("the checkpoint must load");
         assert_eq!(restored.dimensions().expect("the geometry must report"), DIMENSIONS);
         assert_eq!(restored.size().expect("the size must report"), 32);
         assert_eq!(
@@ -1831,14 +2624,18 @@ mod tests {
     fn saves_and_loads_a_buffer() {
         const DIMENSIONS: usize = 16;
         let (index, keys, slab) = populated_index(32, DIMENSIONS, Metric::Angular, ScalarKind::F32);
-        let length = index.serialized_length().expect("the length must report");
+        let length = index.storage_requirements().expect("the length must report");
         assert!(length > 0);
 
         let mut buffer = vec![0u8; length];
-        index.save_buffer(&mut buffer).expect("the monolith must write");
+        index
+            .save_buffer(&executor(), &mut buffer)
+            .expect("the monolith must write");
 
         let restored = empty_index(DIMENSIONS, Metric::Angular, ScalarKind::F32);
-        restored.load_buffer(&buffer).expect("the monolith must load");
+        restored
+            .load_buffer(&executor(), &buffer)
+            .expect("the monolith must load");
         assert_eq!(
             restored.size().expect("the size must report"),
             index.size().expect("the size must report")
@@ -1850,7 +2647,7 @@ mod tests {
 
         let truncated = empty_index(DIMENSIONS, Metric::Angular, ScalarKind::F32);
         assert!(
-            truncated.load_buffer(&buffer[..length - 1]).is_err(),
+            truncated.load_buffer(&executor(), &buffer[..length - 1]).is_err(),
             "a short buffer must not be read"
         );
     }
@@ -1860,16 +2657,18 @@ mod tests {
         const DIMENSIONS: usize = 16;
         let path = scratch_path("reads_metadata_without_loading");
         let (index, _, _) = populated_index(8, DIMENSIONS, Metric::Euclidean, ScalarKind::I8);
-        index.save(&path).expect("the checkpoint must write");
+        index.save(&executor(), &path).expect("the checkpoint must write");
 
-        let described = Index::metadata(&path).expect("the metadata must read");
+        let described = DenseIndex::metadata(&path).expect("the metadata must read");
         assert_eq!(described.dimensions, DIMENSIONS);
         assert_eq!(described.metric, Metric::Euclidean);
         assert_eq!(described.quantization, ScalarKind::I8);
 
-        let mut buffer = vec![0u8; index.serialized_length().expect("the length must report")];
-        index.save_buffer(&mut buffer).expect("the monolith must write");
-        let from_buffer = Index::metadata_buffer(&buffer).expect("the metadata must read");
+        let mut buffer = vec![0u8; index.storage_requirements().expect("the length must report")];
+        index
+            .save_buffer(&executor(), &mut buffer)
+            .expect("the monolith must write");
+        let from_buffer = DenseIndex::metadata_buffer(&buffer).expect("the metadata must read");
         assert_eq!(from_buffer.dimensions, DIMENSIONS);
         remove_quietly(&path);
     }
@@ -1883,7 +2682,7 @@ mod tests {
         let index = empty_index(8, Metric::Angular, ScalarKind::F32);
         let path = std::path::Path::new(OsStr::from_bytes(&[0xff, 0xfe]));
         assert_eq!(
-            index.save(path).unwrap_err().status,
+            index.save(&executor(), path).unwrap_err().status,
             Status::Io,
             "the C interface exchanges UTF-8 bytes"
         );
@@ -1901,7 +2700,13 @@ mod tests {
         assert_eq!(index.dimensions().expect("the geometry must report"), DIMENSIONS);
 
         index
-            .add(&keys, rows(&slab, DIMENSIONS), 0, None)
+            .add(
+                &executor(),
+                &keys,
+                rows(&slab, DIMENSIONS),
+                ExpansionConfig::default(),
+                None,
+            )
             .expect("a cleared index takes the batch again");
         assert_eq!(index.size().expect("the size must report"), 16);
     }
@@ -1919,10 +2724,18 @@ mod tests {
         let donor_keys: Vec<Key> = (100..132u64).map(Key::from).collect();
         let donor_slab = seeded_rows(32, DIMENSIONS, SEED + 1);
         donor
-            .add(&donor_keys, rows(&donor_slab, DIMENSIONS), 0, None)
+            .add(
+                &executor(),
+                &donor_keys,
+                rows(&donor_slab, DIMENSIONS),
+                ExpansionConfig::default(),
+                None,
+            )
             .expect("the donor must fill");
 
-        index.merge(donor).expect("the donor must be absorbed");
+        index
+            .merge(&executor(), vec![donor])
+            .expect("the donor must be absorbed");
         assert_eq!(index.size().expect("the size must report"), 64);
         assert_eq!(
             top_one(&index, &slab[..DIMENSIONS], DIMENSIONS).map(|found| found.key),
@@ -1986,7 +2799,10 @@ mod tests {
         const COUNT: usize = 200;
         let (index, keys, slab) = populated_index(COUNT, DIMENSIONS, Metric::Angular, ScalarKind::F32);
 
-        let mut finder = index.find(&slab[..DIMENSIONS]).expect("the finder must open");
+        let executor = executor();
+        let mut finder = index
+            .find(&executor, &slab[..DIMENSIONS])
+            .expect("the finder must open");
         let first: Vec<Match> = finder
             .by_ref()
             .take(5)
@@ -1998,9 +2814,11 @@ mod tests {
         }
 
         let drained = finder.count();
-        assert!(drained > BATCH, "the stream crosses its refill boundary");
+        assert!(drained > MATCHES_PER_PULL, "the stream crosses its refill boundary");
 
-        let mut exhausted = index.find(&slab[..DIMENSIONS]).expect("the finder must open");
+        let mut exhausted = index
+            .find(&executor, &slab[..DIMENSIONS])
+            .expect("the finder must open");
         while exhausted.next().is_some() {}
         assert!(exhausted.next().is_none(), "a drained finder stays drained");
     }
@@ -2012,7 +2830,7 @@ mod tests {
     const THREADS: usize = 4;
 
     #[test]
-    fn builds_and_searches_in_parallel() {
+    fn builds_and_searches_on_a_shared_executor() {
         const DIMENSIONS: usize = 128;
         const COUNT: usize = 1000;
         const WANTED: usize = 10;
@@ -2022,77 +2840,40 @@ mod tests {
         let keys = sequential_keys(COUNT);
         let slab = seeded_rows(COUNT, DIMENSIONS, SEED);
 
-        let topology = forkunion::Topology::new().expect("the topology must enumerate");
-        let mut pool = forkunion::spawn(&topology, THREADS);
-        let failures = AtomicUsize::new(0);
-
-        // A prong never panics: unwinding here would cross the C fork-join boundary, so every
-        // failure is folded into a counter and asserted after the join.
-        forkunion::for_n(&mut pool, COUNT, |prong| {
-            let row = prong.task_index;
-            let inserted = index.add(
-                &keys[row..row + 1],
-                rows(&slab[row * DIMENSIONS..(row + 1) * DIMENSIONS], DIMENSIONS),
-                0,
-                None,
-            );
-            if inserted != Ok(1) {
-                failures.fetch_add(1, Ordering::Relaxed);
-            }
-        });
+        // The batch is the unit of parallelism: the executor fans one call out over its threads,
+        // so the caller never spawns any of its own.
+        let executor = Executor::new(&Residency::default(), THREADS).expect("the executor must spawn");
         assert_eq!(
-            failures.load(Ordering::Relaxed),
-            0,
-            "every concurrent insert must succeed"
+            index
+                .add(
+                    &executor,
+                    &keys,
+                    rows(&slab, DIMENSIONS),
+                    ExpansionConfig::default(),
+                    None
+                )
+                .expect("the batch must insert"),
+            COUNT
         );
         assert_eq!(index.size().expect("the size must report"), COUNT);
 
-        let mismatches = AtomicUsize::new(0);
-        forkunion::for_n(&mut pool, COUNT, |prong| {
-            let row = prong.task_index;
-            // Per-task locals, not per-thread state: each call owns its own stack frame, so the
-            // closure captures nothing mutable and stays `Fn + Sync` for free.
-            let mut restored = [0.0f32; DIMENSIONS];
-            let mut span = rows_mut(&mut restored, DIMENSIONS);
-            if index.get(keys[row], &mut span) != Ok(1) {
-                mismatches.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-            let source = &slab[row * DIMENSIONS..(row + 1) * DIMENSIONS];
-            if restored
-                .iter()
-                .zip(source)
-                .any(|(left, right)| (left - right).abs() > 1e-6)
-            {
-                mismatches.fetch_add(1, Ordering::Relaxed);
-            }
-        });
-        assert_eq!(mismatches.load(Ordering::Relaxed), 0, "every row must come back intact");
-
-        let misses = AtomicUsize::new(0);
-        forkunion::for_n(&mut pool, COUNT, |prong| {
-            let row = prong.task_index;
-            let mut found = [Key::NIL; WANTED];
-            let mut scores = [0.0 as Distance; WANTED];
-            let mut counts = [0usize; 1];
-            let mut outputs = Outputs::packed(&mut found, &mut scores, &mut counts, WANTED);
-            let query = &slab[row * DIMENSIONS..(row + 1) * DIMENSIONS];
-            if index
-                .search_into(rows(query, DIMENSIONS), 64, &mut outputs, None)
-                .is_err()
-            {
-                misses.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-            if counts[0] == 0 || found[0] != keys[row] {
-                misses.fetch_add(1, Ordering::Relaxed);
-            }
-        });
-        assert_eq!(
-            misses.load(Ordering::Relaxed),
-            0,
-            "every row is its own nearest under contention"
-        );
+        let mut found = vec![Key::NIL; COUNT * WANTED];
+        let mut scores = vec![0.0 as Distance; COUNT * WANTED];
+        let mut counts = vec![0usize; COUNT];
+        let mut outputs = Outputs::packed(&mut found, &mut scores, &mut counts, WANTED);
+        index
+            .search_into(
+                &executor,
+                rows(&slab, DIMENSIONS),
+                ExpansionConfig::with_expansion_factor(64),
+                &mut outputs,
+                None,
+            )
+            .expect("the batch must resolve");
+        for row in 0..COUNT {
+            assert_ne!(counts[row], 0, "every query reports a match");
+            assert_eq!(found[row * WANTED], keys[row], "every row is its own nearest");
+        }
     }
 
     #[test]
@@ -2106,55 +2887,67 @@ mod tests {
         let keys = sequential_keys(2 * HALF);
         let slab = seeded_rows(2 * HALF, DIMENSIONS, SEED);
 
-        // The first half lands serially, so the readers below traverse a populated graph.
+        // The first half lands serially, so the reader below traverses a populated graph.
+        let seeding = executor();
         index
-            .add(&keys[..HALF], rows(&slab[..HALF * DIMENSIONS], DIMENSIONS), 0, None)
+            .add(
+                &seeding,
+                &keys[..HALF],
+                rows(&slab[..HALF * DIMENSIONS], DIMENSIONS),
+                ExpansionConfig::default(),
+                None,
+            )
             .expect("the seed batch must insert");
+        drop(seeding);
 
-        let topology = forkunion::Topology::new().expect("the topology must enumerate");
-        let mut pool = forkunion::spawn(&topology, THREADS);
-        let failures = AtomicUsize::new(0);
-        let strangers = AtomicUsize::new(0);
+        // An executor admits one driver at a time, so genuinely overlapping calls need one
+        // apiece - the writer's and the reader's, on two threads sharing the handle.
+        let writer = Executor::new(&Residency::default(), THREADS).expect("the executor must spawn");
+        let reader = Executor::new(&Residency::default(), THREADS).expect("the executor must spawn");
         let known: HashSet<Key> = keys.iter().copied().collect();
+        let strangers = AtomicUsize::new(0);
 
-        // The range splits contiguously across threads, so the low tasks are writers and the
-        // high tasks are readers - genuinely overlapping, not interleaved on one core.
-        forkunion::for_n(&mut pool, 2 * HALF, |prong| match prong.task_index < HALF {
-            true => {
-                let row = HALF + prong.task_index;
-                let inserted = index.add(
-                    &keys[row..row + 1],
-                    rows(&slab[row * DIMENSIONS..(row + 1) * DIMENSIONS], DIMENSIONS),
-                    0,
-                    None,
-                );
-                if inserted != Ok(1) {
-                    failures.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            false => {
-                let row = prong.task_index - HALF;
-                let mut found = [Key::NIL; WANTED];
-                let mut scores = [0.0 as Distance; WANTED];
-                let mut counts = [0usize; 1];
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let writer = writer;
+                index
+                    .add(
+                        &writer,
+                        &keys[HALF..],
+                        rows(&slab[HALF * DIMENSIONS..], DIMENSIONS),
+                        ExpansionConfig::default(),
+                        None,
+                    )
+                    .expect("the racing batch must insert");
+            });
+            scope.spawn(|| {
+                let reader = reader;
+                let mut found = vec![Key::NIL; HALF * WANTED];
+                let mut scores = vec![0.0 as Distance; HALF * WANTED];
+                let mut counts = vec![0usize; HALF];
                 let mut outputs = Outputs::packed(&mut found, &mut scores, &mut counts, WANTED);
-                let query = &slab[row * DIMENSIONS..(row + 1) * DIMENSIONS];
-                if index
-                    .search_into(rows(query, DIMENSIONS), 32, &mut outputs, None)
-                    .is_err()
-                {
-                    failures.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
+                index
+                    .search_into(
+                        &reader,
+                        rows(&slab[..HALF * DIMENSIONS], DIMENSIONS),
+                        ExpansionConfig::with_expansion_factor(32),
+                        &mut outputs,
+                        None,
+                    )
+                    .expect("the racing search must resolve");
                 // Whether a racing insert is visible is what the watermark leaves unspecified;
                 // that no key outside the dataset appears is what it guarantees.
-                if found[..counts[0]].iter().any(|key| !known.contains(key)) {
-                    strangers.fetch_add(1, Ordering::Relaxed);
+                for row in 0..HALF {
+                    if found[row * WANTED..row * WANTED + counts[row]]
+                        .iter()
+                        .any(|key| !known.contains(key))
+                    {
+                        strangers.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
-            }
+            });
         });
 
-        assert_eq!(failures.load(Ordering::Relaxed), 0, "no call may fail under contention");
         assert_eq!(
             strangers.load(Ordering::Relaxed),
             0,

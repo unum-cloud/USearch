@@ -44,45 +44,53 @@ pub(crate) mod ffi {
         pub bytes: [u8; 16],
     }
 
+    /// A borrowed run of bytes, never null-terminated by contract.
     #[repr(C)]
     #[derive(Clone, Copy)]
-    pub struct usearch_string_t {
-        pub data: *const c_char,
+    pub struct usearch_bytes_view_t {
+        pub data: *const u8,
         pub length: usize,
     }
 
-    impl From<&str> for usearch_string_t {
-        /// Borrows the text as the string view the C interface accepts - no terminator, no copy.
+    impl From<&str> for usearch_bytes_view_t {
+        /// Borrows the text as the view the C interface accepts - no terminator, no copy.
         ///
         /// The view carries no lifetime, so it must not outlive the `str` it borrows.
         fn from(text: &str) -> Self {
-            usearch_string_t {
-                data: text.as_ptr() as *const c_char,
+            usearch_bytes_view_t {
+                data: text.as_ptr(),
                 length: text.len(),
             }
         }
     }
 
+    /// A caller-owned, writable run of bytes - the mutable twin of `usearch_bytes_view_t`.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct usearch_bytes_span_t {
+        pub data: *mut u8,
+        pub length: usize,
+    }
+
     #[repr(C)]
     #[derive(Clone, Copy)]
     pub struct usearch_ram_options_t {
-        pub threads: usize,
-        pub huge_pages: bool,
+        pub memory_domains: *const i32,
+        pub memory_domains_count: usize,
     }
 
     #[repr(C)]
     #[derive(Clone, Copy)]
     pub struct usearch_vram_options_t {
-        pub device: i32,
-        pub unified_addressing: bool,
+        pub devices: *const i32,
+        pub devices_count: usize,
     }
 
     #[repr(C)]
     #[derive(Clone, Copy)]
     pub struct usearch_nvme_options_t {
-        pub sector_bytes: u32,
-        pub queue_depth: u32,
-        pub direct_io: bool,
+        pub paths: *const usearch_bytes_view_t,
+        pub paths_count: usize,
     }
 
     #[repr(C)]
@@ -95,7 +103,30 @@ pub(crate) mod ffi {
 
     pub type usearch_predicate_t = Option<unsafe extern "C" fn(usearch_key_t, *mut c_void) -> c_int>;
 
+    /// Periodic advance report and the caller's chance to stop the call. This binding always
+    /// passes `None`, so neither progress nor cancellation reaches Rust.
+    pub type usearch_progress_callback_t = Option<unsafe extern "C" fn(usize, usize, *mut c_void) -> c_int>;
+
+    pub type usearch_executor_t = *mut c_void;
+
     extern "C" {
+        pub fn usearch_executor_for_ram(
+            ram: *const usearch_ram_options_t,
+            threads: usize,
+            error: *mut usearch_error_t,
+        ) -> usearch_executor_t;
+        pub fn usearch_executor_for_nvme(
+            nvme: *const usearch_nvme_options_t,
+            threads: usize,
+            error: *mut usearch_error_t,
+        ) -> usearch_executor_t;
+        pub fn usearch_executor_for_vram(
+            vram: *const usearch_vram_options_t,
+            error: *mut usearch_error_t,
+        ) -> usearch_executor_t;
+        pub fn usearch_executor_drain(executor: usearch_executor_t, error: *mut usearch_error_t);
+        pub fn usearch_executor_free(executor: usearch_executor_t);
+
         pub fn usearch_version() -> *const c_char;
         pub fn usearch_capabilities_compiled() -> *const c_char;
         pub fn usearch_capabilities_available() -> *const c_char;
@@ -140,6 +171,8 @@ pub enum Status {
     ConfigMismatch = 12,
     /// A synchronization contract was violated by a concurrent operation.
     Contended = 13,
+    /// A progress handler asked the operation to stop; it unwound and published nothing.
+    Cancelled = 14,
     /// A status a newer library reported and this binding has no name for.
     Unrecognized = -1,
 }
@@ -160,6 +193,7 @@ impl Status {
             11 => Status::Uninitialized,
             12 => Status::ConfigMismatch,
             13 => Status::Contended,
+            14 => Status::Cancelled,
             _ => Status::Unrecognized,
         }
     }
@@ -169,6 +203,7 @@ impl Status {
 ///
 /// Messages are static storage, so nothing allocates on the failure path.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Error {
     /// The identity of the failure, shared with the C interface.
     pub status: Status,
@@ -177,7 +212,9 @@ pub struct Error {
 }
 
 impl fmt::Display for Error {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result { formatter.write_str(self.message) }
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.message)
+    }
 }
 
 impl fmt::Debug for Error {
@@ -207,7 +244,9 @@ pub(crate) fn check(error: ffi::usearch_error_t) -> Result<()> {
 
 /// Reports a failure the binding caught before the call crossed the boundary, under the same
 /// status the engine would have used had the ABI let it see the same thing.
-pub(crate) fn fail(status: Status, message: &'static str) -> Error { Error { status, message } }
+pub(crate) fn fail(status: Status, message: &'static str) -> Error {
+    Error { status, message }
+}
 
 /// Borrows a static null-terminated string the library owns.
 pub(crate) unsafe fn static_string(raw: *const c_char) -> &'static str {
@@ -250,22 +289,32 @@ impl Key {
     }
 
     #[inline]
-    pub(crate) fn to_raw(self) -> ffi::usearch_key_t { ffi::usearch_key_t { bytes: self.0 } }
+    pub(crate) fn to_raw(self) -> ffi::usearch_key_t {
+        ffi::usearch_key_t { bytes: self.0 }
+    }
 
     #[inline]
-    pub(crate) fn from_raw(raw: ffi::usearch_key_t) -> Self { Key(raw.bytes) }
+    pub(crate) fn from_raw(raw: ffi::usearch_key_t) -> Self {
+        Key(raw.bytes)
+    }
 }
 
 impl From<u64> for Key {
-    fn from(value: u64) -> Self { Key::from(value as u128) }
+    fn from(value: u64) -> Self {
+        Key::from(value as u128)
+    }
 }
 
 impl From<u128> for Key {
-    fn from(value: u128) -> Self { Key(value.to_be_bytes()) }
+    fn from(value: u128) -> Self {
+        Key(value.to_be_bytes())
+    }
 }
 
 impl From<Key> for u128 {
-    fn from(key: Key) -> Self { u128::from_be_bytes(key.0) }
+    fn from(key: Key) -> Self {
+        u128::from_be_bytes(key.0)
+    }
 }
 
 impl core::str::FromStr for Key {
@@ -310,14 +359,20 @@ impl fmt::Display for Key {
 }
 
 impl fmt::Debug for Key {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::Display::fmt(self, formatter) }
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
 }
 
 // Lets result matrices be NumKong containers like every other output. The identities are the
 // nil key and the integer one.
 impl StorageElement for Key {
-    fn zero() -> Self { Key::NIL }
-    fn one() -> Self { Key::from(1u64) }
+    fn zero() -> Self {
+        Key::NIL
+    }
+    fn one() -> Self {
+        Key::from(1u64)
+    }
 }
 
 // endregion: Keys & Distances
@@ -444,164 +499,104 @@ unsafe impl Scalar for u1x8 {
 
 // region: Residency
 
-/// Whether the RAM arenas demand a provisioned huge-page pool.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
-pub enum HugePages {
-    /// Ordinary pages, whatever the kernel provides.
-    #[default]
-    BasePages,
-    /// Fail loudly when the pool is missing, rather than degrading silently.
-    RequireHugePages,
-}
-
-/// Which accelerator hosts a VRAM index.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
-pub enum Device {
-    /// The first device with free memory.
-    #[default]
-    FirstFree,
-    /// A specific CUDA device ordinal.
-    Ordinal(i32),
-}
-
-/// Whether a VRAM index may spill past the device's memory.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
-pub enum Addressing {
-    /// Everything stays in device memory.
-    #[default]
-    DeviceOnly,
-    /// Spill cold shards into host memory through the pager, trading traversal latency.
-    Unified,
-}
-
-/// How an NVMe index reaches the block device.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
-pub enum IoMode {
-    /// O_DIRECT-class page-cache bypass - the default and the point.
-    #[default]
-    Direct,
-    /// Ordinary buffered reads through the page cache.
-    PageCached,
-}
-
-/// Where an index's payload lives and which engine traverses it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+/// Where an index's payload lives, which engine traverses it, and the hardware its shards are
+/// placed across - one shard per named domain, device, or path.
+///
+/// Names where the index lives, never who walks it: threads and streams belong to the
+/// [`Executor`] the bulk verbs take. An empty placement derives one from the machine.
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
+#[non_exhaustive]
 pub enum Residency {
     /// Volatile-memory index traversed by CPU threads - the concurrent baseline.
     Ram {
-        /// Worker threads; zero takes 7/8 of the logical cores, since full occupancy starves
-        /// the ordered publication path.
-        threads: usize,
-        /// Whether the arenas demand a provisioned huge-page pool.
-        huge_pages: HugePages,
+        /// NUMA node ids to place shards on; empty derives every node the process may use.
+        memory_domains: Vec<i32>,
     },
-    /// Accelerator-memory index traversed by GPU warps on a chosen device.
+    /// Accelerator-memory index traversed by GPU warps, sharded across the named devices and
+    /// never replicated.
     Vram {
-        /// Which accelerator hosts the index.
-        device: Device,
-        /// Whether the index may spill past the device's memory.
-        addressing: Addressing,
+        /// CUDA device ordinals to place shards on; empty derives one free device.
+        devices: Vec<i32>,
     },
     /// Persisted index traversed through pluggable I/O engines, sized past RAM.
     ///
-    /// External-memory graphs are never modified in place, so the handle is read-only and
-    /// every mutating verb fails on it. Bigger indexes come from merging.
+    /// A path is whatever identifies a device to the engine that can reach it - a filesystem
+    /// path, a transport identifier, or a FUSE mount over object storage.
     Nvme {
-        /// I/O granularity in bytes; zero probes the device. 512 fits one 256-d `i8` row.
-        sector_bytes: u32,
-        /// Submission ring depth; zero derives from the device's queue capabilities.
-        queue_depth: u32,
-        /// How the handle reaches the block device.
-        io: IoMode,
+        /// Devices or directories to place shards on; empty leaves every shard where its
+        /// manifest points.
+        paths: Vec<String>,
     },
 }
 
 impl Default for Residency {
     fn default() -> Self {
         Residency::Ram {
-            threads: 0,
-            huge_pages: HugePages::BasePages,
+            memory_domains: Vec::new(),
         }
     }
 }
 
+/// Borrows a placement list, reporting the empty list as the null the C interface derives from.
+fn borrowed<Element>(elements: &[Element]) -> *const Element {
+    match elements.is_empty() {
+        true => core::ptr::null(),
+        false => elements.as_ptr(),
+    }
+}
+
 impl Residency {
-    /// The residency tag and the union member it selects.
-    pub(crate) fn to_raw(self) -> (ffi::usearch_enum_t, ffi::usearch_residency_options_t) {
+    /// The tag naming the active union member.
+    pub(crate) fn tag(&self) -> ffi::usearch_enum_t {
         match self {
-            Residency::Ram { threads, huge_pages } => (
-                0,
-                ffi::usearch_residency_options_t {
-                    ram: ffi::usearch_ram_options_t {
-                        threads,
-                        huge_pages: huge_pages == HugePages::RequireHugePages,
-                    },
-                },
-            ),
-            Residency::Vram { device, addressing } => (
-                1,
-                ffi::usearch_residency_options_t {
-                    vram: ffi::usearch_vram_options_t {
-                        device: match device {
-                            Device::FirstFree => -1,
-                            Device::Ordinal(ordinal) => ordinal,
-                        },
-                        unified_addressing: addressing == Addressing::Unified,
-                    },
-                },
-            ),
-            Residency::Nvme {
-                sector_bytes,
-                queue_depth,
-                io,
-            } => (
-                2,
-                ffi::usearch_residency_options_t {
-                    nvme: ffi::usearch_nvme_options_t {
-                        sector_bytes,
-                        queue_depth,
-                        direct_io: io == IoMode::Direct,
-                    },
-                },
-            ),
+            Residency::Ram { .. } => 0,
+            Residency::Vram { .. } => 1,
+            Residency::Nvme { .. } => 2,
         }
     }
 
-    /// Reads the union member the tag selects.
+    /// The union member the tag selects, borrowing this residency's placement lists.
     ///
-    /// # Safety
-    /// `tag` must be the one that populated `options`, as it is inside every options struct
-    /// the C interface fills.
-    pub(crate) unsafe fn from_raw(
-        tag: ffi::usearch_enum_t,
-        options: &ffi::usearch_residency_options_t,
-    ) -> Result<Self> {
+    /// `path_views` receives the byte views an NVMe placement needs, so it must outlive the
+    /// call the options are passed to; the other residencies leave it untouched.
+    pub(crate) fn to_raw(&self, path_views: &mut Vec<ffi::usearch_bytes_view_t>) -> ffi::usearch_residency_options_t {
+        match self {
+            Residency::Ram { memory_domains } => ffi::usearch_residency_options_t {
+                ram: ffi::usearch_ram_options_t {
+                    memory_domains: borrowed(memory_domains),
+                    memory_domains_count: memory_domains.len(),
+                },
+            },
+            Residency::Vram { devices } => ffi::usearch_residency_options_t {
+                vram: ffi::usearch_vram_options_t {
+                    devices: borrowed(devices),
+                    devices_count: devices.len(),
+                },
+            },
+            Residency::Nvme { paths } => {
+                path_views.clear();
+                path_views.extend(paths.iter().map(|path| ffi::usearch_bytes_view_t::from(path.as_str())));
+                ffi::usearch_residency_options_t {
+                    nvme: ffi::usearch_nvme_options_t {
+                        paths: borrowed(path_views),
+                        paths_count: path_views.len(),
+                    },
+                }
+            }
+        }
+    }
+
+    /// The residency a tag names, with an empty placement.
+    ///
+    /// A checkpoint records where it was written, never where a reader must keep it, so the
+    /// placement lists come back empty for the caller to fill before initialization.
+    pub(crate) fn from_raw(tag: ffi::usearch_enum_t) -> Result<Self> {
         let residency = match tag {
             0 => Residency::Ram {
-                threads: options.ram.threads,
-                huge_pages: match options.ram.huge_pages {
-                    true => HugePages::RequireHugePages,
-                    false => HugePages::BasePages,
-                },
+                memory_domains: Vec::new(),
             },
-            1 => Residency::Vram {
-                device: match options.vram.device {
-                    ordinal if ordinal < 0 => Device::FirstFree,
-                    ordinal => Device::Ordinal(ordinal),
-                },
-                addressing: match options.vram.unified_addressing {
-                    true => Addressing::Unified,
-                    false => Addressing::DeviceOnly,
-                },
-            },
-            2 => Residency::Nvme {
-                sector_bytes: options.nvme.sector_bytes,
-                queue_depth: options.nvme.queue_depth,
-                io: match options.nvme.direct_io {
-                    true => IoMode::Direct,
-                    false => IoMode::PageCached,
-                },
-            },
+            1 => Residency::Vram { devices: Vec::new() },
+            2 => Residency::Nvme { paths: Vec::new() },
             _ => {
                 return Err(fail(
                     Status::UnknownKind,
@@ -615,11 +610,91 @@ impl Residency {
 
 // endregion: Residency
 
+// region: Executors
+
+/// The host threads or device streams a fanned-out verb runs on, and the traversal scratch each
+/// of them walks with.
+///
+/// One executor serves any number of index handles, so separate categories of indexes share one
+/// machine's cores or devices instead of each claiming a private set. Its kind is fixed by the
+/// residency it was constructed for and must match the residency of every handle it drives.
+///
+/// An executor admits one driver at a time - a second concurrent call reports
+/// [`Status::Contended`] - which is why it is `Send` but not `Sync`: a thread that wants to drive
+/// its own calls spawns its own executor. Index handles stay freely shareable.
+#[derive(Debug)]
+pub struct Executor {
+    handle: ffi::usearch_executor_t,
+}
+
+// Safety: an executor may be handed to another thread outright; what it forbids is two threads
+// driving it at once, which the missing `Sync` already prevents.
+unsafe impl Send for Executor {}
+
+impl Executor {
+    /// Spawns the workers a residency calls for, interleaved across the domains it names.
+    ///
+    /// `threads` counts host workers for RAM and submission rings for NVMe, with zero deriving
+    /// from the hardware; a VRAM executor ignores it, since one host thread drives one stream
+    /// per device.
+    pub fn new(residency: &Residency, threads: usize) -> Result<Self> {
+        let mut path_views = Vec::new();
+        let raw = residency.to_raw(&mut path_views);
+        let mut error = ffi::usearch_error_t::default();
+        let handle = unsafe {
+            match residency {
+                Residency::Ram { .. } => ffi::usearch_executor_for_ram(&raw.ram, threads, &mut error),
+                Residency::Nvme { .. } => ffi::usearch_executor_for_nvme(&raw.nvme, threads, &mut error),
+                Residency::Vram { .. } => ffi::usearch_executor_for_vram(&raw.vram, &mut error),
+            }
+        };
+        check(error)?;
+        match handle.is_null() {
+            true => Err(fail(Status::Internal, "the library returned no executor and no error")),
+            false => Ok(Executor { handle }),
+        }
+    }
+
+    /// Waits for every deferred call on this executor to finish, reporting the first failure
+    /// a drained call held back.
+    pub fn drain(&self) -> Result<()> {
+        let mut error = ffi::usearch_error_t::default();
+        unsafe { ffi::usearch_executor_drain(self.handle, &mut error) };
+        check(error)
+    }
+
+    /// The raw handle the modality verbs pass across the boundary.
+    pub(crate) fn handle(&self) -> ffi::usearch_executor_t {
+        self.handle
+    }
+}
+
+impl Drop for Executor {
+    fn drop(&mut self) {
+        unsafe { ffi::usearch_executor_free(self.handle) }
+    }
+}
+
+// endregion: Executors
+
 // region: Matrix Views
+
+/// Storage values one `dimensions`-wide row occupies, sub-byte packing included.
+pub(crate) fn values_of<Scalar: StorageElement>(dimensions: usize) -> usize {
+    dimensions.div_ceil(Scalar::dimensions_per_value())
+}
+
+/// The dimensions a packed run of `values` spells - the inverse of [`values_of`].
+///
+/// A sub-byte kind packs several dimensions per value, so the last value of an odd-width row
+/// carries padding this cannot see; a caller with the true width should state it instead.
+pub(crate) fn dimensions_of<Scalar: StorageElement>(values: usize) -> usize {
+    values * Scalar::dimensions_per_value()
+}
 
 /// Shape and byte strides of a packed slab of `dimensions`-wide rows.
 fn packed_layout<Scalar: StorageElement>(values: usize, dimensions: usize) -> ([usize; 2], [isize; 2]) {
-    let values_per_row = Scalar::dims_to_values(dimensions);
+    let values_per_row = values_of::<Scalar>(dimensions);
     assert!(values_per_row != 0, "a row needs at least one dimension");
     assert_eq!(values % values_per_row, 0, "the slab is not a whole number of rows");
     let element_bytes = core::mem::size_of::<Scalar>() as isize;
@@ -649,13 +724,19 @@ pub fn rows_mut<Scalar: StorageElement>(data: &mut [Scalar], dimensions: usize) 
 // region: Introspection
 
 /// The version of the linked library.
-pub fn version() -> &'static str { unsafe { static_string(ffi::usearch_version()) } }
+pub fn version() -> &'static str {
+    unsafe { static_string(ffi::usearch_version()) }
+}
 
 /// Comma-separated hardware capabilities the library was compiled with.
-pub fn capabilities_compiled() -> &'static str { unsafe { static_string(ffi::usearch_capabilities_compiled()) } }
+pub fn capabilities_compiled() -> &'static str {
+    unsafe { static_string(ffi::usearch_capabilities_compiled()) }
+}
 
 /// Comma-separated hardware capabilities this machine offers at runtime.
-pub fn capabilities_available() -> &'static str { unsafe { static_string(ffi::usearch_capabilities_available()) } }
+pub fn capabilities_available() -> &'static str {
+    unsafe { static_string(ffi::usearch_capabilities_available()) }
+}
 
 // endregion: Introspection
 
@@ -770,7 +851,9 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "whole number of rows")]
-    fn packed_slabs_reject_a_partial_row() { let _ = rows(&[1.0f32, 2.0, 3.0], 2); }
+    fn packed_slabs_reject_a_partial_row() {
+        let _ = rows(&[1.0f32, 2.0, 3.0], 2);
+    }
 
     #[test]
     fn errors_carry_a_status_and_a_message() {
@@ -799,6 +882,7 @@ mod tests {
             Status::Uninitialized,
             Status::ConfigMismatch,
             Status::Contended,
+            Status::Cancelled,
         ];
         for status in statuses {
             let raw = ffi::usearch_error_t {
@@ -816,31 +900,43 @@ mod tests {
     }
 
     #[test]
-    fn residencies_survive_the_raw_round_trip() {
-        let residencies = [
-            Residency::Ram {
-                threads: 7,
-                huge_pages: HugePages::RequireHugePages,
-            },
-            Residency::Vram {
-                device: Device::Ordinal(0),
-                addressing: Addressing::Unified,
-            },
+    fn residency_tags_name_their_kind() {
+        assert_eq!(Residency::default().tag(), 0);
+        assert_eq!(Residency::Vram { devices: vec![0, 3] }.tag(), 1);
+        assert_eq!(
             Residency::Nvme {
-                sector_bytes: 512,
-                queue_depth: 128,
-                io: IoMode::PageCached,
-            },
-        ];
-        for residency in residencies {
-            let (tag, options) = residency.to_raw();
-            assert_eq!(unsafe { Residency::from_raw(tag, &options) }, Ok(residency));
-        }
-        let (_, options) = Residency::default().to_raw();
-        assert!(
-            unsafe { Residency::from_raw(9, &options) }.is_err(),
-            "an unknown tag is not guessed"
+                paths: vec!["/mnt/nvme0".to_string()],
+            }
+            .tag(),
+            2
         );
+        for tag in 0..3 {
+            assert_eq!(Residency::from_raw(tag).expect("the tag must be known").tag(), tag);
+        }
+        assert!(Residency::from_raw(9).is_err(), "an unknown tag is not guessed");
+    }
+
+    #[test]
+    fn placements_marshal_as_borrowed_lists() {
+        let mut path_views = Vec::new();
+
+        let derived = Residency::default().to_raw(&mut path_views);
+        assert!(unsafe { derived.ram.memory_domains }.is_null(), "an empty list derives");
+        assert_eq!(unsafe { derived.ram.memory_domains_count }, 0);
+
+        let pinned = Residency::Vram {
+            devices: vec![0, 1, 2, 3],
+        };
+        let raw = pinned.to_raw(&mut path_views);
+        assert_eq!(unsafe { raw.vram.devices_count }, 4);
+        assert_eq!(unsafe { *raw.vram.devices.add(3) }, 3);
+
+        let drives = Residency::Nvme {
+            paths: vec!["/mnt/nvme0".to_string(), "/mnt/nvme1".to_string()],
+        };
+        let raw = drives.to_raw(&mut path_views);
+        assert_eq!(unsafe { raw.nvme.paths_count }, 2);
+        assert_eq!(unsafe { (*raw.nvme.paths).length }, "/mnt/nvme0".len());
     }
 }
 
