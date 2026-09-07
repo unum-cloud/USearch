@@ -65,31 +65,21 @@ func (metric DenseMetric) String() string {
 	}
 }
 
-// DimensionPadding says whether stored rows round up to the SIMD step quantum.
-type DimensionPadding uint8
-
-const (
-	// NaturalDimensions keeps rows at their natural width.
-	NaturalDimensions DimensionPadding = iota
-	// SimdQuantumDimensions gives cache-line-aligned rows and tail-free unrolled kernels, at
-	// slightly larger arenas.
-	SimdQuantumDimensions
-)
-
 // DenseOptions holds the construction and loading options of a dense index.
 type DenseOptions struct {
 	// Dimensions is the width of the indexed vectors; zero defers the geometry to a later
 	// Load, which reads it off the checkpoint.
 	Dimensions uint
-	// DimensionPadding is a property of the stored layout, so it applies whichever residency
-	// traverses it.
-	DimensionPadding DimensionPadding
 	// Metric is the distance kind used between vectors.
 	Metric DenseMetric
 	// Quantization is the scalar type vectors are stored and quantized into.
 	Quantization ScalarKind
 	// Connectivity bounds the connections per node in the graph; zero derives.
 	Connectivity uint
+	// ValuesPerKey bounds how many entries may share one key; zero derives to one - unique
+	// keys. Above one is what late interaction needs, a document being one key holding its
+	// token rows.
+	ValuesPerKey uint
 	// Residency says where the payload lives, and what loading a checkpoint means.
 	Residency Residency
 }
@@ -104,14 +94,14 @@ func DefaultDenseOptions() DenseOptions {
 }
 
 // toRaw lowers the options, leaving the custom-metric callback null.
-func (options *DenseOptions) toRaw() (C.usearch_dense_options_t, error) {
+func (options *DenseOptions) toRaw(pinner *runtime.Pinner) (C.usearch_dense_options_t, error) {
 	var raw C.usearch_dense_options_t
 	raw.metric = C.usearch_dense_metric_t(options.Metric)
 	raw.quantization = C.usearch_scalar_t(options.Quantization)
 	raw.dimensions = C.size_t(options.Dimensions)
-	raw.pad_dimensions = C.bool(options.DimensionPadding == SimdQuantumDimensions)
+	raw.values_per_key = C.size_t(options.ValuesPerKey)
 	raw.connectivity = C.size_t(options.Connectivity)
-	if err := options.Residency.write(&raw); err != nil {
+	if err := writeResidency(options.Residency, &raw, pinner); err != nil {
 		return raw, err
 	}
 	return raw, nil
@@ -124,9 +114,7 @@ func denseOptionsFromRaw(raw *C.usearch_dense_options_t) (DenseOptions, error) {
 		Metric:       DenseMetric(raw.metric),
 		Quantization: ScalarKind(raw.quantization),
 		Connectivity: uint(raw.connectivity),
-	}
-	if bool(raw.pad_dimensions) {
-		options.DimensionPadding = SimdQuantumDimensions
+		ValuesPerKey: uint(raw.values_per_key),
 	}
 	if options.Metric < Inner || options.Metric > Jaccard {
 		return options, fail(UnknownKind, "the checkpoint names an unknown metric")
@@ -146,7 +134,9 @@ func denseOptionsFromRaw(raw *C.usearch_dense_options_t) (DenseOptions, error) {
 // only thing that exercises the union accessors in shim.c. A test file cannot name cgo types,
 // so the round trip is reachable only from here.
 func (options DenseOptions) reload() (DenseOptions, error) {
-	raw, err := options.toRaw()
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	raw, err := options.toRaw(&pinner)
 	if err != nil {
 		return DenseOptions{}, err
 	}
@@ -156,7 +146,9 @@ func (options DenseOptions) reload() (DenseOptions, error) {
 // reloadTagged is reload with the three enum tags overwritten by whatever a newer library
 // might have written, so the lift path can be shown to reject them rather than guess.
 func (options DenseOptions) reloadTagged(metric, quantization, residency int32) (DenseOptions, error) {
-	raw, err := options.toRaw()
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	raw, err := options.toRaw(&pinner)
 	if err != nil {
 		return DenseOptions{}, err
 	}
@@ -198,6 +190,20 @@ func report(sink *DenseStats, raw C.usearch_dense_traversal_stats_t) {
 	sink.VisitedMembers = uint(raw.visited_members)
 	sink.ComputedDistances = uint(raw.computed_distances)
 	sink.Restarts = uint(raw.restarts)
+}
+
+// ExpansionConfig carries the optional per-call settings insertion and both search forms
+// share. A zero value derives every setting, which is what a null config means to the C
+// interface - so there is one spelling of "decide for me" rather than a pointer around a type
+// that already has one.
+type ExpansionConfig struct {
+	// ExpansionFactor is the candidate-pool breadth; zero derives it from the geometry.
+	ExpansionFactor uint
+}
+
+// lower renders the settings as the struct the C interface reads.
+func (config ExpansionConfig) lower() C.usearch_dense_expansion_config_t {
+	return C.usearch_dense_expansion_config_t{expansion_factor: C.size_t(config.ExpansionFactor)}
 }
 
 // endregion: Per-Call Settings & Telemetry
@@ -273,6 +279,54 @@ func (outputs *DenseOutputs) validate(queries uint) error {
 	return nil
 }
 
+// view lends a matrix as the input descriptor every batch verb reads.
+//
+// The width crosses with the rows, so the engine checks it against the frozen geometry and a
+// narrower row is refused rather than read past - which is why nothing on this side restates
+// that check.
+func (matrix Matrix) view(pinner *runtime.Pinner) C.usearch_dense_matrix_view_t {
+	// The descriptor is Go memory holding a Go pointer, which cgo forbids handing to C unless
+	// the pointee is pinned - so the rows are pinned for the duration of the call.
+	if matrix.pointer != nil {
+		pinner.Pin(matrix.pointer)
+	}
+	return C.usearch_dense_matrix_view_t{
+		data:         matrix.pointer,
+		rows:         C.size_t(matrix.rows),
+		columns:      C.size_t(matrix.dimensions),
+		stride_bytes: C.size_t(matrix.stride),
+		scalar_kind:  C.usearch_scalar_t(matrix.kind),
+	}
+}
+
+// span lends a matrix as the output descriptor a copying verb writes into.
+func (matrix Matrix) span(pinner *runtime.Pinner) C.usearch_dense_matrix_span_t {
+	if matrix.pointer != nil {
+		pinner.Pin(matrix.pointer)
+	}
+	return C.usearch_dense_matrix_span_t{
+		data:         matrix.pointer,
+		capacity:     C.size_t(matrix.rows),
+		columns:      C.size_t(matrix.dimensions),
+		stride_bytes: C.size_t(matrix.stride),
+		scalar_kind:  C.usearch_scalar_t(matrix.kind),
+	}
+}
+
+// span lends the three ranked outputs together. The strides stay zero, which the interface
+// reads as the natural width - one fewer number the caller and the engine can disagree about.
+func (outputs *DenseOutputs) span(pinner *runtime.Pinner) C.usearch_dense_matches_span_t {
+	pinner.Pin(unsafe.SliceData(outputs.keys))
+	pinner.Pin(unsafe.SliceData(outputs.distances))
+	pinner.Pin(unsafe.SliceData(outputs.counts))
+	return C.usearch_dense_matches_span_t{
+		keys:   (*C.usearch_key_t)(unsafe.Pointer(unsafe.SliceData(outputs.keys))),
+		scores: (*C.usearch_distance_t)(unsafe.Pointer(unsafe.SliceData(outputs.distances))),
+		counts: (*C.size_t)(unsafe.Pointer(unsafe.SliceData(outputs.counts))),
+		wanted: C.size_t(outputs.wanted),
+	}
+}
+
 // endregion: Results
 
 // region: Index
@@ -290,7 +344,9 @@ type DenseIndex struct {
 
 // NewDenseIndex initializes an index for the residency its options select.
 func NewDenseIndex(options *DenseOptions) (*DenseIndex, error) {
-	raw, err := options.toRaw()
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	raw, err := options.toRaw(&pinner)
 	if err != nil {
 		return nil, err
 	}
@@ -325,7 +381,7 @@ func DenseMetadataBuffer(buffer []byte) (DenseOptions, error) {
 	}
 	var raw C.usearch_dense_options_t
 	var failure C.usearch_error_t
-	C.usearch_dense_metadata_buffer(unsafe.Pointer(unsafe.SliceData(buffer)), C.size_t(len(buffer)), &raw, &failure)
+	C.usearch_dense_metadata_buffer(borrowBytes(buffer), &raw, &failure)
 	runtime.KeepAlive(buffer)
 	if err := check(failure); err != nil {
 		return DenseOptions{}, err
@@ -412,14 +468,14 @@ func (index *DenseIndex) MemoryUsage() (uint, error) {
 	return measured(C.usearch_dense_memory_usage(index.handle, &failure), failure)
 }
 
-// SerializedLength reports the expected serialized size in bytes: every shard file, plus the
+// StorageRequirements reports the expected serialized size in bytes: every shard file, plus the
 // manifest when the index spans more than one.
-func (index *DenseIndex) SerializedLength() (uint, error) {
+func (index *DenseIndex) StorageRequirements() (uint, error) {
 	if err := index.live(); err != nil {
 		return 0, err
 	}
 	var failure C.usearch_error_t
-	return measured(C.usearch_dense_serialized_length(index.handle, &failure), failure)
+	return measured(C.usearch_dense_storage_requirements(index.handle, &failure), failure)
 }
 
 // Capabilities reports the capability codename the index dispatched to on this machine.
@@ -450,32 +506,27 @@ func (index *DenseIndex) Capabilities() (string, error) {
 // every fallible step runs before the first entry identity is claimed. An accelerator fault
 // severe enough to poison the device context is the sole exception, reporting DeviceFailure
 // and latching the index unusable rather than partially applied.
-func (index *DenseIndex) Add(keys []Key, vectors Matrix, expansion uint, stats *DenseStats) (uint, error) {
+func (index *DenseIndex) Add(executor *Executor, keys []Key, vectors Matrix, config ExpansionConfig,
+	stats *DenseStats) (uint, error) {
 	if err := index.live(); err != nil {
 		return 0, err
 	}
-	dimensions, err := index.Dimensions()
+	pool, err := executor.live()
 	if err != nil {
 		return 0, err
 	}
-	if err := vectors.validate(dimensions); err != nil {
-		return 0, err
-	}
-	if uint(len(keys)) != vectors.Rows() {
-		return 0, fail(ShapeMismatch, "the key count does not match the vector row count")
-	}
-	if len(keys) == 0 {
+	if len(keys) == 0 && vectors.Rows() == 0 {
 		return 0, nil
 	}
 
-	config := C.usearch_dense_expansion_config_t{expansion_factor: C.size_t(expansion)}
+	lowered := config.lower()
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	view := vectors.view(&pinner)
+	run := borrowKeys(keys)
 	var rawStats C.usearch_dense_traversal_stats_t
 	var failure C.usearch_error_t
-	added := C.usearch_dense_add(index.handle,
-		(*C.usearch_key_t)(unsafe.Pointer(unsafe.SliceData(keys))),
-		vectors.pointer, C.size_t(vectors.rows), C.size_t(vectors.stride),
-		C.usearch_scalar_t(vectors.kind),
-		&config, &rawStats, &failure)
+	added := C.usearch_dense_add(index.handle, pool, run, &view, &lowered, nil, nil, &rawStats, &failure)
 	runtime.KeepAlive(keys)
 	runtime.KeepAlive(vectors)
 	if err := check(failure); err != nil {
@@ -489,8 +540,9 @@ func (index *DenseIndex) Add(keys []Key, vectors Matrix, expansion uint, stats *
 // batch path, parallelized internally.
 //
 // Never writes to the graph, so any number of these may overlap with concurrent insertions.
-func (index *DenseIndex) SearchInto(queries Matrix, outputs *DenseOutputs, expansion uint, stats *DenseStats) error {
-	return index.searchDispatch(queries, outputs, expansion, stats, nil)
+func (index *DenseIndex) SearchInto(executor *Executor, queries Matrix, outputs *DenseOutputs,
+	config ExpansionConfig, stats *DenseStats) error {
+	return index.searchDispatch(executor, queries, outputs, config, stats, nil)
 }
 
 // SearchIfInto is the filtered sibling of SearchInto, admitting only the keys admits
@@ -498,24 +550,21 @@ func (index *DenseIndex) SearchInto(queries Matrix, outputs *DenseOutputs, expan
 // low selectivity.
 //
 // The predicate runs on the library's worker threads, so it must be safe for concurrent use.
-func (index *DenseIndex) SearchIfInto(queries Matrix, outputs *DenseOutputs, expansion uint, stats *DenseStats,
-	admits func(Key) bool) error {
+func (index *DenseIndex) SearchIfInto(executor *Executor, queries Matrix, outputs *DenseOutputs,
+	config ExpansionConfig, stats *DenseStats, admits func(Key) bool) error {
 	if admits == nil {
 		return fail(MalformedInput, "the admission predicate is nil")
 	}
-	return index.searchDispatch(queries, outputs, expansion, stats, admits)
+	return index.searchDispatch(executor, queries, outputs, config, stats, admits)
 }
 
-func (index *DenseIndex) searchDispatch(queries Matrix, outputs *DenseOutputs, expansion uint, stats *DenseStats,
-	admits func(Key) bool) error {
+func (index *DenseIndex) searchDispatch(executor *Executor, queries Matrix, outputs *DenseOutputs,
+	config ExpansionConfig, stats *DenseStats, admits func(Key) bool) error {
 	if err := index.live(); err != nil {
 		return err
 	}
-	dimensions, err := index.Dimensions()
+	pool, err := executor.live()
 	if err != nil {
-		return err
-	}
-	if err := queries.validate(dimensions); err != nil {
 		return err
 	}
 	if err := outputs.validate(queries.Rows()); err != nil {
@@ -525,39 +574,24 @@ func (index *DenseIndex) searchDispatch(queries Matrix, outputs *DenseOutputs, e
 		return nil
 	}
 
-	config := C.usearch_dense_expansion_config_t{expansion_factor: C.size_t(expansion)}
+	lowered := config.lower()
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	view := queries.view(&pinner)
+	span := outputs.span(&pinner)
 	var rawStats C.usearch_dense_traversal_stats_t
 	var failure C.usearch_error_t
-	var key Key
-	var distance Distance
-	keysStride := C.size_t(outputs.wanted * uint(unsafe.Sizeof(key)))
-	distancesStride := C.size_t(outputs.wanted * uint(unsafe.Sizeof(distance)))
-	keysPointer := (*C.usearch_key_t)(unsafe.Pointer(unsafe.SliceData(outputs.keys)))
-	distancesPointer := (*C.usearch_distance_t)(unsafe.Pointer(unsafe.SliceData(outputs.distances)))
-	countsPointer := (*C.size_t)(unsafe.Pointer(unsafe.SliceData(outputs.counts)))
 
 	if admits == nil {
-		C.usearch_dense_search(index.handle,
-			queries.pointer, C.size_t(queries.rows), C.size_t(queries.stride),
-			C.usearch_scalar_t(queries.kind), C.size_t(outputs.wanted),
-			&config, &rawStats,
-			keysPointer, keysStride,
-			distancesPointer, distancesStride,
-			countsPointer, &failure)
+		C.usearch_dense_search(index.handle, pool, &view, &span, &lowered, nil, nil, &rawStats, &failure)
 	} else {
 		// The predicate crosses as an opaque handle rather than a Go pointer, since the
 		// closure it names holds Go pointers the cgo rules forbid handing to C. The state
 		// pointer addresses the handle itself, which is an integer and holds no pointers.
 		state := cgo.NewHandle(admits)
 		defer state.Delete()
-		C.usearch_dense_search_if(index.handle,
-			queries.pointer, C.size_t(queries.rows), C.size_t(queries.stride),
-			C.usearch_scalar_t(queries.kind), C.size_t(outputs.wanted),
-			&config, &rawStats,
-			C.usearch_go_admits(), unsafe.Pointer(&state),
-			keysPointer, keysStride,
-			distancesPointer, distancesStride,
-			countsPointer, &failure)
+		C.usearch_dense_search_if(index.handle, pool, &view, &span, &lowered,
+			C.usearch_go_admits(), unsafe.Pointer(&state), nil, nil, &rawStats, &failure)
 	}
 	runtime.KeepAlive(queries)
 	runtime.KeepAlive(outputs.keys)
@@ -571,12 +605,83 @@ func (index *DenseIndex) searchDispatch(queries Matrix, outputs *DenseOutputs, e
 }
 
 //export usearchDenseAdmits
-func usearchDenseAdmits(key C.usearch_key_t, state unsafe.Pointer) C.int {
+func usearchDenseAdmits(key C.usearch_key_t, state unsafe.Pointer) C.usearch_admission_t {
 	admits := (*cgo.Handle)(state).Value().(func(Key) bool)
 	if admits(keyFromRaw(key)) {
-		return 1
+		return C.usearch_admit_k
 	}
-	return 0
+	return C.usearch_reject_k
+}
+
+// Refine re-selects the neighbors of every stored entry against the finished graph, improving
+// edges chosen when the graph around them was still incomplete.
+//
+// A build step rather than a repair: a cheap insertion pass followed by one refinement reaches
+// a better graph, in less total time, than a single expensive insertion pass - so a wide
+// expansion factor belongs here rather than in Add. Returns the nodes whose edges changed, so
+// a caller loops until that falls below whatever change rate they consider settled.
+//
+// Searches may run throughout; insertions may not.
+func (index *DenseIndex) Refine(executor *Executor, config ExpansionConfig, stats *DenseStats) (uint, error) {
+	if err := index.live(); err != nil {
+		return 0, err
+	}
+	pool, err := executor.live()
+	if err != nil {
+		return 0, err
+	}
+	lowered := config.lower()
+	var rawStats C.usearch_dense_traversal_stats_t
+	var failure C.usearch_error_t
+	changed := C.usearch_dense_refine(index.handle, pool, &lowered, nil, nil, &rawStats, &failure)
+	if err := check(failure); err != nil {
+		return 0, err
+	}
+	report(stats, rawStats)
+	return uint(changed), nil
+}
+
+// MaxSimInto scores multi-row queries against multi-row entries by late interaction: every
+// query row takes its best match within a key, and those maxima sum to that key's score.
+//
+// A document is one key holding its token rows, which is what ValuesPerKey above one exists
+// for. rowsPerQuery is the token count each query occupies, queries holds them end to end, and
+// the outputs are sized over documents rather than rows. Runs on an inner-product index alone.
+//
+// See https://arxiv.org/abs/2004.12832 - ColBERT, which introduced this scoring.
+func (index *DenseIndex) MaxSimInto(executor *Executor, queries Matrix, rowsPerQuery uint,
+	outputs *DenseOutputs, config ExpansionConfig, stats *DenseStats) error {
+	if err := index.live(); err != nil {
+		return err
+	}
+	pool, err := executor.live()
+	if err != nil {
+		return err
+	}
+	if rowsPerQuery == 0 || queries.Rows()%rowsPerQuery != 0 {
+		return fail(ShapeMismatch, "the query rows do not divide into whole queries")
+	}
+	if err := outputs.validate(queries.Rows() / rowsPerQuery); err != nil {
+		return err
+	}
+	lowered := config.lower()
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	view := queries.view(&pinner)
+	span := outputs.span(&pinner)
+	var rawStats C.usearch_dense_traversal_stats_t
+	var failure C.usearch_error_t
+	C.usearch_dense_maxsim(index.handle, pool, &view, C.size_t(rowsPerQuery), &span, &lowered,
+		nil, nil, &rawStats, &failure)
+	runtime.KeepAlive(queries)
+	runtime.KeepAlive(outputs.keys)
+	runtime.KeepAlive(outputs.distances)
+	runtime.KeepAlive(outputs.counts)
+	if err := check(failure); err != nil {
+		return err
+	}
+	report(stats, rawStats)
+	return nil
 }
 
 // Count reports how many entries are stored under a key; zero means the index holds none.
@@ -608,17 +713,11 @@ func (index *DenseIndex) Get(key Key, vectors Matrix) (uint, error) {
 	if err := index.live(); err != nil {
 		return 0, err
 	}
-	dimensions, err := index.Dimensions()
-	if err != nil {
-		return 0, err
-	}
-	if err := vectors.validate(dimensions); err != nil {
-		return 0, err
-	}
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	span := vectors.span(&pinner)
 	var failure C.usearch_error_t
-	entries := C.usearch_dense_get(index.handle, key.toRaw(),
-		vectors.pointer, C.size_t(vectors.rows), C.size_t(vectors.stride),
-		C.usearch_scalar_t(vectors.kind), &failure)
+	entries := C.usearch_dense_get(index.handle, key.toRaw(), &span, &failure)
 	runtime.KeepAlive(vectors)
 	if err := check(failure); err != nil {
 		return 0, err
@@ -626,35 +725,19 @@ func (index *DenseIndex) Get(key Key, vectors Matrix) (uint, error) {
 	return uint(entries), nil
 }
 
-// Merge absorbs a donor index - cheaper than re-inserting its vectors one by one, wiring
-// cross-links via landmark stitching. Readers may keep searching throughout, since
-// unpublished rows hide behind the watermark.
-//
-// The donor is consumed whether the call succeeds or fails: the C side owns it afterwards, so
-// the donor handle is emptied here and its own Close becomes a no-op.
-func (index *DenseIndex) Merge(donor *DenseIndex) error {
-	if err := index.live(); err != nil {
-		return err
-	}
-	if donor == nil || donor.handle == nil {
-		return fail(Uninitialized, "the donor index is not initialized")
-	}
-	handle := donor.handle
-	donor.handle = nil
-	var failure C.usearch_error_t
-	C.usearch_dense_merge(index.handle, handle, &failure)
-	return check(failure)
-}
-
 // Save writes the index under a path, in the layout its extension picks - one .safegraphs
 // monolith, or a .safegraphs.json manifest beside its shards. Demands a mutation-free window;
 // concurrent readers keep searching throughout.
-func (index *DenseIndex) Save(path string) error {
+func (index *DenseIndex) Save(executor *Executor, path string) error {
 	if err := index.live(); err != nil {
 		return err
 	}
+	pool, err := executor.live()
+	if err != nil {
+		return err
+	}
 	var failure C.usearch_error_t
-	C.usearch_dense_save(index.handle, borrow(path), &failure)
+	C.usearch_dense_save(index.handle, pool, borrow(path), nil, nil, &failure)
 	runtime.KeepAlive(path)
 	return check(failure)
 }
@@ -663,44 +746,54 @@ func (index *DenseIndex) Save(path string) error {
 // deciding the behavior: materialize into RAM, upload to the device, or open in place on
 // disk. A handle whose geometry was left zeroed freezes it here, from the checkpoint's own
 // headers.
-func (index *DenseIndex) Load(path string) error {
+func (index *DenseIndex) Load(executor *Executor, path string) error {
 	if err := index.live(); err != nil {
 		return err
 	}
+	pool, err := executor.live()
+	if err != nil {
+		return err
+	}
 	var failure C.usearch_error_t
-	C.usearch_dense_load(index.handle, borrow(path), &failure)
+	C.usearch_dense_load(index.handle, pool, borrow(path), nil, nil, &failure)
 	runtime.KeepAlive(path)
 	return check(failure)
 }
 
 // SaveBuffer writes the index into a caller-owned buffer as one monolith. Size the buffer
-// with SerializedLength.
-func (index *DenseIndex) SaveBuffer(buffer []byte) error {
+// with StorageRequirements.
+func (index *DenseIndex) SaveBuffer(executor *Executor, buffer []byte) error {
 	if err := index.live(); err != nil {
 		return err
 	}
 	if len(buffer) == 0 {
 		return fail(ShapeMismatch, "the buffer is empty")
 	}
+	pool, err := executor.live()
+	if err != nil {
+		return err
+	}
 	var failure C.usearch_error_t
-	C.usearch_dense_save_buffer(index.handle, unsafe.Pointer(unsafe.SliceData(buffer)), C.size_t(len(buffer)),
-		&failure)
+	C.usearch_dense_save_buffer(index.handle, pool, lendBytes(buffer), nil, nil, &failure)
 	runtime.KeepAlive(buffer)
 	return check(failure)
 }
 
 // LoadBuffer reads a monolith from a buffer into this handle, with the residency deciding the
 // behavior like Load. A residency that opens in place demands the buffer outlive the handle.
-func (index *DenseIndex) LoadBuffer(buffer []byte) error {
+func (index *DenseIndex) LoadBuffer(executor *Executor, buffer []byte) error {
 	if err := index.live(); err != nil {
 		return err
 	}
 	if len(buffer) == 0 {
 		return fail(MalformedInput, "the buffer is empty")
 	}
+	pool, err := executor.live()
+	if err != nil {
+		return err
+	}
 	var failure C.usearch_error_t
-	C.usearch_dense_load_buffer(index.handle, unsafe.Pointer(unsafe.SliceData(buffer)), C.size_t(len(buffer)),
-		&failure)
+	C.usearch_dense_load_buffer(index.handle, pool, borrowBytes(buffer), nil, nil, &failure)
 	runtime.KeepAlive(buffer)
 	return check(failure)
 }

@@ -13,6 +13,7 @@ import (
 	"math"
 	"math/rand"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 )
@@ -52,6 +53,21 @@ func sequentialKeys(count uint) []Key {
 }
 
 // newIndex builds a reserved index and registers its release.
+// pool is the executor every fanned-out verb here runs on; the engine derives none.
+func pool(t *testing.T) *Executor {
+	t.Helper()
+	executor, err := NewExecutor(DefaultResidency(), 2)
+	if err != nil {
+		t.Fatalf("the executor must spawn: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := executor.Close(); err != nil {
+			t.Errorf("the executor must close: %v", err)
+		}
+	})
+	return executor
+}
+
 func newIndex(t *testing.T, options DenseOptions, capacity uint) *DenseIndex {
 	t.Helper()
 	index, err := NewDenseIndex(&options)
@@ -84,7 +100,7 @@ func populated(t *testing.T, options DenseOptions, count uint) (*DenseIndex, []K
 	index := newIndex(t, options, count)
 	keys := sequentialKeys(count)
 	slab := seededRows(count, options.Dimensions)
-	added, err := index.Add(keys, RowsOf(slab, options.Dimensions), 0, nil)
+	added, err := index.Add(pool(t), keys, RowsOf(slab, options.Dimensions), ExpansionConfig{}, nil)
 	if err != nil {
 		t.Fatalf("the batch must insert: %v", err)
 	}
@@ -98,7 +114,7 @@ func populated(t *testing.T, options DenseOptions, count uint) (*DenseIndex, []K
 func topOne(t *testing.T, index *DenseIndex, query []float32, dimensions uint) (Key, Distance, bool) {
 	t.Helper()
 	outputs := PackedDenseOutputs(1, 1)
-	if err := index.SearchInto(RowsOf(query, dimensions), &outputs, 0, nil); err != nil {
+	if err := index.SearchInto(pool(t), RowsOf(query, dimensions), &outputs, ExpansionConfig{}, nil); err != nil {
 		t.Fatalf("the search must run: %v", err)
 	}
 	keys, distances := outputs.MatchesOf(0)
@@ -239,57 +255,65 @@ func TestMatrixViewsRejectBadShapes(t *testing.T) {
 // the accessors in shim.c. This is the only thing exercising them.
 func TestOptionsSurviveTheRawRoundTrip(t *testing.T) {
 	pinned := DenseOptions{
-		Dimensions:       768,
-		DimensionPadding: SimdQuantumDimensions,
-		Metric:           Euclidean,
-		Quantization:     I8,
-		Connectivity:     32,
-		Residency:        Residency{Kind: RAM, Threads: 7, HugePages: RequireHugePages},
+		Dimensions:   768,
+		Metric:       Euclidean,
+		Quantization: I8,
+		Connectivity: 32,
+		ValuesPerKey: 4,
+		Residency:    RAMResidency{MemoryDomains: []int32{0, 1}},
 	}
 
 	options := []DenseOptions{pinned, DefaultDenseOptions()}
-	// Ordinal zero is the trap: it must not come back as FirstFreeDevice, which marshals as -1.
-	for _, device := range []Device{FirstFreeDevice, 0, 3} {
-		for _, addressing := range []Addressing{DeviceOnly, UnifiedAddressing} {
-			single := angularF32(64)
-			single.Residency = Residency{Kind: VRAM, Device: device, Addressing: addressing}
-			options = append(options, single)
-		}
+	// Ordinal zero is the trap: an empty list derives, a list holding zero names device zero.
+	for _, devices := range [][]int32{nil, {0}, {0, 3}} {
+		single := angularF32(64)
+		single.Residency = VRAMResidency{Devices: devices}
+		options = append(options, single)
 	}
-	for _, sectors := range []uint32{0, 512, 4096} {
-		for _, mode := range []IOMode{DirectIO, PageCachedIO} {
-			single := angularF32(64)
-			single.Residency = Residency{Kind: NVMe, SectorBytes: sectors, QueueDepth: 128, IOMode: mode}
-			options = append(options, single)
-		}
+	for _, paths := range [][]string{nil, {"/dev/nvme0n1"}, {"/dev/nvme0n1", "/dev/nvme1n1"}} {
+		single := angularF32(64)
+		single.Residency = NVMeResidency{Paths: paths}
+		options = append(options, single)
 	}
 
+	// A checkpoint records where it was written, never where a reader must keep it, so only
+	// the tag survives the trip - the placement comes back empty for the caller to fill.
 	for _, single := range options {
 		lifted, err := single.reload()
 		if err != nil {
 			t.Fatalf("%+v must survive the round trip: %v", single.Residency, err)
 		}
-		if lifted != single {
+		if lifted.Residency.String() != single.Residency.String() {
+			t.Errorf("the residency came back as %v, not %v", lifted.Residency, single.Residency)
+		}
+		if lifted.Dimensions != single.Dimensions || lifted.Metric != single.Metric ||
+			lifted.Quantization != single.Quantization || lifted.Connectivity != single.Connectivity {
 			t.Errorf("%+v came back as %+v", single, lifted)
 		}
 	}
 }
 
 func TestOptionsRejectUnknownTags(t *testing.T) {
-	// An unknown residency never reaches the union, so it is caught on the way down.
+	// A fourth residency is unrepresentable - the interface is sealed by an unexported method,
+	// so the only bad value left is the absent one, and that is caught on the way down.
 	unknown := angularF32(64)
-	unknown.Residency.Kind = ResidencyKind(9)
-	if _, err := unknown.toRaw(); StatusOf(err) != UnknownKind {
-		t.Errorf("an unknown residency must not be guessed: %v", StatusOf(err))
+	unknown.Residency = nil
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	if _, err := unknown.toRaw(&pinner); StatusOf(err) != MalformedInput {
+		t.Errorf("a missing residency must be named, not guessed: %v", StatusOf(err))
 	}
 
+	// A tag a newer library wrote is caught on the way up, never passed through. The residency
+	// tags are the C interface's, not this package's, since Go names a residency by its type.
+	const ramTag = 0
 	// A tag a newer library wrote is caught on the way up, never passed through.
 	for _, single := range []struct {
 		name                              string
 		metric, quantization, residencyOf int32
 	}{
-		{"metric", 99, int32(F32), int32(RAM)},
-		{"quantization", int32(Angular), 77, int32(RAM)},
+		{"metric", 99, int32(F32), ramTag},
+		{"quantization", int32(Angular), 77, ramTag},
 		{"residency", int32(Angular), int32(F32), 9},
 	} {
 		t.Run(single.name, func(t *testing.T) {
@@ -356,8 +380,8 @@ func TestAddsAndGetsVectorsIntact(t *testing.T) {
 	const pitch = 16
 	padded := make([]float32, pitch)
 	copy(padded, slab[2*dimensions:3*dimensions])
-	if _, err := index.Add([]Key{KeyFromUint64(500)},
-		StridedRowsOf(padded, 1, dimensions, pitch*4), 0, nil); err != nil {
+	if _, err := index.Add(pool(t), []Key{KeyFromUint64(500)},
+		StridedRowsOf(padded, 1, dimensions, pitch*4), ExpansionConfig{}, nil); err != nil {
 		t.Fatalf("a padded row must insert: %v", err)
 	}
 	widened := make([]float32, pitch)
@@ -379,7 +403,8 @@ func TestReportsTheTrueExtentWhenTruncated(t *testing.T) {
 	shared := KeyFromUint64(7)
 	slab := seededRows(3, dimensions)
 
-	if _, err := index.Add([]Key{shared, shared, shared}, RowsOf(slab, dimensions), 0, nil); err != nil {
+	if _, err := index.Add(pool(t), []Key{shared, shared, shared}, RowsOf(slab, dimensions),
+		ExpansionConfig{}, nil); err != nil {
 		t.Fatalf("three rows may share one key: %v", err)
 	}
 	if counted, err := index.Count(shared); err != nil || counted != 3 {
@@ -418,20 +443,20 @@ func TestRejectsMalformedShapes(t *testing.T) {
 		run  func() error
 	}{
 		{"more rows than keys", func() error {
-			_, err := index.Add(sequentialKeys(1), RowsOf(slab, dimensions), 0, nil)
+			_, err := index.Add(pool(t), sequentialKeys(1), RowsOf(slab, dimensions), ExpansionConfig{}, nil)
 			return err
 		}},
 		{"rows of the wrong width", func() error {
-			_, err := index.Add(sequentialKeys(1), RowsOf(narrow, dimensions/2), 0, nil)
+			_, err := index.Add(pool(t), sequentialKeys(1), RowsOf(narrow, dimensions/2), ExpansionConfig{}, nil)
 			return err
 		}},
 		{"queries of the wrong width", func() error {
 			outputs := PackedDenseOutputs(1, 4)
-			return index.SearchInto(RowsOf(narrow, dimensions/2), &outputs, 0, nil)
+			return index.SearchInto(pool(t), RowsOf(narrow, dimensions/2), &outputs, ExpansionConfig{}, nil)
 		}},
 		{"fewer output rows than queries", func() error {
 			outputs := PackedDenseOutputs(1, 4)
-			return index.SearchInto(queries, &outputs, 0, nil)
+			return index.SearchInto(pool(t), queries, &outputs, ExpansionConfig{}, nil)
 		}},
 		{"outputs with no room", func() error {
 			_, err := DenseOutputsOf(make([]Key, 4), make([]Distance, 4), make([]uint, 1), 0)
@@ -452,11 +477,8 @@ func TestRejectsMalformedShapes(t *testing.T) {
 	}
 
 	outputs := PackedDenseOutputs(2, 4)
-	if status := StatusOf(index.SearchIfInto(queries, &outputs, 0, nil, nil)); status != MalformedInput {
+	if status := StatusOf(index.SearchIfInto(pool(t), queries, &outputs, ExpansionConfig{}, nil, nil)); status != MalformedInput {
 		t.Errorf("a nil predicate reported %v", status)
-	}
-	if status := StatusOf(index.Merge(nil)); status != Uninitialized {
-		t.Errorf("an absent donor reported %v", status)
 	}
 }
 
@@ -477,7 +499,7 @@ func TestSearchFindsEachRowAsItsOwnNearest(t *testing.T) {
 
 	outputs := PackedDenseOutputs(queries, wanted)
 	var stats DenseStats
-	if err := index.SearchInto(RowsOf(slab[:queries*dimensions], dimensions), &outputs, 64, &stats); err != nil {
+	if err := index.SearchInto(pool(t), RowsOf(slab[:queries*dimensions], dimensions), &outputs, ExpansionConfig{}, &stats); err != nil {
 		t.Fatalf("the batch must resolve: %v", err)
 	}
 
@@ -520,7 +542,7 @@ func TestSearchAdmitsOnlyApprovedKeys(t *testing.T) {
 		value, integral := key.Uint64()
 		return integral && value%2 == 0
 	}
-	if err := index.SearchIfInto(queries, &admitted, 64, nil, even); err != nil {
+	if err := index.SearchIfInto(pool(t), queries, &admitted, ExpansionConfig{ExpansionFactor: 64}, nil, even); err != nil {
 		t.Fatalf("the filtered batch must resolve: %v", err)
 	}
 	seen := 0
@@ -540,7 +562,7 @@ func TestSearchAdmitsOnlyApprovedKeys(t *testing.T) {
 
 	// Admitting nothing is a result, not a failure.
 	rejected := PackedDenseOutputs(3, 10)
-	if err := index.SearchIfInto(queries, &rejected, 0, nil, func(Key) bool { return false }); err != nil {
+	if err := index.SearchIfInto(pool(t), queries, &rejected, ExpansionConfig{}, nil, func(Key) bool { return false }); err != nil {
 		t.Fatalf("a rejecting filter must still resolve: %v", err)
 	}
 	for query := uint(0); query < 3; query++ {
@@ -601,13 +623,13 @@ func TestEveryMetricAndQuantizationSearches(t *testing.T) {
 			if vectors.Rows() != rows {
 				t.Fatalf("counted %d of %d packed rows", vectors.Rows(), rows)
 			}
-			if _, err := index.Add(sequentialKeys(rows), vectors, 0, nil); err != nil {
+			if _, err := index.Add(pool(t), sequentialKeys(rows), vectors, ExpansionConfig{}, nil); err != nil {
 				t.Fatalf("packed rows must insert: %v", err)
 			}
 
 			outputs := PackedDenseOutputs(1, 4)
 			query := RowsOf(packed[:dimensions/8], dimensions)
-			if err := index.SearchInto(query, &outputs, 0, nil); err != nil {
+			if err := index.SearchInto(pool(t), query, &outputs, ExpansionConfig{}, nil); err != nil {
 				t.Fatalf("packed rows must search: %v", err)
 			}
 			found, distances := outputs.MatchesOf(0)
@@ -632,21 +654,21 @@ func TestSerializationPreservesEveryOption(t *testing.T) {
 	options.Metric = Euclidean
 	options.Quantization = I8
 	options.Connectivity = 24
-	options.DimensionPadding = SimdQuantumDimensions
-	options.Residency = Residency{Kind: RAM, Threads: 3}
+	options.ValuesPerKey = 2
+	options.Residency = RAMResidency{MemoryDomains: []int32{0}}
 
 	source, keys, slab := populated(t, options, 32)
 	path := filepath.Join(t.TempDir(), "index.safegraphs")
-	if err := source.Save(path); err != nil {
+	if err := source.Save(pool(t), path); err != nil {
 		t.Fatalf("the checkpoint must write: %v", err)
 	}
 
-	length, err := source.SerializedLength()
+	length, err := source.StorageRequirements()
 	if err != nil || length == 0 {
 		t.Fatalf("the index serializes to %d bytes: %v", length, err)
 	}
 	buffer := make([]byte, length)
-	if err := source.SaveBuffer(buffer); err != nil {
+	if err := source.SaveBuffer(pool(t), buffer); err != nil {
 		t.Fatalf("the buffer must write: %v", err)
 	}
 
@@ -657,19 +679,21 @@ func TestSerializationPreservesEveryOption(t *testing.T) {
 	}{
 		{"file",
 			func() (DenseOptions, error) { return DenseMetadata(path) },
-			func(index *DenseIndex) error { return index.Load(path) }},
+			func(index *DenseIndex) error { return index.Load(pool(t), path) }},
 		{"buffer",
 			func() (DenseOptions, error) { return DenseMetadataBuffer(buffer) },
-			func(index *DenseIndex) error { return index.LoadBuffer(buffer) }},
+			func(index *DenseIndex) error { return index.LoadBuffer(pool(t), buffer) }},
 	} {
 		t.Run(single.name, func(t *testing.T) {
 			metadata, err := single.metadata()
 			if err != nil {
 				t.Fatalf("the metadata must read without loading: %v", err)
 			}
+			// The placement is deliberately absent: a checkpoint records where it was written,
+			// never where a reader must keep it.
 			if metadata.Dimensions != dimensions || metadata.Metric != Euclidean ||
 				metadata.Quantization != I8 || metadata.Connectivity != 24 ||
-				metadata.DimensionPadding != SimdQuantumDimensions {
+				metadata.ValuesPerKey != 2 {
 				t.Errorf("the checkpoint describes %+v", metadata)
 			}
 
@@ -696,47 +720,6 @@ func TestSerializationPreservesEveryOption(t *testing.T) {
 
 // endregion: Serialization
 
-// region: Merge
-
-// The C side owns the donor afterwards, so the Go handle must be emptied rather than freed.
-func TestMergeConsumesTheDonor(t *testing.T) {
-	const dimensions = 16
-	options := angularF32(dimensions)
-	index, keys, slab := populated(t, options, 32)
-
-	donor := newIndex(t, options, 32)
-	donorKeys := make([]Key, 32)
-	for row := range donorKeys {
-		donorKeys[row] = KeyFromUint64(uint64(row) + 1000)
-	}
-	donorSlab := seededRows(32, dimensions)
-	if _, err := donor.Add(donorKeys, RowsOf(donorSlab, dimensions), 0, nil); err != nil {
-		t.Fatalf("the donor must fill: %v", err)
-	}
-
-	if err := index.Merge(donor); err != nil {
-		t.Fatalf("the donor must be absorbed: %v", err)
-	}
-	if err := donor.Close(); err != nil {
-		t.Fatalf("closing a consumed donor must be a no-op: %v", err)
-	}
-	if _, err := donor.Size(); StatusOf(err) != Uninitialized {
-		t.Errorf("a consumed donor reported %v", StatusOf(err))
-	}
-
-	if size, err := index.Size(); err != nil || size != 64 {
-		t.Fatalf("the merged index holds %d of 64 entries: %v", size, err)
-	}
-	if found, _, _ := topOne(t, index, slab[:dimensions], dimensions); found != keys[0] {
-		t.Errorf("the merge lost %v", keys[0])
-	}
-	if found, _, _ := topOne(t, index, donorSlab[:dimensions], dimensions); found != donorKeys[0] {
-		t.Errorf("the merge lost %v", donorKeys[0])
-	}
-}
-
-// endregion: Merge
-
 // region: Concurrency
 
 // This earns its keep under -race and GODEBUG=cgocheck=1, where it checks that Go pointers
@@ -757,7 +740,8 @@ func TestSearchesWhileInserting(t *testing.T) {
 
 	for writer := 0; writer < writers; writer++ {
 		writing.Add(1)
-		go func(writer int) {
+		mine := pool(t)
+		go func(writer int, mine *Executor) {
 			defer writing.Done()
 			for batch := 0; batch < batches; batch++ {
 				keys := make([]Key, batchRows)
@@ -765,7 +749,7 @@ func TestSearchesWhileInserting(t *testing.T) {
 					keys[row] = KeyFromUint64(uint64(1000 + (writer*batches+batch)*batchRows + row))
 				}
 				rows := seededRows(batchRows, dimensions)
-				if added, err := index.Add(keys, RowsOf(rows, dimensions), 0, nil); err != nil {
+				if added, err := index.Add(mine, keys, RowsOf(rows, dimensions), ExpansionConfig{}, nil); err != nil {
 					t.Errorf("a concurrent batch failed: %v", err)
 					return
 				} else if added != batchRows {
@@ -773,12 +757,13 @@ func TestSearchesWhileInserting(t *testing.T) {
 					return
 				}
 			}
-		}(writer)
+		}(writer, mine)
 	}
 
 	for reader := 0; reader < writers; reader++ {
 		reading.Add(1)
-		go func() {
+		mine := pool(t)
+		go func(mine *Executor) {
 			defer reading.Done()
 			query := RowsOf(slab[:dimensions], dimensions)
 			for {
@@ -788,12 +773,12 @@ func TestSearchesWhileInserting(t *testing.T) {
 				default:
 				}
 				outputs := PackedDenseOutputs(1, 10)
-				if err := index.SearchInto(query, &outputs, 0, nil); err != nil {
+				if err := index.SearchInto(mine, query, &outputs, ExpansionConfig{}, nil); err != nil {
 					t.Errorf("a concurrent search failed: %v", err)
 					return
 				}
 			}
-		}()
+		}(mine)
 	}
 
 	writing.Wait()

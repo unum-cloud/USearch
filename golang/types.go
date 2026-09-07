@@ -23,6 +23,7 @@ package usearch
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"unsafe"
 )
@@ -74,6 +75,9 @@ const (
 	// Contended means a synchronization contract was violated by a concurrent operation;
 	// discard any produced output and retry in a quieter phase.
 	Contended Status = 13
+	// Cancelled means a progress handler asked the operation to stop; it unwound and published
+	// nothing, so the handle carries whatever it did before the call.
+	Cancelled Status = 14
 	// Unrecognized tags a status a newer library reported and this build cannot name. An
 	// unknown status is never success.
 	Unrecognized Status = -1
@@ -110,6 +114,8 @@ func (status Status) String() string {
 		return "config_mismatch"
 	case Contended:
 		return "contended"
+	case Cancelled:
+		return "cancelled"
 	default:
 		return "unrecognized"
 	}
@@ -139,7 +145,7 @@ func check(raw C.usearch_error_t) error {
 		return nil
 	}
 	status := Status(raw.status)
-	if status <= Success || status > Contended {
+	if status <= Success || status > Cancelled {
 		status = Unrecognized
 	}
 	message := ""
@@ -535,140 +541,227 @@ func (matrix Matrix) validate(dimensions uint) error {
 
 // region: Residency
 
-// HugePages says whether the RAM arenas demand a provisioned huge-page pool.
-type HugePages uint8
-
-const (
-	// BasePages takes ordinary pages, whatever the kernel provides.
-	BasePages HugePages = iota
-	// RequireHugePages fails loudly when the pool is missing, rather than degrading silently.
-	RequireHugePages
-)
-
-// Device names the accelerator that hosts a VRAM index, as a CUDA ordinal.
-type Device int32
-
-// FirstFreeDevice picks the first device with free memory.
-const FirstFreeDevice Device = -1
-
-// Addressing says whether a VRAM index may spill past the device's memory.
-type Addressing uint8
-
-const (
-	// DeviceOnly keeps everything in device memory.
-	DeviceOnly Addressing = iota
-	// UnifiedAddressing spills cold shards into host memory through the pager, trading
-	// traversal latency for datasets past the device.
-	UnifiedAddressing
-)
-
-// IOMode says how an NVMe index reaches the block device.
-type IOMode uint8
-
-const (
-	// DirectIO is the O_DIRECT-class page-cache bypass - the default and the point.
-	DirectIO IOMode = iota
-	// PageCachedIO takes ordinary buffered reads through the page cache.
-	PageCachedIO
-)
-
-// ResidencyKind selects which fields of a Residency are read, and what loading a checkpoint
-// means for the handle.
-type ResidencyKind int32
-
-const (
-	// RAM is a volatile-memory index traversed by CPU threads - the concurrent baseline.
-	RAM ResidencyKind = 0
-	// VRAM is an accelerator-memory index traversed by GPU warps on a chosen device.
-	VRAM ResidencyKind = 1
-	// NVMe is a persisted index traversed through pluggable I/O engines, sized past RAM.
-	// External-memory graphs are never modified in place, so the handle is read-only and
-	// every mutating verb fails on it with ReadOnly.
-	NVMe ResidencyKind = 2
-)
-
-// Residency says where an index's payload lives and which engine traverses it. Only the
-// fields Kind selects are read; the rest are ignored.
-type Residency struct {
-	// Kind selects the fields below, and the meaning of loading a checkpoint.
-	Kind ResidencyKind
-	// Threads is the RAM worker count for construction and batched search; zero takes 7/8 of
-	// the logical cores, since full occupancy starves the ordered publication path.
-	Threads uint
-	// HugePages is the RAM backing demand.
-	HugePages HugePages
-	// Device is the VRAM accelerator ordinal.
-	Device Device
-	// Addressing is the VRAM spill policy.
-	Addressing Addressing
-	// SectorBytes is the NVMe I/O granularity; zero probes the device. 512 fits one 256-d I8
-	// row.
-	SectorBytes uint32
-	// QueueDepth is the NVMe submission ring depth; zero derives from the device.
-	QueueDepth uint32
-	// IOMode is how the NVMe handle reaches the block device.
-	IOMode IOMode
+// Residency says where an index's payload lives and which engine traverses it.
+//
+// Sealed: RAMResidency, VRAMResidency and NVMeResidency are the only implementations, since the
+// method below is unexported. A placement and the residency that reads it are one value, so a
+// caller cannot fill an arm the tag does not select - the contradiction the ABI's tagged union
+// forbids is unrepresentable here too.
+//
+// A placement names hardware and nothing else: the workers belong to an Executor, and the
+// candidate-pool breadth rides each call. Empty placements derive.
+type Residency interface {
+	// write stamps the tag and its arm of the options union. Unexported, which is what seals
+	// the interface - no other package can add a fourth residency.
+	write(options *C.usearch_dense_options_t, pinner *runtime.Pinner) error
+	// String names the residency as the C interface spells it.
+	String() string
 }
 
-// DefaultResidency is a RAM index with a derived thread count and ordinary pages.
-func DefaultResidency() Residency { return Residency{Kind: RAM} }
+// RAMResidency is a volatile-memory index traversed by CPU threads - the concurrent baseline.
+type RAMResidency struct {
+	// MemoryDomains are the NUMA node ids to place one shard on apiece; empty derives every
+	// node the process may use.
+	MemoryDomains []int32
+}
 
-// write stamps the residency tag and its arm of the options union. Each arm is a named struct,
-// so it travels whole and the two-state fields keep their names right up to the boundary.
-func (residency Residency) write(options *C.usearch_dense_options_t) error {
-	switch residency.Kind {
-	case RAM:
-		C.usearch_go_write_ram(options, C.usearch_ram_options_t{
-			threads:    C.size_t(residency.Threads),
-			huge_pages: residency.HugePages == RequireHugePages,
-		})
-	case VRAM:
-		C.usearch_go_write_vram(options, C.usearch_vram_options_t{
-			device:             C.int32_t(residency.Device),
-			unified_addressing: residency.Addressing == UnifiedAddressing,
-		})
-	case NVMe:
-		C.usearch_go_write_nvme(options, C.usearch_nvme_options_t{
-			sector_bytes: C.uint32_t(residency.SectorBytes),
-			queue_depth:  C.uint32_t(residency.QueueDepth),
-			direct_io:    residency.IOMode == DirectIO,
-		})
-	default:
-		return fail(UnknownKind, "the residency names neither RAM, VRAM, nor NVMe")
-	}
+// VRAMResidency is an accelerator-memory index traversed by GPU warps, sharded across the named
+// devices and never replicated.
+type VRAMResidency struct {
+	// Devices are the accelerator ordinals to shard across; empty derives one free device.
+	Devices []int32
+}
+
+// NVMeResidency is a persisted index traversed through pluggable I/O engines, sized past RAM.
+//
+// External-memory graphs are never modified in place, so the handle is read-only and every
+// mutating verb fails on it with ReadOnly.
+type NVMeResidency struct {
+	// Paths are the block devices to span, one shard apiece; empty derives.
+	Paths []string
+}
+
+func (residency RAMResidency) String() string  { return "ram" }
+func (residency VRAMResidency) String() string { return "vram" }
+func (residency NVMeResidency) String() string { return "nvme" }
+
+func (residency RAMResidency) write(options *C.usearch_dense_options_t, pinner *runtime.Pinner) error {
+	domains, count := pinnedInts(residency.MemoryDomains, pinner)
+	C.usearch_go_write_ram(options, C.usearch_ram_options_t{
+		memory_domains:       domains,
+		memory_domains_count: count,
+	})
 	return nil
 }
 
-// readResidency reconstructs a Residency from the tag and the arm it selects.
-func readResidency(options *C.usearch_dense_options_t) (Residency, error) {
-	residency := Residency{Kind: ResidencyKind(options.residency)}
-	switch residency.Kind {
-	case RAM:
-		ram := C.usearch_go_read_ram(options)
-		residency.Threads = uint(ram.threads)
-		if bool(ram.huge_pages) {
-			residency.HugePages = RequireHugePages
-		}
-	case VRAM:
-		vram := C.usearch_go_read_vram(options)
-		residency.Device = Device(vram.device)
-		if bool(vram.unified_addressing) {
-			residency.Addressing = UnifiedAddressing
-		}
-	case NVMe:
-		nvme := C.usearch_go_read_nvme(options)
-		residency.SectorBytes = uint32(nvme.sector_bytes)
-		residency.QueueDepth = uint32(nvme.queue_depth)
-		if !bool(nvme.direct_io) {
-			residency.IOMode = PageCachedIO
-		}
-	default:
-		return residency, fail(UnknownKind, "the checkpoint names an unknown residency")
+func (residency VRAMResidency) write(options *C.usearch_dense_options_t, pinner *runtime.Pinner) error {
+	devices, count := pinnedInts(residency.Devices, pinner)
+	C.usearch_go_write_vram(options, C.usearch_vram_options_t{
+		devices:       devices,
+		devices_count: count,
+	})
+	return nil
+}
+
+func (residency NVMeResidency) write(options *C.usearch_dense_options_t, pinner *runtime.Pinner) error {
+	paths, count, err := pinnedPaths(residency.Paths, pinner)
+	if err != nil {
+		return err
 	}
-	return residency, nil
+	C.usearch_go_write_nvme(options, C.usearch_nvme_options_t{paths: paths, paths_count: count})
+	return nil
+}
+
+// DefaultResidency is a RAM index across every domain the process may use.
+func DefaultResidency() Residency { return RAMResidency{} }
+
+// writeResidency stamps whichever placement the caller named, refusing a nil one where the
+// caller can still read which argument was left out.
+func writeResidency(residency Residency, options *C.usearch_dense_options_t, pinner *runtime.Pinner) error {
+	if residency == nil {
+		return fail(MalformedInput, "the residency is nil; name RAMResidency, VRAMResidency, or NVMeResidency")
+	}
+	return residency.write(options, pinner)
+}
+
+// readResidency reports the placement a checkpoint's tag names, with nothing filled in.
+//
+// A checkpoint records where it was written, never where a reader must keep it, so the
+// placement comes back empty rather than reconstructed - the caller names it before init.
+func readResidency(options *C.usearch_dense_options_t) (Residency, error) {
+	switch options.residency {
+	case C.usearch_residency_ram_k:
+		return RAMResidency{}, nil
+	case C.usearch_residency_vram_k:
+		return VRAMResidency{}, nil
+	case C.usearch_residency_nvme_k:
+		return NVMeResidency{}, nil
+	default:
+		return nil, fail(UnknownKind, "the checkpoint names an unknown residency")
+	}
+}
+
+// pinnedInts borrows a slice of ids for the duration of a call, pinning it so the collector
+// cannot move it while C reads through the pointer.
+func pinnedInts(values []int32, pinner *runtime.Pinner) (*C.int32_t, C.size_t) {
+	if len(values) == 0 {
+		return nil, 0
+	}
+	pinner.Pin(&values[0])
+	return (*C.int32_t)(unsafe.Pointer(&values[0])), C.size_t(len(values))
+}
+
+// pinnedPaths lends a run of device paths, each borrowed rather than copied. Go strings are
+// not null-terminated and the interface never assumes one, so the bytes cross as they are.
+func pinnedPaths(paths []string, pinner *runtime.Pinner) (*C.usearch_bytes_view_t, C.size_t, error) {
+	if len(paths) == 0 {
+		return nil, 0, nil
+	}
+	views := make([]C.usearch_bytes_view_t, len(paths))
+	for position, path := range paths {
+		if len(path) == 0 {
+			return nil, 0, fail(MalformedInput, "a device path must not be empty")
+		}
+		bytes := unsafe.Slice(unsafe.StringData(path), len(path))
+		pinner.Pin(&bytes[0])
+		views[position] = borrow(path)
+	}
+	pinner.Pin(&views[0])
+	return &views[0], C.size_t(len(views)), nil
 }
 
 // endregion: Residency
+
+// region: Executors
+
+// Executor owns the host threads or device streams a fanned-out verb runs on.
+//
+// An executor owns workers; an index owns rows. Keeping them apart is what lets one pool serve
+// several indexes, and what makes the cost of spawning visible at the line that spawns it. Its
+// residency must match the handles it drives - the engine reads a mismatch as a device fault
+// rather than deriving one, so there is no nil to pass.
+//
+// One driver at a time: a second concurrent call on the same executor reports Contended before
+// any work begins. Handles stay freely concurrent - it is the executor that serializes.
+type Executor struct {
+	handle C.usearch_executor_t
+}
+
+// NewExecutor spawns the workers one residency needs.
+//
+// Zero threads derives: seven eighths of the cores for RAM, since full occupancy starves the
+// ordered publication path, and the devices' queue capabilities for NVMe. A VRAM executor opens
+// one stream per device driven by the calling thread, so it reads no thread count at all.
+func NewExecutor(residency Residency, threads uint) (*Executor, error) {
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+
+	var failure C.usearch_error_t
+	var handle C.usearch_executor_t
+	// One factory per residency, as the C interface has them: their arities differ because a
+	// VRAM executor drives one stream per device from the calling thread and reads no count.
+	switch placement := residency.(type) {
+	case RAMResidency:
+		domains, count := pinnedInts(placement.MemoryDomains, &pinner)
+		options := C.usearch_ram_options_t{memory_domains: domains, memory_domains_count: count}
+		handle = C.usearch_executor_for_ram(&options, C.size_t(threads), &failure)
+	case VRAMResidency:
+		devices, count := pinnedInts(placement.Devices, &pinner)
+		options := C.usearch_vram_options_t{devices: devices, devices_count: count}
+		handle = C.usearch_executor_for_vram(&options, &failure)
+	case NVMeResidency:
+		paths, count, err := pinnedPaths(placement.Paths, &pinner)
+		if err != nil {
+			return nil, err
+		}
+		options := C.usearch_nvme_options_t{paths: paths, paths_count: count}
+		handle = C.usearch_executor_for_nvme(&options, C.size_t(threads), &failure)
+	default:
+		return nil, fail(MalformedInput, "the residency is nil; name RAMResidency, VRAMResidency, or NVMeResidency")
+	}
+	if err := check(failure); err != nil {
+		return nil, err
+	}
+	if handle == nil {
+		return nil, fail(Internal, "the library returned no handle and no error")
+	}
+	return &Executor{handle: handle}, nil
+}
+
+// Drain waits for every deferred call on this executor to finish.
+func (executor *Executor) Drain() error {
+	if executor == nil || executor.handle == nil {
+		return fail(Uninitialized, "the executor is freed or was never initialized")
+	}
+	var failure C.usearch_error_t
+	C.usearch_executor_drain(executor.handle, &failure)
+	return check(failure)
+}
+
+// Free drains every thread or stream and releases them. It is idempotent, and a freed executor
+// must not be used again.
+func (executor *Executor) Free() error {
+	if executor == nil || executor.handle == nil {
+		return nil
+	}
+	C.usearch_executor_free(executor.handle)
+	executor.handle = nil
+	return nil
+}
+
+// Close is Free under the name io.Closer names it, so an executor works with defer.
+func (executor *Executor) Close() error { return executor.Free() }
+
+// live reports the handle a verb hands across, refusing a missing or freed executor where the
+// caller can still read which argument was left out.
+func (executor *Executor) live() (C.usearch_executor_t, error) {
+	if executor == nil || executor.handle == nil {
+		return nil, fail(MalformedInput, "the executor is nil, freed, or was never initialized")
+	}
+	return executor.handle, nil
+}
+
+// endregion: Executors
 
 // region: Introspection
 
@@ -695,11 +788,47 @@ const _ = uint(unsafe.Sizeof(uint(0))) - uint(unsafe.Sizeof(C.size_t(0)))
 const _ = uint(unsafe.Sizeof(C.usearch_key_t{})) - uint(unsafe.Sizeof(Key{}))
 const _ = uint(unsafe.Sizeof(Key{})) - uint(unsafe.Sizeof(C.usearch_key_t{}))
 
+// borrowBytes lends a byte slab as the view the C interface reads, with no terminator and no
+// copy. A byte run and a path are the same shape, since text is bytes that happen to decode.
+func borrowBytes(bytes []byte) C.usearch_bytes_view_t {
+	if len(bytes) == 0 {
+		return C.usearch_bytes_view_t{}
+	}
+	return C.usearch_bytes_view_t{
+		data:   (*C.uint8_t)(unsafe.Pointer(unsafe.SliceData(bytes))),
+		length: C.size_t(len(bytes)),
+	}
+}
+
+// lendBytes lends a writable slab as the span a verb fills - the mutable twin of borrowBytes.
+func lendBytes(bytes []byte) C.usearch_bytes_span_t {
+	if len(bytes) == 0 {
+		return C.usearch_bytes_span_t{}
+	}
+	return C.usearch_bytes_span_t{
+		data:   (*C.uint8_t)(unsafe.Pointer(unsafe.SliceData(bytes))),
+		length: C.size_t(len(bytes)),
+	}
+}
+
+// borrowKeys lends a key slice as the run the C interface reads, one key per row of the matrix
+// it accompanies. It crosses by value, so the pointer never sits in Go memory the engine can
+// see and nothing needs pinning.
+func borrowKeys(keys []Key) C.usearch_keys_view_t {
+	if len(keys) == 0 {
+		return C.usearch_keys_view_t{}
+	}
+	return C.usearch_keys_view_t{
+		data:  (*C.usearch_key_t)(unsafe.Pointer(unsafe.SliceData(keys))),
+		count: C.size_t(len(keys)),
+	}
+}
+
 // borrow views a Go string as the pointer-and-length pair every path argument takes. The
 // string is never terminated, by contract, so nothing is copied and nothing is freed.
-func borrow(text string) C.usearch_string_t {
-	return C.usearch_string_t{
-		data:   (*C.char)(unsafe.Pointer(unsafe.StringData(text))),
+func borrow(text string) C.usearch_bytes_view_t {
+	return C.usearch_bytes_view_t{
+		data:   (*C.uint8_t)(unsafe.Pointer(unsafe.StringData(text))),
 		length: C.size_t(len(text)),
 	}
 }

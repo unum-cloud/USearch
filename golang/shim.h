@@ -40,10 +40,14 @@ usearch_vram_options_t usearch_go_read_vram(usearch_dense_options_t const* optio
 usearch_nvme_options_t usearch_go_read_nvme(usearch_dense_options_t const* options);
 
 /**
- *  @brief The admission callback Go exports, declared here so the search verb can name it
- *      from a preamble that must stay free of definitions.
+ *  @brief The admission callback Go defines and C calls - the one symbol here that crosses in
+ *      that direction, which is why it alone wears Go's spelling.
+ *
+ *  cgo emits a C symbol named exactly as the Go function, and Go spells an unexported function
+ *  in camel case, so the name is not this file's to choose. Everything else here is C that Go
+ *  calls, and reads as C.
  */
-extern int usearchDenseAdmits(usearch_key_t key, void* state);
+usearch_admission_t usearchDenseAdmits(usearch_key_t key, void* state);
 
 /**
  *  @brief Hands back @c usearchDenseAdmits as a function pointer. cgo renders a C function as

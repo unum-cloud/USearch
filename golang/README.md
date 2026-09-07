@@ -78,6 +78,14 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// An index owns rows; an executor owns the threads a fanned-out verb runs on. Every batch
+	// verb takes one, and its residency must match the index's.
+	executor, err := usearch.NewExecutor(usearch.DefaultResidency(), 0)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer executor.Close()
+
 	// One batch of `entries` rows, packed end to end.
 	keys := make([]usearch.Key, entries)
 	vectors := make([]float32, entries*dimensions)
@@ -87,14 +95,16 @@ func main() {
 			vectors[entry*dimensions+dimension] = float32(entry + dimension)
 		}
 	}
-	if _, err := index.Add(keys, usearch.RowsOf(vectors, dimensions), 0, nil); err != nil {
+	if _, err := index.Add(executor, keys, usearch.RowsOf(vectors, dimensions),
+		usearch.ExpansionConfig{}, nil); err != nil {
 		log.Fatal(err)
 	}
 
 	// Search one query for its three nearest neighbors.
 	query := []float32{0.0, 1.0, 2.0}
 	outputs := usearch.PackedDenseOutputs(1, 3)
-	if err := index.SearchInto(usearch.RowsOf(query, dimensions), &outputs, 0, nil); err != nil {
+	if err := index.SearchInto(executor, usearch.RowsOf(query, dimensions), &outputs,
+		usearch.ExpansionConfig{}, nil); err != nil {
 		log.Fatal(err)
 	}
 	found, distances := outputs.MatchesOf(0)
@@ -182,7 +192,7 @@ Keys satisfy `encoding.TextMarshaler` and `encoding.TextUnmarshaler`, so they ro
 Every failure carries a status shared with the C interface, so a fault this binding catches before the boundary reports the identity the engine would have reported for the same fault.
 
 ```go
-if _, err := index.Add(keys, vectors, 0, nil); err != nil {
+if _, err := index.Add(executor, keys, vectors, usearch.ExpansionConfig{}, nil); err != nil {
 	if usearch.StatusOf(err) == usearch.ShapeMismatch {
 		// the keys and the rows disagree
 	}
@@ -201,7 +211,7 @@ A `.safegraphs` path is one self-describing monolith; a `.safegraphs.json` path 
 In-memory buffers hold single monoliths only.
 
 ```go
-if err := index.Save("index.safegraphs"); err != nil {
+if err := index.Save(executor, "index.safegraphs"); err != nil {
 	log.Fatal(err)
 }
 
@@ -209,7 +219,7 @@ restored, err := usearch.NewDenseIndex(&options)
 if err != nil {
 	log.Fatal(err)
 }
-if err := restored.Load("index.safegraphs"); err != nil {
+if err := restored.Load(executor, "index.safegraphs"); err != nil {
 	log.Fatal(err)
 }
 ```
@@ -226,7 +236,7 @@ There is no separate view verb.
 Opening a checkpoint in place is a residency, and every mutating verb on such a handle fails with `ReadOnly`:
 
 ```go
-options.Residency = usearch.Residency{Kind: usearch.NVMe, IOMode: usearch.DirectIO}
+options.Residency = usearch.NVMeResidency{Paths: []string{"/dev/nvme0n1"}}
 ```
 
 ## Residency
@@ -235,13 +245,13 @@ Where the payload lives decides which engine traverses it, and what loading a ch
 
 ```go
 // CPU threads over volatile memory - the concurrent baseline.
-options.Residency = usearch.Residency{Kind: usearch.RAM, Threads: 0} // zero takes 7/8 of the cores
+options.Residency = usearch.RAMResidency{} // every domain the process may use
 
 // GPU warps over accelerator memory.
-options.Residency = usearch.Residency{Kind: usearch.VRAM, Device: usearch.FirstFreeDevice}
+options.Residency = usearch.VRAMResidency{} // one free device
 
 // Pluggable I/O over a persisted checkpoint, read-only and sized past RAM.
-options.Residency = usearch.Residency{Kind: usearch.NVMe, IOMode: usearch.DirectIO}
+options.Residency = usearch.NVMeResidency{Paths: []string{"/dev/nvme0n1"}}
 ```
 
 ## Index Introspection
@@ -260,6 +270,13 @@ count, _ := index.Count(usearch.KeyFromUint64(42)) // entries sharing one key
 fmt.Println(usearch.Version(), usearch.CapabilitiesAvailable())
 ```
 
+`Get` copies the entries stored under one key back out, converting into the slab's own scalar kind and reporting how many rows it wrote:
+
+```go
+recovered := make([]float32, count*dimensions)
+written, _ := index.Get(usearch.KeyFromUint64(42), usearch.RowsOf(recovered, dimensions))
+```
+
 ## Filtered Search
 
 `SearchIfInto` admits only the keys a predicate approves.
@@ -272,10 +289,44 @@ admits := func(key usearch.Key) bool {
 }
 
 outputs := usearch.PackedDenseOutputs(queries.Rows(), 10)
-err := index.SearchIfInto(queries, &outputs, 0, nil, admits)
+err := index.SearchIfInto(executor, queries, &outputs, usearch.ExpansionConfig{}, nil, admits)
 ```
 
 The predicate runs on the library's worker threads, so it must be safe for concurrent use.
+
+## Late Interaction
+
+`MaxSimInto` scores multi-row queries against multi-row entries: every query row takes its best match within a key, and those maxima sum to that key's score.
+A document is one key holding its token rows, which is what a `ValuesPerKey` above one exists for, and the outputs are sized over documents rather than rows.
+It runs on an inner-product index alone, since a sum of maxima needs logits rather than distances.
+
+```go
+options.Metric = usearch.Inner
+options.ValuesPerKey = 512
+
+documents := usearch.PackedDenseOutputs(queries.Rows()/tokensPerQuery, 10)
+err := index.MaxSimInto(executor, usearch.RowsOf(tokens, dimensions), tokensPerQuery,
+	&documents, usearch.ExpansionConfig{}, nil)
+```
+
+The `multiply` and `attend` verbs of the C interface are not bound here.
+
+## Refinement
+
+`Refine` re-runs the neighbor selection over entries already in the graph, returning how many links it rewrote.
+A batch built at a low expansion factor can be brought up to the quality of a slower build afterwards, and the count reaching zero is what settled looks like:
+
+```go
+for {
+	changed, err := index.Refine(executor, usearch.ExpansionConfig{ExpansionFactor: 128}, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if changed == 0 {
+		break
+	}
+}
+```
 
 ## Telemetry
 
@@ -285,7 +336,7 @@ Each call overwrites the struct rather than accumulating, so a sweep sums them i
 ```go
 var stats, total usearch.DenseStats
 for _, batch := range batches {
-	if _, err := index.Add(batch.keys, batch.vectors, 0, &stats); err != nil {
+	if _, err := index.Add(executor, batch.keys, batch.vectors, usearch.ExpansionConfig{}, &stats); err != nil {
 		log.Fatal(err)
 	}
 	total.Accumulate(stats)
@@ -294,17 +345,6 @@ fmt.Println(total.VisitedMembers, total.ComputedDistances, total.Restarts)
 ```
 
 The candidate-pool breadth rides each call as the `expansion` argument rather than the handle, so a recall sweep runs against one immutable index with no mutation between points.
-
-## Merging
-
-Growing an index by absorbing another is cheaper than re-inserting its vectors one by one.
-The donor is consumed whether the call succeeds or fails, so its handle is emptied and closing it becomes a no-op.
-
-```go
-if err := index.Merge(donor); err != nil {
-	log.Fatal(err)
-}
-```
 
 ## Concurrency
 
@@ -318,7 +358,7 @@ for worker := 0; worker < workers; worker++ {
 	go func() {
 		defer work.Done()
 		outputs := usearch.PackedDenseOutputs(queries.Rows(), 10)
-		if err := index.SearchInto(queries, &outputs, 0, nil); err != nil {
+		if err := index.SearchInto(executor, queries, &outputs, usearch.ExpansionConfig{}, nil); err != nil {
 			log.Print(err)
 		}
 	}()
@@ -326,6 +366,7 @@ for worker := 0; worker < workers; worker++ {
 work.Wait()
 ```
 
-Internal parallelism is a property of the residency rather than a mutable setting: `Residency{Kind: RAM, Threads: n}` fixes the worker count at construction, and zero takes 7/8 of the logical cores, since full occupancy starves the ordered publication path.
+Internal parallelism belongs to an `Executor` rather than to a residency or a handle: `NewExecutor(RAMResidency{}, n)` fixes the worker count, and zero takes 7/8 of the logical cores, since full occupancy starves the ordered publication path.
+A residency names hardware and nothing else, so one pool serves several indexes and its residency must match theirs.
 
 Serialization is the one exception to the free overlap — saving demands a mutation-free window, though concurrent readers keep searching throughout.
