@@ -4,7 +4,7 @@
  *      is what puts @c include/ on the header search path of everything importing the module,
  *      and the modality headers reach each other through that path.
  *
- *  @file swift/USearchC.c
+ *  @file swift/shim.c
  *
  *  Nothing here implements the ABI - the engine is built by CMake into @c libusearch_c and
  *  linked, since @c src/ pulls the NumKong, ForkUnion, and StringZilla stack and carries a CUDA
