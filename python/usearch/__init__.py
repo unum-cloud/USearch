@@ -4,7 +4,7 @@ import ctypes
 import os
 import sys
 
-#! Load NumKong before the USearch compiled module
+#! Load NumKong before the USearch extension module
 #! We can't just use the `import numkong` as on Linux and Windows (unlike MacOS),
 #! the symbols are not automatically loaded into the global namespace.
 #! NumKong v7.5+ ships as a regular package (`numkong/__init__.py` plus a
@@ -23,7 +23,7 @@ try:
         os.add_dll_directory(os.path.dirname(_numkong_path))
         numkong_lib = ctypes.CDLL(_numkong_path)
     else:
-        # On Linux/macOS we need `RTLD_GLOBAL` so USearch's compiled module can
+        # On Linux/macOS we need `RTLD_GLOBAL` so USearch's extension module can
         # resolve NumKong symbols at its own load time.
         numkong_lib = ctypes.CDLL(_numkong_path, mode=ctypes.RTLD_GLOBAL)
 
@@ -31,8 +31,8 @@ except ImportError:
     pass  # If the user doesn't want NumKong, we assume they know what they're doing
 
 
-from usearch import compiled as _extension
-from usearch.compiled import *  # noqa: F401,F403
+from usearch import lib as _extension
+from usearch.lib import *  # noqa: F401,F403
 
 __version__ = _extension.__version__
 

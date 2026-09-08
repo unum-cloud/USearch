@@ -25,6 +25,7 @@ _DOCUMENTED = [
     "Match",
     "Matches",
     "Error",
+    "Executor",
     "DenseIndex",
     "version",
     "capabilities_compiled",

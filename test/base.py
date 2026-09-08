@@ -1,7 +1,7 @@
 """Shared harness for the Python side of the USearch test suite.
 
 Holds the matrices every module parametrizes over, the oracle it checks against, the recall
-floors it asserts, and the gates that skip a residency this machine cannot host. Imported by
+floors it asserts, and the gate that skips a kernel family this machine cannot reach. Imported by
 name from each test module; only what pytest loads for itself lives in `conftest`.
 """
 
@@ -12,9 +12,8 @@ import os
 import numpy as np
 import pytest
 
-import numkong as nk
 import usearch
-from usearch import DenseIndex
+from usearch import DenseIndex, Executor
 from usearch.eval import exact_matches, random_vectors
 from usearch.keys import integers_to_keys, keys_to_integers
 
@@ -110,33 +109,6 @@ def distance_tolerances(quantization: str) -> tuple[float, float]:
 
 # region Gates
 
-_RESIDENCY_PROBES: dict[str, dict] = {
-    "ram": {},
-    "vram": {"residency": "vram"},
-    "nvme": {"residency": "nvme"},
-}
-
-
-def residency_available(residency: str) -> bool:
-    """Whether this build and machine can host that residency, asked by trying it once."""
-    try:
-        DenseIndex(dimensions=8, quantization="f32", **_RESIDENCY_PROBES[residency])
-    except Exception:
-        return False
-    return True
-
-
-def requires_residency(residency: str):
-    """Skips when this build or machine cannot host that residency.
-
-    USearch has no runtime capability switch - dispatch is fixed when an index is constructed -
-    so residency, not kernel family, is the axis a test can meaningfully gate on.
-    """
-    return pytest.mark.skipif(
-        not residency_available(residency), reason=f"{residency} residency unavailable on this build"
-    )
-
-
 def requires_capability(codename: str):
     """Skips when dispatch on this machine would not reach that kernel family."""
     return pytest.mark.skipif(
@@ -152,6 +124,7 @@ def requires_capability(codename: str):
 def build_index(
     count: int,
     dimensions: int,
+    executor: Executor,
     *,
     metric: str = "angular",
     quantization: str = "f32",
@@ -162,24 +135,19 @@ def build_index(
 
     Returns the index and the rows it was built from, so a caller can query with either.
     """
-    index = DenseIndex(dimensions=dimensions, metric=metric, quantization=quantization, **options)
+    index = DenseIndex.for_ram(dimensions=dimensions, metric=metric, quantization=quantization, **options)
     index.reserve(count)
     vectors = random_vectors(count, dimensions, metric=metric, seed=seed)
-    assert index.add(integers_to_keys(np.arange(count, dtype=np.uint64)), vectors) == count
+    assert index.add(integers_to_keys(np.arange(count, dtype=np.uint64)), vectors, executor=executor) == count
     return index, vectors
 
 
-def measured_recall(index: DenseIndex, vectors, queries, wanted: int, *, metric: str) -> float:
+def measured_recall(index: DenseIndex, vectors, queries, wanted: int, executor: Executor, *, metric: str) -> float:
     """The share of true nearest neighbors the index returned, against the NumKong oracle."""
     truth = exact_matches(vectors, queries, wanted, metric=metric)
-    found = keys_to_integers(index.search(queries, wanted).keys)
+    found = keys_to_integers(index.search(queries, wanted, executor=executor).keys)
     hits = sum(len(set(found[row]) & set(truth[row])) for row in range(len(truth)))
     return hits / (len(truth) * wanted)
-
-
-def as_numkong(rows) -> nk.Tensor:
-    """The same rows as a NumKong tensor, which reaches the index without NumPy in the path."""
-    return nk.Tensor(rows)
 
 
 # endregion Builders

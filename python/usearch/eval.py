@@ -119,7 +119,8 @@ def self_recall(index: DenseIndex, sample: float | int = 1.0, count: int = 1, **
     ``exact_matches`` when the question is how the index ranks against the exact answer.
 
     The *sample* is a share when a float and a count when an integer, and *count* is how many
-    matches each query retrieves.
+    matches each query retrieves. Every other keyword reaches ``index.search``, so the
+    ``executor`` it needs is passed through here.
     """
     if len(index) == 0:
         return SearchStats(0, 0, 0, 0, 0)

@@ -44,11 +44,11 @@ def guess_numpy_dtype_from_filename(filename) -> type | None:
 def load_matrix(
     filename: str,
     start_row: int = 0,
-    count_rows: int = None,
+    count_rows: int | None = None,
     view: bool = False,
     dtype: type | None = None,
 ) -> np.ndarray | None:
-    """Reads a matrix from an ``.ibin``, ``.bbib``, ``.hbin``, ``.fbin``, ``.dbin``, ``.i8bin``,
+    """Reads a matrix from an ``.ibin``, ``.bbin``, ``.hbin``, ``.fbin``, ``.dbin``, ``.i8bin``,
     or ``.i32bin`` file.
 
     Reads *count_rows* vectors starting at *start_row*, or every vector when *count_rows* is
@@ -104,7 +104,7 @@ def load_matrix(
 
 
 def save_matrix(vectors: np.ndarray, filename: str):
-    """Writes a matrix to an ``.ibin``, ``.bbib``, ``.hbin``, ``.fbin``, ``.dbin``, ``.i8bin``,
+    """Writes a matrix to an ``.ibin``, ``.bbin``, ``.hbin``, ``.fbin``, ``.dbin``, ``.i8bin``,
     ``.i32bin``, or ``.f32bin`` file.
 
     The extension decides the scalar type, so it must agree with the matrix's own dtype.

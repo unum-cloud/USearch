@@ -36,8 +36,8 @@ def test_capabilities_are_reported():
 
 
 def test_extension_names_itself():
-    """The extension is `usearch.compiled`, and its types are re-exported from the package."""
-    assert usearch.compiled.__name__ == "usearch.compiled"
+    """The extension is `usearch.lib`, and its types are re-exported from the package."""
+    assert usearch.lib.__name__ == "usearch.lib"
     assert usearch.DenseIndex.__module__ == "usearch"
 
 

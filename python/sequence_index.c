@@ -5,7 +5,7 @@
  *  @author Ash Vardanian
  *
  *  The C surface exists; the verbs land here as the library instantiates them. Entries vary
- *  in size, so batches arrive as `usearch_string_t` tapes rather than strided matrices, the
+ *  in size, so batches arrive as `usearch_bytes_view_t` tapes rather than strided matrices, the
  *  handle carries no dimensions or quantization, and `count` gains a stats out-parameter the
  *  dense modality has no use for.
  */

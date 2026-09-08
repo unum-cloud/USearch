@@ -20,31 +20,17 @@
 
 PyObject* ErrorType = NULL;
 
-char const* usearch_status_name(usearch_status_t status) {
-    switch (status) {
-    case usearch_success_k: return "success";
-    case usearch_error_out_of_memory_k: return "out-of-memory";
-    case usearch_error_shape_mismatch_k: return "shape-mismatch";
-    case usearch_error_unsupported_layout_k: return "unsupported-layout";
-    case usearch_error_unknown_kind_k: return "unknown-kind";
-    case usearch_error_read_only_k: return "read-only";
-    case usearch_error_io_k: return "io";
-    case usearch_error_device_k: return "device";
-    case usearch_error_malformed_input_k: return "malformed-input";
-    case usearch_error_internal_k: return "internal";
-    case usearch_error_overflow_k: return "overflow";
-    case usearch_error_uninitialized_k: return "uninitialized";
-    case usearch_error_config_mismatch_k: return "config-mismatch";
-    case usearch_error_contended_k: return "contended";
-    default: return "unrecognized";
-    }
-}
-
-int usearch_raise(usearch_status_t status, char const* message) {
+int usearch_py_raise(usearch_status_t status, char const* format, ...) {
     // A status this specific supersedes whatever the caller was carrying, and building the
     // instance below must not start with an exception already pending.
     PyErr_Clear();
-    PyObject* const instance = PyObject_CallFunction(ErrorType, "s", message ? message : "");
+    va_list arguments;
+    va_start(arguments, format);
+    PyObject* const message = PyUnicode_FromFormatV(format ? format : "", arguments);
+    va_end(arguments);
+    if (!message) return -1;
+    PyObject* const instance = PyObject_CallFunction(ErrorType, "O", message);
+    Py_DECREF(message);
     if (!instance) return -1;
     PyObject* const status_name = PyUnicode_FromString(usearch_status_name(status));
     if (!status_name) {
@@ -64,9 +50,32 @@ int usearch_raise(usearch_status_t status, char const* message) {
     return -1;
 }
 
-int usearch_raise_on_error(usearch_error_t const* error) {
+int usearch_py_raise_on_error(usearch_error_t const* error) {
     if (error->status == usearch_success_k) return 0;
-    return usearch_raise(error->status, error->message);
+    return usearch_py_raise(error->status, error->message);
+}
+
+int usearch_py_raise_from_cause(PyObject* kind, char const* format, ...) {
+    PyObject* const cause = PyErr_GetRaisedException();
+    va_list arguments;
+    va_start(arguments, format);
+    PyObject* const message = PyUnicode_FromFormatV(format, arguments);
+    va_end(arguments);
+    if (!message) {
+        Py_XDECREF(cause);
+        return -1;
+    }
+
+    PyErr_SetObject(kind, message);
+    Py_DECREF(message);
+    if (cause) {
+        // Both setters steal, so the cause needs a second reference before it is handed over twice.
+        PyObject* const raised = PyErr_GetRaisedException();
+        PyException_SetCause(raised, Py_NewRef(cause));
+        PyException_SetContext(raised, cause);
+        PyErr_SetRaisedException(raised);
+    }
+    return -1;
 }
 
 static char const doc_Error[] =                                                         //
@@ -80,7 +89,7 @@ static char const doc_Error[] =                                                 
     "  status (str): Lowercase, dash-separated status, such as 'shape-mismatch'.\n"     //
     "  args (tuple): The detail the status cannot carry, as on any exception.";
 
-int usearch_register_error_type(PyObject* module) {
+int usearch_py_register_error_type(PyObject* module) {
     ErrorType = PyErr_NewExceptionWithDoc("usearch.Error", (char*)doc_Error, PyExc_RuntimeError, NULL);
     if (!ErrorType) return -1;
     Py_INCREF(ErrorType);
@@ -95,34 +104,33 @@ int usearch_register_error_type(PyObject* module) {
 
 #pragma region Scalar Names
 
-/** @brief One scalar kind, and every spelling a caller might hand us for it. */
-typedef struct usearch_scalar_naming_t {
-    usearch_scalar_t kind;
-    char const* name;            //! The canonical name, as the stubs and constructor spell it.
+/** @brief One scalar kind, the spellings the ecosystem gives it, and how it packs in memory. */
+typedef struct scalar_naming_t {
+    usearch_scalar_t kind;       //! The kind this row describes; @c usearch_scalar_name spells it.
     char const* numpy_typestr;   //! The NumPy array-interface spelling, or NULL when none exists.
     char const* buffer_typestr;  //! The PEP 3118 format string, or NULL when none exists.
     unsigned char values_packed; //! Logical scalars per storage unit; one for byte-wide kinds.
     unsigned char unit_bytes;    //! Bytes one storage unit occupies.
-} usearch_scalar_naming_t;
+} scalar_naming_t;
 
 /**
  *  @brief Ordered by shrinking dynamic range - floats widest exponent first, then signed
  *      integers descending, then unsigned - the order every dtype-indexed list in the
  *      project takes.
  */
-static usearch_scalar_naming_t const scalar_namings[] = {
-    {usearch_scalar_f64_k, "f64", "<f8", "d", 1, 8},    {usearch_scalar_f32_k, "f32", "<f4", "f", 1, 4},
-    {usearch_scalar_bf16_k, "bf16", "<V2", NULL, 1, 2}, {usearch_scalar_f16_k, "f16", "<f2", "e", 1, 2},
-    {usearch_scalar_e5m2_k, "e5m2", "|V1", NULL, 1, 1}, {usearch_scalar_e4m3_k, "e4m3", "|V1", NULL, 1, 1},
-    {usearch_scalar_e3m2_k, "e3m2", "|V1", NULL, 1, 1}, {usearch_scalar_e2m3_k, "e2m3", "|V1", NULL, 1, 1},
-    {usearch_scalar_i8_k, "i8", "|i1", "b", 1, 1},      {usearch_scalar_i4x2_k, "i4x2", "|V1", NULL, 2, 1},
-    {usearch_scalar_u8_k, "u8", "|u1", "B", 1, 1},      {usearch_scalar_u4x2_k, "u4x2", "|V1", NULL, 2, 1},
-    {usearch_scalar_u1x8_k, "u1x8", "|V1", "?", 8, 1},
+static scalar_naming_t const scalar_namings[] = {
+    {usearch_scalar_f64_k, "<f8", "d", 1, 8},   {usearch_scalar_f32_k, "<f4", "f", 1, 4},
+    {usearch_scalar_bf16_k, "<V2", NULL, 1, 2}, {usearch_scalar_f16_k, "<f2", "e", 1, 2},
+    {usearch_scalar_e5m2_k, "|V1", NULL, 1, 1}, {usearch_scalar_e4m3_k, "|V1", NULL, 1, 1},
+    {usearch_scalar_e3m2_k, "|V1", NULL, 1, 1}, {usearch_scalar_e2m3_k, "|V1", NULL, 1, 1},
+    {usearch_scalar_i8_k, "|i1", "b", 1, 1},    {usearch_scalar_i4x2_k, "|V1", NULL, 2, 1},
+    {usearch_scalar_u8_k, "|u1", "B", 1, 1},    {usearch_scalar_u4x2_k, "|V1", NULL, 2, 1},
+    {usearch_scalar_u1x8_k, "|V1", "?", 8, 1},
 };
 
 static size_t const scalar_namings_count = usearch_py_table_size_(scalar_namings);
 
-/** @brief Aliases the ecosystem spells differently than we do, resolved before the table. */
+/** @brief Aliases the ecosystem spells differently than we do, resolved after the table. */
 static struct {
     char const* name;
     usearch_scalar_t kind;
@@ -139,7 +147,7 @@ static struct {
 
 static size_t const scalar_aliases_count = usearch_py_table_size_(scalar_aliases);
 
-static usearch_scalar_naming_t const* scalar_naming(usearch_scalar_t kind) {
+static scalar_naming_t const* scalar_naming(usearch_scalar_t kind) {
     for (size_t naming_index = 0; naming_index != scalar_namings_count; ++naming_index)
         if (scalar_namings[naming_index].kind == kind) return &scalar_namings[naming_index];
     return NULL;
@@ -150,11 +158,15 @@ static int same_string_sized(char const* input, Py_ssize_t input_length, char co
     return (size_t)input_length == literal_length && memcmp(input, literal, literal_length) == 0;
 }
 
-usearch_scalar_t usearch_scalar_from_name(char const* name, Py_ssize_t length) {
+usearch_scalar_t usearch_py_scalar_from_spelling(char const* name, Py_ssize_t length) {
     if (!name || length <= 0) return usearch_scalar_unknown_k;
+    // The canonical spellings belong to the library, so only what the ecosystem adds is
+    // resolved here. A kind this table cannot lay out is no answer, whatever the library said.
+    usearch_bytes_view_t const spelling = {(uint8_t const*)name, (size_t)length};
+    usearch_scalar_t const canonical = usearch_scalar_from_name(spelling);
+    if (scalar_naming(canonical)) return canonical;
     for (size_t naming_index = 0; naming_index != scalar_namings_count; ++naming_index) {
-        usearch_scalar_naming_t const* const naming = &scalar_namings[naming_index];
-        if (same_string_sized(name, length, naming->name)) return naming->kind;
+        scalar_naming_t const* const naming = &scalar_namings[naming_index];
         if (naming->buffer_typestr && same_string_sized(name, length, naming->buffer_typestr)) return naming->kind;
         if (naming->numpy_typestr && same_string_sized(name, length, naming->numpy_typestr)) return naming->kind;
     }
@@ -163,26 +175,21 @@ usearch_scalar_t usearch_scalar_from_name(char const* name, Py_ssize_t length) {
     return usearch_scalar_unknown_k;
 }
 
-char const* usearch_scalar_name(usearch_scalar_t kind) {
-    usearch_scalar_naming_t const* const naming = scalar_naming(kind);
-    return naming ? naming->name : "unknown";
-}
-
-size_t usearch_scalar_row_bytes(usearch_scalar_t kind, size_t columns) {
-    usearch_scalar_naming_t const* const naming = scalar_naming(kind);
+size_t usearch_py_scalar_row_bytes(usearch_scalar_t kind, size_t columns) {
+    scalar_naming_t const* const naming = scalar_naming(kind);
     if (!naming) return 0;
     size_t const units = usearch_py_divide_round_up_(columns, naming->values_packed);
     return units * naming->unit_bytes;
 }
 
-char const* usearch_scalar_buffer_format(usearch_scalar_t kind) {
-    usearch_scalar_naming_t const* const naming = scalar_naming(kind);
+char const* usearch_py_scalar_buffer_format(usearch_scalar_t kind) {
+    scalar_naming_t const* const naming = scalar_naming(kind);
     return naming && naming->values_packed == 1 ? naming->buffer_typestr : NULL;
 }
 
-PyObject* usearch_arena_matrix(PyObject* arena, size_t rows, size_t columns, usearch_scalar_t kind) {
+PyObject* usearch_py_arena_matrix(PyObject* arena, size_t rows, size_t columns, usearch_scalar_t kind) {
     Py_ssize_t occupied = 0;
-    if (usearch_matrix_bytes(rows, usearch_scalar_row_bytes(kind, columns), 1, &occupied) != 0) return NULL;
+    if (usearch_py_matrix_bytes(rows, usearch_py_scalar_row_bytes(kind, columns), 1, &occupied) != 0) return NULL;
 
     PyObject* const flat = PyMemoryView_FromObject(arena);
     if (!flat) return NULL;
@@ -192,30 +199,30 @@ PyObject* usearch_arena_matrix(PyObject* arena, size_t rows, size_t columns, use
     Py_DECREF(flat);
     if (!occupied_view) return NULL;
 
-    char const* const format = usearch_scalar_buffer_format(kind);
-    Py_ssize_t const width = format ? (Py_ssize_t)columns : (Py_ssize_t)usearch_scalar_row_bytes(kind, columns);
+    char const* const format = usearch_py_scalar_buffer_format(kind);
+    Py_ssize_t const width = format ? (Py_ssize_t)columns : (Py_ssize_t)usearch_py_scalar_row_bytes(kind, columns);
     PyObject* const shaped = PyObject_CallMethod(occupied_view, "cast", "s(nn)", format ? format : "B",
                                                  (Py_ssize_t)rows, width);
     Py_DECREF(occupied_view);
     return shaped;
 }
 
-int usearch_matrix_bytes(size_t rows, size_t columns, size_t unit, Py_ssize_t* bytes) {
+int usearch_py_matrix_bytes(size_t rows, size_t columns, size_t unit, Py_ssize_t* bytes) {
     size_t const cells = rows * columns;
     if (columns && cells / columns != rows)
-        return usearch_raise(usearch_error_overflow_k, "the requested output matrix does not fit memory");
+        return usearch_py_raise(usearch_error_overflow_k, "the requested output matrix does not fit memory");
     size_t const total = cells * unit;
     if (unit && total / unit != cells)
-        return usearch_raise(usearch_error_overflow_k, "the requested output matrix does not fit memory");
+        return usearch_py_raise(usearch_error_overflow_k, "the requested output matrix does not fit memory");
     // `PTRDIFF_MAX` rather than `PY_SSIZE_T_MAX`, which resolves to a POSIX macro a strict-C
     // translation unit does not see; `Py_ssize_t` is a `ptrdiff_t` either way.
     if (total > (size_t)PTRDIFF_MAX)
-        return usearch_raise(usearch_error_overflow_k, "the requested output matrix does not fit memory");
+        return usearch_py_raise(usearch_error_overflow_k, "the requested output matrix does not fit memory");
     *bytes = (Py_ssize_t)total;
     return 0;
 }
 
-int usearch_scalar_from_object(PyObject* object, usearch_scalar_t* kind) {
+int usearch_py_scalar_from_object(PyObject* object, usearch_scalar_t* kind) {
     if (!object || object == Py_None) {
         *kind = usearch_scalar_unknown_k;
         return 0;
@@ -227,7 +234,7 @@ int usearch_scalar_from_object(PyObject* object, usearch_scalar_t* kind) {
     Py_ssize_t length = 0;
     char const* const name = PyUnicode_AsUTF8AndSize(object, &length);
     if (!name) return -1;
-    usearch_scalar_t const resolved = usearch_scalar_from_name(name, length);
+    usearch_scalar_t const resolved = usearch_py_scalar_from_spelling(name, length);
     if (resolved == usearch_scalar_unknown_k) {
         PyErr_Format(PyExc_ValueError, "Unsupported scalar kind '%S'", object);
         return -1;
@@ -244,7 +251,7 @@ int usearch_scalar_from_object(PyObject* object, usearch_scalar_t* kind) {
  *  @brief Synthesizes a @c Py_buffer from @c __array_interface__ when PEP 3118 refuses.
  *  @return 1 when the fallback produced a buffer, 0 when the object has no interface.
  */
-static int buffer_via_array_interface(PyObject* object, usearch_buffer_backing_t* backing) {
+static int buffer_via_array_interface(PyObject* object, usearch_py_buffer_backing_t* backing) {
     PyObject* const interface = PyObject_GetAttrString(object, "__array_interface__");
     if (!interface) {
         PyErr_Clear();
@@ -303,7 +310,7 @@ static int buffer_via_array_interface(PyObject* object, usearch_buffer_backing_t
         if (name_attribute) {
             Py_ssize_t name_length = 0;
             char const* const name = PyUnicode_AsUTF8AndSize(name_attribute, &name_length);
-            if (name) kind = usearch_scalar_from_name(name, name_length);
+            if (name) kind = usearch_py_scalar_from_spelling(name, name_length);
             Py_DECREF(name_attribute);
         }
         else { PyErr_Clear(); }
@@ -316,10 +323,10 @@ static int buffer_via_array_interface(PyObject* object, usearch_buffer_backing_t
         if (typestr_object) {
             Py_ssize_t typestr_length = 0;
             char const* const typestr = PyUnicode_AsUTF8AndSize(typestr_object, &typestr_length);
-            if (typestr) kind = usearch_scalar_from_name(typestr, typestr_length);
+            if (typestr) kind = usearch_py_scalar_from_spelling(typestr, typestr_length);
         }
     }
-    usearch_scalar_naming_t const* const naming = scalar_naming(kind);
+    scalar_naming_t const* const naming = scalar_naming(kind);
     if (!naming) {
         Py_DECREF(interface);
         PyErr_SetString(PyExc_ValueError, "Cannot determine the scalar kind from __array_interface__");
@@ -368,26 +375,17 @@ static int buffer_via_array_interface(PyObject* object, usearch_buffer_backing_t
  *  @brief Acquires a strided, formatted buffer over @p object by whichever route works.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
-static int buffer_acquire(PyObject* object, usearch_matrix_access_t access, usearch_buffer_backing_t* backing) {
+static int buffer_from_object(PyObject* object, usearch_py_buffer_backing_t* backing) {
     backing->synthesized_owner = NULL;
-    int const flags = PyBUF_STRIDES | PyBUF_FORMAT | (access == usearch_matrix_access_write_k ? PyBUF_WRITABLE : 0);
-    if (PyObject_GetBuffer(object, &backing->buffer, flags) == 0) return 0;
+    if (PyObject_GetBuffer(object, &backing->buffer, PyBUF_STRIDES | PyBUF_FORMAT) == 0) return 0;
     PyErr_Clear();
-    if (buffer_via_array_interface(object, backing)) {
-        // The fallback bypasses the flag checks `PyObject_GetBuffer` would have made.
-        if (access == usearch_matrix_access_write_k && backing->buffer.readonly) {
-            usearch_matrix_release(backing);
-            PyErr_SetString(PyExc_BufferError, "Expected a writable buffer");
-            return -1;
-        }
-        return 0;
-    }
+    if (buffer_via_array_interface(object, backing)) return 0;
     if (!PyErr_Occurred())
         PyErr_SetString(PyExc_TypeError, "Expected an object supporting the buffer protocol or __array_interface__");
     return -1;
 }
 
-int usearch_object_is_buffer(PyObject* object) {
+int usearch_py_object_is_buffer(PyObject* object) {
     if (PyObject_CheckBuffer(object)) return 1;
     // A probe, not a verb: a missing attribute means "no". Anything else is a real failure and
     // is reported as such, rather than being laundered into a "no" the caller cannot see.
@@ -401,24 +399,23 @@ int usearch_object_is_buffer(PyObject* object) {
     return 0;
 }
 
-void usearch_matrix_release(usearch_buffer_backing_t* backing) {
+void usearch_py_buffer_release(usearch_py_buffer_backing_t* backing) {
     PyBuffer_Release(&backing->buffer);
     Py_CLEAR(backing->synthesized_owner);
 }
 
-int usearch_buffer_borrow_exact(PyObject* object, char const* field, usearch_matrix_access_t access, Py_ssize_t bytes,
-                                usearch_buffer_backing_t* backing, void** data) {
+int usearch_py_buffer_from_object(PyObject* object, char const* field, usearch_py_matrix_access_t access,
+                                  Py_ssize_t bytes, usearch_py_buffer_backing_t* backing, void** data) {
     backing->synthesized_owner = NULL;
-    int const flags = PyBUF_C_CONTIGUOUS | (access == usearch_matrix_access_write_k ? PyBUF_WRITABLE : 0);
+    int const flags = PyBUF_C_CONTIGUOUS | (access == usearch_py_matrix_access_write_k ? PyBUF_WRITABLE : 0);
     if (PyObject_GetBuffer(object, &backing->buffer, flags) != 0) {
         // The exporter's own diagnosis is more precise than any guess we could make, so it
         // rides along as the cause rather than being replaced.
-        _PyErr_FormatFromCause(PyExc_ValueError, "The '%s' buffer must be contiguous%s", field,
-                               access == usearch_matrix_access_write_k ? " and writable" : "");
-        return -1;
+        return usearch_py_raise_from_cause(PyExc_ValueError, "The '%s' buffer must be contiguous%s", field,
+                                           access == usearch_py_matrix_access_write_k ? " and writable" : "");
     }
     if (backing->buffer.len != bytes) {
-        usearch_matrix_release(backing);
+        usearch_py_buffer_release(backing);
         PyErr_Format(PyExc_ValueError, "The '%s' buffer must hold exactly %zd bytes, not %zd", field, bytes,
                      backing->buffer.len);
         return -1;
@@ -427,54 +424,53 @@ int usearch_buffer_borrow_exact(PyObject* object, char const* field, usearch_mat
     return 0;
 }
 
-int usearch_matrix_from_object(PyObject* object, usearch_matrix_access_t access, usearch_scalar_t scalar_hint,
-                               usearch_matrix_view_t* view, usearch_buffer_backing_t* backing) {
-    if (buffer_acquire(object, access, backing) != 0) return -1;
+int usearch_py_matrix_from_object(PyObject* object, usearch_scalar_t scalar_hint, usearch_matrix_view_t* view,
+                                  usearch_py_buffer_backing_t* backing) {
+    if (buffer_from_object(object, backing) != 0) return -1;
     Py_buffer const* const buffer = &backing->buffer;
 
     if (buffer->ndim < 1 || buffer->ndim > usearch_py_max_rank_k) {
         PyErr_Format(PyExc_ValueError, "Expected a vector or a matrix, got rank %d", buffer->ndim);
-        usearch_matrix_release(backing);
+        usearch_py_buffer_release(backing);
         return -1;
     }
 
     usearch_scalar_t kind = scalar_hint;
     if (kind == usearch_scalar_unknown_k && buffer->format)
-        kind = usearch_scalar_from_name(buffer->format, (Py_ssize_t)strlen(buffer->format));
+        kind = usearch_py_scalar_from_spelling(buffer->format, (Py_ssize_t)strlen(buffer->format));
     if (kind == usearch_scalar_unknown_k) {
         PyErr_Format(PyExc_ValueError, "Unsupported '%s' scalar kind; pass `dtype=` to name it",
                      buffer->format ? buffer->format : "?");
-        usearch_matrix_release(backing);
+        usearch_py_buffer_release(backing);
         return -1;
     }
 
-    // Only the row pitch may stride: a strided column would force a gather the kernels have
+    // Only the row stride may vary: a strided column would force a gather the kernels have
     // no form for, and the C surface has no argument to describe one.
     int const last_axis = buffer->ndim - 1;
     if (buffer->strides && buffer->strides[last_axis] != buffer->itemsize) {
-        PyErr_SetString(PyExc_ValueError, "Expected a matrix whose rows are contiguous; only the pitch may stride");
-        usearch_matrix_release(backing);
+        PyErr_SetString(PyExc_ValueError, "Expected a matrix whose rows are contiguous; only the stride may vary");
+        usearch_py_buffer_release(backing);
         return -1;
     }
 
     view->data = buffer->buf;
     view->scalar_kind = kind;
-    view->readonly = buffer->readonly;
     if (buffer->ndim == 1) {
         view->rows = 1;
         view->columns = (size_t)buffer->shape[0];
-        view->pitch = (size_t)buffer->len;
+        view->stride_bytes = (size_t)buffer->len;
     }
     else {
         view->rows = (size_t)buffer->shape[0];
         view->columns = (size_t)buffer->shape[1];
-        Py_ssize_t const pitch = buffer->strides ? buffer->strides[0] : buffer->shape[1] * buffer->itemsize;
-        if (pitch < 0) {
+        Py_ssize_t const stride_bytes = buffer->strides ? buffer->strides[0] : buffer->shape[1] * buffer->itemsize;
+        if (stride_bytes < 0) {
             PyErr_SetString(PyExc_ValueError, "Matrix rows must ascend in memory");
-            usearch_matrix_release(backing);
+            usearch_py_buffer_release(backing);
             return -1;
         }
-        view->pitch = (size_t)pitch;
+        view->stride_bytes = (size_t)stride_bytes;
     }
     return 0;
 }
@@ -524,7 +520,7 @@ static int key_from_text(char const* text, Py_ssize_t length, usearch_key_t* key
     return 0;
 }
 
-int usearch_key_from_object(PyObject* object, usearch_key_t* key) {
+int usearch_py_key_from_object(PyObject* object, usearch_key_t* key) {
     if (PyObject_TypeCheck(object, &KeyType)) {
         *key = ((Key*)object)->key;
         return 0;
@@ -562,13 +558,13 @@ int usearch_key_from_object(PyObject* object, usearch_key_t* key) {
         char const* const text = PyUnicode_AsUTF8AndSize(object, &length);
         if (!text) return -1;
         if (key_from_text(text, length, key) != 0)
-            return usearch_raise(usearch_error_malformed_input_k, "the key is not thirty-two hexadecimal digits");
+            return usearch_py_raise(usearch_error_malformed_input_k, "the key is not thirty-two hexadecimal digits");
         return 0;
     }
     // `uuid.UUID` and anything else shaped like it, without importing the module.
     PyObject* const raw_bytes = PyObject_GetAttrString(object, "bytes");
     if (raw_bytes) {
-        int const outcome = usearch_key_from_object(raw_bytes, key);
+        int const outcome = usearch_py_key_from_object(raw_bytes, key);
         Py_DECREF(raw_bytes);
         return outcome;
     }
@@ -577,7 +573,7 @@ int usearch_key_from_object(PyObject* object, usearch_key_t* key) {
     return -1;
 }
 
-PyObject* usearch_key_to_object(usearch_key_t key) {
+PyObject* usearch_py_key_to_object(usearch_key_t key) {
     Key* const instance = PyObject_New(Key, &KeyType);
     if (!instance) return NULL;
     instance->key = key;
@@ -595,7 +591,7 @@ static PyObject* Key_tp_new(PyTypeObject* type, PyObject* args, PyObject* keywor
     Key* const instance = (Key*)type->tp_alloc(type, 0);
     if (!instance) return NULL;
     memset(instance->key.bytes, 0, sizeof(instance->key.bytes));
-    if (value && usearch_key_from_object(value, &instance->key) != 0) {
+    if (value && usearch_py_key_from_object(value, &instance->key) != 0) {
         Py_DECREF(instance);
         return NULL;
     }
@@ -648,7 +644,7 @@ static Py_hash_t Key_hash(Key* self) {
 
 static PyObject* Key_richcompare(PyObject* first, PyObject* second, int operation) {
     usearch_key_t left, right;
-    if (usearch_key_from_object(first, &left) != 0 || usearch_key_from_object(second, &right) != 0) {
+    if (usearch_py_key_from_object(first, &left) != 0 || usearch_py_key_from_object(second, &right) != 0) {
         // Only "that is not a key" means "not comparable"; a `MemoryError` raised while reading
         // one must not be laundered into a silent `False`.
         if (!PyErr_ExceptionMatches(PyExc_TypeError) && !PyErr_ExceptionMatches(ErrorType)) return NULL;
@@ -695,12 +691,12 @@ PyTypeObject KeyType = {
 
 #pragma region Key Batches
 
-void usearch_keys_release(usearch_key_arena_t* arena) {
-    if (arena->storage == usearch_key_storage_borrowed_k) usearch_matrix_release(&arena->backing);
+void usearch_py_keys_release(usearch_py_key_arena_t* arena) {
+    if (arena->storage == usearch_py_key_storage_borrowed_k) usearch_py_buffer_release(&arena->backing);
     else if (arena->owned) PyMem_Free(arena->owned);
     arena->owned = NULL;
     arena->keys = NULL;
-    arena->storage = usearch_key_storage_owned_k;
+    arena->storage = usearch_py_key_storage_owned_k;
 }
 
 /** @brief Which storage a key batch will use, once its argument has been looked at. */
@@ -719,30 +715,30 @@ typedef enum keys_route_t {
  *  A blanket clear here would swallow a @c KeyboardInterrupt delivered inside an exporter, so
  *  only the failure this function itself provoked is discarded.
  */
-static keys_route_t keys_borrow_buffer(PyObject* object, size_t expected, usearch_key_arena_t* arena) {
+static keys_route_t keys_borrow_buffer(PyObject* object, size_t expected, usearch_py_key_arena_t* arena) {
     if (!PyObject_CheckBuffer(object)) return keys_route_sequence_k;
     if (PyObject_GetBuffer(object, &arena->backing.buffer, PyBUF_STRIDES) != 0) {
         PyErr_Clear();
         return keys_route_sequence_k;
     }
     arena->backing.synthesized_owner = NULL;
-    arena->storage = usearch_key_storage_borrowed_k;
+    arena->storage = usearch_py_key_storage_borrowed_k;
     Py_buffer const* const buffer = &arena->backing.buffer;
     if (buffer->ndim != 2 || buffer->shape[1] != (Py_ssize_t)sizeof(usearch_key_t) || buffer->itemsize != 1 ||
         !PyBuffer_IsContiguous((Py_buffer*)buffer, 'C')) {
-        usearch_keys_release(arena);
+        usearch_py_keys_release(arena);
         return keys_route_sequence_k;
     }
     if ((size_t)buffer->shape[0] != expected) {
-        usearch_keys_release(arena);
-        usearch_raise(usearch_error_shape_mismatch_k, "the key count does not match the vector row count");
+        usearch_py_keys_release(arena);
+        usearch_py_raise(usearch_error_shape_mismatch_k, "the key count does not match the vector row count");
         return keys_route_failed_k;
     }
     arena->keys = (usearch_key_t*)buffer->buf;
     return keys_route_borrowed_k;
 }
 
-int usearch_keys_from_object(PyObject* object, size_t expected, usearch_key_arena_t* arena) {
+int usearch_py_keys_from_object(PyObject* object, size_t expected, usearch_py_key_arena_t* arena) {
     memset(arena, 0, sizeof(*arena));
 
     // An integer array exports a buffer too, so only the identity shape takes the zero-copy
@@ -758,7 +754,7 @@ int usearch_keys_from_object(PyObject* object, size_t expected, usearch_key_aren
     Py_ssize_t const count = PySequence_Fast_GET_SIZE(sequence);
     if ((size_t)count != expected) {
         Py_DECREF(sequence);
-        usearch_raise(usearch_error_shape_mismatch_k, "the key count does not match the vector row count");
+        usearch_py_raise(usearch_error_shape_mismatch_k, "the key count does not match the vector row count");
         return -1;
     }
 
@@ -769,9 +765,10 @@ int usearch_keys_from_object(PyObject* object, size_t expected, usearch_key_aren
         return -1;
     }
     for (Py_ssize_t entry_index = 0; entry_index != count; ++entry_index) {
-        if (usearch_key_from_object(PySequence_Fast_GET_ITEM(sequence, entry_index), &arena->owned[entry_index]) != 0) {
+        if (usearch_py_key_from_object(PySequence_Fast_GET_ITEM(sequence, entry_index), &arena->owned[entry_index]) !=
+            0) {
             Py_DECREF(sequence);
-            usearch_keys_release(arena);
+            usearch_py_keys_release(arena);
             return -1;
         }
     }
@@ -812,14 +809,14 @@ static PyObject* Stats_repr(Stats* self) {
                                 self->stats.visited_members, self->stats.computed_distances, self->stats.restarts);
 }
 
-PyObject* usearch_stats_to_object(usearch_dense_traversal_stats_t const* stats) {
+PyObject* usearch_py_stats_to_object(usearch_dense_traversal_stats_t const* stats) {
     Stats* const instance = PyObject_New(Stats, &StatsType);
     if (!instance) return NULL;
     instance->stats = *stats;
     return (PyObject*)instance;
 }
 
-int usearch_stats_accumulate(PyObject* target, usearch_dense_traversal_stats_t const* stats) {
+int usearch_py_stats_accumulate(PyObject* target, usearch_dense_traversal_stats_t const* stats) {
     if (!target || target == Py_None) return 0;
     if (!PyObject_TypeCheck(target, &StatsType)) {
         PyErr_Format(PyExc_TypeError, "Expected a Stats object, got %S", Py_TYPE(target));
@@ -882,7 +879,7 @@ static char const doc_Match[] =                                //
     "  key (Key): The identity of the matched entry.\n"        //
     "  distance (float): The distance to the query, in the index's own metric.";
 
-PyObject* usearch_match_to_object(usearch_key_t key, usearch_distance_t distance) {
+PyObject* usearch_py_match_to_object(usearch_key_t key, usearch_distance_t distance) {
     Match* const instance = PyObject_New(Match, &MatchType);
     if (!instance) return NULL;
     instance->key = key;
@@ -894,14 +891,14 @@ static void Match_dealloc(Match* self) { Py_TYPE(self)->tp_free((PyObject*)self)
 
 static char const doc_Match_key[] = "The identity of the matched entry.";
 
-static PyObject* Match_get_key(Match* self, void* closure) { return usearch_key_to_object(self->key); }
+static PyObject* Match_get_key(Match* self, void* closure) { return usearch_py_key_to_object(self->key); }
 
 static char const doc_Match_distance[] = "The distance to the query, in the index's own metric.";
 
 static PyObject* Match_get_distance(Match* self, void* closure) { return PyFloat_FromDouble(self->distance); }
 
 static PyObject* Match_repr(Match* self) {
-    PyObject* const key_object = usearch_key_to_object(self->key);
+    PyObject* const key_object = usearch_py_key_to_object(self->key);
     if (!key_object) return NULL;
     PyObject* const distance_object = PyFloat_FromDouble(self->distance);
     if (!distance_object) {
@@ -1034,7 +1031,7 @@ static PyObject* Matches_item(Matches* self, Py_ssize_t query_index) {
     PyObject* const row = PyTuple_New((Py_ssize_t)found);
     if (!row) return NULL;
     for (size_t match_index = 0; match_index != found; ++match_index) {
-        PyObject* const match = usearch_match_to_object(keys[offset + match_index], distances[offset + match_index]);
+        PyObject* const match = usearch_py_match_to_object(keys[offset + match_index], distances[offset + match_index]);
         if (!match) {
             Py_DECREF(row);
             return NULL;
@@ -1079,12 +1076,423 @@ PyTypeObject MatchesType = {
 
 #pragma endregion Matches
 
+#pragma region Closed Sets
+
+int usearch_py_choice_from_object(PyObject* object, char const* field, usearch_py_choice_naming_t const* namings,
+                                  size_t count, int* value) {
+    if (!PyUnicode_Check(object)) {
+        PyErr_Format(PyExc_TypeError, "The '%s' option must be a string, got %S", field, Py_TYPE(object));
+        return -1;
+    }
+    for (size_t naming_index = 0; naming_index != count; ++naming_index)
+        if (PyUnicode_CompareWithASCIIString(object, namings[naming_index].name) == 0) {
+            *value = namings[naming_index].value;
+            return 0;
+        }
+    PyErr_Format(PyExc_ValueError, "Unsupported '%s' option %R", field, object);
+    return -1;
+}
+
+Py_ssize_t usearch_py_args_names_count_checked(char const* verb, Py_ssize_t positional_args_count,
+                                               PyObject* args_names_tuple, Py_ssize_t required_positional) {
+    if (positional_args_count != required_positional) {
+        PyErr_Format(PyExc_TypeError, "%s() takes %zd positional arguments, received %zd", verb, required_positional,
+                     positional_args_count);
+        return -1;
+    }
+    return args_names_tuple ? PyTuple_GET_SIZE(args_names_tuple) : 0;
+}
+
+int usearch_py_ordinals_from_object(PyObject* object, char const* field, int32_t** ordinals, size_t* count) {
+    *ordinals = NULL;
+    *count = 0;
+    if (object == Py_None) return 0;
+
+    PyObject* const sequence = PySequence_Fast(object, "expected a sequence of integers");
+    if (!sequence) {
+        usearch_py_raise_from_cause(PyExc_TypeError, "The '%s' option must be a sequence of integers", field);
+        return -1;
+    }
+    Py_ssize_t const length = PySequence_Fast_GET_SIZE(sequence);
+    if (length == 0) {
+        Py_DECREF(sequence);
+        return 0;
+    }
+
+    int32_t* const claimed = (int32_t*)PyMem_Malloc((size_t)length * sizeof(int32_t));
+    if (!claimed) {
+        Py_DECREF(sequence);
+        PyErr_NoMemory();
+        return -1;
+    }
+    for (Py_ssize_t position = 0; position != length; ++position) {
+        long const ordinal = PyLong_AsLong(PySequence_Fast_GET_ITEM(sequence, position));
+        if (ordinal == -1 && PyErr_Occurred()) {
+            PyMem_Free(claimed);
+            Py_DECREF(sequence);
+            usearch_py_raise_from_cause(PyExc_TypeError, "The '%s' option must hold integers", field);
+            return -1;
+        }
+        if (ordinal < INT32_MIN || ordinal > INT32_MAX) {
+            PyMem_Free(claimed);
+            Py_DECREF(sequence);
+            PyErr_Format(PyExc_ValueError, "The '%s' option holds %ld, outside the 32-bit range", field, ordinal);
+            return -1;
+        }
+        claimed[position] = (int32_t)ordinal;
+    }
+    Py_DECREF(sequence);
+    *ordinals = claimed;
+    *count = (size_t)length;
+    return 0;
+}
+
+/** @brief The encoded objects trailing the views in an arena's single block. */
+static PyObject** paths_encoded(usearch_py_paths_arena_t const* arena) {
+    return (PyObject**)(arena->views + arena->count);
+}
+
+int usearch_py_paths_from_object(PyObject* object, usearch_py_paths_arena_t* arena) {
+    arena->views = NULL;
+    arena->count = 0;
+    if (object == Py_None) return 0;
+
+    PyObject* const sequence = PySequence_Fast(object, "expected a sequence of paths");
+    if (!sequence) {
+        usearch_py_raise_from_cause(PyExc_TypeError, "The 'paths' option must be a sequence of paths");
+        return -1;
+    }
+    Py_ssize_t const length = PySequence_Fast_GET_SIZE(sequence);
+    if (length == 0) {
+        Py_DECREF(sequence);
+        return 0;
+    }
+
+    // Both runs are pointer-aligned, so one block carves into views followed by their objects.
+    size_t const block_bytes = (size_t)length * (sizeof(usearch_bytes_view_t) + sizeof(PyObject*));
+    arena->views = (usearch_bytes_view_t*)PyMem_Malloc(block_bytes);
+    if (!arena->views) {
+        Py_DECREF(sequence);
+        PyErr_NoMemory();
+        return -1;
+    }
+
+    PyObject** const encoded = (PyObject**)(arena->views + length);
+    for (Py_ssize_t position = 0; position != length; ++position) {
+        if (usearch_py_path_from_object(PySequence_Fast_GET_ITEM(sequence, position), &arena->views[position],
+                                        &encoded[position]) != 0) {
+            while (position-- != 0) Py_DECREF(encoded[position]);
+            PyMem_Free(arena->views);
+            arena->views = NULL;
+            Py_DECREF(sequence);
+            return -1;
+        }
+    }
+    Py_DECREF(sequence);
+    arena->count = (size_t)length;
+    return 0;
+}
+
+void usearch_py_paths_release(usearch_py_paths_arena_t* arena) {
+    if (!arena->views) return;
+    PyObject** const encoded = paths_encoded(arena);
+    for (size_t position = 0; position != arena->count; ++position) Py_XDECREF(encoded[position]);
+    PyMem_Free(arena->views);
+    arena->views = NULL;
+    arena->count = 0;
+}
+
+int usearch_py_size_from_object(PyObject* object, char const* field, size_t* value) {
+    Py_ssize_t const signed_value = PyNumber_AsSsize_t(object, PyExc_OverflowError);
+    if (signed_value == -1 && PyErr_Occurred()) return -1;
+    if (signed_value < 0) {
+        PyErr_Format(PyExc_ValueError, "The '%s' option must not be negative", field);
+        return -1;
+    }
+    *value = (size_t)signed_value;
+    return 0;
+}
+
+#pragma endregion Closed Sets
+
+#pragma region Executors
+
+static char const doc_Executor[] =                                                           //
+    "Executor\n"                                                                             //
+    "\n"                                                                                     //
+    "The workers a fanned-out verb runs on, shared across indexes.\n"                        //
+    "\n"                                                                                     //
+    "An executor owns host threads or device streams; an index owns rows. Keeping them\n"    //
+    "apart is what lets one pool serve several indexes, and what makes the cost of\n"        //
+    "spawning visible at the line that spawns rather than hidden in a constructor.\n"        //
+    "\n"                                                                                     //
+    "Construct one through the residency it drives - `for_ram`, `for_vram` or `for_nvme`\n"  //
+    "- since each spawns something different and takes different arguments. Its residency\n" //
+    "must match that of every index it is handed to.\n"                                      //
+    "\n"                                                                                     //
+    "Example:\n"                                                                             //
+    "  >>> from array import array\n"                                                        //
+    "  >>> pool = usearch.Executor.for_ram(threads=8)\n"                                     //
+    "  >>> index = usearch.DenseIndex.for_ram(dimensions=4)\n"                               //
+    "  >>> index.reserve(1)\n"                                                               //
+    "  >>> _ = index.add([1], array('d', [0.1, 0.2, 0.3, 0.4]), executor=pool)\n"            //
+    "  >>> pool.drain()";
+
+/**
+ *  @brief Wraps a fresh handle, or frees it when the wrapper cannot be allocated.
+ *  @return A new reference, or NULL with an exception set.
+ */
+static PyObject* executor_adopt(PyTypeObject* type, usearch_executor_t handle) {
+    Executor* const executor = (Executor*)type->tp_alloc(type, 0);
+    if (!executor) {
+        usearch_executor_free(handle);
+        return NULL;
+    }
+    executor->handle = handle;
+    return (PyObject*)executor;
+}
+
+static PyObject* Executor_tp_new(PyTypeObject* type, PyObject* args, PyObject* keywords) {
+    PyErr_SetString(PyExc_TypeError, "Executor is built through Executor.for_ram(), .for_vram() or .for_nvme()");
+    return NULL;
+}
+
+static void Executor_dealloc(Executor* executor) {
+    usearch_executor_free(executor->handle);
+    Py_TYPE(executor)->tp_free((PyObject*)executor);
+}
+
+int usearch_py_executor_from_object(PyObject* object, usearch_executor_t* executor) {
+    if (!PyObject_TypeCheck(object, &ExecutorType)) {
+        PyErr_Format(PyExc_TypeError, "The 'executor' option must be an Executor, got %S", Py_TYPE(object));
+        return -1;
+    }
+    *executor = ((Executor*)object)->handle;
+    return 0;
+}
+
+static char const doc_Executor_for_ram[] =                                               //
+    "for_ram(threads=0, *, memory_domains=None) -> Executor\n"                           //
+    "\n"                                                                                 //
+    "Spawns host worker threads for a RAM-resident index.\n"                             //
+    "\n"                                                                                 //
+    "Args:\n"                                                                            //
+    "  threads (int, optional): Workers to spawn; 0 derives from the hardware.\n"        //
+    "  memory_domains (Sequence[int], optional): NUMA node ids the workers stay local\n" //
+    "    to; None derives every node the process may allocate on.\n"                     //
+    "\n"                                                                                 //
+    "Example:\n"                                                                         //
+    "  >>> pool = usearch.Executor.for_ram(threads=8)\n"                                 //
+    "  >>> pool.drain()";
+
+static PyObject* Executor_for_ram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
+                                  PyObject* args_names_tuple) {
+    size_t threads = 0;
+    PyObject* memory_domains_object = Py_None;
+
+    if (positional_args_count > 1) {
+        PyErr_SetString(PyExc_TypeError, "for_ram() takes at most one positional argument");
+        return NULL;
+    }
+    if (positional_args_count == 1 && usearch_py_size_from_object(args[0], "threads", &threads) != 0) return NULL;
+
+    Py_ssize_t const args_names_count = args_names_tuple ? PyTuple_GET_SIZE(args_names_tuple) : 0;
+    for (Py_ssize_t names_progress = 0, args_progress = positional_args_count; names_progress != args_names_count;
+         ++args_progress, ++names_progress) {
+        PyObject* const name = PyTuple_GET_ITEM(args_names_tuple, names_progress);
+        PyObject* const value = args[args_progress];
+        if (PyUnicode_CompareWithASCIIString(name, "threads") == 0) {
+            if (usearch_py_size_from_object(value, "threads", &threads) != 0) return NULL;
+        }
+        else if (PyUnicode_CompareWithASCIIString(name, "memory_domains") == 0) { memory_domains_object = value; }
+        else {
+            PyErr_Format(PyExc_TypeError, "Got unexpected keyword argument: %S", name);
+            return NULL;
+        }
+    }
+
+    usearch_ram_options_t options = {0};
+    int32_t* memory_domains = NULL;
+    if (usearch_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
+                                        &options.memory_domains_count) != 0)
+        return NULL;
+    options.memory_domains = memory_domains;
+
+    usearch_error_t error = {0};
+    usearch_executor_t handle = NULL;
+    Py_BEGIN_ALLOW_THREADS;
+    handle = usearch_executor_for_ram(&options, threads, &error);
+    Py_END_ALLOW_THREADS;
+    PyMem_Free(memory_domains);
+
+    if (usearch_py_raise_on_error(&error) != 0) return NULL;
+    if (!handle) {
+        usearch_py_raise(usearch_error_internal_k, "the library returned no handle and no error");
+        return NULL;
+    }
+    return executor_adopt(type, handle);
+}
+
+static char const doc_Executor_for_vram[] =                                              //
+    "for_vram(*, devices=None) -> Executor\n"                                            //
+    "\n"                                                                                 //
+    "Opens one stream per device for a VRAM-resident index.\n"                           //
+    "\n"                                                                                 //
+    "Takes no thread count: a single host thread drives every stream, so the width of\n" //
+    "the pool is the device list rather than a worker count.\n"                          //
+    "\n"                                                                                 //
+    "Args:\n"                                                                            //
+    "  devices (Sequence[int], optional): CUDA ordinals to drive; None derives one\n"    //
+    "    free device.\n"                                                                 //
+    "\n"                                                                                 //
+    "Example:\n"                                                                         //
+    "  >>> pool = usearch.Executor.for_vram(devices=[0, 1])   # doctest: +SKIP";
+
+static PyObject* Executor_for_vram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
+                                   PyObject* args_names_tuple) {
+    PyObject* devices_object = Py_None;
+
+    Py_ssize_t const args_names_count = usearch_py_args_names_count_checked("for_vram", positional_args_count,
+                                                                            args_names_tuple, 0);
+    if (args_names_count < 0) return NULL;
+    for (Py_ssize_t names_progress = 0, args_progress = positional_args_count; names_progress != args_names_count;
+         ++args_progress, ++names_progress) {
+        PyObject* const name = PyTuple_GET_ITEM(args_names_tuple, names_progress);
+        if (PyUnicode_CompareWithASCIIString(name, "devices") == 0) { devices_object = args[args_progress]; }
+        else {
+            PyErr_Format(PyExc_TypeError, "Got unexpected keyword argument: %S", name);
+            return NULL;
+        }
+    }
+
+    usearch_vram_options_t options = {0};
+    int32_t* devices = NULL;
+    if (usearch_py_ordinals_from_object(devices_object, "devices", &devices, &options.devices_count) != 0) return NULL;
+    options.devices = devices;
+
+    usearch_error_t error = {0};
+    usearch_executor_t handle = NULL;
+    Py_BEGIN_ALLOW_THREADS;
+    handle = usearch_executor_for_vram(&options, &error);
+    Py_END_ALLOW_THREADS;
+    PyMem_Free(devices);
+
+    if (usearch_py_raise_on_error(&error) != 0) return NULL;
+    if (!handle) {
+        usearch_py_raise(usearch_error_internal_k, "the library returned no handle and no error");
+        return NULL;
+    }
+    return executor_adopt(type, handle);
+}
+
+static char const doc_Executor_for_nvme[] =                                             //
+    "for_nvme(threads=0, *, paths=None) -> Executor\n"                                  //
+    "\n"                                                                                //
+    "Opens one submission ring per worker for an NVMe-resident index.\n"                //
+    "\n"                                                                                //
+    "Args:\n"                                                                           //
+    "  threads (int, optional): Rings to open; 0 derives from the hardware.\n"          //
+    "  paths (Sequence[str | bytes | PathLike], optional): Devices or directories to\n" //
+    "    stripe shards across; None leaves every shard where its manifest points. A\n"  //
+    "    path may name a kernel device, a transport identifier, or a FUSE mount.\n"     //
+    "\n"                                                                                //
+    "Example:\n"                                                                        //
+    "  >>> pool = usearch.Executor.for_nvme(threads=8, paths=['/mnt/nvme0'])  # doctest: +SKIP";
+
+static PyObject* Executor_for_nvme(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
+                                   PyObject* args_names_tuple) {
+    size_t threads = 0;
+    PyObject* paths_object = Py_None;
+
+    if (positional_args_count > 1) {
+        PyErr_SetString(PyExc_TypeError, "for_nvme() takes at most one positional argument");
+        return NULL;
+    }
+    if (positional_args_count == 1 && usearch_py_size_from_object(args[0], "threads", &threads) != 0) return NULL;
+
+    Py_ssize_t const args_names_count = args_names_tuple ? PyTuple_GET_SIZE(args_names_tuple) : 0;
+    for (Py_ssize_t names_progress = 0, args_progress = positional_args_count; names_progress != args_names_count;
+         ++args_progress, ++names_progress) {
+        PyObject* const name = PyTuple_GET_ITEM(args_names_tuple, names_progress);
+        PyObject* const value = args[args_progress];
+        if (PyUnicode_CompareWithASCIIString(name, "threads") == 0) {
+            if (usearch_py_size_from_object(value, "threads", &threads) != 0) return NULL;
+        }
+        else if (PyUnicode_CompareWithASCIIString(name, "paths") == 0) { paths_object = value; }
+        else {
+            PyErr_Format(PyExc_TypeError, "Got unexpected keyword argument: %S", name);
+            return NULL;
+        }
+    }
+
+    usearch_py_paths_arena_t paths;
+    if (usearch_py_paths_from_object(paths_object, &paths) != 0) return NULL;
+    usearch_nvme_options_t const options = {paths.views, paths.count};
+
+    usearch_error_t error = {0};
+    usearch_executor_t handle = NULL;
+    Py_BEGIN_ALLOW_THREADS;
+    handle = usearch_executor_for_nvme(&options, threads, &error);
+    Py_END_ALLOW_THREADS;
+    usearch_py_paths_release(&paths);
+
+    if (usearch_py_raise_on_error(&error) != 0) return NULL;
+    if (!handle) {
+        usearch_py_raise(usearch_error_internal_k, "the library returned no handle and no error");
+        return NULL;
+    }
+    return executor_adopt(type, handle);
+}
+
+static char const doc_Executor_drain[] =                          //
+    "drain()\n"                                                   //
+    "\n"                                                          //
+    "Waits for every deferred call on this executor to finish.\n" //
+    "\n"                                                          //
+    "Raises:\n"                                                   //
+    "  Error: The first failure a drained call reported.";
+
+static PyObject* Executor_drain(Executor* executor, PyObject* unused) {
+    usearch_error_t error = {0};
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_executor_drain(executor->handle, &error);
+    Py_END_ALLOW_THREADS;
+    if (usearch_py_raise_on_error(&error) != 0) return NULL;
+    Py_RETURN_NONE;
+}
+
+static PyObject* Executor_repr(Executor* executor) {
+    return PyUnicode_FromFormat("usearch.Executor(at=%p)", (void*)executor->handle);
+}
+
+static PyMethodDef Executor_methods[] = {
+    {"for_ram", (PyCFunction)Executor_for_ram, usearch_py_method_flags_k | METH_CLASS, doc_Executor_for_ram},    //
+    {"for_vram", (PyCFunction)Executor_for_vram, usearch_py_method_flags_k | METH_CLASS, doc_Executor_for_vram}, //
+    {"for_nvme", (PyCFunction)Executor_for_nvme, usearch_py_method_flags_k | METH_CLASS, doc_Executor_for_nvme}, //
+    {"drain", (PyCFunction)Executor_drain, METH_NOARGS, doc_Executor_drain},                                     //
+    {NULL, NULL, 0, NULL},
+};
+
+PyTypeObject ExecutorType = {
+    PyVarObject_HEAD_INIT(NULL, 0) //
+        .tp_name = "usearch.Executor",
+    .tp_doc = doc_Executor,
+    .tp_basicsize = sizeof(Executor),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_new = Executor_tp_new,
+    .tp_dealloc = (destructor)Executor_dealloc,
+    .tp_methods = Executor_methods,
+    .tp_repr = (reprfunc)Executor_repr,
+};
+
+#pragma endregion Executors
+
 #pragma region Paths
 
-int usearch_path_from_object(PyObject* object, usearch_string_t* path, PyObject** decoded) {
+int usearch_py_path_from_object(PyObject* object, usearch_bytes_view_t* path, PyObject** decoded) {
     PyObject* bytes_object = NULL;
     if (!PyUnicode_FSConverter(object, &bytes_object)) return -1;
-    path->data = PyBytes_AS_STRING(bytes_object);
+    path->data = (uint8_t const*)PyBytes_AS_STRING(bytes_object);
     path->length = (size_t)PyBytes_GET_SIZE(bytes_object);
     *decoded = bytes_object;
     return 0;
