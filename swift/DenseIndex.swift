@@ -12,6 +12,7 @@
 //
 
 import NumKong
+
 import USearchC
 
 // MARK: - Options
@@ -419,13 +420,16 @@ public final class DenseIndex: @unchecked Sendable {
     }
 
     /// Reads geometry and metric metadata from a serialized monolith buffer.
-    public static func metadata(buffer: UnsafeRawBufferPointer) throws(Error) -> DenseMetadata {
-        guard let base = buffer.baseAddress, buffer.count != 0 else {
-            throw fail(.malformedInput, "the buffer is empty")
-        }
+    public static func metadata(buffer: borrowing RawSpan) throws(Error) -> DenseMetadata {
+        guard buffer.byteCount != 0 else { throw fail(.malformedInput, "the buffer is empty") }
         var raw = usearch_dense_metadata_t()
-        let view = usearch_bytes_view_t(data: base.assumingMemoryBound(to: UInt8.self), length: buffer.count)
-        try throwing { usearch_dense_metadata_buffer(view, &raw, $0) }
+        try buffer.withUnsafeBytes { (bytes) throws(Error) in
+            let view = usearch_bytes_view_t(
+                data: bytes.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                length: bytes.count
+            )
+            try throwing { usearch_dense_metadata_buffer(view, &raw, $0) }
+        }
         return try DenseMetadata.lifted(raw)
     }
 
@@ -708,7 +712,7 @@ public final class DenseIndex: @unchecked Sendable {
 
     /// The number of entries stored under a key; zero means the index holds none.
     public func count(key: Key) throws(Error) -> Int {
-        return try throwing { usearch_dense_count(handle, key.storage, $0) }
+        return try throwing { usearch_dense_count(handle, key.raw, $0) }
     }
 
     /// Whether the index holds at least one entry under a key.
@@ -726,7 +730,7 @@ public final class DenseIndex: @unchecked Sendable {
     ) throws(Error) -> Int {
         try vectors.validate(dimensions: try frozenDimensions())
         var span = vectors.lowered
-        return try throwing { usearch_dense_get(handle, key.storage, &span, $0) }
+        return try throwing { usearch_dense_get(handle, key.raw, &span, $0) }
     }
 
     /// Writes the index under a path, in the layout its extension picks - one `.safegraphs`
@@ -749,23 +753,31 @@ public final class DenseIndex: @unchecked Sendable {
 
     /// Writes the index into a caller-owned buffer as one monolith. Size the buffer with
     /// `storageRequirements`.
-    public func save(executor: Executor, buffer: UnsafeMutableRawBufferPointer) throws(Error) {
-        guard let base = buffer.baseAddress, buffer.count != 0 else {
-            throw fail(.shapeMismatch, "the buffer is empty")
+    public func save(executor: Executor, buffer: inout MutableRawSpan) throws(Error) {
+        guard buffer.byteCount != 0 else { throw fail(.shapeMismatch, "the buffer is empty") }
+        let handle = handle
+        try buffer.withUnsafeMutableBytes { (raw) throws(Error) in
+            let span = usearch_bytes_span_t(
+                data: raw.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                length: raw.count
+            )
+            try throwing { usearch_dense_save_buffer(handle, executor.raw, span, nil, nil, $0) }
         }
-        let span = usearch_bytes_span_t(data: base.assumingMemoryBound(to: UInt8.self), length: buffer.count)
-        try throwing { usearch_dense_save_buffer(handle, executor.raw, span, nil, nil, $0) }
     }
 
     /// Reads a monolith from a buffer into this handle, with the residency deciding the behavior
     /// like `load(executor:path:)`. A residency that opens in place demands the buffer outlive
     /// the handle.
-    public func load(executor: Executor, buffer: UnsafeRawBufferPointer) throws(Error) {
-        guard let base = buffer.baseAddress, buffer.count != 0 else {
-            throw fail(.malformedInput, "the buffer is empty")
+    public func load(executor: Executor, buffer: borrowing RawSpan) throws(Error) {
+        guard buffer.byteCount != 0 else { throw fail(.malformedInput, "the buffer is empty") }
+        let handle = handle
+        try buffer.withUnsafeBytes { (raw) throws(Error) in
+            let view = usearch_bytes_view_t(
+                data: raw.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                length: raw.count
+            )
+            try throwing { usearch_dense_load_buffer(handle, executor.raw, view, nil, nil, $0) }
         }
-        let view = usearch_bytes_view_t(data: base.assumingMemoryBound(to: UInt8.self), length: buffer.count)
-        try throwing { usearch_dense_load_buffer(handle, executor.raw, view, nil, nil, $0) }
     }
 
     /// Opens a consistent snapshot cursor over the current contents, for export or migration.
@@ -893,31 +905,36 @@ public final class DenseCursor {
 
     /// Copies the next batch of keys into `keys`, walking the key column alone; the rows written
     /// come back, and zero means the snapshot is exhausted.
-    public func next(into keys: UnsafeMutableBufferPointer<Key>) throws(Error) -> Int {
-        try advance(keys: keys, vectors: nil)
+    public func next(into keys: inout MutableSpan<Key>) throws(Error) -> Int {
+        try advance(keys: &keys, vectors: nil)
     }
 
     /// Copies the next batch of keys and the vectors they identify. The key run bounds the batch,
     /// so the matrix must have room for at least as many rows.
     public func next<Element: ScalarValue>(
-        into keys: UnsafeMutableBufferPointer<Key>,
+        into keys: inout MutableSpan<Key>,
         vectors: borrowing MatrixSpan<Element>
     ) throws(Error) -> Int {
-        try advance(keys: keys, vectors: vectors.lowered)
+        try advance(keys: &keys, vectors: vectors.lowered)
     }
 
     /// Advances the snapshot by one batch, with or without the vector export.
+    ///
+    /// The key run arrives as a `MutableSpan`, which cannot outlive the storage it borrows - so a
+    /// buffer whose owner has already been released is not a call this signature accepts.
     private func advance(
-        keys: UnsafeMutableBufferPointer<Key>,
+        keys: inout MutableSpan<Key>,
         vectors: usearch_matrix_span_t?
     ) throws(Error) -> Int {
         let handle = handle
-        return try keys.withMemoryRebound(to: usearch_key_t.self) { (rawKeys) throws(Error) -> Int in
-            let run = usearch_keys_span_t(data: rawKeys.baseAddress, capacity: rawKeys.count)
-            guard var span = vectors else {
-                return try throwing { usearch_dense_cursor_next(handle, run, nil, $0) }
+        return try keys.withUnsafeMutableBufferPointer { (typedKeys) throws(Error) -> Int in
+            try typedKeys.withMemoryRebound(to: usearch_key_t.self) { (rawKeys) throws(Error) -> Int in
+                let run = usearch_keys_span_t(data: rawKeys.baseAddress, capacity: rawKeys.count)
+                guard var span = vectors else {
+                    return try throwing { usearch_dense_cursor_next(handle, run, nil, $0) }
+                }
+                return try throwing { usearch_dense_cursor_next(handle, run, &span, $0) }
             }
-            return try throwing { usearch_dense_cursor_next(handle, run, &span, $0) }
         }
     }
 }

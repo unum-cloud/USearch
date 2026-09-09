@@ -13,6 +13,7 @@
 //
 
 import NumKong
+
 import USearchC
 
 // MARK: - Errors
@@ -122,22 +123,20 @@ public typealias Distance = Double
 /// reports how many. Integer identities park in the low eight bytes, so `Key(42)`
 /// prints as `00000000-0000-0000-0000-00000000002a`.
 public struct Key: Hashable, Comparable, CustomStringConvertible, ExpressibleByIntegerLiteral, Sendable {
-    /// The sixteen identity bytes, laid out exactly as the C key so batches reinterpret rather
-    /// than copy.
-    var storage: usearch_key_t
+    /// The sixteen identity bytes, most significant first, laid out exactly as the C key so batches
+    /// reinterpret rather than copy.
+    var storage: InlineArray<16, UInt8>
 
     /// The all-zero key.
     public static let nilKey = Key()
 
     /// Builds the all-zero key.
-    public init() { storage = usearch_key_t() }
+    public init() { storage = .init(repeating: 0) }
 
     /// Parks an integer identity in the low eight bytes, zeroing the rest.
     public init(_ value: UInt64) {
-        storage = usearch_key_t()
-        withUnsafeMutableBytes(of: &storage.bytes) { target in
-            for position in 0 ..< 8 { target[15 - position] = UInt8(truncatingIfNeeded: value >> (8 * position)) }
-        }
+        storage = .init(repeating: 0)
+        for position in 0 ..< 8 { storage[15 - position] = UInt8(truncatingIfNeeded: value >> (8 * position)) }
     }
 
     public init(integerLiteral value: UInt64) { self.init(value) }
@@ -145,10 +144,8 @@ public struct Key: Hashable, Comparable, CustomStringConvertible, ExpressibleByI
     /// Adopts sixteen bytes, most significant first.
     public init(bytes: borrowing [UInt8]) throws(Error) {
         guard bytes.count == 16 else { throw fail(.malformedInput, "a key is sixteen bytes, most significant first") }
-        storage = usearch_key_t()
-        withUnsafeMutableBytes(of: &storage.bytes) { target in
-            for position in 0 ..< 16 { target[position] = bytes[position] }
-        }
+        storage = .init(repeating: 0)
+        for position in 0 ..< 16 { storage[position] = bytes[position] }
     }
 
     /// Reads the rendering `description` produces. Dashes may sit anywhere, or nowhere.
@@ -163,62 +160,66 @@ public struct Key: Hashable, Comparable, CustomStringConvertible, ExpressibleByI
             digits.append(digit)
         }
         guard digits.count == 32 else { throw fail(.malformedInput, malformed) }
-        storage = usearch_key_t()
-        withUnsafeMutableBytes(of: &storage.bytes) { target in
-            for position in 0 ..< 16 { target[position] = digits[position * 2] << 4 | digits[position * 2 + 1] }
+        storage = .init(repeating: 0)
+        for position in 0 ..< 16 { storage[position] = digits[position * 2] << 4 | digits[position * 2 + 1] }
+    }
+
+    /// Adopts the C key, whose array member Swift imports as a tuple.
+    init(raw: usearch_key_t) {
+        self.init()
+        withUnsafeBytes(of: raw.bytes) { source in
+            for position in 0 ..< 16 { storage[position] = source[position] }
         }
     }
 
-    init(raw: usearch_key_t) { storage = raw }
+    /// The C key this identity is, for the two verbs that take one by value.
+    var raw: usearch_key_t {
+        var lowered = usearch_key_t()
+        withUnsafeMutableBytes(of: &lowered.bytes) { target in
+            for position in 0 ..< 16 { target[position] = storage[position] }
+        }
+        return lowered
+    }
 
     /// The sixteen identity bytes, most significant first.
-    public var byteArray: [UInt8] { withUnsafeBytes(of: storage.bytes) { Array($0) } }
+    public var byteArray: [UInt8] { (0 ..< 16).map { storage[$0] } }
 
     /// The integer identity in the low eight bytes, and nil when the high eight carry anything.
     public var integerIdentity: UInt64? {
-        withUnsafeBytes(of: storage.bytes) { source in
-            for position in 0 ..< 8 where source[position] != 0 { return nil }
-            var value: UInt64 = 0
-            for position in 8 ..< 16 { value = value << 8 | UInt64(source[position]) }
-            return value
-        }
+        for position in 0 ..< 8 where storage[position] != 0 { return nil }
+        var value: UInt64 = 0
+        for position in 8 ..< 16 { value = value << 8 | UInt64(storage[position]) }
+        return value
     }
 
     public var description: String {
-        withUnsafeBytes(of: storage.bytes) { source in
-            let hexadecimal = Array("0123456789abcdef".utf8)
-            var rendered: [UInt8] = []
-            rendered.reserveCapacity(36)
-            for position in 0 ..< 16 {
-                if position == 4 || position == 6 || position == 8 || position == 10 {
-                    rendered.append(UInt8(ascii: "-"))
-                }
-                rendered.append(hexadecimal[Int(source[position] >> 4)])
-                rendered.append(hexadecimal[Int(source[position] & 0x0f)])
+        let hexadecimal = Array("0123456789abcdef".utf8)
+        var rendered: [UInt8] = []
+        rendered.reserveCapacity(36)
+        for position in 0 ..< 16 {
+            if position == 4 || position == 6 || position == 8 || position == 10 {
+                rendered.append(UInt8(ascii: "-"))
             }
-            return String(decoding: rendered, as: UTF8.self)
+            rendered.append(hexadecimal[Int(storage[position] >> 4)])
+            rendered.append(hexadecimal[Int(storage[position] & 0x0f)])
         }
+        return String(decoding: rendered, as: UTF8.self)
     }
 
     public func hash(into hasher: inout Hasher) {
-        withUnsafeBytes(of: storage.bytes) { hasher.combine(bytes: $0) }
+        for position in 0 ..< 16 { hasher.combine(storage[position]) }
     }
 
     public static func == (first: Key, second: Key) -> Bool {
-        withUnsafeBytes(of: first.storage.bytes) { left in
-            withUnsafeBytes(of: second.storage.bytes) { right in left.elementsEqual(right) }
-        }
+        for position in 0 ..< 16 where first.storage[position] != second.storage[position] { return false }
+        return true
     }
 
     public static func < (first: Key, second: Key) -> Bool {
-        withUnsafeBytes(of: first.storage.bytes) { left in
-            withUnsafeBytes(of: second.storage.bytes) { right in
-                for position in 0 ..< 16 where left[position] != right[position] {
-                    return left[position] < right[position]
-                }
-                return false
-            }
+        for position in 0 ..< 16 where first.storage[position] != second.storage[position] {
+            return first.storage[position] < second.storage[position]
         }
+        return false
     }
 }
 

@@ -12,6 +12,7 @@ dependencies: [
 
 The package compiles the Swift surface only, and depends on NumKong for the matrix views and the low-precision scalars.
 The engine itself is `libusearch_static`, built by CMake and linked by the package.
+Swift 6.3 or newer is required: the streaming and checkpoint verbs take `MutableSpan` and `RawSpan`, which the standard library gained in 6.2.
 
 ## Quickstart
 
@@ -59,7 +60,8 @@ A search writes into buffers you own and returns only its telemetry, so a sweep 
 The width of the key buffer against the count buffer _is_ the "k" in "kANN", so the space reserved and the count asked for cannot disagree.
 
 A matrix borrows and never owns, so it stays valid only for as long as the storage it points into — which is why every call site above sits inside a `withUnsafeBufferPointer`.
-`MatchesSpan` is `~Escapable` for the same reason, so the compiler refuses a span that outlives the closure holding its buffers rather than leaving it to a comment.
+`MatchesSpan` borrows the same way and is checked the same way — by the closure it sits inside, not by the compiler.
+Making it `~Escapable` needs a lifetime annotation that is still behind an experimental feature flag as of Swift 6.3, so the verbs that could take a span already do: `next(into:)` and the buffer forms of `save`, `load` and `metadata`.
 
 ## Errors
 
@@ -86,7 +88,7 @@ for query in 0 ..< matches.count {
 }
 ```
 
-Neither level is a `Collection`: a `~Escapable` type cannot conform to one, and that is the price of having the compiler check the borrow.
+Both levels are `RandomAccessCollection`, so a row walks, maps and slices like any other sequence.
 
 ## Executors
 
@@ -163,9 +165,20 @@ print(described.dimensions, described.metric.name, described.quantization.name)
 
 An in-memory checkpoint is the same bytes reached another way; size the buffer with `storageRequirements`.
 
+The buffer verbs take spans rather than pointers, so a span cannot outlive the array it borrows.
+A span is scoped to end that borrow before the array is read again.
+
 ```swift
 var buffer = [UInt8](repeating: 0, count: try index.storageRequirements)
-try buffer.withUnsafeMutableBytes { try index.save(executor: executor, buffer: $0) }
+do {
+    var typed = buffer.mutableSpan
+    var span = typed.mutableBytes
+    try index.save(executor: executor, buffer: &span)
+}
+
+let restored = try DenseIndex(options: DenseOptions())
+try restored.load(executor: executor, buffer: buffer.span.bytes)
+let described = try DenseIndex.metadata(buffer: buffer.span.bytes)
 ```
 
 ## Filtered Search
@@ -191,7 +204,11 @@ try queries.withUnsafeBufferPointer { buffer in
 var keys = [Key](repeating: .nilKey, count: 1024)
 let cursor = try index.cursor()
 while true {
-    let written = try keys.withUnsafeMutableBufferPointer { try cursor.next(into: $0) }
+    var written = 0
+    do {
+        var span = keys.mutableSpan
+        written = try cursor.next(into: &span)
+    }
     guard written != 0 else { break }
     print(keys.prefix(written))
 }
