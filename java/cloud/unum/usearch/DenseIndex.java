@@ -42,11 +42,12 @@ import java.nio.charset.StandardCharsets;
  * that was closed, and CONTENDED when a second thread is already driving the same executor.
  *
  * <pre>{@code
- * try (Executor pool = new Executor();
+ * try (Executor pool = Executor.forRam(0);
  *         DenseIndex index = new DenseOptions().dimensions(2).quantization(ScalarKind.F32).open()) {
  *     index.reserve(2);
  *     index.add(new Key[] {Key.of(1), Key.of(2)}, Matrix.of(new float[] {0, 1, 1, 0}, 2), pool);
- *     Matches matches = index.search(Matrix.of(new float[] {0, 1}, 2), 1, pool);
+ *     Matches matches = Matches.packed(1, 1);
+ *     index.search(Matrix.of(new float[] {0, 1}, 2), matches, pool, SearchOptions.DERIVED);
  *     System.out.println(matches.key(0, 0));
  * }
  * }</pre>
@@ -242,7 +243,7 @@ public final class DenseIndex implements AutoCloseable {
             return words;
         }
 
-        /** Lifts the options a checkpoint's headers describe. */
+        /** Lifts a flat layout the native layer wrote back into options. */
         static DenseOptions fromWords(long[] words) {
             DenseOptions options = new DenseOptions();
             options.metric = DenseMetric.of(Extents.toIndex(words[OptionsWords.METRIC], "the metric code"));
@@ -252,10 +253,10 @@ public final class DenseIndex implements AutoCloseable {
             options.valuesPerKey = words[OptionsWords.VALUES_PER_KEY];
             options.residency = Residency.of(Extents.toIndex(words[OptionsWords.RESIDENCY], "the residency code"));
             if (options.metric == DenseMetric.UNKNOWN) {
-                throw new USearchException(Status.UNKNOWN_KIND, "the checkpoint names an unknown metric");
+                throw new USearchException(Status.UNKNOWN_KIND, "the options name an unknown metric");
             }
             if (options.quantization == ScalarKind.UNKNOWN) {
-                throw new USearchException(Status.UNKNOWN_KIND, "the checkpoint names an unknown scalar kind");
+                throw new USearchException(Status.UNKNOWN_KIND, "the options name an unknown scalar kind");
             }
             return options;
         }
@@ -311,6 +312,54 @@ public final class DenseIndex implements AutoCloseable {
 
         /** The three traversal counters a call reports, in the order the native layer writes them. */
         static final int STATS_COUNT = 3;
+    }
+
+    /**
+     * The geometry and metric a checkpoint froze - everything a reader learns without opening it, and
+     * nothing a reader must choose for itself. It travels in its own flat layout, one word per
+     * component.
+     *
+     * <p>
+     * A checkpoint records neither the residency nor the bound on entries sharing one key: the first
+     * says where it was written rather than where a reader must keep it, and the second bounds a live
+     * handle's mutable state rather than the serialized form. Both stay the caller's to choose in the
+     * {@link DenseOptions} a handle is built from.
+     *
+     * @param dimensions the scalars per stored vector.
+     * @param metric the distance kind the checkpoint scores with.
+     * @param quantization the scalar type its rows are stored and quantized into.
+     * @param connectivity the connections-per-node bound the graph was built with.
+     */
+    public record DenseMetadata(long dimensions, DenseMetric metric, ScalarKind quantization, long connectivity) {
+
+        /** The metric kind's code. */
+        static final int METRIC = 0;
+        /** The stored quantization's code. */
+        static final int QUANTIZATION = 1;
+        /** The frozen dimensionality. */
+        static final int DIMENSIONS = 2;
+        /** The connections-per-node bound the graph was built with. */
+        static final int CONNECTIVITY = 3;
+        /** How many words one metadata structure occupies. */
+        static final int COUNT = 4;
+
+        /**
+         * Lifts the geometry and metric a checkpoint's headers describe.
+         *
+         * @throws USearchException UNKNOWN_KIND when the checkpoint names a metric or scalar this
+         *     build cannot name.
+         */
+        static DenseMetadata fromWords(long[] words) {
+            DenseMetric metric = DenseMetric.of(Extents.toIndex(words[METRIC], "the metric code"));
+            ScalarKind quantization = ScalarKind.of(Extents.toIndex(words[QUANTIZATION], "the scalar code"));
+            if (metric == DenseMetric.UNKNOWN) {
+                throw new USearchException(Status.UNKNOWN_KIND, "the checkpoint names an unknown metric");
+            }
+            if (quantization == ScalarKind.UNKNOWN) {
+                throw new USearchException(Status.UNKNOWN_KIND, "the checkpoint names an unknown scalar kind");
+            }
+            return new DenseMetadata(words[DIMENSIONS], metric, quantization, words[CONNECTIVITY]);
+        }
     }
 
     /**
@@ -442,10 +491,10 @@ public final class DenseIndex implements AutoCloseable {
      *     IO_FAILURE when the file cannot be opened, and UNKNOWN_KIND when it names a metric or
      *     scalar this build cannot name.
      */
-    public static DenseOptions metadata(String path) {
-        long[] words = new long[OptionsWords.COUNT];
+    public static DenseMetadata metadata(String path) {
+        long[] words = new long[DenseMetadata.COUNT];
         nativeMetadata(encode(path), words);
-        return DenseOptions.fromWords(words);
+        return DenseMetadata.fromWords(words);
     }
 
     /**
@@ -454,10 +503,10 @@ public final class DenseIndex implements AutoCloseable {
      * @throws USearchException MALFORMED_INPUT on an empty slab or one that ends early, and
      *     UNKNOWN_KIND when it names a metric or scalar this build cannot name.
      */
-    public static DenseOptions metadata(byte[] buffer) {
-        long[] words = new long[OptionsWords.COUNT];
+    public static DenseMetadata metadata(byte[] buffer) {
+        long[] words = new long[DenseMetadata.COUNT];
         nativeMetadataBuffer(buffer, Matrix.Storage.BYTES.code(), 0, lengthOf(buffer), words);
-        return DenseOptions.fromWords(words);
+        return DenseMetadata.fromWords(words);
     }
 
     /**
@@ -467,10 +516,10 @@ public final class DenseIndex implements AutoCloseable {
      *     buffer or one that ends early, and UNKNOWN_KIND when it names a metric or scalar this
      *     build cannot name.
      */
-    public static DenseOptions metadata(ByteBuffer buffer) {
-        long[] words = new long[OptionsWords.COUNT];
+    public static DenseMetadata metadata(ByteBuffer buffer) {
+        long[] words = new long[DenseMetadata.COUNT];
         nativeMetadataBuffer(buffer, Matrix.Storage.DIRECT.code(), offsetOf(buffer), lengthOf(buffer), words);
-        return DenseOptions.fromWords(words);
+        return DenseMetadata.fromWords(words);
     }
 
     /** Releases the index. It is idempotent, and a freed handle must not be used again. */
@@ -647,18 +696,6 @@ public final class DenseIndex implements AutoCloseable {
     }
 
     /**
-     * Resolves a matrix of queries into freshly sized outputs, fanned out over an executor.
-     *
-     * @throws USearchException the statuses {@link #searchInto} names, plus OVERFLOW when the
-     *     queries-by-wanted outputs would not fit in a Java array.
-     */
-    public Matches search(Matrix queries, long wanted, Executor executor) {
-        Matches matches = new Matches(queries.rows(), wanted);
-        searchInto(queries, matches, executor, SearchOptions.DERIVED);
-        return matches;
-    }
-
-    /**
      * Resolves a matrix of queries into caller-owned outputs - the allocation-free batch path,
      * parallelized internally. Never writes to the graph, so any number of these may overlap with
      * concurrent insertions.
@@ -668,7 +705,7 @@ public final class DenseIndex implements AutoCloseable {
      *     the outputs hold fewer rows than there are queries, and UNKNOWN_KIND on a scalar the
      *     engine cannot convert.
      */
-    public DenseStats searchInto(Matrix queries, Matches matches, Executor executor, SearchOptions options) {
+    public DenseStats search(Matrix queries, Matches matches, Executor executor, SearchOptions options) {
         long index = live();
         queries.validate(dimensions());
         if (queries.rows() > matches.queries()) {
@@ -698,18 +735,6 @@ public final class DenseIndex implements AutoCloseable {
     }
 
     /**
-     * Scores multi-row queries against multi-row entries into freshly sized outputs.
-     *
-     * @throws USearchException the statuses {@link #maxsimInto} names, plus OVERFLOW when the
-     *     queries-by-wanted outputs would not fit in a Java array.
-     */
-    public Matches maxsim(Matrix queries, long rowsPerQuery, long wanted, Executor executor) {
-        Matches matches = new Matches(queryCountOf(queries, rowsPerQuery), wanted);
-        maxsimInto(queries, rowsPerQuery, matches, executor, SearchOptions.DERIVED);
-        return matches;
-    }
-
-    /**
      * Late-interaction scoring of multi-row queries against multi-row entries: every query row takes
      * its best match within a key, and those maxima sum to that key's score. A document is one key
      * holding its token rows, so the wanted count is the "k" over keys rather than over rows.
@@ -726,7 +751,7 @@ public final class DenseIndex implements AutoCloseable {
      *     SHAPE_MISMATCH when the token rows do not divide into whole queries, the rows are not as
      *     wide as the frozen geometry, or the outputs hold fewer rows than there are queries.
      */
-    public DenseStats maxsimInto(
+    public DenseStats maxsim(
             Matrix queries, long rowsPerQuery, Matches matches, Executor executor, SearchOptions options) {
         long index = live();
         queries.validate(dimensions());
@@ -1014,10 +1039,10 @@ public final class DenseIndex implements AutoCloseable {
     private static native void nativeLoadBuffer(
             long handle, long executor, Object buffer, int storage, long byteOffset, long length);
 
-    private static native void nativeMetadata(byte[] path, long[] options);
+    private static native void nativeMetadata(byte[] path, long[] metadata);
 
     private static native void nativeMetadataBuffer(
-            Object buffer, int storage, long byteOffset, long length, long[] options);
+            Object buffer, int storage, long byteOffset, long length, long[] metadata);
 
     /** Lowers a flat options layout into the C struct and lifts it straight back. */
     private static native void nativeReloadOptions(long[] input, long[] output);

@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Text;
 
 using static Cloud.Unum.USearch.NativeMethods;
 
@@ -661,37 +662,38 @@ public readonly unsafe ref struct Matrix
 #region Results
 
 /// <summary>
-/// Where a ranked run lands - three slabs sized together, holding a queries-by-wanted matrix of
-/// keys, the distances positionally paired with them, and one match count per query.
+/// Where a ranked run lands - three caller-owned slabs sized together, holding a queries-by-wanted
+/// matrix of keys, the distances positionally paired with them, and one match count per query.
 /// </summary>
 /// <remarks>
-/// The wanted count is the "k" in kANN and the row width of both matrices, so it is fixed when the
-/// slabs are and cannot be restated afterwards. Lending slabs the caller already owns is what lets
-/// a recall sweep allocate once and reuse them across every point.
+/// The wanted count is the "k" in kANN and the row width of both matrices, and it follows from the
+/// slab lengths rather than being asked for, so the space reserved and the count asked for cannot
+/// disagree. Lending slabs the caller already owns is what lets a recall sweep allocate once and
+/// reuse them across every point.
 /// </remarks>
-public sealed class SearchResults
+public sealed class MatchesSpan
 {
     private readonly Memory<USearchKey> _keys;
     private readonly Memory<double> _distances;
     private readonly Memory<nuint> _counts;
 
-    private SearchResults(Memory<USearchKey> keys, Memory<double> distances, Memory<nuint> counts, int wanted)
+    private MatchesSpan(Memory<USearchKey> keys, Memory<double> distances, Memory<nuint> counts)
     {
         this._keys = keys;
         this._distances = distances;
         this._counts = counts;
-        this.Wanted = wanted;
+        this.Wanted = keys.Length / counts.Length;
     }
 
     /// <summary>Sizes three fresh slabs for a batch of queries, each reporting up to wanted matches.</summary>
     /// <param name="queries">How many queries the batch resolves.</param>
     /// <param name="wanted">The upper bound on matches per query.</param>
-    /// <returns>The outputs those slabs make up.</returns>
-    public static SearchResults Packed(int queries, int wanted)
+    /// <returns>The run those slabs make up.</returns>
+    public static MatchesSpan Packed(int queries, int wanted)
     {
-        if (queries < 0)
+        if (queries <= 0)
         {
-            throw new USearchException(Status.ShapeMismatch, "a batch cannot hold a negative query count");
+            throw new USearchException(Status.ShapeMismatch, "a run must hold at least one query");
         }
 
         if (wanted <= 0)
@@ -700,30 +702,32 @@ public sealed class SearchResults
         }
 
         int matches = Extents.CheckedRowMajor((ulong)queries, (ulong)wanted, USearchKey.ByteCount, "search output");
-        return new SearchResults(new USearchKey[matches], new double[matches], new nuint[queries], wanted);
+        return Of(new USearchKey[matches], new double[matches], new nuint[queries]);
     }
 
-    /// <summary>Adopts slabs the caller already owns - the allocation-free path for a sweep.</summary>
-    /// <param name="keys">The key matrix, of at least one row of wanted per query.</param>
+    /// <summary>Lends slabs the caller already owns, whose lengths fix the shape of the run.</summary>
+    /// <param name="keys">The key matrix, one row of wanted per query.</param>
     /// <param name="distances">The distance matrix, of the same extent.</param>
     /// <param name="counts">One match count per query, whose length fixes the query capacity.</param>
-    /// <param name="wanted">The upper bound on matches per query.</param>
-    /// <returns>The outputs those slabs make up.</returns>
-    public static SearchResults Of(
-        Memory<USearchKey> keys, Memory<double> distances, Memory<nuint> counts, int wanted)
+    /// <returns>The run those slabs make up.</returns>
+    public static MatchesSpan Of(Memory<USearchKey> keys, Memory<double> distances, Memory<nuint> counts)
     {
-        if (wanted <= 0)
+        if (counts.Length == 0)
         {
-            throw new USearchException(Status.ShapeMismatch, "the outputs reserve no room for a single match");
+            throw new USearchException(Status.ShapeMismatch, "a run must hold at least one query");
         }
 
-        long matches = (long)counts.Length * wanted;
-        if (keys.Length < matches || distances.Length < matches)
+        if (keys.Length != distances.Length)
         {
-            throw new USearchException(Status.ShapeMismatch, "the matrices are narrower than the wanted count");
+            throw new USearchException(Status.ShapeMismatch, "the key and distance slabs are not the same shape");
         }
 
-        return new SearchResults(keys, distances, counts, wanted);
+        if (keys.Length == 0 || keys.Length % counts.Length != 0)
+        {
+            throw new USearchException(Status.ShapeMismatch, "the slabs do not divide into one row per query");
+        }
+
+        return new MatchesSpan(keys, distances, counts);
     }
 
     /// <summary>The upper bound on matches per query - the "k" in kANN.</summary>
@@ -732,33 +736,62 @@ public sealed class SearchResults
     /// <summary>How many queries the slabs were sized for.</summary>
     public int Queries => this._counts.Length;
 
-    /// <summary>Reports how many matches one query found, clamped to what the slabs hold.</summary>
+    /// <summary>Reads one query's row across all three slabs.</summary>
     /// <param name="query">The query row.</param>
-    /// <returns>The match count of that query.</returns>
-    public int CountOf(int query)
+    /// <returns>That query's matches, trimmed to the cells the engine wrote.</returns>
+    public QueryMatches this[int query]
     {
-        if ((uint)query >= (uint)this._counts.Length)
+        get
         {
-            throw new ArgumentOutOfRangeException(nameof(query));
-        }
+            if ((uint)query >= (uint)this._counts.Length)
+            {
+                throw new ArgumentOutOfRangeException(nameof(query));
+            }
 
-        // A search never reports more than it was asked for, but the count is the library's
-        // word on what it wrote, and entries past it were never written at all.
-        nuint counted = this._counts.Span[query];
-        return counted > (nuint)this.Wanted ? this.Wanted : (int)counted;
+            return new QueryMatches(this, query);
+        }
     }
 
-    /// <summary>Borrows one query's keys, trimmed to the count that query reported.</summary>
-    /// <param name="query">The query row.</param>
-    /// <returns>The keys the query matched, nearest first.</returns>
-    public ReadOnlySpan<USearchKey> KeysOf(int query) =>
-        this._keys.Span.Slice(query * this.Wanted, this.CountOf(query));
+    /// <summary>One query's row of a run, walked through the slabs rather than copied out.</summary>
+    public readonly struct QueryMatches
+    {
+        /// <summary>The run this row belongs to, whose slabs it reads through.</summary>
+        private readonly MatchesSpan _run;
 
-    /// <summary>Borrows one query's distances, trimmed to the count that query reported.</summary>
-    /// <param name="query">The query row.</param>
-    /// <returns>The distances positionally paired with <see cref="KeysOf"/>.</returns>
-    public ReadOnlySpan<double> DistancesOf(int query) =>
-        this._distances.Span.Slice(query * this.Wanted, this.CountOf(query));
+        /// <summary>Which query's row it is.</summary>
+        private readonly int _query;
+
+        /// <summary>Names one row of a run, whose bounds the indexer above already checked.</summary>
+        /// <param name="run">The run holding the slabs.</param>
+        /// <param name="query">The query row.</param>
+        internal QueryMatches(MatchesSpan run, int query)
+        {
+            this._run = run;
+            this._query = query;
+        }
+
+        /// <summary>How many matches the engine wrote, clamped to what the row holds.</summary>
+        public int Count
+        {
+            get
+            {
+                // The library reports the true extent, which may exceed the room reserved for it.
+                nuint counted = this._run._counts.Span[this._query];
+                return counted > (nuint)this._run.Wanted ? this._run.Wanted : (int)counted;
+            }
+        }
+
+        /// <summary>Whether the engine had more to report than the wanted width could hold.</summary>
+        public bool WasTruncated => this._run._counts.Span[this._query] > (nuint)this._run.Wanted;
+
+        /// <summary>The keys the query matched, nearest first.</summary>
+        public ReadOnlySpan<USearchKey> Keys =>
+            this._run._keys.Span.Slice(this._query * this._run.Wanted, this.Count);
+
+        /// <summary>The distances positionally paired with <see cref="Keys"/>.</summary>
+        public ReadOnlySpan<double> Distances =>
+            this._run._distances.Span.Slice(this._query * this._run.Wanted, this.Count);
+    }
 
     /// <summary>The key matrix the library writes into.</summary>
     internal Span<USearchKey> KeysSlab => this._keys.Span;
@@ -786,12 +819,13 @@ public sealed class SearchResults
 
 /// <summary>
 /// Where an index's payload lives, which engine traverses it, and what loading a checkpoint means
-/// for the handle. It also picks the <see cref="Executor"/> factory, and an executor of one kind
-/// may only drive handles of the same one.
+/// for the handle. It also names which <see cref="Executor"/> factory may drive the handle, and an
+/// executor of one kind refuses handles of another.
 /// </summary>
 /// <remarks>
 /// Placement within a kind - the memory domains, the device ordinals, the device paths - is
-/// derived rather than named here, so an index spreads over whatever the machine offers.
+/// derived rather than named here, so an index spreads over whatever the machine offers. An
+/// executor names its own placement, so a pool can still be pinned to the hardware it walks.
 /// </remarks>
 public enum ResidencyKind : int
 {
@@ -836,11 +870,11 @@ public enum Admission : int
 /// lets one pool serve several indexes, and what makes the cost of spawning visible at the line
 /// that spawns rather than hidden in a constructor.
 /// <para>
-/// The residency picks the factory, and the factory decides what the thread count means: host
-/// workers for RAM, one submission ring apiece for NVMe, and nothing at all for VRAM, where a
-/// single host thread drives one stream per device. The kind must match the residency of every
-/// handle the executor drives, and a mismatch fails the first call with
-/// <see cref="Status.DeviceFailure"/>.
+/// One factory per residency, each taking only what its own hardware has: memory domains and host
+/// workers for RAM, device paths and one submission ring apiece for NVMe, and device ordinals alone
+/// for VRAM, where a single host thread drives one stream per device and there is no thread count to
+/// name. The kind must match the residency of every handle the executor drives, and a mismatch fails
+/// the first call with <see cref="Status.DeviceFailure"/>.
 /// </para>
 /// <para>
 /// An executor admits one driver at a time, reporting <see cref="Status.Contended"/> rather than
@@ -850,7 +884,7 @@ public enum Admission : int
 /// </para>
 /// <example>
 /// <code>
-/// using Executor pool = new(ResidencyKind.Ram, threads: 8);
+/// using Executor pool = Executor.ForRam(threads: 8);
 /// using DenseIndex index = new(DenseOptions.Default with { Dimensions = 3 });
 /// index.Add(pool, [42UL], Matrix.RowsOf&lt;float&gt;(vector, 3));
 /// </code>
@@ -860,45 +894,114 @@ public sealed unsafe class Executor : IDisposable
 {
     private readonly NativeExecutorHandle _handle;
 
-    /// <summary>
-    /// Spawns the workers a residency's verbs run on. Zero threads derives from the hardware - 7/8
-    /// of the cores for RAM, since full occupancy starves the ordered publication path. A VRAM
-    /// executor opens one stream per device and takes no thread count, so the count is unread
-    /// there.
-    /// </summary>
-    /// <param name="residency">Which factory spawns the workers, and what they drive.</param>
-    /// <param name="threads">The worker count; zero derives.</param>
-    public Executor(ResidencyKind residency, ulong threads = 0)
-    {
-        NativeError error;
-        switch (residency)
-        {
-            case ResidencyKind.Ram:
-                NativeRamOptions ram = default;
-                this._handle = usearch_executor_for_ram(&ram, (nuint)threads, out error);
-                break;
-            case ResidencyKind.Vram:
-                NativeVramOptions vram = default;
-                this._handle = usearch_executor_for_vram(&vram, out error);
-                break;
-            case ResidencyKind.Nvme:
-                NativeNvmeOptions nvme = default;
-                this._handle = usearch_executor_for_nvme(&nvme, (nuint)threads, out error);
-                break;
-            default:
-                throw new USearchException(Status.UnknownKind, "the residency names neither RAM, VRAM, nor NVMe");
-        }
+    /// <summary>Adopts a handle one of the factories below spawned.</summary>
+    /// <param name="handle">The engine handle the factory claimed.</param>
+    private Executor(NativeExecutorHandle handle) => this._handle = handle;
 
-        error.ThrowIfFailed();
-        if (this._handle.IsInvalid)
+    /// <summary>
+    /// Spawns host workers for RAM-resident indexes, interleaved across the compute domains local to
+    /// the named memory domains - the very ids the indexes were initialized with.
+    /// </summary>
+    /// <param name="memoryDomains">NUMA node ids to place shards on; empty derives every node the
+    /// process may allocate on.</param>
+    /// <param name="threads">The worker count; zero takes 7/8 of the cores those domains carry,
+    /// since full occupancy starves the ordered publication path.</param>
+    /// <returns>The spawned executor.</returns>
+    public static Executor ForRam(ReadOnlySpan<int> memoryDomains = default, ulong threads = 0)
+    {
+        fixed (int* domains = memoryDomains)
         {
-            throw new USearchException(Status.Internal, "the library returned no handle and no error");
+            NativeRamOptions ram = new()
+            {
+                MemoryDomains = (IntPtr)domains,
+                MemoryDomainsCount = (nuint)memoryDomains.Length,
+            };
+            NativeExecutorHandle handle = usearch_executor_for_ram(&ram, (nuint)threads, out NativeError error);
+            return Spawned(handle, error);
         }
     }
 
-    /// <summary>Host workers for RAM-resident indexes, with the thread count derived.</summary>
-    public Executor() : this(ResidencyKind.Ram, 0)
+    /// <summary>
+    /// Spawns host workers for NVMe-resident indexes, one submission ring apiece, across the compute
+    /// domains local to the devices the paths name.
+    /// </summary>
+    /// <param name="paths">Devices or directories to place shards on; empty leaves each shard where
+    /// its manifest points.</param>
+    /// <param name="threads">The ring count; zero derives from those devices' queue
+    /// capabilities.</param>
+    /// <returns>The spawned executor.</returns>
+    public static Executor ForNvme(ReadOnlySpan<string> paths = default, ulong threads = 0)
     {
+        int total = 0;
+        foreach (string path in paths)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                throw new USearchException(Status.MalformedInput, "a placement path is empty");
+            }
+
+            total += Encoding.UTF8.GetByteCount(path);
+        }
+
+        byte[] text = new byte[total];
+        NativeBytesView[] views = new NativeBytesView[paths.Length];
+        fixed (byte* bytes = text)
+        {
+            int offset = 0;
+            for (int position = 0; position < paths.Length; position++)
+            {
+                int written = Encoding.UTF8.GetBytes(paths[position], new Span<byte>(bytes + offset, total - offset));
+                views[position] = new NativeBytesView { Data = (IntPtr)(bytes + offset), Length = (nuint)written };
+                offset += written;
+            }
+
+            fixed (NativeBytesView* borrowed = views)
+            {
+                NativeNvmeOptions nvme = new()
+                {
+                    Paths = (IntPtr)borrowed,
+                    PathsCount = (nuint)paths.Length,
+                };
+                NativeExecutorHandle handle = usearch_executor_for_nvme(&nvme, (nuint)threads, out NativeError error);
+                return Spawned(handle, error);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Opens one submission stream on every named device, all of them driven by the one host thread
+    /// that calls the verbs - which is why this factory takes no thread count.
+    /// </summary>
+    /// <param name="devices">CUDA device ordinals to place shards on; empty derives one free
+    /// device.</param>
+    /// <returns>The opened executor.</returns>
+    public static Executor ForVram(ReadOnlySpan<int> devices = default)
+    {
+        fixed (int* ordinals = devices)
+        {
+            NativeVramOptions vram = new()
+            {
+                Devices = (IntPtr)ordinals,
+                DevicesCount = (nuint)devices.Length,
+            };
+            NativeExecutorHandle handle = usearch_executor_for_vram(&vram, out NativeError error);
+            return Spawned(handle, error);
+        }
+    }
+
+    /// <summary>Wraps what a factory spawned, refusing a null handle no failure was reported for.</summary>
+    /// <param name="handle">The handle the engine returned.</param>
+    /// <param name="error">The status slot the factory filled.</param>
+    /// <returns>The executor owning that handle.</returns>
+    private static Executor Spawned(NativeExecutorHandle handle, NativeError error)
+    {
+        error.ThrowIfFailed();
+        if (handle.IsInvalid)
+        {
+            throw new USearchException(Status.Internal, "the library returned no handle and no error");
+        }
+
+        return new Executor(handle);
     }
 
     /// <summary>Waits for every deferred call on this executor to finish.</summary>

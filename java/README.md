@@ -13,6 +13,7 @@ Both vocabularies are nested types, and a nested type imports directly, so every
 import cloud.unum.usearch.DenseIndex;
 import cloud.unum.usearch.DenseIndex.DenseMetric;
 import cloud.unum.usearch.DenseIndex.DenseOptions;
+import cloud.unum.usearch.DenseIndex.SearchOptions;
 import cloud.unum.usearch.Types.Executor;
 import cloud.unum.usearch.Types.Key;
 import cloud.unum.usearch.Types.Matches;
@@ -59,7 +60,7 @@ Every fanned-out verb takes an executor, which owns the threads the work runs on
 ```java
 public class Main {
     public static void main(String[] arguments) {
-        try (Executor pool = new Executor();
+        try (Executor pool = Executor.forRam(0);
                 DenseIndex index = new DenseOptions()
                         .dimensions(3)
                         .metric(DenseMetric.ANGULAR)
@@ -72,7 +73,8 @@ public class Main {
                 Matrix.of(new float[] {0.1f, 0.2f, 0.3f, 0.3f, 0.2f, 0.1f}, 3),
                 pool);
 
-            Matches matches = index.search(Matrix.of(new float[] {0.1f, 0.2f, 0.3f}, 3), 10, pool);
+            Matches matches = Matches.packed(1, 10);
+            index.search(Matrix.of(new float[] {0.1f, 0.2f, 0.3f}, 3), matches, pool, SearchOptions.DERIVED);
             for (int rank = 0; rank < matches.count(0); ++rank) {
                 System.out.println(matches.key(0, rank) + " at " + matches.score(0, rank));
             }
@@ -115,6 +117,21 @@ A direct `ByteBuffer` is addressed in place with no copy at all, which is the ar
 Quantization kinds run from the widest dynamic range down: `F64`, `F32`, `BF16`, `F16`, `E5M2`, `E4M3`, `E3M2`, `E2M3`, `I8`, `I4X2`, `U8`, `U4X2`, `U1X8`.
 Sub-byte kinds count logical dimensions, so sixteen `U1X8` dimensions occupy two bytes per row.
 
+## Ranked Outputs
+
+Every ranked verb writes into caller-owned outputs and returns only the telemetry its walk reported, so a recall sweep sizes `Matches` once and reuses it across every point.
+`Matches` holds three slabs — a queries-by-wanted matrix of keys, the scores positionally paired with them, and one match count per query.
+
+```java
+Matches sized = Matches.packed(queries, 10);
+Matches adopted = Matches.of(keySlab, scoreSlab, countSlab);
+```
+
+The wanted count is the "k" in kANN and the row width of both matrices, and `Matches.of` reads it off the slab lengths rather than taking it as an argument, so the room reserved and the count asked for cannot disagree.
+Slabs that are not the same shape, or that do not divide into one row per query, are refused with `Status.SHAPE_MISMATCH`.
+
+`count`, `key` and `score` all address one query's row by its position, so no call site multiplies out an offset of its own, and slots past a query's count hold memory the engine never wrote and are refused.
+
 ## Residency
 
 Where the payload lives and which engine traverses it is one tagged choice, and it also decides what loading a checkpoint means.
@@ -134,16 +151,27 @@ An executor owns the host threads or device streams a fanned-out verb runs on; a
 Keeping them apart is what lets one pool serve several indexes, and what makes the cost of spawning visible at the line that spawns.
 Its residency must match the residency of every handle it drives, and no verb derives one for itself.
 
+There is one factory per residency, and each takes only the hardware its own kind places shards on.
+
 ```java
-try (Executor pool = new Executor(Residency.RAM, 16)) {
+Executor.forRam(new int[] {0, 1}, 16);                  // two NUMA nodes, sixteen workers
+Executor.forVram(new int[] {0, 1, 2, 3});               // four devices, one stream apiece
+Executor.forNvme(new String[] {"/mnt/a", "/mnt/b"}, 8); // two drives, eight submission rings
+```
+
+`forVram` takes no thread count: one host thread keeps every device fed, so the width of that pool is the device list itself.
+Naming no hardware derives it — `Executor.forRam(0)` spreads over every memory domain the process may allocate on, `Executor.forVram()` opens one free device, and `Executor.forNvme(0)` leaves every shard where its manifest already points.
+
+```java
+try (Executor pool = Executor.forRam(16)) {
     index.add(keys, vectors, pool);
-    Matches matches = index.search(queries, 10, pool);
+    index.search(queries, matches, pool, SearchOptions.DERIVED);
     index.save("index.safegraphs", pool);
     pool.drain();
 }
 ```
 
-`add`, `refine`, `search`, `searchInto`, `maxsim`, `maxsimInto`, `save`, `load`, `saveBuffer` and `loadBuffer` each take one.
+`add`, `refine`, `search`, `maxsim`, `save`, `load`, `saveBuffer` and `loadBuffer` each take one.
 An executor admits one driver at a time, reporting `Status.CONTENDED` rather than corrupting a dispatch already in flight; handles themselves stay freely concurrent.
 
 ## Per-Call Settings and Telemetry
@@ -153,7 +181,7 @@ Every verb that walks the graph returns the telemetry the walk reported, and `De
 
 ```java
 DenseStats inserted = index.add(keys, vectors, pool, new InsertionOptions(256));
-DenseStats searched = index.searchInto(queries, matches, pool, new SearchOptions(64));
+DenseStats searched = index.search(queries, matches, pool, new SearchOptions(64));
 DenseStats total = inserted.plus(searched);
 ```
 
@@ -182,7 +210,8 @@ try (DenseIndex index = new DenseOptions()
         .metric(DenseMetric.INNER)
         .valuesPerKey(512)
         .open()) {
-    Matches documents = index.maxsim(tokens, 32, 10, pool);
+    Matches documents = Matches.packed(tokens.rows() / 32, 10);
+    index.maxsim(tokens, 32, documents, pool, SearchOptions.DERIVED);
 }
 ```
 
@@ -197,12 +226,15 @@ A handle built with zero dimensions freezes its geometry at the first load, from
 index.save("index.safegraphs", pool);
 index.load("index.safegraphs", pool);
 
-DenseOptions described = DenseIndex.metadata("index.safegraphs");
+DenseMetadata described = DenseIndex.metadata("index.safegraphs");
 
 byte[] slab = new byte[(int) index.storageRequirements()];
 index.saveBuffer(slab, pool);
 index.loadBuffer(slab, pool);
 ```
+
+`DenseMetadata` carries the four fields a checkpoint froze - dimensions, metric, quantization and connectivity.
+Residency is absent because a checkpoint records where it was written rather than where a reader must keep it, and `valuesPerKey` is absent because it bounds a live handle's mutable state rather than the serialized form.
 
 ## Reading Back
 

@@ -19,19 +19,21 @@
  *
  *  Batch inputs arrive through PEP 3118 first and @c __array_interface__ second, so a
  *  PyTorch or TensorFlow tensor reaches the index without a NumPy round-trip and NumPy
- *  itself is never a build-time dependency. Outputs leave as @c memoryview objects over
- *  arenas the result owns, which NumPy wraps with no copy.
+ *  itself is never a build-time dependency. Outputs are buffers the caller already owns and
+ *  a verb fills, and a @c Matches reads them back as @c memoryview objects.
  */
 #ifndef UNUM_USEARCH_PYTHON_LIB_H
 #define UNUM_USEARCH_PYTHON_LIB_H
+
+/*  CPython defines preprocessor macros that reach into the standard headers, so it leads rather
+ *  than joining the third-party group; every unit here includes this file before anything else. */
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
 
 #include <stdarg.h> // `va_list` - the cause-preserving raise
 #include <stddef.h> // `size_t`
 #include <stdint.h> // `uint8_t`, `PTRDIFF_MAX`
 #include <string.h> // `memcpy`, `memset`
-
-#define PY_SSIZE_T_CLEAN
-#include <Python.h>
 
 #include <usearch/dense_index.h>
 #include <usearch/types.h>
@@ -149,9 +151,11 @@ extern PyTypeObject StatsType;
 extern PyTypeObject MatchType;
 extern PyTypeObject MatchesType;
 extern PyTypeObject ExecutorType;
+
 extern PyTypeObject DenseIndexType;
 extern PyTypeObject DenseCursorType;
 extern PyTypeObject DenseFinderType;
+
 extern PyTypeObject SequenceIndexType;
 extern PyTypeObject MatrixIndexType;
 extern PyTypeObject GeospatialIndexType;
@@ -165,7 +169,7 @@ typedef struct Executor {
     usearch_executor_t handle;
 } Executor;
 
-/** @brief Traversal telemetry a caller may pass into @c add or @c search to accumulate. */
+/** @brief Traversal telemetry a caller may pass into @c add or @c search to have overwritten. */
 typedef struct Stats {
     PyObject ob_base;
     usearch_dense_traversal_stats_t stats;
@@ -179,25 +183,23 @@ typedef struct Match {
 } Match;
 
 /**
- *  @brief The result of a batch search: three arenas and the telemetry that produced them.
+ *  @brief A ranked run read back off the three buffers a verb filled.
  *
- *  The arenas are filled before the object is ever visible and never mutated afterwards, so
- *  the @c memoryview objects handed out stay valid for the result's whole lifetime.
+ *  Every field borrows: the exported buffers keep their owners alive for the view's whole
+ *  life, and the row width follows from their lengths rather than travelling beside them.
  */
 typedef struct Matches {
     PyObject ob_base;
-    /** @brief `bytes` of `queries * wanted` keys, sixteen bytes each. */
-    PyObject* keys_arena;
-    /** @brief `bytes` of `queries * wanted` doubles. */
-    PyObject* distances_arena;
-    /** @brief `bytes` of `queries` counts. */
-    PyObject* counts_arena;
-    /** @brief Rows in each arena - one per query. */
+    /** @brief The `queries * wanted` identities, sixteen bytes each. */
+    usearch_py_buffer_backing_t keys;
+    /** @brief The `queries * wanted` distances, positionally paired with the identities. */
+    usearch_py_buffer_backing_t distances;
+    /** @brief The `queries` match counts, one per query. */
+    usearch_py_buffer_backing_t counts;
+    /** @brief Rows in each buffer - one per query. */
     size_t queries;
-    /** @brief Columns in the key and distance arenas - the "k" the search was asked for. */
+    /** @brief Columns in the key and distance buffers - the "k" in "kANN". */
     size_t wanted;
-    /** @brief Telemetry of the walk that filled the arenas. */
-    usearch_dense_traversal_stats_t stats;
 } Matches;
 
 #pragma endregion Shared Types
@@ -233,10 +235,10 @@ PyObject* usearch_py_key_to_object(usearch_key_t key);
 PyObject* usearch_py_stats_to_object(usearch_dense_traversal_stats_t const* stats);
 
 /**
- *  @brief Folds @p stats into the @c Stats object @p target, which may be @c None.
+ *  @brief Replaces the counters of the @c Stats object @p target with @p stats; @c None skips.
  *  @return 0 on success, -1 with an exception set when @p target is neither.
  */
-int usearch_py_stats_accumulate(PyObject* target, usearch_dense_traversal_stats_t const* stats);
+int usearch_py_stats_overwrite(PyObject* target, usearch_dense_traversal_stats_t const* stats);
 
 /** @brief Builds a new @c Match; returns a new reference, or @c NULL. */
 PyObject* usearch_py_match_to_object(usearch_key_t key, usearch_distance_t distance);
@@ -295,7 +297,8 @@ int usearch_py_scalar_from_object(PyObject* object, usearch_scalar_t* kind);
  *
  *  @param[in] object The tensor-like input.
  *  @param[in] scalar_hint Overrides the inferred scalar kind; unknown infers from the buffer.
- *  @param[out] view The borrowed matrix.
+ *  @param[out] view The borrowed matrix, whose @c columns counts logical dimensions rather than
+ *      the storage units a sub-byte kind packs them into.
  *  @param[out] backing Storage the view points into; release it with @c usearch_py_buffer_release.
  *  @return 0 on success, -1 with an exception set otherwise.
  */

@@ -394,6 +394,78 @@ static int executor_named(usearch_executor_t executor, char const* verb) {
 
 #pragma endregion Construction
 
+#pragma region Progress
+
+/** @brief What one watched verb hands its progress trampoline. */
+typedef struct progress_state_t {
+    /** @brief The caller's progress callable, or NULL when the verb was handed none. */
+    PyObject* callable;
+    /** @brief The first exception any report raised; NULL while none has. */
+    PyObject* raised;
+} progress_state_t;
+
+/**
+ *  @brief Re-enters Python for one progress report, from whichever library thread advances.
+ *
+ *  Reports are serialized, but nothing promises they land on the caller's thread, so the GIL is
+ *  taken here rather than assumed. A report that raises also stops the walk, so the call unwinds
+ *  at the next boundary instead of running to completion with a doomed result.
+ */
+static usearch_continuation_t progress_trampoline(size_t completed, size_t total, void* state_pointer) {
+    progress_state_t* const state = (progress_state_t*)state_pointer;
+    PyGILState_STATE const gil_state = PyGILState_Ensure();
+    usearch_continuation_t continuation = usearch_cancel_k;
+    PyObject* const completed_object = PyLong_FromSize_t(completed);
+    PyObject* const total_object = PyLong_FromSize_t(total);
+    if (completed_object && total_object) {
+        PyObject* const verdict = PyObject_CallFunctionObjArgs(state->callable, completed_object, total_object, NULL);
+        if (verdict) {
+            int const truth = PyObject_IsTrue(verdict);
+            Py_DECREF(verdict);
+            continuation = truth > 0 ? usearch_continue_k : usearch_cancel_k;
+        }
+    }
+    Py_XDECREF(total_object);
+    Py_XDECREF(completed_object);
+    PyObject* const raised = PyErr_GetRaisedException(); //! NULL when nothing was raised.
+    if (raised && !state->raised) state->raised = raised;
+    else Py_XDECREF(raised);
+    PyGILState_Release(gil_state);
+    return continuation;
+}
+
+/**
+ *  @brief Reads the `progress` keyword, leaving @p callable alone when the value names None.
+ *  @return 0 on success, -1 with an exception set when the value is not callable.
+ */
+static int progress_from_object(PyObject* value, PyObject** callable) {
+    if (value == Py_None) return 0;
+    if (!PyCallable_Check(value)) {
+        PyErr_Format(PyExc_TypeError, "The 'progress' handler must be callable, got %S", Py_TYPE(value));
+        return -1;
+    }
+    *callable = value;
+    return 0;
+}
+
+/** @brief The trampoline to register for @p state, or NULL when the verb was handed no handler. */
+static usearch_progress_callback_t progress_registered(progress_state_t const* state) {
+    return state->callable ? progress_trampoline : NULL;
+}
+
+/**
+ *  @brief Re-raises on the caller's thread whatever a report left latched.
+ *  @return -1 with the handler's exception set when one raised, 0 otherwise.
+ */
+static int progress_raised(progress_state_t* state) {
+    if (!state->raised) return 0;
+    PyErr_SetRaisedException(state->raised);
+    state->raised = NULL;
+    return -1;
+}
+
+#pragma endregion Progress
+
 #pragma region Introspection
 
 /** @brief The whole family of `(handle, error) → size_t` probes, through one call site. */
@@ -450,7 +522,7 @@ static PyObject* DenseIndex_get_capabilities(DenseIndex* self, void* closure) {
 }
 
 /**
- *  @brief The frozen row width, and the row's byte extent in @p scalar_kind .
+ *  @brief The frozen row width in logical dimensions, and the row's byte extent in @p scalar_kind .
  *
  *  A handle whose geometry is not frozen yet reports zero dimensions, which would size an
  *  arena at zero bytes and hand the engine the immortal empty-bytes singleton to write into -
@@ -483,10 +555,13 @@ static int index_row_extent(DenseIndex* self, usearch_scalar_t scalar_kind, size
 static int index_rows_match(DenseIndex* self, usearch_matrix_view_t const* matrix, char const* role) {
     size_t columns = 0, row_bytes = 0;
     if (index_row_extent(self, matrix->scalar_kind, &columns, &row_bytes) != 0) return -1;
-    if (matrix->columns != columns)
-        return usearch_py_raise(usearch_error_shape_mismatch_k, "the %s are %zu scalars wide, but the index is %zu",
-                                role, matrix->columns, columns);
-    return 0;
+    if (matrix->columns == columns) return 0;
+    // A packed row carries whole storage units, so a geometry stopping mid-unit is still the row
+    // the engine reads: the byte extent settles what the dimension count cannot express.
+    if (matrix->columns > columns && usearch_py_scalar_row_bytes(matrix->scalar_kind, matrix->columns) == row_bytes)
+        return 0;
+    return usearch_py_raise(usearch_error_shape_mismatch_k, "the %s are %zu scalars wide, but the index is %zu", role,
+                            matrix->columns, columns);
 }
 
 static Py_ssize_t DenseIndex_length(DenseIndex* self) {
@@ -552,30 +627,38 @@ static PyObject* DenseIndex_clear(PyObject* self, PyObject* unused) {
     Py_RETURN_NONE;
 }
 
-static char const doc_DenseIndex_add[] =                                                   //
-    "add(keys, vectors, *, executor, expansion_factor=0, dtype=None, stats=None) -> int\n" //
-    "\n"                                                                                   //
-    "Insert a batch of vectors under a batch of keys; one vector is a one-row matrix.\n"   //
-    "A batch is all-or-nothing, so a rejected batch leaves the index untouched.\n"         //
-    "Keys need not be unique: inserting one twice stores two entries, and `count`\n"       //
-    "reports both.\n"                                                                      //
-    "\n"                                                                                   //
-    "Args:\n"                                                                              //
-    "  keys (Sequence[Key | int] | buffer): One key per row, or an (N, 16) buffer.\n"      //
-    "  vectors (buffer): An (N, dimensions) matrix; only the row stride may vary.\n"       //
-    "  executor (Executor): The workers to fan out over; its residency must match.\n"      //
-    "  expansion_factor (int, optional): Candidate-pool breadth; 0 derives it.\n"          //
-    "  dtype (str, optional): Names the input scalar type when the buffer cannot.\n"       //
-    "  stats (Stats, optional): Accumulates traversal telemetry; None skips reporting.\n"  //
-    "Returns:\n"                                                                           //
-    "  int: The number of rows inserted, equal to the number of keys.\n"                   //
-    "\n"                                                                                   //
-    "Example:\n"                                                                           //
-    "  >>> from array import array\n"                                                      //
-    "  >>> index = usearch.DenseIndex.for_ram(dimensions=4)\n"                             //
-    "  >>> index.reserve(1)\n"                                                             //
-    "  >>> pool = usearch.Executor.for_ram()\n"                                            //
-    "  >>> index.add([1], array('d', [0.1, 0.2, 0.3, 0.4]), executor=pool)\n"              //
+static char const doc_DenseIndex_add[] =                                                    //
+    "add(keys, vectors, *, executor, expansion_factor=0, dtype=None, progress=None,\n"      //
+    "    stats=None) -> int\n"                                                              //
+    "\n"                                                                                    //
+    "Insert a batch of vectors under a batch of keys; one vector is a one-row matrix.\n"    //
+    "Keys need not be unique: inserting one twice stores two entries, and `count`\n"        //
+    "reports both.\n"                                                                       //
+    "\n"                                                                                    //
+    "A batch without a handler is all-or-nothing, so a rejected batch leaves the index\n"   //
+    "untouched. With one it advances in increments instead: a cancellation stops at an\n"   //
+    "increment boundary, keeps every row already published, and the return counts what\n"   //
+    "stands.\n"                                                                             //
+    "\n"                                                                                    //
+    "Args:\n"                                                                               //
+    "  keys (Sequence[Key | int] | buffer): One key per row, or an (N, 16) buffer.\n"       //
+    "  vectors (buffer): An (N, dimensions) matrix; only the row stride may vary.\n"        //
+    "  executor (Executor): The workers to fan out over; its residency must match.\n"       //
+    "  expansion_factor (int, optional): Candidate-pool breadth; 0 derives it.\n"           //
+    "  dtype (str, optional): Names the input scalar type when the buffer cannot.\n"        //
+    "  progress (callable, optional): Called with (completed, total) rows; returning\n"     //
+    "    falsy stops the batch. Reports are serialized, so the handler needs no locking.\n" //
+    "  stats (Stats, optional): Overwritten with this call's traversal telemetry; None\n"   //
+    "    skips reporting.\n"                                                                //
+    "Returns:\n"                                                                            //
+    "  int: The number of rows inserted - every key, unless a handler stopped early.\n"     //
+    "\n"                                                                                    //
+    "Example:\n"                                                                            //
+    "  >>> from array import array\n"                                                       //
+    "  >>> index = usearch.DenseIndex.for_ram(dimensions=4)\n"                              //
+    "  >>> index.reserve(1)\n"                                                              //
+    "  >>> pool = usearch.Executor.for_ram()\n"                                             //
+    "  >>> index.add([1], array('d', [0.1, 0.2, 0.3, 0.4]), executor=pool)\n"               //
     "  1";
 
 static PyObject* DenseIndex_add(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
@@ -584,6 +667,7 @@ static PyObject* DenseIndex_add(PyObject* self, PyObject* const* args, Py_ssize_
     if (index_alive(index) != 0) return NULL;
 
     PyObject *stats_object = NULL, *dtype_object = NULL;
+    progress_state_t progress_state = {NULL, NULL};
     usearch_executor_t executor = NULL;
     size_t expansion_factor = 0;
 
@@ -601,6 +685,9 @@ static PyObject* DenseIndex_add(PyObject* self, PyObject* const* args, Py_ssize_
             if (usearch_py_size_from_object(value, "expansion_factor", &expansion_factor) != 0) return NULL;
         }
         else if (PyUnicode_CompareWithASCIIString(name, "dtype") == 0) { dtype_object = value; }
+        else if (PyUnicode_CompareWithASCIIString(name, "progress") == 0) {
+            if (progress_from_object(value, &progress_state.callable) != 0) return NULL;
+        }
         else if (PyUnicode_CompareWithASCIIString(name, "stats") == 0) { stats_object = value; }
         else if (PyUnicode_CompareWithASCIIString(name, "executor") == 0) {
             if (usearch_py_executor_from_object(value, &executor) != 0) return NULL;
@@ -637,18 +724,22 @@ static PyObject* DenseIndex_add(PyObject* self, PyObject* const* args, Py_ssize_
     size_t inserted = 0;
 
     Py_BEGIN_ALLOW_THREADS;
-    inserted = usearch_dense_add(index->handle, executor, keys, &vectors, &options, NULL, NULL, &stats, &error);
+    inserted = usearch_dense_add(index->handle, executor, keys, &vectors, &options,
+                                 progress_registered(&progress_state), &progress_state, &stats, &error);
     Py_END_ALLOW_THREADS;
 
     usearch_py_keys_release(&arena);
     usearch_py_buffer_release(&backing);
-    if (usearch_py_raise_on_error(&error) != 0) return NULL;
-    if (usearch_py_stats_accumulate(stats_object, &stats) != 0) return NULL;
+    // A handler that raised outranks whatever the batch went on to report, and a cancellation it
+    // asked for is the rows that stand rather than a failure.
+    if (progress_raised(&progress_state) != 0) return NULL;
+    if (error.status != usearch_error_cancelled_k && usearch_py_raise_on_error(&error) != 0) return NULL;
+    if (usearch_py_stats_overwrite(stats_object, &stats) != 0) return NULL;
     return PyLong_FromSize_t(inserted);
 }
 
 static char const doc_DenseIndex_refine[] =                                                  //
-    "refine(*, executor, expansion_factor=0, stats=None) -> int\n"                           //
+    "refine(*, executor, expansion_factor=0, progress=None, stats=None) -> int\n"            //
     "\n"                                                                                     //
     "Re-select the neighbors of every stored entry against the finished graph, improving\n"  //
     "edges that were chosen when the graph around them was still incomplete.\n"              //
@@ -659,10 +750,17 @@ static char const doc_DenseIndex_refine[] =                                     
     "throughout, and the sweep resumes where it stopped, so a caller loops until the\n"      //
     "return falls below whatever change rate they consider settled.\n"                       //
     "\n"                                                                                     //
+    "Stopping is not an error here and reports no cancelled status: re-selecting edges\n"    //
+    "claims no identity, so a stopped sweep leaves the graph correct and merely less\n"      //
+    "improved. A handler is therefore how a sweep is put under a time budget.\n"             //
+    "\n"                                                                                     //
     "Args:\n"                                                                                //
     "  executor (Executor): The workers to fan out over; its residency must match.\n"        //
     "  expansion_factor (int, optional): Candidate-pool breadth; 0 derives it.\n"            //
-    "  stats (Stats, optional): Accumulates traversal telemetry; None skips reporting.\n"    //
+    "  progress (callable, optional): Called with (completed, total) nodes; returning\n"     //
+    "    falsy ends the sweep, and the next call resumes where it stopped.\n"                //
+    "  stats (Stats, optional): Overwritten with this call's traversal telemetry; None\n"    //
+    "    skips reporting.\n"                                                                 //
     "Returns:\n"                                                                             //
     "  int: Nodes whose edges changed; zero means the graph has settled.\n"                  //
     "\n"                                                                                     //
@@ -681,6 +779,7 @@ static PyObject* DenseIndex_refine(PyObject* self, PyObject* const* args, Py_ssi
     if (index_alive(index) != 0) return NULL;
 
     PyObject* stats_object = NULL;
+    progress_state_t progress_state = {NULL, NULL};
     usearch_executor_t executor = NULL;
     size_t expansion_factor = 0;
 
@@ -694,6 +793,9 @@ static PyObject* DenseIndex_refine(PyObject* self, PyObject* const* args, Py_ssi
         PyObject* const value = args[args_progress];
         if (PyUnicode_CompareWithASCIIString(name, "expansion_factor") == 0) {
             if (usearch_py_size_from_object(value, "expansion_factor", &expansion_factor) != 0) return NULL;
+        }
+        else if (PyUnicode_CompareWithASCIIString(name, "progress") == 0) {
+            if (progress_from_object(value, &progress_state.callable) != 0) return NULL;
         }
         else if (PyUnicode_CompareWithASCIIString(name, "stats") == 0) { stats_object = value; }
         else if (PyUnicode_CompareWithASCIIString(name, "executor") == 0) {
@@ -713,11 +815,13 @@ static PyObject* DenseIndex_refine(PyObject* self, PyObject* const* args, Py_ssi
     size_t changed = 0;
 
     Py_BEGIN_ALLOW_THREADS;
-    changed = usearch_dense_refine(index->handle, executor, &options, NULL, NULL, &stats, &error);
+    changed = usearch_dense_refine(index->handle, executor, &options, progress_registered(&progress_state),
+                                   &progress_state, &stats, &error);
     Py_END_ALLOW_THREADS;
 
+    if (progress_raised(&progress_state) != 0) return NULL;
     if (usearch_py_raise_on_error(&error) != 0) return NULL;
-    if (usearch_py_stats_accumulate(stats_object, &stats) != 0) return NULL;
+    if (usearch_py_stats_overwrite(stats_object, &stats) != 0) return NULL;
     return PyLong_FromSize_t(changed);
 }
 
@@ -725,7 +829,7 @@ static PyObject* DenseIndex_refine(PyObject* self, PyObject* const* args, Py_ssi
 
 #pragma region Search
 
-/** @brief What the two search doors agree on before either calls the library. */
+/** @brief What every ranked verb agrees on before it calls the library. */
 typedef struct search_request_t {
     /** @brief The borrowed query matrix. */
     usearch_matrix_view_t queries;
@@ -737,7 +841,9 @@ typedef struct search_request_t {
     size_t expansion_factor;
     /** @brief The admission callable, or NULL for an unfiltered walk. */
     PyObject* predicate;
-    /** @brief The @c Stats to accumulate into, or NULL to skip reporting. */
+    /** @brief The progress callable, or NULL for an unwatched walk. */
+    PyObject* progress;
+    /** @brief The @c Stats to overwrite, or NULL to skip reporting. */
     PyObject* stats_object;
     /** @brief The workers this call fans out over. */
     usearch_executor_t executor;
@@ -756,7 +862,7 @@ typedef struct predicate_state_t {
  *
  *  A worker's thread state dies with the callback and the caller's would surface the exception
  *  at an unrelated return, so a raising predicate leaves its failure in the state for
- *  @c search_dispatch to re-raise rather than on whichever thread caught it.
+ *  @c DenseIndex_search to re-raise rather than on whichever thread caught it.
  */
 static usearch_admission_t predicate_trampoline(usearch_key_t key, void* state_pointer) {
     predicate_state_t* const state = (predicate_state_t*)state_pointer;
@@ -815,6 +921,9 @@ static int search_request_parse(DenseIndex* index, char const* verb, PyObject* c
                 request->predicate = value;
             }
         }
+        else if (PyUnicode_CompareWithASCIIString(name, "progress") == 0) {
+            if (progress_from_object(value, &request->progress) != 0) return -1;
+        }
         else if (PyUnicode_CompareWithASCIIString(name, "stats") == 0) { request->stats_object = value; }
         else if (PyUnicode_CompareWithASCIIString(name, "executor") == 0) {
             if (usearch_py_executor_from_object(value, &request->executor) != 0) return -1;
@@ -847,101 +956,76 @@ static int search_request_parse(DenseIndex* index, char const* verb, PyObject* c
     return 0;
 }
 
-/** @brief The one call into the library both doors make, with the outputs already sited. */
-static int search_dispatch(DenseIndex* index, search_request_t const* request, usearch_key_t* keys,
-                           usearch_distance_t* distances, size_t* counts, usearch_dense_traversal_stats_t* stats) {
-    usearch_dense_search_options_t const options = {.expansion_factor = request->expansion_factor};
-    size_t const keys_stride = request->wanted * sizeof(usearch_key_t);
-    size_t const scores_stride = request->wanted * sizeof(usearch_distance_t);
-    usearch_matches_span_t const matches = {keys, keys_stride, distances, scores_stride, counts, request->wanted};
-    usearch_error_t error = {0};
-    predicate_state_t predicate_state = {request->predicate, NULL};
+/**
+ *  @brief Borrows the three outputs a ranked verb fills, sized for @p rows rows of @p wanted.
+ *
+ *  One acquisition loop and one release, so the unwind order lives in a single place rather
+ *  than being hand-maintained once per verb. Nothing stays borrowed when it fails.
+ *
+ *  @param[in] outputs The three output objects, in the order @p fields names them.
+ *  @param[in] fields The names each output answers to in a diagnostic.
+ *  @param[out] backings Storage the pointers came from; release with @c matches_outputs_release.
+ *  @param[out] pointers The first byte of each output.
+ *  @return 0 on success, -1 with an exception set otherwise.
+ */
+static int matches_outputs_borrow(PyObject* const* outputs, char const* const* fields, size_t rows, size_t wanted,
+                                  usearch_py_buffer_backing_t* backings, void** pointers) {
+    Py_ssize_t extents[3] = {0, 0, 0};
+    if (usearch_py_matrix_bytes(rows, wanted, sizeof(usearch_key_t), &extents[0]) != 0 ||
+        usearch_py_matrix_bytes(rows, wanted, sizeof(usearch_distance_t), &extents[1]) != 0 ||
+        usearch_py_matrix_bytes(rows, 1, sizeof(size_t), &extents[2]) != 0)
+        return -1;
 
-    Py_BEGIN_ALLOW_THREADS;
-    if (request->predicate)
-        usearch_dense_search_if(index->handle, request->executor, &request->queries, &matches, &options,
-                                predicate_trampoline, &predicate_state, NULL, NULL, stats, &error);
-    else
-        usearch_dense_search(index->handle, request->executor, &request->queries, &matches, &options, NULL, NULL, stats,
-                             &error);
-    Py_END_ALLOW_THREADS;
-
-    // A predicate that raised outranks whatever the walk went on to report, since every
-    // decision after the first failure was made on a guess.
-    if (predicate_state.raised) {
-        PyErr_SetRaisedException(predicate_state.raised);
+    for (size_t borrowed = 0; borrowed != 3; ++borrowed) {
+        if (usearch_py_buffer_from_object(outputs[borrowed], fields[borrowed], usearch_py_matrix_access_write_k,
+                                          extents[borrowed], &backings[borrowed], &pointers[borrowed]) == 0)
+            continue;
+        while (borrowed--) usearch_py_buffer_release(&backings[borrowed]);
         return -1;
     }
-    return usearch_py_raise_on_error(&error);
+    return 0;
 }
 
-/**
- *  @brief Builds the three zeroed arenas one allocating door hands back, sized for @p rows
- *      result rows of @p wanted columns.
- *
- *  @c PyBytes_FromStringAndSize hands back uninitialized heap and the engine fills only
- *  @c counts[row] cells per row, so the zeroing is what keeps the slack readable.
- *
- *  @return A new reference, or @c NULL with an exception set.
- */
-static Matches* matches_allocate(size_t rows, size_t wanted) {
-    Py_ssize_t keys_bytes = 0, distances_bytes = 0, counts_bytes = 0;
-    if (usearch_py_matrix_bytes(rows, wanted, sizeof(usearch_key_t), &keys_bytes) != 0 ||
-        usearch_py_matrix_bytes(rows, wanted, sizeof(usearch_distance_t), &distances_bytes) != 0 ||
-        usearch_py_matrix_bytes(rows, 1, sizeof(size_t), &counts_bytes) != 0)
-        return NULL;
-
-    Matches* const matches = PyObject_New(Matches, &MatchesType);
-    if (!matches) return NULL;
-    // `PyObject_New` hands back uninitialized storage, and the deallocator walks all three
-    // arena slots, so they must be null before the first thing that can fail.
-    matches->keys_arena = matches->distances_arena = matches->counts_arena = NULL;
-    matches->queries = rows;
-    matches->wanted = wanted;
-    memset(&matches->stats, 0, sizeof(matches->stats));
-    // The arenas are filled before the object is ever visible, so handing out `memoryview`
-    // objects over immutable `bytes` stays honest.
-    matches->keys_arena = PyBytes_FromStringAndSize(NULL, keys_bytes);
-    matches->distances_arena = PyBytes_FromStringAndSize(NULL, distances_bytes);
-    matches->counts_arena = PyBytes_FromStringAndSize(NULL, counts_bytes);
-    if (!matches->keys_arena || !matches->distances_arena || !matches->counts_arena) {
-        Py_DECREF(matches);
-        return NULL;
-    }
-    memset(PyBytes_AS_STRING(matches->keys_arena), 0, (size_t)keys_bytes);
-    memset(PyBytes_AS_STRING(matches->distances_arena), 0, (size_t)distances_bytes);
-    memset(PyBytes_AS_STRING(matches->counts_arena), 0, (size_t)counts_bytes);
-    return matches;
+/** @brief Releases the three outputs @c matches_outputs_borrow acquired. */
+static void matches_outputs_release(usearch_py_buffer_backing_t* backings) {
+    for (size_t borrowed = 3; borrowed--;) usearch_py_buffer_release(&backings[borrowed]);
 }
 
-static char const doc_DenseIndex_search[] =                                                   //
-    "search(queries, wanted, *, executor, expansion_factor=0, dtype=None,\n"                  //
-    "    predicate=None, stats=None) -> Matches\n"                                            //
-    "\n"                                                                                      //
-    "Find the `wanted` nearest entries for every query row; one query is a one-row matrix.\n" //
-    "Never writes to the graph, so any number of searches may overlap with insertions.\n"     //
-    "\n"                                                                                      //
-    "Args:\n"                                                                                 //
-    "  queries (buffer): A (Q, dimensions) matrix of query rows.\n"                           //
-    "  wanted (int): Upper bound on matches per query - the 'k' in 'kANN'.\n"                 //
-    "  executor (Executor): The workers to fan out over; its residency must match.\n"         //
-    "  expansion_factor (int, optional): Candidate-pool breadth; 0 derives it.\n"             //
-    "  dtype (str, optional): Names the query scalar type when the buffer cannot.\n"          //
-    "  predicate (callable, optional): Admits a Key when it returns truthy. Non-matching\n"   //
-    "    entries still route the traversal, so recall survives low selectivity. The\n"        //
-    "    callback re-enters Python, so it runs under the GIL and serializes the walk.\n"      //
-    "  stats (Stats, optional): Accumulates traversal telemetry; None skips reporting.\n"     //
-    "Returns:\n"                                                                              //
-    "  Matches: Zero-copy views over the keys, distances, and per-query counts.\n"            //
-    "\n"                                                                                      //
-    "Example:\n"                                                                              //
-    "  >>> from array import array\n"                                                         //
-    "  >>> index = usearch.DenseIndex.for_ram(dimensions=4)\n"                                //
-    "  >>> index.reserve(1)\n"                                                                //
-    "  >>> query = array('d', [0.1, 0.2, 0.3, 0.4])\n"                                        //
-    "  >>> pool = usearch.Executor.for_ram()\n"                                               //
-    "  >>> _ = index.add([7], query, executor=pool)\n"                                        //
-    "  >>> int(index.search(query, 1, executor=pool)[0][0].key)\n"                            //
+static char const doc_DenseIndex_search[] =                                                    //
+    "search(queries, wanted, keys, distances, counts, *, executor,\n"                          //
+    "    expansion_factor=0, dtype=None, predicate=None, progress=None, stats=None) -> None\n" //
+    "\n"                                                                                       //
+    "Find the `wanted` nearest entries for every query row; one query is a one-row matrix.\n"  //
+    "Never writes to the graph, so any number of searches may overlap with insertions.\n"      //
+    "\n"                                                                                       //
+    "Args:\n"                                                                                  //
+    "  queries (buffer): A (Q, dimensions) matrix of query rows.\n"                            //
+    "  wanted (int): Upper bound on matches per query - the 'k' in 'kANN'.\n"                  //
+    "  keys (buffer): A writable (Q, wanted, 16) buffer of identity bytes.\n"                  //
+    "  distances (buffer): A writable (Q, wanted) buffer of float64 distances.\n"              //
+    "  counts (buffer): A writable (Q,) buffer of unsigned word-sized counts. Each bounds\n"   //
+    "    its own row; cells past it keep whatever the buffer already held.\n"                  //
+    "  executor (Executor): The workers to fan out over; its residency must match.\n"          //
+    "  expansion_factor (int, optional): Candidate-pool breadth; 0 derives it.\n"              //
+    "  dtype (str, optional): Names the query scalar type when the buffer cannot.\n"           //
+    "  predicate (callable, optional): Admits a Key when it returns truthy. Non-matching\n"    //
+    "    entries still route the traversal, so recall survives low selectivity. The\n"         //
+    "    callback re-enters Python, so it runs under the GIL and serializes the walk.\n"       //
+    "  progress (callable, optional): Called with (completed, total) queries; returning\n"     //
+    "    falsy stops the batch and raises, every output row being indeterminate then.\n"       //
+    "  stats (Stats, optional): Overwritten with this call's traversal telemetry; None\n"      //
+    "    skips reporting.\n"                                                                   //
+    "\n"                                                                                       //
+    "Example:\n"                                                                               //
+    "  >>> from array import array\n"                                                          //
+    "  >>> index = usearch.DenseIndex.for_ram(dimensions=4)\n"                                 //
+    "  >>> index.reserve(1)\n"                                                                 //
+    "  >>> query = array('d', [0.1, 0.2, 0.3, 0.4])\n"                                         //
+    "  >>> pool = usearch.Executor.for_ram()\n"                                                //
+    "  >>> _ = index.add([7], query, executor=pool)\n"                                         //
+    "  >>> keys, distances, counts = bytearray(16), bytearray(8), bytearray(8)\n"              //
+    "  >>> index.search(query, 1, keys, distances, counts, executor=pool)\n"                   //
+    "  >>> int(usearch.Matches(keys, distances, counts)[0][0].key)\n"                          //
     "  7";
 
 static PyObject* DenseIndex_search(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
@@ -950,106 +1034,51 @@ static PyObject* DenseIndex_search(PyObject* self, PyObject* const* args, Py_ssi
     if (index_alive(index) != 0) return NULL;
 
     search_request_t request;
-    if (search_request_parse(index, "search", args, positional_args_count, args_names_tuple, 2, 1, &request) != 0)
+    if (search_request_parse(index, "search", args, positional_args_count, args_names_tuple, 5, 1, &request) != 0)
         return NULL;
 
-    Matches* const matches = matches_allocate(request.queries.rows, request.wanted);
-    if (!matches) {
-        usearch_py_buffer_release(&request.queries_backing);
-        return NULL;
-    }
-
-    int const failed = search_dispatch(index, &request, (usearch_key_t*)PyBytes_AS_STRING(matches->keys_arena),
-                                       (usearch_distance_t*)PyBytes_AS_STRING(matches->distances_arena),
-                                       (size_t*)PyBytes_AS_STRING(matches->counts_arena), &matches->stats);
-    usearch_py_buffer_release(&request.queries_backing);
-    if (failed != 0) {
-        Py_DECREF(matches);
-        return NULL;
-    }
-    if (usearch_py_stats_accumulate(request.stats_object, &matches->stats) != 0) {
-        Py_DECREF(matches);
-        return NULL;
-    }
-    return (PyObject*)matches;
-}
-
-/** @brief One output a batch verb writes into, and the extent it must have. */
-typedef struct output_extent_t {
-    char const* field;
-    Py_ssize_t bytes;
-} output_extent_t;
-
-static char const doc_DenseIndex_search_into[] =                                            //
-    "search_into(queries, wanted, keys, distances, counts, *, executor, ...) -> None\n"     //
-    "\n"                                                                                    //
-    "The non-allocating door onto `search`: writes into buffers the caller already owns.\n" //
-    "\n"                                                                                    //
-    "Args:\n"                                                                               //
-    "  queries (buffer): A (Q, dimensions) matrix of query rows.\n"                         //
-    "  wanted (int): Upper bound on matches per query.\n"                                   //
-    "  keys (buffer): A writable (Q, wanted, 16) buffer of identity bytes.\n"               //
-    "  distances (buffer): A writable (Q, wanted) buffer of float64 distances.\n"           //
-    "  counts (buffer): A writable (Q,) buffer of unsigned word-sized counts.\n"            //
-    "  executor (Executor): The workers to fan out over; its residency must match.\n"       //
-    "  expansion_factor (int, optional): Candidate-pool breadth; 0 derives it.\n"           //
-    "  dtype (str, optional): Names the query scalar type when the buffer cannot.\n"        //
-    "  predicate (callable, optional): Admits a Key when it returns truthy.\n"              //
-    "  stats (Stats, optional): Accumulates traversal telemetry.\n"                         //
-    "\n"                                                                                    //
-    "Example:\n"                                                                            //
-    "  >>> from array import array\n"                                                       //
-    "  >>> index = usearch.DenseIndex.for_ram(dimensions=4)\n"                              //
-    "  >>> index.reserve(1)\n"                                                              //
-    "  >>> query = array('d', [0.1, 0.2, 0.3, 0.4])\n"                                      //
-    "  >>> pool = usearch.Executor.for_ram()\n"                                             //
-    "  >>> _ = index.add([7], query, executor=pool)\n"                                      //
-    "  >>> keys, distances, counts = bytearray(16), bytearray(8), bytearray(8)\n"           //
-    "  >>> index.search_into(query, 1, keys, distances, counts, executor=pool)\n"           //
-    "  >>> int.from_bytes(counts, 'little')\n"                                              //
-    "  1";
-
-static PyObject* DenseIndex_search_into(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
-                                        PyObject* args_names_tuple) {
-    DenseIndex* const index = (DenseIndex*)self;
-    if (index_alive(index) != 0) return NULL;
-
-    search_request_t request;
-    if (search_request_parse(index, "search_into", args, positional_args_count, args_names_tuple, 5, 1, &request) != 0)
-        return NULL;
-
-    output_extent_t output_extents[3] = {{"keys", 0}, {"distances", 0}, {"counts", 0}};
-    if (usearch_py_matrix_bytes(request.queries.rows, request.wanted, sizeof(usearch_key_t),
-                                &output_extents[0].bytes) != 0 ||
-        usearch_py_matrix_bytes(request.queries.rows, request.wanted, sizeof(usearch_distance_t),
-                                &output_extents[1].bytes) != 0 ||
-        usearch_py_matrix_bytes(request.queries.rows, 1, sizeof(size_t), &output_extents[2].bytes) != 0) {
-        usearch_py_buffer_release(&request.queries_backing);
-        return NULL;
-    }
-
-    // One acquisition loop and one release loop, so the unwind order lives in a single place
-    // rather than being hand-maintained once per output.
+    char const* const fields[3] = {"keys", "distances", "counts"};
     usearch_py_buffer_backing_t backings[3];
     void* pointers[3] = {NULL, NULL, NULL};
+    if (matches_outputs_borrow(args + 2, fields, request.queries.rows, request.wanted, backings, pointers) != 0) {
+        usearch_py_buffer_release(&request.queries_backing);
+        return NULL;
+    }
+
+    usearch_key_t* const keys = (usearch_key_t*)pointers[0];
+    usearch_distance_t* const distances = (usearch_distance_t*)pointers[1];
+    size_t* const counts = (size_t*)pointers[2];
+    usearch_dense_search_options_t const options = {.expansion_factor = request.expansion_factor};
+    size_t const keys_stride = request.wanted * sizeof(usearch_key_t);
+    size_t const scores_stride = request.wanted * sizeof(usearch_distance_t);
+    usearch_matches_span_t const matches = {keys, keys_stride, distances, scores_stride, counts, request.wanted};
+    predicate_state_t predicate_state = {request.predicate, NULL};
+    progress_state_t progress_state = {request.progress, NULL};
+    usearch_progress_callback_t const progress = progress_registered(&progress_state);
     usearch_dense_traversal_stats_t stats = {0};
+    usearch_error_t error = {0};
     PyObject* result = NULL;
-    size_t borrowed = 0;
 
-    for (; borrowed != 3; ++borrowed)
-        if (usearch_py_buffer_from_object(args[2 + borrowed], output_extents[borrowed].field,
-                                          usearch_py_matrix_access_write_k, output_extents[borrowed].bytes,
-                                          &backings[borrowed], &pointers[borrowed]) != 0)
-            goto release;
+    Py_BEGIN_ALLOW_THREADS;
+    if (request.predicate)
+        usearch_dense_search_if(index->handle, request.executor, &request.queries, &matches, &options,
+                                predicate_trampoline, &predicate_state, progress, &progress_state, &stats, &error);
+    else
+        usearch_dense_search(index->handle, request.executor, &request.queries, &matches, &options, progress,
+                             &progress_state, &stats, &error);
+    Py_END_ALLOW_THREADS;
 
-    if (search_dispatch(index, &request, (usearch_key_t*)pointers[0], (usearch_distance_t*)pointers[1],
-                        (size_t*)pointers[2], &stats) != 0)
-        goto release;
-    if (usearch_py_stats_accumulate(request.stats_object, &stats) != 0) goto release;
-    result = Py_NewRef(Py_None);
+    // A callback that raised outranks whatever the walk went on to report, since every
+    // decision after the first failure was made on a guess.
+    if (predicate_state.raised) {
+        Py_XDECREF(progress_state.raised);
+        PyErr_SetRaisedException(predicate_state.raised);
+    }
+    else if (progress_raised(&progress_state) == 0 && usearch_py_raise_on_error(&error) == 0 &&
+             usearch_py_stats_overwrite(request.stats_object, &stats) == 0)
+        result = Py_NewRef(Py_None);
 
-release:
-    while (borrowed--) usearch_py_buffer_release(&backings[borrowed]);
+    matches_outputs_release(backings);
     usearch_py_buffer_release(&request.queries_backing);
     return result;
 }
@@ -1188,105 +1217,88 @@ static PyObject* DenseIndex_subscript(PyObject* self, PyObject* key_object) {
 
 #pragma region Linear Algebra
 
-static char const doc_DenseIndex_multiply_into[] =                                            //
-    "multiply_into(rows, wanted, columns, products, counts, *, executor,\n"                   //
-    "    expansion_factor=0,\n"                                                               //
+static char const doc_DenseIndex_multiply[] =                                                 //
+    "multiply(rows, wanted, columns, products, counts, *, executor, expansion_factor=0,\n"    //
     "    dtype=None, stats=None) -> int\n"                                                    //
     "\n"                                                                                      //
     "Approximate sparse product of a matrix against the indexed rows - the linear algebra\n"  //
     "sibling of `search`, reporting every pair the traversal scored rather than only the\n"   //
     "nearest. Pairs arrive in traversal order rather than sorted, and carry no duplicates.\n" //
     "\n"                                                                                      //
-    "Into-only: the width of the emitted pattern is the caller's to choose, so there is no\n" //
-    "allocating door to choose it for them.\n"                                                //
-    "\n"                                                                                      //
     "Args:\n"                                                                                 //
     "  rows (buffer): An (R, dimensions) matrix of left-hand rows.\n"                         //
-    "  executor (Executor): The workers to fan out over; its residency must match.\n"         //
     "  wanted (int): Upper bound on pairs emitted per row - the width of the outputs.\n"      //
     "  columns (buffer): A writable (R, wanted, 16) buffer of indexed-row identities.\n"      //
     "  products (buffer): A writable (R, wanted) buffer of float64 products.\n"               //
     "  counts (buffer): A writable (R,) buffer of unsigned word-sized counts. Each reports\n" //
     "    the true pair count, which may exceed `wanted` - that row was truncated to its\n"    //
-    "    nearest pairs. Unlike `search_into`, a count is therefore not a safe slice bound.\n" //
+    "    nearest pairs. Unlike `search`, a count is therefore not a safe slice bound.\n"      //
+    "  executor (Executor): The workers to fan out over; its residency must match.\n"         //
     "  expansion_factor (int, optional): Candidate-pool breadth; 0 derives it. A wider\n"     //
     "    factor widens the emitted pattern, being what the walk's breadth decides.\n"         //
     "  dtype (str, optional): Names the left-hand scalar type when the buffer cannot.\n"      //
-    "  stats (Stats, optional): Accumulates traversal telemetry; None skips reporting.\n"     //
+    "  stats (Stats, optional): Overwritten with this call's traversal telemetry; None\n"     //
+    "    skips reporting.\n"                                                                  //
     "Returns:\n"                                                                              //
     "  int: How many rows truncated; zero means every pair the walk scored was written.\n"    //
-    "    This is the only `_into` verb with a return, because it is the only one with\n"      //
-    "    something to report - the retry loop reads as `while index.multiply_into(...)`.";
+    "    This is the only ranked verb with a return, because it is the only one with\n"       //
+    "    something to report - the retry loop reads as `while index.multiply(...)`.";
 
-static PyObject* DenseIndex_multiply_into(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
-                                          PyObject* args_names_tuple) {
+static PyObject* DenseIndex_multiply(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
+                                     PyObject* args_names_tuple) {
     DenseIndex* const index = (DenseIndex*)self;
     if (index_alive(index) != 0) return NULL;
 
-    // Structurally `search_into` minus the predicate: `multiply` has no `_if` sibling, so a
-    // `predicate=` keyword must be refused rather than quietly ignored.
+    // Structurally `search` minus its two callbacks, neither of which `multiply` takes: a
+    // `predicate=` or `progress=` keyword is refused rather than quietly ignored.
     search_request_t request;
-    if (search_request_parse(index, "multiply_into", args, positional_args_count, args_names_tuple, 5, 1, &request) !=
-        0)
+    if (search_request_parse(index, "multiply", args, positional_args_count, args_names_tuple, 5, 1, &request) != 0)
         return NULL;
-    if (request.predicate) {
+    if (request.predicate || request.progress) {
         usearch_py_buffer_release(&request.queries_backing);
-        PyErr_SetString(PyExc_TypeError, "Got unexpected keyword argument: predicate");
+        PyErr_Format(PyExc_TypeError, "Got unexpected keyword argument: %s",
+                     request.predicate ? "predicate" : "progress");
         return NULL;
     }
 
-    output_extent_t output_extents[3] = {{"columns", 0}, {"products", 0}, {"counts", 0}};
-    if (usearch_py_matrix_bytes(request.queries.rows, request.wanted, sizeof(usearch_key_t),
-                                &output_extents[0].bytes) != 0 ||
-        usearch_py_matrix_bytes(request.queries.rows, request.wanted, sizeof(usearch_distance_t),
-                                &output_extents[1].bytes) != 0 ||
-        usearch_py_matrix_bytes(request.queries.rows, 1, sizeof(size_t), &output_extents[2].bytes) != 0) {
-        usearch_py_buffer_release(&request.queries_backing);
-        return NULL;
-    }
-
+    char const* const fields[3] = {"columns", "products", "counts"};
     usearch_py_buffer_backing_t backings[3];
     void* pointers[3] = {NULL, NULL, NULL};
-    usearch_dense_search_options_t const options = {.expansion_factor = request.expansion_factor};
-    usearch_dense_traversal_stats_t stats = {0};
-    usearch_error_t error = {0};
-    PyObject* result = NULL;
-    size_t borrowed = 0;
-
-    for (; borrowed != 3; ++borrowed)
-        if (usearch_py_buffer_from_object(args[2 + borrowed], output_extents[borrowed].field,
-                                          usearch_py_matrix_access_write_k, output_extents[borrowed].bytes,
-                                          &backings[borrowed], &pointers[borrowed]) != 0)
-            goto release;
+    if (matches_outputs_borrow(args + 2, fields, request.queries.rows, request.wanted, backings, pointers) != 0) {
+        usearch_py_buffer_release(&request.queries_backing);
+        return NULL;
+    }
 
     usearch_key_t* const columns = (usearch_key_t*)pointers[0];
     usearch_distance_t* const scores = (usearch_distance_t*)pointers[1];
     size_t* const counts = (size_t*)pointers[2];
+    usearch_dense_search_options_t const options = {.expansion_factor = request.expansion_factor};
     size_t const keys_stride = request.wanted * sizeof(usearch_key_t);
     size_t const scores_stride = request.wanted * sizeof(usearch_distance_t);
     usearch_matches_span_t const products = {columns, keys_stride, scores, scores_stride, counts, request.wanted};
+    usearch_dense_traversal_stats_t stats = {0};
+    usearch_error_t error = {0};
+    PyObject* result = NULL;
+
     Py_BEGIN_ALLOW_THREADS;
     usearch_dense_multiply(index->handle, request.executor, &request.queries, &products, &options, NULL, NULL, &stats,
                            &error);
     Py_END_ALLOW_THREADS;
 
-    if (usearch_py_raise_on_error(&error) != 0) goto release;
-    if (usearch_py_stats_accumulate(request.stats_object, &stats) != 0) goto release;
+    if (usearch_py_raise_on_error(&error) == 0 && usearch_py_stats_overwrite(request.stats_object, &stats) == 0) {
+        // One pass over a buffer already in cache, so the caller need not make a second.
+        size_t truncated = 0;
+        for (size_t row = 0; row != request.queries.rows; ++row) truncated += counts[row] > request.wanted;
+        result = PyLong_FromSize_t(truncated);
+    }
 
-    // One pass over a buffer already in cache, so the caller need not make a second.
-    size_t truncated = 0;
-    for (size_t row = 0; row != request.queries.rows; ++row) truncated += counts[row] > request.wanted;
-    result = PyLong_FromSize_t(truncated);
-
-release:
-    while (borrowed--) usearch_py_buffer_release(&backings[borrowed]);
+    matches_outputs_release(backings);
     usearch_py_buffer_release(&request.queries_backing);
     return result;
 }
 
-static char const doc_DenseIndex_attend_into[] =                                                //
-    "attend_into(queries, values, outputs, *, executor, expansion_factor=0,\n"                  //
-    "    score_scale=0.0,\n"                                                                    //
+static char const doc_DenseIndex_attend[] =                                                     //
+    "attend(queries, values, outputs, *, executor, expansion_factor=0, score_scale=0.0,\n"      //
     "    mass_tolerance=0.0, dtype=None, values_dtype=None, outputs_dtype=None,\n"              //
     "    carry=None, stats=None) -> None\n"                                                     //
     "\n"                                                                                        //
@@ -1322,10 +1334,11 @@ static char const doc_DenseIndex_attend_into[] =                                
     "    this branch with another over the same queries - a dense recent window, or a second\n" //
     "    shard of one context - by partial-softmax rescaling; a maximum without its\n"          //
     "    partition is a number nothing can rescale, which is why they travel as one row.\n"     //
-    "  stats (Stats, optional): Accumulates traversal telemetry; None skips reporting.";
+    "  stats (Stats, optional): Overwritten with this call's traversal telemetry; None skips\n" //
+    "    reporting.";
 
-static PyObject* DenseIndex_attend_into(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
-                                        PyObject* args_names_tuple) {
+static PyObject* DenseIndex_attend(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
+                                   PyObject* args_names_tuple) {
     DenseIndex* const index = (DenseIndex*)self;
     if (index_alive(index) != 0) return NULL;
 
@@ -1336,7 +1349,7 @@ static PyObject* DenseIndex_attend_into(PyObject* self, PyObject* const* args, P
     PyObject *carry_object = NULL, *stats_object = NULL;
     usearch_executor_t executor = NULL;
 
-    Py_ssize_t const args_names_count = usearch_py_args_names_count_checked("attend_into", positional_args_count,
+    Py_ssize_t const args_names_count = usearch_py_args_names_count_checked("attend", positional_args_count,
                                                                             args_names_tuple, 3);
     if (args_names_count < 0) return NULL;
 
@@ -1373,7 +1386,7 @@ static PyObject* DenseIndex_attend_into(PyObject* self, PyObject* const* args, P
         }
     }
 
-    if (executor_named(executor, "attend_into") != 0) return NULL;
+    if (executor_named(executor, "attend") != 0) return NULL;
     if (usearch_py_scalar_from_object(queries_dtype, &queries_kind) != 0) return NULL;
     if (usearch_py_scalar_from_object(values_dtype, &values_kind) != 0) return NULL;
     if (usearch_py_scalar_from_object(outputs_dtype, &requested_outputs_kind) != 0) return NULL;
@@ -1426,7 +1439,7 @@ static PyObject* DenseIndex_attend_into(PyObject* self, PyObject* const* args, P
     Py_END_ALLOW_THREADS;
 
     if (usearch_py_raise_on_error(&error) != 0) goto release;
-    if (usearch_py_stats_accumulate(stats_object, &stats) != 0) goto release;
+    if (usearch_py_stats_overwrite(stats_object, &stats) != 0) goto release;
     result = Py_NewRef(Py_None);
 
 release:
@@ -1438,8 +1451,8 @@ release:
 }
 
 static char const doc_DenseIndex_maxsim[] =                                                    //
-    "maxsim(queries, rows_per_query, wanted, *, executor, expansion_factor=0,\n"               //
-    "    dtype=None, stats=None) -> Matches\n"                                                 //
+    "maxsim(queries, rows_per_query, wanted, keys, distances, counts, *, executor,\n"          //
+    "    expansion_factor=0, dtype=None, stats=None) -> None\n"                                //
     "\n"                                                                                       //
     "Late-interaction scoring of multi-row queries against multi-row entries: every query\n"   //
     "row takes its best match within a key, and those maxima sum to that key's score.\n"       //
@@ -1455,27 +1468,30 @@ static char const doc_DenseIndex_maxsim[] =                                     
     "  rows_per_query (int): Rows every query occupies; uniform, so ColBERT's padding\n"       //
     "    applies as is. The query row count must be a whole multiple of it.\n"                 //
     "  wanted (int): Upper bound on matches per query - the 'k' over documents, not rows.\n"   //
+    "  keys (buffer): A writable (Q, wanted, 16) buffer of document identities.\n"             //
+    "  distances (buffer): A writable (Q, wanted) buffer of float64 summed maxima.\n"          //
+    "  counts (buffer): A writable (Q,) buffer of unsigned word-sized counts.\n"               //
     "  executor (Executor): The workers to fan out over; its residency must match.\n"          //
     "  expansion_factor (int, optional): Candidate-pool breadth; 0 derives it. Widening it\n"  //
     "    narrows the gap to the exact score, which a walk can only under-report.\n"            //
     "  dtype (str, optional): Names the query scalar type when the buffer cannot.\n"           //
-    "  stats (Stats, optional): Accumulates traversal telemetry; None skips reporting.\n"      //
-    "Returns:\n"                                                                               //
-    "  Matches: One row per query, whose scores carry each key's summed maxima.";
+    "  stats (Stats, optional): Overwritten with this call's traversal telemetry; None\n"      //
+    "    skips reporting.";
 
 static PyObject* DenseIndex_maxsim(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
                                    PyObject* args_names_tuple) {
     DenseIndex* const index = (DenseIndex*)self;
     if (index_alive(index) != 0) return NULL;
 
-    // Structurally `search` minus the predicate: `maxsim` has no `_if` sibling, so a
-    // `predicate=` keyword must be refused rather than quietly ignored.
+    // Structurally `search` minus its two callbacks, neither of which `maxsim` takes: a
+    // `predicate=` or `progress=` keyword is refused rather than quietly ignored.
     search_request_t request;
-    if (search_request_parse(index, "maxsim", args, positional_args_count, args_names_tuple, 3, 2, &request) != 0)
+    if (search_request_parse(index, "maxsim", args, positional_args_count, args_names_tuple, 6, 2, &request) != 0)
         return NULL;
-    if (request.predicate) {
+    if (request.predicate || request.progress) {
         usearch_py_buffer_release(&request.queries_backing);
-        PyErr_SetString(PyExc_TypeError, "Got unexpected keyword argument: predicate");
+        PyErr_Format(PyExc_TypeError, "Got unexpected keyword argument: %s",
+                     request.predicate ? "predicate" : "progress");
         return NULL;
     }
 
@@ -1491,52 +1507,60 @@ static PyObject* DenseIndex_maxsim(PyObject* self, PyObject* const* args, Py_ssi
         return NULL;
     }
 
-    Matches* const matches = matches_allocate(request.queries.rows / rows_per_query, request.wanted);
-    if (!matches) {
+    char const* const fields[3] = {"keys", "distances", "counts"};
+    usearch_py_buffer_backing_t backings[3];
+    void* pointers[3] = {NULL, NULL, NULL};
+    size_t const documents = request.queries.rows / rows_per_query;
+    if (matches_outputs_borrow(args + 3, fields, documents, request.wanted, backings, pointers) != 0) {
         usearch_py_buffer_release(&request.queries_backing);
         return NULL;
     }
 
+    usearch_key_t* const keys = (usearch_key_t*)pointers[0];
+    usearch_distance_t* const distances = (usearch_distance_t*)pointers[1];
+    size_t* const counts = (size_t*)pointers[2];
     usearch_dense_search_options_t const options = {.expansion_factor = request.expansion_factor};
-    usearch_key_t* const keys = (usearch_key_t*)PyBytes_AS_STRING(matches->keys_arena);
-    usearch_distance_t* const scores = (usearch_distance_t*)PyBytes_AS_STRING(matches->distances_arena);
-    size_t* const counts = (size_t*)PyBytes_AS_STRING(matches->counts_arena);
     size_t const keys_stride = request.wanted * sizeof(usearch_key_t);
     size_t const scores_stride = request.wanted * sizeof(usearch_distance_t);
-    usearch_matches_span_t const scored = {keys, keys_stride, scores, scores_stride, counts, request.wanted};
+    usearch_matches_span_t const scored = {keys, keys_stride, distances, scores_stride, counts, request.wanted};
+    usearch_dense_traversal_stats_t stats = {0};
     usearch_error_t error = {0};
+    PyObject* result = NULL;
 
     Py_BEGIN_ALLOW_THREADS;
     usearch_dense_maxsim(index->handle, request.executor, &request.queries, rows_per_query, &scored, &options, NULL,
-                         NULL, &matches->stats, &error);
+                         NULL, &stats, &error);
     Py_END_ALLOW_THREADS;
 
+    if (usearch_py_raise_on_error(&error) == 0 && usearch_py_stats_overwrite(request.stats_object, &stats) == 0)
+        result = Py_NewRef(Py_None);
+
+    matches_outputs_release(backings);
     usearch_py_buffer_release(&request.queries_backing);
-    if (usearch_py_raise_on_error(&error) != 0) {
-        Py_DECREF(matches);
-        return NULL;
-    }
-    if (usearch_py_stats_accumulate(request.stats_object, &matches->stats) != 0) {
-        Py_DECREF(matches);
-        return NULL;
-    }
-    return (PyObject*)matches;
+    return result;
 }
 
 #pragma endregion Linear Algebra
 
 #pragma region Composition
 
-static char const doc_DenseIndex_merge[] =                                                  //
-    "merge(donor, *, executor) -> None\n"                                                   //
-    "\n"                                                                                    //
-    "Absorb `donor` into this index, wiring cross-links via landmark stitching - cheaper\n" //
-    "than re-inserting its vectors one by one. The donor handle is consumed and every\n"    //
-    "verb on it afterwards raises. Readers may keep searching throughout.\n"                //
-    "\n"                                                                                    //
-    "Args:\n"                                                                               //
-    "  donor (DenseIndex): The index to absorb.\n"                                          //
-    "  executor (Executor): The workers to fan out over; its residency must match.";
+static char const doc_DenseIndex_merge[] =                                                     //
+    "merge(donor, *, executor, progress=None) -> None\n"                                       //
+    "\n"                                                                                       //
+    "Absorb `donor` into this index, wiring cross-links via landmark stitching - cheaper\n"    //
+    "than re-inserting its vectors one by one. The donor handle is consumed and every\n"       //
+    "verb on it afterwards raises. Readers may keep searching throughout.\n"                   //
+    "\n"                                                                                       //
+    "Cancellation stops between donors, so a donor already absorbed stays absorbed and one\n"  //
+    "not yet reached stays a live handle its caller still owns - the count a handler last\n"   //
+    "saw is the only way to learn where that boundary fell. This verb takes one donor, so a\n" //
+    "cancellation before it is absorbed leaves that handle usable and the merge retryable.\n"  //
+    "\n"                                                                                       //
+    "Args:\n"                                                                                  //
+    "  donor (DenseIndex): The index to absorb.\n"                                             //
+    "  executor (Executor): The workers to fan out over; its residency must match.\n"          //
+    "  progress (callable, optional): Called with (completed, total) donors; returning\n"      //
+    "    falsy stops the merge and raises.";
 
 static PyObject* DenseIndex_merge(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
                                   PyObject* args_names_tuple) {
@@ -1547,12 +1571,16 @@ static PyObject* DenseIndex_merge(PyObject* self, PyObject* const* args, Py_ssiz
                                                                             args_names_tuple, 1);
     if (args_names_count < 0) return NULL;
     PyObject* const donor_object = args[0];
+    progress_state_t progress_state = {NULL, NULL};
     usearch_executor_t executor = NULL;
     for (Py_ssize_t names_progress = 0, args_progress = positional_args_count; names_progress != args_names_count;
          ++args_progress, ++names_progress) {
         PyObject* const name = PyTuple_GET_ITEM(args_names_tuple, names_progress);
         if (PyUnicode_CompareWithASCIIString(name, "executor") == 0) {
             if (usearch_py_executor_from_object(args[args_progress], &executor) != 0) return NULL;
+        }
+        else if (PyUnicode_CompareWithASCIIString(name, "progress") == 0) {
+            if (progress_from_object(args[args_progress], &progress_state.callable) != 0) return NULL;
         }
         else {
             PyErr_Format(PyExc_TypeError, "Got unexpected keyword argument: %S", name);
@@ -1581,8 +1609,14 @@ static PyObject* DenseIndex_merge(PyObject* self, PyObject* const* args, Py_ssiz
 
     usearch_error_t error = {0};
     Py_BEGIN_ALLOW_THREADS;
-    usearch_dense_merge(index->handle, executor, &donated, 1, NULL, NULL, &error);
+    usearch_dense_merge(index->handle, executor, &donated, 1, progress_registered(&progress_state), &progress_state,
+                        &error);
     Py_END_ALLOW_THREADS;
+
+    // The library nulls the slot of every donor it consumed, so a stopped merge hands the
+    // unabsorbed handle back and the wrapper reclaims it rather than leaking it.
+    if (error.status == usearch_error_cancelled_k && donated) donor->handle = donated;
+    if (progress_raised(&progress_state) != 0) return NULL;
     if (usearch_py_raise_on_error(&error) != 0) return NULL;
     Py_RETURN_NONE;
 }
@@ -1670,24 +1704,25 @@ PyTypeObject DenseCursorType = {
     .tp_doc = doc_DenseCursor,
     .tp_basicsize = sizeof(DenseCursor),
     .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_new = NULL, //! Returned by `batches`, never constructed by name.
+    .tp_new = NULL, //! Returned by `cursor`, never constructed by name.
     .tp_dealloc = (destructor)DenseCursor_dealloc,
     .tp_iter = DenseCursor_iter,
     .tp_iternext = (iternextfunc)DenseCursor_next,
 };
 
-static char const doc_DenseIndex_batches[] =                                               //
-    "batches(size=1024, *, dtype=None) -> DenseCursor\n"                                   //
-    "\n"                                                                                   //
-    "Walk a snapshot of the index in batches, yielding (keys, vectors) memoryview pairs\n" //
-    "when `dtype` names a scalar type, and key matrices alone otherwise.\n"                //
-    "\n"                                                                                   //
-    "Args:\n"                                                                              //
-    "  size (int, optional): Rows per batch. Defaults to 1024.\n"                          //
+static char const doc_DenseIndex_cursor[] =                                                  //
+    "cursor(size=1024, *, dtype=None) -> DenseCursor\n"                                      //
+    "\n"                                                                                     //
+    "Walk a snapshot of the index in batches, yielding (keys, vectors) memoryview pairs\n"   //
+    "when `dtype` names a scalar type, and key matrices alone otherwise. The watermark is\n" //
+    "captured here, so an entry published afterwards never appears mid-iteration.\n"         //
+    "\n"                                                                                     //
+    "Args:\n"                                                                                //
+    "  size (int, optional): Rows per batch. Defaults to 1024.\n"                            //
     "  dtype (str, optional): Export vectors as this scalar type; None walks keys only.";
 
-static PyObject* DenseIndex_batches(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
-                                    PyObject* args_names_tuple) {
+static PyObject* DenseIndex_cursor(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
+                                   PyObject* args_names_tuple) {
     DenseIndex* const index = (DenseIndex*)self;
     if (index_alive(index) != 0) return NULL;
 
@@ -1752,7 +1787,7 @@ static PyObject* DenseIndex_iter(PyObject* self) {
     PyObject* const size = PyLong_FromSize_t(1024);
     if (!size) return NULL;
     PyObject* const positional[1] = {size};
-    PyObject* const cursor = DenseIndex_batches(self, positional, 1, NULL);
+    PyObject* const cursor = DenseIndex_cursor(self, positional, 1, NULL);
     Py_DECREF(size);
     return cursor;
 }
@@ -1918,15 +1953,18 @@ static int checkpoint_borrow(PyObject* object, usearch_py_matrix_access_t access
     return 0;
 }
 
-/** @brief Walks the one keyword `save` and `load` accept beyond their positional target. */
-static int checkpoint_executor_parse(PyObject* const* args, Py_ssize_t positional_args_count,
+/** @brief Walks the two keywords `save` and `load` accept beyond their positional target. */
+static int checkpoint_keywords_parse(PyObject* const* args, Py_ssize_t positional_args_count,
                                      PyObject* args_names_tuple, Py_ssize_t args_names_count,
-                                     usearch_executor_t* executor) {
+                                     usearch_executor_t* executor, progress_state_t* progress_state) {
     for (Py_ssize_t names_progress = 0, args_progress = positional_args_count; names_progress != args_names_count;
          ++args_progress, ++names_progress) {
         PyObject* const name = PyTuple_GET_ITEM(args_names_tuple, names_progress);
         if (PyUnicode_CompareWithASCIIString(name, "executor") == 0) {
             if (usearch_py_executor_from_object(args[args_progress], executor) != 0) return -1;
+        }
+        else if (PyUnicode_CompareWithASCIIString(name, "progress") == 0) {
+            if (progress_from_object(args[args_progress], &progress_state->callable) != 0) return -1;
         }
         else {
             PyErr_Format(PyExc_TypeError, "Got unexpected keyword argument: %S", name);
@@ -1937,14 +1975,17 @@ static int checkpoint_executor_parse(PyObject* const* args, Py_ssize_t positiona
 }
 
 static char const doc_DenseIndex_save[] =                                                     //
-    "save(target, *, executor) -> None\n"                                                     //
+    "save(target, *, executor, progress=None) -> None\n"                                      //
     "\n"                                                                                      //
     "Write the index to a path, or into a writable buffer of `storage_requirements` bytes.\n" //
     "Demands a mutation-free window; concurrent readers keep searching throughout.\n"         //
     "\n"                                                                                      //
     "Args:\n"                                                                                 //
     "  target (str | os.PathLike | buffer): Where the checkpoint goes.\n"                     //
-    "  executor (Executor): The workers to fan out over; its residency must match.";
+    "  executor (Executor): The workers to fan out over; its residency must match.\n"         //
+    "  progress (callable, optional): Called with (completed, total) shards; returning\n"     //
+    "    falsy stops the write and raises, leaving a checkpoint no reader accepts and\n"      //
+    "    whatever parts it already wrote for the caller to remove.";
 
 static PyObject* DenseIndex_save(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
                                  PyObject* args_names_tuple) {
@@ -1955,21 +1996,25 @@ static PyObject* DenseIndex_save(PyObject* self, PyObject* const* args, Py_ssize
                                                                             args_names_tuple, 1);
     if (args_names_count < 0) return NULL;
     PyObject* const target = args[0];
+    progress_state_t progress_state = {NULL, NULL};
     usearch_executor_t executor = NULL;
-    if (checkpoint_executor_parse(args, positional_args_count, args_names_tuple, args_names_count, &executor) != 0)
+    if (checkpoint_keywords_parse(args, positional_args_count, args_names_tuple, args_names_count, &executor,
+                                  &progress_state) != 0)
         return NULL;
 
     if (executor_named(executor, "save") != 0) return NULL;
 
+    usearch_progress_callback_t const progress = progress_registered(&progress_state);
     usearch_error_t error = {0};
     if (checkpoint_source(target) == checkpoint_source_buffer_k) {
         usearch_py_buffer_backing_t backing;
         if (checkpoint_borrow(target, usearch_py_matrix_access_write_k, &backing) != 0) return NULL;
         usearch_bytes_span_t const buffer = {(uint8_t*)backing.buffer.buf, (size_t)backing.buffer.len};
         Py_BEGIN_ALLOW_THREADS;
-        usearch_dense_save_buffer(index->handle, executor, buffer, NULL, NULL, &error);
+        usearch_dense_save_buffer(index->handle, executor, buffer, progress, &progress_state, &error);
         Py_END_ALLOW_THREADS;
         usearch_py_buffer_release(&backing);
+        if (progress_raised(&progress_state) != 0) return NULL;
         if (usearch_py_raise_on_error(&error) != 0) return NULL;
         Py_RETURN_NONE;
     }
@@ -1978,15 +2023,16 @@ static PyObject* DenseIndex_save(PyObject* self, PyObject* const* args, Py_ssize
     PyObject* decoded = NULL;
     if (usearch_py_path_from_object(target, &path, &decoded) != 0) return NULL;
     Py_BEGIN_ALLOW_THREADS;
-    usearch_dense_save(index->handle, executor, path, NULL, NULL, &error);
+    usearch_dense_save(index->handle, executor, path, progress, &progress_state, &error);
     Py_END_ALLOW_THREADS;
     Py_DECREF(decoded);
+    if (progress_raised(&progress_state) != 0) return NULL;
     if (usearch_py_raise_on_error(&error) != 0) return NULL;
     Py_RETURN_NONE;
 }
 
 static char const doc_DenseIndex_load[] =                                                  //
-    "load(source, *, executor) -> None\n"                                                  //
+    "load(source, *, executor, progress=None) -> None\n"                                   //
     "\n"                                                                                   //
     "Read a checkpoint into this handle, with the residency deciding what that means:\n"   //
     "materialize into RAM, upload to a device, or open in place on disk. A handle whose\n" //
@@ -1994,7 +2040,9 @@ static char const doc_DenseIndex_load[] =                                       
     "\n"                                                                                   //
     "Args:\n"                                                                              //
     "  source (str | os.PathLike | buffer): The checkpoint to read.\n"                     //
-    "  executor (Executor): The workers to fan out over; its residency must match.";
+    "  executor (Executor): The workers to fan out over; its residency must match.\n"      //
+    "  progress (callable, optional): Called with (completed, total) shards; returning\n"  //
+    "    falsy stops the read and raises, leaving the handle empty and loadable again.";
 
 static PyObject* DenseIndex_load(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
                                  PyObject* args_names_tuple) {
@@ -2005,21 +2053,25 @@ static PyObject* DenseIndex_load(PyObject* self, PyObject* const* args, Py_ssize
                                                                             args_names_tuple, 1);
     if (args_names_count < 0) return NULL;
     PyObject* const source = args[0];
+    progress_state_t progress_state = {NULL, NULL};
     usearch_executor_t executor = NULL;
-    if (checkpoint_executor_parse(args, positional_args_count, args_names_tuple, args_names_count, &executor) != 0)
+    if (checkpoint_keywords_parse(args, positional_args_count, args_names_tuple, args_names_count, &executor,
+                                  &progress_state) != 0)
         return NULL;
 
     if (executor_named(executor, "load") != 0) return NULL;
 
+    usearch_progress_callback_t const progress = progress_registered(&progress_state);
     usearch_error_t error = {0};
     if (checkpoint_source(source) == checkpoint_source_buffer_k) {
         usearch_py_buffer_backing_t backing;
         if (checkpoint_borrow(source, usearch_py_matrix_access_read_k, &backing) != 0) return NULL;
         usearch_bytes_view_t const buffer = {(uint8_t const*)backing.buffer.buf, (size_t)backing.buffer.len};
         Py_BEGIN_ALLOW_THREADS;
-        usearch_dense_load_buffer(index->handle, executor, buffer, NULL, NULL, &error);
+        usearch_dense_load_buffer(index->handle, executor, buffer, progress, &progress_state, &error);
         Py_END_ALLOW_THREADS;
         usearch_py_buffer_release(&backing);
+        if (progress_raised(&progress_state) != 0) return NULL;
         if (usearch_py_raise_on_error(&error) != 0) return NULL;
         Py_RETURN_NONE;
     }
@@ -2028,31 +2080,32 @@ static PyObject* DenseIndex_load(PyObject* self, PyObject* const* args, Py_ssize
     PyObject* decoded = NULL;
     if (usearch_py_path_from_object(source, &path, &decoded) != 0) return NULL;
     Py_BEGIN_ALLOW_THREADS;
-    usearch_dense_load(index->handle, executor, path, NULL, NULL, &error);
+    usearch_dense_load(index->handle, executor, path, progress, &progress_state, &error);
     Py_END_ALLOW_THREADS;
     Py_DECREF(decoded);
+    if (progress_raised(&progress_state) != 0) return NULL;
     if (usearch_py_raise_on_error(&error) != 0) return NULL;
     Py_RETURN_NONE;
 }
 
-static char const doc_DenseIndex_metadata[] =                                             //
-    "metadata(source) -> dict\n"                                                          //
-    "\n"                                                                                  //
-    "Read a checkpoint's geometry and metric without loading it.\n"                       //
-    "\n"                                                                                  //
-    "The keys are the geometry keywords the checkpoint fixes, so\n"                       //
-    "`DenseIndex.for_ram(**DenseIndex.metadata(path))` rebuilds a handle that can read\n" //
-    "it. Residency is never among them - the factory names where the payload lands.\n"    //
-    "\n"                                                                                  //
-    "Args:\n"                                                                             //
-    "  source (str | os.PathLike | buffer): The checkpoint to inspect. A `bytes` is\n"    //
-    "    read as a path; wrap a blob in a `memoryview` to have it read as one.\n"         //
-    "Returns:\n"                                                                          //
-    "  dict: 'dimensions', 'metric', 'quantization', 'connectivity', 'values_per_key'.";
+static char const doc_DenseIndex_metadata[] =                                               //
+    "metadata(source) -> dict\n"                                                            //
+    "\n"                                                                                    //
+    "Read a checkpoint's geometry and metric without loading it.\n"                         //
+    "\n"                                                                                    //
+    "The keys are the geometry keywords the checkpoint fixes, so\n"                         //
+    "`DenseIndex.for_ram(**DenseIndex.metadata(path))` rebuilds a handle that can read\n"   //
+    "it. Residency is never among them - the factory names where the payload lands - and\n" //
+    "neither is `values_per_key`, which bounds a live handle rather than the file.\n"       //
+    "\n"                                                                                    //
+    "Args:\n"                                                                               //
+    "  source (str | os.PathLike | buffer): The checkpoint to inspect. A `bytes` is\n"      //
+    "    read as a path; wrap a blob in a `memoryview` to have it read as one.\n"           //
+    "Returns:\n"                                                                            //
+    "  dict: 'dimensions', 'metric', 'quantization', 'connectivity'.";
 
 static PyObject* DenseIndex_metadata(PyObject* type, PyObject* source) {
-    usearch_dense_options_t options;
-    options_defaults(&options, usearch_residency_ram_k); //! The geometry is read back; the placement is the caller's.
+    usearch_dense_metadata_t metadata = {0};
     usearch_error_t error = {0};
 
     if (checkpoint_source(source) == checkpoint_source_buffer_k) {
@@ -2060,7 +2113,7 @@ static PyObject* DenseIndex_metadata(PyObject* type, PyObject* source) {
         if (checkpoint_borrow(source, usearch_py_matrix_access_read_k, &backing) != 0) return NULL;
         usearch_bytes_view_t const buffer = {(uint8_t const*)backing.buffer.buf, (size_t)backing.buffer.len};
         Py_BEGIN_ALLOW_THREADS;
-        usearch_dense_metadata_buffer(buffer, &options, &error);
+        usearch_dense_metadata_buffer(buffer, &metadata, &error);
         Py_END_ALLOW_THREADS;
         usearch_py_buffer_release(&backing);
     }
@@ -2069,18 +2122,17 @@ static PyObject* DenseIndex_metadata(PyObject* type, PyObject* source) {
         PyObject* decoded = NULL;
         if (usearch_py_path_from_object(source, &path, &decoded) != 0) return NULL;
         Py_BEGIN_ALLOW_THREADS;
-        usearch_dense_metadata(path, &options, &error);
+        usearch_dense_metadata(path, &metadata, &error);
         Py_END_ALLOW_THREADS;
         Py_DECREF(decoded);
     }
     if (usearch_py_raise_on_error(&error) != 0) return NULL;
 
-    return Py_BuildValue("{s:n,s:s,s:s,s:n,s:n}",                                   //
-                         "dimensions", (Py_ssize_t)options.dimensions,              //
-                         "metric", usearch_dense_metric_name(options.metric),       //
-                         "quantization", usearch_scalar_name(options.quantization), //
-                         "connectivity", (Py_ssize_t)options.connectivity,          //
-                         "values_per_key", (Py_ssize_t)options.values_per_key);
+    return Py_BuildValue("{s:n,s:s,s:s,s:n}",                                        //
+                         "dimensions", (Py_ssize_t)metadata.dimensions,              //
+                         "metric", usearch_dense_metric_name(metadata.metric),       //
+                         "quantization", usearch_scalar_name(metadata.quantization), //
+                         "connectivity", (Py_ssize_t)metadata.connectivity);
 }
 
 #pragma endregion Serialization
@@ -2096,18 +2148,17 @@ static PyMethodDef DenseIndex_methods[] = {
     {"add", (PyCFunction)DenseIndex_add, usearch_py_method_flags_k, doc_DenseIndex_add},                             //
     {"refine", (PyCFunction)DenseIndex_refine, usearch_py_method_flags_k, doc_DenseIndex_refine},                    //
     {"search", (PyCFunction)DenseIndex_search, usearch_py_method_flags_k, doc_DenseIndex_search},                    //
-    {"search_into", (PyCFunction)DenseIndex_search_into, usearch_py_method_flags_k, doc_DenseIndex_search_into},     //
     {"count", (PyCFunction)DenseIndex_count, METH_O, doc_DenseIndex_count},                                          //
     {"get", (PyCFunction)DenseIndex_get, usearch_py_method_flags_k, doc_DenseIndex_get},                             //
-    {"multiply_into", (PyCFunction)DenseIndex_multiply_into, usearch_py_method_flags_k, doc_DenseIndex_multiply_into},
-    {"attend_into", (PyCFunction)DenseIndex_attend_into, usearch_py_method_flags_k, doc_DenseIndex_attend_into},
-    {"maxsim", (PyCFunction)DenseIndex_maxsim, usearch_py_method_flags_k, doc_DenseIndex_maxsim},    //
-    {"merge", (PyCFunction)DenseIndex_merge, usearch_py_method_flags_k, doc_DenseIndex_merge},       //
-    {"find", (PyCFunction)DenseIndex_find, usearch_py_method_flags_k, doc_DenseIndex_find},          //
-    {"batches", (PyCFunction)DenseIndex_batches, usearch_py_method_flags_k, doc_DenseIndex_batches}, //
-    {"save", (PyCFunction)DenseIndex_save, usearch_py_method_flags_k, doc_DenseIndex_save},          //
-    {"load", (PyCFunction)DenseIndex_load, usearch_py_method_flags_k, doc_DenseIndex_load},          //
-    {"metadata", (PyCFunction)DenseIndex_metadata, METH_O | METH_STATIC, doc_DenseIndex_metadata},   //
+    {"multiply", (PyCFunction)DenseIndex_multiply, usearch_py_method_flags_k, doc_DenseIndex_multiply},              //
+    {"attend", (PyCFunction)DenseIndex_attend, usearch_py_method_flags_k, doc_DenseIndex_attend},                    //
+    {"maxsim", (PyCFunction)DenseIndex_maxsim, usearch_py_method_flags_k, doc_DenseIndex_maxsim},                    //
+    {"merge", (PyCFunction)DenseIndex_merge, usearch_py_method_flags_k, doc_DenseIndex_merge},                       //
+    {"find", (PyCFunction)DenseIndex_find, usearch_py_method_flags_k, doc_DenseIndex_find},                          //
+    {"cursor", (PyCFunction)DenseIndex_cursor, usearch_py_method_flags_k, doc_DenseIndex_cursor},                    //
+    {"save", (PyCFunction)DenseIndex_save, usearch_py_method_flags_k, doc_DenseIndex_save},                          //
+    {"load", (PyCFunction)DenseIndex_load, usearch_py_method_flags_k, doc_DenseIndex_load},                          //
+    {"metadata", (PyCFunction)DenseIndex_metadata, METH_O | METH_STATIC, doc_DenseIndex_metadata},                   //
     {NULL, NULL, 0, NULL},
 };
 

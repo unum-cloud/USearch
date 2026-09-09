@@ -3,7 +3,7 @@
 from collections.abc import Callable, Sequence
 from typing import Literal, NoReturn, TypedDict
 
-from usearch.types import Executor, Key, KeyLike, Match, Matches, PathLike, ScalarKind, ScalarName, Stats, Tensor
+from usearch.types import Executor, Key, KeyLike, Match, PathLike, ScalarKind, ScalarName, Stats, Tensor
 
 # region: Dense Index
 
@@ -101,6 +101,7 @@ class DenseIndex:
         executor: Executor,
         expansion_factor: int = 0,
         dtype: ScalarName | None = None,
+        progress: Callable[[int, int], bool] | None = None,
         stats: Stats | None = None,
     ) -> int: ...
     def refine(
@@ -108,21 +109,10 @@ class DenseIndex:
         *,
         executor: Executor,
         expansion_factor: int = 0,
+        progress: Callable[[int, int], bool] | None = None,
         stats: Stats | None = None,
     ) -> int: ...
     def search(
-        self,
-        queries: Tensor,
-        wanted: int,
-        /,
-        *,
-        executor: Executor,
-        expansion_factor: int = 0,
-        dtype: ScalarName | None = None,
-        predicate: Callable[[Key], bool] | None = None,
-        stats: Stats | None = None,
-    ) -> Matches: ...
-    def search_into(
         self,
         queries: Tensor,
         wanted: int,
@@ -135,9 +125,10 @@ class DenseIndex:
         expansion_factor: int = 0,
         dtype: ScalarName | None = None,
         predicate: Callable[[Key], bool] | None = None,
+        progress: Callable[[int, int], bool] | None = None,
         stats: Stats | None = None,
     ) -> None: ...
-    def multiply_into(
+    def multiply(
         self,
         rows: Tensor,
         wanted: int,
@@ -151,7 +142,7 @@ class DenseIndex:
         dtype: ScalarName | None = None,
         stats: Stats | None = None,
     ) -> int: ...
-    def attend_into(
+    def attend(
         self,
         queries: Tensor,
         values: Tensor,
@@ -173,20 +164,44 @@ class DenseIndex:
         queries: Tensor,
         rows_per_query: int,
         wanted: int,
+        keys: Tensor,
+        distances: Tensor,
+        counts: Tensor,
         /,
         *,
         executor: Executor,
         expansion_factor: int = 0,
         dtype: ScalarName | None = None,
         stats: Stats | None = None,
-    ) -> Matches: ...
+    ) -> None: ...
     def count(self, key: KeyLike, /) -> int: ...
     def get(self, key: KeyLike, /, *, dtype: ScalarName = "f32") -> memoryview | None: ...
-    def merge(self, donor: DenseIndex, /, *, executor: Executor) -> None: ...
+    def merge(
+        self,
+        donor: DenseIndex,
+        /,
+        *,
+        executor: Executor,
+        progress: Callable[[int, int], bool] | None = None,
+    ) -> None: ...
     def find(self, query: Tensor, /, *, executor: Executor, dtype: ScalarName | None = None) -> DenseFinder: ...
-    def batches(self, size: int = 1024, *, dtype: ScalarName | None = None) -> DenseCursor: ...
-    def save(self, target: PathLike | Tensor, /, *, executor: Executor) -> None: ...
-    def load(self, source: PathLike | Tensor, /, *, executor: Executor) -> None: ...
+    def cursor(self, size: int = 1024, *, dtype: ScalarName | None = None) -> DenseCursor: ...
+    def save(
+        self,
+        target: PathLike | Tensor,
+        /,
+        *,
+        executor: Executor,
+        progress: Callable[[int, int], bool] | None = None,
+    ) -> None: ...
+    def load(
+        self,
+        source: PathLike | Tensor,
+        /,
+        *,
+        executor: Executor,
+        progress: Callable[[int, int], bool] | None = None,
+    ) -> None: ...
     @staticmethod
     def metadata(source: PathLike | Tensor, /) -> DenseMetadata: ...
     def __len__(self) -> int: ...

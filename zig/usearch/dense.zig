@@ -8,8 +8,8 @@
 //! Every fanned-out verb takes an `Executor`, whose kind must match the handle's residency; there
 //! is no null to pass, since the engine reads a missing one as a residency mismatch.
 //!
-//! Progress reporting and cancellation are not bound. Each verb hands the ABI a null handler, so
-//! `Error.Cancelled` never arrives and a failed batch is all-or-nothing.
+//! Every long verb has a reporting sibling - `addReporting` and friends - taking a handler called
+//! with the units finished so far, whose answer is what stops the call.
 
 const std = @import("std");
 
@@ -43,8 +43,16 @@ pub const Admission = enum(c_int) {
 /// The `usearch_predicate_t` a filtered search calls once per scored candidate.
 const Predicate = *const fn (Key, ?*anyopaque) callconv(.c) Admission;
 
-/// The `usearch_progress_callback_t` every verb accepts and this binding always passes null for.
-const Progress = ?*const fn (usize, usize, ?*anyopaque) callconv(.c) c_int;
+/// Whether the operation a handler is watching carries on or unwinds.
+pub const Continuation = enum(c_int) {
+    /// Carry on to the next unit of work.
+    @"continue" = 0,
+    /// Stop; what the finished increments leave behind is each verb's own contract.
+    cancel = 1,
+};
+
+/// The `usearch_progress_callback_t` a reporting verb calls at every increment boundary.
+const Progress = *const fn (usize, usize, ?*anyopaque) callconv(.c) Continuation;
 
 /// The `usearch_dense_metric_callback_t` a custom metric supplies.
 pub const MetricCallback = *const fn (?*const anyopaque, ?*const anyopaque, usize, ?*anyopaque) callconv(.c) Distance;
@@ -67,8 +75,8 @@ extern fn usearch_dense_add(
     executor: *anyopaque,
     keys: KeysView,
     vectors: *const MatrixView,
-    config: *const ExpansionConfig,
-    progress: Progress,
+    options: *const InsertionOptions,
+    progress: ?Progress,
     progress_state: ?*anyopaque,
     stats: ?*TraversalStats,
     outcome: *Outcome,
@@ -77,8 +85,8 @@ extern fn usearch_dense_add(
 extern fn usearch_dense_refine(
     index: *anyopaque,
     executor: *anyopaque,
-    config: *const ExpansionConfig,
-    progress: Progress,
+    options: *const InsertionOptions,
+    progress: ?Progress,
     progress_state: ?*anyopaque,
     stats: ?*TraversalStats,
     outcome: *Outcome,
@@ -89,8 +97,8 @@ extern fn usearch_dense_search(
     executor: *anyopaque,
     queries: *const MatrixView,
     matches: *const MatchesSpan,
-    config: *const ExpansionConfig,
-    progress: Progress,
+    options: *const SearchOptions,
+    progress: ?Progress,
     progress_state: ?*anyopaque,
     stats: ?*TraversalStats,
     outcome: *Outcome,
@@ -101,10 +109,10 @@ extern fn usearch_dense_search_if(
     executor: *anyopaque,
     queries: *const MatrixView,
     matches: *const MatchesSpan,
-    config: *const ExpansionConfig,
+    options: *const SearchOptions,
     predicate: ?Predicate,
     predicate_state: ?*anyopaque,
-    progress: Progress,
+    progress: ?Progress,
     progress_state: ?*anyopaque,
     stats: ?*TraversalStats,
     outcome: *Outcome,
@@ -115,8 +123,8 @@ extern fn usearch_dense_multiply(
     executor: *anyopaque,
     left: *const MatrixView,
     products: *const MatchesSpan,
-    config: *const ExpansionConfig,
-    progress: Progress,
+    options: *const SearchOptions,
+    progress: ?Progress,
     progress_state: ?*anyopaque,
     stats: ?*TraversalStats,
     outcome: *Outcome,
@@ -128,8 +136,8 @@ extern fn usearch_dense_maxsim(
     queries: *const MatrixView,
     rows_per_query: usize,
     matches: *const MatchesSpan,
-    config: *const ExpansionConfig,
-    progress: Progress,
+    options: *const SearchOptions,
+    progress: ?Progress,
     progress_state: ?*anyopaque,
     stats: ?*TraversalStats,
     outcome: *Outcome,
@@ -142,8 +150,8 @@ extern fn usearch_dense_attend(
     values: *const MatrixView,
     outputs: *const MatrixSpan,
     carry: ?[*]SoftmaxState,
-    config: *const AttentionConfig,
-    progress: Progress,
+    options: *const AttentionOptions,
+    progress: ?Progress,
     progress_state: ?*anyopaque,
     stats: ?*TraversalStats,
     outcome: *Outcome,
@@ -179,7 +187,7 @@ extern fn usearch_dense_save(
     index: *anyopaque,
     executor: *anyopaque,
     path: BytesView,
-    progress: Progress,
+    progress: ?Progress,
     progress_state: ?*anyopaque,
     outcome: *Outcome,
 ) void;
@@ -187,17 +195,17 @@ extern fn usearch_dense_load(
     index: *anyopaque,
     executor: *anyopaque,
     path: BytesView,
-    progress: Progress,
+    progress: ?Progress,
     progress_state: ?*anyopaque,
     outcome: *Outcome,
 ) void;
-extern fn usearch_dense_metadata(path: BytesView, options: *Options, outcome: *Outcome) void;
+extern fn usearch_dense_metadata(path: BytesView, found: *Metadata, outcome: *Outcome) void;
 
 extern fn usearch_dense_save_buffer(
     index: *anyopaque,
     executor: *anyopaque,
     buffer: BytesSpan,
-    progress: Progress,
+    progress: ?Progress,
     progress_state: ?*anyopaque,
     outcome: *Outcome,
 ) void;
@@ -205,11 +213,11 @@ extern fn usearch_dense_load_buffer(
     index: *anyopaque,
     executor: *anyopaque,
     buffer: BytesView,
-    progress: Progress,
+    progress: ?Progress,
     progress_state: ?*anyopaque,
     outcome: *Outcome,
 ) void;
-extern fn usearch_dense_metadata_buffer(buffer: BytesView, options: *Options, outcome: *Outcome) void;
+extern fn usearch_dense_metadata_buffer(buffer: BytesView, found: *Metadata, outcome: *Outcome) void;
 
 /// The dense metric kinds shipped out of the box, all derived from one inner-product kernel with
 /// pre-computed magnitudes. The bit-level pair reads its rows as `Scalar.u1x8` and refuses any
@@ -233,8 +241,7 @@ pub const Metric = enum(c_int) {
     _,
 };
 
-/// Construction and loading options of a dense index. Mirrors `usearch_dense_options_t`, so
-/// `metadata` reads a checkpoint's geometry straight back into one.
+/// Construction and loading options of a dense index. Mirrors `usearch_dense_options_t`.
 ///
 /// Stored rows always round up to the SIMD step quantum, so rows stay cache-line aligned and
 /// every kernel runs tail-free; the arena is slightly larger for it, and that is not a knob.
@@ -306,10 +313,34 @@ pub const Options = extern struct {
     }
 };
 
-/// Optional per-call settings, shared by insertion, refinement, and every search form. A zeroed
-/// config derives every setting, which is what almost every caller wants.
-pub const ExpansionConfig = extern struct {
-    /// The optional candidate-pool breadth; zero derives.
+/// The geometry and metric a checkpoint froze - everything a reader learns without opening it, and
+/// nothing a reader must choose for itself. Mirrors `usearch_dense_metadata_t`.
+///
+/// `values_per_key` is absent because it bounds a live handle's mutable state rather than anything
+/// the serialized form carries, and the placement is absent because a checkpoint records where it
+/// was written and never where a reader must keep it. Both stay the caller's to set in `Options`.
+pub const Metadata = extern struct {
+    /// The metric kind the checkpoint scores with.
+    metric: Metric = .unknown,
+    /// The scalar type its rows are stored and quantized into.
+    quantization: Scalar = .unknown,
+    /// Scalars per stored vector.
+    dimensions: usize = 0,
+    /// Connections per node the graph was built with.
+    connectivity: usize = 0,
+};
+
+/// Optional per-call settings of `DenseIndex.add` and `DenseIndex.refine`. A zeroed value derives
+/// every setting, which is what almost every caller wants.
+pub const InsertionOptions = extern struct {
+    /// The optional candidate-pool breadth the build walk explores; zero derives.
+    expansion_factor: usize = 0,
+};
+
+/// Optional per-call settings of the read-only walks - both searches, `multiply` and `maxsim`. A
+/// zeroed value derives every setting, which is what almost every caller wants.
+pub const SearchOptions = extern struct {
+    /// The optional candidate-pool breadth the walk explores; zero derives.
     expansion_factor: usize = 0,
 };
 
@@ -325,8 +356,8 @@ pub const SoftmaxState = extern struct {
     partition: f32 = 0,
 };
 
-/// Optional per-call settings of `DenseIndex.attend`. A zeroed config derives every setting.
-pub const AttentionConfig = extern struct {
+/// Optional per-call settings of `DenseIndex.attend`. A zeroed value derives every setting.
+pub const AttentionOptions = extern struct {
     /// The optional candidate-pool breadth; zero derives.
     expansion_factor: usize = 0,
     /// The optional logit scale, conventionally the inverse square root of the head
@@ -369,13 +400,23 @@ comptime {
     std.debug.assert(@offsetOf(Options, "residency") == 7 * pointer);
     std.debug.assert(@offsetOf(Options, "placement") == 8 * pointer);
 
-    std.debug.assert(@sizeOf(ExpansionConfig) == pointer);
-    std.debug.assert(@offsetOf(ExpansionConfig, "expansion_factor") == 0);
+    // The four fields a checkpoint answers with, the two tags packing ahead of the two widths.
+    std.debug.assert(@sizeOf(Metadata) == 2 * tag + 2 * pointer);
+    std.debug.assert(@offsetOf(Metadata, "metric") == 0);
+    std.debug.assert(@offsetOf(Metadata, "quantization") == tag);
+    std.debug.assert(@offsetOf(Metadata, "dimensions") == 2 * tag);
+    std.debug.assert(@offsetOf(Metadata, "connectivity") == 2 * tag + pointer);
 
-    std.debug.assert(@sizeOf(AttentionConfig) == pointer + 8);
-    std.debug.assert(@offsetOf(AttentionConfig, "expansion_factor") == 0);
-    std.debug.assert(@offsetOf(AttentionConfig, "score_scale") == pointer);
-    std.debug.assert(@offsetOf(AttentionConfig, "mass_tolerance") == pointer + 4);
+    std.debug.assert(@sizeOf(InsertionOptions) == pointer);
+    std.debug.assert(@offsetOf(InsertionOptions, "expansion_factor") == 0);
+
+    std.debug.assert(@sizeOf(SearchOptions) == pointer);
+    std.debug.assert(@offsetOf(SearchOptions, "expansion_factor") == 0);
+
+    std.debug.assert(@sizeOf(AttentionOptions) == pointer + 8);
+    std.debug.assert(@offsetOf(AttentionOptions, "expansion_factor") == 0);
+    std.debug.assert(@offsetOf(AttentionOptions, "score_scale") == pointer);
+    std.debug.assert(@offsetOf(AttentionOptions, "mass_tolerance") == pointer + 4);
 
     std.debug.assert(@sizeOf(SoftmaxState) == 8);
     std.debug.assert(@offsetOf(SoftmaxState, "maximum_score") == 0);
@@ -402,6 +443,20 @@ inline fn checkContext(comptime Context: type) void {
 /// The pointer a predicate travels with. A `void` context travels as null and is never read.
 inline fn contextPointer(comptime Context: type, context: Context) ?*anyopaque {
     return if (Context == void) null else @ptrCast(@constCast(context));
+}
+
+/// The trampoline a reporting verb hands the ABI, generated per call site so `reports` reads a
+/// typed context rather than an `anyopaque`.
+inline fn progressTrampoline(
+    comptime Context: type,
+    comptime reports: fn (Context, usize, usize) Continuation,
+) Progress {
+    return struct {
+        fn advance(completed: usize, total: usize, state: ?*anyopaque) callconv(.c) Continuation {
+            if (Context == void) return reports({}, completed, total);
+            return reports(@ptrCast(@alignCast(state.?)), completed, total);
+        }
+    }.advance;
 }
 
 /// Vector Search Index over equidimensional dense representations.
@@ -528,8 +583,54 @@ pub const DenseIndex = struct {
         executor: Executor,
         keys: []const Key,
         vectors: MatrixView,
-        config: ExpansionConfig,
+        options: InsertionOptions,
         stats: ?*TraversalStats,
+    ) Error!usize {
+        return self.addDispatch(executor, keys, vectors, options, stats, null, null);
+    }
+
+    /// Adds a matrix of vectors like `add`, reporting the rows admitted as they publish and
+    /// stopping wherever `reports` asks it to.
+    ///
+    /// A handler makes the batch incremental rather than all-or-nothing: a stop lands on an
+    /// increment boundary, the rows already published stand, and the call reports
+    /// `Error.Cancelled` - so the count the handler last saw is what the index kept.
+    ///
+    /// The handler arrives on whichever thread advanced the work and never on two at once, so it
+    /// needs no synchronization of its own. Pass `{}` for a handler needing no context, and a
+    /// single-item pointer otherwise.
+    pub fn addReporting(
+        self: DenseIndex,
+        executor: Executor,
+        keys: []const Key,
+        vectors: MatrixView,
+        options: InsertionOptions,
+        stats: ?*TraversalStats,
+        context: anytype,
+        comptime reports: fn (@TypeOf(context), usize, usize) Continuation,
+    ) Error!usize {
+        const Context = @TypeOf(context);
+        checkContext(Context);
+        return self.addDispatch(
+            executor,
+            keys,
+            vectors,
+            options,
+            stats,
+            progressTrampoline(Context, reports),
+            contextPointer(Context, context),
+        );
+    }
+
+    fn addDispatch(
+        self: DenseIndex,
+        executor: Executor,
+        keys: []const Key,
+        vectors: MatrixView,
+        options: InsertionOptions,
+        stats: ?*TraversalStats,
+        progress: ?Progress,
+        progress_state: ?*anyopaque,
     ) Error!usize {
         var outcome: Outcome = .{};
         const added = usearch_dense_add(
@@ -537,9 +638,9 @@ pub const DenseIndex = struct {
             executor.handle,
             .of(keys),
             &vectors,
-            &config,
-            null,
-            null,
+            &options,
+            progress,
+            progress_state,
             stats,
             &outcome,
         );
@@ -556,11 +657,60 @@ pub const DenseIndex = struct {
     pub fn refine(
         self: DenseIndex,
         executor: Executor,
-        config: ExpansionConfig,
+        options: InsertionOptions,
         stats: ?*TraversalStats,
     ) Error!usize {
+        return self.refineDispatch(executor, options, stats, null, null);
+    }
+
+    /// Re-selects neighbors like `refine`, reporting the nodes swept and stopping wherever
+    /// `reports` asks it to.
+    ///
+    /// Stopping here is a time budget rather than a failure: re-selecting a node's edges is
+    /// idempotent and claims no identity, so a stopped sweep leaves the graph correct and merely
+    /// less improved, reports no `Error.Cancelled`, and resumes where it stopped on the next call.
+    /// A deadline check is the handler this asks for.
+    ///
+    /// The handler arrives on whichever thread advanced the work and never on two at once, so it
+    /// needs no synchronization of its own. Pass `{}` for a handler needing no context, and a
+    /// single-item pointer otherwise.
+    pub fn refineReporting(
+        self: DenseIndex,
+        executor: Executor,
+        options: InsertionOptions,
+        stats: ?*TraversalStats,
+        context: anytype,
+        comptime reports: fn (@TypeOf(context), usize, usize) Continuation,
+    ) Error!usize {
+        const Context = @TypeOf(context);
+        checkContext(Context);
+        return self.refineDispatch(
+            executor,
+            options,
+            stats,
+            progressTrampoline(Context, reports),
+            contextPointer(Context, context),
+        );
+    }
+
+    fn refineDispatch(
+        self: DenseIndex,
+        executor: Executor,
+        options: InsertionOptions,
+        stats: ?*TraversalStats,
+        progress: ?Progress,
+        progress_state: ?*anyopaque,
+    ) Error!usize {
         var outcome: Outcome = .{};
-        const changed = usearch_dense_refine(self.handle, executor.handle, &config, null, null, stats, &outcome);
+        const changed = usearch_dense_refine(
+            self.handle,
+            executor.handle,
+            &options,
+            progress,
+            progress_state,
+            stats,
+            &outcome,
+        );
         try outcome.check();
         return changed;
     }
@@ -573,8 +723,53 @@ pub const DenseIndex = struct {
         executor: Executor,
         queries: MatrixView,
         matches: MatchesSpan,
-        config: ExpansionConfig,
+        options: SearchOptions,
         stats: ?*TraversalStats,
+    ) Error!void {
+        return self.searchDispatch(executor, queries, matches, options, stats, null, null);
+    }
+
+    /// Resolves a matrix of queries like `search`, reporting the queries resolved and stopping
+    /// wherever `reports` asks it to.
+    ///
+    /// A stopped batch reports `Error.Cancelled` and leaves every output row indeterminate, a
+    /// query resolved before the stop being indistinguishable from one that never ran.
+    ///
+    /// The handler arrives on whichever thread advanced the work and never on two at once, so it
+    /// needs no synchronization of its own. Pass `{}` for a handler needing no context, and a
+    /// single-item pointer otherwise.
+    pub fn searchReporting(
+        self: DenseIndex,
+        executor: Executor,
+        queries: MatrixView,
+        matches: MatchesSpan,
+        options: SearchOptions,
+        stats: ?*TraversalStats,
+        context: anytype,
+        comptime reports: fn (@TypeOf(context), usize, usize) Continuation,
+    ) Error!void {
+        const Context = @TypeOf(context);
+        checkContext(Context);
+        return self.searchDispatch(
+            executor,
+            queries,
+            matches,
+            options,
+            stats,
+            progressTrampoline(Context, reports),
+            contextPointer(Context, context),
+        );
+    }
+
+    fn searchDispatch(
+        self: DenseIndex,
+        executor: Executor,
+        queries: MatrixView,
+        matches: MatchesSpan,
+        options: SearchOptions,
+        stats: ?*TraversalStats,
+        progress: ?Progress,
+        progress_state: ?*anyopaque,
     ) Error!void {
         var outcome: Outcome = .{};
         usearch_dense_search(
@@ -582,9 +777,9 @@ pub const DenseIndex = struct {
             executor.handle,
             &queries,
             &matches,
-            &config,
-            null,
-            null,
+            &options,
+            progress,
+            progress_state,
             stats,
             &outcome,
         );
@@ -603,7 +798,7 @@ pub const DenseIndex = struct {
         executor: Executor,
         queries: MatrixView,
         matches: MatchesSpan,
-        config: ExpansionConfig,
+        options: SearchOptions,
         stats: ?*TraversalStats,
         context: anytype,
         comptime admits: fn (@TypeOf(context), Key) Admission,
@@ -623,7 +818,7 @@ pub const DenseIndex = struct {
             executor.handle,
             &queries,
             &matches,
-            &config,
+            &options,
             trampoline,
             contextPointer(Context, context),
             null,
@@ -684,8 +879,44 @@ pub const DenseIndex = struct {
     /// save leaves a file without its header, which every reader rejects, and that leftover is
     /// the caller's to remove.
     pub fn save(self: DenseIndex, executor: Executor, path: []const u8) Error!void {
+        return self.saveDispatch(executor, path, null, null);
+    }
+
+    /// Saves the index like `save`, reporting the shards written and stopping wherever `reports`
+    /// asks it to.
+    ///
+    /// A stopped save leaves a monolith without its header, or the parts of a manifest layout
+    /// without the manifest - leftovers every reader rejects and the caller is left to remove.
+    ///
+    /// The handler arrives on whichever thread advanced the work and never on two at once, so it
+    /// needs no synchronization of its own. Pass `{}` for a handler needing no context, and a
+    /// single-item pointer otherwise.
+    pub fn saveReporting(
+        self: DenseIndex,
+        executor: Executor,
+        path: []const u8,
+        context: anytype,
+        comptime reports: fn (@TypeOf(context), usize, usize) Continuation,
+    ) Error!void {
+        const Context = @TypeOf(context);
+        checkContext(Context);
+        return self.saveDispatch(
+            executor,
+            path,
+            progressTrampoline(Context, reports),
+            contextPointer(Context, context),
+        );
+    }
+
+    fn saveDispatch(
+        self: DenseIndex,
+        executor: Executor,
+        path: []const u8,
+        progress: ?Progress,
+        progress_state: ?*anyopaque,
+    ) Error!void {
         var outcome: Outcome = .{};
-        usearch_dense_save(self.handle, executor.handle, BytesView.of(path), null, null, &outcome);
+        usearch_dense_save(self.handle, executor.handle, BytesView.of(path), progress, progress_state, &outcome);
         try outcome.check();
     }
 
@@ -695,8 +926,43 @@ pub const DenseIndex = struct {
     /// Point `path` at the manifest, never at one of the parts it enumerates. A handle whose
     /// geometry was left zeroed freezes it here, from the checkpoint's own headers.
     pub fn load(self: DenseIndex, executor: Executor, path: []const u8) Error!void {
+        return self.loadDispatch(executor, path, null, null);
+    }
+
+    /// Loads a checkpoint like `load`, reporting the shards placed and stopping wherever `reports`
+    /// asks it to.
+    ///
+    /// A stopped load publishes nothing: the handle is empty afterwards and loads cleanly again.
+    ///
+    /// The handler arrives on whichever thread advanced the work and never on two at once, so it
+    /// needs no synchronization of its own. Pass `{}` for a handler needing no context, and a
+    /// single-item pointer otherwise.
+    pub fn loadReporting(
+        self: DenseIndex,
+        executor: Executor,
+        path: []const u8,
+        context: anytype,
+        comptime reports: fn (@TypeOf(context), usize, usize) Continuation,
+    ) Error!void {
+        const Context = @TypeOf(context);
+        checkContext(Context);
+        return self.loadDispatch(
+            executor,
+            path,
+            progressTrampoline(Context, reports),
+            contextPointer(Context, context),
+        );
+    }
+
+    fn loadDispatch(
+        self: DenseIndex,
+        executor: Executor,
+        path: []const u8,
+        progress: ?Progress,
+        progress_state: ?*anyopaque,
+    ) Error!void {
         var outcome: Outcome = .{};
-        usearch_dense_load(self.handle, executor.handle, BytesView.of(path), null, null, &outcome);
+        usearch_dense_load(self.handle, executor.handle, BytesView.of(path), progress, progress_state, &outcome);
         try outcome.check();
     }
 
@@ -731,11 +997,11 @@ pub const DenseIndex = struct {
         executor: Executor,
         left: MatrixView,
         matches: MatchesSpan,
-        config: ExpansionConfig,
+        options: SearchOptions,
         stats: ?*TraversalStats,
     ) Error!void {
         var outcome: Outcome = .{};
-        usearch_dense_multiply(self.handle, executor.handle, &left, &matches, &config, null, null, stats, &outcome);
+        usearch_dense_multiply(self.handle, executor.handle, &left, &matches, &options, null, null, stats, &outcome);
         try outcome.check();
     }
 
@@ -757,7 +1023,7 @@ pub const DenseIndex = struct {
         values: MatrixView,
         outputs: MatrixSpan,
         carry: ?[]SoftmaxState,
-        config: AttentionConfig,
+        options: AttentionOptions,
         stats: ?*TraversalStats,
     ) Error!void {
         if (outputs.capacity < queries.rows) return refuse(.shape_mismatch);
@@ -773,7 +1039,7 @@ pub const DenseIndex = struct {
             &values,
             &outputs,
             if (carry) |state| state.ptr else null,
-            &config,
+            &options,
             null,
             null,
             stats,
@@ -797,7 +1063,7 @@ pub const DenseIndex = struct {
         queries: MatrixView,
         rows_per_query: usize,
         matches: MatchesSpan,
-        config: ExpansionConfig,
+        options: SearchOptions,
         stats: ?*TraversalStats,
     ) Error!void {
         if (rows_per_query == 0 or queries.rows % rows_per_query != 0) return refuse(.shape_mismatch);
@@ -808,7 +1074,7 @@ pub const DenseIndex = struct {
             &queries,
             rows_per_query,
             &matches,
-            &config,
+            &options,
             null,
             null,
             stats,
@@ -818,25 +1084,22 @@ pub const DenseIndex = struct {
     }
 };
 
-/// Reads a checkpoint's geometry and metric into fresh options, without loading it.
-///
-/// The placement fields come back as they were defaulted, because a checkpoint records where it
-/// was written and never where a reader must keep it - those stay the caller's to fill.
-pub fn metadata(path: []const u8) Error!Options {
-    var options: Options = .{};
+/// Reads a checkpoint's geometry and metric, without loading it.
+pub fn metadata(path: []const u8) Error!Metadata {
+    var found: Metadata = .{};
     var outcome: Outcome = .{};
-    usearch_dense_metadata(BytesView.of(path), &options, &outcome);
+    usearch_dense_metadata(BytesView.of(path), &found, &outcome);
     try outcome.check();
-    return options;
+    return found;
 }
 
 /// Reads geometry and metric out of a serialized monolith buffer, without loading it.
-pub fn metadataBuffer(buffer: []const u8) Error!Options {
-    var options: Options = .{};
+pub fn metadataBuffer(buffer: []const u8) Error!Metadata {
+    var found: Metadata = .{};
     var outcome: Outcome = .{};
-    usearch_dense_metadata_buffer(BytesView.of(buffer), &options, &outcome);
+    usearch_dense_metadata_buffer(BytesView.of(buffer), &found, &outcome);
     try outcome.check();
-    return options;
+    return found;
 }
 
 /// A consistent snapshot cursor over the index contents.
@@ -939,8 +1202,7 @@ test "packed outputs derive their width from the counts" {
     var counts: [3]usize = undefined;
     const matches = try MatchesSpan.of(&keys, &distances, &counts);
     try std.testing.expectEqual(@as(usize, 10), matches.wanted);
-    // A packed run leaves both strides zero, which the interface reads as the natural width -
-    // one fewer number the caller and the engine can disagree about.
+    // A packed run leaves both strides zero, which the interface reads as the natural width.
     try std.testing.expectEqual(@as(usize, 0), matches.keys_stride_bytes);
     try std.testing.expectEqual(@as(usize, 0), matches.scores_stride_bytes);
 }
@@ -987,8 +1249,9 @@ test { // analyze every declaration, the methods on each handle included
 }
 
 test "the generic verbs typecheck" {
-    // `searchIf` and the matrix constructors are generic, so a reference does not analyze them -
-    // only an instantiation does. The branch never runs; the compiler still walks it.
+    // `searchIf`, the reporting siblings and the matrix constructors are generic, so
+    // `refAllDecls` above names them without analyzing them - only an instantiation does that, and
+    // this is the only one in the tree. The branch never runs; the compiler still walks it.
     var never = false;
     _ = &never;
     if (never) {
@@ -1013,6 +1276,32 @@ test "the generic verbs typecheck" {
             }
         }.admits);
         _ = try index.get(.nil, try .of(f32, @constCast(slab), 4));
+
+        // Every reporting sibling, once with a context and once without, since the trampoline is
+        // generated per call site and only an instantiation compiles it.
+        const path: []const u8 = undefined;
+        var tally: usize = 0;
+        const counting = struct {
+            fn saw(seen: *usize, completed: usize, _: usize) Continuation {
+                seen.* = completed;
+                return .@"continue";
+            }
+        }.saw;
+        const stateless = struct {
+            fn saw(_: void, _: usize, _: usize) Continuation {
+                return .@"continue";
+            }
+        }.saw;
+        _ = try index.addReporting(executor, keys, try .of(f32, slab, 4), .{}, null, &tally, counting);
+        _ = try index.addReporting(executor, keys, try .of(f32, slab, 4), .{}, null, {}, stateless);
+        _ = try index.refineReporting(executor, .{}, null, &tally, counting);
+        _ = try index.refineReporting(executor, .{}, null, {}, stateless);
+        try index.searchReporting(executor, try .of(f32, slab, 4), matches, .{}, null, &tally, counting);
+        try index.searchReporting(executor, try .of(f32, slab, 4), matches, .{}, null, {}, stateless);
+        try index.saveReporting(executor, path, &tally, counting);
+        try index.saveReporting(executor, path, {}, stateless);
+        try index.loadReporting(executor, path, &tally, counting);
+        try index.loadReporting(executor, path, {}, stateless);
     }
 }
 
@@ -1048,4 +1337,120 @@ test "a custom metric tags the kind, the quantization, and the callback together
     }.score);
     try std.testing.expectEqual(@as(?*anyopaque, null), stateless.metric_callback_state);
     try std.testing.expectEqual(@as(Distance, 8), stateless.metric_callback.?(&left, &right, left.len, null));
+}
+
+test "a batch crosses the ABI and comes back through the spans the caller lends" {
+    const dimensions = 3;
+    const executor = try Executor.forRam(&.{}, 2);
+    defer executor.deinit();
+    const index = try DenseIndex.init(&.{ .dimensions = dimensions, .metric = .euclidean, .quantization = .f32 });
+    defer index.deinit();
+    try index.reserve(3);
+
+    const slab = [_]f32{ 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    const keys = [_]Key{ .fromInteger(1), .fromInteger(2), .fromInteger(3) };
+    var stats: TraversalStats = .{};
+    const added = try index.add(executor, &keys, try .of(f32, &slab, dimensions), .{}, &stats);
+    try std.testing.expectEqual(@as(usize, 3), added);
+    try std.testing.expectEqual(@as(usize, 3), try index.size());
+    try std.testing.expectEqual(@as(usize, dimensions), try index.dimensions());
+
+    var found: [2]Key = undefined;
+    var scores: [2]Distance = undefined;
+    var counts: [1]usize = undefined;
+    try index.search(executor, try .ofRow(f32, slab[0..dimensions]), try .of(&found, &scores, &counts), .{}, &stats);
+    try std.testing.expectEqual(@as(usize, 2), counts[0]);
+    try std.testing.expect(stats.computed_distances != 0);
+
+    // A stored row comes back through the span the caller lends, value for value.
+    var exported = [_]f32{ -1, -1, -1 };
+    try std.testing.expectEqual(@as(usize, 1), try index.get(keys[1], try .of(f32, &exported, dimensions)));
+    try std.testing.expectEqualSlices(f32, &.{ 0, 1, 0 }, &exported);
+    try std.testing.expectEqual(@as(usize, 1), try index.count(keys[1]));
+
+    // A row the frozen geometry disagrees with is refused, and the status crosses back intact.
+    const narrow = [_]f32{ 1, 0 };
+    try std.testing.expectError(
+        Error.ShapeMismatch,
+        index.search(executor, try .ofRow(f32, &narrow), try .of(&found, &scores, &counts), .{}, null),
+    );
+
+    // A finder streams one query row and refuses a matrix carrying more.
+    try std.testing.expectError(Error.ShapeMismatch, index.find(executor, try .of(f32, &slab, dimensions)));
+    const finder = try index.find(executor, try .ofRow(f32, slab[0..dimensions]));
+    defer finder.deinit();
+    try std.testing.expect(try finder.next(&found, &scores) != 0);
+
+    // A cursor walks the snapshot, and its key run bounds the batch.
+    const walk = try index.cursor();
+    defer walk.deinit();
+    var walked: [3]Key = undefined;
+    try std.testing.expectEqual(@as(usize, 3), try walk.next(&walked, .none));
+    try std.testing.expectEqual(@as(usize, 0), try walk.next(&walked, .none));
+}
+
+test "a reporting batch counts what it published, and a stop keeps it" {
+    const dimensions = 3;
+    const executor = try Executor.forRam(&.{}, 2);
+    defer executor.deinit();
+    const index = try DenseIndex.init(&.{ .dimensions = dimensions, .metric = .euclidean, .quantization = .f32 });
+    defer index.deinit();
+    try index.reserve(6);
+
+    const slab = [_]f32{ 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    const keys = [_]Key{ .fromInteger(1), .fromInteger(2), .fromInteger(3) };
+
+    // How often a verb reports is the increment's size rather than a promise, so the counts are
+    // asserted and their number never is.
+    const Watch = struct {
+        last: usize = 0,
+        total: usize = 0,
+        ordered: bool = true,
+
+        fn record(self: *@This(), completed: usize, total: usize) void {
+            self.ordered = self.ordered and completed >= self.last;
+            self.last = completed;
+            self.total = total;
+        }
+        fn carryOn(self: *@This(), completed: usize, total: usize) Continuation {
+            self.record(completed, total);
+            return .@"continue";
+        }
+        fn stop(self: *@This(), completed: usize, total: usize) Continuation {
+            self.record(completed, total);
+            return .cancel;
+        }
+    };
+
+    var watched: Watch = .{};
+    const added = try index.addReporting(
+        executor,
+        &keys,
+        try .of(f32, &slab, dimensions),
+        .{},
+        null,
+        &watched,
+        Watch.carryOn,
+    );
+    try std.testing.expectEqual(@as(usize, 3), added);
+    try std.testing.expect(watched.ordered);
+    try std.testing.expectEqual(@as(usize, 3), watched.last);
+    try std.testing.expectEqual(@as(usize, 3), watched.total);
+
+    // What a stop leaves behind is the increment's size, not this test's to name, so the index is
+    // checked against the count the handler last saw.
+    var stopped: Watch = .{};
+    const more = [_]Key{ .fromInteger(4), .fromInteger(5), .fromInteger(6) };
+    if (index.addReporting(executor, &more, try .of(f32, &slab, dimensions), .{}, null, &stopped, Watch.stop)) |published| {
+        try std.testing.expectEqual(stopped.last, published);
+    } else |failure| {
+        try std.testing.expectEqual(Error.Cancelled, failure);
+    }
+    try std.testing.expectEqual(3 + stopped.last, try index.size());
+
+    // Stopping a sweep is the time budget rather than a failure, so no status comes back.
+    var swept: Watch = .{};
+    _ = try index.refineReporting(executor, .{}, null, &swept, Watch.stop);
+    try std.testing.expect(swept.ordered);
+    try std.testing.expectEqual(try index.size(), swept.total);
 }

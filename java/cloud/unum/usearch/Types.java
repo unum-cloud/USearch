@@ -2,6 +2,7 @@ package cloud.unum.usearch;
 
 import java.io.Serial;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
 /**
@@ -507,16 +508,17 @@ public final class Types {
      * or device streams, an index owns rows.
      *
      * <p>
-     * The residency picks the factory, and the factory decides what the thread count means: host
-     * workers for RAM, one submission ring apiece for NVMe, and nothing at all for VRAM, where a single
-     * host thread drives one stream per device. It must match the residency of every handle it drives.
+     * One factory per residency, each taking the hardware its own kind places shards on and nothing
+     * else: memory domains and a thread count for RAM, device paths and a thread count for NVMe, and
+     * device ordinals alone for VRAM, where a single host thread drives one stream per device. Naming
+     * no hardware derives it, and the kind must match the residency of every handle it drives.
      *
      * <p>
      * An executor admits one driver at a time, reporting CONTENDED rather than corrupting a dispatch
      * already in flight. Handles stay freely concurrent - it is the executor that serializes.
      *
      * <pre>{@code
-     * try (Executor pool = new Executor(Residency.RAM, 8);
+     * try (Executor pool = Executor.forRam(new int[] {0, 1}, 16);
      *         DenseIndex index = new DenseIndex.DenseOptions().dimensions(256).open()) {
      *     index.add(keys, vectors, pool);
      *     pool.drain();
@@ -527,34 +529,111 @@ public final class Types {
 
         private volatile long handle;
 
-        /**
-         * Spawns the workers a residency's verbs run on. Zero threads derives from the hardware - 7/8 of
-         * the cores for RAM, since full occupancy starves the ordered publication path.
-         *
-         * @throws USearchException SHAPE_MISMATCH on a negative thread count, DEVICE_FAILURE when a
-         *     VRAM or NVMe residency finds nothing to drive, and OUT_OF_MEMORY when the scratch
-         *     arena cannot be claimed.
-         */
-        public Executor(Residency residency, long threads) {
-            if (residency == null) {
-                throw new USearchException(Status.MALFORMED_INPUT, "the residency is null");
-            }
-            if (threads < 0) {
-                throw new USearchException(Status.SHAPE_MISMATCH, "the thread count is negative");
-            }
-            handle = nativeExecutorInitialize(residency.code(), threads);
-            if (handle == 0) {
+        /** Adopts the handle a factory spawned, refusing the one a silent failure left behind. */
+        private Executor(long spawned) {
+            if (spawned == 0) {
                 throw new USearchException(Status.INTERNAL, "the library returned no handle and no error");
             }
+            handle = spawned;
         }
 
         /**
-         * Host workers for RAM-resident indexes, with the thread count derived from the hardware.
+         * Host workers for RAM-resident indexes, spread over every memory domain the process may
+         * allocate on.
          *
-         * @throws USearchException OUT_OF_MEMORY when the scratch arena cannot be claimed.
+         * @param threads Workers to spawn; zero takes 7/8 of the cores, since full occupancy starves
+         *     the ordered publication path.
+         * @throws USearchException SHAPE_MISMATCH on a negative thread count, and OUT_OF_MEMORY when
+         *     the scratch arena cannot be claimed.
          */
-        public Executor() {
-            this(Residency.RAM, 0);
+        public static Executor forRam(long threads) {
+            return new Executor(nativeExecutorForRam(null, spawnable(threads)));
+        }
+
+        /**
+         * Host workers for RAM-resident indexes, interleaved across the compute domains local to the
+         * named NUMA nodes, so a dual-socket box names two and gets workers local to the shards they
+         * walk.
+         *
+         * @param memoryDomains NUMA node ids to place shards on; an empty list derives every node.
+         * @param threads Workers to spawn; zero takes 7/8 of the cores those domains carry.
+         * @throws USearchException MALFORMED_INPUT on a null list, SHAPE_MISMATCH on a negative
+         *     thread count, and OUT_OF_MEMORY when the scratch arena cannot be claimed.
+         */
+        public static Executor forRam(int[] memoryDomains, long threads) {
+            if (memoryDomains == null) {
+                throw new USearchException(Status.MALFORMED_INPUT, "the memory domains are null");
+            }
+            return new Executor(nativeExecutorForRam(memoryDomains, spawnable(threads)));
+        }
+
+        /**
+         * One submission stream on one free device, driven by the thread that calls the verbs.
+         *
+         * @throws USearchException DEVICE_FAILURE when no device answers, and OUT_OF_MEMORY when the
+         *     scratch arena cannot be claimed.
+         */
+        public static Executor forVram() {
+            return new Executor(nativeExecutorForVram(null));
+        }
+
+        /**
+         * One submission stream on every named device, all of them driven by the one thread that calls
+         * the verbs, which is why this takes no thread count: the work has already left for the
+         * accelerator by the time a second host thread would return.
+         *
+         * @param devices CUDA device ordinals to place shards on; an empty list derives one free
+         *     device.
+         * @throws USearchException MALFORMED_INPUT on a null list, DEVICE_FAILURE when a named device
+         *     does not answer, and OUT_OF_MEMORY when the scratch arena cannot be claimed.
+         */
+        public static Executor forVram(int[] devices) {
+            if (devices == null) {
+                throw new USearchException(Status.MALFORMED_INPUT, "the devices are null");
+            }
+            return new Executor(nativeExecutorForVram(devices));
+        }
+
+        /**
+         * Host workers for NVMe-resident indexes, one submission ring apiece, leaving every shard where
+         * its manifest already points.
+         *
+         * @param threads Workers to spawn; zero derives from the devices' queue capabilities.
+         * @throws USearchException SHAPE_MISMATCH on a negative thread count, and OUT_OF_MEMORY when
+         *     the scratch arena cannot be claimed.
+         */
+        public static Executor forNvme(long threads) {
+            return new Executor(nativeExecutorForNvme(null, spawnable(threads)));
+        }
+
+        /**
+         * Host workers for NVMe-resident indexes, one submission ring apiece, across the compute
+         * domains local to the devices the paths name - so striping across four drives names four.
+         *
+         * <p>
+         * A path is whatever identifies a device to the engine that can reach it: a filesystem path
+         * names a kernel device, and a transport identifier like {@code trtype:PCIe traddr:0000:5e:00.0}
+         * names a namespace the kernel no longer owns.
+         *
+         * @param paths Devices or directories to place shards on; an empty list leaves every shard
+         *     where its manifest points.
+         * @param threads Workers to spawn; zero derives from those devices' queue capabilities.
+         * @throws USearchException MALFORMED_INPUT on a null list or an empty path, SHAPE_MISMATCH on
+         *     a negative thread count, and OUT_OF_MEMORY when the scratch arena cannot be claimed.
+         */
+        public static Executor forNvme(String[] paths, long threads) {
+            if (paths == null) {
+                throw new USearchException(Status.MALFORMED_INPUT, "the device paths are null");
+            }
+            byte[][] encoded = new byte[paths.length][];
+            for (int order = 0; order != paths.length; ++order) {
+                String path = paths[order];
+                if (path == null || path.isEmpty()) {
+                    throw new USearchException(Status.MALFORMED_INPUT, "a device path is empty");
+                }
+                encoded[order] = path.getBytes(StandardCharsets.UTF_8);
+            }
+            return new Executor(nativeExecutorForNvme(encoded, spawnable(threads)));
         }
 
         /**
@@ -578,6 +657,14 @@ public final class Types {
             if (released != 0) {
                 nativeExecutorFree(released);
             }
+        }
+
+        /** Refuses a negative thread count, which no factory may spawn. */
+        private static long spawnable(long threads) {
+            if (threads < 0) {
+                throw new USearchException(Status.SHAPE_MISMATCH, "the thread count is negative");
+            }
+            return threads;
         }
 
         /** Reports the handle, refusing a closed executor. */
@@ -907,8 +994,8 @@ public final class Types {
     }
 
     /**
-     * Where a ranked run lands - three slabs sized together, holding a queries-by-wanted matrix of
-     * keys, the scores positionally paired with them, and one match count per query.
+     * Where a ranked run lands - three caller-owned slabs holding a queries-by-wanted matrix of keys,
+     * the scores positionally paired with them, and one match count per query.
      *
      * <p>
      * The keys are one flat byte slab, and {@link #key(int, int)} materializes a {@link Key} only for
@@ -916,34 +1003,63 @@ public final class Types {
      * every accessor here refuses them.
      *
      * <p>
-     * The wanted count is the "k" in kANN and the row width of both matrices, so it is fixed at
-     * construction and cannot be restated afterwards.
+     * The wanted count is the "k" in kANN and the row width of both matrices, and it is read off the
+     * slab lengths rather than asked for, so the room reserved and the count asked for cannot
+     * disagree. Lending slabs the caller already owns is what lets a recall sweep allocate once and
+     * reuse them across every point.
      */
     public static final class Matches {
 
         private final byte[] keys;
         private final double[] scores;
         private final long[] counts;
-        private final int queries;
         private final int wanted;
 
+        private Matches(byte[] keys, double[] scores, long[] counts, int wanted) {
+            this.keys = keys;
+            this.scores = scores;
+            this.counts = counts;
+            this.wanted = wanted;
+        }
+
         /**
-         * Sizes the three slabs for a batch of queries, each reporting up to wanted matches.
+         * Adopts three slabs the caller already owns, deriving the wanted count from their lengths.
          *
-         * @throws USearchException SHAPE_MISMATCH when no match is asked for, and OVERFLOW when the
-         *     queries-by-wanted product would not fit in a Java array.
+         * @throws USearchException MALFORMED_INPUT when a slab is null, and SHAPE_MISMATCH when the
+         *     batch holds no query, the key and score slabs are not the same shape, or the slabs do
+         *     not divide into one row per query.
          */
-        public Matches(long queries, long wanted) {
+        public static Matches of(byte[] keys, double[] scores, long[] counts) {
+            if (keys == null || scores == null || counts == null) {
+                throw new USearchException(Status.MALFORMED_INPUT, "the outputs borrow no storage");
+            }
+            if (counts.length == 0) {
+                throw new USearchException(Status.SHAPE_MISMATCH, "a run must hold at least one query");
+            }
+            if (keys.length % Key.BYTES != 0 || keys.length / Key.BYTES != scores.length) {
+                throw new USearchException(Status.SHAPE_MISMATCH, "the key and score slabs are not the same shape");
+            }
+            if (scores.length == 0 || scores.length % counts.length != 0) {
+                throw new USearchException(Status.SHAPE_MISMATCH, "the slabs do not divide into one row per query");
+            }
+            return new Matches(keys, scores, counts, scores.length / counts.length);
+        }
+
+        /**
+         * Sizes three fresh slabs for a batch of queries, each reporting up to wanted matches.
+         *
+         * @throws USearchException SHAPE_MISMATCH when no query or no match is asked for, and
+         *     OVERFLOW when the queries-by-wanted product would not fit in a Java array.
+         */
+        public static Matches packed(long queries, long wanted) {
             if (wanted <= 0) {
                 throw new USearchException(Status.SHAPE_MISMATCH, "the outputs reserve no room for a single match");
             }
-            this.queries = Extents.toIndex(queries, "the query count");
-            this.wanted = Extents.toIndex(wanted, "the wanted count");
             long slots = Extents.product(queries, wanted, "the match matrix");
-            this.keys = new byte
-                    [Extents.toArrayLength(Extents.product(slots, Key.BYTES, "the key matrix"), "the key matrix")];
-            this.scores = new double[Extents.toArrayLength(slots, "the score matrix")];
-            this.counts = new long[this.queries];
+            int keyBytes = Extents.toArrayLength(Extents.product(slots, Key.BYTES, "the key matrix"), "the key matrix");
+            int scoreSlots = Extents.toArrayLength(slots, "the score matrix");
+            int countSlots = Extents.toIndex(queries, "the query count");
+            return of(new byte[keyBytes], new double[scoreSlots], new long[countSlots]);
         }
 
         /** The upper bound on matches per query, and the row width of both matrices. */
@@ -953,7 +1069,7 @@ public final class Types {
 
         /** How many queries the slabs were sized for. */
         public int queries() {
-            return queries;
+            return counts.length;
         }
 
         /**
@@ -974,7 +1090,7 @@ public final class Types {
          * @throws USearchException SHAPE_MISMATCH when the query is outside the batch.
          */
         public long reportedCount(int query) {
-            if (query < 0 || query >= queries) {
+            if (query < 0 || query >= counts.length) {
                 throw new USearchException(Status.SHAPE_MISMATCH, "the query is outside the batch");
             }
             return counts[query];
@@ -1036,7 +1152,7 @@ public final class Types {
         /** Renders the batch shape, not its contents. */
         @Override
         public String toString() {
-            return "Matches(queries=" + queries + ", wanted=" + wanted + ")";
+            return "Matches(queries=" + counts.length + ", wanted=" + wanted + ")";
         }
     }
 
@@ -1106,7 +1222,11 @@ public final class Types {
 
     private static native String nativeCapabilitiesAvailable();
 
-    private static native long nativeExecutorInitialize(int residency, long threads);
+    private static native long nativeExecutorForRam(int[] memoryDomains, long threads);
+
+    private static native long nativeExecutorForVram(int[] devices);
+
+    private static native long nativeExecutorForNvme(byte[][] paths, long threads);
 
     private static native void nativeExecutorDrain(long handle);
 

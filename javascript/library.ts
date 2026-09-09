@@ -32,7 +32,6 @@ export interface CompiledMetadata {
   metric: string;
   quantization: string;
   connectivity: number;
-  valuesPerKey: number;
 }
 
 /**

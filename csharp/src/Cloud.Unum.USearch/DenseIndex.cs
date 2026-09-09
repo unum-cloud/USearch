@@ -104,24 +104,23 @@ public readonly struct DenseOptions
         };
     }
 
-    /// <summary>Lifts the geometry and metric a checkpoint's headers describe.</summary>
+    /// <summary>Lifts a lowered struct back into managed options.</summary>
     /// <remarks>
-    /// Residency is never read back out of a checkpoint: a checkpoint records where it was written,
-    /// never where a reader must keep it, so the lifted options name RAM and the caller overwrites
-    /// that before constructing a handle.
+    /// The residency arm carries placement lists the lift cannot reconstruct, so the lifted options
+    /// name RAM and the caller overwrites that before constructing a handle.
     /// </remarks>
-    /// <param name="lowered">The C struct the library wrote.</param>
+    /// <param name="lowered">The C struct the library reads.</param>
     /// <returns>The managed options.</returns>
     internal static DenseOptions Lift(in NativeDenseOptions lowered)
     {
         if (lowered.Metric < DenseMetric.Inner || lowered.Metric > DenseMetric.Jaccard)
         {
-            throw new USearchException(Status.UnknownKind, "the checkpoint names an unknown metric");
+            throw new USearchException(Status.UnknownKind, "the options name an unknown metric");
         }
 
         if (lowered.Quantization == ScalarKind.Unknown || !Enum.IsDefined(typeof(ScalarKind), lowered.Quantization))
         {
-            throw new USearchException(Status.UnknownKind, "the checkpoint names an unknown scalar kind");
+            throw new USearchException(Status.UnknownKind, "the options name an unknown scalar kind");
         }
 
         return new DenseOptions
@@ -142,6 +141,55 @@ public readonly struct DenseOptions
     /// </summary>
     /// <returns>The options the round trip reconstructs, placement excepted.</returns>
     internal DenseOptions Reload() => Lift(this.Lower());
+}
+
+/// <summary>
+/// The geometry and metric a checkpoint froze - everything a reader learns without opening it, and
+/// nothing a reader must choose for itself.
+/// </summary>
+/// <remarks>
+/// A checkpoint records neither the residency nor the upper bound on entries sharing one key: the
+/// first says where it was written rather than where a reader must keep it, and the second bounds a
+/// live handle's mutable state rather than the serialized form. Both stay the caller's to choose in
+/// the <see cref="DenseOptions"/> a handle is built from.
+/// </remarks>
+public readonly struct DenseMetadata
+{
+    /// <summary>The scalars per stored vector.</summary>
+    public ulong Dimensions { get; init; }
+
+    /// <summary>The distance kind the checkpoint scores with.</summary>
+    public DenseMetric Metric { get; init; }
+
+    /// <summary>The scalar type its rows are stored and quantized into.</summary>
+    public ScalarKind Quantization { get; init; }
+
+    /// <summary>The connections-per-node bound the graph was built with.</summary>
+    public ulong Connectivity { get; init; }
+
+    /// <summary>Lifts the geometry and metric a checkpoint's headers describe.</summary>
+    /// <param name="lowered">The C struct the library wrote.</param>
+    /// <returns>The managed metadata.</returns>
+    internal static DenseMetadata Lift(in NativeDenseMetadata lowered)
+    {
+        if (lowered.Metric < DenseMetric.Inner || lowered.Metric > DenseMetric.Jaccard)
+        {
+            throw new USearchException(Status.UnknownKind, "the checkpoint names an unknown metric");
+        }
+
+        if (lowered.Quantization == ScalarKind.Unknown || !Enum.IsDefined(typeof(ScalarKind), lowered.Quantization))
+        {
+            throw new USearchException(Status.UnknownKind, "the checkpoint names an unknown scalar kind");
+        }
+
+        return new DenseMetadata
+        {
+            Dimensions = lowered.Dimensions,
+            Metric = lowered.Metric,
+            Quantization = lowered.Quantization,
+            Connectivity = lowered.Connectivity,
+        };
+    }
 }
 
 #endregion Options
@@ -265,43 +313,39 @@ public sealed unsafe class DenseIndex : IDisposable
     /// Reads a checkpoint's geometry and metric metadata without loading it - from the manifest's
     /// summary when the path names one, so no shard is opened.
     /// </summary>
-    /// <remarks>
-    /// A checkpoint records where it was written, never where a reader must keep it, so the
-    /// residency comes back naming RAM and stays the caller's to fill.
-    /// </remarks>
     /// <param name="path">The checkpoint path.</param>
-    /// <returns>The options the checkpoint's headers describe.</returns>
-    public static DenseOptions Metadata(string path)
+    /// <returns>The geometry and metric the checkpoint's headers describe.</returns>
+    public static DenseMetadata Metadata(string path)
     {
         byte[] encoded = EncodePath(path);
-        NativeDenseOptions lowered = default;
+        NativeDenseMetadata lowered = default;
         fixed (byte* data = encoded)
         {
             usearch_dense_metadata(Borrow(data, encoded.Length), &lowered, out NativeError error);
             error.ThrowIfFailed();
         }
 
-        return DenseOptions.Lift(lowered);
+        return DenseMetadata.Lift(lowered);
     }
 
     /// <summary>Reads geometry and metric metadata from a serialized monolith buffer.</summary>
     /// <param name="buffer">The monolith's bytes.</param>
-    /// <returns>The options the monolith's header describes.</returns>
-    public static DenseOptions MetadataFromBuffer(ReadOnlySpan<byte> buffer)
+    /// <returns>The geometry and metric the monolith's header describes.</returns>
+    public static DenseMetadata MetadataFromBuffer(ReadOnlySpan<byte> buffer)
     {
         if (buffer.IsEmpty)
         {
             throw new USearchException(Status.MalformedInput, "the buffer is empty");
         }
 
-        NativeDenseOptions lowered = default;
+        NativeDenseMetadata lowered = default;
         fixed (byte* source = buffer)
         {
             usearch_dense_metadata_buffer(Borrow(source, buffer.Length), &lowered, out NativeError error);
             error.ThrowIfFailed();
         }
 
-        return DenseOptions.Lift(lowered);
+        return DenseMetadata.Lift(lowered);
     }
 
     /// <summary>Claims capacity for incoming vectors, counting the entries already stored.</summary>
@@ -480,7 +524,7 @@ public sealed unsafe class DenseIndex : IDisposable
     public void Search(
         Executor executor,
         Matrix queries,
-        SearchResults matches,
+        MatchesSpan matches,
         DenseSearchOptions options = default,
         TraversalStats? stats = null) =>
         this.SearchDispatch(executor, queries, matches, options, stats, null);
@@ -505,7 +549,7 @@ public sealed unsafe class DenseIndex : IDisposable
     public void SearchIf(
         Executor executor,
         Matrix queries,
-        SearchResults matches,
+        MatchesSpan matches,
         Func<USearchKey, Admission> admits,
         DenseSearchOptions options = default,
         TraversalStats? stats = null)
@@ -540,7 +584,7 @@ public sealed unsafe class DenseIndex : IDisposable
         Executor executor,
         Matrix queries,
         int rowsPerQuery,
-        SearchResults matches,
+        MatchesSpan matches,
         DenseSearchOptions options = default,
         TraversalStats? stats = null)
     {
@@ -625,9 +669,9 @@ public sealed unsafe class DenseIndex : IDisposable
         return entries;
     }
 
-    /// <summary>Opens a snapshot cursor over the current contents.</summary>
+    /// <summary>Opens a consistent snapshot cursor over the current contents.</summary>
     /// <returns>The cursor, which the caller disposes.</returns>
-    public USearchCursor Snapshot()
+    public USearchCursor Cursor()
     {
         NativeCursorHandle cursor = usearch_dense_cursor(this.Handle, out NativeError error);
         error.ThrowIfFailed();
@@ -765,7 +809,7 @@ public sealed unsafe class DenseIndex : IDisposable
     private void SearchDispatch(
         Executor executor,
         Matrix queries,
-        SearchResults matches,
+        MatchesSpan matches,
         DenseSearchOptions options,
         TraversalStats? stats,
         Func<USearchKey, Admission>? admits)
@@ -855,7 +899,7 @@ public sealed unsafe class DenseIndex : IDisposable
         return dimensions;
     }
 
-    private static void CheckOutputs(SearchResults matches)
+    private static void CheckOutputs(MatchesSpan matches)
     {
         if (matches is null)
         {
@@ -1064,6 +1108,22 @@ internal struct NativeDenseOptions
     public ResidencyKind Residency;
     /// <summary>The arm <see cref="Residency"/> selects.</summary>
     public NativeResidencyOptions ResidencyOptions;
+}
+
+/// <summary>
+/// The geometry and metric a checkpoint froze, laid out as the C struct spells them.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeDenseMetadata
+{
+    /// <summary>The metric kind the checkpoint scores with.</summary>
+    public DenseMetric Metric;
+    /// <summary>The scalar type its rows are stored and quantized into.</summary>
+    public ScalarKind Quantization;
+    /// <summary>The scalars per stored vector.</summary>
+    public nuint Dimensions;
+    /// <summary>The connections per node the graph was built with.</summary>
+    public nuint Connectivity;
 }
 
 /// <summary>Optional per-call settings of insertion and refinement; a zero field derives.</summary>
@@ -1282,7 +1342,7 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial void usearch_dense_metadata(
-        NativeBytesView path, NativeDenseOptions* options, out NativeError error);
+        NativeBytesView path, NativeDenseMetadata* metadata, out NativeError error);
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
@@ -1307,7 +1367,7 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial void usearch_dense_metadata_buffer(
-        NativeBytesView buffer, NativeDenseOptions* options, out NativeError error);
+        NativeBytesView buffer, NativeDenseMetadata* metadata, out NativeError error);
 }
 
 #endregion Entry Points

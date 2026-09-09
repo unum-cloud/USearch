@@ -620,6 +620,156 @@ if command -v clang-format > /dev/null 2>&1 && [ -f .clang-format ]; then
     done < <(git diff --cached --name-only --diff-filter=ACM -z)
 fi
 
+# Every gate below takes explicit staged paths rather than a directory: `ruff format` handed a
+# directory also reformats markdown code blocks, which rewrites hand-aligned README examples.
+if command -v ruff > /dev/null 2>&1 && [ -f pyproject.toml ]; then
+    while IFS= read -r -d '' file; do
+        case "$file" in
+        *.py | *.pyi) ;;
+        *) continue ;;
+        esac
+        if ! ruff format --check "$file" > /dev/null 2>&1; then
+            echo "pre-commit: $file is not ruff-format clean - run \`ruff format $file\`"
+            failed=1
+        fi
+        if ! ruff check --quiet "$file" > /dev/null 2>&1; then
+            echo "pre-commit: $file fails ruff's lints - run \`ruff check --fix $file\`"
+            failed=1
+        fi
+    done < <(git diff --cached --name-only --diff-filter=ACM -z)
+fi
+
+# `cargo fmt` reads the crate's edition, so it runs once over the crate rather than per file.
+if command -v cargo > /dev/null 2>&1 && [ -f Cargo.toml ] &&
+    git diff --cached --name-only --diff-filter=ACM -z | tr '\0' '\n' | grep -q '\.rs$'; then
+    if ! cargo fmt --check > /dev/null 2>&1; then
+        echo "pre-commit: a Rust source is not rustfmt clean - run \`cargo fmt\`"
+        failed=1
+    fi
+fi
+
+if command -v zig > /dev/null 2>&1; then
+    while IFS= read -r -d '' file; do
+        case "$file" in
+        *.zig) ;;
+        *) continue ;;
+        esac
+        if ! zig fmt --check "$file" > /dev/null 2>&1; then
+            echo "pre-commit: $file is not zig-fmt clean - run \`zig fmt $file\`"
+            failed=1
+        fi
+    done < <(git diff --cached --name-only --diff-filter=ACM -z)
+fi
+
+if command -v gofmt > /dev/null 2>&1; then
+    while IFS= read -r -d '' file; do
+        case "$file" in
+        *.go) ;;
+        *) continue ;;
+        esac
+        if [ -n "$(gofmt -l "$file" 2> /dev/null)" ]; then
+            echo "pre-commit: $file is not gofmt clean - run \`gofmt -w $file\`"
+            failed=1
+        fi
+    done < <(git diff --cached --name-only --diff-filter=ACM -z)
+fi
+
+# `swift format lint` reports through warnings alone; only `--strict` turns them into an exit code.
+if command -v swift > /dev/null 2>&1 && [ -f .swift-format ]; then
+    while IFS= read -r -d '' file; do
+        case "$file" in
+        *.swift) ;;
+        *) continue ;;
+        esac
+        if ! swift format lint --strict --configuration .swift-format "$file" > /dev/null 2>&1; then
+            echo "pre-commit: $file fails swift-format - run \`swift format --in-place --configuration .swift-format $file\`"
+            failed=1
+        fi
+    done < <(git diff --cached --name-only --diff-filter=ACM -z)
+fi
+
+# `mojo format` has no check mode, so the gate formats a copy and compares.
+if command -v pixi > /dev/null 2>&1 && [ -f pixi.toml ]; then
+    while IFS= read -r -d '' file; do
+        case "$file" in
+        *.mojo) ;;
+        *) continue ;;
+        esac
+        formatted=$(mktemp --suffix=.mojo)
+        cp "$file" "$formatted"
+        pixi run --quiet mojo format --quiet -l 120 "$formatted" > /dev/null 2>&1
+        if ! cmp -s "$file" "$formatted"; then
+            echo "pre-commit: $file is not mojo-format clean - run \`pixi run mojo format -l 120 $file\`"
+            failed=1
+        fi
+        rm -f "$formatted"
+    done < <(git diff --cached --name-only --diff-filter=ACM -z)
+fi
+
+# Spotless needs a Gradle far newer than some distributions ship, so the gate calls the same
+# formatter Spotless would, out of the Gradle cache.
+palantir_jar=$(ls "$HOME"/.gradle/caches/modules-2/files-2.1/com.palantir.javaformat/palantir-java-format/*/*/palantir-java-format-*.jar 2> /dev/null | tail -1)
+if [ -n "$palantir_jar" ] && command -v java > /dev/null 2>&1; then
+    palantir_exports="--add-exports jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED"
+    palantir_exports="$palantir_exports --add-exports jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED"
+    palantir_exports="$palantir_exports --add-exports jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED"
+    palantir_exports="$palantir_exports --add-exports jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED"
+    palantir_exports="$palantir_exports --add-exports jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED"
+    while IFS= read -r -d '' file; do
+        case "$file" in
+        *.java) ;;
+        *) continue ;;
+        esac
+        # A formatter that cannot parse the file says nothing about its formatting - 2.97.0 rejects
+        # Java 21's `case X x when ...` guards - so only a clean run that disagrees is a failure.
+        formatted=$(mktemp)
+        # shellcheck disable=SC2086
+        if java $palantir_exports -cp "$palantir_jar" com.palantir.javaformat.java.Main "$file" \
+            > "$formatted" 2> /dev/null && ! cmp -s "$formatted" "$file"; then
+            echo "pre-commit: $file is not palantir-java-format clean - run \`gradle spotlessApply\`"
+            failed=1
+        fi
+        rm -f "$formatted"
+    done < <(git diff --cached --name-only --diff-filter=ACM -z)
+fi
+
+if [ -x node_modules/.bin/prettier ]; then
+    while IFS= read -r -d '' file; do
+        case "$file" in
+        *.ts | *.js | *.mjs | *.cjs) ;;
+        *) continue ;;
+        esac
+        if ! node_modules/.bin/prettier --check "$file" > /dev/null 2>&1; then
+            echo "pre-commit: $file is not prettier clean - run \`npx prettier --write $file\`"
+            failed=1
+        fi
+    done < <(git diff --cached --name-only --diff-filter=ACM -z)
+fi
+
+# An integer quotient compared against zero says `a < b` the long way round, and it reads as a
+# second divisibility test beside the `%` it usually sits next to. Every source language, added
+# lines only, with line comments stripped so prose about a quotient does not trip it.
+while IFS= read -r -d '' file; do
+    case "$file" in
+    *.c | *.h | *.hpp | *.cpp | *.cu | *.cuh | *.rs | *.zig | *.go | *.cs | *.java | *.swift | *.ts | *.js | *.mojo | *.py) ;;
+    *) continue ;;
+    esac
+    quotients=$(awk '
+        NR == FNR { added[$1 + 0]; next }
+        FNR in added {
+            line = $0
+            sub(/\/\/.*/, "", line)
+            sub(/#.*/, "", line)
+            if (line ~ /\/[[:space:]]*[A-Za-z_][A-Za-z0-9_.()]*[[:space:]]*[=!]=+[[:space:]]*0([^.0-9]|$)/)
+                printf "%d:%s\n", FNR, $0
+        }' <(added_line_numbers "$file") <(git show ":$file"))
+    if [ -n "$quotients" ]; then
+        echo "pre-commit: $file compares an integer quotient against zero - say the comparison outright:"
+        printf '%s\n' "$quotients" | head -3
+        failed=1
+    fi
+done < <(git diff --cached --name-only --diff-filter=ACM -z)
+
 while IFS= read -r -d '' file; do
     case "$file" in
     *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh) ;;

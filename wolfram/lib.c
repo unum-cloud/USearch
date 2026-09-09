@@ -18,8 +18,20 @@
  *  @section wolfram_scalars Tensors and Scalars
  *
  *  Wolfram's real tensors are @c f64, so vectors and queries cross as @c usearch_scalar_f64_k and
- *  the engine quantizes them into whatever the index was built to store. Keys cross as machine
- *  integers, parked big-endian in the low eight bytes of the 128-bit identity.
+ *  the engine quantizes them into whatever the index was built to store. An identity is sixteen
+ *  bytes and the widest tensor cell is an eight-byte machine integer, so keys cross as integer
+ *  tensors of one cell per byte, most significant first - which is what @c IntegerDigits[key,
+ *  @c 256, @c 16] renders and @c FromDigits[cells, @c 256] reads back, at full precision either
+ *  way. An integer identity is that encoding of a number below @c 2^64, so it parks in the low
+ *  eight bytes with the rest zeroed, exactly as the ABI describes.
+ *
+ *  @section wolfram_outputs Caller-Owned Outputs
+ *
+ *  A LibraryLink verb answers one value, so a verb with several outputs takes them as @c "Shared"
+ *  tensors it writes into rather than folding them into one - which is also what keeps a key's
+ *  bytes and a distance's mantissa from having to share a cell type. Shared passing lends the
+ *  library the caller's tensor rather than copying it, so each one is disowned before the verb
+ *  returns, on the failing paths as much as the succeeding one.
  */
 #include <stdint.h> // `int64_t`, `intptr_t`
 #include <stdlib.h> // `malloc`, `free`
@@ -58,22 +70,33 @@ static int outcome(WolframLibraryData library_data, usearch_error_t const* error
     return error->status == usearch_success_k ? LIBRARY_NO_ERROR : reject(library_data, error, NULL);
 }
 
-/** @brief Parks a machine integer in the low eight bytes of a 128-bit identity, big-endian. */
-static usearch_key_t key_from_integer(mint value) {
-    usearch_key_t key;
-    memset(key.bytes, 0, sizeof(key.bytes));
-    uint64_t const magnitude = (uint64_t)value;
-    for (size_t byte_index = 0; byte_index != 8; ++byte_index)
-        key.bytes[15 - byte_index] = (uint8_t)(magnitude >> (byte_index * 8));
-    return key;
+/**
+ *  @brief Reads one 128-bit identity from sixteen tensor cells, most significant byte first.
+ *
+ *  @param[in] cells The sixteen cells the identity spans, each holding one byte.
+ *  @param[out] key Where the identity lands.
+ *  @return @c LIBRARY_NO_ERROR when every cell is a byte.
+ *
+ *  A cell outside @c 0..255 is refused rather than masked, since a caller who built the identity
+ *  from the wrong base wants to hear about it instead of receiving a truncation.
+ */
+static int key_from_cells(mint const* cells, usearch_key_t* key) {
+    for (size_t byte_index = 0; byte_index != sizeof(key->bytes); ++byte_index) {
+        if (cells[byte_index] < 0 || cells[byte_index] > 255) return LIBRARY_TYPE_ERROR;
+        key->bytes[byte_index] = (uint8_t)cells[byte_index];
+    }
+    return LIBRARY_NO_ERROR;
 }
 
-/** @brief Reads back what @c key_from_integer parked; identities wider than eight bytes truncate. */
-static mint key_to_integer(usearch_key_t key) {
-    uint64_t magnitude = 0;
-    for (size_t byte_index = 0; byte_index != 8; ++byte_index)
-        magnitude = (magnitude << 8) | (uint64_t)key.bytes[8 + byte_index];
-    return (mint)magnitude;
+/**
+ *  @brief Writes one 128-bit identity into sixteen tensor cells, most significant byte first.
+ *
+ *  @param[in] key The identity to render.
+ *  @param[out] cells The sixteen cells it spans, each receiving one byte.
+ */
+static void key_to_cells(usearch_key_t key, mint* cells) {
+    for (size_t byte_index = 0; byte_index != sizeof(key.bytes); ++byte_index)
+        cells[byte_index] = (mint)key.bytes[byte_index];
 }
 
 /** @brief Recovers an opaque handle from the integer a caller kept. */
@@ -295,6 +318,24 @@ EXTERN_C DLLEXPORT int DenseIndexConnectivity(WolframLibraryData library_data, m
 #pragma region Dense Index Verbs
 
 /**
+ *  @brief Checks a tensor's cell type and rank, answering the extents behind them.
+ *
+ *  @param[in] library_data The callback table the type, rank and extents come from.
+ *  @param[in] tensor The tensor to inspect.
+ *  @param[in] kind The cell type demanded, either @c MType_Integer or @c MType_Real.
+ *  @param[in] rank The rank demanded.
+ *  @param[out] extents Where the tensor's extents land, owned by the tensor.
+ *  @return @c LIBRARY_NO_ERROR when the tensor matches both.
+ */
+static int extents_from_tensor(WolframLibraryData library_data, MTensor tensor, mint kind, mint rank,
+                               mint const** extents) {
+    if (library_data->MTensor_getType(tensor) != kind) return LIBRARY_TYPE_ERROR;
+    if (library_data->MTensor_getRank(tensor) != rank) return LIBRARY_RANK_ERROR;
+    *extents = library_data->MTensor_getDimensions(tensor);
+    return LIBRARY_NO_ERROR;
+}
+
+/**
  *  @brief Borrows a real tensor as one input matrix: rank one is a single row, rank two a batch.
  *
  *  A rank-two tensor already @b is what the interface asks for - a base, a row count and a width -
@@ -303,7 +344,7 @@ EXTERN_C DLLEXPORT int DenseIndexConnectivity(WolframLibraryData library_data, m
  *
  *  @return @c LIBRARY_NO_ERROR when the tensor is real and of rank one or two.
  */
-static int matrix_from_tensor(WolframLibraryData library_data, MTensor tensor, usearch_dense_matrix_view_t* matrix) {
+static int matrix_from_tensor(WolframLibraryData library_data, MTensor tensor, usearch_matrix_view_t* matrix) {
     if (library_data->MTensor_getType(tensor) != MType_Real) return LIBRARY_TYPE_ERROR;
     mint const rank = library_data->MTensor_getRank(tensor);
     if (rank != 1 && rank != 2) return LIBRARY_RANK_ERROR;
@@ -320,8 +361,9 @@ static int matrix_from_tensor(WolframLibraryData library_data, MTensor tensor, u
 /**
  *  @brief Inserts a batch: @c executor → @c index → @c keys → @c vectors.
  *
- *  The keys are a rank-one integer tensor and the vectors a rank-two real one, one row apiece;
- *  a single vector is the rank-one case of the same call.
+ *  The keys are a rank-two integer tensor of one identity per row, sixteen cells wide and most
+ *  significant byte first, and the vectors a rank-two real one, one row apiece; a single vector is
+ *  the rank-one case of the same call.
  */
 EXTERN_C DLLEXPORT int DenseIndexAdd(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                      MArgument result) {
@@ -330,87 +372,143 @@ EXTERN_C DLLEXPORT int DenseIndexAdd(WolframLibraryData library_data, mint argum
     usearch_dense_index_t index = (usearch_dense_index_t)handle_from_integer(MArgument_getInteger(arguments[1]));
 
     MTensor const keys_tensor = MArgument_getMTensor(arguments[2]);
-    if (library_data->MTensor_getType(keys_tensor) != MType_Integer) return LIBRARY_TYPE_ERROR;
-    if (library_data->MTensor_getRank(keys_tensor) != 1) return LIBRARY_RANK_ERROR;
-    mint const* const keys_data = library_data->MTensor_getIntegerData(keys_tensor);
-    size_t const count = (size_t)library_data->MTensor_getFlattenedLength(keys_tensor);
+    mint const* keys_extents = NULL;
+    int const shaped = extents_from_tensor(library_data, keys_tensor, MType_Integer, 2, &keys_extents);
+    if (shaped != LIBRARY_NO_ERROR) return shaped;
+    if (keys_extents[1] != (mint)sizeof(usearch_key_t))
+        return reject(library_data, NULL, "each key spans sixteen cells, one byte apiece");
+    mint const* const keys_cells = library_data->MTensor_getIntegerData(keys_tensor);
+    size_t const count = (size_t)keys_extents[0];
 
-    usearch_dense_matrix_view_t vectors;
+    usearch_matrix_view_t vectors;
     int const borrowed = matrix_from_tensor(library_data, MArgument_getMTensor(arguments[3]), &vectors);
     if (borrowed != LIBRARY_NO_ERROR) return borrowed;
-    if (vectors.rows != count) return reject(library_data, NULL, "the vectors do not split into one row per key");
-
     usearch_key_t* const keys = (usearch_key_t*)malloc(sizeof(usearch_key_t) * (count ? count : 1));
     if (!keys) return LIBRARY_MEMORY_ERROR;
-    for (size_t row = 0; row != count; ++row) keys[row] = key_from_integer(keys_data[row]);
+    for (size_t row = 0; row != count; ++row) {
+        if (key_from_cells(keys_cells + row * sizeof(usearch_key_t), &keys[row]) == LIBRARY_NO_ERROR) continue;
+        free(keys);
+        return reject(library_data, NULL, "a key cell holds something other than a byte");
+    }
 
+    usearch_keys_view_t const identities = {keys, count};
     usearch_error_t error = {usearch_success_k, NULL};
-    usearch_dense_add(index, executor, keys, &vectors, NULL, NULL, NULL, NULL, &error);
+    usearch_dense_add(index, executor, identities, &vectors, NULL, NULL, NULL, NULL, &error);
     free(keys);
     return outcome(library_data, &error);
 }
 
 /**
- *  @brief Nearest neighbors of a batch: @c executor → @c index → @c queries → @c wanted → matches.
+ *  @brief Resolves one batch into three caller-owned tensors, which stay shared on every path.
  *
- *  The result is a rank-three real tensor of `queries × wanted × 2`, each innermost pair a key and
- *  its distance. A pair rather than a bare key because the distance is computed either way, and a
- *  caller that has to recompute it has been handed half an answer; real rather than integer
- *  because one tensor carries both and Wolfram returns one value. Rows past a query's match count
- *  are zeroed, which `DenseIndexSearchCounts` would report - a truncated row is not an error.
+ *  @param[in] library_data The callback table the tensors are read through.
+ *  @param[in] executor The executor the batch fans out over.
+ *  @param[in] index The handle to be queried.
+ *  @param[in] queries_tensor The real tensor of query rows, one query apiece.
+ *  @param[out] keys_tensor The @b [queries,wanted,16] integer tensor the identities land in.
+ *  @param[out] distances_tensor The @b [queries,wanted] real tensor the scores land in.
+ *  @param[out] counts_tensor The rank-one integer tensor the per-query match counts land in.
+ *  @return @c LIBRARY_NO_ERROR when the batch resolved.
+ *
+ *  Every extent is checked against the queries and against the others, since three tensors sized
+ *  apart are three ways to write past a row the caller never allocated.
+ */
+static int search_into_tensors(WolframLibraryData library_data,                          //
+                               usearch_executor_t executor, usearch_dense_index_t index, //
+                               MTensor queries_tensor, MTensor keys_tensor,              //
+                               MTensor distances_tensor, MTensor counts_tensor) {
+    usearch_matrix_view_t queries;
+    int const borrowed = matrix_from_tensor(library_data, queries_tensor, &queries);
+    if (borrowed != LIBRARY_NO_ERROR) return borrowed;
+
+    mint const* keys_extents = NULL;
+    mint const* distances_extents = NULL;
+    mint const* counts_extents = NULL;
+    int const keys_shaped = extents_from_tensor(library_data, keys_tensor, MType_Integer, 3, &keys_extents);
+    if (keys_shaped != LIBRARY_NO_ERROR) return keys_shaped;
+    int const distances_shaped = extents_from_tensor(library_data, distances_tensor, MType_Real, 2, &distances_extents);
+    if (distances_shaped != LIBRARY_NO_ERROR) return distances_shaped;
+    int const counts_shaped = extents_from_tensor(library_data, counts_tensor, MType_Integer, 1, &counts_extents);
+    if (counts_shaped != LIBRARY_NO_ERROR) return counts_shaped;
+
+    int const agreed = keys_extents[0] == (mint)queries.rows && distances_extents[0] == keys_extents[0] &&
+                       counts_extents[0] == keys_extents[0] && distances_extents[1] == keys_extents[1] &&
+                       keys_extents[1] > 0 && keys_extents[2] == (mint)sizeof(usearch_key_t);
+    if (!agreed)
+        return reject(library_data, NULL,
+                      "the outputs must be shaped queries by wanted by sixteen, queries by wanted, and queries");
+
+    size_t const wanted = (size_t)keys_extents[1];
+    size_t const cells = queries.rows * wanted;
+    usearch_key_t* const found = (usearch_key_t*)malloc(sizeof(usearch_key_t) * (cells ? cells : 1));
+    size_t* const counts = (size_t*)malloc(sizeof(size_t) * (queries.rows ? queries.rows : 1));
+    if (!found || !counts) {
+        free(found);
+        free(counts);
+        return LIBRARY_MEMORY_ERROR;
+    }
+
+    // Scores land in the caller's tensor directly, since a real cell already is what the engine
+    // writes; identities stage through `found`, since sixteen bytes do not fit one cell.
+    double* const distances_cells = library_data->MTensor_getRealData(distances_tensor);
+    usearch_matches_span_t const span = {found, 0, distances_cells, 0, counts, wanted};
+    usearch_error_t error = {usearch_success_k, NULL};
+    usearch_dense_search(index, executor, &queries, &span, NULL, NULL, NULL, NULL, &error);
+    if (error.status != usearch_success_k) {
+        free(found);
+        free(counts);
+        return reject(library_data, &error, NULL);
+    }
+
+    usearch_key_t blank;
+    memset(blank.bytes, 0, sizeof(blank.bytes));
+    mint* const keys_cells = library_data->MTensor_getIntegerData(keys_tensor);
+    mint* const counts_cells = library_data->MTensor_getIntegerData(counts_tensor);
+    for (size_t query = 0; query != queries.rows; ++query) {
+        size_t const written = counts[query] < wanted ? counts[query] : wanted;
+        counts_cells[query] = (mint)written;
+        for (size_t match = written; match != wanted; ++match) distances_cells[query * wanted + match] = 0.0;
+        for (size_t match = 0; match != wanted; ++match) {
+            size_t const cell = query * wanted + match;
+            key_to_cells(match < written ? found[cell] : blank, keys_cells + cell * sizeof(usearch_key_t));
+        }
+    }
+
+    free(found);
+    free(counts);
+    return LIBRARY_NO_ERROR;
+}
+
+/**
+ *  @brief Nearest neighbors of a batch: @c executor → @c index → @c queries → @c keys →
+ *      @c distances → @c counts.
+ *
+ *  The three outputs are shared tensors the caller allocated: keys of @b [queries,wanted,16]
+ *  integer cells, distances of @b [queries,wanted] reals, and one count per query. Three tensors
+ *  rather than one because sixteen identity bytes and a distance's mantissa cannot share a cell
+ *  type without one of them being rounded, and shared rather than returned because a verb answers
+ *  one value. Their extents carry the breadth of the search, so nothing here restates it, and rows
+ *  past a query's count are zeroed - a truncated row is not an error.
  */
 EXTERN_C DLLEXPORT int DenseIndexSearch(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                         MArgument result) {
-    if (arguments_count != 4)
-        return reject(library_data, NULL, "search takes an executor, an index, queries and a count");
-    usearch_executor_t executor = (usearch_executor_t)handle_from_integer(MArgument_getInteger(arguments[0]));
-    usearch_dense_index_t index = (usearch_dense_index_t)handle_from_integer(MArgument_getInteger(arguments[1]));
+    if (arguments_count != 6)
+        return reject(library_data, NULL, "search takes an executor, an index, queries, keys, distances and counts");
+    MTensor const keys_tensor = MArgument_getMTensor(arguments[3]);
+    MTensor const distances_tensor = MArgument_getMTensor(arguments[4]);
+    MTensor const counts_tensor = MArgument_getMTensor(arguments[5]);
 
-    usearch_dense_matrix_view_t queries;
-    int const borrowed = matrix_from_tensor(library_data, MArgument_getMTensor(arguments[2]), &queries);
-    if (borrowed != LIBRARY_NO_ERROR) return borrowed;
+    int const status = search_into_tensors(                                             //
+        library_data,                                                                   //
+        (usearch_executor_t)handle_from_integer(MArgument_getInteger(arguments[0])),    //
+        (usearch_dense_index_t)handle_from_integer(MArgument_getInteger(arguments[1])), //
+        MArgument_getMTensor(arguments[2]), keys_tensor, distances_tensor, counts_tensor);
 
-    mint const requested = MArgument_getInteger(arguments[3]);
-    if (requested <= 0) return reject(library_data, NULL, "a search must want at least one match");
-    size_t const wanted = (size_t)requested;
-    size_t const cells = queries.rows * wanted;
-
-    usearch_key_t* const found = (usearch_key_t*)malloc(sizeof(usearch_key_t) * cells);
-    usearch_distance_t* const scores = (usearch_distance_t*)malloc(sizeof(usearch_distance_t) * cells);
-    size_t* const counts = (size_t*)malloc(sizeof(size_t) * queries.rows);
-    MTensor matches = NULL;
-    mint const extents[3] = {(mint)queries.rows, (mint)wanted, 2};
-    int status = LIBRARY_MEMORY_ERROR;
-    if (!found || !scores || !counts) goto cleanup;
-    if (library_data->MTensor_new(MType_Real, 3, extents, &matches) != LIBRARY_NO_ERROR) goto cleanup;
-
-    usearch_error_t error = {usearch_success_k, NULL};
-    usearch_dense_matches_span_t const span = {found, 0, scores, 0, counts, wanted};
-    usearch_dense_search(index, executor, &queries, &span, NULL, NULL, NULL, NULL, &error);
-    if (error.status != usearch_success_k) {
-        library_data->MTensor_free(matches);
-        matches = NULL;
-        status = reject(library_data, &error, NULL);
-        goto cleanup;
-    }
-
-    // One bulk fill rather than a call per cell, which is what `MTensor_setReal` would cost.
-    double* const cells_data = library_data->MTensor_getRealData(matches);
-    for (size_t query = 0; query != queries.rows; ++query) {
-        size_t const written = counts[query] < wanted ? counts[query] : wanted;
-        for (size_t match = 0; match != wanted; ++match) {
-            double* const pair = cells_data + (query * wanted + match) * 2;
-            pair[0] = match < written ? (double)key_to_integer(found[query * wanted + match]) : 0.0;
-            pair[1] = match < written ? (double)scores[query * wanted + match] : 0.0;
-        }
-    }
-    MArgument_setMTensor(result, matches);
-    status = LIBRARY_NO_ERROR;
-
-cleanup:
-    free(found);
-    free(scores);
-    free(counts);
+    // Shared passing lends the tensor rather than copying it, so a share the library keeps is one
+    // the front end can never reclaim - which is why this runs whether the batch resolved or not.
+    library_data->MTensor_disown(keys_tensor);
+    library_data->MTensor_disown(distances_tensor);
+    library_data->MTensor_disown(counts_tensor);
     return status;
 }
 

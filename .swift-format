@@ -9,5 +9,8 @@
     "lineBreakBeforeControlFlowKeywords": true,
     "lineBreakBeforeEachArgument": true,
     "multiElementCollectionTrailingCommas": true,
-    "spacesAroundRangeFormationOperators": true
+    "spacesAroundRangeFormationOperators": true,
+    "rules": {
+        "DontRepeatTypeInStaticProperties": false
+    }
 }

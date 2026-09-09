@@ -22,17 +22,17 @@ DenseOptions options = DenseOptions.Default with  // Angular metric, BF16 quanti
     ValuesPerKey = 1,                             // Upper bound on entries sharing one key, optional
 };
 
-using Executor pool = new(ResidencyKind.Ram);     // The threads every fanned-out verb runs on
+using Executor pool = Executor.ForRam();          // The threads every fanned-out verb runs on
 using DenseIndex index = new(options);
 index.Reserve(1_000);
 
 float[] vector = [0.2f, 0.6f, 0.4f];
 index.Add(pool, [42UL], Matrix.RowsOf<float>(vector, dimensions: 3));
 
-SearchResults found = SearchResults.Packed(queries: 1, wanted: 10);
+MatchesSpan found = MatchesSpan.Packed(queries: 1, wanted: 10);
 index.Search(pool, Matrix.RowsOf<float>(vector, dimensions: 3), found);
-USearchKey nearest = found.KeysOf(0)[0];          // 00000000-0000-0000-0000-00000000002a
-double distance = found.DistancesOf(0)[0];
+USearchKey nearest = found[0].Keys[0];            // 00000000-0000-0000-0000-00000000002a
+double distance = found[0].Distances[0];
 ```
 
 `DenseOptions` is immutable, so a variant comes from `DenseOptions.Default with { ... }` rather than from mutating a value another handle may already have been built from.
@@ -46,12 +46,22 @@ Parsing reads the dashes as separators rather than positions, so they may sit an
 An executor owns host threads or device streams; an index owns rows.
 Keeping them apart is what lets one pool serve several indexes, and what makes the cost of spawning visible at the line that spawns.
 
-```csharp
-using Executor threads = new(ResidencyKind.Ram, threads: 8);   // Zero derives 7/8 of the cores
-using Executor rings = new(ResidencyKind.Nvme, threads: 4);    // One submission ring apiece
-using Executor streams = new(ResidencyKind.Vram);              // One stream per device, no thread count
+One factory per residency, each taking only what its residency has — `ForVram` has no thread count because a single host thread drives one stream per device.
 
-threads.Drain();                                               // Awaits every deferred call
+```csharp
+using Executor threads = Executor.ForRam(threads: 8);             // Zero derives 7/8 of the cores
+using Executor rings = Executor.ForNvme(threads: 4);              // One submission ring apiece
+using Executor streams = Executor.ForVram();                      // One stream per device
+
+threads.Drain();                                                  // Awaits every deferred call
+```
+
+Each factory also names where its shards go, which is how a dual-socket or multi-GPU box is reached.
+
+```csharp
+using Executor domains = Executor.ForRam([0, 1], threads: 16);    // One shard per NUMA node
+using Executor devices = Executor.ForVram([0, 1]);                // One stream per named device
+using Executor striped = Executor.ForNvme(["/mnt/nvme0", "/mnt/nvme1"]);
 ```
 
 Every fanned-out verb takes the executor it runs on, and there is no overload that leaves it out: the engine reads a missing executor as a residency mismatch, so the absence is a compile-time one instead.
@@ -86,25 +96,25 @@ USearchKey[] keys = [1UL, 2UL, 3UL];
 TraversalStats stats = new();
 index.Add(pool, keys, packed, new DenseInsertionOptions { ExpansionFactor = 128 }, stats);
 
-SearchResults found = SearchResults.Packed(queries: 3, wanted: 4);
+MatchesSpan found = MatchesSpan.Packed(queries: 3, wanted: 4);
 index.Search(pool, packed, found, new DenseSearchOptions { ExpansionFactor = 64 });
 for (int query = 0; query < found.Queries; query++)
 {
-    ReadOnlySpan<USearchKey> matched = found.KeysOf(query);   // Already trimmed to the true count
-    ReadOnlySpan<double> distances = found.DistancesOf(query);
+    ReadOnlySpan<USearchKey> matched = found[query].Keys;       // Already trimmed to the true count
+    ReadOnlySpan<double> distances = found[query].Distances;
 }
 ```
 
 The candidate-pool breadth rides each call rather than the handle, so a recall sweep runs against one immutable index with no mutation between points.
 `TraversalStats` is a pure output, overwritten by every call it is passed to.
 
-A sweep that reuses one set of buffers lends them instead of asking for fresh ones, so nothing is allocated between points:
+A sweep that reuses one set of buffers lends them instead of asking for fresh ones, so nothing is allocated between points, and the `wanted` width follows from the slab lengths rather than being stated a second time:
 
 ```csharp
 USearchKey[] keySlab = new USearchKey[queries * wanted];
 double[] distanceSlab = new double[queries * wanted];
 nuint[] countSlab = new nuint[queries];
-SearchResults lent = SearchResults.Of(keySlab, distanceSlab, countSlab, wanted);
+MatchesSpan lent = MatchesSpan.Of(keySlab, distanceSlab, countSlab);
 
 foreach (int breadth in new[] { 16, 32, 64, 128 })
 {
@@ -126,7 +136,7 @@ Searches may run throughout.
 ## Filtered Search
 
 ```csharp
-SearchResults admitted = SearchResults.Packed(queries: 1, wanted: 10);
+MatchesSpan admitted = MatchesSpan.Packed(queries: 1, wanted: 10);
 index.SearchIf(
     pool, Matrix.RowsOf<float>(vector, dimensions: 3), admitted,
     key => key.TryGetUInt64(out ulong identity) && identity % 2 == 0
@@ -149,7 +159,7 @@ DenseOptions colbert = DenseOptions.Default with
     ValuesPerKey = 32,               // A document is one key holding its token rows
 };
 
-SearchResults scored = SearchResults.Packed(queries: 4, wanted: 10);
+MatchesSpan scored = MatchesSpan.Packed(queries: 4, wanted: 10);
 index.MaxSim(pool, Matrix.RowsOf<float>(queryTokens, dimensions: 128), rowsPerQuery: 32, scored);
 ```
 
@@ -163,7 +173,7 @@ ulong stored = index.Get(key);                         // Probes the count witho
 float[] vectors = new float[stored * index.Dimensions()];
 index.Get(key, Matrix.RowsOf<float>(vectors, dimensions: 3));   // Returns the true count, even when truncated
 
-using USearchCursor cursor = index.Snapshot();         // Consistent snapshot, concurrent inserts hidden
+using USearchCursor cursor = index.Cursor();           // Consistent snapshot, concurrent inserts hidden
 USearchKey[] page = new USearchKey[128];
 for (int written = cursor.Next(page); written != 0; written = cursor.Next(page)) { }
 
@@ -181,7 +191,7 @@ Checkpoints are residency-portable - one file materializes into RAM, uploads to 
 ```csharp
 index.Save(pool, "index.safegraphs");
 
-DenseOptions metadata = DenseIndex.Metadata("index.safegraphs");  // Geometry without loading
+DenseMetadata metadata = DenseIndex.Metadata("index.safegraphs");  // Geometry without loading
 
 DenseOptions deferred = DenseOptions.Default with { Quantization = ScalarKind.F32 };
 using DenseIndex restored = new(deferred);          // Dimensions left zero: the checkpoint freezes them
@@ -192,7 +202,8 @@ index.SaveToBuffer(pool, buffer);
 restored.LoadFromBuffer(pool, buffer);
 ```
 
-A checkpoint records where it was written, never where a reader must keep it, so `Metadata` reports geometry and metric only and the residency stays the caller's to choose.
+`DenseMetadata` carries the four fields a checkpoint froze - dimensions, metric, quantization and connectivity.
+Residency is absent because a checkpoint records where it was written rather than where a reader must keep it, and `ValuesPerKey` is absent because it bounds a live handle's mutable state rather than the serialized form.
 
 ## Residency
 

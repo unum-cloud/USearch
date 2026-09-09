@@ -7,7 +7,7 @@ the day one of them lands.
 Every batch is a matrix. `MatrixView` and `MatrixSpan` carry the base pointer, the row count, the
 column count, the byte stride, and the scalar kind as one value, so a single vector is a one-row
 matrix and a caller never packs a special case. Both structs are laid out exactly as
-`usearch_dense_matrix_view_t` and `usearch_dense_matrix_span_t` declare them, and cross by address
+`usearch_matrix_view_t` and `usearch_matrix_span_t` declare them, and cross by address
 as the verbs take them - transposing two adjacent counts is a compile error rather than a silent
 corruption. `MatchesSpan` is the same idea for the three outputs a ranked run writes.
 
@@ -77,7 +77,7 @@ comptime ScoresOut = Pointer[Distance, MutAnyOrigin]
 """A `usearch_distance_t *` output run."""
 
 comptime MatrixViewIn = Pointer[MatrixView[ImmUntrackedOrigin], MutAnyOrigin]
-"""A `usearch_dense_matrix_view_t const *` run of rows the engine reads.
+"""A `usearch_matrix_view_t const *` run of rows the engine reads.
 
 Every descriptor pointer below carries `MutAnyOrigin` even though C only reads through it: the
 binding fills a stack slot and hands its address over, and a narrower origin lets the compiler
@@ -87,22 +87,28 @@ parametric; what keeps the caller's rows alive is the origin its own descriptor 
 lives for the duration of the binding method that erases it."""
 
 comptime MatrixSpanIn = Pointer[MatrixSpan[MutUntrackedOrigin], MutAnyOrigin]
-"""A `usearch_dense_matrix_span_t const *` run of rows the engine fills."""
+"""A `usearch_matrix_span_t const *` run of rows the engine fills."""
 
-comptime MatchesIn = Pointer[MatchesSpan[MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin], MutAnyOrigin]
-"""A `usearch_dense_matches_span_t const *` triple of ranked outputs the engine fills."""
+comptime MatchesIn = Pointer[
+    MatchesSpan[MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin],
+    MutAnyOrigin,
+]
+"""A `usearch_matches_span_t const *` triple of ranked outputs the engine fills."""
 
 comptime OptionsIn = Pointer[DenseOptions[ImmUntrackedOrigin], MutAnyOrigin]
 """A `usearch_dense_options_t const *` the engine reads."""
 
-comptime OptionsOut = Pointer[DenseOptions[ImmUntrackedOrigin], MutAnyOrigin]
-"""A `usearch_dense_options_t *` a metadata probe fills."""
+comptime MetadataOut = Pointer[DenseMetadata, MutAnyOrigin]
+"""A `usearch_dense_metadata_t *` a metadata probe fills."""
 
-comptime ExpansionIn = Pointer[ExpansionConfig, MutAnyOrigin]
-"""A `usearch_dense_expansion_config_t const *` the engine reads."""
+comptime InsertionIn = Pointer[InsertionOptions, MutAnyOrigin]
+"""A `usearch_dense_insertion_options_t const *` the engine reads."""
 
-comptime AttentionIn = Pointer[AttentionConfig, MutAnyOrigin]
-"""A `usearch_dense_attention_config_t const *` the engine reads."""
+comptime SearchIn = Pointer[SearchOptions, MutAnyOrigin]
+"""A `usearch_dense_search_options_t const *` the engine reads."""
+
+comptime AttentionIn = Pointer[AttentionOptions, MutAnyOrigin]
+"""A `usearch_dense_attention_options_t const *` the engine reads."""
 
 comptime StatsOut = Pointer[TraversalStats, MutAnyOrigin]
 """A `usearch_dense_traversal_stats_t *` the engine overwrites."""
@@ -122,22 +128,48 @@ comptime DenseCapabilities = def(Handle, ErrorReport) thin abi("C") -> Address
 """`usearch_dense_capabilities`: the dispatched codename, as a static C string."""
 
 comptime DenseAdd = def(
-    Handle, Handle, KeysView[ImmUntrackedOrigin], MatrixViewIn, ExpansionIn, Address, Address, StatsOut, ErrorReport
+    Handle,
+    Handle,
+    KeysView[ImmUntrackedOrigin],
+    MatrixViewIn,
+    InsertionIn,
+    Address,
+    Address,
+    StatsOut,
+    ErrorReport,
 ) thin abi("C") -> c_size_t
 """`usearch_dense_add`: the rows and their keys, answering how many were published."""
 
-comptime DenseRefine = def(Handle, Handle, ExpansionIn, Address, Address, StatsOut, ErrorReport) thin abi(
+comptime DenseRefine = def(Handle, Handle, InsertionIn, Address, Address, StatsOut, ErrorReport) thin abi(
     "C"
 ) -> c_size_t
 """`usearch_dense_refine`: re-selects every entry's neighbors, answering how many changed."""
 
 comptime DenseSearch = def(
-    Handle, Handle, MatrixViewIn, MatchesIn, ExpansionIn, Address, Address, StatsOut, ErrorReport
+    Handle,
+    Handle,
+    MatrixViewIn,
+    MatchesIn,
+    SearchIn,
+    Address,
+    Address,
+    StatsOut,
+    ErrorReport,
 ) thin abi("C") -> None
 """`usearch_dense_search`: k-approximate nearest neighbors for a batch of queries."""
 
 comptime DenseSearchIf = def(
-    Handle, Handle, MatrixViewIn, MatchesIn, ExpansionIn, Address, Address, Address, Address, StatsOut, ErrorReport
+    Handle,
+    Handle,
+    MatrixViewIn,
+    MatchesIn,
+    SearchIn,
+    Address,
+    Address,
+    Address,
+    Address,
+    StatsOut,
+    ErrorReport,
 ) thin abi("C") -> None
 """`usearch_dense_search_if`: the same walk, admitting only what the predicate approves."""
 
@@ -171,7 +203,7 @@ comptime DenseLoad = def(Handle, Handle, BytesView[ImmUntrackedOrigin], Address,
     "C"
 ) -> None
 """`usearch_dense_load`: reads a checkpoint into an initialized handle, shard by shard."""
-comptime DenseMetadata = def(BytesView[ImmUntrackedOrigin], OptionsOut, ErrorReport) thin abi("C") -> None
+comptime DenseReadMetadata = def(BytesView[ImmUntrackedOrigin], MetadataOut, ErrorReport) thin abi("C") -> None
 """`usearch_dense_metadata`: reads a checkpoint's geometry without loading it."""
 comptime DenseSaveBuffer = def(Handle, Handle, BytesSpan[MutUntrackedOrigin], Address, Address, ErrorReport) thin abi(
     "C"
@@ -181,11 +213,19 @@ comptime DenseLoadBuffer = def(Handle, Handle, BytesView[ImmUntrackedOrigin], Ad
     "C"
 ) -> None
 """`usearch_dense_load_buffer`: reads one monolith out of a caller-owned buffer."""
-comptime DenseMetadataBuffer = def(BytesView[ImmUntrackedOrigin], OptionsOut, ErrorReport) thin abi("C") -> None
+comptime DenseReadMetadataBuffer = def(BytesView[ImmUntrackedOrigin], MetadataOut, ErrorReport) thin abi("C") -> None
 """`usearch_dense_metadata_buffer`: reads a monolith buffer's geometry without loading it."""
 
 comptime DenseMultiply = def(
-    Handle, Handle, MatrixViewIn, MatchesIn, ExpansionIn, Address, Address, StatsOut, ErrorReport
+    Handle,
+    Handle,
+    MatrixViewIn,
+    MatchesIn,
+    SearchIn,
+    Address,
+    Address,
+    StatsOut,
+    ErrorReport,
 ) thin abi("C") -> None
 """`usearch_dense_multiply`: every pair the walk scored, not only the nearest."""
 
@@ -205,7 +245,16 @@ comptime DenseAttend = def(
 """`usearch_dense_attend`: softmax-weighted attention folded into the walk, in one pass."""
 
 comptime DenseMaxsim = def(
-    Handle, Handle, MatrixViewIn, c_size_t, MatchesIn, ExpansionIn, Address, Address, StatsOut, ErrorReport
+    Handle,
+    Handle,
+    MatrixViewIn,
+    c_size_t,
+    MatchesIn,
+    SearchIn,
+    Address,
+    Address,
+    StatsOut,
+    ErrorReport,
 ) thin abi("C") -> None
 """`usearch_dense_maxsim`: late-interaction scoring, every query row taking its best match per key."""
 
@@ -216,7 +265,7 @@ comptime DenseMaxsim = def(
 
 @fieldwise_init
 struct MatrixView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, TrivialRegisterPassable):
-    """A borrowed strided matrix - `usearch_dense_matrix_view_t`, the batch currency every verb reads.
+    """A borrowed strided matrix - `usearch_matrix_view_t`, the batch currency every verb reads.
 
     One vector is a one-row matrix. The row and column counts are scalars; `stride_bytes` alone is
     a byte count, which is why it says so in its name, and zero means rows sit contiguously at
@@ -240,7 +289,11 @@ struct MatrixView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Tr
     @staticmethod
     def of[
         dtype: DType, rows_origin: ImmOrigin, //
-    ](rows: Span[Scalar[dtype], rows_origin], columns: Int, scalar_kind: ScalarKind) raises Error -> MatrixView[
+    ](
+        rows: Span[Scalar[dtype], rows_origin],
+        columns: Int,
+        scalar_kind: ScalarKind,
+    ) raises Error -> MatrixView[
         rows_origin
     ]:
         """Reads a flat run of scalars as a contiguous matrix of the given width.
@@ -283,12 +336,18 @@ struct MatrixView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Tr
         Returns:
             A view of the same rows, whose type no longer keeps their storage alive.
         """
-        return MatrixView[ImmUntrackedOrigin](self.data, self.rows, self.columns, self.stride_bytes, self.scalar_kind)
+        return MatrixView[ImmUntrackedOrigin](
+            self.data,
+            self.rows,
+            self.columns,
+            self.stride_bytes,
+            self.scalar_kind,
+        )
 
 
 @fieldwise_init
 struct MatrixSpan[origin: MutOrigin = MutUntrackedOrigin](ImplicitlyCopyable, TrivialRegisterPassable):
-    """The writable twin - `usearch_dense_matrix_span_t`, carried by every verb that lands rows.
+    """The writable twin - `usearch_matrix_span_t`, carried by every verb that lands rows.
 
     The row count is the capacity the engine may fill rather than a promise about what it will.
 
@@ -310,7 +369,11 @@ struct MatrixSpan[origin: MutOrigin = MutUntrackedOrigin](ImplicitlyCopyable, Tr
     @staticmethod
     def of[
         dtype: DType, rows_origin: MutOrigin, //
-    ](rows: Span[Scalar[dtype], rows_origin], columns: Int, scalar_kind: ScalarKind) raises Error -> MatrixSpan[
+    ](
+        rows: Span[Scalar[dtype], rows_origin],
+        columns: Int,
+        scalar_kind: ScalarKind,
+    ) raises Error -> MatrixSpan[
         rows_origin
     ]:
         """Writes into a flat run of scalars as a contiguous matrix of the given width.
@@ -353,7 +416,11 @@ struct MatrixSpan[origin: MutOrigin = MutUntrackedOrigin](ImplicitlyCopyable, Tr
             A span over the same storage, whose type no longer keeps it alive.
         """
         return MatrixSpan[MutUntrackedOrigin](
-            self.data, self.capacity, self.columns, self.stride_bytes, self.scalar_kind
+            self.data,
+            self.capacity,
+            self.columns,
+            self.stride_bytes,
+            self.scalar_kind,
         )
 
 
@@ -391,7 +458,10 @@ struct MatchesSpan[
 
     @staticmethod
     def of[
-        found_keys_origin: MutOrigin, found_scores_origin: MutOrigin, found_counts_origin: MutOrigin, //
+        found_keys_origin: MutOrigin,
+        found_scores_origin: MutOrigin,
+        found_counts_origin: MutOrigin,
+        //,
     ](
         keys: Span[Key, found_keys_origin],
         scores: Span[Distance, found_scores_origin],
@@ -429,7 +499,9 @@ struct MatchesSpan[
             c_size_t(len(keys) // len(counts)),
         )
 
-    def untracked(self) -> MatchesSpan[MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]:
+    def untracked(
+        self,
+    ) -> MatchesSpan[MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]:
         """The same triple with its borrows erased - the one instantiation the ABI signatures name.
 
         Returns:
@@ -507,15 +579,15 @@ struct Admission(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 
 
 @fieldwise_init
-struct ExpansionConfig(ImplicitlyCopyable, TrivialRegisterPassable):
-    """Per-call breadth, shared by insertion and both searches - `usearch_dense_expansion_config_t`.
+struct InsertionOptions(ImplicitlyCopyable, TrivialRegisterPassable):
+    """Per-call settings of insertion and refinement - `usearch_dense_insertion_options_t`.
 
     A pure input, never written. Every field zeroed derives every setting, which is what the
     default constructor leaves behind.
     """
 
     var expansion_factor: c_size_t
-    """The candidate-pool breadth; zero derives."""
+    """The candidate-pool breadth the build walk explores; zero derives."""
 
     def __init__(out self):
         """Derives every setting."""
@@ -531,8 +603,32 @@ struct ExpansionConfig(ImplicitlyCopyable, TrivialRegisterPassable):
 
 
 @fieldwise_init
-struct AttentionConfig(ImplicitlyCopyable, TrivialRegisterPassable):
-    """Per-call settings of the attention verb - `usearch_dense_attention_config_t`.
+struct SearchOptions(ImplicitlyCopyable, TrivialRegisterPassable):
+    """Per-call settings of the read-only walks - `usearch_dense_search_options_t`.
+
+    A pure input, never written, taken by both searches as well as the sparse product and late
+    interaction, where the same breadth reads as emitted-pair density rather than as recall.
+    """
+
+    var expansion_factor: c_size_t
+    """The candidate-pool breadth the walk explores; zero derives."""
+
+    def __init__(out self):
+        """Derives every setting."""
+        self.expansion_factor = c_size_t(0)
+
+    def __init__(out self, *, expansion_factor: Int):
+        """Pins the candidate-pool breadth for this call.
+
+        Args:
+            expansion_factor: How wide the pool is kept; zero derives.
+        """
+        self.expansion_factor = c_size_t(expansion_factor)
+
+
+@fieldwise_init
+struct AttentionOptions(ImplicitlyCopyable, TrivialRegisterPassable):
+    """Per-call settings of the attention verb - `usearch_dense_attention_options_t`.
 
     A pure input, never written, and every field zeroed derives every setting.
     """
@@ -603,7 +699,7 @@ struct DenseOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     below name which. Zeroed optional fields derive from the geometry.
 
     Never marked register-passable: its address crosses to C, and Mojo 1.0 mislays a struct this
-    wide once it is, so the metadata probes would read back nothing.
+    wide once it is, so the handle would be built from nothing.
 
     Parameters:
         origin: The borrowed placement array, named so it outlives the call that reads it.
@@ -770,6 +866,37 @@ struct DenseOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         )
 
 
+@fieldwise_init
+struct DenseMetadata(ImplicitlyCopyable):
+    """The geometry and metric a checkpoint froze - `usearch_dense_metadata_t`, a pure output.
+
+    Everything a reader learns without opening the checkpoint, and nothing a reader must choose for
+    itself. Placement is absent because a checkpoint records where it was written rather than where
+    a reader must keep it, and `values_per_key` is absent because it bounds a live handle's mutable
+    state rather than anything the serialized form carries; both stay the caller's to name in the
+    `DenseOptions` a handle is built from.
+
+    Never marked register-passable: its address crosses to C, and Mojo 1.0 mislays a struct once it
+    is, so the probes would read back nothing.
+    """
+
+    var metric: Metric
+    """The metric kind the checkpoint scores with."""
+    var quantization: ScalarKind
+    """The scalar type its rows are stored and quantized into."""
+    var dimensions: c_size_t
+    """Scalars per stored vector."""
+    var connectivity: c_size_t
+    """Connections per node the graph was built with."""
+
+    def __init__(out self):
+        """Names no kind and no geometry, so an unwritten slot reads as an unanswered probe."""
+        self.metric = Metric.UNKNOWN
+        self.quantization = ScalarKind.UNKNOWN
+        self.dimensions = c_size_t(0)
+        self.connectivity = c_size_t(0)
+
+
 # endregion Configuration
 
 # region Index
@@ -840,7 +967,11 @@ struct DenseIndex:
             `Error` if this handle was donated to a merge, which the engine has since freed.
         """
         if self.address == 0:
-            raise Error(Status.UNINITIALIZED, "the index handle was consumed by a merge", 0)
+            raise Error(
+                Status.UNINITIALIZED,
+                "the index handle was consumed by a merge",
+                0,
+            )
         return Handle(unsafe_from_address=self.address)
 
     def reserve(self, capacity: Int) raises Error:
@@ -940,7 +1071,10 @@ struct DenseIndex:
         Raises:
             `Error` if the engine refuses the query.
         """
-        return self._read_integer_property(self.library.symbols().dense_connectivity, "usearch_dense_connectivity")
+        return self._read_integer_property(
+            self.library.symbols().dense_connectivity,
+            "usearch_dense_connectivity",
+        )
 
     def memory_usage(self) raises Error -> Int:
         """How many bytes the index occupies.
@@ -951,7 +1085,10 @@ struct DenseIndex:
         Raises:
             `Error` if the engine refuses the query.
         """
-        return self._read_integer_property(self.library.symbols().dense_memory_usage, "usearch_dense_memory_usage")
+        return self._read_integer_property(
+            self.library.symbols().dense_memory_usage,
+            "usearch_dense_memory_usage",
+        )
 
     def capabilities(self) raises Error -> String:
         """The capability codename the index dispatched to on this machine.
@@ -978,7 +1115,10 @@ struct DenseIndex:
         Raises:
             `Error` if the engine refuses the query.
         """
-        return self._read_integer_property(self.library.symbols().dense_storage_requirements, "usearch_dense_storage_requirements")
+        return self._read_integer_property(
+            self.library.symbols().dense_storage_requirements,
+            "usearch_dense_storage_requirements",
+        )
 
     # endregion Introspection
 
@@ -992,7 +1132,7 @@ struct DenseIndex:
         keys: Span[Key, keys_origin],
         vectors: MatrixView[vectors_origin],
         mut stats: TraversalStats,
-        config: ExpansionConfig = ExpansionConfig(),
+        options: InsertionOptions = InsertionOptions(),
     ) raises Error -> Int:
         """Adds a strided matrix of vectors under their keys - the native batch operation.
 
@@ -1009,7 +1149,7 @@ struct DenseIndex:
             keys: One key per row of `vectors`; keys need not be unique.
             vectors: The rows to insert, converted on ingest to the stored type.
             stats: Receives this call's traversal telemetry, fully overwritten.
-            config: Per-call breadth; the default derives every setting.
+            options: Per-call breadth; the default derives every setting.
 
         Returns:
             How many rows were published, which is every row unless the call failed.
@@ -1021,8 +1161,8 @@ struct DenseIndex:
         var report = stack_allocation[1, ErrorSlot]()
         report[unsafe_offset=0] = ErrorSlot()
         var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var settings = stack_allocation[1, ExpansionConfig]()
-        settings[unsafe_offset=0] = config
+        var settings = stack_allocation[1, InsertionOptions]()
+        settings[unsafe_offset=0] = options
         var view = stack_allocation[1, MatrixView[ImmUntrackedOrigin]]()
         view[unsafe_offset=0] = vectors.untracked()
         var published = self.library.symbols().dense_add(
@@ -1043,7 +1183,7 @@ struct DenseIndex:
         self,
         executor: Executor,
         mut stats: TraversalStats,
-        config: ExpansionConfig = ExpansionConfig(),
+        options: InsertionOptions = InsertionOptions(),
     ) raises Error -> Int:
         """Re-selects every entry's neighbors against the finished graph.
 
@@ -1055,7 +1195,7 @@ struct DenseIndex:
         Args:
             executor: The executor to fan out over; its kind must match the residency.
             stats: Receives this call's traversal telemetry, fully overwritten.
-            config: Per-call breadth; the default derives every setting.
+            options: Per-call breadth; the default derives every setting.
 
         Returns:
             How many nodes' edges changed; zero means the graph has settled.
@@ -1066,8 +1206,8 @@ struct DenseIndex:
         var report = stack_allocation[1, ErrorSlot]()
         report[unsafe_offset=0] = ErrorSlot()
         var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var settings = stack_allocation[1, ExpansionConfig]()
-        settings[unsafe_offset=0] = config
+        var settings = stack_allocation[1, InsertionOptions]()
+        settings[unsafe_offset=0] = options
         var changed = self.library.symbols().dense_refine(
             self.live(),
             executor.handle,
@@ -1096,7 +1236,7 @@ struct DenseIndex:
         queries: MatrixView[queries_origin],
         matches: MatchesSpan[found_keys_origin, found_scores_origin, found_counts_origin],
         mut stats: TraversalStats,
-        config: ExpansionConfig = ExpansionConfig(),
+        options: SearchOptions = SearchOptions(),
     ) raises Error:
         """Performs k-approximate nearest-neighbor search for a batch of queries.
 
@@ -1115,7 +1255,7 @@ struct DenseIndex:
             queries: The query rows, one per search.
             matches: Where the keys, distances, and per-query counts land.
             stats: Receives this call's traversal telemetry, fully overwritten.
-            config: Per-call breadth; the default derives every setting.
+            options: Per-call breadth; the default derives every setting.
 
         Raises:
             `Error` if the shapes disagree, or a second thread is already driving `executor`.
@@ -1123,11 +1263,14 @@ struct DenseIndex:
         var report = stack_allocation[1, ErrorSlot]()
         report[unsafe_offset=0] = ErrorSlot()
         var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var settings = stack_allocation[1, ExpansionConfig]()
-        settings[unsafe_offset=0] = config
+        var settings = stack_allocation[1, SearchOptions]()
+        settings[unsafe_offset=0] = options
         var view = stack_allocation[1, MatrixView[ImmUntrackedOrigin]]()
         view[unsafe_offset=0] = queries.untracked()
-        var landing = stack_allocation[1, MatchesSpan[MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
+        var landing = stack_allocation[
+            1,
+            MatchesSpan[MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin],
+        ]()
         landing[unsafe_offset=0] = matches.untracked()
         self.library.symbols().dense_search(
             self.live(),
@@ -1156,7 +1299,7 @@ struct DenseIndex:
         mut stats: TraversalStats,
         predicate: Address,
         predicate_state: Address = NULL_ADDRESS,
-        config: ExpansionConfig = ExpansionConfig(),
+        options: SearchOptions = SearchOptions(),
     ) raises Error:
         """The filtered sibling of `search`, admitting only entries the predicate approves.
 
@@ -1184,7 +1327,7 @@ struct DenseIndex:
             stats: Receives this call's traversal telemetry, fully overwritten.
             predicate: A `usearch_predicate_t`, which must outlive the call.
             predicate_state: The opaque state forwarded into every predicate call.
-            config: Per-call breadth; the default derives every setting.
+            options: Per-call breadth; the default derives every setting.
 
         Raises:
             `Error` if the shapes disagree, or a second thread is already driving `executor`.
@@ -1192,11 +1335,14 @@ struct DenseIndex:
         var report = stack_allocation[1, ErrorSlot]()
         report[unsafe_offset=0] = ErrorSlot()
         var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var settings = stack_allocation[1, ExpansionConfig]()
-        settings[unsafe_offset=0] = config
+        var settings = stack_allocation[1, SearchOptions]()
+        settings[unsafe_offset=0] = options
         var view = stack_allocation[1, MatrixView[ImmUntrackedOrigin]]()
         view[unsafe_offset=0] = queries.untracked()
-        var landing = stack_allocation[1, MatchesSpan[MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
+        var landing = stack_allocation[
+            1,
+            MatchesSpan[MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin],
+        ]()
         landing[unsafe_offset=0] = matches.untracked()
         self.library.symbols().dense_search_if(
             self.live(),
@@ -1292,7 +1438,12 @@ struct DenseIndex:
         report[unsafe_offset=0] = ErrorSlot()
         var slot = report.unsafe_origin_cast[MutAnyOrigin]()
         self.library.symbols().dense_save(
-            self.live(), executor.handle, path.untracked(), NULL_ADDRESS, NULL_ADDRESS, slot
+            self.live(),
+            executor.handle,
+            path.untracked(),
+            NULL_ADDRESS,
+            NULL_ADDRESS,
+            slot,
         )
         Error.raise_if_failed(slot, "usearch_dense_save")
 
@@ -1319,7 +1470,12 @@ struct DenseIndex:
         report[unsafe_offset=0] = ErrorSlot()
         var slot = report.unsafe_origin_cast[MutAnyOrigin]()
         self.library.symbols().dense_load(
-            self.live(), executor.handle, path.untracked(), NULL_ADDRESS, NULL_ADDRESS, slot
+            self.live(),
+            executor.handle,
+            path.untracked(),
+            NULL_ADDRESS,
+            NULL_ADDRESS,
+            slot,
         )
         Error.raise_if_failed(slot, "usearch_dense_load")
 
@@ -1344,7 +1500,12 @@ struct DenseIndex:
         report[unsafe_offset=0] = ErrorSlot()
         var slot = report.unsafe_origin_cast[MutAnyOrigin]()
         self.library.symbols().dense_save_buffer(
-            self.live(), executor.handle, buffer.untracked(), NULL_ADDRESS, NULL_ADDRESS, slot
+            self.live(),
+            executor.handle,
+            buffer.untracked(),
+            NULL_ADDRESS,
+            NULL_ADDRESS,
+            slot,
         )
         Error.raise_if_failed(slot, "usearch_dense_save_buffer")
 
@@ -1371,7 +1532,12 @@ struct DenseIndex:
         report[unsafe_offset=0] = ErrorSlot()
         var slot = report.unsafe_origin_cast[MutAnyOrigin]()
         self.library.symbols().dense_load_buffer(
-            self.live(), executor.handle, buffer.untracked(), NULL_ADDRESS, NULL_ADDRESS, slot
+            self.live(),
+            executor.handle,
+            buffer.untracked(),
+            NULL_ADDRESS,
+            NULL_ADDRESS,
+            slot,
         )
         Error.raise_if_failed(slot, "usearch_dense_load_buffer")
 
@@ -1391,7 +1557,7 @@ struct DenseIndex:
         rows: MatrixView[rows_origin],
         pairs: MatchesSpan[pair_keys_origin, pair_scores_origin, pair_counts_origin],
         mut stats: TraversalStats,
-        config: ExpansionConfig = ExpansionConfig(),
+        options: SearchOptions = SearchOptions(),
     ) raises Error:
         """Approximate sparse product of a matrix against the indexed rows.
 
@@ -1413,7 +1579,7 @@ struct DenseIndex:
             rows: The left-hand rows.
             pairs: Where the column keys, products, and per-row pair counts land.
             stats: Receives this call's traversal telemetry, fully overwritten.
-            config: Per-call breadth, which is what widens the emitted pattern.
+            options: Per-call breadth, which is what widens the emitted pattern.
 
         Raises:
             `Error` with `CONFIG_MISMATCH` if the graph was frozen under a distance kind.
@@ -1421,11 +1587,14 @@ struct DenseIndex:
         var report = stack_allocation[1, ErrorSlot]()
         report[unsafe_offset=0] = ErrorSlot()
         var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var settings = stack_allocation[1, ExpansionConfig]()
-        settings[unsafe_offset=0] = config
+        var settings = stack_allocation[1, SearchOptions]()
+        settings[unsafe_offset=0] = options
         var view = stack_allocation[1, MatrixView[ImmUntrackedOrigin]]()
         view[unsafe_offset=0] = rows.untracked()
-        var landing = stack_allocation[1, MatchesSpan[MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
+        var landing = stack_allocation[
+            1,
+            MatchesSpan[MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin],
+        ]()
         landing[unsafe_offset=0] = pairs.untracked()
         self.library.symbols().dense_multiply(
             self.live(),
@@ -1454,7 +1623,7 @@ struct DenseIndex:
         outputs: MatrixSpan[outputs_origin],
         mut stats: TraversalStats,
         carry: Optional[Pointer[SoftmaxState, carry_origin]] = None,
-        config: AttentionConfig = AttentionConfig(),
+        options: AttentionOptions = AttentionOptions(),
     ) raises Error:
         """Softmax-weighted attention over the indexed keys, folded into the walk in one pass.
 
@@ -1485,7 +1654,7 @@ struct DenseIndex:
             outputs: Where the attended rows land, one per query.
             stats: Receives this call's traversal telemetry, fully overwritten.
             carry: The online-softmax states, one per query row; omitted skips them.
-            config: Per-call breadth, logit scale, and stopping mass; the default derives all three.
+            options: Per-call breadth, logit scale, and stopping mass; the default derives all three.
 
         Raises:
             `Error` if the outputs cannot hold one row per query or are not as wide as the value
@@ -1496,8 +1665,8 @@ struct DenseIndex:
         var report = stack_allocation[1, ErrorSlot]()
         report[unsafe_offset=0] = ErrorSlot()
         var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var settings = stack_allocation[1, AttentionConfig]()
-        settings[unsafe_offset=0] = config
+        var settings = stack_allocation[1, AttentionOptions]()
+        settings[unsafe_offset=0] = options
         var queries_view = stack_allocation[1, MatrixView[ImmUntrackedOrigin]]()
         queries_view[unsafe_offset=0] = queries.untracked()
         var values_view = stack_allocation[1, MatrixView[ImmUntrackedOrigin]]()
@@ -1533,7 +1702,7 @@ struct DenseIndex:
         rows_per_query: Int,
         matches: MatchesSpan[found_keys_origin, found_scores_origin, found_counts_origin],
         mut stats: TraversalStats,
-        config: ExpansionConfig = ExpansionConfig(),
+        options: SearchOptions = SearchOptions(),
     ) raises Error:
         """Late-interaction scoring: every query row takes its best match within a key, and those
         maxima sum to that key's score.
@@ -1559,7 +1728,7 @@ struct DenseIndex:
             rows_per_query: Rows in every query; uniform, so ColBERT's padding applies as is.
             matches: Where the keys, summed maxima, and per-query key counts land.
             stats: Receives this call's traversal telemetry, fully overwritten.
-            config: Per-call breadth; the default derives every setting.
+            options: Per-call breadth; the default derives every setting.
 
         Raises:
             `Error` with `CONFIG_MISMATCH` if the graph was frozen under a distance kind.
@@ -1569,11 +1738,14 @@ struct DenseIndex:
         var slot = report.unsafe_origin_cast[MutAnyOrigin]()
         if rows_per_query <= 0 or Int(queries.rows) % rows_per_query != 0:
             raise Error(Status.SHAPE_MISMATCH, "usearch_dense_maxsim", NULL_ADDRESS)
-        var settings = stack_allocation[1, ExpansionConfig]()
-        settings[unsafe_offset=0] = config
+        var settings = stack_allocation[1, SearchOptions]()
+        settings[unsafe_offset=0] = options
         var view = stack_allocation[1, MatrixView[ImmUntrackedOrigin]]()
         view[unsafe_offset=0] = queries.untracked()
-        var landing = stack_allocation[1, MatchesSpan[MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
+        var landing = stack_allocation[
+            1,
+            MatchesSpan[MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin],
+        ]()
         landing[unsafe_offset=0] = matches.untracked()
         self.library.symbols().dense_maxsim(
             self.live(),
@@ -1640,7 +1812,10 @@ struct DenseIndex:
         var view = stack_allocation[1, MatrixView[ImmUntrackedOrigin]]()
         view[unsafe_offset=0] = query.untracked()
         var address = self.library.symbols().dense_find(
-            self.live(), executor.handle, view.unsafe_origin_cast[MutAnyOrigin](), slot
+            self.live(),
+            executor.handle,
+            view.unsafe_origin_cast[MutAnyOrigin](),
+            slot,
         )
         Error.raise_if_failed(slot, "usearch_dense_find")
         if address == 0:
@@ -1739,7 +1914,7 @@ struct DenseFinder:
 
     def next[
         keys_origin: MutOrigin, distances_origin: MutOrigin, //
-    ](self, keys: Span[Key, keys_origin], distances: Span[Distance, distances_origin]) raises Error -> Int:
+    ](self, keys: Span[Key, keys_origin], distances: Span[Distance, distances_origin],) raises Error -> Int:
         """Pulls the next matches off the live frontier.
 
         Parameters:
@@ -1776,14 +1951,11 @@ struct DenseFinder:
 # region Metadata
 
 
-def metadata[
-    path_origin: ImmOrigin, //
-](library: Library, path: BytesView[path_origin]) raises Error -> DenseOptions[ImmUntrackedOrigin]:
+def metadata[path_origin: ImmOrigin, //](library: Library, path: BytesView[path_origin]) raises Error -> DenseMetadata:
     """Reads a checkpoint's geometry and metric without loading it.
 
     A manifest answers from its summary and its first part's header, so the cost does not grow with
-    the index. The placement fields come back untouched, because a checkpoint records where it was
-    written and never where a reader must keep it.
+    the index.
 
     Parameters:
         path_origin: The path bytes' origin, inferred from the argument.
@@ -1793,7 +1965,7 @@ def metadata[
         path: The manifest of a sharded checkpoint, or a single monolith.
 
     Returns:
-        The geometry and metric the checkpoint froze, with placement left to the caller.
+        The geometry and metric the checkpoint froze.
 
     Raises:
         `Error` if the checkpoint cannot be opened or its header cannot be decoded.
@@ -1801,16 +1973,16 @@ def metadata[
     var report = stack_allocation[1, ErrorSlot]()
     report[unsafe_offset=0] = ErrorSlot()
     var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-    var options = stack_allocation[1, DenseOptions[ImmUntrackedOrigin]]()
-    options[unsafe_offset=0] = DenseOptions(Metric.UNKNOWN, ScalarKind.UNKNOWN, 0)
-    library.symbols().dense_metadata(path.untracked(), options.unsafe_origin_cast[MutAnyOrigin](), slot)
+    var described = stack_allocation[1, DenseMetadata]()
+    described[unsafe_offset=0] = DenseMetadata()
+    library.symbols().dense_metadata(path.untracked(), described.unsafe_origin_cast[MutAnyOrigin](), slot)
     Error.raise_if_failed(slot, "usearch_dense_metadata")
-    return options[unsafe_offset=0]
+    return described[unsafe_offset=0]
 
 
 def metadata_buffer[
     buffer_origin: ImmOrigin, //
-](library: Library, buffer: BytesView[buffer_origin]) raises Error -> DenseOptions[ImmUntrackedOrigin]:
+](library: Library, buffer: BytesView[buffer_origin]) raises Error -> DenseMetadata:
     """Reads a serialized monolith's geometry and metric without loading it.
 
     Parameters:
@@ -1821,7 +1993,7 @@ def metadata_buffer[
         buffer: Source holding one serialized monolith.
 
     Returns:
-        The geometry and metric the monolith froze, with placement left to the caller.
+        The geometry and metric the monolith froze.
 
     Raises:
         `Error` if the bytes cannot be decoded.
@@ -1829,11 +2001,11 @@ def metadata_buffer[
     var report = stack_allocation[1, ErrorSlot]()
     report[unsafe_offset=0] = ErrorSlot()
     var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-    var options = stack_allocation[1, DenseOptions[ImmUntrackedOrigin]]()
-    options[unsafe_offset=0] = DenseOptions(Metric.UNKNOWN, ScalarKind.UNKNOWN, 0)
-    library.symbols().dense_metadata_buffer(buffer.untracked(), options.unsafe_origin_cast[MutAnyOrigin](), slot)
+    var described = stack_allocation[1, DenseMetadata]()
+    described[unsafe_offset=0] = DenseMetadata()
+    library.symbols().dense_metadata_buffer(buffer.untracked(), described.unsafe_origin_cast[MutAnyOrigin](), slot)
     Error.raise_if_failed(slot, "usearch_dense_metadata_buffer")
-    return options[unsafe_offset=0]
+    return described[unsafe_offset=0]
 
 
 # endregion Metadata

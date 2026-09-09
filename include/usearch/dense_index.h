@@ -272,8 +272,8 @@ USEARCH_EXPORT typedef struct usearch_dense_search_options_t {
 } usearch_dense_search_options_t;
 
 /**
- *  @brief Traversal telemetry, shared by insertion and both search forms - a pure output,
- *      fully overwritten by the call it is passed to. Passing @c NULL skips reporting.
+ *  @brief Traversal telemetry, shared by every verb that walks the graph - a pure output, fully
+ *      overwritten by the call it is passed to. Passing @c NULL skips reporting.
  */
 USEARCH_EXPORT typedef struct usearch_dense_traversal_stats_t {
     /** @brief Graph members visited while resolving the batch. */
@@ -487,8 +487,8 @@ USEARCH_EXPORT size_t usearch_dense_get(            //
  *
  *  Cancellation stops @b between donors, which makes this the one verb where it is not
  *  all-or-nothing: donors already absorbed stay absorbed, and the rest stay live handles the
- *  caller still owns and must free. Read the count the handler last saw to know where the
- *  boundary fell.
+ *  caller still owns and must free. Every consumed slot is nulled as it goes, so the array itself
+ *  says which handles survived, and the count the handler last saw says how many did.
  *
  *  @code{.c}
  *  usearch_dense_index_t shards[4] = {built_on_socket_0, built_on_socket_1, built_on_socket_2, built_on_socket_3};
@@ -634,19 +634,37 @@ USEARCH_EXPORT void usearch_dense_load(                         //
     usearch_error_t* error);
 
 /**
- *  @brief Reads a checkpoint's geometry & metric metadata into @p options without loading it.
+ *  @brief The geometry and metric a checkpoint froze - everything a reader learns without opening
+ *      it, and nothing a reader must choose for itself.
+ *
+ *  Placement is absent because a checkpoint records where it was written, never where a reader
+ *  must keep it. So is @c values_per_key, which bounds a live handle's mutable state rather than
+ *  anything the serialized form carries. Both remain the caller's to choose before
+ *  @c usearch_dense_init, and no caller has to know which fields this call filled.
+ */
+USEARCH_EXPORT typedef struct usearch_dense_metadata_t {
+    /** @brief The metric kind the checkpoint scores with. */
+    usearch_dense_metric_t metric;
+    /** @brief The scalar type its rows are stored & quantized into. */
+    usearch_scalar_t quantization;
+    /** @brief Scalars per stored vector. */
+    size_t dimensions;
+    /** @brief Connections per node the graph was built with. */
+    size_t connectivity;
+} usearch_dense_metadata_t;
+
+/**
+ *  @brief Reads a checkpoint's geometry & metric into @p metadata without loading it.
  *
  *  @param[in] path The manifest of a sharded checkpoint, or a single @c .safegraphs monolith.
- *  @param[out] options Receives the geometry and metric the checkpoint froze; placement untouched.
+ *  @param[out] metadata Receives every field the checkpoint froze.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *
  *  A manifest answers from its summary and its first part's header, so the cost does not grow with
- *  the index. The placement fields stay untouched because a checkpoint records where it was
- *  written, never where a reader must keep it - those remain the caller's to fill before
- *  @c usearch_dense_init.
+ *  the index.
  */
 USEARCH_EXPORT void usearch_dense_metadata( //
-    usearch_bytes_view_t path, usearch_dense_options_t* options, usearch_error_t* error);
+    usearch_bytes_view_t path, usearch_dense_metadata_t* metadata, usearch_error_t* error);
 
 /**
  *  @brief Saves the index into a caller-owned memory buffer as one monolith.
@@ -696,14 +714,14 @@ USEARCH_EXPORT void usearch_dense_load_buffer(                  //
     usearch_error_t* error);
 
 /**
- *  @brief Reads geometry & metric metadata from a serialized monolith buffer into @p options.
+ *  @brief Reads geometry & metric from a serialized monolith buffer into @p metadata.
  *
  *  @param[in] buffer Source holding one serialized monolith.
- *  @param[out] options Receives the geometry and metric the monolith froze; placement untouched.
+ *  @param[out] metadata Receives every field the monolith froze.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  */
 USEARCH_EXPORT void usearch_dense_metadata_buffer( //
-    usearch_bytes_view_t buffer, usearch_dense_options_t* options, usearch_error_t* error);
+    usearch_bytes_view_t buffer, usearch_dense_metadata_t* metadata, usearch_error_t* error);
 
 /**
  *  @brief Approximate sparse product of a strided matrix against the indexed rows - the linear

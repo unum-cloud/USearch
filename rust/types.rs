@@ -3,7 +3,7 @@
 //! Scalar types, matrices, and their traits come from NumKong, so a caller already holding a
 //! `MatrixView` hands it straight to an index without a reshape or a copy.
 
-use core::ffi::{c_char, CStr};
+use core::ffi::{c_char, c_int, c_void, CStr};
 use core::fmt;
 
 use numkong::{bf16, e2m3, e3m2, e4m3, e5m2, f16, i4x2, u1x8, u4x2};
@@ -72,6 +72,79 @@ pub(crate) mod ffi {
         pub length: usize,
     }
 
+    /// A borrowed run of keys - how a batch names the identities it carries.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct usearch_keys_view_t {
+        pub data: *const usearch_key_t,
+        pub count: usize,
+    }
+
+    impl usearch_keys_view_t {
+        /// Borrows a slice as the view the C interface accepts, checked against the row count of
+        /// the matrix it accompanies.
+        pub fn of(keys: &[super::Key]) -> Self {
+            usearch_keys_view_t {
+                data: keys.as_ptr().cast(),
+                count: keys.len(),
+            }
+        }
+    }
+
+    /// A caller-owned, writable run of keys - the mutable twin of `usearch_keys_view_t`, and the
+    /// only bound a streaming verb has on how much it may write.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct usearch_keys_span_t {
+        pub data: *mut usearch_key_t,
+        pub capacity: usize,
+    }
+
+    impl usearch_keys_span_t {
+        /// Lends a mutable slice as the span the C interface accepts.
+        pub fn of(keys: &mut [super::Key]) -> Self {
+            usearch_keys_span_t {
+                data: keys.as_mut_ptr().cast(),
+                capacity: keys.len(),
+            }
+        }
+    }
+
+    /// A borrowed strided matrix - the batch currency every modality's row inputs take.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct usearch_matrix_view_t {
+        pub data: *const c_void,
+        pub rows: usize,
+        pub columns: usize,
+        pub stride_bytes: usize,
+        pub scalar_kind: usearch_enum_t,
+    }
+
+    /// The writable twin of `usearch_matrix_view_t`, carried by every verb that lands rows in a
+    /// matrix the caller allocated.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct usearch_matrix_span_t {
+        pub data: *mut c_void,
+        pub capacity: usize,
+        pub columns: usize,
+        pub stride_bytes: usize,
+        pub scalar_kind: usearch_enum_t,
+    }
+
+    /// Where a ranked run lands - three caller-owned outputs sharing the queries' count.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct usearch_matches_span_t {
+        pub keys: *mut usearch_key_t,
+        pub keys_stride_bytes: usize,
+        pub scores: *mut usearch_distance_t,
+        pub scores_stride_bytes: usize,
+        pub counts: *mut usize,
+        pub wanted: usize,
+    }
+
     #[repr(C)]
     #[derive(Clone, Copy)]
     pub struct usearch_ram_options_t {
@@ -103,8 +176,8 @@ pub(crate) mod ffi {
 
     pub type usearch_predicate_t = Option<unsafe extern "C" fn(usearch_key_t, *mut c_void) -> c_int>;
 
-    /// Periodic advance report and the caller's chance to stop the call. This binding always
-    /// passes `None`, so neither progress nor cancellation reaches Rust.
+    /// Periodic advance report and the caller's chance to stop the call, driven by the reporting
+    /// sibling of each verb that takes one.
     pub type usearch_progress_callback_t = Option<unsafe extern "C" fn(usize, usize, *mut c_void) -> c_int>;
 
     pub type usearch_executor_t = *mut c_void;
@@ -171,7 +244,8 @@ pub enum Status {
     ConfigMismatch = 12,
     /// A synchronization contract was violated by a concurrent operation.
     Contended = 13,
-    /// A progress handler asked the operation to stop; it unwound and published nothing.
+    /// A progress handler asked the operation to stop; what the finished increments leave behind
+    /// is each verb's own contract.
     Cancelled = 14,
     /// A status a newer library reported and this binding has no name for.
     Unrecognized = -1,
@@ -585,30 +659,56 @@ impl Residency {
             }
         }
     }
-
-    /// The residency a tag names, with an empty placement.
-    ///
-    /// A checkpoint records where it was written, never where a reader must keep it, so the
-    /// placement lists come back empty for the caller to fill before initialization.
-    pub(crate) fn from_raw(tag: ffi::usearch_enum_t) -> Result<Self> {
-        let residency = match tag {
-            0 => Residency::Ram {
-                memory_domains: Vec::new(),
-            },
-            1 => Residency::Vram { devices: Vec::new() },
-            2 => Residency::Nvme { paths: Vec::new() },
-            _ => {
-                return Err(fail(
-                    Status::UnknownKind,
-                    "the checkpoint names a residency this binding does not know",
-                ))
-            }
-        };
-        Ok(residency)
-    }
 }
 
 // endregion: Residency
+
+// region: Progress
+
+/// Whether the operation a handler is watching carries on or unwinds.
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum Continuation {
+    /// Carry on to the next unit of work.
+    Continue = 0,
+    /// Stop; what the finished increments leave behind is each verb's own contract.
+    Cancel = 1,
+}
+
+/// The trampoline every reporting verb hands the C interface, generated per handler type so a
+/// report reaches a typed closure rather than an opaque pointer.
+///
+/// A handler is called from whichever thread advanced the work and never from two at once, which
+/// is what makes `FnMut` sound here and why `Send` rather than `Sync` is what it owes. A panic is
+/// caught and reported as a cancellation, since unwinding out of an `extern "C"` frame aborts the
+/// process.
+///
+/// # Safety
+/// `state` must address a live `Handler` that outlives the call the callback was passed to.
+unsafe extern "C" fn progress_trampoline<Handler>(completed: usize, total: usize, state: *mut c_void) -> c_int
+where
+    Handler: FnMut(usize, usize) -> Continuation + Send,
+{
+    let handler = &mut *(state as *mut Handler);
+    let reported = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(completed, total)));
+    match reported {
+        Ok(continuation) => continuation as c_int,
+        Err(_) => Continuation::Cancel as c_int,
+    }
+}
+
+/// Lends a handler to the C interface as the callback and state pair every reporting verb takes,
+/// so the trampoline can never be paired with the wrong state.
+///
+/// The borrow must outlive the call, which the verbs enforce by taking the handler by reference.
+pub(crate) fn lower_progress<Handler>(handler: &mut Handler) -> (ffi::usearch_progress_callback_t, *mut c_void)
+where
+    Handler: FnMut(usize, usize) -> Continuation + Send,
+{
+    (Some(progress_trampoline::<Handler>), (handler as *mut Handler).cast())
+}
+
+// endregion: Progress
 
 // region: Executors
 
@@ -617,7 +717,7 @@ impl Residency {
 ///
 /// One executor serves any number of index handles, so separate categories of indexes share one
 /// machine's cores or devices instead of each claiming a private set. Its kind is fixed by the
-/// residency it was constructed for and must match the residency of every handle it drives.
+/// factory that produced it and must match the residency of every handle it drives.
 ///
 /// An executor admits one driver at a time - a second concurrent call reports
 /// [`Status::Contended`] - which is why it is `Send` but not `Sync`: a thread that wants to drive
@@ -632,22 +732,57 @@ pub struct Executor {
 unsafe impl Send for Executor {}
 
 impl Executor {
-    /// Spawns the workers a residency calls for, interleaved across the domains it names.
+    /// Spawns host workers for RAM-resident indexes, interleaved across the compute domains local
+    /// to `memory_domains`, which is the same list the indexes were initialized with.
     ///
-    /// `threads` counts host workers for RAM and submission rings for NVMe, with zero deriving
-    /// from the hardware; a VRAM executor ignores it, since one host thread drives one stream
-    /// per device.
-    pub fn new(residency: &Residency, threads: usize) -> Result<Self> {
-        let mut path_views = Vec::new();
-        let raw = residency.to_raw(&mut path_views);
-        let mut error = ffi::usearch_error_t::default();
-        let handle = unsafe {
-            match residency {
-                Residency::Ram { .. } => ffi::usearch_executor_for_ram(&raw.ram, threads, &mut error),
-                Residency::Nvme { .. } => ffi::usearch_executor_for_nvme(&raw.nvme, threads, &mut error),
-                Residency::Vram { .. } => ffi::usearch_executor_for_vram(&raw.vram, &mut error),
-            }
+    /// Zero `threads` takes 7/8 of the cores those domains carry, since full occupancy starves
+    /// the ordered publication path.
+    pub fn for_ram(memory_domains: &[i32], threads: usize) -> Result<Self> {
+        let ram = ffi::usearch_ram_options_t {
+            memory_domains: borrowed(memory_domains),
+            memory_domains_count: memory_domains.len(),
         };
+        let mut error = ffi::usearch_error_t::default();
+        let handle = unsafe { ffi::usearch_executor_for_ram(&ram, threads, &mut error) };
+        Executor::spawned(handle, error)
+    }
+
+    /// Spawns host workers for NVMe-resident indexes, one submission ring apiece, across the
+    /// compute domains local to the devices `paths` names.
+    ///
+    /// Zero `threads` derives from those devices' queue capabilities.
+    pub fn for_nvme<Path: AsRef<str>>(paths: &[Path], threads: usize) -> Result<Self> {
+        // The C interface reads one contiguous array of views, so the borrows are staged here.
+        let views: Vec<ffi::usearch_bytes_view_t> = paths
+            .iter()
+            .map(|path| ffi::usearch_bytes_view_t::from(path.as_ref()))
+            .collect();
+        let nvme = ffi::usearch_nvme_options_t {
+            paths: borrowed(&views),
+            paths_count: views.len(),
+        };
+        let mut error = ffi::usearch_error_t::default();
+        let handle = unsafe { ffi::usearch_executor_for_nvme(&nvme, threads, &mut error) };
+        Executor::spawned(handle, error)
+    }
+
+    /// Opens one submission stream on every named device, all of them driven by the one host
+    /// thread that calls the verbs - which is why this takes no thread count.
+    ///
+    /// Adding host threads would buy nothing: the work has already left for the accelerator by
+    /// the time one of them would return.
+    pub fn for_vram(devices: &[i32]) -> Result<Self> {
+        let vram = ffi::usearch_vram_options_t {
+            devices: borrowed(devices),
+            devices_count: devices.len(),
+        };
+        let mut error = ffi::usearch_error_t::default();
+        let handle = unsafe { ffi::usearch_executor_for_vram(&vram, &mut error) };
+        Executor::spawned(handle, error)
+    }
+
+    /// The handle a factory produced, or the failure it left behind.
+    fn spawned(handle: ffi::usearch_executor_t, error: ffi::usearch_error_t) -> Result<Self> {
         check(error)?;
         match handle.is_null() {
             true => Err(fail(Status::Internal, "the library returned no executor and no error")),
@@ -748,18 +883,16 @@ mod tests {
     use core::str::FromStr;
 
     #[test]
-    fn keys_render_as_dashed_uuids() {
-        assert_eq!(Key::from(42u64).to_string(), "00000000-0000-0000-0000-00000000002a");
-        assert_eq!(Key::NIL.to_string(), "00000000-0000-0000-0000-000000000000");
-        assert_eq!(Key::from(u128::MAX).to_string(), "ffffffff-ffff-ffff-ffff-ffffffffffff");
-    }
-
-    #[test]
     fn keys_round_trip_through_their_rendering() {
-        for value in [0u128, 42, u64::MAX as u128, u128::MAX] {
-            let key = Key::from(value);
-            assert_eq!(Key::from_str(&key.to_string()).expect("the rendering must parse"), key);
-            assert_eq!(u128::from(key), value);
+        let cases: [(Key, &str); 4] = [
+            (Key::NIL, "00000000-0000-0000-0000-000000000000"),
+            (Key::from(42u64), "00000000-0000-0000-0000-00000000002a"),
+            (Key::from(u64::MAX), "00000000-0000-0000-ffff-ffffffffffff"),
+            (Key::from(u128::MAX), "ffffffff-ffff-ffff-ffff-ffffffffffff"),
+        ];
+        for (key, rendered) in cases {
+            assert_eq!(key.to_string(), rendered);
+            assert_eq!(Key::from_str(rendered), Ok(key));
         }
         // Dashes are cosmetic, so a bare hex run parses too.
         assert_eq!(Key::from_str("0000000000000000000000000000002a"), Ok(Key::from(42u64)));
@@ -767,31 +900,22 @@ mod tests {
 
     #[test]
     fn keys_reject_malformed_renderings() {
-        assert!(Key::from_str("").is_err());
-        assert!(
-            Key::from_str("00000000-0000-0000-0000-00000000002").is_err(),
-            "one digit short"
-        );
-        assert!(
-            Key::from_str("00000000-0000-0000-0000-00000000002ab").is_err(),
-            "one digit long"
-        );
-        assert!(
-            Key::from_str("0000000g-0000-0000-0000-00000000002a").is_err(),
-            "not hexadecimal"
-        );
+        for text in [
+            "",
+            "00000000-0000-0000-0000-00000000002",   // one digit short
+            "00000000-0000-0000-0000-00000000002ab", // one digit long
+            "0000000g-0000-0000-0000-00000000002a",  // not hexadecimal
+        ] {
+            assert!(Key::from_str(text).is_err(), "{text:?} must not parse");
+        }
     }
 
     #[test]
     fn integer_identities_park_in_the_low_bytes() {
         assert_eq!(Key::from(42u64).as_u64(), Some(42));
-        assert_eq!(Key::NIL.as_u64(), Some(0));
         assert_eq!(Key::from(u64::MAX).as_u64(), Some(u64::MAX));
-        assert_eq!(
-            Key::from(u128::MAX).as_u64(),
-            None,
-            "a non-zero high half has no integer identity"
-        );
+        assert_eq!(u128::from(Key::from(42u64)), 42);
+        // A non-zero high half has no integer identity, and says so rather than truncating.
         assert_eq!(Key::from(1u128 << 64).as_u64(), None);
     }
 
@@ -831,8 +955,6 @@ mod tests {
 
     #[test]
     fn packed_slabs_borrow_as_matrices() {
-        use numkong::TensorRef;
-
         let slab = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
         let matrix = rows(&slab, 3);
         assert_eq!(matrix.shape(), &[2, 3]);
@@ -853,6 +975,14 @@ mod tests {
     #[should_panic(expected = "whole number of rows")]
     fn packed_slabs_reject_a_partial_row() {
         let _ = rows(&[1.0f32, 2.0, 3.0], 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "at least one dimension")]
+    fn packed_slabs_reject_a_zero_width() {
+        // The width divides the slab, so a zero would be a division rather than an empty run -
+        // the same guard an output span of zero wanted matches trips.
+        let _ = rows(&[1.0f32, 2.0], 0);
     }
 
     #[test]
@@ -910,10 +1040,6 @@ mod tests {
             .tag(),
             2
         );
-        for tag in 0..3 {
-            assert_eq!(Residency::from_raw(tag).expect("the tag must be known").tag(), tag);
-        }
-        assert!(Residency::from_raw(9).is_err(), "an unknown tag is not guessed");
     }
 
     #[test]

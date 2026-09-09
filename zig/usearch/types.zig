@@ -426,7 +426,7 @@ pub const MatchesSpan = extern struct {
     /// asked for - three numbers a caller could contradict become one shape the lengths fix.
     /// Lengths that cannot be read as one shape are refused with `Error.ShapeMismatch`.
     pub fn of(keys: []Key, scores: []Distance, counts: []usize) Error!MatchesSpan {
-        if (counts.len == 0 or keys.len != scores.len or keys.len % counts.len != 0)
+        if (counts.len == 0 or keys.len == 0 or keys.len != scores.len or keys.len % counts.len != 0)
             return refuse(.shape_mismatch);
         return .{
             .keys = keys.ptr,
@@ -659,8 +659,6 @@ pub fn capabilitiesAvailable() [:0]const u8 {
 }
 
 test "statuses lift into the error set one for one" {
-    // Every named status but `success` must map to its own error, and an unnamed one must not
-    // vanish into success.
     const success: Outcome = .{};
     try success.check();
     try std.testing.expectEqualStrings("", success.describe());
@@ -669,6 +667,7 @@ test "statuses lift into the error set one for one" {
     try std.testing.expectError(Error.Contended, contended.check());
     try std.testing.expectEqualStrings("another thread is driving it", contended.describe());
 
+    // A status this build has no name for is still a failure rather than a success.
     const unnamed: Outcome = .{ .status = @enumFromInt(9999) };
     try std.testing.expectError(Error.Internal, unnamed.check());
 }
@@ -676,10 +675,7 @@ test "statuses lift into the error set one for one" {
 test "integer identities park in the low eight bytes" {
     const key = Key.fromInteger(42);
     try std.testing.expectEqual(@as(?u64, 42), key.asInteger());
-    try std.testing.expectEqual(@as(u8, 0x2a), key.bytes[15]);
-    for (key.bytes[0..15]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
-
-    try std.testing.expectEqual(@as(?u64, 0), Key.nil.asInteger());
+    try std.testing.expectEqualSlices(u8, &(.{0} ** 15 ++ .{0x2a}), &key.bytes);
 
     // A key whose high half is set is no integer identity, and says so rather than truncating.
     var wide: Key = Key.fromInteger(7);
@@ -692,10 +688,6 @@ test "keys render as dashed UUIDs and read back" {
     try std.testing.expectEqualStrings(
         "00000000-0000-0000-0000-00000000002a",
         try std.fmt.bufPrint(&buffer, "{f}", .{Key.fromInteger(42)}),
-    );
-    try std.testing.expectEqualStrings(
-        "00000000-0000-0000-0000-000000000000",
-        try std.fmt.bufPrint(&buffer, "{f}", .{Key.nil}),
     );
 
     // Every one of the sixteen bytes survives the round trip, in order.

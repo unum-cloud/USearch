@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 
 import numkong as nk
-from usearch import DenseIndex
+from usearch import DenseIndex, Stats
 from usearch.keys import integers_to_keys, keys_to_integers
 
 # `integers_to_keys` and `keys_to_integers` are re-exported so a caller reaching for the recall
@@ -106,7 +106,7 @@ class SearchStats:
 
 def index_keys(index: DenseIndex) -> np.ndarray:
     """Every identity the index holds, as a (size, 16) matrix, walked through one snapshot."""
-    batches = [np.asarray(batch).copy() for batch in index.batches()]
+    batches = [np.asarray(batch).copy() for batch in index.cursor()]
     if not batches:
         return np.zeros((0, 16), dtype=np.uint8)
     return np.concatenate(batches, axis=0)
@@ -120,7 +120,8 @@ def self_recall(index: DenseIndex, sample: float | int = 1.0, count: int = 1, **
 
     The *sample* is a share when a float and a count when an integer, and *count* is how many
     matches each query retrieves. Every other keyword reaches ``index.search``, so the
-    ``executor`` it needs is passed through here.
+    ``executor`` it needs is passed through here, and a ``stats`` given here is what the
+    returned telemetry reads off.
     """
     if len(index) == 0:
         return SearchStats(0, 0, 0, 0, 0)
@@ -135,23 +136,30 @@ def self_recall(index: DenseIndex, sample: float | int = 1.0, count: int = 1, **
     vectors = kwargs.pop("vectors", None)
     if vectors is None:
         vectors = np.concatenate([np.asarray(index[row]) for row in keys], axis=0)
+    vectors = np.atleast_2d(np.asarray(vectors))
 
-    matches = index.search(vectors, count, **kwargs)
+    found_keys = np.zeros((len(vectors), count, 16), dtype=np.uint8)
+    found_distances = np.zeros((len(vectors), count), dtype=np.float64)
+    found_counts = np.zeros(len(vectors), dtype=np.uint64)
+    stats = kwargs.pop("stats", None)
+    if stats is None:
+        stats = Stats()
+    index.search(vectors, count, found_keys, found_distances, found_counts, stats=stats, **kwargs)
+
     expected = keys_to_integers(keys)
-    found = keys_to_integers(matches.keys)
-    counts = np.asarray(matches.counts)
+    found = keys_to_integers(found_keys)
 
     count_matches = 0
     for query_index in range(len(expected)):
-        row = found[query_index, : counts[query_index]]
+        row = found[query_index, : found_counts[query_index]]
         count_matches += int(np.any(row == expected[query_index]))
 
     return SearchStats(
         index_size=len(index),
         count_queries=len(keys),
         count_matches=count_matches,
-        visited_members=matches.visited_members,
-        computed_distances=matches.computed_distances,
+        visited_members=stats.visited_members,
+        computed_distances=stats.computed_distances,
     )
 
 

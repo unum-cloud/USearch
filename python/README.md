@@ -26,9 +26,14 @@ vectors = np.random.rand(10_000, 256).astype(np.float32)
 index.reserve(len(vectors))
 index.add(np.arange(len(vectors)), vectors, executor=pool)
 
-matches = index.search(vectors[:100], 10, executor=pool)
+keys = np.zeros((100, 10, 16), dtype=np.uint8)      # 16 identity bytes per match
+distances = np.zeros((100, 10), dtype=np.float64)
+counts = np.zeros(100, dtype=np.uint64)             # One match count per query
+index.search(vectors[:100], 10, keys, distances, counts, executor=pool)
+
+matches = usearch.Matches(keys, distances, counts)  # A view, borrowing all three
 assert len(index) == 10_000
-assert np.asarray(matches.distances).shape == (100, 10)
+assert distances.shape == (100, 10)
 assert matches[0][0].distance < 0.001
 ```
 
@@ -60,11 +65,11 @@ Calling `usearch.Executor()` raises a `TypeError` naming the three factories, si
 
 One index type per modality, each mirroring the C header of the same name:
 
-| Python | C header | Rust |
-|---|---|---|
-| `usearch.DenseIndex` | `usearch/dense_index.h` | `usearch::dense::Index` |
-| `usearch.SequenceIndex` | `usearch/sequence_index.h` | `usearch::sequence::Index` |
-| `usearch.MatrixIndex` | `usearch/matrix_index.h` | `usearch::matrix::Index` |
+| Python                    | C header                     | Rust                         |
+| ------------------------- | ---------------------------- | ---------------------------- |
+| `usearch.DenseIndex`      | `usearch/dense_index.h`      | `usearch::dense::Index`      |
+| `usearch.SequenceIndex`   | `usearch/sequence_index.h`   | `usearch::sequence::Index`   |
+| `usearch.MatrixIndex`     | `usearch/matrix_index.h`     | `usearch::matrix::Index`     |
 | `usearch.GeospatialIndex` | `usearch/geospatial_index.h` | `usearch::geospatial::Index` |
 
 `DenseIndex` is the one instantiated today; the rest announce themselves with a `NotImplementedError` until their engines land.
@@ -90,25 +95,42 @@ No NumPy dtype expresses a 128-bit integer, so batch identities travel as big-en
 Inputs arrive through PEP 3118 first and `__array_interface__` second, so NumPy is never required and a PyTorch or TensorFlow tensor needs no round-trip through it.
 Only the row stride may vary; a strided column would force a gather the SIMD kernels have no form for.
 
-Results come back as one `Matches` object whose fields are zero-copy views over arenas it owns:
+Every ranked verb writes into three buffers the caller owns and allocates nothing of its own, so a sweep sizes them once and reuses them at every point.
 
 ```python
-matches = index.search(queries, 10, executor=pool)
+keys = np.zeros((len(queries), 10, 16), dtype=np.uint8)
+distances = np.zeros((len(queries), 10), dtype=np.float64)
+counts = np.zeros(len(queries), dtype=np.uint64)
+index.search(queries, 10, keys, distances, counts, executor=pool)
+```
+
+A count bounds its own row, and the cells past it keep whatever the buffer already held.
+`Matches` reads the three back as one run, borrowing rather than copying, and derives the matches-per-query width from their lengths:
+
+```python
+matches = usearch.Matches(keys, distances, counts)
 matches.keys          # memoryview, shape (queries, 10, 16), format 'B'
 matches.distances     # memoryview, shape (queries, 10),     format 'd'
 matches.counts        # memoryview, shape (queries,)
-matches.visited_members, matches.computed_distances, matches.restarts
 matches[0]            # a tuple of `Match` objects, one per hit for query zero
 np.asarray(matches.distances)   # zero-copy; NumPy never entered the binding
 ```
 
-When you already own the output buffers, `search_into` writes into them and allocates nothing:
+Traversal telemetry rides a `Stats` the call fully overwrites, so one reading always belongs to one call and never to the sweep around it:
 
 ```python
-keys = np.empty((len(queries), 10, 16), dtype=np.uint8)
-distances = np.empty((len(queries), 10), dtype=np.float64)
-counts = np.empty(len(queries), dtype=np.uint64)
-index.search_into(queries, 10, keys, distances, counts, executor=pool)
+stats = usearch.Stats()
+index.search(queries, 10, keys, distances, counts, executor=pool, stats=stats)
+stats.visited_members, stats.computed_distances, stats.restarts
+```
+
+`accumulate` folds one reading into another when the totals across a sweep are what is wanted:
+
+```python
+total = usearch.Stats()
+for batch in batches:
+    index.search(batch, 10, keys, distances, counts, executor=pool, stats=stats)
+    total.accumulate(stats)
 ```
 
 ## Expansion Rides The Call
@@ -117,8 +139,9 @@ The candidate-pool breadth is a per-call setting rather than a property of the h
 
 ```python
 for expansion_factor in (16, 32, 64, 128, 256):
-    matches = index.search(queries, 10, executor=pool, expansion_factor=expansion_factor)
-    print(expansion_factor, matches.computed_distances)
+    stats = usearch.Stats()
+    index.search(queries, 10, keys, distances, counts, executor=pool, expansion_factor=expansion_factor, stats=stats)
+    print(expansion_factor, stats.computed_distances)
 ```
 
 ## Filtered Search
@@ -128,7 +151,7 @@ Non-matching entries still route the traversal, so recall does not collapse at l
 The callback re-enters Python, so it runs under the GIL and serializes the walk - every other verb releases the GIL and lets the library parallelize internally.
 
 ```python
-matches = index.search(queries, 10, executor=pool, predicate=lambda key: int(key) % 2 == 0)
+index.search(queries, 10, keys, distances, counts, executor=pool, predicate=lambda key: int(key) % 2 == 0)
 ```
 
 ## Retrieval & Iteration
@@ -138,9 +161,9 @@ index.count(42)             # entries sharing this key
 42 in index                 # the same question, as a membership test
 index[42]                   # a (count, dimensions) memoryview of what is stored under it
 
-for keys in index.batches(1024):                    # snapshot walk, keys only
+for keys in index.cursor(1024):                     # snapshot walk, keys only
     ...
-for keys, vectors in index.batches(1024, dtype="f32"):   # snapshot walk with payloads
+for keys, vectors in index.cursor(1024, dtype="f32"):    # snapshot walk with payloads
     ...
 for match in index.find(query, executor=pool):      # resumable best-first stream
     if match.distance > 0.3:
@@ -207,25 +230,24 @@ Searches may run throughout, and a stopped sweep resumes where it left off, whic
 Three verbs read the same walk as arithmetic rather than as retrieval.
 All of them need an inner-product index, since a product, a softmax, and a maximum over logits are all things only those kinds score.
 
-`multiply_into` reports __every__ pair the traversal scored rather than only the nearest - an approximate `A × Bᵀ`, dense in and sparse out.
+`multiply` reports __every__ pair the traversal scored rather than only the nearest - an approximate `A × Bᵀ`, dense in and sparse out.
 A walk computes many times the products it reports and each of them is exact, so the caller stops recomputing what the index already knew.
-It is into-only: the width of the emitted pattern is the caller's to choose, so there is no allocating door to choose it for them.
-It returns how many rows truncated, which makes the retry loop a `while`:
+The width of the emitted pattern is the caller's to choose, and the verb returns how many rows truncated, which makes the retry loop a `while`:
 
 ```python
-while index.multiply_into(rows, wanted, columns, products, counts, executor=pool):
+while index.multiply(rows, wanted, columns, products, counts, executor=pool):
     wanted *= 2
     columns, products, counts = grow(wanted)
 ```
 
-A count above `wanted` is the truth about that row, not a slice bound - unlike `search_into`, where it can never exceed the width.
+A count above `wanted` is the truth about that row, not a slice bound - unlike `search`, where it can never exceed the width.
 
-`attend_into` folds a softmax over that same walk, the online-softmax recurrence of Flash Attention with the graph replacing the linear sweep over key tiles.
+`attend` folds a softmax over that same walk, the online-softmax recurrence of Flash Attention with the graph replacing the linear sweep over key tiles.
 The index holds one layer's keys for one key-value head; `values` holds the value rows, addressed by key, so a context inserted in token order needs no mapping and the publication watermark doubles as the causal mask.
 
 ```python
 carry = np.zeros((len(queries), 2), dtype=np.float32)
-index.attend_into(queries, values, outputs, executor=pool, outputs_dtype="bf16", carry=carry)
+index.attend(queries, values, outputs, executor=pool, outputs_dtype="bf16", carry=carry)
 ```
 
 Ask for the `carry` to recombine this branch with another over the same queries - a dense recent window, or a second shard of one context - by partial-softmax rescaling.
@@ -237,7 +259,10 @@ A document is one key holding its token rows, which is what `values_per_key` abo
 ```python
 index = DenseIndex.for_ram(dimensions=128, metric="inner", values_per_key=32)
 ...
-matches = index.maxsim(query_tokens, 32, 10, executor=pool)   # 32 token rows per query
+documents = np.zeros((len(query_tokens) // 32, 10, 16), dtype=np.uint8)
+scores = np.zeros((len(query_tokens) // 32, 10), dtype=np.float64)
+counts = np.zeros(len(query_tokens) // 32, dtype=np.uint64)
+index.maxsim(query_tokens, 32, 10, documents, scores, counts, executor=pool)   # 32 token rows per query
 ```
 
 ## Composition & Concurrency

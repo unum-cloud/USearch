@@ -29,7 +29,7 @@ public enum Metric: Int32, Sendable {
     case inner = 1
     /// The cosine distance.
     case angular = 2
-    /// The squared euclidean distance.
+    /// The L2 distance.
     case euclidean = 3
     /// The count of differing bits.
     case hamming = 4
@@ -108,10 +108,8 @@ public struct DenseOptions: Sendable {
         return raw
     }
 
-    /// Lifts the geometry and metric a checkpoint's headers describe.
-    ///
-    /// A checkpoint records where it was written, never where a reader must keep it, so the
-    /// residency comes back with an empty placement for the caller to fill.
+    /// Lifts a lowered struct back into options, the residency arriving with an empty placement
+    /// the caller fills.
     static func lifted(_ raw: usearch_dense_options_t) throws(Error) -> DenseOptions {
         DenseOptions(
             dimensions: raw.dimensions,
@@ -131,6 +129,34 @@ public struct DenseOptions: Sendable {
         return try withExtendedLifetime(placement) { () throws(Error) -> DenseOptions in
             try DenseOptions.lifted(lowered(placement))
         }
+    }
+}
+
+/// The geometry and metric a checkpoint froze - everything a reader learns without opening it,
+/// and nothing a reader must choose for itself.
+///
+/// A checkpoint records neither the residency nor the bound on entries sharing one key: the first
+/// says where it was written rather than where a reader must keep it, and the second bounds a live
+/// handle's mutable state rather than the serialized form. Both stay the caller's to choose in the
+/// `DenseOptions` a handle is built from.
+public struct DenseMetadata: Sendable {
+    /// The scalars per stored vector.
+    public var dimensions: Int
+    /// The distance kind the checkpoint scores with.
+    public var metric: Metric
+    /// The scalar type its rows are stored and quantized into.
+    public var quantization: Scalar
+    /// The connections-per-node bound the graph was built with.
+    public var connectivity: Int
+
+    /// Lifts the geometry and metric a checkpoint's headers describe.
+    static func lifted(_ raw: usearch_dense_metadata_t) throws(Error) -> DenseMetadata {
+        DenseMetadata(
+            dimensions: raw.dimensions,
+            metric: try Metric.lifted(raw.metric),
+            quantization: try Scalar.lifted(raw.quantization),
+            connectivity: raw.connectivity
+        )
     }
 }
 
@@ -268,9 +294,8 @@ public struct Match: Equatable, Sendable {
 /// ranking verb fills. Mirrors `usearch_matches_span_t`.
 ///
 /// It borrows and never owns, so a benchmark loop allocates once and never again, and it stays
-/// valid only as long as the storage it was built from. Reading it is a collection of queries
-/// whose elements are collections of that query's matches, so `span[0]` walks one query's results
-/// and stops at the cells the engine wrote - indexing the buffers directly walks into memory the
+/// valid only as long as the storage it was built from. `span[query]` reads one query's row and
+/// stops at the cells the engine wrote - indexing the buffers directly walks into memory the
 /// engine never touched.
 public struct MatchesSpan: RandomAccessCollection {
     /// The `queries × wanted` key matrix, rows contiguous.
@@ -296,7 +321,7 @@ public struct MatchesSpan: RandomAccessCollection {
         guard keys.count == distances.count else {
             throw fail(.shapeMismatch, "the key and distance buffers are not the same shape")
         }
-        guard keys.count % counts.count == 0, keys.count / counts.count != 0 else {
+        guard !keys.isEmpty, keys.count % counts.count == 0 else {
             throw fail(.shapeMismatch, "the buffers do not divide into one row per query")
         }
         self.keys = keys
@@ -305,10 +330,10 @@ public struct MatchesSpan: RandomAccessCollection {
         wanted = keys.count / counts.count
     }
 
-    /// The first query's position.
+    /// The first query's position, which a collection walk starts from.
     @inlinable public var startIndex: Int { 0 }
 
-    /// One past the last query's position, and the number of queries the buffers were sized for.
+    /// One past the last query's position.
     @inlinable public var endIndex: Int { counts.count }
 
     /// One query's matches, trimmed to the cells the engine actually wrote.
@@ -330,10 +355,10 @@ public struct MatchesSpan: RandomAccessCollection {
         /// Whether the engine had more to report than the wanted width could hold.
         @inlinable public var wasTruncated: Bool { run.counts[query] > run.wanted }
 
-        /// The first match's position.
+        /// The first match's position, which a collection walk starts from.
         @inlinable public var startIndex: Int { 0 }
 
-        /// One past the last match the engine wrote for this query.
+        /// One past the last match the engine wrote, capped at the wanted width.
         @inlinable public var endIndex: Int { Swift.min(run.counts[query], run.wanted) }
 
         /// The match at a position, key and distance read from their paired buffers.
@@ -385,23 +410,23 @@ public final class DenseIndex: @unchecked Sendable {
 
     /// Reads a checkpoint's geometry and metric metadata without loading it - from the
     /// manifest's summary when the path names one, so no shard is opened.
-    public static func metadata(path: borrowing String) throws(Error) -> DenseOptions {
-        var raw = usearch_dense_options_t()
+    public static func metadata(path: borrowing String) throws(Error) -> DenseMetadata {
+        var raw = usearch_dense_metadata_t()
         try withBorrowed(path) { (borrowed) throws(Error) in
             try throwing { usearch_dense_metadata(borrowed, &raw, $0) }
         }
-        return try DenseOptions.lifted(raw)
+        return try DenseMetadata.lifted(raw)
     }
 
     /// Reads geometry and metric metadata from a serialized monolith buffer.
-    public static func metadata(buffer: UnsafeRawBufferPointer) throws(Error) -> DenseOptions {
+    public static func metadata(buffer: UnsafeRawBufferPointer) throws(Error) -> DenseMetadata {
         guard let base = buffer.baseAddress, buffer.count != 0 else {
             throw fail(.malformedInput, "the buffer is empty")
         }
-        var raw = usearch_dense_options_t()
+        var raw = usearch_dense_metadata_t()
         let view = usearch_bytes_view_t(data: base.assumingMemoryBound(to: UInt8.self), length: buffer.count)
         try throwing { usearch_dense_metadata_buffer(view, &raw, $0) }
-        return try DenseOptions.lifted(raw)
+        return try DenseMetadata.lifted(raw)
     }
 
     /// Reserves capacity for a total number of entries, the current size included.
@@ -602,7 +627,17 @@ public final class DenseIndex: @unchecked Sendable {
         var rawStats = usearch_dense_traversal_stats_t()
         try throwing { failure in
             usearch_dense_maxsim(
-                handle, executor.raw, &view, rowsPerQuery, &span, &lowered, nil, nil, &rawStats, failure)
+                handle,
+                executor.raw,
+                &view,
+                rowsPerQuery,
+                &span,
+                &lowered,
+                nil,
+                nil,
+                &rawStats,
+                failure
+            )
         }
         return TraversalStats(rawStats)
     }
@@ -648,12 +683,23 @@ public final class DenseIndex: @unchecked Sendable {
         var failure = usearch_error_t()
         let attend = { (states: UnsafeMutablePointer<usearch_dense_softmax_state_t>?) -> Void in
             usearch_dense_attend(
-                self.handle, executor.raw, &queriesView, &valuesView, &outputsSpan, states,
-                &lowered, nil, nil, &rawStats, &failure)
+                self.handle,
+                executor.raw,
+                &queriesView,
+                &valuesView,
+                &outputsSpan,
+                states,
+                &lowered,
+                nil,
+                nil,
+                &rawStats,
+                &failure
+            )
         }
         if let carry {
             carry.withMemoryRebound(to: usearch_dense_softmax_state_t.self) { attend($0.baseAddress) }
-        } else {
+        }
+        else {
             attend(nil)
         }
         try check(failure)
@@ -778,10 +824,21 @@ public final class DenseIndex: @unchecked Sendable {
             withExtendedLifetime(box) {
                 let state = Unmanaged.passUnretained(box).toOpaque()
                 usearch_dense_search_if(
-                    handle, executor.raw, &view, &span, &lowered,
-                    DenseIndex.usearchDenseAdmits, state, nil, nil, &rawStats, &failure)
+                    handle,
+                    executor.raw,
+                    &view,
+                    &span,
+                    &lowered,
+                    DenseIndex.usearchDenseAdmits,
+                    state,
+                    nil,
+                    nil,
+                    &rawStats,
+                    &failure
+                )
             }
-        } else {
+        }
+        else {
             usearch_dense_search(handle, executor.raw, &view, &span, &lowered, nil, nil, &rawStats, &failure)
         }
         try check(failure)
@@ -929,7 +986,8 @@ public final class DenseFinder: Sequence, IteratorProtocol {
                     }
                 }
             }
-        } catch {
+        }
+        catch {
             failure = error
             filled = 0
         }

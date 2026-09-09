@@ -936,19 +936,18 @@ static napi_value usearch_js_index_load_buffer(napi_env env, napi_callback_info 
 }
 
 /** @brief Wraps the geometry and metric a checkpoint froze; placement is never recorded. */
-static napi_value usearch_js_metadata_object(napi_env env, usearch_dense_options_t const* options) {
+static napi_value usearch_js_metadata_object(napi_env env, usearch_dense_metadata_t const* metadata) {
     napi_value object = NULL;
     if (napi_create_object(env, &object) != napi_ok) {
         usearch_js_throw(env, "internal", "Could not publish the checkpoint metadata");
         return NULL;
     }
-    napi_set_named_property(env, object, "dimensions", usearch_js_number(env, options->dimensions));
+    napi_set_named_property(env, object, "dimensions", usearch_js_number(env, metadata->dimensions));
     napi_set_named_property(env, object, "metric",
-                            usearch_js_static_string(env, usearch_dense_metric_name(options->metric)));
+                            usearch_js_static_string(env, usearch_dense_metric_name(metadata->metric)));
     napi_set_named_property(env, object, "quantization",
-                            usearch_js_static_string(env, usearch_scalar_name(options->quantization)));
-    napi_set_named_property(env, object, "connectivity", usearch_js_number(env, options->connectivity));
-    napi_set_named_property(env, object, "valuesPerKey", usearch_js_number(env, options->values_per_key));
+                            usearch_js_static_string(env, usearch_scalar_name(metadata->quantization)));
+    napi_set_named_property(env, object, "connectivity", usearch_js_number(env, metadata->connectivity));
     return object;
 }
 
@@ -966,13 +965,13 @@ static napi_value usearch_js_index_metadata(napi_env env, napi_callback_info inf
     size_t path_length = 0;
     if (!usearch_js_string_from_value(env, arguments[0], "path", path, sizeof(path), &path_length)) return NULL;
 
-    usearch_dense_options_t options;
-    memset(&options, 0, sizeof(options));
+    usearch_dense_metadata_t metadata;
+    memset(&metadata, 0, sizeof(metadata));
     usearch_error_t error = {usearch_success_k, NULL};
     usearch_bytes_view_t const view = {(uint8_t const*)path, path_length};
-    usearch_dense_metadata(view, &options, &error);
+    usearch_dense_metadata(view, &metadata, &error);
     if (!usearch_js_succeeded(env, &error)) return NULL;
-    return usearch_js_metadata_object(env, &options);
+    return usearch_js_metadata_object(env, &metadata);
 }
 
 /** @brief @c CompiledIndex.metadataBuffer(buffer) → the geometry a monolith in memory froze. */
@@ -988,12 +987,12 @@ static napi_value usearch_js_index_metadata_buffer(napi_env env, napi_callback_i
     usearch_bytes_view_t buffer = {NULL, 0};
     if (!usearch_js_bytes_from_value(env, arguments[0], "buffer", &buffer)) return NULL;
 
-    usearch_dense_options_t options;
-    memset(&options, 0, sizeof(options));
+    usearch_dense_metadata_t metadata;
+    memset(&metadata, 0, sizeof(metadata));
     usearch_error_t error = {usearch_success_k, NULL};
-    usearch_dense_metadata_buffer(buffer, &options, &error);
+    usearch_dense_metadata_buffer(buffer, &metadata, &error);
     if (!usearch_js_succeeded(env, &error)) return NULL;
-    return usearch_js_metadata_object(env, &options);
+    return usearch_js_metadata_object(env, &metadata);
 }
 
 #pragma endregion Serialization

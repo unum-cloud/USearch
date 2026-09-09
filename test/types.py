@@ -15,10 +15,10 @@ import numpy as np
 import pytest
 
 import usearch
-from usearch import Error, Key, Stats
+from usearch import Error, Key, Matches, Stats
 from usearch.keys import integers_to_keys, keys_to_integers
 
-from .base import batch_sizes
+from .base import batch_sizes, matches_outputs
 
 # region Library
 
@@ -122,7 +122,74 @@ def test_identity_packing_roundtrip(count: int):
     assert [int(Key(bytes(row))) for row in packed] == list(range(count))
 
 
+def test_identities_wider_than_an_integer_are_refused():
+    """An identity using its high eight bytes has no integer form, so the run is refused."""
+    packed = integers_to_keys(np.arange(4, dtype=np.uint64))
+    packed[2, 0] = 1
+    with pytest.raises(ValueError):
+        keys_to_integers(packed)
+
+
 # endregion Keys
+
+# region Matches
+
+
+@pytest.mark.parametrize(("queries", "wanted"), [(1, 1), (3, 5), (7, 16)])
+def test_matches_derives_its_width(queries: int, wanted: int):
+    """The matches-per-query width follows from the three lengths, never from an argument."""
+    matches = Matches(*matches_outputs(queries, wanted))
+    assert len(matches) == queries
+    assert np.asarray(matches.keys).shape == (queries, wanted, 16)
+    assert np.asarray(matches.distances).shape == (queries, wanted)
+    assert np.asarray(matches.counts).shape == (queries,)
+    assert f"wanted={wanted}" in repr(matches)
+
+
+def test_matches_reads_through_to_the_buffers():
+    """The view borrows rather than copies, so a write lands where the reader is looking."""
+    keys, distances, counts = matches_outputs(1, 2)
+    matches = Matches(keys, distances, counts)
+    keys[0, 0] = integers_to_keys([42])[0]
+    distances[0, 0] = 0.25
+    counts[0] = 1
+
+    row = matches[0]
+    assert len(row) == 1
+    assert int(row[0].key) == 42
+    assert row[0].distance == 0.25
+
+
+def test_matches_keeps_its_buffers_alive():
+    """The exporters are held for the view's whole life, so the last name may go."""
+    matches = Matches(*matches_outputs(2, 3))
+    assert int(np.asarray(matches.counts).sum()) == 0
+    assert len(matches[1]) == 0
+
+
+@pytest.mark.parametrize(
+    "outputs",
+    [
+        (np.zeros((1, 2, 16), np.uint8), np.zeros((1, 2)), np.zeros(0, np.uint64)),  # No query at all.
+        (np.zeros((1, 2, 16), np.uint8), np.zeros((1, 3)), np.zeros(1, np.uint64)),  # Mismatched widths.
+        (np.zeros((1, 3, 16), np.uint8), np.zeros((1, 3)), np.zeros(2, np.uint64)),  # Ragged rows.
+        (np.zeros(15, np.uint8), np.zeros(1), np.zeros(1, np.uint64)),  # A partial identity.
+    ],
+)
+def test_matches_refuses_disagreeing_buffers(outputs: tuple):
+    """Three lengths that cannot be read as one shape are a shape error, not a guess."""
+    with pytest.raises(Error) as raised:
+        Matches(*outputs)
+    assert raised.value.status == "shape-mismatch"
+
+
+def test_matches_takes_three_buffers():
+    """A run is three outputs, so anything else is refused where it is written."""
+    with pytest.raises(TypeError):
+        Matches(np.zeros((1, 1, 16), np.uint8), np.zeros((1, 1)))
+
+
+# endregion Matches
 
 # region Telemetry & Failures
 
@@ -137,7 +204,7 @@ def test_stats_start_empty():
 
 
 def test_stats_takes_no_arguments():
-    """`Stats` is an accumulator, not a value; it is only ever constructed empty."""
+    """`Stats` is a reading a call fills, not a value; it is only ever constructed empty."""
     with pytest.raises(TypeError):
         Stats(1)
 

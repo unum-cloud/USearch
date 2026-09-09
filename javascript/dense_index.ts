@@ -34,10 +34,10 @@ import {
 } from "./types";
 
 /**
- * Traversal telemetry, accumulated across the calls it is passed to.
+ * Traversal telemetry from one call, a pure output the call fully overwrites.
  *
- * One accumulator handed to several calls sums them, so a sweep reads its totals at the end
- * rather than adding the readings up itself.
+ * One reading handed to several calls holds the last of them, so a sweep that wants totals folds
+ * them with `accumulate` rather than expecting the calls to sum themselves.
  */
 export class Stats {
   /** Entries whose neighborhoods the walk expanded. */
@@ -47,7 +47,7 @@ export class Stats {
   /** Times the walk fell back to a fresh entry point after the frontier drained early. */
   restarts = 0;
 
-  /** Folds another reading into this one. */
+  /** Folds another reading into this one, which is how a sweep gathers totals. */
   accumulate(other: Stats): void {
     this.visitedMembers += other.visitedMembers;
     this.computedDistances += other.computedDistances;
@@ -61,7 +61,7 @@ export interface InsertionOptions {
   expansionFactor?: number;
   /** The scalar kind the rows hold, for the packed and mini-float kinds no TypedArray spells. */
   scalarKind?: ScalarKind;
-  /** The accumulator this call folds its telemetry into; absent skips reporting. */
+  /** The reading this call overwrites with its own telemetry; absent skips reporting. */
   stats?: Stats;
 }
 
@@ -71,7 +71,7 @@ export interface SearchOptions {
   expansionFactor?: number;
   /** The scalar kind the rows hold, for the packed and mini-float kinds no TypedArray spells. */
   scalarKind?: ScalarKind;
-  /** The accumulator this call folds its telemetry into; absent skips reporting. */
+  /** The reading this call overwrites with its own telemetry; absent skips reporting. */
   stats?: Stats;
 }
 
@@ -101,7 +101,7 @@ export interface AttentionOptions {
    * they share a row rather than travelling as two arrays.
    */
   carry?: Float32Array;
-  /** The accumulator this call folds its telemetry into; absent skips reporting. */
+  /** The reading this call overwrites with its own telemetry; absent skips reporting. */
   stats?: Stats;
 }
 
@@ -116,13 +116,21 @@ export interface FinderOptions {
   scalarKind?: ScalarKind;
 }
 
-/** The geometry and metric a checkpoint froze; where it was written is never recorded. */
+/**
+ * The geometry and metric a checkpoint froze.
+ *
+ * Where it was written is never recorded, and neither is `valuesPerKey`, which bounds a live
+ * handle rather than the file - both stay the caller's to choose at construction.
+ */
 export interface Metadata {
+  /** Scalars per stored row. */
   dimensions: number;
+  /** The metric the graph was built for. */
   metric: MetricKind;
+  /** The scalar type its rows are stored as. */
   quantization: ScalarKind;
+  /** Connections per node the graph was built with. */
   connectivity: number;
-  valuesPerKey: number;
 }
 
 /** The geometry every dense index freezes at construction, whatever its residency. */
@@ -242,17 +250,17 @@ function countKeys(keys: Uint8Array | BigUint64Array): number {
 /** The slots the addon overwrites with one call's telemetry, in the order `Stats` reads them. */
 const statsSlots = 3;
 
-/** The sink one call reports into, allocated only when an accumulator asked for a reading. */
+/** The sink one call reports into, allocated only when a caller asked for a reading. */
 function statsSink(stats: Stats | undefined): Float64Array | undefined {
   return stats ? new Float64Array(statsSlots) : undefined;
 }
 
-/** Folds a filled sink into the accumulator that asked for it. */
+/** Adopts a filled sink, overwriting whatever the reading held; summing is `accumulate`'s job. */
 function reportStats(stats: Stats | undefined, sink: Float64Array | undefined): void {
   if (!stats || !sink) return;
-  stats.visitedMembers += sink[0];
-  stats.computedDistances += sink[1];
-  stats.restarts += sink[2];
+  stats.visitedMembers = sink[0];
+  stats.computedDistances = sink[1];
+  stats.restarts = sink[2];
 }
 
 /** The token the three factories hold, which is what a direct `new DenseIndex` cannot produce. */
@@ -363,7 +371,6 @@ export class DenseIndex {
       metric: read.metric as MetricKind,
       quantization: read.quantization as ScalarKind,
       connectivity: read.connectivity,
-      valuesPerKey: read.valuesPerKey,
     };
   }
 
@@ -380,7 +387,6 @@ export class DenseIndex {
       metric: read.metric as MetricKind,
       quantization: read.quantization as ScalarKind,
       connectivity: read.connectivity,
-      valuesPerKey: read.valuesPerKey,
     };
   }
 

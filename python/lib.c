@@ -24,12 +24,14 @@ static struct {
     {"Match", &MatchType},
     {"Matches", &MatchesType},
     {"Executor", &ExecutorType},
+
     {"DenseIndex", &DenseIndexType},
+    {NULL, &DenseCursorType}, //! Returned by `cursor`, never constructed by name.
+    {NULL, &DenseFinderType}, //! Returned by `find`, likewise.
+
     {"SequenceIndex", &SequenceIndexType},
     {"MatrixIndex", &MatrixIndexType},
     {"GeospatialIndex", &GeospatialIndexType},
-    {NULL, &DenseCursorType}, //! Returned by `batches`, never constructed by name.
-    {NULL, &DenseFinderType}, //! Returned by `find`, likewise.
 };
 
 static PyMethodDef module_methods[] = {

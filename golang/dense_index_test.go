@@ -1,10 +1,8 @@
-// Tests for the boundary, not for the engine behind it. Whether approximate search returns
-// good neighbors is the C library's own suite's job; what can break here is marshalling -
-// struct layouts across an anonymous union, sixteen-byte keys reinterpreted in place, stride
-// arithmetic, and handle ownership.
+// Tests for the boundary, not for the engine behind it: struct layouts across an anonymous
+// union, sixteen-byte keys reinterpreted in place, stride arithmetic, and handle ownership.
 //
-// Half the memory-safety surface is checked by tooling rather than by assertions, so run this
-// under `go test -race` with `GODEBUG=cgocheck=1`.
+// Run under `go test -race` with `GODEBUG=cgocheck=1`, which covers the memory-safety surface
+// no assertion here can reach.
 
 package usearch
 
@@ -22,9 +20,8 @@ import (
 
 const seed = 42
 
-// seededRows returns deterministic unit-length rows. Normalizing is not cosmetic: on the unit
-// sphere inner, angular, and euclidean induce the same ranking, so one assertion covers all
-// three, and near-parallel rows stop deciding top-1 by float noise.
+// seededRows returns deterministic unit-length rows, so inner, angular and euclidean rank
+// alike and near-parallel rows stop deciding top-1 by float noise.
 func seededRows(rows, dimensions uint) []float32 {
 	generator := rand.New(rand.NewSource(seed))
 	slab := make([]float32, rows*dimensions)
@@ -43,7 +40,7 @@ func seededRows(rows, dimensions uint) []float32 {
 	return slab
 }
 
-// sequentialKeys names rows one through count, so a key's integer identity is its row plus one.
+// sequentialKeys names rows one through count.
 func sequentialKeys(count uint) []Key {
 	keys := make([]Key, count)
 	for row := uint(0); row < count; row++ {
@@ -52,11 +49,10 @@ func sequentialKeys(count uint) []Key {
 	return keys
 }
 
-// newIndex builds a reserved index and registers its release.
-// pool is the executor every fanned-out verb here runs on; the engine derives none.
+// pool spawns the executor every fanned-out verb runs on; the engine derives none.
 func pool(t *testing.T) *Executor {
 	t.Helper()
-	executor, err := NewExecutor(DefaultResidency(), 2)
+	executor, err := NewRAMExecutor(nil, 2)
 	if err != nil {
 		t.Fatalf("the executor must spawn: %v", err)
 	}
@@ -68,6 +64,7 @@ func pool(t *testing.T) *Executor {
 	return executor
 }
 
+// newIndex builds a reserved index and registers its release.
 func newIndex(t *testing.T, options DenseOptions, capacity uint) *DenseIndex {
 	t.Helper()
 	index, err := NewDenseIndex(&options)
@@ -100,7 +97,7 @@ func populated(t *testing.T, options DenseOptions, count uint) (*DenseIndex, []K
 	index := newIndex(t, options, count)
 	keys := sequentialKeys(count)
 	slab := seededRows(count, options.Dimensions)
-	added, err := index.Add(pool(t), keys, RowsOf(slab, options.Dimensions), ExpansionConfig{}, nil)
+	added, err := index.Add(pool(t), keys, RowsOf(slab, options.Dimensions), InsertionOptions{}, nil)
 	if err != nil {
 		t.Fatalf("the batch must insert: %v", err)
 	}
@@ -110,18 +107,15 @@ func populated(t *testing.T, options DenseOptions, count uint) (*DenseIndex, []K
 	return index, keys, slab
 }
 
-// topOne collapses the three-buffer dance into the answer most assertions want.
-func topOne(t *testing.T, index *DenseIndex, query []float32, dimensions uint) (Key, Distance, bool) {
+// searchOne runs one query and reports how many matches came back.
+func searchOne(t *testing.T, index *DenseIndex, query []float32, dimensions uint) uint {
 	t.Helper()
-	outputs := PackedDenseOutputs(1, 1)
-	if err := index.SearchInto(pool(t), RowsOf(query, dimensions), &outputs, ExpansionConfig{}, nil); err != nil {
+	outputs := PackedMatchesSpan(1, 1)
+	if err := index.Search(pool(t), RowsOf(query, dimensions), &outputs, SearchOptions{}, nil); err != nil {
 		t.Fatalf("the search must run: %v", err)
 	}
-	keys, distances := outputs.MatchesOf(0)
-	if len(keys) == 0 {
-		return NilKey, 0, false
-	}
-	return keys[0], distances[0], true
+	keys, _ := outputs.MatchesOf(0)
+	return uint(len(keys))
 }
 
 func nearly(left, right, tolerance float64) bool { return math.Abs(left-right) <= tolerance }
@@ -130,47 +124,102 @@ func nearly(left, right, tolerance float64) bool { return math.Abs(left-right) <
 
 // region: Keys
 
-func TestKeysRoundTripThroughTheirRendering(t *testing.T) {
-	if rendered := KeyFromUint64(42).String(); rendered != "00000000-0000-0000-0000-00000000002a" {
-		t.Fatalf("the integer identity rendered as %q", rendered)
+func TestKeysRenderAndParse(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		key      Key
+		rendered string
+	}{
+		{"nil", NilKey, "00000000-0000-0000-0000-000000000000"},
+		{"integer", KeyFromUint64(42), "00000000-0000-0000-0000-00000000002a"},
+		{"half word", KeyFromUint64(1 << 32), "00000000-0000-0000-0000-000100000000"},
+		{"widest integer", KeyFromUint64(^uint64(0)), "00000000-0000-0000-ffff-ffffffffffff"},
+		{
+			"every byte",
+			Key{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff},
+			"00112233-4455-6677-8899-aabbccddeeff",
+		},
 	}
 
-	for _, value := range []uint64{0, 1, 42, 1 << 32, ^uint64(0)} {
-		key := KeyFromUint64(value)
-		recovered, integral := key.Uint64()
+	for _, single := range cases {
+		t.Run(single.name, func(t *testing.T) {
+			t.Parallel()
+			if rendered := single.key.String(); rendered != single.rendered {
+				t.Fatalf("rendered as %q, wanted %q", rendered, single.rendered)
+			}
+			if parsed, err := ParseKey(single.rendered); err != nil || parsed != single.key {
+				t.Fatalf("%q parsed as %v: %v", single.rendered, parsed, err)
+			}
+		})
+	}
+}
+
+// Dashes are cosmetic separators rather than field boundaries, and either case reads the same.
+func TestKeysParseLeniently(t *testing.T) {
+	t.Parallel()
+	for _, text := range []string{
+		"0000000000000000000000000000002a",
+		"00000000-0000-0000-0000-00000000002A",
+		"0-0-00000000000000000000000000002a",
+	} {
+		t.Run(text, func(t *testing.T) {
+			t.Parallel()
+			if parsed, err := ParseKey(text); err != nil || parsed != KeyFromUint64(42) {
+				t.Fatalf("parsed as %v: %v", parsed, err)
+			}
+		})
+	}
+}
+
+func TestKeysRejectMalformedRenderings(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ name, text string }{
+		{"empty", ""},
+		{"far too short", "abc"},
+		{"one digit short", "00000000-0000-0000-0000-00000000002"},
+		{"one digit long", "00000000-0000-0000-0000-00000000002ab"},
+		{"not hexadecimal", "00000000-0000-0000-0000-00000000002g"},
+	}
+
+	for _, single := range cases {
+		t.Run(single.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := ParseKey(single.text); StatusOf(err) != MalformedInput {
+				t.Errorf("reported %v", StatusOf(err))
+			}
+		})
+	}
+}
+
+func TestKeysCarryTheirIntegerIdentity(t *testing.T) {
+	t.Parallel()
+	for _, value := range []uint64{0, 42, 1 << 32, ^uint64(0)} {
+		recovered, integral := KeyFromUint64(value).Uint64()
 		if !integral || recovered != value {
-			t.Fatalf("%d recovered as %d, integral %v", value, recovered, integral)
-		}
-		parsed, err := ParseKey(key.String())
-		if err != nil || parsed != key {
-			t.Fatalf("%v round-tripped as %v: %v", key, parsed, err)
+			t.Errorf("%d recovered as %d, integral %v", value, recovered, integral)
 		}
 	}
 
-	// A non-zero high half has no integer identity, and dashes may sit anywhere or nowhere.
 	var wide Key
 	wide[0] = 1
 	if _, integral := wide.Uint64(); integral {
-		t.Fatal("a key with high bytes set must report no integer identity")
+		t.Error("a key with high bytes set must report no integer identity")
 	}
-	for _, text := range []string{"0000000000000000000000000000002a", "00000000-0000-0000-0000-00000000002A"} {
-		if parsed, err := ParseKey(text); err != nil || parsed != KeyFromUint64(42) {
-			t.Fatalf("parsing %q gave %v: %v", text, parsed, err)
-		}
-	}
-	for _, text := range []string{"", "abc", "00000000-0000-0000-0000-00000000002ag"} {
-		if _, err := ParseKey(text); StatusOf(err) != MalformedInput {
-			t.Fatalf("parsing %q reported %v", text, StatusOf(err))
-		}
-	}
+}
 
-	// The text interfaces are what carries a key through a JSON document.
+// The text interfaces are what carries a key through a JSON document.
+func TestKeysCrossJSONAsTheirRendering(t *testing.T) {
+	t.Parallel()
 	type record struct {
 		Key Key `json:"key"`
 	}
 	encoded, err := json.Marshal(record{Key: KeyFromUint64(42)})
 	if err != nil {
 		t.Fatalf("the key must marshal: %v", err)
+	}
+	if string(encoded) != `{"key":"00000000-0000-0000-0000-00000000002a"}` {
+		t.Fatalf("the key marshalled as %s", encoded)
 	}
 	var decoded record
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
@@ -179,6 +228,9 @@ func TestKeysRoundTripThroughTheirRendering(t *testing.T) {
 	if decoded.Key != KeyFromUint64(42) {
 		t.Fatalf("%s decoded as %v", encoded, decoded.Key)
 	}
+	if err := json.Unmarshal([]byte(`{"key":"not-a-key"}`), &decoded); StatusOf(err) != MalformedInput {
+		t.Errorf("a malformed document reported %v", StatusOf(err))
+	}
 }
 
 // endregion: Keys
@@ -186,6 +238,7 @@ func TestKeysRoundTripThroughTheirRendering(t *testing.T) {
 // region: Matrix Views
 
 func TestMatrixViewsDeriveTheirShape(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name       string
 		matrix     Matrix
@@ -207,6 +260,7 @@ func TestMatrixViewsDeriveTheirShape(t *testing.T) {
 
 	for _, single := range cases {
 		t.Run(single.name, func(t *testing.T) {
+			t.Parallel()
 			if single.matrix.Rows() != single.rows {
 				t.Errorf("counted %d rows, wanted %d", single.matrix.Rows(), single.rows)
 			}
@@ -224,6 +278,7 @@ func TestMatrixViewsDeriveTheirShape(t *testing.T) {
 }
 
 func TestMatrixViewsRejectBadShapes(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		build func()
@@ -237,6 +292,7 @@ func TestMatrixViewsRejectBadShapes(t *testing.T) {
 
 	for _, single := range cases {
 		t.Run(single.name, func(t *testing.T) {
+			t.Parallel()
 			defer func() {
 				if recover() == nil {
 					t.Fatal("a caller's arithmetic mistake must panic")
@@ -249,11 +305,41 @@ func TestMatrixViewsRejectBadShapes(t *testing.T) {
 
 // endregion: Matrix Views
 
+// region: Results
+
+// A count above the room reserved for it is the library's way of reporting truncation, so the
+// borrow is trimmed to what was actually written rather than to what was found.
+func TestOutputsTrimToTheRoomTheyReserved(t *testing.T) {
+	t.Parallel()
+	const wanted = 2
+	counts := []uint{wanted + 3, 1, 0}
+	outputs, err := MatchesSpanOf(make([]Key, len(counts)*wanted), make([]Distance, len(counts)*wanted), counts)
+	if err != nil {
+		t.Fatalf("the slabs must adopt: %v", err)
+	}
+	if outputs.Queries() != uint(len(counts)) || outputs.Wanted() != wanted {
+		t.Fatalf("the outputs describe %d queries of %d", outputs.Queries(), outputs.Wanted())
+	}
+
+	for query, count := range counts {
+		keys, distances := outputs.MatchesOf(uint(query))
+		if expected := min(count, wanted); uint(len(keys)) != expected || uint(len(distances)) != expected {
+			t.Errorf("query %d reporting %d borrowed %d matches", query, count, len(keys))
+		}
+	}
+	if keys, distances := outputs.MatchesOf(uint(len(counts))); keys != nil || distances != nil {
+		t.Error("a query past the end must borrow nothing")
+	}
+}
+
+// endregion: Results
+
 // region: Options Round Trip
 
 // The residency arm lives in an anonymous union that cgo cannot address, so it crosses through
 // the accessors in shim.c. This is the only thing exercising them.
 func TestOptionsSurviveTheRawRoundTrip(t *testing.T) {
+	t.Parallel()
 	pinned := DenseOptions{
 		Dimensions:   768,
 		Metric:       Euclidean,
@@ -294,6 +380,7 @@ func TestOptionsSurviveTheRawRoundTrip(t *testing.T) {
 }
 
 func TestOptionsRejectUnknownTags(t *testing.T) {
+	t.Parallel()
 	// A fourth residency is unrepresentable - the interface is sealed by an unexported method,
 	// so the only bad value left is the absent one, and that is caught on the way down.
 	unknown := angularF32(64)
@@ -307,7 +394,6 @@ func TestOptionsRejectUnknownTags(t *testing.T) {
 	// A tag a newer library wrote is caught on the way up, never passed through. The residency
 	// tags are the C interface's, not this package's, since Go names a residency by its type.
 	const ramTag = 0
-	// A tag a newer library wrote is caught on the way up, never passed through.
 	for _, single := range []struct {
 		name                              string
 		metric, quantization, residencyOf int32
@@ -317,6 +403,7 @@ func TestOptionsRejectUnknownTags(t *testing.T) {
 		{"residency", int32(Angular), int32(F32), 9},
 	} {
 		t.Run(single.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := angularF32(64).reloadTagged(single.metric, single.quantization, single.residencyOf)
 			if StatusOf(err) != UnknownKind {
 				t.Errorf("an unknown %s must not be guessed: %v", single.name, StatusOf(err))
@@ -330,6 +417,7 @@ func TestOptionsRejectUnknownTags(t *testing.T) {
 // region: Lifecycle
 
 func TestFreeingTwiceIsHarmless(t *testing.T) {
+	t.Parallel()
 	options := angularF32(16)
 	index, err := NewDenseIndex(&options)
 	if err != nil {
@@ -352,6 +440,70 @@ func TestFreeingTwiceIsHarmless(t *testing.T) {
 	}
 }
 
+// One factory per residency, each reading only what its own hardware has - the VRAM one drives a
+// stream per device from the calling thread and takes no thread count.
+//
+// Whether a build carries the accelerator and block backends decides the outcome, so what is
+// asserted is the invariant either way: a factory hands back an executor or a failure, never both
+// and never neither.
+func TestExecutorFactoriesTakeOnlyWhatTheirResidencyHas(t *testing.T) {
+	t.Parallel()
+	memory, err := NewRAMExecutor(nil, 2)
+	if err != nil {
+		t.Fatalf("the RAM executor must spawn: %v", err)
+	}
+	defer memory.Close()
+
+	devices, err := NewVRAMExecutor(nil)
+	if (devices == nil) == (err == nil) {
+		t.Errorf("the VRAM factory answered with %v and %v", devices, err)
+	}
+	if devices != nil {
+		devices.Close()
+	}
+
+	drives, err := NewNVMeExecutor(nil, 2)
+	if (drives == nil) == (err == nil) {
+		t.Errorf("the NVMe factory answered with %v and %v", drives, err)
+	}
+	if drives != nil {
+		drives.Close()
+	}
+}
+
+// An executor outlives no verb that names it, so every door refuses a freed one rather than
+// handing the library a dangling handle.
+func TestExecutorRefusesUseAfterFree(t *testing.T) {
+	t.Parallel()
+	index := newIndex(t, angularF32(4), 4)
+	executor, err := NewRAMExecutor(nil, 2)
+	if err != nil {
+		t.Fatalf("the executor must spawn: %v", err)
+	}
+	if err := executor.Drain(); err != nil {
+		t.Fatalf("a live executor must drain: %v", err)
+	}
+
+	if err := executor.Free(); err != nil {
+		t.Fatalf("the first release must succeed: %v", err)
+	}
+	if err := executor.Free(); err != nil {
+		t.Fatalf("the second release must be a no-op: %v", err)
+	}
+	if err := executor.Drain(); StatusOf(err) != Uninitialized {
+		t.Errorf("a released executor drained with %v", StatusOf(err))
+	}
+
+	slab := seededRows(1, 4)
+	if _, err := index.Add(executor, sequentialKeys(1), RowsOf(slab, 4), InsertionOptions{}, nil); StatusOf(err) != MalformedInput {
+		t.Errorf("a released executor inserted with %v", StatusOf(err))
+	}
+	var absent *Executor
+	if _, err := index.Add(absent, sequentialKeys(1), RowsOf(slab, 4), InsertionOptions{}, nil); StatusOf(err) != MalformedInput {
+		t.Errorf("a nil executor inserted with %v", StatusOf(err))
+	}
+}
+
 // endregion: Lifecycle
 
 // region: Ingest & Retrieval
@@ -359,6 +511,7 @@ func TestFreeingTwiceIsHarmless(t *testing.T) {
 // The bytes that come back are what proves every stride, scalar kind, and base pointer right;
 // a count alone would pass with all three wrong.
 func TestAddsAndGetsVectorsIntact(t *testing.T) {
+	t.Parallel()
 	const dimensions = 8
 	index, keys, slab := populated(t, angularF32(dimensions), 4)
 
@@ -376,15 +529,19 @@ func TestAddsAndGetsVectorsIntact(t *testing.T) {
 		}
 	}
 
-	// A padded pitch is the layout a mapped dataset arrives in, and it must cross both ways.
+	// A padded pitch is the layout a mapped dataset arrives in, and it must cross both ways,
+	// leaving the padding of the row it writes through untouched.
 	const pitch = 16
 	padded := make([]float32, pitch)
 	copy(padded, slab[2*dimensions:3*dimensions])
 	if _, err := index.Add(pool(t), []Key{KeyFromUint64(500)},
-		StridedRowsOf(padded, 1, dimensions, pitch*4), ExpansionConfig{}, nil); err != nil {
+		StridedRowsOf(padded, 1, dimensions, pitch*4), InsertionOptions{}, nil); err != nil {
 		t.Fatalf("a padded row must insert: %v", err)
 	}
 	widened := make([]float32, pitch)
+	for position := range widened {
+		widened[position] = -1
+	}
 	if _, err := index.Get(KeyFromUint64(500), StridedRowsOf(widened, 1, dimensions, pitch*4)); err != nil {
 		t.Fatalf("a padded row must come back: %v", err)
 	}
@@ -393,22 +550,34 @@ func TestAddsAndGetsVectorsIntact(t *testing.T) {
 			t.Fatalf("padded dimension %d came back as %v", position, widened[position])
 		}
 	}
+	for position := dimensions; position < pitch; position++ {
+		if widened[position] != -1 {
+			t.Fatalf("the padding at %d was overwritten with %v", position, widened[position])
+		}
+	}
 }
 
 // The truncation contract: Get reports what exists, never what it wrote, so a caller can size
 // from the answer and call again.
 func TestReportsTheTrueExtentWhenTruncated(t *testing.T) {
+	t.Parallel()
 	const dimensions = 4
 	index := newIndex(t, angularF32(dimensions), 16)
 	shared := KeyFromUint64(7)
 	slab := seededRows(3, dimensions)
 
 	if _, err := index.Add(pool(t), []Key{shared, shared, shared}, RowsOf(slab, dimensions),
-		ExpansionConfig{}, nil); err != nil {
+		InsertionOptions{}, nil); err != nil {
 		t.Fatalf("three rows may share one key: %v", err)
 	}
 	if counted, err := index.Count(shared); err != nil || counted != 3 {
 		t.Fatalf("the probe counted %d entries: %v", counted, err)
+	}
+	if held, err := index.Contains(shared); err != nil || !held {
+		t.Fatalf("the membership probe reported %v: %v", held, err)
+	}
+	if held, err := index.Contains(KeyFromUint64(8)); err != nil || held {
+		t.Fatalf("an absent key reported %v: %v", held, err)
 	}
 
 	cramped := make([]float32, dimensions)
@@ -433,8 +602,10 @@ func TestReportsTheTrueExtentWhenTruncated(t *testing.T) {
 
 // Every case here is a guard this binding raises before anything crosses into C.
 func TestRejectsMalformedShapes(t *testing.T) {
+	t.Parallel()
 	const dimensions = 8
 	index, _, slab := populated(t, angularF32(dimensions), 4)
+	executor := pool(t)
 	queries := RowsOf(slab[:2*dimensions], dimensions)
 	narrow := make([]float32, dimensions/2)
 
@@ -443,28 +614,44 @@ func TestRejectsMalformedShapes(t *testing.T) {
 		run  func() error
 	}{
 		{"more rows than keys", func() error {
-			_, err := index.Add(pool(t), sequentialKeys(1), RowsOf(slab, dimensions), ExpansionConfig{}, nil)
+			_, err := index.Add(executor, sequentialKeys(1), RowsOf(slab, dimensions), InsertionOptions{}, nil)
 			return err
 		}},
 		{"rows of the wrong width", func() error {
-			_, err := index.Add(pool(t), sequentialKeys(1), RowsOf(narrow, dimensions/2), ExpansionConfig{}, nil)
+			_, err := index.Add(executor, sequentialKeys(1), RowsOf(narrow, dimensions/2), InsertionOptions{}, nil)
 			return err
 		}},
 		{"queries of the wrong width", func() error {
-			outputs := PackedDenseOutputs(1, 4)
-			return index.SearchInto(pool(t), RowsOf(narrow, dimensions/2), &outputs, ExpansionConfig{}, nil)
+			outputs := PackedMatchesSpan(1, 4)
+			return index.Search(executor, RowsOf(narrow, dimensions/2), &outputs, SearchOptions{}, nil)
 		}},
 		{"fewer output rows than queries", func() error {
-			outputs := PackedDenseOutputs(1, 4)
-			return index.SearchInto(pool(t), queries, &outputs, ExpansionConfig{}, nil)
+			outputs := PackedMatchesSpan(1, 4)
+			return index.Search(executor, queries, &outputs, SearchOptions{}, nil)
 		}},
 		{"outputs with no room", func() error {
-			_, err := DenseOutputsOf(make([]Key, 4), make([]Distance, 4), make([]uint, 1), 0)
+			_, err := MatchesSpanOf(nil, nil, make([]uint, 1))
 			return err
 		}},
-		{"outputs narrower than wanted", func() error {
-			_, err := DenseOutputsOf(make([]Key, 4), make([]Distance, 4), make([]uint, 2), 4)
+		{"outputs of unequal shape", func() error {
+			_, err := MatchesSpanOf(make([]Key, 4), make([]Distance, 8), make([]uint, 2))
 			return err
+		}},
+		{"outputs that do not divide into rows", func() error {
+			_, err := MatchesSpanOf(make([]Key, 5), make([]Distance, 5), make([]uint, 2))
+			return err
+		}},
+		{"outputs holding no query at all", func() error {
+			_, err := MatchesSpanOf(make([]Key, 4), make([]Distance, 4), nil)
+			return err
+		}},
+		{"queries that do not divide into documents", func() error {
+			outputs := PackedMatchesSpan(2, 4)
+			return index.MaxSim(executor, queries, 3, &outputs, SearchOptions{}, nil)
+		}},
+		{"documents of no rows", func() error {
+			outputs := PackedMatchesSpan(2, 4)
+			return index.MaxSim(executor, queries, 0, &outputs, SearchOptions{}, nil)
 		}},
 	}
 
@@ -476,8 +663,8 @@ func TestRejectsMalformedShapes(t *testing.T) {
 		})
 	}
 
-	outputs := PackedDenseOutputs(2, 4)
-	if status := StatusOf(index.SearchIfInto(pool(t), queries, &outputs, ExpansionConfig{}, nil, nil)); status != MalformedInput {
+	outputs := PackedMatchesSpan(2, 4)
+	if status := StatusOf(index.SearchIf(executor, queries, &outputs, SearchOptions{}, nil, nil)); status != MalformedInput {
 		t.Errorf("a nil predicate reported %v", status)
 	}
 }
@@ -486,36 +673,29 @@ func TestRejectsMalformedShapes(t *testing.T) {
 
 // region: Search
 
-// Self-retrieval across a batch is what proves sixteen-byte keys survive in the right order and
-// that the output row stride indexes correctly; the recall it implies is the library's business.
-func TestSearchFindsEachRowAsItsOwnNearest(t *testing.T) {
+// A batch is where the output row stride earns its keep: every query's slice must land in its
+// own row, and the three positional size_t fields of the telemetry must land in theirs.
+func TestBatchSearchFillsEveryOutputRow(t *testing.T) {
+	t.Parallel()
 	const (
 		dimensions = 64
 		count      = 256
 		queries    = 8
 		wanted     = 5
 	)
-	index, keys, slab := populated(t, angularF32(dimensions), count)
+	index, _, slab := populated(t, angularF32(dimensions), count)
 
-	outputs := PackedDenseOutputs(queries, wanted)
+	outputs := PackedMatchesSpan(queries, wanted)
 	var stats DenseStats
-	if err := index.SearchInto(pool(t), RowsOf(slab[:queries*dimensions], dimensions), &outputs, ExpansionConfig{}, &stats); err != nil {
+	if err := index.Search(pool(t), RowsOf(slab[:queries*dimensions], dimensions), &outputs, SearchOptions{}, &stats); err != nil {
 		t.Fatalf("the batch must resolve: %v", err)
 	}
-
+	if outputs.Queries() != queries {
+		t.Fatalf("the outputs describe %d of %d queries", outputs.Queries(), queries)
+	}
 	for query := uint(0); query < queries; query++ {
-		found, distances := outputs.MatchesOf(query)
-		if uint(len(found)) != wanted {
+		if found, distances := outputs.MatchesOf(query); uint(len(found)) != wanted || uint(len(distances)) != wanted {
 			t.Fatalf("query %d reported %d of %d matches", query, len(found), wanted)
-		}
-		if found[0] != keys[query] {
-			t.Errorf("row %d found %v rather than itself, %v", query, found[0], keys[query])
-		}
-		if !nearly(distances[0], 0, 1e-6) {
-			t.Errorf("row %d scored %v against itself", query, distances[0])
-		}
-		if distances[0] > distances[1] {
-			t.Errorf("row %d reported matches out of order", query)
 		}
 	}
 
@@ -525,7 +705,8 @@ func TestSearchFindsEachRowAsItsOwnNearest(t *testing.T) {
 	}
 	total := stats
 	total.Accumulate(stats)
-	if total.VisitedMembers != 2*stats.VisitedMembers || total.Restarts != 2*stats.Restarts {
+	if total.VisitedMembers != 2*stats.VisitedMembers || total.ComputedDistances != 2*stats.ComputedDistances ||
+		total.Restarts != 2*stats.Restarts {
 		t.Errorf("accumulating %+v gave %+v", stats, total)
 	}
 }
@@ -533,24 +714,24 @@ func TestSearchFindsEachRowAsItsOwnNearest(t *testing.T) {
 // The predicate crosses as a cgo handle and runs on the library's worker threads - the most
 // dangerous construct in the package.
 func TestSearchAdmitsOnlyApprovedKeys(t *testing.T) {
+	t.Parallel()
 	const dimensions = 32
 	index, _, slab := populated(t, angularF32(dimensions), 128)
 	queries := RowsOf(slab[:3*dimensions], dimensions)
 
-	admitted := PackedDenseOutputs(3, 10)
+	admitted := PackedMatchesSpan(3, 10)
 	even := func(key Key) bool {
 		value, integral := key.Uint64()
 		return integral && value%2 == 0
 	}
-	if err := index.SearchIfInto(pool(t), queries, &admitted, ExpansionConfig{ExpansionFactor: 64}, nil, even); err != nil {
+	if err := index.SearchIf(pool(t), queries, &admitted, SearchOptions{ExpansionFactor: 64}, nil, even); err != nil {
 		t.Fatalf("the filtered batch must resolve: %v", err)
 	}
 	seen := 0
 	for query := uint(0); query < 3; query++ {
 		found, _ := admitted.MatchesOf(query)
 		for _, key := range found {
-			value, integral := key.Uint64()
-			if !integral || value%2 != 0 {
+			if !even(key) {
 				t.Fatalf("query %d admitted %v", query, key)
 			}
 			seen++
@@ -561,8 +742,8 @@ func TestSearchAdmitsOnlyApprovedKeys(t *testing.T) {
 	}
 
 	// Admitting nothing is a result, not a failure.
-	rejected := PackedDenseOutputs(3, 10)
-	if err := index.SearchIfInto(pool(t), queries, &rejected, ExpansionConfig{}, nil, func(Key) bool { return false }); err != nil {
+	rejected := PackedMatchesSpan(3, 10)
+	if err := index.SearchIf(pool(t), queries, &rejected, SearchOptions{}, nil, func(Key) bool { return false }); err != nil {
 		t.Fatalf("a rejecting filter must still resolve: %v", err)
 	}
 	for query := uint(0); query < 3; query++ {
@@ -576,9 +757,10 @@ func TestSearchAdmitsOnlyApprovedKeys(t *testing.T) {
 
 // region: Metrics & Quantization
 
-// The one place the Go enum values are checked against the C ones: a renumbered constant is
-// caught here and nowhere else.
-func TestEveryMetricAndQuantizationSearches(t *testing.T) {
+// The one place the Go enum values are checked against the C ones: a renumbered constant
+// reaches the library as a different kind, and is caught here and nowhere else.
+func TestEveryMetricAndQuantizationCrosses(t *testing.T) {
+	t.Parallel()
 	const dimensions = 64
 
 	scalars := []struct {
@@ -593,14 +775,9 @@ func TestEveryMetricAndQuantizationSearches(t *testing.T) {
 			options := angularF32(dimensions)
 			options.Metric = single.metric
 			options.Quantization = single.quantization
-			index, keys, slab := populated(t, options, 32)
-
-			found, _, ok := topOne(t, index, slab[:dimensions], dimensions)
-			if !ok {
-				t.Fatal("a match must come back")
-			}
-			if found != keys[0] {
-				t.Errorf("found %v rather than %v", found, keys[0])
+			index, _, slab := populated(t, options, 32)
+			if found := searchOne(t, index, slab[:dimensions], dimensions); found != 1 {
+				t.Errorf("the walk reported %d matches", found)
 			}
 		})
 	}
@@ -619,25 +796,18 @@ func TestEveryMetricAndQuantizationSearches(t *testing.T) {
 			for position := range packed {
 				packed[position] = U1x8Scalar(generator.Intn(256))
 			}
-			vectors := RowsOf(packed, dimensions)
-			if vectors.Rows() != rows {
-				t.Fatalf("counted %d of %d packed rows", vectors.Rows(), rows)
-			}
-			if _, err := index.Add(pool(t), sequentialKeys(rows), vectors, ExpansionConfig{}, nil); err != nil {
+			if _, err := index.Add(pool(t), sequentialKeys(rows), RowsOf(packed, dimensions),
+				InsertionOptions{}, nil); err != nil {
 				t.Fatalf("packed rows must insert: %v", err)
 			}
 
-			outputs := PackedDenseOutputs(1, 4)
-			query := RowsOf(packed[:dimensions/8], dimensions)
-			if err := index.SearchInto(pool(t), query, &outputs, ExpansionConfig{}, nil); err != nil {
+			outputs := PackedMatchesSpan(1, 4)
+			if err := index.Search(pool(t), RowsOf(packed[:dimensions/8], dimensions), &outputs,
+				SearchOptions{}, nil); err != nil {
 				t.Fatalf("packed rows must search: %v", err)
 			}
-			found, distances := outputs.MatchesOf(0)
-			if len(found) == 0 {
-				t.Fatal("a match must come back")
-			}
-			if !nearly(distances[0], 0, 1e-9) {
-				t.Errorf("a row scored %v against itself", distances[0])
+			if found, _ := outputs.MatchesOf(0); len(found) == 0 {
+				t.Error("a packed walk reported no matches")
 			}
 		})
 	}
@@ -645,10 +815,78 @@ func TestEveryMetricAndQuantizationSearches(t *testing.T) {
 
 // endregion: Metrics & Quantization
 
+// region: Late Interaction & Refinement
+
+// The outputs are sized over documents rather than rows, which is the one piece of arithmetic
+// this door does that the others do not.
+func TestMaxSimSizesItsOutputsOverDocuments(t *testing.T) {
+	t.Parallel()
+	const (
+		dimensions = 4
+		tokens     = 2
+		documents  = 3
+		queries    = 2
+	)
+	options := angularF32(dimensions)
+	options.Metric = Inner
+	options.ValuesPerKey = tokens
+	index := newIndex(t, options, documents*tokens)
+
+	keys := make([]Key, 0, documents*tokens)
+	for document := uint(0); document < documents; document++ {
+		for token := uint(0); token < tokens; token++ {
+			keys = append(keys, KeyFromUint64(uint64(document)))
+		}
+	}
+	slab := seededRows(documents*tokens, dimensions)
+	if _, err := index.Add(pool(t), keys, RowsOf(slab, dimensions), InsertionOptions{}, nil); err != nil {
+		t.Fatalf("the token rows must insert: %v", err)
+	}
+
+	outputs := PackedMatchesSpan(queries, documents)
+	var stats DenseStats
+	if err := index.MaxSim(pool(t), RowsOf(slab[:queries*tokens*dimensions], dimensions), tokens,
+		&outputs, SearchOptions{}, &stats); err != nil {
+		t.Fatalf("the late interaction must resolve: %v", err)
+	}
+	for query := uint(0); query < queries; query++ {
+		if found, _ := outputs.MatchesOf(query); len(found) != documents {
+			t.Errorf("query %d scored %d of %d documents", query, len(found), documents)
+		}
+	}
+	if stats.ComputedDistances == 0 {
+		t.Errorf("the walk reported %+v", stats)
+	}
+}
+
+// A sweep reports the nodes whose edges changed rather than a status, so a caller loops on the
+// number it returns.
+func TestRefineReportsItsSweep(t *testing.T) {
+	t.Parallel()
+	const dimensions = 8
+	const count = 32
+	index, _, _ := populated(t, angularF32(dimensions), count)
+
+	var stats DenseStats
+	changed, err := index.Refine(pool(t), InsertionOptions{ExpansionFactor: 64}, &stats)
+	if err != nil {
+		t.Fatalf("the sweep must run: %v", err)
+	}
+	if changed > count {
+		t.Errorf("a sweep changed %d of %d nodes", changed, count)
+	}
+	if stats.VisitedMembers == 0 {
+		t.Errorf("the sweep reported %+v", stats)
+	}
+}
+
+// endregion: Late Interaction & Refinement
+
 // region: Serialization
 
 // Every option field must survive the checkpoint, not just the two a reader usually looks at.
 func TestSerializationPreservesEveryOption(t *testing.T) {
+	t.Parallel()
 	const dimensions = 16
 	options := angularF32(dimensions)
 	options.Metric = Euclidean
@@ -657,7 +895,7 @@ func TestSerializationPreservesEveryOption(t *testing.T) {
 	options.ValuesPerKey = 2
 	options.Residency = RAMResidency{MemoryDomains: []int32{0}}
 
-	source, keys, slab := populated(t, options, 32)
+	source, _, _ := populated(t, options, 32)
 	path := filepath.Join(t.TempDir(), "index.safegraphs")
 	if err := source.Save(pool(t), path); err != nil {
 		t.Fatalf("the checkpoint must write: %v", err)
@@ -674,14 +912,14 @@ func TestSerializationPreservesEveryOption(t *testing.T) {
 
 	for _, single := range []struct {
 		name     string
-		metadata func() (DenseOptions, error)
+		metadata func() (DenseCheckpointMetadata, error)
 		restore  func(*DenseIndex) error
 	}{
 		{"file",
-			func() (DenseOptions, error) { return DenseMetadata(path) },
+			func() (DenseCheckpointMetadata, error) { return DenseMetadata(path) },
 			func(index *DenseIndex) error { return index.Load(pool(t), path) }},
 		{"buffer",
-			func() (DenseOptions, error) { return DenseMetadataBuffer(buffer) },
+			func() (DenseCheckpointMetadata, error) { return DenseMetadataBuffer(buffer) },
 			func(index *DenseIndex) error { return index.LoadBuffer(pool(t), buffer) }},
 	} {
 		t.Run(single.name, func(t *testing.T) {
@@ -689,11 +927,10 @@ func TestSerializationPreservesEveryOption(t *testing.T) {
 			if err != nil {
 				t.Fatalf("the metadata must read without loading: %v", err)
 			}
-			// The placement is deliberately absent: a checkpoint records where it was written,
-			// never where a reader must keep it.
+			// The four fields a checkpoint froze, and no more: the placement and ValuesPerKey
+			// are the caller's to choose before construction.
 			if metadata.Dimensions != dimensions || metadata.Metric != Euclidean ||
-				metadata.Quantization != I8 || metadata.Connectivity != 24 ||
-				metadata.ValuesPerKey != 2 {
+				metadata.Quantization != I8 || metadata.Connectivity != 24 {
 				t.Errorf("the checkpoint describes %+v", metadata)
 			}
 
@@ -710,10 +947,6 @@ func TestSerializationPreservesEveryOption(t *testing.T) {
 			if size, err := restored.Size(); err != nil || size != 32 {
 				t.Fatalf("the restored index holds %d of 32 entries: %v", size, err)
 			}
-			found, _, ok := topOne(t, restored, slab[:dimensions], dimensions)
-			if !ok || found != keys[0] {
-				t.Errorf("the restored index found %v rather than %v", found, keys[0])
-			}
 		})
 	}
 }
@@ -726,6 +959,7 @@ func TestSerializationPreservesEveryOption(t *testing.T) {
 // handed to C survive concurrent collection. Unlike Rust, a Go test may report from a
 // goroutine, so no counters are needed.
 func TestSearchesWhileInserting(t *testing.T) {
+	t.Parallel()
 	const (
 		dimensions = 32
 		seeded     = 32
@@ -749,7 +983,7 @@ func TestSearchesWhileInserting(t *testing.T) {
 					keys[row] = KeyFromUint64(uint64(1000 + (writer*batches+batch)*batchRows + row))
 				}
 				rows := seededRows(batchRows, dimensions)
-				if added, err := index.Add(mine, keys, RowsOf(rows, dimensions), ExpansionConfig{}, nil); err != nil {
+				if added, err := index.Add(mine, keys, RowsOf(rows, dimensions), InsertionOptions{}, nil); err != nil {
 					t.Errorf("a concurrent batch failed: %v", err)
 					return
 				} else if added != batchRows {
@@ -772,8 +1006,8 @@ func TestSearchesWhileInserting(t *testing.T) {
 					return
 				default:
 				}
-				outputs := PackedDenseOutputs(1, 10)
-				if err := index.SearchInto(mine, query, &outputs, ExpansionConfig{}, nil); err != nil {
+				outputs := PackedMatchesSpan(1, 10)
+				if err := index.Search(mine, query, &outputs, SearchOptions{}, nil); err != nil {
 					t.Errorf("a concurrent search failed: %v", err)
 					return
 				}

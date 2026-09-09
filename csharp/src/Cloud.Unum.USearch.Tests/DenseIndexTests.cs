@@ -11,7 +11,7 @@ public sealed class DenseIndexTests : IDisposable
 {
     private const int Dimensions = 4;
 
-    private readonly Executor _pool = new(ResidencyKind.Ram, threads: 1);
+    private readonly Executor _pool = Executor.ForRam(threads: 1);
 
     /// <summary>Releases the executor every test in this class fans out over.</summary>
     public void Dispose() => this._pool.Dispose();
@@ -87,9 +87,9 @@ public sealed class DenseIndexTests : IDisposable
         Assert.True(index.Contains(wide));
         Assert.False(index.Contains(USearchKey.FromUInt64(1)));
 
-        SearchResults found = SearchResults.Packed(queries: 1, wanted: 1);
+        MatchesSpan found = MatchesSpan.Packed(queries: 1, wanted: 1);
         index.Search(this._pool, Matrix.RowsOf<float>(RowOf(1f), Dimensions), found);
-        Assert.Equal(wide, found.KeysOf(0)[0]);
+        Assert.Equal(wide, found[0].Keys[0]);
     }
 
     #endregion Keys
@@ -107,6 +107,22 @@ public sealed class DenseIndexTests : IDisposable
         Assert.Equal(0, Marshal.OffsetOf<NativeResidencyOptions>(nameof(NativeResidencyOptions.Ram)).ToInt32());
         Assert.Equal(0, Marshal.OffsetOf<NativeResidencyOptions>(nameof(NativeResidencyOptions.Vram)).ToInt32());
         Assert.Equal(0, Marshal.OffsetOf<NativeResidencyOptions>(nameof(NativeResidencyOptions.Nvme)).ToInt32());
+    }
+
+    [Fact]
+    public void MetadataIsLaidOutAsTheCheckpointHeaderSpellsIt()
+    {
+        Assert.Equal(0, Marshal.OffsetOf<NativeDenseMetadata>(nameof(NativeDenseMetadata.Metric)).ToInt32());
+        Assert.Equal(
+            sizeof(int),
+            Marshal.OffsetOf<NativeDenseMetadata>(nameof(NativeDenseMetadata.Quantization)).ToInt32());
+        Assert.Equal(
+            2 * sizeof(int),
+            Marshal.OffsetOf<NativeDenseMetadata>(nameof(NativeDenseMetadata.Dimensions)).ToInt32());
+        Assert.Equal(
+            (2 * sizeof(int)) + IntPtr.Size,
+            Marshal.OffsetOf<NativeDenseMetadata>(nameof(NativeDenseMetadata.Connectivity)).ToInt32());
+        Assert.Equal((2 * sizeof(int)) + (2 * IntPtr.Size), Marshal.SizeOf<NativeDenseMetadata>());
     }
 
     [Fact]
@@ -176,7 +192,7 @@ public sealed class DenseIndexTests : IDisposable
     [Fact]
     public void ExecutorsDrainAndRefuseEveryVerbOnceDisposed()
     {
-        Executor pool = new(ResidencyKind.Ram, threads: 1);
+        Executor pool = Executor.ForRam(threads: 1);
         pool.Drain();
         pool.Dispose();
         pool.Dispose();
@@ -191,11 +207,10 @@ public sealed class DenseIndexTests : IDisposable
     }
 
     [Fact]
-    public void UnknownResidenciesSpawnNoExecutor()
+    public void RamExecutorsNameTheirMemoryDomains()
     {
-        Assert.Equal(
-            Status.UnknownKind,
-            Assert.Throws<USearchException>(() => new Executor((ResidencyKind)7)).Status);
+        using Executor pool = Executor.ForRam([0], threads: 1);
+        pool.Drain();
     }
 
     #endregion Executors
@@ -254,9 +269,9 @@ public sealed class DenseIndexTests : IDisposable
             padded, rows: 2, dimensions: Dimensions, strideBytes: 6 * sizeof(float), ScalarKind.F32);
         Assert.Equal(2UL, index.Add(this._pool, [1UL, 2UL], rows));
 
-        SearchResults found = SearchResults.Packed(queries: 1, wanted: 1);
+        MatchesSpan found = MatchesSpan.Packed(queries: 1, wanted: 1);
         index.Search(this._pool, Matrix.RowsOf<float>(RowOf(20f), Dimensions), found);
-        Assert.Equal(USearchKey.FromUInt64(2), found.KeysOf(0)[0]);
+        Assert.Equal(USearchKey.FromUInt64(2), found[0].Keys[0]);
     }
 
     [Fact]
@@ -298,7 +313,7 @@ public sealed class DenseIndexTests : IDisposable
                 () => index.Search(
                     this._pool,
                     Matrix.RowsOf<float>(RowOf(1f), Dimensions),
-                    SearchResults.Packed(1, 1))).Status);
+                    MatchesSpan.Packed(1, 1))).Status);
     }
 
     [Fact]
@@ -314,7 +329,7 @@ public sealed class DenseIndexTests : IDisposable
             Status.ShapeMismatch,
             Assert.Throws<USearchException>(
                 () => index.Search(
-                    this._pool, Matrix.RowsOf<float>([1f, 2f, 3f], 3), SearchResults.Packed(1, 1))).Status);
+                    this._pool, Matrix.RowsOf<float>([1f, 2f, 3f], 3), MatchesSpan.Packed(1, 1))).Status);
     }
 
     [Fact]
@@ -352,7 +367,7 @@ public sealed class DenseIndexTests : IDisposable
                 () => Extents.CheckedRowMajor(1, ulong.MaxValue / 8, 16, "probe")).Status);
         Assert.Equal(
             Status.Overflow,
-            Assert.Throws<USearchException>(() => SearchResults.Packed(2, int.MaxValue)).Status);
+            Assert.Throws<USearchException>(() => MatchesSpan.Packed(2, int.MaxValue)).Status);
     }
 
     #endregion Geometry
@@ -370,16 +385,16 @@ public sealed class DenseIndexTests : IDisposable
         Assert.Equal(3UL, index.Size());
 
         float[] queries = [.. RowOf(30f), .. RowOf(10f)];
-        SearchResults found = SearchResults.Packed(queries: 2, wanted: 2);
+        MatchesSpan found = MatchesSpan.Packed(queries: 2, wanted: 2);
         index.Search(this._pool, Matrix.RowsOf<float>(queries, Dimensions), found);
 
         Assert.Equal(2, found.Queries);
-        Assert.Equal(2, found.CountOf(0));
-        Assert.Equal(2, found.CountOf(1));
-        Assert.Equal(USearchKey.FromUInt64(3), found.KeysOf(0)[0]);
-        Assert.Equal(USearchKey.FromUInt64(1), found.KeysOf(1)[0]);
-        Assert.Equal(2, found.DistancesOf(0).Length);
-        Assert.Equal(0d, found.DistancesOf(0)[0], 6);
+        Assert.Equal(2, found[0].Count);
+        Assert.Equal(2, found[1].Count);
+        Assert.Equal(USearchKey.FromUInt64(3), found[0].Keys[0]);
+        Assert.Equal(USearchKey.FromUInt64(1), found[1].Keys[0]);
+        Assert.Equal(2, found[0].Distances.Length);
+        Assert.Equal(0d, found[0].Distances[0], 6);
     }
 
     [Fact]
@@ -391,14 +406,14 @@ public sealed class DenseIndexTests : IDisposable
         USearchKey[] keys = new USearchKey[2];
         double[] distances = new double[2];
         nuint[] counts = new nuint[1];
-        SearchResults lent = SearchResults.Of(keys, distances, counts, wanted: 2);
+        MatchesSpan lent = MatchesSpan.Of(keys, distances, counts);
 
         index.Search(this._pool, Matrix.RowsOf<float>(RowOf(2f), Dimensions), lent);
 
         Assert.Equal(USearchKey.FromUInt64(2), keys[0]);
         Assert.Equal((nuint)2, counts[0]);
         Assert.Equal(0d, distances[0], 6);
-        Assert.Equal(keys[0], lent.KeysOf(0)[0]);
+        Assert.Equal(keys[0], lent[0].Keys[0]);
 
         // The same slabs serve the next point of a sweep, with nothing allocated between them.
         index.Search(this._pool, Matrix.RowsOf<float>(RowOf(1f), Dimensions), lent);
@@ -406,7 +421,7 @@ public sealed class DenseIndexTests : IDisposable
     }
 
     [Fact]
-    public void LentSlabsNarrowerThanTheBatchAreRefused()
+    public void SlabsThatDoNotReadAsOneShapeAreRefused()
     {
         using DenseIndex index = SmallIndex();
         index.Add(this._pool, [1UL], Matrix.RowsOf<float>(RowOf(1f), Dimensions));
@@ -414,14 +429,26 @@ public sealed class DenseIndexTests : IDisposable
         Assert.Equal(
             Status.ShapeMismatch,
             Assert.Throws<USearchException>(
-                () => SearchResults.Of(new USearchKey[2], new double[2], new nuint[2], wanted: 2)).Status);
+                () => MatchesSpan.Of(new USearchKey[4], new double[8], new nuint[2])).Status);
+        Assert.Equal(
+            Status.ShapeMismatch,
+            Assert.Throws<USearchException>(
+                () => MatchesSpan.Of(new USearchKey[5], new double[5], new nuint[2])).Status);
+        Assert.Equal(
+            Status.ShapeMismatch,
+            Assert.Throws<USearchException>(
+                () => MatchesSpan.Of(Array.Empty<USearchKey>(), Array.Empty<double>(), new nuint[1])).Status);
+        Assert.Equal(
+            Status.ShapeMismatch,
+            Assert.Throws<USearchException>(
+                () => MatchesSpan.Of(new USearchKey[4], new double[4], Array.Empty<nuint>())).Status);
         Assert.Equal(
             Status.ShapeMismatch,
             Assert.Throws<USearchException>(
                 () => index.Search(
                     this._pool,
                     Matrix.RowsOf<float>([.. RowOf(1f), .. RowOf(2f)], Dimensions),
-                    SearchResults.Packed(queries: 1, wanted: 1))).Status);
+                    MatchesSpan.Packed(queries: 1, wanted: 1))).Status);
     }
 
     [Fact]
@@ -430,13 +457,13 @@ public sealed class DenseIndexTests : IDisposable
         using DenseIndex index = SmallIndex();
         index.Add(this._pool, [1UL], Matrix.RowsOf<float>(RowOf(1f), Dimensions));
 
-        SearchResults found = SearchResults.Packed(queries: 1, wanted: 8);
+        MatchesSpan found = MatchesSpan.Packed(queries: 1, wanted: 8);
         index.Search(this._pool, Matrix.RowsOf<float>(RowOf(1f), Dimensions), found);
 
         Assert.Equal(8, found.Wanted);
-        Assert.Equal(1, found.CountOf(0));
-        Assert.Single(found.KeysOf(0).ToArray());
-        Assert.Single(found.DistancesOf(0).ToArray());
+        Assert.Equal(1, found[0].Count);
+        Assert.Single(found[0].Keys.ToArray());
+        Assert.Single(found[0].Distances.ToArray());
     }
 
     [Fact]
@@ -444,13 +471,14 @@ public sealed class DenseIndexTests : IDisposable
     {
         // The sibling verbs disagree on what a count means, so the slicing clamps rather than
         // trusting it: entries past the row width were never written by anyone.
-        SearchResults results = SearchResults.Of(
-            new USearchKey[4], new double[4], new nuint[] { 5, 1 }, wanted: 2);
+        MatchesSpan results = MatchesSpan.Of(new USearchKey[4], new double[4], new nuint[] { 5, 1 });
 
-        Assert.Equal(2, results.CountOf(0));
-        Assert.Equal(2, results.KeysOf(0).Length);
-        Assert.Equal(1, results.CountOf(1));
-        Assert.Equal(1, results.DistancesOf(1).Length);
+        Assert.Equal(2, results[0].Count);
+        Assert.True(results[0].WasTruncated);
+        Assert.Equal(2, results[0].Keys.Length);
+        Assert.Equal(1, results[1].Count);
+        Assert.False(results[1].WasTruncated);
+        Assert.Equal(1, results[1].Distances.Length);
     }
 
     [Fact]
@@ -465,7 +493,7 @@ public sealed class DenseIndexTests : IDisposable
         TraversalStats query = new();
         index.Search(
             this._pool, Matrix.RowsOf<float>(RowOf(1f), Dimensions),
-            SearchResults.Packed(1, 2), stats: query);
+            MatchesSpan.Packed(1, 2), stats: query);
 
         Assert.True(insertion.VisitedMembers > 0);
         Assert.True(query.ComputedDistances > 0);
@@ -507,9 +535,9 @@ public sealed class DenseIndexTests : IDisposable
 
         index.Refine(this._pool, new DenseInsertionOptions { ExpansionFactor = 64 });
 
-        SearchResults found = SearchResults.Packed(queries: 1, wanted: 1);
+        MatchesSpan found = MatchesSpan.Packed(queries: 1, wanted: 1);
         index.Search(this._pool, Matrix.RowsOf<float>(RowOf(3f), Dimensions), found);
-        Assert.Equal(USearchKey.FromUInt64(3), found.KeysOf(0)[0]);
+        Assert.Equal(USearchKey.FromUInt64(3), found[0].Keys[0]);
         Assert.Equal(3UL, index.Size());
     }
 
@@ -536,13 +564,13 @@ public sealed class DenseIndexTests : IDisposable
         index.Add(this._pool, [1UL, 1UL, 2UL, 2UL], Matrix.RowsOf<float>(tokens, Dimensions));
 
         float[] query = [1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f];
-        SearchResults scored = SearchResults.Packed(queries: 1, wanted: 2);
+        MatchesSpan scored = MatchesSpan.Packed(queries: 1, wanted: 2);
         index.MaxSim(this._pool, Matrix.RowsOf<float>(query, Dimensions), rowsPerQuery: 2, scored);
 
-        Assert.Equal(2, scored.CountOf(0));
-        Assert.Equal(USearchKey.FromUInt64(1), scored.KeysOf(0)[0]);
-        Assert.Equal(2d, scored.DistancesOf(0)[0], 6);
-        Assert.Equal(USearchKey.FromUInt64(2), scored.KeysOf(0)[1]);
+        Assert.Equal(2, scored[0].Count);
+        Assert.Equal(USearchKey.FromUInt64(1), scored[0].Keys[0]);
+        Assert.Equal(2d, scored[0].Distances[0], 6);
+        Assert.Equal(USearchKey.FromUInt64(2), scored[0].Keys[1]);
     }
 
     [Fact]
@@ -565,7 +593,7 @@ public sealed class DenseIndexTests : IDisposable
                     this._pool,
                     Matrix.RowsOf<float>([.. RowOf(1f), .. RowOf(2f), .. RowOf(3f)], Dimensions),
                     rowsPerQuery: 2,
-                    SearchResults.Packed(2, 1))).Status);
+                    MatchesSpan.Packed(2, 1))).Status);
     }
 
     #endregion Refinement & Late Interaction
@@ -620,15 +648,15 @@ public sealed class DenseIndexTests : IDisposable
         float[] rows = [.. RowOf(1f), .. RowOf(2f), .. RowOf(3f), .. RowOf(4f)];
         index.Add(this._pool, keys, Matrix.RowsOf<float>(rows, Dimensions));
 
-        SearchResults found = SearchResults.Packed(queries: 1, wanted: 4);
+        MatchesSpan found = MatchesSpan.Packed(queries: 1, wanted: 4);
         index.SearchIf(
             this._pool, Matrix.RowsOf<float>(RowOf(1f), Dimensions), found,
             key => key.TryGetUInt64(out ulong identity) && identity % 2 == 0
                 ? Admission.Admit
                 : Admission.Reject);
 
-        Assert.Equal(2, found.CountOf(0));
-        foreach (USearchKey key in found.KeysOf(0))
+        Assert.Equal(2, found[0].Count);
+        foreach (USearchKey key in found[0].Keys)
         {
             Assert.True(key.TryGetUInt64(out ulong identity));
             Assert.Equal(0UL, identity % 2);
@@ -643,7 +671,7 @@ public sealed class DenseIndexTests : IDisposable
 
         USearchException failure = Assert.Throws<USearchException>(
             () => index.SearchIf(
-                this._pool, Matrix.RowsOf<float>(RowOf(1f), Dimensions), SearchResults.Packed(1, 2),
+                this._pool, Matrix.RowsOf<float>(RowOf(1f), Dimensions), MatchesSpan.Packed(1, 2),
                 _ => throw new InvalidOperationException()));
 
         Assert.Equal(Status.Internal, failure.Status);
@@ -673,7 +701,7 @@ public sealed class DenseIndexTests : IDisposable
             this._pool, [1UL, 2UL, 3UL],
             Matrix.RowsOf<float>([.. RowOf(1f), .. RowOf(2f), .. RowOf(3f)], Dimensions));
 
-        using USearchCursor cursor = index.Snapshot();
+        using USearchCursor cursor = index.Cursor();
         index.Add(this._pool, [4UL], Matrix.RowsOf<float>(RowOf(4f), Dimensions));
 
         USearchKey[] keys = new USearchKey[2];
@@ -725,7 +753,7 @@ public sealed class DenseIndexTests : IDisposable
 
             Assert.True(File.Exists(path));
 
-            DenseOptions metadata = DenseIndex.Metadata(path);
+            DenseMetadata metadata = DenseIndex.Metadata(path);
             Assert.Equal((ulong)Dimensions, metadata.Dimensions);
             Assert.Equal(DenseMetric.Euclidean, metadata.Metric);
 
@@ -737,9 +765,9 @@ public sealed class DenseIndexTests : IDisposable
             Assert.Equal((ulong)Dimensions, restored.Dimensions());
             Assert.Equal(2UL, restored.Size());
 
-            SearchResults found = SearchResults.Packed(queries: 1, wanted: 1);
+            MatchesSpan found = MatchesSpan.Packed(queries: 1, wanted: 1);
             restored.Search(this._pool, Matrix.RowsOf<float>(RowOf(2f), Dimensions), found);
-            Assert.Equal(USearchKey.FromUInt64(2), found.KeysOf(0)[0]);
+            Assert.Equal(USearchKey.FromUInt64(2), found[0].Keys[0]);
         }
         finally
         {
@@ -757,7 +785,7 @@ public sealed class DenseIndexTests : IDisposable
         Assert.NotEmpty(buffer);
         index.SaveToBuffer(this._pool, buffer);
 
-        DenseOptions metadata = DenseIndex.MetadataFromBuffer(buffer);
+        DenseMetadata metadata = DenseIndex.MetadataFromBuffer(buffer);
         Assert.Equal((ulong)Dimensions, metadata.Dimensions);
 
         using DenseIndex restored = new(SmallOptions());

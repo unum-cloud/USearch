@@ -24,7 +24,7 @@ import USearch
 
 let index = try DenseIndex(options: DenseOptions(
     dimensions: 3, metric: .angular, quantization: .f32))
-let executor = try Executor(residency: .default, threads: 0)
+let executor = try Executor.forRam()
 try index.reserve(2)
 
 let vectors: [Float] = [0.3, 0.5, 1.2, 0.4, 0.2, 1.2]
@@ -49,7 +49,7 @@ try keys.withUnsafeMutableBufferPointer { keyBuffer in
                     queries: MatrixView(baseAddress: buffer.baseAddress!, rows: 1, cols: 3),
                     into: matches)
             }
-            assert(matches[0].first?.key == Key(42))
+            assert(matches[0][0].key == Key(42))
         }
     }
 }
@@ -59,6 +59,7 @@ A search writes into buffers you own and returns only its telemetry, so a sweep 
 The width of the key buffer against the count buffer _is_ the "k" in "kANN", so the space reserved and the count asked for cannot disagree.
 
 A matrix borrows and never owns, so it stays valid only for as long as the storage it points into — which is why every call site above sits inside a `withUnsafeBufferPointer`.
+`MatchesSpan` is `~Escapable` for the same reason, so the compiler refuses a span that outlives the closure holding its buffers rather than leaving it to a comment.
 
 ## Errors
 
@@ -74,29 +75,34 @@ do {
 
 ## Results
 
-A run is a `RandomAccessCollection` of queries, and each element a `RandomAccessCollection` of that query's matches, so neither level copies a row out.
+A run counts its queries, and `matches[query]` reads one query's row through the same buffers, so neither level copies a row out.
+A row's own `count` stops at the cells the engine wrote, however wide the buffers are.
 
 ```swift
-for query in matches {
-    if query.wasTruncated { print("the engine had more to report than `wanted` could hold") }
-    for match in query { print(match.key, match.distance) }
+for query in 0 ..< matches.count {
+    let row = matches[query]
+    if row.wasTruncated { print("the engine had more to report than `wanted` could hold") }
+    for position in 0 ..< row.count { print(row[position].key, row[position].distance) }
 }
 ```
+
+Neither level is a `Collection`: a `~Escapable` type cannot conform to one, and that is the price of having the compiler check the borrow.
 
 ## Executors
 
 An index says where its payload lives; an `Executor` says who walks it.
 One executor serves any number of handles, so several categories of index share one machine's cores or devices instead of each claiming a private set.
-Its kind is fixed by the residency it was built for and must match every handle it drives; a mismatch reports `deviceFailure` on the first call.
+Its kind is fixed by the factory that spawned it and must match every handle it drives; a mismatch reports `deviceFailure` on the first call.
 
 ```swift
-let hostThreads = try Executor(residency: .ram(memoryDomains: [0, 1]), threads: 0)
-let deviceStreams = try Executor(residency: .vram(devices: [0, 1]))
-let submissionRings = try Executor(residency: .nvme(paths: ["/mnt/nvme0"]), threads: 8)
+let hostThreads = try Executor.forRam(memoryDomains: [0, 1], threads: 0)
+let submissionRings = try Executor.forNvme(paths: ["/mnt/nvme0"], threads: 8)
+let deviceStreams = try Executor.forVram(devices: [0, 1])
 ```
 
-A thread count of zero derives from the hardware — 7/8 of the cores those memory domains carry, since full occupancy starves the ordered publication path.
-A VRAM executor ignores it: one host thread drives one stream per device.
+Each factory takes only what its residency has.
+A thread count of zero derives from the hardware — 7/8 of the cores those memory domains carry, since full occupancy starves the ordered publication path, and for NVMe the devices' queue capabilities.
+`forVram` takes no thread count at all: one host thread drives one stream per device, so there is no count to name.
 
 An executor admits one driver at a time, reporting `contended` to the second, so a thread that wants to drive its own calls spawns its own.
 Index handles stay freely shareable.
@@ -139,7 +145,8 @@ DenseOptions(dimensions: 768, residency: .nvme(paths: ["/mnt/nvme0", "/mnt/nvme1
 ```
 
 A dimensionality of zero is legal: the geometry defers to a later `load`, which reads it off the checkpoint.
-Placement never comes back out of one — a checkpoint records where it was written, never where a reader must keep it — so `metadata` returns geometry and metric with an empty placement for you to fill.
+Placement never comes back out of one — a checkpoint records where it was written, never where a reader must keep it — so `metadata` answers a `DenseMetadata` naming dimensions, metric, quantization and connectivity alone.
+`valuesPerKey` is absent from it too, bounding a live handle's mutable state rather than the serialized form.
 
 ## Serialization
 

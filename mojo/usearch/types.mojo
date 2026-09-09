@@ -280,21 +280,34 @@ struct Key(Equatable, ImplicitlyCopyable, TrivialRegisterPassable, Writable):
         self.leading = 0
         self.trailing = byte_swap(integer)
 
-    def as_integer(self) -> UInt64:
-        """The integer identity in bytes 8 through 15, whatever the leading ones hold.
+    def as_integer(self) -> Optional[UInt64]:
+        """The integer identity in bytes 8 through 15, and nothing when the leading ones are set.
 
         Returns:
-            The trailing word read big-endian, which is the whole identity for a key built from one.
+            The trailing word read big-endian, or `None` for a key whose leading bytes carry
+            identity of their own and so has no 64-bit one.
         """
+        if self.leading != 0:
+            return None
         return byte_swap(self.trailing)
 
     def write_to(self, mut writer: Some[Writer]):
-        """Writes the identity, which is the trailing word for every key an integer named.
+        """Writes the integer identity where the key has one, and both words where it does not.
 
         Args:
             writer: The sink the key is appended to.
         """
-        writer.write("key(", self.as_integer(), ")")
+        var integer = self.as_integer()
+        if integer:
+            writer.write("key(", integer.value(), ")")
+        else:
+            writer.write(
+                "key(",
+                byte_swap(self.leading),
+                ", ",
+                byte_swap(self.trailing),
+                ")",
+            )
 
 
 comptime Distance = Float64
@@ -450,8 +463,8 @@ struct Completion(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 
 
 @fieldwise_init
-struct ExecutionConfig(ImplicitlyCopyable):
-    """Per-call scheduling of the executor - `usearch_execution_config_t`.
+struct ExecutionOptions(ImplicitlyCopyable):
+    """Per-call scheduling of the executor - `usearch_execution_options_t`.
 
     Declared by the ABI's shared vocabulary, and no dense verb accepts one yet, so the binding
     carries the shape without a call site. Deferring moves both the outputs and the failure out of
@@ -650,17 +663,22 @@ struct KeysSpan[origin: MutOrigin = MutUntrackedOrigin](ImplicitlyCopyable, Triv
 # region Signatures
 
 comptime ExecutorForRam = def(
-    Pointer[RamOptions[ImmUntrackedOrigin], MutAnyOrigin], c_size_t, Pointer[ErrorSlot, MutAnyOrigin]
+    Pointer[RamOptions[ImmUntrackedOrigin], MutAnyOrigin],
+    c_size_t,
+    Pointer[ErrorSlot, MutAnyOrigin],
 ) thin abi("C") -> Address
 """`usearch_executor_for_ram`: spawns host workers, answering the handle's address or zero."""
 
 comptime ExecutorForNvme = def(
-    Pointer[NvmeOptions[ImmUntrackedOrigin], MutAnyOrigin], c_size_t, Pointer[ErrorSlot, MutAnyOrigin]
+    Pointer[NvmeOptions[ImmUntrackedOrigin], MutAnyOrigin],
+    c_size_t,
+    Pointer[ErrorSlot, MutAnyOrigin],
 ) thin abi("C") -> Address
 """`usearch_executor_for_nvme`: spawns host workers with one submission ring apiece."""
 
 comptime ExecutorForVram = def(
-    Pointer[VramOptions[ImmUntrackedOrigin], MutAnyOrigin], Pointer[ErrorSlot, MutAnyOrigin]
+    Pointer[VramOptions[ImmUntrackedOrigin], MutAnyOrigin],
+    Pointer[ErrorSlot, MutAnyOrigin],
 ) thin abi("C") -> Address
 """`usearch_executor_for_vram`: opens one stream per device, taking no thread count at all."""
 
@@ -837,7 +855,7 @@ struct Executor:
 
     def __init__[
         ram_origin: ImmOrigin, //
-    ](out self, library: Library, ram: RamOptions[ram_origin], threads: Int = 0) raises Error:
+    ](out self, library: Library, ram: RamOptions[ram_origin], threads: Int = 0,) raises Error:
         """Spawns host workers for RAM-resident indexes.
 
         Passing the very options the indexes were built with is what makes compute and memory
@@ -907,7 +925,11 @@ struct Executor:
         Error.raise_if_failed(slot, "usearch_executor_for_nvme")
         if address == 0:
             raise Error(Status.INTERNAL, "usearch_executor_for_nvme", 0)
-        return Self(library=library, handle=Handle(unsafe_from_address=address), residency=Residency.NVME)
+        return Self(
+            library=library,
+            handle=Handle(unsafe_from_address=address),
+            residency=Residency.NVME,
+        )
 
     @staticmethod
     def for_vram[vram_origin: ImmOrigin, //](library: Library, vram: VramOptions[vram_origin]) raises Error -> Self:
@@ -938,7 +960,11 @@ struct Executor:
         Error.raise_if_failed(slot, "usearch_executor_for_vram")
         if address == 0:
             raise Error(Status.INTERNAL, "usearch_executor_for_vram", 0)
-        return Self(library=library, handle=Handle(unsafe_from_address=address), residency=Residency.VRAM)
+        return Self(
+            library=library,
+            handle=Handle(unsafe_from_address=address),
+            residency=Residency.VRAM,
+        )
 
     def __init__(out self, *, library: Library, handle: Handle, residency: Residency):
         """Adopts a handle that is already spawned, which is how the two factories hand one back.

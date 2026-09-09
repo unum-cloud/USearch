@@ -34,7 +34,7 @@ def main() raises:
         MatchesSpan.of(found_keys, found_scores, found_counts),
         stats,
     )
-    print(t"published {published}, nearest = {found_keys[0].as_integer()}") # published 2, nearest = 10
+    print(t"published {published}, nearest = {found_keys[0]}") # published 2, nearest = key(10)
 ```
 
 An `Executor` is mandatory, never optional: every verb that fans out takes one, and the engine
@@ -67,7 +67,7 @@ from .types import (
     Distance,
     Error,
     ErrorSlot,
-    ExecutionConfig,
+    ExecutionOptions,
     Executor,
     Key,
     KeysSpan,
@@ -86,16 +86,18 @@ from .types import (
 # dense
 from .dense import (
     Admission,
-    AttentionConfig,
+    AttentionOptions,
     DenseCursor,
     DenseFinder,
     DenseIndex,
+    DenseMetadata,
     DenseOptions,
-    ExpansionConfig,
+    InsertionOptions,
     MatchesSpan,
     MatrixSpan,
     MatrixView,
     Metric,
+    SearchOptions,
     SoftmaxState,
     TraversalStats,
     metadata,

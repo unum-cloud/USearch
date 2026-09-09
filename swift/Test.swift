@@ -16,7 +16,7 @@ import XCTest
 final class Test: XCTestCase {
 
     /// One executor per test, since an executor admits a single driver at a time.
-    private func executor() throws(Error) -> Executor { try Executor(residency: .default, threads: 0) }
+    private func executor() throws(Error) -> Executor { try Executor.forRam() }
 
     /// The status a call failed with, and nil when it succeeded. `Error` is the only error
     /// the SDK throws, so the catch needs no cast.
@@ -24,14 +24,15 @@ final class Test: XCTestCase {
         do {
             _ = try body()
             return nil
-        } catch {
+        }
+        catch {
             return error.status
         }
     }
 
     /// Views an array as rows of the given width for the duration of `body`, which is what keeps
     /// the borrow and the storage the same length.
-    private func withMatrix<Element: ScalarValue, Result, Failure: Error>(
+    private func withMatrix<Element: ScalarValue, Result, Failure: Swift.Error>(
         _ values: [Element],
         columns: Int,
         pitchBytes: Int? = nil,
@@ -51,7 +52,7 @@ final class Test: XCTestCase {
     }
 
     /// The written-through twin of `withMatrix`, for the verbs that export rows.
-    private func withMutableMatrix<Element: ScalarValue, Result, Failure: Error>(
+    private func withMutableMatrix<Element: ScalarValue, Result, Failure: Swift.Error>(
         _ values: inout [Element],
         columns: Int,
         pitchBytes: Int? = nil,
@@ -134,7 +135,7 @@ final class Test: XCTestCase {
     /// A key crosses a JSON document as its rendering, so a stored document reads back the same
     /// string whichever SDK wrote it.
     func testKeyCodesAsItsRendering() throws {
-        let keys = [Key(42), Key.nilKey, try Key(bytes: Array<UInt8>(1 ... 16))]
+        let keys = [Key(42), Key.nilKey, try Key(bytes: [UInt8](1 ... 16))]
         let encoded = try JSONEncoder().encode(keys)
         XCTAssertEqual(
             try JSONDecoder().decode([String].self, from: encoded),
@@ -185,8 +186,8 @@ final class Test: XCTestCase {
         }
     }
 
-    func testExecutorMatchesItsResidency() throws {
-        let executor = try Executor(residency: .ram(memoryDomains: []), threads: 2)
+    func testExecutorFactoriesTakeOnlyTheirOwnPlacement() throws {
+        let executor = try Executor.forRam(memoryDomains: [], threads: 2)
         try executor.drain()
     }
 
@@ -312,15 +313,16 @@ final class Test: XCTestCase {
         }
         XCTAssertEqual(matches.count, 1)
         XCTAssertEqual(matches.wanted, 10)
-        XCTAssertEqual(matches[0].count, 3)
-        XCTAssertFalse(matches[0].wasTruncated)
         XCTAssertTrue(stats.computedDistances > 0)
 
-        // The run is a collection of queries and each element a collection of matches, so both
-        // walk without copying a row out.
-        XCTAssertEqual(matches.map(\.count), [3])
-        XCTAssertEqual(Array(matches[0]).count, 3)
-        XCTAssertEqual(matches[0].first?.key, matches[0][0].key)
+        // A row reads through the run rather than copying it out, and stops at the cells the
+        // engine wrote.
+        let row = matches[0]
+        XCTAssertEqual(row.count, 3)
+        XCTAssertFalse(row.wasTruncated)
+        let walked = row.map(\.key)
+        XCTAssertEqual(walked.count, 3)
+        XCTAssertEqual(walked.first, row.first?.key)
     }
 
     func testFilteredSearchTrampoline() throws {
@@ -339,13 +341,23 @@ final class Test: XCTestCase {
         let matches = try storage.span
         try withMatrix(queries, columns: 2) { matrix in
             _ = try index.search(
-                executor: executor, queries: matrix, into: matches, admitting: { $0 == Key(2) })
+                executor: executor,
+                queries: matrix,
+                into: matches,
+                admitting: { $0 == Key(2) }
+            )
         }
-        XCTAssertEqual(matches[0].map(\.key), [Key(2)])
+        let admitted = matches[0]
+        XCTAssertEqual(admitted.count, 1)
+        XCTAssertEqual(admitted[0].key, Key(2))
 
         try withMatrix(queries, columns: 2) { matrix in
             _ = try index.search(
-                executor: executor, queries: matrix, into: matches, admitting: { _ in false })
+                executor: executor,
+                queries: matrix,
+                into: matches,
+                admitting: { _ in false }
+            )
         }
         XCTAssertEqual(matches[0].count, 0)
     }
@@ -378,9 +390,12 @@ final class Test: XCTestCase {
         }
         XCTAssertEqual(Set(walked), Set([Key(1), Key(2), Key(3)]))
 
-        // A key-only walk needs no matrix, and reads the same snapshot from a fresh cursor.
+        // A key-only walk needs no matrix, and reads the same snapshot from a fresh cursor. The
+        // borrow ends with the closure, so the call has to happen inside it.
         let keysOnly = try index.cursor()
-        let written = try keysOnly.next(into: keys.withUnsafeMutableBufferPointer { $0 })
+        let written = try keys.withUnsafeMutableBufferPointer { (buffer) throws(Error) -> Int in
+            try keysOnly.next(into: buffer)
+        }
         XCTAssertTrue(written > 0)
     }
 

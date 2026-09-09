@@ -126,103 +126,49 @@ enum writeback_t {
     writeback_commit_k = 0,
 };
 
-/** @brief One borrowed slab: what it was borrowed from, and what releasing it needs to know. */
-typedef struct borrowed_slab_t {
-    /** @brief The array the elements came from; @c NULL for a direct buffer. */
-    jarray array;
-    /** @brief Which accessor produced the elements, and which one must release them. */
-    enum storage_t storage;
-    /** @brief Whether releasing publishes what the call wrote or discards it. */
-    enum writeback_t writeback;
-    /** @brief The slab's first byte, before the caller's row offset is applied. */
-    void* base;
-} borrowed_slab_t;
-
-/** @brief How many slabs one call may hold borrowed at once. */
-enum { borrowed_capacity_k = 4 };
-
-/** @brief The slabs one call borrowed, released in reverse when the call is done with them. */
-typedef struct borrowed_slabs_t {
-    /** @brief The environment every borrow and release travels through. */
-    JNIEnv* environment;
-    /** @brief The slabs borrowed so far. */
-    borrowed_slab_t slabs[borrowed_capacity_k];
-    /** @brief How many slabs have been borrowed. */
-    size_t count;
-    /** @brief Whether every slab so far became addressable. */
-    bool complete;
-} borrowed_slabs_t;
-
-/** @brief Opens an empty borrow set; no slab is borrowed until one is asked for. */
-static borrowed_slabs_t borrowed_opened(JNIEnv* environment) {
-    borrowed_slabs_t borrowed = {environment, {{NULL, storage_bytes_k, writeback_discard_k, NULL}}, 0, true};
-    return borrowed;
-}
-
-/** @brief Copies a primitive array out through the accessor its storage kind names. */
-static void* elements_borrowed(JNIEnv* environment, jarray array, enum storage_t storage) {
+/**
+ *  @brief Addresses a caller's slab through the accessor its storage kind names.
+ *
+ *  A @c NULL answer is the one failure a caller checks, and it covers every way a slab can fail to
+ *  become addressable: a missing argument, a heap buffer with no stable address, and a JVM that
+ *  could not produce the elements all report the same way.
+ */
+static void* elements_borrowed(JNIEnv* environment, jobject slab, enum storage_t storage) {
+    if (!slab) return NULL;
     switch (storage) {
-    case storage_doubles_k: return (*environment)->GetDoubleArrayElements(environment, (jdoubleArray)array, NULL);
-    case storage_floats_k: return (*environment)->GetFloatArrayElements(environment, (jfloatArray)array, NULL);
-    case storage_shorts_k: return (*environment)->GetShortArrayElements(environment, (jshortArray)array, NULL);
-    case storage_bytes_k: return (*environment)->GetByteArrayElements(environment, (jbyteArray)array, NULL);
+    case storage_doubles_k: return (*environment)->GetDoubleArrayElements(environment, (jdoubleArray)slab, NULL);
+    case storage_floats_k: return (*environment)->GetFloatArrayElements(environment, (jfloatArray)slab, NULL);
+    case storage_shorts_k: return (*environment)->GetShortArrayElements(environment, (jshortArray)slab, NULL);
+    case storage_bytes_k: return (*environment)->GetByteArrayElements(environment, (jbyteArray)slab, NULL);
+    case storage_direct_k: return (*environment)->GetDirectBufferAddress(environment, slab);
     default: return NULL;
     }
 }
 
-/** @brief Returns a primitive array's elements, publishing or discarding what the call wrote. */
-static void elements_released(JNIEnv* environment, borrowed_slab_t const* slab) {
-    jint const mode = (jint)slab->writeback;
-    switch (slab->storage) {
+/**
+ *  @brief Returns a slab's elements, publishing or discarding what the call wrote.
+ *
+ *  A direct buffer was addressed in place and has nothing to return, and a slab that never became
+ *  addressable has nothing either, so a failed borrow releases as harmlessly as a finished one.
+ */
+static void elements_released(JNIEnv* environment, jobject slab, enum storage_t storage, void* base,
+                              enum writeback_t writeback) {
+    jint const mode = (jint)writeback;
+    if (!base) return;
+    switch (storage) {
     case storage_doubles_k:
-        (*environment)->ReleaseDoubleArrayElements(environment, (jdoubleArray)slab->array, (jdouble*)slab->base, mode);
+        (*environment)->ReleaseDoubleArrayElements(environment, (jdoubleArray)slab, (jdouble*)base, mode);
         break;
     case storage_floats_k:
-        (*environment)->ReleaseFloatArrayElements(environment, (jfloatArray)slab->array, (jfloat*)slab->base, mode);
+        (*environment)->ReleaseFloatArrayElements(environment, (jfloatArray)slab, (jfloat*)base, mode);
         break;
     case storage_shorts_k:
-        (*environment)->ReleaseShortArrayElements(environment, (jshortArray)slab->array, (jshort*)slab->base, mode);
+        (*environment)->ReleaseShortArrayElements(environment, (jshortArray)slab, (jshort*)base, mode);
         break;
     case storage_bytes_k:
-        (*environment)->ReleaseByteArrayElements(environment, (jbyteArray)slab->array, (jbyte*)slab->base, mode);
+        (*environment)->ReleaseByteArrayElements(environment, (jbyteArray)slab, (jbyte*)base, mode);
         break;
     default: break;
-    }
-}
-
-/**
- *  @brief Borrows one slab and reports the address its first row starts at.
- *
- *  A @c NULL return marks the whole set incomplete, so a caller checks once after borrowing every
- *  slab rather than after each one. The writeback mode rides the slab because one call mixes pure
- *  inputs with outputs, and copying a query batch back into the JVM would cost as much as the
- *  search it fed.
- */
-static void* borrowed_address_of(borrowed_slabs_t* borrowed, jobject slab, jint storage_code, jlong byte_offset,
-                                 enum writeback_t writeback) {
-    borrowed_slab_t entry = {NULL, (enum storage_t)storage_code, writeback, NULL};
-    if (!slab) {
-        borrowed->complete = false;
-        return NULL;
-    }
-    if (entry.storage == storage_direct_k)
-        entry.base = (*borrowed->environment)->GetDirectBufferAddress(borrowed->environment, slab);
-    else {
-        entry.array = (jarray)slab;
-        entry.base = elements_borrowed(borrowed->environment, entry.array, entry.storage);
-    }
-    borrowed->slabs[borrowed->count] = entry;
-    ++borrowed->count;
-    if (!entry.base) borrowed->complete = false;
-    return entry.base ? (char*)entry.base + byte_offset : NULL;
-}
-
-/** @brief Releases every borrowed slab in reverse, publishing what each one's mode names. */
-static void borrowed_release(borrowed_slabs_t* borrowed) {
-    while (borrowed->count) {
-        --borrowed->count;
-        borrowed_slab_t const* const slab = &borrowed->slabs[borrowed->count];
-        if (slab->array && slab->base) elements_released(borrowed->environment, slab);
     }
 }
 
@@ -265,6 +211,15 @@ enum options_word_t {
     options_values_per_key_k = 4,
     options_residency_k = 5,
     options_word_count_k = 6,
+};
+
+/** @brief The word offsets a flat metadata layout uses, matching @c DenseMetadata on the Java side. */
+enum metadata_word_t {
+    metadata_metric_k = 0,
+    metadata_quantization_k = 1,
+    metadata_dimensions_k = 2,
+    metadata_connectivity_k = 3,
+    metadata_word_count_k = 4,
 };
 
 /** @brief The scalar quantities a handle can be probed for, matching @c Measure on the Java side. */
@@ -333,6 +288,27 @@ static void lift_options(JNIEnv* environment, usearch_dense_options_t const* opt
     (*environment)->SetLongArrayRegion(environment, words, 0, options_word_count_k, buffer);
 }
 
+/**
+ *  @brief Lowers a checkpoint's geometry and metric into the flat layout the Java side reads.
+ *
+ *  Neither the residency nor the entries-per-key bound appears: a checkpoint records where it was
+ *  written rather than where a reader must keep it, and that bound governs a live handle's mutable
+ *  state rather than the serialized form.
+ */
+static void lift_metadata(JNIEnv* environment, usearch_dense_metadata_t const* metadata, jlongArray words) {
+    if (!words || (*environment)->GetArrayLength(environment, words) < metadata_word_count_k) {
+        raise(environment, usearch_error_shape_mismatch_k, "the metadata layout is short");
+        return;
+    }
+
+    jlong buffer[metadata_word_count_k] = {0};
+    buffer[metadata_metric_k] = (jlong)metadata->metric;
+    buffer[metadata_quantization_k] = (jlong)metadata->quantization;
+    buffer[metadata_dimensions_k] = (jlong)metadata->dimensions;
+    buffer[metadata_connectivity_k] = (jlong)metadata->connectivity;
+    (*environment)->SetLongArrayRegion(environment, words, 0, metadata_word_count_k, buffer);
+}
+
 /** @brief Copies the traversal telemetry out, when the caller asked for any. */
 static void report(JNIEnv* environment, jlongArray sink, usearch_dense_traversal_stats_t const* stats) {
     if (!sink || (*environment)->GetArrayLength(environment, sink) < statistics_count_k) return;
@@ -374,26 +350,112 @@ JNIEXPORT jstring JNICALL Java_cloud_unum_usearch_Types_nativeCapabilitiesAvaila
 
 #pragma region Executor
 
-JNIEXPORT jlong JNICALL Java_cloud_unum_usearch_Types_nativeExecutorInitialize( //
-    JNIEnv* environment, jclass owner, jint residency, jlong worker_count) {
+/**
+ *  @brief Spawns host workers for RAM-resident indexes on the memory domains a caller named.
+ *
+ *  A @c jint is exactly an @c int32_t, so the node ids are borrowed and handed across unconverted;
+ *  a null or empty array names nothing and leaves the placement to the engine.
+ */
+JNIEXPORT jlong JNICALL Java_cloud_unum_usearch_Types_nativeExecutorForRam( //
+    JNIEnv* environment, jclass owner, jintArray memory_domains, jlong worker_count) {
     (void)owner;
     size_t threads = 0;
     if (!narrowed(environment, worker_count, "the thread count is negative", &threads)) return 0;
 
-    usearch_ram_options_t const ram = {NULL, 0};
-    usearch_vram_options_t const vram = {NULL, 0};
-    usearch_nvme_options_t const nvme = {NULL, 0};
-    usearch_error_t error = {usearch_success_k, NULL};
-    usearch_executor_t handle = NULL;
-    switch ((usearch_residency_t)residency) {
-    case usearch_residency_ram_k: handle = usearch_executor_for_ram(&ram, threads, &error); break;
-    case usearch_residency_vram_k: handle = usearch_executor_for_vram(&vram, &error); break;
-    case usearch_residency_nvme_k: handle = usearch_executor_for_nvme(&nvme, threads, &error); break;
-    default:
-        raise(environment, usearch_error_unknown_kind_k, "the residency names neither RAM, VRAM, nor NVMe");
+    jsize const named = memory_domains ? (*environment)->GetArrayLength(environment, memory_domains) : 0;
+    jint* const borrowed = named ? (*environment)->GetIntArrayElements(environment, memory_domains, NULL) : NULL;
+    if (named && !borrowed) {
+        raise(environment, usearch_error_malformed_input_k, "the memory domains borrow no addressable storage");
         return 0;
     }
+
+    usearch_ram_options_t const ram = {(int32_t const*)borrowed, (size_t)named};
+    usearch_error_t error = {usearch_success_k, NULL};
+    usearch_executor_t const handle = usearch_executor_for_ram(&ram, threads, &error);
+    if (borrowed) (*environment)->ReleaseIntArrayElements(environment, memory_domains, borrowed, JNI_ABORT);
+
     if (raised(environment, &error)) return 0;
+    return (jlong)(size_t)handle;
+}
+
+/**
+ *  @brief Opens one submission stream on every device a caller named, driven by the calling thread.
+ *      It takes no thread count: the width of the pool is the device list.
+ */
+JNIEXPORT jlong JNICALL Java_cloud_unum_usearch_Types_nativeExecutorForVram( //
+    JNIEnv* environment, jclass owner, jintArray devices) {
+    (void)owner;
+    jsize const named = devices ? (*environment)->GetArrayLength(environment, devices) : 0;
+    jint* const borrowed = named ? (*environment)->GetIntArrayElements(environment, devices, NULL) : NULL;
+    if (named && !borrowed) {
+        raise(environment, usearch_error_malformed_input_k, "the devices borrow no addressable storage");
+        return 0;
+    }
+
+    usearch_vram_options_t const vram = {(int32_t const*)borrowed, (size_t)named};
+    usearch_error_t error = {usearch_success_k, NULL};
+    usearch_executor_t const handle = usearch_executor_for_vram(&vram, &error);
+    if (borrowed) (*environment)->ReleaseIntArrayElements(environment, devices, borrowed, JNI_ABORT);
+
+    if (raised(environment, &error)) return 0;
+    return (jlong)(size_t)handle;
+}
+
+/**
+ *  @brief Spawns host workers for NVMe-resident indexes, one submission ring apiece, on the devices
+ *      the paths name.
+ *
+ *  Every path is copied into one native run and viewed from there, so no slab stays borrowed across
+ *  the call and the views the C interface reads sit in one contiguous array.
+ */
+JNIEXPORT jlong JNICALL Java_cloud_unum_usearch_Types_nativeExecutorForNvme( //
+    JNIEnv* environment, jclass owner, jobjectArray paths, jlong worker_count) {
+    (void)owner;
+    size_t threads = 0;
+    if (!narrowed(environment, worker_count, "the thread count is negative", &threads)) return 0;
+
+    jsize const named = paths ? (*environment)->GetArrayLength(environment, paths) : 0;
+    usearch_bytes_view_t* const views = named ? (usearch_bytes_view_t*)calloc((size_t)named, sizeof(*views)) : NULL;
+    uint8_t* staged = NULL;
+    usearch_executor_t handle = NULL;
+    if (named && !views) {
+        raise(environment, usearch_error_out_of_memory_k, "the device paths could not be staged");
+        return 0;
+    }
+
+    size_t total = 0;
+    for (jsize order = 0; order != named; ++order) {
+        jbyteArray const path = (jbyteArray)(*environment)->GetObjectArrayElement(environment, paths, order);
+        if (!path) {
+            raise(environment, usearch_error_malformed_input_k, "a device path is empty");
+            goto release;
+        }
+        views[order].length = (size_t)(*environment)->GetArrayLength(environment, path);
+        total += views[order].length;
+        (*environment)->DeleteLocalRef(environment, path);
+    }
+
+    staged = total ? (uint8_t*)malloc(total) : NULL;
+    if (total && !staged) {
+        raise(environment, usearch_error_out_of_memory_k, "the device paths could not be staged");
+        goto release;
+    }
+    for (jsize order = 0, filled = 0; order != named; ++order) {
+        jbyteArray const path = (jbyteArray)(*environment)->GetObjectArrayElement(environment, paths, order);
+        (*environment)->GetByteArrayRegion(environment, path, 0, (jsize)views[order].length, (jbyte*)staged + filled);
+        views[order].data = staged + filled;
+        filled += (jsize)views[order].length;
+        (*environment)->DeleteLocalRef(environment, path);
+    }
+
+    usearch_nvme_options_t const nvme = {views, (size_t)named};
+    usearch_error_t error = {usearch_success_k, NULL};
+    handle = usearch_executor_for_nvme(&nvme, threads, &error);
+    if (raised(environment, &error)) handle = NULL;
+
+release:
+    free(staged);
+    free(views);
     return (jlong)(size_t)handle;
 }
 
@@ -510,24 +572,24 @@ JNIEXPORT jlong JNICALL Java_cloud_unum_usearch_DenseIndex_nativeAdd( //
     usearch_error_t error = {usearch_success_k, NULL};
     size_t added = 0;
 
-    borrowed_slabs_t borrowed = borrowed_opened(environment);
-    void* const rows_address = borrowed_address_of(&borrowed, vectors, storage, byte_offset, writeback_discard_k);
-    void* const keys_address = borrowed_address_of(&borrowed, keys, storage_bytes_k, 0, writeback_discard_k);
-    if (borrowed.complete) {
-        usearch_keys_view_t const identities = {(usearch_key_t const*)keys_address, count};
-        usearch_matrix_view_t const matrix = viewed_matrix(rows_address, count, width, row_stride, scalar_kind);
-        added = usearch_dense_add((usearch_dense_index_t)(size_t)handle, (usearch_executor_t)(size_t)executor,
-                                  identities, &matrix, &options, NULL, NULL, &stats, &error);
-    }
-    bool const borrowing_failed = !borrowed.complete;
-    borrowed_release(&borrowed);
-
-    if (borrowing_failed) {
+    void* const rows_base = elements_borrowed(environment, vectors, (enum storage_t)storage);
+    void* const keys_base = elements_borrowed(environment, keys, storage_bytes_k);
+    if (!rows_base || !keys_base) {
         raise(environment, usearch_error_malformed_input_k, "the matrix borrows no addressable storage");
-        return 0;
+        goto release;
     }
-    if (raised(environment, &error)) return 0;
-    report(environment, statistics, &stats);
+
+    usearch_keys_view_t const identities = {(usearch_key_t const*)keys_base, count};
+    usearch_matrix_view_t const matrix = viewed_matrix((char*)rows_base + byte_offset, count, width, row_stride,
+                                                       scalar_kind);
+    added = usearch_dense_add((usearch_dense_index_t)(size_t)handle, (usearch_executor_t)(size_t)executor, identities,
+                              &matrix, &options, NULL, NULL, &stats, &error);
+    if (raised(environment, &error)) added = 0;
+    else report(environment, statistics, &stats);
+
+release:
+    elements_released(environment, keys, storage_bytes_k, keys_base, writeback_discard_k);
+    elements_released(environment, vectors, (enum storage_t)storage, rows_base, writeback_discard_k);
     return (jlong)added;
 }
 
@@ -554,11 +616,11 @@ JNIEXPORT jlong JNICALL Java_cloud_unum_usearch_DenseIndex_nativeRefine( //
 #pragma region Ranked Walks
 
 /**
- *  @brief The shape @c search and @c maxsim share: borrow the queries and the three output slabs,
- *      hand the ranked run across, widen the per-query counts back into the JVM's array.
+ *  @brief The shape @c search and @c maxsim share: borrow the queries, hand the ranked run across,
+ *      write the keys, scores and per-query counts back into the JVM's arrays.
  *
  *  A @p rows_per_query above zero selects the late-interaction verb, which is the only difference
- *  between the two - every extent, slab, and output is checked and borrowed identically.
+ *  between the two - every extent, slab, and output is checked and staged identically.
  */
 static void traverse_ranked(JNIEnv* environment, jlong handle, jlong executor, jobject queries, jint storage,
                             jlong byte_offset, jlong rows, jlong columns, jlong stride_bytes, jint scalar_kind,
@@ -600,52 +662,50 @@ static void traverse_ranked(JNIEnv* environment, jlong handle, jlong executor, j
         return;
     }
 
-    // Counts cross as `size_t` and Java holds them as `long`, so they travel through staging
-    // buffers rather than being aliased across the two spellings.
+    // The engine overwrites every slot it reports, so the outputs are staged natively and written
+    // back through the region accessors rather than borrowed: borrowing would copy the JVM's
+    // untouched rows in for nothing. Counts cross as `size_t` where Java holds them as `long`.
+    usearch_key_t* const staged_keys = (usearch_key_t*)calloc(slots, sizeof(usearch_key_t));
+    usearch_distance_t* const staged_scores = (usearch_distance_t*)calloc(slots, sizeof(usearch_distance_t));
     size_t* const reported = (size_t*)calloc(resolved, sizeof(size_t));
     jlong* const widened = (jlong*)calloc(resolved, sizeof(jlong));
-    if (!reported || !widened) {
-        raise(environment, usearch_error_out_of_memory_k, "the per-query counts could not be staged");
-        goto release_staging;
+    void* queries_base = NULL;
+    if (!staged_keys || !staged_scores || !reported || !widened) {
+        raise(environment, usearch_error_out_of_memory_k, "the ranked outputs could not be staged");
+        goto release;
     }
 
     usearch_dense_search_options_t const options = {expansion};
     usearch_dense_traversal_stats_t stats = {0, 0, 0};
     usearch_error_t error = {usearch_success_k, NULL};
 
-    borrowed_slabs_t borrowed = borrowed_opened(environment);
-    void* const queries_address = borrowed_address_of(&borrowed, queries, storage, byte_offset, writeback_discard_k);
-    void* const keys_address = borrowed_address_of(&borrowed, keys, storage_bytes_k, 0, writeback_commit_k);
-    void* const scores_address = borrowed_address_of(&borrowed, scores, storage_doubles_k, 0, writeback_commit_k);
-    if (borrowed.complete) {
-        usearch_matrix_view_t const matrix = viewed_matrix(queries_address, count, width, row_stride, scalar_kind);
-        usearch_matches_span_t const span = {(usearch_key_t*)keys_address,
-                                             keys_stride,
-                                             (usearch_distance_t*)scores_address,
-                                             scores_stride,
-                                             reported,
-                                             matches};
-        if (grouping)
-            usearch_dense_maxsim((usearch_dense_index_t)(size_t)handle, (usearch_executor_t)(size_t)executor, &matrix,
-                                 grouping, &span, &options, NULL, NULL, &stats, &error);
-        else
-            usearch_dense_search((usearch_dense_index_t)(size_t)handle, (usearch_executor_t)(size_t)executor, &matrix,
-                                 &span, &options, NULL, NULL, &stats, &error);
-    }
-    bool const borrowing_failed = !borrowed.complete;
-    borrowed_release(&borrowed);
-
-    if (borrowing_failed) {
+    queries_base = elements_borrowed(environment, queries, (enum storage_t)storage);
+    if (!queries_base) {
         raise(environment, usearch_error_malformed_input_k, "the matrix borrows no addressable storage");
-        goto release_staging;
+        goto release;
     }
-    if (raised(environment, &error)) goto release_staging;
+
+    usearch_matrix_view_t const matrix = viewed_matrix((char*)queries_base + byte_offset, count, width, row_stride,
+                                                       scalar_kind);
+    usearch_matches_span_t const span = {staged_keys, keys_stride, staged_scores, scores_stride, reported, matches};
+    if (grouping)
+        usearch_dense_maxsim((usearch_dense_index_t)(size_t)handle, (usearch_executor_t)(size_t)executor, &matrix,
+                             grouping, &span, &options, NULL, NULL, &stats, &error);
+    else
+        usearch_dense_search((usearch_dense_index_t)(size_t)handle, (usearch_executor_t)(size_t)executor, &matrix,
+                             &span, &options, NULL, NULL, &stats, &error);
+    if (raised(environment, &error)) goto release;
 
     for (size_t query = 0; query != resolved; ++query) widened[query] = (jlong)reported[query];
+    (*environment)->SetByteArrayRegion(environment, keys, 0, (jsize)key_bytes, (jbyte const*)staged_keys);
+    (*environment)->SetDoubleArrayRegion(environment, scores, 0, (jsize)slots, (jdouble const*)staged_scores);
     (*environment)->SetLongArrayRegion(environment, counts, 0, (jsize)resolved, widened);
     report(environment, statistics, &stats);
 
-release_staging:
+release:
+    elements_released(environment, queries, (enum storage_t)storage, queries_base, writeback_discard_k);
+    free(staged_keys);
+    free(staged_scores);
     free(reported);
     free(widened);
 }
@@ -701,21 +761,17 @@ JNIEXPORT jlong JNICALL Java_cloud_unum_usearch_DenseIndex_nativeGet( //
     if (!narrowed(environment, stride_bytes, "the stride is negative", &row_stride)) return 0;
 
     usearch_error_t error = {usearch_success_k, NULL};
-    size_t entries = 0;
-
-    borrowed_slabs_t borrowed = borrowed_opened(environment);
-    void* const rows_address = borrowed_address_of(&borrowed, vectors, storage, byte_offset, writeback_commit_k);
-    if (borrowed.complete) {
-        usearch_matrix_span_t const span = spanned_matrix(rows_address, capacity, width, row_stride, scalar_kind);
-        entries = usearch_dense_get((usearch_dense_index_t)(size_t)handle, identity, &span, &error);
-    }
-    bool const borrowing_failed = !borrowed.complete;
-    borrowed_release(&borrowed);
-
-    if (borrowing_failed) {
+    void* const rows_base = elements_borrowed(environment, vectors, (enum storage_t)storage);
+    if (!rows_base) {
         raise(environment, usearch_error_malformed_input_k, "the matrix borrows no addressable storage");
         return 0;
     }
+
+    usearch_matrix_span_t const span = spanned_matrix((char*)rows_base + byte_offset, capacity, width, row_stride,
+                                                      scalar_kind);
+    size_t const entries = usearch_dense_get((usearch_dense_index_t)(size_t)handle, identity, &span, &error);
+    elements_released(environment, vectors, (enum storage_t)storage, rows_base, writeback_commit_k);
+
     if (raised(environment, &error)) return 0;
     return (jlong)entries;
 }
@@ -739,23 +795,19 @@ static void traverse_checkpoint(JNIEnv* environment, jlong handle, jlong executo
     size_t const length = (size_t)(*environment)->GetArrayLength(environment, path);
 
     usearch_error_t error = {usearch_success_k, NULL};
-    borrowed_slabs_t borrowed = borrowed_opened(environment);
-    void* const address = borrowed_address_of(&borrowed, path, storage_bytes_k, 0, writeback_discard_k);
-    if (borrowed.complete) {
-        if (verb == checkpoint_save_k)
-            usearch_dense_save((usearch_dense_index_t)(size_t)handle, (usearch_executor_t)(size_t)executor,
-                               borrowed_bytes(address, length), NULL, NULL, &error);
-        else
-            usearch_dense_load((usearch_dense_index_t)(size_t)handle, (usearch_executor_t)(size_t)executor,
-                               borrowed_bytes(address, length), NULL, NULL, &error);
-    }
-    bool const borrowing_failed = !borrowed.complete;
-    borrowed_release(&borrowed);
-
-    if (borrowing_failed) {
+    void* const address = elements_borrowed(environment, path, storage_bytes_k);
+    if (!address) {
         raise(environment, usearch_error_malformed_input_k, "the path borrows no addressable storage");
         return;
     }
+
+    if (verb == checkpoint_save_k)
+        usearch_dense_save((usearch_dense_index_t)(size_t)handle, (usearch_executor_t)(size_t)executor,
+                           borrowed_bytes(address, length), NULL, NULL, &error);
+    else
+        usearch_dense_load((usearch_dense_index_t)(size_t)handle, (usearch_executor_t)(size_t)executor,
+                           borrowed_bytes(address, length), NULL, NULL, &error);
+    elements_released(environment, path, storage_bytes_k, address, writeback_discard_k);
     raised(environment, &error);
 }
 
@@ -779,18 +831,15 @@ JNIEXPORT void JNICALL Java_cloud_unum_usearch_DenseIndex_nativeSaveBuffer( //
     if (!narrowed(environment, length, "the buffer length is negative", &bytes)) return;
 
     usearch_error_t error = {usearch_success_k, NULL};
-    borrowed_slabs_t borrowed = borrowed_opened(environment);
-    void* const address = borrowed_address_of(&borrowed, buffer, storage, byte_offset, writeback_commit_k);
-    if (borrowed.complete)
-        usearch_dense_save_buffer((usearch_dense_index_t)(size_t)handle, (usearch_executor_t)(size_t)executor,
-                                  spanned_bytes(address, bytes), NULL, NULL, &error);
-    bool const borrowing_failed = !borrowed.complete;
-    borrowed_release(&borrowed);
-
-    if (borrowing_failed) {
+    void* const address = elements_borrowed(environment, buffer, (enum storage_t)storage);
+    if (!address) {
         raise(environment, usearch_error_malformed_input_k, "the buffer borrows no addressable storage");
         return;
     }
+
+    usearch_dense_save_buffer((usearch_dense_index_t)(size_t)handle, (usearch_executor_t)(size_t)executor,
+                              spanned_bytes((char*)address + byte_offset, bytes), NULL, NULL, &error);
+    elements_released(environment, buffer, (enum storage_t)storage, address, writeback_commit_k);
     raised(environment, &error);
 }
 
@@ -802,18 +851,15 @@ JNIEXPORT void JNICALL Java_cloud_unum_usearch_DenseIndex_nativeLoadBuffer( //
     if (!narrowed(environment, length, "the buffer length is negative", &bytes)) return;
 
     usearch_error_t error = {usearch_success_k, NULL};
-    borrowed_slabs_t borrowed = borrowed_opened(environment);
-    void* const address = borrowed_address_of(&borrowed, buffer, storage, byte_offset, writeback_discard_k);
-    if (borrowed.complete)
-        usearch_dense_load_buffer((usearch_dense_index_t)(size_t)handle, (usearch_executor_t)(size_t)executor,
-                                  borrowed_bytes(address, bytes), NULL, NULL, &error);
-    bool const borrowing_failed = !borrowed.complete;
-    borrowed_release(&borrowed);
-
-    if (borrowing_failed) {
+    void* const address = elements_borrowed(environment, buffer, (enum storage_t)storage);
+    if (!address) {
         raise(environment, usearch_error_malformed_input_k, "the buffer borrows no addressable storage");
         return;
     }
+
+    usearch_dense_load_buffer((usearch_dense_index_t)(size_t)handle, (usearch_executor_t)(size_t)executor,
+                              borrowed_bytes((char*)address + byte_offset, bytes), NULL, NULL, &error);
+    elements_released(environment, buffer, (enum storage_t)storage, address, writeback_discard_k);
     raised(environment, &error);
 }
 
@@ -826,20 +872,19 @@ JNIEXPORT void JNICALL Java_cloud_unum_usearch_DenseIndex_nativeMetadata( //
     }
     size_t const length = (size_t)(*environment)->GetArrayLength(environment, path);
 
-    usearch_dense_options_t options = {0};
+    usearch_dense_metadata_t metadata = {0};
     usearch_error_t error = {usearch_success_k, NULL};
-    borrowed_slabs_t borrowed = borrowed_opened(environment);
-    void* const address = borrowed_address_of(&borrowed, path, storage_bytes_k, 0, writeback_discard_k);
-    if (borrowed.complete) usearch_dense_metadata(borrowed_bytes(address, length), &options, &error);
-    bool const borrowing_failed = !borrowed.complete;
-    borrowed_release(&borrowed);
-
-    if (borrowing_failed) {
+    void* const address = elements_borrowed(environment, path, storage_bytes_k);
+    if (!address) {
         raise(environment, usearch_error_malformed_input_k, "the path borrows no addressable storage");
         return;
     }
+
+    usearch_dense_metadata(borrowed_bytes(address, length), &metadata, &error);
+    elements_released(environment, path, storage_bytes_k, address, writeback_discard_k);
+
     if (raised(environment, &error)) return;
-    lift_options(environment, &options, words);
+    lift_metadata(environment, &metadata, words);
 }
 
 JNIEXPORT void JNICALL Java_cloud_unum_usearch_DenseIndex_nativeMetadataBuffer( //
@@ -849,20 +894,19 @@ JNIEXPORT void JNICALL Java_cloud_unum_usearch_DenseIndex_nativeMetadataBuffer( 
     size_t bytes = 0;
     if (!narrowed(environment, length, "the buffer length is negative", &bytes)) return;
 
-    usearch_dense_options_t options = {0};
+    usearch_dense_metadata_t metadata = {0};
     usearch_error_t error = {usearch_success_k, NULL};
-    borrowed_slabs_t borrowed = borrowed_opened(environment);
-    void* const address = borrowed_address_of(&borrowed, buffer, storage, byte_offset, writeback_discard_k);
-    if (borrowed.complete) usearch_dense_metadata_buffer(borrowed_bytes(address, bytes), &options, &error);
-    bool const borrowing_failed = !borrowed.complete;
-    borrowed_release(&borrowed);
-
-    if (borrowing_failed) {
+    void* const address = elements_borrowed(environment, buffer, (enum storage_t)storage);
+    if (!address) {
         raise(environment, usearch_error_malformed_input_k, "the buffer borrows no addressable storage");
         return;
     }
+
+    usearch_dense_metadata_buffer(borrowed_bytes((char*)address + byte_offset, bytes), &metadata, &error);
+    elements_released(environment, buffer, (enum storage_t)storage, address, writeback_discard_k);
+
     if (raised(environment, &error)) return;
-    lift_options(environment, &options, words);
+    lift_metadata(environment, &metadata, words);
 }
 
 JNIEXPORT void JNICALL Java_cloud_unum_usearch_DenseIndex_nativeReloadOptions( //

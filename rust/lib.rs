@@ -5,7 +5,7 @@
 //! boundary. One module per modality, named after the header it mirrors.
 //!
 //! ```no_run
-//! use usearch::{DenseIndex, Executor, Residency, ScalarKind};
+//! use usearch::{DenseIndex, Executor, ScalarKind};
 //! use usearch::dense::{Metric, Options};
 //!
 //! let mut options = Options::default();
@@ -15,7 +15,7 @@
 //!
 //! let index = DenseIndex::new(&options)?;
 //! index.reserve(1_000_000)?;
-//! let executor = Executor::new(&Residency::default(), 0)?;
+//! let executor = Executor::for_ram(&[], 0)?;
 //! # Ok::<(), usearch::Error>(())
 //! ```
 
@@ -26,6 +26,6 @@ pub mod dense;
 
 pub use dense::DenseIndex;
 pub use types::{
-    capabilities_available, capabilities_compiled, rows, rows_mut, version, Distance, Error, Executor, Key, Residency,
-    Result, Scalar, ScalarKind, Status,
+    capabilities_available, capabilities_compiled, rows, rows_mut, version, Continuation, Distance, Error, Executor,
+    Key, Residency, Result, Scalar, ScalarKind, Status,
 };

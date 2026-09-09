@@ -678,8 +678,9 @@ func pinnedPaths(paths []string, pinner *runtime.Pinner) (*C.usearch_bytes_view_
 //
 // An executor owns workers; an index owns rows. Keeping them apart is what lets one pool serve
 // several indexes, and what makes the cost of spawning visible at the line that spawns it. Its
-// residency must match the handles it drives - the engine reads a mismatch as a device fault
-// rather than deriving one, so there is no nil to pass.
+// kind is fixed by the factory that produced it and must match the residency of the handles it
+// drives - the engine reads a mismatch as a device fault rather than deriving one, so there is no
+// nil to pass.
 //
 // One driver at a time: a second concurrent call on the same executor reports Contended before
 // any work begins. Handles stay freely concurrent - it is the executor that serializes.
@@ -687,38 +688,60 @@ type Executor struct {
 	handle C.usearch_executor_t
 }
 
-// NewExecutor spawns the workers one residency needs.
+// NewRAMExecutor spawns host workers for RAM-resident indexes, interleaved across the compute
+// domains local to memoryDomains - the same list the indexes were initialized with, which is what
+// keeps compute and memory domains in agreement. An empty list derives them from the machine.
 //
-// Zero threads derives: seven eighths of the cores for RAM, since full occupancy starves the
-// ordered publication path, and the devices' queue capabilities for NVMe. A VRAM executor opens
-// one stream per device driven by the calling thread, so it reads no thread count at all.
-func NewExecutor(residency Residency, threads uint) (*Executor, error) {
+// Zero threads takes seven eighths of the cores those domains carry, since full occupancy starves
+// the ordered publication path.
+func NewRAMExecutor(memoryDomains []int32, threads uint) (*Executor, error) {
 	var pinner runtime.Pinner
 	defer pinner.Unpin()
 
+	domains, count := pinnedInts(memoryDomains, &pinner)
+	options := C.usearch_ram_options_t{memory_domains: domains, memory_domains_count: count}
 	var failure C.usearch_error_t
-	var handle C.usearch_executor_t
-	// One factory per residency, as the C interface has them: their arities differ because a
-	// VRAM executor drives one stream per device from the calling thread and reads no count.
-	switch placement := residency.(type) {
-	case RAMResidency:
-		domains, count := pinnedInts(placement.MemoryDomains, &pinner)
-		options := C.usearch_ram_options_t{memory_domains: domains, memory_domains_count: count}
-		handle = C.usearch_executor_for_ram(&options, C.size_t(threads), &failure)
-	case VRAMResidency:
-		devices, count := pinnedInts(placement.Devices, &pinner)
-		options := C.usearch_vram_options_t{devices: devices, devices_count: count}
-		handle = C.usearch_executor_for_vram(&options, &failure)
-	case NVMeResidency:
-		paths, count, err := pinnedPaths(placement.Paths, &pinner)
-		if err != nil {
-			return nil, err
-		}
-		options := C.usearch_nvme_options_t{paths: paths, paths_count: count}
-		handle = C.usearch_executor_for_nvme(&options, C.size_t(threads), &failure)
-	default:
-		return nil, fail(MalformedInput, "the residency is nil; name RAMResidency, VRAMResidency, or NVMeResidency")
+	handle := C.usearch_executor_for_ram(&options, C.size_t(threads), &failure)
+	return spawned(handle, failure)
+}
+
+// NewNVMeExecutor spawns host workers for NVMe-resident indexes, one submission ring apiece,
+// across the compute domains local to the devices paths names. One ring per thread is what keeps
+// submission lock-free: a thread owns its queue outright.
+//
+// Zero threads derives from those devices' queue capabilities.
+func NewNVMeExecutor(paths []string, threads uint) (*Executor, error) {
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+
+	views, count, err := pinnedPaths(paths, &pinner)
+	if err != nil {
+		return nil, err
 	}
+	options := C.usearch_nvme_options_t{paths: views, paths_count: count}
+	var failure C.usearch_error_t
+	handle := C.usearch_executor_for_nvme(&options, C.size_t(threads), &failure)
+	return spawned(handle, failure)
+}
+
+// NewVRAMExecutor opens one submission stream on every named device, all of them driven by the one
+// host thread that calls the verbs - which is why it takes no thread count.
+//
+// Adding host threads would buy nothing: the work has already left for the accelerator by the time
+// one of them would return.
+func NewVRAMExecutor(devices []int32) (*Executor, error) {
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+
+	ordinals, count := pinnedInts(devices, &pinner)
+	options := C.usearch_vram_options_t{devices: ordinals, devices_count: count}
+	var failure C.usearch_error_t
+	handle := C.usearch_executor_for_vram(&options, &failure)
+	return spawned(handle, failure)
+}
+
+// spawned reports the executor a factory produced, or the failure it left behind.
+func spawned(handle C.usearch_executor_t, failure C.usearch_error_t) (*Executor, error) {
 	if err := check(failure); err != nil {
 		return nil, err
 	}

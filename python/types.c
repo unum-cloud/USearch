@@ -128,8 +128,6 @@ static scalar_naming_t const scalar_namings[] = {
     {usearch_scalar_u1x8_k, "|V1", "?", 8, 1},
 };
 
-static size_t const scalar_namings_count = usearch_py_table_size_(scalar_namings);
-
 /** @brief Aliases the ecosystem spells differently than we do, resolved after the table. */
 static struct {
     char const* name;
@@ -145,10 +143,8 @@ static struct {
     {"bool", usearch_scalar_u1x8_k},
 };
 
-static size_t const scalar_aliases_count = usearch_py_table_size_(scalar_aliases);
-
 static scalar_naming_t const* scalar_naming(usearch_scalar_t kind) {
-    for (size_t naming_index = 0; naming_index != scalar_namings_count; ++naming_index)
+    for (size_t naming_index = 0; naming_index != usearch_py_table_size_(scalar_namings); ++naming_index)
         if (scalar_namings[naming_index].kind == kind) return &scalar_namings[naming_index];
     return NULL;
 }
@@ -165,12 +161,12 @@ usearch_scalar_t usearch_py_scalar_from_spelling(char const* name, Py_ssize_t le
     usearch_bytes_view_t const spelling = {(uint8_t const*)name, (size_t)length};
     usearch_scalar_t const canonical = usearch_scalar_from_name(spelling);
     if (scalar_naming(canonical)) return canonical;
-    for (size_t naming_index = 0; naming_index != scalar_namings_count; ++naming_index) {
+    for (size_t naming_index = 0; naming_index != usearch_py_table_size_(scalar_namings); ++naming_index) {
         scalar_naming_t const* const naming = &scalar_namings[naming_index];
         if (naming->buffer_typestr && same_string_sized(name, length, naming->buffer_typestr)) return naming->kind;
         if (naming->numpy_typestr && same_string_sized(name, length, naming->numpy_typestr)) return naming->kind;
     }
-    for (size_t alias_index = 0; alias_index != scalar_aliases_count; ++alias_index)
+    for (size_t alias_index = 0; alias_index != usearch_py_table_size_(scalar_aliases); ++alias_index)
         if (same_string_sized(name, length, scalar_aliases[alias_index].name)) return scalar_aliases[alias_index].kind;
     return usearch_scalar_unknown_k;
 }
@@ -438,7 +434,8 @@ int usearch_py_matrix_from_object(PyObject* object, usearch_scalar_t scalar_hint
     usearch_scalar_t kind = scalar_hint;
     if (kind == usearch_scalar_unknown_k && buffer->format)
         kind = usearch_py_scalar_from_spelling(buffer->format, (Py_ssize_t)strlen(buffer->format));
-    if (kind == usearch_scalar_unknown_k) {
+    scalar_naming_t const* const naming = scalar_naming(kind);
+    if (!naming) {
         PyErr_Format(PyExc_ValueError, "Unsupported '%s' scalar kind; pass `dtype=` to name it",
                      buffer->format ? buffer->format : "?");
         usearch_py_buffer_release(backing);
@@ -454,16 +451,18 @@ int usearch_py_matrix_from_object(PyObject* object, usearch_scalar_t scalar_hint
         return -1;
     }
 
+    // A shape counts storage units and the descriptor counts logical dimensions, so a sub-byte
+    // kind widens by its packing factor - an eight-byte `u1x8` row is sixty-four dimensions.
     view->data = buffer->buf;
     view->scalar_kind = kind;
     if (buffer->ndim == 1) {
         view->rows = 1;
-        view->columns = (size_t)buffer->shape[0];
+        view->columns = (size_t)buffer->shape[0] * naming->values_packed;
         view->stride_bytes = (size_t)buffer->len;
     }
     else {
         view->rows = (size_t)buffer->shape[0];
-        view->columns = (size_t)buffer->shape[1];
+        view->columns = (size_t)buffer->shape[1] * naming->values_packed;
         Py_ssize_t const stride_bytes = buffer->strides ? buffer->strides[0] : buffer->shape[1] * buffer->itemsize;
         if (stride_bytes < 0) {
             PyErr_SetString(PyExc_ValueError, "Matrix rows must ascend in memory");
@@ -781,14 +780,17 @@ int usearch_py_keys_from_object(PyObject* object, size_t expected, usearch_py_ke
 
 #pragma region Telemetry
 
-static char const doc_Stats[] =                                                 //
-    "Stats()\n"                                                                 //
-    "\n"                                                                        //
-    "Traversal telemetry, accumulated across the calls it is passed to.\n"      //
-    "\n"                                                                        //
-    "Attributes:\n"                                                             //
-    "  visited_members (int): Entries whose neighborhoods the walk expanded.\n" //
-    "  computed_distances (int): Distance evaluations the walk paid for.\n"     //
+static char const doc_Stats[] =                                                  //
+    "Stats()\n"                                                                  //
+    "\n"                                                                         //
+    "Traversal telemetry, fully overwritten by every call it is passed to.\n"    //
+    "\n"                                                                         //
+    "One reading belongs to one call, so a sweep that wants totals folds each\n" //
+    "reading into a separate `Stats` with `accumulate`.\n"                       //
+    "\n"                                                                         //
+    "Attributes:\n"                                                              //
+    "  visited_members (int): Entries whose neighborhoods the walk expanded.\n"  //
+    "  computed_distances (int): Distance evaluations the walk paid for.\n"      //
     "  restarts (int): Times the walk fell back to a fresh entry point.";
 
 static PyObject* Stats_tp_new(PyTypeObject* type, PyObject* args, PyObject* keywords) {
@@ -816,21 +818,45 @@ PyObject* usearch_py_stats_to_object(usearch_dense_traversal_stats_t const* stat
     return (PyObject*)instance;
 }
 
-int usearch_py_stats_accumulate(PyObject* target, usearch_dense_traversal_stats_t const* stats) {
+int usearch_py_stats_overwrite(PyObject* target, usearch_dense_traversal_stats_t const* stats) {
     if (!target || target == Py_None) return 0;
     if (!PyObject_TypeCheck(target, &StatsType)) {
         PyErr_Format(PyExc_TypeError, "Expected a Stats object, got %S", Py_TYPE(target));
         return -1;
     }
-    // The docstring invites sharing one `Stats` across concurrent calls, so the increments are
-    // guarded rather than merely quick - the module declares it does not need the GIL.
-    Stats* const accumulator = (Stats*)target;
-    usearch_py_critical_section_begin_(target);
-    accumulator->stats.visited_members += stats->visited_members;
-    accumulator->stats.computed_distances += stats->computed_distances;
-    accumulator->stats.restarts += stats->restarts;
-    usearch_py_critical_section_end_();
+    ((Stats*)target)->stats = *stats;
     return 0;
+}
+
+static char const doc_Stats_accumulate[] =                                      //
+    "accumulate(other) -> None\n"                                               //
+    "\n"                                                                        //
+    "Fold another reading's counters into this one, summing a sweep's calls.\n" //
+    "\n"                                                                        //
+    "Args:\n"                                                                   //
+    "  other (Stats): The reading to add.\n"                                    //
+    "\n"                                                                        //
+    "Example:\n"                                                                //
+    "  >>> total, reading = usearch.Stats(), usearch.Stats()\n"                 //
+    "  >>> total.accumulate(reading)\n"                                         //
+    "  >>> total.visited_members\n"                                             //
+    "  0";
+
+static PyObject* Stats_accumulate(PyObject* self, PyObject* other) {
+    if (!PyObject_TypeCheck(other, &StatsType)) {
+        PyErr_Format(PyExc_TypeError, "Expected a Stats object, got %S", Py_TYPE(other));
+        return NULL;
+    }
+    // A read-modify-write, unlike the overwrite a verb performs, so two threads folding into
+    // one total are fenced against each other - the module declares it does not need the GIL.
+    Stats* const total = (Stats*)self;
+    usearch_dense_traversal_stats_t const addend = ((Stats*)other)->stats;
+    usearch_py_critical_section_begin_(self);
+    total->stats.visited_members += addend.visited_members;
+    total->stats.computed_distances += addend.computed_distances;
+    total->stats.restarts += addend.restarts;
+    usearch_py_critical_section_end_();
+    Py_RETURN_NONE;
 }
 
 static char const doc_Stats_visited_members[] = "Entries whose neighborhoods the walk expanded.";
@@ -856,6 +882,11 @@ static PyGetSetDef Stats_getset[] = {
     {NULL, NULL, NULL, NULL, NULL},
 };
 
+static PyMethodDef Stats_methods[] = {
+    {"accumulate", (PyCFunction)Stats_accumulate, METH_O, doc_Stats_accumulate}, //
+    {NULL, NULL, 0, NULL},
+};
+
 PyTypeObject StatsType = {
     PyVarObject_HEAD_INIT(NULL, 0) //
         .tp_name = "usearch.Stats",
@@ -865,6 +896,7 @@ PyTypeObject StatsType = {
     .tp_new = Stats_tp_new,
     .tp_dealloc = (destructor)Stats_dealloc,
     .tp_repr = (reprfunc)Stats_repr,
+    .tp_methods = Stats_methods,
     .tp_getset = Stats_getset,
 };
 
@@ -930,30 +962,96 @@ PyTypeObject MatchType = {
 };
 
 static char const doc_Matches[] =                                                           //
-    "The result of a batch search: three matrices and the telemetry that produced them.\n"  //
+    "A ranked run, read back off the three buffers a search filled.\n"                      //
     "\n"                                                                                    //
-    "The fields are zero-copy views over arenas this object owns, so `np.asarray` costs\n"  //
-    "nothing and NumPy is never required. No NumPy dtype expresses a 128-bit integer, so\n" //
-    "keys arrive as big-endian sixteen-byte rows.\n"                                        //
+    "Borrows the buffers rather than copying them, so `np.asarray` costs nothing and\n"     //
+    "NumPy is never required. No NumPy dtype expresses a 128-bit integer, so keys arrive\n" //
+    "as big-endian sixteen-byte rows. The matches-per-query width follows from the three\n" //
+    "lengths, so nothing can contradict them.\n"                                            //
+    "\n"                                                                                    //
+    "Args:\n"                                                                               //
+    "  keys (buffer): A (queries, wanted, 16) buffer of identity bytes.\n"                  //
+    "  distances (buffer): A (queries, wanted) buffer of float64 distances.\n"              //
+    "  counts (buffer): A (queries,) buffer of unsigned word-sized counts.\n"               //
     "\n"                                                                                    //
     "Attributes:\n"                                                                         //
     "  keys (memoryview): (queries, wanted, 16) identities, most significant byte first.\n" //
     "  distances (memoryview): (queries, wanted) distances.\n"                              //
-    "  counts (memoryview): (queries,) match counts; entries past a count are zeroed.\n"    //
-    "  visited_members (int): Entries whose neighborhoods the walk expanded.\n"             //
-    "  computed_distances (int): Distance evaluations the walk paid for.\n"                 //
-    "  restarts (int): Times the walk fell back to a fresh entry point.";
+    "  counts (memoryview): (queries,) match counts, each bounding its own row.\n"          //
+    "\n"                                                                                    //
+    "Example:\n"                                                                            //
+    "  >>> keys, distances, counts = bytearray(2 * 16), bytearray(2 * 8), bytearray(8)\n"   //
+    "  >>> len(usearch.Matches(keys, distances, counts))\n"                                 //
+    "  1";
 
 static void Matches_dealloc(Matches* self) {
-    Py_XDECREF(self->keys_arena);
-    Py_XDECREF(self->distances_arena);
-    Py_XDECREF(self->counts_arena);
+    usearch_py_buffer_release(&self->counts);
+    usearch_py_buffer_release(&self->distances);
+    usearch_py_buffer_release(&self->keys);
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
-/** @brief Wraps @p arena in a read-only `memoryview` reshaped to @p shape. */
-static PyObject* arena_view(PyObject* arena, char const* format, Py_ssize_t const* shape, Py_ssize_t rank) {
-    PyObject* const flat = PyMemoryView_FromObject(arena);
+/** @brief Borrows one contiguous output for a @c Matches to read through. */
+static int matches_borrow(PyObject* object, char const* field, usearch_py_buffer_backing_t* backing) {
+    backing->synthesized_owner = NULL;
+    if (PyObject_GetBuffer(object, &backing->buffer, PyBUF_C_CONTIGUOUS) != 0)
+        return usearch_py_raise_from_cause(PyExc_ValueError, "The '%s' buffer must be contiguous", field);
+    return 0;
+}
+
+static PyObject* Matches_tp_new(PyTypeObject* type, PyObject* args, PyObject* keywords) {
+    if (PyTuple_GET_SIZE(args) != 3 || (keywords && PyDict_GET_SIZE(keywords) != 0)) {
+        PyErr_SetString(PyExc_TypeError, "Matches() takes three positional arguments: keys, distances, counts");
+        return NULL;
+    }
+    Matches* const instance = (Matches*)type->tp_alloc(type, 0);
+    if (!instance) return NULL;
+    if (matches_borrow(PyTuple_GET_ITEM(args, 0), "keys", &instance->keys) != 0 ||
+        matches_borrow(PyTuple_GET_ITEM(args, 1), "distances", &instance->distances) != 0 ||
+        matches_borrow(PyTuple_GET_ITEM(args, 2), "counts", &instance->counts) != 0) {
+        Py_DECREF(instance);
+        return NULL;
+    }
+
+    Py_ssize_t const keys_bytes = instance->keys.buffer.len;
+    Py_ssize_t const distances_bytes = instance->distances.buffer.len;
+    Py_ssize_t const counts_bytes = instance->counts.buffer.len;
+    if (keys_bytes % (Py_ssize_t)sizeof(usearch_key_t) != 0 ||
+        distances_bytes % (Py_ssize_t)sizeof(usearch_distance_t) != 0 ||
+        counts_bytes % (Py_ssize_t)sizeof(size_t) != 0) {
+        usearch_py_raise(usearch_error_shape_mismatch_k, "the buffers do not hold whole keys, distances and counts");
+        Py_DECREF(instance);
+        return NULL;
+    }
+
+    size_t const keyed = (size_t)keys_bytes / sizeof(usearch_key_t);
+    size_t const scored = (size_t)distances_bytes / sizeof(usearch_distance_t);
+    size_t const queries = (size_t)counts_bytes / sizeof(size_t);
+    if (keyed != scored) {
+        usearch_py_raise(usearch_error_shape_mismatch_k, "the key and distance buffers are not the same shape");
+        Py_DECREF(instance);
+        return NULL;
+    }
+    if (queries == 0 || keyed == 0 || keyed % queries != 0) {
+        usearch_py_raise(usearch_error_shape_mismatch_k, "the buffers do not divide into one row per query");
+        Py_DECREF(instance);
+        return NULL;
+    }
+
+    instance->queries = queries;
+    instance->wanted = keyed / queries;
+    return (PyObject*)instance;
+}
+
+/** @brief Wraps a borrowed output in a `memoryview` reshaped to @p shape in @p format. */
+static PyObject* matches_view(usearch_py_buffer_backing_t const* backing, char const* format, Py_ssize_t const* shape,
+                              Py_ssize_t rank) {
+    PyObject* const exported = PyMemoryView_FromObject(backing->buffer.obj);
+    if (!exported) return NULL;
+    // A cast crosses formats only through the byte one, so the caller's own format - `d` for a
+    // float64 output, say - reaches the shape below in two steps rather than one.
+    PyObject* const flat = PyObject_CallMethod(exported, "cast", "s", "B");
+    Py_DECREF(exported);
     if (!flat) return NULL;
     PyObject* const shape_tuple = PyTuple_New(rank);
     if (!shape_tuple) {
@@ -979,38 +1077,22 @@ static char const doc_Matches_keys[] = "(queries, wanted, 16) identities, most s
 
 static PyObject* Matches_get_keys(Matches* self, void* closure) {
     Py_ssize_t const shape[3] = {(Py_ssize_t)self->queries, (Py_ssize_t)self->wanted, 16};
-    return arena_view(self->keys_arena, "B", shape, 3);
+    return matches_view(&self->keys, "B", shape, 3);
 }
 
 static char const doc_Matches_distances[] = "(queries, wanted) distances, in the index's own metric.";
 
 static PyObject* Matches_get_distances(Matches* self, void* closure) {
     Py_ssize_t const shape[2] = {(Py_ssize_t)self->queries, (Py_ssize_t)self->wanted};
-    return arena_view(self->distances_arena, "d", shape, 2);
+    return matches_view(&self->distances, "d", shape, 2);
 }
 
-static char const doc_Matches_counts[] = "(queries,) match counts; entries past a count are zeroed.";
+static char const doc_Matches_counts[] = "(queries,) match counts, each bounding its own row.";
 
 static PyObject* Matches_get_counts(Matches* self, void* closure) {
     Py_ssize_t const shape[1] = {(Py_ssize_t)self->queries};
-    return arena_view(self->counts_arena, "N", shape, 1);
+    return matches_view(&self->counts, "N", shape, 1);
 }
-
-static char const doc_Matches_visited_members[] = "Entries whose neighborhoods the walk expanded.";
-
-static PyObject* Matches_get_visited_members(Matches* self, void* closure) {
-    return PyLong_FromSize_t(self->stats.visited_members);
-}
-
-static char const doc_Matches_computed_distances[] = "Distance evaluations the walk paid for.";
-
-static PyObject* Matches_get_computed_distances(Matches* self, void* closure) {
-    return PyLong_FromSize_t(self->stats.computed_distances);
-}
-
-static char const doc_Matches_restarts[] = "Times the walk fell back to a fresh entry point.";
-
-static PyObject* Matches_get_restarts(Matches* self, void* closure) { return PyLong_FromSize_t(self->stats.restarts); }
 
 static Py_ssize_t Matches_length(Matches* self) { return (Py_ssize_t)self->queries; }
 
@@ -1020,9 +1102,9 @@ static PyObject* Matches_item(Matches* self, Py_ssize_t query_index) {
         PyErr_SetString(PyExc_IndexError, "Query index out of range");
         return NULL;
     }
-    size_t const* const counts = (size_t const*)PyBytes_AS_STRING(self->counts_arena);
-    usearch_key_t const* const keys = (usearch_key_t const*)PyBytes_AS_STRING(self->keys_arena);
-    usearch_distance_t const* const distances = (usearch_distance_t const*)PyBytes_AS_STRING(self->distances_arena);
+    size_t const* const counts = (size_t const*)self->counts.buffer.buf;
+    usearch_key_t const* const keys = (usearch_key_t const*)self->keys.buffer.buf;
+    usearch_distance_t const* const distances = (usearch_distance_t const*)self->distances.buffer.buf;
 
     // A count is the engine's word, and the sibling `multiply` verb documents counts that
     // exceed the column width outright - so it bounds a read here rather than defining one.
@@ -1042,17 +1124,13 @@ static PyObject* Matches_item(Matches* self, Py_ssize_t query_index) {
 }
 
 static PyObject* Matches_repr(Matches* self) {
-    return PyUnicode_FromFormat("Matches(queries=%zu, wanted=%zu, computed_distances=%zu)", self->queries, self->wanted,
-                                self->stats.computed_distances);
+    return PyUnicode_FromFormat("Matches(queries=%zu, wanted=%zu)", self->queries, self->wanted);
 }
 
 static PyGetSetDef Matches_getset[] = {
-    {"keys", (getter)Matches_get_keys, NULL, doc_Matches_keys, NULL},                                           //
-    {"distances", (getter)Matches_get_distances, NULL, doc_Matches_distances, NULL},                            //
-    {"counts", (getter)Matches_get_counts, NULL, doc_Matches_counts, NULL},                                     //
-    {"visited_members", (getter)Matches_get_visited_members, NULL, doc_Matches_visited_members, NULL},          //
-    {"computed_distances", (getter)Matches_get_computed_distances, NULL, doc_Matches_computed_distances, NULL}, //
-    {"restarts", (getter)Matches_get_restarts, NULL, doc_Matches_restarts, NULL},                               //
+    {"keys", (getter)Matches_get_keys, NULL, doc_Matches_keys, NULL},                //
+    {"distances", (getter)Matches_get_distances, NULL, doc_Matches_distances, NULL}, //
+    {"counts", (getter)Matches_get_counts, NULL, doc_Matches_counts, NULL},          //
     {NULL, NULL, NULL, NULL, NULL},
 };
 
@@ -1067,7 +1145,7 @@ PyTypeObject MatchesType = {
     .tp_doc = doc_Matches,
     .tp_basicsize = sizeof(Matches),
     .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_new = NULL, //! Returned by `search`, never constructed by name.
+    .tp_new = Matches_tp_new,
     .tp_dealloc = (destructor)Matches_dealloc,
     .tp_repr = (reprfunc)Matches_repr,
     .tp_as_sequence = &Matches_as_sequence,

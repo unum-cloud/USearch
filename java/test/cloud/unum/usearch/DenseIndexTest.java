@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import cloud.unum.usearch.DenseIndex.DenseMetadata;
 import cloud.unum.usearch.DenseIndex.DenseMetric;
 import cloud.unum.usearch.DenseIndex.DenseOptions;
 import cloud.unum.usearch.DenseIndex.DenseStats;
@@ -41,7 +42,7 @@ import org.junit.jupiter.api.Test;
 public class DenseIndexTest {
 
     /** One pool every fanned-out verb here runs on; the engine derives none. */
-    private static final Executor POOL = new Executor();
+    private static final Executor POOL = Executor.forRam(0);
 
     @AfterAll
     public static void releasePool() {
@@ -159,10 +160,40 @@ public class DenseIndexTest {
                 assertThrows(USearchException.class, () -> Extents.product(-1, 4, "the extent"))
                         .status());
 
-        // The queries-by-wanted product feeds three slab lengths, so it is checked in the constructor.
+        // The queries-by-wanted product feeds three slab lengths, so it is checked before they are sized.
         assertEquals(
                 Status.OVERFLOW,
-                assertThrows(USearchException.class, () -> new Matches(1_000_000, 1_000_000))
+                assertThrows(USearchException.class, () -> Matches.packed(1_000_000, 1_000_000))
+                        .status());
+    }
+
+    @Test
+    public void matchesReadTheirShapeOffTheSlabs() {
+        Matches adopted = Matches.of(new byte[6 * Key.BYTES], new double[6], new long[2]);
+        assertEquals(2, adopted.queries());
+        assertEquals(3, adopted.wanted());
+
+        assertEquals(
+                Status.SHAPE_MISMATCH,
+                assertThrows(
+                                USearchException.class,
+                                () -> Matches.of(new byte[6 * Key.BYTES], new double[6], new long[0]))
+                        .status());
+        assertEquals(
+                Status.SHAPE_MISMATCH,
+                assertThrows(
+                                USearchException.class,
+                                () -> Matches.of(new byte[6 * Key.BYTES], new double[5], new long[2]))
+                        .status());
+        assertEquals(
+                Status.SHAPE_MISMATCH,
+                assertThrows(
+                                USearchException.class,
+                                () -> Matches.of(new byte[5 * Key.BYTES], new double[5], new long[2]))
+                        .status());
+        assertEquals(
+                Status.MALFORMED_INPUT,
+                assertThrows(USearchException.class, () -> Matches.of(null, new double[6], new long[2]))
                         .status());
     }
 
@@ -235,7 +266,8 @@ public class DenseIndexTest {
     @Test
     public void searchWritesOnlyWhatTheCountsClaim() {
         try (DenseIndex index = populated()) {
-            Matches matches = index.search(Matrix.of(new float[] {0, 1}, 2), 4, POOL);
+            Matches matches = Matches.packed(1, 4);
+            index.search(Matrix.of(new float[] {0, 1}, 2), matches, POOL, SearchOptions.DERIVED);
             assertEquals(1, matches.queries());
             assertEquals(4, matches.wanted());
             assertEquals(2, matches.count(0));
@@ -260,7 +292,7 @@ public class DenseIndexTest {
     @Test
     public void searchClampsACountThatOverrunsItsRoom() {
         // The C interface reports the true extent, which may exceed the room reserved for it.
-        Matches matches = new Matches(2, 2);
+        Matches matches = Matches.packed(2, 2);
         matches.countSlab()[0] = 9;
         matches.countSlab()[1] = 1;
         assertEquals(2, matches.count(0));
@@ -275,9 +307,9 @@ public class DenseIndexTest {
     @Test
     public void everyWalkReportsTraversalTelemetry() {
         try (DenseIndex index = populated()) {
-            Matches matches = new Matches(1, 2);
+            Matches matches = Matches.packed(1, 2);
             DenseStats searched =
-                    index.searchInto(Matrix.of(new float[] {0, 1}, 2), matches, POOL, new SearchOptions(64));
+                    index.search(Matrix.of(new float[] {0, 1}, 2), matches, POOL, new SearchOptions(64));
             assertTrue(searched.visitedMembers() > 0);
             assertTrue(searched.computedDistances() > 0);
             assertEquals(searched, DenseStats.NONE.plus(searched));
@@ -303,16 +335,23 @@ public class DenseIndexTest {
                     Matrix.of(new float[] {1, 0, 0, 1, 2, 0, 0, 2}, 2),
                     POOL);
 
-            Matches matches = index.maxsim(Matrix.of(new float[] {1, 0, 0, 1}, 2), 2, 2, POOL);
+            Matches matches = Matches.packed(1, 2);
+            index.maxsim(Matrix.of(new float[] {1, 0, 0, 1}, 2), 2, matches, POOL, SearchOptions.DERIVED);
             assertEquals(1, matches.queries());
             assertEquals(2, matches.count(0));
 
             // The rows of a batch must divide into whole queries, and the check runs before the call.
+            Matches uneven = Matches.packed(1, 1);
             assertEquals(
                     Status.SHAPE_MISMATCH,
                     assertThrows(
                                     USearchException.class,
-                                    () -> index.maxsim(Matrix.of(new float[] {1, 0, 0, 1}, 2), 3, 1, POOL))
+                                    () -> index.maxsim(
+                                            Matrix.of(new float[] {1, 0, 0, 1}, 2),
+                                            3,
+                                            uneven,
+                                            POOL,
+                                            SearchOptions.DERIVED))
                             .status());
         }
     }
@@ -322,8 +361,11 @@ public class DenseIndexTest {
         // No Java-side check produces CONFIG_MISMATCH, so this is the one failure that can only have
         // come from the boundary's exception factory, and its detail from the engine's own string.
         try (DenseIndex index = populated()) {
+            Matches matches = Matches.packed(1, 1);
             USearchException refused = assertThrows(
-                    USearchException.class, () -> index.maxsim(Matrix.of(new float[] {0, 1}, 2), 1, 1, POOL));
+                    USearchException.class,
+                    () -> index.maxsim(
+                            Matrix.of(new float[] {0, 1}, 2), 1, matches, POOL, SearchOptions.DERIVED));
             assertEquals(Status.CONFIG_MISMATCH, refused.status());
             assertTrue(refused.getMessage().startsWith("usearch: config-mismatch: "));
             assertFalse(refused.getMessage().endsWith(": "));
@@ -420,9 +462,10 @@ public class DenseIndexTest {
             index.saveBuffer(slab, POOL);
         }
 
-        DenseOptions described = DenseIndex.metadata(checkpoint.getAbsolutePath());
+        DenseMetadata described = DenseIndex.metadata(checkpoint.getAbsolutePath());
         assertEquals(2, described.dimensions());
         assertEquals(DenseMetric.EUCLIDEAN, described.metric());
+        assertEquals(ScalarKind.F32, described.quantization());
         assertEquals(2, DenseIndex.metadata(slab).dimensions());
 
         try (DenseIndex reopened = twoDimensional().open()) {
@@ -453,18 +496,23 @@ public class DenseIndexTest {
 
             ByteBuffer queries = ByteBuffer.allocateDirect(2 * Float.BYTES).order(ByteOrder.nativeOrder());
             queries.asFloatBuffer().put(new float[] {1, 0});
-            Matches matches = index.search(Matrix.strided(queries, 1, 2, 2L * Float.BYTES, ScalarKind.F32), 1, POOL);
+            Matches matches = Matches.packed(1, 1);
+            index.search(
+                    Matrix.strided(queries, 1, 2, 2L * Float.BYTES, ScalarKind.F32),
+                    matches,
+                    POOL,
+                    SearchOptions.DERIVED);
             assertEquals(Key.of(2), matches.key(0, 0));
         }
     }
 
     @Test
     public void anExplicitlySizedExecutorDrivesAndDrains() {
-        try (Executor pool = new Executor(Residency.RAM, 2);
+        try (Executor pool = Executor.forRam(new int[0], 2);
                 DenseIndex index = twoDimensional().open()) {
             index.reserve(2);
             index.add(new Key[] {Key.of(10), Key.of(20)}, Matrix.of(new float[] {0, 1, 1, 0}, 2), pool);
-            index.search(Matrix.of(new float[] {0, 1}, 2), 1, pool);
+            index.search(Matrix.of(new float[] {0, 1}, 2), Matches.packed(1, 1), pool, SearchOptions.DERIVED);
             pool.drain();
             assertEquals(2, index.size());
         }
@@ -472,7 +520,7 @@ public class DenseIndexTest {
 
     @Test
     public void aClosedExecutorRefusesEveryVerb() {
-        Executor pool = new Executor();
+        Executor pool = Executor.forRam(0);
         pool.close();
         pool.close();
         assertEquals(
@@ -480,7 +528,13 @@ public class DenseIndexTest {
                 assertThrows(USearchException.class, pool::drain).status());
         assertEquals(
                 Status.SHAPE_MISMATCH,
-                assertThrows(USearchException.class, () -> new Executor(Residency.RAM, -1))
+                assertThrows(USearchException.class, () -> Executor.forRam(-1)).status());
+        assertEquals(
+                Status.MALFORMED_INPUT,
+                assertThrows(USearchException.class, () -> Executor.forRam(null, 1)).status());
+        assertEquals(
+                Status.MALFORMED_INPUT,
+                assertThrows(USearchException.class, () -> Executor.forNvme(new String[] {""}, 1))
                         .status());
     }
 

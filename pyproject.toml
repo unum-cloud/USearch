@@ -127,3 +127,6 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["usearch"]
+# A stub re-exports with `X as X`, which isort otherwise gives a statement apiece - thirty lines
+# where two say the same thing.
+combine-as-imports = true

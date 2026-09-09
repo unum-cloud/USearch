@@ -495,7 +495,7 @@ export class MatchesSpan {
     const cells = keys.length / keyBytes;
     if (cells !== distances.length)
       throw new Error("The key and distance buffers are not the same shape.");
-    if (cells % counts.length !== 0 || cells / counts.length === 0)
+    if (cells === 0 || cells % counts.length !== 0)
       throw new Error("The buffers do not divide into one row per query.");
     this.keys = keys;
     this.distances = distances;

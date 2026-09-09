@@ -1011,19 +1011,19 @@ test("Traversal telemetry", async (t) => {
     assertCounters(stats, "maxsim");
   });
 
-  await t.test("one accumulator sums the calls it is shared across", () => {
+  await t.test("one reading holds the last call, not the sum of them", () => {
     const index = populated();
     const query = new Float32Array([7, 8, 9, 10]);
     const matches = usearch.MatchesSpan.reserve(1, 4);
     const once = new usearch.Stats();
     index.search(query, matches, EXECUTOR, { stats: once });
 
-    const twice = new usearch.Stats();
-    index.search(query, matches, EXECUTOR, { stats: twice });
-    index.search(query, matches, EXECUTOR, { stats: twice });
-    assert.equal(twice.visitedMembers, 2 * once.visitedMembers);
-    assert.equal(twice.computedDistances, 2 * once.computedDistances);
-    assert.equal(twice.restarts, 2 * once.restarts);
+    const reused = new usearch.Stats();
+    index.search(query, matches, EXECUTOR, { stats: reused });
+    index.search(query, matches, EXECUTOR, { stats: reused });
+    assert.equal(reused.visitedMembers, once.visitedMembers);
+    assert.equal(reused.computedDistances, once.computedDistances);
+    assert.equal(reused.restarts, once.restarts);
   });
 
   await t.test("accumulate folds one reading into another", () => {

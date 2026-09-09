@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 import usearch
-from usearch import DenseIndex, Executor
+from usearch import DenseIndex, Executor, Matches
 from usearch.eval import exact_matches, random_vectors
 from usearch.keys import integers_to_keys, keys_to_integers
 
@@ -109,6 +109,7 @@ def distance_tolerances(quantization: str) -> tuple[float, float]:
 
 # region Gates
 
+
 def requires_capability(codename: str):
     """Skips when dispatch on this machine would not reach that kernel family."""
     return pytest.mark.skipif(
@@ -142,10 +143,26 @@ def build_index(
     return index, vectors
 
 
+def matches_outputs(queries: int, wanted: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The three zeroed outputs every ranked verb fills, for *queries* rows of *wanted* columns."""
+    return (
+        np.zeros((queries, wanted, 16), dtype=np.uint8),
+        np.zeros((queries, wanted), dtype=np.float64),
+        np.zeros(queries, dtype=np.uint64),
+    )
+
+
+def searched(index: DenseIndex, queries, wanted: int, **kwargs) -> Matches:
+    """Runs `search` into freshly sized outputs and reads the three back as one run."""
+    keys, distances, counts = matches_outputs(len(queries), wanted)
+    index.search(queries, wanted, keys, distances, counts, **kwargs)
+    return Matches(keys, distances, counts)
+
+
 def measured_recall(index: DenseIndex, vectors, queries, wanted: int, executor: Executor, *, metric: str) -> float:
     """The share of true nearest neighbors the index returned, against the NumKong oracle."""
     truth = exact_matches(vectors, queries, wanted, metric=metric)
-    found = keys_to_integers(index.search(queries, wanted, executor=executor).keys)
+    found = keys_to_integers(searched(index, queries, wanted, executor=executor).keys)
     hits = sum(len(set(found[row]) & set(truth[row])) for row in range(len(truth)))
     return hits / (len(truth) * wanted)
 

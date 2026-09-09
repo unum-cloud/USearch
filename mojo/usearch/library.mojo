@@ -33,8 +33,8 @@ from usearch.dense import (
     DenseMaxsim,
     DenseMeasure,
     DenseMerge,
-    DenseMetadata,
-    DenseMetadataBuffer,
+    DenseReadMetadata,
+    DenseReadMetadataBuffer,
     DenseMultiply,
     DenseOpenCursor,
     DenseRefine,
@@ -166,13 +166,13 @@ struct Symbols:
     """`usearch_dense_save`."""
     var dense_load: DenseLoad
     """`usearch_dense_load`."""
-    var dense_metadata: DenseMetadata
+    var dense_metadata: DenseReadMetadata
     """`usearch_dense_metadata`."""
     var dense_save_buffer: DenseSaveBuffer
     """`usearch_dense_save_buffer`."""
     var dense_load_buffer: DenseLoadBuffer
     """`usearch_dense_load_buffer`."""
-    var dense_metadata_buffer: DenseMetadataBuffer
+    var dense_metadata_buffer: DenseReadMetadataBuffer
     """`usearch_dense_metadata_buffer`."""
 
     var dense_multiply: DenseMultiply
@@ -229,10 +229,10 @@ struct Symbols:
 
         self.dense_save = _resolve[DenseSave](handle, "usearch_dense_save")
         self.dense_load = _resolve[DenseLoad](handle, "usearch_dense_load")
-        self.dense_metadata = _resolve[DenseMetadata](handle, "usearch_dense_metadata")
+        self.dense_metadata = _resolve[DenseReadMetadata](handle, "usearch_dense_metadata")
         self.dense_save_buffer = _resolve[DenseSaveBuffer](handle, "usearch_dense_save_buffer")
         self.dense_load_buffer = _resolve[DenseLoadBuffer](handle, "usearch_dense_load_buffer")
-        self.dense_metadata_buffer = _resolve[DenseMetadataBuffer](handle, "usearch_dense_metadata_buffer")
+        self.dense_metadata_buffer = _resolve[DenseReadMetadataBuffer](handle, "usearch_dense_metadata_buffer")
 
         self.dense_multiply = _resolve[DenseMultiply](handle, "usearch_dense_multiply")
         self.dense_attend = _resolve[DenseAttend](handle, "usearch_dense_attend")

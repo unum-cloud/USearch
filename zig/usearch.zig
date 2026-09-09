@@ -8,8 +8,8 @@
 //! output run - where a translated header hands back `c_uint` and `?*anyopaque` and asks every
 //! call site to cast.
 //!
-//! Only the dense modality is bound. Progress reporting and cancellation are not exposed: every
-//! verb passes the ABI a null handler.
+//! Only the dense modality is bound. Every long verb has a reporting sibling - `addReporting` and
+//! friends - taking a handler called with the units finished so far, whose answer stops the call.
 //!
 //! Basic usage:
 //! ```zig
@@ -65,11 +65,14 @@ pub const capabilitiesAvailable = types.capabilitiesAvailable;
 
 // dense
 pub const Admission = dense.Admission;
+pub const Continuation = dense.Continuation;
 pub const MetricCallback = dense.MetricCallback;
 pub const Metric = dense.Metric;
 pub const Options = dense.Options;
-pub const ExpansionConfig = dense.ExpansionConfig;
-pub const AttentionConfig = dense.AttentionConfig;
+pub const Metadata = dense.Metadata;
+pub const InsertionOptions = dense.InsertionOptions;
+pub const SearchOptions = dense.SearchOptions;
+pub const AttentionOptions = dense.AttentionOptions;
 pub const TraversalStats = dense.TraversalStats;
 pub const SoftmaxState = dense.SoftmaxState;
 pub const DenseIndex = dense.DenseIndex;

@@ -18,10 +18,6 @@ exe.root_module.addImport("usearch", usearch.module("usearch"));
 ```
 
 No C or C++ is compiled here: the engine is CMake's to build, and this module consumes it through the C headers alone.
-`-Dlib-dir` names a directory holding the library and may be repeated; left alone it points at `build_release/c`, where an in-tree CMake build leaves it.
-The shared `usearch_c` is what gets linked, since it resolves its own dependencies and one `-l` finishes the link.
-
-A bare `zig build` compiles every declaration without the engine on disk, which makes it a compile check; `zig build test` needs the library.
 
 ## Quickstart
 
@@ -97,6 +93,31 @@ try index.searchIf(executor, try .of(f32, queries, 768), try .of(keys, scores, c
 
 It runs once per scored candidate, far more often than the "k" asked for, and concurrently from the executor's threads - so it belongs on your fast path and must tolerate that.
 
+## Progress and Cancellation
+
+Every long verb has a reporting sibling - `addReporting`, `refineReporting`, `searchReporting`, `saveReporting` and `loadReporting` - taking a handler called with the units finished so far and the units the call finishes if it runs to the end.
+Answering `.cancel` stops the call at the next increment boundary.
+
+```zig
+const Deadline = struct {
+    stop_at: i64,
+    fn reached(self: *const @This(), _: usize, _: usize) usearch.Continuation {
+        return if (std.time.milliTimestamp() < self.stop_at) .@"continue" else .cancel;
+    }
+};
+
+const deadline: Deadline = .{ .stop_at = std.time.milliTimestamp() + 30_000 };
+_ = try index.refineReporting(executor, .{ .expansion_factor = 128 }, null, &deadline, Deadline.reached);
+```
+
+Like a predicate, the handler is a `comptime` function whose trampoline is generated per call site, and its context travels as one pointer - `{}` where none is needed.
+It arrives on whichever thread advanced the work and never on two at once, so a counter or a deadline needs no synchronization of its own.
+Reports are denominated in whatever the verb consumes - rows for an insertion, queries for a search, shards for a checkpoint - and how often they arrive is the increment's size rather than a promise, so read the counts and never the number of calls.
+
+Two verbs mean something different once a handler is present.
+An `add` batch stops being all-or-nothing: it advances in increments, a stop keeps the rows already published and reports `Error.Cancelled`, and the count the handler last saw is what the index kept.
+A stopped `refine` is not a failure but the time budget a whole-graph sweep is meant to run under - re-selection claims no identity, so the graph stays correct and merely less improved, and the next call resumes where this one stopped.
+
 ## Residency
 
 Where the payload lives is a tagged union, not a flag, and it decides what loading a checkpoint means: materialize into RAM, upload to a device, or open in place on disk.
@@ -125,8 +146,10 @@ The path extension picks the layout - a `.safegraphs` path is one monolith, a `.
 try index.save(executor, "index.safegraphs");
 try index.load(executor, "index.safegraphs");
 
-const geometry = try usearch.metadata("index.safegraphs"); // without loading a shard
+const metadata = try usearch.metadata("index.safegraphs"); // without loading a shard
 ```
+
+The result carries only the four fields a checkpoint froze, so `values_per_key` and the placement stay yours to set in `Options` before constructing a handle.
 
 Checkpoints are residency-portable: one file materializes into RAM, uploads to a device, or opens in place on disk, decided by the handle that loads it.
 In-memory buffers hold single monoliths only, through `saveBuffer` and `loadBuffer`.
@@ -137,7 +160,7 @@ Every metric derives from a single inner-product kernel with pre-computed magnit
 
 - `.inner` - inner product, and the only kind the linear-algebra verbs accept.
 - `.angular` - cosine distance, over pre-computed magnitudes.
-- `.euclidean` - squared euclidean distance.
+- `.euclidean` - L2 distance.
 - `.hamming` - bit-level, over the packed sub-byte kinds.
 - `.jaccard` - bit-level, over the packed sub-byte kinds.
 

@@ -229,7 +229,8 @@ extension Key: Codable {
         let text = try container.decode(String.self)
         do {
             try self.init(parsing: text)
-        } catch {
+        }
+        catch {
             throw DecodingError.dataCorruptedError(in: container, debugDescription: error.message)
         }
     }
@@ -622,8 +623,8 @@ final class LoweredResidency {
 ///
 /// One executor serves any number of index handles, so separate categories of indexes share one
 /// machine's cores or devices instead of each claiming a private set. Its kind is fixed by the
-/// residency it was constructed for and must match the residency of every handle it drives; a
-/// mismatch reports `deviceFailure` on the first call.
+/// factory that spawned it and must match the residency of every handle it drives; a mismatch
+/// reports `deviceFailure` on the first call.
 ///
 /// An executor admits one driver at a time - a second concurrent call reports `contended` - so a
 /// thread that wants to drive its own calls spawns its own executor. Index handles stay freely
@@ -633,27 +634,54 @@ public final class Executor: @unchecked Sendable {
     /// engine's own synchronization is the only thing sharing this across threads relies on.
     private let handle: usearch_executor_t
 
-    /// Spawns the workers a residency calls for, interleaved across the domains it names.
+    /// Adopts a handle a factory below spawned.
+    private init(handle: usearch_executor_t) {
+        self.handle = handle
+    }
+
+    /// Spawns host workers for RAM-resident indexes, interleaved across the compute domains local
+    /// to `memoryDomains` - the very list the indexes were initialized with.
     ///
-    /// `threads` counts host workers for RAM and submission rings for NVMe, with zero deriving
-    /// from the hardware; a VRAM executor ignores it, since one host thread drives one stream
-    /// per device.
-    public init(residency: Residency, threads: Int = 0) throws(Error) {
-        let placement = LoweredResidency(residency)
+    /// Zero `threads` takes 7/8 of the cores those domains carry, since full occupancy starves the
+    /// ordered publication path.
+    public static func forRam(memoryDomains: [Int32] = [], threads: Int = 0) throws(Error) -> Executor {
+        let placement = LoweredResidency(.ram(memoryDomains: memoryDomains))
+        return try spawned(placement) { failure in
+            withUnsafePointer(to: placement.ram) { usearch_executor_for_ram($0, threads, failure) }
+        }
+    }
+
+    /// Spawns host workers for NVMe-resident indexes, one submission ring apiece, across the
+    /// compute domains local to the devices `paths` names.
+    ///
+    /// Zero `threads` derives from those devices' queue capabilities.
+    public static func forNvme(paths: [String] = [], threads: Int = 0) throws(Error) -> Executor {
+        let placement = LoweredResidency(.nvme(paths: paths))
+        return try spawned(placement) { failure in
+            withUnsafePointer(to: placement.nvme) { usearch_executor_for_nvme($0, threads, failure) }
+        }
+    }
+
+    /// Opens one submission stream on every named device, all of them driven by the one host thread
+    /// that calls the verbs - which is why this factory takes no thread count.
+    public static func forVram(devices: [Int32] = []) throws(Error) -> Executor {
+        let placement = LoweredResidency(.vram(devices: devices))
+        return try spawned(placement) { failure in
+            withUnsafePointer(to: placement.vram) { usearch_executor_for_vram($0, failure) }
+        }
+    }
+
+    /// Runs one factory against a zeroed error slot, keeping the placement copies alive across it
+    /// and refusing a null handle the library reported no failure for.
+    private static func spawned(
+        _ placement: LoweredResidency,
+        _ open: (UnsafeMutablePointer<usearch_error_t>) -> usearch_executor_t?
+    ) throws(Error) -> Executor {
         let created = try withExtendedLifetime(placement) { () throws(Error) -> usearch_executor_t? in
-            try throwing { failure -> usearch_executor_t? in
-                switch residency {
-                case .ram:
-                    return withUnsafePointer(to: placement.ram) { usearch_executor_for_ram($0, threads, failure) }
-                case .nvme:
-                    return withUnsafePointer(to: placement.nvme) { usearch_executor_for_nvme($0, threads, failure) }
-                case .vram:
-                    return withUnsafePointer(to: placement.vram) { usearch_executor_for_vram($0, failure) }
-                }
-            }
+            try throwing { failure in open(failure) }
         }
         guard let created else { throw fail(.internalFailure, "the library returned no executor and no error") }
-        handle = created
+        return Executor(handle: created)
     }
 
     deinit { usearch_executor_free(handle) }

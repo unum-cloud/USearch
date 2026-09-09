@@ -202,21 +202,26 @@ It adds and removes nothing, and searches may run throughout.
 
 ## Traversal Telemetry
 
-`add`, `refine`, `search`, `maxsim`, `multiply` and `attend` each report how much graph they walked, into a `Stats` accumulator passed through the options:
+`add`, `refine`, `search`, `maxsim`, `multiply` and `attend` each report how much graph they walked, into a `Stats` reading passed through the options:
 
 ```js
 const stats = new usearch.Stats();
-index.add(keys, vectors, executor, { stats });
 index.search(queries, matches, executor, { stats });
 
 stats.visitedMembers;     // entries whose neighborhoods the walk expanded
 stats.computedDistances;  // distance evaluations the walk paid for
 stats.restarts;           // times the walk fell back to a fresh entry point
+
+const total = new usearch.Stats();  // sweeping, and reading the whole sweep's cost
+for (const expansionFactor of [16, 32, 64, 128]) {
+  index.search(queries, matches, executor, { expansionFactor, stats });
+  total.accumulate(stats);
+}
 ```
 
-Telemetry travels through the accumulator rather than the return value, so `add` still answers with the rows it published and a ranked verb still answers with nothing, and passing no accumulator costs nothing.
-One `Stats` handed to several calls sums them, which is what makes a recall sweep's cost readable in distance computations rather than in wall-clock.
-`accumulate` folds one reading into another when the sums are gathered afterwards instead.
+Telemetry travels through the reading rather than the return value, so `add` still answers with the rows it published and a ranked verb still answers with nothing, and passing none costs nothing.
+A reading is a pure output that each call fully overwrites, so one `Stats` handed to several calls holds the last of them.
+Use `accumulate` to fold readings together, which is what makes a recall sweep's cost readable in distance computations rather than in wall-clock.
 
 Telemetry is what a breadth sweep is read against: `expansionFactor` buys recall in distance computations, and only the counters say how many.
 A stream opened by `find` reports none, since the ABI gives a resumable walk no telemetry.
