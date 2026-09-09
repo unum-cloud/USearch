@@ -13,6 +13,8 @@ std::size_t test_dense_index_u8() {
     std::size_t failures_count = 0;
     failures_count += test_configuration<nk_u8_k, nk_kernel_euclidean_k>("u8+euclidean");
     failures_count += test_configuration<nk_u8_k, nk_kernel_angular_k>("u8+angular");
+    failures_count += test_configuration<nk_u8_k, nk_kernel_euclidean_k, dummy_waiter_t, nk_cap_neonsdot_k>( //
+        "u8+euclidean+neonsdot");
 
     // The tiled u8 tier: the serial floor, icelake quads, and sapphireamx tiles.
     constexpr nk_capability_t tiles_caps_k = static_cast<nk_capability_t>( //

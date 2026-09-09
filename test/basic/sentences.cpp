@@ -93,8 +93,10 @@ struct sentences_handmade_t {
     std::array<std::array<u64_t, 3>, 3> distances;
 };
 
-struct sentences_fixture_t {
-    using index_t = basic_ram_index<std::string, u64_t, u32_t, u64_t, flaky_waiter_t, counting_allocator_t>;
+template <typename wait_type_ = dummy_waiter_t, template <typename> class atomic_ref_template_ = std::atomic_ref>
+struct sentences_fixture {
+    using index_t =
+        basic_ram_index<std::string, u64_t, u32_t, u64_t, wait_type_, atomic_ref_template_, counting_allocator_t>;
 
     static index_t make_index(allocation_ledger_t& ledger) { return index_t {counting_allocator_t {ledger}}; }
     static levenshtein_metric_t make_metric() { return {}; }
@@ -148,6 +150,8 @@ struct sentences_fixture_t {
         return values;
     }
 };
+
+using sentences_fixture_t = sentences_fixture<flaky_waiter_t>;
 
 static_assert(basic_value<std::string>);
 static_assert(basic_metric<levenshtein_metric_t, std::string, u64_t>);
@@ -258,6 +262,8 @@ std::size_t test_sentences() {
     sentences_fixture_t const fixture;
     std::size_t failures = 0;
     failures += test_basic_scenarios(fixture);
+    failures += test_basic_scenarios(sentences_fixture<dummy_waiter_t> {});
+    failures += test_basic_scenarios(sentences_fixture<flaky_waiter_t, fu::preferred_atomic_ref> {});
     failures += check_sentences_transparent_search();
     failures += check_sentences_codec_poison();
     failures += check_sentences_independent_oracle();

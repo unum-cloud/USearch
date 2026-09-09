@@ -326,10 +326,10 @@ The same reasoning excludes the progress handlers every long verb takes.
 
 ## Building From Source
 
-The addon links against `libusearch_c`, which CMake drops in the build tree:
+The addon links against `libusearch_static`, which CMake drops in the build tree, so `usearch.node` carries the engine inside it rather than beside it:
 
 ```sh
-npm_config_usearch_library_dir=build/Release npx node-gyp rebuild
+npm_config_usearch_library_dir=build_release npx node-gyp rebuild
 npm run build-js
 npm test
 ```

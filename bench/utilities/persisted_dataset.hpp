@@ -38,12 +38,13 @@
 namespace unum::usearch {
 
 /** @brief Infers the payload dtype from the RetriEval extension family: `.fbin` → f32,
- *      `.i8bin` / `.u8bin` / `.bf16bin` accordingly, `.ibin` → u32 neighbor ids. */
+ *      `.bf16bin` / `.f16bin` / `.i8bin` / `.u8bin` accordingly, `.ibin` → u32 neighbor ids. */
 inline nk_dtype_t dtype_of_extension(sz::string_view path) noexcept {
     if (path.ends_with(".fbin")) return nk_f32_k;
     if (path.ends_with(".i8bin")) return nk_i8_k;
     if (path.ends_with(".u8bin")) return nk_u8_k;
     if (path.ends_with(".bf16bin")) return nk_bf16_k;
+    if (path.ends_with(".f16bin")) return nk_f16_k;
     if (path.ends_with(".ibin")) return nk_u32_k;
     return nk_dtype_unknown_k;
 }

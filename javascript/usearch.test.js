@@ -39,10 +39,7 @@ const usearch = require("./dist/cjs/usearch.js");
 function assertAlmostEqual(actual, expected, tolerance = 1e-6) {
   const lowerBound = expected - tolerance;
   const upperBound = expected + tolerance;
-  assert(
-    actual >= lowerBound && actual <= upperBound,
-    `Expected ${actual} to be almost equal to ${expected}`,
-  );
+  assert(actual >= lowerBound && actual <= upperBound, `Expected ${actual} to be almost equal to ${expected}`);
 }
 
 // The byte run several integer identities spell, laid end to end.
@@ -70,9 +67,7 @@ test("Residency factories", async (t) => {
   });
 
   await t.test("an arm belonging to another residency is refused", () => {
-    assert.throws(() =>
-      usearch.DenseIndex.forRam({ dimensions: 3, devices: [0] }),
-    );
+    assert.throws(() => usearch.DenseIndex.forRam({ dimensions: 3, devices: [0] }));
   });
 
   await t.test("a thread count that is not a whole number at or above zero is refused", () => {
@@ -108,14 +103,8 @@ test("Identities", async (t) => {
   });
 
   await t.test("keys render and parse as lowercase dashed UUIDs", () => {
-    assert.equal(
-      usearch.formatKey(usearch.keyFromInteger(42n)),
-      "00000000-0000-0000-0000-00000000002a",
-    );
-    assert.deepEqual(
-      usearch.parseKey("00000000-0000-0000-0000-00000000002a"),
-      usearch.keyFromInteger(42n),
-    );
+    assert.equal(usearch.formatKey(usearch.keyFromInteger(42n)), "00000000-0000-0000-0000-00000000002a");
+    assert.deepEqual(usearch.parseKey("00000000-0000-0000-0000-00000000002a"), usearch.keyFromInteger(42n));
     assert.deepEqual(
       usearch.parseKey("0000000000000000000000000000002a"),
       usearch.keyFromInteger(42n),
@@ -138,19 +127,9 @@ test("Identities", async (t) => {
     const found = matches.get(0);
 
     assert.deepEqual(found.keys, key, "the high bytes survive the round trip");
-    assert.equal(
-      usearch.formatKey(usearch.keyAt(found.keys, 0)),
-      "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
-    );
-    assert.throws(
-      () => usearch.integerFromKey(found.keys),
-      "no integer spells an identity with leading bytes set",
-    );
-    assert.deepEqual(
-      index.contains(key),
-      [true],
-      "a Uint8Array spells a run, so it answers with a run",
-    );
+    assert.equal(usearch.formatKey(usearch.keyAt(found.keys, 0)), "f81d4fae-7dec-11d0-a765-00a0c91e6bf6");
+    assert.throws(() => usearch.integerFromKey(found.keys), "no integer spells an identity with leading bytes set");
+    assert.deepEqual(index.contains(key), [true], "a Uint8Array spells a run, so it answers with a run");
   });
 
   await t.test("an integer key crosses the addon in the ABI's own byte order", () => {
@@ -210,26 +189,15 @@ test("Single-entry operations", async (t) => {
     index.add(16n, new Float32Array([10, 25]), EXECUTOR);
 
     assert.equal(index.size(), 2, "size after adding elements should be 2");
-    assert.equal(
-      index.contains(15),
-      true,
-      "entry must be present after insertion",
-    );
+    assert.equal(index.contains(15), true, "entry must be present after insertion");
 
     const matches = usearch.MatchesSpan.reserve(1, 2);
     index.search(new Float32Array([13, 14]), matches, EXECUTOR);
     const found = matches.get(0);
 
-    assert.deepEqual(
-      found.keys,
-      keysFromIntegers(15n, 16n),
-      "keys should be 15 and 16",
-    );
+    assert.deepEqual(found.keys, keysFromIntegers(15n, 16n), "keys should be 15 and 16");
     assert(found.distances instanceof Float64Array, "distances are doubles");
-    assert(
-      found.distances[0] < found.distances[1],
-      "matches are ranked nearest first",
-    );
+    assert(found.distances[0] < found.distances[1], "matches are ranked nearest first");
   });
 
   await t.test("get", () => {
@@ -266,15 +234,8 @@ test("Batch operations", async (t) => {
     indexBatch.search(new Float32Array([13, 14]), matches, EXECUTOR);
     const found = matches.get(0);
 
-    assert.deepEqual(
-      found.keys,
-      keysFromIntegers(15n, 16n),
-      "keys should be 15 and 16",
-    );
-    assert(
-      found.distances[0] < found.distances[1],
-      "matches are ranked nearest first",
-    );
+    assert.deepEqual(found.keys, keysFromIntegers(15n, 16n), "keys should be 15 and 16");
+    assert(found.distances[0] < found.distances[1], "matches are ranked nearest first");
   });
 
   await t.test("search", () => {
@@ -284,34 +245,19 @@ test("Batch operations", async (t) => {
     });
 
     const keys = [15n, 16n];
-    const vectors = [
-      new Float32Array([10, 20, 30]),
-      new Float32Array([10, 25, 35]),
-    ];
+    const vectors = [new Float32Array([10, 20, 30]), new Float32Array([10, 25, 35])];
 
     indexBatch.add(keys, vectors, EXECUTOR);
     assert.equal(indexBatch.size(), 2, "size after adding batch should be 2");
 
     const matches = usearch.MatchesSpan.reserve(2, 2);
-    indexBatch.search(
-      [new Float32Array([13, 14, 15]), new Float32Array([13, 14, 15])],
-      matches,
-      EXECUTOR,
-    );
+    indexBatch.search([new Float32Array([13, 14, 15]), new Float32Array([13, 14, 15])], matches, EXECUTOR);
 
     assert.equal(matches.wanted, 2, "the run was reserved two wide");
 
-    assert.deepEqual(
-      matches.counts,
-      new BigUint64Array([2n, 2n]),
-      "counts should be 2 for both keys",
-    );
+    assert.deepEqual(matches.counts, new BigUint64Array([2n, 2n]), "counts should be 2 for both keys");
 
-    assert.deepEqual(
-      matches.keys,
-      keysFromIntegers(15n, 16n, 15n, 16n),
-      "keys should be 15 and 16",
-    );
+    assert.deepEqual(matches.keys, keysFromIntegers(15n, 16n, 15n, 16n), "keys should be 15 and 16");
     for (const queryIndex of [0, 1])
       assert(
         matches.distances[queryIndex * 2] < matches.distances[queryIndex * 2 + 1],
@@ -324,18 +270,10 @@ test("Batch operations", async (t) => {
       dimensions: 3,
       metric: "euclidean",
     });
-    indexBatch.add(
-      [15n, 16n],
-      [new Float32Array([10, 20, 30]), new Float32Array([10, 25, 35])],
-      EXECUTOR,
-    );
+    indexBatch.add([15n, 16n], [new Float32Array([10, 20, 30]), new Float32Array([10, 25, 35])], EXECUTOR);
 
     const matches = usearch.MatchesSpan.reserve(2, 2);
-    indexBatch.search(
-      [new Float32Array([13, 14, 15]), new Float32Array([10, 20, 30])],
-      matches,
-      EXECUTOR,
-    );
+    indexBatch.search([new Float32Array([13, 14, 15]), new Float32Array([10, 20, 30])], matches, EXECUTOR);
     const second = matches.get(1);
 
     assert.equal(second.count, 2, "the row carries both matches");
@@ -358,32 +296,17 @@ test("A run's width follows from the buffers it lends", async (t) => {
 
   await t.test("buffers that read as no single shape are refused", () => {
     assert.throws(
-      () =>
-        new usearch.MatchesSpan(
-          new Uint8Array(4 * usearch.keyBytes),
-          new Float64Array(3),
-          new BigUint64Array(2),
-        ),
+      () => new usearch.MatchesSpan(new Uint8Array(4 * usearch.keyBytes), new Float64Array(3), new BigUint64Array(2)),
       /same shape/,
       "keys and distances must cover the same cells",
     );
     assert.throws(
-      () =>
-        new usearch.MatchesSpan(
-          new Uint8Array(5 * usearch.keyBytes),
-          new Float64Array(5),
-          new BigUint64Array(2),
-        ),
+      () => new usearch.MatchesSpan(new Uint8Array(5 * usearch.keyBytes), new Float64Array(5), new BigUint64Array(2)),
       /one row per query/,
       "five cells do not divide into two rows",
     );
     assert.throws(
-      () =>
-        new usearch.MatchesSpan(
-          new Uint8Array(3),
-          new Float64Array(3),
-          new BigUint64Array(1),
-        ),
+      () => new usearch.MatchesSpan(new Uint8Array(3), new Float64Array(3), new BigUint64Array(1)),
       /sixteen-byte identities/,
       "a run of keys is a whole number of identities",
     );
@@ -441,13 +364,7 @@ test("A row narrower than the index is refused, not read past", () => {
     dimensions: 8,
   });
   assert.throws(() => index.add(42n, new Float32Array([0.2, 0.6, 0.4]), EXECUTOR));
-  assert.throws(() =>
-    index.search(
-      new Float32Array([0.2, 0.6, 0.4]),
-      usearch.MatchesSpan.reserve(1, 1),
-      EXECUTOR,
-    ),
-  );
+  assert.throws(() => index.search(new Float32Array([0.2, 0.6, 0.4]), usearch.MatchesSpan.reserve(1, 1), EXECUTOR));
 });
 
 test("Expected count()", async (t) => {
@@ -456,11 +373,7 @@ test("Expected count()", async (t) => {
     connectivity: 16,
     dimensions: 3,
   });
-  index.add(
-    [42n, 43n],
-    [new Float32Array([0.2, 0.6, 0.4]), new Float32Array([0.2, 0.6, 0.4])],
-    EXECUTOR,
-  );
+  index.add([42n, 43n], [new Float32Array([0.2, 0.6, 0.4]), new Float32Array([0.2, 0.6, 0.4])], EXECUTOR);
 
   await t.test("Argument is a number", () => {
     assert.equal(1, index.count(43n));
@@ -489,9 +402,7 @@ test("Operations with invalid values", () => {
   assert.throws(() => indexBatch.add(keys, vectors, EXECUTOR));
 
   // Vectors must be a TypedArray or an array of arrays
-  assert.throws(() =>
-    indexBatch.search(NaN, usearch.MatchesSpan.reserve(1, 2), EXECUTOR),
-  );
+  assert.throws(() => indexBatch.search(NaN, usearch.MatchesSpan.reserve(1, 2), EXECUTOR));
 });
 
 test("Several entries under one key", async (t) => {
@@ -501,11 +412,7 @@ test("Several entries under one key", async (t) => {
     dimensions: 3,
     valuesPerKey: 3,
   });
-  index.add(
-    [42n, 42n],
-    [new Float32Array([0.1, 0.6, 0.4]), new Float32Array([0.2, 0.6, 0.4])],
-    EXECUTOR,
-  );
+  index.add([42n, 42n], [new Float32Array([0.1, 0.6, 0.4]), new Float32Array([0.2, 0.6, 0.4])], EXECUTOR);
 
   await t.test("the count is the whole extent", () => {
     assert.equal(index.count(42n), 2);
@@ -591,11 +498,7 @@ test("Sparse products against the indexed rows", async (t) => {
     const index = usearch.DenseIndex.forRam({ metric: "inner", dimensions: 4 });
     index.add(
       [1n, 2n, 3n],
-      [
-        new Float32Array([1, 0, 0, 0]),
-        new Float32Array([0, 1, 0, 0]),
-        new Float32Array([0, 0, 1, 0]),
-      ],
+      [new Float32Array([1, 0, 0, 0]), new Float32Array([0, 1, 0, 0]), new Float32Array([0, 0, 1, 0])],
       EXECUTOR,
     );
     return index;
@@ -603,11 +506,7 @@ test("Sparse products against the indexed rows", async (t) => {
 
   await t.test("every left row emits the pairs the walk scored", () => {
     const products = usearch.MatchesSpan.reserve(2, 2);
-    populated().multiply(
-      [new Float32Array([1, 0, 0, 0]), new Float32Array([0, 1, 0, 0])],
-      products,
-      EXECUTOR,
-    );
+    populated().multiply([new Float32Array([1, 0, 0, 0]), new Float32Array([0, 1, 0, 0])], products, EXECUTOR);
 
     assert.equal(products.wanted, 2, "the run's own shape fixes the density");
     assert.equal(products.counts.length, 2, "one emitted run per left row");
@@ -617,8 +516,7 @@ test("Sparse products against the indexed rows", async (t) => {
     const emitted = Math.min(Number(products.counts[0]), products.wanted);
     assert(emitted > 0, "the first row emitted at least one pair");
     const columns = [];
-    for (let pair = 0; pair < emitted; pair++)
-      columns.push(usearch.integerFromKey(usearch.keyAt(products.keys, pair)));
+    for (let pair = 0; pair < emitted; pair++) columns.push(usearch.integerFromKey(usearch.keyAt(products.keys, pair)));
     assert(columns.includes(1n), "the column the first row overlaps is among them");
   });
 
@@ -628,45 +526,28 @@ test("Sparse products against the indexed rows", async (t) => {
       dimensions: 4,
     });
     index.add(1n, new Float32Array([1, 0, 0, 0]), EXECUTOR);
-    assert.throws(() =>
-      index.multiply(
-        new Float32Array([1, 0, 0, 0]),
-        usearch.MatchesSpan.reserve(1, 1),
-        EXECUTOR,
-      ),
-    );
+    assert.throws(() => index.multiply(new Float32Array([1, 0, 0, 0]), usearch.MatchesSpan.reserve(1, 1), EXECUTOR));
   });
 });
 
 test("Attention writes into the buffer the caller lends", async (t) => {
   // An entry's key is its row offset into the value table, so the keys run from zero.
   const index = usearch.DenseIndex.forRam({ metric: "inner", dimensions: 4 });
-  index.add(
-    [0n, 1n],
-    [new Float32Array([1, 0, 0, 0]), new Float32Array([0, 1, 0, 0])],
-    EXECUTOR,
-  );
+  index.add([0n, 1n], [new Float32Array([1, 0, 0, 0]), new Float32Array([0, 1, 0, 0])], EXECUTOR);
   const queries = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0]);
   const valueDimensions = 2;
   const values = new Float32Array([10, 20, 30, 40]);
 
   await t.test("an omitted carry starts the softmax fresh", () => {
     const outputs = new Float32Array(4);
-    const answer = index.attend(
-      queries,
-      values,
-      valueDimensions,
-      outputs,
-      EXECUTOR,
-    );
+    const answer = index.attend(queries, values, valueDimensions, outputs, EXECUTOR);
 
     assert.equal(answer, undefined, "the outputs are the answer, not the return");
     assert(
       outputs.some((scalar) => scalar !== 0),
       "the lent buffer was written in place",
     );
-    for (const scalar of outputs)
-      assert(Number.isFinite(scalar), "every attended scalar is finite");
+    for (const scalar of outputs) assert(Number.isFinite(scalar), "every attended scalar is finite");
   });
 
   await t.test("a carry of two floats per query row is accepted", () => {
@@ -682,13 +563,8 @@ test("Attention writes into the buffer the caller lends", async (t) => {
       outputs.some((scalar) => scalar !== 0),
       "the lent buffer was written in place",
     );
-    for (const scalar of carry)
-      assert(Number.isFinite(scalar), "the maximum and the partition are finite");
-    assert.equal(
-      typeof stats.computedDistances,
-      "number",
-      "attention reports the walk it paid for",
-    );
+    for (const scalar of carry) assert(Number.isFinite(scalar), "the maximum and the partition are finite");
+    assert.equal(typeof stats.computedDistances, "number", "attention reports the walk it paid for");
   });
 
   await t.test("a carry that holds no maximum and partition per query is refused", () => {
@@ -700,9 +576,7 @@ test("Attention writes into the buffer the caller lends", async (t) => {
   });
 
   await t.test("outputs that hold no row of value dimensions per query are refused", () => {
-    assert.throws(() =>
-      index.attend(queries, values, valueDimensions, new Float32Array(3), EXECUTOR),
-    );
+    assert.throws(() => index.attend(queries, values, valueDimensions, new Float32Array(3), EXECUTOR));
   });
 });
 
@@ -712,15 +586,7 @@ test("Snapshot cursors walk every entry once", () => {
     connectivity: 16,
     dimensions: 2,
   });
-  index.add(
-    [1n, 2n, 3n],
-    [
-      new Float32Array([1, 1]),
-      new Float32Array([2, 2]),
-      new Float32Array([3, 3]),
-    ],
-    EXECUTOR,
-  );
+  index.add([1n, 2n, 3n], [new Float32Array([1, 1]), new Float32Array([2, 2]), new Float32Array([3, 3])], EXECUTOR);
 
   const cursor = index.cursor();
   const seen = [];
@@ -730,11 +596,7 @@ test("Snapshot cursors walk every entry once", () => {
     const pulled = batch.keys.length / usearch.keyBytes;
     for (let position = 0; position < pulled; position++)
       seen.push(usearch.integerFromKey(usearch.keyAt(batch.keys, position)));
-    assert.equal(
-      batch.vectors.length,
-      pulled * 2,
-      "one row of two dimensions per identity",
-    );
+    assert.equal(batch.vectors.length, pulled * 2, "one row of two dimensions per identity");
   }
   cursor.free();
   cursor.free(); // releasing twice is a no-op
@@ -749,15 +611,7 @@ test("Finders pull matches lazily", () => {
     connectivity: 16,
     dimensions: 2,
   });
-  index.add(
-    [1n, 2n, 3n],
-    [
-      new Float32Array([1, 1]),
-      new Float32Array([2, 2]),
-      new Float32Array([3, 3]),
-    ],
-    EXECUTOR,
-  );
+  index.add([1n, 2n, 3n], [new Float32Array([1, 1]), new Float32Array([2, 2]), new Float32Array([3, 3])], EXECUTOR);
 
   const finder = index.find(new Float32Array([1, 1]), EXECUTOR);
   const first = finder.next(1);
@@ -819,11 +673,7 @@ test("Serialization through memory", async (t) => {
   index.add(42n, new Float32Array([0.2, 0.6, 0.4]), EXECUTOR);
 
   const buffer = index.saveBuffer(EXECUTOR);
-  assert.equal(
-    buffer.length,
-    index.storageRequirements(),
-    "the monolith is exactly as long as the requirement said",
-  );
+  assert.equal(buffer.length, index.storageRequirements(), "the monolith is exactly as long as the requirement said");
 
   await t.test("loadBuffer", () => {
     const restored = usearch.DenseIndex.forRam({
@@ -856,8 +706,7 @@ test("Mini-float quantization types", async (t) => {
         quantization: quantization,
       });
       const vector = new Float32Array(64);
-      for (let position = 0; position < 64; position++)
-        vector[position] = position * 0.1;
+      for (let position = 0; position < 64; position++) vector[position] = position * 0.1;
       index.add(1n, vector, EXECUTOR);
 
       const matches = usearch.MatchesSpan.reserve(1, 1);
@@ -972,12 +821,7 @@ test("Traversal telemetry", async (t) => {
       [
         "search",
         (stats) =>
-          index.search(
-            new Float32Array([7, 8, 9, 10]),
-            usearch.MatchesSpan.reserve(1, 4),
-            EXECUTOR,
-            { stats },
-          ),
+          index.search(new Float32Array([7, 8, 9, 10]), usearch.MatchesSpan.reserve(1, 4), EXECUTOR, { stats }),
       ],
     ]) {
       const stats = new usearch.Stats();
@@ -1034,10 +878,7 @@ test("Traversal telemetry", async (t) => {
     reading.restarts = 1;
     total.accumulate(reading);
     total.accumulate(reading);
-    assert.deepEqual(
-      { ...total },
-      { visitedMembers: 10, computedDistances: 22, restarts: 2 },
-    );
+    assert.deepEqual({ ...total }, { visitedMembers: 10, computedDistances: 22, restarts: 2 });
   });
 
   await t.test("an omitted accumulator leaves every return shape alone", () => {

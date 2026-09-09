@@ -159,14 +159,16 @@ struct meshes_handmade_t {
     std::array<std::array<f64_t, 3>, 3> distances;
 };
 
-struct meshes_fixture_t {
-    using index_t = basic_ram_index<mesh_t, uuid_t, u64_t, f64_t, dummy_waiter_t, counting_allocator_t>;
+template <typename wait_type_ = dummy_waiter_t, template <typename> class atomic_ref_template_ = std::atomic_ref>
+struct meshes_fixture {
+    using index_t =
+        basic_ram_index<mesh_t, us::uuid_t, u64_t, f64_t, wait_type_, atomic_ref_template_, counting_allocator_t>;
 
     static index_t make_index(allocation_ledger_t& ledger) { return index_t {counting_allocator_t {ledger}}; }
     static spectra_metric_t make_metric() { return {}; }
     static mesh_codec_t make_codec() { return {}; }
-    static uuid_t make_key(std::size_t ordinal) {
-        return std::bit_cast<uuid_t>(std::array<u64_t, 2> {mix_bits(ordinal ^ 0x3D3D3Dull), ordinal});
+    static us::uuid_t make_key(std::size_t ordinal) {
+        return std::bit_cast<us::uuid_t>(std::array<u64_t, 2> {mix_bits(ordinal ^ 0x3D3D3Dull), ordinal});
     }
     static f64_t oracle(mesh_t const& query, mesh_t const& stored) noexcept {
         return scalar_spectra_distance(query.spectrum, stored.spectrum);
@@ -229,6 +231,8 @@ struct meshes_fixture_t {
     }
 };
 
+using meshes_fixture_t = meshes_fixture<>;
+
 static_assert(basic_value<mesh_t>);
 static_assert(basic_metric<spectra_metric_t, mesh_t, f64_t>);
 static_assert(!transparent_metric<spectra_metric_t>);
@@ -270,6 +274,8 @@ std::size_t test_meshes() {
     meshes_fixture_t const fixture;
     std::size_t failures = 0;
     failures += test_basic_scenarios(fixture);
+    failures += test_basic_scenarios(meshes_fixture<flaky_waiter_t> {});
+    failures += test_basic_scenarios(meshes_fixture<dummy_waiter_t, fu::preferred_atomic_ref> {});
     failures += check_meshes_rigid_invariance();
     failures += check_meshes_kernel_parity();
     failures += test_basic_safegraphs_roundtrip(fixture, "uuid", "rmsd"); // The uuid key column.

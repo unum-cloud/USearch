@@ -1,12 +1,12 @@
 /**
  *  @brief What one dense arm is spelled with and compiled through: the scalar and capability
  *      tables, the CPU and GPU classes with their waiters, the key hash, and the
- *      @c specialized_index view every shard TU instantiates.
+ *      @c specialized_index view every class unit instantiates.
  *  @author Ash Vardanian
  *  @file src/dense_specializations.cuh
  *  @date August 14, 2026
  *
- *  Every dtype shard TU includes this to instantiate its arms; @c dense_index.cuh adds the variant
+ *  Every class unit includes this to instantiate its arms; @c dense_index.cuh adds the variant
  *  grid, the handle and the exported C entry points on top of it.
  */
 #pragma once
@@ -15,7 +15,7 @@
 #include <cstdint> // `std::uint64_t` - the sliced key hash
 
 #include <atomic>      // `std::atomic` - serializing the progress ticks
-#include <bit>         // `std::bit_cast` - the C key struct & `uuid_t` share sixteen bytes
+#include <bit>         // `std::bit_cast` - the C key struct & `us::uuid_t` share sixteen bytes
 #include <mutex>       // `std::lock_guard` over the ticks' lock
 #include <span>        // `std::span` - the search verbs' landing planes
 #include <string_view> // `std::string_view` - kernel tokens & checkpoint paths
@@ -31,6 +31,7 @@
 #endif
 
 using namespace unum::usearch;
+namespace us = unum::usearch;
 namespace nk = ashvardanian::numkong;
 namespace fu = ashvardanian::forkunion;
 
@@ -84,10 +85,15 @@ struct numkong_capability_name_t {
     char const* name;
 };
 inline constexpr numkong_capability_name_t numkong_capability_names_k[] = {
-    {nk_cap_serial_k, "serial"},       {nk_cap_neon_k, "neon"},         {nk_cap_neonsdot_k, "neonsdot"},
-    {nk_cap_neonbfdot_k, "neonbfdot"}, {nk_cap_neonfhm_k, "neonfhm"},   {nk_cap_neonfp8_k, "neonfp8"},
-    {nk_cap_haswell_k, "haswell"},     {nk_cap_skylake_k, "skylake"},   {nk_cap_icelake_k, "icelake"},
-    {nk_cap_genoa_k, "genoa"},         {nk_cap_sapphire_k, "sapphire"}, {nk_cap_sapphireamx_k, "sapphireamx"},
+    {nk_cap_serial_k, "serial"},     {nk_cap_neon_k, "neon"},
+    {nk_cap_neonsdot_k, "neonsdot"}, {nk_cap_neonbfdot_k, "neonbfdot"},
+    {nk_cap_neonfhm_k, "neonfhm"},   {nk_cap_neonfp8_k, "neonfp8"},
+    {nk_cap_haswell_k, "haswell"},   {nk_cap_skylake_k, "skylake"},
+    {nk_cap_icelake_k, "icelake"},   {nk_cap_genoa_k, "genoa"},
+    {nk_cap_sapphire_k, "sapphire"}, {nk_cap_sapphireamx_k, "sapphireamx"},
+    {nk_cap_alder_k, "alder"},       {nk_cap_sierra_k, "sierra"},
+    {nk_cap_diamond_k, "diamond"},   {nk_cap_rvv_k, "rvv"},
+    {nk_cap_rvvbb_k, "rvvbb"},
 };
 
 #pragma region CPU Classes
@@ -97,48 +103,50 @@ inline constexpr numkong_capability_name_t numkong_capability_names_k[] = {
 constexpr nk_capability_t numkong_capabilities_of(cpu_class_t cpu_class) noexcept {
     switch (cpu_class) {
     case cpu_class_t::intel_haswell_k: return nk_cap_serial_k | nk_cap_haswell_k;
+    case cpu_class_t::intel_sierra_k:
+        return numkong_capabilities_of(cpu_class_t::intel_haswell_k) | nk_cap_alder_k | nk_cap_sierra_k;
     case cpu_class_t::intel_skylake_k: return numkong_capabilities_of(cpu_class_t::intel_haswell_k) | nk_cap_skylake_k;
     case cpu_class_t::intel_icelake_k: return numkong_capabilities_of(cpu_class_t::intel_skylake_k) | nk_cap_icelake_k;
     case cpu_class_t::amd_genoa_k: return numkong_capabilities_of(cpu_class_t::intel_icelake_k) | nk_cap_genoa_k;
+    case cpu_class_t::intel_diamond_k:
+        return numkong_capabilities_of(cpu_class_t::amd_genoa_k) | nk_cap_alder_k | nk_cap_sierra_k | nk_cap_diamond_k;
     case cpu_class_t::aws_g2_k: return nk_cap_serial_k | nk_cap_neon_k;
     case cpu_class_t::apple_m2_k:
     case cpu_class_t::aws_g5_k:
         return numkong_capabilities_of(cpu_class_t::aws_g2_k) | nk_cap_neonsdot_k | nk_cap_neonbfdot_k |
                nk_cap_neonfhm_k;
     case cpu_class_t::nvidia_vera_k: return numkong_capabilities_of(cpu_class_t::aws_g5_k) | nk_cap_neonfp8_k;
+    case cpu_class_t::alibaba_c930_k: return nk_cap_serial_k | nk_cap_rvv_k | nk_cap_rvvbb_k;
     default: return nk_cap_serial_k;
     }
 }
 
-/** @brief Lowers one CPU class onto ForkUnion's schedule mask - the bits the runtime must
- *      confirm before the class's monitored waiter is trusted; empty for spinning classes. */
-constexpr fu_capabilities_t forkunion_capabilities_of(cpu_class_t cpu_class) noexcept {
+/** @brief The class a refused rung degrades to - the next one down its own lineage, which is the
+ *      class an arm must be distinct from to earn instantiation. Two lineages share the Haswell
+ *      floor on x86: the AVX-512 P-cores and the AVX-VNNI E-cores. */
+constexpr cpu_class_t parent_class_of(cpu_class_t cpu_class) noexcept {
     switch (cpu_class) {
-    case cpu_class_t::aws_g5_k:
-    case cpu_class_t::nvidia_vera_k: return fu_capability_arm64_wfet_k;
-    default: return fu_capabilities_unknown_k;
+    case cpu_class_t::intel_diamond_k: return cpu_class_t::amd_genoa_k;
+    case cpu_class_t::amd_genoa_k: return cpu_class_t::intel_icelake_k;
+    case cpu_class_t::intel_icelake_k: return cpu_class_t::intel_skylake_k;
+    case cpu_class_t::intel_skylake_k: return cpu_class_t::intel_haswell_k;
+    case cpu_class_t::intel_sierra_k: return cpu_class_t::intel_haswell_k;
+    case cpu_class_t::nvidia_vera_k: return cpu_class_t::aws_g5_k;
+    case cpu_class_t::aws_g5_k: return cpu_class_t::apple_m2_k;
+    case cpu_class_t::apple_m2_k: return cpu_class_t::aws_g2_k;
+    default: return cpu_class_t::serial_k;
     }
 }
 
-/** @brief Whether every compute bit one CPU class lowers onto is present in @p available. */
-inline bool has_all(nk_capability_t available, cpu_class_t cpu_class) noexcept {
-    nk_capability_t const wanted = numkong_capabilities_of(cpu_class);
-    return (available & wanted) == wanted;
-}
-
-/** @brief Whether the runtime schedule mask confirms one CPU class's wait instruction. */
-inline bool schedule_admits(cpu_class_t cpu_class) noexcept {
-    fu_capabilities_t const wanted = forkunion_capabilities_of(cpu_class);
-    return (fu_runtime_capabilities() & wanted) == wanted;
-}
-
-/** @brief The wait instruction one CPU class pairs: x86 spins PAUSE, monitored Arm classes
- *      arm WFET, everything else yields - the floor takes the standard one. */
+/** @brief The wait instruction one CPU class pairs: x86 spins PAUSE, the WAITPKG Xeons and the
+ *      monitored Arm & RISC-V classes arm TPAUSE, WFET & WRS, everything else yields - the floor
+ *      takes the standard one, as does any class whose spelling the toolchain lacks, per the probes
+ *      on @c forkunion::header. */
 template <cpu_class_t cpu_class_>
 struct waiter_for_cpu_class {
     using type = fu::standard_yield_t;
 };
-#if NK_TARGET_X8664_
+#if FU_TARGET_X86_PAUSE
 template <>
 struct waiter_for_cpu_class<cpu_class_t::intel_haswell_k> {
     using type = fu::x86_pause_t;
@@ -155,7 +163,18 @@ template <>
 struct waiter_for_cpu_class<cpu_class_t::amd_genoa_k> {
     using type = fu::x86_pause_t;
 };
-#elif NK_TARGET_ARM64_
+#endif
+#if FU_TARGET_X86_TPAUSE
+template <>
+struct waiter_for_cpu_class<cpu_class_t::intel_sierra_k> {
+    using type = fu::x86_tpause_t;
+};
+template <>
+struct waiter_for_cpu_class<cpu_class_t::intel_diamond_k> {
+    using type = fu::x86_tpause_t;
+};
+#endif
+#if FU_TARGET_ARM64_YIELD
 template <>
 struct waiter_for_cpu_class<cpu_class_t::aws_g2_k> {
     using type = fu::arm64_yield_t;
@@ -164,6 +183,8 @@ template <>
 struct waiter_for_cpu_class<cpu_class_t::apple_m2_k> {
     using type = fu::arm64_yield_t;
 };
+#endif
+#if FU_TARGET_ARM64_WFET
 template <>
 struct waiter_for_cpu_class<cpu_class_t::aws_g5_k> {
     using type = fu::arm64_wfet_t;
@@ -173,10 +194,105 @@ struct waiter_for_cpu_class<cpu_class_t::nvidia_vera_k> {
     using type = fu::arm64_wfet_t;
 };
 #endif
+#if FU_TARGET_RISC5_WRS
+template <>
+struct waiter_for_cpu_class<cpu_class_t::alibaba_c930_k> {
+    using type = fu::risc5_wrs_t;
+};
+#endif
 
 /** @brief The waiter a CPU class pairs, spelled short for the arms' explicit instantiations. */
 template <cpu_class_t cpu_class_>
 using waiter_of = typename waiter_for_cpu_class<cpu_class_>::type;
+
+/** @brief The atomic reference one CPU class pairs: single-instruction LSE read-modify-writes
+ *      under RCpc acquiring loads on the Armv8.3+ classes, conditional adds on the CMPCCXADD
+ *      Xeons, `amocas` on Zacas RISC-V - the floors and the older classes take the standard one,
+ *      as does every class whose spelling the toolchain lacks - the probes on @c forkunion::header say. */
+template <cpu_class_t cpu_class_>
+struct atomic_ref_for_cpu_class {
+    template <typename value_type_>
+    using type = fu::standard_atomic_ref<value_type_>;
+};
+#if FU_TARGET_X86_CMPCCXADD
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::intel_sierra_k> {
+    template <typename value_type_>
+    using type = fu::x86_cmpccxadd_atomic_ref<value_type_>;
+};
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::intel_diamond_k> {
+    template <typename value_type_>
+    using type = fu::x86_cmpccxadd_atomic_ref<value_type_>;
+};
+#endif
+#if FU_TARGET_ARM64_RCPC
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::apple_m2_k> {
+    template <typename value_type_>
+    using type = fu::arm64_rcpc_atomic_ref<value_type_>;
+};
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::aws_g5_k> {
+    template <typename value_type_>
+    using type = fu::arm64_rcpc_atomic_ref<value_type_>;
+};
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::nvidia_vera_k> {
+    template <typename value_type_>
+    using type = fu::arm64_rcpc_atomic_ref<value_type_>;
+};
+#elif FU_TARGET_ARM64_LSE
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::apple_m2_k> {
+    template <typename value_type_>
+    using type = fu::arm64_lse_atomic_ref<value_type_>;
+};
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::aws_g5_k> {
+    template <typename value_type_>
+    using type = fu::arm64_lse_atomic_ref<value_type_>;
+};
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::nvidia_vera_k> {
+    template <typename value_type_>
+    using type = fu::arm64_lse_atomic_ref<value_type_>;
+};
+#endif
+#if FU_TARGET_RISC5_ZACAS
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::alibaba_c930_k> {
+    template <typename value_type_>
+    using type = fu::risc5_zacas_atomic_ref<value_type_>;
+};
+#endif
+
+/** @brief The spin hints every core of an architecture carries - PAUSE, YIELD, Zihintpause: the
+ *      runtime confirms nothing about them, and a class differing by one alone earns no rung. */
+inline constexpr fu::capabilities_t baseline_hints_k = fu::capability_x86_pause_k | fu::capability_arm64_yield_k |
+                                                       fu::capability_risc5_pause_k;
+
+/** @brief Lowers one CPU class onto ForkUnion's mask - the bits the runtime must confirm before
+ *      the class's waiter and atomic reference are trusted, read off the two types themselves. */
+template <cpu_class_t cpu_class_>
+constexpr fu::capabilities_t forkunion_capabilities_of() noexcept {
+    constexpr fu::capabilities_t waits_k = waiter_of<cpu_class_>::capability_k;
+    constexpr fu::capabilities_t atomics_k = atomic_ref_for_cpu_class<cpu_class_>::template type<u32_t>::capabilities_k;
+    return static_cast<fu::capabilities_t>((waits_k | atomics_k) & ~baseline_hints_k);
+}
+
+/** @brief Whether every compute bit one CPU class lowers onto is present in @p available. */
+inline bool numkong_admits(nk_capability_t available, cpu_class_t cpu_class) noexcept {
+    nk_capability_t const wanted = numkong_capabilities_of(cpu_class);
+    return (available & wanted) == wanted;
+}
+
+/** @brief Whether the runtime confirms every ForkUnion bit one CPU class needs. */
+template <cpu_class_t cpu_class_>
+inline bool forkunion_admits() noexcept {
+    constexpr fu::capabilities_t wanted = forkunion_capabilities_of<cpu_class_>();
+    return (fu::runtime_capabilities() & wanted) == wanted;
+}
 
 #pragma endregion CPU Classes
 
@@ -222,13 +338,13 @@ inline void propagate_success(usearch_error_t* error) noexcept {
     if (error) *error = usearch_error_t {usearch_success_k, nullptr};
 }
 
-/** @brief The C key struct and the engine's @c uuid_t share sixteen bytes - one bit cast in. */
-inline uuid_t uuid_of(usearch_key_t key) noexcept { return std::bit_cast<uuid_t>(key); }
+/** @brief The C key struct and the engine's @c us::uuid_t share sixteen bytes - one bit cast in. */
+inline us::uuid_t uuid_of(usearch_key_t key) noexcept { return std::bit_cast<us::uuid_t>(key); }
 
 /** @brief Slices the low eight key bytes as the hash: keys arrive pre-mixed, UUIDs and content
  *      hashes alike. */
 struct uuid_slice_hash_t {
-    std::size_t operator()(uuid_t const& uuid) const noexcept {
+    std::size_t operator()(us::uuid_t const& uuid) const noexcept {
         struct halves_t {
             u64_t low, high;
         };
@@ -252,15 +368,17 @@ template <typename multi_type_>
 inline constexpr bool is_vram_index = false;
 #endif
 
-/** One RAM alternative: the CPU class alone names the rung, lowering onto its NumKong mask and its waiter. */
+/** One RAM alternative: the CPU class alone names the rung, lowering onto its NumKong mask, its waiter
+ *  and its atomic reference. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, cpu_class_t cpu_class_>
-using ram_index = dense_ram_indexes<uuid_t, dtype_, kernel_, numkong_capabilities_of(cpu_class_), waiter_of<cpu_class_>,
-                                    uuid_slice_hash_t>;
+using ram_index =
+    dense_ram_indexes<us::uuid_t, dtype_, kernel_, numkong_capabilities_of(cpu_class_), waiter_of<cpu_class_>,
+                      atomic_ref_for_cpu_class<cpu_class_>::template type, uuid_slice_hash_t>;
 #if USEARCH_BUILD_CUDA
 /** One VRAM alternative: the GPU class is a compilation ceiling, not a target, since the index dispatches
  *  by the actual device's generation at runtime, so the newest class serves the whole fleet. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, gpu_class_t gpu_class_ = gpu_class_t::nvidia_blackwell_k>
-using vram_index = dense_vram_indexes<uuid_t, dtype_, kernel_, cuda_arch_of(gpu_class_), uuid_slice_hash_t>;
+using vram_index = dense_vram_indexes<us::uuid_t, dtype_, kernel_, cuda_arch_of(gpu_class_), uuid_slice_hash_t>;
 #endif
 
 /** @brief The C predicate lifted onto the index's key vocabulary. */
@@ -268,7 +386,7 @@ struct key_predicate_t {
     usearch_predicate_t callback;
     void* state;
 
-    admission_t operator()(uuid_t key) const noexcept {
+    admission_t operator()(us::uuid_t key) const noexcept {
         return static_cast<admission_t>(callback(std::bit_cast<usearch_key_t>(key), state));
     }
 };
@@ -296,8 +414,10 @@ struct shard_ticks_t {
 
 /** @brief One arm's verbs, fixed to the C layer's callback types and wrapped as non-template members
  *      of a view over the index: an explicit instantiation compiles exactly these bodies in the arm's
- *      shard TU, and an @c extern one keeps every arm body out of the dispatch TU. The dispatch
- *      reaches an arm only through this view, so no other instantiation is ever needed. */
+ *      unit, and an @c extern one keeps every arm body out of the dispatch unit. The dispatch reaches
+ *      an arm only through this view, so no other instantiation is ever needed. The members are defined
+ *      outside the class on purpose: inside it they would be inline, which an explicit instantiation
+ *      declaration does not restrain, and the arm bodies would compile into the dispatch unit after all. */
 template <typename index_type_>
 struct specialized_index {
     using key_t = typename index_type_::key_t;
@@ -316,71 +436,151 @@ struct specialized_index {
     index_type_& index;
 
     status_t emplace(fu_memory_domain_id_t memory_domain) noexcept
-        requires is_ram_index<index_type_>
-    {
-        return index.emplace(memory_domain);
-    }
+        requires is_ram_index<index_type_>;
     status_t emplace(int device) noexcept
-        requires is_vram_index<index_type_>
-    {
-        return index.emplace(device);
-    }
+        requires is_vram_index<index_type_>;
     /** @brief The device the first shard sits on - what the capability string names. */
     int device() const noexcept
-        requires is_vram_index<index_type_>
-    {
-        return index.shard(0).device_specs().ordinal;
-    }
-    std::size_t shards_count() const noexcept { return index.shards_count(); }
-    std::size_t dimensions() const noexcept { return index.dimensions(); }
-    std::size_t connectivity() const noexcept { return index.connectivity(); }
-    std::size_t size() const noexcept { return index.size(); }
-    std::size_t capacity() const noexcept { return index.capacity(); }
-    std::size_t memory_usage() const noexcept { return index.memory_usage(); }
-    std::size_t storage_requirements() const noexcept { return index.storage_requirements(save_config_t {}).value; }
-    std::size_t count(key_t const& key) const noexcept { return index.count(key); }
-    std::size_t get(key_t const& key, vectors_span_t vectors, std::size_t wanted) const noexcept {
-        return index.get(key, vectors, wanted);
-    }
-    status_t reserve(reserve_capacity_t config) noexcept { return index.reserve(config); }
-    status_t clear() noexcept { return index.clear(); }
+        requires is_vram_index<index_type_>;
+    std::size_t shards_count() const noexcept;
+    std::size_t dimensions() const noexcept;
+    std::size_t connectivity() const noexcept;
+    std::size_t size() const noexcept;
+    std::size_t capacity() const noexcept;
+    std::size_t memory_usage() const noexcept;
+    std::size_t storage_requirements() const noexcept;
+    std::size_t count(key_t const& key) const noexcept;
+    std::size_t get(key_t const& key, vectors_span_t vectors, std::size_t wanted) const noexcept;
+    status_t reserve(reserve_capacity_t config) noexcept;
+    status_t clear() noexcept;
     insert_result_t add(std::span<key_t const> keys, vectors_view_t rows, executor_t& executor,
-                        insert_config_t config) noexcept {
-        return index.add(keys, rows, executor, config);
-    }
+                        insert_config_t config) noexcept;
     search_result_t search(vectors_view_t queries, executor_t& executor, search_config_t config, std::size_t wanted,
-                           keys_span_t keys, distances_span_t distances, counts_span_t counts) noexcept {
-        return index.search(queries, executor, config, wanted, keys, distances, counts);
-    }
+                           keys_span_t keys, distances_span_t distances, counts_span_t counts) noexcept;
     search_result_t search_if(vectors_view_t queries, executor_t& executor, search_config_t config, std::size_t wanted,
                               keys_span_t keys, distances_span_t distances, counts_span_t counts,
                               key_predicate_t& predicate) noexcept
-        requires is_ram_index<index_type_>
-    {
-        return index.search(queries, executor, config, wanted, keys, distances, counts, predicate);
-    }
-    status_t save(std::string_view path, executor_t& executor, shard_ticks_t& ticks) noexcept {
-        return index.save(path, save_config_of(path), executor, ticks);
-    }
-    status_t save(bytes_span_t buffer, executor_t& executor, shard_ticks_t& ticks) noexcept {
-        return index.save(buffer, save_config_of({}), executor, ticks);
-    }
-    status_t load(std::string_view path, executor_t& executor, shard_ticks_t& ticks) noexcept {
-        return index.load(path, load_config_t {}, executor, ticks);
-    }
-    status_t load(bytes_view_t buffer, executor_t& executor, shard_ticks_t& ticks) noexcept {
-        return index.load(buffer, load_config_t {}, executor, ticks);
-    }
+        requires is_ram_index<index_type_>;
+    status_t save(std::string_view path, executor_t& executor, shard_ticks_t& ticks) noexcept;
+    status_t save(bytes_span_t buffer, executor_t& executor, shard_ticks_t& ticks) noexcept;
+    status_t load(std::string_view path, executor_t& executor, shard_ticks_t& ticks) noexcept;
+    status_t load(bytes_view_t buffer, executor_t& executor, shard_ticks_t& ticks) noexcept;
 
     /** @brief The C layer's save config: the path's suffix picks the layout, the residency the
      *      contract - device planes cannot be settlement-probed, so a GPU handle certifies. */
-    static save_config_t save_config_of(std::string_view path) noexcept {
-        save_config_t config;
-        config.layout = path.ends_with(".json") ? checkpoint_layout_t::distributed_k : checkpoint_layout_t::monolith_k;
-        if constexpr (is_vram_index<index_type_>) config.synchronization = synchronization_t::immutable_k;
-        return config;
-    }
+    static save_config_t save_config_of(std::string_view path) noexcept;
 };
+
+template <typename index_type_>
+status_t specialized_index<index_type_>::emplace(fu_memory_domain_id_t memory_domain) noexcept
+    requires is_ram_index<index_type_>
+{
+    return index.emplace(memory_domain);
+}
+template <typename index_type_>
+status_t specialized_index<index_type_>::emplace(int device) noexcept
+    requires is_vram_index<index_type_>
+{
+    return index.emplace(device);
+}
+template <typename index_type_>
+int specialized_index<index_type_>::device() const noexcept
+    requires is_vram_index<index_type_>
+{
+    return index.shard(0).device_specs().ordinal;
+}
+template <typename index_type_>
+std::size_t specialized_index<index_type_>::shards_count() const noexcept {
+    return index.shards_count();
+}
+template <typename index_type_>
+std::size_t specialized_index<index_type_>::dimensions() const noexcept {
+    return index.dimensions();
+}
+template <typename index_type_>
+std::size_t specialized_index<index_type_>::connectivity() const noexcept {
+    return index.connectivity();
+}
+template <typename index_type_>
+std::size_t specialized_index<index_type_>::size() const noexcept {
+    return index.size();
+}
+template <typename index_type_>
+std::size_t specialized_index<index_type_>::capacity() const noexcept {
+    return index.capacity();
+}
+template <typename index_type_>
+std::size_t specialized_index<index_type_>::memory_usage() const noexcept {
+    return index.memory_usage();
+}
+template <typename index_type_>
+std::size_t specialized_index<index_type_>::storage_requirements() const noexcept {
+    return index.storage_requirements(save_config_t {}).value;
+}
+template <typename index_type_>
+std::size_t specialized_index<index_type_>::count(key_t const& key) const noexcept {
+    return index.count(key);
+}
+template <typename index_type_>
+std::size_t specialized_index<index_type_>::get(key_t const& key, vectors_span_t vectors,
+                                                std::size_t wanted) const noexcept {
+    return index.get(key, vectors, wanted);
+}
+template <typename index_type_>
+status_t specialized_index<index_type_>::reserve(reserve_capacity_t config) noexcept {
+    return index.reserve(config);
+}
+template <typename index_type_>
+status_t specialized_index<index_type_>::clear() noexcept {
+    return index.clear();
+}
+template <typename index_type_>
+auto specialized_index<index_type_>::add(std::span<key_t const> keys, vectors_view_t rows, executor_t& executor,
+                                         insert_config_t config) noexcept -> insert_result_t {
+    return index.add(keys, rows, executor, config);
+}
+template <typename index_type_>
+auto specialized_index<index_type_>::search(vectors_view_t queries, executor_t& executor, search_config_t config,
+                                            std::size_t wanted, keys_span_t keys, distances_span_t distances,
+                                            counts_span_t counts) noexcept -> search_result_t {
+    return index.search(queries, executor, config, wanted, keys, distances, counts);
+}
+template <typename index_type_>
+auto specialized_index<index_type_>::search_if(vectors_view_t queries, executor_t& executor, search_config_t config,
+                                               std::size_t wanted, keys_span_t keys, distances_span_t distances,
+                                               counts_span_t counts, key_predicate_t& predicate) noexcept
+    -> search_result_t
+    requires is_ram_index<index_type_>
+{
+    return index.search(queries, executor, config, wanted, keys, distances, counts, predicate);
+}
+template <typename index_type_>
+status_t specialized_index<index_type_>::save(std::string_view path, executor_t& executor,
+                                              shard_ticks_t& ticks) noexcept {
+    return index.save(path, save_config_of(path), executor, ticks);
+}
+template <typename index_type_>
+status_t specialized_index<index_type_>::save(bytes_span_t buffer, executor_t& executor,
+                                              shard_ticks_t& ticks) noexcept {
+    return index.save(buffer, save_config_of({}), executor, ticks);
+}
+template <typename index_type_>
+status_t specialized_index<index_type_>::load(std::string_view path, executor_t& executor,
+                                              shard_ticks_t& ticks) noexcept {
+    return index.load(path, load_config_t {}, executor, ticks);
+}
+template <typename index_type_>
+status_t specialized_index<index_type_>::load(bytes_view_t buffer, executor_t& executor,
+                                              shard_ticks_t& ticks) noexcept {
+    return index.load(buffer, load_config_t {}, executor, ticks);
+}
+template <typename index_type_>
+save_config_t specialized_index<index_type_>::save_config_of(std::string_view path) noexcept {
+    save_config_t config;
+    config.layout = path.ends_with(".json") ? checkpoint_layout_t::distributed_k : checkpoint_layout_t::monolith_k;
+    if constexpr (is_vram_index<index_type_>) config.synchronization = synchronization_t::immutable_k;
+    return config;
+}
 
 template <typename index_type_>
 specialized_index(index_type_&) -> specialized_index<index_type_>;

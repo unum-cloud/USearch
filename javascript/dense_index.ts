@@ -2,13 +2,7 @@
  * Vector search over equidimensional dense embeddings, and the snapshot cursor and resumable
  * finder one index opens.
  */
-import {
-  CompiledCursor,
-  CompiledFinder,
-  CompiledIndex,
-  CompiledPlacement,
-  compiled,
-} from "./library";
+import { CompiledCursor, CompiledFinder, CompiledIndex, CompiledPlacement, compiled } from "./library";
 import {
   Executor,
   KeyLike,
@@ -180,7 +174,7 @@ export interface CursorBatch {
  */
 export class Cursor {
   /** Wraps the native cursor; opened by {@link DenseIndex.cursor} rather than constructed. */
-  constructor(private readonly compiled: CompiledCursor) { }
+  constructor(private readonly compiled: CompiledCursor) {}
 
   /**
    * Pulls the next rows of the snapshot.
@@ -209,7 +203,7 @@ export class Cursor {
  */
 export class Finder {
   /** Wraps the native finder; opened by {@link DenseIndex.find} rather than constructed. */
-  constructor(private readonly compiled: CompiledFinder) { }
+  constructor(private readonly compiled: CompiledFinder) {}
 
   /**
    * Pulls the next-nearest matches from the stream.
@@ -230,15 +224,10 @@ export class Finder {
 }
 
 /** Repeats one identity across `rows` entries, which is how a single key broadcasts. */
-function repeatKeys(
-  keys: Uint8Array | BigUint64Array,
-  rows: number
-): Uint8Array | BigUint64Array {
-  if (keys instanceof BigUint64Array)
-    return BigUint64Array.from({ length: rows }, () => keys[0]);
+function repeatKeys(keys: Uint8Array | BigUint64Array, rows: number): Uint8Array | BigUint64Array {
+  if (keys instanceof BigUint64Array) return BigUint64Array.from({ length: rows }, () => keys[0]);
   const repeated = new Uint8Array(rows * keyBytes);
-  for (let position = 0; position < rows; position++)
-    repeated.set(keys, position * keyBytes);
+  for (let position = 0; position < rows; position++) repeated.set(keys, position * keyBytes);
   return repeated;
 }
 
@@ -272,40 +261,25 @@ export class DenseIndex {
   /** Reached through {@link DenseIndex.forRam}, {@link DenseIndex.forVram} or {@link DenseIndex.forNvme}. */
   private constructor(seal: symbol, compiledIndex: CompiledIndex) {
     if (seal !== indexSeal)
-      throw new Error(
-        "A DenseIndex is opened by DenseIndex.forRam, DenseIndex.forVram or DenseIndex.forNvme."
-      );
+      throw new Error("A DenseIndex is opened by DenseIndex.forRam, DenseIndex.forVram or DenseIndex.forNvme.");
     this.#compiledIndex = compiledIndex;
   }
 
   /** Checks the shared geometry and opens the native index of one residency. */
-  static #opened(
-    options: DenseIndexOptions,
-    residency: Residency,
-    placement: CompiledPlacement
-  ): DenseIndex {
+  static #opened(options: DenseIndexOptions, residency: Residency, placement: CompiledPlacement): DenseIndex {
     const metric = options.metric ?? MetricKind.Angular;
     const quantization = options.quantization ?? ScalarKind.F32;
     const connectivity = options.connectivity ?? 0;
     const valuesPerKey = options.valuesPerKey ?? 0;
 
-    if (!isPositiveInteger(options.dimensions))
-      throw new Error("`dimensions` must be a positive integer.");
+    if (!isPositiveInteger(options.dimensions)) throw new Error("`dimensions` must be a positive integer.");
     if (!isNonNegativeInteger(connectivity) || !isNonNegativeInteger(valuesPerKey))
-      throw new Error(
-        "`connectivity` and `valuesPerKey` must be non-negative integers, 0 deriving each."
-      );
+      throw new Error("`connectivity` and `valuesPerKey` must be non-negative integers, 0 deriving each.");
     if (!Object.values(MetricKind).includes(metric))
-      throw new Error(
-        `Invalid metric: ${metric}. It must be one of: ${Object.values(
-          MetricKind
-        ).join(", ")}`
-      );
+      throw new Error(`Invalid metric: ${metric}. It must be one of: ${Object.values(MetricKind).join(", ")}`);
     if (!Object.values(ScalarKind).includes(quantization))
       throw new Error(
-        `Invalid quantization: ${quantization}. It must be one of: ${Object.values(
-          ScalarKind
-        ).join(", ")}`
+        `Invalid quantization: ${quantization}. It must be one of: ${Object.values(ScalarKind).join(", ")}`,
       );
 
     return new DenseIndex(
@@ -317,8 +291,8 @@ export class DenseIndex {
         connectivity,
         valuesPerKey,
         residency,
-        placement
-      )
+        placement,
+      ),
     );
   }
 
@@ -396,8 +370,7 @@ export class DenseIndex {
    * nothing here could ever free it again.
    */
   #executorOf(executor: Executor): Executor {
-    if (!(executor instanceof Executor))
-      throw new Error("`executor` must be an Executor.");
+    if (!(executor instanceof Executor)) throw new Error("`executor` must be an Executor.");
     return executor;
   }
 
@@ -405,9 +378,7 @@ export class DenseIndex {
   #rowsOf(vectors: Vector, kind: ScalarKind): number {
     const width = rowBytes(this.#compiledIndex.dimensions(), kind);
     if (!width || vectors.byteLength % width !== 0)
-      throw new Error(
-        "The size of the flattened vectors must be a whole multiple of one row."
-      );
+      throw new Error("The size of the flattened vectors must be a whole multiple of one row.");
     return vectors.byteLength / width;
   }
 
@@ -433,20 +404,19 @@ export class DenseIndex {
     keys: KeysLike,
     vectors: VectorOrMatrix | number[][],
     executor: Executor,
-    options: InsertionOptions = {}
+    options: InsertionOptions = {},
   ): number {
     const normalizedVectors = normalizeVectors(vectors);
     const scalarKind = options.scalarKind ?? scalarOf(normalizedVectors);
     const countVectors = this.#rowsOf(normalizedVectors, scalarKind);
 
     let normalizedKeys = normalizeKeys(keys);
-    if (countKeys(normalizedKeys) === 1 && countVectors > 1)
-      normalizedKeys = repeatKeys(normalizedKeys, countVectors);
+    if (countKeys(normalizedKeys) === 1 && countVectors > 1) normalizedKeys = repeatKeys(normalizedKeys, countVectors);
     else if (countKeys(normalizedKeys) !== countVectors)
       throw new Error(
         `The length of keys (${countKeys(
-          normalizedKeys
-        )}) must match the number of vectors (${countVectors}) or be a single key.`
+          normalizedKeys,
+        )}) must match the number of vectors (${countVectors}) or be a single key.`,
       );
 
     const sink = statsSink(options.stats);
@@ -456,7 +426,7 @@ export class DenseIndex {
       this.#executorOf(executor).compiled,
       options.expansionFactor ?? 0,
       options.scalarKind,
-      sink
+      sink,
     );
     reportStats(options.stats, sink);
     return published;
@@ -474,11 +444,7 @@ export class DenseIndex {
    */
   refine(executor: Executor, options: InsertionOptions = {}): number {
     const sink = statsSink(options.stats);
-    const changed = this.#compiledIndex.refine(
-      this.#executorOf(executor).compiled,
-      options.expansionFactor ?? 0,
-      sink
-    );
+    const changed = this.#compiledIndex.refine(this.#executorOf(executor).compiled, options.expansionFactor ?? 0, sink);
     reportStats(options.stats, sink);
     return changed;
   }
@@ -500,7 +466,7 @@ export class DenseIndex {
     vectors: VectorOrMatrix | number[][],
     matches: MatchesSpan,
     executor: Executor,
-    options: SearchOptions = {}
+    options: SearchOptions = {},
   ): void {
     const normalizedVectors = normalizeVectors(vectors);
     const sink = statsSink(options.stats);
@@ -512,7 +478,7 @@ export class DenseIndex {
       this.#executorOf(executor).compiled,
       options.expansionFactor ?? 0,
       options.scalarKind,
-      sink
+      sink,
     );
     reportStats(options.stats, sink);
   }
@@ -533,7 +499,7 @@ export class DenseIndex {
     left: VectorOrMatrix | number[][],
     products: MatchesSpan,
     executor: Executor,
-    options: SearchOptions = {}
+    options: SearchOptions = {},
   ): void {
     const normalizedLeft = normalizeVectors(left);
     const sink = statsSink(options.stats);
@@ -545,7 +511,7 @@ export class DenseIndex {
       this.#executorOf(executor).compiled,
       options.expansionFactor ?? 0,
       options.scalarKind,
-      sink
+      sink,
     );
     reportStats(options.stats, sink);
   }
@@ -569,10 +535,9 @@ export class DenseIndex {
     valueDimensions: number,
     outputs: ArrayBufferView,
     executor: Executor,
-    options: AttentionOptions = {}
+    options: AttentionOptions = {},
   ): void {
-    if (!isPositiveInteger(valueDimensions))
-      throw new Error("`valueDimensions` must be a positive integer.");
+    if (!isPositiveInteger(valueDimensions)) throw new Error("`valueDimensions` must be a positive integer.");
 
     const normalizedQueries = normalizeVectors(queries);
     const normalizedValues = normalizeVectors(values);
@@ -589,7 +554,7 @@ export class DenseIndex {
       options.massTolerance ?? 0,
       options.scalarKind,
       options.valuesScalarKind,
-      sink
+      sink,
     );
     reportStats(options.stats, sink);
   }
@@ -613,10 +578,9 @@ export class DenseIndex {
     rowsPerQuery: number,
     matches: MatchesSpan,
     executor: Executor,
-    options: SearchOptions = {}
+    options: SearchOptions = {},
   ): void {
-    if (!isPositiveInteger(rowsPerQuery))
-      throw new Error("`rowsPerQuery` must be a positive integer.");
+    if (!isPositiveInteger(rowsPerQuery)) throw new Error("`rowsPerQuery` must be a positive integer.");
 
     const normalizedVectors = normalizeVectors(vectors);
     const sink = statsSink(options.stats);
@@ -629,7 +593,7 @@ export class DenseIndex {
       this.#executorOf(executor).compiled,
       options.expansionFactor ?? 0,
       options.scalarKind,
-      sink
+      sink,
     );
     reportStats(options.stats, sink);
   }
@@ -697,13 +661,7 @@ export class DenseIndex {
    * @return {Finder} - The stream, which must be freed the moment pulling stops.
    */
   find(query: Vector, executor: Executor, options: FinderOptions = {}): Finder {
-    return new Finder(
-      this.#compiledIndex.find(
-        query,
-        this.#executorOf(executor).compiled,
-        options.scalarKind
-      )
-    );
+    return new Finder(this.#compiledIndex.find(query, this.#executorOf(executor).compiled, options.scalarKind));
   }
 
   /**
@@ -782,10 +740,7 @@ export class DenseIndex {
    * @throws Will throw an error if `path` is not a string.
    */
   save(path: string, executor: Executor): void {
-    if (typeof path !== "string")
-      throw new Error(
-        "`path` must be a string representing the file path to write."
-      );
+    if (typeof path !== "string") throw new Error("`path` must be a string representing the file path to write.");
     this.#compiledIndex.save(path, this.#executorOf(executor).compiled);
   }
 
@@ -796,10 +751,7 @@ export class DenseIndex {
    * @throws Will throw an error if `path` is not a string.
    */
   load(path: string, executor: Executor): void {
-    if (typeof path !== "string")
-      throw new Error(
-        "`path` must be a string representing the file path to read."
-      );
+    if (typeof path !== "string") throw new Error("`path` must be a string representing the file path to read.");
     this.#compiledIndex.load(path, this.#executorOf(executor).compiled);
   }
 

@@ -91,10 +91,7 @@ export type Key = Uint8Array;
 export type KeyLike = bigint | number | string | Uint8Array;
 
 /** Every spelling a run of identities is accepted in. */
-export type KeysLike =
-  | KeyLike
-  | BigUint64Array
-  | Array<bigint | number | string | Uint8Array>;
+export type KeysLike = KeyLike | BigUint64Array | Array<bigint | number | string | Uint8Array>;
 
 /**
  * Parks an integer identity in the trailing eight bytes, most significant first.
@@ -121,14 +118,11 @@ export function keyFromInteger(value: bigint | number): Key {
  *         spells that identity.
  */
 export function integerFromKey(key: Uint8Array): bigint {
-  if (key.length !== keyBytes)
-    throw new Error("A key is sixteen bytes, most significant first.");
+  if (key.length !== keyBytes) throw new Error("A key is sixteen bytes, most significant first.");
   for (let position = 0; position < 8; position++)
-    if (key[position] !== 0)
-      throw new Error(`The key ${formatKey(key)} carries no integer identity.`);
+    if (key[position] !== 0) throw new Error(`The key ${formatKey(key)} carries no integer identity.`);
   let integer = 0n;
-  for (let position = 8; position < keyBytes; position++)
-    integer = (integer << 8n) | BigInt(key[position]);
+  for (let position = 8; position < keyBytes; position++) integer = (integer << 8n) | BigInt(key[position]);
   return integer;
 }
 
@@ -139,12 +133,10 @@ export function integerFromKey(key: Uint8Array): bigint {
  * @return {string} Thirty-six characters, dashed after the 4th, 6th, 8th and 10th byte.
  */
 export function formatKey(key: Uint8Array): string {
-  if (key.length !== keyBytes)
-    throw new Error("A key is sixteen bytes, most significant first.");
+  if (key.length !== keyBytes) throw new Error("A key is sixteen bytes, most significant first.");
   let rendered = "";
   for (let position = 0; position < keyBytes; position++) {
-    if (position === 4 || position === 6 || position === 8 || position === 10)
-      rendered += "-";
+    if (position === 4 || position === 6 || position === 8 || position === 10) rendered += "-";
     rendered += key[position].toString(16).padStart(2, "0");
   }
   return rendered;
@@ -159,11 +151,9 @@ export function formatKey(key: Uint8Array): string {
 export function parseKey(text: string): Key {
   const malformed = "The key is not thirty-two hexadecimal digits.";
   const digits = text.replace(/-/g, "");
-  if (digits.length !== 32 || !/^[0-9a-fA-F]{32}$/.test(digits))
-    throw new Error(malformed);
+  if (digits.length !== 32 || !/^[0-9a-fA-F]{32}$/.test(digits)) throw new Error(malformed);
   const key = new Uint8Array(keyBytes);
-  for (let position = 0; position < keyBytes; position++)
-    key[position] = parseInt(digits.substr(position * 2, 2), 16);
+  for (let position = 0; position < keyBytes; position++) key[position] = parseInt(digits.substr(position * 2, 2), 16);
   return key;
 }
 
@@ -184,17 +174,11 @@ export function keyAt(keys: Uint8Array, position: number): Key {
  * TypeScript catches this at compile time, but a JavaScript caller reaches the factory with no
  * such check, and a silently ignored `devices` reads as a placement that was honoured.
  */
-export function refuseForeignArms(
-  options: object,
-  own: string,
-  subject: string
-): void {
+export function refuseForeignArms(options: object, own: string, subject: string): void {
   const named = options as Record<string, unknown>;
   for (const arm of ["memoryDomains", "devices", "paths"]) {
     if (arm !== own && named[arm] !== undefined)
-      throw new Error(
-        `\`${arm}\` belongs to another residency; ${subject} places with \`${own}\`.`
-      );
+      throw new Error(`\`${arm}\` belongs to another residency; ${subject} places with \`${own}\`.`);
   }
 }
 
@@ -210,27 +194,19 @@ export function isNonNegativeInteger(value: unknown): value is number {
 
 /** Whether the argument names one identity rather than a run of them. */
 export function isOneKey(keys: KeysLike): boolean {
-  return (
-    typeof keys === "bigint" ||
-    typeof keys === "string" ||
-    (typeof keys === "number" && !Number.isNaN(keys))
-  );
+  return typeof keys === "bigint" || typeof keys === "string" || (typeof keys === "number" && !Number.isNaN(keys));
 }
 
 /** Reads one identity out of any spelling it is accepted in. */
 export function normalizeKey(key: KeyLike): Key {
   if (key instanceof Uint8Array) {
-    if (key.length !== keyBytes)
-      throw new Error("A key is sixteen bytes, most significant first.");
+    if (key.length !== keyBytes) throw new Error("A key is sixteen bytes, most significant first.");
     return key;
   }
   if (typeof key === "string") return parseKey(key);
   if (typeof key === "bigint") return keyFromInteger(key);
-  if (typeof key === "number" && Number.isInteger(key) && key >= 0)
-    return keyFromInteger(key);
-  throw new Error(
-    "A key must be a non-negative integer, a bigint, a dashed UUID, or sixteen bytes."
-  );
+  if (typeof key === "number" && Number.isInteger(key) && key >= 0) return keyFromInteger(key);
+  throw new Error("A key must be a non-negative integer, a bigint, a dashed UUID, or sixteen bytes.");
 }
 
 /**
@@ -242,8 +218,7 @@ export function normalizeKey(key: KeyLike): Key {
 export function normalizeKeys(keys: KeysLike): Uint8Array | BigUint64Array {
   if (keys instanceof BigUint64Array) return keys;
   if (keys instanceof Uint8Array) {
-    if (keys.length % keyBytes !== 0)
-      throw new Error("A run of keys is a whole number of sixteen-byte identities.");
+    if (keys.length % keyBytes !== 0) throw new Error("A run of keys is a whole number of sixteen-byte identities.");
     return keys;
   }
   if (Array.isArray(keys)) {
@@ -287,8 +262,7 @@ export function scalarOf(vectors: Vector): ScalarKind {
   if (vectors instanceof Float64Array) return ScalarKind.F64;
   if (vectors instanceof Float32Array) return ScalarKind.F32;
   if (vectors instanceof Int8Array) return ScalarKind.I8;
-  if (vectors instanceof Uint8Array || vectors instanceof Uint8ClampedArray)
-    return ScalarKind.U8;
+  if (vectors instanceof Uint8Array || vectors instanceof Uint8ClampedArray) return ScalarKind.U8;
   return ScalarKind.Unknown;
 }
 
@@ -316,13 +290,10 @@ export function isVector(vectors: unknown): vectors is Vector {
  */
 export function normalizeVectors(vectors: VectorOrMatrix | number[][]): Vector {
   if (isVector(vectors)) return vectors;
-  if (!Array.isArray(vectors))
-    throw new Error("Vectors must be a TypedArray or an array of arrays.");
+  if (!Array.isArray(vectors)) throw new Error("Vectors must be a TypedArray or an array of arrays.");
 
   const first = vectors[0];
-  const target = isVector(first)
-    ? (first.constructor as Float32ArrayConstructor)
-    : Float32Array;
+  const target = isVector(first) ? (first.constructor as Float32ArrayConstructor) : Float32Array;
   let totalLength = 0;
   for (const row of vectors) totalLength += row.length;
   const flattened = new target(totalLength);
@@ -358,9 +329,7 @@ const executorSeal = Symbol("Executor");
 /** Returns a worker count that is a non-negative integer, and throws on anything else. */
 function checkedThreads(threads: number): number {
   if (!isNonNegativeInteger(threads))
-    throw new Error(
-      "`threads` must be a non-negative integer; 0 derives it from the hardware."
-    );
+    throw new Error("`threads` must be a non-negative integer; 0 derives it from the hardware.");
   return threads;
 }
 
@@ -378,9 +347,7 @@ export class Executor {
   /** Reached through {@link Executor.forRam}, {@link Executor.forVram} or {@link Executor.forNvme}. */
   private constructor(seal: symbol, compiledExecutor: CompiledExecutor) {
     if (seal !== executorSeal)
-      throw new Error(
-        "An Executor is spawned by Executor.forRam, Executor.forVram or Executor.forNvme."
-      );
+      throw new Error("An Executor is spawned by Executor.forRam, Executor.forVram or Executor.forNvme.");
     this.compiled = compiledExecutor;
   }
 
@@ -395,11 +362,7 @@ export class Executor {
     refuseForeignArms(options, "memoryDomains", "Executor.forRam");
     return new Executor(
       executorSeal,
-      new compiled.Executor(
-        Residency.Ram,
-        checkedThreads(threads),
-        options.memoryDomains
-      )
+      new compiled.Executor(Residency.Ram, checkedThreads(threads), options.memoryDomains),
     );
   }
 
@@ -411,10 +374,7 @@ export class Executor {
    */
   static forVram(options: VramExecutorOptions = {}): Executor {
     refuseForeignArms(options, "devices", "Executor.forVram");
-    return new Executor(
-      executorSeal,
-      new compiled.Executor(Residency.Vram, 0, options.devices)
-    );
+    return new Executor(executorSeal, new compiled.Executor(Residency.Vram, 0, options.devices));
   }
 
   /**
@@ -426,14 +386,7 @@ export class Executor {
    */
   static forNvme(threads: number = 0, options: NvmeExecutorOptions = {}): Executor {
     refuseForeignArms(options, "paths", "Executor.forNvme");
-    return new Executor(
-      executorSeal,
-      new compiled.Executor(
-        Residency.Nvme,
-        checkedThreads(threads),
-        options.paths
-      )
-    );
+    return new Executor(executorSeal, new compiled.Executor(Residency.Nvme, checkedThreads(threads), options.paths));
   }
 
   /** Waits for every deferred call on this executor to finish. */
@@ -452,8 +405,8 @@ export class MatchesRow {
     /** Sixteen bytes per match found for this query. */
     public readonly keys: Uint8Array,
     /** The distance of every match found, positionally paired with `keys`. */
-    public readonly distances: Float64Array
-  ) { }
+    public readonly distances: Float64Array,
+  ) {}
 
   /** Matches this query found, which may be fewer than the run asked for. */
   get count(): number {
@@ -488,13 +441,10 @@ export class MatchesSpan {
    * @throws Will throw when the three lengths cannot be read as one shape.
    */
   constructor(keys: Uint8Array, distances: Float64Array, counts: BigUint64Array) {
-    if (counts.length === 0)
-      throw new Error("A run must hold at least one query.");
-    if (keys.length % keyBytes !== 0)
-      throw new Error("A run of keys is a whole number of sixteen-byte identities.");
+    if (counts.length === 0) throw new Error("A run must hold at least one query.");
+    if (keys.length % keyBytes !== 0) throw new Error("A run of keys is a whole number of sixteen-byte identities.");
     const cells = keys.length / keyBytes;
-    if (cells !== distances.length)
-      throw new Error("The key and distance buffers are not the same shape.");
+    if (cells !== distances.length) throw new Error("The key and distance buffers are not the same shape.");
     if (cells === 0 || cells % counts.length !== 0)
       throw new Error("The buffers do not divide into one row per query.");
     this.keys = keys;
@@ -521,20 +471,18 @@ export class MatchesSpan {
     const count = Number(this.counts[queryIndex]);
     return new MatchesRow(
       this.keys.subarray(offset * keyBytes, (offset + count) * keyBytes),
-      this.distances.subarray(offset, offset + count)
+      this.distances.subarray(offset, offset + count),
     );
   }
 
   /** Allocates a run wide enough for `queries` rows of `wanted` matches apiece. */
   static reserve(queries: number, wanted: number): MatchesSpan {
-    if (!isPositiveInteger(queries))
-      throw new Error("`queries` must be a positive integer.");
-    if (!isPositiveInteger(wanted))
-      throw new Error("`wanted` must be a positive integer.");
+    if (!isPositiveInteger(queries)) throw new Error("`queries` must be a positive integer.");
+    if (!isPositiveInteger(wanted)) throw new Error("`wanted` must be a positive integer.");
     return new MatchesSpan(
       new Uint8Array(queries * wanted * keyBytes),
       new Float64Array(queries * wanted),
-      new BigUint64Array(queries)
+      new BigUint64Array(queries),
     );
   }
 }

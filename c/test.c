@@ -187,8 +187,9 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
     for (size_t row = 0; row != collection_size; ++row) keys[row] = key_of(row);
 
     size_t const row_bytes = dimensions * sizeof(float);
-    size_t const inserted = usearch_dense_add(index, keys, data, collection_size, row_bytes, usearch_scalar_f32_k, NULL,
-                                              NULL, &error);
+    usearch_keys_view_t const key_run = {keys, collection_size};
+    usearch_matrix_view_t const rows = {data, collection_size, dimensions, row_bytes, usearch_scalar_f32_k};
+    size_t const inserted = usearch_dense_add(index, NULL, key_run, &rows, NULL, NULL, NULL, NULL, &error);
     expect(!error.message, error.message);
     expect_eq(inserted, collection_size, "A batch is all-or-nothing");
     expect_eq(usearch_dense_size(index, &error), collection_size, "Every row must be published");
@@ -200,8 +201,9 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
     size_t* const counts = (size_t*)malloc(collection_size * sizeof(size_t));
     expect(found_keys && found_distances && counts, "Failed to allocate outputs");
 
-    usearch_dense_search(index, data, collection_size, row_bytes, usearch_scalar_f32_k, 1, NULL, NULL, found_keys,
-                         sizeof(usearch_key_t), found_distances, sizeof(usearch_distance_t), counts, &error);
+    usearch_matches_span_t const matches = {
+        found_keys, sizeof(usearch_key_t), found_distances, sizeof(usearch_distance_t), counts, 1};
+    usearch_dense_search(index, NULL, &rows, &matches, NULL, NULL, NULL, NULL, &error);
     expect(!error.message, error.message);
 
     size_t recalled = 0;
@@ -239,7 +241,9 @@ void test_count_and_get(size_t const dimensions) {
     float* const data = create_vectors(2, dimensions);
     usearch_key_t const keys[2] = {key_of(7), key_of(8)};
     size_t const row_bytes = dimensions * sizeof(float);
-    usearch_dense_add(index, keys, data, 2, row_bytes, usearch_scalar_f32_k, NULL, NULL, &error);
+    usearch_keys_view_t const key_run = {keys, 2};
+    usearch_matrix_view_t const rows = {data, 2, dimensions, row_bytes, usearch_scalar_f32_k};
+    usearch_dense_add(index, NULL, key_run, &rows, NULL, NULL, NULL, NULL, &error);
     expect(!error.message, error.message);
 
     expect_eq(usearch_dense_count(index, key_of(7), &error), 1, "The key was inserted once");
@@ -247,13 +251,13 @@ void test_count_and_get(size_t const dimensions) {
     expect_eq(usearch_dense_count(index, key_of(9), &error), 0, "The key was never inserted");
     expect(!error.message, error.message);
 
-    expect_eq(usearch_dense_get(index, key_of(7), NULL, 0, 0, usearch_scalar_f32_k, &error), 1,
-              "A NULL output probes the count");
+    expect_eq(usearch_dense_get(index, key_of(7), NULL, &error), 1, "A NULL output probes the count");
     expect(!error.message, error.message);
 
     float* const retrieved = (float*)malloc(row_bytes);
     expect(retrieved, "Failed to allocate the retrieval buffer");
-    expect_eq(usearch_dense_get(index, key_of(7), retrieved, 1, row_bytes, usearch_scalar_f32_k, &error), 1,
+    usearch_matrix_span_t const retrieved_rows = {retrieved, 1, dimensions, row_bytes, usearch_scalar_f32_k};
+    expect_eq(usearch_dense_get(index, key_of(7), &retrieved_rows, &error), 1,
               "Retrieval must report the true entry count");
     expect(!error.message, error.message);
     for (size_t position = 0; position != dimensions; ++position)

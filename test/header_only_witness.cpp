@@ -4,7 +4,7 @@
  *      no submodule paths, no third-party targets - and this translation unit instantiates
  *      the whole public surface to witness it.
  *  @author Ash Vardanian
- *  @file test/header_only.cpp
+ *  @file test/header_only_witness.cpp
  *  @date August 27, 2026
  *
  *  @c utilities/serialization.hpp is deliberately absent: it consumes yyjson for the

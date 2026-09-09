@@ -44,7 +44,7 @@ final class Library {
      */
     private static void load() {
         try {
-            System.loadLibrary("usearch_jni");
+            System.loadLibrary("usearch_java");
         } catch (UnsatisfiedLinkError missing) {
             try {
                 loadFromJar();
@@ -135,12 +135,12 @@ final class Library {
     private static String libraryName() {
         String operatingSystem = System.getProperty("os.name", "").toLowerCase();
         if (operatingSystem.contains("mac") || operatingSystem.contains("darwin")) {
-            return "libusearch_jni.dylib";
+            return "libusearch_java.dylib";
         }
         if (operatingSystem.contains("windows")) {
-            return "usearch_jni.dll";
+            return "libusearch_java.dll";
         }
-        return "libusearch_jni.so";
+        return "libusearch_java.so";
     }
 
     /**

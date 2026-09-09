@@ -12,6 +12,7 @@
 #include <span>        // `std::span` - the neighbor run a load rebases
 #include <type_traits> // `std::has_unique_object_representations_v` - the geometry word's guard
 
+#include <forkunion/atomics.hpp>      // `fu::standard_atomic_ref` - the default atomic reference
 #include <forkunion/capabilities.hpp> // `fu::preferred_yield_t` - the default waiter
 #include <forkunion/types.hpp>
 #include <numkong/tensor.hpp>
@@ -71,14 +72,15 @@ struct dense_ram_cursor;
  *  sizes, until we reach a threshold that easily amortizes memory allocations between insertions.
  *  Aiming for @b ~4GB/allocation slabs and compatibility with CXL-backed memory allocators.
  */
-template <                                                       //
-    nk_dtype_t vector_dtype_ = nk_bf16_k,                        //
-    nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k,         //
-    nk_capability_t capability_ = nk_cap_icelake_k,              //
-    typename wait_type_ = fu::preferred_yield_t,                 //
-    typename vectors_allocator_type_ = std::allocator<byte_t>,   //
-    typename neighbors_allocator_type_ = std::allocator<byte_t>, //
-    typename traversals_allocator_type_ = std::allocator<byte_t> //
+template <                                                                    //
+    nk_dtype_t vector_dtype_ = nk_bf16_k,                                     //
+    nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k,                      //
+    nk_capability_t capability_ = nk_cap_icelake_k,                           //
+    typename wait_type_ = fu::preferred_yield_t,                              //
+    template <typename> class atomic_ref_template_ = fu::standard_atomic_ref, //
+    typename vectors_allocator_type_ = std::allocator<byte_t>,                //
+    typename neighbors_allocator_type_ = std::allocator<byte_t>,              //
+    typename traversals_allocator_type_ = std::allocator<byte_t>              //
     >
 struct dense_ram_index;
 
@@ -260,7 +262,7 @@ struct dense_traversal_context {
 
 template <                                                                                //
     nk_dtype_t vector_dtype_, nk_kernel_kind_t kernel_kind_, nk_capability_t capability_, //
-    typename wait_type_,                                                                  //
+    typename wait_type_, template <typename> class atomic_ref_template_,                  //
     typename vectors_allocator_type_, typename neighbors_allocator_type_,
     typename traversals_allocator_type_> //
 struct dense_ram_index {
@@ -299,6 +301,10 @@ struct dense_ram_index {
     /** @brief The hardware wait monitor engaged on contended words - the class-local spelling of
      *      @c wait_type_, reused by external readers waiting out transient lock sentinels. */
     using wait_t = wait_type_;
+    /** @brief The atomic reference owning the index's plain synchronization words - the class-local
+     *      spelling of @c atomic_ref_template_, reused by cursors reading published rows. */
+    template <typename word_type_>
+    using atomic_ref = atomic_ref_template_<word_type_>;
 
     /** @brief The strongest @c synchronization_t contract this design honors: arbitrary
      *      readers and writers may be live, and even snapshots run optimistically. */
@@ -392,7 +398,7 @@ struct dense_ram_index {
     static_assert(std::has_unique_object_representations_v<geometry_t>,
                   "The compare-exchange compares object representations, never operator==: " //
                   "padding would make value-equal geometries spuriously lose the freeze race");
-    static_assert(std::atomic<geometry_t>::is_always_lock_free,
+    static_assert(std::atomic_ref<geometry_t>::is_always_lock_free,
                   "Every geometry load must stay one plain instruction, never a library call");
 
     /** @brief Allocator instance handed to every vectors & norms chunk. */
@@ -429,20 +435,25 @@ struct dense_ram_index {
 #pragma region Measures
 
     /** @brief Number of published vectors - the visibility watermark; the index itself stores no keys. */
-    std::size_t size() const noexcept { return last_visible_id_.load(); }
+    std::size_t size() const noexcept { return atomic_ref<node_id_t>(last_visible_id_).load(); }
+
+    /** @brief The dimensions & connectivity together, as one acquire load of the frozen word - empty
+     *      until the first successful @c reserve, and never a mix of two freezes. */
+    geometry_t geometry() const noexcept { return atomic_ref<geometry_t>(geometry_).load(std::memory_order_acquire); }
 
     /** @brief Neighbor ids per node's list - its full fixed capacity, none lost to bookkeeping. */
-    std::size_t connectivity() const noexcept { return geometry_.load(std::memory_order_acquire).connectivity(); }
+    std::size_t connectivity() const noexcept { return geometry().connectivity(); }
 
     /** @brief Scalar dimensions per stored vector; zero until the first reservation freezes it. */
-    std::size_t dimensions() const noexcept { return geometry_.load(std::memory_order_acquire).dimensions(); }
+    std::size_t dimensions() const noexcept { return geometry().dimensions(); }
 
     /** @brief Rows hosted without growing again - claimed plus unclaimed, the invariant tying the
      *      two counters together. A transient dip while a grower is mid-flight only makes the
      *      estimate conservative, which is what @c reserve compares against. */
     std::size_t capacity() const noexcept {
-        std::size_t const claimed_rows = last_allocated_id_.load(std::memory_order_acquire);
-        std::ptrdiff_t const unclaimed_rows = remaining_capacity_.load(std::memory_order_acquire);
+        std::size_t const claimed_rows = atomic_ref<node_id_t>(last_allocated_id_).load(std::memory_order_acquire);
+        std::ptrdiff_t const unclaimed_rows =
+            atomic_ref<std::ptrdiff_t>(remaining_capacity_).load(std::memory_order_acquire);
         return claimed_rows + static_cast<std::size_t>(unclaimed_rows > 0 ? unclaimed_rows : 0);
     }
 
@@ -451,16 +462,16 @@ struct dense_ram_index {
      *      directories, so it stays safe under concurrent growth. A reservation materializes its
      *      chunks up front, so reserved-but-empty rows count from the moment they are granted. */
     std::size_t memory_usage() const noexcept {
-        geometry_t const geometry = geometry_.load(std::memory_order_acquire);
-        if (!geometry) return sizeof(dense_ram_index);
+        geometry_t const frozen = geometry();
+        if (!frozen) return sizeof(dense_ram_index);
         std::size_t const hosted_rows = capacity();
         small_size_t chunks = 0;
         while (chunks != max_chunks_k && capacity_of_chunks(chunks) < hosted_rows) ++chunks;
         std::size_t const rows = capacity_of_chunks(chunks);
         std::size_t bytes = sizeof(dense_ram_index);
-        bytes += rows * stored_row_values(geometry) * sizeof(scalar_t);
+        bytes += rows * stored_row_values(frozen) * sizeof(scalar_t);
         if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>) bytes += rows * sizeof(vector_norms_t);
-        bytes += rows * geometry.connectivity() * sizeof(node_id_t);
+        bytes += rows * frozen.connectivity() * sizeof(node_id_t);
         return bytes;
     }
 
@@ -490,9 +501,9 @@ struct dense_ram_index {
 
     /** @brief The shapes a @c save() of the current contents fills. */
     saved_shape_t saved_shape() const noexcept {
-        geometry_t const geometry = geometry_.load(std::memory_order_acquire);
-        std::size_t const count = last_visible_id_.load(std::memory_order_acquire);
-        return {count, geometry.dimensions(), geometry.connectivity()};
+        geometry_t const frozen = geometry();
+        std::size_t const count = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
+        return {count, frozen.dimensions(), frozen.connectivity()};
     }
 
 #pragma endregion Measures
@@ -542,7 +553,7 @@ struct dense_ram_index {
         // Freeze the geometry exactly once; competing first-reservations are decided by one CAS.
         geometry_t const desired_geometry {config.dimensions, config.connectivity};
         geometry_t expected_geometry {};
-        bool const froze_now = geometry_.compare_exchange_strong( //
+        bool const froze_now = atomic_ref<geometry_t>(geometry_).compare_exchange_strong( //
             expected_geometry, desired_geometry, std::memory_order_acq_rel, std::memory_order_acquire);
         geometry_t const frozen_geometry = froze_now ? desired_geometry : expected_geometry;
         connectivity_t const frozen_connectivity = static_cast<connectivity_t>(frozen_geometry.connectivity());
@@ -551,8 +562,9 @@ struct dense_ram_index {
         while (true) {
             // Physical rows = claimed + unclaimed - the invariant tying the two counters together.
             // Transient dips while a grower is mid-flight only make this estimate conservative.
-            std::size_t const claimed_rows = last_allocated_id_.load(std::memory_order_acquire);
-            std::ptrdiff_t const unclaimed_rows = remaining_capacity_.load(std::memory_order_acquire);
+            std::size_t const claimed_rows = atomic_ref<node_id_t>(last_allocated_id_).load(std::memory_order_acquire);
+            std::ptrdiff_t const unclaimed_rows =
+                atomic_ref<std::ptrdiff_t>(remaining_capacity_).load(std::memory_order_acquire);
             std::size_t const total_rows = claimed_rows +
                                            static_cast<std::size_t>(unclaimed_rows > 0 ? unclaimed_rows : 0);
             if (total_rows >= config.capacity) return {total_rows, frozen_connectivity, status_t::success_k};
@@ -604,9 +616,9 @@ struct dense_ram_index {
      *  drift only under a reviewer's eye. Zero before the geometry freezes.
      */
     std::size_t traversal_memory_usage(insert_config_t config = {}) const noexcept {
-        geometry_t const geometry = geometry_.load(std::memory_order_acquire);
-        if (!geometry) return 0;
-        std::size_t const node_connectivity = geometry.connectivity();
+        geometry_t const frozen = geometry();
+        if (!frozen) return 0;
+        std::size_t const node_connectivity = frozen.connectivity();
         std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
                                                                      : node_connectivity * 2;
         // One term per reservation, each occupying what the arena will hand out for it.
@@ -623,7 +635,7 @@ struct dense_ram_index {
 
         if constexpr (has_tiles_k) {
             std::size_t const pool = tiles_pool_(expansion_factor, links);
-            bytes += arena_t::reserved_bytes(tiles_kit_t::scratch_bytes(pool, geometry.dimensions())) +
+            bytes += arena_t::reserved_bytes(tiles_kit_t::scratch_bytes(pool, frozen.dimensions())) +
                      arena_t::reserved_bytes(pool * pool * sizeof(dense_distance_t));
         }
         return bytes;
@@ -640,9 +652,9 @@ struct dense_ram_index {
      *  context kept across walks amortizes and the arena behind an executor grows for.
      */
     status_t reserve_traversal(dense_traversal_context_t& context, insert_config_t config = {}) noexcept {
-        geometry_t const geometry = geometry_.load(std::memory_order_acquire);
-        if (!geometry) return status_t::uninitialized_k;
-        std::size_t const node_connectivity = geometry.connectivity();
+        geometry_t const frozen = geometry();
+        if (!frozen) return status_t::uninitialized_k;
+        std::size_t const node_connectivity = frozen.connectivity();
         std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
                                                                      : node_connectivity * 2;
 
@@ -657,7 +669,7 @@ struct dense_ram_index {
         // whole tiles, so the padded pool doubles as the pair-matrix stride.
         if constexpr (has_tiles_k) {
             std::size_t const pool = tiles_pool_(expansion_factor, node_connectivity);
-            if (failed(context.reserve_tiles(pool, tiles_kit_t::scratch_bytes(pool, geometry.dimensions()))))
+            if (failed(context.reserve_tiles(pool, tiles_kit_t::scratch_bytes(pool, frozen.dimensions()))))
                 return status_t::bad_alloc_k;
         }
         return status_t::success_k;
@@ -728,13 +740,13 @@ struct dense_ram_index {
 
         // Geometry is frozen by the first successful `reserve()` - a hard prerequisite here:
         // without it, neither the copy width nor the neighbor-list width is defined.
-        geometry_t const geometry = geometry_.load(std::memory_order_acquire);
-        if (!geometry) return {status_t::uninitialized_k, size()};
+        geometry_t const frozen = geometry();
+        if (!frozen) return {status_t::uninitialized_k, size()};
 
         // Rows narrower than the frozen geometry would be over-read by the copy below, which takes
         // its width from the geometry rather than from the caller's matrix; a packed matrix
         // reports its logical width, like the geometry does.
-        if (new_vectors.extent(1) != geometry.dimensions()) return {status_t::config_mismatch_k, size()};
+        if (new_vectors.extent(1) != frozen.dimensions()) return {status_t::config_mismatch_k, size()};
 
         if (status_t const sized = reserve_traversal(context, config); failed(sized)) return {sized, size()};
 
@@ -815,8 +827,9 @@ struct dense_ram_index {
      *      before crediting the capacity is load-bearing: it keeps the physical-rows sum
      *      conservative, so a concurrent reservation can only over-grow. */
     void release_capacity(std::size_t count) noexcept {
-        last_allocated_id_.fetch_sub(static_cast<node_id_t>(count), std::memory_order_relaxed);
-        remaining_capacity_.fetch_add(static_cast<std::ptrdiff_t>(count), std::memory_order_release);
+        atomic_ref<node_id_t>(last_allocated_id_).sub(static_cast<node_id_t>(count), std::memory_order_relaxed);
+        atomic_ref<std::ptrdiff_t>(remaining_capacity_)
+            .add(static_cast<std::ptrdiff_t>(count), std::memory_order_release);
     }
 
     /**
@@ -836,14 +849,14 @@ struct dense_ram_index {
         claim.consume();
         std::size_t const incoming_vectors_count = new_vectors.extent(0);
         bool const report_assigned_ids = assigned_ids.size() != 0;
-        geometry_t const geometry = geometry_.load(std::memory_order_acquire);
-        std::size_t const node_connectivity = geometry.connectivity();
+        geometry_t const frozen = geometry();
+        std::size_t const node_connectivity = frozen.connectivity();
         std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
                                                                      : node_connectivity * 2;
 
         // All slots share one contiguous packed row layout, so the copy width is loop-invariant.
         // Sub-byte types pack several dimensions per storage value - count storage bytes, not dimensions.
-        std::size_t const vector_bytes = stored_row_values(geometry) * sizeof(scalar_t);
+        std::size_t const vector_bytes = stored_row_values(frozen) * sizeof(scalar_t);
 
         // Go through the vectors and inject them one-by-one.
         for (small_size_t incoming_index = 0; incoming_index != incoming_vectors_count; ++incoming_index) {
@@ -853,7 +866,8 @@ struct dense_ram_index {
             // publication gap stays bounded by the thread count rather than the batch size.
             // The `acq_rel` order chains a happens-before edge from the growth of the hosting
             // chunk through the all-RMW dispenser to this thread.
-            node_id_t const new_node_id = next_visible_id_.fetch_add(1, std::memory_order_acq_rel);
+            node_id_t const new_node_id =
+                atomic_ref<node_id_t>(next_visible_id_).fetch_add(1, std::memory_order_acq_rel);
             chunked_location_t const new_location = chunked_location(new_node_id);
             if (report_assigned_ids) assigned_ids[incoming_index] = new_node_id;
             on_assigned(new_node_id);
@@ -878,7 +892,8 @@ struct dense_ram_index {
             // making it the safe bound for random landmark sampling. On a virgin index there is
             // nothing to traverse - the node publishes with an empty neighbors list, and the
             // following entries wire back to it as soon as the watermark advances.
-            node_id_t const first_invisible_id = last_visible_id_.load(std::memory_order_acquire);
+            node_id_t const first_invisible_id =
+                atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
             // The row is already claimed, so a refused walk wires a thinner node rather than
             // abandoning an id nothing will ever publish.
             if (first_invisible_id != 0 &&
@@ -917,12 +932,13 @@ struct dense_ram_index {
             // hole-free. Each thread holds at most one unpublished id, so this wait is bounded by
             // one wiring per other in-flight thread - the "publication convoy" is the accepted
             // cost of the CAS-free design; a helping-CAS advancement is the known alternative.
-            for (node_id_t watermark = last_visible_id_.load(std::memory_order_acquire); watermark != new_node_id;
-                 watermark = last_visible_id_.load(std::memory_order_acquire))
+            for (node_id_t watermark = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
+                 watermark != new_node_id;
+                 watermark = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire))
                 // Uncapped monitored wait: the watermark is the only word we wait on, and every
                 // predecessor's publication store wakes us to re-check.
-                wait_type_ {}(last_visible_id_, watermark, 0u, fu::wait_uncapped_t {});
-            last_visible_id_.store(new_node_id + 1, std::memory_order_release);
+                wait_type_ {}(&last_visible_id_, watermark, 0u, fu::wait_uncapped_t {});
+            atomic_ref<node_id_t>(last_visible_id_).store(new_node_id + 1, std::memory_order_release);
         }
     }
 
@@ -1052,7 +1068,7 @@ struct dense_ram_index {
         constexpr std::memory_order watermark_order_k = synchronization_ == synchronization_t::concurrent_k
                                                             ? std::memory_order_acquire
                                                             : std::memory_order_relaxed;
-        node_id_t const first_invisible_id = last_visible_id_.load(watermark_order_k);
+        node_id_t const first_invisible_id = atomic_ref<node_id_t>(last_visible_id_).load(watermark_order_k);
         if (first_invisible_id == 0) return {status_t::success_k};
 
         // Snapshot the context's running telemetry, to report this query's share on return.
@@ -1109,9 +1125,9 @@ struct dense_ram_index {
         node_id_t dispensed = 0;
         /** @brief The allocation counter at planning - the growth sensor the probe re-reads. */
         node_id_t allocated = 0;
-        /** @brief Rows whose vectors landed, tallied through @c std::atomic_ref. */
+        /** @brief Rows whose vectors landed, tallied through @c atomic_ref. */
         std::size_t covered_vectors = 0;
-        /** @brief Rows whose neighbors landed, tallied through @c std::atomic_ref. */
+        /** @brief Rows whose neighbors landed, tallied through @c atomic_ref. */
         std::size_t covered_neighbors = 0;
 
         /** @brief One step of the plan: one storage chunk's share of the rows under the cut. */
@@ -1135,12 +1151,12 @@ struct dense_ram_index {
             std::size_t const first = capacity_of_chunks(static_cast<small_size_t>(position));
             std::size_t const bound = min_of(capacity_of_chunks(static_cast<small_size_t>(position + 1)),
                                              static_cast<std::size_t>(visible));
-            geometry_t const geometry = index.geometry_.load(std::memory_order_acquire);
+            geometry_t const frozen = index.geometry();
             step.position = position;
             step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
             step.source_rows = step.index_rows;
-            step.vectors_bytes = step.index_rows.size() * stored_row_values(geometry) * sizeof(scalar_t);
-            step.neighbors_bytes = step.index_rows.size() * geometry.connectivity() * sizeof(node_id_t);
+            step.vectors_bytes = step.index_rows.size() * stored_row_values(frozen) * sizeof(scalar_t);
+            step.neighbors_bytes = step.index_rows.size() * frozen.connectivity() * sizeof(node_id_t);
             return step;
         }
 
@@ -1161,14 +1177,14 @@ struct dense_ram_index {
         status_t save_vectors(step_t const& step, bytes_span_t destination) noexcept {
             iota_view<node_id_t> const rows = step.index_rows;
             if (rows.empty()) return status_t::config_mismatch_k;
-            std::size_t const row_values = stored_row_values(index.geometry_.load(std::memory_order_acquire));
+            std::size_t const row_values = stored_row_values(index.geometry());
             std::size_t const values = rows.size() * row_values;
             if (destination.size() != step.vectors_bytes) return status_t::config_mismatch_k;
             chunked_location_t const location = index.chunked_location(rows.first);
             vectors_view_t const vectors = index.vectors_chunks_[location.chunk_index].view()(
                 nk::range {location.index_in_chunk, location.index_in_chunk + rows.size()}, nk::slice);
             [[maybe_unused]] status_t const copied = copy_bytes(destination, bytes_of(vectors.data(), values));
-            std::atomic_ref<std::size_t> {covered_vectors}.fetch_add(rows.size(), std::memory_order_acq_rel);
+            atomic_ref<std::size_t>(covered_vectors).add(rows.size(), std::memory_order_release);
             return status_t::success_k;
         }
 
@@ -1184,7 +1200,7 @@ struct dense_ram_index {
                                 nk::matrix_span<node_id_t> scratch) noexcept {
             iota_view<node_id_t> const rows = step.index_rows;
             if (rows.empty()) return status_t::config_mismatch_k;
-            std::size_t const connectivity = index.geometry_.load(std::memory_order_acquire).connectivity();
+            std::size_t const connectivity = index.geometry().connectivity();
             std::size_t const words = rows.size() * connectivity;
             if (destination.size() != step.neighbors_bytes) return status_t::config_mismatch_k;
             if (scratch.extent(0) < rows.size() || scratch.extent(1) != connectivity || !scratch.is_contiguous())
@@ -1196,14 +1212,14 @@ struct dense_ram_index {
             // The `const_cast` is the pre-P3323 currency for atomics living in const memory.
             if (synchronization == synchronization_t::concurrent_k)
                 for (std::size_t word = 0; word != words; ++word)
-                    staged[word] = std::atomic_ref<node_id_t>(const_cast<node_id_t&>(source[word]))
-                                       .load(std::memory_order_relaxed);
+                    staged[word] =
+                        atomic_ref<node_id_t>(const_cast<node_id_t&>(source[word])).load(std::memory_order_relaxed);
             else std::copy_n(source, words, staged);
             for (std::size_t word = 0; word != words; ++word)
                 staged[word] = staged[word] < visible ? static_cast<node_id_t>(staged[word] + id_shift)
                                                       : dense_node_id_unknown_k;
             [[maybe_unused]] status_t const copied = copy_bytes(destination, bytes_of(staged, words));
-            std::atomic_ref<std::size_t> {covered_neighbors}.fetch_add(rows.size(), std::memory_order_acq_rel);
+            atomic_ref<std::size_t>(covered_neighbors).add(rows.size(), std::memory_order_release);
             return status_t::success_k;
         }
 
@@ -1211,17 +1227,18 @@ struct dense_ram_index {
          *      and under @c concurrent_k the counters rested across the whole plan. */
         status_t finish() noexcept {
             std::size_t const nodes = static_cast<std::size_t>(visible);
-            if (std::atomic_ref<std::size_t> {covered_vectors}.load(std::memory_order_acquire) != nodes ||
-                std::atomic_ref<std::size_t> {covered_neighbors}.load(std::memory_order_acquire) != nodes)
+            if (atomic_ref<std::size_t>(covered_vectors).load(std::memory_order_acquire) != nodes ||
+                atomic_ref<std::size_t>(covered_neighbors).load(std::memory_order_acquire) != nodes)
                 return status_t::config_mismatch_k;
             if (synchronization != synchronization_t::concurrent_k) return status_t::success_k;
             // Orders the staged reads before the re-reads below; pairs with the release fence
             // heading @c back_link_neighbors, so any row edit the copies overlapped surfaces here.
             // The non-monotone allocation counter rides along as a bonus growth sensor.
             std::atomic_thread_fence(std::memory_order_acquire);
-            bool const settled = index.last_visible_id_.load(std::memory_order_relaxed) == visible &&
-                                 index.next_visible_id_.load(std::memory_order_relaxed) == dispensed &&
-                                 index.last_allocated_id_.load(std::memory_order_relaxed) == allocated;
+            bool const settled =
+                atomic_ref<node_id_t>(index.last_visible_id_).load(std::memory_order_relaxed) == visible &&
+                atomic_ref<node_id_t>(index.next_visible_id_).load(std::memory_order_relaxed) == dispensed &&
+                atomic_ref<node_id_t>(index.last_allocated_id_).load(std::memory_order_relaxed) == allocated;
             return settled ? status_t::success_k : status_t::contended_k;
         }
     };
@@ -1235,10 +1252,10 @@ struct dense_ram_index {
     expected<save_plan_t> plan_save(synchronization_t synchronization) const noexcept {
         save_plan_t plan {*this};
         plan.synchronization = synchronization;
-        plan.visible = last_visible_id_.load(std::memory_order_acquire);
-        plan.dispensed = next_visible_id_.load(std::memory_order_acquire);
-        plan.allocated = last_allocated_id_.load(std::memory_order_acquire);
-        if (!geometry_.load(std::memory_order_acquire)) return {plan, status_t::config_mismatch_k};
+        plan.visible = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
+        plan.dispensed = atomic_ref<node_id_t>(next_visible_id_).load(std::memory_order_acquire);
+        plan.allocated = atomic_ref<node_id_t>(last_allocated_id_).load(std::memory_order_acquire);
+        if (!geometry()) return {plan, status_t::config_mismatch_k};
         if (plan.visible != plan.dispensed) return {plan, status_t::contended_k};
         return {plan, status_t::success_k};
     }
@@ -1260,9 +1277,9 @@ struct dense_ram_index {
         node_id_t base = 0;
         /** @brief Rows the plan appends. */
         std::size_t rows = 0;
-        /** @brief Rows whose vectors landed, tallied through @c std::atomic_ref. */
+        /** @brief Rows whose vectors landed, tallied through @c atomic_ref. */
         std::size_t covered_vectors = 0;
-        /** @brief Rows whose neighbors landed, tallied through @c std::atomic_ref. */
+        /** @brief Rows whose neighbors landed, tallied through @c atomic_ref. */
         std::size_t covered_neighbors = 0;
 
         /** @brief One step of the plan: one storage chunk's share of the appended rows. */
@@ -1288,12 +1305,12 @@ struct dense_ram_index {
                                              static_cast<std::size_t>(base));
             std::size_t const bound = min_of(capacity_of_chunks(static_cast<small_size_t>(first_chunk + position + 1)),
                                              static_cast<std::size_t>(base) + rows);
-            geometry_t const geometry = index.geometry_.load(std::memory_order_acquire);
+            geometry_t const frozen = index.geometry();
             step.position = position;
             step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
             step.source_rows = {static_cast<node_id_t>(first - base), static_cast<node_id_t>(bound - base)};
-            step.vectors_bytes = step.index_rows.size() * stored_row_values(geometry) * sizeof(scalar_t);
-            step.neighbors_bytes = step.index_rows.size() * geometry.connectivity() * sizeof(node_id_t);
+            step.vectors_bytes = step.index_rows.size() * stored_row_values(frozen) * sizeof(scalar_t);
+            step.neighbors_bytes = step.index_rows.size() * frozen.connectivity() * sizeof(node_id_t);
             return step;
         }
 
@@ -1315,7 +1332,7 @@ struct dense_ram_index {
         status_t load_vectors(step_t const& step, bytes_view_t source) noexcept {
             iota_view<node_id_t> const range = step.index_rows;
             if (range.empty()) return status_t::config_mismatch_k;
-            std::size_t const row_values = stored_row_values(index.geometry_.load(std::memory_order_acquire));
+            std::size_t const row_values = stored_row_values(index.geometry());
             std::size_t const values = range.size() * row_values;
             if (source.size() != values * sizeof(scalar_t)) return status_t::config_mismatch_k;
             chunked_location_t const location = index.chunked_location(range.first);
@@ -1329,7 +1346,7 @@ struct dense_ram_index {
                                                   static_cast<small_size_t>(location.index_in_chunk + offset_in_chunk)};
                     index.norm_ref_for(row) = dense_norms(index.vector_for(row));
                 }
-            std::atomic_ref<std::size_t> {covered_vectors}.fetch_add(range.size(), std::memory_order_acq_rel);
+            atomic_ref<std::size_t>(covered_vectors).add(range.size(), std::memory_order_release);
             return status_t::success_k;
         }
 
@@ -1344,7 +1361,7 @@ struct dense_ram_index {
         status_t load_neighbors(step_t const& step, bytes_view_t source, iota_view<node_id_t> source_range) noexcept {
             iota_view<node_id_t> const range = step.index_rows;
             if (range.empty()) return status_t::config_mismatch_k;
-            std::size_t const connectivity = index.geometry_.load(std::memory_order_acquire).connectivity();
+            std::size_t const connectivity = index.geometry().connectivity();
             std::size_t const words = range.size() * connectivity;
             if (source.size() != words * sizeof(node_id_t)) return status_t::config_mismatch_k;
             chunked_location_t const location = index.chunked_location(range.first);
@@ -1354,19 +1371,20 @@ struct dense_ram_index {
             std::span<node_id_t> const landed {neighbors.data(), words};
             rebase_neighbors(landed, source_range, static_cast<node_id_t>(base), dense_node_id_unknown_k);
             compact_neighbors(landed, connectivity, range.first, dense_node_id_unknown_k);
-            std::atomic_ref<std::size_t> {covered_neighbors}.fetch_add(range.size(), std::memory_order_acq_rel);
+            atomic_ref<std::size_t>(covered_neighbors).add(range.size(), std::memory_order_release);
             return status_t::success_k;
         }
 
         /** @brief Publishes the appended rows once every chunk's vectors and neighbors landed:
          *      identity first, the watermark last with a release, as every publication here. */
         status_t finish() noexcept {
-            if (std::atomic_ref<std::size_t> {covered_vectors}.load(std::memory_order_acquire) != rows ||
-                std::atomic_ref<std::size_t> {covered_neighbors}.load(std::memory_order_acquire) != rows)
+            if (atomic_ref<std::size_t>(covered_vectors).load(std::memory_order_acquire) != rows ||
+                atomic_ref<std::size_t>(covered_neighbors).load(std::memory_order_acquire) != rows)
                 return status_t::config_mismatch_k;
             if (!rows) return status_t::success_k;
-            index.next_visible_id_.fetch_add(static_cast<node_id_t>(rows), std::memory_order_relaxed);
-            index.last_visible_id_.store(static_cast<node_id_t>(base + rows), std::memory_order_release);
+            atomic_ref<node_id_t>(index.next_visible_id_).add(static_cast<node_id_t>(rows), std::memory_order_relaxed);
+            atomic_ref<node_id_t>(index.last_visible_id_)
+                .store(static_cast<node_id_t>(base + rows), std::memory_order_release);
             return status_t::success_k;
         }
     };
@@ -1379,11 +1397,12 @@ struct dense_ram_index {
      */
     expected<load_plan_t> plan_load(std::size_t rows) noexcept {
         load_plan_t plan {*this};
-        if (!geometry_.load(std::memory_order_acquire)) return {plan, status_t::config_mismatch_k};
-        node_id_t const visible = last_visible_id_.load(std::memory_order_acquire);
+        if (!geometry()) return {plan, status_t::config_mismatch_k};
+        node_id_t const visible = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
         plan.base = visible;
         if (!rows) return {plan, status_t::success_k};
-        if (visible != next_visible_id_.load(std::memory_order_acquire)) return {plan, status_t::contended_k};
+        if (visible != atomic_ref<node_id_t>(next_visible_id_).load(std::memory_order_acquire))
+            return {plan, status_t::contended_k};
         if (rows > max_node_count_k - visible) return {plan, status_t::overflow_k};
         auto const [base, granted] = claim_capacity(rows);
         if (failed(granted)) return {plan, granted};
@@ -1505,20 +1524,20 @@ struct dense_ram_index {
         /** @brief Relaxed atomic read of slot @p index; slot 0 belongs to @c peek_first / @c lock. */
         inline node_id_t load_slot(small_size_t index) const noexcept {
             if constexpr (synchronization_ == synchronization_t::concurrent_k)
-                return std::atomic_ref<node_id_t>(row_[index]).load(std::memory_order_relaxed);
+                return atomic_ref<node_id_t>(row_[index]).load(std::memory_order_relaxed);
             else return row_[index];
         }
         /** @brief Relaxed atomic write of slot @p index - only for the unpublished owner or the
          *      current lock holder. */
         inline void store_slot(small_size_t index, node_id_t value) const noexcept {
-            std::atomic_ref<node_id_t>(row_[index]).store(value, std::memory_order_relaxed);
+            atomic_ref<node_id_t>(row_[index]).store(value, std::memory_order_relaxed);
         }
         /** @brief Acquire-load of the lock word: the sentinel means unpublished, empty, or locked;
          *      any other value is the first neighbor id, with everything its last (un)locker wrote
          *      now visible to us. */
         inline node_id_t peek_first() const noexcept {
             if constexpr (synchronization_ == synchronization_t::concurrent_k)
-                return std::atomic_ref<node_id_t>(row_[0]).load(std::memory_order_acquire);
+                return atomic_ref<node_id_t>(row_[0]).load(std::memory_order_acquire);
             else return row_[0];
         }
         /** @brief Spins until the lock is ours; returns the displaced first-neighbor value.
@@ -1526,22 +1545,29 @@ struct dense_ram_index {
          *      lives here, in one place, instead of at every call site. Only meaningful on
          *      published nodes: locking an unpublished row would spin until its owner publishes. */
         inline node_id_t lock() const noexcept {
-            node_id_t first_value = std::atomic_ref<node_id_t>(row_[0]).exchange( //
-                dense_node_id_unknown_k, std::memory_order_acq_rel);
-            while (first_value == dense_node_id_unknown_k) {
-                // Monitored capped wait on the lock word itself: the holder's unlock store wakes
-                // us; the cap guards the arming race. The address form exists precisely for such
-                // in-place words that are not `std::atomic` objects.
-                wait_type_ {}(row_.data(), dense_node_id_unknown_k, 0u, fu::wait_capped_t {});
-                first_value = std::atomic_ref<node_id_t>(row_[0]).exchange( //
+            // Claim only after observing the slot free: on Arm a `SWPAL` is a write even when it
+            // just reads the sentinel back, pulling the line into Modified state and stealing it
+            // from the holder mid-rewrite; the acquiring peek keeps contenders in Shared state.
+            // On x86 the peek is one plain load.
+            while (true) {
+                while (peek_first() == dense_node_id_unknown_k) wait_while_locked();
+                node_id_t const displaced = atomic_ref<node_id_t>(row_[0]).exchange( //
                     dense_node_id_unknown_k, std::memory_order_acq_rel);
+                if (displaced != dense_node_id_unknown_k) return displaced;
             }
-            return first_value;
+        }
+        /** @brief Monitored capped wait on the lock word itself until it stops reading as the
+         *      sentinel: the holder's unlock store wakes us, the cap guards the arming race. The
+         *      address form exists precisely for such in-place words that are not `std::atomic`
+         *      objects. Readers use it too: a bare re-peek loop would spin acquiring loads for the
+         *      writer's whole critical section, burning issue slots and cross-cluster fabric. */
+        inline void wait_while_locked() const noexcept {
+            wait_type_ {}(row_.data(), dense_node_id_unknown_k, 0u, fu::wait_capped_t {});
         }
         /** @brief Release-stores @p first_value into slot 0 - unlocking and simultaneously
          *      (re)publishing the edited list to every future acquiring reader. */
         inline void unlock(node_id_t first_value) const noexcept {
-            std::atomic_ref<node_id_t>(row_[0]).store(first_value, std::memory_order_release);
+            atomic_ref<node_id_t>(row_[0]).store(first_value, std::memory_order_release);
         }
     };
 
@@ -1595,10 +1621,10 @@ struct dense_ram_index {
      */
     expected<std::size_t> create_next_chunk(std::size_t minimal_capacity) noexcept {
         // Growing before the geometry is frozen is a usage error, not an allocation failure.
-        geometry_t const geometry = geometry_.load(std::memory_order_acquire);
-        if (!geometry) return {0, status_t::uninitialized_k};
-        std::size_t const chunk_dimensions = geometry.dimensions();
-        std::size_t const chunk_connectivity = geometry.connectivity();
+        geometry_t const frozen = geometry();
+        if (!frozen) return {0, status_t::uninitialized_k};
+        std::size_t const chunk_dimensions = frozen.dimensions();
+        std::size_t const chunk_connectivity = frozen.connectivity();
 
         // Size the never-reallocating chunk directories ahead of the very first chunk - safe
         // without any locks, because growth is provably single-threaded via the grower election.
@@ -1665,8 +1691,13 @@ struct dense_ram_index {
         // capacity arithmetic below.
         if (count > max_node_count_k) return {dense_node_id_unknown_k, status_t::overflow_k};
         while (true) {
-            std::ptrdiff_t const old_remaining_capacity = remaining_capacity_.fetch_sub( //
-                count, std::memory_order_acquire);
+            // One unconditional subtract, and its sign says what happened. A bounded subtract
+            // with a separate election was considered: it never leaves a deficit behind, but
+            // costs a load and a compare-exchange loop where this is one add, and the deficit is
+            // exactly the signal the waiters below watch.
+            std::ptrdiff_t const old_remaining_capacity = atomic_ref<std::ptrdiff_t>(remaining_capacity_)
+                                                              .fetch_sub( //
+                                                                  count, std::memory_order_acquire);
             std::ptrdiff_t const new_remaining_capacity = old_remaining_capacity - static_cast<std::ptrdiff_t>(count);
 
             // The thread that moved the counter from non-negative to negative is responsible for
@@ -1678,26 +1709,29 @@ struct dense_ram_index {
                 if (chunk_status != status_t::success_k) {
                     // Revert our claim - crediting any partially added chunks along the way -
                     // so that a smaller insertion may succeed later.
-                    remaining_capacity_.fetch_add(count + added_capacity, std::memory_order_release);
+                    atomic_ref<std::ptrdiff_t>(remaining_capacity_)
+                        .add(count + added_capacity, std::memory_order_release);
                     return {dense_node_id_unknown_k, chunk_status};
                 }
-                node_id_t const first_id = last_allocated_id_.fetch_add(count, std::memory_order_acquire);
-                remaining_capacity_.fetch_add(added_capacity, std::memory_order_release);
+                node_id_t const first_id =
+                    atomic_ref<node_id_t>(last_allocated_id_).fetch_add(count, std::memory_order_acquire);
+                atomic_ref<std::ptrdiff_t>(remaining_capacity_).add(added_capacity, std::memory_order_release);
                 return {first_id, status_t::success_k};
             }
             // We may be lucky and the space is already reserved for the whole batch.
             else if (new_remaining_capacity >= 0) {
-                return {last_allocated_id_.fetch_add(count, std::memory_order_acquire), status_t::success_k};
+                return {atomic_ref<node_id_t>(last_allocated_id_).fetch_add(count, std::memory_order_acquire),
+                        status_t::success_k};
             }
             // Corner case: the index has 10 free slots, thread Y is growing it for its 20 entries,
             // and we want a 100 - even freshly added capacity may not be enough for us.
             else {
                 // Revert the counter, then wait for it to move - any credit or claim wakes the
                 // capped monitored wait, and we re-poll regardless once the cap expires.
-                std::ptrdiff_t const reverted_capacity = remaining_capacity_.fetch_add(count,
-                                                                                       std::memory_order_release) +
-                                                         static_cast<std::ptrdiff_t>(count);
-                wait_type_ {}(remaining_capacity_, reverted_capacity, 0u, fu::wait_capped_t {});
+                std::ptrdiff_t const reverted_capacity =
+                    atomic_ref<std::ptrdiff_t>(remaining_capacity_).fetch_add(count, std::memory_order_release) +
+                    static_cast<std::ptrdiff_t>(count);
+                wait_type_ {}(&remaining_capacity_, reverted_capacity, 0u, fu::wait_capped_t {});
             }
         }
     }
@@ -2361,11 +2395,14 @@ struct dense_ram_index {
                 candidate_location);
 
             // Slot 0 holds either the lock sentinel or the first neighbor's id. If the node is
-            // locked for re-linking, spin: it will either free up, or we keep re-evaluating the
-            // same nearest candidate until it does - dropping it would silently degrade recall.
+            // locked for re-linking, wait it out: it will either free up, or we keep re-evaluating
+            // the same nearest candidate until it does - dropping it would silently degrade recall.
             node_id_t const first_neighbor_id = candidate_neighbors.peek_first();
             if constexpr (synchronization_ == synchronization_t::concurrent_k)
-                if (first_neighbor_id == dense_node_id_unknown_k) continue;
+                if (first_neighbor_id == dense_node_id_unknown_k) {
+                    candidate_neighbors.wait_while_locked();
+                    continue;
+                }
 
             // The node is live and readable - commit to it and drop it from the frontier.
             frontier.pop();
@@ -2490,30 +2527,37 @@ struct dense_ram_index {
     /**
      *  @brief Signed integer describing "unsigned capacity" to simplify underflow/overflow detection from concurrent
      *      thread updates. @b Never assign values to it, always use increment & decrement to move it up and down.
+     *
+     *  Every RMW'd atomic below sits on its own @c default_alignment_k line: the claim counters move per
+     *  batch, the dispenser per insert, and the watermark is acquire-read by every search - co-located,
+     *  each dispenser RMW would invalidate the line every concurrent search snapshots. Read-mostly members
+     *  stay grouped: a line every core holds Shared is the cheap kind.
      */
-    std::atomic<std::ptrdiff_t> remaining_capacity_ {0};
+    alignas(default_alignment_k) mutable std::ptrdiff_t remaining_capacity_ {0}; // ? `mutable` throughout: the
+    // pre-P3323 `std::atomic_ref` binds no const word, not even to load it, and the const readers only load
 
     /**
      *  @brief Unsigned integer containing the identifier of the last "allocated" node. It defines the lower
      *      bound for the number of initialized or empty rows across @c vectors_chunks_ and @c neighbors_chunks_
      *      chunks. It's typically incremented in batches.
      */
-    std::atomic<node_id_t> last_allocated_id_ {0};
+    alignas(default_alignment_k) mutable node_id_t last_allocated_id_ {0};
 
     /**
      *  @brief The id dispenser: the identifier the next wired node receives. Incremented one-by-one
      *      at wiring time, so ids follow the global wiring-start order and each thread holds at most
      *      one unpublished id. @ref dense_ram_index_concurrency
      */
-    std::atomic<node_id_t> next_visible_id_ {0};
+    alignas(default_alignment_k) mutable node_id_t next_visible_id_ {0};
     /**
      *  @brief The visibility watermark: every id strictly below it is published, its vector, norms &
      *      neighbors readable - the safe bound for random landmark sampling. Advanced strictly in
      *      dispensed order by each publisher taking its turn. @ref dense_ram_index_concurrency
      */
-    std::atomic<node_id_t> last_visible_id_ {0};
+    alignas(default_alignment_k) mutable node_id_t last_visible_id_ {0};
 
-    std::atomic<geometry_t> geometry_ {};
+    /** @brief Read-mostly after the freeze - kept off the watermark's line with the other cold members. */
+    alignas(default_alignment_k) mutable geometry_t geometry_ {};
 
     /** @brief Constructed chunks per directory. Deliberately non-atomic: only the one "responsible"
      *      grower thread mutates it, and successive growers are ordered by the acquire/release pair
@@ -2542,6 +2586,8 @@ template <typename index_type_, synchronization_t synchronization_, typename all
 struct dense_ram_cursor {
 
     using index_t = index_type_;
+    template <typename word_type_>
+    using atomic_ref = typename index_t::template atomic_ref<word_type_>;
     using allocator_t = allocator_type_;
     using scalar_t = typename index_t::scalar_t;
     using vector_view_t = typename index_t::vector_view_t;
@@ -2577,8 +2623,8 @@ struct dense_ram_cursor {
 
     /** @brief Binds the cursor & captures its snapshots; allocates nothing - call @c reserve(). */
     explicit dense_ram_cursor(index_t const& index) noexcept
-        : index_(index), visible_count_(index.last_visible_id_.load(watermark_order_k)), current_(visible_count_),
-          connectivity_(static_cast<small_size_t>(index.connectivity())) {}
+        : index_(index), visible_count_(atomic_ref<node_id_t>(index.last_visible_id_).load(watermark_order_k)),
+          current_(visible_count_), connectivity_(static_cast<small_size_t>(index.connectivity())) {}
 
     dense_ram_cursor(dense_ram_cursor const&) = delete;
     dense_ram_cursor& operator=(dense_ram_cursor const&) = delete;
@@ -2600,7 +2646,7 @@ struct dense_ram_cursor {
      *      end stays past the end - entering the admitted region takes an explicit @c seek. */
     void refresh() noexcept {
         bool const past_end = current_ == visible_count_;
-        visible_count_ = index_.last_visible_id_.load(watermark_order_k);
+        visible_count_ = atomic_ref<node_id_t>(index_.last_visible_id_).load(watermark_order_k);
         if (past_end) current_ = visible_count_;
     }
 
@@ -2630,11 +2676,10 @@ struct dense_ram_cursor {
         // pre-P3323 currency for atomics living in const memory.
         node_id_t first_value = row[0];
         if constexpr (synchronization_ == synchronization_t::concurrent_k) {
-            first_value = std::atomic_ref<node_id_t>(const_cast<node_id_t&>(row[0])).load(std::memory_order_acquire);
+            first_value = atomic_ref<node_id_t>(const_cast<node_id_t&>(row[0])).load(std::memory_order_acquire);
             while (first_value == dense_node_id_unknown_k) {
                 typename index_t::wait_t {}(row.data(), dense_node_id_unknown_k, small_size_t(0), fu::wait_capped_t {});
-                first_value =
-                    std::atomic_ref<node_id_t>(const_cast<node_id_t&>(row[0])).load(std::memory_order_acquire);
+                first_value = atomic_ref<node_id_t>(const_cast<node_id_t&>(row[0])).load(std::memory_order_acquire);
             }
         }
         staged_neighbors_[0] = first_value;
@@ -2643,7 +2688,7 @@ struct dense_ram_cursor {
         if constexpr (synchronization_ == synchronization_t::concurrent_k)
             for (small_size_t slot = 1; slot != connectivity_; ++slot)
                 staged_neighbors_[slot] =
-                    std::atomic_ref<node_id_t>(const_cast<node_id_t&>(row[slot])).load(std::memory_order_relaxed);
+                    atomic_ref<node_id_t>(const_cast<node_id_t&>(row[slot])).load(std::memory_order_relaxed);
         else
             for (small_size_t slot = 1; slot != connectivity_; ++slot) staged_neighbors_[slot] = row[slot];
         // Decode the row's encodings: a self-loop is "published, zero neighbors", and the

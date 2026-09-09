@@ -18,36 +18,73 @@ namespace us = unum::usearch;
 
 extern template int us::run_with_stored_dtype<nk::f32_t, nk_f32_k>(bench_launch<nk::f32_t> const&);
 extern template int us::run_with_stored_dtype<nk::bf16_t, nk_f32_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_stored_dtype<nk::f16_t, nk_f32_k>(bench_launch<nk::f16_t> const&);
 extern template int us::run_with_stored_dtype<nk::i8_t, nk_f32_k>(bench_launch<nk::i8_t> const&);
 extern template int us::run_with_stored_dtype<nk::u8_t, nk_f32_k>(bench_launch<nk::u8_t> const&);
 
 extern template int us::run_with_stored_dtype<nk::f32_t, nk_bf16_k>(bench_launch<nk::f32_t> const&);
 extern template int us::run_with_stored_dtype<nk::bf16_t, nk_bf16_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_stored_dtype<nk::f16_t, nk_bf16_k>(bench_launch<nk::f16_t> const&);
 extern template int us::run_with_stored_dtype<nk::i8_t, nk_bf16_k>(bench_launch<nk::i8_t> const&);
 extern template int us::run_with_stored_dtype<nk::u8_t, nk_bf16_k>(bench_launch<nk::u8_t> const&);
 
 extern template int us::run_with_stored_dtype<nk::f32_t, nk_f16_k>(bench_launch<nk::f32_t> const&);
 extern template int us::run_with_stored_dtype<nk::bf16_t, nk_f16_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_stored_dtype<nk::f16_t, nk_f16_k>(bench_launch<nk::f16_t> const&);
 extern template int us::run_with_stored_dtype<nk::i8_t, nk_f16_k>(bench_launch<nk::i8_t> const&);
 extern template int us::run_with_stored_dtype<nk::u8_t, nk_f16_k>(bench_launch<nk::u8_t> const&);
 
+extern template int us::run_with_stored_dtype<nk::f32_t, nk_e5m2_k>(bench_launch<nk::f32_t> const&);
+extern template int us::run_with_stored_dtype<nk::bf16_t, nk_e5m2_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_stored_dtype<nk::f16_t, nk_e5m2_k>(bench_launch<nk::f16_t> const&);
+extern template int us::run_with_stored_dtype<nk::i8_t, nk_e5m2_k>(bench_launch<nk::i8_t> const&);
+extern template int us::run_with_stored_dtype<nk::u8_t, nk_e5m2_k>(bench_launch<nk::u8_t> const&);
+
+extern template int us::run_with_stored_dtype<nk::f32_t, nk_e4m3_k>(bench_launch<nk::f32_t> const&);
+extern template int us::run_with_stored_dtype<nk::bf16_t, nk_e4m3_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_stored_dtype<nk::f16_t, nk_e4m3_k>(bench_launch<nk::f16_t> const&);
+extern template int us::run_with_stored_dtype<nk::i8_t, nk_e4m3_k>(bench_launch<nk::i8_t> const&);
+extern template int us::run_with_stored_dtype<nk::u8_t, nk_e4m3_k>(bench_launch<nk::u8_t> const&);
+
+extern template int us::run_with_stored_dtype<nk::f32_t, nk_e3m2_k>(bench_launch<nk::f32_t> const&);
+extern template int us::run_with_stored_dtype<nk::bf16_t, nk_e3m2_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_stored_dtype<nk::f16_t, nk_e3m2_k>(bench_launch<nk::f16_t> const&);
+extern template int us::run_with_stored_dtype<nk::i8_t, nk_e3m2_k>(bench_launch<nk::i8_t> const&);
+extern template int us::run_with_stored_dtype<nk::u8_t, nk_e3m2_k>(bench_launch<nk::u8_t> const&);
+
+extern template int us::run_with_stored_dtype<nk::f32_t, nk_e2m3_k>(bench_launch<nk::f32_t> const&);
+extern template int us::run_with_stored_dtype<nk::bf16_t, nk_e2m3_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_stored_dtype<nk::f16_t, nk_e2m3_k>(bench_launch<nk::f16_t> const&);
+extern template int us::run_with_stored_dtype<nk::i8_t, nk_e2m3_k>(bench_launch<nk::i8_t> const&);
+extern template int us::run_with_stored_dtype<nk::u8_t, nk_e2m3_k>(bench_launch<nk::u8_t> const&);
+
 extern template int us::run_with_stored_dtype<nk::f32_t, nk_i8_k>(bench_launch<nk::f32_t> const&);
 extern template int us::run_with_stored_dtype<nk::bf16_t, nk_i8_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_stored_dtype<nk::f16_t, nk_i8_k>(bench_launch<nk::f16_t> const&);
 extern template int us::run_with_stored_dtype<nk::i8_t, nk_i8_k>(bench_launch<nk::i8_t> const&);
 extern template int us::run_with_stored_dtype<nk::u8_t, nk_i8_k>(bench_launch<nk::u8_t> const&);
 
 extern template int us::run_with_stored_dtype<nk::f32_t, nk_i4_k>(bench_launch<nk::f32_t> const&);
 extern template int us::run_with_stored_dtype<nk::bf16_t, nk_i4_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_stored_dtype<nk::f16_t, nk_i4_k>(bench_launch<nk::f16_t> const&);
 extern template int us::run_with_stored_dtype<nk::i8_t, nk_i4_k>(bench_launch<nk::i8_t> const&);
 extern template int us::run_with_stored_dtype<nk::u8_t, nk_i4_k>(bench_launch<nk::u8_t> const&);
 
 extern template int us::run_with_stored_dtype<nk::f32_t, nk_u8_k>(bench_launch<nk::f32_t> const&);
 extern template int us::run_with_stored_dtype<nk::bf16_t, nk_u8_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_stored_dtype<nk::f16_t, nk_u8_k>(bench_launch<nk::f16_t> const&);
 extern template int us::run_with_stored_dtype<nk::i8_t, nk_u8_k>(bench_launch<nk::i8_t> const&);
 extern template int us::run_with_stored_dtype<nk::u8_t, nk_u8_k>(bench_launch<nk::u8_t> const&);
 
+extern template int us::run_with_stored_dtype<nk::f32_t, nk_u4_k>(bench_launch<nk::f32_t> const&);
+extern template int us::run_with_stored_dtype<nk::bf16_t, nk_u4_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_stored_dtype<nk::f16_t, nk_u4_k>(bench_launch<nk::f16_t> const&);
+extern template int us::run_with_stored_dtype<nk::i8_t, nk_u4_k>(bench_launch<nk::i8_t> const&);
+extern template int us::run_with_stored_dtype<nk::u8_t, nk_u4_k>(bench_launch<nk::u8_t> const&);
+
 extern template int us::run_with_stored_dtype<nk::f32_t, nk_u1_k>(bench_launch<nk::f32_t> const&);
 extern template int us::run_with_stored_dtype<nk::bf16_t, nk_u1_k>(bench_launch<nk::bf16_t> const&);
+extern template int us::run_with_stored_dtype<nk::f16_t, nk_u1_k>(bench_launch<nk::f16_t> const&);
 extern template int us::run_with_stored_dtype<nk::i8_t, nk_u1_k>(bench_launch<nk::i8_t> const&);
 extern template int us::run_with_stored_dtype<nk::u8_t, nk_u1_k>(bench_launch<nk::u8_t> const&);
 
@@ -67,9 +104,8 @@ int open_and_run(bench_options_t const& options, fu_topology_t topology) {
                 bench_launch<dataset_scalar_type_> {opened.value, options, topology});
         },
         [&](auto dtype) {
-            fmt::println(
-                "Stored dtype {} has no adapted kernels; override with --f32, --bf16, --f16, --i8, --i4, --u8, or --u1",
-                dtype_name(dtype));
+            fmt::println("Stored dtype {} has no adapted kernels; override with {}", dtype_name(dtype),
+                         "--f32, --bf16, --f16, --e5m2, --e4m3, --e3m2, --e2m3, --i8, --i4, --u8, --u4, or --u1");
             return 1;
         });
 }
@@ -85,9 +121,14 @@ int main(int argc, char** argv) {
         (clipp::option("--f32").set(options.stored_dtype, nk_f32_k) |
          clipp::option("--bf16").set(options.stored_dtype, nk_bf16_k) |
          clipp::option("--f16").set(options.stored_dtype, nk_f16_k) |
+         clipp::option("--e5m2").set(options.stored_dtype, nk_e5m2_k) |
+         clipp::option("--e4m3").set(options.stored_dtype, nk_e4m3_k) |
+         clipp::option("--e3m2").set(options.stored_dtype, nk_e3m2_k) |
+         clipp::option("--e2m3").set(options.stored_dtype, nk_e2m3_k) |
          clipp::option("--i8").set(options.stored_dtype, nk_i8_k) |
          clipp::option("--i4").set(options.stored_dtype, nk_i4_k) |
          clipp::option("--u8").set(options.stored_dtype, nk_u8_k) |
+         clipp::option("--u4").set(options.stored_dtype, nk_u4_k) |
          clipp::option("--u1").set(options.stored_dtype, nk_u1_k)) %
             "stored dtype override, staging `nk::cast` on ingest",
         (clipp::option("--max-compute") & clipp::value("name", max_compute_name)) %

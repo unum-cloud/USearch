@@ -262,7 +262,8 @@ Progress handlers stay unbound for the same reason, which is what makes an inser
 
 ## Building From Source
 
-The JNI layer links `libusearch_c`, which CMake builds from the instantiation grid, and Gradle drives that CMake tree rather than describing a second native build of its own:
+The JNI layer links `libusearch_static`, which CMake builds from the instantiation grid, so `libusearch_java` is one shared object with the engine inside it rather than two files that have to find each other at load time.
+Gradle drives that CMake tree rather than describing a second native build of its own:
 
 ```sh
 gradle test
@@ -274,17 +275,17 @@ CMake builds the JNI library directly too, alongside every other target:
 
 ```sh
 cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_LIB_JAVA=1
-cmake --build build_artifacts --target usearch_jni
+cmake --build build_artifacts --target usearch_java
 ```
 
 The brute-force stand-in defines the same symbols a different way, so the suite runs in seconds against the ABI instead of waiting on a build of the engine:
 
 ```sh
 cmake -B build_stub -DUSEARCH_BUILD_LIB_C_STUB=1 -DUSEARCH_BUILD_LIB_JAVA=1
-cmake --build build_stub --target usearch_jni
+cmake --build build_stub --target usearch_java
 javac -d build_stub/classes -cp junit-platform-console-standalone.jar \
     java/cloud/unum/usearch/*.java java/test/cloud/unum/usearch/*.java
-LD_LIBRARY_PATH=build_stub/stub java -Djava.library.path=build_stub \
+java -Djava.library.path=build_stub \
     -jar junit-platform-console-standalone.jar execute \
     --class-path build_stub/classes --select-class cloud.unum.usearch.DenseIndexTest
 ```

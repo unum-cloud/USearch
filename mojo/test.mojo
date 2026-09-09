@@ -220,7 +220,7 @@ def _round_trip(library: Library) raises:
 def test_engine_round_trips_when_present() raises:
     """Skipped rather than failed when the engine is not on the loader path."""
     if not _engine_is_present():
-        print("skipped: libusearch_c is not on the loader path")
+        print("skipped: libusearch_shared is not on the loader path")
         return
     var library = Library()
     assert_true(library.version().byte_length() != 0, "the engine names its own version")
@@ -230,7 +230,7 @@ def test_engine_round_trips_when_present() raises:
 def test_get_reports_the_true_extent_when_truncated() raises:
     """Get reports what exists, never what it wrote, so a caller sizes from the answer."""
     if not _engine_is_present():
-        print("skipped: libusearch_c is not on the loader path")
+        print("skipped: libusearch_shared is not on the loader path")
         return
     var library = Library()
     var executor = Executor(library, RamOptions(), threads=2)
@@ -289,7 +289,7 @@ def _basis(library: Library, executor: Executor) raises -> DenseIndex:
 def test_multiply_reports_every_scored_pair() raises:
     """The sparse product counts every pair it scored, which may outrun the room it was given."""
     if not _engine_is_present():
-        print("skipped: libusearch_c is not on the loader path")
+        print("skipped: libusearch_shared is not on the loader path")
         return
     var library = Library()
     var executor = Executor(library, RamOptions(), threads=2)
@@ -316,7 +316,7 @@ def test_multiply_reports_every_scored_pair() raises:
 def test_maxsim_scores_over_documents_rather_than_rows() raises:
     """Two tokens of one query score against the indexed documents, not against each other."""
     if not _engine_is_present():
-        print("skipped: libusearch_c is not on the loader path")
+        print("skipped: libusearch_shared is not on the loader path")
         return
     var library = Library()
     var executor = Executor(library, RamOptions(), threads=2)
@@ -344,7 +344,7 @@ def test_maxsim_scores_over_documents_rather_than_rows() raises:
 def test_attend_writes_one_context_row_per_query() raises:
     """The context row and the carry entry are written through the descriptors the caller lends."""
     if not _engine_is_present():
-        print("skipped: libusearch_c is not on the loader path")
+        print("skipped: libusearch_shared is not on the loader path")
         return
     var library = Library()
     var executor = Executor(library, RamOptions(), threads=2)

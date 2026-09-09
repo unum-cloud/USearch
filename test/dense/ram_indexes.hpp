@@ -30,28 +30,29 @@ concept indexes_combo_supported = requires {
     typename dense_quads_chain<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>::kit_t;
 };
 
-/** @brief No-op sibling picked when the cell's serial kernels are not adapted yet. */
-template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, typename waiter_type_ = dummy_waiter_t,
-          nk_capability_t caps_ = nk_cap_serial_k>
-    requires(!indexes_combo_supported<dtype_, kernel_>)
+/** @brief No-op sibling picked when the cell cannot be compiled on this target: its serial
+ *      kernels are not adapted yet, or the requested kit is absent from the build. */
+template <                                       //
+    nk_dtype_t dtype_, nk_kernel_kind_t kernel_, //
+    typename waiter_type_ = dummy_waiter_t,      //
+    nk_capability_t caps_ = nk_cap_serial_k,     //
+    template <typename> class atomic_ref_ = fu::standard_atomic_ref>
+    requires(!indexes_combo_supported<dtype_, kernel_> || !dense_cell_compiled<dtype_, kernel_, caps_>)
 static std::size_t test_configuration(char const* name) {
-    return report(name, "serial kernels not adapted yet");
+    if constexpr (!indexes_combo_supported<dtype_, kernel_>) return report(name, "serial kernels not adapted yet");
+    else return report(name, "kit not compiled for this target");
 }
 
 template <                                       //
     nk_dtype_t dtype_, nk_kernel_kind_t kernel_, //
-    typename waiter_type_ = dummy_waiter_t, nk_capability_t caps_ = nk_cap_serial_k>
-    requires(indexes_combo_supported<dtype_, kernel_>)
+    typename waiter_type_ = dummy_waiter_t,      //
+    nk_capability_t caps_ = nk_cap_serial_k,     //
+    template <typename> class atomic_ref_ = fu::standard_atomic_ref>
+    requires(indexes_combo_supported<dtype_, kernel_> && dense_cell_compiled<dtype_, kernel_, caps_>)
 static std::size_t test_configuration(char const* name) {
 
-    // SIMD-tier cells execute their intrinsics unconditionally, so they run only where
-    // the machine offers every requested bit; the tile permission handshake is per-process.
-    if constexpr (caps_ != nk_cap_serial_k) {
-        if ((nk_capabilities_available() & caps_) != caps_) return report(name, "capabilities missing at runtime");
-        nk_configure_thread(nk_capabilities_available());
-    }
-
-    using indexes_t = dense_ram_indexes<u32_t, dtype_, kernel_, caps_, waiter_type_>;
+    using indexes_t = dense_ram_indexes<u32_t, dtype_, kernel_, caps_, waiter_type_, atomic_ref_>;
+    if (!dense_cell_admitted<caps_, atomic_ref_>()) return report(name, "capabilities missing at runtime");
 
     // The suite is composed here, not reflected: every call below is a capability claim
     // this sharded, executor-driven category makes about itself.

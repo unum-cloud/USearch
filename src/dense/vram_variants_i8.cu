@@ -1,7 +1,7 @@
 /**
- *  @brief The i8 shard of the dense index library: its VRAM arms' explicit instantiations.
+ *  @brief The i8 unit of the dense index library: its VRAM arms' explicit instantiations.
  *  @author Ash Vardanian
- *  @file src/dense/vram_indexes_i8.cu
+ *  @file src/dense/vram_variants_i8.cu
  *  @date September 1, 2026
  */
 #include "dense_specializations.cuh"

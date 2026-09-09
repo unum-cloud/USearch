@@ -1,6 +1,6 @@
 #!/usr/bin/env wolframscript
 
-$library = "wolfram/USearchWFM.so"
+$library = "build_release/usearch_wolfram.so"
 
 ExecutorCreate = LibraryFunctionLoad[$library, "ExecutorCreate", {"UTF8String", Integer}, Integer]
 ExecutorDrain = LibraryFunctionLoad[$library, "ExecutorDrain", {Integer}, "Void"]

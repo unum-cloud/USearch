@@ -56,7 +56,9 @@ from usearch.types import (
     text_at,
 )
 
-comptime LIBRARY_FILE = StaticString("libusearch_c.dylib" if CompilationTarget.is_macos() else "libusearch_c.so")
+comptime LIBRARY_FILE = StaticString(
+    "libusearch_shared.dylib" if CompilationTarget.is_macos() else "libusearch_shared.so"
+)
 """The loader already searches the environment's library directory, because `mojo build` bakes it
 into the binary's runpath, so an unqualified name is enough for a library installed there."""
 

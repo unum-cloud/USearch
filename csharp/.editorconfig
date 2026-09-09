@@ -48,7 +48,9 @@ tab_width = 4
 indent_size = 4
 insert_final_newline = true
 trim_trailing_whitespace = true
-charset = utf-8-bom
+# No byte-order mark: every other language in the tree stores plain UTF-8, and Roslyn never needed
+# one - it is a Visual Studio default that a Linux checkout has never written.
+charset = utf-8
 
 ###############################
 # .NET Coding Conventions     #

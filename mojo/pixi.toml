@@ -1,0 +1,17 @@
+# The Mojo binding, which `dlopen`s the engine rather than linking it - so `usearch` is a run dependency, and a
+# consumer naming this package by `git` or `path` needs no linker flags of its own.
+
+[package]
+name = "usearch_mojo"
+version = "3.0.0"
+
+[package.build]
+backend = {name = "pixi-build-mojo", version = "0.*"}
+
+# The backend only auto-discovers a package under `<name>/` or `src/`, and this one lives under
+# `usearch/`, so it is named here.
+[package.build.config]
+pkg = {name = "usearch", path = "usearch"}
+
+[package.run-dependencies]
+usearch = {path = ".."}

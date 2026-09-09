@@ -16,7 +16,7 @@
 #include <cstddef> // `std::size_t`
 #include <cstdint> // `std::uint64_t`
 
-#include <atomic>       // `std::atomic`
+#include <atomic>       // `std::atomic_ref`
 #include <limits>       // `std::numeric_limits` - the id-space ceiling in `reserve`
 #include <memory>       // `std::allocator`, `std::allocator_traits`
 #include <mutex>        // `std::unique_lock` - the try-only unique side's guard
@@ -214,18 +214,66 @@ concept basic_selector = requires(selector_type_ const& selector, index_type_ co
     { selector.connectivity } -> std::convertible_to<std::size_t>;
 };
 
-/** @brief Minimal test-and-test-and-set lock over one @c std::atomic<bool>. The waiter
- *      policy monitors the flag's address, so hardware waits plug in without this header
- *      naming them; the claiming exchange is the loop's only store, so a monitored waiter
- *      wakes once per @c unlock rather than on every contender's attempt. */
-template <typename wait_type_ = dummy_waiter_t>
+/** @brief A reference spelling the verbs the index posts past the standard's - the no-return add,
+ *      subtract and bit clear, and the bounded add - as ForkUnion's do. For the standard's own
+ *      reference, which does not, the functions below spell them; ForkUnion's references carry the
+ *      same names as free functions in their namespace, reached through argument lookup, so a site
+ *      reads the same whichever reference the index was given. */
+template <typename reference_type_, typename value_type_>
+concept extended_atomic_ref = requires(reference_type_ reference, value_type_ value) {
+    reference.add(value, std::memory_order_relaxed);
+    reference.sub(value, std::memory_order_relaxed);
+    reference.clear_bits(value, std::memory_order_relaxed);
+    reference.fetch_add_if_at_most(value, value, std::memory_order_relaxed);
+};
+
+template <typename reference_type_, typename value_type_>
+    requires(!extended_atomic_ref<reference_type_, value_type_>)
+void atomic_add(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
+    reference.fetch_add(operand, order);
+}
+template <typename reference_type_, typename value_type_>
+    requires(!extended_atomic_ref<reference_type_, value_type_>)
+void atomic_sub(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
+    reference.fetch_sub(operand, order);
+}
+template <typename reference_type_, typename value_type_>
+    requires(!extended_atomic_ref<reference_type_, value_type_>)
+void atomic_clear_bits(reference_type_ reference, value_type_ bits, std::memory_order order) noexcept {
+    reference.fetch_and(static_cast<value_type_>(~bits), order);
+}
+/** @brief Adds @p operand only if the sum stays at most @p limit; returns the value held before. */
+template <typename reference_type_, typename value_type_>
+    requires(!extended_atomic_ref<reference_type_, value_type_>)
+value_type_ atomic_fetch_add_if_at_most(reference_type_ reference, value_type_ operand, value_type_ limit,
+                                        std::memory_order order) noexcept {
+    value_type_ observed = reference.load(std::memory_order_relaxed);
+    while (observed <= limit && limit - observed >= operand &&
+           !reference.compare_exchange_weak(observed, observed + operand, order, std::memory_order_relaxed)) {}
+    return observed;
+}
+
+/** @brief Minimal test-and-test-and-set lock over one plain @c bool, owned through the
+ *      atomic reference. The waiter policy monitors the flag's address, so hardware waits
+ *      plug in without this header naming them; the claiming exchange is the loop's only
+ *      store, so a monitored waiter wakes once per @c unlock rather than on every attempt. */
+template <typename wait_type_ = dummy_waiter_t, template <typename> class atomic_ref_template_ = std::atomic_ref>
 struct basic_mutex {
-    std::atomic<bool> flag {false};
+    template <typename word_type_>
+    using atomic_ref = atomic_ref_template_<word_type_>;
+
+    bool flag {false};
 
     void lock() noexcept {
         annotate_lock_started(&flag);
-        while (flag.exchange(true, std::memory_order_acquire))
-            while (flag.load(std::memory_order_relaxed)) wait_type_ {}(flag, true, 0u, wait_capped_t {});
+        // Claim only after observing the flag free: on Arm a `SWPAL` is a write even when it
+        // just reads `true` back, stealing the line from the holder; the peek keeps contenders
+        // in Shared state, and the exchange stays the loop's only store.
+        while (true) {
+            while (atomic_ref<bool>(flag).load(std::memory_order_relaxed))
+                wait_type_ {}(&flag, true, 0u, wait_capped_t {});
+            if (!atomic_ref<bool>(flag).exchange(true, std::memory_order_acquire)) break;
+        }
         annotate_lock_acquired(&flag);
     }
     /** @brief Takes the lock only if it is free right now - a contention question, never a
@@ -233,14 +281,14 @@ struct basic_mutex {
      *      and this together satisfy, so the STL's lock adapters accept this type. */
     [[nodiscard]] bool try_lock() noexcept {
         annotate_try_lock_started(&flag);
-        bool const acquired = !flag.exchange(true, std::memory_order_acquire);
+        bool const acquired = !atomic_ref<bool>(flag).exchange(true, std::memory_order_acquire);
         if (acquired) annotate_try_lock_acquired(&flag);
         else annotate_try_lock_refused(&flag);
         return acquired;
     }
     void unlock() noexcept {
         annotate_unlock_started(&flag);
-        flag.store(false, std::memory_order_release);
+        atomic_ref<bool>(flag).store(false, std::memory_order_release);
         annotate_unlock_finished(&flag);
     }
 };
@@ -249,21 +297,26 @@ struct basic_mutex {
  *  @brief Shared among mutators, try-unique for stop-the-world, wait-free to probe - one
  *      @c std::atomic word, so every reading is a consistent joint snapshot.
  *
- *  The word packs a dedicated unique bit, twenty-two holder bits - the OS pid ceiling
- *  bounds simultaneous holders well below that - and forty-one generation bits, bumped on
- *  every successful shared @b and unique acquisition: a whole acquisition that opens and
- *  closes between two probes still moves the generation, and wrapping it inside one
- *  probe bracket would need days of saturated acquisitions. Every update is a masked
- *  compare-exchange, never a blind add, so the fields cannot bleed into each other.
+ *  The word packs forty-one generation bits on top, a dedicated unique bit, and twenty-two
+ *  holder bits - the OS pid ceiling bounds simultaneous holders well below that. The
+ *  generation steps on every shared @b and unique acquisition: a whole acquisition that
+ *  opens and closes between two probes still moves it, and wrapping it inside one probe
+ *  bracket would need days of saturated acquisitions. With the generation on top its carry
+ *  leaves the word, so the shared side is one blind add of a holder and a step, backed off
+ *  when the unique bit was already set; only the unique side compare-exchanges, from a
+ *  free word.
  */
-template <typename wait_type_ = dummy_waiter_t>
+template <typename wait_type_ = dummy_waiter_t, template <typename> class atomic_ref_template_ = std::atomic_ref>
 struct basic_shared_mutex {
-    std::atomic<u64_t> word {0};
+    template <typename word_type_>
+    using atomic_ref = atomic_ref_template_<word_type_>;
+
+    mutable u64_t word {0};
 
     inline static constexpr u64_t holders_mask_k = (u64_t {1} << 22) - 1;
-    inline static constexpr u64_t generation_unit_k = u64_t {1} << 22;
-    inline static constexpr u64_t generation_mask_k = ((u64_t {1} << 41) - 1) << 22;
-    inline static constexpr u64_t unique_bit_k = u64_t {1} << 63;
+    inline static constexpr u64_t unique_bit_k = u64_t {1} << 22;
+    inline static constexpr u64_t generation_unit_k = u64_t {1} << 23;
+    inline static constexpr u64_t generation_mask_k = ~(generation_unit_k - 1);
 
     /** @brief One consistent reading: how the gate is held & how often it has been. */
     struct snapshot_t {
@@ -277,19 +330,16 @@ struct basic_shared_mutex {
     /** @brief Joins the shared side, waiting out a unique holder through the waiter. */
     void lock_shared() noexcept {
         annotate_lock_shared_started(&word);
-        u64_t observed = word.load(std::memory_order_relaxed);
+        // A masked compare-exchange kept the fields apart while the generation sat under the
+        // unique bit; it retried under contention where this one add does not.
         while (true) {
-            if (observed & unique_bit_k) {
-                wait_type_ {}(word, observed, 0u, wait_capped_t {});
-                observed = word.load(std::memory_order_relaxed);
-                continue;
-            }
-            if (word.compare_exchange_weak(observed, advanced_(observed) + 1, std::memory_order_acquire,
-                                           std::memory_order_relaxed)) {
-                annotate_lock_shared_acquired(&word);
-                return;
-            }
+            u64_t const observed = atomic_ref<u64_t>(word).fetch_add(generation_unit_k + 1, std::memory_order_acquire);
+            if (!(observed & unique_bit_k)) break;
+            // Joined behind a unique holder: hand the holder back, then wait for the word to move.
+            u64_t const backed_off = atomic_ref<u64_t>(word).fetch_sub(1, std::memory_order_release) - 1;
+            wait_type_ {}(&word, backed_off, 0u, wait_capped_t {});
         }
+        annotate_lock_shared_acquired(&word);
     }
 
     void unlock_shared() noexcept {
@@ -297,7 +347,7 @@ struct basic_shared_mutex {
         // atomics, and the certified probes' acquire would otherwise pair with nothing.
         annotate_release(&word);
         annotate_unlock_shared_started(&word);
-        word.fetch_sub(1, std::memory_order_release);
+        atomic_sub(atomic_ref<u64_t>(word), u64_t {1}, std::memory_order_release);
         annotate_unlock_shared_finished(&word);
     }
 
@@ -305,10 +355,10 @@ struct basic_shared_mutex {
      *      retries, it is not contention - and never waits: a refusal is the answer. */
     [[nodiscard]] bool try_lock() noexcept {
         annotate_try_lock_started(&word);
-        u64_t observed = word.load(std::memory_order_relaxed);
+        u64_t observed = atomic_ref<u64_t>(word).load(std::memory_order_relaxed);
         while ((observed & (holders_mask_k | unique_bit_k)) == 0)
-            if (word.compare_exchange_weak(observed, advanced_(observed) | unique_bit_k, std::memory_order_acquire,
-                                           std::memory_order_relaxed)) {
+            if (atomic_ref<u64_t>(word).compare_exchange_weak(observed, (observed + generation_unit_k) | unique_bit_k,
+                                                              std::memory_order_acquire, std::memory_order_relaxed)) {
                 annotate_try_lock_acquired(&word);
                 return true;
             }
@@ -319,22 +369,16 @@ struct basic_shared_mutex {
     void unlock() noexcept {
         annotate_release(&word);
         annotate_unlock_started(&word);
-        word.fetch_and(~unique_bit_k, std::memory_order_release);
+        atomic_clear_bits(atomic_ref<u64_t>(word), unique_bit_k, std::memory_order_release);
         annotate_unlock_finished(&word);
     }
 
     /** @brief The wait-free probe the certified readers bracket their walks with. */
     snapshot_t snapshot() const noexcept {
-        u64_t const observed = word.load(std::memory_order_acquire);
+        u64_t const observed = atomic_ref<u64_t>(word).load(std::memory_order_acquire);
         annotate_acquire(&word);
         return {observed & generation_mask_k, static_cast<std::size_t>(observed & holders_mask_k),
                 (observed & unique_bit_k) != 0};
-    }
-
-  private:
-    /** @brief Advances the generation within its own field - wrap stays contained. */
-    static constexpr u64_t advanced_(u64_t observed) noexcept {
-        return (observed & ~generation_mask_k) | ((observed + generation_unit_k) & generation_mask_k);
     }
 };
 
@@ -453,15 +497,18 @@ struct basic_ram_cursor;
  *  @tparam node_id_type_ graph-local identity, dense from zero; @c u32_t or @c u64_t.
  *  @tparam distance_type_ the metrics' result element.
  *  @tparam wait_type_ the monitored-wait engaged on contended words.
+ *  @tparam atomic_ref_template_ the atomic reference owning the plain synchronization words;
+ *      @c std::atomic_ref by default, ForkUnion's ISA-specific references plug in.
  *  @tparam allocator_type_ places the node records, neighbor buffers & key multimap.
  */
-template <                                            //
-    typename value_type_,                             //
-    typename key_type_ = uuid_t,                      //
-    typename node_id_type_ = u64_t,                   //
-    typename distance_type_ = f64_t,                  //
-    typename wait_type_ = dummy_waiter_t,             //
-    typename allocator_type_ = std::allocator<byte_t> //
+template <                                                            //
+    typename value_type_,                                             //
+    typename key_type_ = uuid_t,                                      //
+    typename node_id_type_ = u64_t,                                   //
+    typename distance_type_ = f64_t,                                  //
+    typename wait_type_ = dummy_waiter_t,                             //
+    template <typename> class atomic_ref_template_ = std::atomic_ref, //
+    typename allocator_type_ = std::allocator<byte_t>                 //
     >
     requires basic_value<value_type_> && (std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>)
 struct basic_ram_index {
@@ -472,6 +519,8 @@ struct basic_ram_index {
     using distance_t = distance_type_;
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
+    template <typename word_type_>
+    using atomic_ref = atomic_ref_template_<word_type_>;
 
     using scored_node_t = basic_scored_node<node_id_t, distance_t>;
     using traversal_context_t = basic_traversal_context<node_id_t, distance_t, allocator_t>;
@@ -493,7 +542,7 @@ struct basic_ram_index {
     struct node_t {
         /** @brief Mutable so id-addressed const readers, like @c degree_of, may briefly
          *      hold it - locking never mutates the record's logical state. */
-        mutable basic_mutex<wait_t> mutex;
+        mutable basic_mutex<wait_t, atomic_ref_template_> mutex;
         value_t value {};
         key_t key {};
         neighbors_buffer_t neighbors;
@@ -514,7 +563,7 @@ struct basic_ram_index {
 
     using key_map_t = growing_multimap<key_t, node_id_t, std::hash<key_t>, allocator_t>;
 
-    using shared_mutex_t = basic_shared_mutex<wait_t>;
+    using shared_mutex_t = basic_shared_mutex<wait_t, atomic_ref_template_>;
     using shared_lock_t = std::shared_lock<shared_mutex_t>;
     using unique_lock_t = std::unique_lock<shared_mutex_t>;
 
@@ -540,7 +589,7 @@ struct basic_ram_index {
      *      grow with wiring. An allocation failure leaves the shape unfrozen and the same
      *      call retryable. Not safe concurrently with any other operation. */
     expected<std::size_t> reserve(std::size_t capacity) noexcept {
-        if (std::size_t const frozen = capacity_.load(std::memory_order_acquire); frozen)
+        if (std::size_t const frozen = atomic_ref<std::size_t>(capacity_).load(std::memory_order_acquire); frozen)
             return {frozen, capacity > frozen ? status_t::overflow_k : status_t::success_k};
         if (!capacity) return {0, status_t::config_mismatch_k};
         if (capacity > static_cast<std::size_t>((std::numeric_limits<node_id_t>::max)()))
@@ -555,7 +604,7 @@ struct basic_ram_index {
 
         // The release store freezing the capacity doubles as the publication edge for the
         // whole record array & key multimap - entry points pair it with one acquire load.
-        capacity_.store(capacity, std::memory_order_release);
+        atomic_ref<std::size_t>(capacity_).store(capacity, std::memory_order_release);
         return {capacity, status_t::success_k};
     }
 
@@ -622,7 +671,7 @@ struct basic_ram_index {
                       "Certified immutability contradicts insertion - certify exclusive_k or stay concurrent_k");
         std::size_t const incoming_count = incoming_values.size();
         if (!incoming_count) return {};
-        std::size_t const capacity = capacity_.load(std::memory_order_acquire);
+        std::size_t const capacity = atomic_ref<std::size_t>(capacity_).load(std::memory_order_acquire);
         if (!capacity) return {status_t::uninitialized_k, {}};
         std::size_t const connectivity = selector.connectivity;
         if (!connectivity) return {status_t::config_mismatch_k, {}};
@@ -641,12 +690,12 @@ struct basic_ram_index {
 
         // Claims convert one-to-one into dispensed ids, so dispensing, wiring into
         // pre-reserved rows, and the quota-matched key publication can never fail. The
-        // claim commits only within capacity, so peers never observe an overshoot.
-        std::size_t claimed = claimed_count_.load(std::memory_order_relaxed);
-        do {
-            if (claimed + incoming_count > capacity) return {status_t::overflow_k, {}};
-        } while (!claimed_count_.compare_exchange_weak(claimed, claimed + incoming_count, //
-                                                       std::memory_order_acq_rel, std::memory_order_relaxed));
+        // claim commits only within capacity, so peers never observe an overshoot. A speculative
+        // add with a rollback was considered: cheaper under contention, but a peer can see the
+        // overshoot, and claims are per batch, so the exact form is affordable.
+        std::size_t const claimed = atomic_fetch_add_if_at_most(atomic_ref<std::size_t>(claimed_count_), incoming_count,
+                                                                capacity, std::memory_order_acq_rel);
+        if (capacity - claimed < incoming_count) return {status_t::overflow_k, {}};
 
         basic_traversal_telemetry_t const telemetry_before = context.telemetry;
         for (std::size_t incoming_index = 0; incoming_index != incoming_count; ++incoming_index) {
@@ -657,7 +706,8 @@ struct basic_ram_index {
 
             // Walk against the caller's still-unmoved value; a virgin index skips the walk
             // and the first node publishes with an empty neighbors list.
-            node_id_t const first_invisible_id = last_visible_id_.load(std::memory_order_acquire);
+            node_id_t const first_invisible_id =
+                atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
             // Capacity for this row is already claimed, so a refused walk wires a thinner
             // node rather than abandoning an id nothing will ever publish.
             if (first_invisible_id)
@@ -667,7 +717,8 @@ struct basic_ram_index {
 
             // Identity is dispensed here, after the metric-bound walk, so one slow scorer
             // never convoys other publishers through the watermark.
-            node_id_t const new_node_id = next_dispensed_id_.fetch_add(1, std::memory_order_acq_rel);
+            node_id_t const new_node_id =
+                atomic_ref<node_id_t>(next_dispensed_id_).fetch_add(1, std::memory_order_acq_rel);
             node_t& record = nodes_array_[new_node_id];
             record.value = std::move(incoming);
             record.key = keys[incoming_index];
@@ -683,10 +734,11 @@ struct basic_ram_index {
 
             // Take the watermark turn strictly in dispensed order - each thread holds at
             // most one unpublished id, so the wait is bounded by one wiring per peer.
-            for (node_id_t watermark = last_visible_id_.load(std::memory_order_acquire); watermark != new_node_id;
-                 watermark = last_visible_id_.load(std::memory_order_acquire))
-                wait_t {}(last_visible_id_, watermark, 0u, wait_uncapped_t {});
-            last_visible_id_.store(new_node_id + 1, std::memory_order_release);
+            for (node_id_t watermark = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
+                 watermark != new_node_id;
+                 watermark = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire))
+                wait_t {}(&last_visible_id_, watermark, 0u, wait_uncapped_t {});
+            atomic_ref<node_id_t>(last_visible_id_).store(new_node_id + 1, std::memory_order_release);
 
             // Post-turn: the key becomes findable only for a published node, and the
             // quota matches the capacity claim, so this insert cannot fail.
@@ -814,7 +866,7 @@ struct basic_ram_index {
         requires basic_metric<metric_type_, value_t, distance_t> && basic_query<query_type_, metric_type_, value_t>
     search_result_t search(query_type_ const& query, metric_type_& metric, //
                            traversal_context_t& context, search_config_t config = {}) noexcept {
-        if (!capacity_.load(std::memory_order_acquire)) return {status_t::uninitialized_k, 0, {}};
+        if (!capacity()) return {status_t::uninitialized_k, 0, {}};
         std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor : connectivity_32_k * 2;
         std::size_t const fan_out = config.fan_out ? config.fan_out
                                                    : derived_fan_out_(expansion_factor, connectivity_32_k);
@@ -830,7 +882,7 @@ struct basic_ram_index {
         node_id_t first_invisible_id = 0;
         [[maybe_unused]] u64_t entry_generation = 0;
         if constexpr (synchronization_ == synchronization_t::concurrent_k)
-            first_invisible_id = last_visible_id_.load(std::memory_order_acquire);
+            first_invisible_id = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
         else {
             auto const entry_probe = shared_mutex_.snapshot();
             if (!entry_probe.unlocked()) return {status_t::contended_k, 0, {}};
@@ -856,7 +908,7 @@ struct basic_ram_index {
             std::atomic_thread_fence(std::memory_order_acquire);
             auto const exit_probe = shared_mutex_.snapshot();
             if (!exit_probe.unlocked() || exit_probe.generation != entry_generation ||
-                last_visible_id_.load(std::memory_order_acquire) != first_invisible_id)
+                atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire) != first_invisible_id)
                 result.status = status_t::contended_k;
         }
         return result;
@@ -868,12 +920,12 @@ struct basic_ram_index {
 
     /** @brief Number of published nodes - the visibility watermark; safe any time. */
     std::size_t size() const noexcept {
-        return static_cast<std::size_t>(last_visible_id_.load(std::memory_order_acquire));
+        return static_cast<std::size_t>(atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire));
     }
 
     /** @brief Total entries the frozen storage can host; zero before the first @c reserve
      *      froze it - the acquire pairs with that freeze, so this is safe any time. */
-    std::size_t capacity() const noexcept { return capacity_.load(std::memory_order_acquire); }
+    std::size_t capacity() const noexcept { return atomic_ref<std::size_t>(capacity_).load(std::memory_order_acquire); }
 
     /** @brief The key stored under @p node_id - the authoritative direction, immutable
      *      after publication. One acquire load of the watermark gates the id, so any input
@@ -913,7 +965,7 @@ struct basic_ram_index {
      *      unspecified order - use @c find_each to see them all. Wait-free, concurrent
      *      with everything. */
     expected<node_id_t> find(key_t const& key) const noexcept {
-        if (!capacity_.load(std::memory_order_acquire)) return {node_id_t {}, status_t::uninitialized_k};
+        if (!capacity()) return {node_id_t {}, status_t::uninitialized_k};
         return key_map_.find(key);
     }
 
@@ -921,20 +973,20 @@ struct basic_ram_index {
      *      wait-free, concurrent with everything; a no-op before the first @c reserve. */
     template <typename callback_type_>
     void find_each(key_t const& key, callback_type_&& callback) const noexcept {
-        if (!capacity_.load(std::memory_order_acquire)) return;
+        if (!capacity()) return;
         key_map_.find_each(key, std::forward<callback_type_>(callback));
     }
 
     /** @brief Whether at least one published node exists under @p key; @c false before the
      *      first @c reserve. */
     bool contains(key_t const& key) const noexcept {
-        if (!capacity_.load(std::memory_order_acquire)) return false;
+        if (!capacity()) return false;
         return key_map_.contains(key);
     }
 
     /** @brief Number of published nodes under @p key; zero before the first @c reserve. */
     std::size_t count(key_t const& key) const noexcept {
-        if (!capacity_.load(std::memory_order_acquire)) return 0;
+        if (!capacity()) return 0;
         return key_map_.count(key);
     }
 
@@ -1074,7 +1126,7 @@ struct basic_ram_index {
         basic_ram_index const* index = nullptr;
         /** @brief The caller-placed columns every region writes disjoint slices of. */
         columns_t columns {};
-        /** @brief Nodes the regions covered so far, mutated through @c std::atomic_ref. */
+        /** @brief Nodes the regions covered so far, mutated through @c atomic_ref. */
         std::size_t covered = 0;
         /** @brief The unique hold spanning the plan's whole lifetime. */
         unique_lock_t hold;
@@ -1106,7 +1158,7 @@ struct basic_ram_index {
                                                     columns.values.subspan(first, bound - first));
                 if (failed(encoded)) return encoded;
             }
-            std::atomic_ref<std::size_t> {covered}.fetch_add(region.size(), std::memory_order_acq_rel);
+            atomic_add(atomic_ref<std::size_t>(covered), region.size(), std::memory_order_release);
             return status_t::success_k;
         }
 
@@ -1115,7 +1167,7 @@ struct basic_ram_index {
          *      sum right are the caller's own lie. */
         status_t finish() noexcept {
             if (!index) return status_t::uninitialized_k;
-            if (std::atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != columns.keys.size())
+            if (atomic_ref<std::size_t>(covered).load(std::memory_order_acquire) != columns.keys.size())
                 return status_t::config_mismatch_k;
             hold.unlock();
             return status_t::success_k;
@@ -1210,7 +1262,7 @@ struct basic_ram_index {
         basic_ram_index* index = nullptr;
         /** @brief The vetted columns being decoded. */
         columns_view_t columns {};
-        /** @brief Nodes the regions covered so far, mutated through @c std::atomic_ref. */
+        /** @brief Nodes the regions covered so far, mutated through @c atomic_ref. */
         std::size_t covered = 0;
         /** @brief The unique hold spanning the plan's whole lifetime. */
         unique_lock_t hold;
@@ -1248,7 +1300,7 @@ struct basic_ram_index {
 
                 if (status_t const keyed = index->key_map_.insert(record.key, node); failed(keyed)) return keyed;
             }
-            std::atomic_ref<std::size_t> {covered}.fetch_add(region.size(), std::memory_order_acq_rel);
+            atomic_add(atomic_ref<std::size_t>(covered), region.size(), std::memory_order_release);
             return status_t::success_k;
         }
 
@@ -1258,11 +1310,13 @@ struct basic_ram_index {
         status_t finish() noexcept {
             if (!index) return status_t::uninitialized_k;
             std::size_t const node_count = columns.keys.size();
-            if (std::atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != node_count)
+            if (atomic_ref<std::size_t>(covered).load(std::memory_order_acquire) != node_count)
                 return status_t::config_mismatch_k;
-            index->claimed_count_.store(node_count, std::memory_order_relaxed);
-            index->next_dispensed_id_.store(static_cast<node_id_t>(node_count), std::memory_order_relaxed);
-            index->last_visible_id_.store(static_cast<node_id_t>(node_count), std::memory_order_release);
+            atomic_ref<std::size_t>(index->claimed_count_).store(node_count, std::memory_order_relaxed);
+            atomic_ref<node_id_t>(index->next_dispensed_id_)
+                .store(static_cast<node_id_t>(node_count), std::memory_order_relaxed);
+            atomic_ref<node_id_t>(index->last_visible_id_)
+                .store(static_cast<node_id_t>(node_count), std::memory_order_release);
             hold.unlock();
             return status_t::success_k;
         }
@@ -1277,13 +1331,14 @@ struct basic_ram_index {
      *  @param[in] columns The five columns a prior @c save filled; the key column's length
      *      is the row count. */
     expected<load_plan_t> plan_load(columns_view_t columns) noexcept {
-        std::size_t const capacity = capacity_.load(std::memory_order_acquire);
+        std::size_t const capacity = atomic_ref<std::size_t>(capacity_).load(std::memory_order_acquire);
         if (!capacity) return {{}, status_t::uninitialized_k};
         // The gate excludes mutators & flips certified probes to refusal; the exclusivity
         // contract against readers stays the caller's - key lookups race the map rebuild.
         unique_lock_t hold {shared_mutex_, std::try_to_lock};
         if (!hold) return {{}, status_t::contended_k};
-        if (last_visible_id_.load(std::memory_order_acquire) != 0) return {{}, status_t::config_mismatch_k};
+        if (atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire) != 0)
+            return {{}, status_t::config_mismatch_k};
         if (columns.keys.size() > capacity) return {{}, status_t::overflow_k};
         if (status_t const vetted = vetted_columns_(columns); failed(vetted)) return {{}, vetted};
         // A failed prior attempt burned key-map quota; wiping first keeps every entry
@@ -1596,8 +1651,8 @@ struct basic_ram_index {
      *      run ahead of the watermark, which only an exclusive-certified mutator lying mid-turn
      *      can do with the gate held. */
     expected<node_id_t> published_prefix_() const noexcept {
-        node_id_t const visible = last_visible_id_.load(std::memory_order_acquire);
-        return {visible, visible == next_dispensed_id_.load(std::memory_order_acquire) //
+        node_id_t const visible = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
+        return {visible, visible == atomic_ref<node_id_t>(next_dispensed_id_).load(std::memory_order_acquire) //
                              ? status_t::success_k
                              : status_t::contended_k};
     }
@@ -1654,26 +1709,29 @@ struct basic_ram_index {
     /** @brief Frozen entry capacity; its release store is @c reserve's last act, doubling
      *      as the publication edge for the record array & key multimap. Public entry
      *      points take one acquire load into a local, so no loop reads it. */
-    std::atomic<std::size_t> capacity_ {0};
+    mutable std::size_t capacity_ {0}; // ? `mutable` throughout: the pre-P3323 `std::atomic_ref` binds no
+    // const word, not even to load it, and the const readers only load
 
     /** @brief Batch capacity claims - the all-or-nothing admission, separate from
      *      identity: claims convert one-to-one into dispensed ids, so dispensing never
      *      overflows. Rejected batches roll their claim back, so the count transiently
      *      overshoots under contention - kept a full word wide, so no overshoot can ever
      *      wrap it around the bounds check. */
-    std::atomic<std::size_t> claimed_count_ {0};
-    /** @brief Node-id dispenser; ids are claimed after the walk, right before publication. */
-    std::atomic<node_id_t> next_dispensed_id_ {0};
+    alignas(default_alignment_k) mutable std::size_t claimed_count_ {0};
+    /** @brief Node-id dispenser; ids are claimed after the walk, right before publication.
+     *      Its per-insert RMW gets its own line, so it never invalidates the watermark line
+     *      every search snapshots. */
+    alignas(default_alignment_k) mutable node_id_t next_dispensed_id_ {0};
     /** @brief The visibility watermark: every id strictly below it is published. */
-    std::atomic<node_id_t> last_visible_id_ {0};
+    alignas(default_alignment_k) mutable node_id_t last_visible_id_ {0};
     /** @brief Key → ID multimap, sized by @c reserve. */
     key_map_t key_map_;
 
     /** @brief The world gate: mutators hold it shared, stop-the-world verbs try-unique,
      *      certified readers probe it wait-free. Mutable for the const cold readers, like
-     *      the row mutexes; placed away from the watermark's line, which turn loops spin
+     *      the row mutexes; on its own line, away from the watermark, which turn loops spin
      *      on. */
-    mutable shared_mutex_t shared_mutex_;
+    alignas(default_alignment_k) mutable shared_mutex_t shared_mutex_;
 
     [[no_unique_address]] allocator_t allocator_;
 
@@ -1696,6 +1754,8 @@ struct basic_ram_index {
 template <typename index_type_, synchronization_t synchronization_, typename allocator_type_>
 struct basic_ram_cursor {
     using index_t = index_type_;
+    template <typename word_type_>
+    using atomic_ref = typename index_t::template atomic_ref<word_type_>;
     using node_id_t = typename index_t::node_id_t;
     using key_t = typename index_t::key_t;
     using value_t = typename index_t::value_t;
@@ -1709,7 +1769,8 @@ struct basic_ram_cursor {
     /** @brief Binds the index & captures the watermark snapshot; allocates nothing - the
      *      staged-row buffer grows on the first @c seek through @p allocator. */
     explicit basic_ram_cursor(index_t const& index, allocator_t allocator = {}) noexcept
-        : index_(index), staged_row_(allocator), visible_count_(index.last_visible_id_.load(watermark_order_k)),
+        : index_(index), staged_row_(allocator),
+          visible_count_(atomic_ref<node_id_t>(index.last_visible_id_).load(watermark_order_k)),
           current_(visible_count_) {}
 
     /** @brief Ids strictly below this snapshot are readable through this cursor. */
@@ -1719,7 +1780,7 @@ struct basic_ram_cursor {
      *      end stays past the end - entering the admitted region takes an explicit @c seek. */
     void refresh() noexcept {
         bool const past_end = current_ == visible_count_;
-        visible_count_ = index_.last_visible_id_.load(watermark_order_k);
+        visible_count_ = atomic_ref<node_id_t>(index_.last_visible_id_).load(watermark_order_k);
         if (past_end) current_ = visible_count_;
     }
 

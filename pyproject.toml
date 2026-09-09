@@ -6,12 +6,75 @@
 #   * for CPython versions from 3.12 to 3.14 (including free-threaded 3.13t and 3.14t).
 #   = meaning 7 platforms * 5 Python versions = 35 builds.
 [build-system]
-build-backend = "setuptools.build_meta"
+build-backend = "scikit_build_core.build"
 requires = [
-  "setuptools>=42",
-  "wheel",
+  "scikit-build-core>=0.10",
   "numkong>=7.5.0",
 ]
+
+[project]
+name = "usearch"
+description = "Smaller & Faster Single-File Vector Search Engine from Unum"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dynamic = ["version"]
+authors = [{name = "Ash Vardanian", email = "info@unum.cloud"}]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Natural Language :: English",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Information Technology",
+  "Programming Language :: C++",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Java",
+  "Programming Language :: JavaScript",
+  "Programming Language :: Objective C",
+  "Programming Language :: Rust",
+  "Programming Language :: Other",
+  "Operating System :: MacOS",
+  "Operating System :: Unix",
+  "Operating System :: Microsoft :: Windows",
+  "Topic :: System :: Clustering",
+  "Topic :: Database :: Database Engines/Servers",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# NumKong is the one sibling with a runtime half - `python/usearch/__init__.py` resolves its shared
+# library through `ctypes` - so it is the only one that has to be installed alongside the wheel.
+# Batch inputs arrive through the buffer protocol, so NumPy is a convenience of `usearch.eval` and
+# of the test suite, never of the index itself.
+dependencies = ["numkong", "stringzilla"]
+
+[project.optional-dependencies]
+eval = ["numpy", "tqdm"]
+
+[project.urls]
+Homepage = "https://github.com/unum-cloud/USearch"
+
+# One CMake tree serves the compiler flags, the instantiation grid and the release artifacts, so the
+# SDK has one native build rather than a second one described in a `setup.py`.
+[tool.scikit-build]
+build-dir = "build_python/{wheel_tag}"
+build.targets = ["usearch_python"]
+install.components = ["usearch_python"]
+cmake.version = ">=3.28"
+minimum-version = "build-system.requires"
+wheel.packages = ["python/usearch"]
+
+[tool.scikit-build.cmake.define]
+USEARCH_BUILD_BENCH_CPP = "OFF"
+USEARCH_BUILD_LIB_C = "ON"
+USEARCH_BUILD_LIB_PYTHON = "ON"
+USEARCH_BUILD_TEST_CPP = "OFF"
+
+# `VERSION` is what every other SDK reads, so the wheel takes its version from the same file rather
+# than from a second copy that drifts.
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "VERSION"
+regex = "(?P<value>.+)"
 
 [tool.pytest.ini_options]
 # No `-x`: one failure must not hide the rest, which is how a wrong `batches` dtype survived

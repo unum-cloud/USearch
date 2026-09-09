@@ -32,7 +32,7 @@
             "name": "Unit Test C++ Core",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build_debug/test/usearch_test_core",
+            "program": "${workspaceFolder}/build_debug/test/usearch_test_header_only",
             "cwd": "${workspaceFolder}",
             "stopAtEntry": false,
             "preLaunchTask": "Build Debug",
@@ -144,9 +144,7 @@
             "request": "launch",
             "module": "pytest",
             "console": "internalConsole",
-            "args": [
-                "${file}"
-            ],
+            "args": ["${file}"],
             "justMyCode": true
         },
         {
@@ -171,11 +169,7 @@
             "type": "coreclr",
             "request": "launch",
             "program": "dotnet",
-            "args": [
-                "test",
-                "-c",
-                "Debug"
-            ],
+            "args": ["test", "-c", "Debug"],
             "cwd": "${workspaceFolder}/csharp",
             "stopAtEntry": false
         },
@@ -183,9 +177,7 @@
             "type": "lldb",
             "name": "Debug Swift",
             "request": "launch",
-            "sourceLanguages": [
-                "swift"
-            ],
+            "sourceLanguages": ["swift"],
             "args": [],
             "cwd": "${workspaceFolder}",
             "program": "${workspaceFolder}/.build/debug/USearchTestsSwift",

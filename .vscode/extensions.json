@@ -9,8 +9,5 @@
         "ms-python.black-formatter",
         "swellaby.rust-pack"
     ],
-    "unwantedRecommendations": [
-        "ms-vscode.cpptools-extension-pack",
-        "xaver.clang-format"
-    ]
+    "unwantedRecommendations": ["ms-vscode.cpptools-extension-pack", "xaver.clang-format"]
 }

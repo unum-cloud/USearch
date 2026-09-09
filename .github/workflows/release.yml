@@ -139,14 +139,14 @@ jobs:
 
           cmake --build build_release --config Release
 
-          cp build_release/libusearch_c.so "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.so"
+          cp build_release/libusearch_shared.so "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.so"
 
           mkdir -p "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/DEBIAN"
           touch "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/DEBIAN/control"
           mkdir -p "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/usr/local/lib"
           mkdir "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/usr/local/include"
           cp -r include/usearch "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/usr/local/include/"
-          cp build_release/libusearch_c.so "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/usr/local/lib/"
+          cp build_release/libusearch_shared.so "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/usr/local/lib/"
           echo -e "Package: usearch\nVersion: ${{ steps.set_version.outputs.version }}\nMaintainer: Ash Vardanian\nArchitecture: ${{ matrix.arch }}\nDescription: Faster & Smaller Single-File Search Engine for Vectors & Texts" > "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/DEBIAN/control"
           dpkg-deb --build "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}"
 
@@ -154,7 +154,7 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: native-libs-linux-${{ matrix.arch }}
-          path: build_release/libusearch_c.so
+          path: build_release/libusearch_shared.so
           retention-days: 1
 
       - name: Upload library
@@ -214,9 +214,9 @@ jobs:
           cmake -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 -B ./build_release
           cmake --build ./build_release --config Release
           mkdir pkg
-          copy .\build_release\libusearch_c.dll pkg\
+          copy .\build_release\libusearch_shared.dll pkg\
           xcopy /E /I .\include\usearch pkg\usearch
-          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_c.dll usearch
+          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_shared.dll usearch
 
       - name: Build library (MSVC ARM64)
         if: matrix.arch == 'arm64'
@@ -224,15 +224,15 @@ jobs:
           cmake -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 -B ./build_release
           cmake --build ./build_release --config Release
           mkdir pkg
-          copy .\build_release\libusearch_c.dll pkg\
+          copy .\build_release\libusearch_shared.dll pkg\
           xcopy /E /I .\include\usearch pkg\usearch
-          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_c.dll usearch
+          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_shared.dll usearch
 
       - name: Upload native library for Java
         uses: actions/upload-artifact@v5
         with:
           name: native-libs-windows-${{ matrix.arch }}
-          path: build_release/libusearch_c.dll
+          path: build_release/libusearch_shared.dll
           retention-days: 1
 
       - name: Upload archive
@@ -281,15 +281,15 @@ jobs:
                 -B ./build_release
           cmake --build ./build_release --config Release
           mkdir pkg
-          cp build_release/libusearch_c.dylib pkg/
+          cp build_release/libusearch_shared.dylib pkg/
           cp -r include/usearch pkg/
-          (cd pkg && zip -r ../usearch_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip libusearch_c.dylib usearch)
+          (cd pkg && zip -r ../usearch_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip libusearch_shared.dylib usearch)
 
       - name: Upload native library for Java
         uses: actions/upload-artifact@v5
         with:
           name: native-libs-macos-${{ matrix.arch }}
-          path: build_release/libusearch_c.dylib
+          path: build_release/libusearch_shared.dylib
           retention-days: 1
 
       - name: Upload library
@@ -359,15 +359,15 @@ jobs:
       - name: Package library
         run: |
           mkdir pkg
-          cp build_artifacts/libusearch_c.so pkg/
+          cp build_artifacts/libusearch_shared.so pkg/
           cp -r include/usearch pkg/
-          (cd pkg && zip -r ../usearch_android_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip libusearch_c.so usearch)
+          (cd pkg && zip -r ../usearch_android_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip libusearch_shared.so usearch)
 
       - name: Upload native library for Java
         uses: actions/upload-artifact@v5
         with:
           name: native-libs-android-${{ matrix.arch }}
-          path: build_artifacts/libusearch_c.so
+          path: build_artifacts/libusearch_shared.so
           retention-days: 1
 
       - name: Upload archive
@@ -443,13 +443,13 @@ jobs:
       # be for the target arch, otherwise packaging will ship a broken library.
       - name: Verify target architecture
         run: |
-          file build_artifacts/libusearch_jni.so | grep -q '${{ matrix.expected_arch }}'
+          file build_artifacts/libusearch_java.so | grep -q '${{ matrix.expected_arch }}'
 
       - name: Upload JNI library artifact
         uses: actions/upload-artifact@v5
         with:
           name: usearch-jni-linux-${{ matrix.arch }}
-          path: build_artifacts/libusearch_jni.so
+          path: build_artifacts/libusearch_java.so
           retention-days: 1
 
   build_jni_windows:
@@ -496,7 +496,7 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: usearch-jni-windows-${{ matrix.arch }}
-          path: build_artifacts/libusearch_jni.dll
+          path: build_artifacts/libusearch_java.dll
           retention-days: 1
 
   build_jni_macos:
@@ -543,13 +543,13 @@ jobs:
 
       - name: Verify target architecture
         run: |
-          file build_artifacts/libusearch_jni.dylib | grep -q '${{ matrix.cmake_arch }}'
+          file build_artifacts/libusearch_java.dylib | grep -q '${{ matrix.cmake_arch }}'
 
       - name: Upload JNI library artifact
         uses: actions/upload-artifact@v5
         with:
           name: usearch-jni-macos-${{ matrix.arch }}
-          path: build_artifacts/libusearch_jni.dylib
+          path: build_artifacts/libusearch_java.dylib
           retention-days: 1
 
   build_jni_android:
@@ -609,7 +609,7 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: usearch-jni-android-${{ matrix.arch }}
-          path: build_artifacts/libusearch_jni.so
+          path: build_artifacts/libusearch_java.so
           retention-days: 1
 
   create_wasm_library:
@@ -649,8 +649,8 @@ jobs:
 
           cd build_wasm
           cp -r ../include/usearch .
-          tar -czf ../usearch_wasm_${{ steps.set_version.outputs.version }}.tar.gz libusearch_c.* usearch
-          zip -r ../usearch_wasm_${{ steps.set_version.outputs.version }}.zip libusearch_c.* usearch
+          tar -czf ../usearch_wasm_${{ steps.set_version.outputs.version }}.tar.gz libusearch_shared.* usearch
+          zip -r ../usearch_wasm_${{ steps.set_version.outputs.version }}.zip libusearch_shared.* usearch
 
       - name: Upload archives
         uses: xresloader/upload-to-github-release@v1
@@ -974,24 +974,24 @@ jobs:
           mkdir -p build/libs/usearch/shared/{linux-amd64,linux-arm64,windows-amd64,windows-x86,windows-arm64,darwin-amd64,darwin-arm64,android-arm64,android-arm32}
 
           # Linux
-          cp usearch-jni-linux-amd64/libusearch_jni.so build/libs/usearch/shared/linux-amd64/libusearch_jni.so || true
-          cp usearch-jni-linux-arm64/libusearch_jni.so build/libs/usearch/shared/linux-arm64/libusearch_jni.so || true
+          cp usearch-jni-linux-amd64/libusearch_java.so build/libs/usearch/shared/linux-amd64/libusearch_java.so || true
+          cp usearch-jni-linux-arm64/libusearch_java.so build/libs/usearch/shared/linux-arm64/libusearch_java.so || true
 
           # Windows
-          cp usearch-jni-windows-x64/libusearch_jni.dll build/libs/usearch/shared/windows-amd64/libusearch_jni.dll || true
-          cp usearch-jni-windows-x86/libusearch_jni.dll build/libs/usearch/shared/windows-x86/libusearch_jni.dll || true
-          cp usearch-jni-windows-arm64/libusearch_jni.dll build/libs/usearch/shared/windows-arm64/libusearch_jni.dll || true
+          cp usearch-jni-windows-x64/libusearch_java.dll build/libs/usearch/shared/windows-amd64/libusearch_java.dll || true
+          cp usearch-jni-windows-x86/libusearch_java.dll build/libs/usearch/shared/windows-x86/libusearch_java.dll || true
+          cp usearch-jni-windows-arm64/libusearch_java.dll build/libs/usearch/shared/windows-arm64/libusearch_java.dll || true
 
           # macOS
-          cp usearch-jni-macos-amd64/libusearch_jni.dylib build/libs/usearch/shared/darwin-amd64/libusearch_jni.dylib || true
-          cp usearch-jni-macos-arm64/libusearch_jni.dylib build/libs/usearch/shared/darwin-arm64/libusearch_jni.dylib || true
+          cp usearch-jni-macos-amd64/libusearch_java.dylib build/libs/usearch/shared/darwin-amd64/libusearch_java.dylib || true
+          cp usearch-jni-macos-arm64/libusearch_java.dylib build/libs/usearch/shared/darwin-arm64/libusearch_java.dylib || true
 
           # Android
-          cp usearch-jni-android-arm64/libusearch_jni.so build/libs/usearch/shared/android-arm64/libusearch_jni.so || true
-          cp usearch-jni-android-arm32/libusearch_jni.so build/libs/usearch/shared/android-arm32/libusearch_jni.so || true
+          cp usearch-jni-android-arm64/libusearch_java.so build/libs/usearch/shared/android-arm64/libusearch_java.so || true
+          cp usearch-jni-android-arm32/libusearch_java.so build/libs/usearch/shared/android-arm32/libusearch_java.so || true
 
           echo "=== JNI libraries organized ==="
-          tree build/libs/usearch/shared || find build/libs/usearch/shared -name "libusearch_jni.*" | sort
+          tree build/libs/usearch/shared || find build/libs/usearch/shared -name "libusearch_java.*" | sort
 
           # Now build the actual fatJar
           gradle fatJar
@@ -1119,7 +1119,7 @@ jobs:
           cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_JEMALLOC=1
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
-          cp "${{ github.workspace }}/build_artifacts/libusearch_c.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
+          cp "${{ github.workspace }}/build_artifacts/libusearch_shared.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
 
       - name: Build C library for MacOS
         if: matrix.os == 'macos-15'
@@ -1129,7 +1129,7 @@ jobs:
           cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_JEMALLOC=0
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
-          cp "${{ github.workspace }}/build_artifacts/libusearch_c.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
+          cp "${{ github.workspace }}/build_artifacts/libusearch_shared.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
 
       - name: Build C library for Windows
         if: matrix.os == 'windows-2022'
@@ -1138,7 +1138,7 @@ jobs:
           cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_JEMALLOC=0
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
-          cp "${{ github.workspace }}\build_artifacts\libusearch_c.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
+          cp "${{ github.workspace }}\build_artifacts\libusearch_shared.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v5

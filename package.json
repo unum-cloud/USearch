@@ -31,18 +31,19 @@
         "node-gyp-build": "^4.8.4"
     },
     "scripts": {
-        "test": "node --test ./javascript/usearch.test.js",
+        "build-js": "tsc -p javascript/tsconfig-esm.json && tsc -p javascript/tsconfig-cjs.json && cp javascript/dist-package-esm.json javascript/dist/esm/package.json && cp javascript/dist-package-cjs.json javascript/dist/cjs/package.json",
+        "build-native": "cmake-js compile --out build_node --CDUSEARCH_BUILD_LIB_C=ON --CDUSEARCH_BUILD_LIB_NODE=ON --CDUSEARCH_BUILD_TEST_CPP=OFF --CDUSEARCH_BUILD_BENCH_CPP=OFF --target usearch_node",
+        "build-native-stub": "cmake-js compile --out build_node_stub --CDUSEARCH_BUILD_LIB_C_STUB=ON --CDUSEARCH_BUILD_LIB_NODE=ON --CDUSEARCH_BUILD_TEST_CPP=OFF --CDUSEARCH_BUILD_BENCH_CPP=OFF --target usearch_node",
         "install": "node-gyp-build",
-        "prebuild-single": "prebuildify --napi --strip",
-        "prebuild-arm64": "prebuildify --arch arm64 --napi",
-        "prebuild-darwin-x64+arm64": "prebuildify --arch arm64+x64 --napi --strip",
-        "build-js": "tsc -p javascript/tsconfig-esm.json && tsc -p javascript/tsconfig-cjs.json && cp javascript/dist-package-esm.json javascript/dist/esm/package.json && cp javascript/dist-package-cjs.json javascript/dist/cjs/package.json"
+        "prebuild": "npm run build-native && node javascript/stage-prebuild.js build_node",
+        "prebuild-arm64": "cmake-js compile --out build_node_arm64 --arch arm64 --CDUSEARCH_BUILD_LIB_C=ON --CDUSEARCH_BUILD_LIB_NODE=ON --CDUSEARCH_BUILD_TEST_CPP=OFF --CDUSEARCH_BUILD_BENCH_CPP=OFF --target usearch_node && node javascript/stage-prebuild.js build_node_arm64 arm64",
+        "test": "node --test ./javascript/usearch.test.js"
     },
     "devDependencies": {
         "@types/bindings": "^1.5.5",
         "@types/node": "^24.3.0",
-        "node-gyp": "^11.4.2",
-        "prebuildify": "^6.0.1",
+        "cmake-js": "^8.0.0",
+        "prettier": "^3.9.6",
         "remark-cli": "^12.0.1",
         "remark-gfm": "^4.0.1",
         "remark-math": "^6.0.0",

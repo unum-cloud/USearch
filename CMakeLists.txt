@@ -47,6 +47,8 @@ option(USEARCH_BUILD_TEST_C "Compile a test for the C 99 interface" OFF)
 option(USEARCH_BUILD_LIB_C_STUB "Compile a brute-force stand-in for the C 99 interface" OFF)
 option(USEARCH_BUILD_LIB_JAVA "Compile a native library for the Java bindings" OFF)
 option(USEARCH_BUILD_LIB_WOLFRAM "Compile a native library for the Wolfram Language bindings" OFF)
+option(USEARCH_BUILD_LIB_PYTHON "Compile the CPython extension; `scikit-build-core` switches it on" OFF)
+option(USEARCH_BUILD_LIB_NODE "Compile the Node addon; `cmake-js` switches it on" OFF)
 option(USEARCH_BUILD_CUDA "Compile CUDA index tests & benchmarks" ${USEARCH_CAN_BUILD_CUDA})
 
 # One list feeds every CUDA target, so a fat binary from this tree runs on the whole fleet. Ampere is the floor: its
@@ -99,7 +101,7 @@ include(ExternalProject)
 
 # Configuration
 include(GNUInstallDirs)
-set(USEARCH_TARGET_NAME ${PROJECT_NAME})
+set(USEARCH_TARGET_NAME usearch_header)
 set(USEARCH_CONFIG_INSTALL_DIR
     "${CMAKE_INSTALL_DATADIR}/cmake/${PROJECT_NAME}"
     CACHE INTERNAL ""
@@ -113,85 +115,36 @@ set(USEARCH_CMAKE_PROJECT_CONFIG_FILE "${USEARCH_CMAKE_CONFIG_DIR}/${PROJECT_NAM
 set(USEARCH_CMAKE_PROJECT_TARGETS_FILE "${USEARCH_CMAKE_CONFIG_DIR}/${PROJECT_NAME}Targets.cmake")
 set(USEARCH_PKGCONFIG_INSTALL_DIR "${CMAKE_INSTALL_DATADIR}/pkgconfig")
 
-include(CheckCSourceCompiles)
-# Check for `__fp16` support
-check_c_source_compiles(
-    [=[
-int
-main(int argc, char *argv)
-{
-  __fp16 a = 1.0;
-  __fp16 b = a + a;
-  return 0;
-}
-]=]
-    USEARCH_CAN_COMPILE_FP16
-)
-
-# Check for `_Float16` support
-check_c_source_compiles(
-    [=[
-int
-main(int argc, char *argv)
-{
-  _Float16 a = 1.0;
-  _Float16 b = a + a;
-  return 0;
-}
-]=]
-    USEARCH_CAN_COMPILE_FLOAT16
-)
-
-# Check for `__bf16` support
-check_c_source_compiles(
-    [=[
-int
-main(int argc, char *argv)
-{
-  __bf16 a = 1.0;
-  __bf16 b = a + a;
-  return 0;
-}
-]=]
-    USEARCH_CAN_COMPILE_BF16
-)
-
-# Check for `_Bfloat16` support
-check_c_source_compiles(
-    [=[
-int
-main(int argc, char *argv)
-{
-  _Bfloat16 a = 1.0;
-  _Bfloat16 b = a + a;
-  return 0;
-}
-]=]
-    USEARCH_CAN_COMPILE_BFLOAT16
-)
-
-# Define our header-only library
-add_library(${USEARCH_TARGET_NAME} INTERFACE)
-add_library(${PROJECT_NAME}::${USEARCH_TARGET_NAME} ALIAS ${USEARCH_TARGET_NAME})
 set(USEARCH_INCLUDE_BUILD_DIR "${PROJECT_SOURCE_DIR}/include/")
 
-# Concepts are the main reason C++20 is the base language level, with `std::atomic_ref` and the `<bit>` helpers close
-# behind - and the interface target must say so, or external consumers get an unbuildable contract.
-target_compile_features(${USEARCH_TARGET_NAME} INTERFACE cxx_std_20)
+# The core: the basic graph index and the utilities it stands on - six headers on the standard library alone, no sibling
+# library in sight. Concepts are the main reason C++20 is the base language level, with `std::atomic_ref` and the
+# `<bit>` helpers close behind - and the interface target must say so, or external consumers get an unbuildable
+# contract.
+add_library(usearch_core INTERFACE)
+add_library(${PROJECT_NAME}::core ALIAS usearch_core)
+set_target_properties(usearch_core PROPERTIES EXPORT_NAME core)
+target_sources(
+    usearch_core
+    INTERFACE FILE_SET
+              HEADERS
+              BASE_DIRS
+              ${USEARCH_INCLUDE_BUILD_DIR}
+              FILES
+              include/usearch/types.h
+              include/usearch/utilities/types.hpp
+              include/usearch/utilities/sanitizers.hpp
+              include/usearch/utilities/ram_buffers.hpp
+              include/usearch/utilities/ram_tables.hpp
+              include/usearch/basic/ram_index.hpp
+)
+target_compile_features(usearch_core INTERFACE cxx_std_20)
 
-# Define which types can be compiled
-target_compile_definitions(
-    ${USEARCH_TARGET_NAME} INTERFACE "USEARCH_CAN_COMPILE_FP16=$<BOOL:${USEARCH_CAN_COMPILE_FP16}>"
-)
-target_compile_definitions(
-    ${USEARCH_TARGET_NAME} INTERFACE "USEARCH_CAN_COMPILE_FLOAT16=$<BOOL:${USEARCH_CAN_COMPILE_FLOAT16}>"
-)
-target_compile_definitions(
-    ${USEARCH_TARGET_NAME} INTERFACE "USEARCH_CAN_COMPILE_BF16=$<BOOL:${USEARCH_CAN_COMPILE_BF16}>"
-)
-target_compile_definitions(
-    ${USEARCH_TARGET_NAME} INTERFACE "USEARCH_CAN_COMPILE_BFLOAT16=$<BOOL:${USEARCH_CAN_COMPILE_BFLOAT16}>"
-)
+# The whole header-only library: every header, the siblings it reaches into, and the type verdicts below.
+add_library(${USEARCH_TARGET_NAME} INTERFACE)
+add_library(${PROJECT_NAME}::header ALIAS ${USEARCH_TARGET_NAME})
+set_target_properties(${USEARCH_TARGET_NAME} PROPERTIES EXPORT_NAME header)
+target_link_libraries(${USEARCH_TARGET_NAME} INTERFACE usearch_core)
 
 target_include_directories(
     ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE} INTERFACE $<BUILD_INTERFACE:${USEARCH_INCLUDE_BUILD_DIR}>
@@ -215,21 +168,13 @@ if (USEARCH_INSTALL)
     install(FILES ${USEARCH_CMAKE_PROJECT_CONFIG_FILE} ${USEARCH_CMAKE_VERSION_CONFIG_FILE}
             DESTINATION ${USEARCH_CONFIG_INSTALL_DIR}
     )
-    export(
-        TARGETS ${USEARCH_TARGET_NAME}
-        NAMESPACE ${PROJECT_NAME}::
-        FILE ${USEARCH_CMAKE_PROJECT_TARGETS_FILE}
-    )
     install(
-        TARGETS ${USEARCH_TARGET_NAME}
+        TARGETS usearch_core ${USEARCH_TARGET_NAME}
         EXPORT ${USEARCH_TARGETS_EXPORT_NAME}
+        FILE_SET HEADERS
+        DESTINATION ${USEARCH_INCLUDE_INSTALL_DIR}
         INCLUDES
         DESTINATION ${USEARCH_INCLUDE_INSTALL_DIR}
-    )
-    install(
-        EXPORT ${USEARCH_TARGETS_EXPORT_NAME}
-        NAMESPACE ${PROJECT_NAME}::
-        DESTINATION ${USEARCH_CONFIG_INSTALL_DIR}
     )
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc" DESTINATION ${USEARCH_PKGCONFIG_INSTALL_DIR})
 endif ()
@@ -271,14 +216,17 @@ endif ()
 
 # Shared wiring for every target this project builds. Optimization and debug level are deliberately absent: they live in
 # `CMAKE_<LANG>_FLAGS_<CONFIG>`, where a preset or a command-line switch can move them. Only what the code actually
-# depends on - fast math, the diagnostics, the sanitizers - is pinned here.
+# depends on - fast math, the diagnostics, the sanitizers - is pinned here, and only for the host languages, so a unit
+# the CUDA driver compiles is not handed flags it rejects. `HOST` tunes for the machine at hand and takes no probe
+# verdict, since the compiler's own feature macros then say exactly what the host has.
 function (usearch_setup_target TARGET_NAME)
+    cmake_parse_arguments(usearch_setup "HOST" "" "" ${ARGN})
     # Compiler-specific options List of all possible compiler IDs:
     # https://cmake.org/cmake/help/latest/variable/CMAKE_LANG_COMPILER_ID.html
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         target_compile_options(
             ${TARGET_NAME}
-            PRIVATE $<$<CONFIG:DEBUG>:-fsanitize=address
+            PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:-fsanitize=address
                     -fsanitize=leak
                     -fsanitize=alignment
                     -fsanitize=undefined
@@ -291,7 +239,7 @@ function (usearch_setup_target TARGET_NAME)
                     -Wno-unknown-pragmas
                     -fmax-errors=${USEARCH_MAX_ERRORS}
                     -pedantic
-                    -fdiagnostics-color=always
+                    -fdiagnostics-color=always>
         )
         target_link_options(
             ${TARGET_NAME}
@@ -310,7 +258,7 @@ function (usearch_setup_target TARGET_NAME)
     elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         target_compile_options(
             ${TARGET_NAME}
-            PRIVATE $<$<CONFIG:DEBUG>:-fsanitize=address
+            PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:-fsanitize=address
                     -fsanitize=alignment
                     -fsanitize=undefined
                     >
@@ -318,7 +266,7 @@ function (usearch_setup_target TARGET_NAME)
                     -fPIC
                     -pedantic
                     -Wfatal-errors
-                    -fcolor-diagnostics
+                    -fcolor-diagnostics>
         )
         target_link_options(
             ${TARGET_NAME}
@@ -367,11 +315,18 @@ function (usearch_setup_target TARGET_NAME)
         )
     endif ()
 
-    # One source of truth for header paths: whatever the interface target advertises, including the dependency includes,
-    # without inheriting its compile features onto pure-C targets.
+    # One source of truth for header paths and published definitions: whatever the interface target advertises,
+    # including what the dependencies carry, without inheriting its compile features onto pure-C targets.
     target_include_directories(
         ${TARGET_NAME} PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
     )
+    if (usearch_setup_HOST)
+        target_compile_options(${TARGET_NAME} PRIVATE ${USEARCH_HOST_TUNING})
+    else ()
+        target_compile_definitions(
+            ${TARGET_NAME} PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_COMPILE_DEFINITIONS>
+        )
+    endif ()
     set_target_properties(${TARGET_NAME} PROPERTIES CXX_STANDARD 20)
 
     # On Windows, when using multi-configuration CMake builds, the paths will be nested, resulting in
@@ -402,8 +357,7 @@ function (usearch_setup_target TARGET_NAME)
                    LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}"
     )
 
-    # On Linux and MacOS our primary shared libraries for C are called `libusearch_c.so` and `libusearch_c.dylib`, while
-    # on Windows the "lib" prefix might be missing by default, so let's ensure it's always there
+    # Every library carries the `lib` prefix, Windows included, so one file name serves every platform.
     get_target_property(TARGET_TYPE ${TARGET_NAME} TYPE)
 
     if (TARGET_TYPE STREQUAL "SHARED_LIBRARY" OR TARGET_TYPE STREQUAL "STATIC_LIBRARY")
@@ -411,9 +365,9 @@ function (usearch_setup_target TARGET_NAME)
     endif ()
 
     # Link NumKong's shared library, which answers the capability queries and punned kernels for the host CPU.
-    if (TARGET nk_shared)
+    if (TARGET numkong_shared)
         target_compile_definitions(${TARGET_NAME} PRIVATE "NK_RUNTIME_DISPATCH=1")
-        target_link_libraries(${TARGET_NAME} PRIVATE nk_shared)
+        target_link_libraries(${TARGET_NAME} PRIVATE numkong_shared)
     endif ()
 
 endfunction ()
@@ -425,8 +379,10 @@ include(FetchContent)
 
 # The siblings are the engine rather than an option: every header reaches for them unguarded, so there is no build
 # without them and no switch pretending otherwise. Include directories are copied onto the interface target, because
-# `usearch_setup_target` reads `INTERFACE_INCLUDE_DIRECTORIES` directly - a genex that sees only what this target
-# declares, not what its link interface would carry - to keep the C++20 feature requirement off the pure-C targets.
+# `usearch_setup_target` reads `INTERFACE_INCLUDE_DIRECTORIES` and `INTERFACE_COMPILE_DEFINITIONS` directly - genexes
+# that see only what this target declares, not what its link interface would carry - to keep the C++20 feature
+# requirement off the pure-C targets. So each sibling's paths and definitions are copied onto the interface here: the
+# definitions are how NumKong tells its consumers which kits this compiler builds.
 function (usearch_sibling NAME LINK_TARGET REPOSITORY TAG)
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${NAME}/CMakeLists.txt")
         add_subdirectory(${NAME})
@@ -441,9 +397,24 @@ function (usearch_sibling NAME LINK_TARGET REPOSITORY TAG)
     endif ()
 
     target_link_libraries(${USEARCH_TARGET_NAME} INTERFACE ${LINK_TARGET})
+
+    # Collected for the export set: their interfaces carry a language level and `Threads::Threads`, which the paths and
+    # definitions copied below do not.
+    get_target_property(SIBLING_TARGET ${LINK_TARGET} ALIASED_TARGET)
+    if (NOT SIBLING_TARGET)
+        set(SIBLING_TARGET ${LINK_TARGET})
+    endif ()
+    set(USEARCH_SIBLING_TARGETS
+        ${USEARCH_SIBLING_TARGETS} ${SIBLING_TARGET}
+        PARENT_SCOPE
+    )
+
     target_include_directories(
         ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE}
         INTERFACE $<TARGET_PROPERTY:${LINK_TARGET},INTERFACE_INCLUDE_DIRECTORIES>
+    )
+    target_compile_definitions(
+        ${USEARCH_TARGET_NAME} INTERFACE $<TARGET_PROPERTY:${LINK_TARGET},INTERFACE_COMPILE_DEFINITIONS>
     )
 endfunction ()
 
@@ -454,23 +425,41 @@ set(NK_BUILD_SHARED
 )
 
 usearch_sibling(
-    numkong numkong::numkong https://github.com/ashvardanian/NumKong 35b2b6b037c4987c05ec07fc699f9d2d524c98e3
+    numkong numkong::header https://github.com/ashvardanian/NumKong 64d486817dff881402d73729c73e9852c13deaf8
 )
 usearch_sibling(
-    forkunion forkunion::header https://github.com/ashvardanian/ForkUnion 42fe67cc8dc1faf80a77d3b24b606468265bab20
+    forkunion forkunion::header https://github.com/ashvardanian/ForkUnion 4c6922026d74066994a47c0fa54c01ba9df3b046
 )
 usearch_sibling(
-    stringzilla stringzilla::stringzilla_header https://github.com/ashvardanian/StringZilla
-    a5ac71758f177eb8a27883cd1bbae75698ff2c78
+    stringzilla stringzilla::header https://github.com/ashvardanian/StringZilla
+    f3543c2d0b59d7ec1f04a0c311b47b14905a808b
 )
 usearch_sibling(
-    smashtable smashtable::smashtable https://github.com/ashvardanian/SmashTable
-    cf6dfc559867d222522d5ec0b15a4218034626ee
+    smashtable smashtable::header https://github.com/ashvardanian/SmashTable 4f3f9c1a121cc24865e7f2111e89052aa4e470a1
 )
 
+# Recorded without headers - each sibling owns its own - so `usearch::header` names nothing a consumer cannot resolve.
+if (USEARCH_INSTALL AND USEARCH_SIBLING_TARGETS)
+    install(TARGETS ${USEARCH_SIBLING_TARGETS} EXPORT ${USEARCH_TARGETS_EXPORT_NAME})
+endif ()
+
+# Both exports read the set as it stands when called, so they trail every target that belongs to it.
+if (USEARCH_INSTALL)
+    export(
+        TARGETS usearch_core ${USEARCH_TARGET_NAME} ${USEARCH_SIBLING_TARGETS}
+        NAMESPACE ${PROJECT_NAME}::
+        FILE ${USEARCH_CMAKE_PROJECT_TARGETS_FILE}
+    )
+    install(
+        EXPORT ${USEARCH_TARGETS_EXPORT_NAME}
+        NAMESPACE ${PROJECT_NAME}::
+        DESTINATION ${USEARCH_CONFIG_INSTALL_DIR}
+    )
+endif ()
+
 # The dispatch library exports symbols the pre-loaded metrics resolve against at runtime.
-if (TARGET nk_shared)
-    set_target_properties(nk_shared PROPERTIES ENABLE_EXPORTS ON)
+if (TARGET numkong_shared)
+    set_target_properties(numkong_shared PROPERTIES ENABLE_EXPORTS ON)
 endif ()
 
 # Only `safegraphs_format.hpp` reaches for yyjson, and only a compiled target ever includes it - so it is acquired under
@@ -480,6 +469,12 @@ if (USEARCH_BUILD_TEST_CPP
     OR USEARCH_BUILD_LIB_C
     OR USEARCH_BUILD_TEST_C
 )
+    # Its objects go inside our own libraries, so a packager installing this tree must not publish yyjson's header,
+    # archive and CMake config beside ours.
+    set(YYJSON_INSTALL
+        OFF
+        CACHE BOOL "" FORCE
+    )
     FetchContent_Declare(
         yyjson
         GIT_REPOSITORY https://github.com/ibireme/yyjson.git
@@ -553,4 +548,12 @@ endif ()
 
 if (${USEARCH_BUILD_LIB_JAVA})
     add_subdirectory(java)
+endif ()
+
+if (${USEARCH_BUILD_LIB_PYTHON})
+    add_subdirectory(python)
+endif ()
+
+if (${USEARCH_BUILD_LIB_NODE})
+    add_subdirectory(javascript)
 endif ()

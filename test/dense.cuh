@@ -30,7 +30,7 @@
 #include <algorithm> // `std::sort`, `std::unique`
 #include <array>     // `std::array`
 #include <atomic>    // `std::atomic`
-#include <bit>       // `std::bit_cast` - the ULP distance of the oracle audits
+#include <bit>       // `std::bit_cast` - the ULP distance of the oracle audits; `std::bit_floor` - a cell's ceiling
 #include <chrono>    // `std::chrono::microseconds`
 #include <memory>    // `std::allocator` - the part path buffer
 #include <thread>    // `std::this_thread::sleep_for`
@@ -100,6 +100,27 @@ constexpr u64_t dense_seed_upstream_k = 0x0957EA30ull;
 #pragma endregion Constants and Seeds
 
 #pragma region Shared Helpers
+
+/** @brief Gate: a cell's kit is compiled once its requested ceiling is a bit some chain actually
+ *      picked - a build without the kit must not pass its serial floor under a SIMD name. */
+template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, nk_capability_t caps_>
+concept dense_cell_compiled =
+    caps_ == nk_cap_serial_k ||
+    std::bit_floor(caps_) == dense_quads_chain<kernel_, typename nk::type_for<dtype_>::type, caps_>::picked_k ||
+    std::bit_floor(caps_) == dense_tiles_chain<kernel_, typename nk::type_for<dtype_>::type, caps_>::picked_k;
+
+/** @brief Whether this machine offers every bit a cell's kit and atomic reference declare - both
+ *      execute their instructions unconditionally - arming the per-process tile handshake on the way. */
+template <nk_capability_t caps_, template <typename> class atomic_ref_>
+static bool dense_cell_admitted() noexcept {
+    constexpr fu::capabilities_t atomics_k = atomic_ref_<u32_t>::capabilities_k;
+    if ((fu::runtime_capabilities() & atomics_k) != atomics_k) return false;
+    if constexpr (caps_ != nk_cap_serial_k) {
+        if ((nk_capabilities_available() & caps_) != caps_) return false;
+        nk_configure_thread(nk_capabilities_available());
+    }
+    return true;
+}
 
 /** @brief Per-thread state for the concurrent scenarios: one vector slice & one traversal context each. */
 template <typename index_type_>
@@ -1117,8 +1138,9 @@ std::size_t test_dense_indexes_guards() {
 /**
  *  @brief Executor arenas seeded at exactly the first-size estimate serve every walk: a re-table
  *      past the seed chunk lands in a chunk the arena opens beside it, so no walk saturates and
- *      every query ranks. A predicate admitting fewer keys than the pool holds makes every walk
- *      exhaust its shard, so every thread's visited set outgrows its first size.
+ *      every query ranks. A pool as wide as the whole reservation makes every walk exhaustive by
+ *      construction - approximate search promises nothing narrower - so every thread's visited set
+ *      outgrows its first size, and every key a sparse predicate admits surfaces.
  */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 std::size_t test_dense_indexes_arena_growth() {
@@ -1146,13 +1168,16 @@ std::size_t test_dense_indexes_arena_growth() {
     failures += expect(succeeded(added.status));
     failures += expect_eq(added.saturated_walks, 0u);
 
-    // Sixteen keys match, the pool holds thirty-two: every walk visits its whole shard.
+    // Sixteen keys match; with the pool as wide as the reservation every walk visits its whole shard,
+    // so all eight surface - a narrower pool could promise only that what surfaces is admitted and ranked.
+    typename index_t::search_config_t const exhaustive {static_cast<typename index_t::small_size_t>(rows)};
     auto sparse = [](key_t key) noexcept { return key % 128 == 0 ? admission_t::admit_k : admission_t::reject_k; };
     std::vector<key_t> found_keys(queries * wanted);
     std::vector<typename indexes_type_::distance_t> found_distances(queries * wanted);
     std::vector<std::size_t> counts(queries);
-    auto const found = indexes.search(vectors.view()(nk::range(rows, rows + queries), nk::slice), executor, {}, wanted,
-                                      std::span {found_keys}, std::span {found_distances}, std::span {counts}, sparse);
+    auto const found = indexes.search(vectors.view()(nk::range(rows, rows + queries), nk::slice), executor, exhaustive,
+                                      wanted, std::span {found_keys}, std::span {found_distances}, std::span {counts},
+                                      sparse);
     failures += expect(succeeded(found.status));
     failures += expect_eq(found.saturated_walks, 0u);
     for (std::size_t const count : counts) failures += expect_eq(count, wanted);

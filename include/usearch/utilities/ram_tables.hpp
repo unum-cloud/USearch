@@ -447,8 +447,7 @@ class growing_multimap {
         if (!slots_count_) return;
         std::size_t chain = first_probe_of(key, slots_count_);
         while (true) {
-            slot_state_t const state = std::atomic_ref<slot_state_t const>(states_[chain]) //
-                                           .load(std::memory_order_acquire);
+            slot_state_t const state = std::atomic_ref<slot_state_t>(states_[chain]).load(std::memory_order_acquire);
             if (state == slot_state_t::empty_k) return;
             // A building slot's key is still in flight - occupied, but never a match.
             if (state == slot_state_t::published_k && slots_[chain].key == key) callback(slots_[chain].value);

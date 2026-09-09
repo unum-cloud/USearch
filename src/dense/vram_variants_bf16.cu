@@ -1,7 +1,7 @@
 /**
- *  @brief The bf16 shard of the dense index library: its VRAM arms' explicit instantiations.
+ *  @brief The bf16 unit of the dense index library: its VRAM arms' explicit instantiations.
  *  @author Ash Vardanian
- *  @file src/dense/vram_indexes_bf16.cu
+ *  @file src/dense/vram_variants_bf16.cu
  *  @date September 1, 2026
  */
 #include "dense_specializations.cuh"

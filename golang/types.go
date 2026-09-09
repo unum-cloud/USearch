@@ -30,7 +30,7 @@ import (
 
 /*
 #cgo CFLAGS: -I${SRCDIR}
-#cgo LDFLAGS: -L${SRCDIR} -L/usr/local/lib -lusearch_c
+#cgo LDFLAGS: -L${SRCDIR} -L/usr/local/lib -lusearch_static -lstdc++
 
 #include "shim.h"
 */

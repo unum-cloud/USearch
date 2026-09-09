@@ -1,7 +1,7 @@
 /**
  *  @brief The bioinformatics unit of the basic-index suite: ACGT reads under an
  *      alignment distance with transition/transversion-weighted substitutions - the
- *      non-transparent, integer-exact, wide-id, @c uuid_t-keyed corner, and the only
+ *      non-transparent, integer-exact, wide-id, @c unum::usearch::uuid_t-keyed corner, and the only
  *      unit whose serialized bytes differ from the in-RAM form.
  *
  *  @author Ash Vardanian
@@ -128,14 +128,16 @@ struct bioinformatics_handmade_t {
     std::array<std::array<u64_t, 3>, 3> distances;
 };
 
-struct bioinformatics_fixture_t {
-    using index_t = basic_ram_index<dna_t, uuid_t, u64_t, u64_t, dummy_waiter_t, counting_allocator_t>;
+template <typename wait_type_ = dummy_waiter_t, template <typename> class atomic_ref_template_ = std::atomic_ref>
+struct bioinformatics_fixture {
+    using index_t =
+        basic_ram_index<dna_t, us::uuid_t, u64_t, u64_t, wait_type_, atomic_ref_template_, counting_allocator_t>;
 
     static index_t make_index(allocation_ledger_t& ledger) { return index_t {counting_allocator_t {ledger}}; }
     static alignment_metric_t make_metric() { return {}; }
     static packed_dna_codec_t make_codec() { return {}; }
-    static uuid_t make_key(std::size_t ordinal) {
-        return std::bit_cast<uuid_t>(std::array<u64_t, 2> {mix_bits(ordinal), 0xB10B10B1ull ^ ordinal});
+    static us::uuid_t make_key(std::size_t ordinal) {
+        return std::bit_cast<us::uuid_t>(std::array<u64_t, 2> {mix_bits(ordinal), 0xB10B10B1ull ^ ordinal});
     }
     static u64_t oracle(dna_t const& query, dna_t const& stored) noexcept {
         std::vector<u64_t> previous_row, current_row;
@@ -178,6 +180,8 @@ struct bioinformatics_fixture_t {
         return values;
     }
 };
+
+using bioinformatics_fixture_t = bioinformatics_fixture<>;
 
 static_assert(basic_value<dna_t>);
 static_assert(basic_metric<alignment_metric_t, dna_t, u64_t>);
@@ -244,6 +248,8 @@ std::size_t test_bioinformatics() {
     bioinformatics_fixture_t const fixture;
     std::size_t failures = 0;
     failures += test_basic_scenarios(fixture);
+    failures += test_basic_scenarios(bioinformatics_fixture<flaky_waiter_t> {});
+    failures += test_basic_scenarios(bioinformatics_fixture<dummy_waiter_t, fu::preferred_atomic_ref> {});
     failures += check_bioinformatics_codec();
     failures += check_bioinformatics_independent_oracle();
     failures += test_basic_safegraphs_roundtrip(fixture, "uuid", "needleman-wunsch"); // The uuid key column.

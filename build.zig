@@ -23,18 +23,16 @@ pub fn build(b: *std.Build) void {
     // through the stable C headers alone. `-Dlib-dir` names a directory holding the library, and
     // may be repeated; left alone it points where an in-tree CMake build leaves it.
     //
-    // The shared `usearch_c` is what gets linked, not the engine's internal archives. It resolves
-    // its own dependencies - yyjson, ForkUnion, and the C++ runtime CMake built it against - so
-    // one `-l` finishes the link. An archive would leak every libstdc++ symbol into this link,
-    // and `linkSystemLibrary("stdc++")` cannot answer them: Zig reads that name as a request for
-    // its own libc++ and substitutes it, leaving a GCC-built archive short.
+    // The shared library, not the archive the other bindings take: it resolves yyjson, ForkUnion
+    // and its C++ runtime itself. Zig answers `linkSystemLibrary("stdc++")` with its own libc++,
+    // which leaves a GCC-built archive short.
     //
     // The brute-force stand-in publishes the same name in a directory of its own, which is what
     // lets `-Dlib-dir=build/stub` run this binding's tests without building the engine at all.
     const library_directories = b.option([]const []const u8, "lib-dir", "Directory holding the engine library; repeatable") orelse
-        &[_][]const u8{"build_release/c"};
+        &[_][]const u8{"build_release"};
     const library_names = b.option([]const []const u8, "lib", "Engine library to link; repeatable") orelse
-        &[_][]const u8{"usearch_c"};
+        &[_][]const u8{"usearch_shared"};
 
     // The binding itself, which a dependent imports. It declares the C ABI with `extern fn`, so it
     // carries the link directives too - importing it should not mean relinking it by hand.

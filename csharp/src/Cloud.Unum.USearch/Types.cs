@@ -1274,7 +1274,7 @@ internal struct NativeResidencyOptions
 /// </remarks>
 internal static unsafe partial class NativeMethods
 {
-    private const string LibraryName = "libusearch_c";
+    private const string LibraryName = "libusearch_shared";
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

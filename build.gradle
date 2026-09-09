@@ -80,10 +80,8 @@ spotless {
 }
 
 // The JNI boundary compiles against `include/usearch/*.h` alone - flat C headers with no
-// submodule of their own - and links the pre-instantiated `usearch_c` shared library. CMake
-// builds both into `usearchLibraryPath`; point it elsewhere to consume a different tree. Nothing
-// here instantiates an index template, so no NumKong, ForkUnion, or StringZilla header is
-// reachable from `java/lib.c`.
+// submodule of their own - and links the `usearch_static` archive, so the JAR stages one shared object per platform
+// rather than two. CMake builds both into `usearchLibraryPath`; point it elsewhere for a different tree.
 ext.usearchLibraryPath = (findProperty("usearchLibraryPath") ?: "$rootDir/build_artifacts").toString()
 
 // Where the JNI library is staged for the test task's library path and for the JAR to package.
@@ -95,6 +93,9 @@ ext.nativeDirectory = layout.buildDirectory.dir("libs/usearch/shared").get().asF
 // jobs already filled be reused instead of rebuilt. Swap `-DUSEARCH_BUILD_LIB_C=1` for
 // `-DUSEARCH_BUILD_LIB_C_STUB=1` to link the brute-force stand-in and skip the engine entirely.
 tasks.register("configureNativeLibrary", Exec) {
+    inputs.files("$rootDir/CMakeLists.txt", "$rootDir/java/CMakeLists.txt", "$rootDir/c/CMakeLists.txt",
+        "$rootDir/src/CMakeLists.txt")
+    outputs.file("${project.ext.usearchLibraryPath}/CMakeCache.txt")
     commandLine "cmake", "-B", project.ext.usearchLibraryPath, "-S", rootDir.toString(),
         "-DUSEARCH_BUILD_LIB_JAVA=1",
         "-DUSEARCH_BUILD_LIB_C=1",
@@ -104,8 +105,10 @@ tasks.register("configureNativeLibrary", Exec) {
 
 tasks.register("compileNativeLibrary", Exec) {
     dependsOn "configureNativeLibrary"
+    inputs.files(fileTree("$rootDir/src"), fileTree("$rootDir/include"), file("$rootDir/java/lib.c"))
+    outputs.dir(project.ext.usearchLibraryPath)
     commandLine "cmake", "--build", project.ext.usearchLibraryPath,
-        "--config", "Release", "--target", "usearch_jni", "--parallel"
+        "--config", "Release", "--target", "usearch_java", "--parallel"
 }
 
 // The loader reads a shared object out of a directory and never out of an archive, so the JAR
@@ -115,7 +118,7 @@ tasks.register("compileNativeLibrary", Exec) {
 tasks.register("stageNativeLibrary", Copy) {
     dependsOn "compileNativeLibrary"
     from(project.ext.usearchLibraryPath) {
-        include "**/libusearch_jni.so", "**/libusearch_jni.dylib", "**/usearch_jni.dll"
+        include "**/libusearch_java.so", "**/libusearch_java.dylib", "**/libusearch_java.dll"
     }
     eachFile { it.relativePath = new RelativePath(true, it.relativePath.lastName) }
     includeEmptyDirs = false

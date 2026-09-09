@@ -21,6 +21,6 @@
         "strict": true,
         "target": "es2020",
         "traceResolution": false,
-        "types": ["node","./node-gyp-build.d.ts"]
+        "types": ["node", "./node-gyp-build.d.ts"]
     }
 }

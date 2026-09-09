@@ -9,14 +9,17 @@ This directory is a subdirectory of the root project rather than a project of it
 Set `WOLFRAM_PATH` to your Mathematica installation if it is not detected automatically.
 
 ```sh
-cmake -B build -D USEARCH_BUILD_LIB_WOLFRAM=1 -D WOLFRAM_PATH=/usr/local/Wolfram/Mathematica
-cmake --build build --config Release --target USearchWFM
+cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_LIB_WOLFRAM=1 \
+    -D WOLFRAM_PATH=/usr/local/Wolfram/Mathematica
+cmake --build build_release --config Release --target usearch_wolfram
 
 # Resulting artifact will be named like:
-#   build/wolfram/USearchWFM.so     on Linux
-#   build/wolfram/USearchWFM.dylib  on macOS
-#   build/wolfram/USearchWFM.dll    on Windows
+#   build_release/usearch_wolfram.so     on Linux
+#   build_release/usearch_wolfram.dylib  on macOS
+#   build_release/usearch_wolfram.dll    on Windows
 ```
+
+It is the one library here without a `lib` prefix, because Wolfram finds a library dropped into `LibraryResources/$SystemID` by its bare name.
 
 ## Quickstart
 
@@ -24,8 +27,8 @@ Load the library and bind functions using `LibraryFunctionLoad`.
 Below is a minimal example mirroring the API in `wolfram/test.wls`.
 
 ```wolfram
-lib = If[$OperatingSystem === "Windows", "build\\wolfram\\USearchWFM.dll",
-   If[$OperatingSystem === "MacOSX", "build/wolfram/USearchWFM.dylib", "build/wolfram/USearchWFM.so"]
+lib = If[$OperatingSystem === "Windows", "build_release\\usearch_wolfram.dll",
+   If[$OperatingSystem === "MacOSX", "build_release/usearch_wolfram.dylib", "build_release/usearch_wolfram.so"]
 ];
 
 ExecutorCreate  = LibraryFunctionLoad[lib, "ExecutorCreate",  {"UTF8String", Integer}, Integer];

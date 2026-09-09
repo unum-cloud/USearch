@@ -30,6 +30,10 @@
 
 #include "usearch/utilities/types.hpp"
 
+/** The short spelling every test reaches the library through where its `using` directive is
+ *  ambiguous - Darwin declares a global `uuid_t` too - or unwanted, as inside foreign specializations. */
+namespace us = unum::usearch;
+
 namespace unum::usearch {
 
 #define expect(cond) expect_((bool)(cond), #cond, __FILE__, __LINE__)
@@ -297,8 +301,8 @@ nk::matrix<scalar_> make_vectors(std::size_t count, std::size_t dimensions, u64_
  *      compared enum in the suite, and {fmt} refuses unknown enums at compile time. */
 template <>
 struct fmt::formatter<unum::usearch::status_t> : fmt::formatter<char const*> {
-    auto format(unum::usearch::status_t status, format_context& context) const {
-        return fmt::formatter<char const*>::format(unum::usearch::status_to_string(status), context);
+    auto format(us::status_t status, format_context& context) const {
+        return fmt::formatter<char const*>::format(us::status_to_string(status), context);
     }
 };
 

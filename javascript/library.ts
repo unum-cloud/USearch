@@ -56,13 +56,9 @@ export interface CompiledIndex {
     executor: CompiledExecutor,
     expansion: number,
     scalarKind: string | undefined,
-    stats: Float64Array | undefined
+    stats: Float64Array | undefined,
   ): number;
-  refine(
-    executor: CompiledExecutor,
-    expansion: number,
-    stats: Float64Array | undefined
-  ): number;
+  refine(executor: CompiledExecutor, expansion: number, stats: Float64Array | undefined): number;
   search(
     queries: ArrayBufferView,
     keys: Uint8Array,
@@ -71,7 +67,7 @@ export interface CompiledIndex {
     executor: CompiledExecutor,
     expansion: number,
     scalarKind: string | undefined,
-    stats: Float64Array | undefined
+    stats: Float64Array | undefined,
   ): void;
   maxsim(
     queries: ArrayBufferView,
@@ -82,7 +78,7 @@ export interface CompiledIndex {
     executor: CompiledExecutor,
     expansion: number,
     scalarKind: string | undefined,
-    stats: Float64Array | undefined
+    stats: Float64Array | undefined,
   ): void;
   multiply(
     left: ArrayBufferView,
@@ -92,7 +88,7 @@ export interface CompiledIndex {
     executor: CompiledExecutor,
     expansion: number,
     scalarKind: string | undefined,
-    stats: Float64Array | undefined
+    stats: Float64Array | undefined,
   ): void;
   attend(
     queries: ArrayBufferView,
@@ -106,17 +102,13 @@ export interface CompiledIndex {
     massTolerance: number,
     queriesKind: string | undefined,
     valuesKind: string | undefined,
-    stats: Float64Array | undefined
+    stats: Float64Array | undefined,
   ): void;
   count(keys: Uint8Array | BigUint64Array): number[];
   contains(keys: Uint8Array | BigUint64Array): boolean[];
   get(key: Uint8Array | BigUint64Array): Float32Array;
   cursor(): CompiledCursor;
-  find(
-    query: ArrayBufferView,
-    executor: CompiledExecutor,
-    scalarKind: string | undefined
-  ): CompiledFinder;
+  find(query: ArrayBufferView, executor: CompiledExecutor, scalarKind: string | undefined): CompiledFinder;
   save(path: string, executor: CompiledExecutor): void;
   load(path: string, executor: CompiledExecutor): void;
   saveBuffer(executor: CompiledExecutor): Uint8Array;
@@ -138,7 +130,7 @@ export interface CompiledIndexConstructor {
     connectivity: number,
     valuesPerKey: number,
     residency: string,
-    placement: CompiledPlacement
+    placement: CompiledPlacement,
   ): CompiledIndex;
   metadata(path: string): CompiledMetadata;
   metadataBuffer(buffer: Uint8Array): CompiledMetadata;
@@ -146,11 +138,7 @@ export interface CompiledIndexConstructor {
 
 /** The addon's executor constructor, whose residency decides what the other two arguments mean. */
 export interface CompiledExecutorConstructor {
-  new (
-    residency: string,
-    threads: number,
-    placement: CompiledPlacement
-  ): CompiledExecutor;
+  new (residency: string, threads: number, placement: CompiledPlacement): CompiledExecutor;
 }
 
 /** Everything the native addon publishes. */
@@ -179,19 +167,19 @@ function findBuildDirectory(directory: string): string {
 function currentDirectory(): string {
   try {
     if (__dirname) return __dirname;
-  } catch (error) { }
+  } catch (error) {}
   return getRoot(getFileName());
 }
 
 /** The loaded addon, shared by every wrapper class. */
 export const compiled: Compiled = build(findBuildDirectory(currentDirectory()));
 
-// Unreachable, and kept so `ncc` traces the native module into its bundle.
+// Unreachable, and kept so `ncc` traces the native module into its bundle. The name is `node.napi.node`
+// because that is what `node-gyp-build` parses tags out of.
 if (process.uptime() < 0) {
-  require(__dirname + "/../../../prebuilds/darwin-arm64+x64/usearch.node");
-  require(__dirname + "/../../../prebuilds/linux-arm64/usearch.node");
-  require(__dirname + "/../../../prebuilds/linux-x64/usearch.node");
-  require(__dirname + "/../../../prebuilds/win32-ia32/usearch.node");
-  require(__dirname + "/../../../prebuilds/win32-x64/usearch.node");
-  require(__dirname + "/../../../build/Release/usearch.node");
+  require(__dirname + "/../../../prebuilds/darwin-arm64/node.napi.node");
+  require(__dirname + "/../../../prebuilds/darwin-x64/node.napi.node");
+  require(__dirname + "/../../../prebuilds/linux-arm64/node.napi.node");
+  require(__dirname + "/../../../prebuilds/linux-x64/node.napi.node");
+  require(__dirname + "/../../../prebuilds/win32-x64/node.napi.node");
 }

@@ -7,9 +7,7 @@
             "command": "cmake --preset debug && cmake --build --preset debug",
             "args": [],
             "type": "shell",
-            "problemMatcher": [
-                "$gcc"
-            ]
+            "problemMatcher": ["$gcc"]
         },
         {
             "label": "Build Release",
@@ -18,9 +16,7 @@
             "args": [],
             "type": "shell",
             "group": "build",
-            "problemMatcher": [
-                "$gcc"
-            ]
+            "problemMatcher": ["$gcc"]
         },
         {
             "label": "Build Profile",
@@ -28,9 +24,7 @@
             "command": "cmake --preset profile && cmake --build --preset profile",
             "args": [],
             "type": "shell",
-            "problemMatcher": [
-                "$gcc"
-            ]
+            "problemMatcher": ["$gcc"]
         },
         {
             "label": "Build Dev",
@@ -42,10 +36,7 @@
                 "kind": "build",
                 "isDefault": true
             },
-            "problemMatcher": [
-                "$nvcc",
-                "$gcc"
-            ]
+            "problemMatcher": ["$nvcc", "$gcc"]
         },
         {
             "label": "Test Dev",
@@ -62,10 +53,7 @@
         {
             "label": "Swift Build",
             "type": "swift",
-            "args": [
-                "build",
-                "--build-tests"
-            ],
+            "args": ["build", "--build-tests"],
             "env": {},
             "cwd": "${workspaceFolder}",
             "group": "build"

@@ -12,10 +12,7 @@
     // No CUDA grammar here, so highlight the kernels as C++; clangd covers the
     // rest through the `-xcuda` rule in .clangd.
     "file_types": {
-        "C++": [
-            "*.cu",
-            "*.cuh"
-        ]
+        "C++": ["*.cu", "*.cuh"]
     },
     // Keep the project panel, search, and file-watcher out of the heavy dirs.
     // Hiding the submodules trims only Zed's own indexing - clangd reads them
@@ -94,11 +91,7 @@
             "formatter": {
                 "external": {
                     "command": "uvx",
-                    "arguments": [
-                        "clang-format>=22",
-                        "--style=file",
-                        "--assume-filename=a.cpp"
-                    ]
+                    "arguments": ["clang-format>=22", "--style=file", "--assume-filename=a.cpp"]
                 }
             }
         },
@@ -106,11 +99,7 @@
             "formatter": {
                 "external": {
                     "command": "uvx",
-                    "arguments": [
-                        "clang-format>=22",
-                        "--style=file",
-                        "--assume-filename=a.cpp"
-                    ]
+                    "arguments": ["clang-format>=22", "--style=file", "--assume-filename=a.cpp"]
                 }
             }
         },
@@ -119,23 +108,13 @@
             "formatter": {
                 "external": {
                     "command": "uvx",
-                    "arguments": [
-                        "--from",
-                        "cmakelang",
-                        "cmake-format",
-                        "-c",
-                        ".cmake-format.py",
-                        "-"
-                    ]
+                    "arguments": ["--from", "cmakelang", "cmake-format", "-c", ".cmake-format.py", "-"]
                 }
             }
         },
         // ruff formats and sorts imports per pyproject.toml; pyright types.
         "Python": {
-            "language_servers": [
-                "pyright",
-                "ruff"
-            ],
+            "language_servers": ["pyright", "ruff"],
             "format_on_save": "on",
             "formatter": [
                 {
@@ -187,12 +166,7 @@
             "formatter": {
                 "external": {
                     "command": "swift-format",
-                    "arguments": [
-                        "format",
-                        "--configuration",
-                        ".swift-format",
-                        "-"
-                    ]
+                    "arguments": ["format", "--configuration", ".swift-format", "-"]
                 }
             }
         },

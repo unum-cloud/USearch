@@ -14,7 +14,7 @@ struct dummy_memory_hint_t {
     inline void operator()(void const*) const noexcept {}
 };
 
-#if defined(__CLDEMOTE__)
+#if defined(__x86_64__)
 
 /**
  *  @brief Demote one cache line from the core's private caches (L1/L2) to the last shared level.
@@ -24,8 +24,9 @@ struct dummy_memory_hint_t {
  *  remote private cache.
  *
  *  Respected on Intel Tremont, Ice Lake-SP, Alder Lake P-cores, Sapphire Rapids and newer; AMD
- *  Zen 4 (Genoa) and Zen 5 (Turin). Off-target the opcode raises @c #UD - the @c __CLDEMOTE__
- *  guard restricts emission to compile targets that admit it.
+ *  Zen 4 (Genoa) and Zen 5 (Turin). Off-target the opcode raises @c #UD, so only the kits of the
+ *  CPU classes that carry it name this demoter - the runtime dispatch picks those classes, never a
+ *  compile flag, and the assembler spells the opcode on any x86 target.
  *
  *  @see https://www.felixcloutier.com/x86/cldemote
  */

@@ -299,8 +299,7 @@ inline minifloat_t minifloat_of(usearch_scalar_t kind) {
 /**
  *  @brief Widens one mini-float code, ignoring the padding bits a six-bit kind leaves above it.
  *
- *  One decoder serves all four kinds because they differ only in where the exponent ends and
- *  which codes they reserve, both of which @p format names.
+ *  One decoder serves all four kinds: they differ only in what @p format names.
  */
 inline double read_minifloat(u8_t bits, minifloat_t format) {
     unsigned const width = 1 + format.exponent_bits + format.mantissa_bits;
@@ -315,8 +314,7 @@ inline double read_minifloat(u8_t bits, minifloat_t format) {
         return mantissa ? NAN : sign * INFINITY;
     if (exponent == saturated && mantissa == mantissa_span - 1 && format.specials == minifloat_specials_t::nan_only_k)
         return NAN;
-    // A zero exponent field is the subnormal step rather than its own power, so the two arms
-    // differ in the implied leading bit and share everything else.
+    // A zero exponent field is the subnormal step, so the arms differ only in the implied leading bit.
     unsigned const significand = exponent ? mantissa + mantissa_span : mantissa;
     int const scale = static_cast<int>(exponent ? exponent : 1) - bias - static_cast<int>(format.mantissa_bits);
     return sign * std::ldexp(static_cast<double>(significand), scale);
@@ -334,8 +332,7 @@ inline u8_t write_minifloat(double value, minifloat_t format) {
                                  ? ((saturated - 1) << format.mantissa_bits) | (mantissa_span - 1)
                              : format.specials == minifloat_specials_t::nan_only_k ? reserved - 1
                                                                                    : reserved;
-    // A kind reserving no code cannot carry a NaN at all, so it lands on a zero rather than on a
-    // magnitude the caller never wrote.
+    // A kind reserving no code cannot carry a NaN, so it lands on a zero.
     if (std::isnan(value))
         return static_cast<u8_t>(format.specials == minifloat_specials_t::none_k ? 0u : sign | reserved);
     if (std::isinf(value) && format.specials == minifloat_specials_t::inf_and_nan_k)
@@ -346,16 +343,14 @@ inline u8_t write_minifloat(double value, minifloat_t format) {
     // A zero has no leading bit for `frexp` to find, so its code is the sign and nothing else.
     if (magnitude == 0) return static_cast<u8_t>(sign);
     int leading = 0;
-    // `frexp` normalizes into [0.5, 1), one above the exponent of the leading mantissa bit, and a
-    // magnitude below the smallest normal shares the subnormal step instead of its own power.
+    // `frexp` answers one above the leading bit's exponent; below the smallest normal the step is fixed.
     std::frexp(magnitude, &leading);
     int const exponent = std::max(leading - 1, 1 - bias);
     double const scaled = std::ldexp(magnitude, static_cast<int>(format.mantissa_bits) - exponent);
     double const truncated = std::floor(scaled);
     double const remainder = scaled - truncated;
     unsigned const carry = remainder > 0.5 || (remainder == 0.5 && std::fmod(truncated, 2.0) != 0.0) ? 1u : 0u;
-    // The significand carries into the exponent on its own - both when a rounded mantissa fills and
-    // when a subnormal reaches the smallest normal - so neither case needs an arm of its own.
+    // The significand carries into the exponent on its own, so neither overflow case needs an arm.
     unsigned const significand = static_cast<unsigned>(truncated) + carry;
     unsigned const code = ((static_cast<unsigned>(exponent + bias) - 1) << format.mantissa_bits) + significand;
     return static_cast<u8_t>(sign | std::min(code, largest));

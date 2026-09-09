@@ -34,7 +34,7 @@ Move the library and the header directory into their respective folders.
 ```sh
 wget https://github.com/unum-cloud/USearch/releases/download/<release_tag>/usearch_macos_<arch>_<usearch_version>.zip
 unzip usearch_macos_<arch>_<usearch_version>.zip
-sudo mv libusearch_c.dylib /usr/local/lib && sudo mv -t /usr/local/include usearch
+sudo mv libusearch_static.a /usr/local/lib && sudo mv -t /usr/local/include usearch
 ```
 
 ## Quickstart

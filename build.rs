@@ -37,7 +37,7 @@ struct Implementation {
     options: &'static [&'static str],
     /// The target CMake is asked to build.
     target: &'static str,
-    /// Where the generator leaves the archive, relative to the build tree.
+    /// Where the generator leaves the archive, relative to the build tree; empty names its root.
     directory: &'static str,
     /// The archive's name, without the platform's prefix or extension.
     library: &'static str,
@@ -49,9 +49,9 @@ struct Implementation {
 const ENGINE: Implementation = Implementation {
     feature: "static",
     options: &["USEARCH_BUILD_LIB_C"],
-    target: "usearch_static_c",
-    directory: "c",
-    library: "usearch_static_c",
+    target: "usearch_static",
+    directory: "",
+    library: "usearch_static",
     sources: &["src", "c"],
 };
 
@@ -66,9 +66,9 @@ const ENGINE_CUDA: Implementation = Implementation {
 const STUB: Implementation = Implementation {
     feature: "stub",
     options: &["USEARCH_BUILD_LIB_C_STUB"],
-    target: "usearch_static_c_stub",
+    target: "usearch_static_stub",
     directory: "stub",
-    library: "usearch_static_c",
+    library: "usearch_static",
     sources: &["src_stub"],
 };
 
@@ -118,7 +118,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let chosen = selected()?;
 
     let mut engine = cmake::Config::new(&manifest);
-    engine.define("USEARCH_INSTALL", "OFF").build_target(chosen.target);
+    // The crate reconfigures on every invocation by default, which on this tree is a fresh ISA
+    // probe and submodule walk before a build that has nothing to do.
+    engine
+        .define("USEARCH_INSTALL", "OFF")
+        .build_target(chosen.target)
+        .always_configure(false);
     for option in KNOWN_OPTIONS {
         let wanted = chosen.options.contains(option);
         engine.define(option, if wanted { "ON" } else { "OFF" });

@@ -1,6 +1,5 @@
-# Mojo binding. The engine is reached through `libusearch_c`, which CMake builds here rather than
-# pulling from a channel, so nothing has to be published and no artifact differs by where it was
-# built.
+# The workspace, and the `usearch` package the Mojo binding `dlopen`s. Built by the tree's own CMake, so the ISA
+# probes, the instantiation grid and the submodule pins are the ones every other SDK gets.
 
 [workspace]
 authors = ["Ash Vardanian <1983160+ashvardanian@users.noreply.github.com>"]
@@ -14,10 +13,10 @@ preview = ["pixi-build"]
 readme = "README.md"
 version = "3.0.0"
 
+# A dependency of the environment too, so `pixi run` puts the library in the prefix `mojo build` bakes as runpath.
 [dependencies]
-cmake = ">=3.22"
-cxx-compiler = "*"
 mojo = ">=1.0.0,<2"
+usearch = {path = "."}
 
 # `mojo build` links against a MAX runtime that needs a newer glibc than conda-forge's default
 # sysroot, which otherwise fails with a wall of GLIBC_2.34 undefined references.
@@ -27,31 +26,25 @@ sysroot_linux-64 = ">=2.34"
 [target.linux-aarch64.dependencies]
 sysroot_linux-aarch64 = ">=2.34"
 
-# Consumers depend on this by source rather than by channel: `pixi-build-mojo` compiles the package
-# and the C++ core together, so a `git` or `path` entry in their manifest is the whole install.
 [package]
 name = "usearch"
 version = "3.0.0"
 
 [package.build]
-backend = {name = "pixi-build-mojo", version = "0.*"}
+backend = {name = "pixi-build-cmake", version = "0.*"}
 
-# The backend only auto-discovers a package under `<name>/` or `src/`, and this one lives under
-# `mojo/`, so it is named here.
+# The backend defaults to a C++-only toolchain, and the C interface's own units compile as C.
 [package.build.config]
-compilers = ["cxx"]
-pkg = {name = "usearch", path = "mojo/usearch"}
+compilers = ["c", "cxx"]
+extra-args = [
+  "-DUSEARCH_BUILD_LIB_C=1",
+  "-DUSEARCH_BUILD_TEST_CPP=0",
+  "-DUSEARCH_BUILD_BENCH_CPP=0",
+  "-DUSEARCH_BUILD_TEST_C=0",
+]
 
 [tasks]
-# The binding reaches the engine through `dlopen`, and `mojo build` bakes the environment's library
-# directory into the runpath, so installing there is what makes a consumer's build need no linker
-# flags at all.
-build-native = {cmd = """
-  cmake -B build_mojo -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 &&
-  cmake --build build_mojo --target usearch_c -j &&
-  cp build_mojo/libusearch_c.so $CONDA_PREFIX/lib/
-"""}
-# The pure-logic half of the suite needs no engine, so this half runs before the native library does.
+# The pure-logic half of the suite needs no engine, so this half runs without one.
 test-mojo = {cmd = "mojo run -I mojo mojo/test.mojo"}
 build = {cmd = "mkdir -p build_mojo && mojo build -I mojo mojo/test.mojo -o build_mojo/mojo_test"}
-test = {cmd = "mojo run -I mojo mojo/test.mojo", depends-on = ["build-native"]}
+test = {cmd = "mojo run -I mojo mojo/test.mojo"}

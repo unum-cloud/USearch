@@ -11,7 +11,7 @@ dependencies: [
 ```
 
 The package compiles the Swift surface only, and depends on NumKong for the matrix views and the low-precision scalars.
-The engine itself is `libusearch_c`, built by CMake and linked by the package.
+The engine itself is `libusearch_static`, built by CMake and linked by the package.
 
 ## Quickstart
 

@@ -796,12 +796,18 @@ enum class cpu_class_t : u32_t {
     serial_k,
     /** @brief Haswell-class x86: AVX2 & FMA, the 256-bit floor. */
     intel_haswell_k,
+    /** @brief Sierra Forest-class x86 - the E-core Xeons: AVX-VNNI & its INT8 / IFMA / NE-CONVERT
+     *      successors without AVX-512, @c TPAUSE waits, @c CMPCCXADD conditional adds. */
+    intel_sierra_k,
     /** @brief Skylake-class x86: the AVX-512 foundation tier. */
     intel_skylake_k,
     /** @brief Icelake-class x86: AVX-512 VNNI & VPOPCNT - the integer & bit workhorse. */
     intel_icelake_k,
     /** @brief Genoa-class x86 - Zen 4 and newer: native @c bf16 dot products over AVX-512. */
     amd_genoa_k,
+    /** @brief Diamond Rapids-class x86: the AVX-512 lineage plus AVX10.2's FP8 conversions and
+     *      the Sierra vector bundle, @c TPAUSE waits, @c CMPCCXADD conditional adds. */
+    intel_diamond_k,
     /** @brief Graviton2-class Arm - Neoverse N1, the bare NEON floor; pre-v8.6 phones land
      *      here too. */
     aws_g2_k,
@@ -813,6 +819,9 @@ enum class cpu_class_t : u32_t {
     aws_g5_k,
     /** @brief Vera-class Arm - NVIDIA's v9.2+ cores with @c FEAT_FP8 dot products. */
     nvidia_vera_k,
+    /** @brief Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23: the vector extension with
+     *      @c Zvbb, @c Zawrs monitored waits, @c Zacas single-instruction compare-and-swap. */
+    alibaba_c930_k,
 };
 
 /**
