@@ -13,7 +13,7 @@ env:
   PYTHON_VERSION: 3.11
   DOTNET_VERSION: 8.0.x
   NODE_VERSION: 20
-  JAVA_VERSION: 21
+  JAVA_VERSION: 25
   GO_VERSION: "^1.22.0"
   ANDROID_NDK_VERSION: 26.3.11579264
   ANDROID_SDK_VERSION: 21
@@ -128,10 +128,15 @@ jobs:
           distribution: "adopt"
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v5
-      - name: Check Java formatting
+      - name: Check Java, Kotlin & Scala formatting
         run: gradle spotlessCheck
       - name: Test Java
         run: gradle clean build
+      # The Java surface is what Kotlin and Scala consume, so both compile against it and run here:
+      # `@NullMarked` only reaches a Kotlin caller if it survives compilation, and nothing else in
+      # the matrix would notice if it stopped.
+      - name: Test Java from Kotlin & Scala
+        run: gradle kotlinInteropTest scalaInteropTest
 
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}

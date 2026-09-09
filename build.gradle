@@ -2,15 +2,19 @@ plugins {
     id 'java-library'
     id 'maven-publish'
     id 'signing'
-    id 'com.diffplug.spotless' version '6.25.0'
+    id 'com.diffplug.spotless' version '7.2.1'
+    // The published artifact is Java only; these compile the interop suites, which check that the
+    // Java surface reads correctly from the other two languages that consume it.
+    id 'org.jetbrains.kotlin.jvm' version '2.4.20'
+    id 'scala'
 }
 
 group = "cloud.unum"
 version = file("VERSION").text.trim()
 
 java {
-    sourceCompatibility = JavaVersion.VERSION_21
-    targetCompatibility = JavaVersion.VERSION_21
+    sourceCompatibility = JavaVersion.VERSION_25
+    targetCompatibility = JavaVersion.VERSION_25
 }
 
 repositories {
@@ -36,6 +40,11 @@ sourceSets {
     }
 }
 
+// The Kotlin plugin adds every Java source directory to `main`'s own Kotlin set, so `main` is
+// cleared - otherwise `compileKotlin` sweeps up the interop suites below and compiles them against
+// a classpath carrying no test framework.
+sourceSets.main.kotlin.srcDirs = []
+
 task sourcesJar(type: Jar, dependsOn: classes) {
     archiveClassifier.set('sources')
     from sourceSets.main.allSource
@@ -53,6 +62,13 @@ task javadocJar(type: Jar, dependsOn: javadoc) {
 }
 
 dependencies {
+    // Nullness is part of the published contract: `@NullMarked` on the package is what stops a
+    // Kotlin caller seeing platform types across the whole boundary. The annotations are erased at
+    // runtime, so the jar carries no dependency of its own.
+    compileOnly('org.jspecify:jspecify:1.0.0')
+
+
+    testCompileOnly('org.jspecify:jspecify:1.0.0')
     testImplementation('org.junit.jupiter:junit-jupiter:5.11.4')
     testRuntimeOnly('org.junit.platform:junit-platform-launcher')
 }
@@ -74,30 +90,69 @@ spotless {
         target 'java/cloud/unum/usearch/**/*.java', 'java/test/**/*.java'
         palantirJavaFormat('2.97.0')
         removeUnusedImports()
+        // The house grouping the rest of the tree uses: the platform first, then third parties,
+        // then our own package. The formatters sort alphabetically inside each group, and would
+        // flatten the three into one without this.
+        importOrder('java', 'javax', '', 'cloud.unum')
+        trimTrailingWhitespace()
+        endWithNewline()
+    }
+
+    // The interop suites are formatted by their own languages' tools, at the same 120 columns the
+    // rest of the tree wraps at.
+    kotlin {
+        target 'kotlin/**/*.kt'
+        // ktlint rather than ktfmt: it is the only Kotlin formatter that reads the import layout
+        // from `.editorconfig`, which is how the house grouping survives here as it does in Java.
+        ktlint('1.5.0')
+        trimTrailingWhitespace()
+        endWithNewline()
+    }
+
+    scala {
+        target 'scala/**/*.scala'
+        // Spotless has no `importOrder` for Scala, and scalafmt does not reorder, so the house
+        // grouping in the sources stands as written.
+        scalafmt('3.8.3').configFile('.scalafmt.conf')
         trimTrailingWhitespace()
         endWithNewline()
     }
 }
 
-// The JNI boundary compiles against `include/usearch/*.h` alone - flat C headers with no
-// submodule of their own - and links the `usearch_static` archive, so the JAR stages one shared object per platform
-// rather than two. CMake builds both into `usearchLibraryPath`; point it elsewhere for a different tree.
+// The binding reaches the C interface through the FFM API, so there is no boundary of its own to compile: it `dlopen`s
+// `libusearch_shared` and links every verb as a downcall. CMake builds that into `usearchLibraryPath`; point it
+// elsewhere for a different tree.
 ext.usearchLibraryPath = (findProperty("usearchLibraryPath") ?: "$rootDir/build_artifacts").toString()
 
-// Where the JNI library is staged for the test task's library path and for the JAR to package.
+// Where the engine is staged for the test task's library path and for the JAR to package.
 ext.nativeDirectory = layout.buildDirectory.dir("libs/usearch/shared").get().asFile
 
+// A directory already holding `libusearch_shared`, which skips the CMake tasks entirely. CI builds
+// the engine once and runs the Java, Kotlin and Scala suites against that one artifact; it is also
+// how a suite runs against the brute-force stand-in, whose directory is named directly.
+ext.usearchPrebuilt = (findProperty("usearchPrebuilt") ?: "").toString()
+
+// Points one `Test` task at the staged engine. `System.loadLibrary` reads `java.library.path`, and
+// the loader paths carry the engine's own dependencies, so all three suites need the same three
+// settings and none of them should spell them out again.
+ext.loadsTheEngine = { Test task ->
+    def entries = [project.ext.nativeDirectory.absolutePath, project.ext.usearchLibraryPath]
+    task.dependsOn "stageNativeLibrary"
+    task.jvmArgs "--enable-native-access=ALL-UNNAMED"
+    task.systemProperty "java.library.path", entries.join(File.pathSeparator)
+    ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"].each { variable ->
+        task.environment variable,
+            (entries + [System.getenv(variable) ?: ""]).findAll { it }.join(File.pathSeparator)
+    }
+}
+
 // One CMake tree serves the compiler flags, the cross-compilation targets, and the release
-// artifacts, so the SDK has one native build rather than a second one described here. Configuring
-// an already-configured tree only adds the target, which is what lets a directory the C and C++
-// jobs already filled be reused instead of rebuilt. Swap `-DUSEARCH_BUILD_LIB_C=1` for
-// `-DUSEARCH_BUILD_LIB_C_STUB=1` to link the brute-force stand-in and skip the engine entirely.
+// artifacts, so the SDK has one native build rather than a second one described here. Swap
+// `-DUSEARCH_BUILD_LIB_C=1` for `-DUSEARCH_BUILD_LIB_C_STUB=1` to load the brute-force stand-in.
 tasks.register("configureNativeLibrary", Exec) {
-    inputs.files("$rootDir/CMakeLists.txt", "$rootDir/java/CMakeLists.txt", "$rootDir/c/CMakeLists.txt",
-        "$rootDir/src/CMakeLists.txt")
+    inputs.files("$rootDir/CMakeLists.txt", "$rootDir/c/CMakeLists.txt", "$rootDir/src/CMakeLists.txt")
     outputs.file("${project.ext.usearchLibraryPath}/CMakeCache.txt")
     commandLine "cmake", "-B", project.ext.usearchLibraryPath, "-S", rootDir.toString(),
-        "-DUSEARCH_BUILD_LIB_JAVA=1",
         "-DUSEARCH_BUILD_LIB_C=1",
         "-DUSEARCH_BUILD_TEST_CPP=0",
         "-DUSEARCH_BUILD_BENCH_CPP=0"
@@ -105,21 +160,26 @@ tasks.register("configureNativeLibrary", Exec) {
 
 tasks.register("compileNativeLibrary", Exec) {
     dependsOn "configureNativeLibrary"
-    inputs.files(fileTree("$rootDir/src"), fileTree("$rootDir/include"), file("$rootDir/java/lib.c"))
+    inputs.files(fileTree("$rootDir/src"), fileTree("$rootDir/include"))
     outputs.dir(project.ext.usearchLibraryPath)
     commandLine "cmake", "--build", project.ext.usearchLibraryPath,
-        "--config", "Release", "--target", "usearch_java", "--parallel"
+        "--config", "Release", "--target", "usearch_shared", "--parallel"
 }
 
-// The loader reads a shared object out of a directory and never out of an archive, so the JAR
-// carries one copy per platform and `Library` extracts the one it needs. A multi-config
-// generator buries its output one directory deeper, so the search is recursive and the staged
-// copies are flattened back to bare file names.
+// The JAR carries one copy per platform and `Library` extracts the one it needs. A multi-config generator buries its
+// output one directory deeper, so the search is recursive and the staged copies are flattened to bare file names.
 tasks.register("stageNativeLibrary", Copy) {
-    dependsOn "compileNativeLibrary"
-    from(project.ext.usearchLibraryPath) {
-        include "**/libusearch_java.so", "**/libusearch_java.dylib", "**/libusearch_java.dll"
+    if (project.ext.usearchPrebuilt.isEmpty()) {
+        dependsOn "compileNativeLibrary"
     }
+    from(project.ext.usearchPrebuilt.isEmpty() ? project.ext.usearchLibraryPath : project.ext.usearchPrebuilt) {
+        include "**/libusearch_shared.so", "**/libusearch_shared.dylib", "**/libusearch_shared.dll"
+        // The stand-in publishes the same file names under `stub/`, so a tree holding both would
+        // flatten two files onto one. The engine wins; point `usearchLibraryPath` at the stub
+        // directory itself to stage that instead.
+        exclude "**/stub/**"
+    }
+    duplicatesStrategy = DuplicatesStrategy.FAIL
     eachFile { it.relativePath = new RelativePath(true, it.relativePath.lastName) }
     includeEmptyDirs = false
     into project.ext.nativeDirectory
@@ -131,20 +191,9 @@ test {
 
     dependsOn jar
 
-    // Rearrange test classpath, add compiled JAR instead of main classes
+    // The JAR rather than the loose classes, so the suite exercises what is published.
     classpath = project.sourceSets.test.output + configurations.testRuntimeClasspath + files(jar.archiveFile)
-
-    // The JNI library is found on the library path, and the pre-instantiated library it links
-    // through the loader path beside it.
-    def staged = project.ext.nativeDirectory
-    systemProperty "java.library.path",
-        [staged.absolutePath, project.ext.usearchLibraryPath].join(File.pathSeparator)
-    environment "LD_LIBRARY_PATH",
-        [staged.absolutePath, project.ext.usearchLibraryPath, System.getenv("LD_LIBRARY_PATH") ?: ""]
-            .findAll { it }.join(File.pathSeparator)
-    environment "DYLD_LIBRARY_PATH",
-        [staged.absolutePath, project.ext.usearchLibraryPath, System.getenv("DYLD_LIBRARY_PATH") ?: ""]
-            .findAll { it }.join(File.pathSeparator)
+    loadsTheEngine(it)
 
     // Enable detailed test logging
     testLogging {
@@ -155,6 +204,44 @@ test {
         // More detailed test result logging
         events "passed", "skipped", "failed"
     }
+}
+
+// The Java surface is what Kotlin and Scala consume, so each gets a source set compiled against
+// `main`'s output rather than its sources - exercising what a downstream caller actually sees - and
+// a test task of its own. `check` runs all three, so CI covers the boundary from every side.
+// Each language brings its own test framework; everything else it needs comes from `test`.
+def interopFrameworks = [
+    kotlin: "org.jetbrains.kotlin:kotlin-test-junit5:2.4.20",
+    scala: "org.scala-lang:scala3-library_3:3.9.0",
+]
+
+interopFrameworks.each { language, framework ->
+    def interop = "${language}Interop"
+    sourceSets.create(interop) {
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
+        java.srcDirs = []
+        it."$language".srcDirs = [language]
+    }
+    configurations."${interop}Implementation".extendsFrom configurations.testImplementation
+    configurations."${interop}RuntimeOnly".extendsFrom configurations.testRuntimeOnly
+    dependencies.add("${interop}Implementation", framework)
+
+    tasks.register("${interop}Test", Test) {
+        description = "Runs the ${language.capitalize()} suite against the published Java surface."
+        group = "verification"
+        testClassesDirs = sourceSets[interop].output.classesDirs
+        classpath = sourceSets[interop].runtimeClasspath
+        useJUnitPlatform()
+        loadsTheEngine(it)
+    }
+    tasks.named("check") { dependsOn "${interop}Test" }
+}
+
+// Gradle's Scala plugin defaults its output target to 8, which Scala 3.9 no longer emits, so it is
+// told the language level the rest of the build already uses.
+tasks.named("compileScalaInteropScala") {
+    scalaCompileOptions.additionalParameters = ["-release", "25"]
 }
 
 jar {
@@ -233,7 +320,7 @@ publishing {
             pom {
                 name = "USearch"
                 description = "Smaller & Faster Single-File Vector Search Engine from Unum"
-                url = "https://github.com/unum-cloud/usearch"
+                url = "https://github.com/unum-cloud/USearch"
 
                 licenses {
                     license {
@@ -243,9 +330,9 @@ publishing {
                 }
 
                 scm {
-                    connection = 'scm:git:git://github.com/unum-cloud/usearch.git'
-                    developerConnection = 'scm:git:ssh://github.com/unum-cloud/usearch.git'
-                    url = 'https://github.com/unum-cloud/usearch'
+                    connection = 'scm:git:git://github.com/unum-cloud/USearch.git'
+                    developerConnection = 'scm:git:ssh://github.com/unum-cloud/USearch.git'
+                    url = 'https://github.com/unum-cloud/USearch'
                 }
 
                 developers {
@@ -281,7 +368,7 @@ publishing {
     repositories {
         maven {
             name = "GitHubPackages"
-            url = "https://maven.pkg.github.com/unum-cloud/usearch"
+            url = "https://maven.pkg.github.com/unum-cloud/USearch"
             credentials {
                 username = System.getenv("GITHUB_ACTOR")
                 password = System.getenv("GITHUB_TOKEN")

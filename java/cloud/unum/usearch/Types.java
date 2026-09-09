@@ -1,6 +1,11 @@
 package cloud.unum.usearch;
 
 import java.io.Serial;
+import java.lang.foreign.Arena;
+import java.lang.foreign.FunctionDescriptor;
+import java.lang.foreign.MemoryLayout;
+import java.lang.foreign.MemorySegment;
+import java.lang.invoke.MethodHandle;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
@@ -1216,19 +1221,155 @@ public final class Types {
         }
     }
 
-    private static native String nativeVersion();
+    private static final MethodHandle VERSION =
+            Library.downcall("usearch_version", FunctionDescriptor.of(Library.POINTER));
 
-    private static native String nativeCapabilitiesCompiled();
+    private static final MethodHandle CAPABILITIES_COMPILED =
+            Library.downcall("usearch_capabilities_compiled", FunctionDescriptor.of(Library.POINTER));
 
-    private static native String nativeCapabilitiesAvailable();
+    private static final MethodHandle CAPABILITIES_AVAILABLE =
+            Library.downcall("usearch_capabilities_available", FunctionDescriptor.of(Library.POINTER));
 
-    private static native long nativeExecutorForRam(int[] memoryDomains, long threads);
+    private static final MethodHandle EXECUTOR_FOR_RAM = Library.downcall(
+            "usearch_executor_for_ram",
+            FunctionDescriptor.of(Library.POINTER, Library.POINTER, Library.SIZE, Library.POINTER));
 
-    private static native long nativeExecutorForVram(int[] devices);
+    private static final MethodHandle EXECUTOR_FOR_VRAM = Library.downcall(
+            "usearch_executor_for_vram", FunctionDescriptor.of(Library.POINTER, Library.POINTER, Library.POINTER));
 
-    private static native long nativeExecutorForNvme(byte[][] paths, long threads);
+    private static final MethodHandle EXECUTOR_FOR_NVME = Library.downcall(
+            "usearch_executor_for_nvme",
+            FunctionDescriptor.of(Library.POINTER, Library.POINTER, Library.SIZE, Library.POINTER));
 
-    private static native void nativeExecutorDrain(long handle);
+    private static final MethodHandle EXECUTOR_DRAIN =
+            Library.downcall("usearch_executor_drain", FunctionDescriptor.ofVoid(Library.POINTER, Library.POINTER));
 
-    private static native void nativeExecutorFree(long handle);
+    private static final MethodHandle EXECUTOR_FREE =
+            Library.downcall("usearch_executor_free", FunctionDescriptor.ofVoid(Library.POINTER));
+
+    /** Reads a borrowed C string the engine owns; the ABI's name verbs all answer with one. */
+    @SuppressWarnings("restricted")
+    private static String text(MethodHandle verb) {
+        try {
+            MemorySegment answered = (MemorySegment) verb.invokeExact();
+            return answered.equals(MemorySegment.NULL)
+                    ? ""
+                    : answered.reinterpret(Long.MAX_VALUE).getString(0);
+        } catch (Throwable failure) {
+            throw new IllegalStateException("usearch: the engine refused a name query", failure);
+        }
+    }
+
+    private static String nativeVersion() {
+        return text(VERSION);
+    }
+
+    private static String nativeCapabilitiesCompiled() {
+        return text(CAPABILITIES_COMPILED);
+    }
+
+    private static String nativeCapabilitiesAvailable() {
+        return text(CAPABILITIES_AVAILABLE);
+    }
+
+    /**
+     * Stages a placement arm: a borrowed run of 32-bit ids and its count, or the null the ABI reads
+     * as "derive it". The three residency option structs share this shape, so one staging serves all.
+     */
+    private static MemorySegment placement(Arena arena, int[] ordinals) {
+        if (ordinals == null) {
+            return MemorySegment.NULL;
+        }
+        MemorySegment options = arena.allocate(Library.PLACEMENT);
+        MemorySegment run = ordinals.length == 0
+                ? MemorySegment.NULL
+                : arena.allocateFrom(java.lang.foreign.ValueLayout.JAVA_INT, ordinals);
+        options.set(Library.POINTER, 0, run);
+        options.set(
+                Library.SIZE,
+                Library.PLACEMENT.byteOffset(MemoryLayout.PathElement.groupElement("count")),
+                ordinals.length);
+        return options;
+    }
+
+    private static long nativeExecutorForRam(int[] memoryDomains, long threads) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment error = Library.error(arena);
+            MemorySegment spawned =
+                    (MemorySegment) EXECUTOR_FOR_RAM.invokeExact(placement(arena, memoryDomains), threads, error);
+            Library.raise(error);
+            return spawned.address();
+        } catch (Throwable failure) {
+            throw rethrow(failure);
+        }
+    }
+
+    private static long nativeExecutorForVram(int[] devices) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment error = Library.error(arena);
+            MemorySegment spawned = (MemorySegment) EXECUTOR_FOR_VRAM.invokeExact(placement(arena, devices), error);
+            Library.raise(error);
+            return spawned.address();
+        } catch (Throwable failure) {
+            throw rethrow(failure);
+        }
+    }
+
+    private static long nativeExecutorForNvme(byte[][] paths, long threads) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment error = Library.error(arena);
+            MemorySegment options = MemorySegment.NULL;
+            if (paths != null) {
+                MemorySegment views = arena.allocate(Library.BYTES_VIEW, paths.length);
+                for (int index = 0; index != paths.length; ++index) {
+                    MemorySegment view = views.asSlice(index * Library.BYTES_VIEW.byteSize(), Library.BYTES_VIEW);
+                    view.set(
+                            Library.POINTER,
+                            0,
+                            arena.allocateFrom(java.lang.foreign.ValueLayout.JAVA_BYTE, paths[index]));
+                    view.set(Library.SIZE, Library.POINTER.byteSize(), paths[index].length);
+                }
+                options = arena.allocate(Library.PLACEMENT);
+                options.set(Library.POINTER, 0, paths.length == 0 ? MemorySegment.NULL : views);
+                options.set(Library.SIZE, Library.POINTER.byteSize(), paths.length);
+            }
+            MemorySegment spawned = (MemorySegment) EXECUTOR_FOR_NVME.invokeExact(options, threads, error);
+            Library.raise(error);
+            return spawned.address();
+        } catch (Throwable failure) {
+            throw rethrow(failure);
+        }
+    }
+
+    private static void nativeExecutorDrain(long handle) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment error = Library.error(arena);
+            EXECUTOR_DRAIN.invokeExact(MemorySegment.ofAddress(handle), error);
+            Library.raise(error);
+        } catch (Throwable failure) {
+            throw rethrow(failure);
+        }
+    }
+
+    private static void nativeExecutorFree(long handle) {
+        try {
+            EXECUTOR_FREE.invokeExact(MemorySegment.ofAddress(handle));
+        } catch (Throwable failure) {
+            throw rethrow(failure);
+        }
+    }
+
+    /**
+     * Carries a downcall's failure out unchanged when it is already one of ours, and wraps anything
+     * else - a linkage fault, a layout mismatch - as the internal error it is.
+     */
+    static RuntimeException rethrow(Throwable failure) {
+        if (failure instanceof RuntimeException raised) {
+            return raised;
+        }
+        if (failure instanceof Error raised) {
+            throw raised;
+        }
+        return new IllegalStateException("usearch: the C interface could not be reached", failure);
+    }
 }

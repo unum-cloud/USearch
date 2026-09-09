@@ -7,6 +7,14 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.File;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.UUID;
+
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+
 import cloud.unum.usearch.DenseIndex.DenseMetadata;
 import cloud.unum.usearch.DenseIndex.DenseMetric;
 import cloud.unum.usearch.DenseIndex.DenseOptions;
@@ -23,12 +31,6 @@ import cloud.unum.usearch.Types.Residency;
 import cloud.unum.usearch.Types.ScalarKind;
 import cloud.unum.usearch.Types.Status;
 import cloud.unum.usearch.Types.USearchException;
-import java.io.File;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.util.UUID;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.Test;
 
 /**
  * The boundary this SDK owns: how a value is marshalled, how an extent is checked, and how a handle
@@ -308,8 +310,7 @@ public class DenseIndexTest {
     public void everyWalkReportsTraversalTelemetry() {
         try (DenseIndex index = populated()) {
             Matches matches = Matches.packed(1, 2);
-            DenseStats searched =
-                    index.search(Matrix.of(new float[] {0, 1}, 2), matches, POOL, new SearchOptions(64));
+            DenseStats searched = index.search(Matrix.of(new float[] {0, 1}, 2), matches, POOL, new SearchOptions(64));
             assertTrue(searched.visitedMembers() > 0);
             assertTrue(searched.computedDistances() > 0);
             assertEquals(searched, DenseStats.NONE.plus(searched));
@@ -364,8 +365,7 @@ public class DenseIndexTest {
             Matches matches = Matches.packed(1, 1);
             USearchException refused = assertThrows(
                     USearchException.class,
-                    () -> index.maxsim(
-                            Matrix.of(new float[] {0, 1}, 2), 1, matches, POOL, SearchOptions.DERIVED));
+                    () -> index.maxsim(Matrix.of(new float[] {0, 1}, 2), 1, matches, POOL, SearchOptions.DERIVED));
             assertEquals(Status.CONFIG_MISMATCH, refused.status());
             assertTrue(refused.getMessage().startsWith("usearch: config-mismatch: "));
             assertFalse(refused.getMessage().endsWith(": "));
@@ -407,16 +407,16 @@ public class DenseIndexTest {
     }
 
     @Test
-    public void aScalarKindTheLibraryRejectsSurfacesAsUnknownKind() {
+    public void aKindNamingNoScalarIsRefusedBeforeTheEngineIsReached() {
         try (DenseIndex index = twoDimensional().open()) {
             index.reserve(1);
             assertEquals(
-                    Status.UNKNOWN_KIND,
+                    Status.UNSUPPORTED_LAYOUT,
                     assertThrows(
                                     USearchException.class,
                                     () -> index.add(
                                             new Key[] {Key.of(1)},
-                                            Matrix.of(new byte[] {1, 2}, 2, ScalarKind.E5M2),
+                                            Matrix.of(new byte[] {1, 2}, 2, ScalarKind.UNKNOWN),
                                             POOL))
                             .status());
         }
@@ -482,6 +482,29 @@ public class DenseIndexTest {
         }
     }
 
+    /**
+     * A heap array is staged into native memory for the duration of one call, so the engine reads
+     * the values the array held when the call began. Mutating the array afterwards cannot reach
+     * what was stored - which is what distinguishes it from the direct buffer below, where the
+     * engine addresses the caller's own memory in place.
+     */
+    @Test
+    public void heapArraysAreCopiedRatherThanAliased() {
+        try (DenseIndex index = twoDimensional().open()) {
+            index.reserve(1);
+            float[] row = new float[] {0, 1};
+            index.add(new Key[] {Key.of(1)}, Matrix.of(row, 2), POOL);
+
+            // Overwriting the source after the batch must leave the stored row untouched.
+            row[0] = 9;
+            row[1] = 9;
+
+            float[] exported = new float[2];
+            assertEquals(1, index.get(Key.of(1), Matrix.of(exported, 2)));
+            assertArrayEquals(new float[] {0, 1}, exported, 0);
+        }
+    }
+
     @Test
     public void directBuffersCrossWithoutACopy() {
         try (DenseIndex index = twoDimensional().open()) {
@@ -531,7 +554,8 @@ public class DenseIndexTest {
                 assertThrows(USearchException.class, () -> Executor.forRam(-1)).status());
         assertEquals(
                 Status.MALFORMED_INPUT,
-                assertThrows(USearchException.class, () -> Executor.forRam(null, 1)).status());
+                assertThrows(USearchException.class, () -> Executor.forRam(null, 1))
+                        .status());
         assertEquals(
                 Status.MALFORMED_INPUT,
                 assertThrows(USearchException.class, () -> Executor.forNvme(new String[] {""}, 1))

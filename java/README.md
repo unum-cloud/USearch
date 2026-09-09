@@ -1,12 +1,13 @@
 # USearch for Java
 
-The Java SDK is a thin JNI layer over the flat C interface in `include/usearch/types.h` and `include/usearch/dense_index.h`.
-It instantiates no index template: `java/lib.c` marshals arguments and links the pre-instantiated library, so one compiled engine serves every language binding.
+The Java SDK reaches the flat C interface in `include/usearch/types.h` and `include/usearch/dense_index.h` through the FFM API, so it carries no native boundary of its own — no JNI shim to compile, and one fewer artifact to cross-compile.
+It instantiates no index template: every verb is a downcall onto the pre-instantiated `libusearch_shared`, so one compiled engine serves every language binding.
+Java 25 or newer is required, and the runtime needs `--enable-native-access` for the module or class path the SDK loads from.
 
 One source file mirrors one header.
 `Types.java` carries the shared vocabulary — `Key`, `Status`, `ScalarKind`, `Residency`, `Executor`, `USearchException`, `Matrix`, `Matches`.
 `DenseIndex.java` carries the dense modality — the index itself, `DenseOptions`, `DenseMetric`, `InsertionOptions`, `SearchOptions`, `DenseStats`, `Refinement`.
-`Library.java` loads the shared object.
+`Library.java` loads the shared object and links every verb against it.
 Both vocabularies are nested types, and a nested type imports directly, so every call site below spells the bare name:
 
 ```java
@@ -262,7 +263,7 @@ Progress handlers stay unbound for the same reason, which is what makes an inser
 
 ## Building From Source
 
-The JNI layer links `libusearch_static`, which CMake builds from the instantiation grid, so `libusearch_java` is one shared object with the engine inside it rather than two files that have to find each other at load time.
+The SDK `dlopen`s `libusearch_shared`, which CMake builds from the instantiation grid, and the JAR carries one copy per platform.
 Gradle drives that CMake tree rather than describing a second native build of its own:
 
 ```sh
@@ -271,21 +272,43 @@ gradle test
 
 `build_artifacts` is where Gradle configures and builds by default; `-PusearchLibraryPath=<directory>` points it elsewhere.
 
-CMake builds the JNI library directly too, alongside every other target:
+CMake builds the engine directly too, alongside every other target:
 
 ```sh
-cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_LIB_JAVA=1
-cmake --build build_artifacts --target usearch_java
+cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1
+cmake --build build_artifacts --target usearch_shared
 ```
 
-The brute-force stand-in defines the same symbols a different way, so the suite runs in seconds against the ABI instead of waiting on a build of the engine:
+`-PusearchPrebuilt=<directory>` points Gradle at a library that is already built and skips the CMake tasks entirely, which is how CI builds the engine once and runs every suite against that one artifact.
+It is also how a suite runs against the brute-force stand-in, which answers the same verbs a different way and builds in seconds:
 
 ```sh
-cmake -B build_stub -DUSEARCH_BUILD_LIB_C_STUB=1 -DUSEARCH_BUILD_LIB_JAVA=1
-cmake --build build_stub --target usearch_java
-javac -d build_stub/classes -cp junit-platform-console-standalone.jar \
-    java/cloud/unum/usearch/*.java java/test/cloud/unum/usearch/*.java
-java -Djava.library.path=build_stub \
-    -jar junit-platform-console-standalone.jar execute \
-    --class-path build_stub/classes --select-class cloud.unum.usearch.DenseIndexTest
+cmake -B build_stub -DUSEARCH_BUILD_LIB_C_STUB=1
+cmake --build build_stub --target usearch_shared_stub
+gradle -PusearchPrebuilt=$PWD/build_stub/stub test
+```
+
+## Kotlin and Scala
+
+The published surface is Java, and both other JVM languages consume it directly — there is no separate artifact for either.
+
+Nullness is part of the contract.
+The package is `@NullMarked`, so a Kotlin caller gets real non-null types across the whole boundary rather than platform types, and the compiler refuses a null where the API does not accept one:
+
+```kotlin
+val index: DenseIndex = DenseOptions().dimensions(2).quantization(ScalarKind.F32).open()
+index.use { ... }                       // AutoCloseable is Kotlin's `use`
+```
+
+Scala reads no nullness annotations, so what it gets instead is that the array-based batch verbs take `Array[Key]` and `Array[Float]` with no conversion, since both are JVM arrays already:
+
+```scala
+val keys: Array[Key] = Array(Key.of(1), Key.of(2))
+index.add(keys, Matrix.of(Array(1.0f, 0.0f, 0.0f, 1.0f), 2), pool)
+```
+
+Both languages have a suite of their own under `kotlin/` and `scala/`, covering what only another JVM language can observe rather than repeating the Java tests:
+
+```sh
+gradle kotlinInteropTest scalaInteropTest
 ```

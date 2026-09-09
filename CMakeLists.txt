@@ -45,7 +45,6 @@ option(USEARCH_BUILD_BENCH_CPP "Compile a native benchmark in C++" ${USEARCH_IS_
 option(USEARCH_BUILD_LIB_C "Compile a native library for the C 99 interface" OFF)
 option(USEARCH_BUILD_TEST_C "Compile a test for the C 99 interface" OFF)
 option(USEARCH_BUILD_LIB_C_STUB "Compile a brute-force stand-in for the C 99 interface" OFF)
-option(USEARCH_BUILD_LIB_JAVA "Compile a native library for the Java bindings" OFF)
 option(USEARCH_BUILD_LIB_WOLFRAM "Compile a native library for the Wolfram Language bindings" OFF)
 option(USEARCH_BUILD_LIB_PYTHON "Compile the CPython extension; `scikit-build-core` switches it on" OFF)
 option(USEARCH_BUILD_LIB_NODE "Compile the Node addon; `cmake-js` switches it on" OFF)
@@ -544,10 +543,6 @@ endif ()
 
 if (${USEARCH_BUILD_LIB_C} OR ${USEARCH_BUILD_TEST_C})
     add_subdirectory(c)
-endif ()
-
-if (${USEARCH_BUILD_LIB_JAVA})
-    add_subdirectory(java)
 endif ()
 
 if (${USEARCH_BUILD_LIB_PYTHON})

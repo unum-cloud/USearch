@@ -1,5 +1,13 @@
 package cloud.unum.usearch;
 
+import java.lang.foreign.Arena;
+import java.lang.foreign.FunctionDescriptor;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.lang.invoke.MethodHandle;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+
 import cloud.unum.usearch.Types.Executor;
 import cloud.unum.usearch.Types.Extents;
 import cloud.unum.usearch.Types.Key;
@@ -9,8 +17,6 @@ import cloud.unum.usearch.Types.Residency;
 import cloud.unum.usearch.Types.ScalarKind;
 import cloud.unum.usearch.Types.Status;
 import cloud.unum.usearch.Types.USearchException;
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
 
 /**
  * A Vector Search Index over equidimensional dense representations - the Java twin of
@@ -953,19 +959,299 @@ public final class DenseIndex implements AutoCloseable {
         return buffer.position();
     }
 
-    private static native long nativeInitialize(long[] options);
+    private static final MethodHandle INITIALIZE = Library.downcall(
+            "usearch_dense_init", FunctionDescriptor.of(Library.POINTER, Library.POINTER, Library.POINTER));
 
-    private static native void nativeFree(long handle);
+    private static final MethodHandle RELEASE =
+            Library.downcall("usearch_dense_free", FunctionDescriptor.ofVoid(Library.POINTER));
 
-    private static native long nativeProbe(long handle, int measure);
+    private static final MethodHandle RESERVE = Library.downcall(
+            "usearch_dense_reserve", FunctionDescriptor.ofVoid(Library.POINTER, Library.SIZE, Library.POINTER));
 
-    private static native String nativeCapabilities(long handle);
+    private static final MethodHandle CLEAR =
+            Library.downcall("usearch_dense_clear", FunctionDescriptor.ofVoid(Library.POINTER, Library.POINTER));
 
-    private static native void nativeReserve(long handle, long capacity);
+    private static final MethodHandle CAPABILITIES = Library.downcall(
+            "usearch_dense_capabilities", FunctionDescriptor.of(Library.POINTER, Library.POINTER, Library.POINTER));
 
-    private static native void nativeClear(long handle);
+    /** One handle per measure, indexed by the {@link Measure} code, so the probe is a lookup. */
+    private static final MethodHandle[] MEASURES = {
+        Library.downcall("usearch_dense_size", FunctionDescriptor.of(Library.SIZE, Library.POINTER, Library.POINTER)),
+        Library.downcall(
+                "usearch_dense_capacity", FunctionDescriptor.of(Library.SIZE, Library.POINTER, Library.POINTER)),
+        Library.downcall(
+                "usearch_dense_dimensions", FunctionDescriptor.of(Library.SIZE, Library.POINTER, Library.POINTER)),
+        Library.downcall(
+                "usearch_dense_connectivity", FunctionDescriptor.of(Library.SIZE, Library.POINTER, Library.POINTER)),
+        Library.downcall(
+                "usearch_dense_memory_usage", FunctionDescriptor.of(Library.SIZE, Library.POINTER, Library.POINTER)),
+        Library.downcall(
+                "usearch_dense_storage_requirements",
+                FunctionDescriptor.of(Library.SIZE, Library.POINTER, Library.POINTER)),
+    };
 
-    private static native long nativeAdd(
+    private static final MethodHandle ADD = Library.downcall(
+            "usearch_dense_add",
+            FunctionDescriptor.of(
+                    Library.SIZE,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.KEYS_VIEW,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER));
+
+    private static final MethodHandle REFINE = Library.downcall(
+            "usearch_dense_refine",
+            FunctionDescriptor.of(
+                    Library.SIZE,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER));
+
+    private static final MethodHandle SEARCH = Library.downcall(
+            "usearch_dense_search",
+            FunctionDescriptor.ofVoid(
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER));
+
+    private static final MethodHandle MAXSIM = Library.downcall(
+            "usearch_dense_maxsim",
+            FunctionDescriptor.ofVoid(
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.SIZE,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER));
+
+    private static final MethodHandle COUNT = Library.downcall(
+            "usearch_dense_count", FunctionDescriptor.of(Library.SIZE, Library.POINTER, Library.KEY, Library.POINTER));
+
+    private static final MethodHandle GET = Library.downcall(
+            "usearch_dense_get",
+            FunctionDescriptor.of(Library.SIZE, Library.POINTER, Library.KEY, Library.POINTER, Library.POINTER));
+
+    private static final MethodHandle SAVE = Library.downcall(
+            "usearch_dense_save",
+            FunctionDescriptor.ofVoid(
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.BYTES_VIEW,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER));
+
+    private static final MethodHandle LOAD = Library.downcall(
+            "usearch_dense_load",
+            FunctionDescriptor.ofVoid(
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.BYTES_VIEW,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER));
+
+    private static final MethodHandle SAVE_BUFFER = Library.downcall(
+            "usearch_dense_save_buffer",
+            FunctionDescriptor.ofVoid(
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.BYTES_VIEW,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER));
+
+    private static final MethodHandle LOAD_BUFFER = Library.downcall(
+            "usearch_dense_load_buffer",
+            FunctionDescriptor.ofVoid(
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.BYTES_VIEW,
+                    Library.POINTER,
+                    Library.POINTER,
+                    Library.POINTER));
+
+    private static final MethodHandle METADATA = Library.downcall(
+            "usearch_dense_metadata", FunctionDescriptor.ofVoid(Library.BYTES_VIEW, Library.POINTER, Library.POINTER));
+
+    private static final MethodHandle METADATA_BUFFER = Library.downcall(
+            "usearch_dense_metadata_buffer",
+            FunctionDescriptor.ofVoid(Library.BYTES_VIEW, Library.POINTER, Library.POINTER));
+
+    /**
+     * Stages one Java slab into native memory. A direct {@link ByteBuffer} is addressed where it
+     * already lives; a heap array is copied, because no Java array has a stable address.
+     */
+    private static MemorySegment lend(Arena arena, Object slab, int storage, long byteOffset, long lengthBytes) {
+        if (slab == null) {
+            return MemorySegment.NULL;
+        }
+        if (storage == DIRECT_STORAGE) {
+            return MemorySegment.ofBuffer((ByteBuffer) slab).asSlice(byteOffset, lengthBytes);
+        }
+        MemorySegment staged = arena.allocate(lengthBytes);
+        MemorySegment.copy(heapOf(slab), byteOffset, staged, 0, lengthBytes);
+        return staged;
+    }
+
+    /** Copies a staged slab's contents back, which every output that is not direct needs. */
+    private static void restore(MemorySegment staged, Object slab, int storage, long byteOffset, long lengthBytes) {
+        if (slab == null || storage == DIRECT_STORAGE) {
+            return;
+        }
+        MemorySegment.copy(staged, 0, heapOf(slab), byteOffset, lengthBytes);
+    }
+
+    /** The heap slab as a segment, whichever of the four element widths it holds. */
+    private static MemorySegment heapOf(Object slab) {
+        return switch (slab) {
+            case double[] doubles -> MemorySegment.ofArray(doubles);
+            case float[] floats -> MemorySegment.ofArray(floats);
+            case short[] shorts -> MemorySegment.ofArray(shorts);
+            case byte[] bytes -> MemorySegment.ofArray(bytes);
+            default -> throw new USearchException(Status.UNSUPPORTED_LAYOUT, "the slab is of no known element width");
+        };
+    }
+
+    /** The {@code Storage.DIRECT} code, which addresses a buffer in place rather than copying. */
+    private static final int DIRECT_STORAGE = 4;
+
+    /** Fills a @c usearch_matrix_view_t over a staged slab. */
+    private static MemorySegment matrixView(
+            Arena arena, MemorySegment rowsData, long rows, long columns, long strideBytes, int scalarKind) {
+        MemorySegment view = arena.allocate(Library.MATRIX_VIEW);
+        view.set(Library.POINTER, 0, rowsData);
+        view.set(Library.SIZE, 8, rows);
+        view.set(Library.SIZE, 16, columns);
+        view.set(Library.SIZE, 24, strideBytes);
+        view.set(Library.ENUM, 32, scalarKind);
+        return view;
+    }
+
+    /** Fills a @c usearch_bytes_view_t over a staged byte run. */
+    private static MemorySegment bytesView(Arena arena, MemorySegment data, long length) {
+        MemorySegment view = arena.allocate(Library.BYTES_VIEW);
+        view.set(Library.POINTER, 0, data);
+        view.set(Library.SIZE, 8, length);
+        return view;
+    }
+
+    /** The per-call knob both option structs carry, or null when nothing was asked for. */
+    private static MemorySegment expansion(Arena arena, long expansionFactor) {
+        if (expansionFactor == 0) {
+            return MemorySegment.NULL;
+        }
+        MemorySegment options = arena.allocate(Library.SIZE);
+        options.set(Library.SIZE, 0, expansionFactor);
+        return options;
+    }
+
+    /** Lifts the three telemetry counters back into the caller's array, when one was asked for. */
+    private static void reportStats(MemorySegment staged, long[] stats) {
+        if (stats == null) {
+            return;
+        }
+        for (int index = 0; index != Math.min(stats.length, 3); ++index) {
+            stats[index] = staged.get(Library.SIZE, index * 8L);
+        }
+    }
+
+    /** A zeroed telemetry block, or null when the caller wants no reporting. */
+    private static MemorySegment statsBlock(Arena arena, long[] stats) {
+        return stats == null ? MemorySegment.NULL : arena.allocate(Library.TRAVERSAL_STATS);
+    }
+
+    private static long nativeInitialize(long[] options) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment error = Library.error(arena);
+            MemorySegment lowered = arena.allocate(Library.DENSE_OPTIONS);
+            lowered.set(Library.ENUM, 0, (int) options[0]);
+            lowered.set(Library.ENUM, 24, (int) options[1]);
+            lowered.set(Library.SIZE, 32, options[2]);
+            lowered.set(Library.SIZE, 40, options[3]);
+            lowered.set(Library.SIZE, 48, options[4]);
+            lowered.set(Library.ENUM, 56, (int) options[5]);
+            MemorySegment opened = (MemorySegment) INITIALIZE.invokeExact(lowered, error);
+            Library.raise(error);
+            return opened.address();
+        } catch (Throwable failure) {
+            throw Types.rethrow(failure);
+        }
+    }
+
+    private static void nativeFree(long handle) {
+        try {
+            RELEASE.invokeExact(MemorySegment.ofAddress(handle));
+        } catch (Throwable failure) {
+            throw Types.rethrow(failure);
+        }
+    }
+
+    private static long nativeProbe(long handle, int measure) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment error = Library.error(arena);
+            long answered = (long) MEASURES[measure].invokeExact(MemorySegment.ofAddress(handle), error);
+            Library.raise(error);
+            return answered;
+        } catch (Throwable failure) {
+            throw Types.rethrow(failure);
+        }
+    }
+
+    @SuppressWarnings("restricted")
+    private static String nativeCapabilities(long handle) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment error = Library.error(arena);
+            MemorySegment named = (MemorySegment) CAPABILITIES.invokeExact(MemorySegment.ofAddress(handle), error);
+            Library.raise(error);
+            return named.equals(MemorySegment.NULL)
+                    ? ""
+                    : named.reinterpret(Long.MAX_VALUE).getString(0);
+        } catch (Throwable failure) {
+            throw Types.rethrow(failure);
+        }
+    }
+
+    private static void nativeReserve(long handle, long capacity) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment error = Library.error(arena);
+            RESERVE.invokeExact(MemorySegment.ofAddress(handle), capacity, error);
+            Library.raise(error);
+        } catch (Throwable failure) {
+            throw Types.rethrow(failure);
+        }
+    }
+
+    private static void nativeClear(long handle) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment error = Library.error(arena);
+            CLEAR.invokeExact(MemorySegment.ofAddress(handle), error);
+            Library.raise(error);
+        } catch (Throwable failure) {
+            throw Types.rethrow(failure);
+        }
+    }
+
+    private static long nativeAdd(
             long handle,
             long executor,
             byte[] keys,
@@ -977,11 +1263,67 @@ public final class DenseIndex implements AutoCloseable {
             long strideBytes,
             int scalarKind,
             long expansionFactor,
-            long[] stats);
+            long[] stats) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment error = Library.error(arena);
+            MemorySegment keyRun = arena.allocate(Library.KEYS_VIEW);
+            keyRun.set(Library.POINTER, 0, arena.allocateFrom(ValueLayout.JAVA_BYTE, keys));
+            keyRun.set(Library.SIZE, 8, rows);
+            MemorySegment staged = lend(arena, vectors, storage, byteOffset, rows * strideBytes);
+            MemorySegment view = matrixView(arena, staged, rows, columns, strideBytes, scalarKind);
+            MemorySegment telemetry = statsBlock(arena, stats);
+            long published = (long) ADD.invokeExact(
+                    MemorySegment.ofAddress(handle),
+                    MemorySegment.ofAddress(executor),
+                    keyRun,
+                    view,
+                    expansion(arena, expansionFactor),
+                    MemorySegment.NULL,
+                    MemorySegment.NULL,
+                    telemetry,
+                    error);
+            reportStats(telemetry, stats);
+            Library.raise(error);
+            return published;
+        } catch (Throwable failure) {
+            throw Types.rethrow(failure);
+        }
+    }
 
-    private static native long nativeRefine(long handle, long executor, long expansionFactor, long[] stats);
+    private static long nativeRefine(long handle, long executor, long expansionFactor, long[] stats) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment error = Library.error(arena);
+            MemorySegment telemetry = statsBlock(arena, stats);
+            long settled = (long) REFINE.invokeExact(
+                    MemorySegment.ofAddress(handle),
+                    MemorySegment.ofAddress(executor),
+                    expansion(arena, expansionFactor),
+                    MemorySegment.NULL,
+                    MemorySegment.NULL,
+                    telemetry,
+                    error);
+            reportStats(telemetry, stats);
+            Library.raise(error);
+            return settled;
+        } catch (Throwable failure) {
+            throw Types.rethrow(failure);
+        }
+    }
 
-    private static native void nativeSearch(
+    /** Stages the three ranked-output buffers and the span that names them. */
+    private static MemorySegment matchesSpan(
+            Arena arena, MemorySegment keys, MemorySegment scores, MemorySegment counts, long wanted) {
+        MemorySegment span = arena.allocate(Library.MATCHES_SPAN);
+        span.set(Library.POINTER, 0, keys);
+        span.set(Library.SIZE, 8, wanted * Key.BYTES);
+        span.set(Library.POINTER, 16, scores);
+        span.set(Library.SIZE, 24, wanted * Double.BYTES);
+        span.set(Library.POINTER, 32, counts);
+        span.set(Library.SIZE, 40, wanted);
+        return span;
+    }
+
+    private static void nativeSearch(
             long handle,
             long executor,
             Object queries,
@@ -996,9 +1338,41 @@ public final class DenseIndex implements AutoCloseable {
             long[] counts,
             long wanted,
             long expansionFactor,
-            long[] stats);
+            long[] stats) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment error = Library.error(arena);
+            MemorySegment view = matrixView(
+                    arena,
+                    lend(arena, queries, storage, byteOffset, rows * strideBytes),
+                    rows,
+                    columns,
+                    strideBytes,
+                    scalarKind);
+            MemorySegment foundKeys = arena.allocate(keys.length);
+            MemorySegment foundScores = arena.allocate((long) scores.length * Double.BYTES);
+            MemorySegment foundCounts = arena.allocate((long) counts.length * Long.BYTES);
+            MemorySegment telemetry = statsBlock(arena, stats);
+            SEARCH.invokeExact(
+                    MemorySegment.ofAddress(handle),
+                    MemorySegment.ofAddress(executor),
+                    view,
+                    matchesSpan(arena, foundKeys, foundScores, foundCounts, wanted),
+                    expansion(arena, expansionFactor),
+                    MemorySegment.NULL,
+                    MemorySegment.NULL,
+                    telemetry,
+                    error);
+            reportStats(telemetry, stats);
+            Library.raise(error);
+            MemorySegment.copy(foundKeys, ValueLayout.JAVA_BYTE, 0, keys, 0, keys.length);
+            MemorySegment.copy(foundScores, ValueLayout.JAVA_DOUBLE, 0, scores, 0, scores.length);
+            MemorySegment.copy(foundCounts, ValueLayout.JAVA_LONG, 0, counts, 0, counts.length);
+        } catch (Throwable failure) {
+            throw Types.rethrow(failure);
+        }
+    }
 
-    private static native void nativeMaxsim(
+    private static void nativeMaxsim(
             long handle,
             long executor,
             Object queries,
@@ -1014,11 +1388,54 @@ public final class DenseIndex implements AutoCloseable {
             long[] counts,
             long wanted,
             long expansionFactor,
-            long[] stats);
+            long[] stats) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment error = Library.error(arena);
+            MemorySegment view = matrixView(
+                    arena,
+                    lend(arena, queries, storage, byteOffset, rows * strideBytes),
+                    rows,
+                    columns,
+                    strideBytes,
+                    scalarKind);
+            MemorySegment foundKeys = arena.allocate(keys.length);
+            MemorySegment foundScores = arena.allocate((long) scores.length * Double.BYTES);
+            MemorySegment foundCounts = arena.allocate((long) counts.length * Long.BYTES);
+            MemorySegment telemetry = statsBlock(arena, stats);
+            MAXSIM.invokeExact(
+                    MemorySegment.ofAddress(handle),
+                    MemorySegment.ofAddress(executor),
+                    view,
+                    rowsPerQuery,
+                    matchesSpan(arena, foundKeys, foundScores, foundCounts, wanted),
+                    expansion(arena, expansionFactor),
+                    MemorySegment.NULL,
+                    MemorySegment.NULL,
+                    telemetry,
+                    error);
+            reportStats(telemetry, stats);
+            Library.raise(error);
+            MemorySegment.copy(foundKeys, ValueLayout.JAVA_BYTE, 0, keys, 0, keys.length);
+            MemorySegment.copy(foundScores, ValueLayout.JAVA_DOUBLE, 0, scores, 0, scores.length);
+            MemorySegment.copy(foundCounts, ValueLayout.JAVA_LONG, 0, counts, 0, counts.length);
+        } catch (Throwable failure) {
+            throw Types.rethrow(failure);
+        }
+    }
 
-    private static native long nativeCount(long handle, byte[] key);
+    private static long nativeCount(long handle, byte[] key) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment error = Library.error(arena);
+            MemorySegment identity = arena.allocateFrom(ValueLayout.JAVA_BYTE, key);
+            long held = (long) COUNT.invokeExact(MemorySegment.ofAddress(handle), identity, error);
+            Library.raise(error);
+            return held;
+        } catch (Throwable failure) {
+            throw Types.rethrow(failure);
+        }
+    }
 
-    private static native long nativeGet(
+    private static long nativeGet(
             long handle,
             byte[] key,
             Object vectors,
@@ -1027,23 +1444,149 @@ public final class DenseIndex implements AutoCloseable {
             long rows,
             long columns,
             long strideBytes,
-            int scalarKind);
+            int scalarKind) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment error = Library.error(arena);
+            MemorySegment identity = arena.allocateFrom(ValueLayout.JAVA_BYTE, key);
+            MemorySegment span = MemorySegment.NULL;
+            MemorySegment staged = MemorySegment.NULL;
+            if (vectors != null) {
+                staged = lend(arena, vectors, storage, byteOffset, rows * strideBytes);
+                span = arena.allocate(Library.MATRIX_SPAN);
+                span.set(Library.POINTER, 0, staged);
+                span.set(Library.SIZE, 8, rows);
+                span.set(Library.SIZE, 16, columns);
+                span.set(Library.SIZE, 24, strideBytes);
+                span.set(Library.ENUM, 32, scalarKind);
+            }
+            long held = (long) GET.invokeExact(MemorySegment.ofAddress(handle), identity, span, error);
+            Library.raise(error);
+            if (vectors != null) {
+                restore(staged, vectors, storage, byteOffset, rows * strideBytes);
+            }
+            return held;
+        } catch (Throwable failure) {
+            throw Types.rethrow(failure);
+        }
+    }
 
-    private static native void nativeSave(long handle, long executor, byte[] path);
+    private static void nativeSave(long handle, long executor, byte[] path) {
+        checkpoint(SAVE, handle, executor, path);
+    }
 
-    private static native void nativeLoad(long handle, long executor, byte[] path);
+    private static void nativeLoad(long handle, long executor, byte[] path) {
+        checkpoint(LOAD, handle, executor, path);
+    }
 
-    private static native void nativeSaveBuffer(
-            long handle, long executor, Object buffer, int storage, long byteOffset, long length);
+    /** The shared body of the two path-addressed checkpoint verbs, whose shapes are identical. */
+    private static void checkpoint(MethodHandle verb, long handle, long executor, byte[] path) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment error = Library.error(arena);
+            MemorySegment named = bytesView(arena, arena.allocateFrom(ValueLayout.JAVA_BYTE, path), path.length);
+            verb.invokeExact(
+                    MemorySegment.ofAddress(handle),
+                    MemorySegment.ofAddress(executor),
+                    named,
+                    MemorySegment.NULL,
+                    MemorySegment.NULL,
+                    error);
+            Library.raise(error);
+        } catch (Throwable failure) {
+            throw Types.rethrow(failure);
+        }
+    }
 
-    private static native void nativeLoadBuffer(
-            long handle, long executor, Object buffer, int storage, long byteOffset, long length);
+    private static void nativeSaveBuffer(
+            long handle, long executor, Object buffer, int storage, long byteOffset, long length) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment error = Library.error(arena);
+            MemorySegment staged = lend(arena, buffer, storage, byteOffset, length);
+            SAVE_BUFFER.invokeExact(
+                    MemorySegment.ofAddress(handle),
+                    MemorySegment.ofAddress(executor),
+                    bytesView(arena, staged, length),
+                    MemorySegment.NULL,
+                    MemorySegment.NULL,
+                    error);
+            Library.raise(error);
+            restore(staged, buffer, storage, byteOffset, length);
+        } catch (Throwable failure) {
+            throw Types.rethrow(failure);
+        }
+    }
 
-    private static native void nativeMetadata(byte[] path, long[] metadata);
+    private static void nativeLoadBuffer(
+            long handle, long executor, Object buffer, int storage, long byteOffset, long length) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment error = Library.error(arena);
+            LOAD_BUFFER.invokeExact(
+                    MemorySegment.ofAddress(handle),
+                    MemorySegment.ofAddress(executor),
+                    bytesView(arena, lend(arena, buffer, storage, byteOffset, length), length),
+                    MemorySegment.NULL,
+                    MemorySegment.NULL,
+                    error);
+            Library.raise(error);
+        } catch (Throwable failure) {
+            throw Types.rethrow(failure);
+        }
+    }
 
-    private static native void nativeMetadataBuffer(
-            Object buffer, int storage, long byteOffset, long length, long[] metadata);
+    private static void nativeMetadata(byte[] path, long[] metadata) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment error = Library.error(arena);
+            MemorySegment frozen = arena.allocate(Library.DENSE_METADATA);
+            METADATA.invokeExact(
+                    bytesView(arena, arena.allocateFrom(ValueLayout.JAVA_BYTE, path), path.length), frozen, error);
+            Library.raise(error);
+            liftMetadata(frozen, metadata);
+        } catch (Throwable failure) {
+            throw Types.rethrow(failure);
+        }
+    }
 
-    /** Lowers a flat options layout into the C struct and lifts it straight back. */
-    private static native void nativeReloadOptions(long[] input, long[] output);
+    private static void nativeMetadataBuffer(
+            Object buffer, int storage, long byteOffset, long length, long[] metadata) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment error = Library.error(arena);
+            MemorySegment frozen = arena.allocate(Library.DENSE_METADATA);
+            METADATA_BUFFER.invokeExact(
+                    bytesView(arena, lend(arena, buffer, storage, byteOffset, length), length), frozen, error);
+            Library.raise(error);
+            liftMetadata(frozen, metadata);
+        } catch (Throwable failure) {
+            throw Types.rethrow(failure);
+        }
+    }
+
+    /** Lifts the four frozen fields into the flat array the caller reads them from. */
+    private static void liftMetadata(MemorySegment frozen, long[] metadata) {
+        metadata[0] = frozen.get(Library.ENUM, 0);
+        metadata[1] = frozen.get(Library.ENUM, 4);
+        metadata[2] = frozen.get(Library.SIZE, 8);
+        metadata[3] = frozen.get(Library.SIZE, 16);
+    }
+
+    /**
+     * Lowers the flat words into the C struct and lifts them straight back, which is the marshalling
+     * round trip the options test exercises. It reaches no engine verb: the struct is the whole
+     * subject, so writing and reading it back is the entire check.
+     */
+    private static void nativeReloadOptions(long[] input, long[] output) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment lowered = arena.allocate(Library.DENSE_OPTIONS);
+            lowered.set(Library.ENUM, 0, (int) input[OptionsWords.METRIC]);
+            lowered.set(Library.ENUM, 24, (int) input[OptionsWords.QUANTIZATION]);
+            lowered.set(Library.SIZE, 32, input[OptionsWords.DIMENSIONS]);
+            lowered.set(Library.SIZE, 40, input[OptionsWords.CONNECTIVITY]);
+            lowered.set(Library.SIZE, 48, input[OptionsWords.VALUES_PER_KEY]);
+            lowered.set(Library.ENUM, 56, (int) input[OptionsWords.RESIDENCY]);
+            output[OptionsWords.METRIC] = lowered.get(Library.ENUM, 0);
+            output[OptionsWords.QUANTIZATION] = lowered.get(Library.ENUM, 24);
+            output[OptionsWords.DIMENSIONS] = lowered.get(Library.SIZE, 32);
+            output[OptionsWords.CONNECTIVITY] = lowered.get(Library.SIZE, 40);
+            output[OptionsWords.VALUES_PER_KEY] = lowered.get(Library.SIZE, 48);
+            output[OptionsWords.RESIDENCY] = lowered.get(Library.ENUM, 56);
+        }
+    }
 }

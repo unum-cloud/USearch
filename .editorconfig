@@ -10,3 +10,13 @@ max_line_length = 120
 [*.yml]
 indent_style = space
 indent_size = 2
+
+[*.{kt,kts,scala}]
+indent_style = space
+indent_size = 4
+
+# The house grouping, which ktlint reads and enforces: the platform first, then third parties,
+# then our own package, with a blank line between each.
+[*.{kt,kts}]
+ij_kotlin_imports_layout = java.**, javax.**, kotlin.**, |, *, |, cloud.unum.**
+ktlint_standard_max-line-length = disabled

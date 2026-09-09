@@ -767,6 +767,23 @@ if [ -x node_modules/.bin/prettier ]; then
     done < <(git diff --cached --name-only --diff-filter=ACM -z)
 fi
 
+# Kotlin and Scala go through the same Gradle `spotless` that formats Java, since all three share
+# one build. It resolves ktfmt and scalafmt itself, so the hook needs no tool of its own.
+if command -v gradle > /dev/null 2>&1 && [ -f build.gradle ]; then
+    staged_jvm=""
+    while IFS= read -r -d '' file; do
+        case "$file" in
+        *.kt | *.scala) staged_jvm="$staged_jvm $file" ;;
+        esac
+    done < <(git diff --cached --name-only --diff-filter=ACM -z)
+    if [ -n "$staged_jvm" ]; then
+        if ! gradle --quiet --offline spotlessCheck > /dev/null 2>&1; then
+            echo "pre-commit: Kotlin or Scala is not spotless clean - run \`gradle spotlessApply\`"
+            failed=1
+        fi
+    fi
+fi
+
 # `dotnet format` takes a project, so the staged files are an `--include` filter over the solution.
 # Whitespace only: the analyzer passes want a restore, which would turn a commit hook into a build.
 if command -v dotnet > /dev/null 2>&1 && [ -f csharp/Cloud.Unum.USearch.sln ]; then
