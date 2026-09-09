@@ -73,6 +73,19 @@
  *  lists are variable-length: the record stores its own count, and the offsets array
  *  is the only random-access directory.
  *
+ *  @section dense_nvme_tiering Hot Working Set & Cold Storage
+ *
+ *  Block storage is not the bottom of the hierarchy here; it is the hot working area.
+ *  A shard lives long-term wherever it is cheapest to keep - a shared filesystem, an
+ *  object bucket behind a FUSE mount - and is staged onto the local NVMe or
+ *  High-Bandwidth-Flash the handle names when it is loaded, because a traversal at
+ *  device latency cannot run against a ranged @c GET that answers a thousand times
+ *  slower. Nothing in this header decides when a shard moves or which shards stay
+ *  warm; that policy belongs above it. What this header guarantees is the seam that
+ *  policy needs: a shard is opened by path and addressed by a file slot, so one that
+ *  was staged from a bucket onto a drive, or evicted and staged again elsewhere, is
+ *  re-attached without the state machine learning it moved.
+ *
  *  @section dense_nvme_concurrency Concurrency
  *
  *  The graph is immutable, so the index object holds no atomics, no locks, and no
@@ -448,9 +461,7 @@ struct dense_io_staging {
         pending[fill] = request;
         return status_t::success_k;
     }
-    inline status_t complete(dense_io_completion_t completion) noexcept {
-        return completions.complete(completion);
-    }
+    inline status_t complete(dense_io_completion_t completion) noexcept { return completions.complete(completion); }
     inline bool pop(dense_io_completion_t& completion) noexcept { return completions.pop(completion); }
 };
 
@@ -466,7 +477,7 @@ struct dense_io_staging {
  *  Note @c F_NOCACHE is a hint, not @c O_DIRECT: unaligned I/O silently falls back
  *  to the buffered path, and resident pages are still served from cache.
  */
-template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
+template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<byte_t>>
 struct dense_posix_sync_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
@@ -538,7 +549,7 @@ struct dense_posix_sync_engine {
  *  block inside @c io_submit - which costs this design nothing, since every record
  *  read is already block-aligned.
  */
-template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
+template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<byte_t>>
 struct dense_linux_aio_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
@@ -954,7 +965,7 @@ struct dense_uring_ring_t {
  *  Under @c DEFER_TASKRUN the spin is skipped - completions only post inside
  *  @c io_uring_enter by design.
  */
-template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
+template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<byte_t>>
 struct dense_linux_uring_read_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
@@ -1010,7 +1021,7 @@ struct dense_linux_uring_read_engine {
  *      roughly an 11% throughput gain at NVMe rates. Kernel floor matches the read
  *      engine; registration itself works on any ring.
  */
-template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
+template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<byte_t>>
 struct dense_linux_uring_fixed_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
@@ -1074,13 +1085,13 @@ struct dense_linux_uring_fixed_engine {
  *  waiters make this the energy-efficient busy-wait - with a final blocking
  *  enter as the backstop.
  */
-template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
+template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<byte_t>>
 struct dense_linux_uring_polled_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
 
     inline static constexpr io_capability_t capabilities_k = io_capability_t::fixed_buffers_k |
-                                                                   io_capability_t::polled_k;
+                                                             io_capability_t::polled_k;
 
     dense_linux_uring_polled_engine() noexcept = default;
     dense_linux_uring_polled_engine(dense_linux_uring_polled_engine const&) = delete;
@@ -1145,7 +1156,7 @@ struct dense_linux_uring_polled_engine {
  *  NVMe status codes, negatives remain kernel errors - @c pop folds both failure
  *  families into negative results for the state machine.
  */
-template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
+template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<byte_t>>
 struct dense_linux_uring_nvme_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
@@ -1250,7 +1261,7 @@ struct dense_linux_uring_nvme_engine {
  *  IoRing nor NVMe character devices exist there; only native Windows exercises
  *  this code.
  */
-template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<std::byte>>
+template <typename wait_type_ = fu::preferred_yield_t, typename allocator_type_ = std::allocator<byte_t>>
 struct dense_windows_ioring_engine {
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
@@ -1306,7 +1317,8 @@ struct dense_windows_ioring_engine {
         IORING_CQE entry;
         if (PopIoRingCompletion(ring_, &entry) != S_OK) return false;
         completion.tag = entry.UserData;
-        completion.result = SUCCEEDED(entry.ResultCode) ? static_cast<i64_t>(entry.Information) : -static_cast<i64_t>(1);
+        completion.result = SUCCEEDED(entry.ResultCode) ? static_cast<i64_t>(entry.Information)
+                                                        : -static_cast<i64_t>(1);
         return true;
     }
 
@@ -1333,6 +1345,8 @@ enum class dense_nvme_stage_t : u8_t {
     idle_k,
     /** @brief Fetches are outstanding; completions drive the traversal forward. */
     traversing_k,
+    /** @brief A refused re-table ended the walk; in-flight scores still land, then it finishes. */
+    saturated_k,
     /** @brief The traversal converged; results await copying out before recycling. */
     finished_k,
 };
@@ -1343,9 +1357,9 @@ enum class dense_nvme_stage_t : u8_t {
  *      of caller-allocated containers - the state machine in the index advances it,
  *      the engine never sees it.
  */
-template <                                               //
-    nk_dtype_t vector_dtype_ = nk_bf16_k,                //
-    typename allocator_type_ = std::allocator<std::byte> //
+template <                                            //
+    nk_dtype_t vector_dtype_ = nk_bf16_k,             //
+    typename allocator_type_ = std::allocator<byte_t> //
     >
 struct dense_nvme_slot {
 
@@ -1396,23 +1410,21 @@ struct dense_nvme_slot {
     /** @brief Pseudo-random generator for picking this slot's traversal starting points. */
     splitmix64_t random_generator;
 
-    dense_nvme_slot() noexcept = default;
+    dense_nvme_slot() = delete;
+    /** @brief Seats every queue on @p allocator, so the slot's scratch lands in the caller's
+     *      memory domain. */
+    explicit dense_nvme_slot(candidates_allocator_t const& allocator) noexcept
+        : results(allocator), frontier(allocator), visited(visits_allocator_t(allocator)) {}
     dense_nvme_slot(dense_nvme_slot&&) noexcept = default;
     dense_nvme_slot(dense_nvme_slot const&) = delete;
     dense_nvme_slot& operator=(dense_nvme_slot const&) = delete;
 
-    /** @brief Re-seats every container on @p allocator & sizes it for @p expansion results
-     *      and the visited volume one traversal can touch. Slots default-construct so
-     *      arrays of them can be sized first; this late binding is what places their
-     *      queues in the caller's memory domain. Called once per context, never per query. */
-    inline status_t reserve(std::size_t expansion, std::size_t connectivity_ceiling,
-                            candidates_allocator_t const& allocator) noexcept {
-        results = results_array_t(allocator);
-        frontier = frontier_queue_t(allocator);
-        visited = visited_set_t(visits_allocator_t(allocator));
+    /** @brief Sizes every queue for @p expansion results and the visited volume one traversal
+     *      can touch. Called once per context, never per query. */
+    inline status_t reserve(std::size_t expansion, std::size_t connectivity_ceiling) noexcept {
         if (!results.reserve(expansion)) return status_t::bad_alloc_k;
         if (!frontier.reserve(expansion * connectivity_ceiling)) return status_t::bad_alloc_k;
-        if (!visited.reserve(expansion * connectivity_ceiling * 2)) return status_t::bad_alloc_k;
+        if (!visited.reserve(expansion * connectivity_ceiling)) return status_t::bad_alloc_k;
         return status_t::success_k;
     }
 
@@ -1442,7 +1454,7 @@ struct dense_nvme_slot {
 template <                                                                  //
     nk_dtype_t vector_dtype_ = nk_bf16_k,                                   //
     typename engine_type_ = dense_posix_sync_engine<fu::preferred_yield_t>, //
-    typename allocator_type_ = std::allocator<std::byte>                    //
+    typename allocator_type_ = std::allocator<byte_t>                       //
     >
 struct dense_nvme_context {
 
@@ -1473,6 +1485,8 @@ struct dense_nvme_context {
     std::size_t expanded_members = 0;
     /** @brief Reads issued across the context's lifetime, refetches included. */
     std::size_t issued_reads = 0;
+    /** @brief Walks a refused re-table retired early, their rankings short. */
+    std::size_t saturated_walks = 0;
 
     dense_nvme_context(allocator_t const& allocator = {}) noexcept
         : engine(), slots(allocator), free_buffers(buffer_ids_allocator_t(allocator)), allocator_(allocator) {}
@@ -1498,11 +1512,13 @@ struct dense_nvme_context {
         for (std::size_t i = 0; i != depth; ++i)
             free_buffers[i] = static_cast<dense_staging_buffer_id_t>(depth - 1 - i);
 
-        if (status_t const sized = slots.resize(slot_count); failed(sized)) return sized;
-        for (std::size_t i = 0; i != slot_count; ++i) {
-            status_t slot_status = slots[i].reserve(expansion, connectivity_ceiling,
-                                                    typename slot_t::candidates_allocator_t(allocator_));
-            if (slot_status != status_t::success_k) return slot_status;
+        slots.clear();
+        if (status_t const sized = slots.reserve_exactly(slot_count); failed(sized)) return sized;
+        for (std::size_t slot_index = 0; slot_index != slot_count; ++slot_index) {
+            slots.push_back_reserved(slot_t {typename slot_t::candidates_allocator_t(allocator_)});
+            if (status_t const slot_status = slots[slot_index].reserve(expansion, connectivity_ceiling);
+                failed(slot_status))
+                return slot_status;
         }
         expansion_capacity = expansion;
         return status_t::success_k;
@@ -1558,7 +1574,7 @@ template <                                                                  //
     nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k,                    //
     nk_capability_t capability_ = nk_cap_icelake_k,                         //
     typename engine_type_ = dense_posix_sync_engine<fu::preferred_yield_t>, //
-    typename offsets_allocator_type_ = std::allocator<std::byte>            //
+    typename offsets_allocator_type_ = std::allocator<byte_t>               //
     >
 struct dense_nvme_index {
 
@@ -1665,6 +1681,10 @@ struct dense_nvme_index {
     /** @brief Longest record in the payload - the staging-buffer stride engines need. */
     inline std::size_t record_capacity() const noexcept { return record_capacity_; }
     inline int data_descriptor() const noexcept { return data_descriptor_; }
+    /** @brief The registered-file slot every read of this index names; zero for a lone index,
+     *      and the shard's position in the lease when a multi-index attached it. */
+    inline dense_io_file_slot_t file_slot() const noexcept { return file_slot_; }
+    inline void route(dense_io_file_slot_t slot) noexcept { file_slot_ = slot; }
 
     /** @brief Sizing of one traversal harness; passed to @c reserve. */
     struct context_config_t {
@@ -1692,6 +1712,8 @@ struct dense_nvme_index {
         std::size_t computed_distances = 0;
         /** @brief Reads issued for this batch, expansion refetches included. */
         std::size_t issued_reads = 0;
+        /** @brief Walks a refused re-table retired early, their rankings short. */
+        std::size_t saturated_walks = 0;
 
         explicit operator bool() const noexcept { return succeeded(status); }
     };
@@ -1750,6 +1772,7 @@ struct dense_nvme_index {
         std::size_t expanded_before = context.expanded_members;
         std::size_t computed_before = context.computed_distances;
         std::size_t issued_before = context.issued_reads;
+        std::size_t saturated_before = context.saturated_walks;
         small_size_t next_query = 0;
         small_size_t finished_queries = 0;
 
@@ -1771,6 +1794,7 @@ struct dense_nvme_index {
         outcome.expanded_members = context.expanded_members - expanded_before;
         outcome.computed_distances = context.computed_distances - computed_before;
         outcome.issued_reads = context.issued_reads - issued_before;
+        outcome.saturated_walks = context.saturated_walks - saturated_before;
         return outcome;
     }
 
@@ -1809,11 +1833,8 @@ struct dense_nvme_index {
         tag.buffer = buffer_index;
         tag.purpose = static_cast<u32_t>(purpose);
         u64_t begin = offsets_[node], end = offsets_[node + 1];
-        dense_io_request_t request;
-        request.offset = begin;
-        request.length = static_cast<u32_t>(end - begin);
-        request.buffer = buffer_index;
-        request.tag = tag.packed();
+        dense_io_request_t const request {begin, static_cast<u32_t>(end - begin), file_slot_, buffer_index,
+                                          tag.packed()};
         context.slots[slot_index].inflight_reads++;
         context.issued_reads++;
         // The budget - depth = slots x (connectivity + 1) - guarantees the push always lands.
@@ -1875,6 +1896,13 @@ struct dense_nvme_index {
         context.expanded_members++;
         node_id_t const* neighbor_ids = record.neighbor_ids();
         u32_t neighbors_count = record.neighbors_count();
+        // A refused re-table retires the walk with the ranking it has: the in-flight scores
+        // still land, and `advance_` finishes the slot instead of expanding again.
+        if (failed(slot.visited.reserve(slot.visited.size() + neighbors_count))) {
+            if (slot.stage != dense_nvme_stage_t::saturated_k) ++context.saturated_walks;
+            slot.stage = dense_nvme_stage_t::saturated_k;
+            return status_t::success_k;
+        }
         for (small_size_t i = 0; i != neighbors_count; ++i) {
             node_id_t neighbor = neighbor_ids[i];
             if (neighbor == dense_node_id_unknown_k || slot.visited.set(neighbor)) continue;
@@ -1915,6 +1943,11 @@ struct dense_nvme_index {
      *      unexpanded candidate is already further than the worst kept result. */
     inline void advance_(context_t& context, dense_traversal_slot_id_t slot_index) noexcept {
         slot_t& slot = context.slots[slot_index];
+        // A saturated walk keeps what its in-flight scores ranked and expands nothing more.
+        if (slot.stage == dense_nvme_stage_t::saturated_k) {
+            slot.stage = dense_nvme_stage_t::finished_k;
+            return;
+        }
         while (slot.frontier.size()) {
             dense_scored_node_t best = slot.frontier.top();
             bool results_full = slot.results.size() == slot.pool_limit;
@@ -1947,6 +1980,7 @@ struct dense_nvme_index {
     small_size_t dimensions_ = 0;
     small_size_t connectivity_ceiling_ = 0;
     std::size_t record_capacity_ = 0;
+    dense_io_file_slot_t file_slot_ = 0;
 #if !defined(_WIN32)
     int data_descriptor_ = -1;
 #endif

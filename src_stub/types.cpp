@@ -10,6 +10,9 @@
  *  the engine's is, so a binding suite exercises the whole lifetime, but no thread and no stream
  *  ever exists behind it: every verb runs on the caller's thread. Only the RAM constructor
  *  succeeds, because those are the residencies this library implements at all.
+ *
+ *  Nothing here serializes, so @c usearch_error_contended_k is a status this library never
+ *  reports: two threads driving one executor both run, where the engine refuses the second.
  */
 #include "usearch/types.h"
 
@@ -104,18 +107,25 @@ char const* usearch_scalar_name(usearch_scalar_t scalar_kind) {
 }
 
 usearch_scalar_t usearch_scalar_from_name(usearch_bytes_view_t name) {
-    for (int code = usearch_scalar_f64_k; code <= usearch_scalar_u1x8_k; ++code) {
-        usearch_scalar_t const scalar_kind = static_cast<usearch_scalar_t>(code);
+    // The enumerators jump over the gaps their families leave, and every gap spells "unknown", so
+    // a counted walk would read that spelling back as a code naming no scalar.
+    usearch_scalar_t const kinds[] = {
+        usearch_scalar_f64_k,  usearch_scalar_f32_k,  usearch_scalar_bf16_k, usearch_scalar_f16_k,
+        usearch_scalar_e5m2_k, usearch_scalar_e4m3_k, usearch_scalar_e3m2_k, usearch_scalar_e2m3_k,
+        usearch_scalar_i8_k,   usearch_scalar_i4x2_k, usearch_scalar_u8_k,   usearch_scalar_u4x2_k,
+        usearch_scalar_u1x8_k,
+    };
+    for (usearch_scalar_t const scalar_kind : kinds)
         if (named(name, usearch_scalar_name(scalar_kind))) return scalar_kind;
-    }
     return usearch_scalar_unknown_k;
 }
 
 char const* usearch_residency_name(usearch_residency_t residency) {
     switch (residency) {
+    case usearch_residency_ram_k: return "ram";
     case usearch_residency_vram_k: return "vram";
     case usearch_residency_nvme_k: return "nvme";
-    default: return "ram";
+    default: return "unknown";
     }
 }
 

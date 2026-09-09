@@ -858,9 +858,9 @@ static nk::matrix_view<typename multi_type_::scalar_t> stored_rows_of( //
  *      narrows it to CPU handles. */
 template <typename predicate_type_>
 static void search_dense_rows(usearch_dense_index_t index, usearch_executor_t punned_executor,        //
-                              void const* queries, size_t queries_count, size_t queries_stride,       //
-                              usearch_scalar_t scalar_kind, size_t wanted,                            //
-                              usearch_dense_expansion_config_t const* config,                         //
+                              void const* queries, size_t queries_count, size_t queries_columns,      //
+                              size_t queries_stride, usearch_scalar_t scalar_kind, size_t wanted,     //
+                              usearch_dense_search_options_t const* options,                          //
                               predicate_type_ predicate,                                              //
                               usearch_progress_callback_t progress, void* progress_state,             //
                               usearch_key_t* keys, size_t keys_stride,                                //
@@ -888,9 +888,13 @@ static void search_dense_rows(usearch_dense_index_t index, usearch_executor_t pu
                 using distance_t = typename variant_type_::distance_t;
                 using key_t = typename variant_type_::key_t;
                 typename variant_type_::search_config_t search_config {};
-                if (config) search_config.expansion_factor = static_cast<u32_t>(config->expansion_factor);
+                if (options) search_config.expansion_factor = static_cast<u32_t>(options->expansion_factor);
 
                 std::size_t const dimensions = specialized_index {variant}.dimensions();
+                if (queries_columns != dimensions)
+                    return propagate_error(usearch_error_shape_mismatch_k, error,
+                                           "The queries are not as wide as the index"),
+                           void();
                 std::size_t const query_bytes = queries_stride ? queries_stride
                                                                : divide_round_up<std::size_t>(
                                                                      nk_dtype_bits(source_dtype) * dimensions, 8);
@@ -1043,17 +1047,23 @@ USEARCH_EXPORT size_t usearch_dense_count(usearch_dense_index_t index, usearch_k
 
 USEARCH_EXPORT size_t usearch_dense_add(                             //
     usearch_dense_index_t index, usearch_executor_t punned_executor, //
-    usearch_key_t const* keys,                                       //
-    void const* vectors, size_t count, size_t stride,                //
-    usearch_scalar_t scalar_kind,                                    //
-    usearch_dense_expansion_config_t const* config,                  //
+    usearch_keys_view_t keys,                                        //
+    usearch_matrix_view_t const* vectors,                            //
+    usearch_dense_insertion_options_t const* options,                //
     usearch_progress_callback_t progress, void* progress_state,      //
     usearch_dense_traversal_stats_t* stats,                          //
     usearch_error_t* error) {
     auto* punned_index = reinterpret_cast<punned_dense_index_t*>(index);
-    if (!keys || !vectors)
+    if (!keys.data || !vectors || !vectors->data)
         return propagate_error(usearch_error_malformed_input_k, error, "Keys and vectors must not be null"), 0ul;
     if (stats) *stats = {};
+    std::size_t const count = vectors->rows;
+    if (keys.count != count)
+        return propagate_error(usearch_error_shape_mismatch_k, error,
+                               "The key count does not match the vector row count"),
+               0ul;
+    std::size_t const stride = vectors->stride_bytes;
+    usearch_scalar_t const scalar_kind = vectors->scalar_kind;
     if (!count) return propagate_success(error), 0ul;
     return std::visit(
         [&]<typename variant_type_>(variant_type_& variant) -> size_t {
@@ -1063,16 +1073,20 @@ USEARCH_EXPORT size_t usearch_dense_add(                             //
             typename variant_type_::executor_t* const executor = executor_of<variant_type_>(punned_executor, error);
             if (!executor) return 0ul;
             using scalar_t = typename variant_type_::scalar_t;
-            std::span const uuids {reinterpret_cast<uuid_t const*>(keys), count};
+            std::span const uuids {reinterpret_cast<uuid_t const*>(keys.data), count};
             typename variant_type_::insert_config_t insert_config {};
-            if (config) insert_config.expansion_factor = static_cast<u32_t>(config->expansion_factor);
+            if (options) insert_config.expansion_factor = static_cast<u32_t>(options->expansion_factor);
 
             // Only a handler or a conversion splits the batch; otherwise it is one all-or-nothing call.
             std::size_t const dimensions = specialized_index {variant}.dimensions();
+            if (vectors->columns != dimensions)
+                return propagate_error(usearch_error_shape_mismatch_k, error,
+                                       "The vectors are not as wide as the index"),
+                       0ul;
             bool const converting = source_dtype != variant_type_::vector_dtype_k;
             std::size_t const row_bytes =
                 stride ? stride : divide_round_up<std::size_t>(nk_dtype_bits(source_dtype) * dimensions, 8);
-            char const* const rows_base = static_cast<char const*>(vectors);
+            char const* const rows_base = static_cast<char const*>(vectors->data);
             std::size_t const chunk = progress || converting ? min_of(count, increment_rows_k) : count;
             nk::matrix<scalar_t> staged;
             if (converting) {
@@ -1100,57 +1114,70 @@ USEARCH_EXPORT size_t usearch_dense_add(                             //
         punned_index->variants);
 }
 
-USEARCH_EXPORT void usearch_dense_search(                             //
-    usearch_dense_index_t index, usearch_executor_t punned_executor,  //
-    void const* queries, size_t queries_count, size_t queries_stride, //
-    usearch_scalar_t scalar_kind, size_t wanted,                      //
-    usearch_dense_expansion_config_t const* config,                   //
-    usearch_progress_callback_t progress, void* progress_state,       //
-    usearch_key_t* keys, size_t keys_stride,                          //
-    usearch_distance_t* distances, size_t distances_stride,           //
-    size_t* counts,                                                   //
-    usearch_dense_traversal_stats_t* stats,                           //
+USEARCH_EXPORT void usearch_dense_search(                            //
+    usearch_dense_index_t index, usearch_executor_t punned_executor, //
+    usearch_matrix_view_t const* queries,                            //
+    usearch_matches_span_t const* matches,                           //
+    usearch_dense_search_options_t const* options,                   //
+    usearch_progress_callback_t progress, void* progress_state,      //
+    usearch_dense_traversal_stats_t* stats,                          //
     usearch_error_t* error) {
-    search_dense_rows(index, punned_executor, queries, queries_count, queries_stride, scalar_kind, wanted, config,
-                      dummy_predicate_t {}, progress, progress_state, keys, keys_stride, distances, distances_stride,
-                      counts, stats, error);
+    if (!queries || !matches)
+        return propagate_error(usearch_error_malformed_input_k, error,
+                               "The queries and the matches span must not be null"),
+               void();
+    search_dense_rows(index, punned_executor, queries->data, queries->rows, queries->columns, queries->stride_bytes,
+                      queries->scalar_kind, matches->wanted, options, dummy_predicate_t {}, progress, progress_state,
+                      matches->keys, matches->keys_stride_bytes, matches->scores, matches->scores_stride_bytes,
+                      matches->counts, stats, error);
 }
 
-USEARCH_EXPORT void usearch_dense_search_if(                          //
-    usearch_dense_index_t index, usearch_executor_t punned_executor,  //
-    void const* queries, size_t queries_count, size_t queries_stride, //
-    usearch_scalar_t scalar_kind, size_t wanted,                      //
-    usearch_dense_expansion_config_t const* config,                   //
-    usearch_predicate_t predicate, void* predicate_state,             //
-    usearch_progress_callback_t progress, void* progress_state,       //
-    usearch_key_t* keys, size_t keys_stride,                          //
-    usearch_distance_t* distances, size_t distances_stride,           //
-    size_t* counts,                                                   //
-    usearch_dense_traversal_stats_t* stats,                           //
+USEARCH_EXPORT void usearch_dense_search_if(                         //
+    usearch_dense_index_t index, usearch_executor_t punned_executor, //
+    usearch_matrix_view_t const* queries,                            //
+    usearch_matches_span_t const* matches,                           //
+    usearch_dense_search_options_t const* options,                   //
+    usearch_predicate_t predicate, void* predicate_state,            //
+    usearch_progress_callback_t progress, void* progress_state,      //
+    usearch_dense_traversal_stats_t* stats,                          //
     usearch_error_t* error) {
+    if (!queries || !matches)
+        return propagate_error(usearch_error_malformed_input_k, error,
+                               "The queries and the matches span must not be null"),
+               void();
+    // A null predicate admits everything, which is what lets one binding body drive both doors.
     if (!predicate)
-        return propagate_error(usearch_error_malformed_input_k, error, "The predicate must not be null"), void();
+        return usearch_dense_search(index, punned_executor, queries, matches, options, progress, progress_state, stats,
+                                    error);
     key_predicate_t const admitted {predicate, predicate_state};
-    search_dense_rows(index, punned_executor, queries, queries_count, queries_stride, scalar_kind, wanted, config,
-                      admitted, progress, progress_state, keys, keys_stride, distances, distances_stride, counts, stats,
+    search_dense_rows(index, punned_executor, queries->data, queries->rows, queries->columns, queries->stride_bytes,
+                      queries->scalar_kind, matches->wanted, options, admitted, progress, progress_state, matches->keys,
+                      matches->keys_stride_bytes, matches->scores, matches->scores_stride_bytes, matches->counts, stats,
                       error);
 }
 
 USEARCH_EXPORT size_t usearch_dense_get(            //
     usearch_dense_index_t index, usearch_key_t key, //
-    void* vectors, size_t wanted, size_t stride,    //
-    usearch_scalar_t scalar_kind, usearch_error_t* error) {
+    usearch_matrix_span_t const* vectors,           //
+    usearch_error_t* error) {
     auto* punned_index = reinterpret_cast<punned_dense_index_t*>(index);
     return std::visit(
         [&]<typename variant_type_>(variant_type_& variant) -> size_t {
             using scalar_t = typename variant_type_::scalar_t;
-            if (!vectors) return propagate_success(error), specialized_index {variant}.count(uuid_of(key));
-            nk_dtype_t const target_dtype = nk_dtype_of(scalar_kind);
+            if (!vectors || !vectors->data)
+                return propagate_success(error), specialized_index {variant}.count(uuid_of(key));
+            std::size_t const wanted = vectors->capacity;
+            std::size_t const stride = vectors->stride_bytes;
+            nk_dtype_t const target_dtype = nk_dtype_of(vectors->scalar_kind);
             if (target_dtype == nk_dtype_unknown_k)
                 return propagate_error(usearch_error_unknown_kind_k, error, "Unknown scalar kind"), 0ul;
             std::size_t const dimensions = specialized_index {variant}.dimensions();
+            if (vectors->columns != dimensions)
+                return propagate_error(usearch_error_shape_mismatch_k, error,
+                                       "The output rows are not as wide as the index"),
+                       0ul;
             if (target_dtype == variant_type_::vector_dtype_k) {
-                nk::matrix_span<scalar_t> const rows {static_cast<char*>(vectors),
+                nk::matrix_span<scalar_t> const rows {static_cast<char*>(vectors->data),
                                                       rows_shape_of<scalar_t>(wanted, stride, dimensions)};
                 return propagate_success(error), specialized_index {variant}.get(uuid_of(key), rows, wanted);
             }
@@ -1163,7 +1190,7 @@ USEARCH_EXPORT size_t usearch_dense_get(            //
                 stride ? stride : divide_round_up<std::size_t>(nk_dtype_bits(target_dtype) * dimensions, 8);
             for (std::size_t row = 0; row != min_of(total, wanted); ++row)
                 nk_cast(staged.span().row(row).as_vector().byte_data(), variant_type_::vector_dtype_k, dimensions,
-                        static_cast<char*>(vectors) + row * row_bytes, target_dtype);
+                        static_cast<char*>(vectors->data) + row * row_bytes, target_dtype);
             return propagate_success(error), total;
         },
         punned_index->variants);
@@ -1180,15 +1207,15 @@ USEARCH_EXPORT size_t usearch_dense_storage_requirements(usearch_dense_index_t i
                       punned_index->variants);
 }
 
-/** @brief Fills the geometry and metric a checkpoint froze into @p options; placement stays. */
-static void adopt_metadata(safegraphs_metadata_t const& metadata, usearch_dense_options_t* options) noexcept {
-    options->dimensions = regular_width(metadata.value_shape).value_or(0);
-    options->connectivity = metadata.connectivity;
+/** @brief Fills every field a checkpoint froze; the type carries nothing a checkpoint cannot say. */
+static void adopt_metadata(safegraphs_metadata_t const& source, usearch_dense_metadata_t* metadata) noexcept {
+    metadata->dimensions = regular_width(source.value_shape).value_or(0);
+    metadata->connectivity = source.connectivity;
     // Our own checkpoints name the stored scalar outright; a foreign file speaks only its column dtype.
-    std::string_view const quantization = metadata.quantization.empty() ? dtype_name(metadata.value_dtype)
-                                                                        : metadata.quantization.view();
-    options->quantization = usearch_scalar_of(nk_dtype_named(quantization.data(), quantization.size()));
-    options->metric = usearch_metric_of(metadata.metric.view());
+    std::string_view const quantization = source.quantization.empty() ? dtype_name(source.value_dtype)
+                                                                      : source.quantization.view();
+    metadata->quantization = usearch_scalar_of(nk_dtype_named(quantization.data(), quantization.size()));
+    metadata->metric = usearch_metric_of(source.metric.view());
 }
 
 USEARCH_EXPORT void usearch_dense_save(                              //
@@ -1230,12 +1257,13 @@ USEARCH_EXPORT void usearch_dense_load(                              //
 }
 
 USEARCH_EXPORT void usearch_dense_metadata( //
-    usearch_bytes_view_t path, usearch_dense_options_t* options, usearch_error_t* error) {
-    if (!path.data || !path.length || !options)
-        return propagate_error(usearch_error_malformed_input_k, error, "The path and options must not be null"), void();
-    auto const [metadata, read] = safegraphs_read_metadata(std::string_view {path.data, path.length});
+    usearch_bytes_view_t path, usearch_dense_metadata_t* metadata, usearch_error_t* error) {
+    if (!path.data || !path.length || !metadata)
+        return propagate_error(usearch_error_malformed_input_k, error, "The path and metadata must not be null"),
+               void();
+    auto const [source, read] = safegraphs_read_metadata(std::string_view {path.data, path.length});
     if (failed(read)) return propagate_error(read, error), void();
-    adopt_metadata(metadata, options);
+    adopt_metadata(source, metadata);
     propagate_success(error);
 }
 
@@ -1281,14 +1309,14 @@ USEARCH_EXPORT void usearch_dense_load_buffer(                       //
 }
 
 USEARCH_EXPORT void usearch_dense_metadata_buffer( //
-    usearch_bytes_view_t buffer, usearch_dense_options_t* options, usearch_error_t* error) {
-    if (!buffer.data || !buffer.length || !options)
-        return propagate_error(usearch_error_malformed_input_k, error, "The buffer and options must not be null"),
+    usearch_bytes_view_t buffer, usearch_dense_metadata_t* metadata, usearch_error_t* error) {
+    if (!buffer.data || !buffer.length || !metadata)
+        return propagate_error(usearch_error_malformed_input_k, error, "The buffer and metadata must not be null"),
                void();
-    auto const [metadata, read] = safegraphs_read_metadata(
+    auto const [source, read] = safegraphs_read_metadata(
         bytes_view_t {reinterpret_cast<byte_t const*>(buffer.data), buffer.length});
     if (failed(read)) return propagate_error(read, error), void();
-    adopt_metadata(metadata, options);
+    adopt_metadata(source, metadata);
     propagate_success(error);
 }
 

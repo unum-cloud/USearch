@@ -16,9 +16,10 @@
  *  superposition kinds are @b rejected rather than approximated by them, so a binding asking for
  *  Gromov-Wasserstein learns that here instead of receiving a plausible wrong number. Rows are
  *  stored as @c double and @c quantization is ignored, so the matrices a cursor borrows are
- *  @c f64 whatever the index froze. Traversal statistics are plausible fiction: shaped
- *  correctly, invented numerically. A checkpoint is a binary blob of this file's own memory
- *  image, readable by nothing else.
+ *  @c f64 whatever the index froze. Refinement keeps no edges to re-select, so its return is a
+ *  constant zero rather than a settling signal, and a caller must not read it as one. Traversal
+ *  statistics are plausible fiction: shaped correctly, invented numerically. A checkpoint is a
+ *  binary blob of this file's own memory image, readable by nothing else.
  */
 #include <cmath> // `std::sqrt`
 
@@ -130,7 +131,7 @@ bool known_metric(usearch_matrix_metric_t metric) {
 void read_matrix(void const* base, std::size_t row_count, std::size_t columns, usearch_scalar_t scalar_kind,
                  std::vector<double>& values) {
     values.resize(row_count * columns);
-    std::size_t const row_bytes = columns * scalar_bytes(scalar_kind);
+    std::size_t const row_bytes = row_extent(scalar_kind, columns);
     for (std::size_t row = 0; row != row_count; ++row)
         read_row(row_at<std::byte>(base, row, row_bytes, row_bytes), scalar_kind,
                  std::span<double>(values).subspan(row * columns, columns));
@@ -142,14 +143,14 @@ void read_matrix(void const* base, std::size_t row_count, std::size_t columns, u
  */
 std::size_t search_tape(index_t& index, void const* const* queries, std::size_t const* row_counts,
                         usearch_scalar_t scalar_kind, std::size_t wanted,
-                        usearch_matrix_expansion_config_t const* config, usearch_matrix_traversal_stats_t* stats,
+                        usearch_matrix_search_options_t const* options, usearch_matrix_traversal_stats_t* stats,
                         usearch_predicate_t predicate, void* predicate_state, usearch_progress_callback_t progress,
                         void* progress_state, usearch_key_t* keys, std::size_t keys_stride,
                         usearch_distance_t* distances, std::size_t distances_stride, std::span<std::size_t> counts) {
     std::size_t const rows = index.entries.size();
     std::size_t const columns = index.options.columns;
-    if (stats && config && config->expansion_factor)
-        stats->computed_distances += config->expansion_factor * counts.size();
+    if (stats && options && options->expansion_factor)
+        stats->computed_distances += options->expansion_factor * counts.size();
 
     std::fill(counts.begin(), counts.end(), 0);
     std::vector<double> query_matrix;
@@ -232,8 +233,8 @@ void write_into(index_t const& index, std::size_t rows, bytes_span_t target) {
         cursor = cursor.subspan(sizeof(usearch_key_t));
         write_pod(cursor, row_count);
         cursor = cursor.subspan(sizeof(row_count));
-        [[maybe_unused]] status_t const copied =
-            copy_bytes(cursor.first(payload_bytes), bytes_of(entry.payload.data(), entry.payload.size()));
+        [[maybe_unused]] status_t const copied = copy_bytes(cursor.first(payload_bytes),
+                                                            bytes_of(entry.payload.data(), entry.payload.size()));
         cursor = cursor.subspan(payload_bytes);
     }
 }
@@ -292,8 +293,8 @@ bool read_from(index_t& index, bytes_view_t blob, usearch_error_t* error) {
             return false;
         }
         payload.resize(scalars);
-        [[maybe_unused]] status_t const copied =
-            copy_bytes(bytes_of(payload.data(), payload.size()), cursor.first(scalars * sizeof(double)));
+        [[maybe_unused]] status_t const copied = copy_bytes(bytes_of(payload.data(), payload.size()),
+                                                            cursor.first(scalars * sizeof(double)));
         cursor = cursor.subspan(scalars * sizeof(double));
         index.append(key, payload);
     }
@@ -346,7 +347,10 @@ void usearch_matrix_clear(usearch_matrix_index_t handle, usearch_error_t* error)
 
 std::size_t usearch_matrix_size(usearch_matrix_index_t handle, usearch_error_t* error) {
     propagate_success(error);
-    return borrowed<index_t>(handle).entries.size();
+    index_t& index = borrowed<index_t>(handle);
+    // Held shared like every other reader, so a size taken beside an insertion is not a data race.
+    std::shared_lock readers(index.mutex);
+    return index.entries.size();
 }
 std::size_t usearch_matrix_capacity(usearch_matrix_index_t handle, usearch_error_t* error) {
     propagate_success(error);
@@ -360,7 +364,13 @@ std::size_t usearch_matrix_columns(usearch_matrix_index_t handle, usearch_error_
 }
 std::size_t usearch_matrix_rows(usearch_matrix_index_t handle, usearch_error_t* error) {
     propagate_success(error);
-    return borrowed<index_t>(handle).options.rows;
+    index_t& index = borrowed<index_t>(handle);
+    // The header asks for the rows stored rather than the height frozen, which a ragged index has
+    // none of - the two coincide only where every entry shares one height.
+    std::shared_lock readers(index.mutex);
+    std::size_t stored = 0;
+    for (entry_t const& entry : index.entries) stored += rows_of(index, entry);
+    return stored;
 }
 std::size_t usearch_matrix_connectivity(usearch_matrix_index_t handle, usearch_error_t* error) {
     propagate_success(error);
@@ -377,10 +387,9 @@ char const* usearch_matrix_capabilities([[maybe_unused]] usearch_matrix_index_t 
     return "serial";
 }
 
-std::size_t usearch_matrix_add(usearch_matrix_index_t handle, usearch_executor_t executor, usearch_key_t const* keys,
-                               void const* const* matrices, std::size_t const* row_counts, std::size_t count,
-                               usearch_scalar_t scalar_kind,
-                               [[maybe_unused]] usearch_matrix_expansion_config_t const* config,
+std::size_t usearch_matrix_add(usearch_matrix_index_t handle, usearch_executor_t executor, usearch_keys_view_t keys,
+                               void const* const* matrices, std::size_t const* row_counts, usearch_scalar_t scalar_kind,
+                               [[maybe_unused]] usearch_matrix_insertion_options_t const* options,
                                usearch_progress_callback_t progress, void* progress_state,
                                usearch_matrix_traversal_stats_t* stats, usearch_error_t* error) {
     propagate_success(error);
@@ -389,6 +398,10 @@ std::size_t usearch_matrix_add(usearch_matrix_index_t handle, usearch_executor_t
     if (reject_executor(executor, error)) return 0;
     if (reject_unfrozen(index, error)) return 0;
     if (reject_scalar(scalar_kind, error)) return 0;
+    if (reject_keys(keys, error)) return 0;
+    if (reject_if(!matrices || !row_counts, usearch_error_malformed_input_k, "The tape must name storage", error))
+        return 0;
+    std::size_t const count = keys.count;
     // A frozen height is what lets row `i` of one entry pair with row `i` of another, so an
     // entry of any other height is rejected rather than stored.
     if (index.options.rows)
@@ -400,30 +413,38 @@ std::size_t usearch_matrix_add(usearch_matrix_index_t handle, usearch_executor_t
             }
 
     std::unique_lock writers(index.mutex);
+    if (reject_oversubscribed(index, keys, index.options.values_per_key, error)) return 0;
     if (!index.accommodate(index.entries.size() + count)) {
         propagate_error(usearch_error_out_of_memory_k, error, "The batch could not be accommodated");
         return 0;
     }
 
+    std::size_t const watermark = index.entries.size();
     payload_t payload;
     std::size_t published = 0;
     for (std::size_t row = 0; row != count; ++row) {
         read_matrix(matrices[row], row_counts[row], index.options.columns, scalar_kind, payload);
-        index.append(keys[row], payload);
+        index.append(keys.data[row], payload);
         ++published;
         if (!keep_going(progress, progress_state, published, count)) break;
+    }
+    // This modality's batch is all-or-nothing, a cancellation included, so a stopped tape unwinds
+    // to the watermark rather than leaving a prefix published.
+    if (published != count) {
+        index.unwind(watermark);
+        propagate_error(usearch_error_cancelled_k, error, "The caller's handler stopped the batch");
+        return 0;
     }
     if (stats) {
         stats->visited_members = published;
         stats->computed_distances = published * index.entries.size();
         stats->restarts = 1;
     }
-    reject_cancelled(published, count, error);
-    return published;
+    return count;
 }
 
 std::size_t usearch_matrix_refine(usearch_matrix_index_t handle, usearch_executor_t executor,
-                                  [[maybe_unused]] usearch_matrix_expansion_config_t const* config,
+                                  [[maybe_unused]] usearch_matrix_insertion_options_t const* options,
                                   usearch_progress_callback_t progress, void* progress_state,
                                   usearch_matrix_traversal_stats_t* stats, usearch_error_t* error) {
     propagate_success(error);
@@ -440,12 +461,12 @@ std::size_t usearch_matrix_refine(usearch_matrix_index_t handle, usearch_executo
     return 0;
 }
 
-void usearch_matrix_search(usearch_matrix_index_t handle, usearch_executor_t executor, void const* const* queries,
-                           std::size_t const* row_counts, std::size_t queries_count, usearch_scalar_t scalar_kind,
-                           std::size_t wanted, usearch_matrix_expansion_config_t const* config,
-                           usearch_progress_callback_t progress, void* progress_state, usearch_key_t* keys,
-                           std::size_t keys_stride, usearch_distance_t* distances, std::size_t distances_stride,
-                           std::size_t* counts, usearch_matrix_traversal_stats_t* stats, usearch_error_t* error) {
+/** @brief The shared body of both search doors; the unfiltered one admits with a null predicate. */
+void search_matrix_tape(usearch_matrix_index_t handle, usearch_executor_t executor, void const* const* queries,
+                        std::size_t const* row_counts, std::size_t queries_count, usearch_scalar_t scalar_kind,
+                        usearch_matches_span_t const* matches, usearch_matrix_search_options_t const* options,
+                        usearch_predicate_t predicate, void* predicate_state, usearch_progress_callback_t progress,
+                        void* progress_state, usearch_matrix_traversal_stats_t* stats, usearch_error_t* error) {
     propagate_success(error);
     reset(stats);
     index_t& index = borrowed<index_t>(handle);
@@ -453,33 +474,35 @@ void usearch_matrix_search(usearch_matrix_index_t handle, usearch_executor_t exe
     if (reject_unfrozen(index, error)) return;
     if (reject_scalar(scalar_kind, error)) return;
     if (reject_metric(index, error)) return;
+    if (reject_if(!queries || !row_counts, usearch_error_malformed_input_k, "The tape must name storage", error))
+        return;
+    std::size_t keys_stride = 0, scores_stride = 0;
+    if (reject_matches(matches, keys_stride, scores_stride, error)) return;
+
     std::shared_lock readers(index.mutex);
-    std::size_t const answered = search_tape(index, queries, row_counts, scalar_kind, wanted, config, stats, nullptr,
-                                             nullptr, progress, progress_state, keys, keys_stride, distances,
-                                             distances_stride, {counts, queries_count});
+    std::size_t const answered = search_tape(
+        index, queries, row_counts, scalar_kind, matches->wanted, options, stats, predicate, predicate_state, progress,
+        progress_state, matches->keys, keys_stride, matches->scores, scores_stride, {matches->counts, queries_count});
     reject_cancelled(answered, queries_count, error);
 }
 
-void usearch_matrix_search_if(usearch_matrix_index_t handle, usearch_executor_t executor,
-                              void const* const* queries, std::size_t const* row_counts, std::size_t queries_count,
-                              usearch_scalar_t scalar_kind, std::size_t wanted,
-                              usearch_matrix_expansion_config_t const* config, usearch_predicate_t predicate,
-                              void* predicate_state, usearch_progress_callback_t progress, void* progress_state,
-                              usearch_key_t* keys, std::size_t keys_stride, usearch_distance_t* distances,
-                              std::size_t distances_stride, std::size_t* counts,
+void usearch_matrix_search(usearch_matrix_index_t handle, usearch_executor_t executor, void const* const* queries,
+                           std::size_t const* row_counts, std::size_t queries_count, usearch_scalar_t scalar_kind,
+                           usearch_matches_span_t const* matches, usearch_matrix_search_options_t const* options,
+                           usearch_progress_callback_t progress, void* progress_state,
+                           usearch_matrix_traversal_stats_t* stats, usearch_error_t* error) {
+    search_matrix_tape(handle, executor, queries, row_counts, queries_count, scalar_kind, matches, options, nullptr,
+                       nullptr, progress, progress_state, stats, error);
+}
+
+void usearch_matrix_search_if(usearch_matrix_index_t handle, usearch_executor_t executor, void const* const* queries,
+                              std::size_t const* row_counts, std::size_t queries_count, usearch_scalar_t scalar_kind,
+                              usearch_matches_span_t const* matches, usearch_matrix_search_options_t const* options,
+                              usearch_predicate_t predicate, void* predicate_state,
+                              usearch_progress_callback_t progress, void* progress_state,
                               usearch_matrix_traversal_stats_t* stats, usearch_error_t* error) {
-    propagate_success(error);
-    reset(stats);
-    index_t& index = borrowed<index_t>(handle);
-    if (reject_executor(executor, error)) return;
-    if (reject_unfrozen(index, error)) return;
-    if (reject_scalar(scalar_kind, error)) return;
-    if (reject_metric(index, error)) return;
-    std::shared_lock readers(index.mutex);
-    std::size_t const answered = search_tape(index, queries, row_counts, scalar_kind, wanted, config, stats, predicate,
-                                             predicate_state, progress, progress_state, keys, keys_stride, distances,
-                                             distances_stride, {counts, queries_count});
-    reject_cancelled(answered, queries_count, error);
+    search_matrix_tape(handle, executor, queries, row_counts, queries_count, scalar_kind, matches, options, predicate,
+                       predicate_state, progress, progress_state, stats, error);
 }
 
 std::size_t usearch_matrix_count(usearch_matrix_index_t handle, usearch_key_t key, usearch_matrix_key_stats_t* stats,
@@ -510,7 +533,7 @@ std::size_t usearch_matrix_get(usearch_matrix_index_t handle, usearch_key_t key,
     if (matrices && reject_scalar(scalar_kind, error)) return 0;
     std::shared_lock readers(index.mutex);
     std::size_t const columns = index.options.columns;
-    std::size_t const row_bytes = columns * scalar_bytes(scalar_kind);
+    std::size_t const row_bytes = row_extent(scalar_kind, columns);
     std::vector<std::size_t> const rows = rows_under(index, key);
     for (std::size_t found = 0; found != rows.size() && found < wanted; ++found) {
         entry_t const& entry = index.entries[rows[found]];
@@ -544,9 +567,9 @@ void usearch_matrix_merge(usearch_matrix_index_t handle, usearch_executor_t exec
         ++merged;
         if (!keep_going(progress, progress_state, merged, donors_count)) break;
     }
-    // Consumed whether merged or not; the ABI forbids the caller freeing them.
-    for (std::size_t position = 0; position != donors_count; ++position)
-        delete static_cast<index_t*>(donors[position]);
+    // Only an absorbed donor is consumed: a stopped merge leaves the rest live handles the caller
+    // still owns and must free, as the header promises.
+    for (std::size_t position = 0; position != merged; ++position) delete static_cast<index_t*>(donors[position]);
     if (!accommodated)
         return propagate_error(usearch_error_out_of_memory_k, error, "The donor's entries could not be accommodated");
     reject_cancelled(merged, donors_count, error);
@@ -561,14 +584,15 @@ usearch_matrix_cursor_t usearch_matrix_cursor(usearch_matrix_index_t handle, use
     return cursor;
 }
 
-std::size_t usearch_matrix_cursor_next(usearch_matrix_cursor_t handle, usearch_key_t* keys, void const** matrices,
-                                       std::size_t* row_counts, std::size_t wanted, usearch_error_t* error) {
+std::size_t usearch_matrix_cursor_next(usearch_matrix_cursor_t handle, usearch_keys_span_t keys, void const** matrices,
+                                       std::size_t* row_counts, usearch_error_t* error) {
     propagate_success(error);
     cursor_t& cursor = borrowed<cursor_t>(handle);
     index_t& index = *cursor.index;
+    if (reject_keys_span(keys, error)) return 0;
     std::shared_lock readers(index.mutex);
-    std::size_t const written = std::min(wanted, cursor.limit - cursor.position);
-    std::span<usearch_key_t> const keys_row {keys, written};
+    std::size_t const written = std::min(keys.capacity, cursor.limit - cursor.position);
+    std::span<usearch_key_t> const keys_row {keys.data, written};
     for (std::size_t row = 0; row != written; ++row) {
         entry_t const& entry = index.entries[cursor.position + row];
         keys_row[row] = entry.key;

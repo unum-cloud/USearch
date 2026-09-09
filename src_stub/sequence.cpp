@@ -16,8 +16,10 @@
  *  The alignment kernels are textbook dynamic programming with no band, no vectorization, and
  *  quadratic cost, so a corpus of long sequences is slow rather than wrong. Weighted scores are
  *  similarities and reported as their negation, which ranks correctly but is not the engine's
- *  scale. Traversal statistics are plausible fiction: shaped correctly, invented numerically.
- *  A checkpoint is a binary blob of this file's own memory image, readable by nothing else.
+ *  scale. Refinement keeps no edges to re-select, so its return is a constant zero rather than a
+ *  settling signal, and a caller must not read it as one. Traversal statistics are plausible
+ *  fiction: shaped correctly, invented numerically. A checkpoint is a binary blob of this file's
+ *  own memory image, readable by nothing else.
  */
 
 #include <algorithm> // `std::stable_sort`, `std::min`, `std::max`
@@ -250,14 +252,13 @@ bytes_view_t viewed(usearch_bytes_view_t sequence) { return bytes_of(sequence.da
  *  @return Queries answered, short of @p counts.size() exactly when the handler cancelled.
  */
 std::size_t search_tape(index_t& index, usearch_bytes_view_t const* queries, std::size_t wanted,
-                        usearch_sequence_expansion_config_t const* config,
-                        usearch_sequence_traversal_stats_t* stats, usearch_predicate_t predicate,
-                        void* predicate_state, usearch_progress_callback_t progress, void* progress_state,
-                        usearch_key_t* keys, std::size_t keys_stride, usearch_distance_t* distances,
-                        std::size_t distances_stride, std::span<std::size_t> counts) {
+                        usearch_sequence_search_options_t const* options, usearch_sequence_traversal_stats_t* stats,
+                        usearch_predicate_t predicate, void* predicate_state, usearch_progress_callback_t progress,
+                        void* progress_state, usearch_key_t* keys, std::size_t keys_stride,
+                        usearch_distance_t* distances, std::size_t distances_stride, std::span<std::size_t> counts) {
     std::size_t const rows = index.entries.size();
-    if (stats && config && config->expansion_factor)
-        stats->computed_distances += config->expansion_factor * counts.size();
+    if (stats && options && options->expansion_factor)
+        stats->computed_distances += options->expansion_factor * counts.size();
 
     std::fill(counts.begin(), counts.end(), 0);
     scratch_t scratch;
@@ -337,9 +338,9 @@ void write_into(index_t const& index, std::size_t rows, bytes_span_t target) {
     bytes_span_t cursor = target.subspan(sizeof(prefix));
 
     if (!index.options.substitution.empty()) {
-        [[maybe_unused]] status_t const copied =
-            copy_bytes(cursor.first(index.options.substitution.size()),
-                       bytes_of(index.options.substitution.data(), index.options.substitution.size()));
+        [[maybe_unused]] status_t const copied = copy_bytes(
+            cursor.first(index.options.substitution.size()),
+            bytes_of(index.options.substitution.data(), index.options.substitution.size()));
         cursor = cursor.subspan(index.options.substitution.size());
     }
     for (std::size_t row = 0; row != rows; ++row) {
@@ -392,9 +393,9 @@ bool read_from(index_t& index, bytes_view_t blob, usearch_error_t* error) {
     index.options.substitution.clear();
     if (alignment_metric(prefix.metric)) {
         index.options.substitution.resize(alphabet_k * alphabet_k);
-        [[maybe_unused]] status_t const copied =
-            copy_bytes(bytes_of(index.options.substitution.data(), index.options.substitution.size()),
-                       cursor.first(index.options.substitution.size()));
+        [[maybe_unused]] status_t const copied = copy_bytes(
+            bytes_of(index.options.substitution.data(), index.options.substitution.size()),
+            cursor.first(index.options.substitution.size()));
         cursor = cursor.subspan(index.options.substitution.size());
     }
 
@@ -504,7 +505,10 @@ void usearch_sequence_clear(usearch_sequence_index_t handle, usearch_error_t* er
 
 std::size_t usearch_sequence_size(usearch_sequence_index_t handle, usearch_error_t* error) {
     propagate_success(error);
-    return borrowed<index_t>(handle).entries.size();
+    index_t& index = borrowed<index_t>(handle);
+    // Held shared like every other reader, so a size taken beside an insertion is not a data race.
+    std::shared_lock readers(index.mutex);
+    return index.entries.size();
 }
 std::size_t usearch_sequence_capacity(usearch_sequence_index_t handle, usearch_error_t* error) {
     propagate_success(error);
@@ -528,42 +532,53 @@ char const* usearch_sequence_capabilities([[maybe_unused]] usearch_sequence_inde
     return "serial";
 }
 
-std::size_t usearch_sequence_add(usearch_sequence_index_t handle, usearch_executor_t executor,
-                                 usearch_key_t const* keys, usearch_bytes_view_t const* sequences, std::size_t count,
-                                 [[maybe_unused]] usearch_sequence_expansion_config_t const* config,
+std::size_t usearch_sequence_add(usearch_sequence_index_t handle, usearch_executor_t executor, usearch_keys_view_t keys,
+                                 usearch_bytes_view_t const* sequences,
+                                 [[maybe_unused]] usearch_sequence_insertion_options_t const* options,
                                  usearch_progress_callback_t progress, void* progress_state,
                                  usearch_sequence_traversal_stats_t* stats, usearch_error_t* error) {
     propagate_success(error);
     reset(stats);
     index_t& index = borrowed<index_t>(handle);
     if (reject_executor(executor, error)) return 0;
+    if (reject_keys(keys, error)) return 0;
+    std::size_t const count = keys.count;
+    if (reject_if(!sequences, usearch_error_malformed_input_k, "The tape must name storage", error)) return 0;
 
     std::unique_lock writers(index.mutex);
+    if (reject_oversubscribed(index, keys, index.options.options.values_per_key, error)) return 0;
     if (!index.accommodate(index.entries.size() + count)) {
         propagate_error(usearch_error_out_of_memory_k, error, "The batch could not be accommodated");
         return 0;
     }
 
+    std::size_t const watermark = index.entries.size();
     payload_t payload;
     std::size_t published = 0;
     for (std::size_t row = 0; row != count; ++row) {
         bytes_view_t const sequence = viewed(sequences[row]);
         payload.assign(sequence.begin(), sequence.end());
-        index.append(keys[row], payload);
+        index.append(keys.data[row], payload);
         ++published;
         if (!keep_going(progress, progress_state, published, count)) break;
+    }
+    // This modality's batch is all-or-nothing, a cancellation included, so a stopped tape unwinds
+    // to the watermark rather than leaving a prefix published.
+    if (published != count) {
+        index.unwind(watermark);
+        propagate_error(usearch_error_cancelled_k, error, "The caller's handler stopped the batch");
+        return 0;
     }
     if (stats) {
         stats->visited_members = published;
         stats->computed_distances = published * index.entries.size();
         stats->restarts = 1;
     }
-    reject_cancelled(published, count, error);
-    return published;
+    return count;
 }
 
 std::size_t usearch_sequence_refine(usearch_sequence_index_t handle, usearch_executor_t executor,
-                                    [[maybe_unused]] usearch_sequence_expansion_config_t const* config,
+                                    [[maybe_unused]] usearch_sequence_insertion_options_t const* options,
                                     usearch_progress_callback_t progress, void* progress_state,
                                     usearch_sequence_traversal_stats_t* stats, usearch_error_t* error) {
     propagate_success(error);
@@ -580,40 +595,44 @@ std::size_t usearch_sequence_refine(usearch_sequence_index_t handle, usearch_exe
     return 0;
 }
 
-void usearch_sequence_search(usearch_sequence_index_t handle, usearch_executor_t executor,
-                             usearch_bytes_view_t const* queries, std::size_t queries_count, std::size_t wanted,
-                             usearch_sequence_expansion_config_t const* config,
-                             usearch_progress_callback_t progress, void* progress_state, usearch_key_t* keys,
-                             std::size_t keys_stride, usearch_distance_t* distances, std::size_t distances_stride,
-                             std::size_t* counts, usearch_sequence_traversal_stats_t* stats,
-                             usearch_error_t* error) {
+/** @brief The shared body of both search doors; the unfiltered one admits with a null predicate. */
+void search_sequence_tape(usearch_sequence_index_t handle, usearch_executor_t executor,
+                          usearch_bytes_view_t const* queries, std::size_t queries_count,
+                          usearch_matches_span_t const* matches, usearch_sequence_search_options_t const* options,
+                          usearch_predicate_t predicate, void* predicate_state, usearch_progress_callback_t progress,
+                          void* progress_state, usearch_sequence_traversal_stats_t* stats, usearch_error_t* error) {
     propagate_success(error);
     reset(stats);
     index_t& index = borrowed<index_t>(handle);
     if (reject_executor(executor, error)) return;
+    if (reject_if(!queries, usearch_error_malformed_input_k, "The tape must name storage", error)) return;
+    std::size_t keys_stride = 0, scores_stride = 0;
+    if (reject_matches(matches, keys_stride, scores_stride, error)) return;
+
     std::shared_lock readers(index.mutex);
-    std::size_t const answered = search_tape(index, queries, wanted, config, stats, nullptr, nullptr, progress,
-                                             progress_state, keys, keys_stride, distances, distances_stride,
-                                             {counts, queries_count});
+    std::size_t const answered = search_tape(index, queries, matches->wanted, options, stats, predicate,
+                                             predicate_state, progress, progress_state, matches->keys, keys_stride,
+                                             matches->scores, scores_stride, {matches->counts, queries_count});
     reject_cancelled(answered, queries_count, error);
 }
 
+void usearch_sequence_search(usearch_sequence_index_t handle, usearch_executor_t executor,
+                             usearch_bytes_view_t const* queries, std::size_t queries_count,
+                             usearch_matches_span_t const* matches, usearch_sequence_search_options_t const* options,
+                             usearch_progress_callback_t progress, void* progress_state,
+                             usearch_sequence_traversal_stats_t* stats, usearch_error_t* error) {
+    search_sequence_tape(handle, executor, queries, queries_count, matches, options, nullptr, nullptr, progress,
+                         progress_state, stats, error);
+}
+
 void usearch_sequence_search_if(usearch_sequence_index_t handle, usearch_executor_t executor,
-                                usearch_bytes_view_t const* queries, std::size_t queries_count, std::size_t wanted,
-                                usearch_sequence_expansion_config_t const* config, usearch_predicate_t predicate,
-                                void* predicate_state, usearch_progress_callback_t progress, void* progress_state,
-                                usearch_key_t* keys, std::size_t keys_stride, usearch_distance_t* distances,
-                                std::size_t distances_stride, std::size_t* counts,
+                                usearch_bytes_view_t const* queries, std::size_t queries_count,
+                                usearch_matches_span_t const* matches, usearch_sequence_search_options_t const* options,
+                                usearch_predicate_t predicate, void* predicate_state,
+                                usearch_progress_callback_t progress, void* progress_state,
                                 usearch_sequence_traversal_stats_t* stats, usearch_error_t* error) {
-    propagate_success(error);
-    reset(stats);
-    index_t& index = borrowed<index_t>(handle);
-    if (reject_executor(executor, error)) return;
-    std::shared_lock readers(index.mutex);
-    std::size_t const answered = search_tape(index, queries, wanted, config, stats, predicate, predicate_state,
-                                             progress, progress_state, keys, keys_stride, distances, distances_stride,
-                                             {counts, queries_count});
-    reject_cancelled(answered, queries_count, error);
+    search_sequence_tape(handle, executor, queries, queries_count, matches, options, predicate, predicate_state,
+                         progress, progress_state, stats, error);
 }
 
 std::size_t usearch_sequence_count(usearch_sequence_index_t handle, usearch_key_t key,
@@ -671,9 +690,9 @@ void usearch_sequence_merge(usearch_sequence_index_t handle, usearch_executor_t 
         ++merged;
         if (!keep_going(progress, progress_state, merged, donors_count)) break;
     }
-    // Consumed whether merged or not; the ABI forbids the caller freeing them.
-    for (std::size_t position = 0; position != donors_count; ++position)
-        delete static_cast<index_t*>(donors[position]);
+    // Only an absorbed donor is consumed: a stopped merge leaves the rest live handles the caller
+    // still owns and must free, as the header promises.
+    for (std::size_t position = 0; position != merged; ++position) delete static_cast<index_t*>(donors[position]);
     if (!accommodated)
         return propagate_error(usearch_error_out_of_memory_k, error, "The donor's entries could not be accommodated");
     reject_cancelled(merged, donors_count, error);
@@ -688,22 +707,21 @@ usearch_sequence_cursor_t usearch_sequence_cursor(usearch_sequence_index_t handl
     return cursor;
 }
 
-std::size_t usearch_sequence_cursor_next(usearch_sequence_cursor_t handle, usearch_key_t* keys,
-                                         usearch_bytes_view_t* sequences, std::size_t wanted, usearch_error_t* error) {
+std::size_t usearch_sequence_cursor_next(usearch_sequence_cursor_t handle, usearch_keys_span_t keys,
+                                         usearch_bytes_view_t* sequences, usearch_error_t* error) {
     propagate_success(error);
     cursor_t& cursor = borrowed<cursor_t>(handle);
     index_t& index = *cursor.index;
+    if (reject_keys_span(keys, error)) return 0;
     std::shared_lock readers(index.mutex);
-    std::size_t const written = std::min(wanted, cursor.limit - cursor.position);
-    std::span<usearch_key_t> const keys_row {keys, written};
+    std::size_t const written = std::min(keys.capacity, cursor.limit - cursor.position);
+    std::span<usearch_key_t> const keys_row {keys.data, written};
     for (std::size_t row = 0; row != written; ++row) {
         entry_t const& entry = index.entries[cursor.position + row];
         keys_row[row] = entry.key;
         // Views borrow the arena's own bytes, which growth relocates the row of but never the
         // payload buffer itself, so they survive concurrent insertion.
-        if (sequences)
-            sequences[row] = {static_cast<char const*>(static_cast<void const*>(entry.payload.data())),
-                              entry.payload.size()};
+        if (sequences) sequences[row] = as_bytes(entry.payload);
     }
     cursor.position += written;
     return written;
