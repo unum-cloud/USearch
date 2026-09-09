@@ -78,7 +78,7 @@ jobs:
       - name: Test C++
         run: build_artifacts/test_cpp
       - name: Test C
-        run: build_artifacts/test_c
+        run: build_artifacts/usearch_test_c
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
@@ -141,7 +141,7 @@ jobs:
       - name: Test .NET
         run: |
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
-          cp "${{ github.workspace }}/build_artifacts/libusearch_c.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
+          cp "${{ github.workspace }}/build_artifacts/libusearch_shared.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
           dotnet test -c Debug --logger "console;verbosity=detailed"
         shell: bash
         working-directory: ${{ github.workspace }}/csharp
@@ -150,7 +150,7 @@ jobs:
         # With `LD_DEBUG=all` we detect the addresses of the libraries that are loaded
       - name: Test GoLang
         run: |
-          sudo cp ${{ github.workspace }}/build_artifacts/libusearch_c.so /usr/lib/libusearch_c.so
+          sudo cp ${{ github.workspace }}/build_artifacts/libusearch_shared.so /usr/lib/libusearch_shared.so
           sudo cp -r ${{ github.workspace }}/include/usearch /usr/include/
           test -z "$(gofmt -l .)"
           go vet ./...
@@ -180,7 +180,7 @@ jobs:
       - name: Test C++
         run: build_artifacts/test_cpp
       - name: Test C
-        run: build_artifacts/test_c
+        run: build_artifacts/usearch_test_c
 
         # JavaScript
       - name: Set up Node.js
@@ -230,7 +230,7 @@ jobs:
       - name: Test .NET
         run: |
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
-          cp "${{ github.workspace }}/build_artifacts/libusearch_c.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
+          cp "${{ github.workspace }}/build_artifacts/libusearch_shared.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
           dotnet test -c Debug --logger "console;verbosity=detailed"
         shell: bash
         working-directory: ${{ github.workspace }}/csharp
@@ -255,7 +255,7 @@ jobs:
       - name: Test C++
         run: build_artifacts/test_cpp
       - name: Test C
-        run: build_artifacts/test_c
+        run: build_artifacts/usearch_test_c
 
         # JavaScript
       - name: Set up Node.js
@@ -310,7 +310,7 @@ jobs:
       - name: Test .NET
         run: |
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
-          cp "${{ github.workspace }}/build_artifacts/libusearch_c.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
+          cp "${{ github.workspace }}/build_artifacts/libusearch_shared.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
           dotnet test -c Debug --logger "console;verbosity=minimal" --filter "FullyQualifiedName!=Cloud.Unum.USearch.Tests.UsearchIndexTests.PersistAndRestore"
         shell: bash
         working-directory: ${{ github.workspace }}/csharp
@@ -333,7 +333,7 @@ jobs:
       - name: Test C++
         run: .\build_artifacts\test_cpp.exe
       - name: Test C
-        run: .\build_artifacts\test_c.exe
+        run: .\build_artifacts\usearch_test_c.exe
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
@@ -379,7 +379,7 @@ jobs:
       - name: Test .NET
         run: |
           mkdir -p "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
-          cp "${{ github.workspace }}\build_artifacts\libusearch_c.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
+          cp "${{ github.workspace }}\build_artifacts\libusearch_shared.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
           dotnet test -c Debug --logger "console;verbosity=detailed"
         shell: bash
         working-directory: ${{ github.workspace }}/csharp
@@ -405,7 +405,7 @@ jobs:
 
       - name: Verify ARM64 build artifacts
         run: |
-          if (!(Test-Path "build_artifacts\libusearch_c.dll")) { exit 1 }
+          if (!(Test-Path "build_artifacts\libusearch_shared.dll")) { exit 1 }
           Write-Host "ARM64 DLL built successfully"
 
   build_docker:
@@ -574,7 +574,7 @@ jobs:
         # We can't run the produced builds, but we can make sure they exist
       - name: Test artifacts presence
         run: |
-          test -e build_artifacts/libusearch_c.so
+          test -e build_artifacts/libusearch_shared.so
 
   test_android:
     name: Android
@@ -618,7 +618,7 @@ jobs:
 
         # We can't run the produced builds, but we can make sure they exist
       - name: Test artifacts presence
-        run: test -e build_artifacts/libusearch_c.so
+        run: test -e build_artifacts/libusearch_shared.so
 
         # Rust
       - name: Set up Rust
@@ -655,14 +655,14 @@ jobs:
       - name: Test Java bindings with Android library
         run: |
           mkdir -p build/libs/usearch/shared/
-          cp build_artifacts/libusearch_c.so build/libs/usearch/shared/
+          cp build_artifacts/libusearch_shared.so build/libs/usearch/shared/
           javac -cp . java/cloud/unum/usearch/*.java
           echo "Java compilation successful with Android NDK library"
 
       - name: Package Android libraries for release
         run: |
           version=$(cat VERSION)
-          zip -r usearch_android_${{ matrix.arch }}_${version}.zip build_artifacts/libusearch_c.so include/usearch
+          zip -r usearch_android_${{ matrix.arch }}_${version}.zip build_artifacts/libusearch_shared.so include/usearch
 
       - name: Upload Android libraries
         uses: actions/upload-artifact@v5

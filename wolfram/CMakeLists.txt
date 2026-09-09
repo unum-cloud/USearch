@@ -48,11 +48,9 @@ include(WSTP)
 include_directories("${WOLFRAM_PATH}/SystemFiles/IncludeFiles/C/")
 link_directories("${WOLFRAM_PATH}/SystemFiles/Libraries/${SYSTEMID}/")
 
-add_library(usearchWFM SHARED lib.cpp)
+add_library(usearch_wolfram SHARED lib.cpp)
 
 # Link against the Wolfram LibraryLink library
-target_link_libraries(usearchWFM WSTP::STATIC_LIBRARY)
+target_link_libraries(usearch_wolfram WSTP::STATIC_LIBRARY)
 
-# Set the output name of the library to be compatible with Wolfram Language
-set_target_properties(usearchWFM PROPERTIES PREFIX "" OUTPUT_NAME "usearchWFM")
-set_target_properties(usearchWFM PROPERTIES CXX_STANDARD 11)
+set_target_properties(usearch_wolfram PROPERTIES CXX_STANDARD 11)

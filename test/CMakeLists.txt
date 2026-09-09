@@ -1,16 +1,11 @@
-# One suite executable listing the per-family test units, sharded per dtype so the instantiation grids build in
-# parallel. Optimization level comes from the configuration: measured on these shards, -O1 costs as much as -O3 and only
-# slows the suite down.
+# The dense suite lists the per-family test units, sharded per dtype so the instantiation grids build in parallel.
+# Optimization level comes from the configuration: measured on these shards, -O1 costs as much as -O3 and only slows the
+# suite down.
 add_executable(
     usearch_test
     test.cpp
     dense.cpp
-    utilities/ram_buffers.cpp
-    utilities/ram_tables.cpp
     utilities/safegraphs_format.cpp
-    basic/sentences.cpp
-    basic/bioinformatics.cpp
-    basic/meshes.cpp
     dense/ram_metric_f64.cpp
     dense/ram_metric_f32.cpp
     dense/ram_metric_bf16.cpp
@@ -34,8 +29,7 @@ add_executable(
     dense/ram_index_u8.cpp
     dense/ram_index_u1.cpp
 )
-usearch_setup_target(usearch_test)
-target_compile_options(usearch_test PRIVATE ${USEARCH_HOST_TUNING})
+usearch_setup_target(usearch_test HOST)
 target_include_directories(usearch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(usearch_test PRIVATE fmt::fmt yyjson forkunion::static)
 add_test(NAME usearch_test COMMAND usearch_test)
@@ -47,8 +41,8 @@ target_include_directories(usearch_test_header_only PRIVATE ${PROJECT_SOURCE_DIR
 set_target_properties(usearch_test_header_only PROPERTIES CXX_STANDARD 20)
 add_test(NAME usearch_test_header_only COMMAND usearch_test_header_only)
 
-# The CUDA suite skips `usearch_setup_target`: its host-compiler flags - `-march=native`, `-fmax-errors` - don't survive the
-# CUDA driver, so the target wires the interface includes directly.
+# The CUDA suite skips `usearch_setup_target`: its host-compiler flags - `-march=native`, `-fmax-errors` - don't survive
+# the CUDA driver, so the target wires the interface includes directly.
 if (USEARCH_BUILD_CUDA)
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)

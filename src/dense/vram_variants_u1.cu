@@ -1,7 +1,7 @@
 /**
- *  @brief The u1 shard of the dense index library: its VRAM arms' explicit instantiations.
+ *  @brief The u1 unit of the dense index library: its VRAM arms' explicit instantiations.
  *  @author Ash Vardanian
- *  @file src/dense/vram_indexes_u1.cu
+ *  @file src/dense/vram_variants_u1.cu
  *  @date September 1, 2026
  */
 #include "dense_specializations.cuh"

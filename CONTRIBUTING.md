@@ -112,7 +112,7 @@ cmake -D CMAKE_BUILD_TYPE=Release -D USEARCH_USE_JEMALLOC=1 -D USEARCH_BUILD_TES
 
 cmake --build build_release --config Release
 build_release/usearch_test
-build_release/test_c
+build_release/usearch_test_c
 ```
 
 Similarly, to use the most recent Clang compiler version from Homebrew on macOS:
@@ -132,7 +132,7 @@ cmake \
 
 cmake --build build_release --config Release
 build_release/usearch_test
-build_release/test_c
+build_release/usearch_test_c
 ```
 
 Linting:
@@ -215,11 +215,11 @@ cmake -B build_artifacts \
   -D USEARCH_BUILD_BENCH_CPP=0
 
 cmake --build build_artifacts --config RelWithDebInfo
-file build_artifacts/libusearch_c.so # Verify the output
+file build_artifacts/libusearch_shared.so # Verify the output
 # Should show: ELF 32-bit LSB shared object, ARM, EABI5 version 1 (SYSV), dynamically linked, ...
 ```
 
-The resulting `libusearch_c.so` can be used in Android projects by placing it in `src/main/jniLibs/armeabi-v7a/` for 32-bit ARM or `arm64-v8a/` for 64-bit ARM.
+The resulting `libusearch_shared.so` can be used in Android projects by placing it in `src/main/jniLibs/armeabi-v7a/` for 32-bit ARM or `arm64-v8a/` for 64-bit ARM.
 
 ## Python 3
 
@@ -422,7 +422,7 @@ So one should first compile the C library, link it with Go, and only then run te
 cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1
 cmake --build build_release --config Release -j
 
-cp build_release/libusearch_c.so golang/ # or .dylib to install the library on macOS
+cp build_release/libusearch_shared.so golang/ # or .dylib to install the library on macOS
 cp -r include/usearch golang/            # to make the headers available to Go
 
 cd golang && LD_LIBRARY_PATH=. go test -race -v ./... ; cd ..
@@ -524,7 +524,7 @@ Then, on Windows, copy the library to the CSharp project and run the tests:
 
 ```sh
 mkdir -p ".\csharp\lib\runtimes\win-x64\native"
-cp ".\build_artifacts\libusearch_c.dll" ".\csharp\lib\runtimes\win-x64\native"
+cp ".\build_artifacts\libusearch_shared.dll" ".\csharp\lib\runtimes\win-x64\native"
 cd csharp
 dotnet test -c Debug --logger "console;verbosity=detailed"
 dotnet test -c Release
@@ -534,9 +534,9 @@ On Linux, the process is similar:
 
 ```sh
 mkdir -p "csharp/lib/runtimes/linux-x64/native" # for x86
-cp "build_artifacts/libusearch_c.so" "csharp/lib/runtimes/linux-x64/native" # for x86
+cp "build_artifacts/libusearch_shared.so" "csharp/lib/runtimes/linux-x64/native" # for x86
 mkdir -p "csharp/lib/runtimes/linux-arm64/native" # for ARM
-cp "build_artifacts/libusearch_c.so" "csharp/lib/runtimes/linux-arm64/native" # for ARM
+cp "build_artifacts/libusearch_shared.so" "csharp/lib/runtimes/linux-arm64/native" # for ARM
 cd csharp
 dotnet test -c Debug --logger "console;verbosity=detailed"
 dotnet test -c Release
@@ -546,7 +546,7 @@ On macOS with Arm-based chips:
 
 ```sh
 mkdir -p "csharp/lib/runtimes/osx-arm64/native"
-cp "build_artifacts/libusearch_c.dylib" "csharp/lib/runtimes/osx-arm64/native"
+cp "build_artifacts/libusearch_shared.dylib" "csharp/lib/runtimes/osx-arm64/native"
 cd csharp
 dotnet test -c Debug --logger "console;verbosity=detailed"
 dotnet test -c Release

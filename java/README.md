@@ -153,7 +153,7 @@ Point Gradle at the directory holding it:
 
 ```sh
 cmake -B build_release -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1
-cmake --build build_release --target usearch_c
+cmake --build build_release --target usearch_shared
 gradle -PusearchLibraryPath=$PWD/build_release test
 ```
 
@@ -161,5 +161,5 @@ CMake can also build the JNI library itself, alongside every other target:
 
 ```sh
 cmake -B build_release -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_JAVA=1
-cmake --build build_release --target usearch_jni
+cmake --build build_release --target usearch_java
 ```

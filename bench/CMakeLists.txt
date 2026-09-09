@@ -1,5 +1,5 @@
-# Every benchmark is named after the index type it drives, and its dtype shards, ordered by shrinking
-# dynamic range, each carry one stored dtype's instantiation grid so the grids build in parallel.
+# Every benchmark is named after the index type it drives, and its dtype shards, ordered by shrinking dynamic range,
+# each carry one stored dtype's instantiation grid so the grids build in parallel.
 add_executable(
     usearch_bench_dense_ram_index
     dense_ram_index.cpp
@@ -16,13 +16,9 @@ add_executable(
     dense/ram_index_u4.cpp
     dense/ram_index_u1.cpp
 )
-usearch_setup_target(usearch_bench_dense_ram_index)
-target_compile_options(usearch_bench_dense_ram_index PRIVATE ${USEARCH_HOST_TUNING})
+usearch_setup_target(usearch_bench_dense_ram_index HOST)
 target_include_directories(usearch_bench_dense_ram_index PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/test)
-target_link_libraries(
-    usearch_bench_dense_ram_index PRIVATE clipp fmt::fmt yyjson forkunion::static
-                                          stringzilla::stringzilla_header
-)
+target_link_libraries(usearch_bench_dense_ram_index PRIVATE clipp fmt::fmt yyjson forkunion::static stringzilla::header)
 
 add_executable(
     usearch_bench_dense_ram_indexes
@@ -40,16 +36,16 @@ add_executable(
     dense/ram_indexes_u4.cpp
     dense/ram_indexes_u1.cpp
 )
-usearch_setup_target(usearch_bench_dense_ram_indexes)
-target_compile_options(usearch_bench_dense_ram_indexes PRIVATE ${USEARCH_HOST_TUNING})
-target_include_directories(usearch_bench_dense_ram_indexes PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/test)
+usearch_setup_target(usearch_bench_dense_ram_indexes HOST)
+target_include_directories(
+    usearch_bench_dense_ram_indexes PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/test
+)
 target_link_libraries(
-    usearch_bench_dense_ram_indexes PRIVATE clipp fmt::fmt yyjson forkunion::static
-                                            stringzilla::stringzilla_header
+    usearch_bench_dense_ram_indexes PRIVATE clipp fmt::fmt yyjson forkunion::static stringzilla::header
 )
 
-# The CUDA bench skips `usearch_setup_target`: its host-compiler flags don't survive the CUDA driver, so the
-# target wires the interface includes directly.
+# The CUDA bench skips `usearch_setup_target`: its host-compiler flags don't survive the CUDA driver, so the target
+# wires the interface includes directly.
 if (USEARCH_BUILD_CUDA)
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
@@ -78,6 +74,6 @@ if (USEARCH_BUILD_CUDA)
     target_compile_options(usearch_bench_dense_vram_index PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
     target_link_libraries(
         usearch_bench_dense_vram_index PRIVATE clipp fmt::fmt yyjson CUDA::cuda_driver forkunion::static
-                                               stringzilla::stringzilla_header
+                                               stringzilla::header
     )
 endif ()
