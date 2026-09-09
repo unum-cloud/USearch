@@ -1138,8 +1138,9 @@ std::size_t test_dense_indexes_guards() {
 /**
  *  @brief Executor arenas seeded at exactly the first-size estimate serve every walk: a re-table
  *      past the seed chunk lands in a chunk the arena opens beside it, so no walk saturates and
- *      every query ranks. A predicate admitting fewer keys than the pool holds makes every walk
- *      exhaust its shard, so every thread's visited set outgrows its first size.
+ *      every query ranks. A pool as wide as the whole reservation makes every walk exhaustive by
+ *      construction - approximate search promises nothing narrower - so every thread's visited set
+ *      outgrows its first size, and every key a sparse predicate admits surfaces.
  */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 std::size_t test_dense_indexes_arena_growth() {
@@ -1167,13 +1168,16 @@ std::size_t test_dense_indexes_arena_growth() {
     failures += expect(succeeded(added.status));
     failures += expect_eq(added.saturated_walks, 0u);
 
-    // Sixteen keys match, the pool holds thirty-two: every walk visits its whole shard.
+    // Sixteen keys match; with the pool as wide as the reservation every walk visits its whole shard,
+    // so all eight surface - a narrower pool could promise only that what surfaces is admitted and ranked.
+    typename index_t::search_config_t const exhaustive {static_cast<typename index_t::small_size_t>(rows)};
     auto sparse = [](key_t key) noexcept { return key % 128 == 0 ? admission_t::admit_k : admission_t::reject_k; };
     std::vector<key_t> found_keys(queries * wanted);
     std::vector<typename indexes_type_::distance_t> found_distances(queries * wanted);
     std::vector<std::size_t> counts(queries);
-    auto const found = indexes.search(vectors.view()(nk::range(rows, rows + queries), nk::slice), executor, {}, wanted,
-                                      std::span {found_keys}, std::span {found_distances}, std::span {counts}, sparse);
+    auto const found = indexes.search(vectors.view()(nk::range(rows, rows + queries), nk::slice), executor, exhaustive,
+                                      wanted, std::span {found_keys}, std::span {found_distances}, std::span {counts},
+                                      sparse);
     failures += expect(succeeded(found.status));
     failures += expect_eq(found.saturated_walks, 0u);
     for (std::size_t const count : counts) failures += expect_eq(count, wanted);

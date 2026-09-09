@@ -365,6 +365,8 @@ struct dense_ram_indexes {
 
         // Admission is the ceiling and the next batch's rotation base, one conditional add for the
         // whole batch; a refusal drops the claims above unconsumed, so the rows credit themselves back.
+        // Admitting first, with a hand-back on every later refusal, was considered; the ceiling
+        // belongs in the shard instead, which removes the hand-back altogether.
         std::size_t const rows_ceiling = capacity();
         std::size_t const admitted =
             atomic_ref<std::size_t>(admitted_rows_).fetch_add_if_at_most(rows, rows_ceiling, std::memory_order_relaxed);

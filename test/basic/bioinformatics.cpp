@@ -128,9 +128,10 @@ struct bioinformatics_handmade_t {
     std::array<std::array<u64_t, 3>, 3> distances;
 };
 
-struct bioinformatics_fixture_t {
+template <typename wait_type_ = dummy_waiter_t, template <typename> class atomic_ref_template_ = std::atomic_ref>
+struct bioinformatics_fixture {
     using index_t =
-        basic_ram_index<dna_t, us::uuid_t, u64_t, u64_t, dummy_waiter_t, std::atomic_ref, counting_allocator_t>;
+        basic_ram_index<dna_t, us::uuid_t, u64_t, u64_t, wait_type_, atomic_ref_template_, counting_allocator_t>;
 
     static index_t make_index(allocation_ledger_t& ledger) { return index_t {counting_allocator_t {ledger}}; }
     static alignment_metric_t make_metric() { return {}; }
@@ -179,6 +180,8 @@ struct bioinformatics_fixture_t {
         return values;
     }
 };
+
+using bioinformatics_fixture_t = bioinformatics_fixture<>;
 
 static_assert(basic_value<dna_t>);
 static_assert(basic_metric<alignment_metric_t, dna_t, u64_t>);
@@ -245,6 +248,8 @@ std::size_t test_bioinformatics() {
     bioinformatics_fixture_t const fixture;
     std::size_t failures = 0;
     failures += test_basic_scenarios(fixture);
+    failures += test_basic_scenarios(bioinformatics_fixture<flaky_waiter_t> {});
+    failures += test_basic_scenarios(bioinformatics_fixture<dummy_waiter_t, fu::preferred_atomic_ref> {});
     failures += check_bioinformatics_codec();
     failures += check_bioinformatics_independent_oracle();
     failures += test_basic_safegraphs_roundtrip(fixture, "uuid", "needleman-wunsch"); // The uuid key column.

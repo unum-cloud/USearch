@@ -1691,6 +1691,10 @@ struct dense_ram_index {
         // capacity arithmetic below.
         if (count > max_node_count_k) return {dense_node_id_unknown_k, status_t::overflow_k};
         while (true) {
+            // One unconditional subtract, and its sign says what happened. A bounded subtract
+            // with a separate election was considered: it never leaves a deficit behind, but
+            // costs a load and a compare-exchange loop where this is one add, and the deficit is
+            // exactly the signal the waiters below watch.
             std::ptrdiff_t const old_remaining_capacity = atomic_ref<std::ptrdiff_t>(remaining_capacity_)
                                                               .fetch_sub( //
                                                                   count, std::memory_order_acquire);

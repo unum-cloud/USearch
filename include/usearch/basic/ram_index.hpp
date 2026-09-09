@@ -214,6 +214,45 @@ concept basic_selector = requires(selector_type_ const& selector, index_type_ co
     { selector.connectivity } -> std::convertible_to<std::size_t>;
 };
 
+/** @brief A reference spelling the verbs the index posts past the standard's - the no-return add,
+ *      subtract and bit clear, and the bounded add - as ForkUnion's do. For the standard's own
+ *      reference, which does not, the functions below spell them; ForkUnion's references carry the
+ *      same names as free functions in their namespace, reached through argument lookup, so a site
+ *      reads the same whichever reference the index was given. */
+template <typename reference_type_, typename value_type_>
+concept extended_atomic_ref = requires(reference_type_ reference, value_type_ value) {
+    reference.add(value, std::memory_order_relaxed);
+    reference.sub(value, std::memory_order_relaxed);
+    reference.clear_bits(value, std::memory_order_relaxed);
+    reference.fetch_add_if_at_most(value, value, std::memory_order_relaxed);
+};
+
+template <typename reference_type_, typename value_type_>
+    requires(!extended_atomic_ref<reference_type_, value_type_>)
+void atomic_add(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
+    reference.fetch_add(operand, order);
+}
+template <typename reference_type_, typename value_type_>
+    requires(!extended_atomic_ref<reference_type_, value_type_>)
+void atomic_sub(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
+    reference.fetch_sub(operand, order);
+}
+template <typename reference_type_, typename value_type_>
+    requires(!extended_atomic_ref<reference_type_, value_type_>)
+void atomic_clear_bits(reference_type_ reference, value_type_ bits, std::memory_order order) noexcept {
+    reference.fetch_and(static_cast<value_type_>(~bits), order);
+}
+/** @brief Adds @p operand only if the sum stays at most @p limit; returns the value held before. */
+template <typename reference_type_, typename value_type_>
+    requires(!extended_atomic_ref<reference_type_, value_type_>)
+value_type_ atomic_fetch_add_if_at_most(reference_type_ reference, value_type_ operand, value_type_ limit,
+                                        std::memory_order order) noexcept {
+    value_type_ observed = reference.load(std::memory_order_relaxed);
+    while (observed <= limit && limit - observed >= operand &&
+           !reference.compare_exchange_weak(observed, observed + operand, order, std::memory_order_relaxed)) {}
+    return observed;
+}
+
 /** @brief Minimal test-and-test-and-set lock over one plain @c bool, owned through the
  *      atomic reference. The waiter policy monitors the flag's address, so hardware waits
  *      plug in without this header naming them; the claiming exchange is the loop's only
@@ -258,12 +297,14 @@ struct basic_mutex {
  *  @brief Shared among mutators, try-unique for stop-the-world, wait-free to probe - one
  *      @c std::atomic word, so every reading is a consistent joint snapshot.
  *
- *  The word packs a dedicated unique bit, twenty-two holder bits - the OS pid ceiling
- *  bounds simultaneous holders well below that - and forty-one generation bits, bumped on
- *  every successful shared @b and unique acquisition: a whole acquisition that opens and
- *  closes between two probes still moves the generation, and wrapping it inside one
- *  probe bracket would need days of saturated acquisitions. Every update is a masked
- *  compare-exchange, never a blind add, so the fields cannot bleed into each other.
+ *  The word packs forty-one generation bits on top, a dedicated unique bit, and twenty-two
+ *  holder bits - the OS pid ceiling bounds simultaneous holders well below that. The
+ *  generation steps on every shared @b and unique acquisition: a whole acquisition that
+ *  opens and closes between two probes still moves it, and wrapping it inside one probe
+ *  bracket would need days of saturated acquisitions. With the generation on top its carry
+ *  leaves the word, so the shared side is one blind add of a holder and a step, backed off
+ *  when the unique bit was already set; only the unique side compare-exchanges, from a
+ *  free word.
  */
 template <typename wait_type_ = dummy_waiter_t, template <typename> class atomic_ref_template_ = std::atomic_ref>
 struct basic_shared_mutex {
@@ -273,9 +314,9 @@ struct basic_shared_mutex {
     mutable u64_t word {0};
 
     inline static constexpr u64_t holders_mask_k = (u64_t {1} << 22) - 1;
-    inline static constexpr u64_t generation_unit_k = u64_t {1} << 22;
-    inline static constexpr u64_t generation_mask_k = ((u64_t {1} << 41) - 1) << 22;
-    inline static constexpr u64_t unique_bit_k = u64_t {1} << 63;
+    inline static constexpr u64_t unique_bit_k = u64_t {1} << 22;
+    inline static constexpr u64_t generation_unit_k = u64_t {1} << 23;
+    inline static constexpr u64_t generation_mask_k = ~(generation_unit_k - 1);
 
     /** @brief One consistent reading: how the gate is held & how often it has been. */
     struct snapshot_t {
@@ -289,19 +330,16 @@ struct basic_shared_mutex {
     /** @brief Joins the shared side, waiting out a unique holder through the waiter. */
     void lock_shared() noexcept {
         annotate_lock_shared_started(&word);
-        u64_t observed = atomic_ref<u64_t>(word).load(std::memory_order_relaxed);
+        // A masked compare-exchange kept the fields apart while the generation sat under the
+        // unique bit; it retried under contention where this one add does not.
         while (true) {
-            if (observed & unique_bit_k) {
-                wait_type_ {}(&word, observed, 0u, wait_capped_t {});
-                observed = atomic_ref<u64_t>(word).load(std::memory_order_relaxed);
-                continue;
-            }
-            if (atomic_ref<u64_t>(word).compare_exchange_weak(observed, advanced_(observed) + 1,
-                                                              std::memory_order_acquire, std::memory_order_relaxed)) {
-                annotate_lock_shared_acquired(&word);
-                return;
-            }
+            u64_t const observed = atomic_ref<u64_t>(word).fetch_add(generation_unit_k + 1, std::memory_order_acquire);
+            if (!(observed & unique_bit_k)) break;
+            // Joined behind a unique holder: hand the holder back, then wait for the word to move.
+            u64_t const backed_off = atomic_ref<u64_t>(word).fetch_sub(1, std::memory_order_release) - 1;
+            wait_type_ {}(&word, backed_off, 0u, wait_capped_t {});
         }
+        annotate_lock_shared_acquired(&word);
     }
 
     void unlock_shared() noexcept {
@@ -309,7 +347,7 @@ struct basic_shared_mutex {
         // atomics, and the certified probes' acquire would otherwise pair with nothing.
         annotate_release(&word);
         annotate_unlock_shared_started(&word);
-        atomic_ref<u64_t>(word).fetch_sub(1, std::memory_order_release);
+        atomic_sub(atomic_ref<u64_t>(word), u64_t {1}, std::memory_order_release);
         annotate_unlock_shared_finished(&word);
     }
 
@@ -319,7 +357,7 @@ struct basic_shared_mutex {
         annotate_try_lock_started(&word);
         u64_t observed = atomic_ref<u64_t>(word).load(std::memory_order_relaxed);
         while ((observed & (holders_mask_k | unique_bit_k)) == 0)
-            if (atomic_ref<u64_t>(word).compare_exchange_weak(observed, advanced_(observed) | unique_bit_k,
+            if (atomic_ref<u64_t>(word).compare_exchange_weak(observed, (observed + generation_unit_k) | unique_bit_k,
                                                               std::memory_order_acquire, std::memory_order_relaxed)) {
                 annotate_try_lock_acquired(&word);
                 return true;
@@ -331,7 +369,7 @@ struct basic_shared_mutex {
     void unlock() noexcept {
         annotate_release(&word);
         annotate_unlock_started(&word);
-        atomic_ref<u64_t>(word).fetch_and(~unique_bit_k, std::memory_order_release);
+        atomic_clear_bits(atomic_ref<u64_t>(word), unique_bit_k, std::memory_order_release);
         annotate_unlock_finished(&word);
     }
 
@@ -341,12 +379,6 @@ struct basic_shared_mutex {
         annotate_acquire(&word);
         return {observed & generation_mask_k, static_cast<std::size_t>(observed & holders_mask_k),
                 (observed & unique_bit_k) != 0};
-    }
-
-  private:
-    /** @brief Advances the generation within its own field - wrap stays contained. */
-    static constexpr u64_t advanced_(u64_t observed) noexcept {
-        return (observed & ~generation_mask_k) | ((observed + generation_unit_k) & generation_mask_k);
     }
 };
 
@@ -658,13 +690,12 @@ struct basic_ram_index {
 
         // Claims convert one-to-one into dispensed ids, so dispensing, wiring into
         // pre-reserved rows, and the quota-matched key publication can never fail. The
-        // claim commits only within capacity, so peers never observe an overshoot.
-        std::size_t claimed = atomic_ref<std::size_t>(claimed_count_).load(std::memory_order_relaxed);
-        do {
-            if (claimed + incoming_count > capacity) return {status_t::overflow_k, {}};
-        } while (!atomic_ref<std::size_t>(claimed_count_)
-                      .compare_exchange_weak(claimed, claimed + incoming_count, //
-                                             std::memory_order_acq_rel, std::memory_order_relaxed));
+        // claim commits only within capacity, so peers never observe an overshoot. A speculative
+        // add with a rollback was considered: cheaper under contention, but a peer can see the
+        // overshoot, and claims are per batch, so the exact form is affordable.
+        std::size_t const claimed = atomic_fetch_add_if_at_most(atomic_ref<std::size_t>(claimed_count_), incoming_count,
+                                                                capacity, std::memory_order_acq_rel);
+        if (capacity - claimed < incoming_count) return {status_t::overflow_k, {}};
 
         basic_traversal_telemetry_t const telemetry_before = context.telemetry;
         for (std::size_t incoming_index = 0; incoming_index != incoming_count; ++incoming_index) {
@@ -1127,7 +1158,7 @@ struct basic_ram_index {
                                                     columns.values.subspan(first, bound - first));
                 if (failed(encoded)) return encoded;
             }
-            atomic_ref<std::size_t>(covered).fetch_add(region.size(), std::memory_order_acq_rel);
+            atomic_add(atomic_ref<std::size_t>(covered), region.size(), std::memory_order_release);
             return status_t::success_k;
         }
 
@@ -1269,7 +1300,7 @@ struct basic_ram_index {
 
                 if (status_t const keyed = index->key_map_.insert(record.key, node); failed(keyed)) return keyed;
             }
-            atomic_ref<std::size_t>(covered).fetch_add(region.size(), std::memory_order_acq_rel);
+            atomic_add(atomic_ref<std::size_t>(covered), region.size(), std::memory_order_release);
             return status_t::success_k;
         }
 

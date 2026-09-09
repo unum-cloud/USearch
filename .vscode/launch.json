@@ -32,7 +32,7 @@
             "name": "Unit Test C++ Core",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build_debug/test/usearch_test_core",
+            "program": "${workspaceFolder}/build_debug/test/usearch_test_header_only",
             "cwd": "${workspaceFolder}",
             "stopAtEntry": false,
             "preLaunchTask": "Build Debug",

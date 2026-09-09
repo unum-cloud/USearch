@@ -128,7 +128,8 @@ static_assert(interchange_value_codec<embedding_codec_t>);
  *      distributed form, each at every alignment and executor the scenarios cover. */
 std::size_t test_safegraphs_format() {
     embeddings_fixture_t const fixture;
-    std::size_t failures = test_basic_safegraphs_roundtrip(fixture, "u64", embeddings_fixture_t::metric_k);
+    std::size_t failures = 0;
+    failures += test_basic_safegraphs_roundtrip(fixture, "u64", embeddings_fixture_t::metric_k);
     failures += test_basic_safegraphs_hostile(fixture, embeddings_fixture_t::metric_k);
     failures += test_basic_safegraphs_distributed(fixture, embeddings_fixture_t::metric_k);
     return report("safegraphs format", failures);
