@@ -22,8 +22,14 @@ if (USEARCH_BUILD_LIB_C)
     # directly. Linking the archive instead would drop every symbol nothing inside it
     # referenced - which is the entire C interface. CMake 3.21+ allows `TARGET_OBJECTS` on a
     # static library, and the project floor is 3.28.
+    # The shared flavor resolves its private dependencies at link time; the archive cannot, so it
+    # takes their objects too. A static library that leaves yyjson and ForkUnion undefined makes
+    # every consumer hunt two more archives out of the dependency tree to link one of ours.
     add_library(usearch_c SHARED $<TARGET_OBJECTS:usearch_indexes>)
-    add_library(usearch_static_c STATIC $<TARGET_OBJECTS:usearch_indexes>)
+    add_library(
+        usearch_static_c STATIC $<TARGET_OBJECTS:usearch_indexes> $<TARGET_OBJECTS:yyjson>
+                                $<TARGET_OBJECTS:forkunion_static>
+    )
     set_target_properties(usearch_c usearch_static_c PROPERTIES LINKER_LANGUAGE CXX)
 
     # Set the compile options for the static library

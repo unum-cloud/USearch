@@ -16,7 +16,7 @@ bin
 /build_relwithdebinfo
 /build_profile
 /build_artifacts
-/build*
+/build*/
 _deps
 CMakeCache.txt
 CMakeUserPresets.json
@@ -47,6 +47,14 @@ wasi-sdk-*
 # Rust SDK
 Cargo.lock
 target/
+
+# Zig SDK
+zig-out/
+.zig-cache/
+
+# Mojo SDK
+.pixi/
+pixi.lock
 
 # Java SDK
 .gradle

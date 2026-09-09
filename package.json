@@ -28,7 +28,6 @@
     ],
     "dependencies": {
         "bindings": "^1.5.0",
-        "node-addon-api": "^8.5.0",
         "node-gyp-build": "^4.8.4"
     },
     "scripts": {
@@ -51,8 +50,10 @@
     },
     "main": "javascript/dist/cjs/usearch.js",
     "module": "javascript/dist/esm/usearch.js",
+    "types": "javascript/dist/cjs/usearch.d.ts",
     "exports": {
         ".": {
+            "types": "./javascript/dist/cjs/usearch.d.ts",
             "import": "./javascript/dist/esm/usearch.js",
             "require": "./javascript/dist/cjs/usearch.js"
         }

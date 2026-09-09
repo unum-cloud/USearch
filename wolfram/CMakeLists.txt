@@ -1,58 +1,17 @@
-cmake_minimum_required(VERSION 3.15.0)
-
-project(usearch)
-
-if (NOT SYSTEMID)
-    # set system id and build platform
-    set(BITNESS 32)
-    if (CMAKE_SIZEOF_VOID_P EQUAL 8)
-        set(BITNESS 64)
-    endif ()
-
-    set(SYSTEMID NOTFOUND)
-
-    # Determine the current machine's systemid.
-    if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND BITNESS EQUAL 64)
-        if (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
-            set(SYSTEMID Linux-ARM64)
-        else ()
-            set(SYSTEMID Linux-x86-64)
-        endif ()
-    elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND BITNESS EQUAL 64)
-        if (CMAKE_SYSTEM_PROCESSOR MATCHES "arm*")
-            set(SYSTEMID MacOSX-ARM64)
-        else ()
-            set(SYSTEMID MacOSX-x86-64)
-        endif ()
-    elseif (CMAKE_SYSTEM_NAME STREQUAL "Windows" AND BITNESS EQUAL 64)
-        if (_MSVC_C_ARCHITECTURE_FAMILY STREQUAL "ARM64")
-            set(SYSTEMID Windows-ARM64)
-        else ()
-            set(SYSTEMID Windows-x86-64)
-        endif ()
-    endif ()
-
-    if (NOT SYSTEMID)
-        message(FATAL_ERROR "Unable to determine System ID.")
-    endif ()
-endif ()
+# The LibraryLink boundary lives in `wolfram/lib.c` and instantiates nothing: it links
+# `usearch_indexes`, the pre-instantiated grid the C interface is compiled from, exactly as the JNI
+# boundary in `java/` and the C library flavors in `c/` do.
 
 if (NOT WOLFRAM_PATH)
     set(WOLFRAM_PATH "/usr/local/Wolfram/Mathematica")
 endif ()
 
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH}
-                      "${WOLFRAM_PATH}/SystemFiles/Links/WSTP/DeveloperKit/${SYSTEMID}/CompilerAdditions/"
-)
-include(WSTP)
-include_directories("${WOLFRAM_PATH}/SystemFiles/IncludeFiles/C/")
-link_directories("${WOLFRAM_PATH}/SystemFiles/Libraries/${SYSTEMID}/")
+# LibraryLink is a C API declared entirely by one header, so the SDK contributes an include
+# directory and no library to link.
+add_library(USearchWFM SHARED lib.c)
+usearch_setup_target(USearchWFM)
+target_include_directories(USearchWFM PRIVATE "${WOLFRAM_PATH}/SystemFiles/IncludeFiles/C/")
+target_link_libraries(USearchWFM PRIVATE usearch_indexes)
 
-add_library(usearchWFM SHARED lib.cpp)
-
-# Link against the Wolfram LibraryLink library
-target_link_libraries(usearchWFM WSTP::STATIC_LIBRARY)
-
-# Set the output name of the library to be compatible with Wolfram Language
-set_target_properties(usearchWFM PROPERTIES PREFIX "" OUTPUT_NAME "usearchWFM")
-set_target_properties(usearchWFM PROPERTIES CXX_STANDARD 11)
+# Wolfram Language resolves the library by its bare name, with no `lib` prefix.
+set_target_properties(USearchWFM PROPERTIES PREFIX "" OUTPUT_NAME "USearchWFM")

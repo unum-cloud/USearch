@@ -1,9 +1,5 @@
-import org.gradle.internal.jvm.Jvm
-
 plugins {
     id 'java-library'
-    id 'c'
-    id 'cpp'
     id 'maven-publish'
     id 'signing'
     id 'com.diffplug.spotless' version '6.25.0'
@@ -29,7 +25,7 @@ sourceSets {
         }
         // Ensure native libraries are included in the main source set
         resources {
-            srcDirs "$buildDir/libs"
+            srcDirs layout.buildDirectory.dir("libs")
             include "usearch-native/**"
         }
     }
@@ -57,7 +53,8 @@ task javadocJar(type: Jar, dependsOn: javadoc) {
 }
 
 dependencies {
-    testImplementation('junit:junit:4.13.2')
+    testImplementation('org.junit.jupiter:junit-jupiter:5.11.4')
+    testRuntimeOnly('org.junit.platform:junit-platform-launcher')
 }
 
 spotless {
@@ -68,83 +65,65 @@ spotless {
         endWithNewline()
     }
 
-    // Use AOSP style but preserve Javadoc formatting
-    // java {
-    //     target 'java/**/*.java'
-    //     googleJavaFormat('1.17.0').aosp().skipJavadocFormatting()
-    //     removeUnusedImports()
-    //     trimTrailingWhitespace()
-    //     endWithNewline()
-    // }
+    // Palantir's fork of google-java-format rather than the original: it indents four spaces and
+    // wraps at 120 columns, which is what these sources and `.clang-format` already use, where the
+    // original wraps at 100 even under `.aosp()` and would rewrap nearly every line. It also leaves
+    // Javadoc alone by default, so the hand-wrapped prose survives, and it opens the compiler
+    // modules it needs by itself instead of demanding `--add-exports` on the daemon.
+    java {
+        target 'java/cloud/unum/usearch/**/*.java', 'java/test/**/*.java'
+        palantirJavaFormat('2.97.0')
+        removeUnusedImports()
+        trimTrailingWhitespace()
+        endWithNewline()
+    }
 }
 
 // The JNI boundary compiles against `include/usearch/*.h` alone - flat C headers with no
-// submodule of their own - and links the pre-instantiated `usearch_c` shared library, which
-// CMake builds with `-DUSEARCH_BUILD_LIB_C=1`. Point `usearchLibraryPath` at the directory
-// holding it; nothing here instantiates an index template, so no NumKong, ForkUnion, or
-// StringZilla header is reachable from this translation unit.
-ext.usearchLibraryPath = (findProperty("usearchLibraryPath") ?: "$rootDir/build_release").toString()
+// submodule of their own - and links the pre-instantiated `usearch_c` shared library. CMake
+// builds both into `usearchLibraryPath`; point it elsewhere to consume a different tree. Nothing
+// here instantiates an index template, so no NumKong, ForkUnion, or StringZilla header is
+// reachable from `java/lib.c`.
+ext.usearchLibraryPath = (findProperty("usearchLibraryPath") ?: "$rootDir/build_artifacts").toString()
 
-model {
+// Where the JNI library is staged for the test task's library path and for the JAR to package.
+ext.nativeDirectory = layout.buildDirectory.dir("libs/usearch/shared").get().asFile
 
-    components {
-        usearch(NativeLibrarySpec) {
-            baseName = "usearch_jni"  // JNI library for Java bindings
-            sources {
-                cpp {
-                    source {
-                        srcDirs "java"
-                        include "*.cpp"
-                    }
-                    exportedHeaders {
-                        srcDirs "include", "${Jvm.current().javaHome}/include"
-                    }
-                }
-            }
-            binaries.withType(StaticLibraryBinarySpec) {
-                buildable = false
-            }
-            binaries.withType(SharedLibraryBinarySpec) {
-                if (targetPlatform.operatingSystem.windows) {
-                    cppCompiler.args "-I${Jvm.current().javaHome}/include/win32"
-                    cppCompiler.args '/std:c++20'
-                    cppCompiler.args '/O2'
-                    cppCompiler.args '/W1'
-                    linker.args "/LIBPATH:${project.ext.usearchLibraryPath}", 'usearch_c.lib'
-                } else {
-                    if (targetPlatform.operatingSystem.macOsX) {
-                        cppCompiler.args '-I', "${Jvm.current().javaHome}/include/darwin"
-                        cppCompiler.args '-mmacosx-version-min=11.0'
-                    } else if (targetPlatform.operatingSystem.linux) {
-                        cppCompiler.args '-I', "${Jvm.current().javaHome}/include/linux"
-                    }
-                    cppCompiler.args '-D_FILE_OFFSET_BITS=64'
-                    cppCompiler.args '-std=c++20'
-                    cppCompiler.args '-O2'
-                    cppCompiler.args '-fPIC'
-                    cppCompiler.args '-fexceptions'
-                    cppCompiler.args '-Wno-unknown-pragmas'
-                    linker.args '-L', project.ext.usearchLibraryPath.toString()
-                    linker.args '-lusearch_c'
-                    linker.args "-Wl,-rpath,${project.ext.usearchLibraryPath}"
-                }
-            }
-        }
+// One CMake tree serves the compiler flags, the cross-compilation targets, and the release
+// artifacts, so the SDK has one native build rather than a second one described here. Configuring
+// an already-configured tree only adds the target, which is what lets a directory the C and C++
+// jobs already filled be reused instead of rebuilt. Swap `-DUSEARCH_BUILD_LIB_C=1` for
+// `-DUSEARCH_BUILD_LIB_C_STUB=1` to link the brute-force stand-in and skip the engine entirely.
+tasks.register("configureNativeLibrary", Exec) {
+    commandLine "cmake", "-B", project.ext.usearchLibraryPath, "-S", rootDir.toString(),
+        "-DUSEARCH_BUILD_LIB_JAVA=1",
+        "-DUSEARCH_BUILD_LIB_C=1",
+        "-DUSEARCH_BUILD_TEST_CPP=0",
+        "-DUSEARCH_BUILD_BENCH_CPP=0"
+}
+
+tasks.register("compileNativeLibrary", Exec) {
+    dependsOn "configureNativeLibrary"
+    commandLine "cmake", "--build", project.ext.usearchLibraryPath,
+        "--config", "Release", "--target", "usearch_jni", "--parallel"
+}
+
+// The loader reads a shared object out of a directory and never out of an archive, so the JAR
+// carries one copy per platform and `Library` extracts the one it needs. A multi-config
+// generator buries its output one directory deeper, so the search is recursive and the staged
+// copies are flattened back to bare file names.
+tasks.register("stageNativeLibrary", Copy) {
+    dependsOn "compileNativeLibrary"
+    from(project.ext.usearchLibraryPath) {
+        include "**/libusearch_jni.so", "**/libusearch_jni.dylib", "**/usearch_jni.dll"
     }
-
-    toolChains {
-        clang(Clang)
-        gcc(Gcc) {
-            target("linux_aarch64") {
-                cppCompiler.withArguments { args ->
-                    args << "-march=armv8-a"
-                }
-            }
-        }
-    }
+    eachFile { it.relativePath = new RelativePath(true, it.relativePath.lastName) }
+    includeEmptyDirs = false
+    into project.ext.nativeDirectory
 }
 
 test {
+    useJUnitPlatform()
     forkEvery = 1
 
     dependsOn jar
@@ -154,14 +133,14 @@ test {
 
     // The JNI library is found on the library path, and the pre-instantiated library it links
     // through the loader path beside it.
-    def nativeDirectory = file("$buildDir/libs/usearch/shared")
+    def staged = project.ext.nativeDirectory
     systemProperty "java.library.path",
-        [nativeDirectory.absolutePath, project.ext.usearchLibraryPath].join(File.pathSeparator)
+        [staged.absolutePath, project.ext.usearchLibraryPath].join(File.pathSeparator)
     environment "LD_LIBRARY_PATH",
-        [nativeDirectory.absolutePath, project.ext.usearchLibraryPath, System.getenv("LD_LIBRARY_PATH") ?: ""]
+        [staged.absolutePath, project.ext.usearchLibraryPath, System.getenv("LD_LIBRARY_PATH") ?: ""]
             .findAll { it }.join(File.pathSeparator)
     environment "DYLD_LIBRARY_PATH",
-        [nativeDirectory.absolutePath, project.ext.usearchLibraryPath, System.getenv("DYLD_LIBRARY_PATH") ?: ""]
+        [staged.absolutePath, project.ext.usearchLibraryPath, System.getenv("DYLD_LIBRARY_PATH") ?: ""]
             .findAll { it }.join(File.pathSeparator)
 
     // Enable detailed test logging
@@ -176,10 +155,10 @@ test {
 }
 
 jar {
-    dependsOn("usearchSharedLibrary")
+    dependsOn("stageNativeLibrary")
 
     // Include all native libraries with their platform-specific directory structure
-    from("$buildDir/libs/usearch/shared") {
+    from(project.ext.nativeDirectory) {
         include "**/*"
         into "usearch-native"
     }
@@ -306,10 +285,4 @@ publishing {
             }
         }
     }
-}
-
-// Ensure that the native library is built before the Java code
-compileJava.dependsOn tasks.withType(SharedLibraryBinarySpec)
-tasks.named("processResources").configure {
-    dependsOn tasks.named("linkUsearchSharedLibrary")
 }

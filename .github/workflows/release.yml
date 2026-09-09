@@ -434,7 +434,7 @@ jobs:
             -DUSEARCH_BUILD_LIB_JAVA=1 \
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0 \
-            -DUSEARCH_BUILD_LIB_C=0 \
+            -DUSEARCH_BUILD_LIB_C=1 \
             -DNK_RUNTIME_DISPATCH=1
 
           cmake --build build_artifacts --config Release -j
@@ -487,7 +487,7 @@ jobs:
             -DUSEARCH_BUILD_LIB_JAVA=1 `
             -DUSEARCH_BUILD_TEST_CPP=0 `
             -DUSEARCH_BUILD_BENCH_CPP=0 `
-            -DUSEARCH_BUILD_LIB_C=0 `
+            -DUSEARCH_BUILD_LIB_C=1 `
             -DNK_RUNTIME_DISPATCH=1
 
           cmake --build build_artifacts --config Release
@@ -536,7 +536,7 @@ jobs:
             -DUSEARCH_BUILD_LIB_JAVA=1 \
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0 \
-            -DUSEARCH_BUILD_LIB_C=0 \
+            -DUSEARCH_BUILD_LIB_C=1 \
             -DNK_RUNTIME_DISPATCH=1
 
           cmake --build build_artifacts --config Release
@@ -596,7 +596,7 @@ jobs:
             -DUSEARCH_BUILD_LIB_JAVA=1 \
             -DUSEARCH_BUILD_TEST_CPP=0 \
             -DUSEARCH_BUILD_BENCH_CPP=0 \
-            -DUSEARCH_BUILD_LIB_C=0 \
+            -DUSEARCH_BUILD_LIB_C=1 \
             -DNK_TARGET_NEON=1 \
             -DNK_TARGET_NEONBFDOT=1 \
             -DNK_TARGET_NEONHALF=1 \

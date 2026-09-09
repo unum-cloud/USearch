@@ -6,8 +6,10 @@ edition = "2021"
 include = [
   "/rust/**",
   "/include/**",
-  "/c/**",
   "/src/**",
+  "/c/**",
+  "/cmake/**",
+  "/CMakeLists.txt",
   "/build.rs",
 ]
 license = "Apache-2.0"
@@ -22,18 +24,29 @@ path = "rust/lib.rs"
 
 [dependencies]
 # NumKong is not optional and not merely a build input: its matrices, scalar types, and traits
-# are the crate's public vocabulary, and `build.rs` links the SIMD kernels it compiles. For local
+# are the crate's public vocabulary, and it links the SIMD kernels the engine calls. For local
 # NumKong development, add a `[patch.crates-io]` override in your personal `.cargo/config.toml`
 # rather than editing this file.
 numkong = ">=7.7.0"
 
+# Which implementation of the C interface gets linked. Each is a whole implementation rather than
+# a knob on one, so they are mutually exclusive and `build.rs` refuses a pair rather than choosing.
+#
+# Naming neither links the engine as a self-contained archive. That default is deliberately not a
+# feature: Cargo unions features across the dependency graph and never subtracts, so a `static`
+# name could only be turned off by every consumer at once, and one no code reads would do nothing.
+[features]
+# The engine with its CUDA backends compiled in; needs a toolkit at build time.
+cuda = []
+# The brute-force stand-in, which answers the same verbs over the standard library alone -
+# seconds to build, exact search, and no submodules. For testing a caller, never for shipping.
+stub = []
+
 [build-dependencies]
-cc = {version = "1.2.36", features = ["parallel"]}
+# The engine is CMake's to build - `build.rs` drives it rather than restating the instantiation
+# grid and the per-target flags in Rust.
+cmake = "0.1"
 
 [dev-dependencies]
-# The concurrency tests drive the index from outside through ForkUnion's pool, the same
-# scheduler the library uses internally. Version 3 matches the `forkunion/` submodule and the
-# sibling crates; its `spawn` takes a `&Topology`, which version 2 had no notion of.
-forkunion = "3.0"
 rand = "0.10"
 rand_chacha = "0.10" # reproducible across platforms, unlike the thread generator

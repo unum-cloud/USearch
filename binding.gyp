@@ -1,46 +1,35 @@
 {
     "variables": {
-        "numkong_root": "./numkong",
+        # Where the CMake build dropped `libusearch_c`; override with
+        # `npm_config_usearch_library_dir` or `--usearch_library_dir=...`. Absolute, since gyp
+        # rewrites a relative `-L` against its generator output directory.
+        "usearch_library_path%": "<!(node -p \"require('path').resolve(process.env.npm_config_usearch_library_dir || 'build/Release')\")",
     },
-    "includes": ["./numkong/numkong.gypi"],
     "targets": [
         {
             "target_name": "usearch",
-            "sources": ["javascript/lib.cpp"],
-            "dependencies": [
-                "<!(node -p \"require('node-addon-api').gyp\")",
-                "numkong_lib",
+            "sources": [
+                "javascript/lib.c",
+                "javascript/types.c",
+                "javascript/dense_index.c",
             ],
             "cflags": [
-                "-fexceptions",
+                "-std=c11",
                 "-Wno-unknown-pragmas",
-                "-Wno-maybe-uninitialized",
             ],
-            "cflags_cc": [
-                "-fexceptions",
-                "-Wno-unknown-pragmas",
-                "-Wno-maybe-uninitialized",
-                "-std=c++20",
+            "include_dirs": ["include", "javascript"],
+            "libraries": [
+                "-L<(usearch_library_path)",
+                "-lusearch_c",
+                "-Wl,-rpath,<(usearch_library_path)",
             ],
-            "include_dirs": [
-                "<!@(node -p \"require('node-addon-api').include\")",
-                "include",
-                "numkong/include",
-                "forkunion/include",
-                "stringzilla/include",
-            ],
-            "defines": ["NK_DYNAMIC_DISPATCH=1"],
             "xcode_settings": {
-                "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
-                "CLANG_CXX_LIBRARY": "libc++",
                 "MACOSX_DEPLOYMENT_TARGET": "11.0",
-                "OTHER_CFLAGS": ["-arch arm64", "-arch x86_64"],
-                "OTHER_LDFLAGS": ["-arch arm64", "-arch x86_64"],
+                "OTHER_CFLAGS": ["-std=c11"],
             },
             "msvs_settings": {
                 "VCCLCompilerTool": {
-                    "ExceptionHandling": 1,
-                    "AdditionalOptions": ["-std:c++20", "/Zc:preprocessor"],
+                    "AdditionalOptions": ["/Zc:preprocessor"],
                 }
             },
         }
