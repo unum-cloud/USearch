@@ -1087,8 +1087,8 @@ static napi_value usearch_js_cursor_release(napi_env env, napi_callback_info inf
     return usearch_js_undefined(env);
 }
 
-/** @brief @c snapshot() → a consistent cursor over the entries published so far. */
-static napi_value usearch_js_index_snapshot(napi_env env, napi_callback_info info) {
+/** @brief @c cursor() → a consistent cursor over the entries published so far. */
+static napi_value usearch_js_index_cursor(napi_env env, napi_callback_info info) {
     usearch_js_index_t* const index = usearch_js_index_self(env, info, NULL, NULL);
     if (!index) return NULL;
 
@@ -1290,7 +1290,7 @@ napi_value usearch_js_index_define(napi_env env) {
         {"count", NULL, usearch_js_index_count, NULL, NULL, NULL, napi_default_method, NULL},
         {"contains", NULL, usearch_js_index_contains, NULL, NULL, NULL, napi_default_method, NULL},
         {"get", NULL, usearch_js_index_get, NULL, NULL, NULL, napi_default_method, NULL},
-        {"snapshot", NULL, usearch_js_index_snapshot, NULL, NULL, NULL, napi_default_method, NULL},
+        {"cursor", NULL, usearch_js_index_cursor, NULL, NULL, NULL, napi_default_method, NULL},
         {"find", NULL, usearch_js_index_find, NULL, NULL, NULL, napi_default_method, NULL},
         {"save", NULL, usearch_js_index_save, NULL, NULL, NULL, napi_default_method, NULL},
         {"load", NULL, usearch_js_index_load, NULL, NULL, NULL, napi_default_method, NULL},
