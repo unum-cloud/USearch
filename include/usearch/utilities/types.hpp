@@ -586,6 +586,32 @@ constexpr value_type_ round_up_to_multiple(value_type_ value, value_type_ multip
     return divide_round_up(value, multiple) * multiple;
 }
 
+/** @brief @p value with its two bytes reversed. */
+constexpr std::uint16_t reversed_bytes(std::uint16_t value) noexcept {
+    return static_cast<std::uint16_t>((value << 8) | (value >> 8));
+}
+
+/** @brief @p value with its four bytes reversed. */
+constexpr std::uint32_t reversed_bytes(std::uint32_t value) noexcept {
+    return (value << 24) | ((value & 0x0000FF00u) << 8) | ((value >> 8) & 0x0000FF00u) | (value >> 24);
+}
+
+/** @brief @p value with its eight bytes reversed, as the two halves swapped and each reversed. */
+constexpr std::uint64_t reversed_bytes(std::uint64_t value) noexcept {
+    return (static_cast<std::uint64_t>(reversed_bytes(static_cast<std::uint32_t>(value))) << 32) |
+           reversed_bytes(static_cast<std::uint32_t>(value >> 32));
+}
+
+/** @brief @p value with its bytes in little-endian order, and the same call to read one back - the
+ *      conversion is its own inverse, so one name serves both directions. A no-op where the host is
+ *      already little-endian, and a @ref reversed_bytes where it is not. */
+template <typename value_type_>
+constexpr value_type_ little_endian(value_type_ value) noexcept {
+    static_assert(std::is_unsigned_v<value_type_>, "Byte order is only defined for unsigned integers");
+    if constexpr (std::endian::native == std::endian::little) return value;
+    else return reversed_bytes(value);
+}
+
 /** @brief The smaller of @p first & @p second - @c std::min without the <algorithm> tax,
  *      named to also dodge the @c min macro of Windows headers. */
 template <typename value_type_>

@@ -259,8 +259,7 @@ struct safegraphs_prefix_t {
     std::array<char, 8> magic = magic_k;
     u64_t header_length = 0;
 };
-static_assert(sizeof(safegraphs_prefix_t) == 16 && std::endian::native == std::endian::little,
-              "The prefix is read and written as raw little-endian bytes");
+static_assert(sizeof(safegraphs_prefix_t) == 16, "The prefix is read and written as sixteen raw bytes");
 
 /** @brief Trampolines a byte allocator into @c yyjson_alc; each block carries its size in a
  *      max-aligned prefix, since yyjson frees by pointer alone. */
@@ -369,7 +368,7 @@ expected<safegraphs_header_t> safegraphs_read_header(bytes_view_t monolith, allo
     std::memcpy(prefix_bytes.data(), monolith.data(), prefix_bytes.size());
     safegraphs_prefix_t const prefix = std::bit_cast<safegraphs_prefix_t>(prefix_bytes);
     if (prefix.magic != safegraphs_prefix_t::magic_k) return {header, status_t::malformed_k};
-    std::size_t const header_length = static_cast<std::size_t>(prefix.header_length);
+    std::size_t const header_length = static_cast<std::size_t>(little_endian(prefix.header_length));
     if (header_length > monolith.size() - sizeof(prefix)) return {header, status_t::malformed_k};
     safegraphs_yyjson_allocator_<allocator_type_> trampoline {allocator};
     auto [document, parsed] = safegraphs_read_document_(monolith.subspan(sizeof(prefix), header_length), trampoline);
@@ -501,20 +500,20 @@ status_t safegraphs_write_header(bytes_type_ monolith, safegraphs_header_t const
     yyjson_alc const allocator_abi = trampoline.c_abi();
     growing_buffer<byte_t, allocator_type_> image {allocator};
     if (failed(image.resize_uninitialized(header.data_offset))) return status_t::bad_alloc_k;
+    std::size_t const header_length = header.data_offset - sizeof(safegraphs_prefix_t);
     safegraphs_prefix_t prefix;
-    prefix.header_length = header.data_offset - sizeof(prefix);
+    prefix.header_length = little_endian(static_cast<u64_t>(header_length));
     status_t const staged = safegraphs_print_(
         safegraphs_header_document_(header, custom_fields, allocator_abi), allocator_abi,
         [&](std::string_view json) noexcept {
-            if (json.size() > prefix.header_length) return status_t::config_mismatch_k;
+            if (json.size() > header_length) return status_t::config_mismatch_k;
             auto const prefix_bytes = std::bit_cast<std::array<byte_t, sizeof(safegraphs_prefix_t)>>(prefix);
             bytes_span_t const staging = to_writable_span(image);
             [[maybe_unused]] status_t const framed = copy_bytes(staging.subspan(0, prefix_bytes.size()),
                                                                 bytes_of(prefix_bytes.data(), prefix_bytes.size()));
             [[maybe_unused]] status_t const printed = copy_bytes(staging.subspan(sizeof(prefix), json.size()),
                                                                  std::as_bytes(std::span {json}));
-            std::memset(image.data() + sizeof(prefix) + json.size(), ' ',
-                        static_cast<std::size_t>(prefix.header_length) - json.size());
+            std::memset(image.data() + sizeof(prefix) + json.size(), ' ', header_length - json.size());
             return status_t::success_k;
         });
     if (failed(staged)) return staged;
