@@ -16,7 +16,56 @@ import (
 
 /*
 #cgo CFLAGS: -I${SRCDIR}
-#cgo LDFLAGS: -L${SRCDIR} -L/usr/local/lib -lusearch_static -lstdc++
+#cgo LDFLAGS: -L${SRCDIR} -lusearch_static -lnumkong_static
+#cgo linux LDFLAGS: -lstdc++ -lm
+#cgo darwin LDFLAGS: -lc++
+#cgo windows LDFLAGS: -lstdc++
+
+// Two unchecked promises, so each is asserted per verb rather than per group.
+//
+// `nocallback` says the C function can never re-enter Go, and cgo then skips the machinery that
+// makes a Go-to-C-to-Go crossing safe. It is claimed only where the signature carries no callback
+// at all - never for a verb taking a predicate or a progress handler, whether or not this binding
+// passes one today, since the promise is about the function and not the call site.
+//
+// `noescape` says the call retains none of its pointer arguments, so Go may leave them on the
+// stack. A batch verb reads its matrix and writes its span within the call, and a predicate only
+// ever sees a key by value, so it cannot stash the query either. `usearch_dense_find` is the
+// exception and is absent below: its finder keeps scoring the query row after the call returns.
+#cgo noescape usearch_dense_count
+#cgo nocallback usearch_dense_count
+#cgo noescape usearch_dense_get
+#cgo nocallback usearch_dense_get
+#cgo noescape usearch_dense_size
+#cgo nocallback usearch_dense_size
+#cgo noescape usearch_dense_capacity
+#cgo nocallback usearch_dense_capacity
+#cgo noescape usearch_dense_dimensions
+#cgo nocallback usearch_dense_dimensions
+#cgo noescape usearch_dense_connectivity
+#cgo nocallback usearch_dense_connectivity
+#cgo noescape usearch_dense_memory_usage
+#cgo nocallback usearch_dense_memory_usage
+#cgo noescape usearch_dense_clear
+#cgo nocallback usearch_dense_clear
+#cgo noescape usearch_dense_reserve
+#cgo nocallback usearch_dense_reserve
+#cgo noescape usearch_dense_metadata
+#cgo nocallback usearch_dense_metadata
+#cgo noescape usearch_dense_metadata_buffer
+#cgo nocallback usearch_dense_metadata_buffer
+#cgo noescape usearch_dense_storage_requirements
+#cgo nocallback usearch_dense_storage_requirements
+//
+// Retains nothing, but the signature admits a callback, so `noescape` alone.
+#cgo noescape usearch_dense_add
+#cgo noescape usearch_dense_search
+#cgo noescape usearch_dense_search_if
+#cgo noescape usearch_dense_maxsim
+#cgo noescape usearch_dense_save
+#cgo noescape usearch_dense_save_buffer
+#cgo noescape usearch_dense_load
+#cgo noescape usearch_dense_load_buffer
 
 #include "shim.h"
 */
