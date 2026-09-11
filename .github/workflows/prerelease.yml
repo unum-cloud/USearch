@@ -162,6 +162,56 @@ jobs:
           LD_DEBUG=all go test -race -v ./...
         working-directory: ${{ github.workspace }}/golang/
 
+  verify_models:
+    name: Check Promela models
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Pull Git submodules
+        run: git submodule update --init --recursive
+      - name: Install Spin
+        run: |
+          sudo apt update
+          sudo apt install -y spin
+      - name: Check the models
+        run: verification/check.sh
+
+  verify_clients:
+    name: Check GenMC clients
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Pull Git submodules
+        run: git submodule update --init --recursive
+      - name: Install Spin, Clang and the GenMC build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y spin cmake clang-20 llvm-20-dev libffi-dev zlib1g-dev libedit-dev
+      - name: Checkout GenMC
+        uses: actions/checkout@v6
+        with:
+          repository: MPI-SWS/genmc
+          ref: fe124db203f6d1a626057d72f07e25409075d809
+          path: genmc
+      - name: Restore the GenMC build
+        id: genmc
+        uses: actions/cache@v4
+        with:
+          path: genmc/build
+          key: genmc-fe124db-clang-20
+      - name: Build GenMC
+        if: steps.genmc.outputs.cache-hit != 'true'
+        run: |
+          cmake -S genmc -B genmc/build -D CMAKE_BUILD_TYPE=Release -D CMAKE_C_COMPILER=clang-20 -D CMAKE_CXX_COMPILER=clang++-20 -D LLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm
+          cmake --build genmc/build --parallel
+      - name: Check the models and the clients
+        run: verification/check.sh
+        env:
+          GENMC: ${{ github.workspace }}/genmc/build/bin/genmc
+          GENMC_CLANG: clang++-20
+
   test_ubuntu_clang:
     name: Ubuntu (Clang 20)
     runs-on: ubuntu-24.04

@@ -16,7 +16,8 @@
         "scalameta.metals",
         "ms-dotnettools.csharp",
         "ziglang.vscode-zig",
-        "modular-mojotools.vscode-mojo"
+        "modular-mojotools.vscode-mojo",
+        "dsvictor94.promela"
     ],
     "unwantedRecommendations": ["ms-vscode.cpptools-extension-pack", "xaver.clang-format", "ms-python.black-formatter"]
 }

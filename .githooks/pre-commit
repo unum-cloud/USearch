@@ -229,6 +229,27 @@ check_gcc_atomics() {
         "$file uses GCC atomic builtins - use std::atomic_ref with explicit memory orders:"
 }
 
+# A TSan unlock bracket hides the word's own atomics, so the raw release that pairs with a
+# wait-free probe's `annotate_acquire` has to come right before `annotate_unlock*_started`,
+# never inside the bracket - or the probe's edge vanishes under TSan.
+check_annotate_release_before_unlock() {
+    printf '%s\n' "$added" | grep -q 'annotate_' || return 0
+    local probed misplaced
+    probed=$(grep -o 'annotate_acquire(&[a-z_]*' "$file" | sed 's/.*(//' | sort -u | tr '\n' ' ')
+    [ -n "$probed" ] || return 0
+    misplaced=$(awk -v probed=" $probed" '
+        /annotate_unlock(_shared)?_started\(&[a-z_]+\)/ {
+            match($0, /&[a-z_]+/); word = substr($0, RSTART, RLENGTH); inside = 1
+            if (index(probed, " " word " ") && previous !~ ("annotate_release\\(" word "\\)")) print FILENAME ":" NR ": " $0
+        }
+        /annotate_unlock(_shared)?_finished\(/ { inside = 0 }
+        inside && /annotate_release\(/ { print FILENAME ":" NR ": " $0 }
+        NF && $0 !~ /^[[:space:]]*\/\// { previous = $0 }
+    ' "$file")
+    [ -z "$misplaced" ] || fail "$misplaced" \
+        "$file has an unlock bracket on a probed word without annotate_release right before it, or one inside it:"
+}
+
 # A bare `bool` parameter is unreadable at the call site - `setup(n, true, false)` names
 # nothing. Public headers spell the choice with a two-value enum; predicate helpers in
 # tests & benches, where the bool IS the domain, stay out of scope.
@@ -622,6 +643,7 @@ while IFS= read -r -d '' file; do
         check_data_null_probe
         check_call_chained_subscript
         check_gcc_atomics
+        check_annotate_release_before_unlock
         ;;
     *.md)
         check_ascii_arrows_prose
