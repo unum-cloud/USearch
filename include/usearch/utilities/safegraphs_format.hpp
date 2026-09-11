@@ -26,6 +26,7 @@
 #include <cstring> // `std::memcpy`, `std::memset`
 
 #include <algorithm>   // `std::copy_n`
+#include <limits>      // `std::numeric_limits` - the addressable ceiling a 32-bit host refuses past
 #include <array>       // `std::array` - the prefix magic
 #include <atomic>      // `std::atomic` - the first failure across regions
 #include <bit>         // `std::bit_cast`, `std::endian`, `std::has_single_bit`
@@ -252,6 +253,15 @@ struct safegraphs_header_t {
     }
 };
 
+/** @brief Reads @p value into @p extent, answering false where this host cannot address it. A
+ *      checkpoint written where pointers are wider may name an extent past @c size_t, and
+ *      truncating it would pass every later check carrying a plausible wrong number. */
+inline bool safegraphs_addressable_(u64_t value, std::size_t& extent) noexcept {
+    if (value > std::numeric_limits<std::size_t>::max()) return false;
+    extent = static_cast<std::size_t>(value);
+    return true;
+}
+
 /** @brief The fixed 16 bytes every monolith opens with: the magic, then the little-endian
  *      byte length of the JSON header. */
 struct safegraphs_prefix_t {
@@ -323,7 +333,10 @@ expected<yyjson_doc*> safegraphs_read_document_(bytes_view_t json,
  *      leaves both zero, which every extent check then refuses. */
 inline iota_view<std::size_t> safegraphs_parse_span_(yyjson_val* pair) noexcept {
     if (!yyjson_is_arr(pair) || yyjson_arr_size(pair) != 2) return {};
-    return {yyjson_get_uint(yyjson_arr_get(pair, 0)), yyjson_get_uint(yyjson_arr_get(pair, 1))};
+    std::size_t first = 0, last = 0;
+    if (!safegraphs_addressable_(yyjson_get_uint(yyjson_arr_get(pair, 0)), first)) return {};
+    if (!safegraphs_addressable_(yyjson_get_uint(yyjson_arr_get(pair, 1)), last)) return {};
+    return {first, last};
 }
 
 /** @brief Walks one column object, reading the recognized fields and ignoring extras; the shape
@@ -339,11 +352,23 @@ inline expected<safegraphs_column_t> safegraphs_parse_column_(yyjson_val* object
     yyjson_val* const shape = yyjson_obj_get(object, "shape");
     std::size_t const axes = yyjson_is_arr(shape) ? yyjson_arr_size(shape) : 0;
     if (axes > 2) return {column, status_t::malformed_k};
-    if (axes == 2)
-        column.shape = matrix_shape_t {yyjson_get_uint(yyjson_arr_get(shape, 0)),
-                                       yyjson_get_uint(yyjson_arr_get(shape, 1))};
-    else if (axes == 1) column.shape = vector_shape_t {yyjson_get_uint(yyjson_arr_get(shape, 0))};
-    else if (shape) column.shape = vector_shape_t {yyjson_get_uint(shape)};
+    std::size_t rows = 0, columns = 0;
+    if (axes == 2) {
+        if (!safegraphs_addressable_(yyjson_get_uint(yyjson_arr_get(shape, 0)), rows))
+            return {column, status_t::malformed_k};
+        if (!safegraphs_addressable_(yyjson_get_uint(yyjson_arr_get(shape, 1)), columns))
+            return {column, status_t::malformed_k};
+        column.shape = matrix_shape_t {rows, columns};
+    }
+    else if (axes == 1) {
+        if (!safegraphs_addressable_(yyjson_get_uint(yyjson_arr_get(shape, 0)), columns))
+            return {column, status_t::malformed_k};
+        column.shape = vector_shape_t {columns};
+    }
+    else if (shape) {
+        if (!safegraphs_addressable_(yyjson_get_uint(shape), columns)) return {column, status_t::malformed_k};
+        column.shape = vector_shape_t {columns};
+    }
 
     iota_view<std::size_t> const sums = safegraphs_parse_span_(yyjson_obj_get(object, "offsets"));
     if (sums.empty()) return {column, regular_width(column.shape) ? status_t::success_k : status_t::malformed_k};
@@ -816,9 +841,14 @@ expected<safegraphs_metadata_t> safegraphs_read_manifest(std::string_view path, 
         std::string_view const relative = safegraphs_string_(yyjson_obj_get(entry, "path"));
         if (relative.empty()) continue;
         if (first_relative.empty()) first_relative = relative;
-        std::size_t const nodes = yyjson_get_uint(yyjson_obj_get(entry, "nodes"));
+        std::size_t nodes = 0, bytes = 0;
+        if (!safegraphs_addressable_(yyjson_get_uint(yyjson_obj_get(entry, "nodes")), nodes) ||
+            !safegraphs_addressable_(yyjson_get_uint(yyjson_obj_get(entry, "bytes")), bytes)) {
+            yyjson_doc_free(document);
+            return {metadata, status_t::malformed_k};
+        }
         metadata.nodes += nodes;
-        per_part(safegraphs_part_t {relative, yyjson_get_uint(yyjson_obj_get(entry, "bytes")), nodes});
+        per_part(safegraphs_part_t {relative, bytes, nodes});
     }
     yyjson_doc_free(document);
     if (first_relative.empty()) return {metadata, status_t::malformed_k};
