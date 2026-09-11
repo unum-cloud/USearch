@@ -1,0 +1,20 @@
+{
+    "printWidth": 120,
+    "tabWidth": 4,
+    "useTabs": false,
+    "semi": true,
+    "singleQuote": false,
+    "overrides": [
+        {
+            "files": [
+                "*.ts",
+                "*.js",
+                "*.mjs",
+                "*.cjs"
+            ],
+            "options": {
+                "tabWidth": 2
+            }
+        }
+    ]
+}

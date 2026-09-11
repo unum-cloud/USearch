@@ -4,10 +4,19 @@
         "ms-vscode.cmake-tools",
         "ms-vscode.cpptools",
         "nvidia.nsight-vscode-edition",
+        "tamasfe.even-better-toml",
+        "esbenp.prettier-vscode",
+        "charliermarsh.ruff",
+        "rust-lang.rust-analyzer",
+        "golang.go",
         "vknabel.vscode-apple-swift-format",
         "sswg.swift-lang",
-        "ms-python.black-formatter",
-        "swellaby.rust-pack"
+        "redhat.java",
+        "fwcd.kotlin",
+        "scalameta.metals",
+        "ms-dotnettools.csharp",
+        "ziglang.vscode-zig",
+        "modular-mojotools.vscode-mojo"
     ],
-    "unwantedRecommendations": ["ms-vscode.cpptools-extension-pack", "xaver.clang-format"]
+    "unwantedRecommendations": ["ms-vscode.cpptools-extension-pack", "xaver.clang-format", "ms-python.black-formatter"]
 }

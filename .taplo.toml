@@ -1,0 +1,12 @@
+# TOML formatting for `pyproject.toml`, `Cargo.toml`, `pixi.toml` and `rustfmt.toml`, enforced by
+# `.githooks/pre-commit`. Without a checked-in spec an editor's TOML extension reformats on save
+# against its own defaults, which explode a hand-laid array the moment a trailing comment pushes
+# the line past its column limit.
+[formatting]
+align_comments = true       # → Column-align trailing `#` comments within each block
+align_entries = false       # → Do not align the `=` signs, only the comments
+reorder_keys = false        # → Preserve authored key order
+array_auto_expand = false   # → Never explode an inline array across lines
+array_auto_collapse = false # → Never collapse a hand-expanded array, such as `classifiers`
+column_width = 120          # → The wrap every other language in the tree uses
+indent_string = "  "        # → Two spaces, matching the existing arrays

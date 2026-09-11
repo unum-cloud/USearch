@@ -725,6 +725,20 @@ if command -v pixi > /dev/null 2>&1 && [ -f pixi.toml ]; then
     done < <(git diff --cached --name-only --diff-filter=ACM -z)
 fi
 
+# taplo rather than dprint, which reorders keys and collapses the aligned comment columns.
+if command -v taplo > /dev/null 2>&1 && [ -f .taplo.toml ]; then
+    while IFS= read -r -d '' file; do
+        case "$file" in
+        *.toml) ;;
+        *) continue ;;
+        esac
+        if ! taplo fmt --check "$file" > /dev/null 2>&1; then
+            echo "pre-commit: $file is not taplo clean - run \`taplo fmt $file\`"
+            failed=1
+        fi
+    done < <(git diff --cached --name-only --diff-filter=ACM -z)
+fi
+
 # Spotless needs a Gradle far newer than some distributions ship, so the gate calls the same
 # formatter Spotless would, out of the Gradle cache.
 palantir_jar=$(ls "$HOME"/.gradle/caches/modules-2/files-2.1/com.palantir.javaformat/palantir-java-format/*/*/palantir-java-format-*.jar 2> /dev/null | tail -1)
