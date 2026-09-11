@@ -412,11 +412,12 @@ class growing_multimap {
      *      concurrent inserts & lookups; fails with @c overflow_k once the quota is spent. */
     status_t insert(key_t const& key, value_t value) noexcept {
         if (!slots_count_) return status_t::uninitialized_k;
-        // Claim quota before touching any slot, so probe chains stay bounded by construction.
-        if (inserted_count_.fetch_add(1, std::memory_order_relaxed) >= entries_quota_) {
-            inserted_count_.fetch_sub(1, std::memory_order_relaxed);
-            return status_t::overflow_k;
-        }
+        // Claim quota before touching any slot, so probe chains stay bounded by construction
+        // and `size()` never passes `capacity()`, not even while a refusal is in flight.
+        std::size_t inserted = inserted_count_.load(std::memory_order_relaxed);
+        while (inserted < entries_quota_ &&
+               !inserted_count_.compare_exchange_weak(inserted, inserted + 1, std::memory_order_relaxed)) {}
+        if (inserted >= entries_quota_) return status_t::overflow_k;
         std::size_t chain = first_probe_of(key, slots_count_);
         while (true) {
             std::atomic_ref<slot_state_t> state(states_[chain]);
