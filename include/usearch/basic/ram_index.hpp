@@ -339,6 +339,11 @@ struct basic_shared_mutex {
             u64_t const backed_off = atomic_ref<u64_t>(word).fetch_sub(1, std::memory_order_release) - 1;
             wait_type_ {}(&word, backed_off, 0u, wait_capped_t {});
         }
+        // Pairs with the acquire fence before a certified probe's exit snapshot: a row read that
+        // returned a store made under this hold proves the acquisition to that snapshot, which
+        // can then no longer read the word from before it. The ISAs order the hold after an
+        // acquiring read-modify-write on their own; the fence says so to the C++ model.
+        std::atomic_thread_fence(std::memory_order_release);
         annotate_lock_shared_acquired(&word);
     }
 
@@ -724,6 +729,8 @@ struct basic_ram_index {
             record.key = keys[incoming_index];
             context.reverse_ids.clear();
             std::size_t const selected_count = min_of(context.selected_neighbors.size(), connectivity);
+            // A failed load leaves its unpublished rows wired; this one starts from nothing.
+            record.neighbors.clear();
             // A refused row growth wires a thinner node - the claimed id must still publish.
             std::size_t const wired_count = succeeded(record.neighbors.reserve(selected_count)) ? selected_count : 0;
             for (std::size_t link = 0; link != wired_count; ++link) {
@@ -851,7 +858,8 @@ struct basic_ram_index {
      *  snapshot and briefly locks each expanded node to copy its row - while a certified
      *  @c immutable_k or @c exclusive_k instantiation compiles the locks out entirely,
      *  bracketed by the shared mutex's wait-free probes: a violated certification answers
-     *  @c contended_k rather than corrupting silently.
+     *  @c contended_k rather than a silently wrong result - detected, not memory-safe, since
+     *  the plain reads may meet a row a lying mutator is regrowing.
      *  Scoring runs off-lock, one @c reset / @c push / @c drain round per fan-out, and the
      *  metric need not match the one that built the graph. The query is a stored-value
      *  reference by default; a @c transparent_metric accepts other query forms.
@@ -903,8 +911,9 @@ struct basic_ram_index {
         result.count = context.results.size();
         result.telemetry = context.telemetry - telemetry_before;
         if constexpr (synchronization_ != synchronization_t::concurrent_k) {
-            // The fence keeps the walk's plain reads from sinking below the reload; the
-            // watermark equality is the belt against generation wrap driven by inserts.
+            // The fence pairs with the release fence in `lock_shared`: a walk read that met a
+            // mutator's write proves its acquisition to the reload, which then reads a moved
+            // word. The watermark equality is the belt against generation wrap driven by inserts.
             std::atomic_thread_fence(std::memory_order_acquire);
             auto const exit_probe = shared_mutex_.snapshot();
             if (!exit_probe.unlocked() || exit_probe.generation != entry_generation ||
@@ -1267,6 +1276,20 @@ struct basic_ram_index {
         /** @brief The unique hold spanning the plan's whole lifetime. */
         unique_lock_t hold;
 
+        load_plan_t() noexcept = default;
+        load_plan_t(basic_ram_index* index, columns_view_t columns, unique_lock_t&& hold) noexcept
+            : index(index), columns(columns), hold(std::move(hold)) {}
+        load_plan_t(load_plan_t&& other) noexcept
+            : index(std::exchange(other.index, nullptr)), columns(other.columns), covered(other.covered),
+              hold(std::move(other.hold)) {}
+        load_plan_t& operator=(load_plan_t&&) = delete;
+        /** @brief A plan that dies before @c finish wipes the keys its regions registered, still
+         *      under its hold: an insert on the empty index would otherwise dispense ids the
+         *      unpublished attempt's keys still name, and burn quota on the leftovers. */
+        ~load_plan_t() noexcept {
+            if (index) index->key_map_.clear();
+        }
+
         /** @brief Decodes one id region's keys, neighbor rows & values into its
          *      pre-constructed records and registers the keys - the multimap inserts are
          *      concurrency-safe, so any number of caller threads run their regions. */
@@ -1318,6 +1341,7 @@ struct basic_ram_index {
             atomic_ref<node_id_t>(index->last_visible_id_)
                 .store(static_cast<node_id_t>(node_count), std::memory_order_release);
             hold.unlock();
+            index = nullptr; // Published: the plan is spent, and its death wipes nothing.
             return status_t::success_k;
         }
     };
@@ -1341,10 +1365,8 @@ struct basic_ram_index {
             return {{}, status_t::config_mismatch_k};
         if (columns.keys.size() > capacity) return {{}, status_t::overflow_k};
         if (status_t const vetted = vetted_columns_(columns); failed(vetted)) return {{}, vetted};
-        // A failed prior attempt burned key-map quota; wiping first keeps every entry
-        // unique and the quota whole, so failed loads stay genuinely retryable.
-        key_map_.clear();
-        return {load_plan_t {this, columns, 0, std::move(hold)}, status_t::success_k};
+        // A dying plan wipes the keys it registered, so the map arrives whole here.
+        return {load_plan_t {this, columns, std::move(hold)}, status_t::success_k};
     }
 
     /** @brief Loads a snapshot into this reserved, empty index as one plan with a single
@@ -1595,6 +1617,12 @@ struct basic_ram_index {
                 continue;
             }
             std::size_t const degree = node.neighbors.size();
+            // A manual link may have wired the newcomer since it published; re-selecting
+            // would carry the edge twice.
+            if (already_linked(node)) {
+                if constexpr (locked_k) node.mutex.unlock();
+                continue;
+            }
             context.staged_ids.clear();
             if (failed(context.staged_ids.reserve(degree))) {
                 if constexpr (locked_k) node.mutex.unlock();
@@ -1708,15 +1736,15 @@ struct basic_ram_index {
     node_array_t nodes_array_;
     /** @brief Frozen entry capacity; its release store is @c reserve's last act, doubling
      *      as the publication edge for the record array & key multimap. Public entry
-     *      points take one acquire load into a local, so no loop reads it. */
-    mutable std::size_t capacity_ {0}; // ? `mutable` throughout: the pre-P3323 `std::atomic_ref` binds no
-    // const word, not even to load it, and the const readers only load
+     *      points take one acquire load into a local, so no loop reads it. @c mutable, as every
+     *      counter here: the pre-P3323 @c std::atomic_ref binds no const word, not even to load
+     *      it, and the const readers only load. */
+    mutable std::size_t capacity_ {0};
 
     /** @brief Batch capacity claims - the all-or-nothing admission, separate from
      *      identity: claims convert one-to-one into dispensed ids, so dispensing never
-     *      overflows. Rejected batches roll their claim back, so the count transiently
-     *      overshoots under contention - kept a full word wide, so no overshoot can ever
-     *      wrap it around the bounds check. */
+     *      overflows. The bounded add commits only within capacity, so a rejected batch
+     *      never writes and the count never overshoots. */
     alignas(default_alignment_k) mutable std::size_t claimed_count_ {0};
     /** @brief Node-id dispenser; ids are claimed after the walk, right before publication.
      *      Its per-insert RMW gets its own line, so it never invalidates the watermark line
