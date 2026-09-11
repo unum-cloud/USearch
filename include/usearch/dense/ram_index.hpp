@@ -435,7 +435,9 @@ struct dense_ram_index {
 #pragma region Measures
 
     /** @brief Number of published vectors - the visibility watermark; the index itself stores no keys. */
-    std::size_t size() const noexcept { return atomic_ref<node_id_t>(last_visible_id_).load(); }
+    std::size_t size() const noexcept {
+        return atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
+    }
 
     /** @brief The dimensions & connectivity together, as one acquire load of the frozen word - empty
      *      until the first successful @c reserve, and never a mix of two freezes. */
@@ -447,13 +449,15 @@ struct dense_ram_index {
     /** @brief Scalar dimensions per stored vector; zero until the first reservation freezes it. */
     std::size_t dimensions() const noexcept { return geometry().dimensions(); }
 
-    /** @brief Rows hosted without growing again - claimed plus unclaimed, the invariant tying the
-     *      two counters together. A transient dip while a grower is mid-flight only makes the
-     *      estimate conservative, which is what @c reserve compares against. */
+    /** @brief Rows hosted without growing again - unclaimed plus claimed, the invariant tying the
+     *      two counters together. The credit is read first: @ref release_capacity deflates the
+     *      claim before it credits, so a credit seen here carries its deflation, and one missed
+     *      only dips the sum. A transient dip while a grower is mid-flight is the same
+     *      conservative side, which is what @c reserve compares against. */
     std::size_t capacity() const noexcept {
-        std::size_t const claimed_rows = atomic_ref<node_id_t>(last_allocated_id_).load(std::memory_order_acquire);
         std::ptrdiff_t const unclaimed_rows =
             atomic_ref<std::ptrdiff_t>(remaining_capacity_).load(std::memory_order_acquire);
+        std::size_t const claimed_rows = atomic_ref<node_id_t>(last_allocated_id_).load(std::memory_order_acquire);
         return claimed_rows + static_cast<std::size_t>(unclaimed_rows > 0 ? unclaimed_rows : 0);
     }
 
@@ -560,13 +564,7 @@ struct dense_ram_index {
         if (frozen_geometry != desired_geometry) return {0, frozen_connectivity, status_t::config_mismatch_k};
 
         while (true) {
-            // Physical rows = claimed + unclaimed - the invariant tying the two counters together.
-            // Transient dips while a grower is mid-flight only make this estimate conservative.
-            std::size_t const claimed_rows = atomic_ref<node_id_t>(last_allocated_id_).load(std::memory_order_acquire);
-            std::ptrdiff_t const unclaimed_rows =
-                atomic_ref<std::ptrdiff_t>(remaining_capacity_).load(std::memory_order_acquire);
-            std::size_t const total_rows = claimed_rows +
-                                           static_cast<std::size_t>(unclaimed_rows > 0 ? unclaimed_rows : 0);
+            std::size_t const total_rows = capacity();
             if (total_rows >= config.capacity) return {total_rows, frozen_connectivity, status_t::success_k};
 
             // Grow through the same grower-election protocol that powers `insert`: claim the
@@ -824,12 +822,28 @@ struct dense_ram_index {
     }
 
     /** @brief Returns @p count rows no id was dispensed against. Deflating the claim watermark
-     *      before crediting the capacity is load-bearing: it keeps the physical-rows sum
-     *      conservative, so a concurrent reservation can only over-grow. */
+     *      before crediting the capacity is load-bearing: a reader taking the credit with its
+     *      acquire sees the deflation too, so the physical-rows sum it forms is conservative and
+     *      a concurrent reservation can only over-grow. The deflation releases as well: a posted,
+     *      order-free subtract could land after the credit.
+     *
+     *  The credit lands only on a whole counter. A negative one has a grower inside, and a credit
+     *  lifting it back across zero would elect a second grower off the next claim, against the
+     *  plain chunk directory; every growth ends by crediting at least its deficit, so the wait is
+     *  as long as one growth. */
     void release_capacity(std::size_t count) noexcept {
-        atomic_ref<node_id_t>(last_allocated_id_).sub(static_cast<node_id_t>(count), std::memory_order_relaxed);
-        atomic_ref<std::ptrdiff_t>(remaining_capacity_)
-            .add(static_cast<std::ptrdiff_t>(count), std::memory_order_release);
+        atomic_ref<node_id_t>(last_allocated_id_).sub(static_cast<node_id_t>(count), std::memory_order_release);
+        std::ptrdiff_t observed = atomic_ref<std::ptrdiff_t>(remaining_capacity_).load(std::memory_order_acquire);
+        while (true) {
+            if (observed < 0) {
+                wait_type_ {}(&remaining_capacity_, observed, 0u, fu::wait_capped_t {});
+                observed = atomic_ref<std::ptrdiff_t>(remaining_capacity_).load(std::memory_order_acquire);
+            }
+            else if (atomic_ref<std::ptrdiff_t>(remaining_capacity_)
+                         .compare_exchange_weak(observed, observed + static_cast<std::ptrdiff_t>(count),
+                                                std::memory_order_release, std::memory_order_acquire))
+                return;
+        }
     }
 
     /**
@@ -1376,13 +1390,14 @@ struct dense_ram_index {
         }
 
         /** @brief Publishes the appended rows once every chunk's vectors and neighbors landed:
-         *      identity first, the watermark last with a release, as every publication here. */
+         *      identity first, the watermark last with a release, as every publication here. The
+         *      identity releases too: a posted, order-free add could land after the watermark. */
         status_t finish() noexcept {
             if (atomic_ref<std::size_t>(covered_vectors).load(std::memory_order_acquire) != rows ||
                 atomic_ref<std::size_t>(covered_neighbors).load(std::memory_order_acquire) != rows)
                 return status_t::config_mismatch_k;
             if (!rows) return status_t::success_k;
-            atomic_ref<node_id_t>(index.next_visible_id_).add(static_cast<node_id_t>(rows), std::memory_order_relaxed);
+            atomic_ref<node_id_t>(index.next_visible_id_).add(static_cast<node_id_t>(rows), std::memory_order_release);
             atomic_ref<node_id_t>(index.last_visible_id_)
                 .store(static_cast<node_id_t>(base + rows), std::memory_order_release);
             return status_t::success_k;
@@ -1406,7 +1421,10 @@ struct dense_ram_index {
         if (rows > max_node_count_k - visible) return {plan, status_t::overflow_k};
         auto const [base, granted] = claim_capacity(rows);
         if (failed(granted)) return {plan, granted};
-        if (base != visible) return {plan, status_t::contended_k};
+        if (base != visible) {
+            release_capacity(rows); // A refused plan owns nothing.
+            return {plan, status_t::contended_k};
+        }
         plan.rows = rows;
         return {plan, status_t::success_k};
     }
@@ -1701,9 +1719,10 @@ struct dense_ram_index {
             std::ptrdiff_t const new_remaining_capacity = old_remaining_capacity - static_cast<std::ptrdiff_t>(count);
 
             // The thread that moved the counter from non-negative to negative is responsible for
-            // the next allocation; the counter can't recover until this thread credits it, so
-            // growth stays single-threaded. Accepting `old == 0` is load-bearing: capacity may
-            // rest at exactly zero, and `old > 0` would then elect nobody - a proven livelock.
+            // the next allocation. Accepting `old == 0` is load-bearing: capacity may rest at
+            // exactly zero, and `old > 0` would then elect nobody - a proven livelock. Nothing lifts
+            // a negative counter but this thread's own credit: `release_capacity` waits for a whole
+            // one, so no second crossing happens while a grower is inside.
             if (old_remaining_capacity >= 0 && new_remaining_capacity < 0) {
                 auto [added_capacity, chunk_status] = create_next_chunk(count);
                 if (chunk_status != status_t::success_k) {
@@ -1713,8 +1732,10 @@ struct dense_ram_index {
                         .add(count + added_capacity, std::memory_order_release);
                     return {dense_node_id_unknown_k, chunk_status};
                 }
+                // The take releases too: a claimer that fit on the old credit but whose rows this
+                // take pushes into the new chunk reaches the directory through this word alone.
                 node_id_t const first_id =
-                    atomic_ref<node_id_t>(last_allocated_id_).fetch_add(count, std::memory_order_acquire);
+                    atomic_ref<node_id_t>(last_allocated_id_).fetch_add(count, std::memory_order_acq_rel);
                 atomic_ref<std::ptrdiff_t>(remaining_capacity_).add(added_capacity, std::memory_order_release);
                 return {first_id, status_t::success_k};
             }
@@ -2532,9 +2553,11 @@ struct dense_ram_index {
      *  batch, the dispenser per insert, and the watermark is acquire-read by every search - co-located,
      *  each dispenser RMW would invalidate the line every concurrent search snapshots. Read-mostly members
      *  stay grouped: a line every core holds Shared is the cheap kind.
+     *
+     *  Every one of them is @c mutable: the pre-P3323 @c std::atomic_ref binds no const word, not even
+     *  to load it, and the const readers only load.
      */
-    alignas(default_alignment_k) mutable std::ptrdiff_t remaining_capacity_ {0}; // ? `mutable` throughout: the
-    // pre-P3323 `std::atomic_ref` binds no const word, not even to load it, and the const readers only load
+    alignas(default_alignment_k) mutable std::ptrdiff_t remaining_capacity_ {0};
 
     /**
      *  @brief Unsigned integer containing the identifier of the last "allocated" node. It defines the lower
@@ -2559,9 +2582,9 @@ struct dense_ram_index {
     /** @brief Read-mostly after the freeze - kept off the watermark's line with the other cold members. */
     alignas(default_alignment_k) mutable geometry_t geometry_ {};
 
-    /** @brief Constructed chunks per directory. Deliberately non-atomic: only the one "responsible"
-     *      grower thread mutates it, and successive growers are ordered by the acquire/release pair
-     *      on @c remaining_capacity_. @ref create_next_chunk */
+    /** @brief Constructed chunks per directory. Deliberately non-atomic: only the one elected grower
+     *      mutates it, and successive growers are ordered by the acquire/release pair on
+     *      @c remaining_capacity_, which no hand-back lifts while one is inside. @ref create_next_chunk */
     small_size_t chunks_count_ = 0;
 };
 
@@ -2674,7 +2697,7 @@ struct dense_ram_cursor {
         // mid-edit, waited out through the index's own monitor - and never re-read it, so a
         // fresh lock sentinel cannot slip into the staging. The `const_cast` is the
         // pre-P3323 currency for atomics living in const memory.
-        node_id_t first_value = row[0];
+        node_id_t first_value;
         if constexpr (synchronization_ == synchronization_t::concurrent_k) {
             first_value = atomic_ref<node_id_t>(const_cast<node_id_t&>(row[0])).load(std::memory_order_acquire);
             while (first_value == dense_node_id_unknown_k) {
@@ -2682,6 +2705,7 @@ struct dense_ram_cursor {
                 first_value = atomic_ref<node_id_t>(const_cast<node_id_t&>(row[0])).load(std::memory_order_acquire);
             }
         }
+        else first_value = row[0];
         staged_neighbors_[0] = first_value;
         // Tail slots may interleave with a live re-linker: relaxed atomics make the
         // stale-but-valid mix defined; certified contracts read plain memory.
