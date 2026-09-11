@@ -151,9 +151,11 @@ struct dense_cuda_neighbors_ref_t {
         return capacity_ >= 32 ? 0xFFFFFFFFu : (1u << capacity_) - 1u;
     }
 
-    /** @brief Relaxed atomic read of slot @p index; slot 0 belongs to @c peek_first / @c lock_if_free. */
+    /** @brief Acquire read of slot @p index, pairing with the release fence a lock holder places
+     *      before its slot stores, so an id read here comes with its node's payload; slot 0
+     *      belongs to @c peek_first / @c lock_if_free. */
     __device__ __forceinline__ dense_node_id_t load_slot(u32_t index) const noexcept {
-        return word_ref_t(row_[index]).load(cuda::memory_order_relaxed);
+        return word_ref_t(row_[index]).load(cuda::memory_order_acquire);
     }
     /** @brief Relaxed atomic write of slot @p index - only for the unpublished owner or the
      *      current lock holder. */
@@ -186,14 +188,14 @@ struct dense_cuda_neighbors_ref_t {
         word_ref_t(row_[0]).store(first_value, cuda::memory_order_release);
     }
     /** @brief Warp-collective row read for @b unlocked rows: the leader lane acquires slot 0, the
-     *      others load relaxed; a sentinel on lane 0 means transiently locked or unpublished. A
-     *      lock holder reads through @c locked_row instead, since slot 0 holds the sentinel. */
+     *      others acquire their slots; a sentinel on lane 0 means transiently locked or unpublished.
+     *      A lock holder reads through @c locked_row instead, since slot 0 holds the sentinel. */
     __device__ __forceinline__ dense_node_id_t load_row(int lane) const noexcept {
         if (static_cast<u32_t>(lane) >= capacity_) return dense_node_id_unknown_k;
         return lane ? load_slot(lane) : peek_first();
     }
     /** @brief Warp-collective row read for the @b lock holder: lane 0 reports the
-     *      displaced @p first_value, the others load their slots relaxed. */
+     *      displaced @p first_value, the others acquire their slots. */
     __device__ __forceinline__ dense_node_id_t locked_row(int lane, dense_node_id_t first_value) const noexcept {
         if (static_cast<u32_t>(lane) >= capacity_) return dense_node_id_unknown_k;
         return lane ? load_slot(lane) : first_value;
@@ -420,6 +422,9 @@ __device__ __forceinline__ void dense_cuda_search_ahead( //
                 }
             }
             first_value = __shfl_sync(0xFFFFFFFFu, first_value, 0);
+            // The shuffle moves the word, not the leader's acquire: `bar.warp.sync` is what orders
+            // the other lanes' slot loads after it.
+            __syncwarp();
             if (first_value == dense_node_id_unknown_k) {
                 ++telemetry.locked_drops;
                 continue;
@@ -646,6 +651,7 @@ __device__ __forceinline__ void dense_cuda_back_link_neighbors( //
         dense_node_id_t first_value = dense_node_id_unknown_k;
         if (lane == 0) first_value = row.lock_if_free(back_link_lock_attempts_k, random_generator);
         first_value = __shfl_sync(0xFFFFFFFFu, first_value, 0);
+        __syncwarp(); // The sweep below must follow the leader's acquiring exchange on every lane.
         ++telemetry.lock_attempts;
         if (first_value == dense_node_id_unknown_k) { // Bounded-wait policy: skip the edge.
             ++telemetry.lock_skips;
@@ -670,6 +676,9 @@ __device__ __forceinline__ void dense_cuda_back_link_neighbors( //
             if (empty_mask && empty_slot == connectivity) empty_slot = base + __ffs(empty_mask) - 1;
         }
         __syncwarp();
+        // Every slot store below is relaxed; this fence heads each lane's stores, so an acquiring
+        // reader of any slot sees the newcomer's payload, published before this hold was taken.
+        cuda::atomic_thread_fence(cuda::memory_order_release, cuda::thread_scope_device);
         if (empty_slot != connectivity) { // Fast path: append into that slot, unlock unchanged.
             if (lane == 0) row.store_slot(empty_slot, new_node_id);
             __syncwarp();
@@ -2771,6 +2780,9 @@ struct dense_vram_index {
         if (!rows) return {std::move(plan), status_t::success_k};
         if (!claiming_.lock_if_free()) return {std::move(plan), status_t::contended_k};
         plan.claiming = std::unique_lock<fu::spin_mutex<fu::preferred_yield_t>> {claiming_, std::adopt_lock};
+        // Re-read under the claim: a batch claiming between the two reads would overlap the
+        // loaded rows, and `finish` would then lower the claim beneath it.
+        plan.base = static_cast<node_id_t>(size());
         if (rows > max_node_count_k - plan.base) return {std::move(plan), status_t::overflow_k};
         plan.batch_rows = min_of(rows, power_of_two<std::size_t>(bounce_rows_log2_k));
         std::size_t const batch_bytes = plan.batch_rows * (packed_row_bytes() + connectivity() * sizeof(node_id_t));

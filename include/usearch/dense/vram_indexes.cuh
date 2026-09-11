@@ -557,8 +557,10 @@ struct dense_vram_indexes {
      *      host thread, each import riding its own device's stream.
      *  @param[in] on_loaded Fires per finished shard; answering @c cancel_k stops the rest.
      *
-     *  The index must be empty. A cancelled or failed load clears it and reports why, so
-     *  nothing is published and the next load starts clean.
+     *  The index must be empty, and it takes the hold every batch takes, so a batch in flight
+     *  refuses the load as @c contended_k and the load refuses a batch the same way. A cancelled
+     *  or failed load clears it and reports why, so nothing is published and the next load
+     *  starts clean.
      */
     template <typename progress_type_ = dummy_progress_t>
     status_t load(std::string_view path, load_config_t const& config, executor_t& executor,
@@ -1139,26 +1141,29 @@ struct dense_vram_indexes {
             };
             if (status_t const landed = round_robin_steps_(plans, load_step); failed(landed)) return landed;
 
-            // Publish, then the keys at the append base, then the reverse plane - the quota covers them.
+            // The keys at the append base and the reverse plane first, then the publication - the
+            // order an insert keeps, so a search never reaches a published row without its key.
+            // Every plan finishes, an empty one included, since finishing hands the shard's claim back.
             for (std::size_t shard = 0; shard != shards; ++shard) {
-                if (cudaSetDevice(shards_[shard].index->device_specs().ordinal) != cudaSuccess)
-                    return status_t::device_error_k;
-                if (status_t const finished = plans[shard].finish(); failed(finished)) return finished;
                 checkpoint_assignment_t const& assignment = taken[shard];
-                if (assignment.rows.empty()) continue;
-                part_t const& part = parts[assignment.part];
                 keys_plane_t& keys = shards_[shard].keys;
                 std::size_t const base = plans[shard].base;
                 std::size_t const rows = assignment.rows.size();
                 if (base + rows > keys.size()) return status_t::config_mismatch_k;
-                if (status_t const read = copy_bytes(
-                        bytes_of(keys.data() + base, rows),
-                        part.header.rows_of(part.monolith, part.header.key, assignment.rows.first, rows));
-                    failed(read))
-                    return read;
-                for (std::size_t row = 0; row != rows; ++row) [[maybe_unused]]
-                    status_t const recorded = locators_of_key_.insert(
-                        keys[base + row], key_locator_t {shard, static_cast<dense_node_id_t>(base + row)});
+                if (rows) {
+                    part_t const& part = parts[assignment.part];
+                    if (status_t const read = copy_bytes(
+                            bytes_of(keys.data() + base, rows),
+                            part.header.rows_of(part.monolith, part.header.key, assignment.rows.first, rows));
+                        failed(read))
+                        return read;
+                    for (std::size_t row = 0; row != rows; ++row) [[maybe_unused]]
+                        status_t const recorded = locators_of_key_.insert(
+                            keys[base + row], key_locator_t {shard, static_cast<dense_node_id_t>(base + row)});
+                }
+                if (cudaSetDevice(shards_[shard].index->device_specs().ordinal) != cudaSuccess)
+                    return status_t::device_error_k;
+                if (status_t const finished = plans[shard].finish(); failed(finished)) return finished;
             }
         }
         return status_t::success_k;
@@ -1172,6 +1177,12 @@ struct dense_vram_indexes {
         std::size_t const shards = shards_.size();
         auto [held, claimed] = executor.claim();
         if (failed(claimed)) return claimed;
+        // The same two holds `add` takes: a batch through another executor must see `contended_k`, not the load.
+        if (!mutating_.lock_if_free()) return status_t::contended_k;
+        std::lock_guard const mutating {mutating_, std::adopt_lock};
+        // Empty under the hold, not only at the entry check: a batch admitted between the two
+        // would be overwritten by the total this load stores at its end.
+        if (size()) return status_t::config_mismatch_k;
 
         safegraphs_header_t const& first = parts[0].header;
         for (part_t const& part : parts)

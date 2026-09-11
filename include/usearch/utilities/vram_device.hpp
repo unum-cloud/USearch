@@ -15,6 +15,7 @@
 #include <cstddef> // `std::size_t`
 #include <cstdint> // `std::uintptr_t` for device-pointer casts
 
+#include <atomic>  // `std::atomic_ref` - the committed extent read outside the growth lock
 #include <memory>  // `std::unique_ptr` for owned device allocations
 #include <mutex>   // `std::unique_lock`, `std::adopt_lock` - the executor's one-caller hold
 #include <span>    // `std::span` - the device list an executor opens over
@@ -129,7 +130,9 @@ struct cuda_virtual_memory_allocator {
 
     CUdeviceptr base_ = 0;
     std::size_t virtual_address_bytes_ = 0;
-    std::size_t mapped_bytes_ = 0;
+    /** @brief Bytes mapped so far - the one grower advances it with a release, and any thread
+     *      may read it through @c committed_bytes with an acquire; @c mutable for the reference. */
+    mutable std::size_t mapped_bytes_ = 0;
     std::size_t slab_bytes_ = 0;
     int device_ = 0;
 
@@ -173,14 +176,16 @@ struct cuda_virtual_memory_allocator {
                                 cuMemSetAccess(base_ + mapped_bytes_, slab_bytes_, &access, 1) == CUDA_SUCCESS;
             cuMemRelease(handle);
             if (!mapped) return status_t::device_error_k;
-            mapped_bytes_ += slab_bytes_;
+            std::atomic_ref<std::size_t>(mapped_bytes_).store(mapped_bytes_ + slab_bytes_, std::memory_order_release);
         }
         return status_t::success_k;
     }
 
     value_type* base() const noexcept { return reinterpret_cast<value_type*>(static_cast<std::uintptr_t>(base_)); }
     std::size_t reserved_bytes() const noexcept { return virtual_address_bytes_; }
-    std::size_t committed_bytes() const noexcept { return mapped_bytes_; }
+    std::size_t committed_bytes() const noexcept {
+        return std::atomic_ref<std::size_t>(mapped_bytes_).load(std::memory_order_acquire);
+    }
     int device() const noexcept { return device_; }
 
     void release() noexcept {
@@ -212,7 +217,7 @@ struct cuda_managed_allocator {
 
     value_type* base_ = nullptr;
     std::size_t virtual_address_bytes_ = 0;
-    std::size_t committed_bytes_ = 0;
+    mutable std::size_t committed_bytes_ = 0; // ? Released by the one grower, acquired by any reader
     int device_ = 0;
 
     cuda_managed_allocator() = default;
@@ -247,13 +252,15 @@ struct cuda_managed_allocator {
         // Managed pages arrive unzeroed, unlike slabs; zeroing the fresh range also commits its residency.
         if (cudaMemset(reinterpret_cast<byte_t*>(base_) + committed_bytes_, 0, bytes - committed_bytes_) != cudaSuccess)
             return status_t::device_error_k;
-        committed_bytes_ = bytes;
+        std::atomic_ref<std::size_t>(committed_bytes_).store(bytes, std::memory_order_release);
         return status_t::success_k;
     }
 
     value_type* base() const noexcept { return base_; }
     std::size_t reserved_bytes() const noexcept { return virtual_address_bytes_; }
-    std::size_t committed_bytes() const noexcept { return committed_bytes_; }
+    std::size_t committed_bytes() const noexcept {
+        return std::atomic_ref<std::size_t>(committed_bytes_).load(std::memory_order_acquire);
+    }
     int device() const noexcept { return device_; }
 
     /** @brief The reservation ceiling: half the host RAM, since managed reservations are real
