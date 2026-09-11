@@ -2,21 +2,21 @@
 # probes, the instantiation grid and the submodule pins are the ones every other SDK gets.
 
 [workspace]
-authors = ["Ash Vardanian <1983160+ashvardanian@users.noreply.github.com>"]
+authors = ["Ash Vardanian <info@unum.cloud>"]
 channels = ["conda-forge", "https://conda.modular.com/max"]
-description = "Smaller & Faster Single-File Vector Search Engine"
+description = "Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices"
 license = "Apache-2.0"
 license-file = "LICENSE"
 name = "usearch"
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 preview = ["pixi-build"]
 readme = "README.md"
-version = "3.0.0"
+version = "3.0.0-rc.1"
 
 # A dependency of the environment too, so `pixi run` puts the library in the prefix `mojo build` bakes as runpath.
 [dependencies]
 mojo = ">=1.0.0,<2"
-usearch = {path = "."}
+usearch = { path = "." }
 
 # `mojo build` links against a MAX runtime that needs a newer glibc than conda-forge's default
 # sysroot, which otherwise fails with a wall of GLIBC_2.34 undefined references.
@@ -28,10 +28,10 @@ sysroot_linux-aarch64 = ">=2.34"
 
 [package]
 name = "usearch"
-version = "3.0.0"
+version = "3.0.0-rc.1"
 
 [package.build]
-backend = {name = "pixi-build-cmake", version = "0.*"}
+backend = { name = "pixi-build-cmake", version = "0.*" }
 
 # The backend defaults to a C++-only toolchain, and the C interface's own units compile as C.
 [package.build.config]
@@ -45,6 +45,6 @@ extra-args = [
 
 [tasks]
 # The pure-logic half of the suite needs no engine, so this half runs without one.
-test-mojo = {cmd = "mojo run -I mojo mojo/test.mojo"}
-build = {cmd = "mkdir -p build_mojo && mojo build -I mojo mojo/test.mojo -o build_mojo/mojo_test"}
-test = {cmd = "mojo run -I mojo mojo/test.mojo"}
+test-mojo = { cmd = "mojo run -I mojo mojo/test.mojo" }
+build = { cmd = "mkdir -p build_mojo && mojo build -I mojo mojo/test.mojo -o build_mojo/mojo_test" }
+test = { cmd = "mojo run -I mojo mojo/test.mojo" }

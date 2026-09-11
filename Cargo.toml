@@ -1,6 +1,7 @@
 [package]
-authors = ["Ash Vardanian <1983160+ashvardanian@users.noreply.github.com>"]
-description = "Smaller & Faster Single-File Vector Search Engine from Unum"
+authors = ["Ash Vardanian <info@unum.cloud>"]
+description = "Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices"
+keywords = ["vector-search", "vector-database", "similarity-search", "embeddings", "nearest-neighbor"]
 documentation = "https://unum-cloud.github.io/USearch"
 edition = "2021"
 include = [
@@ -16,7 +17,7 @@ license = "Apache-2.0"
 name = "usearch"
 publish = true
 repository = "https://github.com/unum-cloud/USearch"
-version = "3.0.0"
+version = "3.0.0-rc.1"
 
 [lib]
 name = "usearch"

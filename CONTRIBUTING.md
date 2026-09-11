@@ -20,6 +20,12 @@ That's how we bring in NumKong and other optional dependencies to test all of th
 git submodule update --init --recursive
 ```
 
+The repository carries its own hooks, gating each staged file against the formatter its language uses and skipping the rest:
+
+```sh
+git config core.hooksPath .githooks
+```
+
 ## C++ 11 and C 99
 
 Our primary C++ implementation uses CMake for builds.
@@ -95,6 +101,8 @@ The CMakeLists.txt file has a number of options you can pass:
   - `USEARCH_BUILD_BENCH_CPP` - build the C++ benchmark suite
   - `USEARCH_BUILD_LIB_C` - build the C library
   - `USEARCH_BUILD_TEST_C` - build the C test suite
+  - `USEARCH_BUILD_LIB_C_STUB` - a brute-force stand-in answering the same verbs over the standard library alone, for isolating a binding from the engine while bisecting one.
+    It carries the same library names in a `stub/` subdirectory, so pointing a binding at it is a search path rather than a different link line.
   - `USEARCH_BUILD_CUDA` - build the CUDA test & benchmark suites
 - Which GPUs to target:
   - `USEARCH_CUDA_ARCHITECTURES` - the architectures baked into the CUDA targets, `80;90a;100a;120a` by default: the Ampere floor, whose cubins stay loadable on every later 8.x part, then Hopper and both Blackwell lines, each architecture-specific because the kernels reach for instructions with no forward-compatible PTX. Set it to `native` while iterating on one machine.
@@ -103,7 +111,7 @@ The CMakeLists.txt file has a number of options you can pass:
 
 The sibling libraries carry no switches.
 NumKong, ForkUnion, StringZilla and SmashTable are what the headers are written against, so every build acquires all four - from the submodule when a recursive clone provides one, and from the pinned commit otherwise.
-The language bindings take their headers from `numkong/include`, `forkunion/include`, and `stringzilla/include` in the checkout, so `setup.py`, `binding.gyp`, `build.rs`, and `Package.swift` each name the same roots, and none of them builds from a non-recursive clone.
+The language bindings take their headers from `numkong/include`, `forkunion/include`, and `stringzilla/include` in the checkout, so `pyproject.toml`, `package.json`, `build.rs`, and `Package.swift` each reach the same roots, and none of them builds from a non-recursive clone.
 
 Putting all of this together, compiling all targets on most platforms should work with the following snippet:
 
@@ -223,8 +231,8 @@ The resulting `libusearch_shared.so` can be used in Android projects by placing 
 
 ## Python 3
 
-Python bindings are built using PyBind11 and are available on [PyPI](https://pypi.org/project/usearch/).
-The compilation settings are controlled by the `setup.py` and are independent from CMake used for C/C++ builds.
+Python bindings are a CPython extension available on [PyPI](https://pypi.org/project/usearch/).
+`scikit-build-core` drives the project's own CMake from `pyproject.toml`, so the extension is a CMake target rather than a second native build described in a `setup.py`.
 To install USearch locally using `uv`:
 
 ```sh
@@ -287,8 +295,8 @@ python -m cibuildwheel --platform windows
 
 ## JavaScript
 
-USearch provides NAPI bindings for NodeJS available on [NPM](https://www.npmjs.com/package/usearch).
-The compilation settings are controlled by the `binding.gyp` and are independent from CMake used for C/C++ builds.
+USearch provides N-API bindings for NodeJS available on [NPM](https://www.npmjs.com/package/usearch).
+`cmake-js` drives the project's own CMake from `package.json`, so the addon is a CMake target rather than a second native build described in a `binding.gyp`.
 If you don't have NPM installed, first the Node Version Manager:
 
 ```sh
@@ -322,17 +330,18 @@ ENV NK_TARGET_NEON 1
 ENV NK_TARGET_SVE 0
 
 # For specific PR:
-# RUN npm install --build-from-source unum-cloud/usearch#pull/302/head
+# RUN npm install --build-from-source unum-cloud/USearch#pull/302/head
 # For specific version:
 # RUN npm install --build-from-source usearch@2.8.8
 RUN npm install --build-from-source usearch
 ```
 
-To compile to WebAssembly make sure you have `emscripten` installed and run the following script:
+To compile to WebAssembly make sure you have `emscripten` installed and run the following script.
+There is no WebAssembly target of its own — the C library is what crosses, under Emscripten's CMake wrapper:
 
 ```sh
-emcmake cmake -B build -DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS} -s TOTAL_MEMORY=64MB" && emmake make -C build
-node build/usearch.test.js
+emcmake cmake -B build_wasm -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_CPP=0 -D USEARCH_BUILD_BENCH_CPP=0
+emmake make -C build_wasm usearch_static
 ```
 
 If you don't yet have `emcmake` installed:
@@ -344,11 +353,15 @@ git clone https://github.com/emscripten-core/emsdk.git && ./emsdk/emsdk install 
 ## Rust
 
 USearch provides Rust bindings available on [Crates.io](https://crates.io/crates/usearch).
-The compilation settings are controlled by the `build.rs` and are independent from CMake used for C/C++ builds.
+`build.rs` compiles no C or C++ of its own — it drives the project's CMake and links what it produced.
+
+Naming no feature links the engine, and `cuda` links it with the CUDA backends compiled in.
+Each feature is a whole implementation of the C interface rather than a knob on one, so `build.rs` refuses a pair — never `--all-features`.
 
 ```sh
-cargo test -p usearch -- --nocapture --test-threads=1
-cargo clippy --all-targets --all-features
+cargo test -- --nocapture --test-threads=1
+cargo clippy --all-targets
+cargo fmt --check
 ```
 
 Publishing the crate is a bit more complicated than normally.
@@ -376,42 +389,65 @@ mv numkong/Cargo.toml.bak numkong/Cargo.toml
 mv stringzilla/Cargo.toml.bak stringzilla/Cargo.toml
 ```
 
-## Objective-C and Swift
+## Zig
 
-USearch provides both Objective-C and Swift bindings through the [Swift Package Manager](https://swiftpackageindex.com/unum-cloud/usearch).
-The compilation settings are controlled by the `Package.swift` and are independent from CMake used for C/C++ builds.
+USearch provides Zig bindings under `zig/`, driven by `build.zig` and needing Zig 0.16 or newer.
+No C or C++ is compiled there: the engine is CMake's to build, and `-Dlib-dir` names a directory holding it, repeatable.
+It takes the shared library rather than the archive, since Zig answers `linkSystemLibrary("stdc++")` with its own libc++, which leaves a GCC-built archive short of symbols.
 
 ```sh
-swift build && swift test -v
+cmake -B build_release -D USEARCH_BUILD_LIB_C=1
+cmake --build build_release --target usearch_shared
+
+zig build                                     # compile check, resolving no symbols
+zig build test -Dlib-dir=build_release        # links, so every `extern fn` must resolve
+zig fmt --check zig build.zig
 ```
 
-> Those depend on Apple's `Foundation` library and can only run on Apple devices.
+`build.zig.zon` pins its version against the tracked `VERSION` file at comptime, so bumping one and forgetting the other fails the build.
 
-Swift formatting is enforced with `swift-format` default utility from Apple.
-To install and run it on all the files in the project, use the following command:
+## Mojo
 
-```bash
-brew install swift-format
-swift-format . -i -r
+The Mojo binding lives under `mojo/` and `dlopen`s the engine rather than linking it, so a consumer needs no linker flags of its own.
+Pixi drives both halves: the root `pixi.toml` declares the `usearch` package the tree's own CMake builds, and `mojo/pixi.toml` the Mojo package depending on it.
+The engine lands in the environment prefix, which is the runpath `mojo build` bakes.
+
+```sh
+pixi run test
+pixi run build
+pixi run mojo format -l 120 mojo/test.mojo
 ```
 
-The style is controlled by the `.swift-format` JSON file in the root of the repository.
-As there is no standard for Swift formatting, even Apple's own `swift-format` tool and Xcode differ in their formatting rules, and available settings.
+Mojo 1.0 has no test discovery, so every check is registered in `main` by hand and one that is not silently never runs.
 
----
+## Swift
 
-Running Swift on Linux requires a couple of extra steps - [`swift.org/install` page](https://www.swift.org/install).
-Alternatively, on Linux, the official Swift Docker image can be used for builds and tests:
+USearch provides Swift bindings through the [Swift Package Manager](https://swiftpackageindex.com/unum-cloud/USearch).
+`Package.swift` controls the compilation settings and is independent of the CMake used for C and C++ builds.
+Swift 6.3 or newer is required: the streaming and checkpoint verbs take `MutableSpan` and `RawSpan`, and `Key` stores its bytes in an `InlineArray`.
 
-```bash
-sudo docker run --rm -v "$PWD:/workspace" -w /workspace swift:6.0 /bin/bash -cl "swift build -c release --static-swift-stdlib && swift test -c release --enable-test-discovery"
+The package links a library CMake built, so the engine is compiled first and the linker is pointed at it:
+
+```sh
+cmake -B build_release -D USEARCH_BUILD_LIB_C=1
+cmake --build build_release --target usearch_static
+
+swift build -Xlinker -Lbuild_release
+swift test -Xlinker -Lbuild_release
 ```
 
-To format the code on Linux:
+The suite is Swift Testing: tests are `@Test` functions grouped into `@Suite` types, and assertions read as `#expect(...)`.
+It covers what the binding itself decides — key byte order, options marshalling through the residency union, matrix lowering, handle lifetime and the span borrows — since that vector search returns near neighbors is the engine's contract and is tested where the engine lives.
 
-```bash
-sudo docker run --rm -v "$PWD:/workspace" -w /workspace swift:6.0 /bin/bash -c "swift format . -i -r"
+Formatting is enforced with Apple's `swift-format`, whose style lives in the `.swift-format` file at the repository root:
+
+```sh
+swift format --in-place --recursive swift Package.swift
+swift format lint --strict --recursive swift Package.swift
 ```
+
+Neither the build nor the suite needs an Apple device — both run on Linux, where [`swift.org/install`](https://www.swift.org/install) carries the toolchains.
+A toolchain built for an older Ubuntu than the host may want that release's `libxml2` and `libicu` alongside it, since it links their older sonames.
 
 ## Go
 
@@ -422,10 +458,11 @@ So one should first compile the C library, link it with Go, and only then run te
 cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1
 cmake --build build_release --config Release -j
 
-cp build_release/libusearch_shared.so golang/ # or .dylib to install the library on macOS
-cp -r include/usearch golang/            # to make the headers available to Go
+cp build_release/libusearch_static.a golang/         # the archive the cgo directives link
+cp build_release/numkong/libnumkong_static.a golang/ # the punned kernels it calls
+cp -r include/usearch golang/                        # to make the headers available to Go
 
-cd golang && LD_LIBRARY_PATH=. go test -race -v ./... ; cd ..
+cd golang && go test -race -v ./... ; cd ..
 ```
 
 The race detector matters here: the tests drive one shared handle from many goroutines, and it is the only thing that catches a missing `runtime.KeepAlive` around a matrix crossing into C.
@@ -443,66 +480,34 @@ staticcheck ./...   # if installed
 golangci-lint run   # if installed
 ```
 
-## Java
+## Java, Kotlin and Scala
 
-USearch provides Java bindings as a fat-JAR published with prebuilt JNI libraries via GitHub releases. Installation via Maven Central is deprecated; prefer downloading the fat-JAR from the latest GitHub release. The compilation settings are controlled by `build.gradle` and are independent from CMake used for C/C++ builds.
+The Java SDK reaches the C interface through the FFM API, so it compiles no native boundary of its own — there is no JNI shim and no `usearch_java` target.
+Java 25 is the floor, and the runtime needs `--enable-native-access`, which `build.gradle` already passes to every test task.
 
-To setup the Gradle environment:
-
-```sh
-sudo apt-get install zip
-curl -s "https://get.sdkman.io" | bash
-sdk install java
-sdk install gradle
-```
-
-Afterwards, in a new terminal:
+Gradle drives CMake for the engine, so a plain build needs nothing else:
 
 ```sh
-gradle clean build --warning-mode=all # ensure passing builds
-gradle test --rerun-tasks             # pass unit tests
-gradle spotlessApply                  # apply formatting
+gradle clean build --warning-mode=all   # build, engine included
+gradle test --rerun-tasks               # the Java suite
+gradle spotlessApply                    # format Java, Kotlin and Scala
 ```
 
-Alternatively, to run the `Index.main`:
+`-PusearchPrebuilt=<directory>` points every suite at a library that is already built and skips the CMake tasks, which is how CI builds the engine once and tests it from three languages.
+```sh
+cmake -B build_release -D USEARCH_BUILD_LIB_C=1
+cmake --build build_release --target usearch_static usearch_shared
+gradle -PusearchPrebuilt=$PWD/build_release test
+```
+
+Kotlin and Scala consume the same published Java surface rather than a binding of their own, and each has a suite under `kotlin/` and `scala/` covering what only another JVM language can observe — that `@NullMarked` reaches a Kotlin caller as real non-null types, and that the array-based batch verbs take Scala arrays unconverted.
+`check` runs all three.
 
 ```sh
-java -cp "$(pwd)/build/classes/java/main" -Djava.library.path="$(pwd)/build/libs/usearch/shared" java/cloud/unum/usearch/Index.java
+gradle kotlinInteropTest scalaInteropTest
 ```
 
-Or step by-step:
-
-```sh
-javac -cp java -h java/cloud/unum/usearch/ java/cloud/unum/usearch/Index.java
-
-# Ensure JAVA_HOME system environment variable has been set
-# e.g. export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
-
-# Ubuntu:
-g++ -c -fPIC -I${JAVA_HOME}/include -I${JAVA_HOME}/include/linux -Iinclude java/cloud/unum/usearch/cloud_unum_usearch_Index.cpp -o java/cloud/unum/usearch/cloud_unum_usearch_Index.o
-g++ -shared -fPIC -o java/cloud/unum/usearch/libusearch.so java/cloud/unum/usearch/cloud_unum_usearch_Index.o -lc
-
-# Windows
-g++ -c -I%JAVA_HOME%\include -I%JAVA_HOME%\include\win32 java\cloud\unum\usearch\cloud_unum_usearch_Index.cpp -Iinclude -o java\cloud\unum\usearch\cloud_unum_usearch_Index.o
-g++ -shared -o java\cloud\unum\usearch\USearchJNI.dll java\cloud\unum\usearch\cloud_unum_usearch_Index.o -Wl,--add-stdcall-alias
-
-# macOS
-g++ -std=c++11 -c -fPIC \
-    -Iinclude \
-    -Inumkong/include \
-    -I${JAVA_HOME}/include -I${JAVA_HOME}/include/darwin java/cloud/unum/usearch/cloud_unum_usearch_Index.cpp -o java/cloud/unum/usearch/cloud_unum_usearch_Index.o
-g++ -dynamiclib -o java/cloud/unum/usearch/libusearch.dylib java/cloud/unum/usearch/cloud_unum_usearch_Index.o -lc
-
-# Run from project root
-java -cp java -Djava.library.path="java/cloud/unum/usearch" cloud.unum.usearch.Index
-```
-
-Or using CMake:
-
-```bash
-cmake -B build_artifacts -D USEARCH_BUILD_LIB_JAVA=1
-cmake --build build_artifacts --config Release -j
-```
+Adding a fourth JVM language is one entry in the `interopFrameworks` map in `build.gradle`, which derives its source set, its configurations and its test task.
 
 ## C#
 
@@ -512,19 +517,19 @@ Setup the .NET environment:
 dotnet nuget add source https://api.nuget.org/v3/index.json -n nuget.org
 ```
 
-USearch provides CSharp bindings, that depend on the C library that must be installed beforehand.
-So one should first compile the C library, link it with CSharp, and only then run tests.
-
+USearch provides CSharp bindings on .NET 10, reaching the C interface through source-generated `LibraryImport`.
+The project drives no CMake of its own, so the shared library is built first and dropped where the runtime probes for it.
 ```sh
 cmake -B build_artifacts -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1
 cmake --build build_artifacts --config Release -j
 ```
 
-Then, on Windows, copy the library to the CSharp project and run the tests:
+Then, on Windows, copy the library to the CSharp project and run the tests.
+The binding imports `libusearch_shared`, which .NET probes for verbatim while MSVC emits no `lib` prefix, so the destination keeps the name the import expects:
 
 ```sh
 mkdir -p ".\csharp\lib\runtimes\win-x64\native"
-cp ".\build_artifacts\libusearch_shared.dll" ".\csharp\lib\runtimes\win-x64\native"
+cp ".\build_artifacts\usearch_shared.dll" ".\csharp\lib\runtimes\win-x64\native\libusearch_shared.dll"
 cd csharp
 dotnet test -c Debug --logger "console;verbosity=detailed"
 dotnet test -c Release
@@ -552,12 +557,22 @@ dotnet test -c Debug --logger "console;verbosity=detailed"
 dotnet test -c Release
 ```
 
-
 ## Wolfram
+
+USearch reaches the Wolfram Language through LibraryLink, whose boundary is `wolfram/lib.c`.
+It builds from the repository root, and `WOLFRAM_PATH` names the Mathematica installation when it is not in the default place.
 
 ```sh
 brew install --cask wolfram-engine
+
+cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_LIB_WOLFRAM=1 \
+    -D WOLFRAM_PATH=/usr/local/Wolfram/Mathematica
+cmake --build build_release --config Release --target usearch_wolfram
+
+wolframscript -file wolfram/test.wls
 ```
+
+It links the C interface as an archive, so what Wolfram loads is one file, and it is the only target here without a `lib` prefix — Wolfram finds a library in `LibraryResources/$SystemID` by its bare name.
 
 ## Docker
 

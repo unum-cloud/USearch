@@ -8,11 +8,11 @@
  */
 #include "lib.h"
 
-static char const doc_module[] =                                                             //
-    "Smaller & Faster Single-File Vector Search Engine from Unum.\n"                         //
-    "\n"                                                                                     //
-    "One index type per modality, each sitting directly on the stable C ABI. Every verb\n"   //
-    "is a batch over buffer-protocol inputs, so a memory-mapped dataset reaches the index\n" //
+static char const doc_module[] =                                                                              //
+    "Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices.\n" //
+    "\n"                                                                                                      //
+    "One index type per modality, each sitting directly on the stable C ABI. Every verb\n"                    //
+    "is a batch over buffer-protocol inputs, so a memory-mapped dataset reaches the index\n"                  //
     "with no reshape and no copy, and NumPy is never required.";
 
 static struct {

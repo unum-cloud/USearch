@@ -1,8 +1,20 @@
 {
     "name": "usearch",
-    "version": "3.0.0",
-    "description": "Smaller & Faster Single-File Vector Search Engine from Unum",
-    "author": "Ash Vardanian (https://ashvardanian.com/)",
+    "version": "3.0.0-rc.1",
+    "description": "Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices",
+    "keywords": [
+        "vector-search",
+        "vector-database",
+        "similarity-search",
+        "nearest-neighbors",
+        "embeddings",
+        "semantic-search",
+        "retrieval",
+        "clustering",
+        "simd",
+        "gpu"
+    ],
+    "author": "Ash Vardanian <info@unum.cloud>",
     "license": "Apache 2.0",
     "homepage": "https://unum-cloud.github.io/USearch/",
     "repository": {

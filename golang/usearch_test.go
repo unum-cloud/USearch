@@ -8,7 +8,7 @@ import (
 	"log"
 	"testing"
 
-	usearch "github.com/unum-cloud/usearch/golang"
+	usearch "github.com/unum-cloud/USearch/golang"
 )
 
 // region: Introspection

@@ -1,7 +1,6 @@
 <h1 align="center">USearch</h1>
 <h3 align="center">
-Smaller & <a href="https://www.unum.cloud/blog/2023-11-07-scaling-vector-search-with-intel">Faster</a> Single-File<br/>
-Similarity Search & Clustering Engine for <a href="https://github.com/ashvardanian/numkong">Vectors</a> & 🔜 <a href="https://github.com/ashvardanian/stringzilla">Texts</a>
+Billion-Scale Multi-Modal <a href="https://www.unum.cloud/blog/2023-11-07-scaling-vector-search-with-intel">Search</a>, Clustering, & Sparse Algebra<br/> Engine for <a href="https://github.com/ashvardanian/numkong">Vectors</a>, <a href="https://github.com/ashvardanian/stringzilla">Sequences</a> & Coordinates, across CPUs, GPUs & NVMe
 </h3>
 <br/>
 
@@ -26,12 +25,11 @@ Dense Vectors • Strings • Geo-Spatial • Meshes • User-Defined Metrics
 <a href="https://unum-cloud.github.io/USearch/rust">Rust</a> •
 <a href="https://unum-cloud.github.io/USearch/zig">Zig</a> •
 <a href="https://unum-cloud.github.io/USearch/mojo">Mojo</a> •
-<a href="https://unum-cloud.github.io/USearch/java">Java</a> •
+<a href="https://unum-cloud.github.io/USearch/java">Java, Scala, & Kotlin</a> •
 <a href="https://unum-cloud.github.io/USearch/javascript">JavaScript</a> •
 <a href="https://unum-cloud.github.io/USearch/swift">Swift</a> •
 <a href="https://unum-cloud.github.io/USearch/csharp">C#</a> •
-<a href="https://unum-cloud.github.io/USearch/golang">Go</a> •
-<a href="https://unum-cloud.github.io/USearch/kotlin">Kotlin</a> •
+<a href="https://unum-cloud.github.io/USearch/golang">GoLang</a> •
 <a href="https://unum-cloud.github.io/USearch/wolfram">Wolfram</a>
 <br/>
 Linux • macOS • Windows • FreeBSD • iOS • Android • Browser
@@ -45,21 +43,21 @@ x86 • Arm • WASM • RISC-V • LoongArch • Power • CUDA • ROCm • Me
 <a href="https://crates.io/crates/usearch"> <img alt="Crate" src="https://img.shields.io/crates/d/usearch?label=Rust%20Crate%20installs"> </a>
 <a href="https://www.nuget.org/packages/Cloud.Unum.USearch"> <img alt="NuGet" src="https://img.shields.io/nuget/dt/Cloud.Unum.USearch?label=CSharp%20NuGet%20installs"> </a>
 <!-- Maven Central publishing is deprecated for now; fat-JAR download is the supported path. -->
-<img alt="GitHub code size in bytes" src="https://img.shields.io/github/languages/code-size/unum-cloud/usearch?label=Repo%20size">
+<img alt="GitHub code size in bytes" src="https://img.shields.io/github/languages/code-size/unum-cloud/USearch?label=Repo%20size">
 </div>
 
 ---
 
 - ✅ __[10-100x faster][faster-than-faiss]__ indexing & search than [FAISS][faiss].
 - ✅ Powers SpGEMM and Sparse Attention for billion-scale transformer LLM context lengths.
-- ✅ Simple and extensible [C++20 header-only][usearch-header] __library__.
+- ✅ Simple and extensible [C++20][usearch-header] __library__, with one C ABI under all twelve bindings.
 - ✅ [Trusted](#integrations) by most dabases like [ClickHouse][clickhouse-docs] & [DuckDB][duckdb-docs] & AI Frontier labs.
 - ✅ [SIMD][simd]- and [GPU][gpgpu]-optimized and [user-defined metrics](#user-defined-functions) with JIT compilation.
 - ✅ Hardware-agnostic `bf16`, `e5m2`, & `i8` - [half-precision & quarter-precision support](#memory-efficiency-downcasting-and-quantization).
-- ✅ [View large indexes from disk](#serialization--serving-index-from-disk) without loading into RAM.
+- ✅ [Stored in RAM, on a GPU, or on NVMe](#serialization--serving-an-index-from-disk) - one checkpoint, three residencies.
 - ✅ Heterogeneous lookups and 128-bit keys, with several entries free to share one.
 - ✅ Binary Tanimoto and Sorensen coefficients for [Genomics and Chemistry applications](#usearch--rdkit--molecular-search).
-- ✅ Space-efficient point-clouds with `uint40_t`, accommodating 4B+ size.
+- ✅ Quantization from `f64` down to packed nibbles and single bits, chosen per row rather than per build.
 - ✅ Fine-grained parallelism through ForkUnion thread pools and custom "executors".
 - ✅ [Semantic Search](#usearch--uform--ucall--multimodal-semantic-search) and approximate products & attention for LLM context.
 
@@ -77,7 +75,6 @@ __Technical Insights__ and related articles:
 - [Uses Horner's method for polynomial approximations, beating GCC 12 by 119x](https://ashvardanian.com/posts/gcc-12-vs-avx512fp16/).
 - [For every language implements a custom separate binding](https://ashvardanian.com/posts/porting-cpp-library-to-ten-languages/).
 
-
 ## Comparison with FAISS
 
 FAISS is a widely recognized standard for high-performance vector search engines.
@@ -92,8 +89,8 @@ USearch is compact and broadly compatible without sacrificing performance, prima
 |                                              |                         |                          |                         |
 | Codebase length ¹                            |       84 K [SLOC][sloc] |         3 K [SLOC][sloc] |            maintainable |
 | Supported metrics ²                          |         9 fixed metrics |               any metric |              extendible |
-| Supported languages ³                        |             C++, Python |             10 languages |                portable |
-| Supported ID types ⁴                         |          32-bit, 64-bit |   32-bit, 40-bit, 64-bit |               efficient |
+| Supported languages ³                        |             C++, Python |             12 languages |                portable |
+| Supported ID types ⁴                         |          32-bit, 64-bit |                  128-bit |               efficient |
 | Filtering ⁵                                  |               ban-lists |           any predicates |              composable |
 | Required dependencies ⁶                      |            BLAS, OpenMP |                        - |            light-weight |
 | Bindings ⁷                                   |                    SWIG |                   Native |             low-latency |
@@ -107,7 +104,7 @@ USearch is compact and broadly compatible without sacrificing performance, prima
 > ¹ A shorter codebase of `usearch/` over `faiss/` makes the project easier to maintain and audit.
 > ² User-defined metrics allow you to customize your search for various applications, from GIS to creating custom metrics for composite embeddings from multiple AI models or hybrid full-text and semantic search.
 > ³ With USearch, you can reuse the same preconstructed index in various programming languages.
-> ⁴ The 40-bit integer allows you to store 4B+ vectors without allocating 8 bytes for every neighbor reference in the proximity graph.
+> ⁴ Keys are 128 bits wide and need not be unique, so a UUID is an identity rather than something to map, and several rows may share one key - which is what late interaction needs.
 > ⁵ With USearch the index can be combined with arbitrary external containers, like Bloom filters or third-party databases, to filter out irrelevant keys during index traversal.
 > ⁶ Lack of obligatory dependencies makes USearch much more portable.
 > ⁷ Native bindings introduce lower call latencies than more straightforward approaches.
@@ -147,8 +144,7 @@ index = DenseIndex(
 )
 ```
 
-The candidate-pool breadth is no longer a property of the handle: it rides each `add` and
-`search` call as `expansion_factor`, so one immutable index serves a whole recall sweep.
+The candidate-pool breadth rides each `add` and `search` call as `expansion_factor` rather than the handle, so one immutable index serves a whole recall sweep.
 Keys are 128 bits wide and need not be unique, so `multi` has no counterpart either.
 
 ## Serialization & Serving An Index from Disk
@@ -174,9 +170,8 @@ external = DenseIndex(residency="nvme")
 external.load("index.safegraphs")
 ```
 
-Where the payload lives decides what loading means: materialize into RAM, upload to a device,
-or open in place on disk. An external-memory handle is read-only, and bigger indexes come from
-`merge` rather than from further insertion.
+Where the payload lives decides what loading means: materialize into RAM, upload to a device, or open in place on disk.
+An external-memory handle is read-only, and bigger indexes come from `merge` rather than from further insertion.
 
 ## Exact vs. Approximate Search
 
@@ -199,14 +194,11 @@ When compared to FAISS's `IndexFlatL2` in Google Colab, __[those kernels may off
 - `faiss.IndexFlatL2`: __55.3 ms__.
 - NumKong's `cdist`: __2.54 ms__.
 
-USearch itself reads the same walk as arithmetic through `multiply_into`, an approximate
-`A × Bᵀ` that reports every pair the traversal scored, and `attend_into`, which folds a softmax
-over that walk for LLM context.
+USearch itself reads the same walk as arithmetic through `multiply_into`, an approximate $A \times B^{T}$ that reports every pair the traversal scored, and `attend_into`, which folds a softmax over that walk for LLM context.
 
 ## One Modality per Domain
 
-Rather than one index taking an arbitrary distance function, each modality carries the measures
-its domain actually needs, with SIMD kernels dispatched by the machine's capabilities:
+Rather than one index taking an arbitrary distance function, each modality carries the measures its domain actually needs, with SIMD kernels dispatched by the machine's capabilities:
 
 | Modality   | Header                       | Measures                                                |
 | ---------- | ---------------------------- | ------------------------------------------------------- |
@@ -244,7 +236,7 @@ assert!(
 Training a quantization model and dimension-reduction is a common approach to accelerate vector search.
 Those, however, are only sometimes reliable, can significantly affect the statistical properties of your data, and require regular adjustments if your distribution shifts.
 Instead, we have focused on high-precision arithmetic over low-precision downcasted vectors.
-The same index, and `add` and `search` operations will automatically down-cast or up-cast between `f64_t`, `f32_t`, `bf16_t`, `f16_t`, `e5m2_t`, `e4m3_t`, `e3m2_t`, `e2m3_t`, `u8_t`, `i8_t`, and single-bit `b1x8_t` representations.
+The same index, and `add` and `search` operations will automatically down-cast or up-cast between `f64_t`, `f32_t`, `bf16_t`, `f16_t`, `e5m2_t`, `e4m3_t`, `e3m2_t`, `e2m3_t`, `i8_t`, `u8_t`, the packed nibbles `i4x2_t` and `u4x2_t`, and single-bit `u1x8_t` representations.
 You can use the following command to check, if hardware acceleration is enabled:
 
 ```sh
@@ -260,7 +252,7 @@ You can pass pre-quantized buffers from [NumKong](https://github.com/ashvardania
 When quantization is enabled, the "get"-like functions won't be able to recover the original data, so you may want to replicate the original vectors elsewhere.
 When quantizing to `i8_t` integers, note that it's only valid for cosine-like metrics.
 As part of the quantization process, the vectors are normalized to unit length and later scaled to [-127, 127] range to occupy the full 8-bit range.
-When quantizing to `b1x8_t` single-bit representations, note that it's only valid for binary metrics like Jaccard, Hamming, etc.
+When quantizing to `u1x8_t` single-bit representations, note that it's only valid for binary metrics like Jaccard, Hamming, etc.
 As part of the quantization process, the scalar components greater than zero are set to `true`, and the rest to `false`.
 
 ![USearch uint40_t support](https://github.com/unum-cloud/USearch/blob/main/assets/usearch-neighbor-types.png?raw=true)
@@ -269,23 +261,25 @@ Using smaller numeric types will save you RAM needed to store the vectors, but y
 By default, 32-bit `uint32_t` is used to enumerate those, which is not enough if you need to address over 4 Billion entries.
 For such cases we provide a custom `uint40_t` type, that will still be 37.5% more space-efficient than the commonly used 8-byte integers, and will scale up to 1 Trillion entries.
 
-
 ## Functionality
 
-By now, the core functionality is supported across all bindings.
-Broader functionality is ported per request.
-In some cases, like Batch operations, feature parity is meaningless, as the host language has full multi-threading capabilities and the USearch index structure is concurrent by design, so the users can implement batching/scheduling/load-balancing in the most optimal way for their applications.
+Every verb crosses one C interface, so a binding either exposes it or has not been asked to yet.
+Kotlin and Scala consume the Java surface directly and match its row.
 
-|                         | C++ 11 | Python 3 | C 99  | Java  | JavaScript | Rust  |  Go   | Swift |
-| :---------------------- | :----: | :------: | :---: | :---: | :--------: | :---: | :---: | :---: |
-| Add, search, remove     |   ✅    |    ✅     |   ✅   |   ✅   |     ✅      |   ✅   |   ✅   |   ✅   |
-| Save, load, view        |   ✅    |    ✅     |   ✅   |   ✅   |     ✅      |   ✅   |   ✅   |   ✅   |
-| User-defined metrics    |   ✅    |    ✅     |   ✅   |   ❌   |     ❌      |   ✅   |   ❌   |   ❌   |
-| Batch operations        |   ❌    |    ✅     |   ❌   |   ✅   |     ✅      |   ❌   |   ❌   |   ❌   |
-| Filter predicates       |   ✅    |    ❌     |   ✅   |   ❌   |     ❌      |   ✅   |   ❌   |   ✅   |
-| Joins                   |   ✅    |    ✅     |   ❌   |   ❌   |     ❌      |   ❌   |   ❌   |   ❌   |
-| Variable-length vectors |   ✅    |    ❌     |   ❌   |   ❌   |     ❌      |   ❌   |   ❌   |   ❌   |
-| 4B+ capacities          |   ✅    |    ❌     |   ❌   |   ❌   |     ❌      |   ❌   |   ❌   |   ❌   |
+|                             |  C++  | C 99  | Python | Rust  |  Go   | Java  |  JS   | Swift |  C#   |  Zig  | Mojo  | Wolfram |
+| :-------------------------- | :---: | :---: | :----: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :-----: |
+| Add, search, remove         |   ✅   |   ✅   |   ✅    |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |    ✅    |
+| Save, load, metadata        |   ✅   |   ✅   |   ✅    |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |    ✅    |
+| Batch operations            |   ✅   |   ✅   |   ✅    |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |    ✅    |
+| Residency: RAM, VRAM, NVMe  |   ✅   |   ✅   |   ✅    |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |    ✅    |
+| Filter predicates           |   ✅   |   ✅   |   ✅    |   ✅   |   ✅   |   ❌   |   ❌   |   ✅   |   ✅   |   ✅   |   ✅   |    ❌    |
+| Refinement                  |   ✅   |   ✅   |   ✅    |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |    ❌    |
+| Late interaction: `maxsim`  |   ✅   |   ✅   |   ✅    |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |    ❌    |
+| Sparse products: `multiply` |   ✅   |   ✅   |   ✅    |   ✅   |   ❌   |   ❌   |   ✅   |   ✅   |   ❌   |   ✅   |   ✅   |    ❌    |
+| Attention: `attend`         |   ✅   |   ✅   |   ✅    |   ✅   |   ❌   |   ❌   |   ✅   |   ✅   |   ❌   |   ✅   |   ✅   |    ❌    |
+| Streaming cursors           |   ✅   |   ✅   |   ✅    |   ✅   |   ❌   |   ❌   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |    ❌    |
+| Resumable `find`            |   ✅   |   ✅   |   ✅    |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |    ❌    |
+| Index merging               |   ✅   |   ✅   |   ✅    |   ✅   |   ❌   |   ❌   |   ❌   |   ❌   |   ❌   |   ❌   |   ❌   |    ❌    |
 
 ## Application Examples
 
@@ -389,7 +383,7 @@ index.add(keys, fingerprints)
 matches = index.search(fingerprints, 10)
 ```
 
-That method was used to build the ["USearch Molecules"](https://github.com/ashvardanian/usearch-molecules), one of the largest Chem-Informatics datasets, containing 7 billion small molecules and 28 billion fingerprints.
+That method was used to build the ["USearch Molecules"](https://github.com/unum-science/USearchMolecules), one of the largest Chem-Informatics datasets, containing 7 billion small molecules and 28 billion fingerprints.
 
 [smiles]: https://en.wikipedia.org/wiki/Simplified_molecular-input_line-entry_system
 [rdkit-fingerprints]: https://www.rdkit.org/docs/RDKit_Book.html#additional-information-about-the-fingerprints
@@ -397,8 +391,7 @@ That method was used to build the ["USearch Molecules"](https://github.com/ashva
 ### USearch + POI Coordinates = GIS Applications
 
 Space and time get their own modality rather than a user-supplied distance function.
-`geospatial_index.h` carries Karney geodesics - which account for the Earth's oblateness, where
-the Haversine formula does not - alongside trajectory and boundary similarities.
+`geospatial_index.h` carries Karney geodesics - which account for the Earth's oblateness, where the Haversine formula does not - alongside trajectory and boundary similarities.
 
 ```py
 from usearch import GeospatialIndex
@@ -408,12 +401,8 @@ index.add(keys, trajectories)
 matches = index.search(trajectory, 10, mode="route")
 ```
 
-The layout names which axes a position carries - latitude and longitude, optionally altitude and
-a timestamp - and the mode names what a comparison means, from nearest approach between two point
-sets to the shape of a whole route.
-A tolerance supplies the exchange rate between metres and seconds per call, so the same index
-answers both a tight spatial query and a loose temporal one.
-
+The layout names which axes a position carries - latitude and longitude, optionally altitude and a timestamp - and the mode names what a comparison means, from nearest approach between two point sets to the shape of a whole route.
+A tolerance supplies the exchange rate between metres and seconds per call, so the same index answers both a tight spatial query and a loose temporal one.
 
 ## Integrations & Users
 
@@ -424,24 +413,22 @@ answers both a tight spatial query and a loose temporal one.
 - [x] YugaByte: [C++](https://github.com/yugabyte/yugabyte-db/blob/366b9f5e3c4df3a1a17d553db41d6dc50146f488/src/yb/vector_index/usearch_wrapper.cc).
 - [x] MemGraph: [C++](https://github.com/memgraph/memgraph/blob/784dd8520f65050d033aea8b29446e84e487d091/src/storage/v2/indices/vector_index.cpp), [announcement](https://memgraph.com/blog/simplify-data-retrieval-memgraph-vector-search).
 - [x] Google: [UniSim](https://github.com/google/unisim), [RetSim](https://arxiv.org/abs/2311.17264) paper.
-- [x] LangChain: [Python](https://github.com/langchain-ai/langchain/releases/tag/v0.0.257) and [JavaScript](https://github.com/hwchase17/langchainjs/releases/tag/0.0.125).
+- [x] LangChain: [Python](https://github.com/langchain-ai/langchain/releases/tag/v0.0.257) and [JavaScript](https://github.com/langchain-ai/langchainjs/releases/tag/0.0.125).
 - [x] Microsoft Semantic Kernel: [Python](https://github.com/microsoft/semantic-kernel/releases/tag/python-0.3.9.dev) and C#.
 - [x] GPTCache: [Python](https://github.com/zilliztech/GPTCache/releases/tag/0.1.29).
 - [x] Sentence-Transformers: Python [docs](https://www.sbert.net/docs/package_reference/quantization.html#sentence_transformers.quantization.semantic_search_usearch).
 - [x] Pathway: [Rust](https://github.com/pathwaycom/pathway).
 - [x] Vald: [GoLang](https://github.com/vdaas/vald).
 - [x] MatrixOne: [GoLang](https://github.com/matrixorigin/matrixone).
-  
 
 ## Citations
 
 ```bibtex
 @software{Vardanian_USearch,
-doi = {10.5281/zenodo.7949416},
+doi = {10.5281/zenodo.7949415},
 author = {Vardanian, Ash},
-title = {{USearch by Unum Cloud}},
+title = {{USearch: Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices}},
 url = {https://github.com/unum-cloud/USearch},
-version = {2.25.1},
 year = {2026},
 }
 ```

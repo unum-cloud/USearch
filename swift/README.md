@@ -152,8 +152,7 @@ Placement never comes back out of one — a checkpoint records where it was writ
 
 ## Serialization
 
-Checkpoints ride the SafeGraphs interchange format, and the path extension picks the layout —
-a `.safegraphs` monolith, or a `.safegraphs.json` manifest beside its shards.
+Checkpoints ride the SafeGraphs interchange format, and the path extension picks the layout — a `.safegraphs` monolith, or a `.safegraphs.json` manifest beside its shards.
 
 ```swift
 try index.save(executor: executor, path: "index.safegraphs")
@@ -286,3 +285,4 @@ print(stats.visitedMembers, stats.computedDistances, stats.restarts)
 
 Insertions and searches overlap freely on one handle: searches read only entries published behind the visibility watermark, while insertions publish in order.
 Serialization is the one exception, demanding a mutation-free window.
+

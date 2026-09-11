@@ -319,7 +319,7 @@ publishing {
 
             pom {
                 name = "USearch"
-                description = "Smaller & Faster Single-File Vector Search Engine from Unum"
+                description = "Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices"
                 url = "https://github.com/unum-cloud/USearch"
 
                 licenses {
@@ -339,7 +339,7 @@ publishing {
                     developer {
                         id = 'ashvardanian'
                         name = 'Ash Vardanian'
-                        email = 'ash.vardanian@unum.cloud'
+                        email = 'info@unum.cloud'
                     }
                 }
             }

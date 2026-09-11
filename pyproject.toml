@@ -7,20 +7,29 @@
 #   = meaning 7 platforms * 5 Python versions = 35 builds.
 [build-system]
 build-backend = "scikit_build_core.build"
-requires = [
-  "scikit-build-core>=0.10",
-  "numkong>=7.5.0",
-]
+requires = ["scikit-build-core>=0.10"]
 
 [project]
 name = "usearch"
-description = "Smaller & Faster Single-File Vector Search Engine from Unum"
+description = "Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dynamic = ["version"]
-authors = [{name = "Ash Vardanian", email = "info@unum.cloud"}]
+authors = [{ name = "Ash Vardanian", email = "info@unum.cloud" }]
+keywords = [
+  "vector-search",
+  "vector-database",
+  "similarity-search",
+  "nearest-neighbors",
+  "embeddings",
+  "semantic-search",
+  "retrieval",
+  "clustering",
+  "simd",
+  "gpu",
+]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Natural Language :: English",
@@ -28,10 +37,13 @@ classifiers = [
   "Intended Audience :: Information Technology",
   "Programming Language :: C++",
   "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Free Threading :: 3 - Stable",
   "Programming Language :: Java",
   "Programming Language :: JavaScript",
-  "Programming Language :: Objective C",
   "Programming Language :: Rust",
   "Programming Language :: Other",
   "Operating System :: MacOS",
@@ -40,12 +52,12 @@ classifiers = [
   "Topic :: System :: Clustering",
   "Topic :: Database :: Database Engines/Servers",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Typing :: Typed",
 ]
-# NumKong is the one sibling with a runtime half - `python/usearch/__init__.py` resolves its shared
-# library through `ctypes` - so it is the only one that has to be installed alongside the wheel.
-# Batch inputs arrive through the buffer protocol, so NumPy is a convenience of `usearch.eval` and
-# of the test suite, never of the index itself.
-dependencies = ["numkong", "stringzilla"]
+# None. CMake compiles the siblings from their own sources into the extension, so the wheel is
+# self-contained: batch inputs arrive through the buffer protocol, which is CPython's own, and
+# NumPy is a convenience of `usearch.eval` and of the suite rather than of the index.
+dependencies = []
 
 [project.optional-dependencies]
 eval = ["numpy", "tqdm"]
@@ -150,15 +162,19 @@ before-build = [
   "git submodule update --init --recursive",
 ]
 
+# Groups rather than extras, so none of this reaches the published wheel's metadata. They are also
+# deliberately absent from `[tool.cibuildwheel] test-requires`, which builds in a container too slow
+# to run a suite in.
 [dependency-groups]
-lint = [
-  "ruff>=0.15.8",
-]
-tests = [
-  "numpy>=1.21",
-  "pytest>=9.0.2",
-  "pytest-repeat>=0.9.4",
-]
+lint = ["ruff>=0.15.8"]
+tests = ["numpy>=1.21", "pytest>=9.0.2", "pytest-repeat>=0.9.4"]
+# Free-threaded builds only report a race if several threads actually enter the extension at once.
+tests-parallel = ["pytest-run-parallel>=0.7"]
+# The reference the recall checks score against, and the progress bar the sweeps in `eval` print.
+tests-oracles = ["scipy>=1.11", "tqdm>=4.66"]
+# CuPy is the device-buffer producer, exercising `__cuda_array_interface__` against a VRAM-resident
+# index. Not an oracle - the recall reference stays SciPy's, on the host.
+tests-cuda = ["cupy-cuda12x"]
 
 [tool.ruff]
 # Code wraps at 120; prose - docstrings and comments - wraps at 100.
@@ -170,14 +186,14 @@ quote-style = "double"
 
 [tool.ruff.lint]
 select = [
-  "E",     # pycodestyle errors
-  "W",     # pycodestyle warnings
-  "F",     # pyflakes
-  "I",     # isort (import ordering)
-  "UP",    # pyupgrade (modernize syntax)
-  "YTT",   # flake8-2020 (misreading `sys.version` and friends)
-  "B",     # flake8-bugbear (likely bugs)
-  "SIM",   # flake8-simplify (needless complexity)
+  "E",   # pycodestyle errors
+  "W",   # pycodestyle warnings
+  "F",   # pyflakes
+  "I",   # isort (import ordering)
+  "UP",  # pyupgrade (modernize syntax)
+  "YTT", # flake8-2020 (misreading `sys.version` and friends)
+  "B",   # flake8-bugbear (likely bugs)
+  "SIM", # flake8-simplify (needless complexity)
 ]
 ignore = [
   "E501",  # line too long (handled by formatter)
@@ -186,7 +202,10 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"python/usearch/__init__.py" = ["F401", "E402"]  # re-exports and conditional imports
+"python/usearch/__init__.py" = [
+  "F401",
+  "E402",
+] # re-exports and conditional imports
 
 [tool.ruff.lint.isort]
 known-first-party = ["usearch"]

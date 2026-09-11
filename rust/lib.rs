@@ -1,4 +1,4 @@
-//! USearch - Smaller & Faster Single-File Vector Search Engine from Unum.
+//! USearch - Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices.
 //!
 //! The crate links the pre-instantiated C library and consumes it through its stable C headers,
 //! so no index template is instantiated here and nothing but the vocabulary below crosses the

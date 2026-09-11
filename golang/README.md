@@ -56,7 +56,7 @@ import (
 	"fmt"
 	"log"
 
-	usearch "github.com/unum-cloud/usearch/golang"
+	usearch "github.com/unum-cloud/USearch/golang"
 )
 
 func main() {
@@ -119,7 +119,7 @@ Always call `Reserve(capacity)` before the first write.
 3. Get USearch:
 
 ```sh
-go get github.com/unum-cloud/usearch/golang
+go get github.com/unum-cloud/USearch/golang
 ```
 
 4. Run:

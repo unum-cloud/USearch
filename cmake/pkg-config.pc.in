@@ -1,4 +1,4 @@
 Name: ${PROJECT_NAME}
-Description: Smaller & Faster Single-File Vector Search Engine from Unum
+Description: Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices
 Version: ${PROJECT_VERSION}
 Cflags: -I${CMAKE_INSTALL_FULL_INCLUDEDIR}

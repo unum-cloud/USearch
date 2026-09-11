@@ -1,18 +1,38 @@
 cff-version: 1.2.0
-title: "USearch: Smaller & Faster Similarity Search & Clustering Engine"
+title: "USearch: Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices"
 message: "If you use this software, please cite it as below."
 type: software
 license: Apache-2.0
-version: 3.0.0
-doi: 10.5281/zenodo.7949416
+version: 3.0.0-rc.1
+doi: 10.5281/zenodo.7949415
 repository-code: https://github.com/unum-cloud/USearch
 url: https://github.com/unum-cloud/USearch
 abstract: >-
-  Portable single-header similarity search and clustering library
-  with SIMD-optimized and user-defined metrics,
-  supporting 15+ quantization levels from f64 to f6 and single-bit,
-  with native bindings for C++, Python, Rust, JavaScript, Java, Go, Swift, C#, C, Objective-C, and Wolfram,
-  trusted by Google, Microsoft, ClickHouse, DuckDB, ScyallDB, Yugabyte, TiDB, and others.
+  USearch is a similarity-search engine generalizable to sparse linear algebra and machine-learning
+  workloads, designed to put each part of the machine on the work it is best at: GPUs for the
+  compute- and bandwidth-bound passes, CPUs for the latency-bound ones, and NVMe solid-state drives
+  for scale beyond what memory holds. It indexes dense embeddings, biological and textual sequences,
+  geospatial coordinates, and molecular geometries, each addressed as its own modality over a shared
+  proximity graph rather than flattened into a single embedding pipeline. That same graph serves as
+  a sparse operand, folding matrix products, late-interaction MaxSim scoring, and softmax attention
+  into the traversal rather than materializing a match list. It carries native support for x86, Arm,
+  RISC-V, and WebAssembly instruction sets, spanning AVX2 through AVX-512, AVX10.2 and Intel AMX,
+  NEON through SVE2 and SME, RVV, and relaxed SIMD, with the arm chosen from what the host reports
+  at run time. Rows reside in host memory, device memory, or a block-addressable array reached by
+  asynchronous I/O, and one checkpoint materializes into any of the three without being rewritten.
+  Quantization spans Float64 down to NVFP4, packed nibbles and single bits, trading precision for
+  footprint per row, across Linux, Windows, macOS and beyond. Native bindings cover C, C++, Python,
+  Rust, Go, Java, JavaScript, Swift, C#, Zig, Mojo, and Wolfram, with Kotlin and Scala consuming the
+  Java surface directly.
+keywords:
+  - vector-search
+  - similarity-search
+  - nearest-neighbors
+  - clustering
+  - multi-modal
+  - quantization
+  - simd
+  - gpu
 
 authors:
   - family-names: Vardanian

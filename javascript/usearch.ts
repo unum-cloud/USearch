@@ -1,5 +1,5 @@
 /**
- * Smaller & Faster Single-File Vector Search Engine, for Node.
+ * Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices, for Node.
  *
  * The package entry point: one module per C header underneath, re-exported here so a caller
  * imports `usearch` and nothing deeper.

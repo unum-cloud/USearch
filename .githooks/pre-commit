@@ -57,6 +57,19 @@ check_ascii_arrows_prose() {
         "$file uses the ASCII '->' arrow - prose arrows are the Unicode →:"
 }
 
+# Markdown paragraphs are separated by one blank line, so a run of two carries no meaning and only
+# shows as noise in a diff. Fenced blocks keep whatever they hold.
+check_blank_line_runs() {
+    local runs
+    runs=$(awk '
+        /^```/ || /^~~~/ { fence = !fence }
+        !fence && /^[[:space:]]*$/ { blanks++; if (blanks > 1) print NR ": consecutive blank lines"; next }
+        { blanks = 0 }
+    ' "$file" || true)
+    [ -z "$runs" ] || fail "$runs" \
+        "$file separates paragraphs with more than one blank line - Markdown needs exactly one:"
+}
+
 # A Unicode arrow glued to its neighbor - `key→id` - reads as one token to searchers and
 # renderers alike; the arrow always gets whitespace on both sides.
 check_glued_arrows() {
@@ -612,6 +625,7 @@ while IFS= read -r -d '' file; do
         ;;
     *.md)
         check_ascii_arrows_prose
+        check_blank_line_runs
         check_glued_arrows
         check_sibling_justification
         ;;

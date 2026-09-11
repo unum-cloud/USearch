@@ -1,3 +1,3 @@
-module github.com/unum-cloud/usearch/golang
+module github.com/unum-cloud/USearch/golang
 
 go 1.24

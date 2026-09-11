@@ -1,6 +1,6 @@
 .{
     .name = .usearch,
-    .version = "3.0.0",
+    .version = "3.0.0-rc.1",
     .fingerprint = 0x260e5af6f00b2ff4,
     .minimum_zig_version = "0.16.0",
     .paths = .{

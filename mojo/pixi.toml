@@ -2,16 +2,19 @@
 # consumer naming this package by `git` or `path` needs no linker flags of its own.
 
 [package]
+authors = ["Ash Vardanian <info@unum.cloud>"]
+description = "Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices"
+license = "Apache-2.0"
 name = "usearch_mojo"
-version = "3.0.0"
+version = "3.0.0-rc.1"
 
 [package.build]
-backend = {name = "pixi-build-mojo", version = "0.*"}
+backend = { name = "pixi-build-mojo", version = "0.*" }
 
 # The backend only auto-discovers a package under `<name>/` or `src/`, and this one lives under
 # `usearch/`, so it is named here.
 [package.build.config]
-pkg = {name = "usearch", path = "usearch"}
+pkg = { name = "usearch", path = "usearch" }
 
 [package.run-dependencies]
-usearch = {path = ".."}
+usearch = { path = ".." }

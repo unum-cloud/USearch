@@ -5,7 +5,7 @@ project(
     usearch
     VERSION 2.25.1
     LANGUAGES C CXX
-    DESCRIPTION "Smaller & Faster Single-File Vector Search Engine from Unum"
+    DESCRIPTION "Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices"
     HOMEPAGE_URL "https://github.com/unum-cloud/USearch"
 )
 

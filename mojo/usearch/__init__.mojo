@@ -1,4 +1,4 @@
-"""Smaller & Faster Single-File Vector Search Engine, bound over its C ABI.
+"""Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices, bound over its C ABI.
 
 USearch indexes dense embeddings in a navigable graph and answers approximate nearest-neighbor
 queries over it, with SIMD kernels dispatched to the machine it runs on. This package binds the

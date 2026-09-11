@@ -1,20 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project>
   <PropertyGroup>
-    <Version Condition="'$(Version)' == ''">2.25.1</Version>
+    <Version Condition="'$(Version)' == ''">3.0.0-rc.1</Version>
 
-    <Authors>Unum</Authors>
+    <Authors>Ash Vardanian</Authors>
     <Company>Unum</Company>
-    <PackageTags>USearch Vector Search Disk-based Multi-Modal Semantic-Search Molecular-Search</PackageTags>
+    <Description>Billion-Scale Multi-Modal Search, Clustering, &amp; Sparse Algebra Engine for CPUs, GPUs, &amp; NVMe Devices</Description>
+    <!-- Search keywords, semicolon-separated: each is matched on its own, so a phrase would never hit. -->
+    <PackageTags>vector-search;similarity-search;nearest-neighbors;hnsw;embeddings;clustering;simd;gpu</PackageTags>
     <PackageId>Cloud.Unum.USearch</PackageId>
 
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
     <PackageProjectUrl>https://github.com/unum-cloud/USearch</PackageProjectUrl>
+    <PackageLicenseExpression Condition="'$(PackageLicenseFile)' == ''">Apache-2.0</PackageLicenseExpression>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <Copyright>Copyright (c) Unum Cloud</Copyright>
     <RepositoryUrl>https://github.com/unum-cloud/USearch</RepositoryUrl>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
 
     <PackageIcon>unum.png</PackageIcon>
-    <PackageIconUrl>unum.png</PackageIconUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 

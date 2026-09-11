@@ -261,33 +261,6 @@ Its predicate runs on the engine's own worker threads, which are not attached to
 Filter the results of `search` instead, or narrow the index.
 Progress handlers stay unbound for the same reason, which is what makes an insertion batch all-or-nothing here.
 
-## Building From Source
-
-The SDK `dlopen`s `libusearch_shared`, which CMake builds from the instantiation grid, and the JAR carries one copy per platform.
-Gradle drives that CMake tree rather than describing a second native build of its own:
-
-```sh
-gradle test
-```
-
-`build_artifacts` is where Gradle configures and builds by default; `-PusearchLibraryPath=<directory>` points it elsewhere.
-
-CMake builds the engine directly too, alongside every other target:
-
-```sh
-cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1
-cmake --build build_artifacts --target usearch_shared
-```
-
-`-PusearchPrebuilt=<directory>` points Gradle at a library that is already built and skips the CMake tasks entirely, which is how CI builds the engine once and runs every suite against that one artifact.
-It is also how a suite runs against the brute-force stand-in, which answers the same verbs a different way and builds in seconds:
-
-```sh
-cmake -B build_stub -DUSEARCH_BUILD_LIB_C_STUB=1
-cmake --build build_stub --target usearch_shared_stub
-gradle -PusearchPrebuilt=$PWD/build_stub/stub test
-```
-
 ## Kotlin and Scala
 
 The published surface is Java, and both other JVM languages consume it directly — there is no separate artifact for either.
@@ -307,8 +280,3 @@ val keys: Array[Key] = Array(Key.of(1), Key.of(2))
 index.add(keys, Matrix.of(Array(1.0f, 0.0f, 0.0f, 1.0f), 2), pool)
 ```
 
-Both languages have a suite of their own under `kotlin/` and `scala/`, covering what only another JVM language can observe rather than repeating the Java tests:
-
-```sh
-gradle kotlinInteropTest scalaInteropTest
-```

@@ -334,4 +334,4 @@ npm run build-js
 npm test
 ```
 
-`npm_config_usearch_library_dir` also points at `build_stub/stub`, the brute-force stand-in for the C interface, which runs the suite in seconds without building the engine.
+`npm_config_usearch_library_dir` points the build at a library that is already compiled, so a change to the TypeScript needs no CMake pass of its own.
