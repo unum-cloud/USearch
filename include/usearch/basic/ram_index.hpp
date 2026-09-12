@@ -1130,15 +1130,20 @@ struct basic_ram_index {
      *      tally, and the shared mutex's unique hold - released when the plan dies or @c finish
      *      pronounces the columns complete. */
     struct [[nodiscard]] save_plan_t {
-        /** @brief The index being serialized, whose unique side @c hold occupies; null in the
-         *      empty plan a refused @ref plan_save hands back. */
-        basic_ram_index const* index = nullptr;
         /** @brief The caller-placed columns every region writes disjoint slices of. */
         columns_t columns {};
         /** @brief Nodes the regions covered so far, mutated through @c atomic_ref. */
         std::size_t covered = 0;
-        /** @brief The unique hold spanning the plan's whole lifetime. */
-        unique_lock_t hold;
+
+        save_plan_t() noexcept = default;
+        save_plan_t(basic_ram_index const* index, columns_t columns, unique_lock_t&& hold) noexcept
+            : columns(columns), index_(index), hold_(std::move(hold)) {}
+        save_plan_t(save_plan_t&& other) noexcept
+            : columns(other.columns), covered(other.covered), index_(std::exchange(other.index_, nullptr)),
+              hold_(std::move(other.hold_)) {}
+        save_plan_t& operator=(save_plan_t&&) = delete;
+        /** @brief A save publishes nothing, so a dying plan only drops its hold - the lock's own job. */
+        ~save_plan_t() noexcept = default;
 
         /** @brief Copies one id region's keys, neighbor ids & encoded values into the columns -
          *      disjoint slices, so any number of caller threads run their regions concurrently;
@@ -1146,16 +1151,16 @@ struct basic_ram_index {
         template <typename value_codec_type_>
             requires basic_value_codec<value_codec_type_, value_t>
         status_t save(iota_view<node_id_t> region, value_codec_type_ const& codec) noexcept {
-            if (!index) return status_t::uninitialized_k;
+            if (!index_) return status_t::uninitialized_k;
             std::size_t const node_count = columns.keys.size();
             if (region.bound < region.first || static_cast<std::size_t>(region.bound) > node_count)
                 return status_t::config_mismatch_k;
 
-            for (node_id_t const node : region) columns.keys[node] = index->nodes_array_[node].key;
+            for (node_id_t const node : region) columns.keys[node] = index_->nodes_array_[node].key;
 
             std::size_t ids_cursor = columns.neighbor_offsets[region.first];
             for (node_id_t const node : region) {
-                neighbors_buffer_t const& row = index->nodes_array_[node].neighbors;
+                neighbors_buffer_t const& row = index_->nodes_array_[node].neighbors;
                 for (std::size_t link = 0; link != row.size(); ++link) columns.neighbor_ids[ids_cursor++] = row[link];
             }
 
@@ -1163,7 +1168,7 @@ struct basic_ram_index {
             for (node_id_t const node : region) {
                 std::size_t const first = columns.value_offsets[node];
                 std::size_t const bound = columns.value_offsets[node + 1];
-                status_t const encoded = codec.save(index->nodes_array_[node].value,
+                status_t const encoded = codec.save(index_->nodes_array_[node].value,
                                                     columns.values.subspan(first, bound - first));
                 if (failed(encoded)) return encoded;
             }
@@ -1173,14 +1178,23 @@ struct basic_ram_index {
 
         /** @brief Pronounces the columns complete & releases the hold: @c config_mismatch_k
          *      unless the regions' sizes sum to the row count - overlapping regions that still
-         *      sum right are the caller's own lie. */
+         *      sum right are the caller's own lie. A success spends the plan, so a second call
+         *      answers @c uninitialized_k instead of unlocking a hold it no longer owns. */
         status_t finish() noexcept {
-            if (!index) return status_t::uninitialized_k;
+            if (!index_) return status_t::uninitialized_k;
             if (atomic_ref<std::size_t>(covered).load(std::memory_order_acquire) != columns.keys.size())
                 return status_t::config_mismatch_k;
-            hold.unlock();
+            hold_.unlock();
+            index_ = nullptr;
             return status_t::success_k;
         }
+
+      private:
+        /** @brief The index being serialized, whose unique side @c hold_ occupies; null in the
+         *      empty plan a refused @ref plan_save hands back, and once @c finish succeeded. */
+        basic_ram_index const* index_ = nullptr;
+        /** @brief The unique hold spanning the plan's whole lifetime. */
+        unique_lock_t hold_;
     };
 
     /** @brief Opens a region-parallel save: takes the shared mutex's unique side - held
@@ -1222,7 +1236,7 @@ struct basic_ram_index {
             return {{}, sized};
         if (status_t const sized = sized_at_least_(columns.values.size(), running_values); failed(sized))
             return {{}, sized};
-        return {save_plan_t {this, columns, 0, std::move(hold)}, status_t::success_k};
+        return {save_plan_t {this, columns, std::move(hold)}, status_t::success_k};
     }
 
     /** @brief Row & element counts a save needs right now. Takes the shared mutex's unique
@@ -1266,28 +1280,23 @@ struct basic_ram_index {
      *      vetted columns, the covered-node tally, and the shared mutex's unique hold,
      *      released when the plan dies or @c finish publishes the loaded graph. */
     struct [[nodiscard]] load_plan_t {
-        /** @brief The index being repopulated, whose unique side @c hold occupies; null in the
-         *      empty plan a refused @ref plan_load hands back. */
-        basic_ram_index* index = nullptr;
         /** @brief The vetted columns being decoded. */
         columns_view_t columns {};
         /** @brief Nodes the regions covered so far, mutated through @c atomic_ref. */
         std::size_t covered = 0;
-        /** @brief The unique hold spanning the plan's whole lifetime. */
-        unique_lock_t hold;
 
         load_plan_t() noexcept = default;
         load_plan_t(basic_ram_index* index, columns_view_t columns, unique_lock_t&& hold) noexcept
-            : index(index), columns(columns), hold(std::move(hold)) {}
+            : columns(columns), index_(index), hold_(std::move(hold)) {}
         load_plan_t(load_plan_t&& other) noexcept
-            : index(std::exchange(other.index, nullptr)), columns(other.columns), covered(other.covered),
-              hold(std::move(other.hold)) {}
+            : columns(other.columns), covered(other.covered), index_(std::exchange(other.index_, nullptr)),
+              hold_(std::move(other.hold_)) {}
         load_plan_t& operator=(load_plan_t&&) = delete;
         /** @brief A plan that dies before @c finish wipes the keys its regions registered, still
          *      under its hold: an insert on the empty index would otherwise dispense ids the
          *      unpublished attempt's keys still name, and burn quota on the leftovers. */
         ~load_plan_t() noexcept {
-            if (index) index->key_map_.clear();
+            if (index_) index_->key_map_.clear();
         }
 
         /** @brief Decodes one id region's keys, neighbor rows & values into its
@@ -1296,14 +1305,14 @@ struct basic_ram_index {
         template <typename value_codec_type_>
             requires basic_value_codec<value_codec_type_, value_t>
         status_t load(iota_view<node_id_t> region, value_codec_type_ const& codec) noexcept {
-            if (!index) return status_t::uninitialized_k;
+            if (!index_) return status_t::uninitialized_k;
             std::size_t const node_count = columns.keys.size();
             if (region.bound < region.first || static_cast<std::size_t>(region.bound) > node_count)
                 return status_t::config_mismatch_k;
 
             // The plan vetted both prefix-sum columns and every id, so the slices are trusted.
             for (node_id_t const node : region) {
-                node_t& record = index->nodes_array_[node];
+                node_t& record = index_->nodes_array_[node];
                 record.key = columns.keys[node];
 
                 std::size_t const ids_first = columns.neighbor_offsets[node];
@@ -1321,7 +1330,7 @@ struct basic_ram_index {
                     failed(decoded))
                     return decoded;
 
-                if (status_t const keyed = index->key_map_.insert(record.key, node); failed(keyed)) return keyed;
+                if (status_t const keyed = index_->key_map_.insert(record.key, node); failed(keyed)) return keyed;
             }
             atomic_add(atomic_ref<std::size_t>(covered), region.size(), std::memory_order_release);
             return status_t::success_k;
@@ -1331,19 +1340,26 @@ struct basic_ram_index {
          *      watermark last - and releases the hold: @c config_mismatch_k unless the
          *      regions' sizes sum to the row count. */
         status_t finish() noexcept {
-            if (!index) return status_t::uninitialized_k;
+            if (!index_) return status_t::uninitialized_k;
             std::size_t const node_count = columns.keys.size();
             if (atomic_ref<std::size_t>(covered).load(std::memory_order_acquire) != node_count)
                 return status_t::config_mismatch_k;
-            atomic_ref<std::size_t>(index->claimed_count_).store(node_count, std::memory_order_relaxed);
-            atomic_ref<node_id_t>(index->next_dispensed_id_)
+            atomic_ref<std::size_t>(index_->claimed_count_).store(node_count, std::memory_order_relaxed);
+            atomic_ref<node_id_t>(index_->next_dispensed_id_)
                 .store(static_cast<node_id_t>(node_count), std::memory_order_relaxed);
-            atomic_ref<node_id_t>(index->last_visible_id_)
+            atomic_ref<node_id_t>(index_->last_visible_id_)
                 .store(static_cast<node_id_t>(node_count), std::memory_order_release);
-            hold.unlock();
-            index = nullptr; // Published: the plan is spent, and its death wipes nothing.
+            hold_.unlock();
+            index_ = nullptr; // Published: the plan is spent, and its death wipes nothing.
             return status_t::success_k;
         }
+
+      private:
+        /** @brief The index being repopulated, whose unique side @c hold_ occupies; null in the
+         *      empty plan a refused @ref plan_load hands back, and once @c finish published. */
+        basic_ram_index* index_ = nullptr;
+        /** @brief The unique hold spanning the plan's whole lifetime. */
+        unique_lock_t hold_;
     };
 
     /** @brief Opens a region-parallel load into this reserved, empty index: takes the

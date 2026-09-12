@@ -138,6 +138,7 @@ section "basic_ram_index.pml: add, search, save, health and load interleaved on 
 verify basic_ram_index.pml pass
 verify basic_ram_index.pml fail -Dwithout_row_clear
 verify basic_ram_index.pml fail -Dwithout_map_clear
+verify basic_ram_index.pml fail -Dtwice_finished
 
 section "ram_tables.pml: the multimap's quota, its slot claim, and what a finder sees beside a published state"
 verify ram_tables.pml pass -Dmemory=sequential

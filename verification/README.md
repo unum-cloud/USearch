@@ -60,6 +60,7 @@ The regions' tally add releases for the finisher's acquire, which is what puts t
 A failed load left its keys behind.
 `load_plan_t::load` registers keys as it decodes, and a plan that failed kept them until the next `plan_load` wiped the map, so an `insert` in between dispensed ids the failed attempt's keys still named and burned quota on the leftovers.
 The plan now wipes the keys it registered when it dies before `finish`, whether its regions fell short or nobody finished it, still under its hold, and `insert` clears its row before wiring; `basic_ram_index.pml` carries both as `-Dwithout_map_clear` and `-Dwithout_row_clear`.
+A successful `finish` spends the plan, so a second call answers a status instead of dropping a hold the plan no longer owns; `-Dtwice_finished` unlocks twice and the gate's assertion names it, or an adder walks in on a loader's hold.
 
 The multimap's quota counter passed its own quota.
 `insert` claimed with an unconditional add and handed the seat back with a subtract on refusal, so between the two a `size()` read one entry past `capacity()`, and one more per refusal in flight; no caller compares the two today, but the docs promise the bound and the counter is the only one the probe chains have.

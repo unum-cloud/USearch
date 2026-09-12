@@ -22,6 +22,9 @@
  *  - a key is registered once: a plan that dies before `finish` wipes the keys its regions
  *    registered, whether its regions fell short or nobody finished it, so an unpublished
  *    load's entries never meet a retry's or an insert's. `-Dwithout_map_clear` skips the wipe;
+ *  - a hold is dropped once: a successful `finish` spends the plan, so a second call answers a
+ *    status instead of unlocking again. `-Dtwice_finished` unlocks twice, and the gate names it
+ *    or an adder walks in on a loader's hold;
  *  - the certified search's second refusal at entry, an unsettled prefix, is subsumed: an
  *    unlocked gate has no adder inside, so `visible == dispensed`, which the entry asserts.
  */
@@ -62,7 +65,8 @@ inline try_lock(succeeded) {
         fi
     }
 }
-inline unlock() { unique = false }
+// the unique side is dropped by its holder alone: a plan spent by `finish` owns no hold to drop
+inline unlock() { assert(unique); unique = false }
 
 // what every unique holder sees: nobody inside, a settled prefix, every visible row published
 inline settled_prefix() {
@@ -143,7 +147,12 @@ active proctype saver() {
     bool succeeded;
     try_lock(succeeded);
     if
-    :: succeeded -> settled_prefix(); unlock()
+    :: succeeded -> settled_prefix(); unlock();
+#ifdef twice_finished
+        // a second `finish` on a spent plan drops a hold it no longer owns: either the assertion
+        // names it, or an adder walks in through the gate a loader now holds
+        unlock()
+#endif
     :: else
     fi
 }

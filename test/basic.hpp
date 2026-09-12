@@ -1090,6 +1090,7 @@ std::size_t test_basic_snapshot_regions(fixture_type_ const& fixture) {
             });
             failures += expect_eq(thread_failures.load(), 0u);
             failures += expect_eq(planned.value.finish(), status_t::success_k);
+            failures += expect_eq(planned.value.finish(), status_t::uninitialized_k); // Spent: no second unlock.
         }
         failures += expect(pooled == single.value);
         failures += expect(bool(index.columns_extents(codec))); // The finished plan released its hold.
@@ -1119,6 +1120,8 @@ std::size_t test_basic_snapshot_regions(fixture_type_ const& fixture) {
             failures += expect_eq(thread_failures.load(), 0u);
             failures += expect_eq(restored.size(), 0u); // Still unpublished before the finish.
             failures += expect_eq(planned.value.finish(), status_t::success_k);
+            failures += expect_eq(planned.value.finish(), status_t::uninitialized_k); // Spent: no second publish.
+            failures += expect_eq(restored.size(), static_cast<std::size_t>(nodes_k));
         }
         failures += basic_expect_mirrored(fixture, restored, index, nodes_k);
 

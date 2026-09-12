@@ -89,6 +89,14 @@ static_assert(basic_selector<basic_keep_closest_t, narrow_index_t, header_only_m
 static_assert(basic_selector<basic_keep_diverse_t, wide_index_t, header_only_metric_t>);
 static_assert(basic_expansion_round_t::converged_k != basic_expansion_round_t::advanced_k);
 static_assert(std::is_same_v<narrow_index_t::columns_t, basic_columns<u64_t, u32_t, byte_t, u64_t>>);
+static_assert(std::is_move_constructible_v<narrow_index_t::save_plan_t> &&
+              !std::is_copy_constructible_v<narrow_index_t::save_plan_t> &&
+              !std::is_copy_assignable_v<narrow_index_t::save_plan_t> &&
+              !std::is_move_assignable_v<narrow_index_t::save_plan_t>);
+static_assert(std::is_move_constructible_v<narrow_index_t::load_plan_t> &&
+              !std::is_copy_constructible_v<narrow_index_t::load_plan_t> &&
+              !std::is_copy_assignable_v<narrow_index_t::load_plan_t> &&
+              !std::is_move_assignable_v<narrow_index_t::load_plan_t>);
 static_assert(
     std::is_same_v<wide_index_t::columns_view_t, basic_columns<uuid_t const, u64_t const, byte_t const, u64_t const>>);
 
