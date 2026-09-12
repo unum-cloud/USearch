@@ -183,9 +183,10 @@ bool run_insertion(streamed_dataset_type_& streamed) {
         std::size_t const first_row = bench.options.skip_vectors + offset;
         std::size_t const batch = std::min(batch_rows, inserted_rows - offset);
         auto const staged = stage_batch(streamed, streamed.vectors, first_row, batch);
-        auto inserted = bench.index->insert(staged, {batch_ids.data(), batch}, *bench.traversal, config);
-        if (!inserted) {
-            fmt::println("Insertion failed at row {}: status {}", first_row, int(inserted.status));
+        auto const [inserted, landed] = bench.index->insert(staged, {batch_ids.data(), batch}, *bench.traversal,
+                                                            config);
+        if (failed(landed)) {
+            fmt::println("Insertion failed at row {}: status {}", first_row, int(landed));
             return false;
         }
         for (std::size_t row = 0; row != batch; ++row)
@@ -326,12 +327,12 @@ bool run_search(streamed_dataset_type_& streamed) {
         auto const staged = stage_batch(streamed, source, offset, batch);
 
         auto started = clock_t::now();
-        auto found = bench.index->search(staged, nk::matrix_span<node_id_t> {found_ids.data(), {batch, top_k}},
-                                         nk::matrix_span<dense_distance_t> {found_distances.data(), {batch, top_k}},
-                                         *bench.traversal, config);
+        auto const [found, searched] = bench.index->search(
+            staged, nk::matrix_span<node_id_t> {found_ids.data(), {batch, top_k}},
+            nk::matrix_span<dense_distance_t> {found_distances.data(), {batch, top_k}}, *bench.traversal, config);
         double const batch_seconds = stdc::duration<double>(clock_t::now() - started).count();
-        if (!found) {
-            fmt::println("Search failed at query {}: status {}", offset, int(found.status));
+        if (failed(searched)) {
+            fmt::println("Search failed at query {}: status {}", offset, int(searched));
             return false;
         }
         seconds += batch_seconds;

@@ -1198,16 +1198,6 @@ static typename multi_type_::executor_t* executor_of(usearch_executor_t punned_e
     return typed;
 }
 
-/** @brief Adds one fan-out's telemetry into the caller's stats - accumulating, so chunked
- *      verbs report the whole call rather than the last chunk. */
-template <typename result_type_>
-static void accumulate_stats(usearch_dense_traversal_stats_t* stats, result_type_ const& result) noexcept {
-    if (!stats) return;
-    stats->visited_members += result.visited_members;
-    stats->computed_distances += result.computed_distances;
-    stats->restarts += result.restarts;
-}
-
 /** @brief One strided C matrix's rank-2 shape: extents in storage values, so packed dtypes count
  *      bytes; a zero stride means contiguous rows. */
 template <typename scalar_type_>
@@ -1310,16 +1300,11 @@ static void search_dense_rows(usearch_dense_index_t index, usearch_executor_t pu
                     std::span<key_t> const keys_span {staged_keys.data(), taking * wanted};
                     std::span<distance_t> const distances_span {staged_distances.data(), taking * wanted};
                     std::span<std::size_t> const counts_span {counts + resolved, taking};
-                    typename variant_type_::search_result_t found;
-                    if constexpr (filtered_k)
-                        found = specialized_index {variant}.search_if(chunk_queries, *executor, search_config, wanted,
-                                                                      keys_span, distances_span, counts_span,
-                                                                      predicate);
-                    else
-                        found = specialized_index {variant}.search(chunk_queries, *executor, search_config, wanted,
-                                                                   keys_span, distances_span, counts_span);
-                    accumulate_stats(stats, found);
-                    if (failed(found.status)) return propagate_error(found.status, error), void();
+                    // The predicate's type picks the overload: a dummy one takes the unfiltered walk.
+                    auto const found = specialized_index {variant}.search(chunk_queries, *executor, search_config,
+                                                                          wanted, keys_span, distances_span,
+                                                                          counts_span, predicate);
+                    if (!crossed(found, stats, error)) return;
                     for (std::size_t query = 0; query != taking; ++query) {
                         std::memcpy(keys_base + (resolved + query) * keys_bytes, staged_keys.data() + query * wanted,
                                     wanted * sizeof(key_t));
@@ -1452,7 +1437,7 @@ USEARCH_EXPORT size_t usearch_dense_add(                             //
             typename variant_type_::executor_t* const executor = executor_of<variant_type_>(punned_executor, error);
             if (!executor) return 0ul;
             using scalar_t = typename variant_type_::scalar_t;
-            std::span const uuids {reinterpret_cast<uuid_t const*>(keys.data), count};
+            std::span const uuids {reinterpret_cast<us::uuid_t const*>(keys.data), count};
             typename variant_type_::insert_config_t insert_config {};
             if (options) insert_config.expansion_factor = static_cast<u32_t>(options->expansion_factor);
 
@@ -1479,10 +1464,9 @@ USEARCH_EXPORT size_t usearch_dense_add(                             //
                 std::size_t const taking = min_of(chunk, count - published);
                 nk::matrix_view<scalar_t> const rows = stored_rows_of<variant_type_>(
                     rows_base + published * row_bytes, taking, row_bytes, source_dtype, dimensions, staged);
-                typename variant_type_::insert_result_t const inserted = specialized_index {variant}.add(
-                    uuids.subspan(published, taking), rows, *executor, insert_config);
-                accumulate_stats(stats, inserted);
-                if (failed(inserted.status)) return propagate_error(inserted.status, error), published;
+                auto const inserted = specialized_index {variant}.add(uuids.subspan(published, taking), rows, *executor,
+                                                                      insert_config);
+                if (!crossed(inserted, stats, error)) return published;
                 published += taking;
                 if (progress && progress(published, count, progress_state) == usearch_cancel_k)
                     return propagate_error(usearch_error_cancelled_k, error, "The handler stopped the insertion"),
@@ -1508,24 +1492,23 @@ USEARCH_EXPORT size_t usearch_dense_refine(                          //
             typename variant_type_::refine_config_t config {};
             if (options) config.expansion_factor = static_cast<u32_t>(options->expansion_factor);
             shard_ticks_t ticks {progress, progress_state, specialized_index {variant}.size()};
-            typename variant_type_::refine_result_t const refined = specialized_index {variant}.refine(*executor,
-                                                                                                       config, ticks);
+            auto const [refined, refined_status] = specialized_index {variant}.refine(*executor, config, ticks);
             accumulate_stats(stats, refined);
             // A stopped sweep is not a failure: the graph stands, every node it did reach keeps
             // its fresh neighbors, and the next call sweeps again toward the same fixed point.
-            if (failed(refined.status) && refined.status != status_t::cancelled_k)
-                return propagate_error(refined.status, error), 0ul;
+            if (failed(refined_status) && refined_status != status_t::cancelled_k)
+                return propagate_error(refined_status, error), 0ul;
 
             // Re-selection alone can strand a node no search reaches, so every sweep closes with
             // the repair that finds them; its reconnections are neighbor rewrites the caller's
             // settling loop must see, so they join the count.
-            expected<typename variant_type_::heal_result_t> const healed = specialized_index {variant}.heal(*executor);
-            if (failed(healed.status)) return propagate_error(healed.status, error), refined.changed_nodes;
+            auto const [healed, healed_status] = specialized_index {variant}.heal(*executor);
+            if (failed(healed_status)) return propagate_error(healed_status, error), refined.changed_nodes;
             if (stats) {
-                stats->visited_members += healed.value.visited_members;
-                stats->computed_distances += healed.value.computed_distances;
+                stats->visited_members += healed.visited_members;
+                stats->computed_distances += healed.computed_distances;
             }
-            return propagate_success(error), refined.changed_nodes + healed.value.islands_reconnected;
+            return propagate_success(error), refined.changed_nodes + healed.islands_reconnected;
         },
         punned_index->variants);
 }

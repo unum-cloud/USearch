@@ -626,14 +626,10 @@ struct basic_ram_index {
         std::size_t fan_out = 0;
     };
 
-    /** @brief Outcome & telemetry of one @c insert() batch. */
+    /** @brief Telemetry of one @c insert() batch. */
     struct [[nodiscard]] insert_result_t {
-        /** @brief @c success_k, or why the whole batch was rejected before any id was claimed. */
-        status_t status = status_t::success_k;
         /** @brief This batch's share of the context's running counters. */
         basic_traversal_telemetry_t telemetry;
-
-        explicit operator bool() const noexcept { return succeeded(status); }
     };
 
     /**
@@ -669,25 +665,26 @@ struct basic_ram_index {
               typename selector_type_ = basic_keep_diverse_t>
         requires basic_metric<metric_type_, value_t, distance_t> &&
                  basic_selector<selector_type_, basic_ram_index, metric_type_>
-    insert_result_t insert(std::span<value_t> incoming_values, std::span<key_t const> keys, metric_type_& metric,
-                           std::span<node_id_t> assigned_ids, traversal_context_t& context,
-                           selector_type_ selector = {}, insert_config_t config = {}) noexcept {
+    expected<insert_result_t> insert(std::span<value_t> incoming_values, std::span<key_t const> keys,
+                                     metric_type_& metric, std::span<node_id_t> assigned_ids,
+                                     traversal_context_t& context, selector_type_ selector = {},
+                                     insert_config_t config = {}) noexcept {
         static_assert(synchronization_ != synchronization_t::immutable_k,
                       "Certified immutability contradicts insertion - certify exclusive_k or stay concurrent_k");
         std::size_t const incoming_count = incoming_values.size();
         if (!incoming_count) return {};
         std::size_t const capacity = atomic_ref<std::size_t>(capacity_).load(std::memory_order_acquire);
-        if (!capacity) return {status_t::uninitialized_k, {}};
+        if (!capacity) return {{}, status_t::uninitialized_k};
         std::size_t const connectivity = selector.connectivity;
-        if (!connectivity) return {status_t::config_mismatch_k, {}};
-        if (keys.size() != incoming_count) return {status_t::config_mismatch_k, {}};
+        if (!connectivity) return {{}, status_t::config_mismatch_k};
+        if (keys.size() != incoming_count) return {{}, status_t::config_mismatch_k};
         bool const report_assigned_ids = !assigned_ids.empty();
-        if (report_assigned_ids && assigned_ids.size() != incoming_count) return {status_t::config_mismatch_k, {}};
+        if (report_assigned_ids && assigned_ids.size() != incoming_count) return {{}, status_t::config_mismatch_k};
 
         std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor : connectivity * 2;
         std::size_t const fan_out = config.fan_out ? config.fan_out : derived_fan_out_(expansion_factor, connectivity);
         if (status_t const sized = reserve_scratch_(context, expansion_factor, fan_out, connectivity); failed(sized))
-            return {sized, {}};
+            return {{}, sized};
 
         // The gate opens before the claim, so a batch parked behind a unique holder never
         // sits on committed capacity, spuriously overflowing its peers.
@@ -700,7 +697,7 @@ struct basic_ram_index {
         // overshoot, and claims are per batch, so the exact form is affordable.
         std::size_t const claimed = atomic_fetch_add_if_at_most(atomic_ref<std::size_t>(claimed_count_), incoming_count,
                                                                 capacity, std::memory_order_acq_rel);
-        if (capacity - claimed < incoming_count) return {status_t::overflow_k, {}};
+        if (capacity - claimed < incoming_count) return {{}, status_t::overflow_k};
 
         basic_traversal_telemetry_t const telemetry_before = context.telemetry;
         for (std::size_t incoming_index = 0; incoming_index != incoming_count; ++incoming_index) {
@@ -756,7 +753,7 @@ struct basic_ram_index {
 
         insert_result_t result;
         result.telemetry = context.telemetry - telemetry_before;
-        return result;
+        return {result, status_t::success_k};
     }
 
     /** @brief Appends one directed edge @p from → @p to - purely structural: no metric,
@@ -837,16 +834,12 @@ struct basic_ram_index {
         std::size_t fan_out = 0;
     };
 
-    /** @brief Outcome & telemetry of one @c search(); matches stay in the caller's context. */
+    /** @brief Telemetry of one @c search(); matches stay in the caller's context. */
     struct [[nodiscard]] search_result_t {
-        /** @brief @c success_k, or why the search could not run at all. */
-        status_t status = status_t::success_k;
         /** @brief Matches left in @c context.results, ascending by distance. */
         std::size_t count = 0;
         /** @brief This walk's share of the context's running counters. */
         basic_traversal_telemetry_t telemetry;
-
-        explicit operator bool() const noexcept { return succeeded(status); }
     };
 
     /**
@@ -872,15 +865,15 @@ struct basic_ram_index {
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k, //
               typename metric_type_, typename query_type_ = value_t>
         requires basic_metric<metric_type_, value_t, distance_t> && basic_query<query_type_, metric_type_, value_t>
-    search_result_t search(query_type_ const& query, metric_type_& metric, //
-                           traversal_context_t& context, search_config_t config = {}) noexcept {
-        if (!capacity()) return {status_t::uninitialized_k, 0, {}};
+    expected<search_result_t> search(query_type_ const& query, metric_type_& metric, //
+                                     traversal_context_t& context, search_config_t config = {}) noexcept {
+        if (!capacity()) return {{}, status_t::uninitialized_k};
         std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor : connectivity_32_k * 2;
         std::size_t const fan_out = config.fan_out ? config.fan_out
                                                    : derived_fan_out_(expansion_factor, connectivity_32_k);
         if (status_t const sized = reserve_scratch_(context, expansion_factor, fan_out, connectivity_32_k);
             failed(sized))
-            return {sized, 0, {}};
+            return {{}, sized};
         context.results.clear();
         context.frontier.clear();
         context.visited.clear();
@@ -893,10 +886,10 @@ struct basic_ram_index {
             first_invisible_id = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
         else {
             auto const entry_probe = shared_mutex_.snapshot();
-            if (!entry_probe.unlocked()) return {status_t::contended_k, 0, {}};
+            if (!entry_probe.unlocked()) return {{}, status_t::contended_k};
             entry_generation = entry_probe.generation;
             auto const [published, settled] = published_prefix_();
-            if (failed(settled)) return {settled, 0, {}};
+            if (failed(settled)) return {{}, settled};
             first_invisible_id = published;
         }
         if (!first_invisible_id) return {};
@@ -908,6 +901,7 @@ struct basic_ram_index {
         // A refused walk still ranked whatever it reached; the telemetry says the ranking is
         // short because scratch ran out, not because the graph had nothing better.
         search_result_t result;
+        status_t status = status_t::success_k;
         result.count = context.results.size();
         result.telemetry = context.telemetry - telemetry_before;
         if constexpr (synchronization_ != synchronization_t::concurrent_k) {
@@ -918,9 +912,9 @@ struct basic_ram_index {
             auto const exit_probe = shared_mutex_.snapshot();
             if (!exit_probe.unlocked() || exit_probe.generation != entry_generation ||
                 atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire) != first_invisible_id)
-                result.status = status_t::contended_k;
+                status = status_t::contended_k;
         }
-        return result;
+        return {result, status};
     }
 
 #pragma endregion Search

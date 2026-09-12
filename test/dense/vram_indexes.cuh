@@ -106,9 +106,9 @@ std::size_t test_dense_indexes_search_race() {
     // Every published row resolves to a key inside the assigned range - never the plane's zero-fill.
     std::size_t mislabeled = 0;
     for (std::size_t searches = 0; searches != dense_reader_minimal_searches_k; ++searches) {
-        auto const found = indexes.search(vectors.view().row(searches % nodes_count).as_vector(), executor, {},
-                                          std::span<key_t> {found_keys}, std::span {found_distances});
-        failures += expect_eq(found.status, status_t::success_k);
+        auto const [found, searched] = indexes.search(vectors.view().row(searches % nodes_count).as_vector(), executor,
+                                                      {}, std::span<key_t> {found_keys}, std::span {found_distances});
+        failures += expect_eq(searched, status_t::success_k);
         for (std::size_t match = 0; match != found.count; ++match)
             mislabeled += found_keys[match] < key_t {1} || found_keys[match] > static_cast<key_t>(nodes_count);
     }

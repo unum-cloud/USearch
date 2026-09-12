@@ -941,7 +941,7 @@ void usearch_dense_maxsim(usearch_dense_index_t handle, usearch_executor_t execu
     // the walk; an entry's rows need no ordering and two documents need not share a row count.
     std::vector<usearch_key_t> documents;
     std::vector<std::vector<std::size_t>> token_rows;
-    std::unordered_map<uuid_t, std::size_t> position_of;
+    std::unordered_map<us::uuid_t, std::size_t> position_of;
     for (std::size_t row = 0; row != index.entries.size(); ++row) {
         auto const [slot, fresh] = position_of.emplace(keyed(index.entries[row].key), documents.size());
         if (fresh) documents.push_back(index.entries[row].key), token_rows.emplace_back();

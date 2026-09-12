@@ -79,19 +79,6 @@ struct dense_vram_indexes {
      *      never disagree. */
     using index_t = dense_vram_index<vector_dtype_, kernel_kind_, arch_ceiling_>;
 
-    /** @brief One shard: the graph on its device, the keys of its rows on the host, and the
-     *      batch in flight on it. Placement is not repeated - the index reports it through
-     *      @c device_specs. */
-    struct shard_t {
-        /** @brief The graph; an index holds atomics and never moves. */
-        std::unique_ptr<index_t> index;
-        /** @brief The key of each of this shard's rows, indexed by node ID. */
-        keys_plane_t keys;
-        /** @brief The batch submitted on this shard, live until the fan-out drains - a fan-out
-         *      submits on every device before awaiting any. */
-        typename index_t::insert_result_t inserted;
-    };
-
     /** @brief The streams and their scratch every bulk verb runs on; it names no index, so one
      *      executor serves every instantiation. */
     using executor_t = cuda_executor_t;
@@ -110,6 +97,19 @@ struct dense_vram_indexes {
     using refine_result_t = typename index_t::refine_result_t;
     using health_result_t = typename index_t::health_result_t;
     using heal_result_t = typename index_t::heal_result_t;
+
+    /** @brief One shard: the graph on its device, the keys of its rows on the host, and the
+     *      batch in flight on it. Placement is not repeated - the index reports it through
+     *      @c device_specs. */
+    struct shard_t {
+        /** @brief The graph; an index holds atomics and never moves. */
+        std::unique_ptr<index_t> index;
+        /** @brief The key of each of this shard's rows, indexed by node ID. */
+        keys_plane_t keys;
+        /** @brief The batch submitted on this shard, live until the fan-out drains - a fan-out
+         *      submits on every device before awaiting any. */
+        expected<insert_result_t> inserted {};
+    };
 
     /** @brief The stored scalar vocabulary, re-exported for dispatchers gating crossing rows. */
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
@@ -276,28 +276,27 @@ struct dense_vram_indexes {
      *  @param[inout] executor The streams and their scratch, paired positionally with the shards.
      *  @param[in] config The per-shard insertion configuration, applied uniformly.
      */
-    insert_result_t add(std::span<key_t const> keys, vectors_view_t new_vectors, executor_t& executor,
-                        insert_config_t config = {}) noexcept {
+    expected<insert_result_t> add(std::span<key_t const> keys, vectors_view_t new_vectors, executor_t& executor,
+                                  insert_config_t config = {}) noexcept {
         insert_result_t result;
         result.new_size = size();
-        if (status_t const kept = status(); failed(kept)) return result.status = kept, result;
-        if (keys.size() != new_vectors.extent(0)) return result.status = status_t::config_mismatch_k, result;
-        if (status_t const paired = pairs_with_(executor); paired != status_t::success_k)
-            return result.status = paired, result;
-        if (!new_vectors.extent(0)) return result;
+        if (status_t const kept = status(); failed(kept)) return {result, kept};
+        if (keys.size() != new_vectors.extent(0)) return {result, status_t::config_mismatch_k};
+        if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {result, paired};
+        if (!new_vectors.extent(0)) return {result, status_t::success_k};
         // Two holds: the executor's guards the scratch, the index's keeps batches from interleaving claims.
         auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return result.status = claimed, result;
-        if (!mutating_.lock_if_free()) return result.status = status_t::contended_k, result;
+        if (failed(claimed)) return {result, claimed};
+        if (!mutating_.lock_if_free()) return {result, status_t::contended_k};
         std::lock_guard const mutating {mutating_, std::adopt_lock};
         return add_gated_(keys, new_vectors, executor, config);
     }
 
     /** @brief Inserts one row under @p key into whichever shard the rotation names next - the
      *      one-row sibling of the batched form, priced identically: one launch on one device. */
-    insert_result_t add(key_t const& key, vector_view_t new_vector, executor_t& executor,
-                        insert_config_t config = {}) noexcept {
-        if (!new_vector.is_contiguous()) return {status_t::unsupported_layout_k};
+    expected<insert_result_t> add(key_t const& key, vector_view_t new_vector, executor_t& executor,
+                                  insert_config_t config = {}) noexcept {
+        if (!new_vector.is_contiguous()) return {{}, status_t::unsupported_layout_k};
         vectors_view_t const row {new_vector.data(), 1u, new_vector.size()};
         return add(std::span<key_t const> {&key, 1u}, row, executor, config);
     }
@@ -321,37 +320,36 @@ struct dense_vram_indexes {
      *      @c cancel_k answer stops before the next shard, reported as @c cancelled_k.
      */
     template <typename progress_type_ = dummy_progress_t>
-    refine_result_t refine(executor_t& executor, refine_config_t config = {},
-                           progress_type_&& on_visited = {}) noexcept {
-        refine_result_t result;
+    expected<refine_result_t> refine(executor_t& executor, refine_config_t config = {},
+                                     progress_type_&& on_visited = {}) noexcept {
         std::size_t const shards = shards_.size();
-        if (!shards) return result.status = status_t::uninitialized_k, result;
-        if (status_t const kept = status(); failed(kept)) return result.status = kept, result;
-        if (status_t const paired = pairs_with_(executor); failed(paired)) return result.status = paired, result;
+        if (!shards) return {{}, status_t::uninitialized_k};
+        if (status_t const kept = status(); failed(kept)) return {{}, kept};
+        if (status_t const paired = pairs_with_(executor); failed(paired)) return {{}, paired};
         auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return result.status = claimed, result;
-        if (!mutating_.lock_if_free()) return result.status = status_t::contended_k, result;
+        if (failed(claimed)) return {{}, claimed};
+        if (!mutating_.lock_if_free()) return {{}, status_t::contended_k};
         std::lock_guard const mutating {mutating_, std::adopt_lock};
 
         growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
         if (status_t const ready = reserve_traversals_(traversals, executor, 1,
                                                        insert_config_t {config.expansion_factor});
             failed(ready))
-            return result.status = ready, result;
+            return {{}, ready};
 
+        refine_result_t result;
         std::size_t const published = size();
         for (std::size_t shard = 0; shard != shards; ++shard) {
             index_t& one = *shards_[shard].index;
-            if (cudaSetDevice(one.device_specs().ordinal) != cudaSuccess)
-                return result.status = status_t::device_error_k, result;
-            refine_result_t const part = one.refine({0, static_cast<dense_node_id_t>(one.size())}, traversals[shard],
+            if (cudaSetDevice(one.device_specs().ordinal) != cudaSuccess) return {{}, status_t::device_error_k};
+            auto const [part, refined] = one.refine({0, static_cast<dense_node_id_t>(one.size())}, traversals[shard],
                                                     config);
-            if (!part) return result.status = part.status, result;
+            if (failed(refined)) return {{}, refined};
             combine_refinement_(result, part);
             if (on_visited(result.visited_nodes, published) == continuation_t::cancel_k)
-                return result.status = status_t::cancelled_k, result;
+                return {result, status_t::cancelled_k};
         }
-        return result;
+        return {result, status_t::success_k};
     }
 
     /** @brief Measures how much of every shard a search can reach, shard by shard on its own
@@ -434,33 +432,33 @@ struct dense_vram_indexes {
      *  A failing shard stops the scatter but keeps whatever earlier shards already merged, so
      *  the reported count and the ranking always agree.
      */
-    search_result_t search(vector_view_t query_vector, executor_t& executor, search_config_t config,
-                           std::span<key_t> keys, std::span<distance_t> distances) noexcept {
+    expected<search_result_t> search(vector_view_t query_vector, executor_t& executor, search_config_t config,
+                                     std::span<key_t> keys, std::span<distance_t> distances) noexcept {
         search_result_t merged;
-        if (status_t const paired = pairs_with_(executor); paired != status_t::success_k)
-            return merged.status = paired, merged;
+        if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {merged, paired};
         // The executor serializes, never the index: a second caller with its own executor searches concurrently.
         auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return merged.status = claimed, merged;
+        if (failed(claimed)) return {merged, claimed};
         growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
         if (status_t const readied = reserve_traversals_(traversals, executor, 1, config); failed(readied))
-            return merged.status = readied, merged;
+            return {merged, readied};
+        status_t status = status_t::success_k;
         for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
             traversal_t& traversal = traversals[shard];
-            search_result_t const found = shards_[shard].index->search(query_vector, traversal, config);
+            expected<search_result_t> const found = shards_[shard].index->search(query_vector, traversal, config);
             if (!found) {
-                merged.status = found.status;
+                status = found.status;
                 break;
             }
-            merged.visited_members += found.visited_members;
-            merged.computed_distances += found.computed_distances;
-            merged.restarts += found.restarts;
-            merged.tail_drops += found.tail_drops;
-            merged.visited_saturations += found.visited_saturations;
+            merged.visited_members += found.value.visited_members;
+            merged.computed_distances += found.value.computed_distances;
+            merged.restarts += found.value.restarts;
+            merged.tail_drops += found.value.tail_drops;
+            merged.visited_saturations += found.value.visited_saturations;
             merged.count = merge_search_results(to_span(traversal.results), shards_[shard].keys, keys, distances,
                                                 merged.count);
         }
-        return merged;
+        return {merged, status};
     }
 
     /**
@@ -484,27 +482,26 @@ struct dense_vram_indexes {
      *  returning, since the caller's queries and the call's own landing are DMA targets
      *  until then.
      */
-    search_result_t search(vectors_view_t queries, executor_t& executor, search_config_t config, std::size_t wanted,
-                           std::span<key_t> keys, std::span<distance_t> distances,
-                           std::span<std::size_t> counts) noexcept {
+    expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
+                                     std::size_t wanted, std::span<key_t> keys, std::span<distance_t> distances,
+                                     std::span<std::size_t> counts) noexcept {
         search_result_t merged;
         std::size_t const queries_count = queries.extent(0);
         std::size_t const shards = shards_.size();
-        if (status_t const paired = pairs_with_(executor); paired != status_t::success_k)
-            return merged.status = paired, merged;
+        if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {{}, paired};
         if (counts.size() != queries_count || keys.size() < queries_count * wanted ||
             distances.size() < queries_count * wanted)
-            return merged.status = status_t::config_mismatch_k, merged;
-        if (!queries_count) return merged;
+            return {{}, status_t::config_mismatch_k};
+        if (!queries_count) return {merged, status_t::success_k};
         // Vetted once, before anything is claimed or carved - the shards would refuse both,
         // but only after the landing and the runs had been sized for a doomed call.
         if (queries.extent(1) != dimensions() || config.count > dense_cuda_sorted_pool<16>::capacity_k)
-            return merged.status = status_t::config_mismatch_k, merged;
+            return {{}, status_t::config_mismatch_k};
 
         // The executor serializes, never the index: a second caller with its own executor
         // searches concurrently, a second on this one is refused before any scratch is carved.
         auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return merged.status = claimed, merged;
+        if (failed(claimed)) return {{}, claimed};
 
         // The host landing: every shard's matches, one wide matrix per plane, shard columns
         // side by side - the exact destination the pitched writeback was built for. Function
@@ -515,14 +512,14 @@ struct dense_vram_indexes {
         growing_buffer<dense_distance_t, forkunion_allocator_t> distances_landing {allocator_};
         if (failed(ids_landing.resize_uninitialized(landing_entries)) ||
             failed(distances_landing.resize_uninitialized(landing_entries)))
-            return merged.status = status_t::bad_alloc_k, merged;
+            return {{}, status_t::bad_alloc_k};
         nk::matrix_span<dense_node_id_t> const ids_wide {ids_landing.data(), queries_count, shards * config.count};
         nk::matrix_span<dense_distance_t> const distances_wide {distances_landing.data(), queries_count,
                                                                 shards * config.count};
 
         growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
         if (status_t const readied = reserve_traversals_(traversals, executor, queries_count, config); failed(readied))
-            return merged.status = readied, merged;
+            return {{}, readied};
 
         // Queue every shard before awaiting any, so the batch costs the wall clock of the
         // slowest device rather than the sum of them. From here to the drain there must be
@@ -534,7 +531,7 @@ struct dense_vram_indexes {
                 nk::all, nk::range {queued * config.count, (queued + 1) * config.count}, nk::slice);
             nk::matrix_span<dense_distance_t> const shard_distances = distances_wide(
                 nk::all, nk::range {queued * config.count, (queued + 1) * config.count}, nk::slice);
-            search_result_t const landed = shards_[queued].index->search(
+            expected<search_result_t> const landed = shards_[queued].index->search(
                 queries, shard_ids, shard_distances, traversals[queued], config, completion_t::deferred_k);
             if (!landed) {
                 first_refusal = landed.status;
@@ -565,7 +562,6 @@ struct dense_vram_indexes {
         }
 
         // Every drained context's sink holds this call's spend on its shard.
-        merged.status = first_refusal;
         for (std::size_t shard = 0; shard != shards && shard <= queued; ++shard) {
             dense_cuda_telemetry_block_t const spent = traversals[shard].spent();
             merged.visited_members += spent.hops;
@@ -575,7 +571,7 @@ struct dense_vram_indexes {
             merged.visited_saturations += spent.visited_saturations;
         }
         for (std::size_t const count : counts) merged.count += count;
-        return merged;
+        return {merged, first_refusal};
     }
 
 #pragma endregion Search
@@ -795,34 +791,35 @@ struct dense_vram_indexes {
     }
 
     /** @brief The body of @c add, run with the insertion gate held. */
-    insert_result_t add_gated_(std::span<key_t const> keys, vectors_view_t new_vectors, executor_t& executor,
-                               insert_config_t config) noexcept {
+    expected<insert_result_t> add_gated_(std::span<key_t const> keys, vectors_view_t new_vectors, executor_t& executor,
+                                         insert_config_t config) noexcept {
         insert_result_t result;
+        result.new_size = size();
         std::size_t const rows = new_vectors.extent(0);
         std::size_t const shards = shards_.size();
         growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
         if (status_t const readied = reserve_traversals_(traversals, executor, divide_round_up(rows, shards), config);
             failed(readied))
-            return result.status = readied, result.new_size = size(), result;
+            return {result, readied};
 
         // Admission before anything is taken: past the ceiling, an ID has no key-plane slot.
         std::size_t const rows_ceiling = capacity();
         std::size_t routing_base = admitted_rows_.load(std::memory_order_relaxed);
         do {
-            if (rows_ceiling - routing_base < rows)
-                return result.status = status_t::overflow_k, result.new_size = size(), result;
+            if (rows_ceiling - routing_base < rows) return {result, status_t::overflow_k};
         } while (!admitted_rows_.compare_exchange_weak(routing_base, routing_base + rows, std::memory_order_relaxed));
         // Rotating by rows admitted keeps a stream of small batches from drifting onto shard zero.
         std::size_t const rotation = routing_base % shards;
 
         // Claim and launch on every device before awaiting any. Keys are written before the
         // claim publishes, so a search that can rank a row reads its key fully written.
+        status_t status = status_t::success_k;
         std::size_t launched = 0;
         for (; launched != shards; ++launched) {
             std::size_t const first = first_row_of_shard_(launched, shards, rotation);
             std::size_t const taking = rows_from_(rows, first, shards);
             shard_t& one = shards_[launched];
-            one.inserted = {status_t::success_k};
+            one.inserted = {};
             if (!taking) continue;
             dense_node_id_t const first_node = static_cast<dense_node_id_t>(one.index->size());
             // The reverse plane's quota covers the reservation, so recording cannot fail.
@@ -836,18 +833,17 @@ struct dense_vram_indexes {
             one.inserted = one.index->insert(new_vectors(nk::range {first, rows, shards}, nk::slice), {},
                                              traversals[launched], config, completion_t::deferred_k);
             // A mismatched first ID means a claimer outside the gate, which no key written here can name.
-            status_t const launched_status = !one.inserted                         ? one.inserted.status
-                                             : one.inserted.first_id != first_node ? status_t::contended_k
-                                                                                   : status_t::success_k;
+            status_t const launched_status = !one.inserted                               ? one.inserted.status
+                                             : one.inserted.value.first_id != first_node ? status_t::contended_k
+                                                                                         : status_t::success_k;
             if (failed(launched_status)) {
-                result.status = launched_status;
+                status = launched_status;
                 break;
             }
         }
 
         // Drain every stream, the refused launch's included - its upload may still be reading the caller's rows.
-        if (status_t const drained = executor.drain(); failed(drained) && succeeded(result.status))
-            result.status = drained;
+        if (status_t const drained = executor.drain(); failed(drained) && succeeded(status)) status = drained;
         // Every context's sink holds this call's spend on its shard; an unlaunched one holds zeros.
         for (traversal_t& traversal : traversals) {
             dense_cuda_telemetry_block_t const spent = traversal.spent();
@@ -859,7 +855,7 @@ struct dense_vram_indexes {
             result.visited_saturations += spent.visited_saturations;
         }
         result.new_size = size();
-        return result;
+        return {result, status};
     }
 
 #pragma endregion Insertion

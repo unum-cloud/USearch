@@ -473,8 +473,8 @@ std::size_t test_basic_handmade(fixture_type_ const& fixture) {
                     handmade.distances[row][column]);
 
         for (std::size_t row = 0; row != 3; ++row) {
-            auto const found = index.search(queries.values[row], metric, context);
-            failures += expect_eq(found.status, status_t::success_k);
+            auto const [found, searched] = index.search(queries.values[row], metric, context);
+            failures += expect_eq(searched, status_t::success_k);
             failures += expect(found.count >= 3);
             failures += basic_expect_distance<fixture_type_>(context.results[0].distance,
                                                              typename index_t::distance_t {});
@@ -520,8 +520,8 @@ std::size_t test_basic_growth_and_recall(fixture_type_ const& fixture) {
 
         std::size_t found_best_count = 0;
         for (auto const& query : queries) {
-            auto const found = index.search(query, metric, context);
-            failures += expect_eq(found.status, status_t::success_k);
+            auto const [found, searched] = index.search(query, metric, context);
+            failures += expect_eq(searched, status_t::success_k);
             failures += expect(found.count > 0 && found.count <= connectivity_32_k * 2);
             failures += basic_expect_ascending(context);
             bool found_best = false;
@@ -860,8 +860,8 @@ std::size_t test_basic_starved(fixture_type_ const& fixture) {
         // business, so the receipt is asserted across the batch and every answer stays ranked.
         std::size_t saturations = 0;
         for (std::size_t sample = 0; sample != nodes_k; ++sample) {
-            auto const walked = index.search(values[sample], metric, small_context, {8, 1});
-            failures += expect_eq(walked.status, status_t::success_k);
+            auto const [walked, searched] = index.search(values[sample], metric, small_context, {8, 1});
+            failures += expect_eq(searched, status_t::success_k);
             failures += basic_expect_ascending(small_context);
             saturations += walked.telemetry.saturated_walks;
         }
@@ -954,9 +954,9 @@ std::size_t test_basic_snapshot_roundtrip(fixture_type_ const& fixture) {
             context_t restored_context {basic_seed_snapshot_k + 7, counting_allocator_t {ledger}};
             auto original_metric = fixture.make_metric();
             auto restored_metric = fixture.make_metric();
-            auto const original_found = index.search(query, original_metric, original_context);
-            auto const restored_found = restored.search(query, restored_metric, restored_context);
-            failures += expect_eq(original_found.status, restored_found.status);
+            auto const [original_found, original_status] = index.search(query, original_metric, original_context);
+            auto const [restored_found, restored_status] = restored.search(query, restored_metric, restored_context);
+            failures += expect_eq(original_status, restored_status);
             failures += expect_eq(original_found.count, restored_found.count);
             for (std::size_t position = 0; position != original_found.count; ++position) {
                 failures += expect_eq(original_context.results[position].node_id,
@@ -1548,13 +1548,14 @@ std::size_t test_basic_certified(fixture_type_ const& fixture) {
             context_t immutable_arm {basic_seed_certified_k + 7, counting_allocator_t {ledger}};
             context_t exclusive_arm {basic_seed_certified_k + 7, counting_allocator_t {ledger}};
             auto arm_metric = fixture.make_metric();
-            auto const concurrent_found = exclusive_index.search(query, arm_metric, concurrent_arm);
-            auto const immutable_found = exclusive_index.template search<synchronization_t::immutable_k>(
-                query, arm_metric, immutable_arm);
-            auto const exclusive_found = exclusive_index.template search<synchronization_t::exclusive_k>(
-                query, arm_metric, exclusive_arm);
-            failures += expect_eq(immutable_found.status, concurrent_found.status);
-            failures += expect_eq(exclusive_found.status, concurrent_found.status);
+            auto const [concurrent_found, concurrent_status] = exclusive_index.search(query, arm_metric,
+                                                                                      concurrent_arm);
+            auto const [immutable_found, immutable_status] =
+                exclusive_index.template search<synchronization_t::immutable_k>(query, arm_metric, immutable_arm);
+            auto const [exclusive_found, exclusive_status] =
+                exclusive_index.template search<synchronization_t::exclusive_k>(query, arm_metric, exclusive_arm);
+            failures += expect_eq(immutable_status, concurrent_status);
+            failures += expect_eq(exclusive_status, concurrent_status);
             failures += expect_eq(immutable_found.count, concurrent_found.count);
             failures += expect_eq(exclusive_found.count, concurrent_found.count);
             for (std::size_t position = 0; position != concurrent_found.count; ++position) {
@@ -1797,8 +1798,8 @@ std::size_t test_basic_restarts(fixture_type_ const& fixture) {
         bool any_restarts = false;
         for (std::size_t attempt = 0; attempt != attempts_k; ++attempt) {
             context_t attempt_context {basic_seed_restarts_k + 1 + attempt, counting_allocator_t {ledger}};
-            auto const found = index.search(query, metric, attempt_context, {nodes_k, 0});
-            failures += expect_eq(found.status, status_t::success_k);
+            auto const [found, searched] = index.search(query, metric, attempt_context, {nodes_k, 0});
+            failures += expect_eq(searched, status_t::success_k);
             failures += expect_eq(found.count, nodes_k); // The islands included - full coverage.
             any_restarts = any_restarts || attempt_context.telemetry.restarts > 0;
         }

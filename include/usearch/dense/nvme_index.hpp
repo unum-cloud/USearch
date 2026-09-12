@@ -1481,7 +1481,7 @@ struct dense_nvme_context {
     /** @brief Total one-to-one distance computations across the context's lifetime. */
     std::size_t computed_distances = 0;
     /** @brief Frontier candidates whose neighbor lists were fetched & expanded. */
-    std::size_t expanded_members = 0;
+    std::size_t visited_members = 0;
     /** @brief Reads issued across the context's lifetime, refetches included. */
     std::size_t issued_reads = 0;
     /** @brief Walks a refused re-table retired early, their rankings short. */
@@ -1701,20 +1701,16 @@ struct dense_nvme_index {
         small_size_t expansion_factor = 0;
     };
 
-    /** @brief Outcome & telemetry of one @c search() call; matches land in the caller's spans. */
-    struct search_result_t {
-        /** @brief @c success_k, or why the batch could not run at all. */
-        status_t status = status_t::success_k;
+    /** @brief Telemetry of one @c search() call; matches land in the caller's spans. */
+    struct [[nodiscard]] search_result_t {
         /** @brief Frontier candidates whose records were re-fetched & expanded. */
-        std::size_t expanded_members = 0;
+        std::size_t visited_members = 0;
         /** @brief Total distance computations across the batch. */
         std::size_t computed_distances = 0;
         /** @brief Reads issued for this batch, expansion refetches included. */
         std::size_t issued_reads = 0;
         /** @brief Walks a refused re-table retired early, their rankings short. */
         std::size_t saturated_walks = 0;
-
-        explicit operator bool() const noexcept { return succeeded(status); }
     };
 
     /** @brief Sizes @p context per @p config against this payload, then opens its engine
@@ -1750,25 +1746,25 @@ struct dense_nvme_index {
      *      sized by a prior @c reserve.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      */
-    search_result_t search(vectors_view_t queries, nk::matrix_span<dense_scored_node_t> results,
-                           nk::vector_span<small_size_t> result_counts, context_t& context,
-                           search_config_t config = {}) noexcept {
+    expected<search_result_t> search(vectors_view_t queries, nk::matrix_span<dense_scored_node_t> results,
+                                     nk::vector_span<small_size_t> result_counts, context_t& context,
+                                     search_config_t config = {}) noexcept {
 
         search_result_t outcome;
-        if (data_descriptor_ < 0) return outcome.status = status_t::uninitialized_k, outcome;
+        if (data_descriptor_ < 0) return {outcome, status_t::uninitialized_k};
         small_size_t total_queries = static_cast<small_size_t>(queries.extent(0));
         small_size_t wanted = static_cast<small_size_t>(results.extent(1));
         if (results.extent(0) != total_queries || result_counts.size() != total_queries)
-            return outcome.status = status_t::config_mismatch_k, outcome;
+            return {outcome, status_t::config_mismatch_k};
         if (!size()) {
             for (small_size_t i = 0; i != total_queries; ++i) result_counts[i] = 0;
-            return outcome;
+            return {outcome, status_t::success_k};
         }
         // The pool never underflows the request nor overflows the reserved ceiling.
         small_size_t pool_limit = static_cast<small_size_t>(min_of<std::size_t>(
             max_of<std::size_t>(derived_expansion_(config.expansion_factor), wanted), context.expansion_capacity));
 
-        std::size_t expanded_before = context.expanded_members;
+        std::size_t visited_before = context.visited_members;
         std::size_t computed_before = context.computed_distances;
         std::size_t issued_before = context.issued_reads;
         std::size_t saturated_before = context.saturated_walks;
@@ -1777,24 +1773,24 @@ struct dense_nvme_index {
 
         while (finished_queries != total_queries) {
             status_t armed = arm_slots_(context, queries, pool_limit, next_query, total_queries);
-            if (armed != status_t::success_k) return outcome.status = armed, outcome;
+            if (armed != status_t::success_k) return {outcome, armed};
 
             status_t pumped = context.engine.pump(dense_io_wait_t::blocking_k);
-            if (pumped != status_t::success_k) return outcome.status = pumped, outcome;
+            if (pumped != status_t::success_k) return {outcome, pumped};
 
             dense_io_completion_t completion;
             while (context.engine.pop(completion)) {
                 status_t consumed = consume_(context, completion);
-                if (consumed != status_t::success_k) return outcome.status = consumed, outcome;
+                if (consumed != status_t::success_k) return {outcome, consumed};
             }
 
             harvest_slots_(context, results, result_counts, wanted, finished_queries);
         }
-        outcome.expanded_members = context.expanded_members - expanded_before;
+        outcome.visited_members = context.visited_members - visited_before;
         outcome.computed_distances = context.computed_distances - computed_before;
         outcome.issued_reads = context.issued_reads - issued_before;
         outcome.saturated_walks = context.saturated_walks - saturated_before;
-        return outcome;
+        return {outcome, status_t::success_k};
     }
 
   private:
@@ -1892,7 +1888,7 @@ struct dense_nvme_index {
     inline status_t expand_(context_t& context, dense_traversal_slot_id_t slot_index,
                             dense_nvme_record_t record) noexcept {
         slot_t& slot = context.slots[slot_index];
-        context.expanded_members++;
+        context.visited_members++;
         node_id_t const* neighbor_ids = record.neighbor_ids();
         u32_t neighbors_count = record.neighbors_count();
         // A refused re-table retires the walk with the ranking it has: the in-flight scores

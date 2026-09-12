@@ -197,10 +197,13 @@ int main() {
 
     // All three search arms answer, ranked & settled-equal.
     auto const query = make_tag(0);
-    auto const concurrent_found = index.search(query, metric, context);
-    auto const immutable_found = index.template search<synchronization_t::immutable_k>(query, metric, context);
-    auto const exclusive_found = index.template search<synchronization_t::exclusive_k>(query, metric, context);
-    if (failed(concurrent_found.status) || !concurrent_found.count) return 1;
+    auto const [concurrent_found, concurrent_status] = index.search(query, metric, context);
+    auto const [immutable_found, immutable_status] = index.template search<synchronization_t::immutable_k>(
+        query, metric, context);
+    auto const [exclusive_found, exclusive_status] = index.template search<synchronization_t::exclusive_k>(
+        query, metric, context);
+    if (failed(concurrent_status) || failed(immutable_status) || failed(exclusive_status)) return 1;
+    if (!concurrent_found.count) return 1;
     if (immutable_found.count != concurrent_found.count || exclusive_found.count != concurrent_found.count) return 1;
 
     // Manual wiring, the checked readers, and the keyed lookups.

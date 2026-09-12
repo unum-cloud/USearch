@@ -352,6 +352,29 @@ inline void propagate_success(usearch_error_t* error) noexcept {
     if (error) *error = usearch_error_t {usearch_success_k, nullptr};
 }
 
+/** @brief Adds one fan-out's telemetry into the caller's stats - accumulating, so chunked
+ *      verbs report the whole call rather than the last chunk. */
+template <typename result_type_>
+inline void accumulate_stats(usearch_dense_traversal_stats_t* stats, result_type_ const& result) noexcept {
+    if (!stats) return;
+    stats->visited_members += result.visited_members;
+    stats->computed_distances += result.computed_distances;
+    stats->restarts += result.restarts;
+}
+
+/** @brief Whether a result carries traversal telemetry - one probe both crossings read. */
+template <typename value_type_>
+concept carries_telemetry = requires(value_type_ const& value) { value.visited_members; };
+
+/** @brief The one crossing for a fallible verb: folds telemetry into @p stats when the payload
+ *      carries any, writes @p error, and answers whether @c .value is readable. */
+template <typename value_type_>
+inline bool crossed(expected<value_type_> const& result, usearch_dense_traversal_stats_t* stats, usearch_error_t* error,
+                    char const* message = nullptr) noexcept {
+    if constexpr (carries_telemetry<value_type_>) accumulate_stats(stats, result.value);
+    return propagate_error(result.status, error, message);
+}
+
 /** @brief The C key struct and the engine's @c us::uuid_t share sixteen bytes - one bit cast in. */
 inline us::uuid_t uuid_of(usearch_key_t key) noexcept { return std::bit_cast<us::uuid_t>(key); }
 
@@ -480,15 +503,16 @@ struct specialized_index {
     std::size_t get(key_t const& key, vectors_span_t vectors, std::size_t wanted) const noexcept;
     status_t reserve(reserve_capacity_t config) noexcept;
     status_t clear() noexcept;
-    insert_result_t add(std::span<key_t const> keys, vectors_view_t rows, executor_t& executor,
-                        insert_config_t config) noexcept;
-    refine_result_t refine(executor_t& executor, refine_config_t config, shard_ticks_t& ticks) noexcept;
+    expected<insert_result_t> add(std::span<key_t const> keys, vectors_view_t rows, executor_t& executor,
+                                  insert_config_t config) noexcept;
+    expected<refine_result_t> refine(executor_t& executor, refine_config_t config, shard_ticks_t& ticks) noexcept;
     expected<heal_result_t> heal(executor_t& executor) noexcept;
-    search_result_t search(vectors_view_t queries, executor_t& executor, search_config_t config, std::size_t wanted,
-                           keys_span_t keys, distances_span_t distances, counts_span_t counts) noexcept;
-    search_result_t search_if(vectors_view_t queries, executor_t& executor, search_config_t config, std::size_t wanted,
-                              keys_span_t keys, distances_span_t distances, counts_span_t counts,
-                              key_predicate_t& predicate) noexcept
+    expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
+                                     std::size_t wanted, keys_span_t keys, distances_span_t distances,
+                                     counts_span_t counts, dummy_predicate_t) noexcept;
+    expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
+                                     std::size_t wanted, keys_span_t keys, distances_span_t distances,
+                                     counts_span_t counts, key_predicate_t& predicate) noexcept
         requires is_ram_index<index_type_>;
     status_t save(std::string_view path, executor_t& executor, shard_ticks_t& ticks) noexcept;
     status_t save(bytes_span_t buffer, executor_t& executor, shard_ticks_t& ticks) noexcept;
@@ -564,12 +588,12 @@ status_t specialized_index<index_type_>::clear() noexcept {
     return index.clear();
 }
 template <typename index_type_>
-typename specialized_index<index_type_>::insert_result_t specialized_index<index_type_>::add(
+expected<typename specialized_index<index_type_>::insert_result_t> specialized_index<index_type_>::add(
     std::span<key_t const> keys, vectors_view_t rows, executor_t& executor, insert_config_t config) noexcept {
     return index.add(keys, rows, executor, config);
 }
 template <typename index_type_>
-typename specialized_index<index_type_>::refine_result_t specialized_index<index_type_>::refine(
+expected<typename specialized_index<index_type_>::refine_result_t> specialized_index<index_type_>::refine(
     executor_t& executor, refine_config_t config, shard_ticks_t& ticks) noexcept {
     return index.refine(executor, config,
                         [&](std::size_t swept, std::size_t population) noexcept { return ticks(swept, population); });
@@ -580,13 +604,13 @@ expected<typename specialized_index<index_type_>::heal_result_t> specialized_ind
     return index.heal(executor);
 }
 template <typename index_type_>
-typename specialized_index<index_type_>::search_result_t specialized_index<index_type_>::search(
+expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::search(
     vectors_view_t queries, executor_t& executor, search_config_t config, std::size_t wanted, keys_span_t keys,
-    distances_span_t distances, counts_span_t counts) noexcept {
+    distances_span_t distances, counts_span_t counts, dummy_predicate_t) noexcept {
     return index.search(queries, executor, config, wanted, keys, distances, counts);
 }
 template <typename index_type_>
-typename specialized_index<index_type_>::search_result_t specialized_index<index_type_>::search_if(
+expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::search(
     vectors_view_t queries, executor_t& executor, search_config_t config, std::size_t wanted, keys_span_t keys,
     distances_span_t distances, counts_span_t counts, key_predicate_t& predicate) noexcept
     requires is_ram_index<index_type_>

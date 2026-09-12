@@ -267,10 +267,10 @@ bool run_insertion(streamed_dataset_type_& streamed) {
             batch = vectors_view_t {streamed.staging.row(0).data(), count, dimensions};
         }
 
-        auto added = bench.indexes.add(std::span<key_t const> {keys.data(), count}, batch, bench.executor, config);
-        if (!added) {
-            fmt::println("Insertion refused a batch of {} rows at row {}: {}", count, base,
-                         status_to_string(added.status));
+        auto const [added, landed] = bench.indexes.add(std::span<key_t const> {keys.data(), count}, batch,
+                                                       bench.executor, config);
+        if (failed(landed)) {
+            fmt::println("Insertion refused a batch of {} rows at row {}: {}", count, base, status_to_string(landed));
             return false;
         }
         sums.visited_members += added.visited_members;
@@ -350,11 +350,12 @@ bool run_refinement(streamed_dataset_type_& streamed) {
     auto started = clock_t::now();
     for (std::size_t pass = 0; pass != max_refines; ++pass) {
         std::size_t const swept_before = pass * nodes;
-        auto const refined = bench.indexes.refine(bench.executor, config, [&](std::size_t done, std::size_t) noexcept {
-            return progress.tick(swept_before + done), continuation_t::continue_k;
-        });
-        if (!refined) {
-            fmt::println("Refinement failed on pass {}: status {}", pass, int(refined.status));
+        auto const [refined, refined_status] = bench.indexes.refine(
+            bench.executor, config, [&](std::size_t done, std::size_t) noexcept {
+                return progress.tick(swept_before + done), continuation_t::continue_k;
+            });
+        if (failed(refined_status)) {
+            fmt::println("Refinement failed on pass {}: status {}", pass, int(refined_status));
             return false;
         }
         changed_per_pass.push_back(refined.changed_nodes);
@@ -429,14 +430,14 @@ bool run_search(streamed_dataset_type_& streamed) {
             batch = vectors_view_t {streamed.staging.row(0).data(), count, dimensions};
         }
 
-        auto found = bench.indexes.search(
+        auto const [found, searched] = bench.indexes.search(
             batch, bench.executor, config, wanted,
             std::span<key_t> {bench.results.hit_rows.row(base).data(), count * wanted},
             std::span<dense_distance_t> {bench.results.hit_distances.row(base).data(), count * wanted},
             std::span<std::size_t> {counts.data(), count});
-        if (!found) {
+        if (failed(searched)) {
             fmt::println("Search refused a batch of {} queries at query {}: {}", count, base,
-                         status_to_string(found.status));
+                         status_to_string(searched));
             return false;
         }
         sums.visited_members += found.visited_members;

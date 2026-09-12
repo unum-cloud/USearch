@@ -274,8 +274,9 @@ void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_
 
     dense_node_id_t local_id = 0;
     vectors_view_t const one_row {vector.data(), 1, streamed.vectors.extent(1)};
-    auto inserted = bench.index->insert(one_row, {&local_id, std::size_t {1}}, *bench.traversals[thread], config);
-    if (!inserted) {
+    auto const [inserted, landed] = bench.index->insert(one_row, {&local_id, std::size_t {1}},
+                                                        *bench.traversals[thread], config);
+    if (failed(landed)) {
         bench.results.failed_tasks.fetch_add(1, std::memory_order_relaxed);
         return;
     }
@@ -385,12 +386,13 @@ void refinement_callback(fu_lambda_context_t punned, std::size_t task, std::size
     node_id_t const first = static_cast<node_id_t>(task * step_nodes_k);
     node_id_t const bound = static_cast<node_id_t>(
         min_of(task * step_nodes_k + step_nodes_k, fanout.bench.index->size()));
-    auto refined = fanout.bench.index->refine({first, bound}, *fanout.bench.traversals[thread], fanout.config);
-    if (!refined) return fanout.failures.fetch_add(1, std::memory_order_relaxed), void();
-    fanout.changed.fetch_add(refined.changed_nodes, std::memory_order_relaxed);
-    fanout.visited_members.fetch_add(refined.visited_members, std::memory_order_relaxed);
-    fanout.computed_distances.fetch_add(refined.computed_distances, std::memory_order_relaxed);
-    fanout.restarts.fetch_add(refined.restarts, std::memory_order_relaxed);
+    auto const [refinement, refined] = fanout.bench.index->refine({first, bound}, *fanout.bench.traversals[thread],
+                                                                  fanout.config);
+    if (failed(refined)) return fanout.failures.fetch_add(1, std::memory_order_relaxed), void();
+    fanout.changed.fetch_add(refinement.changed_nodes, std::memory_order_relaxed);
+    fanout.visited_members.fetch_add(refinement.visited_members, std::memory_order_relaxed);
+    fanout.computed_distances.fetch_add(refinement.computed_distances, std::memory_order_relaxed);
+    fanout.restarts.fetch_add(refinement.restarts, std::memory_order_relaxed);
 }
 
 /** @brief One audit step per task: the reached nodes it holds expand their neighbors. */
@@ -406,12 +408,11 @@ void sweep_callback(fu_lambda_context_t punned, std::size_t task, std::size_t, s
 template <typename bench_type_>
 void reselect_callback(fu_lambda_context_t punned, std::size_t task, std::size_t thread, std::size_t) noexcept {
     using steps_t = typename refinement_fanout_t<bench_type_>::steps_t;
-    using index_t = typename bench_type_::index_t;
     auto& fanout = *static_cast<refinement_fanout_t<bench_type_>*>(punned);
     steps_t const steps = fanout.plan->steps();
-    typename index_t::refine_result_t const reselected = fanout.plan->reselect_islands(
-        steps[task], *fanout.bench.traversals[thread]);
-    if (!reselected) fanout.failures.fetch_add(1, std::memory_order_relaxed);
+    auto const [reselected, reselected_status] = fanout.plan->reselect_islands(steps[task],
+                                                                               *fanout.bench.traversals[thread]);
+    if (failed(reselected_status)) fanout.failures.fetch_add(1, std::memory_order_relaxed);
 }
 
 /** @brief One audit step per task: its islands land in a reached node's neighbor list. */
@@ -570,8 +571,8 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
     std::span<u32_t> const rows_span {merged_rows, bench.options.top_k};
     std::span<dense_distance_t> const distances_span {merged_distances, bench.options.top_k};
     auto started = clock_t::now();
-    auto const found = bench.index->search(query_vector, traversal, config);
-    if (!found) {
+    auto const [found, searched] = bench.index->search(query_vector, traversal, config);
+    if (failed(searched)) {
         bench.results.failed_tasks.fetch_add(1, std::memory_order_relaxed);
         return;
     }

@@ -669,13 +669,9 @@ struct dense_ram_index {
 
 #pragma region Insertion
 
-    /** @brief Outcome & telemetry of one @c insert() batch. */
-    struct insert_result_t {
-        /** @brief @c success_k, or why the whole batch was rejected. A batch is atomic: every
-         *      fallible step runs before the first ID is claimed, so a failure publishes no row
-         *      and there is no partial count to report. The residual hole is a thread dying
-         *      between a claim and its publication, which no return value can carry. */
-        status_t status = status_t::success_k;
+    /** @brief Telemetry of one @c insert() batch; a batch is atomic, so a failed status leaves no
+     *      partial count to report. */
+    struct [[nodiscard]] insert_result_t {
         /** @brief Index size visible after this batch fully published - the watermark. A
          *      rejected batch publishes nothing, so this reports the size it left untouched. */
         std::size_t new_size = 0;
@@ -691,8 +687,6 @@ struct dense_ram_index {
         std::size_t restarts = 0;
         /** @brief Walks a scratch refusal ended early; their nodes published with fewer neighbors. */
         std::size_t saturated_walks = 0;
-
-        explicit operator bool() const noexcept { return succeeded(status); }
     };
 
     /**
@@ -711,14 +705,14 @@ struct dense_ram_index {
      *  @param[inout] context The calling thread's scratch & telemetry, reused across batches.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      */
-    insert_result_t insert(vectors_view_t new_vectors, node_ids_span_t assigned_ids, dense_traversal_context_t& context,
-                           insert_config_t config = {}) noexcept {
+    expected<insert_result_t> insert(vectors_view_t new_vectors, node_ids_span_t assigned_ids,
+                                     dense_traversal_context_t& context, insert_config_t config = {}) noexcept {
 
         std::size_t const incoming_vectors_count = new_vectors.extent(0); // rows, not scalars
-        if (!incoming_vectors_count) return {status_t::success_k, size()};
+        if (!incoming_vectors_count) return {{size()}, status_t::success_k};
         bool const report_assigned_ids = assigned_ids.size() != 0;
         if (report_assigned_ids && assigned_ids.size() != incoming_vectors_count)
-            return {status_t::config_mismatch_k, size()};
+            return {{size()}, status_t::config_mismatch_k};
 
         // Snapshot the context's running telemetry, to report this batch's share on return.
         std::size_t const visited_members_before = context.visited_members;
@@ -731,19 +725,19 @@ struct dense_ram_index {
         // Geometry is frozen by the first successful `reserve()` - a hard prerequisite here:
         // without it, neither the copy width nor the connectivity is defined.
         geometry_t const frozen = geometry();
-        if (!frozen) return {status_t::uninitialized_k, size()};
+        if (!frozen) return {{size()}, status_t::uninitialized_k};
 
         // Rows narrower than the frozen geometry would be over-read by the copy below, which takes
         // its width from the geometry rather than from the caller's matrix; a packed matrix
         // reports its logical width, like the geometry does.
-        if (new_vectors.extent(1) != frozen.dimensions()) return {status_t::config_mismatch_k, size()};
+        if (new_vectors.extent(1) != frozen.dimensions()) return {{size()}, status_t::config_mismatch_k};
 
-        if (status_t const sized = reserve_traversal(context, config); failed(sized)) return {sized, size()};
+        if (status_t const sized = reserve_traversal(context, config); failed(sized)) return {{size()}, sized};
 
         // Claim storage for the whole batch: from here on enough sentinel-filled rows exist for
         // all our nodes, and this thread must roll forward to publishing every ID it claims.
         auto [batch_claim, granted] = claim(incoming_vectors_count);
-        if (failed(granted)) return {granted, size()};
+        if (failed(granted)) return {{size()}, granted};
         insert_reserved(new_vectors, assigned_ids, context, std::move(batch_claim), config);
 
         insert_result_t result;
@@ -755,7 +749,7 @@ struct dense_ram_index {
                                                        reverse_refines_before;
         result.restarts = context.restarts - restarts_before;
         result.saturated_walks = context.saturated_walks - saturated_walks_before;
-        return result;
+        return {result, status_t::success_k};
     }
 
     /**
@@ -965,10 +959,8 @@ struct dense_ram_index {
         small_size_t expansion_factor = 0;
     };
 
-    /** @brief Outcome & telemetry of one @c refine() sweep. */
-    struct refine_result_t {
-        /** @brief @c success_k, or why the sweep could not start; a sweep that started never fails. */
-        status_t status = status_t::success_k;
+    /** @brief Telemetry of one @c refine() sweep; a sweep that started never fails. */
+    struct [[nodiscard]] refine_result_t {
         /** @brief Published nodes the sweep re-selected - the progress unit. */
         std::size_t visited_nodes = 0;
         /** @brief Nodes whose neighbors differ as a set from before - the settling signal. */
@@ -985,8 +977,6 @@ struct dense_ram_index {
         std::size_t restarts = 0;
         /** @brief Walks a scratch refusal ended early; their rows re-selected from a shorter pool. */
         std::size_t saturated_walks = 0;
-
-        explicit operator bool() const noexcept { return succeeded(status); }
     };
 
     /**
@@ -1006,15 +996,15 @@ struct dense_ram_index {
      *  @param[inout] context The calling thread's scratch & telemetry, reused across sweeps.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      */
-    refine_result_t refine(iota_view<node_id_t> nodes, dense_traversal_context_t& context,
-                           refine_config_t config = {}) noexcept {
+    expected<refine_result_t> refine(iota_view<node_id_t> nodes, dense_traversal_context_t& context,
+                                     refine_config_t config = {}) noexcept {
         geometry_t const frozen = geometry();
-        if (!frozen) return {status_t::uninitialized_k};
+        if (!frozen) return {{}, status_t::uninitialized_k};
         std::size_t const node_connectivity = frozen.connectivity();
         std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
                                                                      : node_connectivity * 2;
         if (status_t const sized = reserve_traversal(context, insert_config_t {config.expansion_factor}); failed(sized))
-            return {sized};
+            return {{}, sized};
 
         // Snapshot the context's running telemetry, to report this sweep's share on return.
         std::size_t const visited_members_before = context.visited_members;
@@ -1040,7 +1030,7 @@ struct dense_ram_index {
                                                        reverse_refines_before;
         result.restarts = context.restarts - restarts_before;
         result.saturated_walks = context.saturated_walks - saturated_walks_before;
-        return result;
+        return {result, status_t::success_k};
     }
 
 #pragma endregion Refinement
@@ -1303,12 +1293,11 @@ struct dense_ram_index {
         /** @brief Re-selects the neighbors of every island in @p step - the refinement's own
          *      per-node pass, so the islands gain the best forward picks the graph offers and
          *      back-link into them. Counts the islands as found on the first call per pass. */
-        refine_result_t reselect_islands(step_t const& step, dense_traversal_context_t& context) noexcept {
-            refine_result_t result;
-            if (!index_) return result.status = status_t::uninitialized_k, result;
+        expected<refine_result_t> reselect_islands(step_t const& step, dense_traversal_context_t& context) noexcept {
+            if (!index_) return {{}, status_t::uninitialized_k};
             std::size_t const expansion_factor = index_->connectivity() * 2;
-            if (status_t const sized = index_->reserve_traversal(context); failed(sized))
-                return result.status = sized, result;
+            if (status_t const sized = index_->reserve_traversal(context); failed(sized)) return {{}, sized};
+            refine_result_t result;
             std::size_t const visited_before = context.visited_members;
             std::size_t const computed_before = context.computed_distances;
             for (node_id_t node_id = step.nodes.first; node_id < step.nodes.bound; ++node_id) {
@@ -1322,7 +1311,7 @@ struct dense_ram_index {
             atomic_ref<std::size_t>(visited_members_).fetch_add(result.visited_members, std::memory_order_relaxed);
             atomic_ref<std::size_t>(computed_distances_)
                 .fetch_add(result.computed_distances, std::memory_order_relaxed);
-            return result;
+            return {result, status_t::success_k};
         }
 
         /**
@@ -1437,10 +1426,8 @@ struct dense_ram_index {
         synchronization_t synchronization = synchronization_t::concurrent_k;
     };
 
-    /** @brief Outcome & telemetry of one @c search() call; matches stay in the caller's context. */
-    struct search_result_t {
-        /** @brief @c success_k, or why the search could not run at all. */
-        status_t status = status_t::success_k;
+    /** @brief Telemetry of one @c search() call; matches stay in the caller's context. */
+    struct [[nodiscard]] search_result_t {
         /** @brief Matches left in `context.results`, ascending by distance to the query. */
         std::size_t count = 0;
         /** @brief Frontier candidates expanded during the walk. */
@@ -1451,8 +1438,6 @@ struct dense_ram_index {
         std::size_t restarts = 0;
         /** @brief One when a scratch refusal ended the walk early, leaving the ranking short. */
         std::size_t saturated_walks = 0;
-
-        explicit operator bool() const noexcept { return succeeded(status); }
     };
 
     /**
@@ -1473,8 +1458,8 @@ struct dense_ram_index {
      *      @c context.results, ascending by distance - the nearest first.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      */
-    search_result_t search(vector_view_t query_vector, dense_traversal_context_t& context,
-                           search_config_t config = {}) noexcept {
+    expected<search_result_t> search(vector_view_t query_vector, dense_traversal_context_t& context,
+                                     search_config_t config = {}) noexcept {
         if (config.synchronization != synchronization_t::concurrent_k)
             return search_typed<synchronization_t::immutable_k>(query_vector, context, config);
         return search_typed<synchronization_t::concurrent_k>(query_vector, context, config);
@@ -1510,8 +1495,8 @@ struct dense_ram_index {
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      */
     template <typename predicate_type_>
-    search_result_t search_if(vector_view_t query_vector, predicate_type_&& predicate,
-                              dense_traversal_context_t& context, search_config_t config = {}) noexcept {
+    expected<search_result_t> search_if(vector_view_t query_vector, predicate_type_&& predicate,
+                                        dense_traversal_context_t& context, search_config_t config = {}) noexcept {
         if (config.synchronization != synchronization_t::concurrent_k)
             return search_typed<synchronization_t::immutable_k>(query_vector, context, config,
                                                                 std::forward<predicate_type_>(predicate));
@@ -1524,9 +1509,9 @@ struct dense_ram_index {
      *      atomics at all, and per predicate type, so @c dummy_predicate_t compiles every
      *      admission check out of the unfiltered paths. */
     template <synchronization_t synchronization_, typename predicate_type_ = dummy_predicate_t>
-    search_result_t search_typed(vector_view_t query_vector, dense_traversal_context_t& context,
-                                 search_config_t config = {},
-                                 predicate_type_&& predicate = predicate_type_ {}) noexcept {
+    expected<search_result_t> search_typed(vector_view_t query_vector, dense_traversal_context_t& context,
+                                           search_config_t config = {},
+                                           predicate_type_&& predicate = predicate_type_ {}) noexcept {
         constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, dummy_predicate_t>;
 
         std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
@@ -1537,7 +1522,7 @@ struct dense_ram_index {
         // re-selection buffer, idle during any search - which the same sizes cover.
         if (status_t const sized = reserve_queues_(context, queue_sizes_(expansion_factor, connectivity()));
             failed(sized))
-            return {sized};
+            return {{}, sized};
         if constexpr (predicated_k) context.refining_candidates.clear();
         context.results.clear();
         context.frontier.clear();
@@ -1550,7 +1535,7 @@ struct dense_ram_index {
                                                             ? std::memory_order_acquire
                                                             : std::memory_order_relaxed;
         node_id_t const first_invisible_id = atomic_ref<node_id_t>(last_visible_id_).load(watermark_order_k);
-        if (first_invisible_id == 0) return {status_t::success_k};
+        if (first_invisible_id == 0) return {{}, status_t::success_k};
 
         // Snapshot the context's running telemetry, to report this query's share on return.
         std::size_t const visited_members_before = context.visited_members;
@@ -1577,7 +1562,7 @@ struct dense_ram_index {
         result.computed_distances = context.computed_distances - computed_distances_before;
         result.restarts = context.restarts - restarts_before;
         result.saturated_walks = context.saturated_walks - saturated_walks_before;
-        return result;
+        return {result, status_t::success_k};
     }
 
 #pragma endregion Search

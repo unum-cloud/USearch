@@ -289,11 +289,11 @@ struct dense_ram_indexes {
      *  @param[inout] traversal The calling thread's scratch & telemetry.
      *  @param[in] config The insertion configuration handed to the receiving shard.
      */
-    insert_result_t add(key_t const& key, vector_view_t new_vector, traversal_t& traversal,
-                        insert_config_t config = {}) noexcept {
+    expected<insert_result_t> add(key_t const& key, vector_view_t new_vector, traversal_t& traversal,
+                                  insert_config_t config = {}) noexcept {
         insert_result_t result;
         result.new_size = size();
-        if (shards_.empty()) return result.status = status_t::uninitialized_k, result;
+        if (shards_.empty()) return {result, status_t::uninitialized_k};
 
         // Admission before anything is taken: past a plane, an id has no key slot. The routing
         // tally only names the first shard to try; a full one passes the row on to the next.
@@ -301,15 +301,15 @@ struct dense_ram_indexes {
         std::size_t const routing_base = atomic_ref<std::size_t>(routed_rows_).fetch_add(1, std::memory_order_relaxed);
         std::size_t probe = 0;
         while (probe != shards && !shards_[(routing_base + probe) % shards].admit(1)) ++probe;
-        if (probe == shards) return result.status = status_t::overflow_k, result;
+        if (probe == shards) return {result, status_t::overflow_k};
         std::size_t const shard = (routing_base + probe) % shards;
         admission_t admission = admission_t::admitted(*this, 1, shard);
 
         shard_t& one = shards_[shard];
         if (status_t const sized = one.index->reserve_traversal(traversal, config); failed(sized))
-            return result.status = sized, result;
+            return {result, sized};
         auto [claim, granted] = one.index->claim(1);
-        if (failed(granted)) return result.status = granted, result;
+        if (failed(granted)) return {result, granted};
 
         // The context's counters run across calls, so the report is the difference this one made.
         std::size_t const visited_before = traversal.visited_members;
@@ -338,7 +338,7 @@ struct dense_ram_indexes {
                                                        reverse_refines_before;
         result.restarts = traversal.restarts - restarts_before;
         result.new_size = size();
-        return result;
+        return {result, status_t::success_k};
     }
 
     /**
@@ -356,23 +356,23 @@ struct dense_ram_indexes {
      *  @param[inout] executor The threads and their scratch.
      *  @param[in] config The per-shard insertion configuration, applied uniformly.
      */
-    insert_result_t add(std::span<key_t const> keys, vectors_view_t new_vectors, executor_t& executor,
-                        insert_config_t config = {}) noexcept {
+    expected<insert_result_t> add(std::span<key_t const> keys, vectors_view_t new_vectors, executor_t& executor,
+                                  insert_config_t config = {}) noexcept {
         using claim_t = typename index_t::capacity_claim_t;
         insert_result_t result;
         result.new_size = size();
         std::size_t const rows = new_vectors.extent(0);
         std::size_t const shards = shards_.size();
-        if (!shards) return result.status = status_t::uninitialized_k, result;
-        if (keys.size() != rows) return result.status = status_t::config_mismatch_k, result;
-        if (!rows) return result;
+        if (!shards) return {result, status_t::uninitialized_k};
+        if (keys.size() != rows) return {result, status_t::config_mismatch_k};
+        if (!rows) return {result, status_t::success_k};
 
         // One caller per executor, and the arenas grow to the widest geometry ever asked of them -
         // no caller guesses a byte count, the frozen geometry already knows it.
         auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return result.status = claimed, result;
+        if (failed(claimed)) return {result, claimed};
         if (status_t const sized = executor.reserve(shards_[0].index->traversal_memory_usage(config)); failed(sized))
-            return result.status = sized, result;
+            return {result, sized};
 
         // Rotating by rows routed keeps a stream of small batches from drifting onto shard zero.
         // Each shard's plane is its own ceiling, admitted shard by shard ahead of the claims, so
@@ -381,18 +381,18 @@ struct dense_ram_indexes {
         std::size_t const rotation = atomic_ref<std::size_t>(routed_rows_).fetch_add(rows, std::memory_order_relaxed) %
                                      shards;
         admission_t admission {*this, rows, rotation};
-        if (!admission.admit()) return result.status = status_t::overflow_k, result;
+        if (!admission.admit()) return {result, status_t::overflow_k};
         growing_buffer<claim_t, forkunion_allocator_t> claims {allocator_};
-        if (failed(claims.reserve_exactly(shards))) return result.status = status_t::bad_alloc_k, result;
+        if (failed(claims.reserve_exactly(shards))) return {result, status_t::bad_alloc_k};
         for (std::size_t shard = 0; shard != shards; ++shard) {
             auto [claim, granted] = shards_[shard].index->claim(share_of_(shard, rows, rotation));
-            if (failed(granted)) return result.status = granted, result;
+            if (failed(granted)) return {result, granted};
             claims.push_back_reserved(std::move(claim));
         }
 
         growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
         if (status_t const ready = reserve_traversals_(traversals, executor, config); failed(ready))
-            return result.status = ready, result;
+            return {result, ready};
 
         // The key lands before publication; the reverse plane's quota covers every claimed row.
         auto insert_row = [&](std::size_t task, std::size_t thread, std::size_t) noexcept {
@@ -408,8 +408,7 @@ struct dense_ram_indexes {
                                                                                key_locator_t {shard, assigned});
         };
         // ForkUnion runs every task or none, so a refused fan-out hands the admissions back whole.
-        if (status_t const fanned = executor.for_tasks(rows, insert_row); failed(fanned))
-            return result.status = fanned, result;
+        if (status_t const fanned = executor.for_tasks(rows, insert_row); failed(fanned)) return {result, fanned};
 
         // Every row dispensed an id, so the claims and the admissions are spent rather than credited back.
         for (claim_t& claimed : claims) claimed.consume();
@@ -424,7 +423,7 @@ struct dense_ram_indexes {
             result.saturated_walks += traversal.saturated_walks;
         }
         result.new_size = size();
-        return result;
+        return {result, status_t::success_k};
     }
 
 #pragma endregion Insertion
@@ -483,39 +482,37 @@ struct dense_ram_indexes {
      *      @c cancel_k answer stops the sweep at that step's boundary, reported as @c cancelled_k.
      */
     template <typename progress_type_ = dummy_progress_t>
-    refine_result_t refine(executor_t& executor, refine_config_t config = {},
-                           progress_type_&& on_visited = {}) noexcept {
-        refine_result_t result;
+    expected<refine_result_t> refine(executor_t& executor, refine_config_t config = {},
+                                     progress_type_&& on_visited = {}) noexcept {
         std::size_t const shards = shards_.size();
-        if (!shards) return result.status = status_t::uninitialized_k, result;
+        if (!shards) return {{}, status_t::uninitialized_k};
 
         // A re-selection walks like any other query, so it sizes like one.
         auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return result.status = claimed, result;
+        if (failed(claimed)) return {{}, claimed};
         insert_config_t const walk_config {config.expansion_factor};
         if (status_t const sized = executor.reserve(shards_[0].index->traversal_memory_usage(walk_config));
             failed(sized))
-            return result.status = sized, result;
+            return {{}, sized};
         growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
         if (status_t const ready = reserve_traversals_(traversals, executor, walk_config); failed(ready))
-            return result.status = ready, result;
+            return {{}, ready};
 
         growing_buffer<refine_plan_t, forkunion_allocator_t> plans {allocator_};
         growing_buffer<std::size_t, forkunion_allocator_t> cursors {allocator_};
-        if (failed(plans.resize(shards)) || failed(cursors.resize(shards)))
-            return result.status = status_t::bad_alloc_k, result;
+        if (failed(plans.resize(shards)) || failed(cursors.resize(shards))) return {{}, status_t::bad_alloc_k};
         for (std::size_t shard = 0; shard != shards; ++shard) plans[shard].index_ = shards_[shard].index.get();
 
         // One tally per thread keeps the sweep's counters off every shared line.
         growing_buffer<refine_result_t, forkunion_allocator_t> tallies {allocator_};
-        if (failed(tallies.resize(executor.size()))) return result.status = status_t::bad_alloc_k, result;
+        if (failed(tallies.resize(executor.size()))) return {{}, status_t::bad_alloc_k};
 
         std::size_t const published = size();
         std::atomic<std::size_t> swept {0};
         auto sweep_step = [&](std::size_t shard, typename refine_plan_t::step_t const& step, std::size_t thread,
                               nk::matrix_span<dense_node_id_t>) noexcept -> status_t {
-            refine_result_t const part = shards_[shard].index->refine(step.nodes, traversals[thread], config);
-            if (!part) return part.status;
+            auto const [part, refined] = shards_[shard].index->refine(step.nodes, traversals[thread], config);
+            if (failed(refined)) return refined;
             tallies[thread].visited_nodes += part.visited_nodes;
             tallies[thread].changed_nodes += part.changed_nodes;
             std::size_t const done = swept.fetch_add(part.visited_nodes, std::memory_order_relaxed) +
@@ -523,8 +520,9 @@ struct dense_ram_indexes {
             return on_visited(done, published) == continuation_t::cancel_k ? status_t::cancelled_k
                                                                            : status_t::success_k;
         };
-        result.status = drain_steps_(plans, to_writable_span(cursors), executor, 0, sweep_step);
+        status_t const drained = drain_steps_(plans, to_writable_span(cursors), executor, 0, sweep_step);
 
+        refine_result_t result;
         for (refine_result_t const& tally : tallies) {
             result.visited_nodes += tally.visited_nodes;
             result.changed_nodes += tally.changed_nodes;
@@ -537,7 +535,7 @@ struct dense_ram_indexes {
             result.restarts += traversal.restarts;
             result.saturated_walks += traversal.saturated_walks;
         }
-        return result;
+        return {result, drained};
     }
 
 #pragma endregion Refinement
@@ -674,23 +672,24 @@ struct dense_ram_indexes {
      *  A failing shard stops the scatter but keeps whatever earlier shards already merged, so the
      *  reported count and the ranking always agree.
      */
-    search_result_t search(vector_view_t query_vector, traversal_t& traversal, search_config_t config,
-                           std::span<key_t> keys, std::span<distance_t> distances) noexcept {
+    expected<search_result_t> search(vector_view_t query_vector, traversal_t& traversal, search_config_t config,
+                                     std::span<key_t> keys, std::span<distance_t> distances) noexcept {
         search_result_t merged;
+        status_t status = status_t::success_k;
         for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
             auto const found = shards_[shard].index->search(query_vector, traversal, config);
             if (!found) {
-                merged.status = found.status;
+                status = found.status;
                 break;
             }
-            merged.visited_members += found.visited_members;
-            merged.computed_distances += found.computed_distances;
-            merged.restarts += found.restarts;
-            merged.saturated_walks += found.saturated_walks;
+            merged.visited_members += found.value.visited_members;
+            merged.computed_distances += found.value.computed_distances;
+            merged.restarts += found.value.restarts;
+            merged.saturated_walks += found.value.saturated_walks;
             merged.count = merge_search_results(to_span(traversal.results), shards_[shard].keys, keys, distances,
                                                 merged.count);
         }
-        return merged;
+        return {merged, status};
     }
 
     /**
@@ -713,29 +712,29 @@ struct dense_ram_indexes {
      *  what the merged result reports, and every other query's outputs stand.
      */
     template <typename predicate_type_ = dummy_predicate_t>
-    search_result_t search(vectors_view_t queries, executor_t& executor, search_config_t config, std::size_t wanted,
-                           std::span<key_t> keys, std::span<distance_t> distances, std::span<std::size_t> counts,
-                           predicate_type_&& predicate = {}) noexcept {
+    expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
+                                     std::size_t wanted, std::span<key_t> keys, std::span<distance_t> distances,
+                                     std::span<std::size_t> counts, predicate_type_&& predicate = {}) noexcept {
         search_result_t merged;
         std::size_t const queries_count = queries.extent(0);
-        if (shards_.empty()) return merged.status = status_t::uninitialized_k, merged;
+        if (shards_.empty()) return {{}, status_t::uninitialized_k};
         if (counts.size() != queries_count || keys.size() < queries_count * wanted ||
             distances.size() < queries_count * wanted)
-            return merged.status = status_t::config_mismatch_k, merged;
-        if (!queries_count) return merged;
+            return {{}, status_t::config_mismatch_k};
+        if (!queries_count) return {merged, status_t::success_k};
 
         // One caller per executor, and the arenas grow to the widest geometry ever asked of them.
         auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return merged.status = claimed, merged;
+        if (failed(claimed)) return {{}, claimed};
         if (status_t const sized = executor.reserve(
                 shards_[0].index->traversal_memory_usage(insert_config_t {config.expansion_factor}));
             failed(sized))
-            return merged.status = sized, merged;
+            return {{}, sized};
 
         growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
         if (status_t const ready = reserve_traversals_(traversals, executor, insert_config_t {config.expansion_factor});
             failed(ready))
-            return merged.status = ready, merged;
+            return {{}, ready};
 
         std::atomic<status_t> first_refusal {status_t::success_k};
         auto scatter_query = [&](std::size_t query, std::size_t thread, std::size_t) noexcept {
@@ -744,7 +743,7 @@ struct dense_ram_indexes {
             std::span<distance_t> const distances_row {distances.data() + query * wanted, wanted};
             std::size_t found_count = 0;
             for (shard_t const& one : shards_) {
-                search_result_t found;
+                expected<search_result_t> found {};
                 if constexpr (std::is_same_v<std::decay_t<predicate_type_>, dummy_predicate_t>)
                     found = one.index->search(queries.row(query).as_vector(), traversal, config);
                 else {
@@ -762,9 +761,8 @@ struct dense_ram_indexes {
             counts[query] = found_count;
         };
         if (status_t const fanned = executor.for_tasks(queries_count, scatter_query); failed(fanned))
-            return merged.status = fanned, merged;
+            return {{}, fanned};
 
-        merged.status = first_refusal.load(std::memory_order_relaxed);
         for (traversal_t const& traversal : traversals) {
             merged.visited_members += traversal.visited_members;
             merged.computed_distances += traversal.computed_distances;
@@ -772,7 +770,7 @@ struct dense_ram_indexes {
             merged.saturated_walks += traversal.saturated_walks;
         }
         for (std::size_t const count : counts) merged.count += count;
-        return merged;
+        return {merged, first_refusal.load(std::memory_order_relaxed)};
     }
 
 #pragma endregion Search
