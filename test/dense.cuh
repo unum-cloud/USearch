@@ -792,6 +792,40 @@ std::size_t test_dense_load_hostile(make_index_type_ const& make_index) {
                                   status_t::config_mismatch_k);
             failures += expect_eq(planned.value.finish(), status_t::config_mismatch_k);
             failures += expect_eq(failing.size(), 0u);
+
+            // A refused finish spends nothing: the missing steps land and the same plan publishes once.
+            failures += expect_eq(planned.value.load_neighbors(steps[1], neighbors_slice(1), local),
+                                  status_t::success_k);
+            for (std::size_t position = 2; position < steps.size(); ++position) {
+                failures += expect_eq(planned.value.load_vectors(steps[position], vectors_slice(position)),
+                                      status_t::success_k);
+                failures += expect_eq(planned.value.load_neighbors(steps[position], neighbors_slice(position), local),
+                                      status_t::success_k);
+            }
+            failures += expect_eq(planned.value.finish(), status_t::success_k);
+            failures += expect_eq(failing.size(), nodes_count);
+            failures += expect_eq(planned.value.finish(), status_t::uninitialized_k); // Spent: no second publish.
+            failures += expect_eq(failing.size(), nodes_count);
+        }
+
+        // A load plan that dies before its finish releases the rows it claimed, once even when
+        // moved: the next plan appends at the same base and lands the whole checkpoint.
+        {
+            index_type_ abandoned = make_index(ledger);
+            failures += expect(abandoned.reserve({nodes_count, connectivity_16_k, dimensions}).status ==
+                               status_t::success_k);
+            {
+                auto planned = dense_plan_load(abandoned, nodes_count);
+                failures += expect(succeeded(planned.status));
+                auto moved = std::move(planned.value);
+                failures += expect_eq(planned.value.steps().size(), 0u);
+                failures += expect_eq(planned.value.finish(), status_t::uninitialized_k); // Moved from: refuses.
+                failures += expect(moved.steps().size() >= 1);
+            }
+            failures += expect_eq(abandoned.size(), 0u);
+            failures += expect_eq(dense_load_from(abandoned, saved_vectors.view(), saved_neighbors.view(), nodes_count),
+                                  status_t::success_k);
+            failures += expect_eq(abandoned.size(), nodes_count);
         }
 
         // A save plan refuses a step past its cut, and a finish with nothing landed.

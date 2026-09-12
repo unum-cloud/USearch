@@ -21,7 +21,9 @@
  *    before the watermark's release store. A saver that acquired the watermark must read the
  *    dispenser level with it. `-Dwithout_appender_release` makes the add relaxed: still carried under
  *    the C++ model, but posted under `-Dmemory=far`, where it may be in flight when the
- *    watermark lands and the plan reports contention on a settled index;
+ *    watermark lands and the plan reports contention on a settled index. A successful `finish`
+ *    spends the plan; `-Dtwice_finished` publishes twice, and the saver finds the dispenser
+ *    past the watermark for good;
  *  - `-Dscenario=keyed`: the sharded index's key plane, written in `on_assigned` right after the
  *    dispense, before the walk and the publication, so every row a reader locates carries its
  *    key. The searcher then walks: one relaxed read of row 0's tail, and the id it holds is
@@ -149,6 +151,11 @@ active proctype loader() {
 #endif
     add_no_return(loader_thread, next_visible_id, appender_order, 2);
     store(loader_thread, last_visible_id, watermark_order, 2);
+#ifdef twice_finished
+    // a second `finish` on a spent plan: the dispenser moves again, the watermark does not
+    add_no_return(loader_thread, next_visible_id, appender_order, 2);
+    store(loader_thread, last_visible_id, watermark_order, 2);
+#endif
     landed(loader_thread)
 }
 #elif scenario == regions

@@ -25,6 +25,7 @@ verify dense_ram_index_watermark.pml pass -Dmemory=sequential -Dscenario=appende
 verify dense_ram_index_watermark.pml pass -Dscenario=appender
 verify dense_ram_index_watermark.pml pass -Dmemory=far -Dscenario=appender
 verify dense_ram_index_watermark.pml fail -Dmemory=far -Dscenario=appender -Dwithout_appender_release
+verify dense_ram_index_watermark.pml fail -Dmemory=sequential -Dscenario=appender -Dtwice_finished
 verify dense_ram_index_watermark.pml pass -Dmemory=sequential -Dscenario=keyed
 verify dense_ram_index_watermark.pml pass -Dscenario=keyed
 verify dense_ram_index_watermark.pml fail -Dmemory=sequential -Dscenario=keyed -Dwithout_key_before_turn
@@ -100,6 +101,10 @@ verify dense_ram_index_capacity.pml pass -Dmemory=sequential -Dscenario=reserver
 verify dense_ram_index_capacity.pml fail -Dmemory=far -Dscenario=reservers -Dwithout_deflation_release
 verify dense_ram_index_capacity.pml fail -Dmemory=sequential -Dscenario=reservers -Dwithout_whole_credit
 verify dense_ram_index_capacity.pml fail -Dscenario=reservers -Dwithout_take_release
+verify dense_ram_index_capacity.pml pass -Dmemory=sequential -Dscenario=loaders
+verify dense_ram_index_capacity.pml pass -Dscenario=loaders
+verify dense_ram_index_capacity.pml pass -Dmemory=far -Dscenario=loaders
+verify dense_ram_index_capacity.pml fail -Dmemory=sequential -Dscenario=loaders -Dwithout_abandon_release
 
 section "dense_ram_indexes.pml: the planes' admission, keys before the turn, the monolith cut per shard, and the load path's keys"
 verify dense_ram_indexes.pml pass -Dmemory=sequential

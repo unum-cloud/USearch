@@ -45,13 +45,20 @@
  *    and its only edge to that chunk is the take it read on `last_allocated_id_`. The grower's
  *    take releases for this; `-Dwithout_take_release` makes it an acquire, and under the view
  *    model the taker's rows lie past every chunk it can see.
+ *
+ *  `-Dscenario=loaders` is a load plan that dies before `finish`: `plan_load` claims two rows,
+ *  the plan owns the claim, and its death releases them; the next plan then claims the same
+ *  rows at the watermark and `capacity()` names one chunk. `-Dwithout_abandon_release` leaves
+ *  the rows claimed, the next plan lands past the watermark, and every later one is refused.
  */
 #include "weak_memory.pml"
 
-// The scenarios: the chunk growth with a hand-back, the admission ceiling, or two reservations.
+// The scenarios: the chunk growth with a hand-back, the admission ceiling, two reservations, or
+// an abandoned load plan and the plan after it.
 #define growth 1
 #define admission 2
 #define reservers 3
+#define loaders 4
 #ifndef scenario
 #define scenario growth
 #endif
@@ -59,6 +66,8 @@
 // The threads, by role, apart from the processes that play them; the adders and the reservers name themselves as they start.
 #define grower_thread 0
 #define claimer_thread 1
+#define abandoner_thread 0
+#define retrier_thread 1
 
 // The words, by the index member each stands for.
 #define remaining_capacity 0
@@ -184,6 +193,30 @@ active [3] proctype adder() {
     :: else
     fi;
     landed(me)
+}
+#elif scenario == loaders
+byte abandoned; // the first plan died
+
+// `plan_load`'s claim of two rows, then the plan's death: the claim it owns releases them
+active proctype abandoner() {
+    int old_remaining, reverted, seen_chunks, first, credited;
+    claim(abandoner_thread, 2, first);
+    assert(first == 0);
+#ifndef without_abandon_release
+    release_capacity(abandoner_thread, 2);
+#endif
+    landed(abandoner_thread);
+    abandoned = 1
+}
+
+// the next `plan_load`: its rows start at the watermark again, and no second chunk grew
+active proctype retrier() {
+    int old_remaining, reverted, seen_chunks, first, credited, unclaimed, total;
+    (abandoned == 1);
+    claim(retrier_thread, 2, first);
+    assert(first == 0);
+    capacity(retrier_thread, total);
+    assert(total == rows_per_chunk)
 }
 #else
 byte reservers_started;

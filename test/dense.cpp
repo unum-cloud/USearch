@@ -8,9 +8,26 @@
  *  The shards are named here, never reflected: each call is a coverage claim the modality
  *  makes about itself, and a dtype that stops building stops being counted loudly.
  */
+#include <type_traits> // `std::is_move_constructible_v` - the plans' and claims' witnesses
+
 #include "dense/ram_metric.hpp"
 #include "dense/ram_index.hpp"
 #include "dense/ram_indexes.hpp"
+
+using namespace unum::usearch;
+
+/** @brief The plans and claims are move-only, and the plans are never assigned over. */
+using witnessed_index_t = dense_ram_index<>;
+static_assert(std::is_move_constructible_v<witnessed_index_t::save_plan_t> &&
+              !std::is_copy_constructible_v<witnessed_index_t::save_plan_t> &&
+              !std::is_copy_assignable_v<witnessed_index_t::save_plan_t> &&
+              !std::is_move_assignable_v<witnessed_index_t::save_plan_t>);
+static_assert(std::is_move_constructible_v<witnessed_index_t::load_plan_t> &&
+              !std::is_copy_constructible_v<witnessed_index_t::load_plan_t> &&
+              !std::is_copy_assignable_v<witnessed_index_t::load_plan_t> &&
+              !std::is_move_assignable_v<witnessed_index_t::load_plan_t>);
+static_assert(std::is_move_constructible_v<witnessed_index_t::capacity_claim_t> &&
+              !std::is_copy_constructible_v<witnessed_index_t::capacity_claim_t>);
 
 std::size_t test_dense_all() {
     std::size_t failures_count = 0;

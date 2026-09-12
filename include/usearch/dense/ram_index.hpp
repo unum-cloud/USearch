@@ -779,10 +779,12 @@ struct dense_ram_index {
      *  it found it. Rows an id was dispensed against never come back, which is why consuming a
      *  claim and dispensing against it are the same step. @ref dense_ram_index_concurrency
      */
-    struct capacity_claim_t {
+    struct [[nodiscard]] capacity_claim_t {
         capacity_claim_t() noexcept = default;
-        /** @brief The granting index and the rows it granted; only @ref claim ever calls it. */
-        capacity_claim_t(dense_ram_index& index, std::size_t rows) noexcept : index_(&index), rows_(rows) {}
+        /** @brief The granting index, the rows it granted and the first of them; only @ref claim
+         *      ever calls it. */
+        capacity_claim_t(dense_ram_index& index, std::size_t rows, node_id_t base) noexcept
+            : index_(&index), rows_(rows), base_(base) {}
         capacity_claim_t(capacity_claim_t&& other) noexcept { swap(other); }
         capacity_claim_t& operator=(capacity_claim_t&& other) noexcept { return swap(other), *this; }
         capacity_claim_t(capacity_claim_t const&) = delete;
@@ -795,10 +797,13 @@ struct dense_ram_index {
         void swap(capacity_claim_t& other) noexcept {
             std::swap(index_, other.index_);
             std::swap(rows_, other.rows_);
+            std::swap(base_, other.base_);
         }
 
         /** @brief Rows this claim still holds; zero once an insertion has taken it. */
         std::size_t rows() const noexcept { return rows_; }
+        /** @brief The first granted row - where a load plan appends. */
+        node_id_t base() const noexcept { return base_; }
         explicit operator bool() const noexcept { return rows_ != 0; }
 
         /** @brief Marks the rows as taken, so destruction credits nothing back - what an insertion
@@ -811,6 +816,8 @@ struct dense_ram_index {
         dense_ram_index* index_ = nullptr;
         /** @brief Rows still held; zero once consumed, so destruction credits nothing. */
         std::size_t rows_ = 0;
+        /** @brief The first granted row. */
+        node_id_t base_ = 0;
     };
 
     /** @brief Claims storage for @p count rows without assigning any identity - the step a batch
@@ -818,7 +825,7 @@ struct dense_ram_index {
     expected<capacity_claim_t> claim(std::size_t count) noexcept {
         auto const [first_row, granted] = claim_capacity(count);
         if (failed(granted)) return {capacity_claim_t {}, granted};
-        return {capacity_claim_t {*this, count}, status_t::success_k};
+        return {capacity_claim_t {*this, count, first_row}, status_t::success_k};
     }
 
     /** @brief Returns @p count rows no id was dispensed against. Deflating the claim watermark
@@ -1129,8 +1136,6 @@ struct dense_ram_index {
      *  surfaces as @c contended_k instead of a silently torn snapshot.
      */
     struct [[nodiscard]] save_plan_t {
-        /** @brief The index being snapshotted. */
-        dense_ram_index const& index;
         /** @brief The contract the caller certified. */
         synchronization_t synchronization = synchronization_t::concurrent_k;
         /** @brief Rows under the cut - the watermark at planning. */
@@ -1143,6 +1148,22 @@ struct dense_ram_index {
         std::size_t covered_vectors = 0;
         /** @brief Rows whose neighbors landed, tallied through @c atomic_ref. */
         std::size_t covered_neighbors = 0;
+
+        save_plan_t() noexcept = default;
+        /** @brief The index being snapshotted under @p synchronization; only @ref plan_save calls it. */
+        save_plan_t(dense_ram_index const& index, synchronization_t synchronization) noexcept
+            : synchronization(synchronization), index_(&index) {}
+        save_plan_t(save_plan_t&& other) noexcept
+            : synchronization(other.synchronization), visible(other.visible), dispensed(other.dispensed),
+              allocated(other.allocated), covered_vectors(other.covered_vectors),
+              covered_neighbors(other.covered_neighbors), index_(std::exchange(other.index_, nullptr)) {}
+        save_plan_t& operator=(save_plan_t&&) = delete;
+        // The tallies are this plan's own: a copy would tally into a twin `finish` never reads.
+        save_plan_t(save_plan_t const&) = delete;
+        save_plan_t& operator=(save_plan_t const&) = delete;
+        /** @brief A cut owns nothing - no rows were claimed and no lock taken - so a dying plan
+         *      leaves the index as it found it. */
+        ~save_plan_t() noexcept = default;
 
         /** @brief One step of the plan: one storage chunk's share of the rows under the cut. */
         struct step_t {
@@ -1165,7 +1186,7 @@ struct dense_ram_index {
             std::size_t const first = capacity_of_chunks(static_cast<small_size_t>(position));
             std::size_t const bound = min_of(capacity_of_chunks(static_cast<small_size_t>(position + 1)),
                                              static_cast<std::size_t>(visible));
-            geometry_t const frozen = index.geometry();
+            geometry_t const frozen = index_->geometry();
             step.position = position;
             step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
             step.source_rows = step.index_rows;
@@ -1174,11 +1195,10 @@ struct dense_ram_index {
             return step;
         }
 
-        /** @brief The steps the cut spans - one per storage chunk it reaches. */
+        /** @brief The steps the cut spans - one per storage chunk it reaches; none once spent. */
         indexed_range<save_plan_t> steps() const noexcept {
-            std::size_t const count = visible
-                                          ? index.chunked_location(static_cast<node_id_t>(visible - 1)).chunk_index + 1u
-                                          : 0u;
+            std::size_t const count =
+                index_ && visible ? index_->chunked_location(static_cast<node_id_t>(visible - 1)).chunk_index + 1u : 0u;
             return {this, count};
         }
 
@@ -1189,13 +1209,14 @@ struct dense_ram_index {
          *  @param[out] destination The step's own bytes, sized by @c step.vectors_bytes.
          */
         status_t save_vectors(step_t const& step, bytes_span_t destination) noexcept {
+            if (!index_) return status_t::uninitialized_k;
             iota_view<node_id_t> const rows = step.index_rows;
             if (rows.empty()) return status_t::config_mismatch_k;
-            std::size_t const row_values = stored_row_values(index.geometry());
+            std::size_t const row_values = stored_row_values(index_->geometry());
             std::size_t const values = rows.size() * row_values;
             if (destination.size() != step.vectors_bytes) return status_t::config_mismatch_k;
-            chunked_location_t const location = index.chunked_location(rows.first);
-            vectors_view_t const vectors = index.vectors_chunks_[location.chunk_index].view()(
+            chunked_location_t const location = index_->chunked_location(rows.first);
+            vectors_view_t const vectors = index_->vectors_chunks_[location.chunk_index].view()(
                 nk::range {location.index_in_chunk, location.index_in_chunk + rows.size()}, nk::slice);
             [[maybe_unused]] status_t const copied = copy_bytes(destination, bytes_of(vectors.data(), values));
             atomic_ref<std::size_t>(covered_vectors).add(rows.size(), std::memory_order_release);
@@ -1212,16 +1233,17 @@ struct dense_ram_index {
          */
         status_t save_neighbors(step_t const& step, bytes_span_t destination, node_id_t id_shift,
                                 nk::matrix_span<node_id_t> scratch) noexcept {
+            if (!index_) return status_t::uninitialized_k;
             iota_view<node_id_t> const rows = step.index_rows;
             if (rows.empty()) return status_t::config_mismatch_k;
-            std::size_t const connectivity = index.geometry().connectivity();
+            std::size_t const connectivity = index_->geometry().connectivity();
             std::size_t const words = rows.size() * connectivity;
             if (destination.size() != step.neighbors_bytes) return status_t::config_mismatch_k;
             if (scratch.extent(0) < rows.size() || scratch.extent(1) != connectivity || !scratch.is_contiguous())
                 return status_t::config_mismatch_k;
-            chunked_location_t const location = index.chunked_location(rows.first);
+            chunked_location_t const location = index_->chunked_location(rows.first);
             node_id_t const* source =
-                index.neighbors_chunks_[location.chunk_index].view().row(location.index_in_chunk).data();
+                index_->neighbors_chunks_[location.chunk_index].view().row(location.index_in_chunk).data();
             node_id_t* staged = scratch.data();
             // The `const_cast` is the pre-P3323 currency for atomics living in const memory.
             if (synchronization == synchronization_t::concurrent_k)
@@ -1238,23 +1260,33 @@ struct dense_ram_index {
         }
 
         /** @brief Pronounces the snapshot complete: every chunk's vectors and neighbors landed,
-         *      and under @c concurrent_k the counters rested across the whole plan. */
+         *      and under @c concurrent_k the counters rested across the whole plan. A success
+         *      spends the plan; a refusal leaves it whole, so the missing steps can still land. */
         status_t finish() noexcept {
+            if (!index_) return status_t::uninitialized_k;
             std::size_t const nodes = static_cast<std::size_t>(visible);
             if (atomic_ref<std::size_t>(covered_vectors).load(std::memory_order_acquire) != nodes ||
                 atomic_ref<std::size_t>(covered_neighbors).load(std::memory_order_acquire) != nodes)
                 return status_t::config_mismatch_k;
-            if (synchronization != synchronization_t::concurrent_k) return status_t::success_k;
-            // Orders the staged reads before the re-reads below; pairs with the release fence
-            // heading @c back_link_neighbors, so any row edit the copies overlapped surfaces here.
-            // The non-monotone allocation counter rides along as a bonus growth sensor.
-            std::atomic_thread_fence(std::memory_order_acquire);
-            bool const settled =
-                atomic_ref<node_id_t>(index.last_visible_id_).load(std::memory_order_relaxed) == visible &&
-                atomic_ref<node_id_t>(index.next_visible_id_).load(std::memory_order_relaxed) == dispensed &&
-                atomic_ref<node_id_t>(index.last_allocated_id_).load(std::memory_order_relaxed) == allocated;
-            return settled ? status_t::success_k : status_t::contended_k;
+            if (synchronization == synchronization_t::concurrent_k) {
+                // Orders the staged reads before the re-reads below; pairs with the release fence
+                // heading @c back_link_neighbors, so any row edit the copies overlapped surfaces here.
+                // The non-monotone allocation counter rides along as a bonus growth sensor.
+                std::atomic_thread_fence(std::memory_order_acquire);
+                bool const settled =
+                    atomic_ref<node_id_t>(index_->last_visible_id_).load(std::memory_order_relaxed) == visible &&
+                    atomic_ref<node_id_t>(index_->next_visible_id_).load(std::memory_order_relaxed) == dispensed &&
+                    atomic_ref<node_id_t>(index_->last_allocated_id_).load(std::memory_order_relaxed) == allocated;
+                if (!settled) return status_t::contended_k;
+            }
+            index_ = nullptr;
+            return status_t::success_k;
         }
+
+      private:
+        /** @brief The index being snapshotted; null in the empty plan a refused @ref plan_save
+         *      hands back, and once @c finish succeeded. */
+        dense_ram_index const* index_ = nullptr;
     };
 
     /**
@@ -1264,14 +1296,13 @@ struct dense_ram_index {
      *      reads like @c immutable_k.
      */
     expected<save_plan_t> plan_save(synchronization_t synchronization) const noexcept {
-        save_plan_t plan {*this};
-        plan.synchronization = synchronization;
+        if (!geometry()) return {{}, status_t::config_mismatch_k};
+        save_plan_t plan {*this, synchronization};
         plan.visible = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
         plan.dispensed = atomic_ref<node_id_t>(next_visible_id_).load(std::memory_order_acquire);
         plan.allocated = atomic_ref<node_id_t>(last_allocated_id_).load(std::memory_order_acquire);
-        if (!geometry()) return {plan, status_t::config_mismatch_k};
-        if (plan.visible != plan.dispensed) return {plan, status_t::contended_k};
-        return {plan, status_t::success_k};
+        if (plan.visible != plan.dispensed) return {{}, status_t::contended_k};
+        return {std::move(plan), status_t::success_k};
     }
 
     /**
@@ -1281,12 +1312,11 @@ struct dense_ram_index {
      *  Demands sole ownership of an index whose geometry is already frozen. A source's ids are
      *  local to the rows it delivers, so every chunk shifts them onto the appended range and
      *  folds every other id onto the sentinel; norms re-derive as the vectors land. Repeated
-     *  plans append, which is how several parts land in one shard. A failed load leaves the
-     *  claimed rows unpublished and the structure unusable - destroy it.
+     *  plans append, which is how several parts land in one shard. The plan owns the claim its
+     *  rows ride in: a plan that dies before @c finish releases them, so the next plan appends
+     *  at the same base and the rows it half-filled are never published.
      */
     struct [[nodiscard]] load_plan_t {
-        /** @brief The index being repopulated. */
-        dense_ram_index& index;
         /** @brief The first appended id - the row the claim landed at. */
         node_id_t base = 0;
         /** @brief Rows the plan appends. */
@@ -1295,6 +1325,22 @@ struct dense_ram_index {
         std::size_t covered_vectors = 0;
         /** @brief Rows whose neighbors landed, tallied through @c atomic_ref. */
         std::size_t covered_neighbors = 0;
+
+        load_plan_t() noexcept = default;
+        /** @brief The index appended to at @p base, and the claim the rows ride in - empty for a
+         *      plan of no rows; only @ref plan_load calls it. */
+        load_plan_t(dense_ram_index& index, node_id_t base, capacity_claim_t&& claim) noexcept
+            : base(base), rows(claim.rows()), index_(&index), claim_(std::move(claim)) {}
+        load_plan_t(load_plan_t&& other) noexcept
+            : base(other.base), rows(std::exchange(other.rows, 0)), covered_vectors(other.covered_vectors),
+              covered_neighbors(other.covered_neighbors), index_(std::exchange(other.index_, nullptr)),
+              claim_(std::move(other.claim_)) {}
+        load_plan_t& operator=(load_plan_t&&) = delete;
+        // The tallies are this plan's own: a copy would tally into a twin `finish` never reads.
+        load_plan_t(load_plan_t const&) = delete;
+        load_plan_t& operator=(load_plan_t const&) = delete;
+        /** @brief The claim's own death releases the rows, unless @c finish consumed them. */
+        ~load_plan_t() noexcept = default;
 
         /** @brief One step of the plan: one storage chunk's share of the appended rows. */
         struct step_t {
@@ -1314,12 +1360,12 @@ struct dense_ram_index {
         step_t operator[](std::size_t position) const noexcept {
             step_t step;
             if (position >= steps().size()) return step;
-            small_size_t const first_chunk = index.chunked_location(base).chunk_index;
+            small_size_t const first_chunk = index_->chunked_location(base).chunk_index;
             std::size_t const first = max_of(capacity_of_chunks(static_cast<small_size_t>(first_chunk + position)),
                                              static_cast<std::size_t>(base));
             std::size_t const bound = min_of(capacity_of_chunks(static_cast<small_size_t>(first_chunk + position + 1)),
                                              static_cast<std::size_t>(base) + rows);
-            geometry_t const frozen = index.geometry();
+            geometry_t const frozen = index_->geometry();
             step.position = position;
             step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
             step.source_rows = {static_cast<node_id_t>(first - base), static_cast<node_id_t>(bound - base)};
@@ -1328,12 +1374,12 @@ struct dense_ram_index {
             return step;
         }
 
-        /** @brief The steps the append spans - one per storage chunk it reaches. */
+        /** @brief The steps the append spans - one per storage chunk it reaches; none once spent. */
         indexed_range<load_plan_t> steps() const noexcept {
             std::size_t const count =
-                rows ? index.chunked_location(static_cast<node_id_t>(base + rows - 1)).chunk_index -
-                           index.chunked_location(base).chunk_index + 1u
-                     : 0u;
+                index_ && rows ? index_->chunked_location(static_cast<node_id_t>(base + rows - 1)).chunk_index -
+                                     index_->chunked_location(base).chunk_index + 1u
+                               : 0u;
             return {this, count};
         }
 
@@ -1344,13 +1390,14 @@ struct dense_ram_index {
          *  @param[in] source The step's own bytes, sized by @c step.vectors_bytes.
          */
         status_t load_vectors(step_t const& step, bytes_view_t source) noexcept {
+            if (!index_) return status_t::uninitialized_k;
             iota_view<node_id_t> const range = step.index_rows;
             if (range.empty()) return status_t::config_mismatch_k;
-            std::size_t const row_values = stored_row_values(index.geometry());
+            std::size_t const row_values = stored_row_values(index_->geometry());
             std::size_t const values = range.size() * row_values;
             if (source.size() != values * sizeof(scalar_t)) return status_t::config_mismatch_k;
-            chunked_location_t const location = index.chunked_location(range.first);
-            nk::matrix_span<scalar_t> const vectors = index.vectors_chunks_[location.chunk_index].span()(
+            chunked_location_t const location = index_->chunked_location(range.first);
+            nk::matrix_span<scalar_t> const vectors = index_->vectors_chunks_[location.chunk_index].span()(
                 nk::range {location.index_in_chunk, location.index_in_chunk + range.size()}, nk::slice);
             [[maybe_unused]] status_t const copied = copy_bytes(bytes_of(vectors.data(), values), source);
             // Norms come from the same kernels the insertion path uses.
@@ -1358,7 +1405,7 @@ struct dense_ram_index {
                 for (std::size_t offset_in_chunk = 0; offset_in_chunk != range.size(); ++offset_in_chunk) {
                     chunked_location_t const row {location.chunk_index,
                                                   static_cast<small_size_t>(location.index_in_chunk + offset_in_chunk)};
-                    index.norm_ref_for(row) = dense_norms(index.vector_for(row));
+                    index_->norm_ref_for(row) = dense_norms(index_->vector_for(row));
                 }
             atomic_ref<std::size_t>(covered_vectors).add(range.size(), std::memory_order_release);
             return status_t::success_k;
@@ -1373,13 +1420,14 @@ struct dense_ram_index {
          *  @param[in] source_range The id space the source's rows speak.
          */
         status_t load_neighbors(step_t const& step, bytes_view_t source, iota_view<node_id_t> source_range) noexcept {
+            if (!index_) return status_t::uninitialized_k;
             iota_view<node_id_t> const range = step.index_rows;
             if (range.empty()) return status_t::config_mismatch_k;
-            std::size_t const connectivity = index.geometry().connectivity();
+            std::size_t const connectivity = index_->geometry().connectivity();
             std::size_t const words = range.size() * connectivity;
             if (source.size() != words * sizeof(node_id_t)) return status_t::config_mismatch_k;
-            chunked_location_t const location = index.chunked_location(range.first);
-            nk::matrix_span<node_id_t> const neighbors = index.neighbors_chunks_[location.chunk_index].span()(
+            chunked_location_t const location = index_->chunked_location(range.first);
+            nk::matrix_span<node_id_t> const neighbors = index_->neighbors_chunks_[location.chunk_index].span()(
                 nk::range {location.index_in_chunk, location.index_in_chunk + range.size()}, nk::slice);
             [[maybe_unused]] status_t const copied = copy_bytes(bytes_of(neighbors.data(), words), source);
             std::span<node_id_t> const landed {neighbors.data(), words};
@@ -1390,18 +1438,33 @@ struct dense_ram_index {
         }
 
         /** @brief Publishes the appended rows once every chunk's vectors and neighbors landed:
-         *      identity first, the watermark last with a release, as every publication here. The
-         *      identity releases too: a posted, order-free add could land after the watermark. */
+         *      the claim consumed first - a published row never comes back - then identity, then
+         *      the watermark last with a release, as every publication here. The identity
+         *      releases too: a posted, order-free add could land after the watermark. A success
+         *      spends the plan, so a second call answers @c uninitialized_k instead of publishing
+         *      twice; a refusal leaves it whole, so the missing steps can still land. */
         status_t finish() noexcept {
+            if (!index_) return status_t::uninitialized_k;
             if (atomic_ref<std::size_t>(covered_vectors).load(std::memory_order_acquire) != rows ||
                 atomic_ref<std::size_t>(covered_neighbors).load(std::memory_order_acquire) != rows)
                 return status_t::config_mismatch_k;
-            if (!rows) return status_t::success_k;
-            atomic_ref<node_id_t>(index.next_visible_id_).add(static_cast<node_id_t>(rows), std::memory_order_release);
-            atomic_ref<node_id_t>(index.last_visible_id_)
-                .store(static_cast<node_id_t>(base + rows), std::memory_order_release);
+            if (rows) {
+                claim_.consume();
+                atomic_ref<node_id_t>(index_->next_visible_id_)
+                    .add(static_cast<node_id_t>(rows), std::memory_order_release);
+                atomic_ref<node_id_t>(index_->last_visible_id_)
+                    .store(static_cast<node_id_t>(base + rows), std::memory_order_release);
+            }
+            index_ = nullptr;
             return status_t::success_k;
         }
+
+      private:
+        /** @brief The index appended to; null in the empty plan a refused @ref plan_load hands
+         *      back, and once @c finish published. */
+        dense_ram_index* index_ = nullptr;
+        /** @brief The rows this plan appends, released by their own death unless consumed. */
+        capacity_claim_t claim_;
     };
 
     /**
@@ -1411,22 +1474,16 @@ struct dense_ram_index {
      *      mid-flight, and rows past the id space.
      */
     expected<load_plan_t> plan_load(std::size_t rows) noexcept {
-        load_plan_t plan {*this};
-        if (!geometry()) return {plan, status_t::config_mismatch_k};
+        if (!geometry()) return {{}, status_t::config_mismatch_k};
         node_id_t const visible = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
-        plan.base = visible;
-        if (!rows) return {plan, status_t::success_k};
+        if (!rows) return {load_plan_t {*this, visible, {}}, status_t::success_k};
         if (visible != atomic_ref<node_id_t>(next_visible_id_).load(std::memory_order_acquire))
-            return {plan, status_t::contended_k};
-        if (rows > max_node_count_k - visible) return {plan, status_t::overflow_k};
-        auto const [base, granted] = claim_capacity(rows);
-        if (failed(granted)) return {plan, granted};
-        if (base != visible) {
-            release_capacity(rows); // A refused plan owns nothing.
-            return {plan, status_t::contended_k};
-        }
-        plan.rows = rows;
-        return {plan, status_t::success_k};
+            return {{}, status_t::contended_k};
+        if (rows > max_node_count_k - visible) return {{}, status_t::overflow_k};
+        auto [claimed, granted] = claim(rows);
+        if (failed(granted)) return {{}, granted};
+        if (claimed.base() != visible) return {{}, status_t::contended_k}; // The claim dies and releases.
+        return {load_plan_t {*this, visible, std::move(claimed)}, status_t::success_k};
     }
 
 #pragma endregion Checkpoints

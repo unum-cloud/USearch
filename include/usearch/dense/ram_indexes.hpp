@@ -946,10 +946,10 @@ struct dense_ram_indexes {
         growing_buffer<std::size_t, forkunion_allocator_t> bases {allocator_};
         if (failed(plans.reserve_exactly(shards)) || failed(bases.resize(shards + 1))) return status_t::bad_alloc_k;
         for (std::size_t shard = 0; shard != shards; ++shard) {
-            auto const [plan, planned] = shards_[shard].index->plan_save(config.synchronization);
+            auto [plan, planned] = shards_[shard].index->plan_save(config.synchronization);
             if (failed(planned)) return planned;
-            plans.push_back_reserved(plan);
             bases[shard + 1] = bases[shard] + plan.visible;
+            plans.push_back_reserved(std::move(plan));
         }
 
         growing_buffer<safegraphs_custom_field_t, forkunion_allocator_t> fields {allocator_};
@@ -1010,7 +1010,7 @@ struct dense_ram_indexes {
         std::string_view const stem = safegraphs_stem(path);
         growing_buffer<char, forkunion_allocator_t> part_path {allocator_};
         for (std::size_t shard = 0; shard != shards; ++shard) {
-            auto const [plan, planned] = shards_[shard].index->plan_save(config.synchronization);
+            auto [plan, planned] = shards_[shard].index->plan_save(config.synchronization);
             if (failed(planned)) return planned;
             auto const [header, framed] = monolith_header_(plan.visible, config, named);
             if (failed(framed)) return framed;
@@ -1018,7 +1018,7 @@ struct dense_ram_indexes {
             if (failed(formatted)) return formatted;
             auto [mapping, mapped] = mapped_file_t::write(file_path, header.monolith_bytes());
             if (failed(mapped)) return mapped;
-            plans.push_back_reserved(plan);
+            plans.push_back_reserved(std::move(plan));
             headers.push_back_reserved(header);
             mappings.push_back_reserved(std::move(mapping));
         }
@@ -1188,9 +1188,9 @@ struct dense_ram_indexes {
                 return status_t::bad_alloc_k;
             for (std::size_t shard = 0; shard != shards; ++shard) {
                 checkpoint_assignment_t const assignment = assignment_of_(assignments, shard, round);
-                auto const [plan, planned] = shards_[shard].index->plan_load(assignment.rows.size());
+                auto [plan, planned] = shards_[shard].index->plan_load(assignment.rows.size());
                 if (failed(planned)) return planned;
-                plans.push_back_reserved(plan);
+                plans.push_back_reserved(std::move(plan));
                 taken.push_back_reserved(assignment);
             }
 
