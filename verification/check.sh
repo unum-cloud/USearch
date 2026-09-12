@@ -49,6 +49,7 @@ verify dense_vram_index_claims.pml fail -Dwithout_size_acquire
 verify dense_vram_index_claims.pml fail -Dmemory=sequential -Dwithout_claiming_mutex
 verify dense_vram_index_claims.pml fail -Dmemory=sequential -Dwithout_unclaim_on_rejection
 verify dense_vram_index_claims.pml fail -Dmemory=sequential -Dwithout_base_under_claim
+verify dense_vram_index_claims.pml fail -Dmemory=sequential -Dwithout_abandon_unlock
 
 section "dense_vram_indexes.pml: the mutation gate, the ceiling, keys before the claim, and a load beside a batch"
 verify dense_vram_indexes.pml pass -Dmemory=sequential

@@ -11,10 +11,25 @@
  */
 #include <cuda_runtime.h>
 
+#include <type_traits> // `std::is_move_constructible_v` - the plans' witnesses
+
 #include <fmt/format.h>
 
 #include "dense/vram_index.cuh"
 #include "dense/vram_indexes.cuh"
+
+using namespace unum::usearch;
+
+/** @brief The device plans are move-only and never assigned over. */
+using witnessed_index_t = dense_vram_index<>;
+static_assert(std::is_move_constructible_v<witnessed_index_t::save_plan_t> &&
+              !std::is_copy_constructible_v<witnessed_index_t::save_plan_t> &&
+              !std::is_copy_assignable_v<witnessed_index_t::save_plan_t> &&
+              !std::is_move_assignable_v<witnessed_index_t::save_plan_t>);
+static_assert(std::is_move_constructible_v<witnessed_index_t::load_plan_t> &&
+              !std::is_copy_constructible_v<witnessed_index_t::load_plan_t> &&
+              !std::is_copy_assignable_v<witnessed_index_t::load_plan_t> &&
+              !std::is_move_assignable_v<witnessed_index_t::load_plan_t>);
 
 int main() {
     int devices_count = 0;

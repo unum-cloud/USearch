@@ -33,7 +33,9 @@
  *    range overlap it;
  *  - progress: a rejected launch publishes nothing, so its ids are not claimed.
  *    `-Dwithout_unclaim_on_rejection` stores the claim either way, and the next batch's ramp
- *    waits for rows nobody publishes: an invalid end state.
+ *    waits for rows nobody publishes: an invalid end state. A load plan that dies before
+ *    `finish` claims nothing and drops the mutex it held; `-Dwithout_abandon_unlock` keeps it,
+ *    and the inserters spin behind it forever.
  *  `-Dmemory=far` is not run: the posted add is x86's, and the ramp's add runs on the GPU.
  */
 #include "weak_memory.pml"
@@ -219,10 +221,18 @@ active proctype loader() {
             total = base + rows_per_load
         };
         grow(loader_thread, total, mapped);
-        claim_range(2, base, rows_per_load);
-        store(loader_thread, published_rows, order_relaxed, total);
-        store(loader_thread, claimed_rows, claim_order, total);
+        // the plan's verdict: finished, the rows are claimed and restored; dead before `finish`,
+        // the planes stay grown and nothing is claimed, so the next batch reuses the base
+        if
+        :: true ->
+            claim_range(2, base, rows_per_load);
+            store(loader_thread, published_rows, order_relaxed, total);
+            store(loader_thread, claimed_rows, claim_order, total)
+        :: true -> skip
+        fi;
+#ifndef without_abandon_unlock
         unlock_claiming(loader_thread)
+#endif
     fi
 }
 
