@@ -520,16 +520,6 @@ struct dense_ram_index {
         small_size_t expansion_factor = 0;
     };
 
-    /** @brief Outcome of a @c reserve() call: the capacity & connectivity actually in effect. */
-    struct reserve_result_t {
-        /** @brief Total rows the index can now host without growing again. */
-        std::size_t new_capacity = 0;
-        /** @brief The frozen neighbors-list width - echoed back even on a geometry mismatch. */
-        connectivity_t connectivity = connectivity_unknown_k;
-        /** @brief @c success_k, or why the reservation failed. */
-        status_t status = status_t::success_k;
-    };
-
     /** @brief Requested geometry & capacity for a @c reserve() call; frozen by the first success. */
     struct reserve_capacity_t {
         /** @brief Minimal number of entries the index must be able to host. */
@@ -541,18 +531,19 @@ struct dense_ram_index {
     };
 
     /**
-     *  @brief Ensures the index can host at least @p config.capacity entries, growing when needed.
+     *  @brief Ensures the index can host at least @p config.capacity entries, growing when needed,
+     *      and answers the capacity now in effect.
      *
      *  Safe to call concurrently with insertions, searches, and other reservations: capacity
      *  growth is a thin wrapper over the very same grower-election protocol that powers @c insert,
      *  and the geometry (vector dimensions & neighbor connectivity) freezes exactly once through
      *  a single cold-path compare-exchange. Later calls must pass a matching geometry, or they
-     *  receive @c status_t::config_mismatch_k with the frozen connectivity echoed back.
+     *  receive @c status_t::config_mismatch_k.
      *
      *  Constructors deliberately allocate nothing, matching the design of ForkUnion's dynamic
-     *  structures - every storage failure surfaces right here, in the returned @c reserve_result_t.
+     *  structures - every storage failure surfaces right here, in the returned status.
      */
-    reserve_result_t reserve(reserve_capacity_t config) noexcept {
+    expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
 
         // Freeze the geometry exactly once; competing first-reservations are decided by one CAS.
         geometry_t const desired_geometry {config.dimensions, config.connectivity};
@@ -560,12 +551,11 @@ struct dense_ram_index {
         bool const froze_now = atomic_ref<geometry_t>(geometry_).compare_exchange_strong( //
             expected_geometry, desired_geometry, std::memory_order_acq_rel, std::memory_order_acquire);
         geometry_t const frozen_geometry = froze_now ? desired_geometry : expected_geometry;
-        connectivity_t const frozen_connectivity = static_cast<connectivity_t>(frozen_geometry.connectivity());
-        if (frozen_geometry != desired_geometry) return {0, frozen_connectivity, status_t::config_mismatch_k};
+        if (frozen_geometry != desired_geometry) return {0, status_t::config_mismatch_k};
 
         while (true) {
             std::size_t const total_rows = capacity();
-            if (total_rows >= config.capacity) return {total_rows, frozen_connectivity, status_t::success_k};
+            if (total_rows >= config.capacity) return {total_rows, status_t::success_k};
 
             // Grow through the same grower-election protocol that powers `insert`: claim the
             // missing rows, then hand the whole claim back. The revert order is load-bearing -
@@ -574,7 +564,7 @@ struct dense_ram_index {
             // can only over-grow, never report capacity that does not exist.
             std::size_t const deficit_rows = config.capacity - total_rows;
             auto const [first_row, granted] = claim_capacity(deficit_rows);
-            if (failed(granted)) return {total_rows, frozen_connectivity, granted};
+            if (failed(granted)) return {total_rows, granted};
             release_capacity(deficit_rows);
         }
     }

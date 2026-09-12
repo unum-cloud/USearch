@@ -76,7 +76,7 @@ std::size_t test_dense_indexes_search_race() {
 
     indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(indexes)));
-    failures += expect(succeeded(indexes.reserve({nodes_count, connectivity_16_k, dimensions})));
+    failures += expect(succeeded(indexes.reserve({nodes_count, connectivity_16_k, dimensions}).status));
 
     dense_indexes_executor<indexes_type_> driver;
     if (failed(driver.status)) return failures + expect(false);

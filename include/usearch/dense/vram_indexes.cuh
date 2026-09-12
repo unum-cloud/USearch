@@ -176,7 +176,7 @@ struct dense_vram_indexes {
         }
         locators_of_key_.clear();
         admitted_rows_.store(0, std::memory_order_relaxed);
-        return geometry.capacity ? reserve(geometry) : status_t::success_k;
+        return geometry.capacity ? reserve(geometry).status : status_t::success_k;
     }
 
 #pragma endregion Placement
@@ -232,24 +232,24 @@ struct dense_vram_indexes {
      *  planes and the reverse plane both demand a mutation-free phase to grow, and a search
      *  resolves a ranking through them while rows are still landing.
      */
-    status_t reserve(reserve_capacity_t config) noexcept {
-        if (shards_.empty()) return status_t::uninitialized_k;
-        if (capacity()) {
+    expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
+        if (shards_.empty()) return {0, status_t::uninitialized_k};
+        if (std::size_t const held = capacity()) {
             if (config.dimensions != dimensions() || config.connectivity != connectivity())
-                return status_t::config_mismatch_k;
-            return config.capacity <= capacity() ? status_t::success_k : status_t::config_mismatch_k;
+                return {held, status_t::config_mismatch_k};
+            return {held, config.capacity <= held ? status_t::success_k : status_t::config_mismatch_k};
         }
         reserve_capacity_t per_shard = config;
         per_shard.capacity = divide_round_up(config.capacity, shards_.size());
 
         // Key planes never grow: a search resolves through them while rows land.
         for (shard_t& one : shards_) {
-            if (auto const reserved = one.index->reserve(per_shard); reserved.status != status_t::success_k)
-                return reserved.status;
-            if (failed(one.keys.resize(per_shard.capacity))) return status_t::bad_alloc_k;
+            if (status_t const reserved = one.index->reserve(per_shard).status; failed(reserved)) return {0, reserved};
+            if (failed(one.keys.resize(per_shard.capacity))) return {0, status_t::bad_alloc_k};
         }
         // The quota covers every admissible row, so recording a locator is infallible by construction.
-        return locators_of_key_.reserve(capacity());
+        if (status_t const indexed = locators_of_key_.reserve(capacity()); failed(indexed)) return {0, indexed};
+        return {capacity(), status_t::success_k};
     }
 
 #pragma endregion Reservation
@@ -1220,7 +1220,7 @@ struct dense_vram_indexes {
         std::size_t const wanted = max_of(config.capacity, widest * shards);
         if (!capacity()) {
             if (!wanted) return status_t::success_k;
-            if (status_t const reserved = reserve({wanted, connectivity, dimensions}); failed(reserved))
+            if (status_t const reserved = reserve({wanted, connectivity, dimensions}).status; failed(reserved))
                 return reserved;
         }
         else {

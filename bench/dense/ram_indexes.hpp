@@ -188,7 +188,7 @@ bool prepare(streamed_dataset_type_& streamed, fu_topology_t topology) {
             return false;
         }
     }
-    else if (failed(bench.indexes.reserve({rows, connectivity, dimensions}))) {
+    else if (failed(bench.indexes.reserve({rows, connectivity, dimensions}).status)) {
         fmt::println("Failed to reserve {} × {}d over {} shards", rows, dimensions, bench.indexes.shards_count());
         return false;
     }

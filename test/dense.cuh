@@ -282,7 +282,8 @@ std::size_t test_dense_guards(make_index_type_ const& make_index) {
         failures += expect(found.status == status_t::success_k && found.count == 0);
 
         auto reserved = index.reserve({64, connectivity_16_k, dense_dimensions_for<scalar_t>(dense_tiny_values_k)});
-        failures += expect(reserved.status == status_t::success_k && reserved.new_capacity >= 64);
+        failures += expect(reserved.status == status_t::success_k && reserved.value >= 64);
+        failures += expect_eq(reserved.value, index.capacity());
         auto mismatched = index.reserve({64, connectivity_32_k, dense_dimensions_for<scalar_t>(dense_tiny_values_k)});
         failures += expect(mismatched.status == status_t::config_mismatch_k);
         auto matching = index.reserve({32, connectivity_16_k, dense_dimensions_for<scalar_t>(dense_tiny_values_k)});
@@ -1112,14 +1113,15 @@ std::size_t test_dense_indexes_guards() {
                                    executor)
                               .status,
                           status_t::uninitialized_k);
-    failures += expect_eq(indexes.reserve({rows, connectivity_16_k, dimensions}), status_t::uninitialized_k);
+    failures += expect_eq(indexes.reserve({rows, connectivity_16_k, dimensions}).status, status_t::uninitialized_k);
 
     // Reserving closes the shard set, and the frozen geometry refuses drift.
     failures += expect(succeeded(place_shards(indexes)));
-    failures += expect(succeeded(indexes.reserve({rows, connectivity_16_k, dimensions})));
+    failures += expect(succeeded(indexes.reserve({rows, connectivity_16_k, dimensions}).status));
     failures += expect_eq(place_shards(indexes), status_t::config_mismatch_k);
-    failures += expect_eq(indexes.reserve({rows, connectivity_32_k, dimensions}), status_t::config_mismatch_k);
-    failures += expect(succeeded(indexes.reserve({rows, connectivity_16_k, dimensions})));
+    failures += expect_eq(indexes.reserve({rows, connectivity_16_k, dimensions}).value, indexes.capacity());
+    failures += expect_eq(indexes.reserve({rows, connectivity_32_k, dimensions}).status, status_t::config_mismatch_k);
+    failures += expect(succeeded(indexes.reserve({rows, connectivity_16_k, dimensions}).status));
 
     // A keys span disagreeing with the batch's rows refuses before anything is taken.
     failures += expect_eq(indexes
@@ -1192,7 +1194,7 @@ std::size_t test_dense_indexes_arena_growth() {
     auto& executor = driver.executor;
     indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(indexes)));
-    failures += expect(succeeded(indexes.reserve({rows, connectivity_16_k, dimensions})));
+    failures += expect(succeeded(indexes.reserve({rows, connectivity_16_k, dimensions}).status));
 
     auto vectors = make_vectors<scalar_t>(rows + queries, dimensions, dense_seed_upstream_k);
     std::vector<key_t> keys(rows);
@@ -1237,7 +1239,7 @@ std::size_t test_dense_indexes_duplicate_keys() {
     if (failed(driver.status)) return failures + expect(false);
     indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(indexes)));
-    failures += expect(succeeded(indexes.reserve({rows, connectivity_16_k, dimensions})));
+    failures += expect(succeeded(indexes.reserve({rows, connectivity_16_k, dimensions}).status));
 
     auto vectors = make_vectors<scalar_t>(rows, dimensions, dense_seed_guards_k + 2);
     dense_indexes_row_driver<indexes_type_> rows_driver {indexes, driver};
@@ -1307,7 +1309,7 @@ std::size_t dense_indexes_build(indexes_type_& indexes, executor_type_& executor
     std::size_t failures = 0;
     std::size_t const rows = keys.size();
     failures += expect(succeeded(place_shards(indexes)));
-    failures += expect(succeeded(indexes.reserve({rows, connectivity_16_k, dimensions})));
+    failures += expect(succeeded(indexes.reserve({rows, connectivity_16_k, dimensions}).status));
     failures += expect(succeeded(indexes
                                      .add(std::span<key_t const> {keys.data(), rows}, vectors.view(), //
                                           executor)
@@ -1510,7 +1512,7 @@ std::size_t test_dense_indexes_split_load() {
     // A reservation the widest shard cannot fit refuses; a populated index refuses a second load.
     indexes_type_ cramped {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(cramped)));
-    failures += expect(succeeded(cramped.reserve({shards, connectivity_16_k, dimensions})));
+    failures += expect(succeeded(cramped.reserve({shards, connectivity_16_k, dimensions}).status));
     failures += expect_eq(cramped.load(paths.monolith, split, executor), status_t::config_mismatch_k);
     failures += expect_eq(striped.load(paths.monolith, split, executor), status_t::config_mismatch_k);
     failures += expect_eq(striped.size(), rows);
@@ -1641,7 +1643,7 @@ std::size_t test_dense_indexes_concurrent_add() {
 
     indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(indexes)));
-    failures += expect(succeeded(indexes.reserve({nodes_count, connectivity_16_k, dimensions})));
+    failures += expect(succeeded(indexes.reserve({nodes_count, connectivity_16_k, dimensions}).status));
 
     std::array<dense_indexes_executor<indexes_type_>, executors_count> drivers;
     std::vector<nk::matrix<scalar_t>> slices;
@@ -1733,7 +1735,7 @@ std::size_t test_dense_indexes_search_race() {
 
     indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(indexes)));
-    failures += expect(succeeded(indexes.reserve({nodes_count, connectivity_16_k, dimensions})));
+    failures += expect(succeeded(indexes.reserve({nodes_count, connectivity_16_k, dimensions}).status));
 
     dense_indexes_executor<indexes_type_> driver;
     if (failed(driver.status)) return failures + expect(false);
@@ -2145,8 +2147,8 @@ std::size_t test_dense_allocation_budget(make_index_type_ const& make_index) {
         typename index_type_::dense_traversal_context_t context {{}};
         auto reserved = index.reserve({1'000, connectivity_16_k, dimensions});
         failures += expect(reserved.status == status_t::success_k);
-        std::size_t const fill_rows_count = reserved.new_capacity; // Fill to the brim, so
-                                                                   // one more row must grow.
+        std::size_t const fill_rows_count = reserved.value; // Fill to the brim, so
+                                                            // one more row must grow.
         auto vectors = make_vectors<scalar_t>(fill_rows_count + extra_rows_count, dimensions,
                                               dense_seed_allocation_budget_k);
         auto fill_rows = vectors.view()(nk::range(0, fill_rows_count), nk::slice);
@@ -2175,7 +2177,7 @@ std::size_t test_dense_allocation_budget(make_index_type_ const& make_index) {
             index_type_ starved = make_index(ledger);
             auto starved_reserved = starved.reserve({1, connectivity_16_k, dimensions});
             failures += expect(starved_reserved.status == status_t::success_k);
-            failures += expect(starved_reserved.new_capacity < nodes_count); // The growth is genuine.
+            failures += expect(starved_reserved.value < nodes_count); // The growth is genuine.
             ledger.byte_budget.store(ledger.live_bytes.load());
             failures += expect(dense_load_from(starved, saved_vectors.view(), saved_neighbors.view(), nodes_count) ==
                                status_t::bad_alloc_k);
@@ -2300,10 +2302,10 @@ std::size_t test_dense_overflow_race(make_index_type_ const& make_index) {
         index_type_ index = make_index(ledger);
         auto reserved = index.reserve({contested_rows_count, connectivity_16_k, dimensions});
         failures += expect(reserved.status == status_t::success_k);
-        failures += expect(reserved.new_capacity >= contested_rows_count);
+        failures += expect(reserved.value >= contested_rows_count);
 
         // Pre-fill any chunk-rounding surplus, so exactly two batches of capacity remain.
-        std::size_t const prefill_rows_count = reserved.new_capacity - contested_rows_count;
+        std::size_t const prefill_rows_count = reserved.value - contested_rows_count;
         typename index_type_::dense_traversal_context_t context {{}};
         if (prefill_rows_count) {
             auto prefill_vectors = make_vectors<scalar_t>(prefill_rows_count, dimensions,
@@ -2342,7 +2344,7 @@ std::size_t test_dense_overflow_race(make_index_type_ const& make_index) {
             }
         }
         failures += expect_eq(winners_count, 2u);
-        failures += expect_eq(index.size(), reserved.new_capacity);
+        failures += expect_eq(index.size(), reserved.value);
         failures += expect_contiguous_ids(winner_ids, prefill_rows_count);
 
         // The genuine overflow_k belongs to the id-space ceiling alone, refused before any
@@ -2359,7 +2361,7 @@ std::size_t test_dense_overflow_race(make_index_type_ const& make_index) {
                                .insert(threads.slices[refused_thread].view(), {}, //
                                        threads.contexts[refused_thread])
                                .status == status_t::success_k);
-        failures += expect_eq(index.size(), reserved.new_capacity + batch_rows_count);
+        failures += expect_eq(index.size(), reserved.value + batch_rows_count);
     }
     failures += expect_eq(ledger.live_bytes.load(), 0);
     return failures;

@@ -528,7 +528,7 @@ std::size_t specialized_index<index_type_>::get(key_t const& key, vectors_span_t
 }
 template <typename index_type_>
 status_t specialized_index<index_type_>::reserve(reserve_capacity_t config) noexcept {
-    return index.reserve(config);
+    return index.reserve(config).status;
 }
 template <typename index_type_>
 status_t specialized_index<index_type_>::clear() noexcept {

@@ -2081,40 +2081,32 @@ struct dense_vram_index {
         connectivity_t connectivity = connectivity_32_k;
         std::size_t dimensions = 0;
     };
-    /** @brief Outcome of a @c reserve() call: the capacity & connectivity actually in effect. */
-    struct reserve_result_t {
-        std::size_t new_capacity = 0;
-        connectivity_t connectivity = connectivity_unknown_k;
-        status_t status = status_t::success_k;
-    };
-
-    /** @brief Ensures the index can host at least @p config.capacity entries; the first successful
-     *      call freezes the geometry and the virtual-address ceiling, later ones only map slabs. */
-    reserve_result_t reserve(reserve_capacity_t config) noexcept {
-        if (neighbors_plane_.device() != device_.ordinal)
-            return {0, connectivity_unknown_k, status_t::config_mismatch_k};
-        if (!config.dimensions || !config.connectivity) return {0, connectivity_unknown_k, status_t::config_mismatch_k};
+    /** @brief Ensures the index can host at least @p config.capacity entries and answers the
+     *      capacity now in effect; the first successful call freezes the geometry and the
+     *      virtual-address ceiling, later ones only map slabs. */
+    expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
+        if (neighbors_plane_.device() != device_.ordinal) return {0, status_t::config_mismatch_k};
+        if (!config.dimensions || !config.connectivity) return {0, status_t::config_mismatch_k};
         // The first success freezes both axes at once; later calls must agree with what they observe.
         packed_geometry_id_t const requested = pack_geometry(config.dimensions,
                                                              static_cast<std::size_t>(config.connectivity));
         packed_geometry_id_t observed = 0;
         if (!geometry_.compare_exchange_strong(observed, requested, std::memory_order_acq_rel) && observed != requested)
-            return {capacity(), static_cast<connectivity_t>(geometry_connectivity(observed)),
-                    status_t::config_mismatch_k};
+            return {capacity(), status_t::config_mismatch_k};
         connectivity_t const connectivity = config.connectivity;
-        if (config.capacity > max_node_count_k) return {capacity(), connectivity, status_t::overflow_k};
+        if (config.capacity > max_node_count_k) return {capacity(), status_t::overflow_k};
         if (!vectors_plane_.reserved_bytes()) { // First reservation: bind the device, size the ceiling.
             // The primary context must exist before any driver-API mapping, since the planes live in it.
             if (cudaSetDevice(device_.ordinal) != cudaSuccess || cudaFree(nullptr) != cudaSuccess)
-                return {0, connectivity, status_t::device_error_k};
+                return {0, status_t::device_error_k};
             expected<cuda_device_specs_t> const specs = cuda_device_specs_t::query(device_.ordinal);
-            if (specs.status != status_t::success_k) return {0, connectivity, specs.status};
+            if (specs.status != status_t::success_k) return {0, specs.status};
             device_ = specs.value;
             // Geometry no launch can seat is refused here, not by a mid-fan-out launch rejection.
             if (static_cast<std::size_t>(dense_cuda_warps_per_block_k) *
                     max_of(insert_scratch_bytes_per_warp(), merge_scratch_bytes_per_warp()) >
                 device_.shared_memory_per_block_bytes)
-                return {0, connectivity, status_t::config_mismatch_k};
+                return {0, status_t::config_mismatch_k};
             cuInit(0);
             // Virtual address space is free, so the ceiling is generous and independent of the first
             // requested capacity; the reservation itself is the ceiling, no cached row count shadows it.
@@ -2130,14 +2122,14 @@ struct dense_vram_index {
                 norms_plane_.reserve_range(ceiling_rows * sizeof(norms_t), device_.ordinal) != status_t::success_k ||
                 neighbors_plane_.reserve_range(ceiling_rows * connectivity * sizeof(u32_t), device_.ordinal) !=
                     status_t::success_k)
-                return {0, connectivity, status_t::bad_alloc_k};
+                return {0, status_t::bad_alloc_k};
             counter_allocator_t counter_allocator {nullptr, device_.ordinal};
             published_rows_ = cuda_make_unique(counter_allocator, 1);
             if (!published_rows_ || cudaMemset(published_rows_.get(), 0, sizeof(u32_t)) != cudaSuccess)
-                return {0, connectivity, status_t::device_error_k};
+                return {0, status_t::device_error_k};
         }
         status_t const grown = grow_rows_(config.capacity, nullptr);
-        return {capacity(), connectivity, grown};
+        return {capacity(), grown};
     }
 
 #pragma endregion Reservation
