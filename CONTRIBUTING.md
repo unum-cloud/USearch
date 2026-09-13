@@ -336,14 +336,20 @@ ENV NK_TARGET_SVE 0
 RUN npm install --build-from-source usearch
 ```
 
-To compile to WebAssembly make sure you have `emscripten` installed and run the following script.
-There is no WebAssembly target of its own — the C library is what crosses, under Emscripten's CMake wrapper:
+To compile to WebAssembly make sure you have `emscripten` installed and pick one of the checked-in toolchains.
+There is no WebAssembly target of its own — the C library is what crosses, and a module carries one SIMD tier, width and threads choice, so each toolchain file fixes all three:
+
+- `cmake/toolchain-wasm32-emscripten.cmake` builds the `wasm32_v128_k` class — 32-bit, single-threaded, the fixed-width `simd128` tier every engine loads.
+- `cmake/toolchain-wasm64-emscripten.cmake` builds the `wasm64_extended_k` class — relaxed SIMD, shared memory for real thread pools, and 64-bit addressing.
+- `cmake/toolchain-wasm32-wasi.cmake` builds `wasm32_v128_k` against the WASI SDK, for Wasmtime, Wasmer and the Rust crate.
 
 ```sh
-emcmake cmake -B build_wasm -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_CPP=0 -D USEARCH_BUILD_BENCH_CPP=0
-emmake make -C build_wasm usearch_static
+emcmake cmake -B build_wasm32_emscripten -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-emscripten.cmake -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST_C=1
+cmake --build build_wasm32_emscripten --target usearch_static usearch_test_c
+ctest --test-dir build_wasm32_emscripten -R '^usearch_test_c$'
 ```
 
+The toolchain file must be passed as the single argument `-DCMAKE_TOOLCHAIN_FILE=…`; written with a space, `emcmake` appends its own file, which then wins.
 If you don't yet have `emcmake` installed:
 
 ```sh
@@ -597,18 +603,18 @@ docker buildx create --use &&
 
 ## WebAssembly
 
-```sh
-export WASI_VERSION=21
-export WASI_VERSION_FULL=${WASI_VERSION}.0
-wget https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_VERSION}/wasi-sdk-${WASI_VERSION_FULL}-linux.tar.gz
-tar xvf wasi-sdk-${WASI_VERSION_FULL}-linux.tar.gz
-```
-
-After the installation, we can pass WASI SDK to CMake as a new toolchain:
+The WASI build uses the same module shape as the Emscripten `wasm32_v128_k` build, but for standalone runtimes and for the Rust crate's `wasm32-wasip1` target.
+Unpack a [WASI SDK release](https://github.com/WebAssembly/wasi-sdk/releases) and point `WASI_SDK_PATH` at it; `cmake/toolchain-wasm32-wasi.cmake` names the compilers, the sysroot and the SIMD tier from there:
 
 ```sh
-cmake -DCMAKE_TOOLCHAIN_FILE=${WASI_SDK_PATH}/share/cmake/wasi-sdk.cmake .
+export WASI_SDK_PATH=/opt/wasi-sdk-34.0-x86_64-linux
+cmake -B build_wasm32_wasi -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST_C=1
+cmake --build build_wasm32_wasi --target usearch_static usearch_test_c
+ctest --test-dir build_wasm32_wasi -R '^usearch_test_c$'
 ```
+
+`ctest` runs the module under Wasmtime when it is on the path.
+The Rust crate hands CMake the same toolchain file on its own, so `cargo build --target wasm32-wasip1` needs only `WASI_SDK_PATH`.
 
 ## Working on Sub-Modules
 

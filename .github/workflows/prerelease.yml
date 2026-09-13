@@ -17,6 +17,9 @@ env:
   GO_VERSION: "^1.22.0"
   ANDROID_NDK_VERSION: 26.3.11579264
   ANDROID_SDK_VERSION: 21
+  EMSCRIPTEN_VERSION: 6.0.9
+  WASI_SDK_VERSION: "34"
+  WASMTIME_VERSION: v48.0.2
 
 # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
@@ -28,12 +31,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Run TinySemVer
-        uses: ashvardanian/tinysemver@v3.0.0
+        uses: ashvardanian/tinysemver@v3
         with:
           verbose: "true"
           version-file: "VERSION"
@@ -64,7 +67,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -82,7 +85,7 @@ jobs:
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
@@ -96,7 +99,7 @@ jobs:
 
         # JavaScript
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
@@ -122,12 +125,12 @@ jobs:
 
         # Java
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: "adopt"
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v5
+        uses: gradle/actions/setup-gradle@v6
       - name: Check Java, Kotlin & Scala formatting
         run: gradle spotlessCheck
       - name: Test Java
@@ -140,7 +143,7 @@ jobs:
 
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
@@ -167,7 +170,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Pull Git submodules
         run: git submodule update --init --recursive
       - name: Install Spin
@@ -182,7 +185,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Pull Git submodules
         run: git submodule update --init --recursive
       - name: Install Spin, Clang and the GenMC build dependencies
@@ -190,14 +193,14 @@ jobs:
           sudo apt update
           sudo apt install -y spin cmake clang-20 llvm-20-dev libffi-dev zlib1g-dev libedit-dev
       - name: Checkout GenMC
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: MPI-SWS/genmc
           ref: fe124db203f6d1a626057d72f07e25409075d809
           path: genmc
       - name: Restore the GenMC build
         id: genmc
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: genmc/build
           key: genmc-fe124db-clang-20
@@ -221,7 +224,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -239,7 +242,7 @@ jobs:
 
         # JavaScript
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
@@ -251,7 +254,7 @@ jobs:
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
@@ -279,7 +282,7 @@ jobs:
 
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
@@ -296,7 +299,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -314,7 +317,7 @@ jobs:
 
         # JavaScript
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
@@ -326,7 +329,7 @@ jobs:
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
@@ -359,7 +362,7 @@ jobs:
 
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
@@ -375,7 +378,7 @@ jobs:
     runs-on: windows-2022
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -392,7 +395,7 @@ jobs:
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
@@ -405,7 +408,7 @@ jobs:
 
         # JavaScript
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
@@ -428,7 +431,7 @@ jobs:
 
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
@@ -444,12 +447,12 @@ jobs:
     runs-on: windows-2022
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
       - name: Setup MSVC for ARM64
-        uses: microsoft/setup-msbuild@v2
+        uses: microsoft/setup-msbuild@v3
 
         # C/C++
       - name: Build C/C++ (ARM64)
@@ -468,11 +471,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Pull Git submodules
         run: git submodule update --init --recursive
       - name: Build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -487,13 +490,13 @@ jobs:
         python-version: ["310", "311", "312", "313", "313t", "314", "314t"]
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Setup QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
       - name: Install cibuildwheel
         uses: nick-fields/retry@v4
         with:
@@ -522,9 +525,9 @@ jobs:
         python-version: ["310", "311", "312", "313", "313t", "314", "314t"]
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Install cibuildwheel
@@ -555,9 +558,9 @@ jobs:
         python-version: ["310", "311", "312", "313", "313t", "314", "314t"]
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Install cibuildwheel
@@ -600,7 +603,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -631,6 +634,58 @@ jobs:
         run: |
           test -e build_artifacts/libusearch_shared.so
 
+  # One row per checked-in WebAssembly toolchain. A module carries one SIMD tier, width and threads choice, so each
+  # row is a whole build; its C test runs under the matrix's Node for Emscripten and under Wasmtime for WASI.
+  test_wasm:
+    name: WebAssembly (${{ matrix.toolchain }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { toolchain: wasm32-emscripten, sdk: emscripten, wrapper: emcmake, node: 22 }
+          - { toolchain: wasm64-emscripten, sdk: emscripten, wrapper: emcmake, node: 24 }
+          - { toolchain: wasm32-wasi, sdk: wasi, wrapper: "" }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Pull Git submodules
+        run: git submodule update --init --recursive
+
+      - name: Setup Emscripten
+        if: matrix.sdk == 'emscripten'
+        uses: mymindstorm/setup-emsdk@v16
+        with:
+          version: ${{ env.EMSCRIPTEN_VERSION }}
+      - name: Setup Node.js
+        if: matrix.sdk == 'emscripten'
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Setup WASI SDK and Wasmtime
+        if: matrix.sdk == 'wasi'
+        run: |
+          curl -sSL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux.tar.gz" \
+            | tar xz -C "$HOME"
+          echo "WASI_SDK_PATH=$HOME/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux" >> "$GITHUB_ENV"
+          curl https://wasmtime.dev/install.sh -sSf | bash -s -- --version "$WASMTIME_VERSION"
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+
+      - name: Build and test C
+        run: |
+          if [ "${{ matrix.sdk }}" = emscripten ]; then emulator="-DCMAKE_CROSSCOMPILING_EMULATOR=$(command -v node)"; fi
+          ${{ matrix.wrapper }} cmake -B build_wasm \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-${{ matrix.toolchain }}.cmake ${emulator:-} \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUSEARCH_BUILD_LIB_C=1 \
+            -DUSEARCH_BUILD_TEST_C=1 \
+            -DUSEARCH_BUILD_TEST_CPP=0 \
+            -DUSEARCH_BUILD_BENCH_CPP=0
+          cmake --build build_wasm --config Release --target usearch_static usearch_test_c
+          ctest --test-dir build_wasm -C Release -R '^usearch_test_c$' --output-on-failure
+
   test_android:
     name: Android
     runs-on: ubuntu-24.04
@@ -648,7 +703,7 @@ jobs:
             arch: arm64
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -698,7 +753,7 @@ jobs:
 
         # Java
       - name: Set up JDK 21
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: "adopt"
@@ -720,7 +775,7 @@ jobs:
           zip -r usearch_android_${{ matrix.arch }}_${version}.zip build_artifacts/libusearch_shared.so include/usearch
 
       - name: Upload Android libraries
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: android-${{ matrix.abi }}-libraries
           path: usearch_android_*.zip
