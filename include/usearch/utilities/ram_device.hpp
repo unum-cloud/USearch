@@ -151,8 +151,10 @@ struct forkunion_executor_t {
         return std::exchange(pool_, nullptr);
     }
 
-    /** @brief The thread count a zero ask means: every core but one in @ref idle_cores_denominator_k. */
+    /** @brief The thread count a zero ask means: every core but one in @ref idle_cores_denominator_k, or the
+     *      caller alone in a build without OS threads. */
     static expected<std::size_t> default_threads(fu_topology_t topology) noexcept {
+        if (!(fu_comptime_capabilities() & fu_capability_os_threads_k)) return {1, status_t::success_k};
         std::size_t cores = 0;
         if (fu_logical_cores_count(topology, &cores) != fu_success_k) return {0, status_t::uninitialized_k};
         return {cores - cores / idle_cores_denominator_k, status_t::success_k};
@@ -167,7 +169,10 @@ struct forkunion_executor_t {
         }
         fu_pool_t pool = nullptr;
         if (fu_pool_new(pool_name_k, fu_capabilities_all_k, &pool) != fu_success_k) return {{}, status_t::bad_alloc_k};
-        if (fu_pool_spawn(topology, pool, threads, fu_caller_exclusive_k) != fu_success_k)
+        fu_caller_exclusivity_t const exclusivity = (fu_comptime_capabilities() & fu_capability_os_threads_k)
+                                                        ? fu_caller_exclusive_k
+                                                        : fu_caller_inclusive_k;
+        if (fu_pool_spawn(topology, pool, threads, exclusivity) != fu_success_k)
             return fu_pool_delete(pool), expected<forkunion_executor_t> {{}, status_t::uninitialized_k};
         return acquire(topology, pool);
     }

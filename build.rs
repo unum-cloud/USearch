@@ -129,6 +129,30 @@ fn main() -> Result<(), Box<dyn Error>> {
         engine.define(option, if wanted { "ON" } else { "OFF" });
     }
 
+    // `cmake-rs` has no WASI system name to hand CMake, so the checked-in toolchain names the SDK and the
+    // sysroot; the one thing a user sets is `WASI_SDK_PATH`.
+    let target_os = env::var("CARGO_CFG_TARGET_OS")?;
+    if target_os == "wasi" {
+        println!("cargo:rerun-if-env-changed=WASI_SDK_PATH");
+        println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_FEATURE");
+        engine.define(
+            "CMAKE_TOOLCHAIN_FILE",
+            manifest.join("cmake/toolchain-wasm32-wasi.cmake"),
+        );
+        // An engine validates a module whole, so the SIMD tier is the one the Rust target declares; the flags
+        // `cmake-rs` passes replace the toolchain's initial ones, so the tier and `-fno-exceptions` ride with them.
+        let target_features = env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
+        let declares = |feature: &str| target_features.split(',').any(|declared| declared == feature);
+        if !declares("simd128") {
+            return Err("USearch on WebAssembly needs `-C target-feature=+simd128`".into());
+        }
+        // Declared relaxed SIMD narrows to the strict class, since its wasm64 class needs threads no WASI target has.
+        engine
+            .cflag("-msimd128")
+            .cxxflag("-msimd128")
+            .cxxflag("-fno-exceptions");
+    }
+
     // The architecture list is CUDA's alone, and says nothing unless its kernels are compiled.
     if chosen.options.contains(&"USEARCH_BUILD_CUDA") {
         println!("cargo:rerun-if-env-changed=USEARCH_CUDA_ARCHITECTURES");
@@ -146,9 +170,17 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // The archive is C++, so the standard library it was compiled against has to come along; the
     // `numkong` crate emits its own directives for the SIMD kernels.
-    match env::var("CARGO_CFG_TARGET_OS")?.as_str() {
+    match target_os.as_str() {
         "windows" => {}
         "macos" | "ios" => println!("cargo:rustc-link-lib=dylib=c++"),
+        // wasi-sdk ships libc++ and libc++abi as archives under its sysroot, in the `noeh` multilib the
+        // toolchain file compiles against.
+        "wasi" => {
+            let sysroot = PathBuf::from(env::var("WASI_SDK_PATH")?).join("share/wasi-sysroot/lib/wasm32-wasip1/noeh");
+            println!("cargo:rustc-link-search=native={}", sysroot.display());
+            println!("cargo:rustc-link-lib=static=c++");
+            println!("cargo:rustc-link-lib=static=c++abi");
+        }
         _ => println!("cargo:rustc-link-lib=dylib=stdc++"),
     }
 

@@ -22,9 +22,9 @@
 
 #include <cerrno>  // `errno`, `EINTR`
 #include <cstddef> // `std::byte`
-#include <cstring> // `std::memcpy`
+#include <cstring> // `std::memcpy`, `std::memset`
 
-#include <memory>      // `std::allocator_traits`
+#include <memory>      // `std::allocator`, `std::allocator_traits`
 #include <span>        // `std::span`
 #include <string_view> // `std::string_view`
 #include <utility>     // `std::exchange`
@@ -36,9 +36,11 @@
 #include <windows.h> // `CreateFileA`, `CreateFileMappingA`, `MapViewOfFile`
 #else
 #include <fcntl.h>    // `open`
-#include <sys/mman.h> // `mmap`, `munmap`, `msync`
 #include <sys/stat.h> // `fstat`
 #include <unistd.h>   // `pread`, `pwrite`, `ftruncate`, `close`
+#if !defined(__wasi__)
+#include <sys/mman.h> // `mmap`, `munmap`, `msync`
+#endif
 #endif
 
 #include "usearch/utilities/types.hpp"
@@ -283,7 +285,8 @@ inline status_t copy_bytes(bytes_span_t destination, file_view_t source) noexcep
  *
  *  A read mapping opens what is there; a write mapping creates the file, sizes it once, and
  *  hands back zeroed bytes, since a freshly grown file reads as zeros - which is why nothing
- *  downstream sweeps the gaps between columns.
+ *  downstream sweeps the gaps between columns. WASI maps nothing, so there the mapping is a heap
+ *  copy, filled once by @ref read and written back whole by @ref sync.
  */
 class mapped_file_t {
   public:
@@ -301,6 +304,8 @@ class mapped_file_t {
 #if defined(_WIN32)
         std::swap(file_handle_, other.file_handle_);
         std::swap(mapping_handle_, other.mapping_handle_);
+#elif defined(__wasi__)
+        std::swap(file_, other.file_);
 #else
         std::swap(descriptor_, other.descriptor_);
 #endif
@@ -333,6 +338,8 @@ class mapped_file_t {
 #if defined(_WIN32)
     HANDLE file_handle_ = INVALID_HANDLE_VALUE;
     HANDLE mapping_handle_ = nullptr;
+#elif defined(__wasi__)
+    seekable_file_t file_;
 #else
     int descriptor_ = -1;
 #endif
@@ -387,6 +394,56 @@ inline void mapped_file_t::unmap_() noexcept {
     if (file_handle_ != INVALID_HANDLE_VALUE) ::CloseHandle(file_handle_);
     data_ = nullptr, bytes_ = 0, mode_ = file_mode_t::read_k, mapping_handle_ = nullptr,
     file_handle_ = INVALID_HANDLE_VALUE;
+}
+
+#elif defined(__wasi__)
+
+inline expected<mapped_file_t> mapped_file_t::read(std::string_view path) noexcept {
+    mapped_file_t mapping;
+    auto [file, opened] = seekable_file_t::open(path, file_mode_t::read_k);
+    if (failed(opened)) return {std::move(mapping), opened};
+    auto const [bytes, measured] = file.length();
+    if (failed(measured)) return {std::move(mapping), measured};
+    if (!bytes) return {std::move(mapping), status_t::malformed_k};
+    byte_t* base = std::allocator<byte_t> {}.allocate(bytes);
+    if (!base) return {std::move(mapping), status_t::bad_alloc_k};
+    if (status_t const filled = file.read_at(0, bytes_span_t {base, bytes}); failed(filled)) {
+        std::allocator<byte_t> {}.deallocate(base, bytes);
+        return {std::move(mapping), filled};
+    }
+    mapping.data_ = base;
+    mapping.bytes_ = bytes;
+    return {std::move(mapping), status_t::success_k};
+}
+
+inline expected<mapped_file_t> mapped_file_t::write(std::string_view path, std::size_t bytes) noexcept {
+    mapped_file_t mapping;
+    if (!bytes) return {std::move(mapping), status_t::config_mismatch_k};
+    auto [file, opened] = seekable_file_t::open(path, file_mode_t::write_k);
+    if (failed(opened)) return {std::move(mapping), opened};
+    if (status_t const sized = file.truncate(bytes); failed(sized)) return {std::move(mapping), sized};
+    byte_t* base = std::allocator<byte_t> {}.allocate(bytes);
+    if (!base) return {std::move(mapping), status_t::bad_alloc_k};
+    std::memset(base, 0, bytes);
+    mapping.file_ = std::move(file);
+    mapping.data_ = base;
+    mapping.bytes_ = bytes;
+    mapping.mode_ = file_mode_t::write_k;
+    return {std::move(mapping), status_t::success_k};
+}
+
+inline status_t mapped_file_t::sync() noexcept {
+    if (!data_) return status_t::success_k;
+    status_t const flushed = mode_ == file_mode_t::read_k ? status_t::success_k
+                                                          : file_.write_at(0, bytes_view_t {data_, bytes_});
+    unmap_();
+    return flushed;
+}
+
+inline void mapped_file_t::unmap_() noexcept {
+    if (data_) std::allocator<byte_t> {}.deallocate(data_, bytes_);
+    [[maybe_unused]] status_t const closed = file_.close();
+    data_ = nullptr, bytes_ = 0, mode_ = file_mode_t::read_k;
 }
 
 #else

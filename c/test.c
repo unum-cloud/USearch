@@ -1,8 +1,8 @@
 /**
- *  @file       test.c
- *  @author     Ash Vardanian
- *  @brief      Unit tests for the pure-C ABI of USearch (`usearch/dense_index.h`).
- *  @date       June 25, 2023
+ *  @brief Unit tests for the pure-C ABI of USearch (`usearch/dense_index.h`).
+ *  @author Ash Vardanian
+ *  @file c/test.c
+ *  @date June 25, 2023
  *
  *  Exercises the dense surface through the ABI every binding consumes: initialization and
  *  reservation, batch `add` and `search`, retrieval by key, and the error contract of
@@ -15,29 +15,23 @@
  *  prints a native back-trace before re-raising, so CI logs pinpoint the
  *  faulting frame instead of stopping at a bare exit code.
  */
-#include <errno.h>
+#include <math.h>    // `fabsf`
 #include <signal.h>  // `signal`, `raise`, `SIGSEGV`
 #include <stdbool.h> // `bool`
 #include <stdint.h>  // `uint8_t`, `uint64_t`
 #include <stdio.h>   // `printf`
 #include <stdlib.h>  // `malloc`, `free`
 #include <string.h>  // `memset`, `memcmp`
-#include <sys/stat.h>
 
-/* Back-trace support for the C test harness. The `signal` API is standard C;
- * the back-trace itself is taken via an OS-specific facility since C has no
- * standard stack-introspection API. On Windows, `dbghelp.h` references types
- * (e.g. `PSTR`) that are only defined after `windows.h`, so the two headers
- * are separated by a blank line to keep clang-format from re-sorting them
- * into a single alphabetized block. */
+/* `dbghelp.h` needs types `windows.h` defines, so a blank line keeps clang-format from sorting it first. */
 #if defined(_WIN32)
 #include <windows.h>
 
-#include <dbghelp.h>
+#include <dbghelp.h> // `CaptureStackBackTrace`, `SymFromAddr`
 #pragma comment(lib, "Dbghelp.lib")
-#elif defined(__unix__) || defined(__APPLE__)
-#include <execinfo.h>
-#include <unistd.h>
+#elif __has_include(<execinfo.h>)
+#include <execinfo.h> // `backtrace`, `backtrace_symbols_fd`
+#include <unistd.h>   // `STDERR_FILENO`
 #endif
 
 #include <usearch/dense_index.h>
@@ -62,7 +56,7 @@ static void usearch_write_backtrace(int signal_number) {
                     (unsigned long long)((DWORD64)backtrace_frames[frame_index] - symbol_info->Address));
         else fprintf(stderr, "  #%2u %p\n", (unsigned)frame_index, backtrace_frames[frame_index]);
     }
-#elif defined(__unix__) || defined(__APPLE__)
+#elif __has_include(<execinfo.h>)
     enum { backtrace_depth_limit = 64 };
     void* backtrace_frames[backtrace_depth_limit];
     int backtrace_depth = backtrace(backtrace_frames, backtrace_depth_limit);
@@ -124,7 +118,7 @@ usearch_dense_options_t create_options(size_t const dimensions) {
     usearch_dense_options_t options;
     memset(&options, 0, sizeof(options));
     options.metric = usearch_dense_metric_angular_k;
-    options.quantization = usearch_scalar_f32_k;
+    options.quantization = usearch_scalar_bf16_k;
     options.dimensions = dimensions;
     options.connectivity = 16;
     options.residency = usearch_residency_ram_k;
@@ -180,6 +174,8 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
     expect(!error.message, error.message);
     usearch_dense_reserve(index, collection_size, &error);
     expect(!error.message, error.message);
+    usearch_executor_t const executor = usearch_executor_for_ram(&options.ram, 0, &error);
+    expect(!error.message, error.message);
 
     float* const data = create_vectors(collection_size, dimensions);
     usearch_key_t* const keys = (usearch_key_t*)malloc(collection_size * sizeof(usearch_key_t));
@@ -189,7 +185,7 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
     size_t const row_bytes = dimensions * sizeof(float);
     usearch_keys_view_t const key_run = {keys, collection_size};
     usearch_matrix_view_t const rows = {data, collection_size, dimensions, row_bytes, usearch_scalar_f32_k};
-    size_t const inserted = usearch_dense_add(index, NULL, key_run, &rows, NULL, NULL, NULL, NULL, &error);
+    size_t const inserted = usearch_dense_add(index, executor, key_run, &rows, NULL, NULL, NULL, NULL, &error);
     expect(!error.message, error.message);
     expect_eq(inserted, collection_size, "A batch is all-or-nothing");
     expect_eq(usearch_dense_size(index, &error), collection_size, "Every row must be published");
@@ -203,7 +199,7 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
 
     usearch_matches_span_t const matches = {
         found_keys, sizeof(usearch_key_t), found_distances, sizeof(usearch_distance_t), counts, 1};
-    usearch_dense_search(index, NULL, &rows, &matches, NULL, NULL, NULL, NULL, &error);
+    usearch_dense_search(index, executor, &rows, &matches, NULL, NULL, NULL, NULL, &error);
     expect(!error.message, error.message);
 
     size_t recalled = 0;
@@ -220,6 +216,7 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
     free(found_keys);
     free(keys);
     free(data);
+    usearch_executor_free(executor);
     usearch_dense_free(index);
     printf("Test: Add & Search - PASSED\n");
 }
@@ -237,13 +234,15 @@ void test_count_and_get(size_t const dimensions) {
     expect(!error.message, error.message);
     usearch_dense_reserve(index, 2, &error);
     expect(!error.message, error.message);
+    usearch_executor_t const executor = usearch_executor_for_ram(&options.ram, 0, &error);
+    expect(!error.message, error.message);
 
     float* const data = create_vectors(2, dimensions);
     usearch_key_t const keys[2] = {key_of(7), key_of(8)};
     size_t const row_bytes = dimensions * sizeof(float);
     usearch_keys_view_t const key_run = {keys, 2};
     usearch_matrix_view_t const rows = {data, 2, dimensions, row_bytes, usearch_scalar_f32_k};
-    usearch_dense_add(index, NULL, key_run, &rows, NULL, NULL, NULL, NULL, &error);
+    usearch_dense_add(index, executor, key_run, &rows, NULL, NULL, NULL, NULL, &error);
     expect(!error.message, error.message);
 
     expect_eq(usearch_dense_count(index, key_of(7), &error), 1, "The key was inserted once");
@@ -261,10 +260,12 @@ void test_count_and_get(size_t const dimensions) {
               "Retrieval must report the true entry count");
     expect(!error.message, error.message);
     for (size_t position = 0; position != dimensions; ++position)
-        expect(retrieved[position] == data[position], "An f32 index must return f32 rows unchanged");
+        expect(fabsf(retrieved[position] - data[position]) <= fabsf(data[position]) / 128,
+               "A bf16 index must return rows within its 7-bit mantissa");
 
     free(retrieved);
     free(data);
+    usearch_executor_free(executor);
     usearch_dense_free(index);
     printf("Test: Count & Get - PASSED\n");
 }

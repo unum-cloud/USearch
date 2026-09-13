@@ -213,6 +213,26 @@ else ()
     set(USEARCH_HOST_TUNING "")
 endif ()
 
+# Debug builds take each sanitizer whose instrumented load the toolchain compiles and links; WASI links no sanitizer
+# runtime at all.
+set(USEARCH_SANITIZERS "")
+if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    include(CheckCXXSourceCompiles)
+    include(CMakePushCheckState)
+    cmake_push_check_state(RESET)
+    foreach (usearch_sanitizer_ address leak alignment undefined)
+        set(CMAKE_REQUIRED_FLAGS "-fsanitize=${usearch_sanitizer_}")
+        check_cxx_source_compiles(
+            "int main(int argc, char **argv) { return *(int *)(void *)argv[0] + argc; }"
+            USEARCH_SANITIZER_${usearch_sanitizer_}_
+        )
+        if (USEARCH_SANITIZER_${usearch_sanitizer_}_)
+            list(APPEND USEARCH_SANITIZERS "-fsanitize=${usearch_sanitizer_}")
+        endif ()
+    endforeach ()
+    cmake_pop_check_state()
+endif ()
+
 # Shared wiring for every target this project builds. Optimization and debug level are deliberately absent: they live in
 # `CMAKE_<LANG>_FLAGS_<CONFIG>`, where a preset or a command-line switch can move them. Only what the code actually
 # depends on - fast math, the diagnostics, the sanitizers - is pinned here, and only for the host languages, so a unit
@@ -225,11 +245,7 @@ function (usearch_setup_target TARGET_NAME)
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         target_compile_options(
             ${TARGET_NAME}
-            PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:-fsanitize=address
-                    -fsanitize=leak
-                    -fsanitize=alignment
-                    -fsanitize=undefined
-                    >
+            PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:${USEARCH_SANITIZERS}>
                     -ffast-math
                     -fPIC
                     -Wall
@@ -240,52 +256,16 @@ function (usearch_setup_target TARGET_NAME)
                     -pedantic
                     -fdiagnostics-color=always>
         )
-        target_link_options(
-            ${TARGET_NAME}
-            PRIVATE
-            $<$<CONFIG:DEBUG>:-g
-            -fsanitize=address
-            -fsanitize=leak
-            -fsanitize=alignment
-            -fsanitize=undefined
-            >
-            -fPIC
-        )
+        target_link_options(${TARGET_NAME} PRIVATE $<$<CONFIG:DEBUG>:-g ${USEARCH_SANITIZERS}> -fPIC)
 
         target_link_libraries(${TARGET_NAME} PRIVATE Threads::Threads)
 
     elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         target_compile_options(
-            ${TARGET_NAME}
-            PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:-fsanitize=address
-                    -fsanitize=alignment
-                    -fsanitize=undefined
-                    >
-                    -ffast-math
-                    -fPIC
-                    -pedantic
-                    -Wfatal-errors
-                    -fcolor-diagnostics>
+            ${TARGET_NAME} PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:${USEARCH_SANITIZERS}> -ffast-math
+                                   -fPIC -pedantic -Wfatal-errors -fcolor-diagnostics>
         )
-        target_link_options(
-            ${TARGET_NAME}
-            PRIVATE
-            $<$<CONFIG:DEBUG>:-g
-            -fsanitize=address
-            -fsanitize=alignment
-            -fsanitize=undefined
-            >
-            -fPIC
-        )
-
-        # Check if the compiler is AppleClang, and if not, add the leak sanitizer
-        if (CMAKE_HOST_SYSTEM_NAME MATCHES "Darwin")
-            # It's likely AppleClang Adjust options as needed for AppleClang
-        else ()
-            # It's likely LLVM Clang
-            target_compile_options(${TARGET_NAME} PRIVATE $<$<CONFIG:DEBUG>:-fsanitize=leak>)
-            target_link_options(${TARGET_NAME} PRIVATE $<$<CONFIG:DEBUG>:-fsanitize=leak>)
-        endif ()
+        target_link_options(${TARGET_NAME} PRIVATE $<$<CONFIG:DEBUG>:-g ${USEARCH_SANITIZERS}> -fPIC)
 
         if (CMAKE_HOST_SYSTEM_NAME MATCHES "Darwin")
             target_link_libraries(
@@ -363,8 +343,12 @@ function (usearch_setup_target TARGET_NAME)
         set_target_properties(${TARGET_NAME} PROPERTIES PREFIX "lib")
     endif ()
 
-    # Link NumKong's shared library, which answers the capability queries and punned kernels for the host CPU.
-    if (TARGET numkong_shared)
+    # Link NumKong's shared library, which answers the capability queries and punned kernels for the host CPU. A
+    # WebAssembly module links the static archive, since neither Emscripten nor WASI loads a `.so`.
+    if (CMAKE_SYSTEM_NAME STREQUAL "Emscripten" OR CMAKE_SYSTEM_NAME STREQUAL "WASI")
+        target_compile_definitions(${TARGET_NAME} PRIVATE "NK_RUNTIME_DISPATCH=1")
+        target_link_libraries(${TARGET_NAME} PRIVATE numkong::static)
+    elseif (TARGET numkong_shared)
         target_compile_definitions(${TARGET_NAME} PRIVATE "NK_RUNTIME_DISPATCH=1")
         target_link_libraries(${TARGET_NAME} PRIVATE numkong_shared)
     endif ()
@@ -427,11 +411,11 @@ usearch_sibling(
     numkong numkong::header https://github.com/ashvardanian/NumKong 14c0d48240bf38e9fbd33246685d75d56ebc7fee
 )
 usearch_sibling(
-    forkunion forkunion::header https://github.com/ashvardanian/ForkUnion 4c6922026d74066994a47c0fa54c01ba9df3b046
+    forkunion forkunion::header https://github.com/ashvardanian/ForkUnion 0e5001e7bc0ee41747386408e599ab65f9204d40
 )
 usearch_sibling(
     stringzilla stringzilla::header https://github.com/ashvardanian/StringZilla
-    f3543c2d0b59d7ec1f04a0c311b47b14905a808b
+    0efdaf10b6e788bc51ca7668285162714104a42d
 )
 usearch_sibling(
     smashtable smashtable::header https://github.com/ashvardanian/SmashTable 4f3f9c1a121cc24865e7f2111e89052aa4e470a1
