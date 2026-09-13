@@ -36,8 +36,7 @@ set_target_properties(
 target_include_directories(usearch_python PRIVATE ${PROJECT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(usearch_python PRIVATE ${USEARCH_PYTHON_LIBRARY})
 
-# NumKong's symbols are resolved at import by the `ctypes.CDLL` in `usearch/__init__.py`, and CPython's by the
-# interpreter, so neither is present at link time and the linker must not insist.
+# CPython's own symbols come from the interpreter, so they are absent at link time and the linker must not insist.
 if (APPLE)
     target_link_options(usearch_python PRIVATE -undefined dynamic_lookup)
 elseif (MSVC)

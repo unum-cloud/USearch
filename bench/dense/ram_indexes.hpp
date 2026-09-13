@@ -41,18 +41,26 @@ namespace usearch {
 
 /** @brief The STL floor below the schedule table, correct on every machine. */
 using yield_waiter_t = fu::standard_yield_t;
+/** @brief The spin hint every core of this architecture runs. */
 #if FU_DETECT_ARCH_X86_64_
 using hint_waiter_t = fu::x86_pause_t;
-using monitor_waiter_t = fu::x86_tpause_t;
 #elif FU_DETECT_ARCH_ARM64_
 using hint_waiter_t = fu::arm64_yield_t;
-using monitor_waiter_t = fu::arm64_wfet_t;
 #elif FU_DETECT_ARCH_RISC5_
 using hint_waiter_t = fu::risc5_pause_t;
-using monitor_waiter_t = fu::risc5_wrs_t;
 #else
 using hint_waiter_t = fu::standard_yield_t;
-using monitor_waiter_t = fu::standard_yield_t;
+#endif
+/** @brief The monitored wait this unit compiles, admitted against @c fu_runtime_capabilities before its row
+ *      runs; with none compiled the row collapses onto the hint. */
+#if FU_TARGET_X86_TPAUSE
+using monitor_waiter_t = fu::x86_tpause_t;
+#elif FU_TARGET_ARM64_WFET
+using monitor_waiter_t = fu::arm64_wfet_t;
+#elif FU_TARGET_RISC5_WRS
+using monitor_waiter_t = fu::risc5_wrs_t;
+#else
+using monitor_waiter_t = hint_waiter_t;
 #endif
 
 /** @brief The waiter type each schedule table row instantiates, positionally - the data list the

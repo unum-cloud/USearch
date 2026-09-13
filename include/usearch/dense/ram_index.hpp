@@ -12,9 +12,8 @@
 #include <span>        // `std::span` - the neighbor run a load rebases
 #include <type_traits> // `std::has_unique_object_representations_v` - the geometry word's guard
 
-#include <forkunion/atomics.hpp>      // `fu::standard_atomic_ref` - the default atomic reference
-#include <forkunion/capabilities.hpp> // `fu::preferred_yield_t` - the default waiter
-#include <forkunion/types.hpp>
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the default atomic reference
+#include <forkunion/types.hpp>   // `fu::standard_yield_t` - the default waiter
 #include <numkong/tensor.hpp>
 
 #include "usearch/utilities/types.hpp"
@@ -76,7 +75,7 @@ template <                                                                    //
     nk_dtype_t vector_dtype_ = nk_bf16_k,                                     //
     nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k,                      //
     nk_capability_t capability_ = nk_cap_icelake_k,                           //
-    typename wait_type_ = fu::preferred_yield_t,                              //
+    typename wait_type_ = fu::standard_yield_t,                               //
     template <typename> class atomic_ref_template_ = fu::standard_atomic_ref, //
     typename vectors_allocator_type_ = std::allocator<byte_t>,                //
     typename neighbors_allocator_type_ = std::allocator<byte_t>,              //

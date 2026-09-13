@@ -16,7 +16,7 @@ import (
 
 /*
 #cgo CFLAGS: -I${SRCDIR}
-#cgo LDFLAGS: -L${SRCDIR} -lusearch_static -lnumkong_static
+#cgo LDFLAGS: -L${SRCDIR} -lusearch_static
 #cgo linux LDFLAGS: -lstdc++ -lm
 #cgo darwin LDFLAGS: -lc++
 #cgo windows LDFLAGS: -lstdc++

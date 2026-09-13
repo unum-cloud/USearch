@@ -22,12 +22,13 @@ if (USEARCH_BUILD_LIB_C)
     # their dependencies; the archive takes the objects themselves, since an archive links nothing - and linking a
     # library instead would drop every symbol nothing inside referenced, which is the entire C interface.
     #
-    # For the same reason the archive carries its dependencies' objects: one leaving yyjson and ForkUnion undefined
-    # makes every consumer hunt two more archives out of the dependency tree to link one of ours.
+    # For the same reason the archive carries its dependencies' objects: one leaving yyjson, NumKong or ForkUnion
+    # undefined makes every consumer hunt more archives out of the dependency tree to link one of ours.
     add_library(usearch_shared SHARED)
     target_link_libraries(usearch_shared PRIVATE ${USEARCH_PUNNED_LIBRARIES})
     add_library(
-        usearch_static STATIC ${USEARCH_PUNNED_OBJECTS} $<TARGET_OBJECTS:yyjson> $<TARGET_OBJECTS:forkunion_static>
+        usearch_static STATIC ${USEARCH_PUNNED_OBJECTS} $<TARGET_OBJECTS:yyjson> $<TARGET_OBJECTS:numkong_static>
+                              $<TARGET_OBJECTS:forkunion_static>
     )
     set_target_properties(usearch_shared usearch_static PROPERTIES LINKER_LANGUAGE CXX)
 

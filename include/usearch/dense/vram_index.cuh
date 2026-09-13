@@ -2675,9 +2675,8 @@ struct dense_vram_index {
         /** @brief The index appended to at @p base on @p stream, and the claim held meanwhile -
          *      unowned for a plan of no rows; only @ref plan_load calls it, and sizes the bounce
          *      afterwards. */
-        load_plan_t(dense_vram_index& index, cudaStream_t stream,
-                    std::unique_lock<fu::spin_mutex<fu::preferred_yield_t>>&& claiming, node_id_t base,
-                    std::size_t rows) noexcept
+        load_plan_t(dense_vram_index& index, cudaStream_t stream, std::unique_lock<fu::spin_mutex_t>&& claiming,
+                    node_id_t base, std::size_t rows) noexcept
             : stream(stream), bounce(cuda_pinned_allocator_t {stream, index.device_.ordinal}), base(base), rows(rows),
               batch_rows(min_of(rows, power_of_two<std::size_t>(bounce_rows_log2_k))), index_(&index),
               claiming_(std::move(claiming)) {}
@@ -2813,7 +2812,7 @@ struct dense_vram_index {
          *      back, and once @c finish published. */
         dense_vram_index* index_ = nullptr;
         /** @brief The claim held from planning to publication, dropped by its own death otherwise. */
-        std::unique_lock<fu::spin_mutex<fu::preferred_yield_t>> claiming_;
+        std::unique_lock<fu::spin_mutex_t> claiming_;
     };
 
     /**
@@ -2827,7 +2826,7 @@ struct dense_vram_index {
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (!rows) return {load_plan_t {*this, stream, {}, static_cast<node_id_t>(size()), 0}, status_t::success_k};
         if (!claiming_.lock_if_free()) return {{}, status_t::contended_k};
-        std::unique_lock<fu::spin_mutex<fu::preferred_yield_t>> claiming {claiming_, std::adopt_lock};
+        std::unique_lock<fu::spin_mutex_t> claiming {claiming_, std::adopt_lock};
         // Read under the claim: a batch claiming between an earlier read and the claim would
         // overlap the loaded rows, and `finish` would then lower the claim beneath it.
         node_id_t const base = static_cast<node_id_t>(size());
@@ -3309,7 +3308,7 @@ struct dense_vram_index {
      *      driving context polls it, none owns it. */
     cuda_unique_ptr<u32_t, counter_allocator_t> published_rows_;
     /** @brief Held by the one batch growing and claiming at a time. */
-    fu::spin_mutex<fu::preferred_yield_t> claiming_;
+    fu::spin_mutex_t claiming_;
     /** @brief Each batch's dense id range, release-published once its launch is accepted. */
     std::atomic<std::size_t> claimed_rows_ {0};
     /** @brief The first post-claim device failure: ids past it may be unpublished or unfilled. */

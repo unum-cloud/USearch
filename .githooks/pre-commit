@@ -408,6 +408,18 @@ check_hand_minmax() {
         "$file uses std::min/std::max - use min_of/max_of from usearch/utilities/types.hpp:"
 }
 
+# `fu::preferred_yield_t` and `fu::preferred_atomic_ref` are for a unit that dispatches nothing; every unit under
+# include/ and src/ takes the probe lists, where they resolve to the newest buildable rung. A lock takes
+# `fu::spin_mutex_t`; a class's waiter and reference come from `waiter_of` and `atomic_ref_for_cpu_class`.
+check_preferred_aliases() {
+    local hits
+    hits=$(printf '%s\n' "$added" | grep -vE '^\+[[:space:]]*(//|/?\*)' |
+        grep -E '\bfu::preferred_(yield_t|atomic_ref)\b' || true)
+    [ -z "$hits" ] || fail "$hits" \
+        "$file names a ForkUnion alias meant for units that dispatch nothing - a lock takes fu::spin_mutex_t," \
+        "            a class's waiter is waiter_of<class_>, its reference atomic_ref_for_cpu_class<class_>:"
+}
+
 # A `#pragma region` label must be letters, digits & spaces only. clang-format tokenises the label
 # as code, so a dash, ampersand, colon, or any other symbol makes it reflow the marker and the
 # regions drift out of place on the next format run. Keep the label a plain phrase:
@@ -625,6 +637,7 @@ while IFS= read -r -d '' file; do
         ;;&
     include/*.hpp | include/*.cuh | src/*.cpp | src/*.cuh)
         check_hand_minmax
+        check_preferred_aliases
         ;;&
     src/*.cpp | src/*.cuh | test/*.cpp | test/*.hpp | test/*.cu | test/*.cuh | bench/*.cpp | bench/*.hpp | bench/*.cuh | c/*.cpp)
         check_qualified_namespace

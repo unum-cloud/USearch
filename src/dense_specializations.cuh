@@ -22,7 +22,7 @@
 #include <type_traits> // `std::is_same_v` - the residency discrimination
 
 #include <forkunion/capabilities.hpp> // `fu::x86_pause_t`, `fu::arm64_wfet_t` & waiter kin
-#include <forkunion/types.hpp>        // `fu::spin_mutex` - the ticks' lock
+#include <forkunion/types.hpp>        // `fu::spin_mutex_t` - the ticks' lock
 
 #include "usearch/dense_index.h"
 #include "usearch/dense/ram_indexes.hpp"
@@ -154,8 +154,8 @@ constexpr cpu_class_t parent_class_of(cpu_class_t cpu_class) noexcept {
 
 /** @brief The wait instruction one CPU class pairs: x86 spins PAUSE, the WAITPKG Xeons and the
  *      monitored Arm & RISC-V classes arm TPAUSE, WFET & WRS, everything else yields - the floor
- *      takes the standard one, as does any class whose spelling the toolchain lacks, per the probes
- *      on @c forkunion::header. */
+ *      takes the standard one, as does any class whose @c FU_TARGET_<BIT> is off in the probe list
+ *      every runtime-dispatched unit takes. */
 template <cpu_class_t cpu_class_>
 struct waiter_for_cpu_class {
     using type = fu::standard_yield_t;
@@ -222,7 +222,7 @@ using waiter_of = typename waiter_for_cpu_class<cpu_class_>::type;
 /** @brief The atomic reference one CPU class pairs: single-instruction LSE read-modify-writes
  *      under RCpc acquiring loads on the Armv8.3+ classes, conditional adds on the CMPCCXADD
  *      Xeons, `amocas` on Zacas RISC-V - the floors and the older classes take the standard one,
- *      as does every class whose spelling the toolchain lacks - the probes on @c forkunion::header say. */
+ *      as does every class whose @c FU_TARGET_<BIT> is off in the probe list every runtime-dispatched unit takes. */
 template <cpu_class_t cpu_class_>
 struct atomic_ref_for_cpu_class {
     template <typename value_type_>
@@ -412,7 +412,7 @@ struct shard_ticks_t {
     void* state;
     std::size_t total;
     std::atomic<std::size_t> done {0};
-    fu::spin_mutex<fu::preferred_yield_t> mutex;
+    fu::spin_mutex_t mutex;
 
     shard_ticks_t(usearch_progress_callback_t progress, void* state, std::size_t total) noexcept
         : progress(progress), state(state), total(total) {}

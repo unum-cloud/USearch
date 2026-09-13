@@ -1258,7 +1258,7 @@ struct dense_vram_indexes {
      *      rotation base. */
     std::atomic<std::size_t> admitted_rows_ {0};
     /** @brief Held by the one batch of mutating work at a time; a refused hold is @c contended_k. */
-    fu::spin_mutex<fu::preferred_yield_t> mutating_;
+    fu::spin_mutex_t mutating_;
 };
 
 #endif // defined(__CUDACC__)

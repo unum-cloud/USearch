@@ -201,8 +201,7 @@ endif ()
 # Host tuning for the tests & benches only - never the distributable libraries - and only where the host is the target
 # and the compiler has a spelling for it; elsewhere the suite runs on its serial floor and the SIMD cells report
 # themselves skipped. Apple Clang's `-march=native` advertises only a subset of the host's features - no FP16 arithmetic
-# & FML, no SME - leaving NumKong's f16 kits serial; `-mcpu=native` is the complete AArch64 knob, as NumKong's own build
-# concludes.
+# & FML, no SME - leaving NumKong's f16 kits serial; `-mcpu=native` is the complete AArch64 knob.
 if (MSVC OR CMAKE_CROSSCOMPILING)
     set(USEARCH_HOST_TUNING "")
 elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
@@ -294,17 +293,15 @@ function (usearch_setup_target TARGET_NAME)
         )
     endif ()
 
-    # One source of truth for header paths and published definitions: whatever the interface target advertises,
-    # including what the dependencies carry, without inheriting its compile features onto pure-C targets.
+    # One source of truth for header paths: whatever the interface target advertises, including what the dependencies
+    # carry, without inheriting its compile features onto pure-C targets.
     target_include_directories(
         ${TARGET_NAME} PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
     )
     if (usearch_setup_HOST)
         target_compile_options(${TARGET_NAME} PRIVATE ${USEARCH_HOST_TUNING})
     else ()
-        target_compile_definitions(
-            ${TARGET_NAME} PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_COMPILE_DEFINITIONS>
-        )
+        target_compile_definitions(${TARGET_NAME} PRIVATE ${usearch_compile_definitions_})
     endif ()
     set_target_properties(${TARGET_NAME} PROPERTIES CXX_STANDARD 20)
 
@@ -343,15 +340,10 @@ function (usearch_setup_target TARGET_NAME)
         set_target_properties(${TARGET_NAME} PROPERTIES PREFIX "lib")
     endif ()
 
-    # Link NumKong's shared library, which answers the capability queries and punned kernels for the host CPU. A
-    # WebAssembly module links the static archive, since neither Emscripten nor WASI loads a `.so`.
-    if (CMAKE_SYSTEM_NAME STREQUAL "Emscripten" OR CMAKE_SYSTEM_NAME STREQUAL "WASI")
-        target_compile_definitions(${TARGET_NAME} PRIVATE "NK_RUNTIME_DISPATCH=1")
-        target_link_libraries(${TARGET_NAME} PRIVATE numkong::static)
-    elseif (TARGET numkong_shared)
-        target_compile_definitions(${TARGET_NAME} PRIVATE "NK_RUNTIME_DISPATCH=1")
-        target_link_libraries(${TARGET_NAME} PRIVATE numkong_shared)
-    endif ()
+    # NumKong's archive answers the capability queries and the punned kernels through its dispatch table, so every
+    # artifact carries it whole and none needs a `libnumkong.so` beside it.
+    target_compile_definitions(${TARGET_NAME} PRIVATE "NK_RUNTIME_DISPATCH=1")
+    target_link_libraries(${TARGET_NAME} PRIVATE numkong::static)
 
 endfunction ()
 
@@ -362,10 +354,9 @@ include(FetchContent)
 
 # The siblings are the engine rather than an option: every header reaches for them unguarded, so there is no build
 # without them and no switch pretending otherwise. Include directories are copied onto the interface target, because
-# `usearch_setup_target` reads `INTERFACE_INCLUDE_DIRECTORIES` and `INTERFACE_COMPILE_DEFINITIONS` directly - genexes
-# that see only what this target declares, not what its link interface would carry - to keep the C++20 feature
-# requirement off the pure-C targets. So each sibling's paths and definitions are copied onto the interface here: the
-# definitions are how NumKong tells its consumers which kits this compiler builds.
+# `usearch_setup_target` reads `INTERFACE_INCLUDE_DIRECTORIES` directly - a genex that sees only what this target
+# declares, not what its link interface would carry - to keep the C++20 feature requirement off the pure-C targets. So
+# each sibling's paths are copied onto the interface here; its verdicts arrive in `usearch_compile_definitions_` below.
 function (usearch_sibling NAME LINK_TARGET REPOSITORY TAG)
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${NAME}/CMakeLists.txt")
         add_subdirectory(${NAME})
@@ -381,8 +372,8 @@ function (usearch_sibling NAME LINK_TARGET REPOSITORY TAG)
 
     target_link_libraries(${USEARCH_TARGET_NAME} INTERFACE ${LINK_TARGET})
 
-    # Collected for the export set: their interfaces carry a language level and `Threads::Threads`, which the paths and
-    # definitions copied below do not.
+    # Collected for the export set: their interfaces carry a language level and `Threads::Threads`, which the paths
+    # copied below do not.
     get_target_property(SIBLING_TARGET ${LINK_TARGET} ALIASED_TARGET)
     if (NOT SIBLING_TARGET)
         set(SIBLING_TARGET ${LINK_TARGET})
@@ -396,30 +387,37 @@ function (usearch_sibling NAME LINK_TARGET REPOSITORY TAG)
         ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE}
         INTERFACE $<TARGET_PROPERTY:${LINK_TARGET},INTERFACE_INCLUDE_DIRECTORIES>
     )
-    target_compile_definitions(
-        ${USEARCH_TARGET_NAME} INTERFACE $<TARGET_PROPERTY:${LINK_TARGET},INTERFACE_COMPILE_DEFINITIONS>
-    )
 endfunction ()
 
-# NumKong wants its shared library built for runtime ISA dispatch, so the flag is set before the subdirectory lands.
+# The compiled siblings land as archives inside our shared objects, so every one is position-independent. NumKong
+# defines its archive under the same switch as its shared library, so the switch is set before the subdirectory lands.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(NK_BUILD_SHARED
     ON
     CACHE BOOL "" FORCE
 )
 
 usearch_sibling(
-    numkong numkong::header https://github.com/ashvardanian/NumKong 14c0d48240bf38e9fbd33246685d75d56ebc7fee
+    numkong numkong::header https://github.com/ashvardanian/NumKong 649d1a72bfa2247089eb42303138a616e47a0372
 )
 usearch_sibling(
-    forkunion forkunion::header https://github.com/ashvardanian/ForkUnion 0e5001e7bc0ee41747386408e599ab65f9204d40
+    forkunion forkunion::header https://github.com/ashvardanian/ForkUnion 5cb8fb7dd022cd47754ee9db19c7187882d73e84
 )
 usearch_sibling(
     stringzilla stringzilla::header https://github.com/ashvardanian/StringZilla
-    0efdaf10b6e788bc51ca7668285162714104a42d
+    93fa8cc1e0a14a50b6f6a2e8cd90affcbb944d56
 )
 usearch_sibling(
-    smashtable smashtable::header https://github.com/ashvardanian/SmashTable 4f3f9c1a121cc24865e7f2111e89052aa4e470a1
+    smashtable smashtable::header https://github.com/ashvardanian/SmashTable f69cd0732842189dc3bede2e70712af8b525b70c
 )
+
+# The siblings' compile verdicts, one list: every unit that admits rungs at runtime takes it whole, so the class units,
+# the dispatch unit and the CUDA arms name the same rungs. Host-tuned executables take none and read the compiler.
+# StringZilla stays out: its header-only entry points pick a tier at compile time, so a unit keeps its own flags there.
+set(usearch_compile_definitions_ ${nk_compile_definitions_} ${fu_compile_definitions_})
+if (NOT DEFINED CACHE{nk_compile_definitions_} OR NOT DEFINED CACHE{fu_compile_definitions_})
+    message(FATAL_ERROR "usearch: the sibling pins predate the cached probe lists; bump the usearch_sibling tags")
+endif ()
 
 # Recorded without headers - each sibling owns its own - so `usearch::header` names nothing a consumer cannot resolve.
 if (USEARCH_INSTALL AND USEARCH_SIBLING_TARGETS)
@@ -440,10 +438,8 @@ if (USEARCH_INSTALL)
     )
 endif ()
 
-# The dispatch library exports symbols the pre-loaded metrics resolve against at runtime.
-if (TARGET numkong_shared)
-    set_target_properties(numkong_shared PROPERTIES ENABLE_EXPORTS ON)
-endif ()
+# Nothing links NumKong's dynamic flavor, so a bare build skips it.
+set_target_properties(numkong_shared PROPERTIES EXCLUDE_FROM_ALL ON)
 
 # Only `safegraphs_format.hpp` reaches for yyjson, and only a compiled target ever includes it - so it is acquired under
 # the same condition as `src/`, leaving the header-only target consumable without it.

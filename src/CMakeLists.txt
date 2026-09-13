@@ -171,9 +171,9 @@ if (USEARCH_BUILD_CUDA)
         usearch_dense_vram_variants PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
                                             ${CMAKE_CURRENT_SOURCE_DIR}
     )
+    # Skips `usearch_setup_target`, whose host-compiler flags the CUDA driver rejects, so it takes the list by hand.
     target_compile_definitions(
-        usearch_dense_vram_variants PRIVATE "USEARCH_BUILD_CUDA=1"
-                                            $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_COMPILE_DEFINITIONS>
+        usearch_dense_vram_variants PRIVATE "USEARCH_BUILD_CUDA=1" ${usearch_compile_definitions_}
     )
     set_target_properties(
         usearch_dense_vram_variants

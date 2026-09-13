@@ -17,9 +17,8 @@
 #include <type_traits> // `std::remove_reference_t` - the trampolines' callback recovery
 #include <utility>     // `std::swap`, `std::move`, `std::exchange`
 
-#include <forkunion.h>                // `fu_allocate_on_domain_id`, `fu_pool_spawn`, `fu_local_memory_of`
-#include <forkunion/capabilities.hpp> // `fu::preferred_yield_t` - the hold's spin policy
-#include <forkunion/types.hpp>        // `fu::spin_mutex`
+#include <forkunion.h>         // `fu_allocate_on_domain_id`, `fu_pool_spawn`, `fu_local_memory_of`
+#include <forkunion/types.hpp> // `fu::spin_mutex_t` - the hold
 
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the arenas' storage
 #include "usearch/utilities/types.hpp"       // `status_t`, `expected`
@@ -91,7 +90,7 @@ struct forkunion_executor_t {
      *      rewound between calls. */
     using arena_t = growing_arena<forkunion_allocator_t>;
     /** @brief One call's hold on the executor, released when it dies. */
-    using claim_t = std::unique_lock<fu::spin_mutex<fu::preferred_yield_t>>;
+    using claim_t = std::unique_lock<fu::spin_mutex_t>;
 
     /** @brief The label the pool's threads carry in the OS. */
     inline static constexpr char const pool_name_k[] = "usearch";
@@ -244,7 +243,7 @@ struct forkunion_executor_t {
      *      so its chunks never move. */
     growing_buffer<arena_t> arenas_per_thread_ {global_allocator};
     /** @brief Held by the one caller driving the threads; never swapped. */
-    fu::spin_mutex<fu::preferred_yield_t> held_;
+    fu::spin_mutex_t held_;
     /** @brief The pool every fan-out dispatches on, owned outright and deleted here. */
     fu_pool_t pool_ = nullptr;
     /** @brief The topology the pool was spawned over; borrowed, never owned. */

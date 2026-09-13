@@ -51,7 +51,7 @@ template <                                                                    //
     nk_dtype_t vector_dtype_ = nk_bf16_k,                                     //
     nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k,                      //
     nk_capability_t capability_ = nk_cap_icelake_k,                           //
-    typename wait_type_ = fu::preferred_yield_t,                              //
+    typename wait_type_ = fu::standard_yield_t,                               //
     template <typename> class atomic_ref_template_ = fu::standard_atomic_ref, //
     typename key_hash_type_ = std::hash<key_type_>                            //
     >

@@ -24,9 +24,8 @@
 #include <cuda.h>         // Driver API: `cuMemAddressReserve`, `cuMemCreate`, `cuMemMap`
 #include <cuda_runtime.h> // Runtime API: `cudaMallocAsync`, `cudaMallocManaged`, `cudaHostAlloc`
 
-#include <forkunion/capabilities.hpp> // `fu::preferred_yield_t` - the hold's spin policy
-#include <forkunion/topology.hpp>     // `fu::volume_ram` - the managed planes' host-memory budget
-#include <forkunion/types.hpp>        // `fu::round_up_to_multiple`, `fu::spin_mutex`
+#include <forkunion/topology.hpp> // `fu::volume_ram` - the managed planes' host-memory budget
+#include <forkunion/types.hpp>    // `fu::round_up_to_multiple`, `fu::spin_mutex_t` - the hold
 
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - an executor's table of contexts
 #include "usearch/utilities/types.hpp"
@@ -414,7 +413,7 @@ struct cuda_executor_t {
      *      @ref reserve, since relocation would be a host loop over device bytes. */
     using arena_t = growing_arena<cuda_device_allocator_t>;
     /** @brief One call's hold on the executor, released when it dies. */
-    using claim_t = std::unique_lock<fu::spin_mutex<fu::preferred_yield_t>>;
+    using claim_t = std::unique_lock<fu::spin_mutex_t>;
 
     /** @brief One device's stream and run; the arena is declared last so it frees onto a live
      *      stream. */
@@ -497,7 +496,7 @@ struct cuda_executor_t {
     /** @brief One stream per named device, in the caller's order. */
     growing_buffer<stream_t> streams_ {global_allocator};
     /** @brief Held by the one caller driving the streams; never swapped. */
-    fu::spin_mutex<fu::preferred_yield_t> held_;
+    fu::spin_mutex_t held_;
 };
 
 /** @brief The @c std::unique_ptr deleter carrying the allocator and the element count. */
