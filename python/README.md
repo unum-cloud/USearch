@@ -66,7 +66,7 @@ Calling `usearch.Executor()` raises a `TypeError` naming the three factories, si
 One index type per modality, each mirroring the C header of the same name:
 
 | Python                    | C header                     | Rust                         |
-| ------------------------- | ---------------------------- | ---------------------------- |
+| :------------------------ | :--------------------------- | :--------------------------- |
 | `usearch.DenseIndex`      | `usearch/dense_index.h`      | `usearch::dense::Index`      |
 | `usearch.SequenceIndex`   | `usearch/sequence_index.h`   | `usearch::sequence::Index`   |
 | `usearch.MatrixIndex`     | `usearch/matrix_index.h`     | `usearch::matrix::Index`     |

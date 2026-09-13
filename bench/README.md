@@ -12,11 +12,11 @@ Every result is a throughput, a latency and a recall under one explicit configur
 
 Three executables come out of `bench/CMakeLists.txt`, one per residency and cardinality.
 
-| Executable              | Index                                            | What it isolates                                                                                      |
-| :---------------------- | :----------------------------------------------- | :---------------------------------------------------------------------------------------------------- |
+| Executable                        | Index                                            | What it isolates                                                                                      |
+| :-------------------------------- | :----------------------------------------------- | :---------------------------------------------------------------------------------------------------- |
 | `usearch_bench_dense_ram_index`   | one `dense_ram_index` on one memory domain       | kernel kits, wait instructions, connectivity and expansion, per-thread staging, latency percentiles   |
 | `usearch_bench_dense_ram_indexes` | one `dense_ram_indexes` over every memory domain | what the C interface drives: admission, rotation across shards, batched verbs, SafeGraphs checkpoints |
-| `usearch_bench_dense_vram_index`    | one `dense_vram_index` on one device             | batch-per-launch build and search, the kit generation ceiling, managed-memory planes                  |
+| `usearch_bench_dense_vram_index`  | one `dense_vram_index` on one device             | batch-per-launch build and search, the kit generation ceiling, managed-memory planes                  |
 
 Each binary prints a `Machine` block, an `Insertions` block and a `Queries` block to standard output and nothing else, so a run is its transcript.
 The `Insertions` block reports the wall time, the throughput in IPS, the distances computed with the shares spent in refinement, the visited members and the restarts.
@@ -51,18 +51,18 @@ build_release/usearch_bench_dense_ram_indexes \
     --u8 --euclidean --connectivity 32 --expansion-add 256 --expansion-search 96
 ```
 
-| Flag                                                                      | Meaning                                                                                            |
-| :------------------------------------------------------------------------ | :------------------------------------------------------------------------------------------------- |
-| `--vectors`, `--queries`, `--neighbors`                                   | base vectors, query vectors and ground truth in the RetriEval layout                               |
+| Flag                                                          | Meaning                                                                                            |
+| :------------------------------------------------------------ | :------------------------------------------------------------------------------------------------- |
+| `--vectors`, `--queries`, `--neighbors`                       | base vectors, query vectors and ground truth in the RetriEval layout                               |
 | `--f32`, `--bf16`, `--f16`, `--i8`, `--i4`, `--u8`, `--u1`    | the stored dtype; a file of another dtype is cast on ingest                                        |
 | `--dot`, `--angular`, `--euclidean`, `--hamming`, `--jaccard` | the metric; angular by default                                                                     |
-| `--connectivity`, `--expansion-add`, `--expansion-search`                 | graph degree and the two candidate pools; 32, 256 and 96 by default                                |
-| `--max-compute`, `--max-schedule`, `--max-arch`                           | cap the kernel kit, the wait instruction, or the GPU generation below what the machine offers      |
-| `--threads`, `--memory-domain`                                            | the executor's threads and the NUMA domain to pin, or `all` on the multi-index                     |
-| `--batch`                                                                 | rows per batched call or per launch                                                                |
-| `--max-vectors`, `--top-k`, `--self-recall`                               | cap the ingested rows, the matches judged per query, or judge every stored vector as its own query |
-| `--save`, `--load`, `--checkpoints-dir`                                   | checkpoint after ingestion, or restore instead of building                                         |
-| `--huge-pages`                                                            | the huge pages provisioned before launch; the run fails rather than measuring base pages           |
+| `--connectivity`, `--expansion-add`, `--expansion-search`     | graph degree and the two candidate pools; 32, 256 and 96 by default                                |
+| `--max-compute`, `--max-schedule`, `--max-arch`               | cap the kernel kit, the wait instruction, or the GPU generation below what the machine offers      |
+| `--threads`, `--memory-domain`                                | the executor's threads and the NUMA domain to pin, or `all` on the multi-index                     |
+| `--batch`                                                     | rows per batched call or per launch                                                                |
+| `--max-vectors`, `--top-k`, `--self-recall`                   | cap the ingested rows, the matches judged per query, or judge every stored vector as its own query |
+| `--save`, `--load`, `--checkpoints-dir`                       | checkpoint after ingestion, or restore instead of building                                         |
+| `--huge-pages`                                                | the huge pages provisioned before launch; the run fails rather than measuring base pages           |
 
 Recall is judged against `--neighbors` as recall@1, recall@k, overlap@k and ndcg@k.
 A ground truth is computed for the whole file, so `--max-vectors` reshapes the graph it describes and the harness drops it, printing a notice; `--self-recall` judges connectivity instead and needs no ground truth at all.

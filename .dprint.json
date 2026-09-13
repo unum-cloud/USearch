@@ -1,0 +1,28 @@
+{
+  "indentWidth": 2,
+  "lineWidth": 120,
+  "newLineKind": "lf",
+  "includes": ["**/*.{json,jsonc,yaml,yml}"],
+  "excludes": [
+    "**/.git/",
+    "**/.pixi/",
+    "**/.venv/",
+    "**/.zig-cache/",
+    "**/build*/",
+    "**/dist/",
+    "**/node_modules/",
+    "**/package-lock.json",
+    "**/prebuilds/",
+    "**/target/",
+    "**/zig-out/",
+    "data/",
+    "forkunion/",
+    "numkong/",
+    "smashtable/",
+    "stringzilla/"
+  ],
+  "plugins": [
+    "https://plugins.dprint.dev/json-0.23.0.wasm",
+    "https://plugins.dprint.dev/g-plane/pretty_yaml-v0.6.0.wasm"
+  ]
+}

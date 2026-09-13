@@ -1,62 +1,62 @@
 {
-    "version": "2.0.0",
-    "tasks": [
-        {
-            "label": "Build Debug",
-            "detail": "Unoptimized C++ and C suites, sanitizers armed",
-            "command": "cmake --preset debug && cmake --build --preset debug",
-            "args": [],
-            "type": "shell",
-            "problemMatcher": ["$gcc"]
-        },
-        {
-            "label": "Build Release",
-            "detail": "Every CPU target, optimized",
-            "command": "cmake --preset release && cmake --build --preset release",
-            "args": [],
-            "type": "shell",
-            "group": "build",
-            "problemMatcher": ["$gcc"]
-        },
-        {
-            "label": "Build Profile",
-            "detail": "The profiling configuration bench/README.md measures with",
-            "command": "cmake --preset profile && cmake --build --preset profile",
-            "args": [],
-            "type": "shell",
-            "problemMatcher": ["$gcc"]
-        },
-        {
-            "label": "Build Dev",
-            "detail": "Everything including CUDA, narrowed to the host GPU - the tree the language server reads",
-            "command": "cmake --preset dev && cmake --build --preset dev",
-            "args": [],
-            "type": "shell",
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            },
-            "problemMatcher": ["$nvcc", "$gcc"]
-        },
-        {
-            "label": "Test Dev",
-            "detail": "CTest over the dev tree",
-            "command": "ctest --preset dev",
-            "args": [],
-            "type": "shell",
-            "group": {
-                "kind": "test",
-                "isDefault": true
-            },
-            "problemMatcher": []
-        },
-        {
-            "label": "Swift Build",
-            "type": "swift",
-            "args": ["build", "--build-tests"],
-            "env": {},
-            "cwd": "${workspaceFolder}",
-            "group": "build"
-        }
-    ]
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build Debug",
+      "detail": "Unoptimized C++ and C suites, sanitizers armed",
+      "command": "cmake --preset debug && cmake --build --preset debug",
+      "args": [],
+      "type": "shell",
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Build Release",
+      "detail": "Every CPU target, optimized",
+      "command": "cmake --preset release && cmake --build --preset release",
+      "args": [],
+      "type": "shell",
+      "group": "build",
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Build Profile",
+      "detail": "The profiling configuration bench/README.md measures with",
+      "command": "cmake --preset profile && cmake --build --preset profile",
+      "args": [],
+      "type": "shell",
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Build Dev",
+      "detail": "Everything including CUDA, narrowed to the host GPU - the tree the language server reads",
+      "command": "cmake --preset dev && cmake --build --preset dev",
+      "args": [],
+      "type": "shell",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$nvcc", "$gcc"]
+    },
+    {
+      "label": "Test Dev",
+      "detail": "CTest over the dev tree",
+      "command": "ctest --preset dev",
+      "args": [],
+      "type": "shell",
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Swift Build",
+      "type": "swift",
+      "args": ["build", "--build-tests"],
+      "env": {},
+      "cwd": "${workspaceFolder}",
+      "group": "build"
+    }
+  ]
 }

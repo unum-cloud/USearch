@@ -775,6 +775,40 @@ if command -v taplo > /dev/null 2>&1 && [ -f .taplo.toml ]; then
     done < <(git diff --cached --name-only --diff-filter=ACM -z)
 fi
 
+# JSON and YAML must satisfy the checked-in .dprint.json. Skips without dprint, installed from https://dprint.dev/install.
+if command -v dprint > /dev/null 2>&1; then
+    dprint_staged=()
+    while IFS= read -r -d '' file; do dprint_staged+=("$file"); done \
+        < <(git diff --cached --name-only -z --diff-filter=ACM -- '*.json' '*.jsonc' '*.yml' '*.yaml')
+    if [ ${#dprint_staged[@]} -gt 0 ] && ! dprint check "${dprint_staged[@]}" > /dev/null 2>&1; then
+        echo "pre-commit: staged JSON or YAML is not dprint clean - run: dprint fmt"
+        failed=1
+    fi
+fi
+
+# Editor settings and extension lists stay sorted case-insensitively, so every addition has one place to go.
+editor_lists=$(git diff --cached --name-only --diff-filter=ACM -- .vscode/settings.json .vscode/extensions.json .zed/settings.json)
+if [ -n "$editor_lists" ]; then
+    unsorted=$(printf '%s\n' "$editor_lists" | python3 -c '
+import json, re, subprocess, sys
+def load(path):
+    text = subprocess.run(["git", "show", ":" + path], capture_output=True, text=True).stdout
+    text = re.sub(r"\"(?:\\.|[^\"\\])*\"|//[^\n]*|/\*.*?\*/", lambda match: match.group(0) if match.group(0)[0] == "\"" else "", text, flags=re.S)
+    return json.loads(re.sub(r",(\s*[}\]])", r"\1", text))
+for path in sys.stdin.read().split():
+    data = load(path)
+    lists = [list(data)] if path.endswith("settings.json") else []
+    lists += [data.get(key, []) for key in ("cSpell.words", "recommendations", "unwantedRecommendations")]
+    if any(list(items) != sorted(items, key=str.lower) for items in lists):
+        print(path)
+')
+    if [ -n "$unsorted" ]; then
+        echo "pre-commit: sort top-level settings keys, cSpell.words and extension recommendations case-insensitively in:"
+        printf '    %s\n' $unsorted
+        failed=1
+    fi
+fi
+
 # Spotless needs a Gradle far newer than some distributions ship, so the gate calls the same
 # formatter Spotless would, out of the Gradle cache.
 palantir_jar=$(ls "$HOME"/.gradle/caches/modules-2/files-2.1/com.palantir.javaformat/palantir-java-format/*/*/palantir-java-format-*.jar 2> /dev/null | tail -1)
@@ -807,7 +841,7 @@ fi
 if [ -x node_modules/.bin/prettier ]; then
     while IFS= read -r -d '' file; do
         case "$file" in
-        *.ts | *.js | *.mjs | *.cjs | *.json) ;;
+        *.ts | *.js | *.mjs | *.cjs) ;;
         *) continue ;;
         esac
         if ! node_modules/.bin/prettier --check "$file" > /dev/null 2>&1; then

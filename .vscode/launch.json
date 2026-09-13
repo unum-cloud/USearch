@@ -1,187 +1,187 @@
 {
-    "version": "0.2.0",
-    "configurations": [
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Unit Test C++",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build_debug/usearch_test",
+      "cwd": "${workspaceFolder}",
+      "environment": [
         {
-            "name": "Unit Test C++",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build_debug/usearch_test",
-            "cwd": "${workspaceFolder}",
-            "environment": [
-                {
-                    "name": "ASAN_OPTIONS",
-                    "value": "detect_leaks=0:atexit=1:strict_init_order=1:strict_string_checks=1:abort_on_error=0"
-                },
-                {
-                    "name": "LSAN_OPTIONS",
-                    "value": "verbosity=1:log_threads=1"
-                }
-            ],
-            "stopAtEntry": false,
-            "preLaunchTask": "Build Debug",
-            "MIMode": "gdb",
-            "osx": {
-                "MIMode": "lldb"
-            },
-            "windows": {
-                "type": "cppvsdbg",
-                "program": "${workspaceFolder}/build_debug/usearch_test.exe"
-            }
+          "name": "ASAN_OPTIONS",
+          "value": "detect_leaks=0:atexit=1:strict_init_order=1:strict_string_checks=1:abort_on_error=0"
         },
         {
-            "name": "Unit Test C++ Core",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build_debug/test/usearch_test_header_only",
-            "cwd": "${workspaceFolder}",
-            "stopAtEntry": false,
-            "preLaunchTask": "Build Debug",
-            "MIMode": "gdb",
-            "osx": {
-                "MIMode": "lldb"
-            }
-        },
-        {
-            "name": "Unit Test C",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build_debug/test_c",
-            "cwd": "${workspaceFolder}",
-            "environment": [
-                {
-                    "name": "ASAN_OPTIONS",
-                    "value": "detect_leaks=0:atexit=1:strict_init_order=1:strict_string_checks=1:abort_on_error=0"
-                },
-                {
-                    "name": "LSAN_OPTIONS",
-                    "value": "verbosity=1:log_threads=1"
-                }
-            ],
-            "stopAtEntry": false,
-            "preLaunchTask": "Build Debug",
-            "MIMode": "gdb",
-            "osx": {
-                "MIMode": "lldb"
-            },
-            "windows": {
-                "type": "cppvsdbg",
-                "program": "${workspaceFolder}/build_debug/test_c.exe"
-            }
-        },
-        {
-            "name": "Unit Test CUDA",
-            "type": "cuda-gdb",
-            "request": "launch",
-            "program": "${workspaceFolder}/build_dev/test/usearch_test_cuda",
-            "cwd": "${workspaceFolder}",
-            "stopAtEntry": false,
-            "breakOnLaunch": false,
-            "preLaunchTask": "Build Dev"
-        },
-        {
-            "name": "Benchmark C++ on Wiki 1M",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build_profile/usearch_bench",
-            "cwd": "${workspaceFolder}",
-            "args": [
-                "--vectors",
-                "data/wiki-1m/base.1M.fbin",
-                "--queries",
-                "data/wiki-1m/query.public.100K.fbin",
-                "--neighbors",
-                "data/wiki-1m/groundtruth.public.100K.ibin"
-            ],
-            "stopAtEntry": false,
-            "preLaunchTask": "Build Profile",
-            "MIMode": "gdb",
-            "osx": {
-                "MIMode": "lldb"
-            }
-        },
-        {
-            "name": "Benchmark C++ on Deep 10M",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build_profile/usearch_bench",
-            "cwd": "${workspaceFolder}",
-            "args": [
-                "--vectors",
-                "data/deep-1b/base.10M.fbin",
-                "--queries",
-                "data/deep-1b/query.public.10K.fbin",
-                "--neighbors",
-                "data/deep-1b/groundtruth.public.10K.ibin"
-            ],
-            "stopAtEntry": false,
-            "preLaunchTask": "Build Profile",
-            "MIMode": "gdb",
-            "osx": {
-                "MIMode": "lldb"
-            }
-        },
-        {
-            "name": "Benchmark CUDA on Deep 10M",
-            "type": "cuda-gdb",
-            "request": "launch",
-            "program": "${workspaceFolder}/build_dev/bench/usearch_bench_dense_vram_index",
-            "cwd": "${workspaceFolder}",
-            "args": [
-                "--vectors",
-                "data/deep-1b/base.10M.fbin",
-                "--queries",
-                "data/deep-1b/query.public.10K.fbin",
-                "--neighbors",
-                "data/deep-1b/groundtruth.public.10K.ibin"
-            ],
-            "stopAtEntry": false,
-            "breakOnLaunch": false,
-            "preLaunchTask": "Build Dev"
-        },
-        {
-            "name": "Debug PyTest",
-            "type": "python",
-            "request": "launch",
-            "module": "pytest",
-            "console": "internalConsole",
-            "args": ["${file}"],
-            "justMyCode": true
-        },
-        {
-            "name": "Debug Python Benchmark",
-            "type": "python",
-            "request": "launch",
-            "program": "python/scripts/bench.py",
-            "console": "internalConsole",
-            "args": [
-                "speed",
-                "--vectors",
-                "data/wiki-1m/base.1M.fbin",
-                "--queries",
-                "data/wiki-1m/query.public.100K.fbin",
-                "--neighbors",
-                "data/wiki-1m/groundtruth.public.100K.ibin"
-            ],
-            "justMyCode": true
-        },
-        {
-            "name": "Unit Test C#",
-            "type": "coreclr",
-            "request": "launch",
-            "program": "dotnet",
-            "args": ["test", "-c", "Debug"],
-            "cwd": "${workspaceFolder}/csharp",
-            "stopAtEntry": false
-        },
-        {
-            "type": "lldb",
-            "name": "Debug Swift",
-            "request": "launch",
-            "sourceLanguages": ["swift"],
-            "args": [],
-            "cwd": "${workspaceFolder}",
-            "program": "${workspaceFolder}/.build/debug/USearchTestsSwift",
-            "preLaunchTask": "Swift Build"
+          "name": "LSAN_OPTIONS",
+          "value": "verbosity=1:log_threads=1"
         }
-    ]
+      ],
+      "stopAtEntry": false,
+      "preLaunchTask": "Build Debug",
+      "MIMode": "gdb",
+      "osx": {
+        "MIMode": "lldb"
+      },
+      "windows": {
+        "type": "cppvsdbg",
+        "program": "${workspaceFolder}/build_debug/usearch_test.exe"
+      }
+    },
+    {
+      "name": "Unit Test C++ Core",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build_debug/test/usearch_test_header_only",
+      "cwd": "${workspaceFolder}",
+      "stopAtEntry": false,
+      "preLaunchTask": "Build Debug",
+      "MIMode": "gdb",
+      "osx": {
+        "MIMode": "lldb"
+      }
+    },
+    {
+      "name": "Unit Test C",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build_debug/test_c",
+      "cwd": "${workspaceFolder}",
+      "environment": [
+        {
+          "name": "ASAN_OPTIONS",
+          "value": "detect_leaks=0:atexit=1:strict_init_order=1:strict_string_checks=1:abort_on_error=0"
+        },
+        {
+          "name": "LSAN_OPTIONS",
+          "value": "verbosity=1:log_threads=1"
+        }
+      ],
+      "stopAtEntry": false,
+      "preLaunchTask": "Build Debug",
+      "MIMode": "gdb",
+      "osx": {
+        "MIMode": "lldb"
+      },
+      "windows": {
+        "type": "cppvsdbg",
+        "program": "${workspaceFolder}/build_debug/test_c.exe"
+      }
+    },
+    {
+      "name": "Unit Test CUDA",
+      "type": "cuda-gdb",
+      "request": "launch",
+      "program": "${workspaceFolder}/build_dev/test/usearch_test_cuda",
+      "cwd": "${workspaceFolder}",
+      "stopAtEntry": false,
+      "breakOnLaunch": false,
+      "preLaunchTask": "Build Dev"
+    },
+    {
+      "name": "Benchmark C++ on Wiki 1M",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build_profile/usearch_bench",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "--vectors",
+        "data/wiki-1m/base.1M.fbin",
+        "--queries",
+        "data/wiki-1m/query.public.100K.fbin",
+        "--neighbors",
+        "data/wiki-1m/groundtruth.public.100K.ibin"
+      ],
+      "stopAtEntry": false,
+      "preLaunchTask": "Build Profile",
+      "MIMode": "gdb",
+      "osx": {
+        "MIMode": "lldb"
+      }
+    },
+    {
+      "name": "Benchmark C++ on Deep 10M",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build_profile/usearch_bench",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "--vectors",
+        "data/deep-1b/base.10M.fbin",
+        "--queries",
+        "data/deep-1b/query.public.10K.fbin",
+        "--neighbors",
+        "data/deep-1b/groundtruth.public.10K.ibin"
+      ],
+      "stopAtEntry": false,
+      "preLaunchTask": "Build Profile",
+      "MIMode": "gdb",
+      "osx": {
+        "MIMode": "lldb"
+      }
+    },
+    {
+      "name": "Benchmark CUDA on Deep 10M",
+      "type": "cuda-gdb",
+      "request": "launch",
+      "program": "${workspaceFolder}/build_dev/bench/usearch_bench_dense_vram_index",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "--vectors",
+        "data/deep-1b/base.10M.fbin",
+        "--queries",
+        "data/deep-1b/query.public.10K.fbin",
+        "--neighbors",
+        "data/deep-1b/groundtruth.public.10K.ibin"
+      ],
+      "stopAtEntry": false,
+      "breakOnLaunch": false,
+      "preLaunchTask": "Build Dev"
+    },
+    {
+      "name": "Debug PyTest",
+      "type": "python",
+      "request": "launch",
+      "module": "pytest",
+      "console": "internalConsole",
+      "args": ["${file}"],
+      "justMyCode": true
+    },
+    {
+      "name": "Debug Python Benchmark",
+      "type": "python",
+      "request": "launch",
+      "program": "python/scripts/bench.py",
+      "console": "internalConsole",
+      "args": [
+        "speed",
+        "--vectors",
+        "data/wiki-1m/base.1M.fbin",
+        "--queries",
+        "data/wiki-1m/query.public.100K.fbin",
+        "--neighbors",
+        "data/wiki-1m/groundtruth.public.100K.ibin"
+      ],
+      "justMyCode": true
+    },
+    {
+      "name": "Unit Test C#",
+      "type": "coreclr",
+      "request": "launch",
+      "program": "dotnet",
+      "args": ["test", "-c", "Debug"],
+      "cwd": "${workspaceFolder}/csharp",
+      "stopAtEntry": false
+    },
+    {
+      "type": "lldb",
+      "name": "Debug Swift",
+      "request": "launch",
+      "sourceLanguages": ["swift"],
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "program": "${workspaceFolder}/.build/debug/USearchTestsSwift",
+      "preLaunchTask": "Swift Build"
+    }
+  ]
 }

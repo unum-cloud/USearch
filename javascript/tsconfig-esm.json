@@ -1,9 +1,9 @@
 {
-    "extends": "./tsconfig-base.json",
-    "compilerOptions": {
-        "module": "esnext",
-        "outDir": "dist/esm",
-        "target": "esnext",
-        "esModuleInterop": true
-    }
+  "extends": "./tsconfig-base.json",
+  "compilerOptions": {
+    "module": "esnext",
+    "outDir": "dist/esm",
+    "target": "esnext",
+    "esModuleInterop": true
+  }
 }

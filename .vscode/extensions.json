@@ -1,23 +1,24 @@
 {
-    "recommendations": [
-        "llvm-vs-code-extensions.vscode-clangd",
-        "ms-vscode.cmake-tools",
-        "ms-vscode.cpptools",
-        "nvidia.nsight-vscode-edition",
-        "tamasfe.even-better-toml",
-        "esbenp.prettier-vscode",
-        "charliermarsh.ruff",
-        "rust-lang.rust-analyzer",
-        "golang.go",
-        "vknabel.vscode-apple-swift-format",
-        "sswg.swift-lang",
-        "redhat.java",
-        "fwcd.kotlin",
-        "scalameta.metals",
-        "ms-dotnettools.csharp",
-        "ziglang.vscode-zig",
-        "modular-mojotools.vscode-mojo",
-        "dsvictor94.promela"
-    ],
-    "unwantedRecommendations": ["ms-vscode.cpptools-extension-pack", "xaver.clang-format", "ms-python.black-formatter"]
+  "recommendations": [
+    "charliermarsh.ruff",
+    "dprint.dprint",
+    "dsvictor94.promela",
+    "esbenp.prettier-vscode",
+    "fwcd.kotlin",
+    "golang.go",
+    "llvm-vs-code-extensions.vscode-clangd",
+    "modular-mojotools.vscode-mojo",
+    "ms-dotnettools.csharp",
+    "ms-vscode.cmake-tools",
+    "ms-vscode.cpptools",
+    "nvidia.nsight-vscode-edition",
+    "redhat.java",
+    "rust-lang.rust-analyzer",
+    "scalameta.metals",
+    "sswg.swift-lang",
+    "tamasfe.even-better-toml",
+    "vknabel.vscode-apple-swift-format",
+    "ziglang.vscode-zig"
+  ],
+  "unwantedRecommendations": ["ms-python.black-formatter", "ms-vscode.cpptools-extension-pack", "xaver.clang-format"]
 }

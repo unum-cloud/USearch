@@ -201,7 +201,7 @@ USearch itself reads the same walk as arithmetic through `multiply_into`, an app
 Rather than one index taking an arbitrary distance function, each modality carries the measures its domain actually needs, with SIMD kernels dispatched by the machine's capabilities:
 
 | Modality   | Header                       | Measures                                                |
-| ---------- | ---------------------------- | ------------------------------------------------------- |
+| :--------- | :--------------------------- | :------------------------------------------------------ |
 | Dense      | `usearch/dense_index.h`      | Inner, Angular, Euclidean, Hamming, Jaccard             |
 | Sequence   | `usearch/sequence_index.h`   | Levenshtein, Needleman-Wunsch, Smith-Waterman           |
 | Matrix     | `usearch/matrix_index.h`     | Chamfer, Hausdorff, Gromov-Wasserstein, Kabsch, Umeyama |

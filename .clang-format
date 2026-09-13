@@ -8,6 +8,8 @@ NamespaceIndentation: None
 # `ReflowComments` only reflows past the limit, so it never widens prose already inside 100.
 ColumnLimit: 120
 ReflowComments: true
+# A URL cannot wrap, so reflow would split it from its `@see` and drop the hanging indent.
+CommentPragmas: '^ IWYU pragma:|https?://'
 UseTab: Never
 
 AlignConsecutiveAssignments: false

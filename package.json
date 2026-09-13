@@ -1,74 +1,74 @@
 {
-    "name": "usearch",
-    "version": "3.0.0-rc.1",
-    "description": "Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices",
-    "keywords": [
-        "vector-search",
-        "vector-database",
-        "similarity-search",
-        "nearest-neighbors",
-        "embeddings",
-        "semantic-search",
-        "retrieval",
-        "clustering",
-        "simd",
-        "gpu"
-    ],
-    "author": "Ash Vardanian <info@unum.cloud>",
-    "license": "Apache 2.0",
-    "homepage": "https://unum-cloud.github.io/USearch/",
-    "repository": {
-        "type": "git",
-        "url": "https://github.com/unum-cloud/USearch.git"
-    },
-    "bugs": {
-        "url": "https://github.com/unum-cloud/USearch/issues",
-        "email": "info@unum.cloud"
-    },
-    "engines": {
-        "node": ">=20"
-    },
-    "files": [
-        "binding.gyp",
-        "c",
-        "cpp",
-        "cmake",
-        "numkong",
-        "include",
-        "javascript",
-        "prebuilds"
-    ],
-    "dependencies": {
-        "bindings": "^1.5.0",
-        "node-gyp-build": "^4.8.4"
-    },
-    "scripts": {
-        "build-js": "tsc -p javascript/tsconfig-esm.json && tsc -p javascript/tsconfig-cjs.json && cp javascript/dist-package-esm.json javascript/dist/esm/package.json && cp javascript/dist-package-cjs.json javascript/dist/cjs/package.json",
-        "build-native": "cmake-js compile --out build_node --CDUSEARCH_BUILD_LIB_C=ON --CDUSEARCH_BUILD_LIB_NODE=ON --CDUSEARCH_BUILD_TEST_CPP=OFF --CDUSEARCH_BUILD_BENCH_CPP=OFF --target usearch_node",
-        "build-native-stub": "cmake-js compile --out build_node_stub --CDUSEARCH_BUILD_LIB_C_STUB=ON --CDUSEARCH_BUILD_LIB_NODE=ON --CDUSEARCH_BUILD_TEST_CPP=OFF --CDUSEARCH_BUILD_BENCH_CPP=OFF --target usearch_node",
-        "install": "node-gyp-build",
-        "prebuild": "npm run build-native && node javascript/stage-prebuild.js build_node",
-        "prebuild-arm64": "cmake-js compile --out build_node_arm64 --arch arm64 --CDUSEARCH_BUILD_LIB_C=ON --CDUSEARCH_BUILD_LIB_NODE=ON --CDUSEARCH_BUILD_TEST_CPP=OFF --CDUSEARCH_BUILD_BENCH_CPP=OFF --target usearch_node && node javascript/stage-prebuild.js build_node_arm64 arm64",
-        "test": "node --test ./javascript/usearch.test.js"
-    },
-    "devDependencies": {
-        "@types/bindings": "^1.5.5",
-        "@types/node": "^24.3.0",
-        "cmake-js": "^8.0.0",
-        "prettier": "^3.9.6",
-        "remark-cli": "^12.0.1",
-        "remark-gfm": "^4.0.1",
-        "remark-math": "^6.0.0",
-        "typescript": "^5.9.2"
-    },
-    "main": "javascript/dist/cjs/usearch.js",
-    "module": "javascript/dist/esm/usearch.js",
-    "types": "javascript/dist/cjs/usearch.d.ts",
-    "exports": {
-        ".": {
-            "types": "./javascript/dist/cjs/usearch.d.ts",
-            "import": "./javascript/dist/esm/usearch.js",
-            "require": "./javascript/dist/cjs/usearch.js"
-        }
+  "name": "usearch",
+  "version": "3.0.0-rc.1",
+  "description": "Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices",
+  "keywords": [
+    "vector-search",
+    "vector-database",
+    "similarity-search",
+    "nearest-neighbors",
+    "embeddings",
+    "semantic-search",
+    "retrieval",
+    "clustering",
+    "simd",
+    "gpu"
+  ],
+  "author": "Ash Vardanian <info@unum.cloud>",
+  "license": "Apache 2.0",
+  "homepage": "https://unum-cloud.github.io/USearch/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/unum-cloud/USearch.git"
+  },
+  "bugs": {
+    "url": "https://github.com/unum-cloud/USearch/issues",
+    "email": "info@unum.cloud"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "binding.gyp",
+    "c",
+    "cpp",
+    "cmake",
+    "numkong",
+    "include",
+    "javascript",
+    "prebuilds"
+  ],
+  "dependencies": {
+    "bindings": "^1.5.0",
+    "node-gyp-build": "^4.8.4"
+  },
+  "scripts": {
+    "build-js": "tsc -p javascript/tsconfig-esm.json && tsc -p javascript/tsconfig-cjs.json && cp javascript/dist-package-esm.json javascript/dist/esm/package.json && cp javascript/dist-package-cjs.json javascript/dist/cjs/package.json",
+    "build-native": "cmake-js compile --out build_node --CDUSEARCH_BUILD_LIB_C=ON --CDUSEARCH_BUILD_LIB_NODE=ON --CDUSEARCH_BUILD_TEST_CPP=OFF --CDUSEARCH_BUILD_BENCH_CPP=OFF --target usearch_node",
+    "build-native-stub": "cmake-js compile --out build_node_stub --CDUSEARCH_BUILD_LIB_C_STUB=ON --CDUSEARCH_BUILD_LIB_NODE=ON --CDUSEARCH_BUILD_TEST_CPP=OFF --CDUSEARCH_BUILD_BENCH_CPP=OFF --target usearch_node",
+    "install": "node-gyp-build",
+    "prebuild": "npm run build-native && node javascript/stage-prebuild.js build_node",
+    "prebuild-arm64": "cmake-js compile --out build_node_arm64 --arch arm64 --CDUSEARCH_BUILD_LIB_C=ON --CDUSEARCH_BUILD_LIB_NODE=ON --CDUSEARCH_BUILD_TEST_CPP=OFF --CDUSEARCH_BUILD_BENCH_CPP=OFF --target usearch_node && node javascript/stage-prebuild.js build_node_arm64 arm64",
+    "test": "node --test ./javascript/usearch.test.js"
+  },
+  "devDependencies": {
+    "@types/bindings": "^1.5.5",
+    "@types/node": "^24.3.0",
+    "cmake-js": "^8.0.0",
+    "prettier": "^3.9.6",
+    "remark-cli": "^12.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
+    "typescript": "^5.9.2"
+  },
+  "main": "javascript/dist/cjs/usearch.js",
+  "module": "javascript/dist/esm/usearch.js",
+  "types": "javascript/dist/cjs/usearch.d.ts",
+  "exports": {
+    ".": {
+      "types": "./javascript/dist/cjs/usearch.d.ts",
+      "import": "./javascript/dist/esm/usearch.js",
+      "require": "./javascript/dist/cjs/usearch.js"
     }
+  }
 }

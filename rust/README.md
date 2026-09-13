@@ -205,7 +205,7 @@ while index.refine(&executor, InsertionOptions::with_expansion_factor(128), None
 The scalar types are NumKong's, so nothing needs re-wrapping to move between the two crates - `f16` and `bf16` included, emulated where the CPU has no native support.
 
 | Rust type                      | `ScalarKind`                   |
-| ------------------------------ | ------------------------------ |
+| :----------------------------- | :----------------------------- |
 | `f64`, `f32`                   | `F64`, `F32`                   |
 | `bf16`, `f16`                  | `BF16`, `F16`                  |
 | `e5m2`, `e4m3`, `e3m2`, `e2m3` | `E5M2`, `E4M3`, `E3M2`, `E2M3` |
