@@ -95,7 +95,7 @@ BENCHMARK_TEMPLATE(bench_sorted_buffer_insert_span, 16)->Arg(64)->Arg(256);
 BENCHMARK_TEMPLATE(bench_sorted_buffer_insert_n_separate, 32)->Arg(64)->Arg(256);
 BENCHMARK_TEMPLATE(bench_sorted_buffer_insert_span, 32)->Arg(64)->Arg(256);
 
-void bench_hash_set_set_one(bm::State& state) {
+void bench_hash_set_insert_one(bm::State& state) {
     auto const expected_size = static_cast<std::size_t>(state.range(0));
     growing_hash_set<u32_t> hash_set {global_allocator};
     if (failed(hash_set.reserve(expected_size * 4))) return state.SkipWithError("the set refused its reservation");
@@ -104,15 +104,15 @@ void bench_hash_set_set_one(bm::State& state) {
     std::size_t step_count = 0;
     for (auto _ : state) {
         u32_t const key = random_generator();
-        bm::DoNotOptimize(hash_set.set(key));
+        bm::DoNotOptimize(hash_set.insert(key));
         if ((++step_count % clear_every) == 0) hash_set.clear();
     }
     state.SetItemsProcessed(state.iterations());
 }
 
-/** @brief Apples-to-apples: @c batch_size separate @c set calls per iteration. */
+/** @brief Apples-to-apples: @c batch_size separate @c insert calls per iteration. */
 template <std::size_t batch_size_>
-void bench_hash_set_set_n_separate(bm::State& state) {
+void bench_hash_set_insert_n_separate(bm::State& state) {
     auto const expected_size = static_cast<std::size_t>(state.range(0));
     growing_hash_set<u32_t> hash_set {global_allocator};
     if (failed(hash_set.reserve(expected_size * 4))) return state.SkipWithError("the set refused its reservation");
@@ -124,7 +124,7 @@ void bench_hash_set_set_n_separate(bm::State& state) {
         for (auto& value : batch) value = random_generator();
         u64_t accepted_mask = 0;
         for (std::size_t i = 0; i < batch_size_; ++i)
-            if (hash_set.set(batch[i]) == membership_t::fresh_k) accepted_mask |= u64_t {1} << i;
+            if (hash_set.insert(batch[i]) == membership_t::absent_k) accepted_mask |= u64_t {1} << i;
         bm::DoNotOptimize(accepted_mask);
         if ((++step_count % clear_every) == 0) hash_set.clear();
     }
@@ -132,9 +132,9 @@ void bench_hash_set_set_n_separate(bm::State& state) {
     state.counters["batch_N"] = static_cast<double>(batch_size_);
 }
 
-/** @brief Apples-to-apples: one @c set(std::array) call per iteration. */
+/** @brief Apples-to-apples: one @c insert(std::array) call per iteration. */
 template <std::size_t batch_size_>
-void bench_hash_set_set_one_batch(bm::State& state) {
+void bench_hash_set_insert_one_batch(bm::State& state) {
     auto const expected_size = static_cast<std::size_t>(state.range(0));
     growing_hash_set<u32_t> hash_set {global_allocator};
     if (failed(hash_set.reserve(expected_size * 4))) return state.SkipWithError("the set refused its reservation");
@@ -144,20 +144,20 @@ void bench_hash_set_set_one_batch(bm::State& state) {
     for (auto _ : state) {
         std::array<u32_t, batch_size_> batch;
         for (auto& value : batch) value = random_generator();
-        bm::DoNotOptimize(hash_set.set(batch));
+        bm::DoNotOptimize(hash_set.insert(batch));
         if ((++step_count % clear_every) == 0) hash_set.clear();
     }
     state.SetItemsProcessed(state.iterations() * batch_size_);
     state.counters["batch_N"] = static_cast<double>(batch_size_);
 }
 
-BENCHMARK(bench_hash_set_set_one)->Arg(256)->Arg(2048)->Arg(16384);
-BENCHMARK_TEMPLATE(bench_hash_set_set_n_separate, 4)->Arg(256)->Arg(2048)->Arg(16384);
-BENCHMARK_TEMPLATE(bench_hash_set_set_one_batch, 4)->Arg(256)->Arg(2048)->Arg(16384);
-BENCHMARK_TEMPLATE(bench_hash_set_set_n_separate, 16)->Arg(256)->Arg(2048)->Arg(16384);
-BENCHMARK_TEMPLATE(bench_hash_set_set_one_batch, 16)->Arg(256)->Arg(2048)->Arg(16384);
-BENCHMARK_TEMPLATE(bench_hash_set_set_n_separate, 32)->Arg(256)->Arg(2048)->Arg(16384);
-BENCHMARK_TEMPLATE(bench_hash_set_set_one_batch, 32)->Arg(256)->Arg(2048)->Arg(16384);
+BENCHMARK(bench_hash_set_insert_one)->Arg(256)->Arg(2048)->Arg(16384);
+BENCHMARK_TEMPLATE(bench_hash_set_insert_n_separate, 4)->Arg(256)->Arg(2048)->Arg(16384);
+BENCHMARK_TEMPLATE(bench_hash_set_insert_one_batch, 4)->Arg(256)->Arg(2048)->Arg(16384);
+BENCHMARK_TEMPLATE(bench_hash_set_insert_n_separate, 16)->Arg(256)->Arg(2048)->Arg(16384);
+BENCHMARK_TEMPLATE(bench_hash_set_insert_one_batch, 16)->Arg(256)->Arg(2048)->Arg(16384);
+BENCHMARK_TEMPLATE(bench_hash_set_insert_n_separate, 32)->Arg(256)->Arg(2048)->Arg(16384);
+BENCHMARK_TEMPLATE(bench_hash_set_insert_one_batch, 32)->Arg(256)->Arg(2048)->Arg(16384);
 
 void bench_max_heap_push_pop(bm::State& state) {
     auto const target_size = static_cast<std::size_t>(state.range(0));

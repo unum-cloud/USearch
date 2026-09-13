@@ -710,7 +710,7 @@ std::size_t test_basic_wiring(fixture_type_ const& fixture) {
 
         auto const linked = index.link(from, to);
         failures += expect_eq(linked.status, status_t::success_k);
-        failures += expect(linked.value == membership_t::fresh_k);
+        failures += expect(linked.value == membership_t::absent_k);
         failures += expect_eq(index.degree_of(from).value, degree_before + 1);
         auto const relinked = index.link(from, to);
         failures += expect_eq(relinked.status, status_t::success_k);
@@ -783,7 +783,7 @@ std::size_t test_basic_allocation_budget(fixture_type_ const& fixture) {
         for (std::size_t target = 1; target != linked_nodes_k && !refused_target; ++target) {
             auto const linked = index.link(0, static_cast<node_id_t>(target));
             if (linked.status == status_t::bad_alloc_k) refused_target = static_cast<node_id_t>(target);
-            else if (succeeded(linked.status) && linked.value == membership_t::fresh_k) ++fresh_links;
+            else if (succeeded(linked.status) && linked.value == membership_t::absent_k) ++fresh_links;
         }
         failures += expect(refused_target != 0);
         failures += expect_eq(index.degree_of(0).value, degree_before + fresh_links);
@@ -791,7 +791,7 @@ std::size_t test_basic_allocation_budget(fixture_type_ const& fixture) {
         ledger.byte_budget.store(PTRDIFF_MAX);
         auto const retried = index.link(0, refused_target);
         failures += expect_eq(retried.status, status_t::success_k);
-        failures += expect(retried.value == membership_t::fresh_k);
+        failures += expect(retried.value == membership_t::absent_k);
         failures += expect_eq(index.degree_of(0).value, degree_before + fresh_links + 1);
     }
     failures += expect_eq(ledger.live_bytes.load(), 0);

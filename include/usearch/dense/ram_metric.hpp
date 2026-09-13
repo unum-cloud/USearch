@@ -103,6 +103,7 @@
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_hints.hpp"
+#include "usearch/utilities/ram_tables.hpp"
 
 /**
  *  @brief Per-step cache-hint feature gates for the @c invoke_distances_ trampoline.
@@ -3325,6 +3326,16 @@ template <typename fallback_, typename head_, typename... tail_>
 struct first_available_kit<fallback_, head_, tail_...> {
     using type = std::conditional_t<head_::available, typename head_::kit_t,
                                     typename first_available_kit<fallback_, tail_...>::type>;
+};
+
+/** @brief The visited set's kit for one capability ceiling: the Skylake group scan where the
+ *      class carries AVX-512, the serial walk otherwise. */
+template <nk_capability_t caps_>
+struct dense_visits_hash_set_chain {
+    using kit_t = typename first_available_kit<                                                              //
+        serial_visits_hash_set_kit_t,                                                                        //
+        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, u32_skylake_visits_hash_set_kit_t> //
+        >::type;
 };
 
 /**

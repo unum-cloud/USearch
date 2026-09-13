@@ -17,9 +17,10 @@
  *     the union because the "top-k of (existing ∪ batch)" semantic can accept
  *     candidates that cascading single-element inserts would reject.
  */
+#include <cstdint>
+
 #include <algorithm>
 #include <array>
-#include <cstdint>
 #include <memory> // `std::allocator` - every container names its allocator
 #include <random>
 #include <unordered_set> // The reference oracle of the hash-set growth-parity audit
@@ -34,7 +35,7 @@
 
 using namespace unum::usearch;
 
-// sorted_buffer
+#pragma region Sorted Buffer
 
 std::size_t check_sorted_buffer_single_element() noexcept {
     std::size_t failures = 0;
@@ -101,16 +102,18 @@ std::size_t check_sorted_buffer_batch_parity(unsigned seed) noexcept {
     return failures;
 }
 
-// growing_hash_set
+#pragma endregion Sorted Buffer
+
+#pragma region Growing Hash Set
 
 std::size_t check_hash_set_single_element() noexcept {
     std::size_t failures = 0;
     growing_hash_set<u32_t> hash_set {global_allocator};
     failures += expect(succeeded(hash_set.reserve(16)));
-    failures += expect(hash_set.set(42) == membership_t::fresh_k);
-    failures += expect(hash_set.set(42) == membership_t::present_k);
-    failures += expect(hash_set.test(42));
-    failures += expect(!hash_set.test(99));
+    failures += expect(hash_set.insert(42) == membership_t::absent_k);
+    failures += expect(hash_set.insert(42) == membership_t::present_k);
+    failures += expect(hash_set.contains(42));
+    failures += expect(!hash_set.contains(99));
     return failures;
 }
 
@@ -136,8 +139,8 @@ std::size_t check_hash_set_growth_parity(unsigned seed) noexcept {
         }
         for (int step = 0; step < inserts_per_round_k; ++step) {
             u32_t key = distribution(random_generator);
-            while (key == default_free_value<u32_t>()) key = distribution(random_generator);
-            bool const was_known = tested.set(key) == membership_t::present_k;
+            while (key == unused_hash_slot_value<u32_t>()) key = distribution(random_generator);
+            bool const was_known = tested.insert(key) == membership_t::present_k;
             bool const oracle_known = !oracle.insert(key).second;
             if (was_known != oracle_known) {
                 fmt::print(stderr, "FAIL hash_set growth round={} step={} key={} tested={} oracle={}\n", round, step,
@@ -147,7 +150,7 @@ std::size_t check_hash_set_growth_parity(unsigned seed) noexcept {
         }
         // Every element ever inserted must remain reachable after all the rehashes so far.
         for (u32_t key : oracle)
-            if (!tested.test(key)) {
+            if (!tested.contains(key)) {
                 fmt::print(stderr, "FAIL hash_set growth round={} key={} unreachable after rehash\n", round, key);
                 return ++failures;
             }
@@ -173,7 +176,7 @@ std::size_t check_hash_set_batch_parity(unsigned seed) noexcept {
     auto draw_key = [&](void) noexcept {
         u32_t candidate;
         do candidate = distribution(random_generator);
-        while (candidate == default_free_value<u32_t>());
+        while (candidate == unused_hash_slot_value<u32_t>());
         return candidate;
     };
 
@@ -182,10 +185,10 @@ std::size_t check_hash_set_batch_parity(unsigned seed) noexcept {
         std::array<u32_t, batch_size_> batch;
         for (auto& key : batch) key = draw_key();
 
-        u64_t const tested_mask = tested.set(batch);
+        u64_t const tested_mask = tested.insert(batch);
         u64_t oracle_mask = 0;
         for (std::size_t lane = 0; lane < batch_size_; ++lane)
-            if (oracle.set(batch[lane]) == membership_t::fresh_k) oracle_mask |= u64_t {1} << lane;
+            if (oracle.insert(batch[lane]) == membership_t::absent_k) oracle_mask |= u64_t {1} << lane;
         if (tested_mask != oracle_mask) {
             fmt::print(stderr, "FAIL hash_set N={} parity step={} tested=0x{:x} oracle=0x{:x}\n", batch_size_, step,
                        tested_mask, oracle_mask);
@@ -216,18 +219,18 @@ std::size_t check_hash_set_arena_growth() noexcept {
         set_t set {arena_allocator<std::byte, upstream_t>(arena)};
         failures += expect(succeeded(set.reserve(16)));
         failures += expect_eq(ledger.live_bytes.load(), seed_bytes); // The seed chunk served it.
-        for (u32_t value = 0; value != 16; ++value) failures += expect(set.set(value) == membership_t::fresh_k);
+        for (u32_t value = 0; value != 16; ++value) failures += expect(set.insert(value) == membership_t::absent_k);
 
         failures += expect(succeeded(set.reserve(4'096)));
         failures += expect(ledger.live_bytes.load() > seed_bytes); // A wider chunk opened beside the seed.
         failures += expect(arena.capacity() > 1024u);
-        for (u32_t value = 0; value != 16; ++value) failures += expect(set.test(value));
-        for (u32_t value = 16; value != 4'096; ++value) failures += expect(set.set(value) == membership_t::fresh_k);
+        for (u32_t value = 0; value != 16; ++value) failures += expect(set.contains(value));
+        for (u32_t value = 16; value != 4'096; ++value) failures += expect(set.insert(value) == membership_t::absent_k);
 
         ledger.byte_budget.store(ledger.live_bytes.load());
         failures += expect_eq(set.reserve(1u << 20), status_t::bad_alloc_k);
         failures += expect_eq(set.size(), 4'096u);
-        failures += expect(set.test(4'095));
+        failures += expect(set.contains(4'095));
 
         std::ptrdiff_t const grown_bytes = ledger.live_bytes.load();
         set.reset();
@@ -240,7 +243,9 @@ std::size_t check_hash_set_arena_growth() noexcept {
     return failures;
 }
 
-// max_heap
+#pragma endregion Growing Hash Set
+
+#pragma region Max Heap
 
 std::size_t check_max_heap_push_pop() noexcept {
     std::size_t failures = 0;
@@ -410,6 +415,8 @@ std::size_t check_max_heap_pop_many() noexcept {
         }
     return failures;
 }
+
+#pragma endregion Max Heap
 
 std::size_t test_ram_buffers() {
     std::size_t failures = 0;

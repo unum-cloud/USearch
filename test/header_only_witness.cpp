@@ -12,13 +12,6 @@
  *  deliberately minimal - instantiate, insert, search, round-trip - existence is the
  *  assertion; behavioral depth lives in the fmt-linked suite.
  */
-#include "usearch/utilities/types.hpp"
-#include "usearch/utilities/ram_buffers.hpp"
-#include "usearch/utilities/ram_tables.hpp"
-#include "usearch/utilities/ram_hints.hpp"
-#include "usearch/basic/ram_index.hpp"
-#include "usearch/geospatial/ram_index.hpp"
-
 #include <array>       // `std::array` - stored tags & batch overloads
 #include <bit>         // `std::bit_cast` - uuid keys from words
 #include <memory>      // `std::allocator` - every container names its allocator
@@ -26,6 +19,13 @@
 #include <string_view> // `std::string_view` - the status vocabulary probe
 #include <type_traits> // `std::is_same_v` - the columns' witness
 #include <vector>      // `std::vector` - the five snapshot columns
+
+#include "usearch/utilities/types.hpp"
+#include "usearch/utilities/ram_buffers.hpp"
+#include "usearch/utilities/ram_tables.hpp"
+#include "usearch/utilities/ram_hints.hpp"
+#include "usearch/basic/ram_index.hpp"
+#include "usearch/geospatial/ram_index.hpp"
 
 using namespace unum::usearch;
 
@@ -158,9 +158,9 @@ int main() {
     // Associative containers: the visited set & the concurrent multimap.
     growing_hash_set<dense_node_id_t> visited {global_allocator};
     if (failed(visited.reserve(64))) return 1;
-    if (visited.set(42) != membership_t::fresh_k) return 1;
-    if (!visited.test(42) || visited.test(43)) return 1;
-    if (visited.set(std::array<dense_node_id_t, 4> {42, 43, 44, 45}) != 0b1110u) return 1;
+    if (visited.insert(42) != membership_t::absent_k) return 1;
+    if (!visited.contains(42) || visited.contains(43)) return 1;
+    if (visited.insert(std::array<dense_node_id_t, 4> {42, 43, 44, 45}) != 0b1110u) return 1;
 
     growing_multimap<u64_t, u32_t> multimap {global_allocator};
     if (failed(multimap.reserve(8))) return 1;

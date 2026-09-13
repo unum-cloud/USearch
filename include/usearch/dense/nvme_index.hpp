@@ -1854,7 +1854,7 @@ struct dense_nvme_index {
                        u64_t(next_query) * 0x9E3779B97F4A7C15ull + slot_index + 1);
             ++next_query;
             node_id_t seed = uniform_below<node_id_t> {static_cast<node_id_t>(size())}(slot.random_generator);
-            slot.visited.set(seed);
+            slot.visited.insert(seed);
             status_t emitted = emit_(context, slot_index, seed, dense_io_purpose_t::score_k);
             if (emitted != status_t::success_k) return emitted;
         }
@@ -1905,7 +1905,7 @@ struct dense_nvme_index {
         }
         for (small_size_t i = 0; i != neighbors_count; ++i) {
             node_id_t neighbor = neighbor_ids[i];
-            if (neighbor == dense_node_id_unknown_k || slot.visited.set(neighbor)) continue;
+            if (neighbor == dense_node_id_unknown_k || slot.visited.insert(neighbor)) continue;
             status_t emitted = emit_(context, slot_index, neighbor, dense_io_purpose_t::score_k);
             if (emitted != status_t::success_k) return emitted;
         }

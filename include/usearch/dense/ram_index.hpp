@@ -153,7 +153,10 @@ struct dense_traversal_context {
      *      insert-dominated frontier (~2x connectivity pushes per pop) rides the shallower
      *      log_8 @c shift_up depth. */
     using frontier_queue_t = max_heap_dary<8, dense_scored_node_t, dense_further_scored_node_t, candidates_allocator_t>;
-    using visited_set_t = growing_hash_set<dense_node_id_t, std::hash<dense_node_id_t>, visits_allocator_t>;
+    /** @brief The visited set walks its slots with the kit the class's mask earns: sixteen at a
+     *      time on the AVX-512 classes, one at a time below them. */
+    using visited_set_t = growing_hash_set<dense_node_id_t, std::hash<dense_node_id_t>, visits_allocator_t,
+                                           typename dense_visits_hash_set_chain<capability_>::kit_t>;
 
     /** @brief Nodes we've already scored, kept ascending as the best results so far. */
     results_array_t results;
@@ -2324,7 +2327,7 @@ struct dense_ram_index {
             // Draw uniformly; on collision with an already-visited id, probe forward cyclically -
             // deterministic progress even when the published set is almost fully explored.
             node_id_t landmark_node_id = uniform_below<node_id_t> {first_invisible_id}(context.random_generator);
-            while (visited.test(landmark_node_id))
+            while (visited.contains(landmark_node_id))
                 landmark_node_id = landmark_node_id + 1 == first_invisible_id ? 0 : landmark_node_id + 1;
 
             chunked_location_t const landmark_location = chunked_location(landmark_node_id);
@@ -2333,7 +2336,7 @@ struct dense_ram_index {
             if constexpr (synchronization_ == synchronization_t::concurrent_k)
                 if (neighbors_for(landmark_location).peek_first() == dense_node_id_unknown_k) continue;
 
-            [[maybe_unused]] membership_t const marked = visited.set(landmark_node_id);
+            [[maybe_unused]] membership_t const marked = visited.insert(landmark_node_id);
             landmarks_ids[landmarks_in_batch] = landmark_node_id;
             landmarks_vectors[landmarks_in_batch] = vector_for(landmark_location);
             landmarks_norms[landmarks_in_batch] = norm_for(landmark_location);
@@ -2503,7 +2506,7 @@ struct dense_ram_index {
                     // has no happens-before edge to its hosting chunk yet, so skip it; a later
                     // traversal with a fresher snapshot will meet it safely.
                     if (neighbor_id >= first_invisible_id) continue;
-                    if (visited.test(neighbor_id)) continue;
+                    if (visited.contains(neighbor_id)) continue;
                     chunked_location_t const neighbor_location = chunked_location(neighbor_id);
                     gathered_ids[gathered_count] = neighbor_id;
                     gathered_vectors[gathered_count] = vector_for(neighbor_location);
@@ -2549,11 +2552,11 @@ struct dense_ram_index {
                 // Full quads - the hot case - mark all four lanes in one interleaved probe sweep.
                 if (status_t const seen = visited.reserve(visited.size() + gathered_count); failed(seen)) return seen;
                 if (gathered_count == gathered_ids.size()) {
-                    [[maybe_unused]] u64_t const fresh = visited.set(gathered_ids);
+                    [[maybe_unused]] u64_t const fresh = visited.insert(gathered_ids);
                 }
                 else
                     for (small_size_t lane = 0; lane != gathered_count; ++lane) {
-                        [[maybe_unused]] membership_t const marked = visited.set(gathered_ids[lane]);
+                        [[maybe_unused]] membership_t const marked = visited.insert(gathered_ids[lane]);
                     }
 
                 for (small_size_t lane = 0; lane != accepted_count; ++lane)

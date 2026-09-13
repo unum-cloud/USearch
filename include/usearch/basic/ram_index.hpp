@@ -771,19 +771,19 @@ struct basic_ram_index {
         constexpr bool locked_k = synchronization_ == synchronization_t::concurrent_k;
         std::size_t const visible = size();
         if (static_cast<std::size_t>(from) >= visible || static_cast<std::size_t>(to) >= visible || from == to)
-            return {membership_t::fresh_k, status_t::malformed_k};
+            return {membership_t::absent_k, status_t::malformed_k};
 
         // Joins the mutator class: manual wiring never moves the watermark, so the shared
         // mutex is what makes it visible to stop-the-world verbs & the certified probes.
         shared_lock_t shared_lock {shared_mutex_};
         node_t& node = nodes_array_[from];
         if constexpr (locked_k) node.mutex.lock();
-        membership_t membership = membership_t::fresh_k;
-        for (std::size_t position = 0; position != node.neighbors.size() && membership == membership_t::fresh_k;
+        membership_t membership = membership_t::absent_k;
+        for (std::size_t position = 0; position != node.neighbors.size() && membership == membership_t::absent_k;
              ++position)
             if (node.neighbors[position] == to) membership = membership_t::present_k;
         status_t status = status_t::success_k;
-        if (membership == membership_t::fresh_k) {
+        if (membership == membership_t::absent_k) {
             status = node.neighbors.reserve(node.neighbors.size() + 1);
             if (succeeded(status)) node.neighbors.push_back_reserved(to);
         }
@@ -1083,7 +1083,7 @@ struct basic_ram_index {
             std::size_t flooded = 0;
             context.staged_ids.clear();
             context.staged_ids.push_back_reserved(seed);
-            [[maybe_unused]] membership_t const seeded = context.visited.set(seed);
+            [[maybe_unused]] membership_t const seeded = context.visited.insert(seed);
             while (!context.staged_ids.empty()) {
                 node_id_t const node = context.staged_ids.pop_back();
                 ++flooded;
@@ -1094,7 +1094,7 @@ struct basic_ram_index {
                         report.status = status_t::internal_k;
                         continue;
                     }
-                    if (context.visited.set(row[link]) == membership_t::fresh_k)
+                    if (context.visited.insert(row[link]) == membership_t::absent_k)
                         context.staged_ids.push_back_reserved(row[link]);
                 }
             }
@@ -1103,7 +1103,7 @@ struct basic_ram_index {
 
         context.visited.clear();
         for (std::size_t node = 0; node != node_count; ++node) {
-            if (context.visited.test(static_cast<node_id_t>(node))) continue;
+            if (context.visited.contains(static_cast<node_id_t>(node))) continue;
             ++report.connected_components;
             report.largest_component = max_of(report.largest_component, flood(static_cast<node_id_t>(node)));
         }
@@ -1115,7 +1115,7 @@ struct basic_ram_index {
         std::size_t const seed_count = min_of<std::size_t>(health_seeds_k, node_count);
         for (std::size_t seed = 0; seed != seed_count && context.visited.size() != node_count; ++seed) {
             node_id_t draw = uniform_below<node_id_t> {visible}(context.random_generator);
-            while (context.visited.test(draw)) draw = draw + 1 == visible ? 0 : draw + 1;
+            while (context.visited.contains(draw)) draw = draw + 1 == visible ? 0 : draw + 1;
             flood(draw);
         }
         report.unreachable_from_seeds = node_count - context.visited.size();
@@ -1473,10 +1473,10 @@ struct basic_ram_index {
         while (context.staged_ids.size() != wanted &&
                context.visited.size() < static_cast<std::size_t>(first_invisible_id)) {
             node_id_t draw = uniform_below<node_id_t> {first_invisible_id}(context.random_generator);
-            while (context.visited.test(draw)) draw = draw + 1 == first_invisible_id ? 0 : draw + 1;
+            while (context.visited.contains(draw)) draw = draw + 1 == first_invisible_id ? 0 : draw + 1;
             if (metric.push(published_value_of(draw)) == basic_metric_staging_t::refused_k)
                 break; // Unmarked, so a later round may retry it.
-            [[maybe_unused]] membership_t const marked = context.visited.set(draw);
+            [[maybe_unused]] membership_t const marked = context.visited.insert(draw);
             context.staged_ids.push_back_reserved(draw);
         }
         std::size_t const staged_count = context.staged_ids.size();
@@ -1527,12 +1527,12 @@ struct basic_ram_index {
                 // The translation frontier: an id at or above the snapshot has no
                 // happens-before edge to its record, so a later query picks it up.
                 if (neighbor_id >= first_invisible_id) continue;
-                if (context.visited.test(neighbor_id)) continue;
+                if (context.visited.contains(neighbor_id)) continue;
                 if (metric.push(published_value_of(neighbor_id)) == basic_metric_staging_t::refused_k) {
                     context.staged_ids.resize_reserved(kept);
                     return basic_expansion_round_t::saturated_k;
                 }
-                [[maybe_unused]] membership_t const marked = context.visited.set(neighbor_id);
+                [[maybe_unused]] membership_t const marked = context.visited.insert(neighbor_id);
                 context.staged_ids[kept] = neighbor_id;
                 ++kept;
             }
