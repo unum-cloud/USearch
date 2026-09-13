@@ -1,44 +1,50 @@
 /**
- *  The sharded dense index from `include/usearch/dense/ram_indexes.hpp`: rows admitted into each
- *  shard's key plane through `fetch_add_if_at_most`, a refusal past admission handing them back
- *  with a release subtract, each landed row's key stored before its shard's watermark turn, and
- *  the readers that rest on the watermark - the search merge reading `keys[node]`, the monolith
- *  save taking one `plan_save` per shard, and the load path landing keys under one `finish`.
+ *  The sharded dense index from `include/usearch/dense/ram_indexes.hpp`: each row claimed from
+ *  its shard's own capacity counter, whose ceiling is the shard's key column, a refusal past the
+ *  claim releasing it with a release subtract, each landed row's key stored before its shard's
+ *  watermark turn, and the readers that rest on the watermark - the search merge reading
+ *  `keys[node]`, the monolith save taking one `plan_save` per shard, and the load path landing
+ *  keys under one `finish`.
  *
- *  Two shards with planes of two rows. `-Dscenario=adding`, the default: two batch adders each
- *  bringing one row per shard, one single-row adder probing the shards from its routing base,
- *  and a searcher; the dispenser is a ghost, a row's publication is its watermark turn. The
- *  batch adder admits shard by shard, unwinds every shard admitted so far on a refusal, and may
- *  have its claims or fan-out refused after admission, which unwinds them all. A checker outside
- *  the memory model compares each plane's admission word with its dispenser once every adder is
- *  done. `-Dscenario=saving`: one batch adder, a saver running `plan_save` per shard, `finish`,
- *  then the plain key copy of `keys[0..visible)`, and a searcher; the dispenser is a word, since
- *  the cut compares it. `-Dscenario=loading`: a loader running `plan_load` per shard, the keys at
- *  the base, then `finish`, against a searcher on the still-empty index.
+ *  Two shards with key columns of two rows. `-Dscenario=adding`, the default: two batch adders
+ *  each bringing one row per shard, one single-row adder probing the shards from its routing
+ *  base, and a searcher; the dispenser is a ghost, a row's publication is its watermark turn.
+ *  The batch adder claims shard by shard, releases every shard claimed so far on a refusal, and
+ *  may have its fan-out refused after the claims, which releases them all. A checker outside the
+ *  memory model compares each shard's claim word with its dispenser once every adder is done.
+ *  `-Dscenario=saving`: one batch adder, a saver running `plan_save` per shard, `finish`, then
+ *  the plain key copy of `keys[0..visible)`, and a searcher; the dispenser is a word, since the
+ *  watermark compares it. `-Dscenario=loading`: a loader running `plan_load` per shard, the keys
+ *  at the base, then `finish`, against a searcher on the still-empty index.
+ *
+ *  The shard's claim is `claim_capacity` seen from outside - `dense_ram_index_capacity.pml` under
+ *  `-Dceiling` covers the counter itself: one unconditional add, a fit or the crossing that the
+ *  ceiling refuses, and a peer's refusal in flight released and waited out.
  *
  *  Invariants:
- *  - the plane: a dispensed id is below its shard's plane, and once every adder is done each
- *    plane's admission word equals its dispenser. `-Dwithout_withdraw` skips the hand-back after
- *    a refused fan-out, and the admission word stays above the dispenser;
+ *  - the ceiling: a dispensed id is below its shard's key column, and once every adder is done
+ *    each shard's claim word equals its dispenser. `-Dwithout_release` skips the release after a
+ *    refused fan-out, and the claim word stays above the dispenser;
  *  - publication: every id below a watermark a reader acquired has its key. The key lands before
  *    the watermark turn; `-Dwithout_key_before_watermark` moves it after, and a searcher reads an
  *    unset key under every model; `-Dwithout_watermark_release` drops the release from the
  *    watermark store, and the searcher reads it under the view model;
- *  - the cut: a settled `plan_save` copies no unset key below its cut, and, sequentially, a plan
- *    is refused exactly when a row is between its dispense and its publication, or was published
- *    between the plan's two loads. `-Dwhole_batches` asks the cut to capture whole batches, shard
- *    zero and shard one together, and fails under every model: the cut is per shard;
+ *  - the watermark: a settled `plan_save` copies no unset key below its watermark, and,
+ *    sequentially, a plan is refused exactly when a row is between its dispense and its
+ *    publication, or was published between the plan's two loads. `-Dwhole_batches` asks the
+ *    watermark to capture whole batches, shard zero and shard one together, and fails under
+ *    every model: the watermark is per shard;
  *  - the load path: keys land before `finish` publishes the rows. `-Dwithout_keys_before_finish`
  *    moves them after, and the searcher reads an unset key under the sequential and view models.
  *
- *  `-Dwithout_single_consume` drops the `admission.consume()` the single-row `add` makes after
- *  `insert_reserved`, the header before the fix: the landed row is handed back and the
- *  admission word falls below the dispenser; with two batches behind it the plane admits one
- *  row more than it holds, and the next dispensed id names a key slot past the plane.
+ *  `-Dwithout_claim_consume` drops the `claim.consume()` the single-row `insert` makes once the
+ *  row is dispensed against: the landed row is released and the claim word falls below the
+ *  dispenser; with two batches behind it the shard claims one row more than it holds, and the
+ *  next dispensed id names a key slot past the column.
  */
 #include "weak_memory.pml"
 
-// The scenarios: the adders against the planes, the monolith save's cut, or the load path.
+// The scenarios: the adders against the shards, the monolith save's watermark, or the load path.
 #define adding 1
 #define saving 2
 #define loading 3
@@ -59,19 +65,19 @@
 #define searcher_thread 1
 #endif
 
-// The sizes: two shards, each with a key plane of two rows.
+// The sizes: two shards, each with a key column of two rows - each shard's ceiling.
 #define shards 2
-#define plane 2
+#define ceiling 2
 
 // The words, by the index member each stands for, per shard.
 #if scenario == adding
 #define routed_rows 0
-#define admitted(shard) (1 + (shard))
+#define claimed(shard) (1 + (shard))
 #define last_visible_id(shard) (3 + (shard))
 #define key(shard, id) (5 + (shard) * 2 + (id))
 #else
 #define last_visible_id(shard) (0 + (shard))
-#define next_visible_id(shard) (2 + (shard))
+#define next_dispensed_id(shard) (2 + (shard))
 #define key(shard, id) (4 + (shard) * 2 + (id))
 #endif
 
@@ -92,10 +98,10 @@ byte adders_done; // the checker waits on it
 #else
 #define done() skip
 #endif
-byte dispensed[shards]; // each shard's `next_visible_id_`, a ghost where no plan reads it
+byte dispensed[shards]; // each shard's `next_dispensed_id_`, a ghost where no plan reads it
 byte in_flight[shards]; // rows dispensed and not yet published, per shard
-bool locators_of_key[shards * plane]; // the reverse plane: which rows were recorded
-#define locator(shard, id) ((shard) * plane + (id))
+bool locators_of_key[shards * ceiling]; // the reverse ceiling: which rows were recorded
+#define locator(shard, id) ((shard) * ceiling + (id))
 
 #if scenario == adding
 inline dispense(t, shard, id) {
@@ -103,20 +109,20 @@ inline dispense(t, shard, id) {
         id = dispensed[shard];
         dispensed[shard]++;
         in_flight[shard]++;
-        assert(id < plane) // admission is what keeps an id inside the key plane
+        assert(id < ceiling) // the claim is what keeps an id inside the key ceiling
     }
 }
 #else
 inline dispense(t, shard, id) {
     atomic {
-        read_modify_write(t, next_visible_id(shard), order_acq_rel, id, id + 1);
+        read_modify_write(t, next_dispensed_id(shard), order_acq_rel, id, id + 1);
         in_flight[shard]++
     }
 }
 #endif
 
 // insert_reserved's tail, for one row of one shard: the key before the turn, the turn strictly
-// in dispensed order, the watermark released, then the reverse plane's entry
+// in dispensed order, the watermark released, then the locator map's entry
 inline land_row(t, shard, id) {
     // on_assigned fires right after the dispense: one step for the two
     atomic {
@@ -145,20 +151,27 @@ inline land_row(t, shard, id) {
 #endif
 }
 
-// shard_t::admit for one row: `fetch_add_if_at_most` against the plane
-inline admit(t, shard, before) {
-    atomic {
-        read_modify_write_if(t, admitted(shard), order_relaxed, before + 1 <= plane, before, before + 1);
-        assert(newest_value(admitted(shard)) <= plane)
-    }
+// the shard's own row claim with the key column as its ceiling - `claim_capacity` seen from
+// outside: one unconditional add whose value says what happened - a fit; the crossing, which
+// elects this claimer and the ceiling then refuses; or a peer's refusal still in flight, handed
+// back and waited out. `before + 1 <= ceiling` afterwards names a fit
+inline claim(t, shard, before) {
+    do
+    :: read_modify_write(t, claimed(shard), order_acquire, before, before + 1);
+       if
+       :: before + 1 <= ceiling -> break
+       :: before == ceiling -> add_no_return(t, claimed(shard), order_release, 0 - 1); break
+       :: else -> add_no_return(t, claimed(shard), order_release, 0 - 1); (newest_value(claimed(shard)) <= ceiling)
+       fi
+    od
 }
 
-// admission_t's destructor: every shard admitted so far, from shard zero, hands its row back
-inline withdraw_up_to(t, count) {
+// the claims' destructors: every shard claimed so far, from shard zero, releases its row
+inline release_up_to(t, count) {
     back = 0;
     do
     :: back == count -> break
-    :: else -> add_no_return(t, admitted(back), order_release, 0 - 1); back++
+    :: else -> add_no_return(t, claimed(back), order_release, 0 - 1); back++
     od
 }
 
@@ -169,23 +182,23 @@ active [2] proctype batch_adder() {
     atomic { me = adders_started; adders_started++ };
     read_modify_write(me, routed_rows, order_relaxed, routed, routed + shards);
     rotation = routed % shards;
-    // admit_: shard by shard ahead of the claims, or into none
+    // claim_: shard by shard, or into none
     shard = 0;
     do
     :: shard == shards -> break
     :: else ->
-        admit(me, shard, before);
+        claim(me, shard, before);
         if
-        :: before + 1 <= plane -> shard++
-        :: else -> withdraw_up_to(me, shard); goto refused
+        :: before + 1 <= ceiling -> shard++
+        :: else -> release_up_to(me, shard); goto refused
         fi
     od;
-    // a claim or the fan-out refused: ForkUnion runs every task or none, so the admissions go back whole
+    // the fan-out refused: ForkUnion runs every task or none, so the claims go back whole
     if
-#ifdef without_withdraw
+#ifdef without_release
     :: goto refused
 #else
-    :: withdraw_up_to(me, shards); goto refused
+    :: release_up_to(me, shards); goto refused
 #endif
     :: skip
     fi;
@@ -205,20 +218,20 @@ active proctype single_adder() {
     :: probe == shards -> goto refused
     :: else ->
         shard = (routed + probe) % shards;
-        admit(single_adder_thread, shard, before);
+        claim(single_adder_thread, shard, before);
         if
-        :: before + 1 <= plane -> break
+        :: before + 1 <= ceiling -> break
         :: else -> probe++
         fi
     od;
-    // reserve_traversal or the claim refused: only this shard's row goes back
+    // reserve_traversal refused: only this shard's row goes back
     if
-    :: add_no_return(single_adder_thread, admitted(shard), order_release, 0 - 1); goto refused
+    :: add_no_return(single_adder_thread, claimed(shard), order_release, 0 - 1); goto refused
     :: skip
     fi;
     land_row(single_adder_thread, shard, id);
-#ifdef without_single_consume
-    add_no_return(single_adder_thread, admitted(shard), order_release, 0 - 1);
+#ifdef without_claim_consume
+    add_no_return(single_adder_thread, claimed(shard), order_release, 0 - 1);
 #endif
 refused:
     done()
@@ -229,7 +242,7 @@ active proctype checker() {
     byte shard;
     (adders_done == 3);
     for (shard : 0 .. shards - 1) {
-        assert(newest_value(admitted(shard)) == dispensed[shard]);
+        assert(newest_value(claimed(shard)) == dispensed[shard]);
         assert(!locators_of_key[locator(shard, 0)] || newest_value(key(shard, 0)) != unset);
         assert(!locators_of_key[locator(shard, 1)] || newest_value(key(shard, 1)) != unset)
     }
@@ -247,11 +260,11 @@ active proctype batch_adder() {
 active proctype saver() {
     byte shard, id;
     int visible[shards], dispensed_now, again, copy;
-    // plan_save per shard: the cut, refused while an insert is mid-flight
+    // plan_save per shard: the watermark, refused while an insert is mid-flight
     for (shard : 0 .. shards - 1) {
         load(saver_thread, last_visible_id(shard), order_acquire, visible[shard]);
         atomic {
-            load(saver_thread, next_visible_id(shard), order_acquire, dispensed_now);
+            load(saver_thread, next_dispensed_id(shard), order_acquire, dispensed_now);
 #if memory == sequential
             assert((visible[shard] != dispensed_now) ==
                    (in_flight[shard] != 0 || newest_value(last_visible_id(shard)) != visible[shard]));
@@ -270,7 +283,7 @@ active proctype saver() {
         :: again != visible[shard] -> goto contended
         :: else
         fi;
-        load(saver_thread, next_visible_id(shard), order_relaxed, again);
+        load(saver_thread, next_dispensed_id(shard), order_relaxed, again);
         if
         :: again != visible[shard] -> goto contended
         :: else
@@ -294,21 +307,21 @@ active proctype loader() {
     byte shard, row;
     int visible, dispensed_now;
     for (shard : 0 .. shards - 1) {
-        // plan_load: the cut, never refused on an idle index
+        // plan_load: the watermark, never refused on an idle index
         load(loader_thread, last_visible_id(shard), order_acquire, visible);
-        load(loader_thread, next_visible_id(shard), order_acquire, dispensed_now);
+        load(loader_thread, next_dispensed_id(shard), order_acquire, dispensed_now);
         assert(visible == dispensed_now);
-        // the keys at the base and the reverse plane, then the publication
+        // the keys at the base and the locator map, then the publication
 #ifndef without_keys_before_finish
-        for (row : 0 .. plane - 1) {
+        for (row : 0 .. ceiling - 1) {
             store(loader_thread, key(shard, visible + row), order_relaxed, key_of(loader_thread));
             locators_of_key[locator(shard, visible + row)] = true
         };
 #endif
-        add_no_return(loader_thread, next_visible_id(shard), order_release, plane);
-        store(loader_thread, last_visible_id(shard), watermark_order, visible + plane);
+        add_no_return(loader_thread, next_dispensed_id(shard), order_release, ceiling);
+        store(loader_thread, last_visible_id(shard), watermark_order, visible + ceiling);
 #ifdef without_keys_before_finish
-        for (row : 0 .. plane - 1) {
+        for (row : 0 .. ceiling - 1) {
             store(loader_thread, key(shard, visible + row), order_relaxed, key_of(loader_thread));
             locators_of_key[locator(shard, visible + row)] = true
         };
@@ -318,7 +331,7 @@ active proctype loader() {
 }
 #endif
 
-// the search merge: every id below the watermark it acquired resolves through the key plane
+// the search merge: every id below the watermark it acquired resolves through the key column
 active proctype searcher() {
     byte shard, id;
     int watermark, seen;

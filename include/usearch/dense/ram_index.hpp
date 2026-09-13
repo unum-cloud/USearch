@@ -560,15 +560,14 @@ struct dense_ram_index {
             std::size_t const total_rows = capacity();
             if (total_rows >= config.capacity) return {total_rows, status_t::success_k};
 
-            // Grow through the same grower-election protocol that powers `insert`: claim the
-            // missing rows, then hand the whole claim back. The revert order is load-bearing -
-            // deflating `last_allocated_id_` before re-crediting `remaining_capacity_` keeps the
-            // physical-rows sum conservative for concurrent observers, so a racing reservation
-            // can only over-grow, never report capacity that does not exist.
-            std::size_t const deficit_rows = config.capacity - total_rows;
-            auto const [first_row, granted] = claim_capacity(deficit_rows);
-            if (failed(granted)) return {total_rows, granted};
-            release_capacity(deficit_rows);
+            // Claim from the claimed rows up to the request, not the deficit alone: a deficit that
+            // fits in the free rows is granted without a growth and released, forever. Only a claim
+            // crossing the free rows elects a grower, and one growth covers it.
+            std::size_t const claimed_rows = atomic_ref<node_id_t>(last_allocated_id_).load(std::memory_order_acquire);
+            std::size_t const claim_rows = config.capacity - claimed_rows;
+            auto const [first_row, granted] = claim_capacity(claim_rows);
+            if (failed(granted)) return {capacity(), granted};
+            release_capacity(claim_rows);
         }
     }
 

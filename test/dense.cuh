@@ -1400,24 +1400,6 @@ std::size_t test_dense_indexes_guards() {
                                   .status,
                               status_t::contended_k);
     }
-    // A batch past the reservation refuses whole - no partial fill, no id holes.
-    failures += expect_eq(indexes
-                              .add(std::span<key_t const> {keys.data(), rows + 1}, oversized.view(), //
-                                   executor)
-                              .status,
-                          status_t::overflow_k);
-
-    // A dropped capacity claim credits itself back two-sidedly: the exact-fit insertion
-    // below cannot succeed unless these rows returned in full - and neither can it unless a
-    // batch admitted at the gate but refused at a shard's claim handed its admission back.
-    if constexpr (requires { indexes.shard(0).claim(rows / 4); }) {
-        [[maybe_unused]] auto claimed = indexes.shard(0).claim(rows / 4);
-        failures += expect(failed(indexes
-                                      .add(std::span<key_t const> {keys.data(), rows}, vectors.view(), //
-                                           executor)
-                                      .status));
-    }
-
     failures += expect(succeeded(indexes
                                      .add(std::span<key_t const> {keys.data(), rows}, vectors.view(), //
                                           executor)
@@ -1426,6 +1408,15 @@ std::size_t test_dense_indexes_guards() {
     std::size_t rows_in_shards = 0;
     for (std::size_t shard = 0; shard != indexes.shards_count(); ++shard) rows_in_shards += indexes.shard(shard).size();
     failures += expect_eq(rows_in_shards, rows);
+
+    // A batch past the reservation grows into it - whole, with no id holes - and the capacity
+    // reported afterwards covers every row that landed.
+    failures += expect(succeeded(indexes
+                                     .add(std::span<key_t const> {keys.data(), rows + 1}, oversized.view(), //
+                                          executor)
+                                     .status));
+    failures += expect_eq(indexes.size(), 2 * rows + 1);
+    failures += expect(indexes.capacity() >= indexes.size());
     return failures;
 }
 
@@ -1767,11 +1758,13 @@ std::size_t test_dense_indexes_split_load() {
     for (std::size_t shard = 0; shard != shards; ++shard)
         failures += expect_eq(restriped.shard(shard).size(), indexes.shard(shard).size());
 
-    // A reservation the widest shard cannot fit refuses; a populated index refuses a second load.
+    // A reservation smaller than the parts still fits them, since a shard rounds up to whole
+    // chunks; a populated index refuses a second load.
     indexes_type_ cramped {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(cramped)));
     failures += expect(succeeded(cramped.reserve({shards, connectivity_16_k, dimensions}).status));
-    failures += expect_eq(cramped.load(paths.monolith, split, executor), status_t::config_mismatch_k);
+    failures += expect(succeeded(cramped.load(paths.monolith, split, executor)));
+    failures += dense_indexes_expect_restored(cramped, vectors, keys, dimensions);
     failures += expect_eq(striped.load(paths.monolith, split, executor), status_t::config_mismatch_k);
     failures += expect_eq(striped.size(), rows);
 

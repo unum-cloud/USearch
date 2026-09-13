@@ -18,7 +18,7 @@
 #include <cstring> // `std::memcpy`, `std::memcmp` - row copies & the monolith's magic
 
 #include <array>       // `std::array` - the monolith magic
-#include <atomic>      // `std::atomic` - the admission word, the chunk cursors & fan-out outcomes
+#include <atomic>      // `std::atomic` - the routing tally, the chunk cursors & fan-out outcomes
 #include <memory>      // `std::unique_ptr` - an index holds atomics and never moves
 #include <span>        // `std::span` - the callers' key batches & merged rankings
 #include <string_view> // `std::string_view` - the checkpoint paths
@@ -90,25 +90,11 @@ struct dense_ram_indexes {
     /** @brief One shard: the graph, and the keys of its rows. Placement is not repeated - the
      *      index's own allocator carries it. */
     struct shard_t {
-        /** @brief The graph; an index holds atomics and never moves. */
+        /** @brief The graph; its capacity counter is bounded by the key column, so its claims are
+         *      the only admission a row needs. An index holds atomics and never moves. */
         std::unique_ptr<index_t> index;
         /** @brief The key of each of this shard's rows, indexed by node ID. */
         keys_plane_t keys;
-        /** @brief Rows admitted into @c keys so far, moved through @c atomic_ref: the plane is
-         *      the ceiling, and a refusal past admission hands its rows back. */
-        std::size_t admitted = 0;
-        /** @brief Takes @p rows of the plane, or none; a zero share touches nothing. */
-        bool admit(std::size_t rows) noexcept {
-            if (!rows) return true;
-            std::size_t const before = atomic_ref<std::size_t>(admitted).fetch_add_if_at_most(
-                rows, keys.size(), std::memory_order_relaxed);
-            return keys.size() - before >= rows;
-        }
-        /** @brief Hands @p rows back after a refusal past admission - released, so no reference
-         *      posts it past a quiescent reset of the plane. */
-        void withdraw(std::size_t rows) noexcept {
-            if (rows) atomic_ref<std::size_t>(admitted).sub(rows, std::memory_order_release);
-        }
     };
 
     /** @brief The threads and their scratch every bulk verb runs on; it names no index, so one
@@ -194,7 +180,6 @@ struct dense_ram_indexes {
             if (!fresh) return status_t::bad_alloc_k;
             one.index = std::move(fresh);
             one.keys.clear();
-            one.admitted = 0;
         }
         locators_of_key_.clear();
         atomic_ref<std::size_t>(routed_rows_).store(0, std::memory_order_relaxed);
@@ -224,7 +209,7 @@ struct dense_ram_indexes {
         return total;
     }
 
-    /** @brief Rows the admission gate can let in - the key planes' total, sized once at @ref reserve. */
+    /** @brief Rows the shards can host - the key planes' total, sized once at @ref reserve. */
     std::size_t capacity() const noexcept {
         std::size_t total = 0;
         for (shard_t const& one : shards_) total += one.keys.size();
@@ -264,10 +249,11 @@ struct dense_ram_indexes {
         // refusal here leaves nothing reserved, so the call stays retryable.
         if (status_t const indexed = locators_of_key_.reserve(per_shard.capacity * shards_.size()); failed(indexed))
             return {0, indexed};
-        // Key planes never grow: a search resolves through them while rows land.
+        // A shard rounds up to whole chunks; its key plane is sized to what it really holds.
         for (shard_t& one : shards_) {
-            if (status_t const reserved = one.index->reserve(per_shard).status; failed(reserved)) return {0, reserved};
-            if (failed(one.keys.resize(per_shard.capacity))) return {0, status_t::bad_alloc_k};
+            auto const [shard_capacity, reserved] = one.index->reserve(per_shard);
+            if (failed(reserved)) return {0, reserved};
+            if (failed(one.keys.resize(shard_capacity))) return {0, status_t::bad_alloc_k};
         }
         return {capacity(), status_t::success_k};
     }
@@ -295,21 +281,27 @@ struct dense_ram_indexes {
         result.new_size = size();
         if (shards_.empty()) return {result, status_t::uninitialized_k};
 
-        // Admission before anything is taken: past a plane, an id has no key slot. The routing
-        // tally only names the first shard to try; a full one passes the row on to the next.
+        // The claim is the admission: a shard's counter is bounded by its key plane, so a granted
+        // row always has a key slot. The routing tally only names the first shard to try; a full
+        // one passes the row on to the next, and any other refusal stops the probe.
         std::size_t const shards = shards_.size();
         std::size_t const routing_base = atomic_ref<std::size_t>(routed_rows_).fetch_add(1, std::memory_order_relaxed);
+        typename index_t::capacity_claim_t claim;
         std::size_t probe = 0;
-        while (probe != shards && !shards_[(routing_base + probe) % shards].admit(1)) ++probe;
+        for (; probe != shards; ++probe) {
+            auto [attempt, granted] = shards_[(routing_base + probe) % shards].index->claim(1);
+            if (succeeded(granted)) {
+                claim = std::move(attempt);
+                break;
+            }
+            if (granted != status_t::overflow_k) return {result, granted};
+        }
         if (probe == shards) return {result, status_t::overflow_k};
         std::size_t const shard = (routing_base + probe) % shards;
-        admission_t admission = admission_t::admitted(*this, 1, shard);
 
         shard_t& one = shards_[shard];
         if (status_t const sized = one.index->reserve_traversal(traversal, config); failed(sized))
             return {result, sized};
-        auto [claim, granted] = one.index->claim(1);
-        if (failed(granted)) return {result, granted};
 
         // The context's counters run across calls, so the report is the difference this one made.
         std::size_t const visited_before = traversal.visited_members;
@@ -326,8 +318,6 @@ struct dense_ram_indexes {
                                        assigned = assigned_id;
                                        one.keys[assigned_id] = key;
                                    });
-        // The row dispensed an id, so the admission is spent rather than credited back.
-        admission.consume();
         // The reverse plane's quota covers the reservation, so recording cannot fail.
         [[maybe_unused]] status_t const recorded = locators_of_key_.insert(key, key_locator_t {shard, assigned});
 
@@ -375,13 +365,10 @@ struct dense_ram_indexes {
             return {result, sized};
 
         // Rotating by rows routed keeps a stream of small batches from drifting onto shard zero.
-        // Each shard's plane is its own ceiling, admitted shard by shard ahead of the claims, so
-        // a batch never lands more rows on a shard than its plane holds; the admission and the
-        // claims both hand themselves back on any refusal below.
+        // Each shard's counter is bounded by its plane, so a batch never lands more rows on a
+        // shard than its plane holds, and the claims release themselves on any refusal below.
         std::size_t const rotation = atomic_ref<std::size_t>(routed_rows_).fetch_add(rows, std::memory_order_relaxed) %
                                      shards;
-        admission_t admission {*this, rows, rotation};
-        if (!admission.admit()) return {result, status_t::overflow_k};
         growing_buffer<claim_t, forkunion_allocator_t> claims {allocator_};
         if (failed(claims.reserve_exactly(shards))) return {result, status_t::bad_alloc_k};
         for (std::size_t shard = 0; shard != shards; ++shard) {
@@ -407,12 +394,11 @@ struct dense_ram_indexes {
             [[maybe_unused]] status_t const recorded = locators_of_key_.insert(keys[task],
                                                                                key_locator_t {shard, assigned});
         };
-        // ForkUnion runs every task or none, so a refused fan-out hands the admissions back whole.
+        // ForkUnion runs every task or none, so a refused fan-out releases the claims whole.
         if (status_t const fanned = executor.for_tasks(rows, insert_row); failed(fanned)) return {result, fanned};
 
-        // Every row dispensed an id, so the claims and the admissions are spent rather than credited back.
+        // Every row dispensed an id, so the claims are spent rather than released.
         for (claim_t& claimed : claims) claimed.consume();
-        admission.consume();
 
         for (traversal_t const& traversal : traversals) {
             result.visited_members += traversal.visited_members;
@@ -962,51 +948,6 @@ struct dense_ram_indexes {
     std::size_t share_of_(std::size_t shard, std::size_t rows, std::size_t rotation) const noexcept {
         return rows_from_(rows, first_row_of_shard_(shard, shards_.size(), rotation), shards_.size());
     }
-    /**
-     *  @brief A batch's admissions into the shards' key planes - handed back on destruction unless
-     *      consumed, the twin of the shards' capacity claims, so a refusal past admission unwinds itself.
-     */
-    struct admission_t {
-        /** @brief The batch of @p rows under @p rotation, admitted nowhere yet. */
-        admission_t(dense_ram_indexes& index, std::size_t rows, std::size_t rotation) noexcept
-            : admission_t(index, rows, rotation, 0) {}
-        admission_t(admission_t const&) = delete;
-        admission_t& operator=(admission_t const&) = delete;
-        /** @brief Hands every admitted plane its share back; a consumed admission hands back nothing. */
-        ~admission_t() noexcept {
-            if (index_)
-                for (std::size_t shard = 0; shard != admitted_; ++shard)
-                    index_->shards_[shard].withdraw(index_->share_of_(shard, rows_, rotation_));
-        }
-
-        /** @brief A batch already admitted into every plane - what a single row's probe of the
-         *      shards has done by the time it settles on one. */
-        static admission_t admitted(dense_ram_indexes& index, std::size_t rows, std::size_t rotation) noexcept {
-            return {index, rows, rotation, index.shards_.size()};
-        }
-        /** @brief Admits the batch's share into every plane, or into none: a refused plane stops the
-         *      walk, and destruction hands back the planes before it. */
-        bool admit() noexcept {
-            for (; admitted_ != index_->shards_.size(); ++admitted_)
-                if (!index_->shards_[admitted_].admit(index_->share_of_(admitted_, rows_, rotation_))) return false;
-            return true;
-        }
-        /** @brief Marks the admissions as spent, so destruction hands back nothing - what a batch
-         *      calls once every row dispensed an id. */
-        void consume() noexcept { index_ = nullptr; }
-
-      private:
-        admission_t(dense_ram_indexes& index, std::size_t rows, std::size_t rotation, std::size_t admitted) noexcept
-            : index_(&index), rows_(rows), rotation_(rotation), admitted_(admitted) {}
-
-        /** @brief The admitting index, reached only to hand back; null once consumed. */
-        dense_ram_indexes* index_;
-        /** @brief The batch's rows, and the rotation that names each shard's share of them. */
-        std::size_t rows_, rotation_;
-        /** @brief Planes admitted so far, from shard zero. */
-        std::size_t admitted_;
-    };
-
     /** @brief Builds one traversal context per thread over its own arena, so a fan-out never
      *      allocates and never shares scratch. Sized to the executor, since a dynamic fan-out
      *      picks its threads. */
@@ -1579,6 +1520,8 @@ struct dense_ram_indexes {
                 return status_t::config_mismatch_k;
             for (std::size_t shard = 0; shard != shards; ++shard)
                 if (shard_rows[shard] > shards_[shard].keys.size()) return status_t::config_mismatch_k;
+            // The load holds the mutation gate, which is the quiet the map's rehash asks for.
+            if (status_t const indexed = locators_of_key_.reserve(wanted); failed(indexed)) return indexed;
         }
 
         status_t settled = load_rounds_(parts, assignments, executor);
@@ -1589,7 +1532,6 @@ struct dense_ram_indexes {
             [[maybe_unused]] status_t const cleared = clear();
             return settled;
         }
-        for (std::size_t shard = 0; shard != shards; ++shard) shards_[shard].admitted = shard_rows[shard];
         atomic_ref<std::size_t>(routed_rows_).store(total, std::memory_order_relaxed);
         return status_t::success_k;
     }

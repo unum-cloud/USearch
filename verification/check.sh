@@ -87,14 +87,15 @@ verify dense_vram_index_locks.pml fail -Dwithout_tail_acquire
 verify dense_vram_index_locks.pml fail -Dwithout_tail_fence
 verify dense_vram_index_locks.pml fail -Dwithout_fixes
 
-section "dense_ram_index_capacity.pml: the chunk election and its flag, the grower's take, release_capacity's order, the admission ceilings, and two reservations"
+section "dense_ram_index_capacity.pml: the chunk election and its flag, the grower's take, release_capacity's order, a second reservation above the physical rows, two reservations, and an abandoned load plan"
 verify dense_ram_index_capacity.pml pass -Dmemory=sequential
 verify dense_ram_index_capacity.pml pass
 verify dense_ram_index_capacity.pml pass -Dmemory=far
 verify dense_ram_index_capacity.pml fail -Dmemory=far -Dwithout_deflation_release
-verify dense_ram_index_capacity.pml pass -Dmemory=sequential -Dscenario=admission
-verify dense_ram_index_capacity.pml pass -Dscenario=admission
-verify dense_ram_index_capacity.pml pass -Dmemory=far -Dscenario=admission
+verify dense_ram_index_capacity.pml pass -Dmemory=sequential -Dscenario=regrow
+verify dense_ram_index_capacity.pml pass -Dscenario=regrow
+verify dense_ram_index_capacity.pml pass -Dmemory=far -Dscenario=regrow
+verify dense_ram_index_capacity.pml fail -Dmemory=sequential -Dscenario=regrow -Dwithout_deficit_growth
 verify dense_ram_index_capacity.pml pass -Dmemory=sequential -Dscenario=reservers
 verify dense_ram_index_capacity.pml pass -Dscenario=reservers
 verify dense_ram_index_capacity.pml pass -Dmemory=far -Dscenario=reservers
@@ -107,14 +108,14 @@ verify dense_ram_index_capacity.pml pass -Dscenario=loaders
 verify dense_ram_index_capacity.pml pass -Dmemory=far -Dscenario=loaders
 verify dense_ram_index_capacity.pml fail -Dmemory=sequential -Dscenario=loaders -Dwithout_abandon_release
 
-section "dense_ram_indexes.pml: the planes' admission, keys before the turn, the monolith cut per shard, and the load path's keys"
+section "dense_ram_indexes.pml: the shards' claims, keys before the turn, the monolith cut per shard, and the load path's keys"
 verify dense_ram_indexes.pml pass -Dmemory=sequential
 verify dense_ram_indexes.pml pass
 verify dense_ram_indexes.pml fail -Dmemory=sequential -Dwithout_key_before_watermark
 verify dense_ram_indexes.pml fail -Dwithout_key_before_watermark
 verify dense_ram_indexes.pml fail -Dwithout_watermark_release
-verify dense_ram_indexes.pml fail -Dmemory=sequential -Dwithout_withdraw
-verify dense_ram_indexes.pml fail -Dmemory=sequential -Dwithout_single_consume
+verify dense_ram_indexes.pml fail -Dmemory=sequential -Dwithout_release
+verify dense_ram_indexes.pml fail -Dmemory=sequential -Dwithout_claim_consume
 verify dense_ram_indexes.pml pass -Dmemory=sequential -Dscenario=saving
 verify dense_ram_indexes.pml pass -Dscenario=saving
 verify dense_ram_indexes.pml fail -Dmemory=sequential -Dscenario=saving -Dwhole_batches
