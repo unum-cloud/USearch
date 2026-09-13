@@ -32,10 +32,13 @@ constexpr struct {
     nk_capability_t bit;
     char const* name;
 } capability_names_k[] = {
-    {nk_cap_serial_k, "serial"},       {nk_cap_neon_k, "neon"},         {nk_cap_neonsdot_k, "neonsdot"},
-    {nk_cap_neonbfdot_k, "neonbfdot"}, {nk_cap_neonfhm_k, "neonfhm"},   {nk_cap_neonfp8_k, "neonfp8"},
-    {nk_cap_haswell_k, "haswell"},     {nk_cap_skylake_k, "skylake"},   {nk_cap_icelake_k, "icelake"},
-    {nk_cap_genoa_k, "genoa"},         {nk_cap_sapphire_k, "sapphire"}, {nk_cap_sapphireamx_k, "sapphireamx"},
+    {nk_cap_serial_k, "serial"},     {nk_cap_neon_k, "neon"},
+    {nk_cap_neonsdot_k, "neonsdot"}, {nk_cap_neonbfdot_k, "neonbfdot"},
+    {nk_cap_neonfhm_k, "neonfhm"},   {nk_cap_neonfp8_k, "neonfp8"},
+    {nk_cap_haswell_k, "haswell"},   {nk_cap_skylake_k, "skylake"},
+    {nk_cap_icelake_k, "icelake"},   {nk_cap_genoa_k, "genoa"},
+    {nk_cap_sapphire_k, "sapphire"}, {nk_cap_sapphireamx_k, "sapphireamx"},
+    {nk_cap_v128_k, "v128"},         {nk_cap_v128relaxed_k, "v128relaxed"},
 };
 
 /** @brief Composes @p mask into @p rendered as a comma-separated list, once. */

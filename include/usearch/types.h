@@ -314,6 +314,11 @@ USEARCH_EXPORT typedef enum usearch_cpu_class_t {
     /** @brief Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23: vectors with Zvbb, Zawrs
      *      monitored waits, Zacas single-instruction compare-and-swap. */
     usearch_cpu_class_alibaba_c930_k,
+    /** @brief WebAssembly every engine loads: 32-bit, single-threaded, the fixed-width simd128 tier. */
+    usearch_cpu_class_wasm32_v128_k,
+    /** @brief WebAssembly with relaxed SIMD, shared memory for real thread pools, and the 64-bit
+     *      addressing that alone lets one module's memory pass 4 GiB. */
+    usearch_cpu_class_wasm64_extended_k,
 } usearch_cpu_class_t;
 
 /**

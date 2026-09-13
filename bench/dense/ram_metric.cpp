@@ -389,6 +389,7 @@ static void register_kernel(std::string_view kernel_name, std::string_view scala
     register_quads<kernel_, scalar_, nk_cap_neon_k>(kernel_name, scalar_name, "neon");
 #elif NK_TARGET_WASM_
     register_quads<kernel_, scalar_, nk_cap_v128relaxed_k>(kernel_name, scalar_name, "v128relaxed");
+    register_quads<kernel_, scalar_, nk_cap_v128_k>(kernel_name, scalar_name, "v128");
 #elif NK_TARGET_POWER64_
     register_quads<kernel_, scalar_, nk_cap_powervsx_k>(kernel_name, scalar_name, "powervsx");
 #endif

@@ -424,7 +424,7 @@ set(NK_BUILD_SHARED
 )
 
 usearch_sibling(
-    numkong numkong::header https://github.com/ashvardanian/NumKong 64d486817dff881402d73729c73e9852c13deaf8
+    numkong numkong::header https://github.com/ashvardanian/NumKong 14c0d48240bf38e9fbd33246685d75d56ebc7fee
 )
 usearch_sibling(
     forkunion forkunion::header https://github.com/ashvardanian/ForkUnion 4c6922026d74066994a47c0fa54c01ba9df3b046

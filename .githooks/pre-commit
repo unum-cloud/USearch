@@ -266,9 +266,9 @@ check_boolean_parameters() {
 check_backward_references() {
     local backrefs
     # Case-sensitive on purpose: lowercase `v2` is a version reference, while uppercase `V2` names
-    # real hardware, like the Arm Neoverse cores.
+    # real hardware, like the Arm Neoverse cores. Three digits name a SIMD tier like `v128`, never a version.
     backrefs=$(printf '%s\n' "$added" | grep -E '(//|/\*|^\+[[:space:]]*\*)' |
-        grep -E '\bv[0-9]+\b|[Tt]he (previous|old|legacy) (design|implementation|version|draft|approach|convention|code)|\bused to (be|do|work)\b' || true)
+        grep -E '\bv[0-9]{1,2}\b|[Tt]he (previous|old|legacy) (design|implementation|version|draft|approach|convention|code)|\bused to (be|do|work)\b' || true)
     [ -z "$backrefs" ] || fail "$backrefs" \
         "$file cites a past version in a comment - describe the behavior on its own terms;" \
         "            history belongs in commit messages and design docs:"

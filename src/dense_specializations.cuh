@@ -85,15 +85,25 @@ struct numkong_capability_name_t {
     char const* name;
 };
 inline constexpr numkong_capability_name_t numkong_capability_names_k[] = {
-    {nk_cap_serial_k, "serial"},     {nk_cap_neon_k, "neon"},
-    {nk_cap_neonsdot_k, "neonsdot"}, {nk_cap_neonbfdot_k, "neonbfdot"},
-    {nk_cap_neonfhm_k, "neonfhm"},   {nk_cap_neonfp8_k, "neonfp8"},
-    {nk_cap_haswell_k, "haswell"},   {nk_cap_skylake_k, "skylake"},
-    {nk_cap_icelake_k, "icelake"},   {nk_cap_genoa_k, "genoa"},
-    {nk_cap_sapphire_k, "sapphire"}, {nk_cap_sapphireamx_k, "sapphireamx"},
-    {nk_cap_alder_k, "alder"},       {nk_cap_sierra_k, "sierra"},
-    {nk_cap_diamond_k, "diamond"},   {nk_cap_rvv_k, "rvv"},
+    {nk_cap_serial_k, "serial"},
+    {nk_cap_neon_k, "neon"},
+    {nk_cap_neonsdot_k, "neonsdot"},
+    {nk_cap_neonbfdot_k, "neonbfdot"},
+    {nk_cap_neonfhm_k, "neonfhm"},
+    {nk_cap_neonfp8_k, "neonfp8"},
+    {nk_cap_haswell_k, "haswell"},
+    {nk_cap_skylake_k, "skylake"},
+    {nk_cap_icelake_k, "icelake"},
+    {nk_cap_genoa_k, "genoa"},
+    {nk_cap_sapphire_k, "sapphire"},
+    {nk_cap_sapphireamx_k, "sapphireamx"},
+    {nk_cap_alder_k, "alder"},
+    {nk_cap_sierra_k, "sierra"},
+    {nk_cap_diamond_k, "diamond"},
+    {nk_cap_rvv_k, "rvv"},
     {nk_cap_rvvbb_k, "rvvbb"},
+    {nk_cap_v128_k, "v128"},
+    {nk_cap_v128relaxed_k, "v128relaxed"},
 };
 
 #pragma region CPU Classes
@@ -117,6 +127,9 @@ constexpr nk_capability_t numkong_capabilities_of(cpu_class_t cpu_class) noexcep
                nk_cap_neonfhm_k;
     case cpu_class_t::nvidia_vera_k: return numkong_capabilities_of(cpu_class_t::aws_g5_k) | nk_cap_neonfp8_k;
     case cpu_class_t::alibaba_c930_k: return nk_cap_serial_k | nk_cap_rvv_k | nk_cap_rvvbb_k;
+    case cpu_class_t::wasm32_v128_k: return nk_cap_serial_k | nk_cap_v128_k;
+    case cpu_class_t::wasm64_extended_k:
+        return numkong_capabilities_of(cpu_class_t::wasm32_v128_k) | nk_cap_v128relaxed_k;
     default: return nk_cap_serial_k;
     }
 }
@@ -134,6 +147,7 @@ constexpr cpu_class_t parent_class_of(cpu_class_t cpu_class) noexcept {
     case cpu_class_t::nvidia_vera_k: return cpu_class_t::aws_g5_k;
     case cpu_class_t::aws_g5_k: return cpu_class_t::apple_m2_k;
     case cpu_class_t::apple_m2_k: return cpu_class_t::aws_g2_k;
+    case cpu_class_t::wasm64_extended_k: return cpu_class_t::wasm32_v128_k;
     default: return cpu_class_t::serial_k;
     }
 }

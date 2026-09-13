@@ -848,6 +848,12 @@ enum class cpu_class_t : u32_t {
     /** @brief Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23: the vector extension with
      *      @c Zvbb, @c Zawrs monitored waits, @c Zacas single-instruction compare-and-swap. */
     alibaba_c930_k,
+    /** @brief WebAssembly every engine loads: 32-bit, one caller-inclusive thread, the fixed-width @c simd128
+     *      tier, so it runs on WebKit and in a page served without cross-origin isolation. */
+    wasm32_v128_k,
+    /** @brief WebAssembly with relaxed SIMD, a shared memory for Web Worker pools and 64-bit addressing,
+     *      bundled because every engine that ships one ships the other two. */
+    wasm64_extended_k,
 };
 
 /**

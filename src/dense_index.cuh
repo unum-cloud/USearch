@@ -363,6 +363,55 @@ struct punned_dense_index_t {
         ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::alibaba_c930_k>,     //
         ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::alibaba_c930_k>,     //
 #endif
+#elif NK_TARGET_WASM_
+#if NK_TARGET_V128
+        // wasm32_v128 over serial by v128: bf16 i8 u8 u1, 12 arms
+        ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::wasm32_v128_k>,       //
+        ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::wasm32_v128_k>,   //
+        ram_index<nk_bf16_k, nk_kernel_euclidean_k, cpu_class_t::wasm32_v128_k>, //
+        ram_index<nk_i8_k, nk_kernel_dot_k, cpu_class_t::wasm32_v128_k>,         //
+        ram_index<nk_i8_k, nk_kernel_angular_k, cpu_class_t::wasm32_v128_k>,     //
+        ram_index<nk_i8_k, nk_kernel_euclidean_k, cpu_class_t::wasm32_v128_k>,   //
+        ram_index<nk_u8_k, nk_kernel_dot_k, cpu_class_t::wasm32_v128_k>,         //
+        ram_index<nk_u8_k, nk_kernel_angular_k, cpu_class_t::wasm32_v128_k>,     //
+        ram_index<nk_u8_k, nk_kernel_euclidean_k, cpu_class_t::wasm32_v128_k>,   //
+        ram_index<nk_u1_k, nk_kernel_dot_k, cpu_class_t::wasm32_v128_k>,         //
+        ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::wasm32_v128_k>,     //
+        ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::wasm32_v128_k>,     //
+#endif
+#if NK_TARGET_V128RELAXED
+        // wasm64_extended over wasm32_v128 by v128relaxed: bf16 f16 e5m2 e4m3 e3m2 e2m3 i8 i4 u8 u4, 30 arms
+        ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>,       //
+        ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>,   //
+        ram_index<nk_bf16_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>, //
+        ram_index<nk_f16_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>,        //
+        ram_index<nk_f16_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>,    //
+        ram_index<nk_f16_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>,  //
+        ram_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>,       //
+        ram_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>,   //
+        ram_index<nk_e5m2_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>, //
+        ram_index<nk_e4m3_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>,       //
+        ram_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>,   //
+        ram_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>, //
+        ram_index<nk_e3m2_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>,       //
+        ram_index<nk_e3m2_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>,   //
+        ram_index<nk_e3m2_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>, //
+        ram_index<nk_e2m3_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>,       //
+        ram_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>,   //
+        ram_index<nk_e2m3_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>, //
+        ram_index<nk_i8_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>,         //
+        ram_index<nk_i8_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>,     //
+        ram_index<nk_i8_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>,   //
+        ram_index<nk_i4_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>,         //
+        ram_index<nk_i4_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>,     //
+        ram_index<nk_i4_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>,   //
+        ram_index<nk_u8_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>,         //
+        ram_index<nk_u8_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>,     //
+        ram_index<nk_u8_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>,   //
+        ram_index<nk_u4_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>,         //
+        ram_index<nk_u4_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>,     //
+        ram_index<nk_u4_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>,   //
+#endif
 #endif
 #if USEARCH_BUILD_CUDA
         vram_index<nk_bf16_k, nk_kernel_angular_k>,   //
@@ -748,6 +797,55 @@ extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_dot_k, cpu
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::alibaba_c930_k>>;
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::alibaba_c930_k>>;
 #endif
+#elif NK_TARGET_WASM_
+#if NK_TARGET_V128
+/* wasm32_v128 over serial by v128: bf16 i8 u8 u1, 12 arms */
+extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::wasm32_v128_k>>;
+extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::wasm32_v128_k>>;
+extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_euclidean_k, cpu_class_t::wasm32_v128_k>>;
+extern template struct specialized_index<ram_index<nk_i8_k, nk_kernel_dot_k, cpu_class_t::wasm32_v128_k>>;
+extern template struct specialized_index<ram_index<nk_i8_k, nk_kernel_angular_k, cpu_class_t::wasm32_v128_k>>;
+extern template struct specialized_index<ram_index<nk_i8_k, nk_kernel_euclidean_k, cpu_class_t::wasm32_v128_k>>;
+extern template struct specialized_index<ram_index<nk_u8_k, nk_kernel_dot_k, cpu_class_t::wasm32_v128_k>>;
+extern template struct specialized_index<ram_index<nk_u8_k, nk_kernel_angular_k, cpu_class_t::wasm32_v128_k>>;
+extern template struct specialized_index<ram_index<nk_u8_k, nk_kernel_euclidean_k, cpu_class_t::wasm32_v128_k>>;
+extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_dot_k, cpu_class_t::wasm32_v128_k>>;
+extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::wasm32_v128_k>>;
+extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::wasm32_v128_k>>;
+#endif
+#if NK_TARGET_V128RELAXED
+/* wasm64_extended over wasm32_v128 by v128relaxed: bf16 f16 e5m2 e4m3 e3m2 e2m3 i8 i4 u8 u4, 30 arms */
+extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_f16_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_f16_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_f16_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_e5m2_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_e4m3_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_e3m2_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_e3m2_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_e3m2_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_e2m3_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_e2m3_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_i8_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_i8_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_i8_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_i4_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_i4_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_i4_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_u8_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_u8_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_u8_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_u4_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_u4_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_index<nk_u4_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>>;
+#endif
 #endif
 #if USEARCH_BUILD_CUDA
 extern template struct specialized_index<vram_index<nk_bf16_k, nk_kernel_angular_k>>;
@@ -967,6 +1065,9 @@ static usearch_dense_index_t make_ram_index(usearch_dense_options_t const* optio
         options, available, error);
 #elif NK_TARGET_RISCV64_
     return descend_ram_ladder<dtype_, kernel_, cpu_class_t::alibaba_c930_k>(options, available, error);
+#elif NK_TARGET_WASM_
+    return descend_ram_ladder<dtype_, kernel_, cpu_class_t::wasm64_extended_k, cpu_class_t::wasm32_v128_k>( //
+        options, available, error);
 #else
     return descend_ram_ladder<dtype_, kernel_>(options, available, error);
 #endif

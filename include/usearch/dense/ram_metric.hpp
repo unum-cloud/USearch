@@ -287,6 +287,9 @@ struct bf16_neon_euclidean_kit_t;
 struct bf16_neonbfdot_inner_kit_t;
 struct bf16_neonbfdot_angular_kit_t;
 struct bf16_neonbfdot_euclidean_kit_t;
+struct bf16_v128_inner_kit_t;
+struct bf16_v128_angular_kit_t;
+struct bf16_v128_euclidean_kit_t;
 struct bf16_v128relaxed_inner_kit_t;
 struct bf16_v128relaxed_angular_kit_t;
 struct bf16_v128relaxed_euclidean_kit_t;
@@ -422,6 +425,9 @@ struct i8_sierra_euclidean_kit_t;
 struct i8_neonsdot_inner_kit_t;
 struct i8_neonsdot_angular_kit_t;
 struct i8_neonsdot_euclidean_kit_t;
+struct i8_v128_inner_kit_t;
+struct i8_v128_angular_kit_t;
+struct i8_v128_euclidean_kit_t;
 struct i8_v128relaxed_inner_kit_t;
 struct i8_v128relaxed_angular_kit_t;
 struct i8_v128relaxed_euclidean_kit_t;
@@ -446,6 +452,9 @@ struct u8_sierra_euclidean_kit_t;
 struct u8_neonsdot_inner_kit_t;
 struct u8_neonsdot_angular_kit_t;
 struct u8_neonsdot_euclidean_kit_t;
+struct u8_v128_inner_kit_t;
+struct u8_v128_angular_kit_t;
+struct u8_v128_euclidean_kit_t;
 struct u8_v128relaxed_inner_kit_t;
 struct u8_v128relaxed_angular_kit_t;
 struct u8_v128relaxed_euclidean_kit_t;
@@ -494,9 +503,9 @@ struct u1x8_icelake_jaccard_kit_t;
 struct u1x8_neon_inner_kit_t;
 struct u1x8_neon_hamming_kit_t;
 struct u1x8_neon_jaccard_kit_t;
-struct u1x8_v128relaxed_inner_kit_t;
-struct u1x8_v128relaxed_hamming_kit_t;
-struct u1x8_v128relaxed_jaccard_kit_t;
+struct u1x8_v128_inner_kit_t;
+struct u1x8_v128_hamming_kit_t;
+struct u1x8_v128_jaccard_kit_t;
 struct u1x8_powervsx_inner_kit_t;
 struct u1x8_powervsx_hamming_kit_t;
 struct u1x8_powervsx_jaccard_kit_t;
@@ -703,6 +712,39 @@ struct bf16_neonbfdot_euclidean_kit_t : public bf16_neonbfdot_inner_kit_t {
 };
 #endif // NK_TARGET_NEONBFDOT
 
+#if NK_TARGET_V128
+/** @brief bf16 inner-product distance kit - WebAssembly SIMD128. */
+struct bf16_v128_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128_k;
+    using scalar_t = nk::bf16_t;
+    using accumulator_t = nk_dot_bf16x8_state_v128_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto init_accumulator = nk_dot_bf16x8_init_v128;
+    static constexpr auto update_accumulator = nk_dot_bf16x8_update_v128;
+    static constexpr auto load_step = nk_load_b128_v128_;
+    static constexpr auto load_tail = nk_partial_load_b16x8_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_bf16x8_finalize_v128;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_bf16_v128;
+    static constexpr std::size_t step_dimensions = 8;
+};
+
+/** @brief bf16 angular distance kit - WebAssembly SIMD128. */
+struct bf16_v128_angular_kit_t : public bf16_v128_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128_;
+};
+
+/** @brief bf16 Euclidean (L2) distance kit - WebAssembly SIMD128. */
+struct bf16_v128_euclidean_kit_t : public bf16_v128_inner_kit_t {
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
+};
+#endif // NK_TARGET_V128
+
 #if NK_TARGET_V128RELAXED
 /** @brief bf16 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct bf16_v128relaxed_inner_kit_t {
@@ -717,22 +759,22 @@ struct bf16_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_bf16x8_init_v128relaxed;
     static constexpr auto update_accumulator = nk_dot_bf16x8_update_v128relaxed;
-    static constexpr auto load_step = nk_load_b128_v128relaxed_;
+    static constexpr auto load_step = nk_load_b128_v128_;
     static constexpr auto load_tail = nk_partial_load_b16x8_serial_;
     static constexpr auto reduce_accumulators = nk_dot_bf16x8_finalize_v128relaxed;
     static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
-    static constexpr auto compute_norms = nk_reduce_moments_bf16_v128relaxed;
+    static constexpr auto compute_norms = nk_reduce_moments_bf16_v128;
     static constexpr std::size_t step_dimensions = 8;
 };
 
 /** @brief bf16 angular distance kit - WebAssembly relaxed SIMD. */
 struct bf16_v128relaxed_angular_kit_t : public bf16_v128relaxed_inner_kit_t {
-    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128_;
 };
 
 /** @brief bf16 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
 struct bf16_v128relaxed_euclidean_kit_t : public bf16_v128relaxed_inner_kit_t {
-    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
 };
 #endif // NK_TARGET_V128RELAXED
 
@@ -972,12 +1014,12 @@ struct f16_v128relaxed_inner_kit_t {
 
 /** @brief f16 angular distance kit - WebAssembly relaxed SIMD. */
 struct f16_v128relaxed_angular_kit_t : public f16_v128relaxed_inner_kit_t {
-    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128_;
 };
 
 /** @brief f16 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
 struct f16_v128relaxed_euclidean_kit_t : public f16_v128relaxed_inner_kit_t {
-    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
 };
 #endif // NK_TARGET_V128RELAXED
 
@@ -1279,8 +1321,8 @@ struct e5m2_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_through_f32x4_init_v128relaxed_;
     static constexpr auto update_accumulator = nk_dot_through_f32x4_update_v128relaxed_;
-    static constexpr auto load_step = nk_load_e5m2x4_to_f32x4_v128relaxed_;
-    static constexpr auto load_tail = nk_partial_load_e5m2x4_to_f32x4_v128relaxed_;
+    static constexpr auto load_step = nk_load_e5m2x4_to_f32x4_v128_;
+    static constexpr auto load_tail = nk_partial_load_e5m2x4_to_f32x4_v128_;
     static constexpr auto reduce_accumulators = nk_dot_through_f32x4_finalize_v128relaxed_;
     static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
     static constexpr auto compute_norms = nk_reduce_moments_e5m2_v128relaxed;
@@ -1289,12 +1331,12 @@ struct e5m2_v128relaxed_inner_kit_t {
 
 /** @brief e5m2 angular distance kit - WebAssembly relaxed SIMD. */
 struct e5m2_v128relaxed_angular_kit_t : public e5m2_v128relaxed_inner_kit_t {
-    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128_;
 };
 
 /** @brief e5m2 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
 struct e5m2_v128relaxed_euclidean_kit_t : public e5m2_v128relaxed_inner_kit_t {
-    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
 };
 #endif // NK_TARGET_V128RELAXED
 
@@ -1565,12 +1607,12 @@ struct e4m3_v128relaxed_inner_kit_t {
 
 /** @brief e4m3 angular distance kit - WebAssembly relaxed SIMD. */
 struct e4m3_v128relaxed_angular_kit_t : public e4m3_v128relaxed_inner_kit_t {
-    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128_;
 };
 
 /** @brief e4m3 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
 struct e4m3_v128relaxed_euclidean_kit_t : public e4m3_v128relaxed_inner_kit_t {
-    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
 };
 #endif // NK_TARGET_V128RELAXED
 
@@ -1763,7 +1805,7 @@ struct e3m2_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e3m2x16_init_v128relaxed;
     static constexpr auto update_accumulator = nk_dot_e3m2x16_update_v128relaxed;
-    static constexpr auto load_step = nk_load_b128_v128relaxed_;
+    static constexpr auto load_step = nk_load_b128_v128_;
     static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
     static constexpr auto reduce_accumulators = nk_dot_e3m2x16_finalize_v128relaxed;
     static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
@@ -1773,12 +1815,12 @@ struct e3m2_v128relaxed_inner_kit_t {
 
 /** @brief e3m2 angular distance kit - WebAssembly relaxed SIMD. */
 struct e3m2_v128relaxed_angular_kit_t : public e3m2_v128relaxed_inner_kit_t {
-    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128_;
 };
 
 /** @brief e3m2 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
 struct e3m2_v128relaxed_euclidean_kit_t : public e3m2_v128relaxed_inner_kit_t {
-    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
 };
 #endif // NK_TARGET_V128RELAXED
 
@@ -2025,7 +2067,7 @@ struct e2m3_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto init_accumulator = nk_dot_e2m3x16_init_v128relaxed;
     static constexpr auto update_accumulator = nk_dot_e2m3x16_update_v128relaxed;
-    static constexpr auto load_step = nk_load_b128_v128relaxed_;
+    static constexpr auto load_step = nk_load_b128_v128_;
     static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
     static constexpr auto reduce_accumulators = nk_dot_e2m3x16_finalize_v128relaxed;
     static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
@@ -2035,12 +2077,12 @@ struct e2m3_v128relaxed_inner_kit_t {
 
 /** @brief e2m3 angular distance kit - WebAssembly relaxed SIMD. */
 struct e2m3_v128relaxed_angular_kit_t : public e2m3_v128relaxed_inner_kit_t {
-    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128_;
 };
 
 /** @brief e2m3 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
 struct e2m3_v128relaxed_euclidean_kit_t : public e2m3_v128relaxed_inner_kit_t {
-    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
 };
 #endif // NK_TARGET_V128RELAXED
 
@@ -2254,6 +2296,41 @@ struct u8_neonsdot_euclidean_kit_t : public u8_neonsdot_inner_kit_t {
 };
 #endif // NK_TARGET_NEONSDOT
 
+#if NK_TARGET_V128
+/** @brief u8 inner-product distance kit - WebAssembly SIMD128. */
+struct u8_v128_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128_k;
+    using scalar_t = nk::u8_t;
+    using accumulator_t = nk_dot_u8x16_state_v128_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_u8x16_init_v128;
+    static constexpr auto update_accumulator = nk_dot_u8x16_update_v128;
+    static constexpr auto load_step = nk_load_b128_v128_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_u8x16_finalize_v128;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_u8_v128;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief u8 angular distance kit - WebAssembly SIMD128. */
+struct u8_v128_angular_kit_t : public u8_v128_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_v128_;
+};
+
+/** @brief u8 Euclidean (L2) distance kit - WebAssembly SIMD128. */
+struct u8_v128_euclidean_kit_t : public u8_v128_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128_;
+};
+#endif // NK_TARGET_V128
+
 #if NK_TARGET_V128RELAXED
 /** @brief u8 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct u8_v128relaxed_inner_kit_t {
@@ -2268,24 +2345,24 @@ struct u8_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_u8x16_init_v128relaxed;
     static constexpr auto update_accumulator = nk_dot_u8x16_update_v128relaxed;
-    static constexpr auto load_step = nk_load_b128_v128relaxed_;
+    static constexpr auto load_step = nk_load_b128_v128_;
     static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
     static constexpr auto reduce_accumulators = nk_dot_u8x16_finalize_v128relaxed;
     static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
-    static constexpr auto compute_norms = nk_reduce_moments_u8_v128relaxed;
+    static constexpr auto compute_norms = nk_reduce_moments_u8_v128;
     static constexpr std::size_t step_dimensions = 16;
 };
 
 /** @brief u8 angular distance kit - WebAssembly relaxed SIMD. */
 struct u8_v128relaxed_angular_kit_t : public u8_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
-    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_v128_;
 };
 
 /** @brief u8 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
 struct u8_v128relaxed_euclidean_kit_t : public u8_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
-    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128_;
 };
 #endif // NK_TARGET_V128RELAXED
 
@@ -2537,6 +2614,41 @@ struct i8_neonsdot_euclidean_kit_t : public i8_neonsdot_inner_kit_t {
 };
 #endif // NK_TARGET_NEONSDOT
 
+#if NK_TARGET_V128
+/** @brief i8 inner-product distance kit - WebAssembly SIMD128. */
+struct i8_v128_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128_k;
+    using scalar_t = nk::i8_t;
+    using accumulator_t = nk_dot_i8x16_state_v128_t;
+    using step_vec_t = nk_b128_vec_t;
+    using prefetch_query_t = dummy_memory_hint_t;
+    using prefetch_candidate_t = dummy_memory_hint_t;
+    using demote_candidate_t = dummy_memory_hint_t;
+    using finalized_vec_t = nk_b128_vec_t;
+    using distance_lane_t = nk_i32_t;
+    static constexpr auto init_accumulator = nk_dot_i8x16_init_v128;
+    static constexpr auto update_accumulator = nk_dot_i8x16_update_v128;
+    static constexpr auto load_step = nk_load_b128_v128_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto reduce_accumulators = nk_dot_i8x16_finalize_v128;
+    static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
+    static constexpr auto compute_norms = nk_reduce_moments_i8_v128;
+    static constexpr std::size_t step_dimensions = 16;
+};
+
+/** @brief i8 angular distance kit - WebAssembly SIMD128. */
+struct i8_v128_angular_kit_t : public i8_v128_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_v128_;
+};
+
+/** @brief i8 Euclidean (L2) distance kit - WebAssembly SIMD128. */
+struct i8_v128_euclidean_kit_t : public i8_v128_inner_kit_t {
+    using distance_lane_t = nk_f32_t;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128_;
+};
+#endif // NK_TARGET_V128
+
 #if NK_TARGET_V128RELAXED
 /** @brief i8 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct i8_v128relaxed_inner_kit_t {
@@ -2551,24 +2663,24 @@ struct i8_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_i8x16_init_v128relaxed;
     static constexpr auto update_accumulator = nk_dot_i8x16_update_v128relaxed;
-    static constexpr auto load_step = nk_load_b128_v128relaxed_;
+    static constexpr auto load_step = nk_load_b128_v128_;
     static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
     static constexpr auto reduce_accumulators = nk_dot_i8x16_finalize_v128relaxed;
     static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
-    static constexpr auto compute_norms = nk_reduce_moments_i8_v128relaxed;
+    static constexpr auto compute_norms = nk_reduce_moments_i8_v128;
     static constexpr std::size_t step_dimensions = 16;
 };
 
 /** @brief i8 angular distance kit - WebAssembly relaxed SIMD. */
 struct i8_v128relaxed_angular_kit_t : public i8_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
-    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_v128_;
 };
 
 /** @brief i8 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
 struct i8_v128relaxed_euclidean_kit_t : public i8_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
-    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128_;
 };
 #endif // NK_TARGET_V128RELAXED
 
@@ -2763,7 +2875,7 @@ struct u4x2_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_u4x32_init_v128relaxed;
     static constexpr auto update_accumulator = nk_dot_u4x32_update_v128relaxed;
-    static constexpr auto load_step = nk_load_b128_v128relaxed_;
+    static constexpr auto load_step = nk_load_b128_v128_;
     static constexpr auto load_tail = nk_partial_load_b4x32_serial_;
     static constexpr auto reduce_accumulators = nk_dot_u4x32_finalize_v128relaxed;
     static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
@@ -2774,13 +2886,13 @@ struct u4x2_v128relaxed_inner_kit_t {
 /** @brief u4x2 angular distance kit - WebAssembly relaxed SIMD. */
 struct u4x2_v128relaxed_angular_kit_t : public u4x2_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
-    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_v128_;
 };
 
 /** @brief u4x2 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
 struct u4x2_v128relaxed_euclidean_kit_t : public u4x2_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
-    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128_;
 };
 #endif // NK_TARGET_V128RELAXED
 
@@ -2950,7 +3062,7 @@ struct i4x2_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_i32_t;
     static constexpr auto init_accumulator = nk_dot_i4x32_init_v128relaxed;
     static constexpr auto update_accumulator = nk_dot_i4x32_update_v128relaxed;
-    static constexpr auto load_step = nk_load_b128_v128relaxed_;
+    static constexpr auto load_step = nk_load_b128_v128_;
     static constexpr auto load_tail = nk_partial_load_b4x32_serial_;
     static constexpr auto reduce_accumulators = nk_dot_i4x32_finalize_v128relaxed;
     static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
@@ -2961,13 +3073,13 @@ struct i4x2_v128relaxed_inner_kit_t {
 /** @brief i4x2 angular distance kit - WebAssembly relaxed SIMD. */
 struct i4x2_v128relaxed_angular_kit_t : public i4x2_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
-    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_v128_;
 };
 
 /** @brief i4x2 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
 struct i4x2_v128relaxed_euclidean_kit_t : public i4x2_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
-    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128_;
 };
 #endif // NK_TARGET_V128RELAXED
 
@@ -3109,43 +3221,43 @@ struct u1x8_neon_jaccard_kit_t : public u1x8_neon_inner_kit_t {
 };
 #endif // NK_TARGET_NEON
 
-#if NK_TARGET_V128RELAXED
+#if NK_TARGET_V128
 /**
- *  @brief u1x8 inner-product distance kit - WebAssembly relaxed SIMD. NumKong has no
+ *  @brief u1x8 inner-product distance kit - WebAssembly SIMD128. NumKong has no
  *         binary moments kernel for this tier, so the norms come from the serial one.
  */
-struct u1x8_v128relaxed_inner_kit_t {
-    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+struct u1x8_v128_inner_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128_k;
     using scalar_t = nk::u1x8_t;
-    using accumulator_t = nk_dot_u1x128_state_v128relaxed_t;
+    using accumulator_t = nk_dot_u1x128_state_v128_t;
     using step_vec_t = nk_b128_vec_t;
     using prefetch_query_t = dummy_memory_hint_t;
     using prefetch_candidate_t = dummy_memory_hint_t;
     using demote_candidate_t = dummy_memory_hint_t;
     using finalized_vec_t = nk_b128_vec_t;
     using distance_lane_t = nk_i32_t;
-    static constexpr auto init_accumulator = nk_dot_u1x128_init_v128relaxed;
-    static constexpr auto update_accumulator = nk_dot_u1x128_update_v128relaxed;
-    static constexpr auto load_step = nk_load_b128_v128relaxed_;
+    static constexpr auto init_accumulator = nk_dot_u1x128_init_v128;
+    static constexpr auto update_accumulator = nk_dot_u1x128_update_v128;
+    static constexpr auto load_step = nk_load_b128_v128_;
     static constexpr auto load_tail = nk_partial_load_b1x128_serial_;
-    static constexpr auto reduce_accumulators = nk_dot_u1x128_finalize_v128relaxed;
+    static constexpr auto reduce_accumulators = nk_dot_u1x128_finalize_v128;
     static constexpr auto convert_to_distances = inner_product_distance_<scalar_t::dot_result_t, nk_b128_vec_t>;
     static constexpr auto compute_norms = nk_reduce_moments_u1_serial;
     static constexpr std::size_t step_dimensions = 128;
 };
 
-/** @brief u1x8 Hamming distance kit - WebAssembly relaxed SIMD. */
-struct u1x8_v128relaxed_hamming_kit_t : public u1x8_v128relaxed_inner_kit_t {
+/** @brief u1x8 Hamming distance kit - WebAssembly SIMD128. */
+struct u1x8_v128_hamming_kit_t : public u1x8_v128_inner_kit_t {
     using distance_lane_t = nk_u32_t;
-    static constexpr auto convert_to_distances = nk_hamming_u32x4_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_hamming_u32x4_from_dot_v128_;
 };
 
-/** @brief u1x8 Jaccard distance kit - WebAssembly relaxed SIMD. */
-struct u1x8_v128relaxed_jaccard_kit_t : public u1x8_v128relaxed_inner_kit_t {
+/** @brief u1x8 Jaccard distance kit - WebAssembly SIMD128. */
+struct u1x8_v128_jaccard_kit_t : public u1x8_v128_inner_kit_t {
     using distance_lane_t = nk_f32_t;
-    static constexpr auto convert_to_distances = nk_jaccard_f32x4_from_dot_v128relaxed_;
+    static constexpr auto convert_to_distances = nk_jaccard_f32x4_from_dot_v128_;
 };
-#endif // NK_TARGET_V128RELAXED
+#endif // NK_TARGET_V128
 
 #if NK_TARGET_POWERVSX
 /**
@@ -3233,6 +3345,7 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::bf16_t, caps_> {
         chain_layer<NK_TARGET_NEONBFDOT && (caps_ & nk_cap_neonbfdot_k) != 0, bf16_neonbfdot_inner_kit_t>,       //
         chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, bf16_neon_inner_kit_t>,                      //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, bf16_v128relaxed_inner_kit_t>, //
+        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, bf16_v128_inner_kit_t>,                      //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, bf16_powervsx_inner_kit_t>           //
         >::type;
     /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3249,6 +3362,7 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::bf16_t, caps_> {
         chain_layer<NK_TARGET_NEONBFDOT && (caps_ & nk_cap_neonbfdot_k) != 0, bf16_neonbfdot_angular_kit_t>,       //
         chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, bf16_neon_angular_kit_t>,                      //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, bf16_v128relaxed_angular_kit_t>, //
+        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, bf16_v128_angular_kit_t>,                      //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, bf16_powervsx_angular_kit_t>           //
         >::type;
     /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3265,6 +3379,7 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::bf16_t, caps_> {
         chain_layer<NK_TARGET_NEONBFDOT && (caps_ & nk_cap_neonbfdot_k) != 0, bf16_neonbfdot_euclidean_kit_t>,       //
         chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, bf16_neon_euclidean_kit_t>,                      //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, bf16_v128relaxed_euclidean_kit_t>, //
+        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, bf16_v128_euclidean_kit_t>,                      //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, bf16_powervsx_euclidean_kit_t>           //
         >::type;
     /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3512,6 +3627,7 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::i8_t, caps_> {
         chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i8_haswell_inner_kit_t>,             //
         chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i8_neonsdot_inner_kit_t>,          //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i8_v128relaxed_inner_kit_t>, //
+        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, i8_v128_inner_kit_t>,                      //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, i8_powervsx_inner_kit_t>           //
         >::type;
     /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3528,6 +3644,7 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::i8_t, caps_> {
         chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i8_haswell_angular_kit_t>,             //
         chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i8_neonsdot_angular_kit_t>,          //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i8_v128relaxed_angular_kit_t>, //
+        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, i8_v128_angular_kit_t>,                      //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, i8_powervsx_angular_kit_t>           //
         >::type;
     /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3544,6 +3661,7 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::i8_t, caps_> {
         chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i8_haswell_euclidean_kit_t>,             //
         chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i8_neonsdot_euclidean_kit_t>,          //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i8_v128relaxed_euclidean_kit_t>, //
+        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, i8_v128_euclidean_kit_t>,                      //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, i8_powervsx_euclidean_kit_t>           //
         >::type;
     /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3560,6 +3678,7 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::u8_t, caps_> {
         chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u8_haswell_inner_kit_t>,             //
         chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u8_neonsdot_inner_kit_t>,          //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u8_v128relaxed_inner_kit_t>, //
+        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u8_v128_inner_kit_t>,                      //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u8_powervsx_inner_kit_t>           //
         >::type;
     /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3576,6 +3695,7 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::u8_t, caps_> {
         chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u8_haswell_angular_kit_t>,             //
         chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u8_neonsdot_angular_kit_t>,          //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u8_v128relaxed_angular_kit_t>, //
+        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u8_v128_angular_kit_t>,                      //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u8_powervsx_angular_kit_t>           //
         >::type;
     /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3592,6 +3712,7 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::u8_t, caps_> {
         chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u8_haswell_euclidean_kit_t>,             //
         chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u8_neonsdot_euclidean_kit_t>,          //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u8_v128relaxed_euclidean_kit_t>, //
+        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u8_v128_euclidean_kit_t>,                      //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u8_powervsx_euclidean_kit_t>           //
         >::type;
     /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3678,39 +3799,39 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::i4x2_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_dot_k, nk::u1x8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                  //
-        u1x8_serial_inner_kit_t,                                                                                 //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_inner_kit_t>,             //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_inner_kit_t>,             //
-        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, u1x8_neon_inner_kit_t>,                      //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u1x8_v128relaxed_inner_kit_t>, //
-        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u1x8_powervsx_inner_kit_t>           //
+    using kit_t = typename first_available_kit<                                                        //
+        u1x8_serial_inner_kit_t,                                                                       //
+        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_inner_kit_t>,   //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_inner_kit_t>,   //
+        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, u1x8_neon_inner_kit_t>,            //
+        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u1x8_v128_inner_kit_t>,            //
+        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u1x8_powervsx_inner_kit_t> //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_hamming_k, nk::u1x8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                    //
-        u1x8_serial_hamming_kit_t,                                                                                 //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_hamming_kit_t>,             //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_hamming_kit_t>,             //
-        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, u1x8_neon_hamming_kit_t>,                      //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u1x8_v128relaxed_hamming_kit_t>, //
-        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u1x8_powervsx_hamming_kit_t>           //
+    using kit_t = typename first_available_kit<                                                          //
+        u1x8_serial_hamming_kit_t,                                                                       //
+        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_hamming_kit_t>,   //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_hamming_kit_t>,   //
+        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, u1x8_neon_hamming_kit_t>,            //
+        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u1x8_v128_hamming_kit_t>,            //
+        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u1x8_powervsx_hamming_kit_t> //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_jaccard_k, nk::u1x8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                    //
-        u1x8_serial_jaccard_kit_t,                                                                                 //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_jaccard_kit_t>,             //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_jaccard_kit_t>,             //
-        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, u1x8_neon_jaccard_kit_t>,                      //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u1x8_v128relaxed_jaccard_kit_t>, //
-        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u1x8_powervsx_jaccard_kit_t>           //
+    using kit_t = typename first_available_kit<                                                          //
+        u1x8_serial_jaccard_kit_t,                                                                       //
+        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_jaccard_kit_t>,   //
+        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_jaccard_kit_t>,   //
+        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, u1x8_neon_jaccard_kit_t>,            //
+        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u1x8_v128_jaccard_kit_t>,            //
+        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u1x8_powervsx_jaccard_kit_t> //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };

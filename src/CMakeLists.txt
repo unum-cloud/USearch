@@ -135,6 +135,19 @@ usearch_dense_ram_variant(
     risc5_wrs
     risc5_zacas
 )
+# A WebAssembly module carries the one SIMD tier its toolchain declares, so its verdicts read the compiler's own macros
+# rather than a probe that would pass the tier's flags itself.
+if (CMAKE_SYSTEM_NAME STREQUAL "Emscripten" OR CMAKE_SYSTEM_NAME STREQUAL "WASI")
+    include(CheckCXXSourceCompiles)
+    check_cxx_source_compiles(
+        "#if !defined(__wasm_simd128__)\n#error\n#endif\nint main() { return 0; }" nk_target_v128_compiles
+    )
+    check_cxx_source_compiles(
+        "#if !defined(__wasm_relaxed_simd__)\n#error\n#endif\nint main() { return 0; }" nk_target_v128relaxed_compiles
+    )
+endif ()
+usearch_dense_ram_variant(wasm32_v128 OVER serial v128)
+usearch_dense_ram_variant(wasm64_extended OVER wasm32_v128 v128relaxed)
 
 # The type-erased implementations behind the C interface: the dispatch unit visits the arms through their explicitly
 # instantiated views and compiles at the baseline, since it inlines no kernel. Under CUDA the dispatch unit is the `.cu`
