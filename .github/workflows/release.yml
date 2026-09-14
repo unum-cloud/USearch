@@ -1135,109 +1135,32 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
   build_csharp:
-    name: Build C Dependencies for C#
+    name: Build and test C# package
     needs: versioning
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-15, windows-2022]
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        shell: bash
-
-    steps:
-      - name: Check out refreshed version
-        uses: actions/checkout@v6
-        with:
-          ref: "main"
-      - name: Pull Git submodules
-        run: git submodule update --init --recursive
-
-      - name: Build C library for Linux
-        if: matrix.os == 'ubuntu-24.04'
-        run: |
-          sudo apt update
-          sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=1 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=1
-          cmake --build build_artifacts --config Release
-          mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
-          cp "${{ github.workspace }}/build_artifacts/libusearch_c.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
-          cp "${{ github.workspace }}/build_artifacts/numkong/libnumkong.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
-
-      - name: Build C library for MacOS
-        if: matrix.os == 'macos-15'
-        run: |
-          brew update
-          brew reinstall cmake
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=0 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=0
-          cmake --build build_artifacts --config Release
-          mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
-          cp "${{ github.workspace }}/build_artifacts/libusearch_c.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
-          cp "${{ github.workspace }}/build_artifacts/numkong/libnumkong.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
-
-      - name: Build C library for Windows
-        if: matrix.os == 'windows-2022'
-        shell: pwsh
-        run: |
-          choco install cmake -y
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_OPENMP=0 -DUSEARCH_USE_NUMKONG=1 -DUSEARCH_USE_JEMALLOC=0
-          cmake --build build_artifacts --config Release
-          $nativeDir = "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
-          New-Item -ItemType Directory -Force -Path $nativeDir | Out-Null
-          Copy-Item "${{ github.workspace }}\build_artifacts\libusearch_c.dll" -Destination $nativeDir
-          Copy-Item "${{ github.workspace }}\build_artifacts\numkong.dll" -Destination $nativeDir
-
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v5
-        with:
-          name: usearch-csharp-dependencies-${{ matrix.os }}
-          path: ${{ github.workspace }}/csharp/lib/**/*
+    uses: ./.github/workflows/csharp-package.yml
+    with:
+      ref: main
 
   publish_csharp:
     name: Publish C#
     runs-on: ubuntu-24.04
     needs: [build_csharp]
     env:
-      SOLUTION: ${{ github.workspace }}/csharp
-      USEARCH_LIBS: ${{ github.workspace }}/csharp/lib
       NUGET_PACKAGES: ${{ github.workspace }}/csharp/packages
       # NUGET_SOURCE: https://apiint.nugettest.org/v3/index.json
       NUGET_SOURCE: https://api.nuget.org/v3/index.json
       GITHUB_PACKAGES_SOURCE: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
     steps:
-      - name: Check out refreshed version
-        uses: actions/checkout@v6
-        with:
-          ref: "main"
-      - name: Pull Git submodules
-        run: git submodule update --init --recursive
-
-      - name: Download usearch libs artifact
+      - name: Download tested NuGet package
         uses: actions/download-artifact@v6
         with:
-          pattern: usearch-csharp-dependencies-*
-          merge-multiple: true
-          path: ${{ env.USEARCH_LIBS }}
-
-      - name: Verify native package inputs
-        run: |
-          test -f "${{ env.USEARCH_LIBS }}/runtimes/linux-x64/native/libusearch_c.so"
-          test -f "${{ env.USEARCH_LIBS }}/runtimes/linux-x64/native/libnumkong.so"
-          test -f "${{ env.USEARCH_LIBS }}/runtimes/osx-arm64/native/libusearch_c.dylib"
-          test -f "${{ env.USEARCH_LIBS }}/runtimes/osx-arm64/native/libnumkong.dylib"
-          test -f "${{ env.USEARCH_LIBS }}/runtimes/win-x64/native/libusearch_c.dll"
-          test -f "${{ env.USEARCH_LIBS }}/runtimes/win-x64/native/numkong.dll"
+          name: usearch-nuget
+          path: ${{ env.NUGET_PACKAGES }}
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
-
-      - name: Pack project
-        run: |
-          dotnet pack "${{ env.SOLUTION }}" -c Release --output ${{ env.NUGET_PACKAGES }}
-        working-directory: ${{ github.workspace }}
 
       - name: Publish to NuGet
         run: dotnet nuget push "${{ env.NUGET_PACKAGES }}/*.nupkg" --api-key "${{ secrets.NUGET_API }}" --source "${{

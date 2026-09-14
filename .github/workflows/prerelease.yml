@@ -23,6 +23,10 @@ permissions:
   contents: read
 
 jobs:
+  test_csharp_package:
+    name: Build and test C# package
+    uses: ./.github/workflows/csharp-package.yml
+
   versioning:
     name: Update Version
     runs-on: ubuntu-24.04

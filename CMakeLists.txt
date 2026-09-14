@@ -27,6 +27,11 @@ option(USEARCH_INSTALL "Install CMake targets" OFF)
 option(USEARCH_USE_OPENMP "Use OpenMP for a thread pool" OFF)
 option(USEARCH_USE_NUMKONG "Use NumKong hardware-accelerated metrics" OFF)
 option(USEARCH_USE_JEMALLOC "Use JeMalloc for faster memory allocations" OFF)
+option(USEARCH_MARCH_NATIVE "Tune native targets for the build host (not portable)" OFF)
+
+if (USEARCH_MARCH_NATIVE AND CMAKE_CROSSCOMPILING)
+    message(FATAL_ERROR "USEARCH_MARCH_NATIVE cannot be used when cross-compiling")
+endif ()
 
 option(USEARCH_BUILD_TEST_CPP "Compile a native unit test in C++" ${USEARCH_IS_MAIN_PROJECT})
 option(USEARCH_BUILD_BENCH_CPP "Compile a native benchmark in C++" ${USEARCH_IS_MAIN_PROJECT})
@@ -216,6 +221,25 @@ set(USEARCH_HEADER_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRE
 
 # Function to setup target
 function (setup_target TARGET_NAME)
+    # The index core executes before NumKong can dispatch to a CPU-specific kernel.
+    # Keep it at the target ABI baseline; host tuning is only for local builds.
+    if (CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
+        if (USEARCH_MARCH_NATIVE)
+            if (APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|AARCH64|arm64|ARM64)$")
+                target_compile_options(${TARGET_NAME} PRIVATE -mcpu=native)
+            else ()
+                target_compile_options(${TARGET_NAME} PRIVATE -march=native)
+            endif ()
+        elseif (NOT APPLE)
+            # Apple toolchains choose the baseline separately for each -arch slice.
+            if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|X86_64|AMD64|amd64)$")
+                target_compile_options(${TARGET_NAME} PRIVATE -march=x86-64)
+            elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|AARCH64|arm64|ARM64)$")
+                target_compile_options(${TARGET_NAME} PRIVATE -march=armv8-a)
+            endif ()
+        endif ()
+    endif ()
+
     # Compiler-specific options List of all possible compiler IDs:
     # https://cmake.org/cmake/help/latest/variable/CMAKE_LANG_COMPILER_ID.html
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -237,7 +261,6 @@ function (setup_target TARGET_NAME)
                     -Wextra
                     -Wno-conversion
                     -Wno-unknown-pragmas
-                    -march=native
                     -fmax-errors=1
                     -pedantic
                     -fdiagnostics-color=always

@@ -1,0 +1,128 @@
+name: C# Package
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Source revision to build (defaults to the calling workflow's revision)
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Native libraries (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+          submodules: recursive
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential libjemalloc-dev libomp-dev
+      - name: Build portable native libraries
+        shell: pwsh
+        run: |
+          $linux = '${{ runner.os }}' -eq 'Linux'
+          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=OFF -DUSEARCH_BUILD_BENCH_CPP=OFF -DUSEARCH_BUILD_TEST_C=ON -DUSEARCH_BUILD_LIB_C=ON -DUSEARCH_MARCH_NATIVE=OFF -DNK_MARCH_NATIVE=OFF -DUSEARCH_USE_NUMKONG=ON "-DUSEARCH_USE_OPENMP=$linux" "-DUSEARCH_USE_JEMALLOC=$linux"
+          if ($LASTEXITCODE) { throw 'Native configuration failed.' }
+          cmake --build build_artifacts --config Release --parallel 2
+          if ($LASTEXITCODE) { throw 'Native build failed.' }
+          & ./build_artifacts/test_c
+          if ($LASTEXITCODE) { throw 'Native tests failed.' }
+      - name: Stage native libraries
+        shell: pwsh
+        run: |
+          switch ('${{ runner.os }}') {
+            Linux { $rid = 'linux-x64'; $core = 'libusearch_c.so'; $numkong = 'numkong/libnumkong.so' }
+            macOS { $rid = 'osx-arm64'; $core = 'libusearch_c.dylib'; $numkong = 'numkong/libnumkong.dylib' }
+            Windows { $rid = 'win-x64'; $core = 'libusearch_c.dll'; $numkong = 'numkong.dll' }
+          }
+          $destination = "csharp/lib/runtimes/$rid/native"
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          Copy-Item "build_artifacts/$core", "build_artifacts/$numkong" -Destination $destination
+      - uses: actions/upload-artifact@v5
+        with:
+          name: usearch-csharp-dependencies-${{ matrix.os }}
+          path: csharp/lib/runtimes
+          if-no-files-found: error
+
+  pack:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: usearch-csharp-dependencies-*
+          merge-multiple: true
+          path: csharp/lib/runtimes
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+      - name: Pack once for all platforms
+        run: dotnet pack csharp/src/Cloud.Unum.USearch/Cloud.Unum.USearch.csproj -c Release --output packages
+      - uses: actions/upload-artifact@v5
+        with:
+          name: usearch-nuget
+          path: packages/*.nupkg
+          if-no-files-found: error
+
+  test:
+    name: Restored package (${{ matrix.rid }}, ${{ matrix.cpu || 'native' }})
+    needs: pack
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            rid: linux-x64
+            cpu: ''
+          - os: ubuntu-24.04
+            rid: linux-x64
+            cpu: Haswell
+          - os: ubuntu-24.04
+            rid: linux-x64
+            cpu: Nehalem
+          - os: windows-2022
+            rid: win-x64
+            cpu: ''
+          - os: macos-15
+            rid: osx-arm64
+            cpu: ''
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/download-artifact@v6
+        with:
+          name: usearch-nuget
+          path: packages
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+      - name: Install Linux OpenMP runtime
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgomp1
+      - name: Install CPU emulator
+        if: matrix.cpu != ''
+        run: sudo apt-get install -y qemu-user
+      - name: Test the packaged libraries outside the build tree
+        shell: pwsh
+        run: |
+          $package = (Get-ChildItem packages/*.nupkg).FullName
+          ./csharp/test-package.ps1 -PackagePath $package -RuntimeIdentifier '${{ matrix.rid }}' -Cpu '${{ matrix.cpu }}'

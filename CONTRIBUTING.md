@@ -23,6 +23,11 @@ git submodule update --init --recursive
 ## C++ 11 and C 99
 
 Our primary C++ implementation uses CMake for builds.
+Native targets default to portable code generation. NumKong still compiles optimized kernels and chooses a supported one at runtime.
+For a build used only on the build machine, GCC/Clang users can opt into `-DUSEARCH_MARCH_NATIVE=ON`.
+Do not enable this option for redistributable packages or cross-compilation; host-specific instructions in the index core bypass NumKong's runtime dispatch.
+NumKong's separate `NK_MARCH_NATIVE` option should also stay OFF for distributed builds.
+
 If this is your first experience with CMake, use the following commands to get started:
 
 ```sh
@@ -509,11 +514,37 @@ On macOS with Arm-based chips:
 ```sh
 mkdir -p "csharp/lib/runtimes/osx-arm64/native"
 cp "build_artifacts/libusearch_c.dylib" "csharp/lib/runtimes/osx-arm64/native"
+cp "build_artifacts/numkong/libnumkong.dylib" "csharp/lib/runtimes/osx-arm64/native"
 cd csharp
 dotnet test -c Debug --logger "console;verbosity=detailed"
 dotnet test -c Release
 ```
 
+
+### Test the NuGet package
+
+The C# package workflow builds portable native pairs for `linux-x64`, `win-x64`, and `osx-arm64`, packs once, and tests the restored archive on each platform before publishing it.
+The consumer lives outside the source/build tree and uses a fresh package cache so that local native libraries cannot hide missing package files.
+It checks index creation, insertion, search results, save/reload, and SIMD capability reporting.
+
+After collecting all three native pairs under `csharp/lib/runtimes`, run from the repository root:
+
+```sh
+dotnet pack csharp/src/Cloud.Unum.USearch/Cloud.Unum.USearch.csproj -c Release --output packages
+pwsh -File csharp/test-package.ps1 -PackagePath packages/Cloud.Unum.USearch.<version>.nupkg -RuntimeIdentifier linux-x64
+```
+
+Use `win-x64` or `osx-arm64` on those platforms. Linux additionally tests the same package under QEMU user-mode emulation:
+
+```sh
+sudo apt-get install qemu-user
+pwsh -File csharp/test-package.ps1 -PackagePath packages/Cloud.Unum.USearch.<version>.nupkg -RuntimeIdentifier linux-x64 -Cpu Haswell
+pwsh -File csharp/test-package.ps1 -PackagePath packages/Cloud.Unum.USearch.<version>.nupkg -RuntimeIdentifier linux-x64 -Cpu Nehalem
+```
+
+Haswell must select the AVX2 `haswell` kernel without AVX-512; Nehalem must select `serial` without AVX2.
+Both retain the package's compiled SIMD kernels. Testing only on the build CPU would miss accidental host-specific instructions.
+The script prints and preserves its temporary consumer directory for diagnosis.
 
 ## Wolfram
 
