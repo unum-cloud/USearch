@@ -217,6 +217,64 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     return true;
 }
 
+/** @brief Re-selects every node's neighbors, pass after pass, then re-links whatever no search
+ *      can reach - the build step a cheap ingestion pays for. */
+template <typename streamed_dataset_type_>
+bool run_refinement(streamed_dataset_type_& streamed) {
+    using clock_t = stdc::steady_clock;
+    using bench_t = typename streamed_dataset_type_::bench_t;
+    using index_t = typename bench_t::index_t;
+    using node_id_t = typename bench_t::node_id_t;
+    using small_size_t = typename bench_t::small_size_t;
+    auto& bench = streamed.bench;
+    std::size_t const max_refines = bench.options.max_refines;
+    std::size_t const nodes = bench.index->size();
+    if (!max_refines || !nodes) return true;
+
+    typename index_t::refine_config_t config;
+    config.expansion_factor = static_cast<small_size_t>(bench.options.expansion_refine ? bench.options.expansion_refine
+                                                                                       : bench.options.expansion_add);
+
+    refinement_report_t report;
+    report.nodes = nodes;
+    report.expansion = config.expansion_factor;
+    report.threads = 1;
+    std::vector<std::size_t> changed_per_pass;
+    changed_per_pass.reserve(max_refines);
+    progress_bar_t progress {"refining", max_refines};
+    auto started = clock_t::now();
+    for (std::size_t pass = 0; pass != max_refines; ++pass) {
+        auto refined = bench.index->refine({0, static_cast<node_id_t>(nodes)}, *bench.traversal, config);
+        if (!refined) {
+            fmt::println("Refinement failed on pass {}: status {}", pass, int(refined.status));
+            return false;
+        }
+        changed_per_pass.push_back(refined.changed_nodes);
+        report.sums.visited_members += refined.visited_members;
+        report.sums.computed_distances += refined.computed_distances;
+        report.sums.restarts += refined.restarts;
+        progress.tick(pass + 1);
+        if (!refined.changed_nodes) break; // Settled: another pass would re-select the same picks.
+    }
+    progress.finish();
+    report.refining_seconds = stdc::duration<double>(clock_t::now() - started).count();
+    report.changed_per_pass = changed_per_pass;
+
+    started = clock_t::now();
+    auto const healed = bench.index->heal(*bench.traversal);
+    if (!healed) {
+        fmt::println("Healing failed: status {}", int(healed.status));
+        return false;
+    }
+    report.healing_seconds = stdc::duration<double>(clock_t::now() - started).count();
+    report.islands_found = healed.value.islands_found;
+    report.islands_reconnected = healed.value.islands_reconnected;
+    report.reachable_nodes = healed.value.health.reachable_nodes;
+    report.sweeps = healed.value.health.sweeps;
+    report_refinement_metrics(report);
+    return true;
+}
+
 /** @brief Serializes the device index as the same three RetriEval-layout matrices the CPU
  *      bench writes - vectors, neighbors, and the id → row map. */
 template <typename streamed_dataset_type_>
@@ -387,6 +445,7 @@ int stage_and_run(persisted_dataset<dataset_scalar_type_> const& dataset, bench_
 
     if (!prepare(streamed)) return 1;
     if (!run_insertion(streamed)) return 1;
+    if (!run_refinement(streamed)) return 1;
     if (!options.save_name.empty() && !save_index(streamed)) return 1;
     if (!run_search(streamed)) return 1;
     return 0;

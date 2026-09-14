@@ -163,9 +163,10 @@ struct executor_t {
     std::size_t threads = 1;
 };
 
-/** @brief Refuses an executor a verb cannot run on, reporting where the engine's dispatch does. */
+/** @brief Refuses a null executor with the engine's own code and message; one stand-in serves
+ *      every residency, so the engine's kind-mismatch refusal has nothing to mirror here. */
 inline bool reject_executor(usearch_executor_t executor, usearch_error_t* error) {
-    return reject_if(!executor, usearch_error_device_k, "The executor's kind must match the handle's residency", error);
+    return reject_if(!executor, usearch_error_malformed_input_k, "Executor must not be null", error);
 }
 
 /** @brief Ticks the caller's handler and answers whether to carry on; a null handler always does. */

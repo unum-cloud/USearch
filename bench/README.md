@@ -57,6 +57,7 @@ build_release/usearch_bench_dense_ram_indexes \
 | `--f32`, `--bf16`, `--f16`, `--i8`, `--i4`, `--u8`, `--u1`    | the stored dtype; a file of another dtype is cast on ingest                                        |
 | `--dot`, `--angular`, `--euclidean`, `--hamming`, `--jaccard` | the metric; angular by default                                                                     |
 | `--connectivity`, `--expansion-add`, `--expansion-search`     | graph degree and the two candidate pools; 32, 256 and 96 by default                                |
+| `--max-refines`, `--expansion-refine`                         | refinement passes after ingestion and the pool they re-select under; skipped by default            |
 | `--max-compute`, `--max-schedule`, `--max-arch`               | cap the kernel kit, the wait instruction, or the GPU generation below what the machine offers      |
 | `--threads`, `--memory-domain`                                | the executor's threads and the NUMA domain to pin, or `all` on the multi-index                     |
 | `--batch`                                                     | rows per batched call or per launch                                                                |
@@ -67,6 +68,22 @@ build_release/usearch_bench_dense_ram_indexes \
 Recall is judged against `--neighbors` as recall@1, recall@k, overlap@k and ndcg@k.
 A ground truth is computed for the whole file, so `--max-vectors` reshapes the graph it describes and the harness drops it, printing a notice; `--self-recall` judges connectivity instead and needs no ground truth at all.
 Judge GPU builds through a reload: a search issued right after a bulk build runs against a device still settling, and the checkpoint path is exactly what the C interface exposes.
+
+### Refinement
+
+`--max-refines` inserts a refinement phase between ingestion and search: each pass re-selects every node's neighbors against the finished graph, and the phase stops early once a pass re-wires nothing.
+A heal follows, re-linking whatever no search can reach, and the report ends with the reachable population so a build that stranded nodes is visible rather than merely slow.
+
+This is what a cheap ingestion pays for - a narrow `--expansion-add` topped with one or two wide passes, rather than one expensive build:
+
+```sh
+build_fleet/bench/usearch_bench_dense_vram_index \
+    --vectors data/sift-10m/base.10M.u8bin --queries data/sift-10m/query.public.10K.u8bin \
+    --neighbors data/sift-10m/groundtruth.public.10K.ibin --u8 --euclidean \
+    --connectivity 16 --expansion-add 32 --expansion-search 64 --max-refines 2 --expansion-refine 128
+```
+
+Judge the two builds at matched distance computations rather than matched knobs; the report prints the count for every phase.
 
 ### Checkpoints
 

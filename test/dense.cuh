@@ -96,6 +96,9 @@ constexpr u64_t dense_seed_overflow_race_k = 0xF100DED0ull;
 constexpr u64_t dense_seed_shedding_k = 0x5EDD1EF0ull;
 constexpr u64_t dense_seed_saturated_k = 0x5A7A7EDDull;
 constexpr u64_t dense_seed_upstream_k = 0x0957EA30ull;
+constexpr u64_t dense_seed_refine_k = 0x2EF1BE00ull;
+constexpr u64_t dense_seed_health_k = 0x4EA17400ull;
+constexpr u64_t dense_seed_heal_k = 0x4EA1D000ull;
 
 #pragma endregion Constants and Seeds
 
@@ -158,14 +161,14 @@ constexpr std::size_t dense_rows_bytes(matrix_view_type_ view, std::size_t rows_
  *      Sampling is evenly spaced; callers keep the dot-kernel gate, where "distance" is
  *      a similarity and self-matching is undefined. Requires @p rows_count ≥ @p samples_count. */
 template <typename index_type_, typename vectors_view_type_>
-std::size_t dense_expect_self_recall(index_type_& index, vectors_view_type_ vectors, std::size_t rows_count,
-                                     std::size_t samples_count) {
-    std::size_t failures = 0, hits = 0;
+std::size_t dense_count_self_hits(index_type_& index, vectors_view_type_ vectors, std::size_t rows_count,
+                                  std::size_t samples_count) {
+    std::size_t hits = 0;
     typename index_type_::dense_traversal_context_t context {{}};
     for (std::size_t sample = 0; sample != samples_count; ++sample) {
         std::size_t const row = sample * (rows_count / samples_count);
         auto const found = index.search(vectors.row(row).as_vector(), context);
-        failures += expect(found.status == status_t::success_k && found.count > 0);
+        if (!found.count) continue;
         for (std::size_t match = 0; match != found.count; ++match) {
             dense_scored_node_t const scored = context.results.data()[match];
             if (scored.distance < dense_self_match_tolerance_k && scored.distance > -dense_self_match_tolerance_k) {
@@ -174,8 +177,15 @@ std::size_t dense_expect_self_recall(index_type_& index, vectors_view_type_ vect
             }
         }
     }
-    failures += expect(hits * 100 >= samples_count * dense_minimal_recall_percent_k);
-    return failures;
+    return hits;
+}
+
+/** @brief The judged form of @ref dense_count_self_hits: the share found must clear the floor. */
+template <typename index_type_, typename vectors_view_type_>
+std::size_t dense_expect_self_recall(index_type_& index, vectors_view_type_ vectors, std::size_t rows_count,
+                                     std::size_t samples_count) {
+    std::size_t const hits = dense_count_self_hits(index, vectors, rows_count, samples_count);
+    return expect(hits * 100 >= samples_count * dense_minimal_recall_percent_k);
 }
 
 /** @brief The ranking in @p context ascends by distance - the pool's invariant after any walk. */
@@ -952,6 +962,247 @@ std::size_t test_dense_load_append(make_index_type_ const& make_index) {
 }
 
 #pragma endregion Snapshots
+
+#pragma region Refinement
+
+/** @brief Sweeps one audit to convergence: the bitsets restart, then every step of every level
+ *      until no level expands a node - the serial spelling of what an executor fans out. The
+ *      restart is what lets a repaired graph be re-audited; without it the expanded bits still
+ *      stand and no fresh edge is ever followed. */
+template <typename plan_type_>
+void dense_sweep_reachability(plan_type_& plan) {
+    plan.restart_sweep();
+    do
+        for (auto const step : plan.steps()) plan.sweep(step);
+    while (plan.advance_level());
+}
+
+/** @brief One shard's reachability, whichever way its residency spells the audit: the device
+ *      answers in one call, the host drives the plan the caller owns. */
+template <typename index_type_>
+auto dense_audit_health(index_type_& index, typename index_type_::dense_traversal_context_t& context) {
+    if constexpr (requires { index.health(context); }) return index.health(context);
+    else {
+        auto [plan, planned] = index.plan_health(context);
+        if (failed(planned)) return expected<typename index_type_::health_result_t> {{}, planned};
+        dense_sweep_reachability(plan);
+        return plan.finish();
+    }
+}
+
+/** @brief One shard healed, whichever way its residency spells it: the device runs its own
+ *      rounds, the host runs the documented ones - sweep, re-select, sweep, reconnect, sweep,
+ *      while the island population shrinks. */
+template <typename index_type_>
+auto dense_repair_islands(index_type_& index, typename index_type_::dense_traversal_context_t& context) {
+    if constexpr (requires { index.heal(context); }) return index.heal(context);
+    else {
+        auto [plan, planned] = index.plan_heal(context);
+        if (failed(planned)) return expected<typename index_type_::heal_result_t> {{}, planned};
+        dense_sweep_reachability(plan);
+        for (std::size_t islands_before = plan.islands_left(); islands_before;) {
+            for (auto const step : plan.steps()) plan.reselect_islands(step, context);
+            dense_sweep_reachability(plan);
+            if (!plan.islands_left()) break;
+            for (auto const step : plan.steps()) plan.reconnect_islands(step, context);
+            dense_sweep_reachability(plan);
+            std::size_t const islands_after = plan.islands_left();
+            if (islands_after >= islands_before) break;
+            islands_before = islands_after;
+        }
+        return plan.finish();
+    }
+}
+
+/**
+ *  @brief The settling contract: a graph built under a narrow pool has work for the first sweep,
+ *      the second finds far less, and recall never falls for the trouble.
+ *
+ *  The bound on the second sweep is a ratio rather than zero, since the walks re-seed from random
+ *  landmarks and a later back-link can still disturb a row a earlier step already settled.
+ */
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+std::size_t test_dense_refine_settles(make_index_type_ const& make_index) {
+    using scalar_t = typename index_type_::scalar_t;
+    using node_id_t = typename index_type_::node_id_t;
+    std::size_t failures = 0;
+    allocation_ledger_t ledger;
+    {
+        index_type_ index = make_index(ledger);
+        typename index_type_::dense_traversal_context_t context {{}};
+        auto vectors = make_vectors<scalar_t>(dense_growth_nodes_k, dense_dimensions_for<scalar_t>(dense_values_k),
+                                              dense_seed_refine_k);
+        failures += expect(
+            index.reserve({16, connectivity_16_k, dense_dimensions_for<scalar_t>(dense_values_k)}).status ==
+            status_t::success_k);
+
+        // Narrow enough that the first sweep has real work to do - the recipe the verb exists for.
+        typename index_type_::insert_config_t cheap;
+        cheap.expansion_factor = 4;
+        failures += expect(index.insert(vectors.view(), {}, context, cheap).status == status_t::success_k);
+        failures += expect_eq(index.size(), dense_growth_nodes_k);
+
+        node_id_t const published = static_cast<node_id_t>(index.size());
+        std::size_t const hits_before = kernel_ != nk_kernel_dot_k
+                                            ? dense_count_self_hits(index, vectors.view(), dense_growth_nodes_k, 32)
+                                            : 0;
+        auto const first = index.refine({0, published}, context);
+        failures += expect(first.status == status_t::success_k);
+        failures += expect_eq(first.visited_nodes, dense_growth_nodes_k);
+        failures += expect(first.changed_nodes > 0 && first.changed_nodes <= first.visited_nodes);
+        failures += expect(first.computed_distances > 0 && first.visited_members > 0);
+        if constexpr (requires { first.computed_distances_in_refines; })
+            failures += expect(first.computed_distances_in_refines + first.computed_distances_in_reverse_refines <=
+                               first.computed_distances);
+
+        auto const second = index.refine({0, published}, context);
+        failures += expect(second.status == status_t::success_k);
+        failures += expect_eq(second.visited_nodes, dense_growth_nodes_k);
+        failures += expect(second.changed_nodes < first.changed_nodes);
+
+        // A range past the end sweeps nothing, and one straddling it stops at the watermark.
+        auto const beyond = index.refine({published, published + 16}, context);
+        failures += expect(beyond.status == status_t::success_k);
+        failures += expect_eq(beyond.visited_nodes, 0u);
+        auto const straddling = index.refine({published / 2, published * 2}, context);
+        failures += expect_eq(straddling.visited_nodes, dense_growth_nodes_k - dense_growth_nodes_k / 2);
+
+        // A sweep is a build step, so what it must never do is cost the graph its answers.
+        if constexpr (kernel_ != nk_kernel_dot_k)
+            failures += expect(dense_count_self_hits(index, vectors.view(), dense_growth_nodes_k, 32) >= hits_before);
+    }
+    failures += expect_eq(ledger.live_bytes.load(), 0);
+    return failures;
+}
+
+/**
+ *  @brief The audit's contract on a graph nothing stranded: an empty index reaches nothing, a
+ *      healthy one reaches everything, and two audits of one graph agree - the landmarks are
+ *      stride-spread, so the answer is a property of the graph rather than of the draw.
+ */
+template <typename index_type_, typename make_index_type_>
+std::size_t test_dense_health_audits(make_index_type_ const& make_index) {
+    using scalar_t = typename index_type_::scalar_t;
+    std::size_t failures = 0;
+    allocation_ledger_t ledger;
+    {
+        index_type_ index = make_index(ledger);
+        typename index_type_::dense_traversal_context_t context {{}};
+        failures += expect(
+            index.reserve({16, connectivity_16_k, dense_dimensions_for<scalar_t>(dense_values_k)}).status ==
+            status_t::success_k);
+
+        auto const empty = dense_audit_health(index, context);
+        failures += expect(succeeded(empty.status));
+        failures += expect_eq(empty.value.reachable_nodes, 0u);
+
+        auto vectors = make_vectors<scalar_t>(dense_growth_nodes_k, dense_dimensions_for<scalar_t>(dense_values_k),
+                                              dense_seed_health_k);
+        failures += expect(index.insert(vectors.view(), {}, context).status == status_t::success_k);
+
+        // An insertion wires each node against the graph as it stood, so a few can end up with no
+        // in-edge any search follows; reaching every one of them is what the repair is for, and
+        // what the healing scenario asserts. Here the claim is that the audit sees the bulk.
+        auto const audited = dense_audit_health(index, context);
+        failures += expect(succeeded(audited.status));
+        failures += expect(audited.value.reachable_nodes <= index.size());
+        failures += expect(audited.value.reachable_nodes * 100 >= index.size() * dense_minimal_recall_percent_k);
+        failures += expect(audited.value.sweeps >= 1);
+
+        auto const again = dense_audit_health(index, context);
+        failures += expect(succeeded(again.status));
+        failures += expect_eq(again.value.reachable_nodes, audited.value.reachable_nodes);
+        failures += expect_eq(again.value.sweeps, audited.value.sweeps);
+    }
+    failures += expect_eq(ledger.live_bytes.load(), 0);
+    return failures;
+}
+
+/**
+ *  @brief The repair's contract, against islands planted by construction rather than coaxed out
+ *      of a build: a checkpoint's neighbor rows are rewritten so a tail of nodes points only at
+ *      itself, which no walk can enter, and the load's own compaction keeps that encoding.
+ *
+ *  Healing must then reach every node, and a second pass must find nothing left to do.
+ */
+template <typename index_type_, typename make_index_type_>
+std::size_t test_dense_heal_islands(make_index_type_ const& make_index) {
+    using scalar_t = typename index_type_::scalar_t;
+    using node_id_t = typename index_type_::node_id_t;
+    std::size_t failures = 0;
+    constexpr std::size_t nodes_count = 512, islands_count = 32;
+    allocation_ledger_t ledger;
+    {
+        std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+        auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, dense_seed_heal_k);
+
+        // Build every node, then strand the tail: its rows become self-loops, the "published with
+        // no neighbors" encoding, so nothing points into them and they point nowhere.
+        index_type_ built = make_index(ledger);
+        typename index_type_::dense_traversal_context_t context {{}};
+        failures += expect(built.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
+        failures += expect(built.insert(vectors.view(), {}, context).status == status_t::success_k);
+
+        auto saved_vectors = nk::matrix<scalar_t>::try_zeros({nodes_count, dimensions});
+        auto saved_neighbors = nk::matrix<node_id_t>::try_zeros(
+            {nodes_count, static_cast<std::size_t>(built.connectivity())});
+        failures += expect(!saved_vectors.empty() && !saved_neighbors.empty());
+        if (!saved_vectors.empty() && !saved_neighbors.empty()) {
+            std::size_t saved_nodes = 0;
+            failures += expect(dense_save_into(built, saved_vectors, saved_neighbors, synchronization_t::exclusive_k,
+                                               saved_nodes) == status_t::success_k);
+            failures += expect_eq(saved_nodes, nodes_count);
+            // Stranding a node means cutting what points at it, so every reference to the tail
+            // leaves the graph first; the tail itself then keeps only the published-empty
+            // self-loop, pointing nowhere and pointed at by nothing.
+            node_id_t const first_island = static_cast<node_id_t>(nodes_count - islands_count);
+            for (std::size_t node = 0; node != first_island; ++node) {
+                auto mainland_row = saved_neighbors.span().row(node).as_vector();
+                for (std::size_t slot = 0; slot != mainland_row.size(); ++slot)
+                    if (mainland_row[slot] >= first_island && mainland_row[slot] != dense_node_id_unknown_k)
+                        mainland_row[slot] = dense_node_id_unknown_k;
+            }
+            for (std::size_t node = first_island; node != nodes_count; ++node) {
+                auto island_row = saved_neighbors.span().row(node).as_vector();
+                island_row[0] = static_cast<node_id_t>(node);
+                for (std::size_t slot = 1; slot != island_row.size(); ++slot)
+                    island_row[slot] = dense_node_id_unknown_k;
+            }
+
+            index_type_ islanded = make_index(ledger);
+            failures += expect(islanded.reserve({nodes_count, connectivity_16_k, dimensions}).status ==
+                               status_t::success_k);
+            failures += expect(dense_load_from(islanded, saved_vectors.view(), saved_neighbors.view(), nodes_count) ==
+                               status_t::success_k);
+
+            // The landmarks are spread across the whole id space, so a planted island that happens
+            // to be one is reachable by a walk starting there - what must hold is that the rest
+            // are not, and that the repair closes every one of them.
+            auto const before = dense_audit_health(islanded, context);
+            failures += expect(succeeded(before.status));
+            failures += expect(before.value.reachable_nodes < nodes_count);
+
+            auto const healed = dense_repair_islands(islanded, context);
+            failures += expect(succeeded(healed.status));
+            failures += expect_eq(healed.value.health.reachable_nodes, nodes_count);
+            failures += expect(healed.value.islands_found > 0);
+            failures += expect(healed.value.islands_reconnected <= healed.value.islands_found);
+
+            auto const after = dense_audit_health(islanded, context);
+            failures += expect(succeeded(after.status));
+            failures += expect_eq(after.value.reachable_nodes, nodes_count);
+
+            auto const settled = dense_repair_islands(islanded, context);
+            failures += expect(succeeded(settled.status));
+            failures += expect_eq(settled.value.islands_found, 0u);
+            failures += expect_eq(settled.value.islands_reconnected, 0u);
+        }
+    }
+    failures += expect_eq(ledger.live_bytes.load(), 0);
+    return failures;
+}
+
+#pragma endregion Refinement
 
 #pragma region Races
 

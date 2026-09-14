@@ -156,6 +156,10 @@ int main(int argc, char** argv) {
             "stitch the shards into ONE graph after ingest; single-walk queries",
         (clipp::option("--expansion-merge") & clipp::value("breadth", options.expansion_merge)) %
             "merge candidate pool; inherits --expansion-add by default",
+        (clipp::option("--max-refines") & clipp::value("passes", options.max_refines)) %
+            "upper bound on whole-graph refinement passes after ingestion; 0 by default",
+        (clipp::option("--expansion-refine") & clipp::value("breadth", options.expansion_refine)) %
+            "refinement candidate pool; inherits --expansion-add by default",
         (clipp::option("--max-arch") & clipp::value("name", max_arch_name)) %
             "kit-generation ceiling: ampere, ada, hopper, or blackwell; newest by default",
         clipp::option("--managed-memory").set(plane_space, cuda_address_space_t::managed_k) % //

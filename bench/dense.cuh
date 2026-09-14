@@ -299,6 +299,11 @@ struct bench_options_t {
     /** @brief Merge candidate pool; zero inherits `--expansion-add`. Halving it roughly
      *      halves the merge wall for under a recall point. */
     std::size_t expansion_merge = 0;
+    /** @brief Upper bound on refinement passes after ingestion or a load; a pass that re-selects
+     *      nothing ends the phase early, and zero skips it outright. */
+    std::size_t max_refines = 0;
+    /** @brief Refinement candidate pool; zero inherits `--expansion-add`. */
+    std::size_t expansion_refine = 0;
     /** @brief Print the manual and exit. */
     bool help = false;
 };
@@ -556,6 +561,51 @@ struct bench_results_t {
     /** @brief Tasks that returned an error in either phase; any non-zero fails the run. */
     std::atomic<std::size_t> failed_tasks {0};
 };
+
+/** @brief What the refinement phase measured, whichever backend ran it: the passes, the audit
+ *      that followed them, and the traversal telemetry they cost. */
+struct refinement_report_t {
+    /** @brief Published nodes one pass sweeps. */
+    std::size_t nodes = 0;
+    /** @brief The candidate pool every pass re-selects under. */
+    std::size_t expansion = 0;
+    /** @brief Nodes each pass re-wired; its length is the passes that actually ran. */
+    std::span<std::size_t const> changed_per_pass;
+    /** @brief Threads the passes fanned over; one on a device. */
+    std::size_t threads = 0;
+    /** @brief Wall clock of the passes alone. */
+    double refining_seconds = 0;
+    /** @brief Wall clock of the heal and its final audit. */
+    double healing_seconds = 0;
+    /** @brief Traversal telemetry summed across the passes. */
+    telemetry_lane_t sums;
+    /** @brief Nodes the heal's first audit found unreachable. */
+    std::size_t islands_found = 0;
+    /** @brief Islands the heal wired into a reachable pick. */
+    std::size_t islands_reconnected = 0;
+    /** @brief Nodes a search still reaches once the heal returned. */
+    std::size_t reachable_nodes = 0;
+    /** @brief Level-synchronous sweeps the final audit took - a diameter proxy. */
+    std::size_t sweeps = 0;
+};
+
+/** @brief Prints the refinement phase - the passes, their cost, and the reachability the heal
+ *      left behind; the one place the phase's shape is written down. */
+inline void report_refinement_metrics(refinement_report_t const& report) {
+    std::size_t const passes = report.changed_per_pass.size();
+    fmt::print(header_style(), "\nRefinement\n");
+    fmt::println("  passes: {} · expansion {}", passes, report.expansion);
+    fmt::println("  changed: {}", fmt::join(report.changed_per_pass, " → "));
+    fmt::println("  threads: {}", report.threads);
+    fmt::println("  wall: {:.2f} s refining · {:.2f} s healing", report.refining_seconds, report.healing_seconds);
+    fmt::println("  throughput: {} nodes/s", humanize(double(report.nodes * passes) / report.refining_seconds));
+    fmt::println("  distances: {}", humanize(double(report.sums.computed_distances)));
+    fmt::println("  visited: {}", humanize(double(report.sums.visited_members)));
+    fmt::println("  islands: {} found, {} reconnected", report.islands_found, report.islands_reconnected);
+    fmt::println("  reachable: {} of {} · {} sweeps",
+                 fmt::styled(report.reachable_nodes, verdict_style(report.reachable_nodes == report.nodes)),
+                 report.nodes, report.sweeps);
+}
 
 /** @brief Prints the search phase's wall clock, throughput, latency percentiles & traversal
  *      telemetry - the backend-neutral half of the report; @p latencies_us reorders in place. */

@@ -317,6 +317,73 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     return true;
 }
 
+/**
+ *  @brief Re-selects every node's neighbors across the shards, pass after pass, then re-links
+ *      whatever no search can reach - the build step a cheap ingestion pays for.
+ *
+ *  The passes stop early once one re-wires nothing, since the next would re-select the same
+ *  picks. Both verbs fan out over the same executor the insertions used.
+ */
+template <typename streamed_dataset_type_>
+bool run_refinement(streamed_dataset_type_& streamed) {
+    using clock_t = stdc::steady_clock;
+    using bench_t = typename streamed_dataset_type_::bench_t;
+    using indexes_t = typename bench_t::indexes_t;
+    using small_size_t = typename bench_t::small_size_t;
+    auto& bench = streamed.bench;
+    std::size_t const max_refines = bench.options.max_refines;
+    std::size_t const nodes = bench.indexes.size();
+    if (!max_refines || !nodes) return true;
+
+    typename indexes_t::refine_config_t config;
+    config.expansion_factor = static_cast<small_size_t>(bench.options.expansion_refine ? bench.options.expansion_refine
+                                                                                       : bench.options.expansion_add);
+
+    refinement_report_t report;
+    report.nodes = nodes;
+    report.expansion = config.expansion_factor;
+    report.threads = bench.executor.size();
+
+    std::vector<std::size_t> changed_per_pass;
+    changed_per_pass.reserve(max_refines);
+    progress_bar_t progress {"refining", nodes * max_refines};
+    auto started = clock_t::now();
+    for (std::size_t pass = 0; pass != max_refines; ++pass) {
+        std::size_t const swept_before = pass * nodes;
+        auto const refined = bench.indexes.refine(bench.executor, config, [&](std::size_t done, std::size_t) noexcept {
+            return progress.tick(swept_before + done), continuation_t::continue_k;
+        });
+        if (!refined) {
+            fmt::println("Refinement failed on pass {}: status {}", pass, int(refined.status));
+            return false;
+        }
+        changed_per_pass.push_back(refined.changed_nodes);
+        report.sums.visited_members += refined.visited_members;
+        report.sums.computed_distances += refined.computed_distances;
+        report.sums.restarts += refined.restarts;
+        if (!refined.changed_nodes) break;
+    }
+    progress.finish();
+    report.refining_seconds = stdc::duration<double>(clock_t::now() - started).count();
+    report.changed_per_pass = changed_per_pass;
+
+    started = clock_t::now();
+    auto const healed = bench.indexes.heal(bench.executor);
+    if (!healed) {
+        fmt::println("Healing failed: status {}", int(healed.status));
+        return false;
+    }
+    report.healing_seconds = stdc::duration<double>(clock_t::now() - started).count();
+    report.sums.visited_members += healed.value.visited_members;
+    report.sums.computed_distances += healed.value.computed_distances;
+    report.islands_found = healed.value.islands_found;
+    report.islands_reconnected = healed.value.islands_reconnected;
+    report.reachable_nodes = healed.value.health.reachable_nodes;
+    report.sweeps = healed.value.health.sweeps;
+    report_refinement_metrics(report);
+    return true;
+}
+
 /** @brief Streams every query through batched @c search calls, the merged rankings landing
  *      straight in the judgment matrices - keys are dataset rows, so no translation exists.
  *      A batch-shaped verb has no honest per-query clock, so the report prints the mean. */
@@ -483,6 +550,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
 
     // A restored checkpoint replaces ingestion outright; the search phase runs either way.
     if (launch.options.load_name.empty() && !run_insertion(streamed)) return 1;
+    if (!run_refinement(streamed)) return 1;
     if (!launch.options.save_name.empty() && !save_indexes(streamed)) return 1;
     if (!run_search(streamed)) return 1;
     return 0;

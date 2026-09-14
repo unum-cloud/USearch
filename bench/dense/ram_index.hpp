@@ -347,6 +347,178 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     return true;
 }
 
+/** @brief The state one refinement or healing fan-out shares with its threads: the phase it is
+ *      in, the plan that phase drives, and the tallies a task adds to. One index knows nothing
+ *      of pools, so this is where a pool meets its plans. */
+template <typename bench_type_>
+struct refinement_fanout_t {
+    using index_t = typename bench_type_::index_t;
+    using heal_plan_t = typename index_t::heal_plan_t;
+    using steps_t = indexed_range<typename index_t::health_plan_t>;
+
+    /** @brief The index under measurement and its per-thread traversal contexts. */
+    bench_type_& bench;
+    /** @brief The pool every pass re-selects under. */
+    typename index_t::refine_config_t config;
+    /** @brief The healing pass, once it is open; null while the refinement passes run. */
+    heal_plan_t* plan = nullptr;
+    /** @brief Nodes the current pass re-wired. */
+    std::atomic<std::size_t> changed {0};
+    /** @brief Frontier candidates the passes expanded. */
+    std::atomic<std::size_t> visited_members {0};
+    /** @brief Distances the passes computed. */
+    std::atomic<std::size_t> computed_distances {0};
+    /** @brief Starvation restarts the passes hit. */
+    std::atomic<std::size_t> restarts {0};
+    /** @brief Tasks that returned an error; any non-zero fails the run. */
+    std::atomic<std::size_t> failures {0};
+};
+
+/** @brief One chunk of node IDs per task, re-selected against the graph as it stands - the
+ *      refinement's fan-out unit, matching the growth chunk the index allocates in. */
+template <typename bench_type_>
+void refinement_callback(fu_lambda_context_t punned, std::size_t task, std::size_t thread, std::size_t) noexcept {
+    using index_t = typename bench_type_::index_t;
+    using node_id_t = typename index_t::node_id_t;
+    constexpr std::size_t step_nodes_k = power_of_two<std::size_t>(index_t::first_chunk_rows_log2_k);
+    auto& fanout = *static_cast<refinement_fanout_t<bench_type_>*>(punned);
+    node_id_t const first = static_cast<node_id_t>(task * step_nodes_k);
+    node_id_t const bound = static_cast<node_id_t>(
+        min_of(task * step_nodes_k + step_nodes_k, fanout.bench.index->size()));
+    auto refined = fanout.bench.index->refine({first, bound}, *fanout.bench.traversals[thread], fanout.config);
+    if (!refined) return fanout.failures.fetch_add(1, std::memory_order_relaxed), void();
+    fanout.changed.fetch_add(refined.changed_nodes, std::memory_order_relaxed);
+    fanout.visited_members.fetch_add(refined.visited_members, std::memory_order_relaxed);
+    fanout.computed_distances.fetch_add(refined.computed_distances, std::memory_order_relaxed);
+    fanout.restarts.fetch_add(refined.restarts, std::memory_order_relaxed);
+}
+
+/** @brief One audit step per task: the reached nodes it holds expand their neighbors. */
+template <typename bench_type_>
+void sweep_callback(fu_lambda_context_t punned, std::size_t task, std::size_t, std::size_t) noexcept {
+    using steps_t = typename refinement_fanout_t<bench_type_>::steps_t;
+    auto& fanout = *static_cast<refinement_fanout_t<bench_type_>*>(punned);
+    steps_t const steps = fanout.plan->steps();
+    fanout.plan->sweep(steps[task]);
+}
+
+/** @brief One audit step per task: its islands re-select their neighbors from scratch. */
+template <typename bench_type_>
+void reselect_callback(fu_lambda_context_t punned, std::size_t task, std::size_t thread, std::size_t) noexcept {
+    using steps_t = typename refinement_fanout_t<bench_type_>::steps_t;
+    using index_t = typename bench_type_::index_t;
+    auto& fanout = *static_cast<refinement_fanout_t<bench_type_>*>(punned);
+    steps_t const steps = fanout.plan->steps();
+    typename index_t::refine_result_t const reselected = fanout.plan->reselect_islands(
+        steps[task], *fanout.bench.traversals[thread]);
+    if (!reselected) fanout.failures.fetch_add(1, std::memory_order_relaxed);
+}
+
+/** @brief One audit step per task: its islands land in a reached node's neighbor list. */
+template <typename bench_type_>
+void reconnect_callback(fu_lambda_context_t punned, std::size_t task, std::size_t thread, std::size_t) noexcept {
+    using steps_t = typename refinement_fanout_t<bench_type_>::steps_t;
+    auto& fanout = *static_cast<refinement_fanout_t<bench_type_>*>(punned);
+    steps_t const steps = fanout.plan->steps();
+    fanout.plan->reconnect_islands(steps[task], *fanout.bench.traversals[thread]);
+}
+
+/**
+ *  @brief Re-selects every node's neighbors, pass after pass, then re-links whatever no search
+ *      can reach - the build step a cheap ingestion pays for.
+ *
+ *  The passes stop early once one re-wires nothing, since the next would re-select the same
+ *  picks. The heal that follows sweeps to convergence, re-selects the islands, sweeps again, and
+ *  reconnects what the diversity judgment still drops, round after round while the island
+ *  population shrinks.
+ */
+template <typename streamed_dataset_type_>
+bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
+    using clock_t = stdc::steady_clock;
+    using bench_t = typename streamed_dataset_type_::bench_t;
+    using index_t = typename bench_t::index_t;
+    using small_size_t = typename bench_t::small_size_t;
+    auto& bench = streamed.bench;
+    std::size_t const max_refines = bench.options.max_refines;
+    std::size_t const nodes = bench.index->size();
+    if (!max_refines || !nodes) return true;
+
+    constexpr std::size_t step_nodes_k = power_of_two<std::size_t>(index_t::first_chunk_rows_log2_k);
+    std::size_t const refine_steps = divide_round_up(nodes, step_nodes_k);
+    refinement_fanout_t<bench_t> fanout {bench, {}};
+    fanout.config.expansion_factor = static_cast<small_size_t>(
+        bench.options.expansion_refine ? bench.options.expansion_refine : bench.options.expansion_add);
+
+    refinement_report_t report;
+    report.nodes = nodes;
+    report.expansion = fanout.config.expansion_factor;
+    [[maybe_unused]] fu_status_t const counted = fu_pool_threads_count(pool, &report.threads);
+
+    std::vector<std::size_t> changed_per_pass;
+    changed_per_pass.reserve(max_refines);
+    progress_bar_t progress {"refining", max_refines};
+    auto started = clock_t::now();
+    for (std::size_t pass = 0; pass != max_refines; ++pass) {
+        fanout.changed.store(0, std::memory_order_relaxed);
+        fu_pool_for_n_dynamic(pool, refine_steps, &refinement_callback<bench_t>, &fanout);
+        std::size_t const changed = fanout.changed.load(std::memory_order_relaxed);
+        changed_per_pass.push_back(changed);
+        progress.tick(pass + 1);
+        if (!changed) break;
+    }
+    progress.finish();
+    report.refining_seconds = stdc::duration<double>(clock_t::now() - started).count();
+    report.changed_per_pass = changed_per_pass;
+    if (std::size_t failures = fanout.failures.load(std::memory_order_relaxed); failures) {
+        fmt::println("Refinement failed on {} chunks", failures);
+        return false;
+    }
+
+    started = clock_t::now();
+    auto [plan, planned] = bench.index->plan_heal(*bench.traversals[0]);
+    if (failed(planned)) {
+        fmt::println("Failed to open the healing pass: status {}", int(planned));
+        return false;
+    }
+    fanout.plan = &plan;
+    std::size_t const audit_steps = plan.steps().size();
+    auto sweep_to_convergence = [&]() noexcept {
+        do { fu_pool_for_n(pool, audit_steps, &sweep_callback<bench_t>, &fanout); } while (plan.advance_level());
+    };
+    sweep_to_convergence();
+    for (std::size_t islands_before = plan.islands_left(); islands_before;) {
+        fu_pool_for_n_dynamic(pool, audit_steps, &reselect_callback<bench_t>, &fanout);
+        plan.restart_sweep();
+        sweep_to_convergence();
+        if (!plan.islands_left()) break;
+        fu_pool_for_n_dynamic(pool, audit_steps, &reconnect_callback<bench_t>, &fanout);
+        plan.restart_sweep();
+        sweep_to_convergence();
+        // A round that frees no island frees none on the next either - the picks it needs are
+        // themselves unreached - so the pass ends here and reports what still stands.
+        std::size_t const islands_after = plan.islands_left();
+        if (islands_after >= islands_before) break;
+        islands_before = islands_after;
+    }
+    auto const healed = plan.finish();
+    if (!healed) {
+        fmt::println("Healing failed: status {}", int(healed.status));
+        return false;
+    }
+    report.healing_seconds = stdc::duration<double>(clock_t::now() - started).count();
+    report.islands_found = healed.value.islands_found;
+    report.islands_reconnected = healed.value.islands_reconnected;
+    report.reachable_nodes = healed.value.health.reachable_nodes;
+    report.sweeps = healed.value.health.sweeps;
+
+    report.sums.visited_members = fanout.visited_members.load(std::memory_order_relaxed) + healed.value.visited_members;
+    report.sums.computed_distances = fanout.computed_distances.load(std::memory_order_relaxed) +
+                                     healed.value.computed_distances;
+    report.sums.restarts = fanout.restarts.load(std::memory_order_relaxed);
+    report_refinement_metrics(report);
+    return true;
+}
+
 /** @brief Serializes the index as three RetriEval-layout matrices - vectors, neighbors, and
  *      the id → row map - so later runs @c --load the base and stream only the topping: a
  *      100M experiment then costs an mmap, not a half-hour rebuild. */
@@ -549,6 +721,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
 
     if (!prepare(streamed, launch.pool)) return 1;
     if (!run_insertion(streamed, launch.pool)) return 1;
+    if (!run_refinement(streamed, launch.pool)) return 1;
     if (!launch.options.save_name.empty() && !save_index(streamed)) return 1;
     if (!run_search(streamed, launch.pool)) return 1;
     return 0;
