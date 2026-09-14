@@ -1,7 +1,8 @@
 /**
- *  @brief Declarations shared by every USearch CPython translation unit.
  *  @file python/lib.h
  *  @author Ash Vardanian
+ *  @date August 16, 2026
+ *  @brief Declarations shared by every USearch CPython translation unit.
  *
  *  One extension, one file per modality: @c types.c owns the vocabulary every modality
  *  shares, each @c <modality>_index.c owns its verbs, and @c lib.c owns the module glue
@@ -44,20 +45,22 @@ extern "C" {
 
 #pragma region Calling Convention
 
-/** @brief Compile-time constants of the binding layer. */
+/** Compile-time constants of the binding layer. */
 enum {
-    /** @brief Fast-call plus keywords, the calling convention every batch verb uses. */
+
+    /** Fast-call plus keywords, the calling convention every batch verb uses. */
     usearch_py_method_flags_k = METH_FASTCALL | METH_KEYWORDS,
-    /** @brief The rank ceiling every batch verb accepts: a matrix, or a vector read as one row. */
+
+    /** The rank ceiling every batch verb accepts: a matrix, or a vector read as one row. */
     usearch_py_max_rank_k = 2,
 };
 
-/** @brief @p value divided by @p divisor, rounded up - the packing arithmetic sub-byte kinds need. */
+/** @p value divided by @p divisor, rounded up - the packing arithmetic sub-byte kinds need. */
 static inline size_t usearch_py_divide_round_up_(size_t value, size_t divisor) {
     return value / divisor + (value % divisor != 0);
 }
 
-/** @brief Element count of a statically-sized table, which every naming table asks for. */
+/** Element count of a statically-sized table, which every naming table asks for. */
 #define usearch_py_table_size_(table) (sizeof(table) / sizeof((table)[0]))
 
 /**
@@ -80,33 +83,37 @@ static inline size_t usearch_py_divide_round_up_(size_t value, size_t divisor) {
 
 #pragma region Buffer Views
 
-/**
- *  @brief Backing storage for a synthesized @c Py_buffer, so the @c __array_interface__
- *      fallback never allocates. Pair one with every @c usearch_py_matrix_from_object call and
- *      release it with @c usearch_py_buffer_release once the call has returned.
- */
+/** Backing storage for a synthesized @c Py_buffer, so the @c __array_interface__
+ *  fallback never allocates. Pair one with every @c usearch_py_matrix_from_object call and
+ *  release it with @c usearch_py_buffer_release once the call has returned. */
 typedef struct usearch_py_buffer_backing_t {
-    /** @brief The buffer, exported by PEP 3118 or synthesized from @c __array_interface__ . */
+
+    /** The buffer, exported by PEP 3118 or synthesized from @c __array_interface__ . */
     Py_buffer buffer;
-    /** @brief Per-axis extents the synthesized buffer points at; unused on the PEP 3118 path. */
+
+    /** Per-axis extents the synthesized buffer points at; unused on the PEP 3118 path. */
     Py_ssize_t shape[usearch_py_max_rank_k];
-    /** @brief Per-axis byte strides the synthesized buffer points at; likewise unused. */
+
+    /** Per-axis byte strides the synthesized buffer points at; likewise unused. */
     Py_ssize_t strides[usearch_py_max_rank_k];
-    /** @brief The exporter a synthesized buffer borrows from, kept alive; NULL otherwise. */
+
+    /** The exporter a synthesized buffer borrows from, kept alive; NULL otherwise. */
     PyObject* synthesized_owner;
 } usearch_py_buffer_backing_t;
 
-/** @brief What a borrowed byte run will be used for, and therefore what the exporter must permit. */
+/** What a borrowed byte run will be used for, and therefore what the exporter must permit. */
 typedef enum usearch_py_matrix_access_t {
     usearch_py_matrix_access_read_k = 0,
     usearch_py_matrix_access_write_k = 1,
 } usearch_py_matrix_access_t;
 
-/** @brief Where a key batch's storage came from, and therefore how it is released. */
+/** Where a key batch's storage came from, and therefore how it is released. */
 typedef enum usearch_py_key_storage_t {
-    /** @brief One allocation this arena made, freed with @c PyMem_Free . */
+
+    /** One allocation this arena made, freed with @c PyMem_Free . */
     usearch_py_key_storage_owned_k = 0,
-    /** @brief An @c (N,16) buffer the caller exported, released with @c PyBuffer_Release . */
+
+    /** An @c (N,16) buffer the caller exported, released with @c PyBuffer_Release . */
     usearch_py_key_storage_borrowed_k = 1,
 } usearch_py_key_storage_t;
 
@@ -118,13 +125,17 @@ typedef enum usearch_py_key_storage_t {
  *  @c usearch_py_keys_release.
  */
 typedef struct usearch_py_key_arena_t {
-    /** @brief The identities, aliasing whichever storage @c storage names. */
+
+    /** The identities, aliasing whichever storage @c storage names. */
     usearch_key_t* keys;
-    /** @brief The allocation backing @c keys when @c storage is owned; NULL otherwise. */
+
+    /** The allocation backing @c keys when @c storage is owned; NULL otherwise. */
     usearch_key_t* owned;
-    /** @brief The exported buffer backing @c keys when @c storage is borrowed. */
+
+    /** The exported buffer backing @c keys when @c storage is borrowed. */
     usearch_py_buffer_backing_t backing;
-    /** @brief Which of the two above @c keys points into. */
+
+    /** Which of the two above @c keys points into. */
     usearch_py_key_storage_t storage;
 } usearch_py_key_arena_t;
 
@@ -136,9 +147,11 @@ typedef struct usearch_py_key_arena_t {
  *  trail them in the same block instead - one allocation, released as one.
  */
 typedef struct usearch_py_paths_arena_t {
-    /** @brief The run the arm reads, or NULL when the caller named no paths. */
+
+    /** The run the arm reads, or NULL when the caller named no paths. */
     usearch_bytes_view_t* views;
-    /** @brief Paths the arena holds; zero when the caller named none. */
+
+    /** Paths the arena holds; zero when the caller named none. */
     size_t count;
 } usearch_py_paths_arena_t;
 
@@ -160,22 +173,22 @@ extern PyTypeObject SequenceIndexType;
 extern PyTypeObject MatrixIndexType;
 extern PyTypeObject GeospatialIndexType;
 
-/** @brief The one exception every failing verb raises, subclassing @c RuntimeError. */
+/** The one exception every failing verb raises, subclassing @c RuntimeError. */
 extern PyObject* ErrorType;
 
-/** @brief The workers a fanned-out verb runs on, owned apart from any index so one pool serves many. */
+/** The workers a fanned-out verb runs on, owned apart from any index so one pool serves many. */
 typedef struct Executor {
     PyObject ob_base;
     usearch_executor_t handle;
 } Executor;
 
-/** @brief Traversal telemetry a caller may pass into @c add or @c search to have overwritten. */
+/** Traversal telemetry a caller may pass into @c add or @c search to have overwritten. */
 typedef struct Stats {
     PyObject ob_base;
     usearch_dense_traversal_stats_t stats;
 } Stats;
 
-/** @brief One scored entry, as a finder yields them and as a @c Matches row indexes them. */
+/** One scored entry, as a finder yields them and as a @c Matches row indexes them. */
 typedef struct Match {
     PyObject ob_base;
     usearch_key_t key;
@@ -190,15 +203,20 @@ typedef struct Match {
  */
 typedef struct Matches {
     PyObject ob_base;
-    /** @brief The `queries * wanted` identities, sixteen bytes each. */
+
+    /** The `queries * wanted` identities, sixteen bytes each. */
     usearch_py_buffer_backing_t keys;
-    /** @brief The `queries * wanted` distances, positionally paired with the identities. */
+
+    /** The `queries * wanted` distances, positionally paired with the identities. */
     usearch_py_buffer_backing_t distances;
-    /** @brief The `queries` match counts, one per query. */
+
+    /** The `queries` match counts, one per query. */
     usearch_py_buffer_backing_t counts;
-    /** @brief Rows in each buffer - one per query. */
+
+    /** Rows in each buffer - one per query. */
     size_t queries;
-    /** @brief Columns in the key and distance buffers - the "k" in "kANN". */
+
+    /** Columns in the key and distance buffers - the "k" in "kANN". */
     size_t wanted;
 } Matches;
 
@@ -212,7 +230,7 @@ typedef struct Matches {
  */
 int usearch_py_raise_on_error(usearch_error_t const* error);
 
-/** @brief Raises @c ErrorType with @p status and a formatted message; always returns -1. */
+/** Raises @c ErrorType with @p status and a formatted message; always returns -1. */
 int usearch_py_raise(usearch_status_t status, char const* format, ...);
 
 /**
@@ -228,10 +246,10 @@ int usearch_py_raise_from_cause(PyObject* kind, char const* format, ...);
  */
 int usearch_py_key_from_object(PyObject* object, usearch_key_t* key);
 
-/** @brief Wraps sixteen identity bytes into a new @c Key; returns a new reference, or @c NULL. */
+/** Wraps sixteen identity bytes into a new @c Key; returns a new reference, or @c NULL. */
 PyObject* usearch_py_key_to_object(usearch_key_t key);
 
-/** @brief Builds a new @c Stats holding @p stats; returns a new reference, or @c NULL. */
+/** Builds a new @c Stats holding @p stats; returns a new reference, or @c NULL. */
 PyObject* usearch_py_stats_to_object(usearch_dense_traversal_stats_t const* stats);
 
 /**
@@ -240,7 +258,7 @@ PyObject* usearch_py_stats_to_object(usearch_dense_traversal_stats_t const* stat
  */
 int usearch_py_stats_overwrite(PyObject* target, usearch_dense_traversal_stats_t const* stats);
 
-/** @brief Builds a new @c Match; returns a new reference, or @c NULL. */
+/** Builds a new @c Match; returns a new reference, or @c NULL. */
 PyObject* usearch_py_match_to_object(usearch_key_t key, usearch_distance_t distance);
 
 /**
@@ -250,7 +268,7 @@ PyObject* usearch_py_match_to_object(usearch_key_t key, usearch_distance_t dista
  */
 usearch_scalar_t usearch_py_scalar_from_spelling(char const* name, Py_ssize_t length);
 
-/** @brief Bytes one row of @p columns scalars of @p kind occupies, sub-byte packing included. */
+/** Bytes one row of @p columns scalars of @p kind occupies, sub-byte packing included. */
 size_t usearch_py_scalar_row_bytes(usearch_scalar_t kind, size_t columns);
 
 /**
@@ -316,7 +334,7 @@ int usearch_py_matrix_from_object(PyObject* object, usearch_scalar_t scalar_hint
 int usearch_py_buffer_from_object(PyObject* object, char const* field, usearch_py_matrix_access_t access,
                                   Py_ssize_t bytes, usearch_py_buffer_backing_t* backing, void** data);
 
-/** @brief Releases whatever @c usearch_py_matrix_from_object acquired. */
+/** Releases whatever @c usearch_py_matrix_from_object acquired. */
 void usearch_py_buffer_release(usearch_py_buffer_backing_t* backing);
 
 /**
@@ -325,7 +343,7 @@ void usearch_py_buffer_release(usearch_py_buffer_backing_t* backing);
  */
 int usearch_py_keys_from_object(PyObject* object, size_t expected, usearch_py_key_arena_t* arena);
 
-/** @brief Releases whatever @c usearch_py_keys_from_object acquired. */
+/** Releases whatever @c usearch_py_keys_from_object acquired. */
 void usearch_py_keys_release(usearch_py_key_arena_t* arena);
 
 /**
@@ -335,17 +353,19 @@ void usearch_py_keys_release(usearch_py_key_arena_t* arena);
  */
 int usearch_py_path_from_object(PyObject* object, usearch_bytes_view_t* path, PyObject** decoded);
 
-/** @brief Whether @p object exports a buffer, distinguishing a checkpoint blob from a path. */
+/** Whether @p object exports a buffer, distinguishing a checkpoint blob from a path. */
 int usearch_py_object_is_buffer(PyObject* object);
 
-/** @brief Readies and registers @c ErrorType on @p module; returns 0 or -1. */
+/** Readies and registers @c ErrorType on @p module; returns 0 or -1. */
 int usearch_py_register_error_type(PyObject* module);
 
-/** @brief One spelling of a closed-set option and the value it selects. */
+/** One spelling of a closed-set option and the value it selects. */
 typedef struct usearch_py_choice_naming_t {
-    /** @brief The keyword's spelling, as a caller writes it. */
+
+    /** The keyword's spelling, as a caller writes it. */
     char const* name;
-    /** @brief The enumerator the spelling selects. */
+
+    /** The enumerator the spelling selects. */
     int value;
 } usearch_py_choice_naming_t;
 
@@ -371,7 +391,7 @@ Py_ssize_t usearch_py_args_names_count_checked(char const* verb, Py_ssize_t posi
                                                PyObject* args_names_tuple, Py_ssize_t required_positional);
 
 /**
- *  @brief Reads a sequence of NUMA node ids or device ordinals into a caller-freed array.
+ *  @brief Reads a sequence of NUMA node IDs or device ordinals into a caller-freed array.
  *
  *  Residency arms borrow their arrays only for the duration of the factory call, so the
  *  allocation lives no longer than the constructor that made it.
@@ -392,10 +412,10 @@ int usearch_py_ordinals_from_object(PyObject* object, char const* field, int32_t
  */
 int usearch_py_paths_from_object(PyObject* object, usearch_py_paths_arena_t* arena);
 
-/** @brief Releases the encoded paths and the block they share. */
+/** Releases the encoded paths and the block they share. */
 void usearch_py_paths_release(usearch_py_paths_arena_t* arena);
 
-/** @brief Reads a non-negative count; returns 0 or -1 with an exception set. */
+/** Reads a non-negative count; returns 0 or -1 with an exception set. */
 int usearch_py_size_from_object(PyObject* object, char const* field, size_t* value);
 
 /**

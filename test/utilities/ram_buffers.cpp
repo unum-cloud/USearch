@@ -1,21 +1,20 @@
 /**
- *  @brief Smoke tests for the @c ram_buffers.hpp & @c ram_tables.hpp containers -
- *      @c max_heap, @c sorted_buffer, and @c growing_hash_set - including their four-wide
- *      and larger-N batch overloads plus @c insert_many / @c pop_many on the heap.
- *
- *  @author Ash Vardanian
  *  @file test/utilities/ram_buffers.cpp
+ *  @author Ash Vardanian
  *  @date April 24, 2026
+ *  @brief Smoke tests for the @c ram_buffers.hpp & @c ram_tables.hpp containers - @c max_heap,
+ *      @c sorted_buffer, and @c growing_hash_set - including their four-wide and larger-N batch
+ *      overloads plus @c insert_many / @c pop_many on the heap.
  *
  *  Mirrors the structure of @c test/dense_metric.hpp:
  *
  *  1. One monolithic TU, no test framework. Each check returns a failure count;
- *     counts roll up to @c main without any global mutable state. A non-zero exit
- *     code means something failed.
+ *  counts roll up to @c main without any global mutable state. A non-zero exit
+ *  code means something failed.
  *  2. Serial single-element operations define the oracle for the multi-element overloads.
- *     For @c sorted_buffer::insert(std::array,limit) the oracle uses @c std::sort on
- *     the union because the "top-k of (existing ∪ batch)" semantic can accept
- *     candidates that cascading single-element inserts would reject.
+ *  For @c sorted_buffer::insert(std::array,limit) the oracle uses @c std::sort on
+ *  the union because the "top-k of (existing ∪ batch)" semantic can accept
+ *  candidates that cascading single-element inserts would reject.
  */
 #include <cstdint>
 
@@ -59,11 +58,9 @@ std::size_t check_sorted_buffer_single_element() noexcept {
     return failures;
 }
 
-/**
- *  @brief Parity of the sorted-span @c insert(span,limit) against a full @c std::sort of
- *      (existing ∪ batch) truncated to the limit. Quad-sized batches pre-sort through
- *      @c network_sort - auditing the network itself - wider ones through the library sort.
- */
+/** Parity of the sorted-span @c insert(span,limit) against a full @c std::sort of
+ *  (existing ∪ batch) truncated to the limit. Quad-sized batches pre-sort through
+ *  @c network_sort - auditing the network itself - wider ones through the library sort. */
 template <std::size_t batch_size_>
 std::size_t check_sorted_buffer_batch_parity(unsigned seed) noexcept {
     constexpr std::size_t limit_k = 64;
@@ -117,11 +114,9 @@ std::size_t check_hash_set_single_element() noexcept {
     return failures;
 }
 
-/**
- *  @brief Randomized membership parity against @c std::unordered_set across repeated growth
- *      cycles - the audit for the grown-into-unreachable bug class: a rehash placing
- *      elements through any probe walk other than the reader's strands them invisible.
- */
+/** Randomized membership parity against @c std::unordered_set across repeated growth
+ *  cycles - the audit for the grown-into-unreachable bug class: a rehash placing
+ *  elements through any probe walk other than the reader's strands them invisible. */
 std::size_t check_hash_set_growth_parity(unsigned seed) noexcept {
     constexpr int rounds_k = 12, inserts_per_round_k = 700;
     growing_hash_set<u32_t> tested {global_allocator};
@@ -203,8 +198,8 @@ std::size_t check_hash_set_batch_parity(unsigned seed) noexcept {
     return failures;
 }
 
-/** @brief A set over a spent arena re-tables into a chunk the arena opens beside the seed, keeps
- *      its table where a refusing upstream stops it, and the rewind keeps only the widest chunk. */
+/** A set over a spent arena re-tables into a chunk the arena opens beside the seed, keeps
+ *  its table where a refusing upstream stops it, and the rewind keeps only the widest chunk. */
 std::size_t check_hash_set_arena_growth() noexcept {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
@@ -258,7 +253,7 @@ std::size_t check_max_heap_push_pop() noexcept {
     return failures;
 }
 
-/** @brief D-ary heap pops in descending order, parameterised by arity. */
+/** D-ary heap pops in descending order, parameterised by arity. */
 template <std::size_t arity_>
 std::size_t check_max_heap_dary_push_pop(unsigned seed, std::size_t element_count) noexcept {
     max_heap_dary<arity_, u32_t> heap {global_allocator};
@@ -283,7 +278,7 @@ std::size_t check_max_heap_dary_push_pop(unsigned seed, std::size_t element_coun
     return failures;
 }
 
-/** @brief `erase_below` sheds exactly the entries under the bar; what remains still pops in order. */
+/** `erase_below` sheds exactly the entries under the bar; what remains still pops in order. */
 template <std::size_t arity_>
 std::size_t check_max_heap_dary_erase_below(unsigned seed, std::size_t element_count) noexcept {
     max_heap_dary<arity_, u32_t> heap {global_allocator};
@@ -307,7 +302,7 @@ std::size_t check_max_heap_dary_erase_below(unsigned seed, std::size_t element_c
     return failures;
 }
 
-/** @brief D=2 d-ary heap must agree with the binary heap pop-by-pop on the same input. */
+/** D=2 d-ary heap must agree with the binary heap pop-by-pop on the same input. */
 std::size_t check_max_heap_dary_parity_with_binary(unsigned seed, std::size_t element_count) noexcept {
     max_heap<u32_t> binary {global_allocator};
     max_heap_dary<2, u32_t> dary {global_allocator};
@@ -331,7 +326,7 @@ std::size_t check_max_heap_dary_parity_with_binary(unsigned seed, std::size_t el
     return failures;
 }
 
-/** @brief D-ary @c insert_many (Floyd vs @c shift_up paths) must match descending-pop order from individual inserts. */
+/** D-ary @c insert_many (Floyd vs @c shift_up paths) must match descending-pop order from individual inserts. */
 template <std::size_t arity_>
 std::size_t check_max_heap_dary_insert_many(unsigned seed, std::size_t initial_count,
                                             std::size_t batch_count) noexcept {
@@ -362,7 +357,7 @@ std::size_t check_max_heap_dary_insert_many(unsigned seed, std::size_t initial_c
     return failures;
 }
 
-/** @brief Bulk @c insert_many(std::array) must pop in the same descending order as single inserts. */
+/** Bulk @c insert_many(std::array) must pop in the same descending order as single inserts. */
 template <std::size_t batch_size_>
 std::size_t check_max_heap_insert_many(unsigned seed, std::size_t initial_size) noexcept {
     max_heap<u32_t> bulk {global_allocator};
@@ -397,7 +392,7 @@ std::size_t check_max_heap_insert_many(unsigned seed, std::size_t initial_size) 
     return failures;
 }
 
-/** @brief @c pop_many<N> must return the same sequence as N sequential @c pop calls. */
+/** @c pop_many<N> must return the same sequence as N sequential @c pop calls. */
 template <std::size_t batch_size_>
 std::size_t check_max_heap_pop_many() noexcept {
     max_heap<u32_t> heap {global_allocator};

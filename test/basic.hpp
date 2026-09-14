@@ -1,14 +1,13 @@
 /**
- *  @brief The use-case-agnostic test scenario library shared by every basic-index unit -
- *      sentences, bioinformatics sequences, and 3D meshes alike.
- *
- *  @author Ash Vardanian
  *  @file test/basic.hpp
+ *  @author Ash Vardanian
  *  @date August 26, 2026
+ *  @brief The use-case-agnostic test scenario library shared by every basic-index unit - sentences,
+ *      bioinformatics sequences, and 3D meshes alike.
  *
  *  Every scenario is a template over a unit fixture supplying the index instantiation, a
  *  metric factory, a value generator, a value codec, and - unlike the dense tier, where
- *  the metric is library code - an @b exact brute-force oracle, so returned ids and
+ *  the metric is library code - an @b exact brute-force oracle, so returned IDs and
  *  distances are asserted against ground truth rather than self-recall. Fixtures name
  *  their concrete index instantiations; this header names no index and assumes no
  *  constructor shape beyond a ledgered allocator.
@@ -45,26 +44,33 @@ namespace usearch {
 
 #pragma region Constants and Seeds
 
-/** @brief Nodes in the single-threaded growth & oracle-recall scenarios. */
+/** Nodes in the single-threaded growth & oracle-recall scenarios. */
 constexpr std::size_t basic_growth_nodes_k = 256;
-/** @brief Queries sampled against the exact oracle. */
+
+/** Queries sampled against the exact oracle. */
 constexpr std::size_t basic_recall_samples_k = 24;
-/** @brief Share of sampled queries whose best distance must match the oracle's. */
+
+/** Share of sampled queries whose best distance must match the oracle's. */
 constexpr std::size_t basic_minimal_recall_percent_k = 90;
-/** @brief The floor for @c basic_keep_closest_t builds: closest-only wiring promises
- *      navigability, never the diverse selector's cross-cluster recall. */
+
+/** The floor for @c basic_keep_closest_t builds: closest-only wiring promises
+ *  navigability, never the diverse selector's cross-cluster recall. */
 constexpr std::size_t basic_relaxed_recall_percent_k = 50;
-/** @brief Threads in the concurrent scenarios. */
+
+/** Threads in the concurrent scenarios. */
 constexpr std::size_t basic_threads_k = 4;
-/** @brief Nodes inserted by each thread of the concurrent scenarios. */
+
+/** Nodes inserted by each thread of the concurrent scenarios. */
 constexpr std::size_t basic_thread_nodes_k = 96;
-/** @brief The selectors' neighbors-per-node budget across the scenarios. */
+
+/** The selectors' neighbors-per-node budget across the scenarios. */
 constexpr std::size_t basic_connectivity_k = 8;
-/** @brief The reader thread performs at least this many searches, even if writers finish first. */
+
+/** The reader thread performs at least this many searches, even if writers finish first. */
 constexpr std::size_t basic_reader_minimal_searches_k = 16;
 
-/** @brief Data seeds, one per scenario family, so no two scenarios share a draw;
- *      derived draws follow the salt rule documented beside @c salt_queries_k. */
+/** Data seeds, one per scenario family, so no two scenarios share a draw;
+ *  derived draws follow the salt rule documented beside @c salt_queries_k. */
 constexpr u64_t basic_seed_guards_k = 0xB001100Aull;
 constexpr u64_t basic_seed_handmade_k = 0xBEADED00ull;
 constexpr u64_t basic_seed_growth_k = 0x20260826ull;
@@ -87,8 +93,9 @@ constexpr u64_t basic_seed_plan_contention_k = 0x714EC047ull;
 constexpr u64_t basic_seed_torn_bracket_k = 0x7076B4C7ull;
 constexpr u64_t basic_seed_cursor_k = 0xCA4E7000ull;
 constexpr u64_t basic_seed_safegraphs_k = 0x5AFE6247ull;
-/** @brief Context seeds per concurrent thread: identical seeds would draw identical
- *      landmarks and silently stop testing decorrelation, so threads offset from these. */
+
+/** Context seeds per concurrent thread: identical seeds would draw identical
+ *  landmarks and silently stop testing decorrelation, so threads offset from these. */
 constexpr u64_t basic_seed_build_thread_k = 0x0C000000ull;
 constexpr u64_t basic_seed_search_thread_k = 0x05EA8C00ull;
 
@@ -96,11 +103,9 @@ constexpr u64_t basic_seed_search_thread_k = 0x05EA8C00ull;
 
 #pragma region Instrumented Metrics
 
-/**
- *  @brief Contract-auditing wrapper over any @c basic_metric: counts the verbs, verifies
- *      every drain is sized to that round's accepted pushes, flags abandoned pushed
- *      rounds, and can refuse pushes after an armed budget to drive every saturation path.
- */
+/** Contract-auditing wrapper over any @c basic_metric: counts the verbs, verifies
+ *  every drain is sized to that round's accepted pushes, flags abandoned pushed
+ *  rounds, and can refuse pushes after an armed budget to drive every saturation path. */
 template <typename inner_metric_type_, typename distance_type_>
 struct basic_auditing_metric {
     inner_metric_type_ inner;
@@ -110,9 +115,11 @@ struct basic_auditing_metric {
     std::size_t drains = 0;
     std::size_t pushes_this_round = 0;
     std::size_t refusals = 0;
-    /** @brief Contract breaches observed; every scenario asserts this stays zero. */
+
+    /** Contract breaches observed; every scenario asserts this stays zero. */
     std::size_t violations = 0;
-    /** @brief Accepted pushes before refusal begins; @c SIZE_MAX means unarmed. */
+
+    /** Accepted pushes before refusal begins; @c SIZE_MAX means unarmed. */
     std::size_t budget_left = SIZE_MAX;
 
     template <typename query_type_>
@@ -143,8 +150,8 @@ struct basic_auditing_metric {
     void disarm() noexcept { budget_left = SIZE_MAX; }
 };
 
-/** @brief Wrapper whose first push parks until released - the deterministic way to hold
- *      one insert mid-flight, so the settled-past guards can be observed refusing. */
+/** Wrapper whose first push parks until released - the deterministic way to hold
+ *  one insert mid-flight, so the settled-past guards can be observed refusing. */
 template <typename inner_metric_type_, typename distance_type_>
 struct basic_gated_metric {
     inner_metric_type_ inner;
@@ -168,7 +175,7 @@ struct basic_gated_metric {
 
 #pragma region Shared Helpers
 
-/** @brief Distances must ascend in every result pool; answers the failures found. */
+/** Distances must ascend in every result pool; answers the failures found. */
 template <typename context_type_>
 std::size_t basic_expect_ascending(context_type_ const& context) noexcept {
     std::size_t failures = 0;
@@ -177,16 +184,16 @@ std::size_t basic_expect_ascending(context_type_ const& context) noexcept {
     return failures;
 }
 
-/** @brief Compares two distances by the metric's own type: an integral distance is exact and
- *      compares bit-for-bit, a floating one at the fast-math tolerance. */
+/** Compares two distances by the metric's own type: an integral distance is exact and
+ *  compares bit-for-bit, a floating one at the fast-math tolerance. */
 template <typename fixture_type_, typename distance_type_>
 std::size_t basic_expect_distance(distance_type_ actual, distance_type_ wanted) noexcept {
     if constexpr (std::is_integral_v<distance_type_>) return expect_eq(actual, wanted);
     else return expect_near(static_cast<f64_t>(actual), static_cast<f64_t>(wanted));
 }
 
-/** @brief Inserts @p count values under sequential fixture keys in batches, collecting
- *      assigned ids; the workhorse the single-threaded scenarios build graphs with. */
+/** Inserts @p count values under sequential fixture keys in batches, collecting
+ *  assigned IDs; the workhorse the single-threaded scenarios build graphs with. */
 template <typename fixture_type_, typename index_type_, typename metric_type_, typename selector_type_>
 std::size_t basic_build(fixture_type_ const& fixture, index_type_& index, metric_type_& metric,
                         std::vector<typename index_type_::value_t>& values,
@@ -208,8 +215,8 @@ std::size_t basic_build(fixture_type_ const& fixture, index_type_& index, metric
     return failures;
 }
 
-/** @brief Per-thread state of the concurrent scenarios: distinctly-seeded values, the
- *      matching sequential keys, one context, and one metric per thread. */
+/** Per-thread state of the concurrent scenarios: distinctly-seeded values, the
+ *  matching sequential keys, one context, and one metric per thread. */
 template <typename fixture_type_>
 struct basic_threads {
     using index_t = typename fixture_type_::index_t;
@@ -219,8 +226,8 @@ struct basic_threads {
     std::vector<decltype(std::declval<fixture_type_ const&>().make_metric())> metrics;
 };
 
-/** @brief Prepares @p threads_count threads: per-thread draws & context seeds add the thread
- *      index, and keys run sequentially from @p first_key_ordinal across the threads. */
+/** Prepares @p threads_count threads: per-thread draws & context seeds add the thread
+ *  index, and keys run sequentially from @p first_key_ordinal across the threads. */
 template <typename fixture_type_>
 basic_threads<fixture_type_> basic_make_threads(fixture_type_ const& fixture, allocation_ledger_t& ledger,
                                                 std::size_t threads_count, std::size_t nodes_per_thread, u64_t seed,
@@ -238,8 +245,8 @@ basic_threads<fixture_type_> basic_make_threads(fixture_type_ const& fixture, al
     return threads;
 }
 
-/** @brief One index mirrors another across the first @p nodes_count ids: size, key,
- *      degree, and the stored value under the fixture's own equality. */
+/** One index mirrors another across the first @p nodes_count ids: size, key,
+ *  degree, and the stored value under the fixture's own equality. */
 template <typename fixture_type_, typename index_type_>
 std::size_t basic_expect_mirrored(fixture_type_ const& fixture, index_type_ const& mirrored,
                                   index_type_ const& original, std::size_t nodes_count) {
@@ -255,8 +262,8 @@ std::size_t basic_expect_mirrored(fixture_type_ const& fixture, index_type_ cons
     return failures;
 }
 
-/** @brief The exact oracle's verdict on one search: every returned id must carry its true
- *      distance, and the best must match the graph-independent minimum. */
+/** The exact oracle's verdict on one search: every returned id must carry its true
+ *  distance, and the best must match the graph-independent minimum. */
 template <typename fixture_type_, typename index_type_, typename query_type_>
 std::size_t basic_audit_search(fixture_type_ const& fixture, index_type_ const& index, query_type_ const& query,
                                typename index_type_::traversal_context_t const& context, bool& found_best) {
@@ -283,9 +290,9 @@ std::size_t basic_audit_search(fixture_type_ const& fixture, index_type_ const& 
     return failures;
 }
 
-/** @brief The five columns of one snapshot, each owned by a vector - the container every
- *      scenario saves into and loads from, sized from the index's own extents. Equality is the
- *      byte-for-byte proof that two saves of a settled graph agree. */
+/** The five columns of one snapshot, each owned by a vector - the container every
+ *  scenario saves into and loads from, sized from the index's own extents. Equality is the
+ *  byte-for-byte proof that two saves of a settled graph agree. */
 template <typename index_type_>
 struct basic_columns_storage {
     using key_t = typename index_type_::key_t;
@@ -312,7 +319,7 @@ struct basic_columns_storage {
     }
 };
 
-/** @brief Sizes fresh columns from @p index and saves into them in one call. */
+/** Sizes fresh columns from @p index and saves into them in one call. */
 template <typename index_type_, typename codec_type_>
 expected<basic_columns_storage<index_type_>> basic_saved_columns(index_type_ const& index, codec_type_ const& codec) {
     auto const [extents, status] = index.columns_extents(codec);
@@ -322,8 +329,8 @@ expected<basic_columns_storage<index_type_>> basic_saved_columns(index_type_ con
     return {std::move(storage), saved};
 }
 
-/** @brief The one-thread executor the SafeGraphs glue fans out over: every region runs on
- *      the calling thread. */
+/** The one-thread executor the SafeGraphs glue fans out over: every region runs on
+ *  the calling thread. */
 struct serial_executor_t {
     std::size_t size() const noexcept { return 1; }
     template <typename callback_type_>
@@ -333,8 +340,8 @@ struct serial_executor_t {
     }
 };
 
-/** @brief A ForkUnion flat pool as the glue's executor: one region per thread when the
- *      counts agree, the calling thread otherwise. */
+/** A ForkUnion flat pool as the glue's executor: one region per thread when the
+ *  counts agree, the calling thread otherwise. */
 struct pooled_executor_t {
     fu::flat_pool_t pool;
     std::size_t threads = 0;
@@ -360,8 +367,8 @@ struct pooled_executor_t {
 
 #pragma region Foundations
 
-/** @brief Pre-reserve misuse, the frozen capacity, argument guards, and the all-or-nothing
- *      overflow rollback that must leave the claim counter exactly as it found it. */
+/** Pre-reserve misuse, the frozen capacity, argument guards, and the all-or-nothing
+ *  overflow rollback that must leave the claim counter exactly as it found it. */
 template <typename fixture_type_>
 std::size_t test_basic_guards(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -445,8 +452,8 @@ std::size_t test_basic_guards(fixture_type_ const& fixture) {
     return failures;
 }
 
-/** @brief Three values whose pairwise distances the unit states by hand: the oracle must
- *      reproduce the stated matrix, and every value must find itself at distance zero. */
+/** Three values whose pairwise distances the unit states by hand: the oracle must
+ *  reproduce the stated matrix, and every value must find itself at distance zero. */
 template <typename fixture_type_>
 std::size_t test_basic_handmade(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -487,9 +494,9 @@ std::size_t test_basic_handmade(fixture_type_ const& fixture) {
     return failures;
 }
 
-/** @brief Fills the index, then samples queries against the exact brute-force oracle:
- *      returned distances must be true, the best must be the true best for at least the
- *      recall bar, and the telemetry must have counted the work. */
+/** Fills the index, then samples queries against the exact brute-force oracle:
+ *  returned distances must be true, the best must be the true best for at least the
+ *  recall bar, and the telemetry must have counted the work. */
 template <typename fixture_type_>
 std::size_t test_basic_growth_and_recall(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -512,7 +519,7 @@ std::size_t test_basic_growth_and_recall(fixture_type_ const& fixture) {
                                 basic_keep_diverse_t {basic_connectivity_k});
         failures += expect_eq(index.size(), basic_growth_nodes_k);
 
-        // A single-threaded build dispenses a contiguous id window in submission order.
+        // A single-threaded build dispenses a contiguous ID window in submission order.
         for (std::size_t ordinal = 0; ordinal != assigned_ids.size(); ++ordinal)
             failures += expect_eq(static_cast<std::size_t>(assigned_ids[ordinal]), ordinal);
         failures += expect(context.telemetry.computed_distances > 0);
@@ -555,10 +562,10 @@ std::size_t test_basic_growth_and_recall(fixture_type_ const& fixture) {
     return failures;
 }
 
-/** @brief The same data built through both shipped selectors - the per-call budget makes
- *      this one index instantiation, two graphs. The diverse build must clear the full
- *      recall bar, the closest build its navigability floor, and the wiring must differ
- *      structurally, or the selector argument is being ignored. */
+/** The same data built through both shipped selectors - the per-call budget makes
+ *  this one index instantiation, two graphs. The diverse build must clear the full
+ *  recall bar, the closest build its navigability floor, and the wiring must differ
+ *  structurally, or the selector argument is being ignored. */
 template <typename fixture_type_>
 std::size_t test_basic_selectors(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -611,8 +618,8 @@ std::size_t test_basic_selectors(fixture_type_ const& fixture) {
     return failures;
 }
 
-/** @brief Keyed lookups with planted duplicates, id → key staying authoritative, and the
- *      checked id-readers answering @c malformed_k at & past the watermark. */
+/** Keyed lookups with planted duplicates, id → key staying authoritative, and the
+ *  checked ID-readers answering @c malformed_k at & past the watermark. */
 template <typename fixture_type_>
 std::size_t test_basic_keys(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -671,7 +678,7 @@ std::size_t test_basic_keys(fixture_type_ const& fixture) {
         failures += expect(!index.contains(absent));
         failures += expect_eq(index.count(absent), 0u);
 
-        // The checked id-readers gate every input on the watermark.
+        // The checked ID-readers gate every input on the watermark.
         failures += expect(bool(index.key_of(0)));
         failures += expect(bool(index.value_of(0)));
         failures += expect(bool(index.degree_of(0)));
@@ -684,8 +691,8 @@ std::size_t test_basic_keys(fixture_type_ const& fixture) {
     return failures;
 }
 
-/** @brief Manual wiring: idempotent links, honest rejections, degree bookkeeping, growth
- *      past the build budget, and a snapshot roundtrip preserving variable degrees. */
+/** Manual wiring: idempotent links, honest rejections, degree bookkeeping, growth
+ *  past the build budget, and a snapshot roundtrip preserving variable degrees. */
 template <typename fixture_type_>
 std::size_t test_basic_wiring(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -748,8 +755,8 @@ std::size_t test_basic_wiring(fixture_type_ const& fixture) {
 
 #pragma region Allocation Budgets
 
-/** @brief All-or-nothing under a starved ledger: a refused reserve leaves the shape
- *      unfrozen & retryable, and a refused link-growth leaves the row untouched. */
+/** All-or-nothing under a starved ledger: a refused reserve leaves the shape
+ *  unfrozen & retryable, and a refused link-growth leaves the row untouched. */
 template <typename fixture_type_>
 std::size_t test_basic_allocation_budget(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -798,11 +805,11 @@ std::size_t test_basic_allocation_budget(fixture_type_ const& fixture) {
     return failures;
 }
 
-/** @brief The mid-flight allocation-failure battery: every fallible allocation inside a
- *      running operation keeps its stated consistency story - thinner nodes publish,
- *      refused staging saturates, cold scratch refuses all-or-nothing, and a starved
- *      load stays retryable. The warm-scratch trick isolates each site: a reused context
- *      already holds its buffers, so a frozen ledger budget starves exactly one thing. */
+/** The mid-flight allocation-failure battery: every fallible allocation inside a
+ *  running operation keeps its stated consistency story - thinner nodes publish,
+ *  refused staging saturates, cold scratch refuses all-or-nothing, and a starved
+ *  load stays retryable. The warm-scratch trick isolates each site: a reused context
+ *  already holds its buffers, so a frozen ledger budget starves exactly one thing. */
 template <typename fixture_type_>
 std::size_t test_basic_starved(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -846,7 +853,7 @@ std::size_t test_basic_starved(fixture_type_ const& fixture) {
         failures += expect_eq(index.size(), nodes_k);
         failures += expect_eq(index.health(cold_context).status, status_t::bad_alloc_k);
 
-        // Warm scratch under the same budget: the claimed id must still publish, only
+        // Warm scratch under the same budget: the claimed ID must still publish, only
         // thinner - the fresh row's growth is the one refused allocation.
         failures += expect_eq(
             index.insert({extras.data(), 1}, {extra_keys.data(), 1}, metric, {}, warm_context, basic_keep_closest_t {4})
@@ -895,8 +902,8 @@ std::size_t test_basic_starved(fixture_type_ const& fixture) {
 
 #pragma region Snapshots
 
-/** @brief Snapshot roundtrip: sized exactly, refused when short, loaded into a fresh
- *      index that answers every query identically and mirrors every id's key & degree. */
+/** Snapshot roundtrip: sized exactly, refused when short, loaded into a fresh
+ *  index that answers every query identically and mirrors every ID's key & degree. */
 template <typename fixture_type_>
 std::size_t test_basic_snapshot_roundtrip(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -972,9 +979,9 @@ std::size_t test_basic_snapshot_roundtrip(fixture_type_ const& fixture) {
     return failures;
 }
 
-/** @brief Hostile columns: every structural mutation of a good snapshot's prefix sums and
- *      ids must be refused with its documented status, and the same index must load the
- *      intact columns after every refusal - the retryability contract. */
+/** Hostile columns: every structural mutation of a good snapshot's prefix sums and
+ *  IDs must be refused with its documented status, and the same index must load the
+ *  intact columns after every refusal - the retryability contract. */
 template <typename fixture_type_>
 std::size_t test_basic_snapshot_hostile(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -994,7 +1001,7 @@ std::size_t test_basic_snapshot_hostile(fixture_type_ const& fixture) {
         std::vector<node_id_t> assigned_ids;
         failures += basic_build(fixture, index, metric, values, assigned_ids, context, basic_keep_diverse_t {4});
         // One extra manual edge de-uniformizes the degrees and guarantees at least one
-        // serialized neighbor id to corrupt.
+        // serialized neighbor ID to corrupt.
         [[maybe_unused]] auto const bumped = index.link(0, static_cast<node_id_t>(nodes_k / 2));
 
         auto const [columns, status] = basic_saved_columns(index, codec);
@@ -1039,11 +1046,11 @@ std::size_t test_basic_snapshot_hostile(fixture_type_ const& fixture) {
     return failures;
 }
 
-/** @brief Region-scoped serialization: a save plan whose uneven regions run from a pool
- *      must emit bytes identical to the single-call form, a region-parallel load must
- *      rebuild a graph whose own re-save is byte-identical, and the misuse rows -
- *      premature finish, out-of-bounds region, dropped plan - answer their documented
- *      statuses while the hold blocks & then frees the unique verbs. */
+/** Region-scoped serialization: a save plan whose uneven regions run from a pool
+ *  must emit bytes identical to the single-call form, a region-parallel load must
+ *  rebuild a graph whose own re-save is byte-identical, and the misuse rows -
+ *  premature finish, out-of-bounds region, dropped plan - answer their documented
+ *  statuses while the hold blocks & then frees the unique verbs. */
 template <typename fixture_type_>
 std::size_t test_basic_snapshot_regions(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -1149,10 +1156,10 @@ std::size_t test_basic_snapshot_regions(fixture_type_ const& fixture) {
 
 #pragma region Plans and Holds
 
-/** @brief Three rendezvous threads around one held save plan: every try-unique verb answers
- *      @c contended_k for the hold's whole span, the concurrent arm & wait-free readers
- *      stay fully served, and an inserter parked at the shared gate lands only after the
- *      plan's finish - with the planner never waiting on the parked inserter. */
+/** Three rendezvous threads around one held save plan: every try-unique verb answers
+ *  @c contended_k for the hold's whole span, the concurrent arm & wait-free readers
+ *  stay fully served, and an inserter parked at the shared gate lands only after the
+ *  plan's finish - with the planner never waiting on the parked inserter. */
 template <typename fixture_type_>
 std::size_t test_basic_plan_race(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -1282,11 +1289,11 @@ std::size_t test_basic_plan_race(fixture_type_ const& fixture) {
     return failures;
 }
 
-/** @brief Racing planners: one deterministic refusal round - the hold provably standing
- *      while every other thread tries - then statistical rounds where each round crowns at
- *      least one winner, every refusal is exactly @c contended_k, and every winner's
- *      payload mirrors the settled reference; last, a gated inserter proves the shared
- *      side alone makes @c plan_load & @c plan_save answer @c contended_k. */
+/** Racing planners: one deterministic refusal round - the hold provably standing
+ *  while every other thread tries - then statistical rounds where each round crowns at
+ *  least one winner, every refusal is exactly @c contended_k, and every winner's
+ *  payload mirrors the settled reference; last, a gated inserter proves the shared
+ *  side alone makes @c plan_load & @c plan_save answer @c contended_k. */
 template <typename fixture_type_>
 std::size_t test_basic_plan_contention(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -1417,9 +1424,9 @@ std::size_t test_basic_plan_contention(fixture_type_ const& fixture) {
 
 #pragma region Parked Mutations
 
-/** @brief The health report on a settled graph, its determinism across repeated calls,
- *      and - through a gated metric parking one insert mid-flight - the settled-past
- *      guard refusing @c health & @c columns_extents with @c contended_k. */
+/** The health report on a settled graph, its determinism across repeated calls,
+ *  and - through a gated metric parking one insert mid-flight - the settled-past
+ *  guard refusing @c health & @c columns_extents with @c contended_k. */
 template <typename fixture_type_>
 std::size_t test_basic_health(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -1500,10 +1507,10 @@ std::size_t test_basic_health(fixture_type_ const& fixture) {
     return failures;
 }
 
-/** @brief The certified arms at runtime: an exclusive build equals a concurrent
- *      single-threaded one, certified searches answer identically to the concurrent arm
- *      on a settled graph, and a parked insert makes both certified arms answer
- *      @c contended_k instead of tearing. */
+/** The certified arms at runtime: an exclusive build equals a concurrent
+ *  single-threaded one, certified searches answer identically to the concurrent arm
+ *  on a settled graph, and a parked insert makes both certified arms answer
+ *  @c contended_k instead of tearing. */
 template <typename fixture_type_>
 std::size_t test_basic_certified(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -1610,10 +1617,10 @@ std::size_t test_basic_certified(fixture_type_ const& fixture) {
     return failures;
 }
 
-/** @brief The certified exit probe: a gated metric parks a certified search mid-walk -
- *      entry probe already passed - an insert runs to completion inside the parked walk,
- *      and the exit probe must pronounce @c contended_k. The speculative reads formally
- *      race the writer, so the racing block skips under ThreadSanitizer. */
+/** The certified exit probe: a gated metric parks a certified search mid-walk -
+ *  entry probe already passed - an insert runs to completion inside the parked walk,
+ *  and the exit probe must pronounce @c contended_k. The speculative reads formally
+ *  race the writer, so the racing block skips under ThreadSanitizer. */
 template <typename fixture_type_>
 std::size_t test_basic_torn_bracket(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -1696,9 +1703,9 @@ std::size_t test_basic_torn_bracket(fixture_type_ const& fixture) {
 
 #pragma region Contracts
 
-/** @brief The metric-contract audit: every drain sized to its round's pushes, no round
- *      abandoned mid-flight, telemetry equal to the audited push count, and armed
- *      refusals driving the saturation paths without ever breaking a walk. */
+/** The metric-contract audit: every drain sized to its round's pushes, no round
+ *  abandoned mid-flight, telemetry equal to the audited push count, and armed
+ *  refusals driving the saturation paths without ever breaking a walk. */
 template <typename fixture_type_>
 std::size_t test_basic_metric_contract(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -1757,9 +1764,9 @@ std::size_t test_basic_metric_contract(fixture_type_ const& fixture) {
     return failures;
 }
 
-/** @brief Frontier starvation drives re-seeding: islands - nodes manually stripped of
- *      every edge in both directions - are reachable only through a restart's landmark
- *      draws, and a whole-graph pool must still find every node. */
+/** Frontier starvation drives re-seeding: islands - nodes manually stripped of
+ *  every edge in both directions - are reachable only through a restart's landmark
+ *  draws, and a whole-graph pool must still find every node. */
 template <typename fixture_type_>
 std::size_t test_basic_restarts(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -1813,8 +1820,8 @@ std::size_t test_basic_restarts(fixture_type_ const& fixture) {
 
 #pragma region Races
 
-/** @brief Concurrent build on distinct-seeded contexts: dense unique ids, every thread's
- *      keys landing on its own values, and the payloads surviving the move intact. */
+/** Concurrent build on distinct-seeded contexts: dense unique ids, every thread's
+ *  keys landing on its own values, and the payloads surviving the move intact. */
 template <typename fixture_type_>
 std::size_t test_basic_concurrent_build(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -1849,7 +1856,7 @@ std::size_t test_basic_concurrent_build(fixture_type_ const& fixture) {
         std::vector<node_id_t> sorted_ids = assigned_ids;
         failures += expect_contiguous_ids(sorted_ids, 0);
 
-        // Every thread's keys & values landed on the ids that thread was assigned; the values
+        // Every thread's keys & values landed on the IDs that thread was assigned; the values
         // compare against a fresh identically-seeded draw - the insert moved the originals.
         for (std::size_t thread = 0; thread != basic_threads_k; ++thread) {
             auto expected_values = fixture.make_values(basic_thread_nodes_k, basic_seed_build_thread_k + thread);
@@ -1865,9 +1872,9 @@ std::size_t test_basic_concurrent_build(fixture_type_ const& fixture) {
     return failures;
 }
 
-/** @brief A reader thread races writers: every result id sits below a watermark sampled
- *      after its search, distances ascend, and the checked id-readers stay honest under
- *      any input while the graph grows underneath them. */
+/** A reader thread races writers: every result id sits below a watermark sampled
+ *  after its search, distances ascend, and the checked ID-readers stay honest under
+ *  any input while the graph grows underneath them. */
 template <typename fixture_type_>
 std::size_t test_basic_concurrent_search(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -1922,7 +1929,7 @@ std::size_t test_basic_concurrent_search(fixture_type_ const& fixture) {
                 if (search_status != status_t::success_k) thread_failures.fetch_add(1);
                 thread_failures.fetch_add(scored_failures(reader_context.results.data(), reader_context.results.size(),
                                                           index.size(), results_bound));
-                // Any id is a legal input to the checked readers, published or not.
+                // Any ID is a legal input to the checked readers, published or not.
                 node_id_t const probe = static_cast<node_id_t>(probe_distribution(reader_random));
                 std::size_t const published_before = index.size();
                 auto const [probed_key, key_status] = index.key_of(probe);
@@ -1941,9 +1948,9 @@ std::size_t test_basic_concurrent_search(fixture_type_ const& fixture) {
     return failures;
 }
 
-/** @brief Manual wiring raced against inserts, searches & saves - the regression net for
- *      the census word and the duplicate-scan: overlapping saves answer @c contended_k,
- *      settled saves parse duplicate-free and reload cleanly. */
+/** Manual wiring raced against inserts, searches & saves - the regression net for
+ *  the census word and the duplicate-scan: overlapping saves answer @c contended_k,
+ *  settled saves parse duplicate-free and reload cleanly. */
 template <typename fixture_type_>
 std::size_t test_basic_wiring_race(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -2104,8 +2111,8 @@ std::size_t test_basic_wiring_race(fixture_type_ const& fixture) {
     return failures;
 }
 
-/** @brief Concurrent overflow: threads submit batches totalling past capacity, and the
- *      claim protocol admits exactly the capacity - no lost room, no over-admission. */
+/** Concurrent overflow: threads submit batches totalling past capacity, and the
+ *  claim protocol admits exactly the capacity - no lost room, no over-admission. */
 template <typename fixture_type_>
 std::size_t test_basic_overflow_race(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -2161,8 +2168,8 @@ std::size_t test_basic_overflow_race(fixture_type_ const& fixture) {
     return failures;
 }
 
-/** @brief The reader's cursor: id-order iteration over the watermark, snapshot
- *      discipline, edge-following, refresh widening, and a thread racing live mutators. */
+/** The reader's cursor: id-order iteration over the watermark, snapshot
+ *  discipline, edge-following, refresh widening, and a thread racing live mutators. */
 template <typename fixture_type_>
 std::size_t test_basic_cursor(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
@@ -2231,7 +2238,7 @@ std::size_t test_basic_cursor(fixture_type_ const& fixture) {
         // resurrect through a refresh, however far the watermark moved meanwhile.
         cursor_t parked_cursor {index, counting_allocator_t {ledger}};
 
-        // A cursor thread races an inserting & wiring thread; every visited id stays below
+        // A cursor thread races an inserting & wiring thread; every visited ID stays below
         // that pass's snapshot, and the final refresh converges on the full prefix.
         fu::flat_pool_t pool;
         if (fu::failed(pool.spawn(2))) return failures + expect(false);
@@ -2297,13 +2304,13 @@ std::size_t test_basic_cursor(fixture_type_ const& fixture) {
 
 #pragma region Adapters
 
-/** @brief The SafeGraphs round trip through the shared glue: the monolith's header names the
- *      key dtype, an irregular value column of the codec's dtype, an irregular neighbors column
- *      and the metric token; memory and file forms hold the same bytes at the default alignment
- *      and at the floor, serial and pooled; and a fresh index restored from either mirrors the
- *      original. Composed per unit, never by @c test_basic_scenarios: the key dtype's name and
- *      the metric token are unit knowledge - sentences passes "u64", while bioinformatics and
- *      meshes both carry the @c uuid_t key and pass "uuid". */
+/** The SafeGraphs round trip through the shared glue: the monolith's header names the
+ *  key dtype, an irregular value column of the codec's dtype, an irregular neighbors column
+ *  and the metric token; memory and file forms hold the same bytes at the default alignment
+ *  and at the floor, serial and pooled; and a fresh index restored from either mirrors the
+ *  original. Composed per unit, never by @c test_basic_scenarios: the key dtype's name and
+ *  the metric token are unit knowledge - sentences passes "u64", while bioinformatics and
+ *  meshes both carry the @c uuid_t key and pass "uuid". */
 template <typename fixture_type_>
 std::size_t test_basic_safegraphs_roundtrip(fixture_type_ const& fixture, std::string_view key_dtype_name,
                                             std::string_view metric_token) {
@@ -2431,10 +2438,10 @@ std::size_t test_basic_safegraphs_roundtrip(fixture_type_ const& fixture, std::s
     return failures;
 }
 
-/** @brief The distributed form: two indexes over halves of one value set become two part files
- *      beside a manifest named as the interchange illustrates, the manifest answers the summary
- *      by content without loading a payload, every entry resolves beside it, and each part
- *      restores on its own into a fresh index that mirrors the half that wrote it. */
+/** The distributed form: two indexes over halves of one value set become two part files
+ *  beside a manifest named as the interchange illustrates, the manifest answers the summary
+ *  by content without loading a payload, every entry resolves beside it, and each part
+ *  restores on its own into a fresh index that mirrors the half that wrote it. */
 template <typename fixture_type_>
 std::size_t test_basic_safegraphs_distributed(fixture_type_ const& fixture, std::string_view metric_token) {
     using index_t = typename fixture_type_::index_t;
@@ -2528,10 +2535,10 @@ std::size_t test_basic_safegraphs_distributed(fixture_type_ const& fixture, std:
     return failures;
 }
 
-/** @brief Hostile monoliths: every header mutation of a good monolith is refused with its
- *      documented status before a payload byte lands, a planted out-of-range id is the plan's
- *      refusal, a short target overflows, an illegal config is refused, and the same index
- *      restores from the intact monolith after every refusal. */
+/** Hostile monoliths: every header mutation of a good monolith is refused with its
+ *  documented status before a payload byte lands, a planted out-of-range ID is the plan's
+ *  refusal, a short target overflows, an illegal config is refused, and the same index
+ *  restores from the intact monolith after every refusal. */
 template <typename fixture_type_>
 std::size_t test_basic_safegraphs_hostile(fixture_type_ const& fixture, std::string_view metric_token) {
     using index_t = typename fixture_type_::index_t;
@@ -2610,7 +2617,7 @@ std::size_t test_basic_safegraphs_hostile(fixture_type_ const& fixture, std::str
         expect_refused(rewrite_header([](safegraphs_header_t& h) { h.neighbors.data.bound += h.alignment; }),
                        status_t::malformed_k);
         expect_refused(rewrite_header([](safegraphs_header_t& h) { h.key.data.bound -= 1; }), status_t::malformed_k);
-        // An id at the node count is the plan's refusal, not the header's.
+        // An ID at the node count is the plan's refusal, not the header's.
         expect_refused(
             [&](std::vector<std::byte>& c) {
                 std::size_t const at = header.data_offset + header.neighbors.data.first;
@@ -2643,9 +2650,9 @@ std::size_t test_basic_safegraphs_hostile(fixture_type_ const& fixture, std::str
 
 #pragma endregion Adapters
 
-/** @brief The whole shared battery over one fixture, in file order - units add their own
- *      extras after; only the SafeGraphs round trip and hostile battery compose per unit, as
- *      their docblocks say. */
+/** The whole shared battery over one fixture, in file order - units add their own
+ *  extras after; only the SafeGraphs round trip and hostile battery compose per unit, as
+ *  their docblocks say. */
 template <typename fixture_type_>
 std::size_t test_basic_scenarios(fixture_type_ const& fixture) {
     std::size_t failures = 0;

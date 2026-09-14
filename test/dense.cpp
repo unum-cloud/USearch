@@ -1,9 +1,9 @@
 /**
- *  @brief The dense modality's CPU composer: rolls every per-dtype metric & index shard
- *      into one failure count for the suite's entry point.
- *  @author Ash Vardanian
  *  @file test/dense.cpp
+ *  @author Ash Vardanian
  *  @date August 14, 2026
+ *  @brief The dense modality's CPU composer: rolls every per-dtype metric & index shard into one
+ *      failure count for the suite's entry point.
  *
  *  The shards are named here, never reflected: each call is a coverage claim the modality
  *  makes about itself, and a dtype that stops building stops being counted loudly.
@@ -16,7 +16,7 @@
 
 using namespace unum::usearch;
 
-/** @brief The plans and claims are move-only, and the plans are never assigned over. */
+/** The plans and claims are move-only, and the plans are never assigned over. */
 using witnessed_index_t = dense_ram_index<>;
 static_assert(std::is_move_constructible_v<witnessed_index_t::save_plan_t> &&
               !std::is_copy_constructible_v<witnessed_index_t::save_plan_t> &&

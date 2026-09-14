@@ -1,16 +1,15 @@
 /**
- *  @brief The CUDA pipeline of the dense-index benchmark, shared by the per-dtype shards:
- *      the single-device phases and the compile-time cascade below the stored dtype.
- *  @author Ash Vardanian
  *  @file bench/dense/vram_index.cuh
+ *  @author Ash Vardanian
  *  @date July 22, 2026
+ *  @brief The CUDA pipeline of the dense-index benchmark, shared by the per-dtype shards: the
+ *      single-device phases and the compile-time cascade below the stored dtype.
  *
- *  The backend-neutral surface - options, checkpoints, dataset streaming, telemetry,
- *  result judgment - lives in @c dense_index.cuh; this header owns everything CUDA: one
- *  device, one @c dense_vram_index instantiation, batch-shaped run loops, and the
- *  compile-time cascade lowering memory space, generation ceiling, and metric below the
- *  stored dtype - the axis the shard translation units split, so the heavy device
- *  instantiation grids build in parallel.
+ *  The backend-neutral surface - options, checkpoints, dataset streaming, telemetry, result
+ *  judgment - lives in @c dense_index.cuh; this header owns everything CUDA: one device, one
+ *  @c dense_vram_index instantiation, batch-shaped run loops, and the compile-time cascade
+ *  lowering memory space, generation ceiling, and metric below the stored dtype - the axis the
+ *  shard translation units split.
  */
 #pragma once
 
@@ -35,10 +34,13 @@ namespace usearch {
 
 #pragma region CUDA Pipeline
 
-/** @brief The GPU-side state one fully-typed benchmark run shares between its phases: the
- *      single device index, its one driving traversal context, and the embedded
- *      backend-neutral judgment results. One device, one submission lane - the batch shape,
- *      not thread count, is what fills the machine. */
+/**
+ *  @brief The GPU-side state one fully-typed benchmark run shares between its phases: the single
+ *      device index, its one driving traversal context, and the embedded backend-neutral
+ *      judgment results.
+ *
+ *  One device, one submission lane - the batch shape, not the thread count, fills the machine.
+ */
 template <typename index_type_>
 struct cuda_bench_context {
     using index_t = index_type_;
@@ -51,21 +53,32 @@ struct cuda_bench_context {
 
     static constexpr nk_kernel_kind_t kernel_kind_k = index_t::kernel_kind_k;
 
+    /** The parsed CLI, borrowed for the run's lifetime. */
     bench_options_t const& options;
+
+    /** The CUDA ordinal every plane and launch of this run lands on. */
     int device = 0;
+
+    /** The one index under measurement. */
     std::unique_ptr<index_t> index;
+
+    /** The one context driving every batched verb. */
     std::unique_ptr<traversal_t> traversal;
-    /** @brief Dense node id → global dataset row, the recall bookkeeping. */
+
+    /** Dense node id → global dataset row, the recall bookkeeping. */
     std::vector<u32_t> id_to_row;
-    /** @brief One accumulation lane - the launches are sequential on one stream. */
+
+    /** One accumulation lane - the launches are sequential on one stream. */
     telemetry_lane_t lane;
+
+    /** The backend-neutral judgment state both phases fill. */
     bench_results_t results;
 
     cuda_bench_context(bench_options_t const& options, int device) noexcept : options(options), device(device) {}
 };
 
-/** @brief Builds the device index, reserves it for the viewed rows, restores an optional
- *      checkpoint, and sizes the judgment state - everything fallible, before any clock. */
+/** Builds the device index, reserves it for the viewed rows, restores an optional checkpoint, and
+ *  sizes the judgment state - everything fallible, before any clock. */
 template <typename streamed_dataset_type_>
 bool prepare(streamed_dataset_type_& streamed) {
     using bench_t = typename streamed_dataset_type_::bench_t;
@@ -92,9 +105,7 @@ bool prepare(streamed_dataset_type_& streamed) {
     index_t& index = *bench.index;
     bench.id_to_row.resize(rows);
 
-    // Reserving first freezes the CLI geometry and pre-maps capacity; a checkpoint then
-    // loads against that frozen geometry, so a header mismatch fails loudly below instead
-    // of restoring an incompatible graph.
+    // Reserving first freezes the CLI geometry a checkpoint then has to agree with.
     auto const [capacity, status] = index.reserve({rows, connectivity, dimensions});
     if (failed(status)) {
         fmt::println("Failed to reserve {} × {}d on device {}", rows, dimensions, bench.device);
@@ -105,8 +116,7 @@ bool prepare(streamed_dataset_type_& streamed) {
         !load_checkpoint(bench.options, index, dimensions, std::span {bench.id_to_row}, 0, 1))
         return false;
 
-    // The loaded base must cover exactly the skipped prefix - anything else would judge
-    // recall against rows the graph never saw.
+    // A base that misses the skipped prefix would judge recall against rows the graph never saw.
     if (index.size() != bench.options.skip_vectors) {
         fmt::println("Loaded index covers {} rows, but --skip-vectors says {}", index.size(),
                      bench.options.skip_vectors);
@@ -127,17 +137,16 @@ bool prepare(streamed_dataset_type_& streamed) {
     return true;
 }
 
-/** @brief `--batch` rows per launch, or a launch-saturating default: the insert path drains
- *      through a bounded admission window, so bigger batches only amortize transfers. */
+/** `--batch` rows per launch, or a launch-saturating default: the insert path drains through a
+ *  bounded admission window, so bigger batches only amortize transfers. */
 inline std::size_t streamed_batch_rows(bench_options_t const& options, std::size_t total_rows) noexcept {
     std::size_t const preferred = options.batch ? options.batch : 65536;
     return std::min(std::max<std::size_t>(preferred, 1), total_rows);
 }
 
-/** @brief Stages up to @p batch_rows rows of @p source starting at @p first_row into one
- *      device-ready host matrix - a zero-copy view when the scalars already match, or the
- *      trampoline's single contiguous plane after per-row rescale & cast. Both phases share
- *      it: insertion stages base rows, search stages queries or the self-recall base. */
+/** Stages up to @p batch_rows rows of @p source starting at @p first_row into one device-ready
+ *  host matrix - a zero-copy view when the scalars match, or the trampoline's contiguous plane
+ *  after per-row rescale and cast. Both phases share it. */
 template <typename streamed_dataset_type_>
 typename streamed_dataset_type_::bench_t::vectors_view_t stage_batch(
     streamed_dataset_type_& streamed, nk::matrix_view<typename streamed_dataset_type_::dataset_scalar_t> source,
@@ -153,8 +162,8 @@ typename streamed_dataset_type_::bench_t::vectors_view_t stage_batch(
     }
 }
 
-/** @brief Streams the un-ingested topping into the index, `--batch` rows per launch - the
- *      GPU's natural task shape - and keeps the id → row bookkeeping dense. */
+/** Streams the un-ingested topping into the index, `--batch` rows per launch, and keeps the
+ *  ID → row bookkeeping dense. */
 template <typename streamed_dataset_type_>
 bool run_insertion(streamed_dataset_type_& streamed) {
     using clock_t = stdc::steady_clock;
@@ -217,8 +226,8 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     return true;
 }
 
-/** @brief Re-selects every node's neighbors, pass after pass, then re-links whatever no search
- *      can reach - the build step a cheap ingestion pays for. */
+/** Re-selects every node's neighbors, pass after pass, then re-links whatever no search can
+ *  reach; a pass that re-wires nothing ends the phase. */
 template <typename streamed_dataset_type_>
 bool run_refinement(streamed_dataset_type_& streamed) {
     using clock_t = stdc::steady_clock;
@@ -255,7 +264,7 @@ bool run_refinement(streamed_dataset_type_& streamed) {
         report.sums.computed_distances += refinement.computed_distances;
         report.sums.restarts += refinement.restarts;
         progress.tick(pass + 1);
-        if (!refinement.changed_nodes) break; // Settled: another pass would re-select the same picks.
+        if (!refinement.changed_nodes) break;
     }
     progress.finish();
     report.refining_seconds = stdc::duration<double>(clock_t::now() - started).count();
@@ -276,8 +285,8 @@ bool run_refinement(streamed_dataset_type_& streamed) {
     return true;
 }
 
-/** @brief Serializes the device index as the same three RetriEval-layout matrices the CPU
- *      bench writes - vectors, neighbors, and the id → row map. */
+/** Serializes the device index as three RetriEval-layout matrices - vectors, neighbors, and the
+ *  ID → row map. */
 template <typename streamed_dataset_type_>
 bool save_index(streamed_dataset_type_& streamed) {
     using clock_t = stdc::steady_clock;
@@ -290,10 +299,8 @@ bool save_index(streamed_dataset_type_& streamed) {
     return true;
 }
 
-/** @brief Answers every query through the batch verb - thousands of queries per launch, the
- *      shape the device is built for - then translates node ids into dataset rows for the
- *      shared judgment. Latency is reported per batch, spread over its queries: the GPU has
- *      no per-query clock to read honestly from the host. */
+/** Answers every query through the batch verb, then translates node ids into dataset rows for the
+ *  shared judgment; a batch-shaped verb has no per-query clock, so the report prints the mean. */
 template <typename streamed_dataset_type_>
 bool run_search(streamed_dataset_type_& streamed) {
     using clock_t = stdc::steady_clock;
@@ -361,8 +368,7 @@ bool run_search(streamed_dataset_type_& streamed) {
     }
     progress.finish();
 
-    // The empty latency span asks the shared report for the batch-uniform mean - one
-    // launch clocks a whole batch, so per-query percentiles would be fiction here.
+    // The empty latency span asks the shared report for the batch-uniform mean.
     report_search_metrics(bench.options, query_count, seconds, 1, bench.lane, {});
     judge_hits(bench.options, bench.results, query_count);
     return true;
@@ -372,13 +378,12 @@ bool run_search(streamed_dataset_type_& streamed) {
 
 #pragma region Dispatch Cascade
 
-/** @brief Gate: a (stored dtype, kernel) cell is runnable once its device kit is adapted
- *      in @c dense/vram_metric.cuh - unadapted combinations report as skipped and light up
- *      automatically when their kits land, exactly like the CPU cascade. */
+/** Gate: a (stored dtype, kernel) cell is runnable once its device kit is adapted in
+ *  @c dense/vram_metric.cuh; unadapted combinations report as skipped. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 concept cuda_kit_adapted = requires { typename dense_cuda_kit_for<dtype_, kernel_>::kit_t; };
 
-/** @brief No-op sibling picked when the pair's device kit is not adapted yet. */
+/** No-op sibling picked when the pair's device kit is not adapted yet. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t arch_ceiling_,
           typename plane_allocator_>
     requires(!cuda_kit_adapted<stored_dtype_, kernel_>)
@@ -388,8 +393,8 @@ int stage_and_run(persisted_dataset<dataset_scalar_type_> const&, bench_options_
     return 0;
 }
 
-/** @brief The innermost hop: binds the concrete CUDA-index instantiation, wires the typed
- *      source views and the staging trampoline, and runs the phases in checkpoint order. */
+/** The innermost hop: binds the concrete CUDA-index instantiation, wires the typed source views
+ *  and the staging trampoline, and runs the phases in checkpoint order. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t arch_ceiling_,
           typename plane_allocator_>
     requires(cuda_kit_adapted<stored_dtype_, kernel_>)
@@ -413,12 +418,12 @@ int stage_and_run(persisted_dataset<dataset_scalar_type_> const& dataset, bench_
     bench_context_t bench {options, device};
     streamed_t streamed {bench, {dataset.vectors().data(), rows, dimensions}, source_queries};
 
-    // Owns the staging trampoline plane, `[1, batch, dimensions]`.
+    // Owns the staging trampoline plane, @b [1,batch,dimensions].
     nk::tensor<scalar_t, std::allocator<scalar_t>, 3> staging;
+    // Owns the rescaling plane @c streamed_dataset::rescaling views.
     nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3> rescaling_planes;
     if constexpr (!streamed_t::zero_copy_k) {
-        // The trampoline serves both phases, so it follows the larger of the two row
-        // counts - a query file bigger than the base must not overflow the plane.
+        // The trampoline serves both phases, so it follows the larger of the two row counts.
         std::size_t const batch_rows = streamed_batch_rows(options, std::max(rows, source_queries.extent(0)));
         staging = nk::tensor<scalar_t, std::allocator<scalar_t>, 3>::try_zeros({1, batch_rows, dimensions});
         if (staging.empty()) {
@@ -452,8 +457,8 @@ int stage_and_run(persisted_dataset<dataset_scalar_type_> const& dataset, bench_
     return 0;
 }
 
-/** @brief Kernel axis: lowers the runtime metric to a compile-time kernel kind, the terminal hop
- *      into @ref stage_and_run - whose concept gate skips any pair whose device kit is unadapted. */
+/** Kernel axis: lowers the runtime metric to a compile-time kernel kind, the terminal hop into
+ *  @ref stage_and_run. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, cuda_arch_t arch_ceiling_, typename plane_allocator_>
 int run_with_metric(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
                     int device) {
@@ -469,9 +474,8 @@ int run_with_metric(persisted_dataset<dataset_scalar_type_> const& dataset, benc
         });
 }
 
-/** @brief Generation axis: the CLI's architecture ceiling picks which kit-chain rows every
- *      cell below may select, so two runs on one device compare generation codegen side by
- *      side. */
+/** Generation axis: the CLI's architecture ceiling picks which kit-chain rows every cell below
+ *  may select, so two runs on one device compare generation codegen side by side. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, typename plane_allocator_>
 int run_with_arch(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options, int device,
                   cuda_arch_t arch_ceiling) {
@@ -492,13 +496,12 @@ int run_with_arch(persisted_dataset<dataset_scalar_type_> const& dataset, bench_
 }
 
 /**
- *  @brief The shard hop: everything below one stored dtype - the memory axis picking the
- *      plane allocator, the generation ceiling, and the metric - so the per-dtype shard
- *      translation units carry the whole device instantiation grid of their dtype.
+ *  @brief The shard hop: everything below one stored dtype - the memory axis picking the plane
+ *      allocator, the generation ceiling, and the metric - so the per-dtype shard translation
+ *      units carry the whole device instantiation grid of their dtype.
  *
- *  Device-space planes stay in VRAM through the virtual-memory backend, managed-space
- *  planes oversubscribe it through the pager - the bigger-than-VRAM build path,
- *  ceiling-budgeted on host RAM.
+ *  Device-space planes stay in VRAM through the virtual-memory backend; managed-space planes
+ *  oversubscribe it through the pager, the bigger-than-VRAM build path.
  */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
 int run_with_stored_dtype(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,

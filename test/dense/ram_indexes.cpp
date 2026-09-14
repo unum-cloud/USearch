@@ -1,9 +1,9 @@
 /**
- *  @brief Concurrency & misuse tests for the CPU-resident @c dense_ram_indexes, repeated
- *      under a deliberately flaky waiter to widen the interleaving windows.
- *  @author Ash Vardanian
  *  @file test/dense/ram_indexes.cpp
+ *  @author Ash Vardanian
  *  @date August 31, 2026
+ *  @brief Concurrency & misuse tests for the CPU-resident @c dense_ram_indexes, repeated under a
+ *      deliberately flaky waiter to widen the interleaving windows.
  */
 #include "dense/ram_indexes.hpp"
 

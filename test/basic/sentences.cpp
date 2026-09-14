@@ -1,11 +1,10 @@
 /**
- *  @brief The sentences unit of the basic-index suite: string payloads under unit-cost
- *      Levenshtein distance - the transparent-metric, exact-integer-distance, narrow-id,
- *      fuzzed-waiter corner of the instantiation space.
- *
- *  @author Ash Vardanian
  *  @file test/basic/sentences.cpp
+ *  @author Ash Vardanian
  *  @date August 26, 2026
+ *  @brief The sentences unit of the basic-index suite: string payloads under unit-cost Levenshtein
+ *      distance - the transparent-metric, exact-integer-distance, narrow-ID, fuzzed-waiter corner
+ *      of the instantiation space.
  *
  *  Sentences are drawn from planted templates over a small vocabulary with a few character
  *  edits each, so edit distances bimodalize - within a template only the edits differ,
@@ -21,9 +20,9 @@
 
 using namespace unum::usearch;
 
-/** @brief Unit-cost Levenshtein through the classic two-row Wagner-Fischer recurrence - both
- *      the metric's kernel and the scenarios' oracle, so the two always agree; the caller owns
- *      the rows, so a whole batch scores without allocating. */
+/** Unit-cost Levenshtein through the classic two-row Wagner-Fischer recurrence - both
+ *  the metric's kernel and the scenarios' oracle, so the two always agree; the caller owns
+ *  the rows, so a whole batch scores without allocating. */
 static u64_t levenshtein_distance(std::string_view first, std::string_view second, std::vector<u64_t>& previous_row,
                                   std::vector<u64_t>& current_row) noexcept {
     previous_row.assign(second.size() + 1, 0), current_row.assign(second.size() + 1, 0);
@@ -41,9 +40,9 @@ static u64_t levenshtein_distance(std::string_view first, std::string_view secon
     return previous_row[second.size()];
 }
 
-/** @brief The unit's batched metric: stages views over the stored strings, scores a whole
- *      round in one drain, and refuses pushes past a fixed staging cap - so the index's
- *      saturation paths are reachable with a real metric, not only the auditing double. */
+/** The unit's batched metric: stages views over the stored strings, scores a whole
+ *  round in one drain, and refuses pushes past a fixed staging cap - so the index's
+ *  saturation paths are reachable with a real metric, not only the auditing double. */
 struct levenshtein_metric_t {
     using is_transparent = void;
     static constexpr std::size_t staging_limit_k = 256;
@@ -66,9 +65,9 @@ struct levenshtein_metric_t {
     }
 };
 
-/** @brief Identity-bytes codec: the payload is the string's own characters, a @c utf8
- *      column in the interchange, and a @c 0xFF byte - impossible in generated ASCII - is
- *      the unit's poison marker on load. */
+/** Identity-bytes codec: the payload is the string's own characters, a @c utf8
+ *  column in the interchange, and a @c 0xFF byte - impossible in generated ASCII - is
+ *  the unit's poison marker on load. */
 struct sentence_codec_t {
     inline static constexpr dtype_t value_dtype_k = dtype_t::utf8_k;
 
@@ -87,7 +86,7 @@ struct sentence_codec_t {
     }
 };
 
-/** @brief The handmade triple with its paper-verified pairwise Levenshtein matrix. */
+/** The handmade triple with its paper-verified pairwise Levenshtein matrix. */
 struct sentences_handmade_t {
     std::array<std::string, 3> values;
     std::array<std::array<u64_t, 3>, 3> distances;
@@ -159,8 +158,8 @@ static_assert(transparent_metric<levenshtein_metric_t>);
 static_assert(basic_query<std::string_view, levenshtein_metric_t, std::string>);
 static_assert(basic_value_codec<sentence_codec_t, std::string>);
 
-/** @brief The transparency arm: a @c string_view query - never a stored value - opens the
- *      metric's rounds, and its self-match still lands at distance zero. */
+/** The transparency arm: a @c string_view query - never a stored value - opens the
+ *  metric's rounds, and its self-match still lands at distance zero. */
 static std::size_t check_sentences_transparent_search() {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
@@ -184,8 +183,8 @@ static std::size_t check_sentences_transparent_search() {
     return failures;
 }
 
-/** @brief The codec-rejection row of the hostile battery: a poison byte in the values
- *      section must surface the codec's own refusal through @c load. */
+/** The codec-rejection row of the hostile battery: a poison byte in the values
+ *  section must surface the codec's own refusal through @c load. */
 static std::size_t check_sentences_codec_poison() {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
@@ -212,9 +211,9 @@ static std::size_t check_sentences_codec_poison() {
     return failures;
 }
 
-/** @brief Myers' bit-parallel Levenshtein - a genuinely different algorithm from the
- *      unit's Wagner-Fischer rows, so a bug in the shared metric-and-oracle DP cannot
- *      cancel out of the checks. The single-word form bounds patterns to 64 characters. */
+/** Myers' bit-parallel Levenshtein - a genuinely different algorithm from the
+ *  unit's Wagner-Fischer rows, so a bug in the shared metric-and-oracle DP cannot
+ *  cancel out of the checks. The single-word form bounds patterns to 64 characters. */
 static u64_t myers_levenshtein_distance(std::string_view first, std::string_view second) noexcept {
     if (first.size() > second.size()) return myers_levenshtein_distance(second, first);
     if (first.empty()) return second.size();
@@ -241,8 +240,8 @@ static u64_t myers_levenshtein_distance(std::string_view first, std::string_view
     return distance;
 }
 
-/** @brief The independent-oracle audit over sampled pairs, truncated to the bit-parallel
- *      form's 64-character bound. */
+/** The independent-oracle audit over sampled pairs, truncated to the bit-parallel
+ *  form's 64-character bound. */
 static std::size_t check_sentences_independent_oracle() {
     std::size_t failures = 0;
     std::vector<u64_t> previous_row, current_row;

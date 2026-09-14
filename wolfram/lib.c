@@ -1,7 +1,8 @@
 /**
- *  @brief Wolfram LibraryLink bindings for USearch, written against the C interface.
  *  @file wolfram/lib.c
  *  @author Ash Vardanian
+ *  @date September 7, 2026
+ *  @brief Wolfram LibraryLink bindings for USearch, written against the C interface.
  *
  *  LibraryLink hands every verb an @c MArgument array and expects an integer status back, so the
  *  whole binding is C and links the pre-instantiated engine rather than compiling templates of its
@@ -44,7 +45,7 @@
 
 #pragma region Vocabulary
 
-/** @brief A borrowed run of bytes over a null-terminated Wolfram string. */
+/** A borrowed run of bytes over a null-terminated Wolfram string. */
 static usearch_bytes_view_t bytes_from_text(char const* text) {
     usearch_bytes_view_t view;
     view.data = (uint8_t const*)text;
@@ -65,7 +66,7 @@ static int reject(WolframLibraryData library_data, usearch_error_t const* error,
     return LIBRARY_FUNCTION_ERROR;
 }
 
-/** @brief Answers @c LIBRARY_NO_ERROR when the call succeeded, reporting its message otherwise. */
+/** Answers @c LIBRARY_NO_ERROR when the call succeeded, reporting its message otherwise. */
 static int outcome(WolframLibraryData library_data, usearch_error_t const* error) {
     return error->status == usearch_success_k ? LIBRARY_NO_ERROR : reject(library_data, error, NULL);
 }
@@ -99,10 +100,10 @@ static void key_to_cells(usearch_key_t key, mint* cells) {
         cells[byte_index] = (mint)key.bytes[byte_index];
 }
 
-/** @brief Recovers an opaque handle from the integer a caller kept. */
+/** Recovers an opaque handle from the integer a caller kept. */
 static void* handle_from_integer(mint value) { return (void*)(intptr_t)value; }
 
-/** @brief Hands an opaque handle back as the integer a caller keeps. */
+/** Hands an opaque handle back as the integer a caller keeps. */
 static mint handle_to_integer(void* handle) { return (mint)(intptr_t)handle; }
 
 #pragma endregion Vocabulary
@@ -154,7 +155,7 @@ EXTERN_C DLLEXPORT int ExecutorCreate(WolframLibraryData library_data, mint argu
     return LIBRARY_NO_ERROR;
 }
 
-/** @brief Waits for every deferred call on the executor to finish. */
+/** Waits for every deferred call on the executor to finish. */
 EXTERN_C DLLEXPORT int ExecutorDrain(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                      MArgument result) {
     usearch_executor_t executor = (usearch_executor_t)handle_from_integer(MArgument_getInteger(arguments[0]));
@@ -163,7 +164,7 @@ EXTERN_C DLLEXPORT int ExecutorDrain(WolframLibraryData library_data, mint argum
     return outcome(library_data, &error);
 }
 
-/** @brief Drains every thread or stream and frees the executor; the handle is invalid afterwards. */
+/** Drains every thread or stream and frees the executor; the handle is invalid afterwards. */
 EXTERN_C DLLEXPORT int ExecutorDestroy(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                        MArgument result) {
     usearch_executor_free((usearch_executor_t)handle_from_integer(MArgument_getInteger(arguments[0])));
@@ -222,7 +223,7 @@ EXTERN_C DLLEXPORT int DenseIndexCreate(WolframLibraryData library_data, mint ar
     return LIBRARY_NO_ERROR;
 }
 
-/** @brief Frees the index; the handle is invalid afterwards. */
+/** Frees the index; the handle is invalid afterwards. */
 EXTERN_C DLLEXPORT int DenseIndexDestroy(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                          MArgument result) {
     usearch_dense_free((usearch_dense_index_t)handle_from_integer(MArgument_getInteger(arguments[0])));
@@ -269,7 +270,7 @@ EXTERN_C DLLEXPORT int DenseIndexLoad(WolframLibraryData library_data, mint argu
 
 #pragma region Dense Index Probes
 
-/** @brief Reports the number of stored entries. */
+/** Reports the number of stored entries. */
 EXTERN_C DLLEXPORT int DenseIndexSize(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                       MArgument result) {
     usearch_error_t error = {usearch_success_k, NULL};
@@ -280,7 +281,7 @@ EXTERN_C DLLEXPORT int DenseIndexSize(WolframLibraryData library_data, mint argu
     return LIBRARY_NO_ERROR;
 }
 
-/** @brief Reports the reserved capacity in entries. */
+/** Reports the reserved capacity in entries. */
 EXTERN_C DLLEXPORT int DenseIndexCapacity(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                           MArgument result) {
     usearch_error_t error = {usearch_success_k, NULL};
@@ -291,7 +292,7 @@ EXTERN_C DLLEXPORT int DenseIndexCapacity(WolframLibraryData library_data, mint 
     return LIBRARY_NO_ERROR;
 }
 
-/** @brief Reports the frozen dimensionality of the stored vectors. */
+/** Reports the frozen dimensionality of the stored vectors. */
 EXTERN_C DLLEXPORT int DenseIndexDimensions(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                             MArgument result) {
     usearch_error_t error = {usearch_success_k, NULL};
@@ -302,7 +303,7 @@ EXTERN_C DLLEXPORT int DenseIndexDimensions(WolframLibraryData library_data, min
     return LIBRARY_NO_ERROR;
 }
 
-/** @brief Reports the frozen connections-per-node bound of the graph. */
+/** Reports the frozen connections-per-node bound of the graph. */
 EXTERN_C DLLEXPORT int DenseIndexConnectivity(WolframLibraryData library_data, mint arguments_count,
                                               MArgument* arguments, MArgument result) {
     usearch_error_t error = {usearch_success_k, NULL};

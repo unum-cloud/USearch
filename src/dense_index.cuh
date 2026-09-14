@@ -1,9 +1,9 @@
 /**
- *  @brief The dense modality's C surface: the variant grid over every compiled backend, the
- *      handle owning the chosen one, and every exported entry point as one visit apiece.
- *  @author Ash Vardanian
  *  @file src/dense_index.cuh
+ *  @author Ash Vardanian
  *  @date August 14, 2026
+ *  @brief The dense modality's C surface: the variant grid over every compiled backend, the handle
+ *      owning the chosen one, and every exported entry point as one visit apiece.
  *
  *  Compiled twice: as @c dense_index.cpp for the portable library and as @c dense_index.cu for
  *  the CUDA one, with @c USEARCH_BUILD_CUDA deciding whether the VRAM arms join the variant.
@@ -460,19 +460,19 @@ struct punned_dense_index_t {
         ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::serial_k>,     //
         ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::serial_k>>;    //
 
-    /** @brief The chosen backend - one alternative of the compiled grid, selected once at
-     *      construction and visited once per call. Residency, quantization, and compute tier
-     *      all live in the alternative's own type - no second tag exists to disagree. */
+    /** The chosen backend - one alternative of the compiled grid, selected once at construction.
+     *  Residency, quantization and compute tier all live in the alternative's own type. */
     variants_t variants;
 
-    /** @brief The dimensionality the options requested, consumed by the first @c reserve;
-     *      once any shard froze real geometry, the variant answers and this stops mattering. */
+    /** The dimensionality the options requested, consumed by the first @c reserve; once any shard
+     *  froze real geometry, the variant answers and this stops mattering. */
     std::size_t requested_dimensions = 0;
-    /** @brief The neighbors-per-node bound the options requested, consumed like the
-     *      dimensionality above. */
+
+    /** The neighbors-per-node bound the options requested, consumed like the dimensionality. */
     connectivity_t requested_connectivity = connectivity_32_k;
-    /** @brief The dispatched tiers, composed once at construction and read-only after - the
-     *      C @c capabilities verb returns this buffer, so it must outlive every call. */
+
+    /** The dispatched tiers, composed once at construction - the C @c capabilities verb returns
+     *  this buffer, so it must outlive every call. */
     char capabilities_string[128] = {};
 
     template <typename variant_type_>
@@ -480,8 +480,8 @@ struct punned_dense_index_t {
         : variants(tag, allocator) {}
 };
 
-/** @brief The arms' explicit instantiation declarations: every body compiles in its class's unit,
- *      so this unit only visits. */
+/** The arms' explicit instantiation declarations: every body compiles in its class's unit, so this
+ *  unit only visits. */
 #if NK_TARGET_X8664_
 #if NK_TARGET_HASWELL
 /* intel_haswell over serial by haswell: every dtype, 33 arms */
@@ -894,8 +894,8 @@ extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_dot_k, cpu
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::serial_k>>;
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::serial_k>>;
 
-/** @brief Whether @p alternative_type_ is listed in @p variant_type_ - the membership fact the
- *      ladder asserts against the explicit list. */
+/** Whether @p alternative_type_ is listed in @p variant_type_ - the membership fact the ladder
+ *  asserts against the explicit list. */
 template <typename alternative_type_, typename variant_type_>
 inline constexpr bool variant_carries = false;
 template <typename alternative_type_, typename... alternative_types_>
@@ -906,8 +906,8 @@ inline constexpr bool variant_carries<alternative_type_, std::variant<alternativ
 
 #pragma region Construction
 
-/** @brief Appends one RAM shard per named memory domain - or one per allocatable domain of a
- *      transient topology when the list is empty, so a bare init still spans the machine. */
+/** Appends one RAM shard per named memory domain - or one per allocatable domain of a transient
+ *  topology when the list is empty, so a bare init still spans the machine. */
 template <typename multi_type_>
     requires is_ram_index<multi_type_>
 static status_t place_shards(multi_type_& variant, usearch_dense_options_t const& options) noexcept {
@@ -936,14 +936,14 @@ static status_t place_shards(multi_type_& variant, usearch_dense_options_t const
     return placed;
 }
 
-/** @brief Appends one comma-separated codename to the handle's capability string. */
+/** Appends one comma-separated codename to the handle's capability string. */
 static void append_capability(punned_dense_index_t& handle, char const* name) noexcept {
     std::size_t const used = std::strlen(handle.capabilities_string);
     std::snprintf(handle.capabilities_string + used, sizeof(handle.capabilities_string) - used, "%s%s", used ? "," : "",
                   name);
 }
 
-/** @brief Fills the handle's capability string once, from the picked NumKong kit. */
+/** Fills the handle's capability string once, from the picked NumKong kit. */
 template <typename multi_type_>
     requires is_ram_index<multi_type_>
 static void compose_capabilities(punned_dense_index_t& handle, multi_type_ const&) noexcept {
@@ -954,7 +954,8 @@ static void compose_capabilities(punned_dense_index_t& handle, multi_type_ const
 }
 
 #if USEARCH_BUILD_CUDA
-/** @brief Appends one VRAM shard per named device ordinal; an empty list takes ordinal zero. */
+
+/** Appends one VRAM shard per named device ordinal; an empty list takes ordinal zero. */
 template <typename multi_type_>
     requires is_vram_index<multi_type_>
 static status_t place_shards(multi_type_& variant, usearch_dense_options_t const& options) noexcept {
@@ -967,7 +968,7 @@ static status_t place_shards(multi_type_& variant, usearch_dense_options_t const
     return status_t::success_k;
 }
 
-/** @brief Fills the handle's capability string once, from the resident device's generation. */
+/** Fills the handle's capability string once, from the resident device's generation. */
 template <typename multi_type_>
     requires is_vram_index<multi_type_>
 static void compose_capabilities(punned_dense_index_t& handle, multi_type_& variant) noexcept {
@@ -979,8 +980,8 @@ static void compose_capabilities(punned_dense_index_t& handle, multi_type_& vari
 }
 #endif
 
-/** @brief The host allocator a multi-index keeps its tables on: the first named memory domain
- *      on RAM, the heap's domain otherwise. */
+/** The host allocator a multi-index keeps its tables on: the first named memory domain on RAM,
+ *  the heap's domain otherwise. */
 template <typename multi_type_>
 static forkunion_allocator_t host_allocator_of(usearch_dense_options_t const& options) noexcept {
     if constexpr (is_ram_index<multi_type_>)
@@ -989,8 +990,8 @@ static forkunion_allocator_t host_allocator_of(usearch_dense_options_t const& op
     return forkunion_allocator_t {no_memory_domain_k};
 }
 
-/** @brief Allocates the handle holding @p variant_type_, places its shards, and publishes the
- *      opaque pointer. */
+/** Allocates the handle holding @p variant_type_, places its shards, and publishes the opaque
+ *  pointer. */
 template <typename variant_type_>
 static usearch_dense_index_t make_punned_dense_index(usearch_dense_options_t const* options,
                                                      usearch_error_t* error) noexcept {
@@ -1008,8 +1009,8 @@ static usearch_dense_index_t make_punned_dense_index(usearch_dense_options_t con
     return propagate_success(error), reinterpret_cast<usearch_dense_index_t>(handle);
 }
 
-/** @brief Whether one rung is genuinely distinct from the class it degrades to: a different picked
- *      kit or a different ForkUnion mask - the one fact justifying its instantiation. */
+/** Whether one rung is genuinely distinct from the class it degrades to: a different picked kit or
+ *  a different ForkUnion mask - the one fact justifying its instantiation. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, cpu_class_t cpu_class_>
 consteval bool rung_advances() noexcept {
     constexpr cpu_class_t parent_k = parent_class_of(cpu_class_);
@@ -1020,14 +1021,14 @@ consteval bool rung_advances() noexcept {
            forkunion_capabilities_of<cpu_class_>() != forkunion_capabilities_of<parent_k>();
 }
 
-/** @brief The unconditional serial floor - every ladder's last rung. */
+/** The unconditional serial floor - every ladder's last rung. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 static usearch_dense_index_t descend_ram_ladder(usearch_dense_options_t const* options, nk_capability_t,
                                                 usearch_error_t* error) noexcept {
     return make_punned_dense_index<ram_index<dtype_, kernel_, cpu_class_t::serial_k>>(options, error);
 }
 
-/** @brief One distinct rung: taken when the machine reports the class, else falls through. */
+/** One distinct rung: taken when the machine reports the class, else falls through. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, cpu_class_t cpu_class_, cpu_class_t... lower_classes_>
     requires(rung_advances<dtype_, kernel_, cpu_class_>())
 static usearch_dense_index_t descend_ram_ladder(usearch_dense_options_t const* options, nk_capability_t available,
@@ -1037,7 +1038,7 @@ static usearch_dense_index_t descend_ram_ladder(usearch_dense_options_t const* o
     return descend_ram_ladder<dtype_, kernel_, lower_classes_...>(options, available, error);
 }
 
-/** @brief A rung whose class picks nothing new: skipped without instantiating its index. */
+/** A rung whose class picks nothing new: skipped without instantiating its index. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, cpu_class_t cpu_class_, cpu_class_t... lower_classes_>
     requires(!rung_advances<dtype_, kernel_, cpu_class_>())
 static usearch_dense_index_t descend_ram_ladder(usearch_dense_options_t const* options, nk_capability_t available,
@@ -1047,10 +1048,9 @@ static usearch_dense_index_t descend_ram_ladder(usearch_dense_options_t const* o
     return descend_ram_ladder<dtype_, kernel_, lower_classes_...>(options, available, error);
 }
 
-/** @brief Picks the RAM variant for one @c (dtype,kernel) cell: CPU classes newest-first, each
- *      rung compiled only where it advances past the class it degrades to, so the ladders stay
- *      sparse per type and every alternative is genuinely distinct. A refused rung falls to the
- *      next in the list, so lineages that share a floor simply interleave. */
+/** Picks the RAM variant for one @c (dtype,kernel) cell: CPU classes newest-first, each rung
+ *  compiled only where it advances past the class it degrades to. A refused rung falls to the next
+ *  in the list, so lineages that share a floor interleave. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 static usearch_dense_index_t make_ram_index(usearch_dense_options_t const* options, usearch_error_t* error) noexcept {
     nk_capability_t const available = nk_capabilities_available();
@@ -1074,7 +1074,8 @@ static usearch_dense_index_t make_ram_index(usearch_dense_options_t const* optio
 }
 
 #if USEARCH_BUILD_CUDA
-/** @brief The VRAM cells with adapted CUDA kits - the device half of the variant list. */
+
+/** The VRAM cells with adapted CUDA kits - the device half of the variant list. */
 constexpr bool vram_cell_wired(nk_dtype_t dtype, nk_kernel_kind_t kernel) noexcept {
     switch (dtype) {
     case nk_i8_k: return kernel == nk_kernel_angular_k || kernel == nk_kernel_euclidean_k;
@@ -1087,8 +1088,8 @@ constexpr bool vram_cell_wired(nk_dtype_t dtype, nk_kernel_kind_t kernel) noexce
     }
 }
 
-/** @brief The VRAM sibling of @ref make_ram_index; the device tier is a template argument
- *      of the index itself, so the cell alone selects the variant. */
+/** The VRAM sibling of @ref make_ram_index; the device tier is a template argument of the index
+ *  itself, so the cell alone selects the variant. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 static usearch_dense_index_t make_vram_index(usearch_dense_options_t const* options, usearch_error_t* error) noexcept {
     if constexpr (!vram_cell_wired(dtype_, kernel_))
@@ -1098,14 +1099,15 @@ static usearch_dense_index_t make_vram_index(usearch_dense_options_t const* opti
     else return make_punned_dense_index<vram_index<dtype_, kernel_>>(options, error);
 }
 #else
-/** @brief The portable build's stand-in: every VRAM request lands on one static message. */
+
+/** The portable build's stand-in: every VRAM request lands on one static message. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 static usearch_dense_index_t make_vram_index(usearch_dense_options_t const*, usearch_error_t* error) noexcept {
     return propagate_error(usearch_error_device_k, error, "This build carries no CUDA backends"), nullptr;
 }
 #endif
 
-/** @brief Routes one lowered cell onto its residency's constructor. */
+/** Routes one lowered cell onto its residency's constructor. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 static usearch_dense_index_t with_residency(usearch_dense_options_t const* options, usearch_error_t* error) noexcept {
     switch (options->residency) {
@@ -1119,7 +1121,7 @@ static usearch_dense_index_t with_residency(usearch_dense_options_t const* optio
     }
 }
 
-/** @brief Routes a numeric dtype's metric onto its three wired kernels. */
+/** Routes a numeric dtype's metric onto its three wired kernels. */
 template <nk_dtype_t dtype_>
     requires(dtype_ != nk_u1_k)
 static usearch_dense_index_t with_metric(usearch_dense_options_t const* options, usearch_error_t* error) noexcept {
@@ -1133,7 +1135,7 @@ static usearch_dense_index_t with_metric(usearch_dense_options_t const* options,
     }
 }
 
-/** @brief Routes the bit-packed dtype's metric onto the bit kernels. */
+/** Routes the bit-packed dtype's metric onto the bit kernels. */
 template <nk_dtype_t dtype_>
     requires(dtype_ == nk_u1_k)
 static usearch_dense_index_t with_metric(usearch_dense_options_t const* options, usearch_error_t* error) noexcept {
@@ -1148,9 +1150,8 @@ static usearch_dense_index_t with_metric(usearch_dense_options_t const* options,
     }
 }
 
-/** @brief Lowers the runtime @c (quantization,metric) pair onto the wired cells - every
- *      numeric dtype speaks inner, angular & euclidean; the bit dtype speaks inner,
- *      hamming & jaccard. */
+/** Lowers the runtime @c (quantization,metric) pair onto the wired cells - every numeric dtype
+ *  speaks inner, angular & euclidean; the bit dtype speaks inner, hamming & jaccard. */
 static usearch_dense_index_t with_cell(usearch_dense_options_t const* options, usearch_error_t* error) noexcept {
     switch (options->quantization) {
     case usearch_scalar_bf16_k: return with_metric<nk_bf16_k>(options, error);
@@ -1172,8 +1173,8 @@ static usearch_dense_index_t with_cell(usearch_dense_options_t const* options, u
 
 #pragma region Multi Verbs
 
-/** @brief The state behind @c usearch_executor_t: the discovered topology it owns, and one
- *      residency's executor - the variant is the kind tag, so no second word can disagree. */
+/** The state behind @c usearch_executor_t: the discovered topology it owns, and one residency's
+ *  executor - the variant is the kind tag, so no second word can disagree. */
 struct punned_executor_t {
     fu_topology_t topology = nullptr;
     std::variant<forkunion_executor_t
@@ -1185,8 +1186,8 @@ struct punned_executor_t {
         executor;
 };
 
-/** @brief The typed executor behind the C handle, or null with @c usearch_error_device_k on a
- *      kind mismatch. */
+/** The typed executor behind the C handle, or null with @c usearch_error_device_k on a kind
+ *  mismatch. */
 template <typename multi_type_>
 static typename multi_type_::executor_t* executor_of(usearch_executor_t punned_executor,
                                                      usearch_error_t* error) noexcept {
@@ -1198,8 +1199,8 @@ static typename multi_type_::executor_t* executor_of(usearch_executor_t punned_e
     return typed;
 }
 
-/** @brief One strided C matrix's rank-2 shape: extents in storage values, so packed dtypes count
- *      bytes; a zero stride means contiguous rows. */
+/** One strided C matrix's rank-2 shape: extents in storage values, so packed dtypes count bytes;
+ *  a zero stride means contiguous rows. */
 template <typename scalar_type_>
 static nk::shape_storage_<2> rows_shape_of(std::size_t rows_count, std::size_t stride,
                                            std::size_t dimensions) noexcept {
@@ -1208,8 +1209,8 @@ static nk::shape_storage_<2> rows_shape_of(std::size_t rows_count, std::size_t s
     return {{rows_count, row_values}, {row_bytes, static_cast<std::ptrdiff_t>(sizeof(scalar_type_))}, 2};
 }
 
-/** @brief A chunk's rows in @p multi_type_ 's stored scalar: the caller's own when they match,
- *      else cast into @p staged. */
+/** A chunk's rows in @p multi_type_ 's stored scalar: the caller's own when they match, else cast
+ *  into @p staged. */
 template <typename multi_type_>
 static nk::matrix_view<typename multi_type_::scalar_t> stored_rows_of( //
     char const* rows, std::size_t rows_count, std::size_t row_bytes, nk_dtype_t source_dtype, std::size_t dimensions,
@@ -1223,11 +1224,9 @@ static nk::matrix_view<typename multi_type_::scalar_t> stored_rows_of( //
     return {reinterpret_cast<char const*>(staged.data()), rows_shape_of<scalar_t>(rows_count, 0, dimensions)};
 }
 
-/**
- *  @brief The export tail every row reader shares: @p fill produces up to @c rows.extent(0) rows
- *      in the stored type and reports how many, landing in the caller's own plane when the two
- *      types agree and in a staged one converted row by row otherwise.
- */
+/** The export tail every row reader shares: @p fill produces up to @c rows.extent(0) rows in the
+ *  stored type and reports how many, landing in the caller's own plane when the two types agree
+ *  and in a staged one converted row by row otherwise. */
 template <typename scalar_type_, typename fill_type_>
 static std::size_t export_rows(usearch_matrix_span_t const* vectors, std::size_t dimensions, nk_dtype_t stored_dtype,
                                fill_type_&& fill, usearch_error_t* error) noexcept {
@@ -1256,8 +1255,8 @@ static std::size_t export_rows(usearch_matrix_span_t const* vectors, std::size_t
     return propagate_success(error), total;
 }
 
-/** @brief The one search engine both C verbs drive: chunked, staged, scattered; a real predicate
- *      narrows it to CPU handles. */
+/** The one search engine both C verbs drive: chunked, staged, scattered; a real predicate narrows
+ *  it to CPU handles. */
 template <typename predicate_type_>
 static void search_dense_rows(usearch_dense_index_t index, usearch_executor_t punned_executor,        //
                               void const* queries, size_t queries_count, size_t queries_columns,      //
@@ -1569,14 +1568,13 @@ USEARCH_EXPORT size_t usearch_dense_refine(                          //
             shard_ticks_t ticks {progress, progress_state, specialized_index {variant}.size()};
             auto const [refined, refined_status] = specialized_index {variant}.refine(*executor, config, ticks);
             accumulate_stats(stats, refined);
-            // A stopped sweep is not a failure: the graph stands, every node it did reach keeps
-            // its fresh neighbors, and the next call sweeps again toward the same fixed point.
+            // A stopped sweep is not a failure: the graph stands, and the next call sweeps again
+            // toward the same fixed point.
             if (failed(refined_status) && refined_status != status_t::cancelled_k)
                 return propagate_error(refined_status, error), 0ul;
 
             // Re-selection alone can strand a node no search reaches, so every sweep closes with
-            // the repair that finds them; its reconnections are neighbor rewrites the caller's
-            // settling loop must see, so they join the count.
+            // the repair; its reconnections join the count the caller's settling loop watches.
             auto const [healed, healed_status] = specialized_index {variant}.heal(*executor);
             if (failed(healed_status)) return propagate_error(healed_status, error), refined.changed_nodes;
             if (stats) {
@@ -1785,8 +1783,8 @@ USEARCH_EXPORT void usearch_dense_maxsim(      //
 
 #pragma region Serialization
 
-/** @brief The run read as text - a path, which is bytes that happen to decode. The ABI spells a
- *      byte @c uint8_t and the language spells it @c char, so the two never meet implicitly. */
+/** The run read as text - a path, which is bytes that happen to decode. The ABI spells a byte
+ *  @c uint8_t and the language spells it @c char, so the two never meet implicitly. */
 static std::string_view as_text(usearch_bytes_view_t bytes) noexcept {
     return {reinterpret_cast<char const*>(bytes.data), bytes.length};
 }
@@ -1798,7 +1796,7 @@ USEARCH_EXPORT size_t usearch_dense_storage_requirements(usearch_dense_index_t i
                       punned_index->variants);
 }
 
-/** @brief Fills every field a checkpoint froze; the type carries nothing a checkpoint cannot say. */
+/** Fills every field a checkpoint froze; the type carries nothing a checkpoint cannot say. */
 static void adopt_metadata(safegraphs_metadata_t const& source, usearch_dense_metadata_t* metadata) noexcept {
     metadata->dimensions = regular_width(source.value_shape).value_or(0);
     metadata->connectivity = source.connectivity;

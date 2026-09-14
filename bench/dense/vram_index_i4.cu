@@ -1,9 +1,9 @@
 /**
- *  @brief The i4-stored shard of the CUDA dense-index benchmark: carries the
- *      run_with_stored_dtype instantiations the dtype-free CLI unit extern-declares.
- *  @author Ash Vardanian
  *  @file bench/dense/vram_index_i4.cu
+ *  @author Ash Vardanian
  *  @date July 23, 2026
+ *  @brief The i4-stored shard of the CUDA dense-index benchmark: carries the run_with_stored_dtype
+ *      instantiations the dtype-free CLI unit extern-declares.
  */
 #include "dense/vram_index.cuh"
 

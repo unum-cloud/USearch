@@ -1,11 +1,10 @@
 /**
- *  @brief The interchange unit of the suite: a fixed-width embedding fixture carried through
- *      the shared basic-tier SafeGraphs scenarios - monolith, hostile headers, and the
- *      distributed manifest form.
- *
- *  @author Ash Vardanian
  *  @file test/utilities/safegraphs_format.cpp
+ *  @author Ash Vardanian
  *  @date September 3, 2026
+ *  @brief The interchange unit of the suite: a fixed-width embedding fixture carried through the
+ *      shared basic-tier SafeGraphs scenarios - monolith, hostile headers, and the distributed
+ *      manifest form.
  *
  *  Every modality unit brings a ragged value column, so a fixed-width one is what this fixture
  *  adds: its header must say @c FixedSizeList where theirs say a prefix-sum list, and the same
@@ -27,10 +26,10 @@ using namespace unum::usearch;
 
 #pragma region Embeddings
 
-/** @brief One fixed-width vector; plain floats, so the codec round trip is bit-exact. */
+/** One fixed-width vector; plain floats, so the codec round trip is bit-exact. */
 using embedding_t = std::array<f32_t, 16>;
 
-/** @brief One minus the cosine - the reference's @c angular over unit-ish vectors. */
+/** One minus the cosine - the reference's @c angular over unit-ish vectors. */
 static f32_t angular_distance(embedding_t const& first, embedding_t const& second) noexcept {
     f32_t dot = 0, first_norm = 0, second_norm = 0;
     for (std::size_t axis = 0; axis != first.size(); ++axis) {
@@ -41,8 +40,8 @@ static f32_t angular_distance(embedding_t const& first, embedding_t const& secon
     return 1.0f - dot / std::sqrt(first_norm * second_norm);
 }
 
-/** @brief The batched metric over stored embeddings, staged by value - a fixed row of floats
- *      is cheaper copied than chased. */
+/** The batched metric over stored embeddings, staged by value - a fixed row of floats
+ *  is cheaper copied than chased. */
 struct angular_metric_t {
     embedding_t query_ {};
     std::vector<embedding_t> staged_;
@@ -58,7 +57,7 @@ struct angular_metric_t {
     }
 };
 
-/** @brief The embedding's own bytes: one fixed row of sixteen @c f32, a regular column. */
+/** The embedding's own bytes: one fixed row of sixteen @c f32, a regular column. */
 struct embedding_codec_t {
     inline static constexpr dtype_t value_dtype_k = dtype_t::f32_k;
     inline static constexpr column_shape_t value_shape_k = vector_shape_t {std::tuple_size_v<embedding_t>};
@@ -91,8 +90,8 @@ struct embeddings_fixture_t {
     static u64_t make_key(std::size_t ordinal) { return 0x5EED000000000000ull + ordinal; }
     static bool value_equals(embedding_t const& first, embedding_t const& second) noexcept { return first == second; }
 
-    /** @brief A few prototypes on the unit sphere, each drawn many times with a small jitter,
-     *      so the graph has clusters to navigate. */
+    /** A few prototypes on the unit sphere, each drawn many times with a small jitter,
+     *  so the graph has clusters to navigate. */
     static std::vector<embedding_t> make_values(std::size_t count, u64_t seed) {
         constexpr std::size_t prototypes_k = 6;
         splitmix64_t random_generator {seed};
@@ -123,9 +122,9 @@ static_assert(interchange_value_codec<embedding_codec_t>);
 
 #pragma region Harness
 
-/** @brief The shared basic-tier scenarios over the embeddings fixture - a fixed-width value
- *      column, which no modality unit has: monolith, hostile header battery, and the
- *      distributed form, each at every alignment and executor the scenarios cover. */
+/** The shared basic-tier scenarios over the embeddings fixture - a fixed-width value
+ *  column, which no modality unit has: monolith, hostile header battery, and the
+ *  distributed form, each at every alignment and executor the scenarios cover. */
 std::size_t test_safegraphs_format() {
     embeddings_fixture_t const fixture;
     std::size_t failures = 0;

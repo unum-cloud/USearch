@@ -1,16 +1,15 @@
 /**
- *  @brief Files as bytes, two ways: @ref seekable_file_t addressed by offset with sliceable
- *      proxies over its contents, and @ref mapped_file_t addressed as memory - so a reader and
- *      a writer both speak @c subspan and @ref copy_bytes wherever the bytes sit.
+ *  @file include/usearch/utilities/blocking_files.hpp
+ *  @author Ash Vardanian
+ *  @date September 4, 2026
+ *  @brief Files as bytes, two ways: @ref seekable_file_t addressed by offset with sliceable proxies
+ *      over its contents, and @ref mapped_file_t addressed as memory - so a reader and a writer
+ *      both speak @c subspan and @ref copy_bytes wherever the bytes sit.
  *
  *  Every verb here blocks the calling thread, which is the whole difference from the NVMe
  *  engines: those queue their reads and return, where these park until the kernel answers.
  *  Bulk work - a whole checkpoint, a whole dataset - is what this is for, and it needs no
  *  @c io_uring, no I/O Rings and no @c O_DIRECT, so it builds and runs everywhere.
- *
- *  @author Ash Vardanian
- *  @file include/usearch/utilities/blocking_files.hpp
- *  @date September 4, 2026
  *
  *  The format this backs is memory-mappable by design, so reading is a mapping and every reader
  *  works on @c bytes_view_t. Writing has two shapes for one reason: a mapping dirties the page
@@ -50,21 +49,25 @@ namespace usearch {
 
 #pragma region Descriptors
 
-/** @brief How @ref seekable_file_t::open opens a file: reading an existing one, or creating a fresh one. */
+/** How @ref seekable_file_t::open opens a file: reading an existing one, or creating a fresh one. */
 enum class file_mode_t { read_k, write_k };
 
-/** @brief An owned file descriptor with positional verbs only - no cursor, so any thread reads or
- *      writes any offset; every verb answers @c status_t. */
+/** An owned file descriptor with positional verbs only - no cursor, so any thread reads or
+ *  writes any offset; every verb answers @c status_t. */
 struct seekable_file_t {
 #if defined(_WIN32)
-    /** @brief What the platform calls an open file. */
+
+    /** What the platform calls an open file. */
     using descriptor_t = HANDLE;
-    /** @brief The value a closed file carries. */
+
+    /** The value a closed file carries. */
     inline static descriptor_t const closed_k = INVALID_HANDLE_VALUE;
 #else
-    /** @brief What the platform calls an open file. */
+
+    /** What the platform calls an open file. */
     using descriptor_t = int;
-    /** @brief The value a closed file carries. */
+
+    /** The value a closed file carries. */
     inline static constexpr descriptor_t closed_k = -1;
 #endif
 
@@ -77,11 +80,11 @@ struct seekable_file_t {
     seekable_file_t& operator=(seekable_file_t const&) = delete;
     ~seekable_file_t() noexcept { [[maybe_unused]] status_t const closed = close(); }
 
-    /** @brief Truthy exactly while a file is open. */
+    /** Truthy exactly while a file is open. */
     explicit operator bool() const noexcept { return descriptor_ != closed_k; }
 
-    /** @brief Opens @p path; the NUL terminator the OS demands is one transient allocation
-     *      through @p allocator. */
+    /** Opens @p path; the NUL terminator the OS demands is one transient allocation
+     *  through @p allocator. */
     template <typename allocator_type_ = std::allocator<byte_t>>
     static expected<seekable_file_t> open(std::string_view path, file_mode_t mode,
                                           allocator_type_ allocator = {}) noexcept {
@@ -98,24 +101,30 @@ struct seekable_file_t {
         return {std::move(file), opened};
     }
 
-    /** @brief Sets the file's length to @p bytes, so positional writes land in a pre-sized file. */
+    /** Sets the file's length to @p bytes, so positional writes land in a pre-sized file. */
     status_t truncate(std::size_t bytes) noexcept;
-    /** @brief Writes every byte of @p source at @p offset, looping over short writes. */
+
+    /** Writes every byte of @p source at @p offset, looping over short writes. */
     status_t write_at(std::size_t offset, bytes_view_t source) noexcept;
-    /** @brief Reads exactly @p destination.size() bytes at @p offset; a short read answers @c io_k. */
+
+    /** Reads exactly @p destination.size() bytes at @p offset; a short read answers @c io_k. */
     status_t read_at(std::size_t offset, bytes_span_t destination) const noexcept;
-    /** @brief Byte length of the file. */
+
+    /** Byte length of the file. */
     expected<std::size_t> length() const noexcept;
-    /** @brief Closes, surfacing the failure the destructor would swallow. */
+
+    /** Closes, surfacing the failure the destructor would swallow. */
     status_t close() noexcept;
-    /** @brief Hands the descriptor to a caller that closes it from now on - what a mapping takes. */
+
+    /** Hands the descriptor to a caller that closes it from now on - what a mapping takes. */
     descriptor_t release() noexcept { return std::exchange(descriptor_, closed_k); }
 
   private:
-    /** @brief Opens @p path under @p mode, answering @c closed_k on failure. */
+
+    /** Opens @p path under @p mode, answering @c closed_k on failure. */
     static descriptor_t open_(char const* path, file_mode_t mode) noexcept;
 
-    /** @brief The wrapped descriptor; @c closed_k marks the empty state a move-out leaves behind. */
+    /** The wrapped descriptor; @c closed_k marks the empty state a move-out leaves behind. */
     descriptor_t descriptor_ = closed_k;
 };
 
@@ -224,46 +233,55 @@ inline status_t seekable_file_t::close() noexcept {
 
 #pragma region Slices and Mappings
 
-/** @brief A read-only run of a file's bytes: the descriptor and an absolute byte range, sliced
- *      like a span and read through @ref copy_bytes. */
+/** A read-only run of a file's bytes: the descriptor and an absolute byte range, sliced
+ *  like a span and read through @ref copy_bytes. */
 struct file_view_t {
-    /** @brief The file the range lives in; null for an empty slice. */
+
+    /** The file the range lives in; null for an empty slice. */
     seekable_file_t const* file = nullptr;
-    /** @brief First byte of the range within the file. */
+
+    /** First byte of the range within the file. */
     std::size_t begin = 0;
-    /** @brief One past the last byte. */
+
+    /** One past the last byte. */
     std::size_t end = 0;
 
     std::size_t size() const noexcept { return end - begin; }
     bool empty() const noexcept { return end == begin; }
-    /** @brief The @p length bytes at @p offset within this range; empty when they do not fit. */
+
+    /** The @p length bytes at @p offset within this range; empty when they do not fit. */
     file_view_t subspan(std::size_t offset, std::size_t length) const noexcept {
         if (offset > size() || length > size() - offset) return {};
         return {file, begin + offset, begin + offset + length};
     }
 };
 
-/** @brief The writable twin of @ref file_view_t, written through @ref copy_bytes. */
+/** The writable twin of @ref file_view_t, written through @ref copy_bytes. */
 struct file_span_t {
-    /** @brief The file the range lives in; null for an empty slice. */
+
+    /** The file the range lives in; null for an empty slice. */
     seekable_file_t* file = nullptr;
-    /** @brief First byte of the range within the file. */
+
+    /** First byte of the range within the file. */
     std::size_t begin = 0;
-    /** @brief One past the last byte. */
+
+    /** One past the last byte. */
     std::size_t end = 0;
 
     std::size_t size() const noexcept { return end - begin; }
     bool empty() const noexcept { return end == begin; }
-    /** @brief The @p length bytes at @p offset within this range; empty when they do not fit. */
+
+    /** The @p length bytes at @p offset within this range; empty when they do not fit. */
     file_span_t subspan(std::size_t offset, std::size_t length) const noexcept {
         if (offset > size() || length > size() - offset) return {};
         return {file, begin + offset, begin + offset + length};
     }
-    /** @brief The same range, read-only. */
+
+    /** The same range, read-only. */
     file_view_t view() const noexcept { return {file, begin, end}; }
 };
 
-/** @brief Writes @p source into the file bytes @p destination names, at their own offset. */
+/** Writes @p source into the file bytes @p destination names, at their own offset. */
 inline status_t copy_bytes(file_span_t destination, bytes_view_t source) noexcept {
     if (destination.size() != source.size()) return status_t::config_mismatch_k;
     if (source.empty()) return status_t::success_k;
@@ -271,7 +289,7 @@ inline status_t copy_bytes(file_span_t destination, bytes_view_t source) noexcep
     return destination.file->write_at(destination.begin, source);
 }
 
-/** @brief Reads the file bytes @p source names into @p destination. */
+/** Reads the file bytes @p source names into @p destination. */
 inline status_t copy_bytes(bytes_span_t destination, file_view_t source) noexcept {
     if (destination.size() != source.size()) return status_t::malformed_k;
     if (destination.empty()) return status_t::success_k;
@@ -311,22 +329,27 @@ class mapped_file_t {
 #endif
     }
 
-    /** @brief Truthy exactly while a mapping is held. */
+    /** Truthy exactly while a mapping is held. */
     explicit operator bool() const noexcept { return data_ != nullptr; }
-    /** @brief The mapped bytes, read-only. */
+
+    /** The mapped bytes, read-only. */
     bytes_view_t view() const noexcept { return {data_, bytes_}; }
-    /** @brief The mapped bytes for writing; empty on a read mapping. */
+
+    /** The mapped bytes for writing; empty on a read mapping. */
     bytes_span_t span() noexcept {
         return mode_ == file_mode_t::write_k ? bytes_span_t {data_, bytes_} : bytes_span_t {};
     }
-    /** @brief Bytes the mapping spans. */
+
+    /** Bytes the mapping spans. */
     std::size_t size() const noexcept { return bytes_; }
 
-    /** @brief Maps the whole of @p path read-only. */
+    /** Maps the whole of @p path read-only. */
     static expected<mapped_file_t> read(std::string_view path) noexcept;
-    /** @brief Creates @p path at @p bytes and maps it writable; the bytes arrive zeroed. */
+
+    /** Creates @p path at @p bytes and maps it writable; the bytes arrive zeroed. */
     static expected<mapped_file_t> write(std::string_view path, std::size_t bytes) noexcept;
-    /** @brief Flushes a write mapping and releases it, surfacing what the destructor swallows. */
+
+    /** Flushes a write mapping and releases it, surfacing what the destructor swallows. */
     status_t sync() noexcept;
 
   private:

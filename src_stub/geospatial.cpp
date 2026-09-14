@@ -1,8 +1,9 @@
 /**
- *  @brief A brute-force stand-in for the @c usearch_geospatial_* C ABI, scoring every stored
- *      point set against every query so a binding can be exercised without the engine.
- *
  *  @file src_stub/geospatial.cpp
+ *  @author Ash Vardanian
+ *  @date September 5, 2026
+ *  @brief A brute-force stand-in for the @c usearch_geospatial_* C ABI, scoring every stored point
+ *      set against every query so a binding can be exercised without the engine.
  *
  *  Two things here are worth a binding's attention more than any kernel. A layout's enumerator
  *  is not its width - @c surface_k carries two axes, @c timed_k three, @c elevated_timed_k four
@@ -43,13 +44,13 @@ namespace {
 
 #pragma region Storage
 
-/** @brief The mean radius the sphere stands in for the ellipsoid with, in metres. */
+/** The mean radius the sphere stands in for the ellipsoid with, in metres. */
 constexpr double earth_radius_k = 6371000.0;
 
-/** @brief What a zeroed characteristic speed derives to, in metres per second. */
+/** What a zeroed characteristic speed derives to, in metres per second. */
 constexpr double derived_speed_k = 13.0;
 
-/** @brief The converted form every mode scores over: Earth-fixed metres, plus scaled time. */
+/** The converted form every mode scores over: Earth-fixed metres, plus scaled time. */
 using position_t = std::array<double, 4>;
 
 using payload_t = std::vector<float>;
@@ -60,31 +61,33 @@ static_assert(std::is_nothrow_move_constructible_v<entry_t>, "reallocation must 
 using index_t = handle<payload_t, usearch_geospatial_options_t>;
 
 struct cursor_t {
-    /** @brief The index being walked; it must outlive the cursor. */
+
+    /** The index being walked; it must outlive the cursor. */
     index_t* index;
-    /** @brief The next entry to hand out. */
+
+    /** The next entry to hand out. */
     std::size_t position;
-    /** @brief The watermark captured at creation, which later insertions cannot raise. */
+
+    /** The watermark captured at creation, which later insertions cannot raise. */
     std::size_t limit;
-    /** @brief Earth-fixed centimetres of the batch just handed out, borrowed until the next call. */
+
+    /** Earth-fixed centimetres of the batch just handed out, borrowed until the next call. */
     std::vector<us::i32_t> centimetres;
 };
 
-/**
- *  @brief A query converted once and reused: it keeps the caller's coordinates, since the axes
- *      a search selects are not known until the search itself.
- */
+/** A query converted once and reused: it keeps the caller's coordinates, since the axes
+ *  a search selects are not known until the search itself. */
 struct emplaced_t {
-    /** @brief The index whose layout and speed govern conversion; it must outlive this. */
+
+    /** The index whose layout and speed govern conversion; it must outlive this. */
     index_t* index;
-    /** @brief The query's positions, as many as its point count times the layout's width. */
+
+    /** The query's positions, as many as its point count times the layout's width. */
     std::vector<double> points;
 };
 
-/**
- *  @brief How many coordinates one position carries. Deliberately a switch rather than a cast
- *      of the enumerator, whose values are not the widths they name.
- */
+/** How many coordinates one position carries. Deliberately a switch rather than a cast
+ *  of the enumerator, whose values are not the widths they name. */
 std::size_t layout_width(usearch_geospatial_layout_t layout) {
     switch (layout) {
     case usearch_geospatial_layout_surface_k: return 2;
@@ -103,19 +106,19 @@ bool layout_carries_time(usearch_geospatial_layout_t layout) {
     return layout == usearch_geospatial_layout_timed_k || layout == usearch_geospatial_layout_elevated_timed_k;
 }
 
-/** @brief Whether the layout is frozen; a zeroed one makes every derived extent zero. */
+/** Whether the layout is frozen; a zeroed one makes every derived extent zero. */
 bool reject_unfrozen(index_t const& index, usearch_error_t* error) {
     return reject_if(!layout_width(index.options.layout), usearch_error_uninitialized_k, "The layout was never frozen",
                      error);
 }
 
-/** @brief Whether the mode is one this build scores at all. */
+/** Whether the mode is one this build scores at all. */
 bool known_mode(usearch_geospatial_mode_t mode) {
     return mode == usearch_geospatial_mode_approach_k || mode == usearch_geospatial_mode_shape_k ||
            mode == usearch_geospatial_mode_coverage_k || mode == usearch_geospatial_mode_route_k;
 }
 
-/** @brief Route scoring reads the ordering of a set, which only a path structure carries. */
+/** Route scoring reads the ordering of a set, which only a path structure carries. */
 bool reject_mode(index_t const& index, usearch_geospatial_mode_t mode, usearch_error_t* error) {
     if (reject_if(!known_mode(mode), usearch_error_unknown_kind_k, "The scoring mode is not one this build knows",
                   error))
@@ -126,17 +129,15 @@ bool reject_mode(index_t const& index, usearch_geospatial_mode_t mode, usearch_e
                      error);
 }
 
-/** @brief The exchange rate between the axes, which a tolerance names as a radius over a window. */
+/** The exchange rate between the axes, which a tolerance names as a radius over a window. */
 double speed_of(usearch_geospatial_tolerance_t const* tolerance) {
     if (!tolerance || tolerance->metres <= 0 || tolerance->seconds <= 0) return derived_speed_k;
     return tolerance->metres / tolerance->seconds;
 }
 
-/**
- *  @brief Whether the query was emplaced against this very index. The conversion a query holds
- *      is only meaningful under the layout it was built for, so crossing handles is rejected
- *      rather than scored.
- */
+/** Whether the query was emplaced against this very index. The conversion a query holds
+ *  is only meaningful under the layout it was built for, so crossing handles is rejected
+ *  rather than scored. */
 bool reject_foreign(index_t const& index, usearch_geospatial_emplaced_t query, usearch_error_t* error) {
     if (reject_if(!query, usearch_error_malformed_input_k, "The query is null", error)) return true;
     return reject_if(borrowed<emplaced_t const>(query).index != &index, usearch_error_config_mismatch_k,
@@ -147,10 +148,8 @@ bool reject_foreign(index_t const& index, usearch_geospatial_emplaced_t query, u
 
 #pragma region Scoring
 
-/**
- *  @brief Converts one geodetic position into Earth-fixed metres under the selected axes, with
- *      the unselected components zeroed so they cancel on both sides of a comparison.
- */
+/** Converts one geodetic position into Earth-fixed metres under the selected axes, with
+ *  the unselected components zeroed so they cancel on both sides of a comparison. */
 position_t converted(std::span<double const> point, usearch_geospatial_layout_t layout, usearch_geospatial_axes_t axes,
                      double speed) {
     double const latitude = point[0] * M_PI / 180.0, longitude = point[1] * M_PI / 180.0;
@@ -177,7 +176,7 @@ double position_distance(position_t const& first, position_t const& second) {
     return std::sqrt(squared);
 }
 
-/** @brief The converted form of a whole point set, which every mode below scores over. */
+/** The converted form of a whole point set, which every mode below scores over. */
 void convert_set(std::span<double const> points, usearch_geospatial_layout_t layout, usearch_geospatial_axes_t axes,
                  double speed, std::vector<position_t>& positions) {
     std::size_t const width = layout_width(layout);
@@ -192,7 +191,7 @@ void convert_stored(std::span<float const> stored, usearch_geospatial_layout_t l
     convert_set(widened, layout, axes, speed, positions);
 }
 
-/** @brief The directed nearest-approach of every position in @p from to the whole of @p onto. */
+/** The directed nearest-approach of every position in @p from to the whole of @p onto. */
 void directed(std::span<position_t const> from, std::span<position_t const> onto, double& nearest, double& worst) {
     nearest = INFINITY, worst = 0;
     for (position_t const& position : from) {
@@ -205,10 +204,8 @@ void directed(std::span<position_t const> from, std::span<position_t const> onto
     if (nearest == INFINITY) nearest = 0;
 }
 
-/**
- *  @brief Scores one query set against one stored set under the selected mode. Route scoring
- *      pairs positions in order, which is what an ordered structure buys.
- */
+/** Scores one query set against one stored set under the selected mode. Route scoring
+ *  pairs positions in order, which is what an ordered structure buys. */
 double distance(std::span<position_t const> query, std::span<position_t const> stored, usearch_geospatial_mode_t mode) {
     if (mode == usearch_geospatial_mode_route_k) {
         std::size_t const paired = std::min(query.size(), stored.size());
@@ -228,14 +225,14 @@ double distance(std::span<position_t const> query, std::span<position_t const> s
     }
 }
 
-/** @brief Reusable buffers, so scoring a whole corpus allocates once rather than per pair. */
+/** Reusable buffers, so scoring a whole corpus allocates once rather than per pair. */
 struct scratch_t {
     std::vector<position_t> query_positions;
     std::vector<position_t> entry_positions;
     std::vector<double> widened;
 };
 
-/** @brief One query's whole scan. The query converts once, then every entry scores against it. */
+/** One query's whole scan. The query converts once, then every entry scores against it. */
 void rank(index_t const& index, emplaced_t const& query, usearch_geospatial_mode_t mode, usearch_geospatial_axes_t axes,
           usearch_geospatial_tolerance_t const* tolerance, std::size_t rows, usearch_predicate_t predicate,
           void* predicate_state, scratch_t& scratch, std::vector<match_t>& ranked) {
@@ -292,24 +289,27 @@ std::size_t search_queries(index_t& index, usearch_geospatial_emplaced_t const* 
 
 #pragma region Serialization
 
-/**
- *  @brief What @c load needs before it can read an entry. The blob is this file's own memory
- *      image rather than a format: no magic, no version, and nothing else reads it back.
- */
+/** What @c load needs before it can read an entry. The blob is this file's own memory
+ *  image rather than a format: no magic, no version, and nothing else reads it back. */
 struct prefix_t {
-    /** @brief The connections-per-node bound the handle was built with. */
+
+    /** The connections-per-node bound the handle was built with. */
     std::size_t connectivity;
-    /** @brief How many entries follow the prefix. */
+
+    /** How many entries follow the prefix. */
     std::size_t entries;
-    /** @brief Bytes of entry payload that follow, keys and point counts included. */
+
+    /** Bytes of entry payload that follow, keys and point counts included. */
     std::size_t payload_bytes;
-    /** @brief Which axes each stored position carries. */
+
+    /** Which axes each stored position carries. */
     usearch_geospatial_layout_t layout;
-    /** @brief What the ordering of points within one set means. */
+
+    /** What the ordering of points within one set means. */
     usearch_geospatial_structure_t structure;
 };
 
-/** @brief The per-entry overhead of the blob: the key, then the point count that follows it. */
+/** The per-entry overhead of the blob: the key, then the point count that follows it. */
 constexpr std::size_t record_overhead_k = sizeof(usearch_key_t) + sizeof(us::u64_t);
 
 std::size_t payload_extent(index_t const& index, std::size_t rows) {
@@ -348,7 +348,7 @@ void write_into(index_t const& index, std::size_t rows, bytes_span_t target) {
     }
 }
 
-/** @brief Reads the prefix and checks the blob is long enough for what it claims. */
+/** Reads the prefix and checks the blob is long enough for what it claims. */
 bool parse_prefix(prefix_t& prefix, bytes_view_t blob, usearch_error_t* error) {
     if (reject_if(blob.size() < sizeof(prefix_t), usearch_error_malformed_input_k, "The checkpoint ends early", error))
         return false;
@@ -362,7 +362,7 @@ void adopt(usearch_geospatial_options_t& options, prefix_t const& prefix) {
     options.connectivity = prefix.connectivity;
 }
 
-/** @brief Replaces the contents of @p index; the caller holds both locks exclusively. */
+/** Replaces the contents of @p index; the caller holds both locks exclusively. */
 bool read_from(index_t& index, bytes_view_t blob, usearch_error_t* error) {
     prefix_t prefix {};
     if (!parse_prefix(prefix, blob, error)) return false;
@@ -562,7 +562,7 @@ void usearch_geospatial_release(usearch_geospatial_emplaced_t handle, usearch_er
     delete static_cast<emplaced_t*>(handle);
 }
 
-/** @brief The shared body of both search doors; the unfiltered one admits with a null predicate. */
+/** The shared body of both search doors; the unfiltered one admits with a null predicate. */
 void search_geospatial_batch(usearch_geospatial_index_t handle, usearch_executor_t executor,
                              usearch_geospatial_emplaced_t const* queries, std::size_t queries_count,
                              usearch_geospatial_mode_t mode, usearch_geospatial_axes_t axes,

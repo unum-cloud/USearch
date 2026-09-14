@@ -1,14 +1,16 @@
 /**
- *  @brief GenMC client for the dense index's publication protocol in `include/usearch/dense/ram_index.hpp`:
- *      the dispenser, the rows, the back-link's release fence, the watermark turn, and the save
- *      under `concurrent_k` with its settlement probe, spelled line for line over the ForkUnion
- *      reference the index binds; the header's chunk fills are beyond GenMC's graph, see
- *      `dense_ram_index_capacity.cpp`.
- *  @author Ash Vardanian
  *  @file verification/dense_ram_index_watermark.cpp
+ *  @author Ash Vardanian
  *  @date September 9, 2026
+ *  @brief GenMC client for the dense index's publication protocol in
+ *      `include/usearch/dense/ram_index.hpp`.
  *
- *  Two inserters dispense ids 0 and 1, publish their rows, and the second back-links into row
+ *  The dispenser, the rows, the back-link's release fence, the watermark turn, and the save under
+ *  `concurrent_k` with its settlement probe, spelled line for line over the ForkUnion reference the
+ *  index binds; the header's chunk fills are beyond GenMC's graph, see
+ *  `dense_ram_index_capacity.cpp`.
+ *
+ *  Two inserters dispense IDs 0 and 1, publish their rows, and the second back-links into row
  *  0. A saver plans, copies the rows relaxed, and re-checks the counters after an acquire fence.
  *  A settled copy holds whole rows and no locked one. `-Dwithout_release_fence` drops the fence
  *  heading `back_link_neighbors`, and a settled copy pairs a new tail with an old slot zero.

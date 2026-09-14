@@ -1,7 +1,8 @@
 /**
- *  @brief Accessors for the anonymous residency union of @c usearch_dense_options_t.
- *
  *  @file golang/shim.c
+ *  @author Ash Vardanian
+ *  @date August 16, 2026
+ *  @brief Accessors for the anonymous residency union of @c usearch_dense_options_t.
  *
  *  Each writer stamps the residency tag alongside its arm, so a caller cannot leave the tag
  *  disagreeing with the member it filled.

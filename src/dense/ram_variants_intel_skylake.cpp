@@ -1,8 +1,8 @@
 /**
- *  @brief The intel_skylake unit: its arms inline the AVX-512 kits, so the unit compiles with them.
- *  @author Ash Vardanian
  *  @file src/dense/ram_variants_intel_skylake.cpp
+ *  @author Ash Vardanian
  *  @date September 7, 2026
+ *  @brief The intel_skylake unit: its arms inline the AVX-512 kits, so the unit compiles with them.
  */
 #include "dense_specializations.cuh"
 

@@ -1,9 +1,9 @@
 /**
+ *  @file test/dense/ram_index_bf16.cpp
+ *  @author Ash Vardanian
+ *  @date July 23, 2026
  *  @brief Smoke & concurrency tests for the CPU-resident @c dense_ram_index over bf16 cells,
  *      repeated under a deliberately flaky waiter to widen the interleaving windows.
- *  @author Ash Vardanian
- *  @file test/dense/ram_index_bf16.cpp
- *  @date July 23, 2026
  */
 #include "dense/ram_index.hpp"
 

@@ -1,9 +1,9 @@
 /**
- *  @brief Sanitizer ABI shims: mutex annotations for the thread sanitizer & contiguous-
- *      container annotations for the address sanitizer, compiling to no-ops elsewhere.
- *  @author Ash Vardanian
  *  @file include/usearch/utilities/sanitizers.hpp
+ *  @author Ash Vardanian
  *  @date August 27, 2026
+ *  @brief Sanitizer ABI shims: mutex annotations for the thread sanitizer & contiguous- container
+ *      annotations for the address sanitizer, compiling to no-ops elsewhere.
  *
  *  The thread half teaches TSan the home-grown locks: every verb brackets its atomic with
  *  pre/post annotations, so race reports name the held mutexes and lock-order inversions
@@ -62,62 +62,76 @@ namespace usearch {
 inline constexpr bool thread_sanitizer_k = true;
 inline constexpr bool address_sanitizer_k = false;
 
-/** @brief Opens the bracket of a blocking @c lock; the verb's own atomics are ignored
- *      until the matching @c annotate_lock_acquired. */
+/** Opens the bracket of a blocking @c lock; the verb's own atomics are ignored
+ *  until the matching @c annotate_lock_acquired. */
 inline void annotate_lock_started(void const volatile* mutex_address) noexcept {
     __tsan_mutex_pre_lock(const_cast<void*>(mutex_address), 0u);
 }
-/** @brief Closes the @c lock bracket: the calling thread now holds the mutex. */
+
+/** Closes the @c lock bracket: the calling thread now holds the mutex. */
 inline void annotate_lock_acquired(void const volatile* mutex_address) noexcept {
     __tsan_mutex_post_lock(const_cast<void*>(mutex_address), 0u, 0);
 }
-/** @brief Opens the bracket of a @c try_lock; closes through @c annotate_try_lock_acquired
- *      or @c annotate_try_lock_refused - the flags must match this opening. */
+
+/** Opens the bracket of a @c try_lock; closes through @c annotate_try_lock_acquired
+ *  or @c annotate_try_lock_refused - the flags must match this opening. */
 inline void annotate_try_lock_started(void const volatile* mutex_address) noexcept {
     __tsan_mutex_pre_lock(const_cast<void*>(mutex_address), __tsan_mutex_try_lock);
 }
-/** @brief Closes a @c try_lock bracket as a successful acquisition. */
+
+/** Closes a @c try_lock bracket as a successful acquisition. */
 inline void annotate_try_lock_acquired(void const volatile* mutex_address) noexcept {
     __tsan_mutex_post_lock(const_cast<void*>(mutex_address), __tsan_mutex_try_lock, 0);
 }
-/** @brief Closes a @c try_lock bracket as a refusal - nothing is held. */
+
+/** Closes a @c try_lock bracket as a refusal - nothing is held. */
 inline void annotate_try_lock_refused(void const volatile* mutex_address) noexcept {
     __tsan_mutex_post_lock(const_cast<void*>(mutex_address), __tsan_mutex_try_lock | __tsan_mutex_try_lock_failed, 0);
 }
-/** @brief Opens an @c unlock bracket; the release into the mutex happens at the opening. */
+
+/** Opens an @c unlock bracket; the release into the mutex happens at the opening. */
 inline void annotate_unlock_started(void const volatile* mutex_address) noexcept {
     __tsan_mutex_pre_unlock(const_cast<void*>(mutex_address), 0u);
 }
-/** @brief Closes an @c unlock bracket. */
+
+/** Closes an @c unlock bracket. */
 inline void annotate_unlock_finished(void const volatile* mutex_address) noexcept {
     __tsan_mutex_post_unlock(const_cast<void*>(mutex_address), 0u);
 }
-/** @brief The shared-side twin of @c annotate_lock_started, carrying the read-lock flag. */
+
+/** The shared-side twin of @c annotate_lock_started, carrying the read-lock flag. */
 inline void annotate_lock_shared_started(void const volatile* mutex_address) noexcept {
     __tsan_mutex_pre_lock(const_cast<void*>(mutex_address), __tsan_mutex_read_lock);
 }
-/** @brief The shared-side twin of @c annotate_lock_acquired. */
+
+/** The shared-side twin of @c annotate_lock_acquired. */
 inline void annotate_lock_shared_acquired(void const volatile* mutex_address) noexcept {
     __tsan_mutex_post_lock(const_cast<void*>(mutex_address), __tsan_mutex_read_lock, 0);
 }
-/** @brief The shared-side twin of @c annotate_unlock_started. */
+
+/** The shared-side twin of @c annotate_unlock_started. */
 inline void annotate_unlock_shared_started(void const volatile* mutex_address) noexcept {
     __tsan_mutex_pre_unlock(const_cast<void*>(mutex_address), __tsan_mutex_read_lock);
 }
-/** @brief The shared-side twin of @c annotate_unlock_finished. */
+
+/** The shared-side twin of @c annotate_unlock_finished. */
 inline void annotate_unlock_shared_finished(void const volatile* mutex_address) noexcept {
     __tsan_mutex_post_unlock(const_cast<void*>(mutex_address), __tsan_mutex_read_lock);
 }
-/** @brief One half of a raw happens-before edge on @p address - what keeps a wait-free
- *      probe's pairing with the unlock releases visible once brackets hide the atomics.
- *      Call @c annotate_release before an unlock bracket opens, never inside one. */
+
+/** One half of a raw happens-before edge on @p address - what keeps a wait-free
+ *  probe's pairing with the unlock releases visible once brackets hide the atomics.
+ *  Call @c annotate_release before an unlock bracket opens, never inside one. */
 inline void annotate_acquire(void const volatile* address) noexcept { __tsan_acquire(const_cast<void*>(address)); }
-/** @brief The releasing half of @ref annotate_acquire. */
+
+/** The releasing half of @ref annotate_acquire. */
 inline void annotate_release(void const volatile* address) noexcept { __tsan_release(const_cast<void*>(address)); }
-/** @brief Reports a bug if the calling thread still holds any annotated mutex - the
- *      scenario-tail check of the concurrent suites. */
+
+/** Reports a bug if the calling thread still holds any annotated mutex - the
+ *  scenario-tail check of the concurrent suites. */
 inline void assert_no_locks_held() noexcept { __tsan_check_no_mutexes_held(); }
-/** @brief No container poisoning under TSan: @c libtsan does not export the verb. */
+
+/** No container poisoning under TSan: @c libtsan does not export the verb. */
 inline void annotate_container(void const*, void const*, void const*, void const*) noexcept {}
 
 #elif USEARCH_SANITIZE_ADDRESS
@@ -139,10 +153,11 @@ inline void annotate_unlock_shared_finished(void const volatile*) noexcept {}
 inline void annotate_acquire(void const volatile*) noexcept {}
 inline void annotate_release(void const volatile*) noexcept {}
 inline void assert_no_locks_held() noexcept {}
-/** @brief Re-poisons a flat container's capacity slack: @p storage_begin & @p storage_end
- *      span one owned allocation, the used prefix ends at @p old_used_end and moves to
- *      @p new_used_end. Unpoison before constructing into slack, destroy before poisoning
- *      it, and restore full addressability before the storage returns to the allocator. */
+
+/** Re-poisons a flat container's capacity slack: @p storage_begin & @p storage_end
+ *  span one owned allocation, the used prefix ends at @p old_used_end and moves to
+ *  @p new_used_end. Unpoison before constructing into slack, destroy before poisoning
+ *  it, and restore full addressability before the storage returns to the allocator. */
 inline void annotate_container(void const* storage_begin, void const* storage_end, //
                                void const* old_used_end, void const* new_used_end) noexcept {
     if (storage_begin == storage_end) return;

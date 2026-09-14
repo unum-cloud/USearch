@@ -1,8 +1,9 @@
 /**
- *  @brief A brute-force stand-in for the @c usearch_dense_* C ABI, letting a language binding
- *      link and run its suite in seconds instead of building the engine.
- *
  *  @file src_stub/dense.cpp
+ *  @author Ash Vardanian
+ *  @date September 5, 2026
+ *  @brief A brute-force stand-in for the @c usearch_dense_* C ABI, letting a language binding link
+ *      and run its suite in seconds instead of building the engine.
  *
  *  Every SDK in this repository talks to the same C ABI, and most of what breaks in one is the
  *  binding rather than the engine: a leaked handle, a stride counted in scalars instead of
@@ -63,18 +64,23 @@ static_assert(std::is_nothrow_move_constructible_v<entry_t>, "reallocation must 
 using index_t = handle<payload_t, usearch_dense_options_t>;
 
 struct cursor_t {
-    /** @brief The index being walked; it must outlive the cursor. */
+
+    /** The index being walked; it must outlive the cursor. */
     index_t* index;
-    /** @brief The next row to hand out. */
+
+    /** The next row to hand out. */
     std::size_t position;
-    /** @brief The watermark captured at creation, which later insertions cannot raise. */
+
+    /** The watermark captured at creation, which later insertions cannot raise. */
     std::size_t limit;
 };
 
 struct finder_t {
-    /** @brief Every scored match, nearest first - a snapshot, so it needs no further locking. */
+
+    /** Every scored match, nearest first - a snapshot, so it needs no further locking. */
     std::vector<match_t> ranked;
-    /** @brief The next match to hand out. */
+
+    /** The next match to hand out. */
     std::size_t position;
 };
 
@@ -101,7 +107,7 @@ bool reject_view(usearch_matrix_view_t const* matrix, index_t const& index, std:
     return false;
 }
 
-/** @brief The output twin of @c reject_view, whose width the caller chooses rather than the index. */
+/** The output twin of @c reject_view, whose width the caller chooses rather than the index. */
 bool reject_span(usearch_matrix_span_t const* matrix, std::size_t columns, std::size_t& stride,
                  usearch_error_t* error) {
     if (reject_if(!matrix || !matrix->data, usearch_error_malformed_input_k, "The matrix must name storage", error))
@@ -118,7 +124,7 @@ bool reject_span(usearch_matrix_span_t const* matrix, std::size_t columns, std::
     return false;
 }
 
-/** @brief Whether the geometry is frozen; a zeroed width makes every derived extent zero. */
+/** Whether the geometry is frozen; a zeroed width makes every derived extent zero. */
 bool reject_unfrozen(index_t const& index, usearch_error_t* error) {
     return reject_if(!index.options.dimensions, usearch_error_uninitialized_k, "The geometry was never frozen", error);
 }
@@ -127,10 +133,8 @@ bool reject_unfrozen(index_t const& index, usearch_error_t* error) {
 
 #pragma region Scoring
 
-/**
- *  @brief Scores one pair under the frozen kind. @c usearch_dense_init refuses a kind this
- *      build does not know, so every enumerator reaching here is one of the five.
- */
+/** Scores one pair under the frozen kind. @c usearch_dense_init refuses a kind this
+ *  build does not know, so every enumerator reaching here is one of the five. */
 double distance(usearch_dense_metric_t metric, std::span<double const> first, std::span<double const> second) {
     double dot = 0, first_norm = 0, second_norm = 0, squared = 0;
     std::size_t differing = 0, shared = 0, either = 0;
@@ -158,7 +162,7 @@ double distance(usearch_dense_metric_t metric, std::span<double const> first, st
     }
 }
 
-/** @brief Whether the kind is one this build implements at all. */
+/** Whether the kind is one this build implements at all. */
 bool known_metric(usearch_dense_metric_t metric) {
     return metric == usearch_dense_metric_inner_k || metric == usearch_dense_metric_angular_k ||
            metric == usearch_dense_metric_euclidean_k || metric == usearch_dense_metric_hamming_k ||
@@ -218,28 +222,32 @@ std::size_t search_rows(index_t& index, void const* queries, std::size_t queries
 
 #pragma region Serialization
 
-/**
- *  @brief What @c load needs before it can read a row. The blob is this file's own memory image
- *      rather than a format: no magic, no version, and nothing but the stand-in reads it back.
- */
+/** What @c load needs before it can read a row. The blob is this file's own memory image
+ *  rather than a format: no magic, no version, and nothing but the stand-in reads it back. */
 struct prefix_t {
-    /** @brief The frozen row width. */
+
+    /** The frozen row width. */
     std::size_t dimensions;
-    /** @brief The connections-per-node bound the handle was built with. */
+
+    /** The connections-per-node bound the handle was built with. */
     std::size_t connectivity;
-    /** @brief How many rows follow the prefix. */
+
+    /** How many rows follow the prefix. */
     std::size_t entries;
-    /** @brief What entries are compared by. */
+
+    /** What entries are compared by. */
     usearch_dense_metric_t metric;
-    /** @brief The scalar kind the rows were frozen at, which metadata reports back. */
+
+    /** The scalar kind the rows were frozen at, which metadata reports back. */
     usearch_scalar_t quantization;
-    /** @brief Entries that may share one key, which late interaction needs above one. */
+
+    /** Entries that may share one key, which late interaction needs above one. */
     std::size_t values_per_key;
 };
 
 std::size_t stored_row_bytes(std::size_t dimensions) { return sizeof(usearch_key_t) + dimensions * sizeof(double); }
 
-/** @brief The whole blob's extent, empty when that many rows could not be addressed. */
+/** The whole blob's extent, empty when that many rows could not be addressed. */
 std::optional<std::size_t> serialized_bytes(index_t const& index, std::size_t rows) {
     return blob_bytes(sizeof(prefix_t), rows, stored_row_bytes(index.options.dimensions));
 }
@@ -266,7 +274,7 @@ void write_into(index_t const& index, std::size_t rows, bytes_span_t target) {
     }
 }
 
-/** @brief Reads the prefix and checks the blob is long enough for the rows it claims. */
+/** Reads the prefix and checks the blob is long enough for the rows it claims. */
 bool parse_prefix(prefix_t& prefix, bytes_view_t blob, usearch_error_t* error) {
     if (reject_if(blob.size() < sizeof(prefix_t), usearch_error_malformed_input_k, "The checkpoint ends early", error))
         return false;
@@ -288,7 +296,7 @@ bool describe(usearch_dense_metadata_t& metadata, prefix_t const& prefix) {
     return true;
 }
 
-/** @brief Adopts a checkpoint's configuration, answering whether its metric is one we know. */
+/** Adopts a checkpoint's configuration, answering whether its metric is one we know. */
 bool adopt(usearch_dense_options_t& options, prefix_t const& prefix) {
     if (!known_metric(prefix.metric)) return false;
     options.dimensions = prefix.dimensions;
@@ -299,7 +307,7 @@ bool adopt(usearch_dense_options_t& options, prefix_t const& prefix) {
     return true;
 }
 
-/** @brief Replaces the contents of @p index; the caller holds both locks exclusively. */
+/** Replaces the contents of @p index; the caller holds both locks exclusively. */
 bool read_from(index_t& index, bytes_view_t blob, usearch_error_t* error) {
     prefix_t prefix {};
     if (!parse_prefix(prefix, blob, error)) return false;
@@ -332,10 +340,10 @@ bool read_from(index_t& index, bytes_view_t blob, usearch_error_t* error) {
 
 #pragma region Attention
 
-/** @brief The value matrix a key may address, past which the entry is skipped as unmapped. */
+/** The value matrix a key may address, past which the entry is skipped as unmapped. */
 constexpr std::size_t value_rows_limit_k = 1u << 30;
 
-/** @brief An entry's key is its row offset into the value matrix, parked in the low bytes. */
+/** An entry's key is its row offset into the value matrix, parked in the low bytes. */
 std::size_t value_offset(usearch_key_t const& key) {
     std::size_t offset = 0;
     for (unsigned byte_index = 8; byte_index != 16; ++byte_index) offset = (offset << 8) | key.bytes[byte_index];
@@ -498,7 +506,7 @@ std::size_t usearch_dense_refine(usearch_dense_index_t handle, usearch_executor_
     return 0;
 }
 
-/** @brief The shared body of both search doors; the unfiltered one admits with a null predicate. */
+/** The shared body of both search doors; the unfiltered one admits with a null predicate. */
 void search_matrix(usearch_dense_index_t handle, usearch_executor_t executor, usearch_matrix_view_t const* queries,
                    usearch_matches_span_t const* matches, usearch_dense_search_options_t const* options,
                    usearch_predicate_t predicate, void* predicate_state, usearch_progress_callback_t progress,

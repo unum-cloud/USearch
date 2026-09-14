@@ -1,8 +1,8 @@
 /**
- *  @brief Similarity Search baseline over arbitrary payloads & caller-supplied metrics.
- *  @author Ash Vardanian
  *  @file include/usearch/basic/ram_index.hpp
+ *  @author Ash Vardanian
  *  @date August 15, 2026
+ *  @brief Similarity Search baseline over arbitrary payloads & caller-supplied metrics.
  *
  *  The baseline tier's RAM residency: the readable reference implementation. Arbitrary
  *  payload objects, expensive caller-supplied batched metrics, caller-visible keys,
@@ -33,19 +33,20 @@
 namespace unum {
 namespace usearch {
 
-/** @brief One traversal candidate; both halves are the caller's chosen widths. */
+/** One traversal candidate; both halves are the caller's chosen widths. */
 template <typename node_id_type_ = u64_t, typename distance_type_ = f64_t>
 struct basic_scored_node {
     node_id_type_ node_id;
     distance_type_ distance;
 
-    /** @brief Orders scored nodes nearest-first; the comparator of the sorted results pool. */
+    /** Orders scored nodes nearest-first; the comparator of the sorted results pool. */
     struct closer_t {
         bool operator()(basic_scored_node first, basic_scored_node second) const noexcept {
             return first.distance < second.distance;
         }
     };
-    /** @brief Orders scored nodes furthest-first; the comparator of the frontier heap. */
+
+    /** Orders scored nodes furthest-first; the comparator of the frontier heap. */
     struct further_t {
         bool operator()(basic_scored_node first, basic_scored_node second) const noexcept {
             return first.distance > second.distance;
@@ -53,29 +54,31 @@ struct basic_scored_node {
     };
 };
 
-/** @brief Stored payloads live in records default-constructed by @c reserve, receive their
- *      content through one move-assignment at publication, are read as @c const& after, and
- *      are destroyed only at teardown - that is the whole lifecycle. */
+/** Stored payloads live in records default-constructed by @c reserve, receive their
+ *  content through one move-assignment at publication, are read as @c const& after, and
+ *  are destroyed only at teardown - that is the whole lifecycle. */
 template <typename value_type_>
 concept basic_value = std::is_nothrow_default_constructible_v<value_type_> && //
                       std::is_nothrow_move_assignable_v<value_type_> &&       //
                       std::is_nothrow_destructible_v<value_type_>;
 
-/** @brief A batched metric's answer to one @c push: whether the candidate entered the
- *      staging of the current scoring round - a capacity answer, never a failure. */
+/** A batched metric's answer to one @c push: whether the candidate entered the
+ *  staging of the current scoring round - a capacity answer, never a failure. */
 enum class basic_metric_staging_t : bool {
-    /** @brief The staging is full; the round should drain before anything else stages. */
+
+    /** The staging is full; the round should drain before anything else stages. */
     refused_k = false,
-    /** @brief The candidate is staged, and the round's @c drain will score it. */
+
+    /** The candidate is staged, and the round's @c drain will score it. */
     staged_k = true,
 };
 
 /**
- *  @brief Any batched similarity measure, driven as a builder: @c reset opens a scoring
- *      round for one query, @c push stages one candidate - the metric owns its staging,
- *      packing or uploading eagerly if it wishes, answering whether the candidate staged -
- *      and @c drain scores everything staged, writing distances in push order and clearing
- *      the staging.
+ *  @brief Any batched similarity measure, driven as a builder.
+ *
+ *  @c reset opens a scoring round for one query, @c push stages one candidate - the metric owns its
+ *  staging, packing or uploading eagerly if it wishes, answering whether the candidate staged - and
+ *  @c drain scores everything staged, writing distances in push order and clearing the staging.
  *
  *  Every verb runs with no locks held, so a @c drain may cost milliseconds without
  *  stalling any other thread; pushed references stay valid until the round's @c drain
@@ -90,21 +93,21 @@ concept basic_metric = basic_value<value_type_> &&
                            { metric.drain(distances) } noexcept;
                        };
 
-/** @brief Marks a metric whose @c reset also accepts query forms other than the stored
- *      value - the standard @c is_transparent convention. */
+/** Marks a metric whose @c reset also accepts query forms other than the stored
+ *  value - the standard @c is_transparent convention. */
 template <typename metric_type_>
 concept transparent_metric = requires { typename metric_type_::is_transparent; };
 
-/** @brief A query form @p metric_type_ opens rounds for: the stored value itself, or -
- *      on a @c transparent_metric - any other type its @c reset accepts. */
+/** A query form @p metric_type_ opens rounds for: the stored value itself, or -
+ *  on a @c transparent_metric - any other type its @c reset accepts. */
 template <typename query_type_, typename metric_type_, typename value_type_>
 concept basic_query = (std::same_as<query_type_, value_type_> || transparent_metric<metric_type_>) &&
                       requires(metric_type_& metric, query_type_ const& query) {
                           { metric.reset(query) } noexcept;
                       };
 
-/** @brief Serializes stored values into caller-owned buffers and back - the payload half
- *      of @c save & @c load, supplied by the caller because values are arbitrary objects. */
+/** Serializes stored values into caller-owned buffers and back - the payload half
+ *  of @c save & @c load, supplied by the caller because values are arbitrary objects. */
 template <typename codec_type_, typename value_type_>
 concept basic_value_codec = requires(codec_type_ const& codec, value_type_ const& immutable_value,
                                      value_type_& mutable_value, bytes_span_t output, bytes_view_t input) {
@@ -113,16 +116,20 @@ concept basic_value_codec = requires(codec_type_ const& codec, value_type_ const
     { codec.load(input, mutable_value) } noexcept -> std::same_as<status_t>;
 };
 
-/** @brief The four per-walk counters every traversal accumulates; results report one
- *      call's share as the difference of two snapshots. */
+/** The four per-walk counters every traversal accumulates; results report one
+ *  call's share as the difference of two snapshots. */
 struct basic_traversal_telemetry_t {
-    /** @brief Metric invocations, batched rounds counted once per scored candidate. */
+
+    /** Metric invocations, batched rounds counted once per scored candidate. */
     std::size_t computed_distances = 0;
-    /** @brief Frontier candidates whose neighbor lists were expanded. */
+
+    /** Frontier candidates whose neighbor lists were expanded. */
     std::size_t visited_members = 0;
-    /** @brief Re-seedings after the frontier drained prematurely - a connectivity signal. */
+
+    /** Re-seedings after the frontier drained prematurely - a connectivity signal. */
     std::size_t restarts = 0;
-    /** @brief Walks a scratch refusal ended early - ranked short, and on insertion wired thinner. */
+
+    /** Walks a scratch refusal ended early - ranked short, and on insertion wired thinner. */
     std::size_t saturated_walks = 0;
 
     basic_traversal_telemetry_t operator-(basic_traversal_telemetry_t const& before) const noexcept {
@@ -131,19 +138,22 @@ struct basic_traversal_telemetry_t {
     }
 };
 
-/** @brief How one frontier-expansion round of a batched traversal ended - the interface
- *      between the expansion that stages one metric round and the caller draining it. */
+/** How one frontier-expansion round of a batched traversal ended - the interface
+ *  between the expansion that stages one metric round and the caller draining it. */
 enum class basic_expansion_round_t : u32_t {
-    /** @brief The nearest frontier entry exceeds a full pool's radius - the walk is done. */
+
+    /** The nearest frontier entry exceeds a full pool's radius - the walk is done. */
     converged_k,
-    /** @brief Scratch or metric staging refused mid-round - drain what staged, then stop. */
+
+    /** Scratch or metric staging refused mid-round - drain what staged, then stop. */
     saturated_k,
-    /** @brief A normal round: whatever staged is ready to drain. */
+
+    /** A normal round: whatever staged is ready to drain. */
     advanced_k,
 };
 
-/** @brief One round's scoring epilogue: sizes the distances to the staging fill, drains
- *      the metric, and counts the round into the telemetry. */
+/** One round's scoring epilogue: sizes the distances to the staging fill, drains
+ *  the metric, and counts the round into the telemetry. */
 template <typename metric_type_, typename context_type_>
 void drain_round(metric_type_& metric, std::size_t staged_count, context_type_& context) noexcept {
     context.staged_distances.resize_reserved(staged_count);
@@ -151,9 +161,10 @@ void drain_round(metric_type_& metric, std::size_t staged_count, context_type_& 
     context.telemetry.computed_distances += staged_count;
 }
 
-/** @brief Plain NSW selection: the nearest @c connectivity candidates, no pruning. */
+/** Plain NSW selection: the nearest @c connectivity candidates, no pruning. */
 struct basic_keep_closest_t {
-    /** @brief The neighbors-per-node budget this selector prunes to. */
+
+    /** The neighbors-per-node budget this selector prunes to. */
     std::size_t connectivity = connectivity_32_k;
 
     template <typename index_type_, typename metric_type_>
@@ -166,11 +177,12 @@ struct basic_keep_closest_t {
     }
 };
 
-/** @brief Relative-neighborhood pruning: a candidate survives only if closer to the
- *      query than to every already-kept neighbor - pair distances drawn through the same
- *      metric in shrinking rounds, exiting each candidate on its first violation. */
+/** Relative-neighborhood pruning: a candidate survives only if closer to the
+ *  query than to every already-kept neighbor - pair distances drawn through the same
+ *  metric in shrinking rounds, exiting each candidate on its first violation. */
 struct basic_keep_diverse_t {
-    /** @brief The neighbors-per-node budget this selector prunes to. */
+
+    /** The neighbors-per-node budget this selector prunes to. */
     std::size_t connectivity = connectivity_32_k;
 
     template <typename index_type_, typename metric_type_>
@@ -201,12 +213,12 @@ struct basic_keep_diverse_t {
     }
 };
 
-/** @brief Any link-selection heuristic: carries its own neighbors-per-node budget as
- *      @c connectivity, reads the ascending pool in @c context.results, resolves values
- *      through the index's @c published_value_of - every pooled id is published - scores
- *      pairs through the @p metric, and fills @c context.selected_neighbors. A selector
- *      may also write @c context.staged_distances - and nothing else: @c staged_ids and
- *      @c reverse_ids belong to the calling traversal. */
+/** Any link-selection heuristic: carries its own neighbors-per-node budget as
+ *  @c connectivity, reads the ascending pool in @c context.results, resolves values
+ *  through the index's @c published_value_of - every pooled ID is published - scores
+ *  pairs through the @p metric, and fills @c context.selected_neighbors. A selector
+ *  may also write @c context.staged_distances - and nothing else: @c staged_ids and
+ *  @c reverse_ids belong to the calling traversal. */
 template <typename selector_type_, typename index_type_, typename metric_type_>
 concept basic_selector = requires(selector_type_ const& selector, index_type_ const& index, metric_type_& metric,
                                   typename index_type_::traversal_context_t& context) {
@@ -214,11 +226,11 @@ concept basic_selector = requires(selector_type_ const& selector, index_type_ co
     { selector.connectivity } -> std::convertible_to<std::size_t>;
 };
 
-/** @brief A reference spelling the verbs the index posts past the standard's - the no-return add,
- *      subtract and bit clear, and the bounded add - as ForkUnion's do. For the standard's own
- *      reference, which does not, the functions below spell them; ForkUnion's references carry the
- *      same names as free functions in their namespace, reached through argument lookup, so a site
- *      reads the same whichever reference the index was given. */
+/** A reference spelling the verbs the index posts past the standard's - the no-return add,
+ *  subtract and bit clear, and the bounded add - as ForkUnion's do. For the standard's own
+ *  reference, which does not, the functions below spell them; ForkUnion's references carry the
+ *  same names as free functions in their namespace, reached through argument lookup, so a site
+ *  reads the same whichever reference the index was given. */
 template <typename reference_type_, typename value_type_>
 concept extended_atomic_ref = requires(reference_type_ reference, value_type_ value) {
     reference.add(value, std::memory_order_relaxed);
@@ -242,7 +254,8 @@ template <typename reference_type_, typename value_type_>
 void atomic_clear_bits(reference_type_ reference, value_type_ bits, std::memory_order order) noexcept {
     reference.fetch_and(static_cast<value_type_>(~bits), order);
 }
-/** @brief Adds @p operand only if the sum stays at most @p limit; returns the value held before. */
+
+/** Adds @p operand only if the sum stays at most @p limit; returns the value held before. */
 template <typename reference_type_, typename value_type_>
     requires(!extended_atomic_ref<reference_type_, value_type_>)
 value_type_ atomic_fetch_add_if_at_most(reference_type_ reference, value_type_ operand, value_type_ limit,
@@ -253,10 +266,10 @@ value_type_ atomic_fetch_add_if_at_most(reference_type_ reference, value_type_ o
     return observed;
 }
 
-/** @brief Minimal test-and-test-and-set lock over one plain @c bool, owned through the
- *      atomic reference. The waiter policy monitors the flag's address, so hardware waits
- *      plug in without this header naming them; the claiming exchange is the loop's only
- *      store, so a monitored waiter wakes once per @c unlock rather than on every attempt. */
+/** Minimal test-and-test-and-set lock over one plain @c bool, owned through the
+ *  atomic reference. The waiter policy monitors the flag's address, so hardware waits
+ *  plug in without this header naming them; the claiming exchange is the loop's only
+ *  store, so a monitored waiter wakes once per @c unlock rather than on every attempt. */
 template <typename wait_type_ = dummy_waiter_t, template <typename> class atomic_ref_template_ = std::atomic_ref>
 struct basic_mutex {
     template <typename word_type_>
@@ -276,9 +289,10 @@ struct basic_mutex {
         }
         annotate_lock_acquired(&flag);
     }
-    /** @brief Takes the lock only if it is free right now - a contention question, never a
-     *      failure. Named for the standard @c Lockable requirement, which @c lock, @c unlock
-     *      and this together satisfy, so the STL's lock adapters accept this type. */
+
+    /** Takes the lock only if it is free right now - a contention question, never a
+     *  failure. Named for the standard @c Lockable requirement, which @c lock, @c unlock
+     *  and this together satisfy, so the STL's lock adapters accept this type. */
     [[nodiscard]] bool try_lock() noexcept {
         annotate_try_lock_started(&flag);
         bool const acquired = !atomic_ref<bool>(flag).exchange(true, std::memory_order_acquire);
@@ -318,7 +332,7 @@ struct basic_shared_mutex {
     inline static constexpr u64_t generation_unit_k = u64_t {1} << 23;
     inline static constexpr u64_t generation_mask_k = ~(generation_unit_k - 1);
 
-    /** @brief One consistent reading: how the gate is held & how often it has been. */
+    /** One consistent reading: how the gate is held & how often it has been. */
     struct snapshot_t {
         u64_t generation = 0;
         std::size_t holders = 0;
@@ -327,7 +341,7 @@ struct basic_shared_mutex {
         bool unlocked() const noexcept { return !holders && !unique; }
     };
 
-    /** @brief Joins the shared side, waiting out a unique holder through the waiter. */
+    /** Joins the shared side, waiting out a unique holder through the waiter. */
     void lock_shared() noexcept {
         annotate_lock_shared_started(&word);
         // A masked compare-exchange kept the fields apart while the generation sat under the
@@ -356,8 +370,8 @@ struct basic_shared_mutex {
         annotate_unlock_shared_finished(&word);
     }
 
-    /** @brief Takes the unique side only from a genuinely free word - generation churn
-     *      retries, it is not contention - and never waits: a refusal is the answer. */
+    /** Takes the unique side only from a genuinely free word - generation churn
+     *  retries, it is not contention - and never waits: a refusal is the answer. */
     [[nodiscard]] bool try_lock() noexcept {
         annotate_try_lock_started(&word);
         u64_t observed = atomic_ref<u64_t>(word).load(std::memory_order_relaxed);
@@ -378,7 +392,7 @@ struct basic_shared_mutex {
         annotate_unlock_finished(&word);
     }
 
-    /** @brief The wait-free probe the certified readers bracket their walks with. */
+    /** The wait-free probe the certified readers bracket their walks with. */
     snapshot_t snapshot() const noexcept {
         u64_t const observed = atomic_ref<u64_t>(word).load(std::memory_order_acquire);
         annotate_acquire(&word);
@@ -387,10 +401,8 @@ struct basic_shared_mutex {
     }
 };
 
-/**
- *  @brief Per-thread traversal scratch: the candidate queues, the exact visited set,
- *      the staging surfaces of batched metric rounds, and running telemetry.
- */
+/** Per-thread traversal scratch: the candidate queues, the exact visited set,
+ *  the staging surfaces of batched metric rounds, and running telemetry. */
 template <typename node_id_type_ = u64_t, typename distance_type_ = f64_t,
           typename allocator_type_ = std::allocator<byte_t>>
 struct basic_traversal_context {
@@ -403,71 +415,84 @@ struct basic_traversal_context {
     using results_array_t = sorted_buffer<scored_node_t, typename scored_node_t::closer_t, scored_allocator_t>;
     using frontier_queue_t = max_heap_dary<8, scored_node_t, typename scored_node_t::further_t, scored_allocator_t>;
     using visited_set_t = growing_hash_set<node_id_type_, std::hash<node_id_type_>, visits_allocator_t>;
-    /** @brief The buffer rebinds to its element type itself, so no alias spells it here. */
+
+    /** The buffer rebinds to its element type itself, so no alias spells it here. */
     template <typename element_type_>
     using scratch_buffer = growing_buffer<element_type_, allocator_t>;
 
-    /** @brief Nodes already scored, kept ascending as the best results so far. */
+    /** Nodes already scored, kept ascending as the best results so far. */
     results_array_t results;
-    /** @brief Nodes considered promising, to be expanded next. */
+
+    /** Nodes considered promising, to be expanded next. */
     frontier_queue_t frontier;
-    /** @brief Nodes already checked - exact, never lossy. */
+
+    /** Nodes already checked - exact, never lossy. */
     visited_set_t visited;
-    /** @brief Pseudo-random generator for picking traversal starting points. */
+
+    /** Pseudo-random generator for picking traversal starting points. */
     splitmix64_t random_generator;
 
-    /** @brief Ids of one staged fan-out - the batch a single metric round scores; also
-     *      the flood stack of `health` and the row copies of back-linking. */
+    /** Ids of one staged fan-out - the batch a single metric round scores; also
+     *  the flood stack of `health` and the row copies of back-linking. */
     scratch_buffer<node_id_type_> staged_ids;
-    /** @brief Distances output of one batched metric round, parallel to @c staged_ids. */
+
+    /** Distances output of one batched metric round, parallel to @c staged_ids. */
     scratch_buffer<distance_type_> staged_distances;
-    /** @brief The selector's output: surviving neighbors, ascending by query distance. */
+
+    /** The selector's output: surviving neighbors, ascending by query distance. */
     scratch_buffer<scored_node_t> selected_neighbors;
-    /** @brief The freshly wired node's neighbors, snapshotted for the reverse pass - the
-     *      re-selections there reuse @c selected_neighbors, so the pass walks its own copy. */
+
+    /** The freshly wired node's neighbors, snapshotted for the reverse pass - the
+     *  re-selections there reuse @c selected_neighbors, so the pass walks its own copy. */
     scratch_buffer<node_id_type_> reverse_ids;
 
-    /** @brief Running per-walk counters; calls report their share as snapshot deltas. */
+    /** Running per-walk counters; calls report their share as snapshot deltas. */
     basic_traversal_telemetry_t telemetry;
 
-    /** @brief Every container gets a rebound copy of @p allocator, so scratch lands where
-     *      the caller places it; seed distinctly per thread to decorrelate the walks. */
+    /** Every container gets a rebound copy of @p allocator, so scratch lands where
+     *  the caller places it; seed distinctly per thread to decorrelate the walks. */
     explicit basic_traversal_context(u64_t seed = 0, allocator_t allocator = {}) noexcept
         : results(scored_allocator_t(allocator)), frontier(scored_allocator_t(allocator)),
           visited(visits_allocator_t(allocator)), random_generator {seed}, staged_ids(allocator),
           staged_distances(allocator), selected_neighbors(allocator), reverse_ids(allocator) {}
 };
 
-/** @brief Row & element counts of the five columns a snapshot needs - what a container sizes. */
+/** Row & element counts of the five columns a snapshot needs - what a container sizes. */
 struct basic_columns_extents_t {
-    /** @brief Published nodes, the row count of every node-sized column. */
+
+    /** Published nodes, the row count of every node-sized column. */
     std::size_t nodes = 0;
-    /** @brief Neighbor ids across every row. */
+
+    /** Neighbor ids across every row. */
     std::size_t neighbors = 0;
-    /** @brief Codec bytes across every value. */
+
+    /** Codec bytes across every value. */
     std::size_t value_bytes = 0;
 };
 
-/**
- *  @brief The five caller-placed columns a basic-tier snapshot is: keys, neighbor prefix sums,
- *      neighbor ids, value prefix sums, and codec bytes - each an independent buffer, so a
- *      container lays them out wherever it likes. Both prefix-sum columns hold @b nodes+1 sums
- *      from zero, so row @c i owns the slice between sums @c i and @c i+1.
- */
+/** The five caller-placed columns a basic-tier snapshot is: keys, neighbor prefix sums,
+ *  neighbor IDs, value prefix sums, and codec bytes - each an independent buffer, so a
+ *  container lays them out wherever it likes. Both prefix-sum columns hold @b nodes+1 sums
+ *  from zero, so row @c i owns the slice between sums @c i and @c i+1. */
 template <typename key_type_, typename node_id_type_, typename byte_type_, typename offset_type_ = u64_t>
 struct basic_columns {
-    /** @brief One key per row. */
+
+    /** One key per row. */
     std::span<key_type_> keys;
-    /** @brief @b nodes+1 sums of neighbor ids, from zero. */
+
+    /** @b nodes+1 sums of neighbor ids, from zero. */
     std::span<offset_type_> neighbor_offsets;
-    /** @brief Every row's neighbor ids, back to back. */
+
+    /** Every row's neighbor ids, back to back. */
     std::span<node_id_type_> neighbor_ids;
-    /** @brief @b nodes+1 sums of codec bytes, from zero. */
+
+    /** @b nodes+1 sums of codec bytes, from zero. */
     std::span<offset_type_> value_offsets;
-    /** @brief Every row's codec bytes, back to back. */
+
+    /** Every row's codec bytes, back to back. */
     std::span<byte_type_> values;
 
-    /** @brief The read-only view of the same columns, so a saved set loads as it is. */
+    /** The read-only view of the same columns, so a saved set loads as it is. */
     basic_columns<key_type_ const, node_id_type_ const, byte_type_ const, offset_type_ const> view() const noexcept {
         return {keys, neighbor_offsets, neighbor_ids, value_offsets, values};
     }
@@ -494,8 +519,8 @@ struct basic_ram_cursor;
  *  through a watermark advanced in dispensed order, and a node's key lands in the
  *  multimap only after its watermark turn - so a findable key always names a published
  *  node. Keys need not be unique: every holder of a key stays addressable through
- *  @c find_each, and id → key stays authoritative. Node ids are never recycled and
- *  removals are deleted, keeping every reader's stale id valid forever.
+ *  @c find_each, and ID → key stays authoritative. Node IDs are never recycled and
+ *  removals are deleted, keeping every reader's stale ID valid forever.
  *
  *  @tparam value_type_ any payload satisfying @c basic_value; immovable once published.
  *  @tparam key_type_ trivially-copyable caller-visible identity.
@@ -529,9 +554,11 @@ struct basic_ram_index {
 
     using scored_node_t = basic_scored_node<node_id_t, distance_t>;
     using traversal_context_t = basic_traversal_context<node_id_t, distance_t, allocator_t>;
-    /** @brief The five caller-placed columns a save fills. */
+
+    /** The five caller-placed columns a save fills. */
     using columns_t = basic_columns<key_t, node_id_t, byte_t, u64_t>;
-    /** @brief The read-only columns a load consumes. */
+
+    /** The read-only columns a load consumes. */
     using columns_view_t = basic_columns<key_t const, node_id_t const, byte_t const, u64_t const>;
 
   private:
@@ -540,13 +567,14 @@ struct basic_ram_index {
 
     using neighbors_buffer_t = growing_buffer<node_id_t, allocator_t>;
 
-    /** @brief One node record: the payload, its key, the neighbors it links to, and the
-     *      mutex guarding those neighbors. The value & key are written before publication
-     *      and never change; only @c neighbors mutates after - wired by inserts, grown or
-     *      trimmed by manual linking - with its own @c size() as the live degree. */
+    /** One node record: the payload, its key, the neighbors it links to, and the
+     *  mutex guarding those neighbors. The value & key are written before publication
+     *  and never change; only @c neighbors mutates after - wired by inserts, grown or
+     *  trimmed by manual linking - with its own @c size() as the live degree. */
     struct node_t {
-        /** @brief Mutable so id-addressed const readers, like @c degree_of, may briefly
-         *      hold it - locking never mutates the record's logical state. */
+
+        /** Mutable so id-addressed const readers, like @c degree_of, may briefly
+         *  hold it - locking never mutates the record's logical state. */
         mutable basic_mutex<wait_t, atomic_ref_template_> mutex;
         value_t value {};
         key_t key {};
@@ -561,9 +589,9 @@ struct basic_ram_index {
         }
     };
 
-    /** @brief All node records in one array: @c reserve sizes it once and constructs every
-     *      record up front - each seeded with the index allocator - so slots exist before
-     *      publication with no per-slot lifecycle tracking. */
+    /** All node records in one array: @c reserve sizes it once and constructs every
+     *  record up front - each seeded with the index allocator - so slots exist before
+     *  publication with no per-slot lifecycle tracking. */
     using node_array_t = growing_buffer<node_t, allocator_t>;
 
     using key_map_t = growing_multimap<key_t, node_id_t, std::hash<key_t>, allocator_t>;
@@ -580,19 +608,19 @@ struct basic_ram_index {
     basic_ram_index(basic_ram_index&&) noexcept = delete;
     basic_ram_index& operator=(basic_ram_index&&) noexcept = delete;
 
-    /** @brief Constructs an empty index; allocates nothing - storage arrives in @c reserve. */
+    /** Constructs an empty index; allocates nothing - storage arrives in @c reserve. */
     basic_ram_index(allocator_t allocator = {}) noexcept
         : nodes_array_(allocator), key_map_(allocator), allocator_(std::move(allocator)) {}
 
-    /** @brief Exclusive: the record array destroys every value in place, the key multimap
-     *      frees its columns wholesale. */
+    /** Exclusive: the record array destroys every value in place, the key multimap
+     *  frees its columns wholesale. */
     ~basic_ram_index() noexcept = default;
 
-    /** @brief Sizes the node records & the key multimap for @p capacity entries - once:
-     *      the capacity is frozen by the first success, and later calls answer
-     *      @c overflow_k past it with zero side effects. Neighbor rows start empty and
-     *      grow with wiring. An allocation failure leaves the shape unfrozen and the same
-     *      call retryable. Not safe concurrently with any other operation. */
+    /** Sizes the node records & the key multimap for @p capacity entries - once:
+     *  the capacity is frozen by the first success, and later calls answer
+     *  @c overflow_k past it with zero side effects. Neighbor rows start empty and
+     *  grow with wiring. An allocation failure leaves the shape unfrozen and the same
+     *  call retryable. Not safe concurrently with any other operation. */
     expected<std::size_t> reserve(std::size_t capacity) noexcept {
         if (std::size_t const frozen = atomic_ref<std::size_t>(capacity_).load(std::memory_order_acquire); frozen)
             return {frozen, capacity > frozen ? status_t::overflow_k : status_t::success_k};
@@ -617,32 +645,36 @@ struct basic_ram_index {
 
 #pragma region Mutation
 
-    /** @brief Optional tuning knobs for @c insert(); zeros mean "derive from the
-     *      selector's budget". */
+    /** Optional tuning knobs for @c insert(); zeros mean "derive from the
+     *  selector's budget". */
     struct insert_config_t {
-        /** @brief Breadth of the candidate pool during wiring. */
+
+        /** Breadth of the candidate pool during wiring. */
         std::size_t expansion_factor = 0;
-        /** @brief Frontier entries expanded per metric round. */
+
+        /** Frontier entries expanded per metric round. */
         std::size_t fan_out = 0;
     };
 
-    /** @brief Telemetry of one @c insert() batch. */
+    /** Telemetry of one @c insert() batch. */
     struct [[nodiscard]] insert_result_t {
-        /** @brief This batch's share of the context's running counters. */
+
+        /** This batch's share of the context's running counters. */
         basic_traversal_telemetry_t telemetry;
     };
 
     /**
-     *  @brief Moves a batch of values into the index under their keys, walking the graph
-     *      for each and wiring the selector's chosen neighbors. All-or-nothing: capacity &
-     *      scratch for the whole batch are secured before the first value moves, so a
-     *      non-success status means the caller's batch is untouched. Safe concurrently
-     *      with @c insert & @c search; never with @c reserve, @c save, @c load, @c health,
-     *      or teardown. An @c exclusive_k instantiation compiles the per-node locks out
-     *      for single-threaded builds; an @c immutable_k one is rejected at compile time.
+     *  @brief Moves a batch of values into the index under their keys, walking the graph for each
+     *      and wiring the selector's chosen neighbors.
+     *
+     *  All-or-nothing: capacity & scratch for the whole batch are secured before the first value
+     *  moves, so a non-success status means the caller's batch is untouched. Safe concurrently with
+     *  @c insert & @c search; never with @c reserve, @c save, @c load, @c health, or teardown. An
+     *  @c exclusive_k instantiation compiles the per-node locks out for single-threaded builds; an
+     *  @c immutable_k one is rejected at compile time.
      *
      *  Per value: walk the graph scoring against the caller's still-unmoved value, claim
-     *  an id from the dispenser, move the value & key into the claimed record, wire the
+     *  an ID from the dispenser, move the value & key into the claimed record, wire the
      *  selected neighbors, take the watermark turn, publish the key, then back-link -
      *  locking one neighbor at a time, never during a metric verb. A full reverse row
      *  re-selects down to the selector's budget - manual over-wiring is advisory here
@@ -653,7 +685,7 @@ struct basic_ram_index {
      *  @param[inout] metric This thread's scoring instance; weights may be shared,
      *      staging scratch must be thread-private.
      *  @param[out] assigned_ids Caller-owned output: either empty, or exactly one slot per
-     *      incoming value, receiving that value's dispensed node id - generally
+     *      incoming value, receiving that value's dispensed node ID - generally
      *      non-contiguous across concurrently inserting threads.
      *  @param[inout] context The calling thread's scratch & telemetry, reused across batches.
      *  @param[in] selector The link-selection heuristic, carrying its own
@@ -690,7 +722,7 @@ struct basic_ram_index {
         // sits on committed capacity, spuriously overflowing its peers.
         shared_lock_t shared_lock {shared_mutex_};
 
-        // Claims convert one-to-one into dispensed ids, so dispensing, wiring into
+        // Claims convert one-to-one into dispensed IDs, so dispensing, wiring into
         // pre-reserved rows, and the ceiling-matched key publication can never fail. The
         // claim commits only within capacity, so peers never observe an overshoot. A speculative
         // add with a rollback was considered: cheaper under contention, but a peer can see the
@@ -711,7 +743,7 @@ struct basic_ram_index {
             node_id_t const first_invisible_id =
                 atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
             // Capacity for this row is already claimed, so a refused walk wires a thinner
-            // node rather than abandoning an id nothing will ever publish.
+            // node rather than abandoning an ID nothing will ever publish.
             if (first_invisible_id)
                 search_around_<synchronization_>(incoming, metric, first_invisible_id, expansion_factor, fan_out,
                                                  connectivity, context);
@@ -728,7 +760,7 @@ struct basic_ram_index {
             std::size_t const selected_count = min_of(context.selected_neighbors.size(), connectivity);
             // A failed load leaves its unpublished rows wired; this one starts from nothing.
             record.neighbors.clear();
-            // A refused row growth wires a thinner node - the claimed id must still publish.
+            // A refused row growth wires a thinner node - the claimed ID must still publish.
             std::size_t const wired_count = succeeded(record.neighbors.reserve(selected_count)) ? selected_count : 0;
             for (std::size_t link = 0; link != wired_count; ++link) {
                 record.neighbors.push_back_reserved(context.selected_neighbors[link].node_id);
@@ -737,7 +769,7 @@ struct basic_ram_index {
             if (report_assigned_ids) assigned_ids[incoming_index] = new_node_id;
 
             // Take the watermark turn strictly in dispensed order - each thread holds at
-            // most one unpublished id, so the wait is bounded by one wiring per peer.
+            // most one unpublished ID, so the wait is bounded by one wiring per peer.
             for (node_id_t watermark = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
                  watermark != new_node_id;
                  watermark = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire))
@@ -756,11 +788,11 @@ struct basic_ram_index {
         return {result, status_t::success_k};
     }
 
-    /** @brief Appends one directed edge @p from → @p to - purely structural: no metric,
-     *      no selector, no pruning, and the row grows past any prior extent when needed.
-     *      Idempotent: an existing edge answers @c present_k. Both ids must be published;
-     *      unpublished ids & self-links answer @c malformed_k. Safe concurrently with
-     *      @c insert, @c search, readers & other manual wiring. */
+    /** Appends one directed edge @p from → @p to - purely structural: no metric,
+     *  no selector, no pruning, and the row grows past any prior extent when needed.
+     *  Idempotent: an existing edge answers @c present_k. Both IDs must be published;
+     *  unpublished IDs & self-links answer @c malformed_k. Safe concurrently with
+     *  @c insert, @c search, readers & other manual wiring. */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k>
     expected<membership_t> link(node_id_t from, node_id_t to) noexcept {
         static_assert(synchronization_ != synchronization_t::immutable_k,
@@ -788,9 +820,9 @@ struct basic_ram_index {
         return {membership, status};
     }
 
-    /** @brief Removes one directed edge @p from → @p to; @c malformed_k when the edge or
-     *      either id is unpublished or absent. The surviving row's order is unspecified.
-     *      Safe concurrently with @c insert, @c search, readers & other manual wiring. */
+    /** Removes one directed edge @p from → @p to; @c malformed_k when the edge or
+     *  either ID is unpublished or absent. The surviving row's order is unspecified.
+     *  Safe concurrently with @c insert, @c search, readers & other manual wiring. */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k>
     status_t unlink(node_id_t from, node_id_t to) noexcept {
         static_assert(synchronization_ != synchronization_t::immutable_k,
@@ -815,30 +847,34 @@ struct basic_ram_index {
         return status;
     }
 
-    /** @brief Removals are deleted, not pending: id immortality is what keeps every
-     *      reader's stale id valid. */
+    /** Removals are deleted, not pending: id immortality is what keeps every
+     *  reader's stale ID valid. */
     status_t remove(std::span<key_t const>, traversal_context_t&) noexcept = delete;
 
 #pragma endregion Mutation
 
 #pragma region Search
 
-    /** @brief Optional tuning knobs for @c search(); zeros mean "derive from
-     *      @c connectivity_32_k" - the searcher does not know the budgets the graph was
-     *      wired with. */
+    /** Optional tuning knobs for @c search(); zeros mean "derive from
+     *  @c connectivity_32_k" - the searcher does not know the budgets the graph was
+     *  wired with. */
     struct search_config_t {
-        /** @brief Breadth of the candidate pool; raise to trade latency for recall. */
+
+        /** Breadth of the candidate pool; raise to trade latency for recall. */
         std::size_t expansion_factor = 0;
-        /** @brief Frontier entries expanded per round; their unioned rows form one
-         *      metric round - the lever that feeds tiled engines their batch width. */
+
+        /** Frontier entries expanded per round; their unioned rows form one
+         *  metric round - the lever that feeds tiled engines their batch width. */
         std::size_t fan_out = 0;
     };
 
-    /** @brief Telemetry of one @c search(); matches stay in the caller's context. */
+    /** Telemetry of one @c search(); matches stay in the caller's context. */
     struct [[nodiscard]] search_result_t {
-        /** @brief Matches left in @c context.results, ascending by distance. */
+
+        /** Matches left in @c context.results, ascending by distance. */
         std::size_t count = 0;
-        /** @brief This walk's share of the context's running counters. */
+
+        /** This walk's share of the context's running counters. */
         basic_traversal_telemetry_t telemetry;
     };
 
@@ -921,39 +957,39 @@ struct basic_ram_index {
 
 #pragma region Keys and Introspection
 
-    /** @brief Number of published nodes - the visibility watermark; safe any time. */
+    /** Number of published nodes - the visibility watermark; safe any time. */
     std::size_t size() const noexcept {
         return static_cast<std::size_t>(atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire));
     }
 
-    /** @brief Total entries the frozen storage can host; zero before the first @c reserve
-     *      froze it - the acquire pairs with that freeze, so this is safe any time. */
+    /** Total entries the frozen storage can host; zero before the first @c reserve
+     *  froze it - the acquire pairs with that freeze, so this is safe any time. */
     std::size_t capacity() const noexcept { return atomic_ref<std::size_t>(capacity_).load(std::memory_order_acquire); }
 
-    /** @brief The key stored under @p node_id - the authoritative direction, immutable
-     *      after publication. One acquire load of the watermark gates the id, so any input
-     *      is safe any time; an unpublished id answers @c malformed_k. */
+    /** The key stored under @p node_id - the authoritative direction, immutable
+     *  after publication. One acquire load of the watermark gates the ID, so any input
+     *  is safe any time; an unpublished ID answers @c malformed_k. */
     expected<key_t> key_of(node_id_t node_id) const noexcept {
         if (static_cast<std::size_t>(node_id) >= size()) return {key_t {}, status_t::malformed_k};
         return {nodes_array_[node_id].key, status_t::success_k};
     }
 
-    /** @brief The payload stored under @p node_id - never relocated, valid until teardown,
-     *      immutable after publication. The same watermark gate as @c key_of, so any input
-     *      is safe any time; an unpublished id answers @c malformed_k. */
+    /** The payload stored under @p node_id - never relocated, valid until teardown,
+     *  immutable after publication. The same watermark gate as @c key_of, so any input
+     *  is safe any time; an unpublished ID answers @c malformed_k. */
     expected<value_t const&> value_of(node_id_t node_id) const noexcept {
         if (static_cast<std::size_t>(node_id) >= size()) return {nullptr, status_t::malformed_k};
         return {&nodes_array_[node_id].value, status_t::success_k};
     }
 
-    /** @brief The payload under a @b published @p node_id, unchecked: for traversal-contract
-     *      callers - selectors and the walks themselves - whose ids come from the published
-     *      pool, where the watermark gate of @c value_of would re-prove a known fact. */
+    /** The payload under a @b published @p node_id, unchecked: for traversal-contract
+     *  callers - selectors and the walks themselves - whose IDs come from the published
+     *  pool, where the watermark gate of @c value_of would re-prove a known fact. */
     value_t const& published_value_of(node_id_t node_id) const noexcept { return nodes_array_[node_id].value; }
 
-    /** @brief The out-degree of @p node_id: the same watermark gate as @c key_of, then the
-     *      row mutex - every post-publication row edit holds it, so the read is one
-     *      consistent instant even while back-linking appends. */
+    /** The out-degree of @p node_id: the same watermark gate as @c key_of, then the
+     *  row mutex - every post-publication row edit holds it, so the read is one
+     *  consistent instant even while back-linking appends. */
     expected<std::size_t> degree_of(node_id_t node_id) const noexcept {
         if (static_cast<std::size_t>(node_id) >= size()) return {0, status_t::malformed_k};
         node_t const& node = nodes_array_[node_id];
@@ -963,68 +999,78 @@ struct basic_ram_index {
         return {degree, status_t::success_k};
     }
 
-    /** @brief One published node under @p key: @c malformed_k when absent,
-     *      @c uninitialized_k before the first @c reserve. Duplicates surface in an
-     *      unspecified order - use @c find_each to see them all. Wait-free, concurrent
-     *      with everything. */
+    /** One published node under @p key: @c malformed_k when absent,
+     *  @c uninitialized_k before the first @c reserve. Duplicates surface in an
+     *  unspecified order - use @c find_each to see them all. Wait-free, concurrent
+     *  with everything. */
     expected<node_id_t> find(key_t const& key) const noexcept {
         if (!capacity()) return {node_id_t {}, status_t::uninitialized_k};
         return key_map_.find(key);
     }
 
-    /** @brief Invokes @p callback with the id of every published node under @p key -
-     *      wait-free, concurrent with everything; a no-op before the first @c reserve. */
+    /** Invokes @p callback with the id of every published node under @p key -
+     *  wait-free, concurrent with everything; a no-op before the first @c reserve. */
     template <typename callback_type_>
     void find_each(key_t const& key, callback_type_&& callback) const noexcept {
         if (!capacity()) return;
         key_map_.find_each(key, std::forward<callback_type_>(callback));
     }
 
-    /** @brief Whether at least one published node exists under @p key; @c false before the
-     *      first @c reserve. */
+    /** Whether at least one published node exists under @p key; @c false before the
+     *  first @c reserve. */
     bool contains(key_t const& key) const noexcept {
         if (!capacity()) return false;
         return key_map_.contains(key);
     }
 
-    /** @brief Number of published nodes under @p key; zero before the first @c reserve. */
+    /** Number of published nodes under @p key; zero before the first @c reserve. */
     std::size_t count(key_t const& key) const noexcept {
         if (!capacity()) return 0;
         return key_map_.count(key);
     }
 
-    /** @brief Post-construction graph report - the quality signal a recall number hides.
-     *      Meaningful only on @c success_k. */
+    /** Post-construction graph report - the quality signal a recall number hides.
+     *  Meaningful only on @c success_k. */
     struct [[nodiscard]] graph_health_t {
-        /** @brief @c success_k, or why the report could not be taken. */
+
+        /** @c success_k, or why the report could not be taken. */
         status_t status = status_t::success_k;
-        /** @brief Forward-reachability components, flooded in id order - equal to weak
-         *      components whenever back-linking has kept the edges reciprocal. */
+
+        /** Forward-reachability components, flooded in id order - equal to weak
+         *  components whenever back-linking has kept the edges reciprocal. */
         std::size_t connected_components = 0;
-        /** @brief Nodes in the largest such component. */
+
+        /** Nodes in the largest such component. */
         std::size_t largest_component = 0;
-        /** @brief Nodes no flood from the stochastic entry points reached - the
-         *      searcher's-eye blind spot. */
+
+        /** Nodes no flood from the stochastic entry points reached - the
+         *  searcher's-eye blind spot. */
         std::size_t unreachable_from_seeds = 0;
-        /** @brief The smallest published out-degree. */
+
+        /** The smallest published out-degree. */
         std::size_t degree_min = 0;
-        /** @brief The largest published out-degree. */
+
+        /** The largest published out-degree. */
         std::size_t degree_max = 0;
-        /** @brief Directed edges whose reverse edge also exists. */
+
+        /** Directed edges whose reverse edge also exists. */
         std::size_t reciprocal_edges = 0;
-        /** @brief Average published out-degree. */
+
+        /** Average published out-degree. */
         f64_t mean_degree = 0;
 
         explicit operator bool() const noexcept { return succeeded(status); }
     };
 
-    /** @brief Walks the whole graph, reporting components, degree spread, edge
-     *      reciprocity, and reachability from stochastic seeds. Takes the shared mutex's
-     *      unique side for the whole walk - live mutators answer @c contended_k at entry,
-     *      and none can start until the report returns.
+    /**
+     *  @brief Walks the whole graph, reporting components, degree spread, edge reciprocity, and
+     *      reachability from stochastic seeds.
+     *
+     *  Takes the shared mutex's unique side for the whole walk - live mutators answer
+     *  @c contended_k at entry, and none can start until the report returns.
      *
      *  @param[inout] context The calling thread's scratch; its visited set and staged
-     *      ids grow to the full graph size for the duration of the walk. */
+     *      IDs grow to the full graph size for the duration of the walk. */
     graph_health_t health(traversal_context_t& context) const noexcept {
         graph_health_t report;
         unique_lock_t unique_lock {shared_mutex_, std::try_to_lock};
@@ -1049,7 +1095,7 @@ struct basic_ram_index {
         }
 
         // Degrees & reciprocity in one edge sweep - plain reads, the gate excludes every
-        // mutator; the row-id tripwires stay as a corruption net, never an overflow.
+        // mutator; the row-ID tripwires stay as a corruption net, never an overflow.
         report.degree_min = (std::numeric_limits<std::size_t>::max)();
         std::size_t total_neighbors = 0;
         for (std::size_t node = 0; node != node_count; ++node) {
@@ -1120,13 +1166,15 @@ struct basic_ram_index {
 
 #pragma region Serialization
 
-    /** @brief One step-parallel save in flight: the caller's five columns, the covered-node
-     *      tally, and the shared mutex's unique hold - released when the plan dies or @c finish
-     *      pronounces the columns complete. */
+    /** One step-parallel save in flight: the caller's five columns, the covered-node
+     *  tally, and the shared mutex's unique hold - released when the plan dies or @c finish
+     *  pronounces the columns complete. */
     struct [[nodiscard]] save_plan_t {
-        /** @brief The caller-placed columns every step writes disjoint slices of. */
+
+        /** The caller-placed columns every step writes disjoint slices of. */
         columns_t columns {};
-        /** @brief Nodes the steps covered so far, mutated through @c atomic_ref. */
+
+        /** Nodes the steps covered so far, mutated through @c atomic_ref. */
         std::size_t covered = 0;
 
         save_plan_t() noexcept = default;
@@ -1136,12 +1184,13 @@ struct basic_ram_index {
             : columns(other.columns), covered(other.covered), index_(std::exchange(other.index_, nullptr)),
               hold_(std::move(other.hold_)) {}
         save_plan_t& operator=(save_plan_t&&) = delete;
-        /** @brief A save publishes nothing, so a dying plan only drops its hold - the lock's own job. */
+
+        /** A save publishes nothing, so a dying plan only drops its hold - the lock's own job. */
         ~save_plan_t() noexcept = default;
 
-        /** @brief Copies the node range's keys, neighbor ids & encoded values into the columns -
-         *      disjoint slices, so any number of caller threads run their steps concurrently;
-         *      every slice starts where the plan's prefix sums say. */
+        /** Copies the node range's keys, neighbor IDs & encoded values into the columns -
+         *  disjoint slices, so any number of caller threads run their steps concurrently;
+         *  every slice starts where the plan's prefix sums say. */
         template <typename value_codec_type_>
             requires basic_value_codec<value_codec_type_, value_t>
         status_t save(iota_view<node_id_t> node_range, value_codec_type_ const& codec) noexcept {
@@ -1170,10 +1219,10 @@ struct basic_ram_index {
             return status_t::success_k;
         }
 
-        /** @brief Pronounces the columns complete & releases the hold: @c config_mismatch_k
-         *      unless the steps' sizes sum to the row count - overlapping steps that still
-         *      sum right are the caller's own lie. A success spends the plan, so a second call
-         *      answers @c uninitialized_k instead of unlocking a hold it no longer owns. */
+        /** Pronounces the columns complete & releases the hold: @c config_mismatch_k
+         *  unless the steps' sizes sum to the row count - overlapping steps that still
+         *  sum right are the caller's own lie. A success spends the plan, so a second call
+         *  answers @c uninitialized_k instead of unlocking a hold it no longer owns. */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
             if (atomic_ref<std::size_t>(covered).load(std::memory_order_acquire) != columns.keys.size())
@@ -1184,19 +1233,23 @@ struct basic_ram_index {
         }
 
       private:
-        /** @brief The index being serialized, whose unique side @c hold_ occupies; null in the
-         *      empty plan a refused @ref plan_save returns, and once @c finish succeeded. */
+
+        /** The index being serialized, whose unique side @c hold_ occupies; null in the
+         *  empty plan a refused @ref plan_save returns, and once @c finish succeeded. */
         basic_ram_index const* index_ = nullptr;
-        /** @brief The unique hold spanning the plan's whole lifetime. */
+
+        /** The unique hold spanning the plan's whole lifetime. */
         unique_lock_t hold_;
     };
 
-    /** @brief Opens a step-parallel save: takes the shared mutex's unique side - held
-     *      inside the returned plan until its @c finish or its death - sizes the columns
-     *      against the watermark, and writes both prefix-sum columns up front, so the
-     *      plan's own @c save calls copy the per-node bulk into slices already named. Live
-     *      mutators answer @c contended_k; a mutator call from the plan-holding thread
-     *      deadlocks on its own hold, by construction.
+    /**
+     *  @brief Opens a step-parallel save.
+     *
+     *  Takes the shared mutex's unique side - held inside the returned plan until its @c finish or
+     *  its death - sizes the columns against the watermark, and writes both prefix-sum columns up
+     *  front, so the plan's own @c save calls copy the per-node bulk into slices already named.
+     *  Live mutators answer @c contended_k; a mutator call from the plan-holding thread deadlocks
+     *  on its own hold, by construction.
      *
      *  A column shorter than its count answers @c overflow_k and a longer one
      *  @c config_mismatch_k, so the key column's length always names the row count. */
@@ -1233,10 +1286,12 @@ struct basic_ram_index {
         return {save_plan_t {this, columns, std::move(hold)}, status_t::success_k};
     }
 
-    /** @brief Row & element counts a save needs right now. Takes the shared mutex's unique
+    /**
+     *  @brief Row & element counts a save needs right now. Takes the shared mutex's unique
      *      side for the tally; live mutators and open plans answer @c contended_k at entry.
      *
-     *  @param[in] codec Sizes each stored value's encoded form. */
+     *  @param[in] codec Sizes each stored value's encoded form.
+     */
     template <typename value_codec_type_>
         requires basic_value_codec<value_codec_type_, value_t>
     expected<basic_columns_extents_t> columns_extents(value_codec_type_ const& codec) const noexcept {
@@ -1253,10 +1308,12 @@ struct basic_ram_index {
         return {extents, status_t::success_k};
     }
 
-    /** @brief Serializes the snapshot into @p columns as one plan with a single step.
-     *      Takes the shared mutex's unique side for the whole copy - live mutators answer
-     *      @c contended_k at entry, none can start until the columns are complete, and
-     *      searches keep running throughout.
+    /**
+     *  @brief Serializes the snapshot into @p columns as one plan with a single step.
+     *
+     *  Takes the shared mutex's unique side for the whole copy - live mutators answer
+     *  @c contended_k at entry, none can start until the columns are complete, and searches keep
+     *  running throughout.
      *
      *  @param[out] columns Caller-placed destinations sized from @ref columns_extents.
      *  @param[in] codec Encodes each stored value into its slice. */
@@ -1270,13 +1327,15 @@ struct basic_ram_index {
         return plan.finish();
     }
 
-    /** @brief One step-parallel load in flight - the mirror of @ref save_plan_t: the
-     *      vetted columns, the covered-node tally, and the shared mutex's unique hold,
-     *      released when the plan dies or @c finish publishes the loaded graph. */
+    /** One step-parallel load in flight - the mirror of @ref save_plan_t: the
+     *  vetted columns, the covered-node tally, and the shared mutex's unique hold,
+     *  released when the plan dies or @c finish publishes the loaded graph. */
     struct [[nodiscard]] load_plan_t {
-        /** @brief The vetted columns being decoded. */
+
+        /** The vetted columns being decoded. */
         columns_view_t columns {};
-        /** @brief Nodes the steps covered so far, mutated through @c atomic_ref. */
+
+        /** Nodes the steps covered so far, mutated through @c atomic_ref. */
         std::size_t covered = 0;
 
         load_plan_t() noexcept = default;
@@ -1286,16 +1345,17 @@ struct basic_ram_index {
             : columns(other.columns), covered(other.covered), index_(std::exchange(other.index_, nullptr)),
               hold_(std::move(other.hold_)) {}
         load_plan_t& operator=(load_plan_t&&) = delete;
-        /** @brief A plan that dies before @c finish wipes the keys its steps registered, still
-         *      under its hold: an insert on the empty index would otherwise dispense ids the
-         *      unpublished attempt's keys still name, and spend the map's ceiling on the leftovers. */
+
+        /** A plan that dies before @c finish wipes the keys its steps registered, still
+         *  under its hold: an insert on the empty index would otherwise dispense IDs the
+         *  unpublished attempt's keys still name, and spend the map's ceiling on the leftovers. */
         ~load_plan_t() noexcept {
             if (index_) index_->key_map_.clear();
         }
 
-        /** @brief Decodes the node range's keys, neighbor rows & values into its
-         *      pre-constructed records and registers the keys - the multimap inserts are
-         *      concurrency-safe, so any number of caller threads run their steps. */
+        /** Decodes the node range's keys, neighbor rows & values into its
+         *  pre-constructed records and registers the keys - the multimap inserts are
+         *  concurrency-safe, so any number of caller threads run their steps. */
         template <typename value_codec_type_>
             requires basic_value_codec<value_codec_type_, value_t>
         status_t load(iota_view<node_id_t> node_range, value_codec_type_ const& codec) noexcept {
@@ -1304,7 +1364,7 @@ struct basic_ram_index {
             if (node_range.bound < node_range.first || static_cast<std::size_t>(node_range.bound) > node_count)
                 return status_t::config_mismatch_k;
 
-            // The plan vetted both prefix-sum columns and every id, so the slices are trusted.
+            // The plan vetted both prefix-sum columns and every ID, so the slices are trusted.
             for (node_id_t const node : node_range) {
                 node_t& record = index_->nodes_array_[node];
                 record.key = columns.keys[node];
@@ -1330,9 +1390,9 @@ struct basic_ram_index {
             return status_t::success_k;
         }
 
-        /** @brief Publishes the loaded graph in the tier-wide order - claims, identity,
-         *      watermark last - and releases the hold: @c config_mismatch_k unless the
-         *      steps' sizes sum to the row count. */
+        /** Publishes the loaded graph in the tier-wide order - claims, identity,
+         *  watermark last - and releases the hold: @c config_mismatch_k unless the
+         *  steps' sizes sum to the row count. */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
             std::size_t const node_count = columns.keys.size();
@@ -1349,18 +1409,22 @@ struct basic_ram_index {
         }
 
       private:
-        /** @brief The index being repopulated, whose unique side @c hold_ occupies; null in the
-         *      empty plan a refused @ref plan_load returns, and once @c finish published. */
+
+        /** The index being repopulated, whose unique side @c hold_ occupies; null in the
+         *  empty plan a refused @ref plan_load returns, and once @c finish published. */
         basic_ram_index* index_ = nullptr;
-        /** @brief The unique hold spanning the plan's whole lifetime. */
+
+        /** The unique hold spanning the plan's whole lifetime. */
         unique_lock_t hold_;
     };
 
-    /** @brief Opens a step-parallel load into this reserved, empty index: takes the
-     *      shared mutex's unique side - held inside the returned plan until its
-     *      @c finish or its death - vets both prefix-sum columns and every neighbor id
-     *      in full, and wipes the key multimap. The plan's own @c load calls then decode
-     *      the per-node bulk, and nothing publishes until its @c finish.
+    /**
+     *  @brief Opens a step-parallel load into this reserved, empty index: takes the shared
+     *      mutex's unique side - held inside the returned plan until its @c finish or its death -
+     *      vets both prefix-sum columns and every neighbor ID in full, and wipes the key multimap.
+     *
+     *  The plan's own @c load calls then decode the per-node bulk, and nothing publishes until its
+     *  @c finish.
      *
      *  @param[in] columns The five columns a prior @c save filled; the key column's length
      *      is the row count. */
@@ -1379,10 +1443,12 @@ struct basic_ram_index {
         return {load_plan_t {this, columns, std::move(hold)}, status_t::success_k};
     }
 
-    /** @brief Loads a snapshot into this reserved, empty index as one plan with a single
-     *      step - exclusive: decodes each value into its pre-constructed record,
-     *      rebuilds the key multimap, and publishes the watermark last. The key map is
-     *      wiped at planning, so a failed attempt may be retried with corrected columns.
+    /**
+     *  @brief Loads a snapshot into this reserved, empty index as one plan with a single step -
+     *      exclusive: decodes each value into its pre-constructed record, rebuilds the key
+     *      multimap, and publishes the watermark last.
+     *
+     *  The key map is wiped at planning, so a failed attempt may be retried with corrected columns.
      *
      *  @param[in] columns The five columns a prior @c save filled.
      *  @param[in] codec Decodes each value slice into its record. */
@@ -1401,19 +1467,19 @@ struct basic_ram_index {
   private:
 #pragma region Internals
 
-    /** @brief Stochastic entry points the health report floods from. */
+    /** Stochastic entry points the health report floods from. */
     inline static constexpr std::size_t health_seeds_k = 8;
 
-    /** @brief The default frontier fan-out: enough expanded rows for one metric round to
-     *      stage a full candidate pool. */
+    /** The default frontier fan-out: enough expanded rows for one metric round to
+     *  stage a full candidate pool. */
     static std::size_t derived_fan_out_(std::size_t expansion_factor, std::size_t connectivity) noexcept {
         return max_of<std::size_t>(divide_round_up(expansion_factor, connectivity), 1);
     }
 
-    /** @brief Sizes every context container for one walk from the frozen geometry: the pools,
-     *      the staging surfaces and the selections never allocate again, the frontier sheds
-     *      within its reservation, and the visited set alone may re-table as a walk widens -
-     *      once per doubling per context lifetime, which a context kept across walks amortizes. */
+    /** Sizes every context container for one walk from the frozen geometry: the pools,
+     *  the staging surfaces and the selections never allocate again, the frontier sheds
+     *  within its reservation, and the visited set alone may re-table as a walk widens -
+     *  once per doubling per context lifetime, which a context kept across walks amortizes. */
     static status_t reserve_scratch_(traversal_context_t& context, std::size_t expansion_factor, std::size_t fan_out,
                                      std::size_t connectivity) noexcept {
         std::size_t const round_capacity = max_of(fan_out * connectivity, connectivity + 1);
@@ -1427,10 +1493,12 @@ struct basic_ram_index {
         return context.reverse_ids.reserve(connectivity);
     }
 
-    /** @brief Appends @p node_id's live neighbors into @c context.staged_ids - under the
-     *      node's mutex on the concurrent contract, as a plain copy otherwise - topping up
-     *      the staging surfaces first, since manual linking grows rows past any estimate.
-     *      Bounded copies only, never metric verbs.
+    /**
+     *  @brief Appends @p node_id's live neighbors into @c context.staged_ids - under the node's
+     *      mutex on the concurrent contract, as a plain copy otherwise - topping up the staging
+     *      surfaces first, since manual linking grows rows past any estimate.
+     *
+     *  Bounded copies only, never metric verbs.
      *  @return The copied degree, or the refusal that kept the row out of staging. */
     template <synchronization_t synchronization_>
     expected<std::size_t> copy_row_(node_id_t node_id, traversal_context_t& context) const noexcept {
@@ -1450,12 +1518,14 @@ struct basic_ram_index {
         return {degree, status_t::success_k};
     }
 
-    /** @brief Scores up to @p wanted fresh stochastic landmarks in one builder round,
+    /**
+     *  @brief Scores up to @p wanted fresh stochastic landmarks in one builder round,
      *      seeding the results & frontier. Visited collisions probe forward cyclically,
      *      staying exact.
      *  @return The landmarks scored; zero means the published set is exhausted, staging was
      *      refused, or scratch could not grow - the last counted as a saturated walk - and is
-     *      the reason to stop. */
+     *      the reason to stop.
+     */
     template <typename metric_type_, typename query_type_>
     std::size_t sample_landmarks_(query_type_ const& query, metric_type_& metric, node_id_t first_invisible_id,
                                   std::size_t wanted, std::size_t expansion_factor,
@@ -1485,9 +1555,9 @@ struct basic_ram_index {
         return staged_count;
     }
 
-    /** @brief One round's expansion half: peels up to @p fan_out frontier entries within
-     *      the stopping radius, copies their rows, and pushes the watermark- and
-     *      visited-filtered union into the metric, compacted in @c context.staged_ids. */
+    /** One round's expansion half: peels up to @p fan_out frontier entries within
+     *  the stopping radius, copies their rows, and pushes the watermark- and
+     *  visited-filtered union into the metric, compacted in @c context.staged_ids. */
     template <synchronization_t synchronization_, typename metric_type_, typename query_type_>
     basic_expansion_round_t expand_frontier_(query_type_ const& query, metric_type_& metric,
                                              node_id_t first_invisible_id, std::size_t expansion_factor,
@@ -1505,7 +1575,7 @@ struct basic_ram_index {
             std::size_t const segment_start = context.staged_ids.size();
             auto const [degree, status] = copy_row_<synchronization_>(best.node_id, context);
             if (failed(status) || failed(context.visited.reserve(context.visited.size() + degree))) {
-                // Drop the raw row copy: only pushed, filtered ids may reach the drain.
+                // Drop the raw row copy: only pushed, filtered IDs may reach the drain.
                 // The entry stays on the frontier - nothing is lost, only postponed.
                 context.staged_ids.resize_reserved(segment_start);
                 ++context.telemetry.saturated_walks;
@@ -1517,7 +1587,7 @@ struct basic_ram_index {
             std::size_t kept = segment_start;
             for (std::size_t position = segment_start; position != segment_start + degree; ++position) {
                 node_id_t const neighbor_id = context.staged_ids[position];
-                // The translation frontier: an id at or above the snapshot has no
+                // The translation frontier: an ID at or above the snapshot has no
                 // happens-before edge to its record, so a later query picks it up.
                 if (neighbor_id >= first_invisible_id) continue;
                 if (context.visited.contains(neighbor_id)) continue;
@@ -1570,9 +1640,9 @@ struct basic_ram_index {
         }
     }
 
-    /** @brief One round's scoring half: drains the staged union through the metric and pushes what
-     *      improved the pool into the frontier, shedding the frontier past a full pool's radius
-     *      first so the pushes fit. */
+    /** One round's scoring half: drains the staged union through the metric and pushes what
+     *  improved the pool into the frontier, shedding the frontier past a full pool's radius
+     *  first so the pushes fit. */
     template <typename metric_type_>
     basic_expansion_round_t rank_round_(metric_type_& metric, std::size_t expansion_factor,
                                         traversal_context_t& context) const noexcept {
@@ -1593,13 +1663,11 @@ struct basic_ram_index {
         return basic_expansion_round_t::advanced_k;
     }
 
-    /**
-     *  @brief Wires the reverse edges of the freshly published node, walking the links
-     *      snapshotted in @c context.reverse_ids: per neighbor - lock, append when room
-     *      remains at zero metric cost; otherwise copy the full row, unlock, re-select
-     *      off-lock through the selector, relock, and apply only if the row is still the
-     *      one copied - a lost race falls back to append-if-room, never a re-score.
-     */
+    /** Wires the reverse edges of the freshly published node, walking the links
+     *  snapshotted in @c context.reverse_ids: per neighbor - lock, append when room
+     *  remains at zero metric cost; otherwise copy the full row, unlock, re-select
+     *  off-lock through the selector, relock, and apply only if the row is still the
+     *  one copied - a lost race falls back to append-if-room, never a re-score. */
     template <synchronization_t synchronization_, typename metric_type_, typename selector_type_>
     void back_link_(node_id_t new_node_id, metric_type_& metric, selector_type_ const& selector,
                     traversal_context_t& context) noexcept {
@@ -1684,9 +1752,9 @@ struct basic_ram_index {
         }
     }
 
-    /** @brief The watermark at unique acquisition; @c contended_k when the dispenser has
-     *      run ahead of the watermark, which only an exclusive-certified mutator lying mid-turn
-     *      can do with the gate held. */
+    /** The watermark at unique acquisition; @c contended_k when the dispenser has
+     *  run ahead of the watermark, which only an exclusive-certified mutator lying mid-turn
+     *  can do with the gate held. */
     expected<node_id_t> watermark_() const noexcept {
         node_id_t const visible = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
         return {visible, visible == atomic_ref<node_id_t>(next_dispensed_id_).load(std::memory_order_acquire) //
@@ -1694,23 +1762,23 @@ struct basic_ram_index {
                              : status_t::contended_k};
     }
 
-    /** @brief Refuses a column of @p size that is not exactly @p wanted elements: a short one
-     *      overflows, a long one disagrees about the row count. For the three node-sized columns,
-     *      whose length is what names the row count. */
+    /** Refuses a column of @p size that is not exactly @p wanted elements: a short one
+     *  overflows, a long one disagrees about the row count. For the three node-sized columns,
+     *  whose length is what names the row count. */
     static status_t sized_exactly_(std::size_t size, std::size_t wanted) noexcept {
         if (size < wanted) return status_t::overflow_k;
         if (size > wanted) return status_t::config_mismatch_k;
         return status_t::success_k;
     }
 
-    /** @brief Refuses a column of @p size shorter than @p wanted elements. For the two bulk
-     *      columns, whose content the prefix sums delimit, so spare room is unused rather than
-     *      wrong - and a graph that sheds edges between sizing and planning still saves. */
+    /** Refuses a column of @p size shorter than @p wanted elements. For the two bulk
+     *  columns, whose content the prefix sums delimit, so spare room is unused rather than
+     *  wrong - and a graph that sheds edges between sizing and planning still saves. */
     static status_t sized_at_least_(std::size_t size, std::size_t wanted) noexcept {
         return size < wanted ? status_t::overflow_k : status_t::success_k;
     }
 
-    /** @brief Whether @p sums start at zero, never fall, never pass @p total, and end at it. */
+    /** Whether @p sums start at zero, never fall, never pass @p total, and end at it. */
     static status_t monotone_sums_(std::span<u64_t const> sums, std::size_t total) noexcept {
         if (sums.empty() || sums.front() != 0) return status_t::malformed_k;
         u64_t previous = 0;
@@ -1721,9 +1789,9 @@ struct basic_ram_index {
         return previous == total ? status_t::success_k : status_t::malformed_k;
     }
 
-    /** @brief Vets untrusted columns in full - both prefix-sum columns sized to the rows and
-     *      monotone over their element columns, every neighbor id naming a row - so the step
-     *      decoders trust every slice they read. */
+    /** Vets untrusted columns in full - both prefix-sum columns sized to the rows and
+     *  monotone over their element columns, every neighbor ID naming a row - so the step
+     *  decoders trust every slice they read. */
     static status_t vetted_columns_(columns_view_t columns) noexcept {
         std::size_t const node_count = columns.keys.size();
         if (columns.neighbor_offsets.size() != node_count + 1 || columns.value_offsets.size() != node_count + 1)
@@ -1741,33 +1809,37 @@ struct basic_ram_index {
 
 #pragma region State
 
-    /** @brief The node records, sized by @c reserve, addresses stable forever. */
+    /** The node records, sized by @c reserve, addresses stable forever. */
     node_array_t nodes_array_;
-    /** @brief Frozen entry capacity; its release store is @c reserve's last act, doubling
-     *      as the publication edge for the record array & key multimap. Public entry
-     *      points take one acquire load into a local, so no loop reads it. @c mutable, as every
-     *      counter here: the pre-P3323 @c std::atomic_ref binds no const word, not even to load
-     *      it, and the const readers only load. */
+
+    /** Frozen entry capacity; its release store is @c reserve's last act, doubling
+     *  as the publication edge for the record array & key multimap. Public entry
+     *  points take one acquire load into a local, so no loop reads it. @c mutable, as every
+     *  counter here: the pre-P3323 @c std::atomic_ref binds no const word, not even to load
+     *  it, and the const readers only load. */
     mutable std::size_t capacity_ {0};
 
-    /** @brief Batch capacity claims - the all-or-nothing admission, separate from
-     *      identity: claims convert one-to-one into dispensed ids, so dispensing never
-     *      overflows. The bounded add commits only within capacity, so a rejected batch
-     *      never writes and the count never overshoots. */
+    /** Batch capacity claims - the all-or-nothing admission, separate from
+     *  identity: claims convert one-to-one into dispensed IDs, so dispensing never
+     *  overflows. The bounded add commits only within capacity, so a rejected batch
+     *  never writes and the count never overshoots. */
     alignas(default_alignment_k) mutable std::size_t claimed_count_ {0};
-    /** @brief Node-id dispenser; ids are claimed after the walk, right before publication.
-     *      Its per-insert RMW gets its own line, so it never invalidates the watermark line
-     *      every search snapshots. */
+
+    /** Node-id dispenser; ids are claimed after the walk, right before publication.
+     *  Its per-insert RMW gets its own line, so it never invalidates the watermark line
+     *  every search snapshots. */
     alignas(default_alignment_k) mutable node_id_t next_dispensed_id_ {0};
-    /** @brief The visibility watermark: every id strictly below it is published. */
+
+    /** The visibility watermark: every id strictly below it is published. */
     alignas(default_alignment_k) mutable node_id_t last_visible_id_ {0};
-    /** @brief Key → ID multimap, sized by @c reserve. */
+
+    /** Key → ID multimap, sized by @c reserve. */
     key_map_t key_map_;
 
-    /** @brief The world gate: mutators hold it shared, stop-the-world verbs try-unique,
-     *      certified readers probe it wait-free. Mutable for the const cold readers, like
-     *      the row mutexes; on its own line, away from the watermark, which turn loops spin
-     *      on. */
+    /** The world gate: mutators hold it shared, stop-the-world verbs try-unique,
+     *  certified readers probe it wait-free. Mutable for the const cold readers, like
+     *  the row mutexes; on its own line, away from the watermark, which turn loops spin
+     *  on. */
     alignas(default_alignment_k) mutable shared_mutex_t shared_mutex_;
 
     [[no_unique_address]] allocator_t allocator_;
@@ -1777,14 +1849,14 @@ struct basic_ram_index {
 
 /**
  *  @brief External reader's cursor over the watermark of one @c basic_ram_index:
- *      id-order iteration, random seeks, and edge-following through a privately staged
+ *      ID-order iteration, random seeks, and edge-following through a privately staged
  *      copy of the current node's row.
  *
  *  Strictly read-only under every contract, so readers never stall writers. One watermark
  *  snapshot, captured at construction and widened by @c refresh, bounds everything: keys
  *  & values below it are immutable and read wait-free, rows are staged under the row
  *  mutex on the concurrent arm and as plain copies on the certified ones. A staged row
- *  may name ids at or past this cursor's snapshot - fresh back-links - and @c follow
+ *  may name IDs at or past this cursor's snapshot - fresh back-links - and @c follow
  *  refuses those with @c malformed_k until a @c refresh admits them. The cursor starts
  *  past the end; @c seek(0) enters the graph.
  */
@@ -1803,25 +1875,25 @@ struct basic_ram_cursor {
     basic_ram_cursor(basic_ram_cursor&&) noexcept = default;
     basic_ram_cursor& operator=(basic_ram_cursor&&) = delete;
 
-    /** @brief Binds the index & captures the watermark snapshot; allocates nothing - the
-     *      staged-row buffer grows on the first @c seek through @p allocator. */
+    /** Binds the index & captures the watermark snapshot; allocates nothing - the
+     *  staged-row buffer grows on the first @c seek through @p allocator. */
     explicit basic_ram_cursor(index_t const& index, allocator_t allocator = {}) noexcept
         : index_(index), staged_row_(allocator),
           visible_count_(atomic_ref<node_id_t>(index.last_visible_id_).load(watermark_order_k)),
           current_(visible_count_) {}
 
-    /** @brief Ids strictly below this snapshot are readable through this cursor. */
+    /** Ids strictly below this snapshot are readable through this cursor. */
     node_id_t visible_count() const noexcept { return visible_count_; }
 
-    /** @brief Widens the snapshot to admit nodes published since; a cursor standing past the
-     *      end stays past the end - entering the admitted region takes an explicit @c seek. */
+    /** Widens the snapshot to admit nodes published since; a cursor standing past the
+     *  end stays past the end - entering the admitted region takes an explicit @c seek. */
     void refresh() noexcept {
         bool const past_end = current_ == visible_count_;
         visible_count_ = atomic_ref<node_id_t>(index_.last_visible_id_).load(watermark_order_k);
         if (past_end) current_ = visible_count_;
     }
 
-    /** @brief Whether the cursor stands on a readable node. */
+    /** Whether the cursor stands on a readable node. */
     explicit operator bool() const noexcept { return current_ < visible_count_; }
 
     node_id_t id() const noexcept { return current_; }
@@ -1829,9 +1901,9 @@ struct basic_ram_cursor {
     value_t const& value() const noexcept { return index_.nodes_array_[current_].value; }
     std::span<node_id_t const> neighbors() const noexcept { return {staged_row_.begin(), staged_row_.end()}; }
 
-    /** @brief Positions on @p node & stages its row: @c malformed_k at or past the
-     *      snapshot, @c bad_alloc_k when the staging buffer refused to grow - the cursor
-     *      stays where it was on either refusal. */
+    /** Positions on @p node & stages its row: @c malformed_k at or past the
+     *  snapshot, @c bad_alloc_k when the staging buffer refused to grow - the cursor
+     *  stays where it was on either refusal. */
     status_t seek(node_id_t node) noexcept {
         if (static_cast<std::size_t>(node) >= static_cast<std::size_t>(visible_count_)) return status_t::malformed_k;
         typename index_t::node_t const& record = index_.nodes_array_[node];
@@ -1848,9 +1920,9 @@ struct basic_ram_cursor {
         return status_t::success_k;
     }
 
-    /** @brief Advances to the next published id, staging its row; past the last one the
-     *      cursor turns false. A staging refusal parks on the new id with an empty row -
-     *      a later @c seek to the same id retries the staging. */
+    /** Advances to the next published id, staging its row; past the last one the
+     *  cursor turns false. A staging refusal parks on the new ID with an empty row -
+     *  a later @c seek to the same ID retries the staging. */
     basic_ram_cursor& operator++() noexcept {
         node_id_t const next = current_ + 1;
         if (static_cast<std::size_t>(next) >= static_cast<std::size_t>(visible_count_)) {
@@ -1864,28 +1936,33 @@ struct basic_ram_cursor {
         }
         return *this;
     }
-    /** @brief Deleted: it would copy the staged row - an allocation in disguise. */
+
+    /** Deleted: it would copy the staged row - an allocation in disguise. */
     basic_ram_cursor operator++(int) = delete;
 
-    /** @brief Hops to the staged row's @p position -th neighbor: @c malformed_k past the
-     *      staged degree or when the neighbor sits at or past the snapshot. */
+    /** Hops to the staged row's @p position -th neighbor: @c malformed_k past the
+     *  staged degree or when the neighbor sits at or past the snapshot. */
     status_t follow(std::size_t position) noexcept {
         if (position >= staged_row_.size()) return status_t::malformed_k;
         return seek(staged_row_[position]);
     }
 
   private:
-    /** @brief Certified contracts already ordered every publication, so no acquire. */
+
+    /** Certified contracts already ordered every publication, so no acquire. */
     inline static constexpr std::memory_order watermark_order_k = synchronization_ == synchronization_t::concurrent_k
                                                                       ? std::memory_order_acquire
                                                                       : std::memory_order_relaxed;
 
     index_t const& index_;
-    /** @brief The private copy of the current node's row - @c follow's ground truth. */
+
+    /** The private copy of the current node's row - @c follow's ground truth. */
     growing_buffer<node_id_t, allocator_t> staged_row_;
-    /** @brief This cursor's watermark snapshot; ids strictly below it are readable. */
+
+    /** This cursor's watermark snapshot; ids strictly below it are readable. */
     node_id_t visible_count_;
-    /** @brief The current id, or @c visible_count_ when past the end. */
+
+    /** The current id, or @c visible_count_ when past the end. */
     node_id_t current_;
 };
 

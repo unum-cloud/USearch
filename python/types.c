@@ -1,7 +1,8 @@
 /**
- *  @brief The vocabulary every modality shares - the CPython twin of `usearch/types.h`.
  *  @file python/types.c
  *  @author Ash Vardanian
+ *  @date August 16, 2026
+ *  @brief The vocabulary every modality shares - the CPython twin of `usearch/types.h`.
  *
  *  Keys, distances, failures, and telemetry live here rather than inside any one modality,
  *  the same split `rust/types.rs` takes: a `Key` produced by a dense search is the very
@@ -104,7 +105,7 @@ int usearch_py_register_error_type(PyObject* module) {
 
 #pragma region Scalar Names
 
-/** @brief One scalar kind, the spellings the ecosystem gives it, and how it packs in memory. */
+/** One scalar kind, the spellings the ecosystem gives it, and how it packs in memory. */
 typedef struct scalar_naming_t {
     usearch_scalar_t kind;       //! The kind this row describes; @c usearch_scalar_name spells it.
     char const* numpy_typestr;   //! The NumPy array-interface spelling, or NULL when none exists.
@@ -113,11 +114,9 @@ typedef struct scalar_naming_t {
     unsigned char unit_bytes;    //! Bytes one storage unit occupies.
 } scalar_naming_t;
 
-/**
- *  @brief Ordered by shrinking dynamic range - floats widest exponent first, then signed
- *      integers descending, then unsigned - the order every dtype-indexed list in the
- *      project takes.
- */
+/** Ordered by shrinking dynamic range - floats widest exponent first, then signed
+ *  integers descending, then unsigned - the order every dtype-indexed list in the
+ *  project takes. */
 static scalar_naming_t const scalar_namings[] = {
     {usearch_scalar_f64_k, "<f8", "d", 1, 8},   {usearch_scalar_f32_k, "<f4", "f", 1, 4},
     {usearch_scalar_bf16_k, "<V2", NULL, 1, 2}, {usearch_scalar_f16_k, "<f2", "e", 1, 2},
@@ -128,7 +127,7 @@ static scalar_naming_t const scalar_namings[] = {
     {usearch_scalar_u1x8_k, "|V1", "?", 8, 1},
 };
 
-/** @brief Aliases the ecosystem spells differently than we do, resolved after the table. */
+/** Aliases the ecosystem spells differently than we do, resolved after the table. */
 static struct {
     char const* name;
     usearch_scalar_t kind;
@@ -478,7 +477,7 @@ int usearch_py_matrix_from_object(PyObject* object, usearch_scalar_t scalar_hint
 
 #pragma region Keys
 
-/** @brief A 128-bit entry identity, rendered as a lowercase dashed UUID. */
+/** A 128-bit entry identity, rendered as a lowercase dashed UUID. */
 typedef struct Key {
     PyObject ob_base;
     usearch_key_t key;
@@ -698,13 +697,16 @@ void usearch_py_keys_release(usearch_py_key_arena_t* arena) {
     arena->storage = usearch_py_key_storage_owned_k;
 }
 
-/** @brief Which storage a key batch will use, once its argument has been looked at. */
+/** Which storage a key batch will use, once its argument has been looked at. */
 typedef enum keys_route_t {
-    /** @brief An (N, 16) contiguous identity buffer; the arena borrows it outright. */
+
+    /** An (N, 16) contiguous identity buffer; the arena borrows it outright. */
     keys_route_borrowed_k,
-    /** @brief Not that shape, so each element converts on its own terms. */
+
+    /** Not that shape, so each element converts on its own terms. */
     keys_route_sequence_k,
-    /** @brief Something went wrong and an exception is set. */
+
+    /** Something went wrong and an exception is set. */
     keys_route_failed_k,
 } keys_route_t;
 
@@ -991,7 +993,7 @@ static void Matches_dealloc(Matches* self) {
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
-/** @brief Borrows one contiguous output for a @c Matches to read through. */
+/** Borrows one contiguous output for a @c Matches to read through. */
 static int matches_borrow(PyObject* object, char const* field, usearch_py_buffer_backing_t* backing) {
     backing->synthesized_owner = NULL;
     if (PyObject_GetBuffer(object, &backing->buffer, PyBUF_C_CONTIGUOUS) != 0)
@@ -1043,7 +1045,7 @@ static PyObject* Matches_tp_new(PyTypeObject* type, PyObject* args, PyObject* ke
     return (PyObject*)instance;
 }
 
-/** @brief Wraps a borrowed output in a `memoryview` reshaped to @p shape in @p format. */
+/** Wraps a borrowed output in a `memoryview` reshaped to @p shape in @p format. */
 static PyObject* matches_view(usearch_py_buffer_backing_t const* backing, char const* format, Py_ssize_t const* shape,
                               Py_ssize_t rank) {
     PyObject* const exported = PyMemoryView_FromObject(backing->buffer.obj);
@@ -1225,7 +1227,7 @@ int usearch_py_ordinals_from_object(PyObject* object, char const* field, int32_t
     return 0;
 }
 
-/** @brief The encoded objects trailing the views in an arena's single block. */
+/** The encoded objects trailing the views in an arena's single block. */
 static PyObject** paths_encoded(usearch_py_paths_arena_t const* arena) {
     return (PyObject**)(arena->views + arena->count);
 }

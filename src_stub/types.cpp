@@ -1,7 +1,8 @@
 /**
- *  @brief The vocabulary verbs that belong to no modality - version, capabilities, executors.
- *
  *  @file src_stub/types.cpp
+ *  @author Ash Vardanian
+ *  @date September 5, 2026
+ *  @brief The vocabulary verbs that belong to no modality - version, capabilities, executors.
  *
  *  The engine renders the capability strings from NumKong's dispatch mask in @c src/types.cpp. A
  *  stand-in dispatches to nothing, so it reports @c serial and says so wherever a binding asks.

@@ -1,9 +1,9 @@
 /**
- *  @brief The u4-stored shard of the CPU dense-index benchmark: carries the
- *      run_with_stored_dtype instantiations the dtype-free CLI unit extern-declares.
- *  @author Ash Vardanian
  *  @file bench/dense/ram_index_u4.cpp
+ *  @author Ash Vardanian
  *  @date September 6, 2026
+ *  @brief The u4-stored shard of the CPU dense-index benchmark: carries the run_with_stored_dtype
+ *      instantiations the dtype-free CLI unit extern-declares.
  */
 #include "dense/ram_index.hpp"
 

@@ -1,10 +1,9 @@
 /**
- *  @brief Shared helpers for the C++ test suites: failure counting, ledgered allocators,
- *      and universally-representable synthetic data generation.
- *
- *  @author Ash Vardanian
  *  @file test/test.hpp
+ *  @author Ash Vardanian
  *  @date July 17, 2026
+ *  @brief Shared helpers for the C++ test suites: failure counting, ledgered allocators, and
+ *      universally-representable synthetic data generation.
  *
  *  Checks return their own failure counts and roll up to @c main without global mutable
  *  state. Four verbs cover every case: @c expect for a condition, @c expect_eq and
@@ -51,8 +50,8 @@ inline std::size_t expect_eq_(actual_type_ const& actual, wanted_type_ const& wa
     return 1;
 }
 
-/** @brief The @c expect_eq twin for floats, at the 1e-3 relative tolerance a @c -ffast-math
- *      build needs: it re-derives finalizes per inlining context, so bit-equality is wrong. */
+/** The @c expect_eq twin for floats, at the 1e-3 relative tolerance a @c -ffast-math
+ *  build needs: it re-derives finalizes per inlining context, so bit-equality is wrong. */
 #define expect_near(actual, wanted) expect_near_((actual), (wanted), #actual " ~ " #wanted, __FILE__, __LINE__)
 inline std::size_t expect_near_(f64_t actual, f64_t wanted, char const* expression, char const* file, int line) {
     f64_t const scale = std::fmax(std::fmax(std::fabs(actual), std::fabs(wanted)), 1.0);
@@ -63,8 +62,8 @@ inline std::size_t expect_near_(f64_t actual, f64_t wanted, char const* expressi
     return 1;
 }
 
-/** @brief One verdict column, whichever way the case ended; answers the count it was given,
- *      so a caller accumulates through it. The @c char-pointer overload names a skip. */
+/** One verdict column, whichever way the case ended; answers the count it was given,
+ *  so a caller accumulates through it. The @c char-pointer overload names a skip. */
 inline std::size_t report(char const* name, std::size_t failures) {
     fmt::println("{}  {:<20} : {} failures", failures ? "FAILED" : "passed", name, failures);
     return failures;
@@ -75,9 +74,9 @@ inline std::size_t report(char const* name, char const* skip_reason) {
     return 0;
 }
 
-/** @brief Ids dispensed to racing lanes must land dense & duplicate-free: sorted in
- *      place, unique, and running from @p first_id through the half-open bound
- *      @p first_id plus the id count. */
+/** Ids dispensed to racing lanes must land dense & duplicate-free: sorted in
+ *  place, unique, and running from @p first_id through the half-open bound
+ *  @p first_id plus the ID count. */
 template <typename node_id_type_>
 inline std::size_t expect_contiguous_ids(std::vector<node_id_type_>& ids, std::size_t first_id) {
     std::sort(ids.begin(), ids.end());
@@ -87,29 +86,31 @@ inline std::size_t expect_contiguous_ids(std::vector<node_id_type_>& ids, std::s
     return failures;
 }
 
-/** @brief Derived-draw salts shared by both scenario libraries. Every scenario family
- *      owns exactly one named hex-leet seed and never reuses it verbatim: query draws
- *      XOR @c salt_queries_k, auxiliary value draws - extras, prefills, pairs - XOR
- *      @c salt_extras_k, per-lane draws add the lane index, and per-context re-seeds add
- *      small literal offsets. Two salts, disjoint from every lane index and offset, keep
- *      a family's draws distinct without per-site magic. */
+/** Derived-draw salts shared by both scenario libraries. Every scenario family
+ *  owns exactly one named hex-leet seed and never reuses it verbatim: query draws
+ *  XOR @c salt_queries_k, auxiliary value draws - extras, prefills, pairs - XOR
+ *  @c salt_extras_k, per-lane draws add the lane index, and per-context re-seeds add
+ *  small literal offsets. Two salts, disjoint from every lane index and offset, keep
+ *  a family's draws distinct without per-site magic. */
 constexpr u64_t salt_queries_k = 0xFFull;
-/** @brief The auxiliary-draw twin of @ref salt_queries_k. */
+
+/** The auxiliary-draw twin of @ref salt_queries_k. */
 constexpr u64_t salt_extras_k = 0xAAull;
 
-/** @brief Spin ceiling for waits on prompt flags - flags a peer sets within bounded
- *      work: a gate entry, a hold acquisition, a refusal confirmation. Expiry proves a
- *      broken rendezvous. Waits on a peer's completion of unbounded-duration work are
- *      deliberately not hatched at this bound - see @ref attempt_limit_k. */
+/** Spin ceiling for waits on prompt flags - flags a peer sets within bounded
+ *  work: a gate entry, a hold acquisition, a refusal confirmation. Expiry proves a
+ *  broken rendezvous. Waits on a peer's completion of unbounded-duration work are
+ *  deliberately not hatched at this bound - see @ref attempt_limit_k. */
 constexpr std::size_t spin_limit_k = std::size_t {1} << 28;
-/** @brief Retry ceiling for settle phases & sweep loops: once every racer is done, an
- *      operation retried this many times without success has provably starved. */
+
+/** Retry ceiling for settle phases & sweep loops: once every racer is done, an
+ *  operation retried this many times without success has provably starved. */
 constexpr std::size_t attempt_limit_k = std::size_t {1} << 20;
 
-/** @brief Spins - yielding - until @p condition holds or @c spin_limit_k expires;
- *      answers whether the condition held. It never counts failures itself: the caller
- *      owns the on-expiry story - count & proceed so a hold can die, count & return, or
- *      open a gate before leaving so the pool cannot deadlock. */
+/** Spins - yielding - until @p condition holds or @c spin_limit_k expires;
+ *  answers whether the condition held. It never counts failures itself: the caller
+ *  owns the on-expiry story - count & proceed so a hold can die, count & return, or
+ *  open a gate before leaving so the pool cannot deadlock. */
 template <typename condition_type_>
 [[nodiscard]] inline bool spin_until(condition_type_&& condition) noexcept {
     for (std::size_t spins = 0; spins != spin_limit_k; ++spins) {
@@ -119,11 +120,11 @@ template <typename condition_type_>
     return false;
 }
 
-/** @brief The reader-lane invariants over one search's scored results: every id below
- *      the watermark sampled after the search, distances ascending, the pool bound
- *      honored. Answers the violation count silently - racing lanes add it to their
- *      shared counter, since printing from inside a race would interleave & flood - and
- *      the status verdict stays at the call site: lanes differ in how they record it. */
+/** The reader-lane invariants over one search's scored results: every id below
+ *  the watermark sampled after the search, distances ascending, the pool bound
+ *  honored. Answers the violation count silently - racing lanes add it to their
+ *  shared counter, since printing from inside a race would interleave & flood - and
+ *  the status verdict stays at the call site: lanes differ in how they record it. */
 template <typename scored_type_>
 inline std::size_t scored_failures(scored_type_ const* results, std::size_t results_count, std::size_t published_after,
                                    std::size_t results_bound) noexcept {
@@ -135,14 +136,17 @@ inline std::size_t scored_failures(scored_type_ const* results, std::size_t resu
     return failures;
 }
 
-/** @brief Shared tally of live bytes & allocation counts, mutated by every @c counting_allocator. */
+/** Shared tally of live bytes & allocation counts, mutated by every @c counting_allocator. */
 struct allocation_ledger_t {
-    /** @brief Bytes allocated minus bytes freed; must balance to zero at scope exit. */
+
+    /** Bytes allocated minus bytes freed; must balance to zero at scope exit. */
     std::atomic<std::ptrdiff_t> live_bytes {0};
-    /** @brief Lifetime number of @c allocate calls, for coarse allocation-pressure checks. */
+
+    /** Lifetime number of @c allocate calls, for coarse allocation-pressure checks. */
     std::atomic<std::size_t> total_allocations {0};
-    /** @brief Allocation ceiling in live bytes; scenarios lower it to drive the all-or-
-     *      nothing refusal paths, so a request past it is refused, never counted. */
+
+    /** Allocation ceiling in live bytes; scenarios lower it to drive the all-or-
+     *  nothing refusal paths, so a request past it is refused, never counted. */
     std::atomic<std::ptrdiff_t> byte_budget {PTRDIFF_MAX};
 };
 
@@ -185,31 +189,33 @@ struct counting_allocator {
     bool operator==(counting_allocator const& other) const noexcept { return ledger_ == other.ledger_; }
 };
 
-/** @brief The byte specialization every fixture places its index through. */
+/** The byte specialization every fixture places its index through. */
 using counting_allocator_t = counting_allocator<byte_t>;
 
-/** @brief The largest magnitude one stored dimension can carry - per component for the
- *      packed types, the finite maximum for the plain ones. The conditional papers over a
- *      NumKong asymmetry: plain scalars name their @c component_t but only the packed ones
- *      expose @c component_max. */
+/** The largest magnitude one stored dimension can carry - per component for the
+ *  packed types, the finite maximum for the plain ones. The conditional papers over a
+ *  NumKong asymmetry: plain scalars name their @c component_t but only the packed ones
+ *  expose @c component_max. */
 template <typename scalar_>
 constexpr float dimension_amplitude() noexcept {
     if constexpr (requires { scalar_::component_max(); }) return float(scalar_::component_max());
     else return float(scalar_::finite_max());
 }
 
-/** @brief Distinct levels one component of @p scalar_ draws from: a packed bit has two, since
+/**
+ *  @brief Distinct levels one component of @p scalar_ draws from: a packed bit has two, since
  *      its proxy sets the bit for any nonzero and a wider draw would bias it toward ones; every
  *      other type keeps the eight levels the fixtures are built around.
- *  @see @c nk::fill_uniform, which ranges every dtype by its own @c finite_min & @c finite_max. */
+ *  @see @c nk::fill_uniform, which ranges every dtype by its own @c finite_min & @c finite_max.
+ */
 template <typename scalar_>
 constexpr u32_t random_component_levels() noexcept {
     if constexpr (std::is_same_v<scalar_, nk::u1x8_t>) return 2;
     else return 8;
 }
 
-/** @brief Builds a scalar from a small unsigned - sub-byte types go through the raw nibble path,
- *      float wrappers via @c from_f32, byte-or-larger integers via the integral constructor. */
+/** Builds a scalar from a small unsigned - sub-byte types go through the raw nibble path,
+ *  float wrappers via @c from_f32, byte-or-larger integers via the integral constructor. */
 template <typename scalar_>
 auto make_scalar(unsigned value) noexcept {
     if constexpr (nk::dimensions_per_value<scalar_>() > 1) return static_cast<i8_t>(value);
@@ -217,9 +223,9 @@ auto make_scalar(unsigned value) noexcept {
     else return scalar_(value);
 }
 
-/** @brief Waiter that misbehaves on purpose: mostly yields, but occasionally oversleeps for
- *      hundreds of microseconds, stretching the lock & watermark contention windows far beyond
- *      anything hardware timing produces - a poor man's schedule fuzzer. */
+/** Waiter that misbehaves on purpose: mostly yields, but occasionally oversleeps for
+ *  hundreds of microseconds, stretching the lock & watermark contention windows far beyond
+ *  anything hardware timing produces - a poor man's schedule fuzzer. */
 struct flaky_waiter_t {
     template <typename value_type_, typename thread_index_type_, typename bound_type_>
     void operator()(std::atomic<value_type_> const&, value_type_, thread_index_type_, bound_type_) const noexcept {
@@ -242,15 +248,15 @@ struct flaky_waiter_t {
     }
 };
 
-/** @brief Builds vectors with planted cluster structure: a few random centroid rows, each
- *      emitted row a centroid copy with a small share of dimensions redrawn. Uniform
- *      random data concentrates pairwise distances into one narrow band - a flat landscape
- *      no graph can navigate, at its worst for binary vectors - while planting bimodalizes
- *      them: within a cluster only the redrawn dimensions differ, across clusters most do,
- *      so self-recall measures navigation instead of fighting near-equidistance. Both
- *      constants derive from the shape: eight centroids keep every cluster deep at the
- *      scenarios' row counts, and redrawing dimensions/16 keeps cluster members distinct
- *      while preserving a several-fold within-to-across distance margin. */
+/** Builds vectors with planted cluster structure: a few random centroid rows, each
+ *  emitted row a centroid copy with a small share of dimensions redrawn. Uniform
+ *  random data concentrates pairwise distances into one narrow band - a flat landscape
+ *  no graph can navigate, at its worst for binary vectors - while planting bimodalizes
+ *  them: within a cluster only the redrawn dimensions differ, across clusters most do,
+ *  so self-recall measures navigation instead of fighting near-equidistance. Both
+ *  constants derive from the shape: eight centroids keep every cluster deep at the
+ *  scenarios' row counts, and redrawing dimensions/16 keeps cluster members distinct
+ *  while preserving a several-fold within-to-across distance margin. */
 template <typename scalar_>
 nk::matrix<scalar_> make_clustered_vectors(std::size_t count, std::size_t dimensions, u64_t seed) {
     constexpr std::size_t centroids_count_k = 8;
@@ -278,10 +284,10 @@ nk::matrix<scalar_> make_clustered_vectors(std::size_t count, std::size_t dimens
     return vectors;
 }
 
-/** @brief Fills a row-major matrix with pseudo-random small values from {0..7}, exactly
- *      representable in every supported scalar type down to i4 nibbles. Binary vectors
- *      route through the planted-cluster generator: their flat draw has no navigable
- *      structure, and each bit keeps a fair coin either way. */
+/** Fills a row-major matrix with pseudo-random small values from {0..7}, exactly
+ *  representable in every supported scalar type down to i4 nibbles. Binary vectors
+ *  route through the planted-cluster generator: their flat draw has no navigable
+ *  structure, and each bit keeps a fair coin either way. */
 template <typename scalar_>
 nk::matrix<scalar_> make_vectors(std::size_t count, std::size_t dimensions, u64_t seed) {
     if constexpr (std::is_same_v<scalar_, nk::u1x8_t>) return make_clustered_vectors<scalar_>(count, dimensions, seed);
@@ -297,8 +303,8 @@ nk::matrix<scalar_> make_vectors(std::size_t count, std::size_t dimensions, u64_
 }
 } // namespace unum::usearch
 
-/** @brief Teaches the expect verbs to print statuses by name - @c status_t is the most
- *      compared enum in the suite, and {fmt} refuses unknown enums at compile time. */
+/** Teaches the expect verbs to print statuses by name - @c status_t is the most
+ *  compared enum in the suite, and {fmt} refuses unknown enums at compile time. */
 template <>
 struct fmt::formatter<unum::usearch::status_t> : fmt::formatter<char const*> {
     auto format(us::status_t status, format_context& context) const {

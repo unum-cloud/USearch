@@ -1,8 +1,9 @@
 /**
- *  @brief Vector search over equidimensional dense embeddings - the Node-API twin of
- *      @c include/usearch/dense_index.h.
  *  @file javascript/dense_index.c
  *  @author Ash Vardanian
+ *  @date September 9, 2026
+ *  @brief Vector search over equidimensional dense embeddings - the Node-API twin of
+ *      @c include/usearch/dense_index.h.
  *
  *  The @c CompiledIndex class, the snapshot cursor and the resumable finder it opens, and the
  *  checkpoint metadata readers that need no index at all.
@@ -14,21 +15,25 @@
 
 #pragma region Handles
 
-/** @brief A snapshot cursor and the geometry its vector export is sized from. */
+/** A snapshot cursor and the geometry its vector export is sized from. */
 typedef struct usearch_js_cursor_t {
-    /** @brief The engine handle, @c NULL once released. */
+
+    /** The engine handle, @c NULL once released. */
     usearch_dense_cursor_t handle;
-    /** @brief The frozen dimensionality, captured so a pull needs no index argument. */
+
+    /** The frozen dimensionality, captured so a pull needs no index argument. */
     size_t dimensions;
 } usearch_js_cursor_t;
 
-/** @brief A resumable nearest-neighbor stream, holding one of the executor's threads until released. */
+/** A resumable nearest-neighbor stream, holding one of the executor's threads until released. */
 typedef struct usearch_js_finder_t {
-    /** @brief The engine handle, @c NULL once released. */
+
+    /** The engine handle, @c NULL once released. */
     usearch_dense_finder_t handle;
 } usearch_js_finder_t;
 
-/** @brief The three outputs of a ranked run, allocated where the engine writes them. */
+/** The three outputs of a ranked run, allocated where the engine writes them. */
+
 /**
  *  @brief Borrows the three output arrays a ranked verb fills, deriving the row width.
  *
@@ -75,7 +80,7 @@ static bool usearch_js_matches_from_value(napi_env env, napi_value keys_value, n
     return true;
 }
 
-/** @brief Copies the counts the engine wrote into the caller's array and frees the scratch. */
+/** Copies the counts the engine wrote into the caller's array and frees the scratch. */
 static napi_value usearch_js_matches_publish(napi_env env, napi_value counts_value, size_t queries_count,
                                              usearch_matches_span_t* span) {
     napi_typedarray_type counts_type = napi_int8_array;
@@ -91,7 +96,7 @@ static napi_value usearch_js_matches_publish(napi_env env, napi_value counts_val
     return usearch_js_undefined(env);
 }
 
-/** @brief Releases the count scratch when a verb fails before publishing. */
+/** Releases the count scratch when a verb fails before publishing. */
 static void usearch_js_matches_release(usearch_matches_span_t* span) {
     free(span->counts);
     span->counts = NULL;
@@ -186,7 +191,7 @@ static napi_value usearch_js_index_construct(napi_env env, napi_callback_info in
     return self;
 }
 
-/** @brief Reads the receiver and, when @p arguments is non-NULL, the verb's arguments beside it. */
+/** Reads the receiver and, when @p arguments is non-NULL, the verb's arguments beside it. */
 static usearch_js_index_t* usearch_js_index_self(napi_env env, napi_callback_info info, size_t* arguments_count,
                                                  napi_value* arguments) {
     napi_value self = NULL;
@@ -202,7 +207,7 @@ static usearch_js_index_t* usearch_js_index_self(napi_env env, napi_callback_inf
     return index;
 }
 
-/** @brief Refuses a verb whose argument count is not the one its signature spells. */
+/** Refuses a verb whose argument count is not the one its signature spells. */
 static bool usearch_js_arity(napi_env env, size_t taken, size_t wanted, char const* signature) {
     if (taken == wanted) return true;
     return usearch_js_throw(env, "ERR_INVALID_ARG_TYPE", signature);
@@ -275,7 +280,7 @@ static napi_value usearch_js_index_capabilities(napi_env env, napi_callback_info
     return usearch_js_static_string(env, value);
 }
 
-/** @brief @c reserve(capacity) - claims room for a total entry count ahead of insertion. */
+/** @c reserve(capacity) - claims room for a total entry count ahead of insertion. */
 static napi_value usearch_js_index_reserve(napi_env env, napi_callback_info info) {
     size_t arguments_count = 1;
     napi_value arguments[1] = {NULL};
@@ -291,7 +296,7 @@ static napi_value usearch_js_index_reserve(napi_env env, napi_callback_info info
     return usearch_js_undefined(env);
 }
 
-/** @brief @c clear() - erases every entry, keeping the reserved capacity and frozen geometry. */
+/** @c clear() - erases every entry, keeping the reserved capacity and frozen geometry. */
 static napi_value usearch_js_index_clear(napi_env env, napi_callback_info info) {
     usearch_js_index_t* const index = usearch_js_index_self(env, info, NULL, NULL);
     if (!index) return NULL;
@@ -305,7 +310,7 @@ static napi_value usearch_js_index_clear(napi_env env, napi_callback_info info) 
 
 #pragma region Insertion and Search
 
-/** @brief Slots a telemetry sink carries, in the order a report writes them. */
+/** Slots a telemetry sink carries, in the order a report writes them. */
 enum { usearch_js_stats_slots_k = 3 };
 
 /**
@@ -336,7 +341,7 @@ static bool usearch_js_stats_from_value(napi_env env, napi_value value, double**
     return true;
 }
 
-/** @brief Writes one call's counters into @p sink, which the caller's accumulator folds in. */
+/** Writes one call's counters into @p sink, which the caller's accumulator folds in. */
 static void usearch_js_stats_report(double* sink, usearch_dense_traversal_stats_t const* stats) {
     if (!sink) return;
     sink[0] = (double)stats->visited_members;
@@ -344,7 +349,7 @@ static void usearch_js_stats_report(double* sink, usearch_dense_traversal_stats_
     sink[2] = (double)stats->restarts;
 }
 
-/** @brief @c add(keys, vectors, executor, expansion, scalarKind, stats) → rows published. */
+/** @c add(keys, vectors, executor, expansion, scalarKind, stats) → rows published. */
 static napi_value usearch_js_index_add(napi_env env, napi_callback_info info) {
     size_t arguments_count = 6;
     napi_value arguments[6] = {NULL, NULL, NULL, NULL, NULL, NULL};
@@ -405,7 +410,7 @@ cleanup:
     return result;
 }
 
-/** @brief @c refine(executor, expansion, stats) → nodes whose edges changed. */
+/** @c refine(executor, expansion, stats) → nodes whose edges changed. */
 static napi_value usearch_js_index_refine(napi_env env, napi_callback_info info) {
     size_t arguments_count = 3;
     napi_value arguments[3] = {NULL, NULL, NULL};
@@ -710,7 +715,7 @@ static napi_value usearch_js_index_maxsim(napi_env env, napi_callback_info info)
 
 #pragma region Membership
 
-/** @brief @c count(keys) → one entry count per identity. */
+/** @c count(keys) → one entry count per identity. */
 static napi_value usearch_js_index_count(napi_env env, napi_callback_info info) {
     size_t arguments_count = 1;
     napi_value arguments[1] = {NULL};
@@ -743,7 +748,7 @@ cleanup:
     return result;
 }
 
-/** @brief @c contains(keys) → whether the index holds any entry under each identity. */
+/** @c contains(keys) → whether the index holds any entry under each identity. */
 static napi_value usearch_js_index_contains(napi_env env, napi_callback_info info) {
     size_t arguments_count = 1;
     napi_value arguments[1] = {NULL};
@@ -825,7 +830,7 @@ static napi_value usearch_js_index_get(napi_env env, napi_callback_info info) {
 
 #pragma region Serialization
 
-/** @brief @c save(path, executor) - writes the checkpoint the path's extension picks. */
+/** @c save(path, executor) - writes the checkpoint the path's extension picks. */
 static napi_value usearch_js_index_save(napi_env env, napi_callback_info info) {
     size_t arguments_count = 2;
     napi_value arguments[2] = {NULL, NULL};
@@ -847,7 +852,7 @@ static napi_value usearch_js_index_save(napi_env env, napi_callback_info info) {
     return usearch_js_undefined(env);
 }
 
-/** @brief @c load(path, executor) - materializes a checkpoint into this handle. */
+/** @c load(path, executor) - materializes a checkpoint into this handle. */
 static napi_value usearch_js_index_load(napi_env env, napi_callback_info info) {
     size_t arguments_count = 2;
     napi_value arguments[2] = {NULL, NULL};
@@ -869,7 +874,7 @@ static napi_value usearch_js_index_load(napi_env env, napi_callback_info info) {
     return usearch_js_undefined(env);
 }
 
-/** @brief @c saveBuffer(executor) → one monolith, sized by the storage requirements. */
+/** @c saveBuffer(executor) → one monolith, sized by the storage requirements. */
 static napi_value usearch_js_index_save_buffer(napi_env env, napi_callback_info info) {
     size_t arguments_count = 1;
     napi_value arguments[1] = {NULL};
@@ -899,7 +904,7 @@ static napi_value usearch_js_index_save_buffer(napi_env env, napi_callback_info 
     return array;
 }
 
-/** @brief Borrows the bytes of a @c Uint8Array, which is how a checkpoint arrives without a file. */
+/** Borrows the bytes of a @c Uint8Array, which is how a checkpoint arrives without a file. */
 static bool usearch_js_bytes_from_value(napi_env env, napi_value value, char const* field, usearch_bytes_view_t* view) {
     napi_typedarray_type type = napi_int8_array;
     napi_value arraybuffer = NULL;
@@ -915,7 +920,7 @@ static bool usearch_js_bytes_from_value(napi_env env, napi_value value, char con
     return true;
 }
 
-/** @brief @c loadBuffer(buffer, executor) - materializes a monolith held in memory. */
+/** @c loadBuffer(buffer, executor) - materializes a monolith held in memory. */
 static napi_value usearch_js_index_load_buffer(napi_env env, napi_callback_info info) {
     size_t arguments_count = 2;
     napi_value arguments[2] = {NULL, NULL};
@@ -935,7 +940,7 @@ static napi_value usearch_js_index_load_buffer(napi_env env, napi_callback_info 
     return usearch_js_undefined(env);
 }
 
-/** @brief Wraps the geometry and metric a checkpoint froze; placement is never recorded. */
+/** Wraps the geometry and metric a checkpoint froze; placement is never recorded. */
 static napi_value usearch_js_metadata_object(napi_env env, usearch_dense_metadata_t const* metadata) {
     napi_value object = NULL;
     if (napi_create_object(env, &object) != napi_ok) {
@@ -951,7 +956,7 @@ static napi_value usearch_js_metadata_object(napi_env env, usearch_dense_metadat
     return object;
 }
 
-/** @brief @c CompiledIndex.metadata(path) → the geometry a checkpoint froze, without loading it. */
+/** @c CompiledIndex.metadata(path) → the geometry a checkpoint froze, without loading it. */
 static napi_value usearch_js_index_metadata(napi_env env, napi_callback_info info) {
     size_t arguments_count = 1;
     napi_value arguments[1] = {NULL};
@@ -974,7 +979,7 @@ static napi_value usearch_js_index_metadata(napi_env env, napi_callback_info inf
     return usearch_js_metadata_object(env, &metadata);
 }
 
-/** @brief @c CompiledIndex.metadataBuffer(buffer) → the geometry a monolith in memory froze. */
+/** @c CompiledIndex.metadataBuffer(buffer) → the geometry a monolith in memory froze. */
 static napi_value usearch_js_index_metadata_buffer(napi_env env, napi_callback_info info) {
     size_t arguments_count = 1;
     napi_value arguments[1] = {NULL};
@@ -1008,7 +1013,7 @@ static void usearch_js_cursor_finalize(napi_env env, void* data, void* hint) {
     free(cursor);
 }
 
-/** @brief Reads the cursor behind the receiver, refusing one that has already been released. */
+/** Reads the cursor behind the receiver, refusing one that has already been released. */
 static usearch_js_cursor_t* usearch_js_cursor_self(napi_env env, napi_callback_info info, size_t* arguments_count,
                                                    napi_value* arguments) {
     napi_value self = NULL;
@@ -1025,7 +1030,7 @@ static usearch_js_cursor_t* usearch_js_cursor_self(napi_env env, napi_callback_i
     return cursor;
 }
 
-/** @brief @c next(batch) → @c [keys, vectors] of up to @p batch rows, or @c null when drained. */
+/** @c next(batch) → @c [keys, vectors] of up to @p batch rows, or @c null when drained. */
 static napi_value usearch_js_cursor_next(napi_env env, napi_callback_info info) {
     size_t arguments_count = 1;
     napi_value arguments[1] = {NULL};
@@ -1072,7 +1077,7 @@ static napi_value usearch_js_cursor_next(napi_env env, napi_callback_info info) 
     return result;
 }
 
-/** @brief @c free() - releases the snapshot; a second call is a no-op. */
+/** @c free() - releases the snapshot; a second call is a no-op. */
 static napi_value usearch_js_cursor_release(napi_env env, napi_callback_info info) {
     napi_value self = NULL;
     usearch_js_cursor_t* cursor = NULL;
@@ -1086,7 +1091,7 @@ static napi_value usearch_js_cursor_release(napi_env env, napi_callback_info inf
     return usearch_js_undefined(env);
 }
 
-/** @brief @c cursor() → a consistent cursor over the entries published so far. */
+/** @c cursor() → a consistent cursor over the entries published so far. */
 static napi_value usearch_js_index_cursor(napi_env env, napi_callback_info info) {
     usearch_js_index_t* const index = usearch_js_index_self(env, info, NULL, NULL);
     if (!index) return NULL;
@@ -1134,7 +1139,7 @@ static void usearch_js_finder_finalize(napi_env env, void* data, void* hint) {
     free(finder);
 }
 
-/** @brief Reads the finder behind the receiver, refusing one that has already been released. */
+/** Reads the finder behind the receiver, refusing one that has already been released. */
 static usearch_js_finder_t* usearch_js_finder_self(napi_env env, napi_callback_info info, size_t* arguments_count,
                                                    napi_value* arguments) {
     napi_value self = NULL;
@@ -1151,7 +1156,7 @@ static usearch_js_finder_t* usearch_js_finder_self(napi_env env, napi_callback_i
     return finder;
 }
 
-/** @brief @c next(wanted) → @c [keys, scores] of up to @p wanted matches, or @c null when drained. */
+/** @c next(wanted) → @c [keys, scores] of up to @p wanted matches, or @c null when drained. */
 static napi_value usearch_js_finder_next(napi_env env, napi_callback_info info) {
     size_t arguments_count = 1;
     napi_value arguments[1] = {NULL};
@@ -1197,7 +1202,7 @@ static napi_value usearch_js_finder_next(napi_env env, napi_callback_info info) 
     return result;
 }
 
-/** @brief @c free() - releases the stream and the executor thread it pinned; a second call is a no-op. */
+/** @c free() - releases the stream and the executor thread it pinned; a second call is a no-op. */
 static napi_value usearch_js_finder_release(napi_env env, napi_callback_info info) {
     napi_value self = NULL;
     usearch_js_finder_t* finder = NULL;
@@ -1211,7 +1216,7 @@ static napi_value usearch_js_finder_release(napi_env env, napi_callback_info inf
     return usearch_js_undefined(env);
 }
 
-/** @brief @c find(query, executor, scalarKind) → a resumable stream over one query row. */
+/** @c find(query, executor, scalarKind) → a resumable stream over one query row. */
 static napi_value usearch_js_index_find(napi_env env, napi_callback_info info) {
     size_t arguments_count = 3;
     napi_value arguments[3] = {NULL, NULL, NULL};

@@ -1,8 +1,9 @@
 /**
+ *  @file src_stub/matrix.cpp
+ *  @author Ash Vardanian
+ *  @date September 5, 2026
  *  @brief A brute-force stand-in for the @c usearch_matrix_* C ABI, scoring every stored matrix
  *      against every query so a binding can be exercised without the engine.
- *
- *  @file src_stub/matrix.cpp
  *
  *  One entry is a rank-2 tensor whose height varies and whose width is frozen index-wide, so
  *  batches arrive as a tape - one array of base pointers beside one of row counts - rather than
@@ -49,20 +50,23 @@ static_assert(std::is_nothrow_move_constructible_v<entry_t>, "reallocation must 
 using index_t = handle<payload_t, usearch_matrix_options_t>;
 
 struct cursor_t {
-    /** @brief The index being walked; it must outlive the cursor. */
+
+    /** The index being walked; it must outlive the cursor. */
     index_t* index;
-    /** @brief The next entry to hand out. */
+
+    /** The next entry to hand out. */
     std::size_t position;
-    /** @brief The watermark captured at creation, which later insertions cannot raise. */
+
+    /** The watermark captured at creation, which later insertions cannot raise. */
     std::size_t limit;
 };
 
-/** @brief Whether the width is frozen; a zeroed one makes every derived extent zero. */
+/** Whether the width is frozen; a zeroed one makes every derived extent zero. */
 bool reject_unfrozen(index_t const& index, usearch_error_t* error) {
     return reject_if(!index.options.columns, usearch_error_uninitialized_k, "The geometry was never frozen", error);
 }
 
-/** @brief Whether this stand-in scores the kind, or rejects it rather than approximating it. */
+/** Whether this stand-in scores the kind, or rejects it rather than approximating it. */
 bool reject_metric(index_t const& index, usearch_error_t* error) {
     bool const scored = index.options.metric == usearch_matrix_metric_chamfer_k ||
                         index.options.metric == usearch_matrix_metric_hausdorff_k;
@@ -70,7 +74,7 @@ bool reject_metric(index_t const& index, usearch_error_t* error) {
                      error);
 }
 
-/** @brief The height of a stored entry, which its payload's extent and the frozen width fix. */
+/** The height of a stored entry, which its payload's extent and the frozen width fix. */
 std::size_t rows_of(index_t const& index, entry_t const& entry) { return entry.payload.size() / index.options.columns; }
 
 #pragma endregion Storage
@@ -86,10 +90,8 @@ double row_distance(std::span<double const> first, std::span<double const> secon
     return std::sqrt(squared);
 }
 
-/**
- *  @brief Every row of @p from finds its nearest partner in @p onto; the two kinds differ only
- *      in how those distances are aggregated, so both come off this one sweep.
- */
+/** Every row of @p from finds its nearest partner in @p onto; the two kinds differ only
+ *  in how those distances are aggregated, so both come off this one sweep. */
 void nearest_partners(std::span<double const> from, std::span<double const> onto, std::size_t columns, double& summed,
                       double& worst) {
     summed = 0, worst = 0;
@@ -106,10 +108,8 @@ void nearest_partners(std::span<double const> from, std::span<double const> onto
     if (from_rows) summed /= static_cast<double>(from_rows);
 }
 
-/**
- *  @brief Scores one pair under the frozen kind. @c usearch_matrix_init refuses a kind this
- *      build does not implement, so only the two best-partner kinds reach here.
- */
+/** Scores one pair under the frozen kind. @c usearch_matrix_init refuses a kind this
+ *  build does not implement, so only the two best-partner kinds reach here. */
 double distance(index_t const& index, std::span<double const> query, std::span<double const> stored) {
     std::size_t const columns = index.options.columns;
     double forward_mean = 0, forward_worst = 0, reverse_mean = 0, reverse_worst = 0;
@@ -119,15 +119,13 @@ double distance(index_t const& index, std::span<double const> query, std::span<d
     return std::max(forward_worst, reverse_worst);
 }
 
-/**
- *  @brief Whether the kind is one this build implements. The transport and superposition kinds
- *      need a solver and an SVD, which a brute-force stand-in deliberately does not carry.
- */
+/** Whether the kind is one this build implements. The transport and superposition kinds
+ *  need a solver and an SVD, which a brute-force stand-in deliberately does not carry. */
 bool known_metric(usearch_matrix_metric_t metric) {
     return metric == usearch_matrix_metric_chamfer_k || metric == usearch_matrix_metric_hausdorff_k;
 }
 
-/** @brief Widens one tape entry into doubles, sized by its own row count. */
+/** Widens one tape entry into doubles, sized by its own row count. */
 void read_matrix(void const* base, std::size_t row_count, std::size_t columns, usearch_scalar_t scalar_kind,
                  std::vector<double>& values) {
     values.resize(row_count * columns);
@@ -181,26 +179,30 @@ std::size_t search_tape(index_t& index, void const* const* queries, std::size_t 
 
 #pragma region Serialization
 
-/**
- *  @brief What @c load needs before it can read an entry. The blob is this file's own memory
- *      image rather than a format: no magic, no version, and nothing else reads it back.
- */
+/** What @c load needs before it can read an entry. The blob is this file's own memory
+ *  image rather than a format: no magic, no version, and nothing else reads it back. */
 struct prefix_t {
-    /** @brief The frozen row width shared by every entry. */
+
+    /** The frozen row width shared by every entry. */
     std::size_t columns;
-    /** @brief The frozen row count, or zero where heights are ragged. */
+
+    /** The frozen row count, or zero where heights are ragged. */
     std::size_t rows;
-    /** @brief The connections-per-node bound the handle was built with. */
+
+    /** The connections-per-node bound the handle was built with. */
     std::size_t connectivity;
-    /** @brief How many entries follow the prefix. */
+
+    /** How many entries follow the prefix. */
     std::size_t entries;
-    /** @brief Bytes of entry payload that follow, keys and row counts included. */
+
+    /** Bytes of entry payload that follow, keys and row counts included. */
     std::size_t payload_bytes;
-    /** @brief What entries are compared by. */
+
+    /** What entries are compared by. */
     usearch_matrix_metric_t metric;
 };
 
-/** @brief The per-entry overhead of the blob: the key, then the row count that follows it. */
+/** The per-entry overhead of the blob: the key, then the row count that follows it. */
 constexpr std::size_t record_overhead_k = sizeof(usearch_key_t) + sizeof(us::u64_t);
 
 std::size_t payload_extent(index_t const& index, std::size_t rows) {
@@ -239,7 +241,7 @@ void write_into(index_t const& index, std::size_t rows, bytes_span_t target) {
     }
 }
 
-/** @brief Reads the prefix and checks the blob is long enough for what it claims. */
+/** Reads the prefix and checks the blob is long enough for what it claims. */
 bool parse_prefix(prefix_t& prefix, bytes_view_t blob, usearch_error_t* error) {
     if (reject_if(blob.size() < sizeof(prefix_t), usearch_error_malformed_input_k, "The checkpoint ends early", error))
         return false;
@@ -247,7 +249,7 @@ bool parse_prefix(prefix_t& prefix, bytes_view_t blob, usearch_error_t* error) {
     return fits_blob(blob, sizeof(prefix_t), prefix.payload_bytes, 1, error);
 }
 
-/** @brief Adopts a checkpoint's configuration, answering whether its metric is one we implement. */
+/** Adopts a checkpoint's configuration, answering whether its metric is one we implement. */
 bool adopt(usearch_matrix_options_t& options, prefix_t const& prefix) {
     if (!known_metric(prefix.metric)) return false;
     options.columns = prefix.columns;
@@ -257,7 +259,7 @@ bool adopt(usearch_matrix_options_t& options, prefix_t const& prefix) {
     return true;
 }
 
-/** @brief Replaces the contents of @p index; the caller holds both locks exclusively. */
+/** Replaces the contents of @p index; the caller holds both locks exclusively. */
 bool read_from(index_t& index, bytes_view_t blob, usearch_error_t* error) {
     prefix_t prefix {};
     if (!parse_prefix(prefix, blob, error)) return false;
@@ -461,7 +463,7 @@ std::size_t usearch_matrix_refine(usearch_matrix_index_t handle, usearch_executo
     return 0;
 }
 
-/** @brief The shared body of both search doors; the unfiltered one admits with a null predicate. */
+/** The shared body of both search doors; the unfiltered one admits with a null predicate. */
 void search_matrix_tape(usearch_matrix_index_t handle, usearch_executor_t executor, void const* const* queries,
                         std::size_t const* row_counts, std::size_t queries_count, usearch_scalar_t scalar_kind,
                         usearch_matches_span_t const* matches, usearch_matrix_search_options_t const* options,

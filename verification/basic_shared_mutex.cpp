@@ -1,10 +1,10 @@
 /**
- *  @brief GenMC client for `basic_shared_mutex` from `include/usearch/basic/ram_index.hpp`,
- *      the real header: one mutator takes the shared side and writes a pair of rows inside
- *      it, one prober brackets its reads with the wait-free snapshots.
- *  @author Ash Vardanian
  *  @file verification/basic_shared_mutex.cpp
+ *  @author Ash Vardanian
  *  @date September 9, 2026
+ *  @brief GenMC client for `basic_shared_mutex` from `include/usearch/basic/ram_index.hpp`, the
+ *      real header: one mutator takes the shared side and writes a pair of rows inside it, one
+ *      prober brackets its reads with the wait-free snapshots.
  *
  *  A certified prober must not see the pair torn, and RC11 would let it: `lock_shared` is an
  *  acquire read-modify-write, and without the release fence it ends in the exit snapshot may

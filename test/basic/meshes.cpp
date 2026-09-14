@@ -1,20 +1,21 @@
 /**
- *  @brief The meshes unit of the basic-index suite: 3D point clouds compared through the
- *      first Gromov-Wasserstein lower bound - sorted intra-cloud distance spectra - the
- *      floating-distance, derived-state, rigid-motion-invariant corner, with the metric
- *      built on NumKong's kernels the way real caller metrics are.
- *
- *  @author Ash Vardanian
  *  @file test/basic/meshes.cpp
+ *  @author Ash Vardanian
  *  @date August 26, 2026
+ *  @brief The meshes unit of the basic-index suite.
+ *
+ *  3D point clouds compared through the first Gromov-Wasserstein lower bound - sorted intra-cloud
+ *  distance spectra - the floating-distance, derived-state, rigid-motion-invariant corner, with the
+ *  metric built on NumKong's kernels the way real caller metrics are.
  *
  *  Clouds are planted prototypes under random rigid motions with a few jittered points,
  *  so the spectra cluster while the raw coordinates do not - a broken metric that leaks
  *  coordinates fails the recall bar loudly. The spectrum is derived state: cached per
  *  value, never serialized, and recomputed by the codec on load.
  */
-#include <array> // `std::array` - the handmade tetrahedra
 #include <cmath> // `std::sqrt`
+
+#include <array> // `std::array` - the handmade tetrahedra
 #include <span>  // `std::span` - the metric's drain surface
 #include <vector>
 
@@ -24,13 +25,13 @@
 
 using namespace unum::usearch;
 
-/** @brief One vertex; plain floats, so codec roundtrips are bit-exact. */
+/** One vertex; plain floats, so codec roundtrips are bit-exact. */
 struct point3_t {
     f32_t x {}, y {}, z {};
 };
 
-/** @brief One cloud with its cached spectrum: the sorted multiset of all pairwise
- *      intra-cloud distances - the rigid-motion-invariant signature the metric compares. */
+/** One cloud with its cached spectrum: the sorted multiset of all pairwise
+ *  intra-cloud distances - the rigid-motion-invariant signature the metric compares. */
 struct mesh_t {
     std::vector<point3_t> points;
     std::vector<f32_t> spectrum;
@@ -43,8 +44,8 @@ static f32_t point_distance(point3_t first, point3_t second) noexcept {
     return float(distance);
 }
 
-/** @brief Recomputes the cached spectrum from the points - the generator's epilogue and
- *      the codec's on-load derivation. */
+/** Recomputes the cached spectrum from the points - the generator's epilogue and
+ *  the codec's on-load derivation. */
 static void refresh_spectrum(mesh_t& mesh) {
     mesh.spectrum.clear();
     for (std::size_t first = 0; first != mesh.points.size(); ++first)
@@ -53,9 +54,9 @@ static void refresh_spectrum(mesh_t& mesh) {
     std::sort(mesh.spectrum.begin(), mesh.spectrum.end());
 }
 
-/** @brief The first GW lower bound between equal-size clouds: the root-mean-square gap
- *      between their sorted spectra, through NumKong's Euclidean kernel - the tier's
- *      intended shape, a caller metric built on the SIMD kernel library. */
+/** The first GW lower bound between equal-size clouds: the root-mean-square gap
+ *  between their sorted spectra, through NumKong's Euclidean kernel - the tier's
+ *  intended shape, a caller metric built on the SIMD kernel library. */
 static f64_t spectra_distance(std::span<f32_t const> first, std::span<f32_t const> second) noexcept {
     if (first.empty()) return 0.0;
     nk::f32_t::euclidean_result_t gap {};
@@ -64,9 +65,9 @@ static f64_t spectra_distance(std::span<f32_t const> first, std::span<f32_t cons
     return static_cast<f64_t>(float(gap)) / std::sqrt(static_cast<f64_t>(first.size()));
 }
 
-/** @brief The hand-rolled scalar twin of @c spectra_distance - the independent oracle:
- *      plain f64 accumulation, no library kernels, so a NumKong dispatch bug cannot
- *      cancel out of the scenarios' distance audits. */
+/** The hand-rolled scalar twin of @c spectra_distance - the independent oracle:
+ *  plain f64 accumulation, no library kernels, so a NumKong dispatch bug cannot
+ *  cancel out of the scenarios' distance audits. */
 static f64_t scalar_spectra_distance(std::span<f32_t const> first, std::span<f32_t const> second) noexcept {
     f64_t sum_of_squares = 0;
     for (std::size_t pair = 0; pair != first.size(); ++pair) {
@@ -76,8 +77,8 @@ static f64_t scalar_spectra_distance(std::span<f32_t const> first, std::span<f32
     return first.size() ? std::sqrt(sum_of_squares / static_cast<f64_t>(first.size())) : 0.0;
 }
 
-/** @brief The unit's batched metric: stages spans over the cached spectra, never
- *      recomputing one - "cached per push" is the whole point of the derived state. */
+/** The unit's batched metric: stages spans over the cached spectra, never
+ *  recomputing one - "cached per push" is the whole point of the derived state. */
 struct spectra_metric_t {
     std::span<f32_t const> query_spectrum_;
     std::vector<std::span<f32_t const>> staged_;
@@ -96,10 +97,10 @@ struct spectra_metric_t {
     }
 };
 
-/** @brief Serializes the points back to back - never the spectrum, which the load path
- *      re-derives, the way norms re-derive in the dense tiers. The slice length is the point
- *      count, so nothing is self-delimited, and the interchange sees a ragged @c f32 cloud of
- *      @c [*,3] rows. */
+/** Serializes the points back to back - never the spectrum, which the load path
+ *  re-derives, the way norms re-derive in the dense tiers. The slice length is the point
+ *  count, so nothing is self-delimited, and the interchange sees a ragged @c f32 cloud of
+ *  @c [*,3] rows. */
 struct mesh_codec_t {
     inline static constexpr dtype_t value_dtype_k = dtype_t::f32_k;
     inline static constexpr column_shape_t value_shape_k = matrix_shape_t {0, 3};
@@ -131,8 +132,8 @@ struct mesh_codec_t {
     }
 };
 
-/** @brief Rotates @p point by the unit quaternion @p rotation - the rigid motion the
- *      spectra must be blind to. */
+/** Rotates @p point by the unit quaternion @p rotation - the rigid motion the
+ *  spectra must be blind to. */
 static point3_t rotate_point(point3_t point, std::array<f32_t, 4> rotation) noexcept {
     f32_t const qw = rotation[0], qx = rotation[1], qy = rotation[2], qz = rotation[3];
     f32_t const tx = 2 * (qy * point.z - qz * point.y);
@@ -143,7 +144,7 @@ static point3_t rotate_point(point3_t point, std::array<f32_t, 4> rotation) noex
             point.z + qw * tz + (qx * ty - qy * tx)};
 }
 
-/** @brief A regular tetrahedron scaled so every edge has length @p edge. */
+/** A regular tetrahedron scaled so every edge has length @p edge. */
 static mesh_t make_tetrahedron(f32_t edge) {
     f32_t const scale = edge / (2.0f * std::sqrt(2.0f));
     mesh_t mesh;
@@ -152,8 +153,8 @@ static mesh_t make_tetrahedron(f32_t edge) {
     return mesh;
 }
 
-/** @brief Three tetrahedra with edges 1, 2 & 3: six equal spectrum entries each, so the
- *      pairwise spectra distances are exactly the edge gaps. */
+/** Three tetrahedra with edges 1, 2 & 3: six equal spectrum entries each, so the
+ *  pairwise spectra distances are exactly the edge gaps. */
 struct meshes_handmade_t {
     std::array<mesh_t, 3> values;
     std::array<std::array<f64_t, 3>, 3> distances;
@@ -238,8 +239,8 @@ static_assert(basic_metric<spectra_metric_t, mesh_t, f64_t>);
 static_assert(!transparent_metric<spectra_metric_t>);
 static_assert(basic_value_codec<mesh_codec_t, mesh_t>);
 
-/** @brief The invariance arm: a rigidly moved cloud must sit at spectra distance zero
- *      from its original - the property that makes the metric a GW lower bound. */
+/** The invariance arm: a rigidly moved cloud must sit at spectra distance zero
+ *  from its original - the property that makes the metric a GW lower bound. */
 static std::size_t check_meshes_rigid_invariance() {
     std::size_t failures = 0;
     mesh_t const original = make_tetrahedron(2);
@@ -256,9 +257,9 @@ static std::size_t check_meshes_rigid_invariance() {
     return failures;
 }
 
-/** @brief Kernel-vs-scalar parity: the NumKong-built metric distance and the scalar
- *      oracle must agree over sampled cloud pairs - each also runs implicitly through
- *      every scenario's per-result audit. */
+/** Kernel-vs-scalar parity: the NumKong-built metric distance and the scalar
+ *  oracle must agree over sampled cloud pairs - each also runs implicitly through
+ *  every scenario's per-result audit. */
 static std::size_t check_meshes_kernel_parity() {
     std::size_t failures = 0;
     auto values = meshes_fixture_t::make_values(8, basic_seed_contract_k ^ 0x0Dull);

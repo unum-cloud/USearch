@@ -1,7 +1,8 @@
 /**
- *  @brief The module-init glue - `PyModuleDef`, type registration, and `PyInit_lib`.
  *  @file python/lib.c
  *  @author Ash Vardanian
+ *  @date August 16, 2026
+ *  @brief The module-init glue - `PyModuleDef`, type registration, and `PyInit_lib`.
  *
  *  Every modality contributes rows to one table here and its verbs to one file beside this
  *  one, so a modality joining the library touches two lines of glue and nothing else.

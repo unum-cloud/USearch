@@ -1,8 +1,8 @@
 /**
- *  @brief Device metric kits for the dense VRAM indexes - the GPU twin of @c ram_metric.hpp.
- *  @author Ash Vardanian
  *  @file include/usearch/dense/vram_metric.cuh
+ *  @author Ash Vardanian
  *  @date July 22, 2026
+ *  @brief Device metric kits for the dense VRAM indexes - the GPU twin of @c ram_metric.hpp.
  *
  *  A kit binds one storage dtype to one metric on one GPU generation, named like the CPU
  *  kits: @b dtype_arch_metric_kit_t, where the dot-product base takes the @c inner slot
@@ -38,11 +38,11 @@
 namespace unum {
 namespace usearch {
 
-/** @brief The generation this compilation pass can encode: the device passes carry their
- *      target's @c __CUDA_ARCH__, the host pass admits only the floor - harmless, since
- *      generation rows inherit their floor's record layouts and the host touches layouts
- *      alone. Kit-chain layers intersect their architecture requirement with this AND with
- *      the caller's ceiling, the CPU-style side-by-side selector. */
+/** The generation this compilation pass can encode: the device passes carry their
+ *  target's @c __CUDA_ARCH__, the host pass admits only the floor - harmless, since
+ *  generation rows inherit their floor's record layouts and the host touches layouts
+ *  alone. Kit-chain layers intersect their architecture requirement with this AND with
+ *  the caller's ceiling, the CPU-style side-by-side selector. */
 #if defined(__CUDA_ARCH__)
 inline constexpr cuda_arch_t dense_cuda_target_arch_k = static_cast<cuda_arch_t>(__CUDA_ARCH__);
 #else
@@ -75,8 +75,8 @@ concept dense_cuda_kit = requires(typename kit_::fragment_t fragment, typename k
     { kit_::convert_to_distance(ranked) } -> std::same_as<dense_distance_t>;
 };
 
-/** @brief Generic cross-lane reduction: folds sub-warp partials of width @p lanes_per_row
- *      (a warp-uniform power of two) down to the leader lane. One tree serves every kit. */
+/** Generic cross-lane reduction: folds sub-warp partials of width @p lanes_per_row
+ *  (a warp-uniform power of two) down to the leader lane. One tree serves every kit. */
 template <typename dot_type_>
 __device__ __forceinline__ dot_type_ dense_cuda_reduce(dot_type_ partial, u32_t lanes_per_row) noexcept {
     for (u32_t offset = lanes_per_row / 2; offset; offset >>= 1)
@@ -84,8 +84,8 @@ __device__ __forceinline__ dot_type_ dense_cuda_reduce(dot_type_ partial, u32_t 
     return partial;
 }
 
-/** @brief Full-warp reduction of a two-component norms accumulator - {sum,sumsq} for the
- *      arithmetic kits, {popcount,popcount} for the binary ones. */
+/** Full-warp reduction of a two-component norms accumulator - {sum,sumsq} for the
+ *  arithmetic kits, {popcount,popcount} for the binary ones. */
 __device__ __forceinline__ int2 dense_cuda_reduce_norms(int2 partial) noexcept {
 #pragma unroll
     for (u32_t offset = 16; offset; offset >>= 1) {
@@ -111,8 +111,8 @@ __device__ __forceinline__ float2 dense_cuda_reduce_norms(float2 partial) noexce
     return partial;
 }
 
-/** @brief Rebroadcasts lane 0's reduced norms to every lane - values that feed
- *      lane-divergent control flow must be warp-uniform. */
+/** Rebroadcasts lane 0's reduced norms to every lane - values that feed
+ *  lane-divergent control flow must be warp-uniform. */
 __device__ __forceinline__ int2 dense_cuda_broadcast_norms(int2 reduced) noexcept {
     reduced.x = __shfl_sync(0xFFFFFFFFu, reduced.x, 0);
     reduced.y = __shfl_sync(0xFFFFFFFFu, reduced.y, 0);
@@ -131,8 +131,8 @@ __device__ __forceinline__ float2 dense_cuda_broadcast_norms(float2 reduced) noe
 
 #pragma region Single Precision Floats
 
-/** @brief The @c f32 dot base over 4-value fragments - plain fused multiply-adds, the
- *      reference arithmetic every narrower family approximates. */
+/** The @c f32 dot base over 4-value fragments - plain fused multiply-adds, the
+ *  reference arithmetic every narrower family approximates. */
 struct f32_ampere_inner_kit_t {
     using scalar_t = nk::f32_t;
     using fragment_t = uint4;
@@ -179,8 +179,9 @@ struct f32_ampere_inner_kit_t {
     static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
         return {norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f, norms.sumsq};
     }
-    /** @brief The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
-     *      a distance as @b 1-dot, monotone decreasing and negative-safe. */
+
+    /** The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
+     *  a distance as @b 1-dot, monotone decreasing and negative-safe. */
     static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
         return 1.0f - dot;
     }
@@ -211,8 +212,8 @@ struct f32_ampere_euclidean_kit_t : f32_ampere_sqeuclidean_kit_t {
 
 #pragma region Half Precision Floats
 
-/** @brief The @c f16 dot base over 8-value fragments: packed multiplies widened into an
- *      @c f32 accumulator every fragment, so no half-range overflow can accumulate. */
+/** The @c f16 dot base over 8-value fragments: packed multiplies widened into an
+ *  @c f32 accumulator every fragment, so no half-range overflow can accumulate. */
 struct f16_ampere_inner_kit_t {
     using scalar_t = nk::f16_t;
     using fragment_t = uint4;
@@ -228,8 +229,9 @@ struct f16_ampere_inner_kit_t {
     };
 
     inline static constexpr u32_t fragment_bytes_k = 16;
-    /** @brief Ceiling on concurrently in-flight candidate-vector gathers per lane - the
-     *      memory-parallelism window over the @b candidate axis, never the dimension axis. */
+
+    /** Ceiling on concurrently in-flight candidate-vector gathers per lane - the
+     *  memory-parallelism window over the @b candidate axis, never the dimension axis. */
     inline static constexpr u32_t max_gathers_in_flight_k = 8;
     inline static constexpr bool has_norms_k = true;
 
@@ -270,8 +272,9 @@ struct f16_ampere_inner_kit_t {
     static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
         return {norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f, norms.sumsq};
     }
-    /** @brief The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
-     *      a distance as @b 1-dot, monotone decreasing and negative-safe. */
+
+    /** The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
+     *  a distance as @b 1-dot, monotone decreasing and negative-safe. */
     static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
         return 1.0f - dot;
     }
@@ -298,8 +301,8 @@ struct f16_ampere_euclidean_kit_t : f16_ampere_sqeuclidean_kit_t {
     }
 };
 
-/** @brief The @c bf16 dot base - the same widening discipline as f16 through the
- *      @c bf16x2 instructions that land exactly at the sm_80 floor. */
+/** The @c bf16 dot base - the same widening discipline as f16 through the
+ *  @c bf16x2 instructions that land exactly at the sm_80 floor. */
 struct bf16_ampere_inner_kit_t {
     using scalar_t = nk::bf16_t;
     using fragment_t = uint4;
@@ -355,8 +358,9 @@ struct bf16_ampere_inner_kit_t {
     static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
         return {norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f, norms.sumsq};
     }
-    /** @brief The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
-     *      a distance as @b 1-dot, monotone decreasing and negative-safe. */
+
+    /** The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
+     *  a distance as @b 1-dot, monotone decreasing and negative-safe. */
     static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
         return 1.0f - dot;
     }
@@ -387,9 +391,9 @@ struct bf16_ampere_euclidean_kit_t : bf16_ampere_sqeuclidean_kit_t {
 
 #pragma region Byte Sized Integers
 
-/** @brief The @c i8 dot base - one signed @c dp4a per fragment word, norms via the same
- *      instruction against splat-one and self. Signed records throughout: sums are
- *      genuinely negative, and the layout matches the CPU planes' @b {sum,sumsq}. */
+/** The @c i8 dot base - one signed @c dp4a per fragment word, norms via the same
+ *  instruction against splat-one and self. Signed records throughout: sums are
+ *  genuinely negative, and the layout matches the CPU planes' @b {sum,sumsq}. */
 struct i8_ampere_inner_kit_t {
     using scalar_t = nk::i8_t;
     using fragment_t = uint4;
@@ -437,15 +441,17 @@ struct i8_ampere_inner_kit_t {
     static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
         return {norms.sumsq ? rsqrtf(static_cast<f32_t>(norms.sumsq)) : 0.0f, norms.sumsq};
     }
-    /** @brief The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
-     *      a distance as @b 1-dot, monotone decreasing and negative-safe. */
+
+    /** The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
+     *  a distance as @b 1-dot, monotone decreasing and negative-safe. */
     static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
         return 1.0f - static_cast<f32_t>(dot);
     }
-    /** @brief Output-boundary finalize, the CPU kits' @c convert_to_distances in miniature:
-     *      the traversal ranks on raw @c distance values end to end, and only the matches a
-     *      caller receives pass through here - identity unless a metric owes a monotone
-     *      transform, like Euclidean's square root. */
+
+    /** Output-boundary finalize, the CPU kits' @c convert_to_distances in miniature:
+     *  the traversal ranks on raw @c distance values end to end, and only the matches a
+     *  caller receives pass through here - identity unless a metric owes a monotone
+     *  transform, like Euclidean's square root. */
     static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return ranked;
     }
@@ -464,18 +470,19 @@ struct i8_ampere_sqeuclidean_kit_t : i8_ampere_inner_kit_t {
         return static_cast<f32_t>(query_state.sumsq) + static_cast<f32_t>(norms.sumsq) - 2.0f * static_cast<f32_t>(dot);
     }
 };
-/** @brief Metric-true Euclidean over the squared-distance walk: rankings are identical
- *      under the monotone square root, so only reported matches pay one @c sqrtf each -
- *      numerically matching the CPU euclidean kits. */
+
+/** Metric-true Euclidean over the squared-distance walk: rankings are identical
+ *  under the monotone square root, so only reported matches pay one @c sqrtf each -
+ *  numerically matching the CPU euclidean kits. */
 struct i8_ampere_euclidean_kit_t : i8_ampere_sqeuclidean_kit_t {
     static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return sqrtf(ranked);
     }
 };
 
-/** @brief The @c u8 dot base - the unsigned @c dp4a form with unsigned records: every
- *      quantity is non-negative, the dot alone can pass the signed range at wide rows,
- *      and the instruction's native operand types need no cast chatter. */
+/** The @c u8 dot base - the unsigned @c dp4a form with unsigned records: every
+ *  quantity is non-negative, the dot alone can pass the signed range at wide rows,
+ *  and the instruction's native operand types need no cast chatter. */
 struct u8_ampere_inner_kit_t {
     using scalar_t = nk::u8_t;
     using fragment_t = uint4;
@@ -523,8 +530,9 @@ struct u8_ampere_inner_kit_t {
     static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
         return {norms.sumsq ? rsqrtf(static_cast<f32_t>(norms.sumsq)) : 0.0f, norms.sumsq};
     }
-    /** @brief The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
-     *      a distance as @b 1-dot, monotone decreasing and negative-safe. */
+
+    /** The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
+     *  a distance as @b 1-dot, monotone decreasing and negative-safe. */
     static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
         return 1.0f - static_cast<f32_t>(dot);
     }
@@ -558,9 +566,9 @@ struct u8_ampere_euclidean_kit_t : u8_ampere_sqeuclidean_kit_t {
 
 #if __CUDA_ARCH__ >= 890 || !defined(__CUDA_ARCH__)
 
-/** @brief The @c e4m3 dot base: no generation has fp8 arithmetic - conversion is all the
- *      ISA offers - so pairs widen through the sm_89+ @c cvt.rn.f16x2.e4m3x2 and
- *      accumulate like the 16-bit float kits; hence the @c ada architecture slot. */
+/** The @c e4m3 dot base: no generation has fp8 arithmetic - conversion is all the
+ *  ISA offers - so pairs widen through the sm_89+ @c cvt.rn.f16x2.e4m3x2 and
+ *  accumulate like the 16-bit float kits; hence the @c ada architecture slot. */
 struct e4m3_ada_inner_kit_t {
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
@@ -622,8 +630,9 @@ struct e4m3_ada_inner_kit_t {
     static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
         return {norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f, norms.sumsq};
     }
-    /** @brief The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
-     *      a distance as @b 1-dot, monotone decreasing and negative-safe. */
+
+    /** The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
+     *  a distance as @b 1-dot, monotone decreasing and negative-safe. */
     static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
         return 1.0f - dot;
     }
@@ -650,8 +659,8 @@ struct e4m3_ada_euclidean_kit_t : e4m3_ada_sqeuclidean_kit_t {
     }
 };
 
-/** @brief The @c e5m2 dot base - the wide-exponent fp8, widening through
- *      @c cvt.rn.f16x2.e5m2x2. */
+/** The @c e5m2 dot base - the wide-exponent fp8, widening through
+ *  @c cvt.rn.f16x2.e5m2x2. */
 struct e5m2_ada_inner_kit_t {
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
@@ -713,8 +722,9 @@ struct e5m2_ada_inner_kit_t {
     static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
         return {norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f, norms.sumsq};
     }
-    /** @brief The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
-     *      a distance as @b 1-dot, monotone decreasing and negative-safe. */
+
+    /** The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
+     *  a distance as @b 1-dot, monotone decreasing and negative-safe. */
     static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
         return 1.0f - dot;
     }
@@ -747,9 +757,9 @@ struct e5m2_ada_euclidean_kit_t : e5m2_ada_sqeuclidean_kit_t {
 
 #pragma region Packed Nibbles
 
-/** @brief The @c i4x2 dot base: SWAR-unpacks each word of 8 signed nibbles into two
- *      byte-lane words - sign-extended through the classic xor-sub bias - and feeds the
- *      byte engine, two @c dp4a per source word. Signed records, like @c i8. */
+/** The @c i4x2 dot base: SWAR-unpacks each word of 8 signed nibbles into two
+ *  byte-lane words - sign-extended through the classic xor-sub bias - and feeds the
+ *  byte engine, two @c dp4a per source word. Signed records, like @c i8. */
 struct i4x2_ampere_inner_kit_t {
     using scalar_t = nk::i4x2_t;
     using fragment_t = uint4;
@@ -809,8 +819,9 @@ struct i4x2_ampere_inner_kit_t {
     static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
         return {norms.sumsq ? rsqrtf(static_cast<f32_t>(norms.sumsq)) : 0.0f, norms.sumsq};
     }
-    /** @brief The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
-     *      a distance as @b 1-dot, monotone decreasing and negative-safe. */
+
+    /** The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
+     *  a distance as @b 1-dot, monotone decreasing and negative-safe. */
     static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
         return 1.0f - static_cast<f32_t>(dot);
     }
@@ -838,7 +849,7 @@ struct i4x2_ampere_euclidean_kit_t : i4x2_ampere_sqeuclidean_kit_t {
     }
 };
 
-/** @brief The @c u4x2 dot base - the unsigned unpack, no sign bias, unsigned records. */
+/** The @c u4x2 dot base - the unsigned unpack, no sign bias, unsigned records. */
 struct u4x2_ampere_inner_kit_t {
     using scalar_t = nk::u4x2_t;
     using fragment_t = uint4;
@@ -896,8 +907,9 @@ struct u4x2_ampere_inner_kit_t {
     static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
         return {norms.sumsq ? rsqrtf(static_cast<f32_t>(norms.sumsq)) : 0.0f, norms.sumsq};
     }
-    /** @brief The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
-     *      a distance as @b 1-dot, monotone decreasing and negative-safe. */
+
+    /** The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
+     *  a distance as @b 1-dot, monotone decreasing and negative-safe. */
     static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
         return 1.0f - static_cast<f32_t>(dot);
     }
@@ -929,11 +941,11 @@ struct u4x2_ampere_euclidean_kit_t : u4x2_ampere_sqeuclidean_kit_t {
 
 #pragma region Packed Bits
 
-/** @brief The @c u1x8 base over 128-bit fragments: the "dot" is the intersection popcount
- *      via two 64-bit @c popc per fragment - the counter, not the logic, limits throughput,
- *      so XOR/AND fold in front of as few @c popc as possible. Unsigned records: popcounts
- *      are counts; the norms store each row's set-bit count, the currency of Jaccard's
- *      union, mirrored into both fields. */
+/** The @c u1x8 base over 128-bit fragments: the "dot" is the intersection popcount
+ *  via two 64-bit @c popc per fragment - the counter, not the logic, limits throughput,
+ *  so XOR/AND fold in front of as few @c popc as possible. Unsigned records: popcounts
+ *  are counts; the norms store each row's set-bit count, the currency of Jaccard's
+ *  union, mirrored into both fields. */
 struct u1x8_ampere_inner_kit_t {
     using scalar_t = nk::u1x8_t;
     using fragment_t = uint4;
@@ -977,8 +989,9 @@ struct u1x8_ampere_inner_kit_t {
     static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
         return {0.0f, norms.sum};
     }
-    /** @brief The inner base IS the dot-kernel kit: for bit vectors the dot is the
-     *      intersection popcount, flipped into a distance as @b 1-dot. */
+
+    /** The inner base IS the dot-kernel kit: for bit vectors the dot is the
+     *  intersection popcount, flipped into a distance as @b 1-dot. */
     static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
         return 1.0f - static_cast<f32_t>(dot);
     }
@@ -987,9 +1000,9 @@ struct u1x8_ampere_inner_kit_t {
     }
 };
 
-/** @brief Hamming distance: differing bits = |a| + |b| - 2·intersection - never negative,
- *      since the intersection is bounded by either operand's count - so the stored
- *      popcount norms turn the intersection dot into the XOR count without a second pass. */
+/** Hamming distance: differing bits = |a| + |b| - 2·intersection - never negative,
+ *  since the intersection is bounded by either operand's count - so the stored
+ *  popcount norms turn the intersection dot into the XOR count without a second pass. */
 struct u1x8_ampere_hamming_kit_t : u1x8_ampere_inner_kit_t {
     static __device__ __forceinline__ dense_distance_t distance(u32_t dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
@@ -997,8 +1010,8 @@ struct u1x8_ampere_hamming_kit_t : u1x8_ampere_inner_kit_t {
     }
 };
 
-/** @brief Jaccard distance: 1 - intersection / union, union = |a| + |b| - intersection;
- *      two empty sets are identical, distance zero. */
+/** Jaccard distance: 1 - intersection / union, union = |a| + |b| - intersection;
+ *  two empty sets are identical, distance zero. */
 struct u1x8_ampere_jaccard_kit_t : u1x8_ampere_inner_kit_t {
     static __device__ __forceinline__ dense_distance_t distance(u32_t dot, query_state_t query_state,
                                                                 norms_t norms) noexcept {
@@ -1009,9 +1022,9 @@ struct u1x8_ampere_jaccard_kit_t : u1x8_ampere_inner_kit_t {
 
 #pragma endregion
 
-/** @brief One selectable generation row of a kit chain - the CPU @c chain_layer's twin.
- *      A row is admissible when its architecture requirement clears both gates: the
- *      caller's ceiling - the ask - and this compilation pass's target - the can. */
+/** One selectable generation row of a kit chain - the CPU @c chain_layer's twin.
+ *  A row is admissible when its architecture requirement clears both gates: the
+ *  caller's ceiling - the ask - and this compilation pass's target - the can. */
 template <cuda_arch_t required_arch_, cuda_arch_t arch_ceiling_, typename kit_>
 struct dense_cuda_arch_layer {
     static constexpr bool available_k = required_arch_ <= arch_ceiling_ && required_arch_ <= dense_cuda_target_arch_k;
@@ -1019,8 +1032,8 @@ struct dense_cuda_arch_layer {
     using kit_t = kit_;
 };
 
-/** @brief The CPU's @c first_available_kit, verbatim in spirit: the first admissible layer
- *      wins, the floor backs them all, and @c picked_arch_k names the winner for reports. */
+/** The CPU's @c first_available_kit, verbatim in spirit: the first admissible layer
+ *  wins, the floor backs them all, and @c picked_arch_k names the winner for reports. */
 template <typename fallback_, typename... layers_>
 struct dense_cuda_first_available_kit {
     using type = fallback_;
@@ -1033,9 +1046,9 @@ struct dense_cuda_first_available_kit<fallback_, head_, tail_...> {
     static constexpr cuda_arch_t picked_arch_k = head_::available_k ? head_::required_arch_k : next_t::picked_arch_k;
 };
 
-/** @brief Maps a (dtype, metric) pair onto its Ampere-floor device kit; unsupported pairs
- *      fail the index instantiation with a one-line constraint error. Rows sort like the
- *      kit families: widest types first, packed bits last. */
+/** Maps a (dtype, metric) pair onto its Ampere-floor device kit; unsupported pairs
+ *  fail the index instantiation with a one-line constraint error. Rows sort like the
+ *  kit families: widest types first, packed bits last. */
 template <nk_dtype_t vector_dtype_, nk_kernel_kind_t kernel_kind_>
 struct dense_cuda_kit_for;
 

@@ -1,7 +1,8 @@
 /**
- *  @brief The vocabulary every modality shares - the Node-API twin of @c include/usearch/types.h.
  *  @file javascript/types.c
  *  @author Ash Vardanian
+ *  @date September 9, 2026
+ *  @brief The vocabulary every modality shares - the Node-API twin of @c include/usearch/types.h.
  *
  *  Closed-set naming, argument parsing, identities, matrix borrowing, and the @c Executor whose
  *  threads or streams every fanned-out verb runs on.
@@ -14,11 +15,13 @@
 
 #pragma region Naming
 
-/** @brief One spelling of a closed-set option and the value it selects. */
+/** One spelling of a closed-set option and the value it selects. */
 typedef struct usearch_js_choice_naming_t {
-    /** @brief The spelling, as a caller writes it. */
+
+    /** The spelling, as a caller writes it. */
     char const* name;
-    /** @brief The enumerator the spelling selects. */
+
+    /** The enumerator the spelling selects. */
     int value;
 } usearch_js_choice_naming_t;
 
@@ -34,10 +37,8 @@ static usearch_js_choice_naming_t const usearch_js_metric_namings[] = {
     {"jaccard", usearch_dense_metric_jaccard_k},
 };
 
-/**
- *  @brief The scalar types, ordered by shrinking dynamic range - floats widest exponent first,
- *      then signed integers descending, then unsigned.
- */
+/** The scalar types, ordered by shrinking dynamic range - floats widest exponent first,
+ *  then signed integers descending, then unsigned. */
 static usearch_js_choice_naming_t const usearch_js_scalar_namings[] = {
     {"f64", usearch_scalar_f64_k},   {"f32", usearch_scalar_f32_k},   {"bf16", usearch_scalar_bf16_k},
     {"f16", usearch_scalar_f16_k},   {"e5m2", usearch_scalar_e5m2_k}, {"e4m3", usearch_scalar_e4m3_k},
@@ -46,7 +47,7 @@ static usearch_js_choice_naming_t const usearch_js_scalar_namings[] = {
     {"u1x8", usearch_scalar_u1x8_k},
 };
 
-/** @brief Where an index's payload lives, and which executor factory matches it. */
+/** Where an index's payload lives, and which executor factory matches it. */
 static usearch_js_choice_naming_t const usearch_js_residency_namings[] = {
     {"ram", usearch_residency_ram_k},
     {"vram", usearch_residency_vram_k},
@@ -292,7 +293,7 @@ size_t usearch_js_scalar_row_bytes(size_t columns, usearch_scalar_t scalar_kind)
     return 0;
 }
 
-/** @brief Bytes one element of a @c TypedArray occupies; zero for the types no scalar kind spells. */
+/** Bytes one element of a @c TypedArray occupies; zero for the types no scalar kind spells. */
 static size_t usearch_js_typedarray_unit_bytes(napi_typedarray_type type) {
     switch (type) {
     case napi_int8_array:
@@ -310,7 +311,7 @@ static size_t usearch_js_typedarray_unit_bytes(napi_typedarray_type type) {
     return 0;
 }
 
-/** @brief The scalar kind a @c TypedArray spells on its own, before any declared kind overrides it. */
+/** The scalar kind a @c TypedArray spells on its own, before any declared kind overrides it. */
 static usearch_scalar_t usearch_js_scalar_from_typedarray(napi_typedarray_type type) {
     switch (type) {
     case napi_float64_array: return usearch_scalar_f64_k;
@@ -353,7 +354,7 @@ bool usearch_js_matrix_from_value(napi_env env, napi_value value, char const* fi
 
 #pragma region Identities
 
-/** @brief Parks an integer identity in the trailing eight bytes, most significant first. */
+/** Parks an integer identity in the trailing eight bytes, most significant first. */
 static void usearch_js_key_from_integer(uint64_t integer, usearch_key_t* key) {
     memset(key->bytes, 0, sizeof(key->bytes));
     for (size_t position = 0; position != 8; ++position)
@@ -513,7 +514,7 @@ static napi_value usearch_js_executor_construct(napi_env env, napi_callback_info
     return self;
 }
 
-/** @brief @c drain() - waits for every deferred call on this executor to finish. */
+/** @c drain() - waits for every deferred call on this executor to finish. */
 static napi_value usearch_js_executor_drain(napi_env env, napi_callback_info info) {
     napi_value self = NULL;
     if (napi_get_cb_info(env, info, NULL, NULL, &self, NULL) != napi_ok) return NULL;

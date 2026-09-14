@@ -1,7 +1,8 @@
 /**
- *  @brief Declarations shared by every USearch Node-API translation unit.
  *  @file javascript/lib.h
  *  @author Ash Vardanian
+ *  @date September 9, 2026
+ *  @brief Declarations shared by every USearch Node-API translation unit.
  *
  *  One addon, one file per header: @c types.c owns the vocabulary every modality shares,
  *  each @c <modality>_index.c owns its verbs, and @c lib.c owns the module glue alone.
@@ -40,41 +41,47 @@
 
 #pragma region Vocabulary
 
-/** @brief Compile-time constants of the binding layer. */
+/** Compile-time constants of the binding layer. */
 enum {
-    /** @brief Bytes a filesystem path may occupy, terminator included. */
+
+    /** Bytes a filesystem path may occupy, terminator included. */
     usearch_js_path_capacity_k = 4096,
-    /** @brief Bytes an option name may occupy, terminator included. */
+
+    /** Bytes an option name may occupy, terminator included. */
     usearch_js_name_capacity_k = 64,
-    /** @brief Bytes a formatted diagnostic may occupy, terminator included. */
+
+    /** Bytes a formatted diagnostic may occupy, terminator included. */
     usearch_js_message_capacity_k = 256,
-    /** @brief Bytes one identity occupies, on the wire and in the engine alike. */
+
+    /** Bytes one identity occupies, on the wire and in the engine alike. */
     usearch_js_key_bytes_k = 16,
 };
 
-/** @brief Element count of a statically-sized table, which every naming table asks for. */
+/** Element count of a statically-sized table, which every naming table asks for. */
 #define usearch_js_table_size_(table) (sizeof(table) / sizeof((table)[0]))
 
-/**
- *  @brief Everything the addon owns per environment: the constructors its verbs type-check
- *      against, reached through @c napi_get_instance_data rather than a namespace-scope global.
- */
+/** Everything the addon owns per environment: the constructors its verbs type-check
+ *  against, reached through @c napi_get_instance_data rather than a namespace-scope global. */
 typedef struct usearch_js_addon_t {
-    /** @brief The @c Executor constructor, kept alive for @c napi_instanceof. */
+
+    /** The @c Executor constructor, kept alive for @c napi_instanceof. */
     napi_ref executor_class;
-    /** @brief The @c CompiledIndex constructor, kept alive for symmetry with the above. */
+
+    /** The @c CompiledIndex constructor, kept alive for symmetry with the above. */
     napi_ref index_class;
 } usearch_js_addon_t;
 
-/** @brief The workers a fanned-out verb runs on, owned apart from any index so one pool serves many. */
+/** The workers a fanned-out verb runs on, owned apart from any index so one pool serves many. */
 typedef struct usearch_js_executor_t {
-    /** @brief The engine handle, freed when the JavaScript wrapper is collected. */
+
+    /** The engine handle, freed when the JavaScript wrapper is collected. */
     usearch_executor_t handle;
 } usearch_js_executor_t;
 
-/** @brief An owned index handle, one per @c CompiledIndex instance. */
+/** An owned index handle, one per @c CompiledIndex instance. */
 typedef struct usearch_js_index_t {
-    /** @brief The engine handle, freed when the JavaScript wrapper is collected. */
+
+    /** The engine handle, freed when the JavaScript wrapper is collected. */
     usearch_dense_index_t handle;
 } usearch_js_index_t;
 
@@ -85,11 +92,14 @@ typedef struct usearch_js_index_t {
  *  only the index's frozen width says how many bytes one row takes.
  */
 typedef struct usearch_js_matrix_t {
-    /** @brief Pointer to the first scalar, offset into the backing @c ArrayBuffer already applied. */
+
+    /** Pointer to the first scalar, offset into the backing @c ArrayBuffer already applied. */
     void* data;
-    /** @brief Bytes the view spans. */
+
+    /** Bytes the view spans. */
     size_t bytes;
-    /** @brief The scalar type the bytes hold. */
+
+    /** The scalar type the bytes hold. */
     usearch_scalar_t scalar_kind;
 } usearch_js_matrix_t;
 
@@ -100,9 +110,11 @@ typedef struct usearch_js_matrix_t {
  *  and trail them in the same block instead - one allocation, released as one.
  */
 typedef struct usearch_js_paths_arena_t {
-    /** @brief The run the arm reads, or NULL when the caller named no paths. */
+
+    /** The run the arm reads, or NULL when the caller named no paths. */
     usearch_bytes_view_t* views;
-    /** @brief Paths the arena holds; zero when the caller named none. */
+
+    /** Paths the arena holds; zero when the caller named none. */
     size_t count;
 } usearch_js_paths_arena_t;
 
@@ -110,10 +122,10 @@ typedef struct usearch_js_paths_arena_t {
 
 #pragma region Error Reporting
 
-/** @brief Throws @p message under @p code; always returns false, so a caller returns straight through. */
+/** Throws @p message under @p code; always returns false, so a caller returns straight through. */
 bool usearch_js_throw(napi_env env, char const* code, char const* message);
 
-/** @brief Throws a @c TypeError saying what @p field expected; always returns false. */
+/** Throws a @c TypeError saying what @p field expected; always returns false. */
 bool usearch_js_throw_field(napi_env env, char const* field, char const* expectation);
 
 /**
@@ -126,30 +138,30 @@ bool usearch_js_succeeded(napi_env env, usearch_error_t const* error);
 
 #pragma region Argument Parsing
 
-/** @brief Whether @p value is @c undefined or @c null, which every optional argument derives from. */
+/** Whether @p value is @c undefined or @c null, which every optional argument derives from. */
 bool usearch_js_value_absent(napi_env env, napi_value value);
 
-/** @brief Reads a non-negative count from a number or a @c BigInt; absent arguments read as zero. */
+/** Reads a non-negative count from a number or a @c BigInt; absent arguments read as zero. */
 bool usearch_js_size_from_value(napi_env env, napi_value value, char const* field, size_t* result);
 
-/** @brief Reads a finite real; absent arguments read as zero, which every knob derives from. */
+/** Reads a finite real; absent arguments read as zero, which every knob derives from. */
 bool usearch_js_double_from_value(napi_env env, napi_value value, char const* field, double* result);
 
-/** @brief Copies a UTF-8 string into @p buffer, refusing anything that would not fit. */
+/** Copies a UTF-8 string into @p buffer, refusing anything that would not fit. */
 bool usearch_js_string_from_value(napi_env env, napi_value value, char const* field, char* buffer, size_t capacity,
                                   size_t* length);
 
-/** @brief Reads a metric kind from its canonical spelling. */
+/** Reads a metric kind from its canonical spelling. */
 bool usearch_js_metric_from_value(napi_env env, napi_value value, char const* field, usearch_dense_metric_t* result);
 
-/** @brief Reads a scalar kind from its canonical spelling; absent arguments read as unknown. */
+/** Reads a scalar kind from its canonical spelling; absent arguments read as unknown. */
 bool usearch_js_scalar_from_value(napi_env env, napi_value value, char const* field, usearch_scalar_t* result);
 
-/** @brief Reads a residency from its canonical spelling. */
+/** Reads a residency from its canonical spelling. */
 bool usearch_js_residency_from_value(napi_env env, napi_value value, char const* field, usearch_residency_t* result);
 
 /**
- *  @brief Reads NUMA node ids or CUDA ordinals from an array of numbers.
+ *  @brief Reads NUMA node IDs or CUDA ordinals from an array of numbers.
  *
  *  A residency arm borrows its array only for the length of one factory call, so the
  *  allocation lives no longer than the constructor that made it.
@@ -171,7 +183,7 @@ bool usearch_js_ordinals_from_value(napi_env env, napi_value value, char const* 
  */
 bool usearch_js_paths_from_value(napi_env env, napi_value value, char const* field, usearch_js_paths_arena_t* arena);
 
-/** @brief Releases the encoded paths and the block they share. */
+/** Releases the encoded paths and the block they share. */
 void usearch_js_paths_release(usearch_js_paths_arena_t* arena);
 
 /**
@@ -205,7 +217,7 @@ bool usearch_js_matrix_from_value(napi_env env, napi_value value, char const* fi
  */
 usearch_key_t* usearch_js_keys_from_value(napi_env env, napi_value value, char const* field, size_t* count);
 
-/** @brief Reads one identity, which the argument spells the same way a batch of one would. */
+/** Reads one identity, which the argument spells the same way a batch of one would. */
 bool usearch_js_key_from_value(napi_env env, napi_value value, char const* field, usearch_key_t* key);
 
 /**
@@ -215,39 +227,39 @@ bool usearch_js_key_from_value(napi_env env, napi_value value, char const* field
  */
 napi_value usearch_js_buffer(napi_env env, size_t bytes, void** data);
 
-/** @brief Wraps a count the engine reported, once its error has been checked. */
+/** Wraps a count the engine reported, once its error has been checked. */
 napi_value usearch_js_number(napi_env env, size_t value);
 
-/** @brief Wraps a static null-terminated string the engine owns. */
+/** Wraps a static null-terminated string the engine owns. */
 napi_value usearch_js_static_string(napi_env env, char const* text);
 
-/** @brief The @c undefined every void verb hands back. */
+/** The @c undefined every void verb hands back. */
 napi_value usearch_js_undefined(napi_env env);
 
 #pragma endregion Argument Parsing
 
 #pragma region Classes
 
-/** @brief Defines the @c Executor class; the module glue keeps the reference. */
+/** Defines the @c Executor class; the module glue keeps the reference. */
 napi_value usearch_js_executor_define(napi_env env);
 
-/** @brief Unwraps the @c executor argument every fanned-out verb takes. */
+/** Unwraps the @c executor argument every fanned-out verb takes. */
 bool usearch_js_executor_from_value(napi_env env, napi_value value, usearch_executor_t* handle);
 
-/** @brief Defines the @c CompiledIndex class, its cursors and its finders included. */
+/** Defines the @c CompiledIndex class, its cursors and its finders included. */
 napi_value usearch_js_index_define(napi_env env);
 
 #pragma endregion Classes
 
 #pragma region Library Probes
 
-/** @brief Answers with the library's semantic version. */
+/** Answers with the library's semantic version. */
 napi_value usearch_js_version(napi_env env, napi_callback_info info);
 
-/** @brief Answers with the kernel families this build carries, whatever the machine offers. */
+/** Answers with the kernel families this build carries, whatever the machine offers. */
 napi_value usearch_js_capabilities_compiled(napi_env env, napi_callback_info info);
 
-/** @brief Answers with the kernel families this machine can run, and dispatch picks from. */
+/** Answers with the kernel families this machine can run, and dispatch picks from. */
 napi_value usearch_js_capabilities_available(napi_env env, napi_callback_info info);
 
 #pragma endregion Library Probes

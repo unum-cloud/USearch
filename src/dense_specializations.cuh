@@ -1,10 +1,10 @@
 /**
+ *  @file src/dense_specializations.cuh
+ *  @author Ash Vardanian
+ *  @date August 14, 2026
  *  @brief What one dense arm is spelled with and compiled through: the scalar and capability
  *      tables, the CPU and GPU classes with their waiters, the key hash, and the
  *      @c specialized_index view every class unit instantiates.
- *  @author Ash Vardanian
- *  @file src/dense_specializations.cuh
- *  @date August 14, 2026
  *
  *  Every class unit includes this to instantiate its arms; @c dense_index.cuh adds the variant
  *  grid, the handle and the exported C entry points on top of it.
@@ -37,8 +37,8 @@ namespace fu = ashvardanian::forkunion;
 
 #pragma region Scaffolding
 
-/** @brief The C scalar vocabulary beside NumKong's - independent enumerations, so both crossings
- *      read one table. */
+/** The C scalar vocabulary beside NumKong's - independent enumerations, so both crossings read
+ *  one table. */
 struct scalar_dtype_pair_t {
     usearch_scalar_t scalar;
     nk_dtype_t dtype;
@@ -63,7 +63,7 @@ inline usearch_scalar_t usearch_scalar_of(nk_dtype_t dtype) noexcept {
     return usearch_scalar_unknown_k;
 }
 
-/** @brief A checkpoint's kernel name lifted back onto the C metric vocabulary. */
+/** A checkpoint's kernel name lifted back onto the C metric vocabulary. */
 inline usearch_dense_metric_t usearch_metric_of(std::string_view kernel) noexcept {
     switch (nk_kernel_named(kernel.data(), kernel.size())) {
     case nk_kernel_dot_k: return usearch_dense_metric_inner_k;
@@ -75,11 +75,11 @@ inline usearch_dense_metric_t usearch_metric_of(std::string_view kernel) noexcep
     }
 }
 
-/** @brief Rows one progress tick or one staged conversion spans - a few megabytes at any width in
- *      use, and wide enough to bury a fan-out's per-thread setup on CPU and GPU executors alike. */
+/** Rows one progress tick or one staged conversion spans - a few megabytes at any width in use,
+ *  and wide enough to bury a fan-out's per-thread setup. */
 inline constexpr std::size_t increment_rows_k = 4096;
 
-/** @brief Codenames of the dispatchable CPU tiers, composed into the capability string once. */
+/** Codenames of the dispatchable CPU tiers, composed into the capability string once. */
 struct numkong_capability_name_t {
     nk_capability_t bit;
     char const* name;
@@ -108,8 +108,8 @@ inline constexpr numkong_capability_name_t numkong_capability_names_k[] = {
 
 #pragma region CPU Classes
 
-/** @brief Lowers one CPU class onto NumKong's compute mask - cumulative within a platform,
- *      so the chains pick their best row per dtype under it. */
+/** Lowers one CPU class onto NumKong's compute mask - cumulative within a platform, so the chains
+ *  pick their best row per dtype under it. */
 constexpr nk_capability_t numkong_capabilities_of(cpu_class_t cpu_class) noexcept {
     switch (cpu_class) {
     case cpu_class_t::intel_haswell_k: return nk_cap_serial_k | nk_cap_haswell_k;
@@ -134,9 +134,9 @@ constexpr nk_capability_t numkong_capabilities_of(cpu_class_t cpu_class) noexcep
     }
 }
 
-/** @brief The class a refused rung degrades to - the next one down its own lineage, which is the
- *      class an arm must be distinct from to earn instantiation. Two lineages share the Haswell
- *      floor on x86: the AVX-512 P-cores and the AVX-VNNI E-cores. */
+/** The class a refused rung degrades to - the next one down its own lineage, which is the class an
+ *  arm must be distinct from to earn instantiation. On x86 the AVX-512 P-cores and the AVX-VNNI
+ *  E-cores share the Haswell floor. */
 constexpr cpu_class_t parent_class_of(cpu_class_t cpu_class) noexcept {
     switch (cpu_class) {
     case cpu_class_t::intel_diamond_k: return cpu_class_t::amd_genoa_k;
@@ -152,10 +152,9 @@ constexpr cpu_class_t parent_class_of(cpu_class_t cpu_class) noexcept {
     }
 }
 
-/** @brief The wait instruction one CPU class pairs: x86 spins PAUSE, the WAITPKG Xeons and the
- *      monitored Arm & RISC-V classes arm TPAUSE, WFET & WRS, everything else yields - the floor
- *      takes the standard one, as does any class whose @c FU_TARGET_<BIT> is off in the probe list
- *      every runtime-dispatched unit takes. */
+/** The wait instruction one CPU class pairs: x86 spins PAUSE, the WAITPKG Xeons and the monitored
+ *  Arm & RISC-V classes arm TPAUSE, WFET & WRS, everything else yields - as does any class whose
+ *  @c FU_TARGET_<BIT> is off in the probe list. */
 template <cpu_class_t cpu_class_>
 struct waiter_for_cpu_class {
     using type = fu::standard_yield_t;
@@ -215,14 +214,14 @@ struct waiter_for_cpu_class<cpu_class_t::alibaba_c930_k> {
 };
 #endif
 
-/** @brief The waiter a CPU class pairs, spelled short for the arms' explicit instantiations. */
+/** The waiter a CPU class pairs, spelled short for the arms' explicit instantiations. */
 template <cpu_class_t cpu_class_>
 using waiter_of = typename waiter_for_cpu_class<cpu_class_>::type;
 
-/** @brief The atomic reference one CPU class pairs: single-instruction LSE read-modify-writes
- *      under RCpc acquiring loads on the Armv8.3+ classes, conditional adds on the CMPCCXADD
- *      Xeons, `amocas` on Zacas RISC-V - the floors and the older classes take the standard one,
- *      as does every class whose @c FU_TARGET_<BIT> is off in the probe list every runtime-dispatched unit takes. */
+/** The atomic reference one CPU class pairs: single-instruction LSE read-modify-writes under RCpc
+ *  acquiring loads on the Armv8.3+ classes, conditional adds on the CMPCCXADD Xeons, @c amocas on
+ *  Zacas RISC-V - the floors, the older classes, and any class whose @c FU_TARGET_<BIT> is off in
+ *  the probe list take the standard one. */
 template <cpu_class_t cpu_class_>
 struct atomic_ref_for_cpu_class {
     template <typename value_type_>
@@ -281,13 +280,13 @@ struct atomic_ref_for_cpu_class<cpu_class_t::alibaba_c930_k> {
 };
 #endif
 
-/** @brief The spin hints every core of an architecture carries - PAUSE, YIELD, Zihintpause: the
- *      runtime confirms nothing about them, and a class differing by one alone earns no rung. */
+/** The spin hints every core of an architecture carries - PAUSE, YIELD, Zihintpause: the runtime
+ *  confirms nothing about them, and a class differing by one alone earns no rung. */
 inline constexpr fu::capabilities_t baseline_hints_k = fu::capability_x86_pause_k | fu::capability_arm64_yield_k |
                                                        fu::capability_risc5_pause_k;
 
-/** @brief Lowers one CPU class onto ForkUnion's mask - the bits the runtime must confirm before
- *      the class's waiter and atomic reference are trusted, read off the two types themselves. */
+/** Lowers one CPU class onto ForkUnion's mask - the bits the runtime must confirm before the
+ *  class's waiter and atomic reference are trusted, read off the two types themselves. */
 template <cpu_class_t cpu_class_>
 constexpr fu::capabilities_t forkunion_capabilities_of() noexcept {
     constexpr fu::capabilities_t waits_k = waiter_of<cpu_class_>::capability_k;
@@ -295,13 +294,13 @@ constexpr fu::capabilities_t forkunion_capabilities_of() noexcept {
     return static_cast<fu::capabilities_t>((waits_k | atomics_k) & ~baseline_hints_k);
 }
 
-/** @brief Whether every compute bit one CPU class lowers onto is present in @p available. */
+/** Whether every compute bit one CPU class lowers onto is present in @p available. */
 inline bool numkong_admits(nk_capability_t available, cpu_class_t cpu_class) noexcept {
     nk_capability_t const wanted = numkong_capabilities_of(cpu_class);
     return (available & wanted) == wanted;
 }
 
-/** @brief Whether the runtime confirms every ForkUnion bit one CPU class needs. */
+/** Whether the runtime confirms every ForkUnion bit one CPU class needs. */
 template <cpu_class_t cpu_class_>
 inline bool forkunion_admits() noexcept {
     constexpr fu::capabilities_t wanted = forkunion_capabilities_of<cpu_class_>();
@@ -310,7 +309,7 @@ inline bool forkunion_admits() noexcept {
 
 #pragma endregion CPU Classes
 
-/** @brief Codenames of the GPU classes a VRAM alternative dispatches onto. */
+/** Codenames of the GPU classes a VRAM alternative dispatches onto. */
 struct gpu_class_name_t {
     gpu_class_t gpu_class;
     char const* name;
@@ -322,8 +321,9 @@ inline constexpr gpu_class_name_t gpu_class_names_k[] = {
 };
 
 #if USEARCH_BUILD_CUDA
-/** @brief Lowers one GPU class onto the CUDA architecture ceiling its kits compile up to;
- *      Rubin rides the newest compiled ceiling until its own kits land. */
+
+/** Lowers one GPU class onto the CUDA architecture ceiling its kits compile up to; Rubin rides the
+ *  newest compiled ceiling until its own kits land. */
 constexpr cuda_arch_t cuda_arch_of(gpu_class_t gpu_class) noexcept {
     switch (gpu_class) {
     case gpu_class_t::nvidia_hopper_k: return cuda_arch_hopper_k;
@@ -334,26 +334,26 @@ constexpr cuda_arch_t cuda_arch_of(gpu_class_t gpu_class) noexcept {
 }
 #endif
 
-/** @brief The one write path to @p error; the message is null exactly on success. */
+/** The one write path to @p error; the message is null exactly on success. */
 inline bool propagate_error(usearch_status_t status, usearch_error_t* error, char const* message) noexcept {
     bool const succeeded = status == usearch_success_k;
     if (error) *error = usearch_error_t {status, succeeded ? nullptr : message};
     return succeeded;
 }
 
-/** @brief The engine-side overload: the C++ mirror shares the ABI's values, so crossing is a
- *      cast, and an unnamed @p message falls back to the status's own static text. */
+/** The engine-side overload: the C++ mirror shares the ABI's values, so crossing is a cast, and an
+ *  unnamed @p message falls back to the status's own static text. */
 inline bool propagate_error(status_t status, usearch_error_t* error, char const* message = nullptr) noexcept {
     return propagate_error(static_cast<usearch_status_t>(status), error, message ? message : status_to_string(status));
 }
 
-/** @brief Success needs no vocabulary crossing and no message. */
+/** Success needs no vocabulary crossing and no message. */
 inline void propagate_success(usearch_error_t* error) noexcept {
     if (error) *error = usearch_error_t {usearch_success_k, nullptr};
 }
 
-/** @brief Adds one fan-out's telemetry into the caller's stats - accumulating, so chunked
- *      verbs report the whole call rather than the last chunk. */
+/** Adds one fan-out's telemetry into the caller's stats - accumulating, so chunked verbs report
+ *  the whole call rather than the last chunk. */
 template <typename result_type_>
 inline void accumulate_stats(usearch_dense_traversal_stats_t* stats, result_type_ const& result) noexcept {
     if (!stats) return;
@@ -362,12 +362,12 @@ inline void accumulate_stats(usearch_dense_traversal_stats_t* stats, result_type
     stats->restarts += result.restarts;
 }
 
-/** @brief Whether a result carries traversal telemetry - one probe both crossings read. */
+/** Whether a result carries traversal telemetry - one probe both crossings read. */
 template <typename value_type_>
 concept carries_telemetry = requires(value_type_ const& value) { value.visited_members; };
 
-/** @brief The one crossing for a fallible verb: folds telemetry into @p stats when the payload
- *      carries any, writes @p error, and answers whether @c .value is readable. */
+/** The one crossing for a fallible verb: folds telemetry into @p stats when the payload carries
+ *  any, writes @p error, and answers whether @c .value is readable. */
 template <typename value_type_>
 inline bool crossed(expected<value_type_> const& result, usearch_dense_traversal_stats_t* stats, usearch_error_t* error,
                     char const* message = nullptr) noexcept {
@@ -375,11 +375,11 @@ inline bool crossed(expected<value_type_> const& result, usearch_dense_traversal
     return propagate_error(result.status, error, message);
 }
 
-/** @brief The C key struct and the engine's @c us::uuid_t share sixteen bytes - one bit cast in. */
+/** The C key struct and the engine's @c us::uuid_t share sixteen bytes - one bit cast in. */
 inline us::uuid_t uuid_of(usearch_key_t key) noexcept { return std::bit_cast<us::uuid_t>(key); }
 
-/** @brief Slices the low eight key bytes as the hash: keys arrive pre-mixed, UUIDs and content
- *      hashes alike. */
+/** Slices the low eight key bytes as the hash: keys arrive pre-mixed, UUIDs and content hashes
+ *  alike. */
 struct uuid_slice_hash_t {
     std::size_t operator()(us::uuid_t const& uuid) const noexcept {
         struct halves_t {
@@ -393,8 +393,8 @@ struct uuid_slice_hash_t {
 
 #pragma region Specialized Index
 
-/** @brief Residency discrimination off the alternative's own executor type - no second tag
- *      exists to disagree with the variant. */
+/** Residency discrimination off the alternative's own executor type - no second tag exists to
+ *  disagree with the variant. */
 template <typename multi_type_>
 inline constexpr bool is_ram_index = std::is_same_v<typename multi_type_::executor_t, forkunion_executor_t>;
 #if USEARCH_BUILD_CUDA
@@ -412,13 +412,14 @@ using ram_index =
     dense_ram_indexes<us::uuid_t, dtype_, kernel_, numkong_capabilities_of(cpu_class_), waiter_of<cpu_class_>,
                       atomic_ref_for_cpu_class<cpu_class_>::template type, uuid_slice_hash_t>;
 #if USEARCH_BUILD_CUDA
+
 /** One VRAM alternative: the GPU class is a compilation ceiling, not a target, since the index dispatches
  *  by the actual device's generation at runtime, so the newest class serves the whole fleet. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, gpu_class_t gpu_class_ = gpu_class_t::nvidia_blackwell_k>
 using vram_index = dense_vram_indexes<us::uuid_t, dtype_, kernel_, cuda_arch_of(gpu_class_), uuid_slice_hash_t>;
 #endif
 
-/** @brief The C predicate lifted onto the index's key vocabulary. */
+/** The C predicate lifted onto the index's key vocabulary. */
 struct key_predicate_t {
     usearch_predicate_t callback;
     void* state;
@@ -428,8 +429,8 @@ struct key_predicate_t {
     }
 };
 
-/** @brief Serializes shard ticks from the executor's threads onto the C handler, which the
- *      contract promises is never concurrent. */
+/** Serializes shard ticks from the executor's threads onto the C handler, which the contract
+ *  promises is never concurrent. */
 struct shard_ticks_t {
     usearch_progress_callback_t progress;
     void* state;
@@ -444,8 +445,8 @@ struct shard_ticks_t {
         return report_(done.fetch_add(1, std::memory_order_relaxed) + 1, total);
     }
 
-    /** @brief The sibling for verbs that count their own units and know their own population -
-     *      a refinement ticks the nodes visited so far, which no counter here could derive. */
+    /** The sibling for verbs that count their own units and know their own population - a
+     *  refinement ticks the nodes visited so far, which no counter here could derive. */
     continuation_t operator()(std::size_t finished, std::size_t population) noexcept {
         return report_(finished, population);
     }
@@ -459,12 +460,11 @@ struct shard_ticks_t {
     }
 };
 
-/** @brief One arm's verbs, fixed to the C layer's callback types and wrapped as non-template members
- *      of a view over the index: an explicit instantiation compiles exactly these bodies in the arm's
- *      unit, and an @c extern one keeps every arm body out of the dispatch unit. The dispatch reaches
- *      an arm only through this view, so no other instantiation is ever needed. The members are defined
- *      outside the class on purpose: inside it they would be inline, which an explicit instantiation
- *      declaration does not restrain, and the arm bodies would compile into the dispatch unit after all. */
+/** One arm's verbs, fixed to the C layer's callback types and wrapped as non-template members of a
+ *  view over the index: an explicit instantiation compiles exactly these bodies in the arm's unit,
+ *  and an @c extern one keeps every arm body out of the dispatch unit. The members are defined
+ *  outside the class because in-class ones would be inline, which an explicit instantiation
+ *  declaration does not restrain. */
 template <typename index_type_>
 struct specialized_index {
     using key_t = typename index_type_::key_t;
@@ -489,7 +489,8 @@ struct specialized_index {
         requires is_ram_index<index_type_>;
     status_t emplace(int device) noexcept
         requires is_vram_index<index_type_>;
-    /** @brief The device the first shard sits on - what the capability string names. */
+
+    /** The device the first shard sits on - what the capability string names. */
     int device() const noexcept
         requires is_vram_index<index_type_>;
     std::size_t shards_count() const noexcept;
@@ -519,8 +520,8 @@ struct specialized_index {
     status_t load(std::string_view path, executor_t& executor, shard_ticks_t& ticks) noexcept;
     status_t load(bytes_view_t buffer, executor_t& executor, shard_ticks_t& ticks) noexcept;
 
-    /** @brief The C layer's save config: the path's suffix picks the layout, the residency the
-     *      contract - device planes cannot be settlement-probed, so a GPU handle certifies. */
+    /** The C layer's save config: the path's suffix picks the layout, the residency the contract -
+     *  device planes cannot be settlement-probed, so a GPU handle certifies. */
     static save_config_t save_config_of(std::string_view path) noexcept;
 };
 

@@ -1,21 +1,18 @@
 /**
- *  @brief Profiling harness for the sharded @c dense_ram_indexes over real persisted
- *      datasets, shared by the per-dtype benchmark shards.
- *
- *  @author Ash Vardanian
  *  @file bench/dense/ram_indexes.hpp
+ *  @author Ash Vardanian
  *  @date August 30, 2026
+ *  @brief Profiling harness for the sharded @c dense_ram_indexes over real persisted datasets,
+ *      shared by the per-dtype benchmark shards.
  *
  *  The multi-index category: one sharded index holding a shard per engaged memory domain,
  *  driven through one @c forkunion_executor_t with batched insertions and batched searches -
- *  the handle the C surface exposes, measured end to end. The sibling `usearch_bench_dense_ram_index`
- *  measures one shard with everything local; this binary measures what the whole plural
- *  costs, fill balance and cross-domain rotation included.
+ *  the handle the C surface exposes, measured end to end, fill balance and cross-domain
+ *  rotation included.
  *
  *  Keys are dataset rows, so a search's merged ranking judges directly against the ground
- *  truth and no id-to-row bookkeeping exists. Checkpoints ride the sharded index's own
- *  SafeGraphs verbs - a monolith per shard, the manifest committed last - so `--save` and
- *  `--load` exercise exactly the persistence path the C surface exposes.
+ *  truth and no ID-to-row bookkeeping exists. Checkpoints ride the sharded index's own
+ *  SafeGraphs verbs - a monolith per shard, the manifest committed last.
  */
 #pragma once
 
@@ -39,9 +36,10 @@ namespace usearch {
 
 #pragma region CPU Pipeline
 
-/** @brief The STL floor below the schedule table, correct on every machine. */
+/** The STL floor below the schedule table, correct on every machine. */
 using yield_waiter_t = fu::standard_yield_t;
-/** @brief The spin hint every core of this architecture runs. */
+
+/** The spin hint every core of this architecture runs. */
 #if FU_DETECT_ARCH_X86_64_
 using hint_waiter_t = fu::x86_pause_t;
 #elif FU_DETECT_ARCH_ARM64_
@@ -51,8 +49,9 @@ using hint_waiter_t = fu::risc5_pause_t;
 #else
 using hint_waiter_t = fu::standard_yield_t;
 #endif
-/** @brief The monitored wait this unit compiles, admitted against @c fu_runtime_capabilities before its row
- *      runs; with none compiled the row collapses onto the hint. */
+
+/** The monitored wait this unit compiles, admitted against @c fu_runtime_capabilities before its
+ *  row runs; with none compiled the row collapses onto the hint. */
 #if FU_TARGET_X86_TPAUSE
 using monitor_waiter_t = fu::x86_tpause_t;
 #elif FU_TARGET_ARM64_WFET
@@ -63,10 +62,8 @@ using monitor_waiter_t = fu::risc5_wrs_t;
 using monitor_waiter_t = hint_waiter_t;
 #endif
 
-/** @brief The waiter type each schedule table row instantiates, positionally - the data list the
- *      schedule axis indexes, mirroring how the compute axis indexes @c prefix_mask. Every real
- *      table has two rows; on the fallback arch both entries collapse onto the yield floor, so
- *      only row 0 is ever reachable. */
+/** The waiter type each schedule table row instantiates, positionally; on the fallback arch both
+ *  entries collapse onto the yield floor, so only row 0 is reachable. */
 using schedule_waiters_t = std::tuple<hint_waiter_t, monitor_waiter_t>;
 
 /**
@@ -74,8 +71,7 @@ using schedule_waiters_t = std::tuple<hint_waiter_t, monitor_waiter_t>;
  *      the executor driving them, and the embedded backend-neutral judgment results.
  *
  *  The dataset never appears here - the data side lives in @c streamed_dataset, which bridges
- *  the file's scalar into the stored one batch by batch. The sharded index owns its shards and
- *  key columns; the executor owns its pool and per-thread arenas; nothing else exists.
+ *  the file's scalar into the stored one batch by batch.
  */
 template <typename indexes_type_>
 struct bench_indexes_context {
@@ -89,23 +85,27 @@ struct bench_indexes_context {
 
     static constexpr nk_kernel_kind_t kernel_kind_k = index_t::kernel_kind_k;
 
+    /** The parsed CLI, borrowed for the run's lifetime. */
     bench_options_t const& options;
-    /** @brief The sharded index under measurement: one shard per engaged memory domain. */
+
+    /** The sharded index under measurement: one shard per engaged memory domain. */
     indexes_t indexes;
-    /** @brief The worker threads and per-thread arenas every batched verb runs on. */
+
+    /** The worker threads and per-thread arenas every batched verb runs on. */
     forkunion_executor_t executor;
-    /** @brief The backend-neutral judgment state both phases fill. */
+
+    /** The backend-neutral judgment state both phases fill. */
     bench_results_t results;
 
-    /** @brief The host tables follow the first named memory domain, or the heap when none is named. */
+    /** The host tables follow the first named memory domain, or the heap when none is named. */
     bench_indexes_context(bench_options_t const& options) noexcept
         : options(options),
           indexes(forkunion_allocator_t {options.memory_domains.empty() ? no_memory_domain_k
                                                                         : options.memory_domains.front()}) {}
 };
 
-/** @brief The checkpoint manifest path: dtype, kernel & connectivity stamped into the name, so
- *      a geometry-mismatched run finds nothing rather than restoring the wrong graph. */
+/** The checkpoint manifest path: dtype, kernel and connectivity stamped into the name, so a
+ *  geometry-mismatched run finds nothing rather than restoring the wrong graph. */
 template <typename indexes_type_>
 std::string checkpoint_path_of(bench_options_t const& options, std::string const& name) {
     using index_t = typename indexes_type_::index_t;
@@ -113,8 +113,8 @@ std::string checkpoint_path_of(bench_options_t const& options, std::string const
                        index_t::scalar_t::dtype_name(), nk_kernel_name(index_t::kernel_kind_k), options.connectivity);
 }
 
-/** @brief Serializes the sharded index as one SafeGraphs checkpoint - a monolith per shard and
- *      the manifest committed last - so later runs @c --load it instead of rebuilding. */
+/** Serializes the sharded index as one SafeGraphs checkpoint - a monolith per shard and the
+ *  manifest committed last - so later runs @c --load it instead of rebuilding. */
 template <typename streamed_dataset_type_>
 bool save_indexes(streamed_dataset_type_& streamed) {
     using clock_t = stdc::steady_clock;
@@ -134,8 +134,8 @@ bool save_indexes(streamed_dataset_type_& streamed) {
     return true;
 }
 
-/** @brief Places one shard per engaged memory domain, restores a checkpoint or reserves for the
- *      viewed rows, and spawns & warms the executor - everything fallible, before any clock. */
+/** Places one shard per engaged memory domain, restores a checkpoint or reserves for the viewed
+ *  rows, and spawns and warms the executor - everything fallible, before any clock. */
 template <typename streamed_dataset_type_>
 bool prepare(streamed_dataset_type_& streamed, fu_topology_t topology) {
     using bench_t = typename streamed_dataset_type_::bench_t;
@@ -151,9 +151,7 @@ bool prepare(streamed_dataset_type_& streamed, fu_topology_t topology) {
         return false;
     }
 
-    // Placement: one shard per named memory domain, or a single heap shard when none is
-    // named. The sharded index splits the reservation evenly and refuses to grow it later, so the
-    // full row count goes in here.
+    // The reservation splits evenly and never grows later, so the full row count goes in here.
     if (bench.options.memory_domains.empty()) {
         if (failed(bench.indexes.emplace(fu_memory_domain_id_t {-1}))) {
             fmt::println("Failed to place the heap shard");
@@ -174,16 +172,14 @@ bool prepare(streamed_dataset_type_& streamed, fu_topology_t topology) {
     }
     bench.executor = std::move(executor);
 
-    // AMX tile state needs a per-thread OS permission handshake before first use; NumKong's
-    // thread configurator performs it and no-ops everywhere else.
+    // AMX tile state needs a per-thread OS permission handshake before first use.
     if (failed(bench.executor.for_threads(
             [](std::size_t, std::size_t) noexcept { nk_configure_thread(nk_capabilities_available()); }))) {
         fmt::println("Failed to configure the worker threads");
         return false;
     }
 
-    // Restoring replaces building outright: the checkpoint's own summary sizes the reservation
-    // inside `load`, so the fresh shards reach it unreserved; a build reserves here instead.
+    // The checkpoint's own summary sizes the reservation inside @c load, so shards reach it bare.
     if (!bench.options.load_name.empty()) {
         std::string const path = checkpoint_path_of<typename bench_t::indexes_t>(bench.options,
                                                                                  bench.options.load_name);
@@ -201,8 +197,7 @@ bool prepare(streamed_dataset_type_& streamed, fu_topology_t topology) {
         return false;
     }
 
-    // Warming the arenas here moves every allocation ahead of the clocks; a walk that outgrows the
-    // estimate re-tables into a chunk the arena grows by, so the estimate is the whole ask.
+    // Warming the arenas here moves every allocation ahead of the clocks.
     typename index_t::insert_config_t warm_config;
     warm_config.expansion_factor = static_cast<small_size_t>(bench.options.expansion_add);
     if (failed(bench.executor.reserve(bench.indexes.shard(0).traversal_memory_usage(warm_config)))) {
@@ -223,9 +218,8 @@ bool prepare(streamed_dataset_type_& streamed, fu_topology_t topology) {
     return true;
 }
 
-/** @brief Streams the whole dataset through batched @c add calls: a zero-copy dataset goes in
- *      as one call - the cleanest measure of the sharded index's own machinery - and a casting one in
- *      staging-bounded batches, each cast fanned over the executor before its call. */
+/** Streams the whole dataset through batched @c add calls: a zero-copy dataset goes in as one
+ *  call, a casting one in staging-bounded batches, each cast fanned out before its call. */
 template <typename streamed_dataset_type_>
 bool run_insertion(streamed_dataset_type_& streamed) {
     using clock_t = stdc::steady_clock;
@@ -255,8 +249,7 @@ bool run_insertion(streamed_dataset_type_& streamed) {
         if constexpr (streamed_dataset_type_::zero_copy_k)
             batch = streamed.vectors(nk::range {base, base + count}, nk::slice);
         else {
-            // The cast fans over the same workers the insertion will use; every task lands in
-            // its own staging row, so the batch materializes contiguous and clash-free.
+            // Every task lands in its own staging row, so the batch materializes clash-free.
             auto cast_row = [&](std::size_t task, std::size_t, std::size_t) noexcept {
                 [[maybe_unused]] auto staged = streamed.stage(streamed.vectors.row(base + task).as_vector(), 0, task);
             };
@@ -317,13 +310,8 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     return true;
 }
 
-/**
- *  @brief Re-selects every node's neighbors across the shards, pass after pass, then re-links
- *      whatever no search can reach - the build step a cheap ingestion pays for.
- *
- *  The passes stop early once one re-wires nothing, since the next would re-select the same
- *  picks. Both verbs fan out over the same executor the insertions used.
- */
+/** Re-selects every node's neighbors across the shards, pass after pass, then re-links whatever
+ *  no search can reach; a pass that re-wires nothing ends the phase. */
 template <typename streamed_dataset_type_>
 bool run_refinement(streamed_dataset_type_& streamed) {
     using clock_t = stdc::steady_clock;
@@ -385,9 +373,9 @@ bool run_refinement(streamed_dataset_type_& streamed) {
     return true;
 }
 
-/** @brief Streams every query through batched @c search calls, the merged rankings landing
- *      straight in the judgment matrices - keys are dataset rows, so no translation exists.
- *      A batch-shaped verb has no honest per-query clock, so the report prints the mean. */
+/** Streams every query through batched @c search calls, the merged rankings landing straight in
+ *  the judgment matrices; a batch-shaped verb has no per-query clock, so the report prints the
+ *  mean. */
 template <typename streamed_dataset_type_>
 bool run_search(streamed_dataset_type_& streamed) {
     using clock_t = stdc::steady_clock;
@@ -404,8 +392,7 @@ bool run_search(streamed_dataset_type_& streamed) {
 
     typename index_t::search_config_t config;
     config.expansion_factor = static_cast<small_size_t>(bench.options.expansion_search);
-    // The search phase runs strictly after ingestion, so the mutation-free contract holds by
-    // construction - certify it and measure the atomics-free traversal.
+    // The search phase runs strictly after ingestion, so the mutation-free contract holds.
     config.synchronization = synchronization_t::immutable_k;
 
     std::size_t const batch_rows = streamed_dataset_type_::zero_copy_k ? search_count : streamed.staging.extent(1);
@@ -458,8 +445,8 @@ bool run_search(streamed_dataset_type_& streamed) {
 
 #pragma region Dispatch Cascade
 
-/** @brief Bundles the launch state the cascade threads through its compile-time hops; the
- *      executor spawns inside the run, so no pool travels here. */
+/** Bundles the launch state the cascade threads through its compile-time hops; the executor
+ *  spawns inside the run, so no pool travels here. */
 template <typename dataset_scalar_type_>
 struct bench_launch {
     persisted_dataset<dataset_scalar_type_> const& dataset;
@@ -467,15 +454,14 @@ struct bench_launch {
     fu_topology_t topology;
 };
 
-/** @brief Gate: a (stored dtype, kernel) cell is runnable once its kit chain is adapted in
- *      @c usearch/dense/ram_metric.hpp - unadapted combinations report as skipped and light up
- *      automatically when their kits land, exactly like the CUDA cascade. */
+/** Gate: a (stored dtype, kernel) cell is runnable once its kit chain is adapted in
+ *  @c usearch/dense/ram_metric.hpp; unadapted combinations report as skipped. */
 template <nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, nk_capability_t capability_>
 concept ram_kit_adapted = requires {
     sizeof(dense_quads_chain<kernel_, typename nk::type_for<stored_dtype_>::type, capability_>);
 };
 
-/** @brief No-op sibling picked when the cell's CPU kit chain is not adapted yet. */
+/** No-op sibling picked when the cell's CPU kit chain is not adapted yet. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_,
           nk_capability_t capability_, typename wait_type_>
     requires(!ram_kit_adapted<stored_dtype_, kernel_, capability_>)
@@ -484,14 +470,9 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const&) {
     return 0;
 }
 
-/**
- *  @brief The innermost hop: binds the concrete sharded-index instantiation, wires the typed source
- *      views and the batch-shaped staging into a @c streamed_dataset, and runs both phases.
- *
- *  Staging is one contiguous plane the batched verbs view whole, sized after the executor
- *  spawns so its row count can follow the thread count. When the file scalar already matches
- *  the stored one, everything is a zero-copy view into the mappings.
- */
+/** The innermost hop: binds the concrete sharded-index instantiation, wires the typed source views
+ *  and the batch-shaped staging into a @c streamed_dataset, and runs both phases. Staging is one
+ *  contiguous plane, sized after the executor spawns so its rows follow the thread count. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_,
           nk_capability_t capability_, typename wait_type_>
     requires(ram_kit_adapted<stored_dtype_, kernel_, capability_>)
@@ -519,7 +500,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
 
     // Owns the one staging plane both batched phases view.
     nk::tensor<scalar_t, std::allocator<scalar_t>, 3> staging;
-    // Owns the rescaling plane `streamed_dataset::rescaling` views.
+    // Owns the rescaling plane @c streamed_dataset::rescaling views.
     nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3> rescaling_plane;
     if constexpr (!streamed_t::zero_copy_k) {
         std::size_t const threads = bench.executor.size();
@@ -556,8 +537,8 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
     return 0;
 }
 
-/** @brief Kernel axis: lowers the runtime metric to a compile-time kernel kind, the terminal
- *      hop into @ref stage_and_run. */
+/** Kernel axis: lowers the runtime metric to a compile-time kernel kind, the terminal hop into
+ *  @ref stage_and_run. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename wait_type_>
 int run_with_metric(bench_launch<dataset_scalar_type_> const& launch) {
     return dispatch_kernel<stored_dtype_>(
@@ -571,9 +552,9 @@ int run_with_metric(bench_launch<dataset_scalar_type_> const& launch) {
         });
 }
 
-/** @brief Schedule axis: the newest schedule row the allow-mask admits - intersected with what
- *      this machine actually offers - picks the waiter from @ref schedule_waiters_t. Past the
- *      table's tail sits the STL yield floor. */
+/** Schedule axis: the newest schedule row the allow-mask admits, intersected with what this
+ *  machine offers, picks the waiter from @ref schedule_waiters_t; past the tail sits the yield
+ *  floor. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_>
 int run_with_schedule(bench_launch<dataset_scalar_type_> const& launch) {
     return dispatch_index<schedule_choices_count_k>(
@@ -585,9 +566,9 @@ int run_with_schedule(bench_launch<dataset_scalar_type_> const& launch) {
         [&] { return run_with_metric<dataset_scalar_type_, stored_dtype_, capability_, yield_waiter_t>(launch); });
 }
 
-/** @brief Compute axis: the allow-mask intersected with the runtime detection picks the newest
- *      table row, whose @ref prefix_mask ceiling instantiates @ref run_with_schedule. Past the
- *      table's tail sits the one ceiling every machine owns: the serial kernels. */
+/** Compute axis: the allow-mask intersected with the runtime detection picks the newest table
+ *  row, whose @ref prefix_mask ceiling instantiates @ref run_with_schedule; past the tail sit the
+ *  serial kernels every machine owns. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
 int run_with_compute(bench_launch<dataset_scalar_type_> const& launch) {
     nk_capability_t const effective = launch.options.max_compute & nk_capabilities_available();
@@ -600,8 +581,8 @@ int run_with_compute(bench_launch<dataset_scalar_type_> const& launch) {
         [&] { return run_with_schedule<dataset_scalar_type_, stored_dtype_, nk_cap_serial_k>(launch); });
 }
 
-/** @brief The shard hop: everything below one stored dtype, so a per-dtype shard translation unit
- *      carries the whole instantiation grid of its dtype. */
+/** The shard hop: everything below one stored dtype, so a per-dtype shard translation unit
+ *  carries the whole instantiation grid of its dtype. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
 int run_with_stored_dtype(bench_launch<dataset_scalar_type_> const& launch) {
     return run_with_compute<dataset_scalar_type_, stored_dtype_>(launch);

@@ -1,11 +1,10 @@
 /**
- *  @brief The SafeGraphs interchange - the self-describing JSON header in front of every
- *      `.safegraphs` file and the manifest beside it - read & written positionally through
- *      a mapping, a buffer, or a file slice - all of them bytes - and yyjson.
- *
- *  @author Ash Vardanian
  *  @file include/usearch/utilities/safegraphs_format.hpp
+ *  @author Ash Vardanian
  *  @date July 19, 2026
+ *  @brief The SafeGraphs interchange - the self-describing JSON header in front of every
+ *      `.safegraphs` file and the manifest beside it - read & written positionally through a
+ *      mapping, a buffer, or a file slice - all of them bytes - and yyjson.
  *
  *  Every backend serializes its payloads differently - volatile in-RAM snapshots, GPU-resident
  *  uploads, persisted on-NVMe layouts - but they all speak the same header, so its reader and
@@ -49,50 +48,59 @@ namespace usearch {
 
 #pragma region Configs
 
-/** @brief The two file forms the interchange defines. */
+/** The two file forms the interchange defines. */
 enum class checkpoint_layout_t : u32_t {
-    /** @brief One file or buffer holding one graph: every shard's rows in placement order. */
+
+    /** One file or buffer holding one graph: every shard's rows in placement order. */
     monolith_k,
-    /** @brief A manifest beside one monolith per shard: the interchange's partition record. */
+
+    /** A manifest beside one monolith per shard: the interchange's partition record. */
     distributed_k,
 };
 
-/** @brief How a checkpoint's parts land on the placed shards of a multi-index. */
+/** How a checkpoint's parts land on the placed shards of a multi-index. */
 enum class checkpoint_placement_t : u32_t {
-    /** @brief Part @c p lands on shard @c p mod S whole: exact when the counts agree, a union
-     *      of parts past @c S, empty shards below it; never cuts a part. */
+
+    /** Part @c p lands on shard @c p mod S whole: exact when the counts agree, a union
+     *  of parts past @c S, empty shards below it; never cuts a part. */
     partitioned_k,
-    /** @brief The checkpoint's rows cut into @c S contiguous stripes, one per shard; exact for
-     *      a monolith that @c S rotation-filled shards wrote, well-formed for any other. */
+
+    /** The checkpoint's rows cut into @c S contiguous stripes, one per shard; exact for
+     *  a monolith that @c S rotation-filled shards wrote, well-formed for any other. */
     split_k,
 };
 
-/** @brief One custom `__metadata__` entry: a producer's own key and its string value. */
+/** One custom `__metadata__` entry: a producer's own key and its string value. */
 struct safegraphs_custom_field_t {
     std::string_view key;
     std::string_view value;
 };
 
-/** @brief The smallest buffer alignment the interchange allows. */
+/** The smallest buffer alignment the interchange allows. */
 inline constexpr std::size_t safegraphs_alignment_floor_k = 64;
-/** @brief The buffer alignment a header declares when the producer names none. */
+
+/** The buffer alignment a header declares when the producer names none. */
 inline constexpr std::size_t safegraphs_alignment_default_k = 4096;
 
-/** @brief What a save writes and how. */
+/** What a save writes and how. */
 struct save_config_t {
-    /** @brief One monolith, or a manifest beside one monolith per shard. */
+
+    /** One monolith, or a manifest beside one monolith per shard. */
     checkpoint_layout_t layout = checkpoint_layout_t::monolith_k;
-    /** @brief The header's buffer alignment: a power of two, at least the floor. */
+
+    /** The header's buffer alignment: a power of two, at least the floor. */
     std::size_t alignment = safegraphs_alignment_default_k;
-    /** @brief The contract the caller certifies; @c concurrent_k probes for settlement and may
-     *      answer @c contended_k, @c immutable_k copies plain. */
+
+    /** The contract the caller certifies; @c concurrent_k probes for settlement and may
+     *  answer @c contended_k, @c immutable_k copies plain. */
     synchronization_t synchronization = synchronization_t::concurrent_k;
-    /** @brief Free-form `__metadata__` strings - @c created_by, @c embedding_model, @c built_at;
-     *      the metric, quantization and alignment are the writer's own. */
+
+    /** Free-form `__metadata__` strings - @c created_by, @c embedding_model, @c built_at;
+     *  the metric, quantization and alignment are the writer's own. */
     std::span<safegraphs_custom_field_t const> provenance = {};
 
-    /** @brief Whether this config can be written: a legal alignment, and no provenance key the
-     *      writer already owns. */
+    /** Whether this config can be written: a legal alignment, and no provenance key the
+     *  writer already owns. */
     constexpr status_t validate() const noexcept {
         if (alignment < safegraphs_alignment_floor_k || !std::has_single_bit(alignment))
             return status_t::config_mismatch_k;
@@ -104,12 +112,14 @@ struct save_config_t {
     }
 };
 
-/** @brief Where a load places parts and how much room it leaves. */
+/** Where a load places parts and how much room it leaves. */
 struct load_config_t {
-    /** @brief Parts onto shards as written, or the rows cut into stripes. */
+
+    /** Parts onto shards as written, or the rows cut into stripes. */
     checkpoint_placement_t placement = checkpoint_placement_t::partitioned_k;
-    /** @brief Rows to reserve across the shards; zero fits the checkpoint exactly and leaves
-     *      the index full. */
+
+    /** Rows to reserve across the shards; zero fits the checkpoint exactly and leaves
+     *  the index full. */
     std::size_t capacity = 0;
 };
 
@@ -117,33 +127,36 @@ struct load_config_t {
 
 #pragma region Headers
 
-/** @brief One element per row; the header names no @c shape at all. */
+/** One element per row; the header names no @c shape at all. */
 struct scalar_shape_t {
     constexpr bool operator==(scalar_shape_t const&) const noexcept = default;
 };
 
-/** @brief @c columns elements per row - a dense vector or a coordinate pair. */
+/** @c columns elements per row - a dense vector or a coordinate pair. */
 struct vector_shape_t {
-    /** @brief Elements one row holds. */
+
+    /** Elements one row holds. */
     std::size_t columns = 1;
     constexpr bool operator==(vector_shape_t const&) const noexcept = default;
 };
 
-/** @brief @c rows by @c columns per node; zero rows is the axis that resizes per node. */
+/** @c rows by @c columns per node; zero rows is the axis that resizes per node. */
 struct matrix_shape_t {
-    /** @brief Rows per node; zero leaves the count to the prefix sums. */
+
+    /** Rows per node; zero leaves the count to the prefix sums. */
     std::size_t rows = 0;
-    /** @brief Elements one row holds. */
+
+    /** Elements one row holds. */
     std::size_t columns = 1;
     constexpr bool operator==(matrix_shape_t const&) const noexcept = default;
 };
 
-/** @brief One row's shape, in the interchange's own three cases: an absent @c shape is a scalar,
- *      a bare number a vector of that width, and a @b [rows,columns] pair a matrix. */
+/** One row's shape, in the interchange's own three cases: an absent @c shape is a scalar,
+ *  a bare number a vector of that width, and a @b [rows,columns] pair a matrix. */
 using column_shape_t = std::variant<scalar_shape_t, vector_shape_t, matrix_shape_t>;
 
-/** @brief Elements one fixed row holds; nothing when an axis resizes per node, which is the
- *      one case a fixed width cannot describe and the prefix sums must. */
+/** Elements one fixed row holds; nothing when an axis resizes per node, which is the
+ *  one case a fixed width cannot describe and the prefix sums must. */
 constexpr std::optional<std::size_t> regular_width(column_shape_t shape) noexcept {
     if (auto const* matrix = std::get_if<matrix_shape_t>(&shape))
         return matrix->rows ? std::optional<std::size_t> {matrix->rows * matrix->columns} : std::nullopt;
@@ -151,36 +164,43 @@ constexpr std::optional<std::size_t> regular_width(column_shape_t shape) noexcep
     return 1;
 }
 
-/** @brief The prefix sums an irregular column addresses its rows through: one element count per
- *      node, ending at the column's own element total. */
+/** The prefix sums an irregular column addresses its rows through: one element count per
+ *  node, ending at the column's own element total. */
 struct prefix_sums_t {
-    /** @brief Element type of the sums - @c u32_k or @c u64_k. */
+
+    /** Element type of the sums - @c u32_k or @c u64_k. */
     dtype_t dtype = dtype_t::u64_k;
-    /** @brief The sums themselves, within the data segment. */
+
+    /** The sums themselves, within the data segment. */
     iota_view<std::size_t> bytes;
 };
 
-/** @brief One header column: an element type, the shape of one row, its rows, and the prefix
- *      sums that address them when their width varies. */
+/** One header column: an element type, the shape of one row, its rows, and the prefix
+ *  sums that address them when their width varies. */
 struct safegraphs_column_t {
-    /** @brief Element type of the data buffer. */
+
+    /** Element type of the data buffer. */
     dtype_t dtype = dtype_t::unknown_k;
-    /** @brief What one row holds. */
+
+    /** What one row holds. */
     column_shape_t shape;
-    /** @brief The rows themselves, within the data segment. */
+
+    /** The rows themselves, within the data segment. */
     iota_view<std::size_t> data;
-    /** @brief The prefix sums; absent for a fixed-width column, which needs none. */
+
+    /** The prefix sums; absent for a fixed-width column, which needs none. */
     std::optional<prefix_sums_t> offsets;
 
-    /** @brief Bytes one row occupies - both axes, the packed families rounded up to whole
-     *      bytes; zero when the row has no fixed width. */
+    /** Bytes one row occupies - both axes, the packed families rounded up to whole
+     *  bytes; zero when the row has no fixed width. */
     std::size_t row_bytes() const noexcept {
         std::optional<std::size_t> const width = regular_width(shape);
         std::size_t const bits = width ? *width * dtype_bits(dtype) : 0;
         return bits ? divide_round_up<std::size_t>(bits, 8) : 0;
     }
-    /** @brief Nodes this column's own buffers describe: its data over one row's width when
-     *      fixed, its prefix sums less one otherwise; zero when neither says. */
+
+    /** Nodes this column's own buffers describe: its data over one row's width when
+     *  fixed, its prefix sums less one otherwise; zero when neither says. */
     std::size_t nodes() const noexcept {
         if (!offsets) {
             std::size_t const width = row_bytes();
@@ -192,33 +212,38 @@ struct safegraphs_column_t {
     }
 };
 
-/** @brief A parsed monolith header: the metadata, the three columns, and where the data
- *      segment begins. */
+/** A parsed monolith header: the metadata, the three columns, and where the data
+ *  segment begins. */
 struct safegraphs_header_t {
-    /** @brief Buffer alignment in bytes the producer declared; 4096 by default. */
+
+    /** Buffer alignment in bytes the producer declared; 4096 by default. */
     std::size_t alignment = safegraphs_alignment_default_k;
-    /** @brief Absolute file offset of the data segment every column range is relative to. */
+
+    /** Absolute file offset of the data segment every column range is relative to. */
     std::size_t data_offset = 0;
-    /** @brief Node identity column. */
+
+    /** Node identity column. */
     safegraphs_column_t key;
-    /** @brief Payload column - the vectors, strings, or feature sets. */
+
+    /** Payload column - the vectors, strings, or feature sets. */
     safegraphs_column_t value;
-    /** @brief Adjacency column of node indices; out-of-range IDs are positional sentinels. */
+
+    /** Adjacency column of node indices; out-of-range IDs are positional sentinels. */
     safegraphs_column_t neighbors;
 
-    /** @brief The @p length bytes of @p monolith at @p offset, empty when they do not fit -
-     *      @c subspan asserts its precondition, so every range is checked before it is taken. */
+    /** The @p length bytes of @p monolith at @p offset, empty when they do not fit -
+     *  @c subspan asserts its precondition, so every range is checked before it is taken. */
     template <typename bytes_type_>
     static bytes_type_ slice_of(bytes_type_ monolith, std::size_t offset, std::size_t length) noexcept {
         if (offset > monolith.size() || length > monolith.size() - offset) return {};
         return monolith.subspan(offset, length);
     }
 
-    /** @brief The node count - the key column's own rows, the one source of truth every other
-     *      column must agree with. */
+    /** The node count - the key column's own rows, the one source of truth every other
+     *  column must agree with. */
     std::size_t nodes() const noexcept { return key.nodes(); }
 
-    /** @brief Bytes the monolith occupies: the header segment and the furthest column buffer. */
+    /** Bytes the monolith occupies: the header segment and the furthest column buffer. */
     std::size_t monolith_bytes() const noexcept {
         auto const end_of = [](safegraphs_column_t const& column) noexcept {
             return max_of(column.data.bound, column.offsets ? column.offsets->bytes.bound : 0);
@@ -226,9 +251,9 @@ struct safegraphs_header_t {
         return data_offset + max_of(end_of(key), max_of(end_of(value), end_of(neighbors)));
     }
 
-    /** @brief The bytes of @p rows rows of a regular @p column, starting at row @p first_row -
-     *      the one slice a reader and a writer both address. Empty when the range does not fit
-     *      the column, which every caller then refuses. */
+    /** The bytes of @p rows rows of a regular @p column, starting at row @p first_row -
+     *  the one slice a reader and a writer both address. Empty when the range does not fit
+     *  the column, which every caller then refuses. */
     template <typename bytes_type_>
     bytes_type_ rows_of(bytes_type_ monolith, safegraphs_column_t const& column, std::size_t first_row,
                         std::size_t rows) const noexcept {
@@ -239,13 +264,13 @@ struct safegraphs_header_t {
         return slice_of(monolith, data_offset + column.data.first + start, length);
     }
 
-    /** @brief The bytes of one whole column's rows. */
+    /** The bytes of one whole column's rows. */
     template <typename bytes_type_>
     bytes_type_ data_of(bytes_type_ monolith, safegraphs_column_t const& column) const noexcept {
         return slice_of(monolith, data_offset + column.data.first, column.data.size());
     }
 
-    /** @brief The bytes of one column's prefix sums; empty for a regular column. */
+    /** The bytes of one column's prefix sums; empty for a regular column. */
     template <typename bytes_type_>
     bytes_type_ offsets_of(bytes_type_ monolith, safegraphs_column_t const& column) const noexcept {
         if (!column.offsets) return {};
@@ -253,17 +278,17 @@ struct safegraphs_header_t {
     }
 };
 
-/** @brief Reads @p value into @p extent, answering false where this host cannot address it. A
- *      checkpoint written where pointers are wider may name an extent past @c size_t, and
- *      truncating it would pass every later check carrying a plausible wrong number. */
+/** Reads @p value into @p extent, answering false where this host cannot address it. A
+ *  checkpoint written where pointers are wider may name an extent past @c size_t, and
+ *  truncating it would pass every later check carrying a plausible wrong number. */
 inline bool safegraphs_addressable_(u64_t value, std::size_t& extent) noexcept {
     if (value > std::numeric_limits<std::size_t>::max()) return false;
     extent = static_cast<std::size_t>(value);
     return true;
 }
 
-/** @brief The fixed 16 bytes every monolith opens with: the magic, then the little-endian
- *      byte length of the JSON header. */
+/** The fixed 16 bytes every monolith opens with: the magic, then the little-endian
+ *  byte length of the JSON header. */
 struct safegraphs_prefix_t {
     inline static constexpr std::array<char, 8> magic_k = {'S', 'A', 'F', 'E', 'G', 'R', 'P', 'H'};
     std::array<char, 8> magic = magic_k;
@@ -271,8 +296,8 @@ struct safegraphs_prefix_t {
 };
 static_assert(sizeof(safegraphs_prefix_t) == 16, "The prefix is read and written as sixteen raw bytes");
 
-/** @brief Trampolines a byte allocator into @c yyjson_alc; each block carries its size in a
- *      max-aligned prefix, since yyjson frees by pointer alone. */
+/** Trampolines a byte allocator into @c yyjson_alc; each block carries its size in a
+ *  max-aligned prefix, since yyjson frees by pointer alone. */
 template <typename allocator_type_>
 struct safegraphs_yyjson_allocator_ {
     using byte_allocator_t = typename std::allocator_traits<allocator_type_>::template rebind_alloc<std::byte>;
@@ -303,17 +328,17 @@ struct safegraphs_yyjson_allocator_ {
         return grown;
     }
 
-    /** @brief The C-ABI view yyjson consumes; valid while this trampoline stays alive. */
+    /** The C-ABI view yyjson consumes; valid while this trampoline stays alive. */
     yyjson_alc c_abi() noexcept { return {&allocate_, &reallocate_, &deallocate_, this}; }
 };
 
-/** @brief The text of a string value; empty for anything else. */
+/** The text of a string value; empty for anything else. */
 inline std::string_view safegraphs_string_(yyjson_val* value) noexcept {
     return yyjson_is_str(value) ? std::string_view {yyjson_get_str(value), yyjson_get_len(value)} : std::string_view {};
 }
 
-/** @brief Parses @p json into an object-rooted document the caller frees; the text is copied
- *      because yyjson mutates its input while reading it. */
+/** Parses @p json into an object-rooted document the caller frees; the text is copied
+ *  because yyjson mutates its input while reading it. */
 template <typename allocator_type_>
 expected<yyjson_doc*> safegraphs_read_document_(bytes_view_t json,
                                                 safegraphs_yyjson_allocator_<allocator_type_>& trampoline) noexcept {
@@ -329,8 +354,8 @@ expected<yyjson_doc*> safegraphs_read_document_(bytes_view_t json,
     return {nullptr, status_t::malformed_k};
 }
 
-/** @brief Reads one @b [begin,end] pair into @p begin and @p end; a missing or malformed pair
- *      leaves both zero, which every extent check then refuses. */
+/** Reads one @b [begin,end] pair into @p begin and @p end; a missing or malformed pair
+ *  leaves both zero, which every extent check then refuses. */
 inline iota_view<std::size_t> safegraphs_parse_span_(yyjson_val* pair) noexcept {
     if (!yyjson_is_arr(pair) || yyjson_arr_size(pair) != 2) return {};
     std::size_t first = 0, last = 0;
@@ -339,8 +364,8 @@ inline iota_view<std::size_t> safegraphs_parse_span_(yyjson_val* pair) noexcept 
     return {first, last};
 }
 
-/** @brief Walks one column object, reading the recognized fields and ignoring extras; the shape
- *      and the prefix sums are the one pair this file checks against each other. */
+/** Walks one column object, reading the recognized fields and ignoring extras; the shape
+ *  and the prefix sums are the one pair this file checks against each other. */
 inline expected<safegraphs_column_t> safegraphs_parse_column_(yyjson_val* object) noexcept {
     safegraphs_column_t column;
     if (!yyjson_is_obj(object)) return {column, status_t::malformed_k};
@@ -424,7 +449,7 @@ expected<safegraphs_header_t> safegraphs_read_header(bytes_view_t monolith, allo
     return {header, status_t::success_k};
 }
 
-/** @brief Maps @p path read-only and parses its header. */
+/** Maps @p path read-only and parses its header. */
 template <typename allocator_type_ = std::allocator<byte_t>, typename callback_type_ = dummy_callback_t>
 expected<safegraphs_header_t> safegraphs_read_header(std::string_view path, allocator_type_ allocator = {},
                                                      callback_type_&& per_custom_field = {}) noexcept {
@@ -433,8 +458,8 @@ expected<safegraphs_header_t> safegraphs_read_header(std::string_view path, allo
     return safegraphs_read_header(mapping.view(), allocator, std::forward<callback_type_>(per_custom_field));
 }
 
-/** @brief Builds the header's JSON document; null when an allocation failed. A regular column
- *      carries its shape, an irregular one its prefix-sum buffer, and both their data pair. */
+/** Builds the header's JSON document; null when an allocation failed. A regular column
+ *  carries its shape, an irregular one its prefix-sum buffer, and both their data pair. */
 inline yyjson_mut_doc* safegraphs_header_document_(safegraphs_header_t const& header,
                                                    std::span<safegraphs_custom_field_t const> custom_fields,
                                                    yyjson_alc const& allocator_abi) noexcept {
@@ -481,8 +506,8 @@ inline yyjson_mut_doc* safegraphs_header_document_(safegraphs_header_t const& he
     return nullptr;
 }
 
-/** @brief Serializes @p document, hands the text to @p consume, then frees both; a null document
- *      reports @c bad_alloc_k. */
+/** Serializes @p document, hands the text to @p consume, then frees both; a null document
+ *  reports @c bad_alloc_k. */
 template <typename consumer_type_>
 status_t safegraphs_print_(yyjson_mut_doc* document, yyjson_alc const& allocator_abi,
                            consumer_type_&& consume) noexcept {
@@ -495,8 +520,8 @@ status_t safegraphs_print_(yyjson_mut_doc* document, yyjson_alc const& allocator
     return consumed;
 }
 
-/** @brief Where a header lands its data segment: the prefix and JSON rounded up to the declared
- *      alignment. */
+/** Where a header lands its data segment: the prefix and JSON rounded up to the declared
+ *  alignment. */
 template <typename allocator_type_ = std::allocator<byte_t>>
 expected<std::size_t> safegraphs_data_offset(safegraphs_header_t const& header,
                                              std::span<safegraphs_custom_field_t const> custom_fields = {},
@@ -513,9 +538,9 @@ expected<std::size_t> safegraphs_data_offset(safegraphs_header_t const& header,
             status_t::success_k};
 }
 
-/** @brief Writes the prefix, the JSON, and space padding up to @c header.data_offset over the
- *      front of @p monolith - exactly the bytes @ref safegraphs_read_header consumes. Written
- *      last, it is what turns a run of bytes into a checkpoint. */
+/** Writes the prefix, the JSON, and space padding up to @c header.data_offset over the
+ *  front of @p monolith - exactly the bytes @ref safegraphs_read_header consumes. Written
+ *  last, it is what turns a run of bytes into a checkpoint. */
 template <typename bytes_type_, typename allocator_type_ = std::allocator<byte_t>>
 status_t safegraphs_write_header(bytes_type_ monolith, safegraphs_header_t const& header,
                                  std::span<safegraphs_custom_field_t const> custom_fields = {},
@@ -550,8 +575,8 @@ status_t safegraphs_write_header(bytes_type_ monolith, safegraphs_header_t const
 
 #pragma region Columns
 
-/** @brief The interchange token of one trivially-copyable key by its width; @c unknown_k for
- *      widths the interchange has no name for. */
+/** The interchange token of one trivially-copyable key by its width; @c unknown_k for
+ *  widths the interchange has no name for. */
 template <typename key_type_>
 constexpr dtype_t safegraphs_key_dtype() noexcept {
     if constexpr (sizeof(key_type_) == 4) return dtype_t::u32_k;
@@ -560,7 +585,7 @@ constexpr dtype_t safegraphs_key_dtype() noexcept {
     else return dtype_t::unknown_k;
 }
 
-/** @brief The interchange token of one node ID: the interchange admits @c u32 and @c u64. */
+/** The interchange token of one node ID: the interchange admits @c u32 and @c u64. */
 template <typename node_id_type_>
 constexpr dtype_t safegraphs_node_id_dtype() noexcept {
     if constexpr (sizeof(node_id_type_) == 4) return dtype_t::u32_k;
@@ -568,32 +593,38 @@ constexpr dtype_t safegraphs_node_id_dtype() noexcept {
     else return dtype_t::unknown_k;
 }
 
-/** @brief The value column's dtype for a stored scalar - its own token, the packed families
- *      included, whose @c x2 and @c x8 suffixes let a shape count logical elements. */
+/** The value column's dtype for a stored scalar - its own token, the packed families
+ *  included, whose @c x2 and @c x8 suffixes let a shape count logical elements. */
 template <typename scalar_type_>
 constexpr dtype_t safegraphs_value_dtype() noexcept {
     return dtype_named(scalar_type_::dtype_name());
 }
 
-/** @brief What three regular columns need to be laid out: the node count, each column's element
- *      type, and the two row widths. */
+/** What three regular columns need to be laid out: the node count, each column's element
+ *  type, and the two row widths. */
 struct safegraphs_regular_shape_t {
-    /** @brief Nodes every column describes. */
+
+    /** Nodes every column describes. */
     std::size_t nodes = 0;
-    /** @brief Element type of the key column. */
+
+    /** Element type of the key column. */
     dtype_t key_dtype = dtype_t::unknown_k;
-    /** @brief Element type of the value column. */
+
+    /** Element type of the value column. */
     dtype_t value_dtype = dtype_t::unknown_k;
-    /** @brief Elements per value row - the logical dimensions, the packed families included. */
+
+    /** Elements per value row - the logical dimensions, the packed families included. */
     std::size_t value_columns = 0;
-    /** @brief Element type of the neighbors column. */
+
+    /** Element type of the neighbors column. */
     dtype_t neighbors_dtype = dtype_t::unknown_k;
-    /** @brief Neighbor IDs per node's list. */
+
+    /** Neighbor IDs per node's list. */
     std::size_t connectivity = 0;
 };
 
-/** @brief A header of three regular columns at aligned starts - keys, fixed-width values, and
- *      fixed-degree neighbors - with the data offset they follow. */
+/** A header of three regular columns at aligned starts - keys, fixed-width values, and
+ *  fixed-degree neighbors - with the data offset they follow. */
 template <typename allocator_type_ = std::allocator<byte_t>>
 expected<safegraphs_header_t> safegraphs_regular_header(safegraphs_regular_shape_t const& shape, std::size_t alignment,
                                                         std::span<safegraphs_custom_field_t const> custom_fields = {},
@@ -619,21 +650,24 @@ expected<safegraphs_header_t> safegraphs_regular_header(safegraphs_regular_shape
 
 #pragma region Parts
 
-/** @brief One monolith of a checkpoint: a manifest's file entry, or the lone monolith itself. */
+/** One monolith of a checkpoint: a manifest's file entry, or the lone monolith itself. */
 struct safegraphs_part_t {
-    /** @brief The monolith's path, relative to the manifest; empty for a lone monolith. */
+
+    /** The monolith's path, relative to the manifest; empty for a lone monolith. */
     std::string_view path;
-    /** @brief The monolith's whole size in bytes. */
+
+    /** The monolith's whole size in bytes. */
     std::size_t bytes = 0;
-    /** @brief Nodes the monolith holds. */
+
+    /** Nodes the monolith holds. */
     std::size_t nodes = 0;
 };
 
-/** @brief Holds the longest NumKong kernel spelling, 22 characters, with its NUL. */
+/** Holds the longest NumKong kernel spelling, 22 characters, with its NUL. */
 inline constexpr std::size_t safegraphs_name_capacity_k = 32;
 
-/** @brief A NUL-terminated metadata name; longer input truncates, so a foreign name fails a
- *      comparison instead of overrunning. */
+/** A NUL-terminated metadata name; longer input truncates, so a foreign name fails a
+ *  comparison instead of overrunning. */
 struct safegraphs_name_t {
     char characters[safegraphs_name_capacity_k] = {};
 
@@ -645,41 +679,49 @@ struct safegraphs_name_t {
     bool empty() const noexcept { return !characters[0]; }
 };
 
-/** @brief What a manifest or a lone monolith says about itself without opening a column. */
+/** What a manifest or a lone monolith says about itself without opening a column. */
 struct safegraphs_metadata_t {
-    /** @brief The metric the graph was built for; empty when the producer omitted it. */
+
+    /** The metric the graph was built for; empty when the producer omitted it. */
     safegraphs_name_t metric;
-    /** @brief The stored scalar by its own name - what a packed @c u8 value column cannot say;
-     *      empty when the producer omitted it. */
+
+    /** The stored scalar by its own name - what a packed @c u8 value column cannot say;
+     *  empty when the producer omitted it. */
     safegraphs_name_t quantization;
-    /** @brief Element type of every part's value column. */
+
+    /** Element type of every part's value column. */
     dtype_t value_dtype = dtype_t::unknown_k;
-    /** @brief Element type of every part's key column. */
+
+    /** Element type of every part's key column. */
     dtype_t key_dtype = dtype_t::unknown_k;
-    /** @brief The value column's shape, from the first part's header. */
+
+    /** The value column's shape, from the first part's header. */
     column_shape_t value_shape;
-    /** @brief Neighbor IDs per node's list, from the first part's header. */
+
+    /** Neighbor IDs per node's list, from the first part's header. */
     std::size_t connectivity = 0;
-    /** @brief Total nodes across every part. */
+
+    /** Total nodes across every part. */
     std::size_t nodes = 0;
-    /** @brief Monoliths the checkpoint spans; one for a lone monolith. */
+
+    /** Monoliths the checkpoint spans; one for a lone monolith. */
     std::size_t parts = 0;
 };
 
-/** @brief @p path with its @c .json and @c .safegraphs suffixes removed. */
+/** @p path with its @c .json and @c .safegraphs suffixes removed. */
 inline std::string_view safegraphs_stem(std::string_view path) noexcept {
     if (path.ends_with(".json")) path.remove_suffix(std::string_view {".json"}.size());
     if (path.ends_with(".safegraphs")) path.remove_suffix(std::string_view {".safegraphs"}.size());
     return path;
 }
 
-/** @brief The last path component - what a manifest entry records. */
+/** The last path component - what a manifest entry records. */
 inline std::string_view safegraphs_basename(std::string_view path) noexcept {
     return path.substr(path.find_last_of("/\\") + 1);
 }
 
-/** @brief Formats @c <stem>-00001-of-00002.safegraphs into @p buffer, measured first; parts
- *      count from one, as the interchange illustrates. */
+/** Formats @c <stem>-00001-of-00002.safegraphs into @p buffer, measured first; parts
+ *  count from one, as the interchange illustrates. */
 template <typename allocator_type_>
 expected<std::string_view> safegraphs_part_path(growing_buffer<char, allocator_type_>& buffer, std::string_view stem,
                                                 std::size_t part, std::size_t parts) noexcept {
@@ -694,7 +736,7 @@ expected<std::string_view> safegraphs_part_path(growing_buffer<char, allocator_t
     return {std::string_view {buffer.data(), static_cast<std::size_t>(length)}, status_t::success_k};
 }
 
-/** @brief Resolves an entry's @p relative path beside @p manifest_path into @p buffer. */
+/** Resolves an entry's @p relative path beside @p manifest_path into @p buffer. */
 template <typename allocator_type_>
 expected<std::string_view> safegraphs_sibling_path(growing_buffer<char, allocator_type_>& buffer,
                                                    std::string_view manifest_path, std::string_view relative) noexcept {
@@ -706,8 +748,8 @@ expected<std::string_view> safegraphs_sibling_path(growing_buffer<char, allocato
     return {to_string_view(buffer), status_t::success_k};
 }
 
-/** @brief Rows @p stripe of @p stripes takes from @p rows: the leading stripes take one more,
- *      which is exactly how rotation fills shards. */
+/** Rows @p stripe of @p stripes takes from @p rows: the leading stripes take one more,
+ *  which is exactly how rotation fills shards. */
 constexpr iota_view<std::size_t> checkpoint_stripe(std::size_t rows, std::size_t stripes, std::size_t stripe) noexcept {
     std::size_t const quotient = rows / stripes;
     std::size_t const remainder = rows % stripes;
@@ -715,18 +757,21 @@ constexpr iota_view<std::size_t> checkpoint_stripe(std::size_t rows, std::size_t
     return {first, first + quotient + (stripe < remainder ? 1 : 0)};
 }
 
-/** @brief One slice of one part landing on one shard. */
+/** One slice of one part landing on one shard. */
 struct checkpoint_assignment_t {
-    /** @brief The shard receiving the rows. */
+
+    /** The shard receiving the rows. */
     std::size_t shard = 0;
-    /** @brief The part the rows come from. */
+
+    /** The part the rows come from. */
     std::size_t part = 0;
-    /** @brief The part-local rows taken, in the part's own id space. */
+
+    /** The part-local rows taken, in the part's own id space. */
     iota_view<std::size_t> rows;
 };
 
-/** @brief Maps a checkpoint's parts onto @p shards under @p placement, firing @p per_assignment
- *      grouped by shard and in part order within one; empty slices never fire. */
+/** Maps a checkpoint's parts onto @p shards under @p placement, firing @p per_assignment
+ *  grouped by shard and in part order within one; empty slices never fire. */
 template <typename callback_type_>
 void assign_parts(checkpoint_placement_t placement, std::span<std::size_t const> part_rows, std::size_t shards,
                   callback_type_&& per_assignment) noexcept {
@@ -755,9 +800,9 @@ void assign_parts(checkpoint_placement_t placement, std::span<std::size_t const>
     }
 }
 
-/** @brief Builds a manifest document; null when an allocation failed. It catalogs parts and
- *      nothing else: the schema, the metric and the provenance live in each part's own header,
- *      so a part lifted out of the set still describes itself completely. */
+/** Builds a manifest document; null when an allocation failed. It catalogs parts and
+ *  nothing else: the schema, the metric and the provenance live in each part's own header,
+ *  so a part lifted out of the set still describes itself completely. */
 template <typename callback_type_>
 yyjson_mut_doc* safegraphs_manifest_document_(std::size_t parts, callback_type_&& part_at,
                                               std::span<safegraphs_custom_field_t const> custom_fields,
@@ -788,7 +833,7 @@ yyjson_mut_doc* safegraphs_manifest_document_(std::size_t parts, callback_type_&
     return nullptr;
 }
 
-/** @brief Bytes a manifest over @p parts entries from @p part_at occupies. */
+/** Bytes a manifest over @p parts entries from @p part_at occupies. */
 template <typename callback_type_, typename allocator_type_ = std::allocator<byte_t>>
 expected<std::size_t> safegraphs_manifest_bytes(std::size_t parts, callback_type_&& part_at,
                                                 std::span<safegraphs_custom_field_t const> custom_fields = {},
@@ -802,8 +847,8 @@ expected<std::size_t> safegraphs_manifest_bytes(std::size_t parts, callback_type
     return {json_bytes, printed};
 }
 
-/** @brief The metadata one monolith's header implies - the answer every schema question has,
- *      whether it was asked of a lone monolith or of a checkpoint's first part. */
+/** The metadata one monolith's header implies - the answer every schema question has,
+ *  whether it was asked of a lone monolith or of a checkpoint's first part. */
 inline safegraphs_metadata_t safegraphs_metadata_of_(safegraphs_header_t const& header, safegraphs_name_t metric,
                                                      safegraphs_name_t quantization) noexcept {
     safegraphs_metadata_t metadata;
@@ -818,11 +863,9 @@ inline safegraphs_metadata_t safegraphs_metadata_of_(safegraphs_header_t const& 
     return metadata;
 }
 
-/**
- *  @brief Reads a manifest: @p per_part fires once per entry in file order with a path that dies
- *      with this call, and the metadata comes from the first part's header, the one place a
- *      schema is written. Node counts sum over the entries that declare one.
- */
+/** Reads a manifest: @p per_part fires once per entry in file order with a path that dies
+ *  with this call, and the metadata comes from the first part's header, the one place a
+ *  schema is written. Node counts sum over the entries that declare one. */
 template <typename allocator_type_ = std::allocator<byte_t>, typename callback_type_ = dummy_callback_t>
 expected<safegraphs_metadata_t> safegraphs_read_manifest(std::string_view path, allocator_type_ allocator = {},
                                                          callback_type_&& per_part = {}) noexcept {
@@ -874,8 +917,8 @@ expected<safegraphs_metadata_t> safegraphs_read_manifest(std::string_view path, 
     return {metadata, status_t::success_k};
 }
 
-/** @brief Writes a manifest over @p parts entries drawn from @p part_at in order - the commit
- *      record a distributed save writes last. */
+/** Writes a manifest over @p parts entries drawn from @p part_at in order - the commit
+ *  record a distributed save writes last. */
 template <typename callback_type_, typename allocator_type_ = std::allocator<byte_t>>
 status_t safegraphs_write_manifest(std::string_view path, std::size_t parts, callback_type_&& part_at,
                                    std::span<safegraphs_custom_field_t const> custom_fields = {},
@@ -893,7 +936,7 @@ status_t safegraphs_write_manifest(std::string_view path, std::size_t parts, cal
         });
 }
 
-/** @brief The metadata of a monolith held in @p monolith. */
+/** The metadata of a monolith held in @p monolith. */
 template <typename allocator_type_ = std::allocator<byte_t>>
 expected<safegraphs_metadata_t> safegraphs_read_metadata(bytes_view_t monolith,
                                                          allocator_type_ allocator = {}) noexcept {
@@ -908,8 +951,8 @@ expected<safegraphs_metadata_t> safegraphs_read_metadata(bytes_view_t monolith,
     return {safegraphs_metadata_of_(header, metric, quantization), status_t::success_k};
 }
 
-/** @brief The metadata of a manifest or of a lone monolith at @p path - told apart by content,
- *      the monolith's magic, never by the extension. */
+/** The metadata of a manifest or of a lone monolith at @p path - told apart by content,
+ *  the monolith's magic, never by the extension. */
 template <typename allocator_type_ = std::allocator<byte_t>>
 expected<safegraphs_metadata_t> safegraphs_read_metadata(std::string_view path,
                                                          allocator_type_ allocator = {}) noexcept {
@@ -926,22 +969,22 @@ expected<safegraphs_metadata_t> safegraphs_read_metadata(std::string_view path,
 
 #pragma region Columned Indexes
 
-/** @brief A value codec that also names the dtype of the elements it emits, so a header can
- *      describe its column; elements only, since the prefix sums delimit every value. */
+/** A value codec that also names the dtype of the elements it emits, so a header can
+ *  describe its column; elements only, since the prefix sums delimit every value. */
 template <typename codec_type_>
 concept interchange_value_codec = requires {
     { codec_type_::value_dtype_k } -> std::convertible_to<dtype_t const&>;
 };
 
-/** @brief The shape a codec declares, or one element per row when it names none. */
+/** The shape a codec declares, or one element per row when it names none. */
 template <typename codec_type_>
 constexpr column_shape_t safegraphs_value_shape() noexcept {
     if constexpr (requires { codec_type_::value_shape_k; }) return codec_type_::value_shape_k;
     else return scalar_shape_t {};
 }
 
-/** @brief Whether every value of a codec occupies the same bytes, so its column carries no prefix
- *      sums; a codec that declares no shape writes a tape, which always does. */
+/** Whether every value of a codec occupies the same bytes, so its column carries no prefix
+ *  sums; a codec that declares no shape writes a tape, which always does. */
 template <typename codec_type_>
 constexpr bool safegraphs_value_is_fixed() noexcept {
     if constexpr (requires { codec_type_::value_shape_k; })
@@ -949,22 +992,23 @@ constexpr bool safegraphs_value_is_fixed() noexcept {
     else return false;
 }
 
-/** @brief The header and extents a columned index's monolith takes. */
+/** The header and extents a columned index's monolith takes. */
 struct safegraphs_index_layout_t {
-    /** @brief A regular key column, a value column shaped by the codec, and ragged neighbors. */
+
+    /** A regular key column, a value column shaped by the codec, and ragged neighbors. */
     safegraphs_header_t header;
-    /** @brief Bytes of the data segment, from the key column to the last neighbor id. */
+
+    /** Bytes of the data segment, from the key column to the last neighbor id. */
     std::size_t segment_bytes = 0;
-    /** @brief Bytes of the whole monolith, header segment included. */
+
+    /** Bytes of the whole monolith, header segment included. */
     std::size_t monolith_bytes = 0;
 };
 
-/**
- *  @brief Lays out a columned index's monolith: keys regular; values regular when the codec's
- *      shape is fixed and ragged with element prefix sums otherwise; neighbors ragged with
- *      prefix sums; each buffer on an @c alignment boundary. A fixed shape is held to the
- *      index's byte count, so a codec cannot claim a width its values do not have.
- */
+/** Lays out a columned index's monolith: keys regular; values regular when the codec's
+ *  shape is fixed and ragged with element prefix sums otherwise; neighbors ragged with
+ *  prefix sums; each buffer on an @c alignment boundary. A fixed shape is held to the
+ *  index's byte count, so a codec cannot claim a width its values do not have. */
 template <typename key_type_, typename node_id_type_, typename codec_type_,
           typename allocator_type_ = std::allocator<byte_t>>
     requires interchange_value_codec<codec_type_>
@@ -1022,8 +1066,8 @@ expected<safegraphs_index_layout_t> safegraphs_index_layout(std::size_t nodes, s
     return {layout, status_t::success_k};
 }
 
-/** @brief The custom fields a columned index's monolith carries: the metric, the producer, and
- *      the caller's provenance. */
+/** The custom fields a columned index's monolith carries: the metric, the producer, and
+ *  the caller's provenance. */
 template <typename allocator_type_>
 status_t safegraphs_index_fields_(growing_buffer<safegraphs_custom_field_t, allocator_type_>& fields,
                                   std::string_view metric, save_config_t const& config) noexcept {
@@ -1034,14 +1078,14 @@ status_t safegraphs_index_fields_(growing_buffer<safegraphs_custom_field_t, allo
     return status_t::success_k;
 }
 
-/** @brief A typed span over @p count elements of the data segment starting at byte @p start. */
+/** A typed span over @p count elements of the data segment starting at byte @p start. */
 template <typename element_type_, typename byte_type_>
 std::span<element_type_> safegraphs_typed_span_(std::span<byte_type_> segment, std::size_t start,
                                                 std::size_t count) noexcept {
     return {reinterpret_cast<element_type_*>(segment.data() + start), count};
 }
 
-/** @brief Bytes a save of @p index under @p config writes; @c contended_k while a plan is open. */
+/** Bytes a save of @p index under @p config writes; @c contended_k while a plan is open. */
 template <typename index_type_, typename codec_type_, typename allocator_type_ = std::allocator<byte_t>>
     requires interchange_value_codec<codec_type_>
 expected<std::size_t> safegraphs_storage_requirements(index_type_ const& index, codec_type_ const& codec,
@@ -1103,7 +1147,7 @@ status_t safegraphs_write_index(bytes_span_t monolith, index_type_ const& index,
     bytes_span_t const segment = monolith.subspan(header.data_offset, layout.segment_bytes);
     if (reinterpret_cast<std::uintptr_t>(segment.data()) % alignof(u64_t)) return status_t::config_mismatch_k;
 
-    // Neighbor sums count ids on both sides, so the plan writes the monolith's own buffer. Value
+    // Neighbor sums count IDs on both sides, so the plan writes the monolith's own buffer. Value
     // sums count bytes here and elements on the wire, so a fixed column has none to write and a
     // ragged one of wider elements stages them and lands them scaled after the plan.
     std::span<u64_t> const neighbor_sums = safegraphs_typed_span_<u64_t>(segment, header.neighbors.offsets->bytes.first,
@@ -1160,29 +1204,38 @@ status_t safegraphs_write_index(bytes_span_t monolith, index_type_ const& index,
     return safegraphs_write_header(monolith, header, to_span(fields), allocator);
 }
 
-/** @brief What a columned index's monolith says about itself without touching the payload. */
+/** What a columned index's monolith says about itself without touching the payload. */
 struct safegraphs_index_metadata_t {
-    /** @brief Nodes the monolith holds. */
+
+    /** Nodes the monolith holds. */
     std::size_t nodes = 0;
-    /** @brief Neighbor ids across every node. */
+
+    /** Neighbor ids across every node. */
     std::size_t neighbors = 0;
-    /** @brief Value bytes across every node - what a tape must hold to load them. */
+
+    /** Value bytes across every node - what a tape must hold to load them. */
     std::size_t value_bytes = 0;
-    /** @brief The header's buffer alignment. */
+
+    /** The header's buffer alignment. */
     std::size_t alignment = 0;
-    /** @brief Element type of the key column. */
+
+    /** Element type of the key column. */
     dtype_t key_dtype = dtype_t::unknown_k;
-    /** @brief Element type of the value column. */
+
+    /** Element type of the value column. */
     dtype_t value_dtype = dtype_t::unknown_k;
-    /** @brief Element type of the neighbors column. */
+
+    /** Element type of the neighbors column. */
     dtype_t neighbors_dtype = dtype_t::unknown_k;
-    /** @brief The value column's shape, in the interchange's own three cases. */
+
+    /** The value column's shape, in the interchange's own three cases. */
     column_shape_t value_shape;
-    /** @brief The metric token the producer recorded; empty when it omitted one. */
+
+    /** The metric token the producer recorded; empty when it omitted one. */
     safegraphs_name_t metric;
 };
 
-/** @brief Reads a columned index's header from @p source into its metadata. */
+/** Reads a columned index's header from @p source into its metadata. */
 template <typename allocator_type_ = std::allocator<byte_t>>
 expected<safegraphs_index_metadata_t> safegraphs_read_index_metadata(bytes_view_t monolith,
                                                                      allocator_type_ allocator = {}) noexcept {
@@ -1280,7 +1333,7 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
     if (reinterpret_cast<std::uintptr_t>(segment.data()) % alignof(u64_t)) return status_t::config_mismatch_k;
 
     // Neighbor sums are the file's own buffer; @c plan_load proves they start at zero, never
-    // fall and end at the id count. Value sums count bytes here, so a fixed shape synthesizes
+    // fall and end at the ID count. Value sums count bytes here, so a fixed shape synthesizes
     // them and a ragged one of wider elements scales them up.
     std::span<u64_t const> const neighbor_sums = safegraphs_typed_span_<u64_t const>(
         segment, adjacency.offsets->bytes.first, nodes + 1);

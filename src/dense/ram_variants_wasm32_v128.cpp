@@ -1,8 +1,8 @@
 /**
- *  @brief The wasm32_v128 unit: fixed-width SIMD128, one thread, the cells with a strict kit.
- *  @author Ash Vardanian
  *  @file src/dense/ram_variants_wasm32_v128.cpp
+ *  @author Ash Vardanian
  *  @date September 12, 2026
+ *  @brief The wasm32_v128 unit: fixed-width SIMD128, one thread, the cells with a strict kit.
  */
 #include "dense_specializations.cuh"
 

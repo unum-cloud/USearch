@@ -1,8 +1,9 @@
 /**
- *  @brief Similarity search over variable-length sequences - the CPython twin of
- *      `include/usearch/sequence_index.h`.
  *  @file python/sequence_index.c
  *  @author Ash Vardanian
+ *  @date August 16, 2026
+ *  @brief Similarity search over variable-length sequences - the CPython twin of
+ *      `include/usearch/sequence_index.h`.
  *
  *  The C surface exists; the verbs land here as the library instantiates them. Entries vary
  *  in size, so batches arrive as `usearch_bytes_view_t` tapes rather than strided matrices, the

@@ -1,10 +1,10 @@
 /**
- *  @brief Throughput benchmarks for the @c ram_buffers.hpp & @c ram_tables.hpp containers - @c max_heap,
- *      @c sorted_buffer, and @c growing_hash_set - including their multi-element overloads.
- *
- *  @author Ash Vardanian
  *  @file bench/utilities/ram_buffers.cpp
+ *  @author Ash Vardanian
  *  @date April 25, 2026
+ *  @brief Throughput benchmarks for the @c ram_buffers.hpp & @c ram_tables.hpp containers -
+ *      @c max_heap, @c sorted_buffer, and @c growing_hash_set - including their multi-element
+ *      overloads.
  *
  *  Pure data-structure microbenches. No L1-noise simulator, no HNSW context. Each cell
  *  measures only the container ops.
@@ -33,7 +33,7 @@
 namespace bm = benchmark;
 using namespace unum::usearch;
 
-/** @brief Single-element @c insert into a steady-state buffer kept near full.
+/** Single-element @c insert into a steady-state buffer kept near full.
  *  Hits the O(1) fast-reject path nearly every iteration on uniform-u32 input. */
 void bench_sorted_buffer_insert_one(bm::State& state) {
     auto const limit = static_cast<std::size_t>(state.range(0));
@@ -46,7 +46,7 @@ void bench_sorted_buffer_insert_one(bm::State& state) {
     state.SetItemsProcessed(state.iterations());
 }
 
-/** @brief Apples-to-apples: @c batch_size separate @c insert calls per iteration. */
+/** Apples-to-apples: @c batch_size separate @c insert calls per iteration. */
 template <std::size_t batch_size_>
 void bench_sorted_buffer_insert_n_separate(bm::State& state) {
     auto const limit = static_cast<std::size_t>(state.range(0));
@@ -66,8 +66,8 @@ void bench_sorted_buffer_insert_n_separate(bm::State& state) {
     state.counters["batch_N"] = static_cast<double>(batch_size_);
 }
 
-/** @brief Apples-to-apples: sort the batch - the network for quads, the library beyond -
- *      then one sorted-span @c insert(span, limit) call per iteration. */
+/** Apples-to-apples: sort the batch - the network for quads, the library beyond -
+ *  then one sorted-span @c insert(span, limit) call per iteration. */
 template <std::size_t batch_size_>
 void bench_sorted_buffer_insert_span(bm::State& state) {
     auto const limit = static_cast<std::size_t>(state.range(0));
@@ -110,7 +110,7 @@ void bench_hash_set_insert_one(bm::State& state) {
     state.SetItemsProcessed(state.iterations());
 }
 
-/** @brief Apples-to-apples: @c batch_size separate @c insert calls per iteration. */
+/** Apples-to-apples: @c batch_size separate @c insert calls per iteration. */
 template <std::size_t batch_size_>
 void bench_hash_set_insert_n_separate(bm::State& state) {
     auto const expected_size = static_cast<std::size_t>(state.range(0));
@@ -132,7 +132,7 @@ void bench_hash_set_insert_n_separate(bm::State& state) {
     state.counters["batch_N"] = static_cast<double>(batch_size_);
 }
 
-/** @brief Apples-to-apples: one @c insert(std::array) call per iteration. */
+/** Apples-to-apples: one @c insert(std::array) call per iteration. */
 template <std::size_t batch_size_>
 void bench_hash_set_insert_one_batch(bm::State& state) {
     auto const expected_size = static_cast<std::size_t>(state.range(0));
@@ -174,7 +174,7 @@ void bench_max_heap_push_pop(bm::State& state) {
     state.SetItemsProcessed(state.iterations() * 3);
 }
 
-/** @brief Apples-to-apples: @c batch_size separate @c insert calls per iteration. */
+/** Apples-to-apples: @c batch_size separate @c insert calls per iteration. */
 template <std::size_t batch_size_>
 void bench_max_heap_insert_n_separate(bm::State& state) {
     auto const target_size = static_cast<std::size_t>(state.range(0));
@@ -197,7 +197,7 @@ void bench_max_heap_insert_n_separate(bm::State& state) {
     state.counters["batch_N"] = static_cast<double>(batch_size_);
 }
 
-/** @brief Apples-to-apples: one @c insert_many(std::array) call per iteration. */
+/** Apples-to-apples: one @c insert_many(std::array) call per iteration. */
 template <std::size_t batch_size_>
 void bench_max_heap_insert_one_batch(bm::State& state) {
     auto const target_size = static_cast<std::size_t>(state.range(0));
@@ -219,7 +219,7 @@ void bench_max_heap_insert_one_batch(bm::State& state) {
     state.counters["batch_N"] = static_cast<double>(batch_size_);
 }
 
-/** @brief D-ary heap mixed push/pop - same workload as the binary cell, parameterised by arity. */
+/** D-ary heap mixed push/pop - same workload as the binary cell, parameterised by arity. */
 template <std::size_t arity_>
 void bench_max_heap_dary_push_pop(bm::State& state) {
     auto const target_size = static_cast<std::size_t>(state.range(0));
@@ -237,7 +237,7 @@ void bench_max_heap_dary_push_pop(bm::State& state) {
     state.counters["arity"] = static_cast<double>(arity_);
 }
 
-/** @brief D-ary heap insert-only steady state - pop periodically to keep size bounded. */
+/** D-ary heap insert-only steady state - pop periodically to keep size bounded. */
 template <std::size_t arity_>
 void bench_max_heap_dary_insert_only(bm::State& state) {
     auto const target_size = static_cast<std::size_t>(state.range(0));

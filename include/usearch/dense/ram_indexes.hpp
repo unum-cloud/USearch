@@ -1,38 +1,38 @@
 /**
+ *  @file include/usearch/dense/ram_indexes.hpp
+ *  @author Ash Vardanian
+ *  @date July 23, 2026
  *  @brief The sharded index over CPU-resident dense shards - one per memory domain - with
  *      rotation-balanced insertion, merged cross-shard search, and SafeGraphs checkpoints.
- *  @author Ash Vardanian
- *  @file include/usearch/dense/ram_indexes.hpp
- *  @date July 23, 2026
  *
- *  The plural layer over @c dense_ram_index: same-geometry shards, each owned and pinned to
- *  one ForkUnion memory domain, viewed as one index. Insertions rotate across the shards so
- *  they fill evenly and each holds a representative sample; searches scatter over every
- *  shard and gather through @ref merge_search_results, resolving matches into the caller's
- *  keys, so shards with colliding id spaces land in one shared ranking. Checkpoints ride the
- *  SafeGraphs interchange - one consolidated monolith, or one per shard beside a manifest -
- *  written positionally with every header last, so a failed save reads as absent.
+ *  The plural layer over @c dense_ram_index: same-geometry shards, each owned and pinned to one
+ *  ForkUnion memory domain, viewed as one index. Insertions rotate across the shards so they fill
+ *  evenly; searches scatter over every shard and gather through @ref merge_search_results,
+ *  resolving matches into the caller's keys, so shards with colliding ID spaces land in one
+ *  ranking. Checkpoints ride the SafeGraphs interchange - one consolidated monolith, or one per
+ *  shard beside a manifest - written positionally with every header last, so a failed save reads
+ *  as absent.
  */
 #pragma once
 
-#include <cstring> // `std::memcpy`, `std::memcmp` - row copies & the monolith's magic
+#include <cstring> // `std::memcpy`, `std::memcmp`
 
-#include <array>       // `std::array` - the monolith magic
-#include <atomic>      // `std::atomic` - the routing tally, the chunk cursors & fan-out outcomes
-#include <memory>      // `std::unique_ptr` - an index holds atomics and never moves
-#include <span>        // `std::span` - the callers' key batches & merged rankings
-#include <string_view> // `std::string_view` - the checkpoint paths
-#include <type_traits> // `std::is_same_v` - detecting the compiled-out default predicate
-#include <utility>     // `std::move` - handing a mapping to the buffer that outlives the load
+#include <array>       // `std::array`
+#include <atomic>      // `std::atomic`
+#include <memory>      // `std::unique_ptr`
+#include <span>        // `std::span`
+#include <string_view> // `std::string_view`
+#include <type_traits> // `std::is_same_v`
+#include <utility>     // `std::move`
 
-#include <forkunion.h> // `fu_memory_domain_id_t` - the placement argument of `emplace`
+#include <forkunion.h> // `fu_memory_domain_id_t`
 
 #include "usearch/utilities/types.hpp"
-#include "usearch/utilities/blocking_files.hpp"    // `mapped_file_t`, `copy_bytes` - the checkpoints' bytes
-#include "usearch/utilities/ram_buffers.hpp"       // `growing_buffer` - the shard table & key columns
+#include "usearch/utilities/blocking_files.hpp"    // `mapped_file_t`, `copy_bytes`
+#include "usearch/utilities/ram_buffers.hpp"       // `growing_buffer`
 #include "usearch/utilities/ram_device.hpp"        // `forkunion_allocator`, `forkunion_executor_t`
-#include "usearch/utilities/ram_tables.hpp"        // `growing_multimap` - the locator map
-#include "usearch/utilities/safegraphs_format.hpp" // SafeGraphs monoliths & manifests - the checkpoints
+#include "usearch/utilities/ram_tables.hpp"        // `growing_multimap`
+#include "usearch/utilities/safegraphs_format.hpp" // SafeGraphs monoliths & manifests
 #include "usearch/dense/ram_index.hpp"
 
 namespace unum {
@@ -60,52 +60,58 @@ template <                                                                    //
     >
 struct dense_ram_indexes {
     friend struct dense_ram_indexes_cursor<dense_ram_indexes>;
-    /** @brief A reader's walk over every shard's published rows in placement order. */
+
+    /** A reader's walk over every shard's published rows in placement order. */
     using cursor_t = dense_ram_indexes_cursor<dense_ram_indexes>;
 
-    /** @brief The caller-visible identity, opaque to every shard - indexes store no keys, so the
-     *      whole key vocabulary begins here. */
+    /** The caller-visible identity, opaque to every shard - indexes store no keys, so the whole
+     *  key vocabulary begins here. */
     using key_t = key_type_;
 
-    /** @brief Where one entry lives: the shard, and its shard-local ID - the index's only
-     *      address for an entry. */
+    /** Where one entry lives: the shard, and its shard-local ID - the index's only address for
+     *  an entry. */
     struct key_locator_t {
-        /** @brief The shard holding the entry, positional in placement order. */
+
+        /** The shard holding the entry, positional in placement order. */
         std::size_t shard = 0;
-        /** @brief The entry's ID inside that shard's own space. */
+
+        /** The entry's ID inside that shard's own space. */
         dense_node_id_t node = 0;
     };
 
-    /** @brief Keys of one shard's rows, indexed by that shard's own node IDs. */
+    /** Keys of one shard's rows, indexed by that shard's own node IDs. */
     using keys_column_t = growing_buffer<key_t, forkunion_allocator_t>;
-    /** @brief Key to every entry stored under it; insert-only, wait-free for readers. */
+
+    /** Key to every entry stored under it; insert-only, wait-free for readers. */
     using locators_map_t = growing_multimap<key_t, key_locator_t, key_hash_type_, //
                                             forkunion_allocator_t>;
 
-    /** @brief The atomic reference owning the plain synchronization words - the shards' and this
-     *      index's own admission word alike. */
+    /** The atomic reference owning the plain synchronization words - the shards' and this index's
+     *  own admission word alike. */
     template <typename word_type_>
     using atomic_ref = atomic_ref_template_<word_type_>;
 
-    /** @brief The shard type - geometry parameters in the shard's own order, so the two can
-     *      never disagree. */
+    /** The shard type - geometry parameters in the shard's own order, so the two can never
+     *  disagree. */
     using index_t = dense_ram_index<vector_dtype_, kernel_kind_, capability_, wait_type_, atomic_ref_template_, //
                                     forkunion_allocator_t,                                                      //
                                     forkunion_allocator_t,                                                      //
                                     arena_allocator<byte_t, forkunion_allocator_t>>;
 
-    /** @brief One shard: the graph, and the keys of its rows. Placement is not repeated - the
-     *      index's own allocator carries it. */
+    /** One shard: the graph, and the keys of its rows. Placement is not repeated - the index's
+     *  own allocator carries it. */
     struct shard_t {
-        /** @brief The graph; its capacity counter is bounded by the key column, so its claims are
-         *      the only admission a row needs. An index holds atomics and never moves. */
+
+        /** The graph; its capacity counter is bounded by the key column, so its claims are the
+         *  only admission a row needs. An index holds atomics and never moves. */
         std::unique_ptr<index_t> index;
-        /** @brief The key of each of this shard's rows, indexed by node ID. */
+
+        /** The key of each of this shard's rows, indexed by node ID. */
         keys_column_t keys;
     };
 
-    /** @brief The threads and their scratch every bulk verb runs on; it names no index, so one
-     *      executor serves every instantiation. */
+    /** The threads and their scratch every bulk verb runs on; it names no index, so one executor
+     *  serves every instantiation. */
     using executor_t = forkunion_executor_t;
     using distance_t = typename index_t::distance_t;
     using scalar_t = typename index_t::scalar_t;
@@ -125,17 +131,19 @@ struct dense_ram_indexes {
     using shard_capacity_claim_t = typename index_t::capacity_claim_t;
     static_assert(index_family<index_t> && index_claim<shard_capacity_claim_t>);
 
-    /** @brief The stored scalar vocabulary, re-exported for dispatchers gating crossing rows. */
+    /** The stored scalar vocabulary, re-exported for dispatchers gating crossing rows. */
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
-    /** @brief The distance kernel this instantiation walks with. */
+
+    /** The distance kernel this instantiation walks with. */
     inline static constexpr nk_kernel_kind_t kernel_kind_k = kernel_kind_;
-    /** @brief The compute-capability mask the kernels compiled under. */
+
+    /** The compute-capability mask the kernels compiled under. */
     inline static constexpr nk_capability_t capability_k = capability_;
 
 #pragma region Placement
 
-    /** @brief Every index names the host allocator its shard table, locator map and checkpoint
-     *      catalogs sit on; nothing is placed by default. */
+    /** Every index names the host allocator its shard table, locator map and checkpoint
+     *  catalogs sit on; nothing is placed by default. */
     dense_ram_indexes() = delete;
     explicit dense_ram_indexes(forkunion_allocator_t allocator) noexcept
         : shards_(allocator), locators_of_key_(allocator), allocator_(allocator) {}
@@ -146,7 +154,8 @@ struct dense_ram_indexes {
     dense_ram_indexes& operator=(dense_ram_indexes&& other) noexcept { return swap(other), *this; }
     dense_ram_indexes(dense_ram_indexes const&) = delete;
     dense_ram_indexes& operator=(dense_ram_indexes const&) = delete;
-    /** @brief Every member is RAII, so the shards die with the index and nothing leaks. */
+
+    /** Every member is RAII, so the shards die with the index and nothing leaks. */
     ~dense_ram_indexes() noexcept = default;
 
     void swap(dense_ram_indexes& other) noexcept {
@@ -160,16 +169,16 @@ struct dense_ram_indexes {
         atomic_ref<std::size_t>(other.routed_rows_).store(routed, std::memory_order_relaxed);
     }
 
-    /** @brief Appends one shard built here on @p memory_domain, for callers with none to hand over. */
+    /** Appends one shard built here on @p memory_domain, for callers with none to hand over. */
     status_t emplace(fu_memory_domain_id_t memory_domain) noexcept {
         std::unique_ptr<index_t> shard = build_(memory_domain);
         if (!shard) return status_t::bad_alloc_k;
         return emplace(std::move(shard));
     }
 
-    /** @brief Appends one shard the caller already built, consuming it; refuses any whose frozen
-     *      geometry differs from the shards already here, and any already reserved. Refused once
-     *      storage exists - @ref reserve closes the shard set. */
+    /** Appends one shard the caller already built, consuming it; refuses any whose frozen geometry
+     *  differs from the shards already here, and any already reserved. Refused once storage
+     *  exists - @ref reserve closes the shard set. */
     status_t emplace(std::unique_ptr<index_t>&& shard) noexcept {
         if (!shard) return status_t::config_mismatch_k;
         if (capacity()) return status_t::config_mismatch_k;
@@ -180,8 +189,8 @@ struct dense_ram_indexes {
         return shards_.push_back(shard_t {std::move(shard), std::move(keys)});
     }
 
-    /** @brief Empties every shard in place, keeping its memory domain, geometry and capacity.
-     *      Demands the same quiescence as @ref reserve. */
+    /** Empties every shard in place, keeping its memory domain, geometry and capacity. Demands
+     *  the same quiescence as @ref reserve. */
     status_t clear() noexcept {
         reserve_capacity_t const geometry {capacity(), static_cast<connectivity_t>(connectivity()), dimensions()};
         for (shard_t& one : shards_) {
@@ -199,34 +208,37 @@ struct dense_ram_indexes {
 
 #pragma region Measures
 
-    /** @brief Shards in the index, one per engaged memory domain. */
+    /** Shards in the index, one per engaged memory domain. */
     std::size_t shards_count() const noexcept { return shards_.size(); }
-    /** @brief The shard at @p shard, in placement order. */
+
+    /** The shard at @p shard, in placement order. */
     index_t& shard(std::size_t shard) noexcept { return *shards_[shard].index; }
-    /** @brief The read-only shard at @p shard. */
+
+    /** The read-only shard at @p shard. */
     index_t const& shard(std::size_t shard) const noexcept { return *shards_[shard].index; }
 
-    /** @brief The frozen geometry, taken from the first shard - @ref emplace refused any that differ. */
+    /** The frozen geometry, taken from the first shard - @ref emplace refused any that differ. */
     std::size_t dimensions() const noexcept { return shards_.empty() ? 0 : shards_[0].index->dimensions(); }
-    /** @brief Connections per node, frozen with the geometry. */
+
+    /** Connections per node, frozen with the geometry. */
     std::size_t connectivity() const noexcept { return shards_.empty() ? 0 : shards_[0].index->connectivity(); }
 
-    /** @brief Entries across every shard - each shard's own @c size, summed. */
+    /** Entries across every shard - each shard's own @c size, summed. */
     std::size_t size() const noexcept {
         std::size_t total = 0;
         for (shard_t const& one : shards_) total += one.index->size();
         return total;
     }
 
-    /** @brief Rows the shards can host - the key columns' total, sized once at @ref reserve. */
+    /** Rows the shards can host - the key columns' total, sized once at @ref reserve. */
     std::size_t capacity() const noexcept {
         std::size_t total = 0;
         for (shard_t const& one : shards_) total += one.keys.size();
         return total;
     }
 
-    /** @brief Bytes the index occupies - every shard's storage, its key column, and the shared
-     *      locator map; traversal scratch is the executor's. */
+    /** Bytes the index occupies - every shard's storage, its key column, and the shared locator
+     *  map; traversal scratch is the executor's. */
     std::size_t memory_usage() const noexcept {
         std::size_t bytes = sizeof(dense_ram_indexes) + locators_of_key_.memory_usage();
         for (shard_t const& one : shards_) bytes += one.index->memory_usage() + one.keys.memory_usage();
@@ -255,7 +267,7 @@ struct dense_ram_indexes {
         per_shard.capacity = divide_round_up(config.capacity, shards_.size());
 
         // The locator map first: its ceiling is what makes recording a locator infallible, and a
-        // refusal here leaves nothing reserved, so the call stays retryable.
+        // refusal here leaves nothing reserved.
         if (status_t const indexed = locators_of_key_.reserve(per_shard.capacity * shards_.size()); failed(indexed))
             return {0, indexed};
         // A shard rounds up to whole chunks; its key column is sized to what it really holds.
@@ -448,8 +460,7 @@ struct dense_ram_indexes {
         if (keys.size() != rows || claim.rows() != rows) return {result, status_t::config_mismatch_k};
         if (!rows) return {result, status_t::success_k};
 
-        // One caller per executor, and the arenas grow to the widest geometry ever asked of them -
-        // no caller guesses a byte count, the frozen geometry already knows it.
+        // One caller per executor; the arenas grow to the widest geometry ever asked of them.
         auto [executor_claim, claim_status] = executor.claim();
         if (failed(claim_status)) return {result, claim_status};
         if (status_t const sized = executor.reserve(shards_[0].index->traversal_memory_usage(config)); failed(sized))
@@ -495,25 +506,27 @@ struct dense_ram_indexes {
 
 #pragma region Refinement
 
-    /** @brief One shard's share of a refinement sweep: its published ids cut into steps a fan-out
-     *      pulls, the same shape the checkpoint plans take. */
+    /** One shard's share of a refinement sweep: its published IDs cut into steps a fan-out pulls,
+     *  the same shape the checkpoint plans take. */
     struct refine_plan_t {
 
-        /** @brief One unit of the sweep's fan-out. */
+        /** One unit of the sweep's fan-out. */
         struct step_t {
-            /** @brief The step's position in the plan - what a fan-out hands to a thread. */
+
+            /** The step's position in the plan - what a fan-out hands to a thread. */
             std::size_t position = 0;
-            /** @brief The ids this step re-selects. */
+
+            /** The IDs this step re-selects. */
             iota_view<dense_node_id_t> nodes;
         };
 
-        /** @brief The swept shard; null on a default plan, which holds no steps. */
+        /** The swept shard; null on a default plan, which holds no steps. */
         index_t* index_ = nullptr;
 
-        /** @brief Ids one step covers - the first chunk's rows, so a step is one growth unit. */
+        /** IDs one step covers - the first chunk's rows, so a step is one growth unit. */
         inline static constexpr std::size_t step_nodes_k = power_of_two<std::size_t>(index_t::first_chunk_rows_log2_k);
 
-        /** @brief Step @p position of the plan; an empty step past the end. */
+        /** Step @p position of the plan; an empty step past the end. */
         step_t operator[](std::size_t position) const noexcept {
             step_t step;
             if (position >= steps().size()) return step;
@@ -524,7 +537,7 @@ struct dense_ram_indexes {
             return step;
         }
 
-        /** @brief The plan's steps, positionally. */
+        /** The plan's steps, positionally. */
         indexed_range<refine_plan_t> steps() const noexcept {
             return {this, index_ ? divide_round_up(index_->size(), step_nodes_k) : 0u};
         }
@@ -536,10 +549,9 @@ struct dense_ram_indexes {
      *
      *  Every thread pulls steps from its home shard first and steals from the rest in the tail,
      *  so a sweep costs one pass over the graph however the shards are filled. Re-selection
-     *  claims no identity and moves no watermark, so searches run throughout, a stopped sweep
-     *  leaves the graph correct and merely less improved, and the next call simply sweeps again -
-     *  re-selecting a settled node changes nothing, so nothing needs to remember where one
-     *  stopped. Insertions may not overlap.
+     *  claims no identity and moves no watermark, so searches run throughout and a stopped sweep
+     *  leaves the graph correct; re-selecting a settled node changes nothing, so nothing needs to
+     *  remember where one stopped. Insertions may not overlap.
      *
      *  @param[inout] executor The threads and their scratch.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity"
@@ -645,9 +657,10 @@ struct dense_ram_indexes {
 
     /**
      *  @brief Re-links whatever no search can reach: the audit's islands are re-selected, the graph
-     *      is re-swept, and whatever the diversity judgment still drops is reconnected into a
-     *      reached pick - round after round while the island population shrinks, so a graph no
-     *      round can improve ends the pass rather than spinning. Insertions may not overlap.
+     *      re-swept, and whatever the diversity judgment still drops is reconnected into a reached
+     *      pick - round after round while the island population shrinks.
+     *
+     *  Insertions may not overlap.
      *
      *  @param[inout] executor The threads and their scratch.
      */
@@ -699,8 +712,8 @@ struct dense_ram_indexes {
                 return {{}, forced};
             if (status_t const audited = sweep_reachability_(plans, cursors_span, executor); failed(audited))
                 return {{}, audited};
-            // A round that frees no island frees none on the next either - the picks it needs are
-            // themselves unreached - so the pass ends here and reports what still stands.
+            // A round that frees no island frees none on the next either, since the picks it
+            // needs are themselves unreached, so the pass ends here.
             std::size_t const islands_after = islands_left();
             if (islands_after >= islands_before) break;
             islands_before = islands_after;
@@ -770,7 +783,7 @@ struct dense_ram_indexes {
      *  @param[out] distances Distances of the same rankings, parallel to @p keys.
      *  @param[out] counts Per-query merged hit counts, one per query row.
      *  @param[in] predicate Optional per-key admission filter; the default admits everything
-     *      and compiles the filtered machinery out. Shards test node ids, so each one's keys
+     *      and compiles the filtered machinery out. Shards test node IDs, so each one's keys
      *      column translates before the predicate sees a candidate.
      *
      *  A thread that fails stops its own query and leaves the rest to finish; the first failure is
@@ -842,10 +855,9 @@ struct dense_ram_indexes {
 
 #pragma region Checkpoints
 
-    /** @brief Bytes a @ref save under @p config writes: one monolith, or every part file and the
-     *      manifest measured over a placeholder stem; zero for an invalid config or an unplaced
-     *      index. The row count is read now, so a buffer sized here fits a save that no row
-     *      lands before. */
+    /** Bytes a @ref save under @p config writes: one monolith, or every part file and the
+     *  manifest measured over a placeholder stem; zero for an invalid config or an unplaced
+     *  index. The row count is read now, so a buffer sized here fits a save no row lands before. */
     expected<std::size_t> storage_requirements(save_config_t const& config) const noexcept {
         if (shards_.empty() || !dimensions()) return {0, status_t::uninitialized_k};
         if (status_t const valid = config.validate(); failed(valid)) return {0, valid};
@@ -853,8 +865,8 @@ struct dense_ram_indexes {
         if (status_t const named = custom_fields_(fields, config); failed(named)) return {0, named};
         std::span<safegraphs_custom_field_t const> const fields_span = to_span(fields);
 
-        // Every part is framed to be measured, and a header that cannot be formatted is an
-        // allocation failure the caller must see rather than a zero it would size a file by.
+        // A header that cannot be formatted is an allocation failure the caller must see, never
+        // a zero it would size a file by.
         status_t framing = status_t::success_k;
         auto part_bytes = [&](std::size_t nodes) noexcept {
             auto const [header, status] = monolith_header_(nodes, config, fields_span);
@@ -1047,8 +1059,10 @@ struct dense_ram_indexes {
     /**
      *  @brief Opens a save under @p path in the layout @p config names: one monolith of every
      *      shard's rows in placement order with IDs rebased, so it reads as one graph, or one
-     *      monolith per shard beside a manifest. Every part is framed, sized and mapped here, and
-     *      every header lands in @c finish, so a failed or cancelled save reads as absent.
+     *      monolith per shard beside a manifest.
+     *
+     *  Every part is framed, sized and mapped here, and every header lands in @c finish, so a
+     *  failed or cancelled save reads as absent.
      *
      *  @param[in] path The monolith's path, or the manifest's - its parts land beside it as
      *      @c <stem>-00001-of-0000S.safegraphs.
@@ -1264,8 +1278,8 @@ struct dense_ram_indexes {
         return plan.finish(on_saved);
     }
 
-    /** @brief Serializes the index into @p monolith as one graph - the one-shot over the bytes
-     *      form of @ref plan_save. */
+    /** Serializes the index into @p monolith as one graph - the one-shot over the bytes form of
+     *  @ref plan_save. */
     template <typename progress_type_ = dummy_progress_t>
     status_t save(bytes_span_t monolith, save_config_t const& config, executor_t& executor,
                   progress_type_&& on_saved = {}) noexcept {
@@ -1299,8 +1313,8 @@ struct dense_ram_indexes {
         return settled;
     }
 
-    /** @brief Restores one monolith held in @p monolith - the one-shot over the bytes form of
-     *      @ref plan_load. */
+    /** Restores one monolith held in @p monolith - the one-shot over the bytes form of
+     *  @ref plan_load. */
     template <typename progress_type_ = dummy_progress_t>
     status_t load(bytes_view_t monolith, load_config_t const& config, executor_t& executor,
                   progress_type_&& on_loaded = {}) noexcept {
@@ -1316,12 +1330,12 @@ struct dense_ram_indexes {
         return settled;
     }
 
-    /** @brief The checkpoint's metadata without loading it - @ref safegraphs_read_metadata. */
+    /** The checkpoint's metadata without loading it - @ref safegraphs_read_metadata. */
     static expected<safegraphs_metadata_t> metadata(std::string_view path) noexcept {
         return safegraphs_read_metadata(path);
     }
 
-    /** @brief The metadata of one monolith held in memory. */
+    /** The metadata of one monolith held in memory. */
     static expected<safegraphs_metadata_t> metadata(bytes_view_t buffer) noexcept {
         return safegraphs_read_metadata(buffer);
     }
@@ -1330,10 +1344,10 @@ struct dense_ram_indexes {
 
 #pragma region Key Columns
 
-    /** @brief Entries stored under @p key; a concurrent insertion can only make it under-report. */
+    /** Entries stored under @p key; a concurrent insertion can only make it under-report. */
     std::size_t count(key_t const& key) const noexcept { return locators_of_key_.count(key); }
 
-    /** @brief Whether at least one entry is stored under @p key. */
+    /** Whether at least one entry is stored under @p key. */
     bool contains(key_t const& key) const noexcept { return locators_of_key_.contains(key); }
 
     /**
@@ -1361,7 +1375,7 @@ struct dense_ram_indexes {
   private:
 #pragma region Placement
 
-    /** @brief One unreserved shard placed on @p memory_domain; null when the allocation fails. */
+    /** One unreserved shard placed on @p memory_domain; null when the allocation fails. */
     static std::unique_ptr<index_t> build_(fu_memory_domain_id_t memory_domain) noexcept {
         forkunion_allocator_t const allocator {memory_domain};
         return std::unique_ptr<index_t>(new (std::nothrow) index_t(allocator, allocator));
@@ -1371,23 +1385,25 @@ struct dense_ram_indexes {
 
 #pragma region Insertion
 
-    /** @brief The first row of a batch that @p shard takes under @p rotation - a bijection over
-     *      the shards, so the residue classes it names partition the batch exactly. */
+    /** The first row of a batch that @p shard takes under @p rotation - a bijection over the
+     *  shards, so the residue classes it names partition the batch exactly. */
     static std::size_t first_row_of_shard_(std::size_t shard, std::size_t shards, std::size_t rotation) noexcept {
         return (shard + shards - rotation) % shards;
     }
 
-    /** @brief How many of @p rows a shard starting at @p first takes, stepping by @p shards. */
+    /** How many of @p rows a shard starting at @p first takes, stepping by @p shards. */
     static std::size_t rows_from_(std::size_t rows, std::size_t first, std::size_t shards) noexcept {
         return first < rows ? divide_round_up(rows - first, shards) : 0;
     }
-    /** @brief Shard @p shard's share of a @p rows batch under @p rotation. */
+
+    /** Shard @p shard's share of a @p rows batch under @p rotation. */
     std::size_t share_of_(std::size_t shard, std::size_t rows, std::size_t rotation) const noexcept {
         return rows_from_(rows, first_row_of_shard_(shard, shards_.size(), rotation), shards_.size());
     }
-    /** @brief Builds one traversal context per thread over its own arena, so a fan-out never
-     *      allocates and never shares scratch. Sized to the executor, since a dynamic fan-out
-     *      picks its threads. */
+
+    /** Builds one traversal context per thread over its own arena, so a fan-out never allocates
+     *  and never shares scratch. Sized to the executor, since a dynamic fan-out picks its
+     *  threads. */
     status_t reserve_traversals_(growing_buffer<traversal_t, forkunion_allocator_t>& traversals, executor_t& executor,
                                  insert_config_t config) noexcept {
         std::size_t const threads = executor.size();
@@ -1410,9 +1426,9 @@ struct dense_ram_indexes {
 
 #pragma region Health
 
-    /** @brief Sizes what an audit runs on: one context per thread, one cursor per shard. The
-     *      reservation comes first, since it rewinds every arena, and the plans opened after it
-     *      keep their bitsets. */
+    /** Sizes what an audit runs on: one context per thread, one cursor per shard. The reservation
+     *  comes first, since it rewinds every arena, and the plans opened after it keep their
+     *  bitsets. */
     status_t reserve_audit_(growing_buffer<traversal_t, forkunion_allocator_t>& traversals,
                             growing_buffer<std::size_t, forkunion_allocator_t>& cursors,
                             executor_t& executor) noexcept {
@@ -1422,9 +1438,8 @@ struct dense_ram_indexes {
         return cursors.resize(shards_.size());
     }
 
-    /** @brief One reachability audit over every shard's plan: the bitsets restart, then every level
-     *      sweeps every step and advances each plan once, until no level expands a node - what
-     *      @ref health reports and what each round of @ref heal re-runs. */
+    /** One reachability audit over every shard's plan: the bitsets restart, then every level
+     *  sweeps every step and advances each plan once, until no level expands a node. */
     template <typename plan_type_>
     status_t sweep_reachability_(growing_buffer<plan_type_, forkunion_allocator_t>& plans,
                                  std::span<std::size_t> cursors, executor_t& executor) noexcept {
@@ -1443,8 +1458,8 @@ struct dense_ram_indexes {
         return status_t::success_k;
     }
 
-    /** @brief Folds one shard's audit into the index's: populations add, and the depth is the
-     *      deepest shard's, since a searcher waits for the last one. */
+    /** Folds one shard's audit into the index's: populations add, and the depth is the deepest
+     *  shard's, since a searcher waits for the last one. */
     static void combine_health_(health_result_t& into, health_result_t const& one) noexcept {
         into.reachable_nodes += one.reachable_nodes;
         into.sweeps = max_of(into.sweeps, one.sweeps);
@@ -1454,13 +1469,14 @@ struct dense_ram_indexes {
 
 #pragma region Checkpoints
 
-    /** @brief The interchange token of one key - the monolith's key column dtype. */
+    /** The interchange token of one key - the monolith's key column dtype. */
     inline static constexpr dtype_t key_dtype_k = safegraphs_key_dtype<key_t>();
-    /** @brief The value column's dtype - the stored scalar's own token, so a packed word's
-     *      suffix carries the packing and the column's shape counts logical dimensions. */
+
+    /** The value column's dtype - the stored scalar's own token, so a packed word's suffix
+     *  carries the packing and the column's shape counts logical dimensions. */
     inline static constexpr dtype_t value_column_dtype_k = safegraphs_value_dtype<scalar_t>();
 
-    /** @brief Whether the index can write @p config: placed, reserved, tokenized, and legal. */
+    /** Whether the index can write @p config: placed, reserved, tokenized, and legal. */
     status_t saveable_(save_config_t const& config) const noexcept {
         static_assert(key_dtype_k != dtype_t::unknown_k, "The key type has no interchange token");
         if (shards_.empty() || !dimensions()) return status_t::uninitialized_k;
@@ -1468,19 +1484,19 @@ struct dense_ram_indexes {
         return config.validate();
     }
 
-    /** @brief Whether the index can take a checkpoint: placed, and holding nothing yet. */
+    /** Whether the index can take a checkpoint: placed, and holding nothing yet. */
     status_t loadable_() const noexcept {
         if (shards_.empty()) return status_t::uninitialized_k;
         return size() ? status_t::config_mismatch_k : status_t::success_k;
     }
 
-    /** @brief Storage values per stored row - the copy width of every column. */
+    /** Storage values per stored row - the copy width of every column. */
     std::size_t row_values_() const noexcept {
         return divide_round_up<std::size_t>(dimensions(), nk::dimensions_per_value<scalar_t>());
     }
 
-    /** @brief The custom fields every monolith carries: the metric, the stored scalar by its own
-     *      name - what a packed @c u8 column cannot say - and the caller's provenance. */
+    /** The custom fields every monolith carries: the metric, the stored scalar by its own name -
+     *  what a packed @c u8 column cannot say - and the caller's provenance. */
     status_t custom_fields_(growing_buffer<safegraphs_custom_field_t, forkunion_allocator_t>& fields,
                             save_config_t const& config) const noexcept {
         if (failed(fields.reserve_exactly(2 + config.provenance.size()))) return status_t::bad_alloc_k;
@@ -1490,7 +1506,7 @@ struct dense_ram_indexes {
         return status_t::success_k;
     }
 
-    /** @brief The monolith header for @p nodes rows under @p config 's alignment. */
+    /** The monolith header for @p nodes rows under @p config 's alignment. */
     expected<safegraphs_header_t> monolith_header_(std::size_t nodes, save_config_t const& config,
                                                    std::span<safegraphs_custom_field_t const> fields) const noexcept {
         safegraphs_regular_shape_t const shape {nodes,        key_dtype_k,    value_column_dtype_k,
@@ -1498,8 +1514,8 @@ struct dense_ram_indexes {
         return safegraphs_regular_header(shape, config.alignment, fields);
     }
 
-    /** @brief One slab of neighbor ids from @p arena - the scratch a save chunk rebases through;
-     *      empty when the arena is short. */
+    /** One slab of neighbor IDs from @p arena - the scratch a save chunk rebases through; empty
+     *  when the arena is short. */
     nk::matrix_span<dense_node_id_t> scratch_of_(typename executor_t::arena_t& arena,
                                                  std::size_t scratch_rows) const noexcept {
         std::size_t const connectivity = this->connectivity();
@@ -1509,8 +1525,8 @@ struct dense_ram_indexes {
         return {reinterpret_cast<dense_node_id_t*>(bytes), scratch_rows, connectivity};
     }
 
-    /** @brief The shard placed on @p memory_domain - a thread's home - or the first shard when
-     *      none sits there. */
+    /** The shard placed on @p memory_domain - a thread's home - or the first shard when none sits
+     *  there. */
     std::size_t home_shard_(fu_memory_domain_id_t memory_domain) const noexcept {
         for (std::size_t shard = 0; shard != shards_.size(); ++shard)
             if (shards_[shard].index->vectors_allocator_.memory_domain == memory_domain) return shard;
@@ -1518,11 +1534,12 @@ struct dense_ram_indexes {
     }
 
     /**
-     *  @brief Fans every plan's chunks out over the executor's threads: each thread drains its
-     *      home shard first, then helps the rest, one atomic cursor per shard being the whole
-     *      schedule. @p per_step lands one step on the thread that pulled it, with that thread's
-     *      scratch - @p scratch_rows of neighbor ids, none when zero - and answers a status; the
-     *      first failure wins.
+     *  @brief Fans every plan's chunks out over the executor's threads: each thread drains its home
+     *      shard first, then helps the rest, one atomic cursor per shard being the whole schedule.
+     *
+     *  @p per_step lands one step on the thread that pulled it, with that thread's scratch -
+     *  @p scratch_rows of neighbor IDs, none when zero - and answers a status; the first failure
+     *  wins.
      *
      *  @p cursors is the caller's, one entry per plan, so an audit reuses one across its levels
      *  rather than allocating per level.
@@ -1563,12 +1580,10 @@ struct dense_ram_indexes {
         return outcome.load(std::memory_order_relaxed);
     }
 
-    /**
-     *  @brief Fans @p plan 's steps out over the executor's threads: each thread drains its home
-     *      shard's own run first, then helps the rest, one atomic cursor per shard being the whole
-     *      schedule. A save lands each step with the thread's scratch of neighbor IDs; a load
-     *      reads straight out of its part. The first failure wins and stops the rest.
-     */
+    /** Fans @p plan 's steps out over the executor's threads: each thread drains its home shard's
+     *  own run first, then helps the rest, one atomic cursor per shard being the whole schedule. A
+     *  save lands each step with the thread's scratch of neighbor IDs; a load reads straight out of
+     *  its part. The first failure wins and stops the rest. */
     template <typename plan_type_>
     status_t drain_steps_(plan_type_& plan, executor_t& executor) noexcept {
         std::size_t const shards = shards_.size();
@@ -1625,8 +1640,8 @@ struct dense_ram_indexes {
         return status_t::success_k;
     }
 
-    /** @brief Opens shard @p shard 's own save over the @p nodes rows it writes at @p first_row of
-     *      @p target; the plan's own @c id_shift is where its keys land in @c finish. */
+    /** Opens shard @p shard 's own save over the @p nodes rows it writes at @p first_row of
+     *  @p target; the plan's own @c id_shift is where its keys land in @c finish. */
     status_t open_save_shard_(save_plan_t& plan, std::size_t shard, bytes_span_t target,
                               safegraphs_header_t const& header, std::size_t first_row, std::size_t nodes,
                               save_config_t const& config) noexcept {
@@ -1670,8 +1685,8 @@ struct dense_ram_indexes {
         return status_t::success_k;
     }
 
-    /** @brief Frames, sizes and maps one part per shard beside the plan's path, and opens one save plan
-     *      over each - a part's IDs stay shard-local, so its rows travel verbatim. */
+    /** Frames, sizes and maps one part per shard beside the plan's path, and opens one save plan
+     *  over each - a part's IDs stay shard-local, so its rows travel verbatim. */
     status_t open_save_parts_(save_plan_t& plan, save_config_t const& config) noexcept {
         std::size_t const shards = shards_.size();
         plan.layout_ = checkpoint_layout_t::distributed_k;
@@ -1702,7 +1717,7 @@ struct dense_ram_indexes {
         return status_t::success_k;
     }
 
-    /** @brief Reads one part's header and tokens out of the bytes it carries. */
+    /** Reads one part's header and tokens out of the bytes it carries. */
     status_t describe_part_(part_t& part) const noexcept {
         auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
             if (field.key == "metric") part.metric = safegraphs_name_t {field.value};
@@ -1715,7 +1730,7 @@ struct dense_ram_indexes {
         return status_t::success_k;
     }
 
-    /** @brief Lists @p monolith as the checkpoint's only part. */
+    /** Lists @p monolith as the checkpoint's only part. */
     status_t catalog_monolith_(bytes_view_t monolith,
                                growing_buffer<part_t, forkunion_allocator_t>& parts) const noexcept {
         part_t part;
@@ -1724,12 +1739,9 @@ struct dense_ram_indexes {
         return parts.push_back(part);
     }
 
-    /**
-     *  @brief Lists the parts at @p path: the magic makes a lone monolith, anything else a
-     *      manifest whose every part is mapped and its header read now, so no entry is taken on
-     *      trust. The mappings land in @p mappings, which must outlive the load, since every
-     *      part's rows are read straight out of them.
-     */
+    /** Lists the parts at @p path: the magic makes a lone monolith, anything else a manifest
+     *  whose every part is mapped and its header read now, so no entry is taken on trust. The
+     *  mappings land in @p mappings, which must outlive the load. */
     status_t catalog_(std::string_view path, growing_buffer<mapped_file_t, forkunion_allocator_t>& mappings,
                       growing_buffer<part_t, forkunion_allocator_t>& parts) const noexcept {
         auto [mapping, map_status] = mapped_file_t::read(path);
@@ -1771,9 +1783,9 @@ struct dense_ram_indexes {
         return status_t::success_k;
     }
 
-    /** @brief Whether @p part can land here: three regular columns of the index's own dtypes,
-     *      the tokens it names agreeing with this instantiation, the geometry @p first froze,
-     *      and every column describing the same rows. */
+    /** Whether @p part can land here: three regular columns of the index's own dtypes, the tokens
+     *  it names agreeing with this instantiation, the geometry @p first froze, and every column
+     *  describing the same rows. */
     status_t vetted_part_(part_t const& part, safegraphs_header_t const& first) const noexcept {
         safegraphs_header_t const& header = part.header;
         if (header.key.offsets || header.value.offsets || header.neighbors.offsets) return status_t::config_mismatch_k;
@@ -1890,17 +1902,20 @@ struct dense_ram_indexes {
 
 #pragma endregion Checkpoints
 
-    /** @brief The owned shards, graph and keys together. A shard's key column is sized at
-     *      @ref reserve to what the shard holds, since a search reads it while rows are still landing. */
+    /** The owned shards, graph and keys together. A shard's key column is sized at @ref reserve
+     *  to what the shard holds, since a search reads it while rows are still landing. */
     growing_buffer<shard_t, forkunion_allocator_t> shards_;
-    /** @brief Every key's entries. Duplicates coexist as separate slots, which is exactly what
-     *      several values under one key means, and costs one slot per row rather than per key. */
+
+    /** Every key's entries. Duplicates coexist as separate slots, costing one slot per row rather
+     *  than per key. */
     locators_map_t locators_of_key_;
-    /** @brief The host allocator behind the shard table, the locator map and every checkpoint
-     *      catalog; the shards carry their own. */
+
+    /** The host allocator behind the shard table, the locator map and every checkpoint catalog;
+     *  the shards carry their own. */
     forkunion_allocator_t allocator_;
-    /** @brief Rows routed so far - the next row's shard and the next batch's rotation base.
-     *      @c mutable since the pre-P3323 @c std::atomic_ref binds no const word, not even to load it. */
+
+    /** Rows routed so far - the next row's shard and the next batch's rotation base. @c mutable
+     *  since the pre-P3323 @c std::atomic_ref binds no const word, not even to load it. */
     mutable std::size_t routed_rows_ {0};
 };
 

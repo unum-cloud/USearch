@@ -1,9 +1,10 @@
 /**
- *  @brief Declarations the Go binding needs and the C header cannot give it: accessors for
- *      the anonymous residency union inside @c usearch_dense_options_t, and the Go-side
- *      admission trampoline the filtered search installs as a C callback.
- *
  *  @file golang/shim.h
+ *  @author Ash Vardanian
+ *  @date August 16, 2026
+ *  @brief Declarations the Go binding needs and the C header cannot give it: accessors for the
+ *      anonymous residency union inside @c usearch_dense_options_t, and the Go-side admission
+ *      trampoline the filtered search installs as a C callback.
  *
  *  cgo renders an anonymous union as unnamed storage no Go expression can address, so the
  *  union is crossed through these functions rather than reconstructed field by field. Only
@@ -21,22 +22,22 @@
 extern "C" {
 #endif
 
-/** @brief Tags @p options as RAM-resident and fills that arm of the union. */
+/** Tags @p options as RAM-resident and fills that arm of the union. */
 void usearch_go_write_ram(usearch_dense_options_t* options, usearch_ram_options_t ram);
 
-/** @brief Tags @p options as VRAM-resident and fills that arm of the union. */
+/** Tags @p options as VRAM-resident and fills that arm of the union. */
 void usearch_go_write_vram(usearch_dense_options_t* options, usearch_vram_options_t vram);
 
-/** @brief Tags @p options as NVMe-resident and fills that arm of the union. */
+/** Tags @p options as NVMe-resident and fills that arm of the union. */
 void usearch_go_write_nvme(usearch_dense_options_t* options, usearch_nvme_options_t nvme);
 
-/** @brief Reads the RAM arm; the caller checks @c options->residency first. */
+/** Reads the RAM arm; the caller checks @c options->residency first. */
 usearch_ram_options_t usearch_go_read_ram(usearch_dense_options_t const* options);
 
-/** @brief Reads the VRAM arm; the caller checks @c options->residency first. */
+/** Reads the VRAM arm; the caller checks @c options->residency first. */
 usearch_vram_options_t usearch_go_read_vram(usearch_dense_options_t const* options);
 
-/** @brief Reads the NVMe arm; the caller checks @c options->residency first. */
+/** Reads the NVMe arm; the caller checks @c options->residency first. */
 usearch_nvme_options_t usearch_go_read_nvme(usearch_dense_options_t const* options);
 
 /**
@@ -49,10 +50,8 @@ usearch_nvme_options_t usearch_go_read_nvme(usearch_dense_options_t const* optio
  */
 usearch_admission_t usearchDenseAdmits(usearch_key_t key, void* state);
 
-/**
- *  @brief Hands back @c usearchDenseAdmits as a function pointer. cgo renders a C function as
- *      a Go wrapper rather than an address, so the pointer has to be taken on this side.
- */
+/** Hands back @c usearchDenseAdmits as a function pointer. cgo renders a C function as
+ *  a Go wrapper rather than an address, so the pointer has to be taken on this side. */
 usearch_predicate_t usearch_go_admits(void);
 
 #ifdef __cplusplus

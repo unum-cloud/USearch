@@ -1,8 +1,8 @@
 /**
- *  @brief Host-side vocabulary for driving one CUDA device - specs, streams, allocators.
- *  @author Ash Vardanian
  *  @file include/usearch/utilities/vram_device.hpp
+ *  @author Ash Vardanian
  *  @date July 22, 2026
+ *  @brief Host-side vocabulary for driving one CUDA device - specs, streams, allocators.
  *
  *  Host-side driver & runtime API code only - no kernels, hence the @c .hpp extension - so the
  *  layer compiles under a plain host compiler with the toolkit headers on the include path.
@@ -33,39 +33,49 @@
 namespace unum {
 namespace usearch {
 
-/** @brief GPU generations on the @c __CUDA_ARCH__ scale - a plain enum, so tiers order
- *      against each other and against that macro directly. */
+/** GPU generations on the @c __CUDA_ARCH__ scale - a plain enum, so tiers order
+ *  against each other and against that macro directly. */
 enum cuda_arch_t : int {
-    /** @brief The sm_80 floor: @c dp4a, packed-half & bf16x2 fma, @c cp.async. */
+
+    /** The sm_80 floor: @c dp4a, packed-half & bf16x2 fma, @c cp.async. */
     cuda_arch_ampere_k = 800,
-    /** @brief sm_89 adds the fp8 conversions - the e4m3/e5m2 kits' requirement. */
+
+    /** sm_89 adds the fp8 conversions - the e4m3/e5m2 kits' requirement. */
     cuda_arch_ada_k = 890,
-    /** @brief sm_90 adds TMA, thread-block clusters, and distributed shared memory. */
+
+    /** sm_90 adds TMA, thread-block clusters, and distributed shared memory. */
     cuda_arch_hopper_k = 900,
-    /** @brief sm_100 adds Tensor Memory, fp6/fp4 conversions, and scalar @c fma.f32.f16. */
+
+    /** sm_100 adds Tensor Memory, fp6/fp4 conversions, and scalar @c fma.f32.f16. */
     cuda_arch_blackwell_k = 1000,
 };
 
-/** @brief One GPU's hardware specification - the facts runtime dispatch consults; hardware only,
- *      never derived policy. */
+/** One GPU's hardware specification - the facts runtime dispatch consults; hardware only,
+ *  never derived policy. */
 struct cuda_device_specs_t {
-    /** @brief The device ordinal every CUDA runtime & driver call routes through. */
+
+    /** The device ordinal every CUDA runtime & driver call routes through. */
     int ordinal = 0;
-    /** @brief Streaming-multiprocessor count - the launch-grid currency. */
+
+    /** Streaming-multiprocessor count - the launch-grid currency. */
     int multiprocessor_count = 0;
-    /** @brief Compute-capability major version - the hardware generation, e.g. 9 = Hopper. */
+
+    /** Compute-capability major version - the hardware generation, e.g. 9 = Hopper. */
     int compute_major = 0;
-    /** @brief Compute-capability minor version - the in-generation revision. */
+
+    /** Compute-capability minor version - the in-generation revision. */
     int compute_minor = 0;
-    /** @brief Total device-resident memory in bytes. */
+
+    /** Total device-resident memory in bytes. */
     std::size_t vram_bytes = 0;
-    /** @brief Widest dynamic shared memory one block can be granted at launch, on explicit request. */
+
+    /** Widest dynamic shared memory one block can be granted at launch, on explicit request. */
     std::size_t shared_memory_per_block_bytes = 0;
 
-    /** @brief This device's generation on the @c cuda_arch_t scale - the kit chains' runtime ceiling. */
+    /** This device's generation on the @c cuda_arch_t scale - the kit chains' runtime ceiling. */
     cuda_arch_t arch() const noexcept { return static_cast<cuda_arch_t>(compute_major * 100 + compute_minor * 10); }
 
-    /** @brief Queries the runtime for @p ordinal's specification; meaningful only on @c success_k. */
+    /** Queries the runtime for @p ordinal's specification; meaningful only on @c success_k. */
     static expected<cuda_device_specs_t> query(int ordinal) noexcept {
         cudaDeviceProp properties = {};
         if (cudaGetDeviceProperties(&properties, ordinal) != cudaSuccess) return {{ordinal}, status_t::device_error_k};
@@ -75,19 +85,22 @@ struct cuda_device_specs_t {
     }
 };
 
-/** @brief The address space an allocation lives in, in LLVM's sense: who can dereference the
- *      pointer and what transfer path moves its bytes; all three are @c global to device code. */
+/** The address space an allocation lives in, in LLVM's sense: who can dereference the
+ *  pointer and what transfer path moves its bytes; all three are @c global to device code. */
 enum class cuda_address_space_t : u32_t {
-    /** @brief Plain device memory; explicit host-device copies required. */
+
+    /** Plain device memory; explicit host-device copies required. */
     device_k,
-    /** @brief Unified memory; migratable, host- and device-visible. */
+
+    /** Unified memory; migratable, host- and device-visible. */
     managed_k,
-    /** @brief Page-locked host memory; the DMA source & sink for staging. */
+
+    /** Page-locked host memory; the DMA source & sink for staging. */
     host_pinned_k,
 };
 
-/** @brief The device analog of @c std::allocator, with the ordering stream and the target device
- *      bound at construction; @c address_space_k fixes host visibility. */
+/** The device analog of @c std::allocator, with the ordering stream and the target device
+ *  bound at construction; @c address_space_k fixes host visibility. */
 template <typename allocator_>
 concept cuda_allocator = requires(allocator_ allocator, typename allocator_::value_type* pointer, std::size_t count) {
     typename allocator_::value_type;
@@ -98,8 +111,8 @@ concept cuda_allocator = requires(allocator_ allocator, typename allocator_::val
     { allocator.device() } -> std::convertible_to<int>;
 };
 
-/** @brief The plane backend contract: a reserve-once / commit-on-demand address range whose base
- *      never moves. Not a refinement of @c cuda_allocator, since planes never free mid-life. */
+/** The plane backend contract: a reserve-once / commit-on-demand address range whose base
+ *  never moves. Not a refinement of @c cuda_allocator, since planes never free mid-life. */
 template <typename allocator_>
 concept cuda_reservable_allocator = requires(allocator_ allocator, std::size_t bytes, int device) {
     typename allocator_::value_type;
@@ -113,8 +126,8 @@ concept cuda_reservable_allocator = requires(allocator_ allocator, std::size_t b
     { allocator.device() } -> std::convertible_to<int>;
 };
 
-/** @brief Virtual-memory plane backend: a fixed driver-API address reservation backed by slabs
- *      mapped on demand, host-driven ahead of any kernel; fresh slabs arrive zeroed. */
+/** Virtual-memory plane backend: a fixed driver-API address reservation backed by slabs
+ *  mapped on demand, host-driven ahead of any kernel; fresh slabs arrive zeroed. */
 template <typename value_type_ = byte_t>
 struct cuda_virtual_memory_allocator {
     using value_type = value_type_;
@@ -124,21 +137,24 @@ struct cuda_virtual_memory_allocator {
         using other = cuda_virtual_memory_allocator<other_>;
     };
 
-    /** @brief Preferred physical slab, rounded to the driver's granularity at reservation. */
+    /** Preferred physical slab, rounded to the driver's granularity at reservation. */
     inline static constexpr std::size_t preferred_slab_bytes_k = 128u << 20;
 
     CUdeviceptr base_ = 0;
     std::size_t virtual_address_bytes_ = 0;
-    /** @brief Bytes mapped so far - the one grower advances it with a release, and any thread
-     *      may read it through @c committed_bytes with an acquire; @c mutable for the reference. */
+
+    /** Bytes mapped so far - the one grower advances it with a release, and any thread
+     *  may read it through @c committed_bytes with an acquire; @c mutable for the reference. */
     mutable std::size_t mapped_bytes_ = 0;
     std::size_t slab_bytes_ = 0;
     int device_ = 0;
 
     cuda_virtual_memory_allocator() = default;
-    /** @brief Names the GPU the future reservation pins to - placement only, no driver call. */
+
+    /** Names the GPU the future reservation pins to - placement only, no driver call. */
     explicit cuda_virtual_memory_allocator(int device) noexcept : device_(device) {}
-    /** @brief Copies the placement only, never a live reservation. */
+
+    /** Copies the placement only, never a live reservation. */
     cuda_virtual_memory_allocator(cuda_virtual_memory_allocator const& other) noexcept : device_(other.device_) {}
     template <typename other_>
     cuda_virtual_memory_allocator(cuda_virtual_memory_allocator<other_> const& other) noexcept
@@ -146,8 +162,8 @@ struct cuda_virtual_memory_allocator {
     cuda_virtual_memory_allocator& operator=(cuda_virtual_memory_allocator const&) = delete;
     ~cuda_virtual_memory_allocator() noexcept { release(); }
 
-    /** @brief Reserves @p virtual_address_bytes of virtual address space on @p device - no physical
-     *      memory yet, so the ceiling costs nothing and should be generous. */
+    /** Reserves @p virtual_address_bytes of virtual address space on @p device - no physical
+     *  memory yet, so the ceiling costs nothing and should be generous. */
     status_t reserve_range(std::size_t virtual_address_bytes, int device) noexcept {
         CUmemAllocationProp properties = allocation_properties_(device);
         std::size_t granularity = 0;
@@ -160,8 +176,8 @@ struct cuda_virtual_memory_allocator {
         return status_t::success_k;
     }
 
-    /** @brief Maps physical slabs until at least @p bytes are usable; never unmaps early. Each
-     *      handle is released right after mapping, since the mapping alone keeps the memory alive. */
+    /** Maps physical slabs until at least @p bytes are usable; never unmaps early. Each
+     *  handle is released right after mapping, since the mapping alone keeps the memory alive. */
     status_t commit(std::size_t bytes) noexcept {
         if (bytes > virtual_address_bytes_) return status_t::overflow_k;
         CUmemAllocationProp properties = allocation_properties_(device_);
@@ -203,8 +219,8 @@ struct cuda_virtual_memory_allocator {
     }
 };
 
-/** @brief Unified-memory plane backend: one @c cudaMallocManaged reservation for the whole ceiling,
- *      preferring the device and oversubscribable past VRAM. */
+/** Unified-memory plane backend: one @c cudaMallocManaged reservation for the whole ceiling,
+ *  preferring the device and oversubscribable past VRAM. */
 template <typename value_type_ = byte_t>
 struct cuda_managed_allocator {
     using value_type = value_type_;
@@ -220,9 +236,11 @@ struct cuda_managed_allocator {
     int device_ = 0;
 
     cuda_managed_allocator() = default;
-    /** @brief Names the GPU the future reservation prefers - placement only, no driver call. */
+
+    /** Names the GPU the future reservation prefers - placement only, no driver call. */
     explicit cuda_managed_allocator(int device) noexcept : device_(device) {}
-    /** @brief Copies the placement configuration only, never a live reservation. */
+
+    /** Copies the placement configuration only, never a live reservation. */
     cuda_managed_allocator(cuda_managed_allocator const& other) noexcept : device_(other.device_) {}
     template <typename other_>
     cuda_managed_allocator(cuda_managed_allocator<other_> const& other) noexcept : device_(other.device_) {}
@@ -262,8 +280,8 @@ struct cuda_managed_allocator {
     }
     int device() const noexcept { return device_; }
 
-    /** @brief The reservation ceiling: half the host RAM, since managed reservations are real
-     *      allocations; only this backend consults the topology. */
+    /** The reservation ceiling: half the host RAM, since managed reservations are real
+     *  allocations; only this backend consults the topology. */
     static std::size_t budget_bytes() noexcept { return fu::volume_ram() / 2; }
 
     void release() noexcept {
@@ -272,8 +290,8 @@ struct cuda_managed_allocator {
     }
 };
 
-/** @brief Stream-ordered device allocator for transient scratch; a null stream rides the legacy
- *      default. */
+/** Stream-ordered device allocator for transient scratch; a null stream rides the legacy
+ *  default. */
 template <typename value_type_ = byte_t>
 struct cuda_device_allocator {
     using value_type = value_type_;
@@ -304,7 +322,7 @@ struct cuda_device_allocator {
     int device_ = 0;
 };
 
-/** @brief The byte specialization device storage is placed through. */
+/** The byte specialization device storage is placed through. */
 using cuda_device_allocator_t = cuda_device_allocator<byte_t>;
 
 /**
@@ -327,8 +345,9 @@ struct cuda_arena_allocator {
 
     cuda_arena_allocator(arena_t& arena, cudaStream_t stream, int device) noexcept
         : arena_(arena), stream_(stream), device_(device) {}
-    /** @brief The rebinding conversion @c std::allocator_traits performs - the identity rides
-     *      along, and the run is shared rather than copied. */
+
+    /** The rebinding conversion @c std::allocator_traits performs - the identity rides
+     *  along, and the run is shared rather than copied. */
     template <typename other_>
     constexpr cuda_arena_allocator(cuda_arena_allocator<other_> const& other) noexcept
         : arena_(other.arena()), stream_(other.stream()), device_(other.device()) {}
@@ -337,12 +356,14 @@ struct cuda_arena_allocator {
         // Host-side pointer arithmetic over device bytes: the carve never touches them.
         return arena_allocator<value_type_, cuda_device_allocator_t> {arena_}.allocate(count);
     }
-    /** @brief A carve is never returned; the run's owner rewinds it between calls. */
+
+    /** A carve is never returned; the run's owner rewinds it between calls. */
     void deallocate(value_type*, std::size_t) noexcept {}
 
     cudaStream_t stream() const noexcept { return stream_; }
     int device() const noexcept { return device_; }
-    /** @brief The run every rebound copy shares. */
+
+    /** The run every rebound copy shares. */
     arena_t& arena() const noexcept { return arena_; }
     bool operator==(cuda_arena_allocator const& other) const noexcept { return &arena_ == &other.arena_; }
 
@@ -352,11 +373,11 @@ struct cuda_arena_allocator {
     int device_ = 0;
 };
 
-/** @brief The byte specialization a walk carves its scratch through. */
+/** The byte specialization a walk carves its scratch through. */
 using cuda_arena_allocator_t = cuda_arena_allocator<byte_t>;
 
-/** @brief Page-locked host allocator - the DMA source and sink; pinning is synchronous, the
- *      stream is identity only. */
+/** Page-locked host allocator - the DMA source and sink; pinning is synchronous, the
+ *  stream is identity only. */
 template <typename value_type_ = byte_t>
 struct cuda_pinned_allocator {
     using value_type = value_type_;
@@ -387,10 +408,10 @@ struct cuda_pinned_allocator {
     int device_ = 0;
 };
 
-/** @brief The byte specialization a host bounce is pinned through. */
+/** The byte specialization a host bounce is pinned through. */
 using cuda_pinned_allocator_t = cuda_pinned_allocator<byte_t>;
 
-/** @brief Owned non-blocking stream; destruction drains it first. */
+/** Owned non-blocking stream; destruction drains it first. */
 struct cuda_stream_t {
     cuda_stream_t() noexcept { cudaStreamCreateWithFlags(&handle_, cudaStreamNonBlocking); }
     cuda_stream_t(cuda_stream_t&& other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
@@ -406,26 +427,31 @@ struct cuda_stream_t {
     cudaStream_t handle_ = nullptr;
 };
 
-/** @brief The streams a bulk verb advances on and the scratch they walk with - one of each per
- *      device. Work is queued, never waited on, so one host thread drives every device. */
+/** The streams a bulk verb advances on and the scratch they walk with - one of each per
+ *  device. Work is queued, never waited on, so one host thread drives every device. */
 struct cuda_executor_t {
-    /** @brief One device's run of scratch, carved and rewound between calls; sized once by
-     *      @ref reserve, since relocation would be a host loop over device bytes. */
+
+    /** One device's run of scratch, carved and rewound between calls; sized once by
+     *  @ref reserve, since relocation would be a host loop over device bytes. */
     using arena_t = growing_arena<cuda_device_allocator_t>;
-    /** @brief One call's hold on the executor, released when it dies. */
+
+    /** One call's hold on the executor, released when it dies. */
     using claim_t = std::unique_lock<fu::spin_mutex_t>;
 
-    /** @brief One device's stream and run; the arena is declared last so it frees onto a live
-     *      stream. */
+    /** One device's stream and run; the arena is declared last so it frees onto a live
+     *  stream. */
     struct stream_t {
-        /** @brief The device this stream was opened on - placement and launch target both. */
+
+        /** The device this stream was opened on - placement and launch target both. */
         int device = 0;
-        /** @brief The ordering identity every transfer and launch on this device rides. */
+
+        /** The ordering identity every transfer and launch on this device rides. */
         cuda_stream_t handle;
-        /** @brief The scratch a walk carves its state from, sized once by @ref reserve. */
+
+        /** The scratch a walk carves its state from, sized once by @ref reserve. */
         arena_t arena;
 
-        /** @brief Opens a stream on the current device and binds the arena to it. */
+        /** Opens a stream on the current device and binds the arena to it. */
         explicit stream_t(int device) noexcept : device(device), arena(cuda_device_allocator_t {handle, device}) {}
     };
 
@@ -435,17 +461,17 @@ struct cuda_executor_t {
     cuda_executor_t(cuda_executor_t const&) = delete;
     cuda_executor_t& operator=(cuda_executor_t const&) = delete;
 
-    /** @brief Exchanges the stream tables; @c held_ stays, since a move with a call in flight is
-     *      misuse. */
+    /** Exchanges the stream tables; @c held_ stays, since a move with a call in flight is
+     *  misuse. */
     void swap(cuda_executor_t& other) noexcept { std::swap(streams_, other.streams_); }
 
-    /** @brief Claims the executor for one call; a second concurrent caller gets @c contended_k. */
+    /** Claims the executor for one call; a second concurrent caller gets @c contended_k. */
     expected<claim_t> claim() noexcept {
         if (!held_.lock_if_free()) return {{}, status_t::contended_k};
         return {claim_t {held_, std::adopt_lock}, status_t::success_k};
     }
 
-    /** @brief Takes over streams the caller already opened, owned and destroyed here from now on. */
+    /** Takes over streams the caller already opened, owned and destroyed here from now on. */
     static expected<cuda_executor_t> acquire(growing_buffer<stream_t>&& streams) noexcept {
         if (streams.empty()) return {{}, status_t::config_mismatch_k};
         cuda_executor_t executor;
@@ -453,8 +479,8 @@ struct cuda_executor_t {
         return {std::move(executor), status_t::success_k};
     }
 
-    /** @brief Opens one stream per named device, binding each first, since a stream is born on
-     *      the current device. */
+    /** Opens one stream per named device, binding each first, since a stream is born on
+     *  the current device. */
     static expected<cuda_executor_t> spawn(std::span<int const> devices) noexcept {
         growing_buffer<stream_t> streams {global_allocator};
         if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
@@ -467,8 +493,8 @@ struct cuda_executor_t {
         return acquire(std::move(streams));
     }
 
-    /** @brief Claims @p bytes_per_device of scratch on every stream, ahead of the fan-out that
-     *      maps state onto it; the old run frees in stream order behind whatever still rides it. */
+    /** Claims @p bytes_per_device of scratch on every stream, ahead of the fan-out that
+     *  maps state onto it; the old run frees in stream order behind whatever still rides it. */
     status_t reserve(std::size_t bytes_per_device) noexcept {
         if (streams_.empty()) return status_t::uninitialized_k;
         for (stream_t& opened : streams_) {
@@ -478,28 +504,32 @@ struct cuda_executor_t {
         return status_t::success_k;
     }
 
-    /** @brief Waits for every transfer and launch queued on every stream - the fleet's completion. */
+    /** Waits for every transfer and launch queued on every stream - the fleet's completion. */
     status_t drain() noexcept {
         for (stream_t& opened : streams_)
             if (cudaStreamSynchronize(opened.handle) != cudaSuccess) return status_t::device_error_k;
         return status_t::success_k;
     }
 
-    /** @brief The stream driving @p index, in the order the devices were named. */
+    /** The stream driving @p index, in the order the devices were named. */
     stream_t& stream(std::size_t index) noexcept { return streams_[index]; }
-    /** @brief The device @p index drives - what a caller pairs its shards against. */
+
+    /** The device @p index drives - what a caller pairs its shards against. */
     int device(std::size_t index) const noexcept { return streams_[index].device; }
-    /** @brief Devices this executor drives. */
+
+    /** Devices this executor drives. */
     std::size_t size() const noexcept { return streams_.size(); }
 
   private:
-    /** @brief One stream per named device, in the caller's order. */
+
+    /** One stream per named device, in the caller's order. */
     growing_buffer<stream_t> streams_ {global_allocator};
-    /** @brief Held by the one caller driving the streams; never swapped. */
+
+    /** Held by the one caller driving the streams; never swapped. */
     fu::spin_mutex_t held_;
 };
 
-/** @brief The @c std::unique_ptr deleter carrying the allocator and the element count. */
+/** The @c std::unique_ptr deleter carrying the allocator and the element count. */
 template <cuda_allocator allocator_>
 struct cuda_deleter {
     allocator_ allocator;
@@ -508,11 +538,11 @@ struct cuda_deleter {
     void operator()(typename allocator_::value_type* pointer) noexcept { allocator.deallocate(pointer, count); }
 };
 
-/** @brief Owned device or pinned allocation; host code takes @c .get() for views and transfers. */
+/** Owned device or pinned allocation; host code takes @c .get() for views and transfers. */
 template <typename value_type_, cuda_allocator allocator_ = cuda_device_allocator<value_type_>>
 using cuda_unique_ptr = std::unique_ptr<value_type_, cuda_deleter<allocator_>>;
 
-/** @brief The @c std::make_unique analog, null on exhaustion; the bytes arrive uninitialized. */
+/** The @c std::make_unique analog, null on exhaustion; the bytes arrive uninitialized. */
 template <cuda_allocator allocator_>
 cuda_unique_ptr<typename allocator_::value_type, allocator_> cuda_make_unique(allocator_ allocator,
                                                                               std::size_t count) noexcept {

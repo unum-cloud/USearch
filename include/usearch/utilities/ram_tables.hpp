@@ -1,8 +1,8 @@
 /**
- *  @brief Associative open-addressing hash tables for Graph traversals & key lookups.
- *  @author Ash Vardanian
  *  @file include/usearch/utilities/ram_tables.hpp
+ *  @author Ash Vardanian
  *  @date August 18, 2026
+ *  @brief Associative open-addressing hash tables for Graph traversals & key lookups.
  *
  *  Standalone header providing baseline associative structures, like:
  *
@@ -48,23 +48,21 @@ inline element_type_ unused_hash_slot_value() noexcept {
     return (std::numeric_limits<element_type_>::max)();
 }
 
-/**
- *  @brief Whether a membership structure already held the element an insert offered it -
- *      an answer, never a failure, so it never travels as a @c status_t.
- */
+/** Whether a membership structure already held the element an insert offered it -
+ *  an answer, never a failure, so it never travels as a @c status_t. */
 enum class membership_t : bool {
-    /** @brief The element was absent, and this insert is the one that added it. */
+
+    /** The element was absent, and this insert is the one that added it. */
     absent_k = false,
-    /** @brief The element was already there, and the insert changed nothing. */
+
+    /** The element was already there, and the insert changed nothing. */
     present_k = true,
 };
 
-/**
- *  @brief The slot walk every set takes at the portable floor: one slot per step, any element
- *      width. Returns the slot holding @p element, or the empty slot where it belongs; @c contains,
- *      @c insert and the rehash all place and find through this one walk, which is what keeps
- *      placement and lookup coherent.
- */
+/** The slot walk every set takes at the portable floor: one slot per step, any element
+ *  width. Returns the slot holding @p element, or the empty slot where it belongs; @c contains,
+ *  @c insert and the rehash all place and find through this one walk, which is what keeps
+ *  placement and lookup coherent. */
 struct serial_visits_hash_set_kit_t {
     template <typename element_type_, typename hasher_type_>
     static inline element_type_* locate_slot(element_type_* slots, std::size_t capacity, hasher_type_ const& hasher,
@@ -76,9 +74,9 @@ struct serial_visits_hash_set_kit_t {
     }
 };
 
-/** @brief The group scan for u32 slots, defined below wherever the intrinsics exist. Declared
- *      unconditionally, so a capability chain can name it on every target and its own tier flag
- *      alone decides whether a class takes it - an unselected layer never needs a body. */
+/** The group scan for u32 slots, defined below wherever the intrinsics exist. Declared
+ *  unconditionally, so a capability chain can name it on every target and its own tier flag
+ *  alone decides whether a class takes it - an unselected layer never needs a body. */
 struct u32_skylake_visits_hash_set_kit_t;
 
 #if defined(__x86_64__) || defined(_M_X64)
@@ -153,17 +151,21 @@ class growing_hash_set {
     static_assert(sizeof(byte_t) == 1, "Allocator must allocate separate addressable bytes");
 
     element_t* slots_ {};
-    /** @brief Number of slots. */
+
+    /** Number of slots. */
     std::size_t capacity_ {};
-    /** @brief Number of populated slots. */
+
+    /** Number of populated slots. */
     std::size_t count_ {};
     hasher_t hasher_ {};
     allocator_t allocator_ {};
 
   public:
-    /** @brief Every set names its allocator; nothing is placed by default. */
+
+    /** Every set names its allocator; nothing is placed by default. */
     growing_hash_set() = delete;
-    /** @brief The process-wide allocator, for a set no arena or domain owns. */
+
+    /** The process-wide allocator, for a set no arena or domain owns. */
     explicit growing_hash_set(global_allocator_t) noexcept
         requires std::default_initializable<allocator_t>
         : growing_hash_set(allocator_t {}) {}
@@ -185,14 +187,14 @@ class growing_hash_set {
         count_ = 0;
     }
 
-    /** @brief Slots @p capacity elements probe over; sized to the bare count a table fills, and a
-     *      full linear probe never terminates. */
+    /** Slots @p capacity elements probe over; sized to the bare count a table fills, and a
+     *  full linear probe never terminates. */
     static std::size_t slots_for(std::size_t capacity) noexcept { return ceil2(capacity * 5u / 3u); }
 
-    /** @brief Bytes @p capacity elements occupy, the load headroom included. */
+    /** Bytes @p capacity elements occupy, the load headroom included. */
     static std::size_t memory_usage(std::size_t capacity) noexcept { return slots_for(capacity) * sizeof(element_t); }
 
-    /** @brief Bytes this set currently occupies. */
+    /** Bytes this set currently occupies. */
     std::size_t memory_usage() const noexcept { return capacity_ * sizeof(element_t); }
 
     growing_hash_set(growing_hash_set&& other) noexcept {
@@ -310,22 +312,26 @@ class growing_multimap {
     using hash_t = hash_type_;
     using allocator_t = allocator_type_;
 
-    /** @brief Lifecycle of one slot, advanced monotonically by its one claiming inserter. */
+    /** Lifecycle of one slot, advanced monotonically by its one claiming inserter. */
     enum class slot_state_t : u8_t {
-        /** @brief Never claimed - the probe chain terminator. */
+
+        /** Never claimed - the probe chain terminator. */
         empty_k = 0,
-        /** @brief Claimed; the key & value stores have not been released yet. */
+
+        /** Claimed; the key & value stores have not been released yet. */
         building_k,
-        /** @brief Fully published; the key & value are immutable from here on. */
+
+        /** Fully published; the key & value are immutable from here on. */
         published_k,
     };
 
     growing_multimap(growing_multimap const&) noexcept = delete;
     growing_multimap& operator=(growing_multimap const&) noexcept = delete;
 
-    /** @brief Every map names its allocator; nothing is placed by default. */
+    /** Every map names its allocator; nothing is placed by default. */
     growing_multimap() = delete;
-    /** @brief The process-wide allocator, for a map no arena or domain owns. */
+
+    /** The process-wide allocator, for a map no arena or domain owns. */
     explicit growing_multimap(global_allocator_t) noexcept
         requires std::default_initializable<allocator_t>
         : growing_multimap(allocator_t {}) {}
@@ -340,8 +346,8 @@ class growing_multimap {
         other.inserted_count_.store(0, std::memory_order_relaxed);
     }
 
-    /** @brief Swap-based, so the displaced table dies with @p other rather than here; the count is
-     *      moved by hand, since an atomic is not swappable. Single-threaded, like @ref clear. */
+    /** Swap-based, so the displaced table dies with @p other rather than here; the count is
+     *  moved by hand, since an atomic is not swappable. Single-threaded, like @ref clear. */
     growing_multimap& operator=(growing_multimap&& other) noexcept {
         std::swap(slots_, other.slots_);
         std::swap(states_, other.states_);
@@ -355,20 +361,20 @@ class growing_multimap {
         return *this;
     }
 
-    /** @brief Forgets every entry, keeping the slot array & ceiling - single-threaded, like
-     *      @c reserve: the caller certifies no concurrent readers or writers for the call. */
+    /** Forgets every entry, keeping the slot array & ceiling - single-threaded, like
+     *  @c reserve: the caller certifies no concurrent readers or writers for the call. */
     void clear() noexcept {
         for (std::size_t position = 0; position != slots_count_; ++position) states_[position] = slot_state_t::empty_k;
         inserted_count_.store(0, std::memory_order_relaxed);
     }
 
-    /** @brief Bytes @p slots_count slots occupy - one allocation carrying both arrays: the
-     *      slots, then the control bytes. */
+    /** Bytes @p slots_count slots occupy - one allocation carrying both arrays: the
+     *  slots, then the control bytes. */
     static std::size_t memory_usage(std::size_t slots_count) noexcept {
         return slots_count * (sizeof(slot_t) + sizeof(slot_state_t));
     }
 
-    /** @brief Bytes this multimap currently occupies. */
+    /** Bytes this multimap currently occupies. */
     std::size_t memory_usage() const noexcept { return memory_usage(slots_count_); }
 
     void reset() noexcept {
@@ -381,9 +387,9 @@ class growing_multimap {
         inserted_count_.store(0, std::memory_order_relaxed);
     }
 
-    /** @brief Sizes the slot array for @p capacity entries at a load factor of at most one
-     *      half. Repeatable: a larger @p capacity rehashes into a fresh array, single-
-     *      threaded - the caller certifies no concurrent readers or writers for the call. */
+    /** Sizes the slot array for @p capacity entries at a load factor of at most one
+     *  half. Repeatable: a larger @p capacity rehashes into a fresh array, single-
+     *  threaded - the caller certifies no concurrent readers or writers for the call. */
     status_t reserve(std::size_t capacity) noexcept {
         if (capacity <= entries_ceiling_) return status_t::success_k;
 
@@ -415,8 +421,8 @@ class growing_multimap {
         return status_t::success_k;
     }
 
-    /** @brief Claims one slot along the probe path of @p key - safe under arbitrary
-     *      concurrent inserts & lookups; fails with @c overflow_k once the ceiling is spent. */
+    /** Claims one slot along the probe path of @p key - safe under arbitrary
+     *  concurrent inserts & lookups; fails with @c overflow_k once the ceiling is spent. */
     status_t insert(key_t const& key, value_t value) noexcept {
         if (!slots_count_) return status_t::uninitialized_k;
         // Claim a seat under the ceiling before touching any slot, so probe chains stay bounded by construction
@@ -441,15 +447,15 @@ class growing_multimap {
         }
     }
 
-    /** @brief One value stored under @p key, or @c malformed_k when absent. Duplicates
-     *      surface in an unspecified order - use @c find_each to see them all. */
+    /** One value stored under @p key, or @c malformed_k when absent. Duplicates
+     *  surface in an unspecified order - use @c find_each to see them all. */
     expected<value_t> find(key_t const& key) const noexcept {
         expected<value_t> result {value_t {}, status_t::malformed_k};
         find_each(key, [&](value_t value) noexcept { result = {value, status_t::success_k}; });
         return result;
     }
 
-    /** @brief Invokes @p callback for every value stored under @p key - wait-free. */
+    /** Invokes @p callback for every value stored under @p key - wait-free. */
     template <typename callback_type_>
     void find_each(key_t const& key, callback_type_&& callback) const noexcept {
         if (!slots_count_) return;
@@ -463,25 +469,26 @@ class growing_multimap {
         }
     }
 
-    /** @brief Number of values stored under @p key. */
+    /** Number of values stored under @p key. */
     std::size_t count(key_t const& key) const noexcept {
         std::size_t matches = 0;
         find_each(key, [&](value_t) noexcept { ++matches; });
         return matches;
     }
 
-    /** @brief Whether at least one value is stored under @p key. */
+    /** Whether at least one value is stored under @p key. */
     bool contains(key_t const& key) const noexcept { return static_cast<bool>(find(key)); }
 
-    /** @brief Total inserted entries across all keys. */
+    /** Total inserted entries across all keys. */
     std::size_t size() const noexcept { return inserted_count_.load(std::memory_order_relaxed); }
 
-    /** @brief Total entries the current slot array can host. */
+    /** Total entries the current slot array can host. */
     std::size_t capacity() const noexcept { return entries_ceiling_; }
 
   private:
-    /** @brief One probe slot: the key beside its value; its lifecycle lives in the
-     *      parallel control-byte array, so no payload bit-pattern is ever reserved. */
+
+    /** One probe slot: the key beside its value; its lifecycle lives in the
+     *  parallel control-byte array, so no payload bit-pattern is ever reserved. */
     struct slot_t {
         key_t key;
         value_t value;
@@ -489,8 +496,8 @@ class growing_multimap {
 
     using bytes_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<std::byte>;
 
-    /** @brief Avalanches the hash through @ref mix_bits before masking, so the identity
-     *      hashes of sequential integer keys still scatter across the table. */
+    /** Avalanches the hash through @ref mix_bits before masking, so the identity
+     *  hashes of sequential integer keys still scatter across the table. */
     std::size_t first_probe_of(key_t const& key, std::size_t slots_count) const noexcept {
         return static_cast<std::size_t>(mix_bits(static_cast<u64_t>(hash_(key)))) & (slots_count - 1);
     }

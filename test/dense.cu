@@ -1,9 +1,9 @@
 /**
- *  @brief The CUDA suite's one entry point: probes the device, composes every per-dtype
- *      shard explicitly, and rolls their failure counts into the exit code.
- *  @author Ash Vardanian
  *  @file test/dense.cu
+ *  @author Ash Vardanian
  *  @date July 22, 2026
+ *  @brief The CUDA suite's one entry point: probes the device, composes every per-dtype shard
+ *      explicitly, and rolls their failure counts into the exit code.
  *
  *  The scenarios live in @c dense_index.cuh, the ledgered device adapter & the cell
  *  composer in @c dense_index_cuda.cuh; the cells themselves are named by the per-dtype
@@ -20,7 +20,7 @@
 
 using namespace unum::usearch;
 
-/** @brief The device plans are move-only and never assigned over. */
+/** The device plans are move-only and never assigned over. */
 using witnessed_index_t = dense_vram_index<>;
 static_assert(std::is_move_constructible_v<witnessed_index_t::save_plan_t> &&
               !std::is_copy_constructible_v<witnessed_index_t::save_plan_t> &&

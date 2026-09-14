@@ -1,9 +1,9 @@
 /**
- *  @brief The CLI entry of the sharded-index CPU benchmark: option parsing, the topology
- *      setup, and the dataset-scalar hop into the per-dtype shards.
- *  @author Ash Vardanian
  *  @file bench/dense_ram_indexes.cpp
+ *  @author Ash Vardanian
  *  @date August 30, 2026
+ *  @brief The CLI entry of the sharded-index CPU benchmark: option parsing, the topology setup, and
+ *      the dataset-scalar hop into the per-dtype shards.
  *
  *  The compile-time cascade lives in @c dense/ram_indexes.hpp; this translation unit stays
  *  dtype-free by extern-declaring the @c run_with_stored_dtype instantiations the per-dtype
@@ -88,7 +88,7 @@ extern template int us::run_with_stored_dtype<nk::f16_t, nk_u1_k>(bench_launch<n
 extern template int us::run_with_stored_dtype<nk::i8_t, nk_u1_k>(bench_launch<nk::i8_t> const&);
 extern template int us::run_with_stored_dtype<nk::u8_t, nk_u1_k>(bench_launch<nk::u8_t> const&);
 
-/** @brief Opens the dataset with the file-native scalar and enters the typed cascade. */
+/** Opens the dataset with the file-native scalar and enters the typed cascade. */
 template <typename dataset_scalar_type_>
 int open_and_run(bench_options_t const& options, fu_topology_t topology) {
     auto [dataset, status] = persisted_dataset<dataset_scalar_type_>::open(options.vectors_path, options.queries_path,
@@ -228,7 +228,7 @@ int main(int argc, char** argv) {
     }
 
     // Resolve `--memory-domain` into the engaged-domain list: empty means one heap shard,
-    // a single id one pinned shard, and `all` one shard per memory domain - the list IS the
+    // a single ID one pinned shard, and `all` one shard per memory domain - the list IS the
     // placement, no modes.
     if (memory_domain_name == "all")
         for (std::size_t domain = 0; domain != memory_domains; ++domain)

@@ -1,9 +1,9 @@
 /**
- *  @brief The CUDA-side suite composer for @c dense_vram_indexes - the sharded index over
- *      one shard per device - shared by its translation unit.
- *  @author Ash Vardanian
  *  @file test/dense/vram_indexes.cuh
+ *  @author Ash Vardanian
  *  @date September 1, 2026
+ *  @brief The CUDA-side suite composer for @c dense_vram_indexes - the sharded index over one shard
+ *      per device - shared by its translation unit.
  *
  *  The scenarios live in @c dense.cuh, templated over the sharded-index type; the VRAM forms
  *  of the placement and executor helpers live here, since they name the CUDA executor.
@@ -17,11 +17,11 @@
 namespace unum {
 namespace usearch {
 
-/** @brief Whether a sharded index runs on CUDA streams - the VRAM residency. */
+/** Whether a sharded index runs on CUDA streams - the VRAM residency. */
 template <typename indexes_type_>
 concept vram_indexes = std::is_same_v<typename indexes_type_::executor_t, cuda_executor_t>;
 
-/** @brief The VRAM form: one stream on device zero. */
+/** The VRAM form: one stream on device zero. */
 template <vram_indexes indexes_type_>
 struct dense_indexes_executor<indexes_type_> {
     using executor_t = cuda_executor_t;
@@ -39,15 +39,15 @@ struct dense_indexes_executor<indexes_type_> {
     dense_indexes_executor& operator=(dense_indexes_executor const&) = delete;
 };
 
-/** @brief Places the shards one sharded scenario drives: one VRAM shard on device zero, since
- *      the index refuses two on one device. */
+/** Places the shards one sharded scenario drives: one VRAM shard on device zero, since
+ *  the index refuses two on one device. */
 template <vram_indexes indexes_type_>
 status_t place_shards(indexes_type_& indexes) noexcept {
     return indexes.emplace(0);
 }
 
-/** @brief The VRAM form: the one-row verbs take the executor itself, as no single context can
- *      walk every device. */
+/** The VRAM form: the one-row verbs take the executor itself, as no single context can
+ *  walk every device. */
 template <vram_indexes indexes_type_>
 struct dense_indexes_row_driver<indexes_type_> {
     cuda_executor_t& executor;
@@ -58,11 +58,9 @@ struct dense_indexes_row_driver<indexes_type_> {
     cuda_executor_t& handle() noexcept { return executor; }
 };
 
-/**
- *  @brief The VRAM reading of the search race: the index admits no search during a mutation,
- *      so the exclusion is the executor's - a search on a claimed executor is refused, and the
- *      reader walks the published rows only once the writer has returned.
- */
+/** The VRAM reading of the search race: the index admits no search during a mutation,
+ *  so the exclusion is the executor's - a search on a claimed executor is refused, and the
+ *  reader walks the published rows only once the writer has returned. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
     requires vram_indexes<indexes_type_>
 std::size_t test_dense_indexes_search_race() {
@@ -118,8 +116,8 @@ std::size_t test_dense_indexes_search_race() {
     return failures;
 }
 
-/** @brief Composes one (dtype, kernel) cell's sharded suite over device zero, skipping it
- *      where no device answers. */
+/** Composes one (dtype, kernel) cell's sharded suite over device zero, skipping it
+ *  where no device answers. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 std::size_t test_cuda_indexes_configuration(char const* name) {
     if (failed(cuda_device_specs_t::query(0).status)) return report(name, "no CUDA device reachable");
@@ -145,8 +143,8 @@ std::size_t test_cuda_indexes_configuration(char const* name) {
 
 #pragma region Suite Entry Points
 
-/** @brief The sharded CUDA suite entry its translation unit defines and the suite's @c main
- *      composes explicitly; returns the suite's failure count. */
+/** The sharded CUDA suite entry its translation unit defines and the suite's @c main
+ *  composes explicitly; returns the suite's failure count. */
 std::size_t test_dense_indexes_cuda();
 
 #pragma endregion Suite Entry Points

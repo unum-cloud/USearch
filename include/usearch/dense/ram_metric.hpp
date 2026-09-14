@@ -1,10 +1,9 @@
 /**
- *  @brief Compile-time-dispatched 1-to-1, 1-to-4, and 16×16 tiled distance kernels
- *      backed by NumKong.
- *
- *  @author Ash Vardanian
  *  @file include/usearch/dense/ram_metric.hpp
+ *  @author Ash Vardanian
  *  @date April 21, 2026
+ *  @brief Compile-time-dispatched 1-to-1, 1-to-4, and 16×16 tiled distance kernels backed by
+ *      NumKong.
  *
  *  This header is the hot inner loop of @c basic_dense_hindex - everything called per
  *  graph-traversal step, per query, per candidate. Its job is to turn NumKong's stateful
@@ -57,27 +56,27 @@
  *  @section Design Goals & Decisions
  *
  *  1. @b Avoid-call-overhead. All NumKong logic is inlined from @c NK_PUBLIC ISA-specific
- *     APIs - the @c NK_DYNAMIC stack-frame construction in the shared lib is skipped.
+ *  APIs - the @c NK_DYNAMIC stack-frame construction in the shared lib is skipped.
  *
  *  2. @b Amortize-arithmetic-reductions. Both Euclidean (L2) and Angular (Cos) distances
- *     can be inferred from the inner product if the norms are known. This means @b 2-by-D
- *     arithmetic operations per distance computation instead of @b 6-by-D on the hot path,
- *     by precomputing and storing one extra norm value per vector.
+ *  can be inferred from the inner product if the norms are known. This means @b 2-by-D
+ *  arithmetic operations per distance computation instead of @b 6-by-D on the hot path,
+ *  by precomputing and storing one extra norm value per vector.
  *
  *  3. @b Amortize-memory-loads-and-mini-float-upcasting. When computing an angular distance
- *     between a query vector and M neighbors of a graph node, we might be upcasting
- *     mini-floats to Float32 @b 2-by-M times. Storing Float32 in the index kills the value
- *     proposition of memory reductions. Pre-upcasting M vectors at once washes the
- *     register file. So we expose @b 1-to-4 distances - the query half of the binary
- *     operation is loaded and upcast four times less frequently, shrinking the total
- *     loads & upcasts to @b M+M/4. This also paves the way for cache-friendly streaming
- *     loads, keeping L1/L2 reserved for graph-traversal data structures while the vectors
- *     themselves only go as high as the L3 / cross-core LLC.
+ *  between a query vector and M neighbors of a graph node, we might be upcasting
+ *  mini-floats to Float32 @b 2-by-M times. Storing Float32 in the index kills the value
+ *  proposition of memory reductions. Pre-upcasting M vectors at once washes the
+ *  register file. So we expose @b 1-to-4 distances - the query half of the binary
+ *  operation is loaded and upcast four times less frequently, shrinking the total
+ *  loads & upcasts to @b M+M/4. This also paves the way for cache-friendly streaming
+ *  loads, keeping L1/L2 reserved for graph-traversal data structures while the vectors
+ *  themselves only go as high as the L3 / cross-core LLC.
  *
  *  4. @b Amortize-horizontal-reductions. On low-dimensional vectors (64D Matryoshka or
- *     128D GQA), the most expensive part of inner-products on x86 is the final horizontal
- *     reduction of accumulators. The 1-to-4 path lets us amortize each reduction with
- *     cross-register shuffles.
+ *  128D GQA), the most expensive part of inner-products on x86 is the final horizontal
+ *  reduction of accumulators. The 1-to-4 path lets us amortize each reduction with
+ *  cross-register shuffles.
  *
  *  @section Assumptions & Limitations
  *
@@ -130,35 +129,31 @@
 namespace unum {
 namespace usearch {
 
-/**
- *  @brief Per-vector header carrying L2 norm and row-sum (used by DPBUSD compensation).
+/** Per-vector header carrying L2 norm and row-sum (used by DPBUSD compensation).
  *  Both fields share width @c dot_result_type_ - the lane width every downstream finalize
- *  and through-from-dot helper consumes.
- */
+ *  and through-from-dot helper consumes. */
 template <typename dot_result_type_>
 struct vector_norms {
     dot_result_type_ sum;
     dot_result_type_ sumsq;
 };
 
-/** @brief Zero-size stand-in for @c vector_norms wherever a kernel's finalize never reads
- *      them - dot is the pure product. Storage of it vanishes, gathers copy nothing, and
- *      every norms-shaped call site stays uniform. */
+/** Zero-size stand-in for @c vector_norms wherever a kernel's finalize never reads
+ *  them - dot is the pure product. Storage of it vanishes, gathers copy nothing, and
+ *  every norms-shaped call site stays uniform. */
 struct no_norms_t {};
 
-/**
- *  @brief The norms record worth @b storing for @p kernel_ over @p scalar_ vectors: the real
- *      moments for finalizes that consume them, the empty stand-in for dot. The kernel ABI
- *      itself stays uniform - @c moments_of widens either record into the moments it feeds,
- *      mirroring the 4-state finalize convention.
- */
+/** The norms record worth @b storing for @p kernel_ over @p scalar_ vectors: the real
+ *  moments for finalizes that consume them, the empty stand-in for dot. The kernel ABI
+ *  itself stays uniform - @c moments_of widens either record into the moments it feeds,
+ *  mirroring the 4-state finalize convention. */
 template <nk_kernel_kind_t kernel_, typename scalar_>
 using stored_norms = std::conditional_t<kernel_ == nk_kernel_dot_k, no_norms_t, //
                                         vector_norms<typename scalar_::dot_result_t>>;
 
-/** @brief Widens a stored norms record into the moments the kernel plumbing consumes - the
- *      identity for real moments, zeroed moments for the empty stand-in - so the distance
- *      trampolines keep one body per shape instead of branching per record. */
+/** Widens a stored norms record into the moments the kernel plumbing consumes - the
+ *  identity for real moments, zeroed moments for the empty stand-in - so the distance
+ *  trampolines keep one body per shape instead of branching per record. */
 template <typename scalar_>
 [[gnu::always_inline]] inline vector_norms<typename scalar_::dot_result_t> moments_of(
     vector_norms<typename scalar_::dot_result_t> norms) noexcept {
@@ -179,10 +174,8 @@ template <typename scalar_, std::size_t lanes_>
     return {};
 }
 
-/**
- *  @brief Per-lane @c 1 - dot in NumKong vec form. Exists to match the
- *  @c nk_*_through_*_from_dot_* signature so the trampoline routes every metric uniformly.
- */
+/** Per-lane @c 1 - dot in NumKong vec form. Exists to match the
+ *  @c nk_*_through_*_from_dot_* signature so the trampoline routes every metric uniformly. */
 template <typename norm_type_, typename finalized_inners_type_>
 inline void inner_product_distance_(finalized_inners_type_ const* dots_vec, norm_type_ /*query_sumsq_unused*/,
                                     finalized_inners_type_ const* /*target_sumsqs_unused*/,
@@ -215,10 +208,8 @@ inline void inner_product_distance_(finalized_inners_type_ const* dots_vec, norm
     }
 }
 
-/**
- *  @brief Compile-time concept for every @c inner_kit_t. The trampoline takes only a kit,
- *  so substitution errors land at the call site as a one-line constraint-not-satisfied.
- */
+/** Compile-time concept for every @c inner_kit_t. The trampoline takes only a kit,
+ *  so substitution errors land at the call site as a one-line constraint-not-satisfied. */
 template <typename kit_>
 concept dense_quads_kit = requires {
     typename kit_::scalar_t;
@@ -266,10 +257,8 @@ inline vector_norms<typename scalar_type_::dot_result_t> invoke_dense_norms_( //
     return {static_cast<dot_result_t>(native_sum), static_cast<dot_result_t>(native_sumsq)};
 }
 
-/**
- *  @brief Forward declarations for every "kit" regardless of @c NK_TARGET_* availability,
- *  so @c dense_quads_chain backend resolution chains name-resolve on every build.
- */
+/** Forward declarations for every "kit" regardless of @c NK_TARGET_* availability,
+ *  so @c dense_quads_chain backend resolution chains name-resolve on every build. */
 struct bf16_serial_inner_kit_t;
 struct bf16_serial_angular_kit_t;
 struct bf16_serial_euclidean_kit_t;
@@ -511,7 +500,7 @@ struct u1x8_powervsx_inner_kit_t;
 struct u1x8_powervsx_hamming_kit_t;
 struct u1x8_powervsx_jaccard_kit_t;
 
-/** @brief bf16 inner-product distance kit - serial reference. */
+/** bf16 inner-product distance kit - serial reference. */
 struct bf16_serial_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
     using scalar_t = nk::bf16_t;
@@ -532,18 +521,19 @@ struct bf16_serial_inner_kit_t {
     static constexpr std::size_t step_dimensions = 8;
 };
 
-/** @brief bf16 angular distance kit - serial reference. */
+/** bf16 angular distance kit - serial reference. */
 struct bf16_serial_angular_kit_t : public bf16_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
 };
 
-/** @brief bf16 Euclidean (L2) distance kit - serial reference. */
+/** bf16 Euclidean (L2) distance kit - serial reference. */
 struct bf16_serial_euclidean_kit_t : public bf16_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 
 #if NK_TARGET_HASWELL
-/** @brief bf16 inner-product distance kit - Intel Haswell AVX2. */
+
+/** bf16 inner-product distance kit - Intel Haswell AVX2. */
 struct bf16_haswell_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
     using scalar_t = nk::bf16_t;
@@ -564,19 +554,20 @@ struct bf16_haswell_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief bf16 angular distance kit - Haswell. */
+/** bf16 angular distance kit - Haswell. */
 struct bf16_haswell_angular_kit_t : public bf16_haswell_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
 };
 
-/** @brief bf16 Euclidean (L2) distance kit - Haswell. */
+/** bf16 Euclidean (L2) distance kit - Haswell. */
 struct bf16_haswell_euclidean_kit_t : public bf16_haswell_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
 #endif // NK_TARGET_HASWELL
 
 #if NK_TARGET_SKYLAKE
-/** @brief bf16 inner-product distance kit - Intel Skylake-X AVX-512 Foundation. */
+
+/** bf16 inner-product distance kit - Intel Skylake-X AVX-512 Foundation. */
 struct bf16_skylake_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
     using scalar_t = nk::bf16_t;
@@ -597,19 +588,20 @@ struct bf16_skylake_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief bf16 angular distance kit - Skylake inner + Haswell through. */
+/** bf16 angular distance kit - Skylake inner + Haswell through. */
 struct bf16_skylake_angular_kit_t : public bf16_skylake_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
 };
 
-/** @brief bf16 Euclidean (L2) distance kit - Skylake inner + Haswell through. */
+/** bf16 Euclidean (L2) distance kit - Skylake inner + Haswell through. */
 struct bf16_skylake_euclidean_kit_t : public bf16_skylake_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
 #endif // NK_TARGET_SKYLAKE
 
 #if NK_TARGET_GENOA
-/** @brief bf16 inner-product distance kit - AMD Genoa AVX-512 + VNNI BF16. */
+
+/** bf16 inner-product distance kit - AMD Genoa AVX-512 + VNNI BF16. */
 struct bf16_genoa_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_genoa_k;
     using scalar_t = nk::bf16_t;
@@ -630,12 +622,12 @@ struct bf16_genoa_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief bf16 angular distance kit - Genoa inner + Haswell through. */
+/** bf16 angular distance kit - Genoa inner + Haswell through. */
 struct bf16_genoa_angular_kit_t : public bf16_genoa_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
 };
 
-/** @brief bf16 Euclidean (L2) distance kit - Genoa inner + Haswell through. */
+/** bf16 Euclidean (L2) distance kit - Genoa inner + Haswell through. */
 struct bf16_genoa_euclidean_kit_t : public bf16_genoa_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
@@ -643,7 +635,7 @@ struct bf16_genoa_euclidean_kit_t : public bf16_genoa_inner_kit_t {
 
 #if NK_TARGET_NEON
 
-/** @brief bf16 inner-product distance kit - Arm NEON. */
+/** bf16 inner-product distance kit - Arm NEON. */
 struct bf16_neon_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
     using scalar_t = nk::bf16_t;
@@ -664,13 +656,13 @@ struct bf16_neon_inner_kit_t {
     static constexpr std::size_t step_dimensions = 8;
 };
 
-/** @brief bf16 angular distance kit - Arm NEON. */
+/** bf16 angular distance kit - Arm NEON. */
 struct bf16_neon_angular_kit_t : public bf16_neon_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
 };
 
-/** @brief bf16 Euclidean (L2) distance kit - Arm NEON. */
+/** bf16 Euclidean (L2) distance kit - Arm NEON. */
 struct bf16_neon_euclidean_kit_t : public bf16_neon_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
@@ -679,7 +671,7 @@ struct bf16_neon_euclidean_kit_t : public bf16_neon_inner_kit_t {
 
 #if NK_TARGET_NEONBFDOT
 
-/** @brief bf16 inner-product distance kit - Arm BFDOT. */
+/** bf16 inner-product distance kit - Arm BFDOT. */
 struct bf16_neonbfdot_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonbfdot_k;
     using scalar_t = nk::bf16_t;
@@ -700,13 +692,13 @@ struct bf16_neonbfdot_inner_kit_t {
     static constexpr std::size_t step_dimensions = 8;
 };
 
-/** @brief bf16 angular distance kit - Arm BFDOT. */
+/** bf16 angular distance kit - Arm BFDOT. */
 struct bf16_neonbfdot_angular_kit_t : public bf16_neonbfdot_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
 };
 
-/** @brief bf16 Euclidean (L2) distance kit - Arm BFDOT. */
+/** bf16 Euclidean (L2) distance kit - Arm BFDOT. */
 struct bf16_neonbfdot_euclidean_kit_t : public bf16_neonbfdot_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
@@ -714,7 +706,8 @@ struct bf16_neonbfdot_euclidean_kit_t : public bf16_neonbfdot_inner_kit_t {
 #endif // NK_TARGET_NEONBFDOT
 
 #if NK_TARGET_V128
-/** @brief bf16 inner-product distance kit - WebAssembly SIMD128. */
+
+/** bf16 inner-product distance kit - WebAssembly SIMD128. */
 struct bf16_v128_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128_k;
     using scalar_t = nk::bf16_t;
@@ -735,19 +728,20 @@ struct bf16_v128_inner_kit_t {
     static constexpr std::size_t step_dimensions = 8;
 };
 
-/** @brief bf16 angular distance kit - WebAssembly SIMD128. */
+/** bf16 angular distance kit - WebAssembly SIMD128. */
 struct bf16_v128_angular_kit_t : public bf16_v128_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128_;
 };
 
-/** @brief bf16 Euclidean (L2) distance kit - WebAssembly SIMD128. */
+/** bf16 Euclidean (L2) distance kit - WebAssembly SIMD128. */
 struct bf16_v128_euclidean_kit_t : public bf16_v128_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
 };
 #endif // NK_TARGET_V128
 
 #if NK_TARGET_V128RELAXED
-/** @brief bf16 inner-product distance kit - WebAssembly relaxed SIMD. */
+
+/** bf16 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct bf16_v128relaxed_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
     using scalar_t = nk::bf16_t;
@@ -768,22 +762,21 @@ struct bf16_v128relaxed_inner_kit_t {
     static constexpr std::size_t step_dimensions = 8;
 };
 
-/** @brief bf16 angular distance kit - WebAssembly relaxed SIMD. */
+/** bf16 angular distance kit - WebAssembly relaxed SIMD. */
 struct bf16_v128relaxed_angular_kit_t : public bf16_v128relaxed_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128_;
 };
 
-/** @brief bf16 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
+/** bf16 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
 struct bf16_v128relaxed_euclidean_kit_t : public bf16_v128relaxed_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
 };
 #endif // NK_TARGET_V128RELAXED
 
 #if NK_TARGET_POWERVSX
-/**
- *  @brief bf16 inner-product distance kit - IBM POWER VSX. NumKong has no bf16 moments
- *         kernel for this tier, so the norms come from the serial one.
- */
+
+/** bf16 inner-product distance kit - IBM POWER VSX. NumKong has no bf16 moments
+ *  kernel for this tier, so the norms come from the serial one. */
 struct bf16_powervsx_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
     using scalar_t = nk::bf16_t;
@@ -804,18 +797,18 @@ struct bf16_powervsx_inner_kit_t {
     static constexpr std::size_t step_dimensions = 8;
 };
 
-/** @brief bf16 angular distance kit - IBM POWER VSX. */
+/** bf16 angular distance kit - IBM POWER VSX. */
 struct bf16_powervsx_angular_kit_t : public bf16_powervsx_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_powervsx_;
 };
 
-/** @brief bf16 Euclidean (L2) distance kit - IBM POWER VSX. */
+/** bf16 Euclidean (L2) distance kit - IBM POWER VSX. */
 struct bf16_powervsx_euclidean_kit_t : public bf16_powervsx_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_powervsx_;
 };
 #endif // NK_TARGET_POWERVSX
 
-/** @brief f16 inner-product distance kit - serial reference. */
+/** f16 inner-product distance kit - serial reference. */
 struct f16_serial_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
     using scalar_t = nk::f16_t;
@@ -836,17 +829,18 @@ struct f16_serial_inner_kit_t {
     static constexpr std::size_t step_dimensions = 8;
 };
 
-/** @brief f16 angular distance kit - serial reference. */
+/** f16 angular distance kit - serial reference. */
 struct f16_serial_angular_kit_t : public f16_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
 };
 
-/** @brief f16 Euclidean (L2) distance kit - serial reference. */
+/** f16 Euclidean (L2) distance kit - serial reference. */
 struct f16_serial_euclidean_kit_t : public f16_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 
 #if NK_TARGET_HASWELL
+
 /**
  *  @brief f16 inner-product distance kit - Intel Haswell AVX2 + F16C.
  *
@@ -875,19 +869,20 @@ struct f16_haswell_inner_kit_t {
     static constexpr std::size_t step_dimensions = 8;
 };
 
-/** @brief f16 angular distance kit - Intel Haswell AVX2 + F16C. */
+/** f16 angular distance kit - Intel Haswell AVX2 + F16C. */
 struct f16_haswell_angular_kit_t : public f16_haswell_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
 };
 
-/** @brief f16 Euclidean (L2) distance kit - Intel Haswell AVX2 + F16C. */
+/** f16 Euclidean (L2) distance kit - Intel Haswell AVX2 + F16C. */
 struct f16_haswell_euclidean_kit_t : public f16_haswell_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
 #endif // NK_TARGET_HASWELL
 
 #if NK_TARGET_SKYLAKE
-/** @brief f16 inner-product distance kit - Intel Skylake-X AVX-512, widening on load. */
+
+/** f16 inner-product distance kit - Intel Skylake-X AVX-512, widening on load. */
 struct f16_skylake_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
     using scalar_t = nk::f16_t;
@@ -908,19 +903,20 @@ struct f16_skylake_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief f16 angular distance kit - Skylake-X inner + Haswell through. */
+/** f16 angular distance kit - Skylake-X inner + Haswell through. */
 struct f16_skylake_angular_kit_t : public f16_skylake_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
 };
 
-/** @brief f16 Euclidean (L2) distance kit - Skylake-X inner + Haswell through. */
+/** f16 Euclidean (L2) distance kit - Skylake-X inner + Haswell through. */
 struct f16_skylake_euclidean_kit_t : public f16_skylake_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
 #endif // NK_TARGET_SKYLAKE
 
 #if NK_TARGET_NEON
-/** @brief f16 inner-product distance kit - Arm NEON. */
+
+/** f16 inner-product distance kit - Arm NEON. */
 struct f16_neon_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
     using scalar_t = nk::f16_t;
@@ -941,22 +937,21 @@ struct f16_neon_inner_kit_t {
     static constexpr std::size_t step_dimensions = 8;
 };
 
-/** @brief f16 angular distance kit - Arm NEON. */
+/** f16 angular distance kit - Arm NEON. */
 struct f16_neon_angular_kit_t : public f16_neon_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_neon_;
 };
 
-/** @brief f16 Euclidean (L2) distance kit - Arm NEON. */
+/** f16 Euclidean (L2) distance kit - Arm NEON. */
 struct f16_neon_euclidean_kit_t : public f16_neon_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_neon_;
 };
 #endif // NK_TARGET_NEON
 
 #if NK_TARGET_NEONFHM
-/**
- *  @brief f16 inner-product distance kit - Arm FP16 FML. NumKong has no f16 moments
- *         kernel for this tier, so the norms come from the serial one.
- */
+
+/** f16 inner-product distance kit - Arm FP16 FML. NumKong has no f16 moments
+ *  kernel for this tier, so the norms come from the serial one. */
 struct f16_neonfhm_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
     using scalar_t = nk::f16_t;
@@ -977,22 +972,21 @@ struct f16_neonfhm_inner_kit_t {
     static constexpr std::size_t step_dimensions = 8;
 };
 
-/** @brief f16 angular distance kit - Arm FP16 FML. */
+/** f16 angular distance kit - Arm FP16 FML. */
 struct f16_neonfhm_angular_kit_t : public f16_neonfhm_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
 };
 
-/** @brief f16 Euclidean (L2) distance kit - Arm FP16 FML. */
+/** f16 Euclidean (L2) distance kit - Arm FP16 FML. */
 struct f16_neonfhm_euclidean_kit_t : public f16_neonfhm_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 #endif // NK_TARGET_NEONFHM
 
 #if NK_TARGET_V128RELAXED
-/**
- *  @brief f16 inner-product distance kit - WebAssembly relaxed SIMD, widening on load.
- *         Four dimensions per step, since the widened f32 quad fills the 128-bit vec.
- */
+
+/** f16 inner-product distance kit - WebAssembly relaxed SIMD, widening on load.
+ *  Four dimensions per step, since the widened f32 quad fills the 128-bit vec. */
 struct f16_v128relaxed_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
     using scalar_t = nk::f16_t;
@@ -1013,22 +1007,21 @@ struct f16_v128relaxed_inner_kit_t {
     static constexpr std::size_t step_dimensions = 4;
 };
 
-/** @brief f16 angular distance kit - WebAssembly relaxed SIMD. */
+/** f16 angular distance kit - WebAssembly relaxed SIMD. */
 struct f16_v128relaxed_angular_kit_t : public f16_v128relaxed_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128_;
 };
 
-/** @brief f16 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
+/** f16 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
 struct f16_v128relaxed_euclidean_kit_t : public f16_v128relaxed_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
 };
 #endif // NK_TARGET_V128RELAXED
 
 #if NK_TARGET_POWERVSX
-/**
- *  @brief f16 inner-product distance kit - IBM POWER VSX. NumKong has no f16 moments
- *         kernel for this tier, so the norms come from the serial one.
- */
+
+/** f16 inner-product distance kit - IBM POWER VSX. NumKong has no f16 moments
+ *  kernel for this tier, so the norms come from the serial one. */
 struct f16_powervsx_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
     using scalar_t = nk::f16_t;
@@ -1049,18 +1042,18 @@ struct f16_powervsx_inner_kit_t {
     static constexpr std::size_t step_dimensions = 8;
 };
 
-/** @brief f16 angular distance kit - IBM POWER VSX. */
+/** f16 angular distance kit - IBM POWER VSX. */
 struct f16_powervsx_angular_kit_t : public f16_powervsx_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_powervsx_;
 };
 
-/** @brief f16 Euclidean (L2) distance kit - IBM POWER VSX. */
+/** f16 Euclidean (L2) distance kit - IBM POWER VSX. */
 struct f16_powervsx_euclidean_kit_t : public f16_powervsx_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_powervsx_;
 };
 #endif // NK_TARGET_POWERVSX
 
-/** @brief e5m2 inner-product distance kit - serial reference. */
+/** e5m2 inner-product distance kit - serial reference. */
 struct e5m2_serial_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
     using scalar_t = nk::e5m2_t;
@@ -1081,17 +1074,18 @@ struct e5m2_serial_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief e5m2 angular distance kit - serial reference. */
+/** e5m2 angular distance kit - serial reference. */
 struct e5m2_serial_angular_kit_t : public e5m2_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
 };
 
-/** @brief e5m2 Euclidean (L2) distance kit - serial reference. */
+/** e5m2 Euclidean (L2) distance kit - serial reference. */
 struct e5m2_serial_euclidean_kit_t : public e5m2_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 
 #if NK_TARGET_HASWELL
+
 /**
  *  @brief e5m2 inner-product distance kit - Intel Haswell AVX2.
  *
@@ -1118,19 +1112,20 @@ struct e5m2_haswell_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief e5m2 angular distance kit - Intel Haswell AVX2. */
+/** e5m2 angular distance kit - Intel Haswell AVX2. */
 struct e5m2_haswell_angular_kit_t : public e5m2_haswell_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
 };
 
-/** @brief e5m2 Euclidean (L2) distance kit - Intel Haswell AVX2. */
+/** e5m2 Euclidean (L2) distance kit - Intel Haswell AVX2. */
 struct e5m2_haswell_euclidean_kit_t : public e5m2_haswell_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
 #endif // NK_TARGET_HASWELL
 
 #if NK_TARGET_SKYLAKE
-/** @brief e5m2 inner-product distance kit - Intel Skylake-X AVX-512, widening in the update. */
+
+/** e5m2 inner-product distance kit - Intel Skylake-X AVX-512, widening in the update. */
 struct e5m2_skylake_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
     using scalar_t = nk::e5m2_t;
@@ -1151,24 +1146,23 @@ struct e5m2_skylake_inner_kit_t {
     static constexpr std::size_t step_dimensions = 64;
 };
 
-/** @brief e5m2 angular distance kit - Skylake-X inner + Haswell through. */
+/** e5m2 angular distance kit - Skylake-X inner + Haswell through. */
 struct e5m2_skylake_angular_kit_t : public e5m2_skylake_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
 };
 
-/** @brief e5m2 Euclidean (L2) distance kit - Skylake-X inner + Haswell through. */
+/** e5m2 Euclidean (L2) distance kit - Skylake-X inner + Haswell through. */
 struct e5m2_skylake_euclidean_kit_t : public e5m2_skylake_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
 #endif // NK_TARGET_SKYLAKE
 
 #if NK_TARGET_DIAMOND
-/**
- *  @brief e5m2 inner-product distance kit - Intel Diamond Rapids AVX10.2. The loaders
- *         widen each step to f16 with a native FP8 convert, so the dot rides the FP16
- *         accumulator. NumKong has no e5m2 moments kernel for this tier, so the norms
- *         come from the AVX-512 one.
- */
+
+/** e5m2 inner-product distance kit - Intel Diamond Rapids AVX10.2. The loaders
+ *  widen each step to f16 with a native FP8 convert, so the dot rides the FP16
+ *  accumulator. NumKong has no e5m2 moments kernel for this tier, so the norms
+ *  come from the AVX-512 one. */
 struct e5m2_diamond_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_diamond_k;
     using scalar_t = nk::e5m2_t;
@@ -1189,22 +1183,21 @@ struct e5m2_diamond_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief e5m2 angular distance kit - Diamond Rapids inner + Haswell through. */
+/** e5m2 angular distance kit - Diamond Rapids inner + Haswell through. */
 struct e5m2_diamond_angular_kit_t : public e5m2_diamond_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
 };
 
-/** @brief e5m2 Euclidean (L2) distance kit - Diamond Rapids inner + Haswell through. */
+/** e5m2 Euclidean (L2) distance kit - Diamond Rapids inner + Haswell through. */
 struct e5m2_diamond_euclidean_kit_t : public e5m2_diamond_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
 #endif // NK_TARGET_DIAMOND
 
 #if NK_TARGET_GENOA
-/**
- *  @brief e5m2 inner-product distance kit - AMD Genoa AVX-512 + VNNI BF16. The loaders
- *         widen each step to bf16 so the dot rides the BF16 accumulator.
- */
+
+/** e5m2 inner-product distance kit - AMD Genoa AVX-512 + VNNI BF16. The loaders
+ *  widen each step to bf16 so the dot rides the BF16 accumulator. */
 struct e5m2_genoa_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_genoa_k;
     using scalar_t = nk::e5m2_t;
@@ -1225,19 +1218,20 @@ struct e5m2_genoa_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief e5m2 angular distance kit - Genoa inner + Haswell through. */
+/** e5m2 angular distance kit - Genoa inner + Haswell through. */
 struct e5m2_genoa_angular_kit_t : public e5m2_genoa_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
 };
 
-/** @brief e5m2 Euclidean (L2) distance kit - Genoa inner + Haswell through. */
+/** e5m2 Euclidean (L2) distance kit - Genoa inner + Haswell through. */
 struct e5m2_genoa_euclidean_kit_t : public e5m2_genoa_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
 #endif // NK_TARGET_GENOA
 
 #if NK_TARGET_NEONFHM
-/** @brief e5m2 inner-product distance kit - Arm FP16 FML. */
+
+/** e5m2 inner-product distance kit - Arm FP16 FML. */
 struct e5m2_neonfhm_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
     using scalar_t = nk::e5m2_t;
@@ -1258,22 +1252,21 @@ struct e5m2_neonfhm_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief e5m2 angular distance kit - Arm FP16 FML. */
+/** e5m2 angular distance kit - Arm FP16 FML. */
 struct e5m2_neonfhm_angular_kit_t : public e5m2_neonfhm_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
 };
 
-/** @brief e5m2 Euclidean (L2) distance kit - Arm FP16 FML. */
+/** e5m2 Euclidean (L2) distance kit - Arm FP16 FML. */
 struct e5m2_neonfhm_euclidean_kit_t : public e5m2_neonfhm_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 #endif // NK_TARGET_NEONFHM
 
 #if NK_TARGET_NEONFP8
-/**
- *  @brief e5m2 inner-product distance kit - Arm FP8 DOT. NumKong has no e5m2 moments
- *         kernel for this tier, so the norms come from the serial one.
- */
+
+/** e5m2 inner-product distance kit - Arm FP8 DOT. NumKong has no e5m2 moments
+ *  kernel for this tier, so the norms come from the serial one. */
 struct e5m2_neonfp8_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
     using scalar_t = nk::e5m2_t;
@@ -1294,22 +1287,21 @@ struct e5m2_neonfp8_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief e5m2 angular distance kit - Arm FP8 DOT. */
+/** e5m2 angular distance kit - Arm FP8 DOT. */
 struct e5m2_neonfp8_angular_kit_t : public e5m2_neonfp8_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
 };
 
-/** @brief e5m2 Euclidean (L2) distance kit - Arm FP8 DOT. */
+/** e5m2 Euclidean (L2) distance kit - Arm FP8 DOT. */
 struct e5m2_neonfp8_euclidean_kit_t : public e5m2_neonfp8_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 #endif // NK_TARGET_NEONFP8
 
 #if NK_TARGET_V128RELAXED
-/**
- *  @brief e5m2 inner-product distance kit - WebAssembly relaxed SIMD, widening on load.
- *         Four dimensions per step, since the widened f32 quad fills the 128-bit vec.
- */
+
+/** e5m2 inner-product distance kit - WebAssembly relaxed SIMD, widening on load.
+ *  Four dimensions per step, since the widened f32 quad fills the 128-bit vec. */
 struct e5m2_v128relaxed_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
     using scalar_t = nk::e5m2_t;
@@ -1330,18 +1322,18 @@ struct e5m2_v128relaxed_inner_kit_t {
     static constexpr std::size_t step_dimensions = 4;
 };
 
-/** @brief e5m2 angular distance kit - WebAssembly relaxed SIMD. */
+/** e5m2 angular distance kit - WebAssembly relaxed SIMD. */
 struct e5m2_v128relaxed_angular_kit_t : public e5m2_v128relaxed_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128_;
 };
 
-/** @brief e5m2 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
+/** e5m2 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
 struct e5m2_v128relaxed_euclidean_kit_t : public e5m2_v128relaxed_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
 };
 #endif // NK_TARGET_V128RELAXED
 
-/** @brief e4m3 inner-product distance kit - serial reference. */
+/** e4m3 inner-product distance kit - serial reference. */
 struct e4m3_serial_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
     using scalar_t = nk::e4m3_t;
@@ -1362,18 +1354,19 @@ struct e4m3_serial_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief e4m3 angular distance kit - serial reference. */
+/** e4m3 angular distance kit - serial reference. */
 struct e4m3_serial_angular_kit_t : public e4m3_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
 };
 
-/** @brief e4m3 Euclidean (L2) distance kit - serial reference. */
+/** e4m3 Euclidean (L2) distance kit - serial reference. */
 struct e4m3_serial_euclidean_kit_t : public e4m3_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 
 #if NK_TARGET_HASWELL
-/** @brief e4m3 inner-product distance kit - Intel Haswell AVX2, widening in the update. */
+
+/** e4m3 inner-product distance kit - Intel Haswell AVX2, widening in the update. */
 struct e4m3_haswell_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
     using scalar_t = nk::e4m3_t;
@@ -1394,19 +1387,20 @@ struct e4m3_haswell_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief e4m3 angular distance kit - Intel Haswell AVX2. */
+/** e4m3 angular distance kit - Intel Haswell AVX2. */
 struct e4m3_haswell_angular_kit_t : public e4m3_haswell_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
 };
 
-/** @brief e4m3 Euclidean (L2) distance kit - Intel Haswell AVX2. */
+/** e4m3 Euclidean (L2) distance kit - Intel Haswell AVX2. */
 struct e4m3_haswell_euclidean_kit_t : public e4m3_haswell_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
 #endif // NK_TARGET_HASWELL
 
 #if NK_TARGET_SKYLAKE
-/** @brief e4m3 inner-product distance kit - Intel Skylake-X AVX-512, widening on load. */
+
+/** e4m3 inner-product distance kit - Intel Skylake-X AVX-512, widening on load. */
 struct e4m3_skylake_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
     using scalar_t = nk::e4m3_t;
@@ -1427,24 +1421,23 @@ struct e4m3_skylake_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief e4m3 angular distance kit - Skylake-X inner + Haswell through. */
+/** e4m3 angular distance kit - Skylake-X inner + Haswell through. */
 struct e4m3_skylake_angular_kit_t : public e4m3_skylake_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
 };
 
-/** @brief e4m3 Euclidean (L2) distance kit - Skylake-X inner + Haswell through. */
+/** e4m3 Euclidean (L2) distance kit - Skylake-X inner + Haswell through. */
 struct e4m3_skylake_euclidean_kit_t : public e4m3_skylake_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
 #endif // NK_TARGET_SKYLAKE
 
 #if NK_TARGET_DIAMOND
-/**
- *  @brief e4m3 inner-product distance kit - Intel Diamond Rapids AVX10.2. The loaders
- *         widen each step to f16 with a native FP8 convert, so the dot rides the FP16
- *         accumulator. NumKong has no e4m3 moments kernel for this tier, so the norms
- *         come from the AVX-512 one.
- */
+
+/** e4m3 inner-product distance kit - Intel Diamond Rapids AVX10.2. The loaders
+ *  widen each step to f16 with a native FP8 convert, so the dot rides the FP16
+ *  accumulator. NumKong has no e4m3 moments kernel for this tier, so the norms
+ *  come from the AVX-512 one. */
 struct e4m3_diamond_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_diamond_k;
     using scalar_t = nk::e4m3_t;
@@ -1465,22 +1458,21 @@ struct e4m3_diamond_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief e4m3 angular distance kit - Diamond Rapids inner + Haswell through. */
+/** e4m3 angular distance kit - Diamond Rapids inner + Haswell through. */
 struct e4m3_diamond_angular_kit_t : public e4m3_diamond_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
 };
 
-/** @brief e4m3 Euclidean (L2) distance kit - Diamond Rapids inner + Haswell through. */
+/** e4m3 Euclidean (L2) distance kit - Diamond Rapids inner + Haswell through. */
 struct e4m3_diamond_euclidean_kit_t : public e4m3_diamond_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
 #endif // NK_TARGET_DIAMOND
 
 #if NK_TARGET_GENOA
-/**
- *  @brief e4m3 inner-product distance kit - AMD Genoa AVX-512 + VNNI BF16. The loaders
- *         widen each step to bf16 so the dot rides the BF16 accumulator.
- */
+
+/** e4m3 inner-product distance kit - AMD Genoa AVX-512 + VNNI BF16. The loaders
+ *  widen each step to bf16 so the dot rides the BF16 accumulator. */
 struct e4m3_genoa_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_genoa_k;
     using scalar_t = nk::e4m3_t;
@@ -1501,19 +1493,20 @@ struct e4m3_genoa_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief e4m3 angular distance kit - Genoa inner + Haswell through. */
+/** e4m3 angular distance kit - Genoa inner + Haswell through. */
 struct e4m3_genoa_angular_kit_t : public e4m3_genoa_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
 };
 
-/** @brief e4m3 Euclidean (L2) distance kit - Genoa inner + Haswell through. */
+/** e4m3 Euclidean (L2) distance kit - Genoa inner + Haswell through. */
 struct e4m3_genoa_euclidean_kit_t : public e4m3_genoa_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
 #endif // NK_TARGET_GENOA
 
 #if NK_TARGET_NEONFHM
-/** @brief e4m3 inner-product distance kit - Arm FP16 FML. */
+
+/** e4m3 inner-product distance kit - Arm FP16 FML. */
 struct e4m3_neonfhm_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
     using scalar_t = nk::e4m3_t;
@@ -1534,22 +1527,21 @@ struct e4m3_neonfhm_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief e4m3 angular distance kit - Arm FP16 FML. */
+/** e4m3 angular distance kit - Arm FP16 FML. */
 struct e4m3_neonfhm_angular_kit_t : public e4m3_neonfhm_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
 };
 
-/** @brief e4m3 Euclidean (L2) distance kit - Arm FP16 FML. */
+/** e4m3 Euclidean (L2) distance kit - Arm FP16 FML. */
 struct e4m3_neonfhm_euclidean_kit_t : public e4m3_neonfhm_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 #endif // NK_TARGET_NEONFHM
 
 #if NK_TARGET_NEONFP8
-/**
- *  @brief e4m3 inner-product distance kit - Arm FP8 DOT. NumKong has no e4m3 moments
- *         kernel for this tier, so the norms come from the serial one.
- */
+
+/** e4m3 inner-product distance kit - Arm FP8 DOT. NumKong has no e4m3 moments
+ *  kernel for this tier, so the norms come from the serial one. */
 struct e4m3_neonfp8_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
     using scalar_t = nk::e4m3_t;
@@ -1570,22 +1562,21 @@ struct e4m3_neonfp8_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief e4m3 angular distance kit - Arm FP8 DOT. */
+/** e4m3 angular distance kit - Arm FP8 DOT. */
 struct e4m3_neonfp8_angular_kit_t : public e4m3_neonfp8_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
 };
 
-/** @brief e4m3 Euclidean (L2) distance kit - Arm FP8 DOT. */
+/** e4m3 Euclidean (L2) distance kit - Arm FP8 DOT. */
 struct e4m3_neonfp8_euclidean_kit_t : public e4m3_neonfp8_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 #endif // NK_TARGET_NEONFP8
 
 #if NK_TARGET_V128RELAXED
-/**
- *  @brief e4m3 inner-product distance kit - WebAssembly relaxed SIMD, widening on load.
- *         Four dimensions per step, since the widened f32 quad fills the 128-bit vec.
- */
+
+/** e4m3 inner-product distance kit - WebAssembly relaxed SIMD, widening on load.
+ *  Four dimensions per step, since the widened f32 quad fills the 128-bit vec. */
 struct e4m3_v128relaxed_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
     using scalar_t = nk::e4m3_t;
@@ -1606,12 +1597,12 @@ struct e4m3_v128relaxed_inner_kit_t {
     static constexpr std::size_t step_dimensions = 4;
 };
 
-/** @brief e4m3 angular distance kit - WebAssembly relaxed SIMD. */
+/** e4m3 angular distance kit - WebAssembly relaxed SIMD. */
 struct e4m3_v128relaxed_angular_kit_t : public e4m3_v128relaxed_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128_;
 };
 
-/** @brief e4m3 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
+/** e4m3 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
 struct e4m3_v128relaxed_euclidean_kit_t : public e4m3_v128relaxed_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
 };
@@ -1644,18 +1635,19 @@ struct e3m2_serial_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief e3m2 angular distance kit - serial reference. */
+/** e3m2 angular distance kit - serial reference. */
 struct e3m2_serial_angular_kit_t : public e3m2_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
 };
 
-/** @brief e3m2 Euclidean (L2) distance kit - serial reference. */
+/** e3m2 Euclidean (L2) distance kit - serial reference. */
 struct e3m2_serial_euclidean_kit_t : public e3m2_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 
 #if NK_TARGET_HASWELL
-/** @brief e3m2 inner-product distance kit - Intel Haswell AVX2. */
+
+/** e3m2 inner-product distance kit - Intel Haswell AVX2. */
 struct e3m2_haswell_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
     using scalar_t = nk::e3m2_t;
@@ -1676,19 +1668,20 @@ struct e3m2_haswell_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief e3m2 angular distance kit - Intel Haswell AVX2. */
+/** e3m2 angular distance kit - Intel Haswell AVX2. */
 struct e3m2_haswell_angular_kit_t : public e3m2_haswell_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
 };
 
-/** @brief e3m2 Euclidean (L2) distance kit - Intel Haswell AVX2. */
+/** e3m2 Euclidean (L2) distance kit - Intel Haswell AVX2. */
 struct e3m2_haswell_euclidean_kit_t : public e3m2_haswell_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
 #endif // NK_TARGET_HASWELL
 
 #if NK_TARGET_SKYLAKE
-/** @brief e3m2 inner-product distance kit - Intel Skylake-X AVX-512 Foundation. */
+
+/** e3m2 inner-product distance kit - Intel Skylake-X AVX-512 Foundation. */
 struct e3m2_skylake_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
     using scalar_t = nk::e3m2_t;
@@ -1709,22 +1702,21 @@ struct e3m2_skylake_inner_kit_t {
     static constexpr std::size_t step_dimensions = 64;
 };
 
-/** @brief e3m2 angular distance kit - Skylake-X inner + Haswell through. */
+/** e3m2 angular distance kit - Skylake-X inner + Haswell through. */
 struct e3m2_skylake_angular_kit_t : public e3m2_skylake_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
 };
 
-/** @brief e3m2 Euclidean (L2) distance kit - Skylake-X inner + Haswell through. */
+/** e3m2 Euclidean (L2) distance kit - Skylake-X inner + Haswell through. */
 struct e3m2_skylake_euclidean_kit_t : public e3m2_skylake_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
 #endif // NK_TARGET_SKYLAKE
 
 #if NK_TARGET_NEONSDOT
-/**
- *  @brief e3m2 inner-product distance kit - Arm SDOT. NumKong has no e3m2 moments kernel
- *         for this tier, so the norms come from the serial one.
- */
+
+/** e3m2 inner-product distance kit - Arm SDOT. NumKong has no e3m2 moments kernel
+ *  for this tier, so the norms come from the serial one. */
 struct e3m2_neonsdot_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
     using scalar_t = nk::e3m2_t;
@@ -1745,22 +1737,21 @@ struct e3m2_neonsdot_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief e3m2 angular distance kit - Arm SDOT. */
+/** e3m2 angular distance kit - Arm SDOT. */
 struct e3m2_neonsdot_angular_kit_t : public e3m2_neonsdot_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
 };
 
-/** @brief e3m2 Euclidean (L2) distance kit - Arm SDOT. */
+/** e3m2 Euclidean (L2) distance kit - Arm SDOT. */
 struct e3m2_neonsdot_euclidean_kit_t : public e3m2_neonsdot_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 #endif // NK_TARGET_NEONSDOT
 
 #if NK_TARGET_NEONFP8
-/**
- *  @brief e3m2 inner-product distance kit - Arm FP8 DOT. NumKong has no e3m2 moments
- *         kernel for this tier, so the norms come from the serial one.
- */
+
+/** e3m2 inner-product distance kit - Arm FP8 DOT. NumKong has no e3m2 moments
+ *  kernel for this tier, so the norms come from the serial one. */
 struct e3m2_neonfp8_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
     using scalar_t = nk::e3m2_t;
@@ -1781,19 +1772,20 @@ struct e3m2_neonfp8_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief e3m2 angular distance kit - Arm FP8 DOT. */
+/** e3m2 angular distance kit - Arm FP8 DOT. */
 struct e3m2_neonfp8_angular_kit_t : public e3m2_neonfp8_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
 };
 
-/** @brief e3m2 Euclidean (L2) distance kit - Arm FP8 DOT. */
+/** e3m2 Euclidean (L2) distance kit - Arm FP8 DOT. */
 struct e3m2_neonfp8_euclidean_kit_t : public e3m2_neonfp8_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 #endif // NK_TARGET_NEONFP8
 
 #if NK_TARGET_V128RELAXED
-/** @brief e3m2 inner-product distance kit - WebAssembly relaxed SIMD. */
+
+/** e3m2 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct e3m2_v128relaxed_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
     using scalar_t = nk::e3m2_t;
@@ -1814,18 +1806,18 @@ struct e3m2_v128relaxed_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief e3m2 angular distance kit - WebAssembly relaxed SIMD. */
+/** e3m2 angular distance kit - WebAssembly relaxed SIMD. */
 struct e3m2_v128relaxed_angular_kit_t : public e3m2_v128relaxed_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128_;
 };
 
-/** @brief e3m2 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
+/** e3m2 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
 struct e3m2_v128relaxed_euclidean_kit_t : public e3m2_v128relaxed_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
 };
 #endif // NK_TARGET_V128RELAXED
 
-/** @brief e2m3 inner-product distance kit - serial reference. One element per byte. */
+/** e2m3 inner-product distance kit - serial reference. One element per byte. */
 struct e2m3_serial_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
     using scalar_t = nk::e2m3_t;
@@ -1846,18 +1838,19 @@ struct e2m3_serial_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief e2m3 angular distance kit - serial reference. */
+/** e2m3 angular distance kit - serial reference. */
 struct e2m3_serial_angular_kit_t : public e2m3_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
 };
 
-/** @brief e2m3 Euclidean (L2) distance kit - serial reference. */
+/** e2m3 Euclidean (L2) distance kit - serial reference. */
 struct e2m3_serial_euclidean_kit_t : public e2m3_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 
 #if NK_TARGET_HASWELL
-/** @brief e2m3 inner-product distance kit - Intel Haswell AVX2. */
+
+/** e2m3 inner-product distance kit - Intel Haswell AVX2. */
 struct e2m3_haswell_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
     using scalar_t = nk::e2m3_t;
@@ -1878,19 +1871,20 @@ struct e2m3_haswell_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief e2m3 angular distance kit - Intel Haswell AVX2. */
+/** e2m3 angular distance kit - Intel Haswell AVX2. */
 struct e2m3_haswell_angular_kit_t : public e2m3_haswell_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
 };
 
-/** @brief e2m3 Euclidean (L2) distance kit - Intel Haswell AVX2. */
+/** e2m3 Euclidean (L2) distance kit - Intel Haswell AVX2. */
 struct e2m3_haswell_euclidean_kit_t : public e2m3_haswell_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
 #endif // NK_TARGET_HASWELL
 
 #if NK_TARGET_SKYLAKE
-/** @brief e2m3 inner-product distance kit - Intel Skylake-X AVX-512 Foundation. */
+
+/** e2m3 inner-product distance kit - Intel Skylake-X AVX-512 Foundation. */
 struct e2m3_skylake_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
     using scalar_t = nk::e2m3_t;
@@ -1911,19 +1905,20 @@ struct e2m3_skylake_inner_kit_t {
     static constexpr std::size_t step_dimensions = 64;
 };
 
-/** @brief e2m3 angular distance kit - Skylake-X inner + Haswell through. */
+/** e2m3 angular distance kit - Skylake-X inner + Haswell through. */
 struct e2m3_skylake_angular_kit_t : public e2m3_skylake_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
 };
 
-/** @brief e2m3 Euclidean (L2) distance kit - Skylake-X inner + Haswell through. */
+/** e2m3 Euclidean (L2) distance kit - Skylake-X inner + Haswell through. */
 struct e2m3_skylake_euclidean_kit_t : public e2m3_skylake_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
 #endif // NK_TARGET_SKYLAKE
 
 #if NK_TARGET_ALDER
-/** @brief e2m3 inner-product distance kit - Intel Alder Lake AVX-VNNI. */
+
+/** e2m3 inner-product distance kit - Intel Alder Lake AVX-VNNI. */
 struct e2m3_alder_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_alder_k;
     using scalar_t = nk::e2m3_t;
@@ -1944,19 +1939,20 @@ struct e2m3_alder_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief e2m3 angular distance kit - Alder Lake inner + Haswell through. */
+/** e2m3 angular distance kit - Alder Lake inner + Haswell through. */
 struct e2m3_alder_angular_kit_t : public e2m3_alder_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
 };
 
-/** @brief e2m3 Euclidean (L2) distance kit - Alder Lake inner + Haswell through. */
+/** e2m3 Euclidean (L2) distance kit - Alder Lake inner + Haswell through. */
 struct e2m3_alder_euclidean_kit_t : public e2m3_alder_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
 #endif // NK_TARGET_ALDER
 
 #if NK_TARGET_SIERRA
-/** @brief e2m3 inner-product distance kit - Intel Sierra Forest AVX-VNNI. */
+
+/** e2m3 inner-product distance kit - Intel Sierra Forest AVX-VNNI. */
 struct e2m3_sierra_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sierra_k;
     using scalar_t = nk::e2m3_t;
@@ -1977,19 +1973,20 @@ struct e2m3_sierra_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief e2m3 angular distance kit - Sierra Forest inner + Haswell through. */
+/** e2m3 angular distance kit - Sierra Forest inner + Haswell through. */
 struct e2m3_sierra_angular_kit_t : public e2m3_sierra_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_haswell_;
 };
 
-/** @brief e2m3 Euclidean (L2) distance kit - Sierra Forest inner + Haswell through. */
+/** e2m3 Euclidean (L2) distance kit - Sierra Forest inner + Haswell through. */
 struct e2m3_sierra_euclidean_kit_t : public e2m3_sierra_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
 #endif // NK_TARGET_SIERRA
 
 #if NK_TARGET_NEONSDOT
-/** @brief e2m3 inner-product distance kit - Arm SDOT. */
+
+/** e2m3 inner-product distance kit - Arm SDOT. */
 struct e2m3_neonsdot_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
     using scalar_t = nk::e2m3_t;
@@ -2010,19 +2007,20 @@ struct e2m3_neonsdot_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief e2m3 angular distance kit - Arm SDOT. */
+/** e2m3 angular distance kit - Arm SDOT. */
 struct e2m3_neonsdot_angular_kit_t : public e2m3_neonsdot_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
 };
 
-/** @brief e2m3 Euclidean (L2) distance kit - Arm SDOT. */
+/** e2m3 Euclidean (L2) distance kit - Arm SDOT. */
 struct e2m3_neonsdot_euclidean_kit_t : public e2m3_neonsdot_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 #endif // NK_TARGET_NEONSDOT
 
 #if NK_TARGET_NEONFP8
-/** @brief e2m3 inner-product distance kit - Arm FP8 DOT. */
+
+/** e2m3 inner-product distance kit - Arm FP8 DOT. */
 struct e2m3_neonfp8_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
     using scalar_t = nk::e2m3_t;
@@ -2043,19 +2041,20 @@ struct e2m3_neonfp8_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief e2m3 angular distance kit - Arm FP8 DOT. */
+/** e2m3 angular distance kit - Arm FP8 DOT. */
 struct e2m3_neonfp8_angular_kit_t : public e2m3_neonfp8_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_serial_;
 };
 
-/** @brief e2m3 Euclidean (L2) distance kit - Arm FP8 DOT. */
+/** e2m3 Euclidean (L2) distance kit - Arm FP8 DOT. */
 struct e2m3_neonfp8_euclidean_kit_t : public e2m3_neonfp8_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 #endif // NK_TARGET_NEONFP8
 
 #if NK_TARGET_V128RELAXED
-/** @brief e2m3 inner-product distance kit - WebAssembly relaxed SIMD. */
+
+/** e2m3 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct e2m3_v128relaxed_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
     using scalar_t = nk::e2m3_t;
@@ -2076,18 +2075,18 @@ struct e2m3_v128relaxed_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief e2m3 angular distance kit - WebAssembly relaxed SIMD. */
+/** e2m3 angular distance kit - WebAssembly relaxed SIMD. */
 struct e2m3_v128relaxed_angular_kit_t : public e2m3_v128relaxed_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_f32_from_dot_v128_;
 };
 
-/** @brief e2m3 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
+/** e2m3 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
 struct e2m3_v128relaxed_euclidean_kit_t : public e2m3_v128relaxed_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
 };
 #endif // NK_TARGET_V128RELAXED
 
-/** @brief u8 inner-product distance kit - serial reference. */
+/** u8 inner-product distance kit - serial reference. */
 struct u8_serial_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
     using scalar_t = nk::u8_t;
@@ -2108,13 +2107,13 @@ struct u8_serial_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief u8 angular distance kit - serial reference. Through writes f32. */
+/** u8 angular distance kit - serial reference. Through writes f32. */
 struct u8_serial_angular_kit_t : public u8_serial_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_serial_;
 };
 
-/** @brief u8 Euclidean (L2) distance kit - serial reference. Through writes f32. */
+/** u8 Euclidean (L2) distance kit - serial reference. Through writes f32. */
 struct u8_serial_euclidean_kit_t : public u8_serial_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
@@ -2122,7 +2121,7 @@ struct u8_serial_euclidean_kit_t : public u8_serial_inner_kit_t {
 
 #if NK_TARGET_HASWELL
 
-/** @brief u8 inner-product distance kit - Haswell AVX2. */
+/** u8 inner-product distance kit - Haswell AVX2. */
 struct u8_haswell_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
     using scalar_t = nk::u8_t;
@@ -2143,13 +2142,13 @@ struct u8_haswell_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief u8 angular distance kit - Haswell AVX2. */
+/** u8 angular distance kit - Haswell AVX2. */
 struct u8_haswell_angular_kit_t : public u8_haswell_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
 };
 
-/** @brief u8 Euclidean (L2) distance kit - Haswell AVX2. */
+/** u8 Euclidean (L2) distance kit - Haswell AVX2. */
 struct u8_haswell_euclidean_kit_t : public u8_haswell_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
@@ -2157,7 +2156,8 @@ struct u8_haswell_euclidean_kit_t : public u8_haswell_inner_kit_t {
 #endif // NK_TARGET_HASWELL
 
 #if NK_TARGET_ICELAKE
-/** @brief u8 inner-product distance kit - Intel Ice Lake AVX-512 + VNNI VPDPBUSD. */
+
+/** u8 inner-product distance kit - Intel Ice Lake AVX-512 + VNNI VPDPBUSD. */
 struct u8_icelake_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
     using scalar_t = nk::u8_t;
@@ -2178,13 +2178,13 @@ struct u8_icelake_inner_kit_t {
     static constexpr std::size_t step_dimensions = 64;
 };
 
-/** @brief u8 angular distance kit - Ice Lake VNNI. */
+/** u8 angular distance kit - Ice Lake VNNI. */
 struct u8_icelake_angular_kit_t : public u8_icelake_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
 };
 
-/** @brief u8 Euclidean (L2) distance kit - Ice Lake VNNI. */
+/** u8 Euclidean (L2) distance kit - Ice Lake VNNI. */
 struct u8_icelake_euclidean_kit_t : public u8_icelake_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
@@ -2192,7 +2192,8 @@ struct u8_icelake_euclidean_kit_t : public u8_icelake_inner_kit_t {
 #endif // NK_TARGET_ICELAKE
 
 #if NK_TARGET_ALDER
-/** @brief u8 inner-product distance kit - Intel Alder Lake AVX-VNNI. */
+
+/** u8 inner-product distance kit - Intel Alder Lake AVX-VNNI. */
 struct u8_alder_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_alder_k;
     using scalar_t = nk::u8_t;
@@ -2213,13 +2214,13 @@ struct u8_alder_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief u8 angular distance kit - Alder Lake inner + Haswell through. */
+/** u8 angular distance kit - Alder Lake inner + Haswell through. */
 struct u8_alder_angular_kit_t : public u8_alder_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
 };
 
-/** @brief u8 Euclidean (L2) distance kit - Alder Lake inner + Haswell through. */
+/** u8 Euclidean (L2) distance kit - Alder Lake inner + Haswell through. */
 struct u8_alder_euclidean_kit_t : public u8_alder_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
@@ -2227,7 +2228,8 @@ struct u8_alder_euclidean_kit_t : public u8_alder_inner_kit_t {
 #endif // NK_TARGET_ALDER
 
 #if NK_TARGET_SIERRA
-/** @brief u8 inner-product distance kit - Intel Sierra Forest AVX-VNNI. */
+
+/** u8 inner-product distance kit - Intel Sierra Forest AVX-VNNI. */
 struct u8_sierra_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sierra_k;
     using scalar_t = nk::u8_t;
@@ -2248,13 +2250,13 @@ struct u8_sierra_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief u8 angular distance kit - Sierra Forest inner + Haswell through. */
+/** u8 angular distance kit - Sierra Forest inner + Haswell through. */
 struct u8_sierra_angular_kit_t : public u8_sierra_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
 };
 
-/** @brief u8 Euclidean (L2) distance kit - Sierra Forest inner + Haswell through. */
+/** u8 Euclidean (L2) distance kit - Sierra Forest inner + Haswell through. */
 struct u8_sierra_euclidean_kit_t : public u8_sierra_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
@@ -2263,7 +2265,7 @@ struct u8_sierra_euclidean_kit_t : public u8_sierra_inner_kit_t {
 
 #if NK_TARGET_NEONSDOT
 
-/** @brief u8 inner-product distance kit - Arm UDOT. */
+/** u8 inner-product distance kit - Arm UDOT. */
 struct u8_neonsdot_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
     using scalar_t = nk::u8_t;
@@ -2284,13 +2286,13 @@ struct u8_neonsdot_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief u8 angular distance kit - Arm UDOT. */
+/** u8 angular distance kit - Arm UDOT. */
 struct u8_neonsdot_angular_kit_t : public u8_neonsdot_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_serial_;
 };
 
-/** @brief u8 Euclidean (L2) distance kit - Arm UDOT. */
+/** u8 Euclidean (L2) distance kit - Arm UDOT. */
 struct u8_neonsdot_euclidean_kit_t : public u8_neonsdot_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
@@ -2298,7 +2300,8 @@ struct u8_neonsdot_euclidean_kit_t : public u8_neonsdot_inner_kit_t {
 #endif // NK_TARGET_NEONSDOT
 
 #if NK_TARGET_V128
-/** @brief u8 inner-product distance kit - WebAssembly SIMD128. */
+
+/** u8 inner-product distance kit - WebAssembly SIMD128. */
 struct u8_v128_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128_k;
     using scalar_t = nk::u8_t;
@@ -2319,13 +2322,13 @@ struct u8_v128_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief u8 angular distance kit - WebAssembly SIMD128. */
+/** u8 angular distance kit - WebAssembly SIMD128. */
 struct u8_v128_angular_kit_t : public u8_v128_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_v128_;
 };
 
-/** @brief u8 Euclidean (L2) distance kit - WebAssembly SIMD128. */
+/** u8 Euclidean (L2) distance kit - WebAssembly SIMD128. */
 struct u8_v128_euclidean_kit_t : public u8_v128_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128_;
@@ -2333,7 +2336,8 @@ struct u8_v128_euclidean_kit_t : public u8_v128_inner_kit_t {
 #endif // NK_TARGET_V128
 
 #if NK_TARGET_V128RELAXED
-/** @brief u8 inner-product distance kit - WebAssembly relaxed SIMD. */
+
+/** u8 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct u8_v128relaxed_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
     using scalar_t = nk::u8_t;
@@ -2354,13 +2358,13 @@ struct u8_v128relaxed_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief u8 angular distance kit - WebAssembly relaxed SIMD. */
+/** u8 angular distance kit - WebAssembly relaxed SIMD. */
 struct u8_v128relaxed_angular_kit_t : public u8_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_v128_;
 };
 
-/** @brief u8 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
+/** u8 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
 struct u8_v128relaxed_euclidean_kit_t : public u8_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128_;
@@ -2368,7 +2372,8 @@ struct u8_v128relaxed_euclidean_kit_t : public u8_v128relaxed_inner_kit_t {
 #endif // NK_TARGET_V128RELAXED
 
 #if NK_TARGET_POWERVSX
-/** @brief u8 inner-product distance kit - IBM POWER VSX. */
+
+/** u8 inner-product distance kit - IBM POWER VSX. */
 struct u8_powervsx_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
     using scalar_t = nk::u8_t;
@@ -2389,20 +2394,20 @@ struct u8_powervsx_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief u8 angular distance kit - IBM POWER VSX. */
+/** u8 angular distance kit - IBM POWER VSX. */
 struct u8_powervsx_angular_kit_t : public u8_powervsx_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_powervsx_;
 };
 
-/** @brief u8 Euclidean (L2) distance kit - IBM POWER VSX. */
+/** u8 Euclidean (L2) distance kit - IBM POWER VSX. */
 struct u8_powervsx_euclidean_kit_t : public u8_powervsx_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_powervsx_;
 };
 #endif // NK_TARGET_POWERVSX
 
-/** @brief i8 inner-product distance kit - serial reference. */
+/** i8 inner-product distance kit - serial reference. */
 struct i8_serial_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
     using scalar_t = nk::i8_t;
@@ -2423,20 +2428,21 @@ struct i8_serial_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief i8 angular distance kit - serial reference. Through writes f32. */
+/** i8 angular distance kit - serial reference. Through writes f32. */
 struct i8_serial_angular_kit_t : public i8_serial_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_serial_;
 };
 
-/** @brief i8 Euclidean (L2) distance kit - serial reference. Through writes f32. */
+/** i8 Euclidean (L2) distance kit - serial reference. Through writes f32. */
 struct i8_serial_euclidean_kit_t : public i8_serial_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
 };
 
 #if NK_TARGET_HASWELL
-/** @brief i8 inner-product distance kit - Intel Haswell AVX2. */
+
+/** i8 inner-product distance kit - Intel Haswell AVX2. */
 struct i8_haswell_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
     using scalar_t = nk::i8_t;
@@ -2457,13 +2463,13 @@ struct i8_haswell_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief i8 angular distance kit - Haswell. */
+/** i8 angular distance kit - Haswell. */
 struct i8_haswell_angular_kit_t : public i8_haswell_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
 };
 
-/** @brief i8 Euclidean (L2) distance kit - Haswell. */
+/** i8 Euclidean (L2) distance kit - Haswell. */
 struct i8_haswell_euclidean_kit_t : public i8_haswell_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
@@ -2471,7 +2477,8 @@ struct i8_haswell_euclidean_kit_t : public i8_haswell_inner_kit_t {
 #endif // NK_TARGET_HASWELL
 
 #if NK_TARGET_ICELAKE
-/** @brief i8 inner-product distance kit - Intel Ice Lake AVX-512 + VNNI VPDPBUSD compensation. */
+
+/** i8 inner-product distance kit - Intel Ice Lake AVX-512 + VNNI VPDPBUSD compensation. */
 struct i8_icelake_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
     using scalar_t = nk::i8_t;
@@ -2492,13 +2499,13 @@ struct i8_icelake_inner_kit_t {
     static constexpr std::size_t step_dimensions = 64;
 };
 
-/** @brief i8 angular distance kit - Icelake inner + Haswell through. */
+/** i8 angular distance kit - Icelake inner + Haswell through. */
 struct i8_icelake_angular_kit_t : public i8_icelake_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
 };
 
-/** @brief i8 Euclidean (L2) distance kit - Icelake inner + Haswell through. */
+/** i8 Euclidean (L2) distance kit - Icelake inner + Haswell through. */
 struct i8_icelake_euclidean_kit_t : public i8_icelake_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
@@ -2506,11 +2513,10 @@ struct i8_icelake_euclidean_kit_t : public i8_icelake_inner_kit_t {
 #endif // NK_TARGET_ICELAKE
 
 #if NK_TARGET_ALDER
-/**
- *  @brief i8 inner-product distance kit - Intel Alder Lake AVX-VNNI. NumKong has no
- *         signed-i8 moments kernel for this tier, so the norms come from the AVX2 one,
- *         which Alder Lake also implements.
- */
+
+/** i8 inner-product distance kit - Intel Alder Lake AVX-VNNI. NumKong has no
+ *  signed-i8 moments kernel for this tier, so the norms come from the AVX2 one,
+ *  which Alder Lake also implements. */
 struct i8_alder_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_alder_k;
     using scalar_t = nk::i8_t;
@@ -2531,13 +2537,13 @@ struct i8_alder_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief i8 angular distance kit - Alder Lake inner + Haswell through. */
+/** i8 angular distance kit - Alder Lake inner + Haswell through. */
 struct i8_alder_angular_kit_t : public i8_alder_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
 };
 
-/** @brief i8 Euclidean (L2) distance kit - Alder Lake inner + Haswell through. */
+/** i8 Euclidean (L2) distance kit - Alder Lake inner + Haswell through. */
 struct i8_alder_euclidean_kit_t : public i8_alder_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
@@ -2545,7 +2551,8 @@ struct i8_alder_euclidean_kit_t : public i8_alder_inner_kit_t {
 #endif // NK_TARGET_ALDER
 
 #if NK_TARGET_SIERRA
-/** @brief i8 inner-product distance kit - Intel Sierra Forest AVX-VNNI. */
+
+/** i8 inner-product distance kit - Intel Sierra Forest AVX-VNNI. */
 struct i8_sierra_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sierra_k;
     using scalar_t = nk::i8_t;
@@ -2566,13 +2573,13 @@ struct i8_sierra_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief i8 angular distance kit - Sierra Forest inner + Haswell through. */
+/** i8 angular distance kit - Sierra Forest inner + Haswell through. */
 struct i8_sierra_angular_kit_t : public i8_sierra_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
 };
 
-/** @brief i8 Euclidean (L2) distance kit - Sierra Forest inner + Haswell through. */
+/** i8 Euclidean (L2) distance kit - Sierra Forest inner + Haswell through. */
 struct i8_sierra_euclidean_kit_t : public i8_sierra_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
@@ -2581,7 +2588,7 @@ struct i8_sierra_euclidean_kit_t : public i8_sierra_inner_kit_t {
 
 #if NK_TARGET_NEONSDOT
 
-/** @brief i8 inner-product distance kit - Arm SDOT. */
+/** i8 inner-product distance kit - Arm SDOT. */
 struct i8_neonsdot_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
     using scalar_t = nk::i8_t;
@@ -2602,13 +2609,13 @@ struct i8_neonsdot_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief i8 angular distance kit - Arm SDOT. */
+/** i8 angular distance kit - Arm SDOT. */
 struct i8_neonsdot_angular_kit_t : public i8_neonsdot_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_serial_;
 };
 
-/** @brief i8 Euclidean (L2) distance kit - Arm SDOT. */
+/** i8 Euclidean (L2) distance kit - Arm SDOT. */
 struct i8_neonsdot_euclidean_kit_t : public i8_neonsdot_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
@@ -2616,7 +2623,8 @@ struct i8_neonsdot_euclidean_kit_t : public i8_neonsdot_inner_kit_t {
 #endif // NK_TARGET_NEONSDOT
 
 #if NK_TARGET_V128
-/** @brief i8 inner-product distance kit - WebAssembly SIMD128. */
+
+/** i8 inner-product distance kit - WebAssembly SIMD128. */
 struct i8_v128_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128_k;
     using scalar_t = nk::i8_t;
@@ -2637,13 +2645,13 @@ struct i8_v128_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief i8 angular distance kit - WebAssembly SIMD128. */
+/** i8 angular distance kit - WebAssembly SIMD128. */
 struct i8_v128_angular_kit_t : public i8_v128_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_v128_;
 };
 
-/** @brief i8 Euclidean (L2) distance kit - WebAssembly SIMD128. */
+/** i8 Euclidean (L2) distance kit - WebAssembly SIMD128. */
 struct i8_v128_euclidean_kit_t : public i8_v128_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128_;
@@ -2651,7 +2659,8 @@ struct i8_v128_euclidean_kit_t : public i8_v128_inner_kit_t {
 #endif // NK_TARGET_V128
 
 #if NK_TARGET_V128RELAXED
-/** @brief i8 inner-product distance kit - WebAssembly relaxed SIMD. */
+
+/** i8 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct i8_v128relaxed_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
     using scalar_t = nk::i8_t;
@@ -2672,13 +2681,13 @@ struct i8_v128relaxed_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief i8 angular distance kit - WebAssembly relaxed SIMD. */
+/** i8 angular distance kit - WebAssembly relaxed SIMD. */
 struct i8_v128relaxed_angular_kit_t : public i8_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_v128_;
 };
 
-/** @brief i8 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
+/** i8 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
 struct i8_v128relaxed_euclidean_kit_t : public i8_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128_;
@@ -2686,7 +2695,8 @@ struct i8_v128relaxed_euclidean_kit_t : public i8_v128relaxed_inner_kit_t {
 #endif // NK_TARGET_V128RELAXED
 
 #if NK_TARGET_POWERVSX
-/** @brief i8 inner-product distance kit - IBM POWER VSX. */
+
+/** i8 inner-product distance kit - IBM POWER VSX. */
 struct i8_powervsx_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
     using scalar_t = nk::i8_t;
@@ -2707,24 +2717,22 @@ struct i8_powervsx_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief i8 angular distance kit - IBM POWER VSX. */
+/** i8 angular distance kit - IBM POWER VSX. */
 struct i8_powervsx_angular_kit_t : public i8_powervsx_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_powervsx_;
 };
 
-/** @brief i8 Euclidean (L2) distance kit - IBM POWER VSX. */
+/** i8 Euclidean (L2) distance kit - IBM POWER VSX. */
 struct i8_powervsx_euclidean_kit_t : public i8_powervsx_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_powervsx_;
 };
 #endif // NK_TARGET_POWERVSX
 
-/**
- *  @brief u4x2 inner-product distance kit - serial reference. Two unsigned nibbles per
- *         byte, so a step of 16 dimensions rides in a 64-bit vec. The dot lanes land in
- *         @c i32 like every other integral kit, even though @c dot_result_t is unsigned.
- */
+/** u4x2 inner-product distance kit - serial reference. Two unsigned nibbles per
+ *  byte, so a step of 16 dimensions rides in a 64-bit vec. The dot lanes land in
+ *  @c i32 like every other integral kit, even though @c dot_result_t is unsigned. */
 struct u4x2_serial_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
     using scalar_t = nk::u4x2_t;
@@ -2745,20 +2753,21 @@ struct u4x2_serial_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief u4x2 angular distance kit - serial reference. Through writes f32. */
+/** u4x2 angular distance kit - serial reference. Through writes f32. */
 struct u4x2_serial_angular_kit_t : public u4x2_serial_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_serial_;
 };
 
-/** @brief u4x2 Euclidean (L2) distance kit - serial reference. Through writes f32. */
+/** u4x2 Euclidean (L2) distance kit - serial reference. Through writes f32. */
 struct u4x2_serial_euclidean_kit_t : public u4x2_serial_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
 };
 
 #if NK_TARGET_HASWELL
-/** @brief u4x2 inner-product distance kit - Intel Haswell AVX2. */
+
+/** u4x2 inner-product distance kit - Intel Haswell AVX2. */
 struct u4x2_haswell_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
     using scalar_t = nk::u4x2_t;
@@ -2779,13 +2788,13 @@ struct u4x2_haswell_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief u4x2 angular distance kit - Intel Haswell AVX2. */
+/** u4x2 angular distance kit - Intel Haswell AVX2. */
 struct u4x2_haswell_angular_kit_t : public u4x2_haswell_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
 };
 
-/** @brief u4x2 Euclidean (L2) distance kit - Intel Haswell AVX2. */
+/** u4x2 Euclidean (L2) distance kit - Intel Haswell AVX2. */
 struct u4x2_haswell_euclidean_kit_t : public u4x2_haswell_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
@@ -2793,7 +2802,8 @@ struct u4x2_haswell_euclidean_kit_t : public u4x2_haswell_inner_kit_t {
 #endif // NK_TARGET_HASWELL
 
 #if NK_TARGET_ICELAKE
-/** @brief u4x2 inner-product distance kit - Ice Lake VNNI. */
+
+/** u4x2 inner-product distance kit - Ice Lake VNNI. */
 struct u4x2_icelake_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
     using scalar_t = nk::u4x2_t;
@@ -2814,13 +2824,13 @@ struct u4x2_icelake_inner_kit_t {
     static constexpr std::size_t step_dimensions = 128;
 };
 
-/** @brief u4x2 angular distance kit - Icelake inner + Haswell through. */
+/** u4x2 angular distance kit - Icelake inner + Haswell through. */
 struct u4x2_icelake_angular_kit_t : public u4x2_icelake_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
 };
 
-/** @brief u4x2 Euclidean (L2) distance kit - Icelake inner + Haswell through. */
+/** u4x2 Euclidean (L2) distance kit - Icelake inner + Haswell through. */
 struct u4x2_icelake_euclidean_kit_t : public u4x2_icelake_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
@@ -2828,7 +2838,8 @@ struct u4x2_icelake_euclidean_kit_t : public u4x2_icelake_inner_kit_t {
 #endif // NK_TARGET_ICELAKE
 
 #if NK_TARGET_NEONSDOT
-/** @brief u4x2 inner-product distance kit - Arm UDOT. */
+
+/** u4x2 inner-product distance kit - Arm UDOT. */
 struct u4x2_neonsdot_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
     using scalar_t = nk::u4x2_t;
@@ -2849,13 +2860,13 @@ struct u4x2_neonsdot_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief u4x2 angular distance kit - Arm UDOT. */
+/** u4x2 angular distance kit - Arm UDOT. */
 struct u4x2_neonsdot_angular_kit_t : public u4x2_neonsdot_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_serial_;
 };
 
-/** @brief u4x2 Euclidean (L2) distance kit - Arm UDOT. */
+/** u4x2 Euclidean (L2) distance kit - Arm UDOT. */
 struct u4x2_neonsdot_euclidean_kit_t : public u4x2_neonsdot_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
@@ -2863,7 +2874,8 @@ struct u4x2_neonsdot_euclidean_kit_t : public u4x2_neonsdot_inner_kit_t {
 #endif // NK_TARGET_NEONSDOT
 
 #if NK_TARGET_V128RELAXED
-/** @brief u4x2 inner-product distance kit - WebAssembly relaxed SIMD. */
+
+/** u4x2 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct u4x2_v128relaxed_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
     using scalar_t = nk::u4x2_t;
@@ -2884,20 +2896,20 @@ struct u4x2_v128relaxed_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief u4x2 angular distance kit - WebAssembly relaxed SIMD. */
+/** u4x2 angular distance kit - WebAssembly relaxed SIMD. */
 struct u4x2_v128relaxed_angular_kit_t : public u4x2_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_v128_;
 };
 
-/** @brief u4x2 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
+/** u4x2 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
 struct u4x2_v128relaxed_euclidean_kit_t : public u4x2_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128_;
 };
 #endif // NK_TARGET_V128RELAXED
 
-/** @brief i4x2 inner-product distance kit - serial reference. */
+/** i4x2 inner-product distance kit - serial reference. */
 struct i4x2_serial_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
     using scalar_t = nk::i4x2_t;
@@ -2918,25 +2930,22 @@ struct i4x2_serial_inner_kit_t {
     static constexpr std::size_t step_dimensions = 16;
 };
 
-/** @brief i4x2 angular distance kit - serial reference. Through writes f32. */
+/** i4x2 angular distance kit - serial reference. Through writes f32. */
 struct i4x2_serial_angular_kit_t : public i4x2_serial_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_serial_;
 };
 
-/**
- *  @brief i4x2 Euclidean (L2) distance kit - serial reference. The through helper
- *         applies @c sqrt and writes f32, so we override @c distance_lane_t accordingly.
- */
+/** i4x2 Euclidean (L2) distance kit - serial reference. The through helper
+ *  applies @c sqrt and writes f32, so we override @c distance_lane_t accordingly. */
 struct i4x2_serial_euclidean_kit_t : public i4x2_serial_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
 };
 
 #if NK_TARGET_HASWELL
-/**
- *  @brief i4x2 inner-product distance kit - Haswell AVX2.
- */
+
+/** i4x2 inner-product distance kit - Haswell AVX2. */
 struct i4x2_haswell_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
     using scalar_t = nk::i4x2_t;
@@ -2957,16 +2966,14 @@ struct i4x2_haswell_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/**
- *  @brief i4x2 Euclidean (L2) distance kit - Haswell inner + Haswell through. The
- *         through helper applies @c sqrt and writes f32, so override @c distance_lane_t.
- */
+/** i4x2 Euclidean (L2) distance kit - Haswell inner + Haswell through. The
+ *  through helper applies @c sqrt and writes f32, so override @c distance_lane_t. */
 struct i4x2_haswell_euclidean_kit_t : public i4x2_haswell_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
 };
 
-/** @brief i4 angular distance kit - Haswell AVX2. */
+/** i4 angular distance kit - Haswell AVX2. */
 struct i4x2_haswell_angular_kit_t : public i4x2_haswell_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
@@ -2976,7 +2983,7 @@ struct i4x2_haswell_angular_kit_t : public i4x2_haswell_inner_kit_t {
 
 #if NK_TARGET_ICELAKE
 
-/** @brief i4 inner-product distance kit - Ice Lake VNNI. */
+/** i4 inner-product distance kit - Ice Lake VNNI. */
 struct i4x2_icelake_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
     using scalar_t = nk::i4x2_t;
@@ -2997,13 +3004,13 @@ struct i4x2_icelake_inner_kit_t {
     static constexpr std::size_t step_dimensions = 128;
 };
 
-/** @brief i4 angular distance kit - Ice Lake VNNI. */
+/** i4 angular distance kit - Ice Lake VNNI. */
 struct i4x2_icelake_angular_kit_t : public i4x2_icelake_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
 };
 
-/** @brief i4 Euclidean (L2) distance kit - Ice Lake VNNI. */
+/** i4 Euclidean (L2) distance kit - Ice Lake VNNI. */
 struct i4x2_icelake_euclidean_kit_t : public i4x2_icelake_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
@@ -3012,7 +3019,7 @@ struct i4x2_icelake_euclidean_kit_t : public i4x2_icelake_inner_kit_t {
 
 #if NK_TARGET_NEONSDOT
 
-/** @brief i4 inner-product distance kit - Arm SDOT. */
+/** i4 inner-product distance kit - Arm SDOT. */
 struct i4x2_neonsdot_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
     using scalar_t = nk::i4x2_t;
@@ -3033,13 +3040,13 @@ struct i4x2_neonsdot_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief i4 angular distance kit - Arm SDOT. */
+/** i4 angular distance kit - Arm SDOT. */
 struct i4x2_neonsdot_angular_kit_t : public i4x2_neonsdot_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_serial_;
 };
 
-/** @brief i4 Euclidean (L2) distance kit - Arm SDOT. */
+/** i4 Euclidean (L2) distance kit - Arm SDOT. */
 struct i4x2_neonsdot_euclidean_kit_t : public i4x2_neonsdot_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
@@ -3047,10 +3054,9 @@ struct i4x2_neonsdot_euclidean_kit_t : public i4x2_neonsdot_inner_kit_t {
 #endif // NK_TARGET_NEONSDOT
 
 #if NK_TARGET_V128RELAXED
-/**
- *  @brief i4x2 inner-product distance kit - WebAssembly relaxed SIMD. NumKong has no
- *         4-bit moments kernel for this tier, so the norms come from the serial one.
- */
+
+/** i4x2 inner-product distance kit - WebAssembly relaxed SIMD. NumKong has no
+ *  4-bit moments kernel for this tier, so the norms come from the serial one. */
 struct i4x2_v128relaxed_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
     using scalar_t = nk::i4x2_t;
@@ -3071,20 +3077,20 @@ struct i4x2_v128relaxed_inner_kit_t {
     static constexpr std::size_t step_dimensions = 32;
 };
 
-/** @brief i4x2 angular distance kit - WebAssembly relaxed SIMD. */
+/** i4x2 angular distance kit - WebAssembly relaxed SIMD. */
 struct i4x2_v128relaxed_angular_kit_t : public i4x2_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_v128_;
 };
 
-/** @brief i4x2 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
+/** i4x2 Euclidean (L2) distance kit - WebAssembly relaxed SIMD. */
 struct i4x2_v128relaxed_euclidean_kit_t : public i4x2_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128_;
 };
 #endif // NK_TARGET_V128RELAXED
 
-/** @brief u1x8 inner-product distance kit - serial reference (binary AND-popcount). */
+/** u1x8 inner-product distance kit - serial reference (binary AND-popcount). */
 struct u1x8_serial_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
     using scalar_t = nk::u1x8_t;
@@ -3105,20 +3111,21 @@ struct u1x8_serial_inner_kit_t {
     static constexpr std::size_t step_dimensions = 128;
 };
 
-/** @brief u1x8 Hamming distance kit - serial. Through computes @c popA+popB-2*intersection. */
+/** u1x8 Hamming distance kit - serial. Through computes @c popA+popB-2*intersection. */
 struct u1x8_serial_hamming_kit_t : public u1x8_serial_inner_kit_t {
     using distance_lane_t = nk_u32_t;
     static constexpr auto convert_to_distances = nk_hamming_u32x4_from_dot_serial_;
 };
 
-/** @brief u1x8 Jaccard distance kit - serial. Through computes @c 1-intersection/union. */
+/** u1x8 Jaccard distance kit - serial. Through computes @c 1-intersection/union. */
 struct u1x8_serial_jaccard_kit_t : public u1x8_serial_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_jaccard_f32x4_from_dot_serial_;
 };
 
 #if NK_TARGET_HASWELL
-/** @brief u1x8 inner-product distance kit - Intel Haswell AVX2 + POPCNT. */
+
+/** u1x8 inner-product distance kit - Intel Haswell AVX2 + POPCNT. */
 struct u1x8_haswell_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
     using scalar_t = nk::u1x8_t;
@@ -3139,13 +3146,13 @@ struct u1x8_haswell_inner_kit_t {
     static constexpr std::size_t step_dimensions = 128;
 };
 
-/** @brief u1x8 Hamming distance kit - Haswell. */
+/** u1x8 Hamming distance kit - Haswell. */
 struct u1x8_haswell_hamming_kit_t : public u1x8_haswell_inner_kit_t {
     using distance_lane_t = nk_u32_t;
     static constexpr auto convert_to_distances = nk_hamming_u32x4_from_dot_haswell_;
 };
 
-/** @brief u1x8 Jaccard distance kit - Haswell. */
+/** u1x8 Jaccard distance kit - Haswell. */
 struct u1x8_haswell_jaccard_kit_t : public u1x8_haswell_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_jaccard_f32x4_from_dot_haswell_;
@@ -3153,7 +3160,8 @@ struct u1x8_haswell_jaccard_kit_t : public u1x8_haswell_inner_kit_t {
 #endif // NK_TARGET_HASWELL
 
 #if NK_TARGET_ICELAKE
-/** @brief u1x8 inner-product distance kit - Intel Ice Lake AVX-512 + VPOPCNTQ. */
+
+/** u1x8 inner-product distance kit - Intel Ice Lake AVX-512 + VPOPCNTQ. */
 struct u1x8_icelake_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
     using scalar_t = nk::u1x8_t;
@@ -3174,13 +3182,13 @@ struct u1x8_icelake_inner_kit_t {
     static constexpr std::size_t step_dimensions = 512;
 };
 
-/** @brief u1x8 Hamming distance kit - Icelake inner + Icelake through. */
+/** u1x8 Hamming distance kit - Icelake inner + Icelake through. */
 struct u1x8_icelake_hamming_kit_t : public u1x8_icelake_inner_kit_t {
     using distance_lane_t = nk_u32_t;
     static constexpr auto convert_to_distances = nk_hamming_u32x4_from_dot_icelake_;
 };
 
-/** @brief u1x8 Jaccard distance kit - Icelake inner + Icelake through. */
+/** u1x8 Jaccard distance kit - Icelake inner + Icelake through. */
 struct u1x8_icelake_jaccard_kit_t : public u1x8_icelake_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_jaccard_f32x4_from_dot_icelake_;
@@ -3188,7 +3196,8 @@ struct u1x8_icelake_jaccard_kit_t : public u1x8_icelake_inner_kit_t {
 #endif // NK_TARGET_ICELAKE
 
 #if NK_TARGET_NEON
-/** @brief u1x8 inner-product distance kit - Arm NEON (binary AND-popcount). */
+
+/** u1x8 inner-product distance kit - Arm NEON (binary AND-popcount). */
 struct u1x8_neon_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
     using scalar_t = nk::u1x8_t;
@@ -3209,13 +3218,13 @@ struct u1x8_neon_inner_kit_t {
     static constexpr std::size_t step_dimensions = 128;
 };
 
-/** @brief u1x8 Hamming distance kit - Arm NEON. */
+/** u1x8 Hamming distance kit - Arm NEON. */
 struct u1x8_neon_hamming_kit_t : public u1x8_neon_inner_kit_t {
     using distance_lane_t = nk_u32_t;
     static constexpr auto convert_to_distances = nk_hamming_u32x4_from_dot_neon_;
 };
 
-/** @brief u1x8 Jaccard distance kit - Arm NEON. */
+/** u1x8 Jaccard distance kit - Arm NEON. */
 struct u1x8_neon_jaccard_kit_t : public u1x8_neon_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_jaccard_f32x4_from_dot_neon_;
@@ -3223,10 +3232,9 @@ struct u1x8_neon_jaccard_kit_t : public u1x8_neon_inner_kit_t {
 #endif // NK_TARGET_NEON
 
 #if NK_TARGET_V128
-/**
- *  @brief u1x8 inner-product distance kit - WebAssembly SIMD128. NumKong has no
- *         binary moments kernel for this tier, so the norms come from the serial one.
- */
+
+/** u1x8 inner-product distance kit - WebAssembly SIMD128. NumKong has no
+ *  binary moments kernel for this tier, so the norms come from the serial one. */
 struct u1x8_v128_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128_k;
     using scalar_t = nk::u1x8_t;
@@ -3247,13 +3255,13 @@ struct u1x8_v128_inner_kit_t {
     static constexpr std::size_t step_dimensions = 128;
 };
 
-/** @brief u1x8 Hamming distance kit - WebAssembly SIMD128. */
+/** u1x8 Hamming distance kit - WebAssembly SIMD128. */
 struct u1x8_v128_hamming_kit_t : public u1x8_v128_inner_kit_t {
     using distance_lane_t = nk_u32_t;
     static constexpr auto convert_to_distances = nk_hamming_u32x4_from_dot_v128_;
 };
 
-/** @brief u1x8 Jaccard distance kit - WebAssembly SIMD128. */
+/** u1x8 Jaccard distance kit - WebAssembly SIMD128. */
 struct u1x8_v128_jaccard_kit_t : public u1x8_v128_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_jaccard_f32x4_from_dot_v128_;
@@ -3261,10 +3269,9 @@ struct u1x8_v128_jaccard_kit_t : public u1x8_v128_inner_kit_t {
 #endif // NK_TARGET_V128
 
 #if NK_TARGET_POWERVSX
-/**
- *  @brief u1x8 inner-product distance kit - IBM POWER VSX. NumKong has no binary moments
- *         kernel for this tier, so the norms come from the serial one.
- */
+
+/** u1x8 inner-product distance kit - IBM POWER VSX. NumKong has no binary moments
+ *  kernel for this tier, so the norms come from the serial one. */
 struct u1x8_powervsx_inner_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
     using scalar_t = nk::u1x8_t;
@@ -3285,13 +3292,13 @@ struct u1x8_powervsx_inner_kit_t {
     static constexpr std::size_t step_dimensions = 128;
 };
 
-/** @brief u1x8 Hamming distance kit - IBM POWER VSX. */
+/** u1x8 Hamming distance kit - IBM POWER VSX. */
 struct u1x8_powervsx_hamming_kit_t : public u1x8_powervsx_inner_kit_t {
     using distance_lane_t = nk_u32_t;
     static constexpr auto convert_to_distances = nk_hamming_u32x4_from_dot_powervsx_;
 };
 
-/** @brief u1x8 Jaccard distance kit - IBM POWER VSX. */
+/** u1x8 Jaccard distance kit - IBM POWER VSX. */
 struct u1x8_powervsx_jaccard_kit_t : public u1x8_powervsx_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_jaccard_f32x4_from_dot_powervsx_;
@@ -3328,8 +3335,8 @@ struct first_available_kit<fallback_, head_, tail_...> {
                                     typename first_available_kit<fallback_, tail_...>::type>;
 };
 
-/** @brief The visited set's kit for one capability ceiling: the Skylake group scan where the
- *      class carries AVX-512, the serial walk otherwise. */
+/** The visited set's kit for one capability ceiling: the Skylake group scan where the
+ *  class carries AVX-512, the serial walk otherwise. */
 template <nk_capability_t caps_>
 struct dense_visits_hash_set_chain {
     using kit_t = typename first_available_kit<                                                              //
@@ -3338,11 +3345,9 @@ struct dense_visits_hash_set_chain {
         >::type;
 };
 
-/**
- *  @brief Capability cascase for every @c (kernel,scalar) combination. Reading order is the
+/** Capability cascase for every @c (kernel,scalar) combination. Reading order is the
  *  priority order; the first row whose @c available flag is true wins, else the fallback is selected.
- *  Most Eucldiean and Angular distances derive from the same "dot" parent kit.
- */
+ *  Most Eucldiean and Angular distances derive from the same "dot" parent kit. */
 template <nk_kernel_kind_t kernel_, nk::numeric_dtype scalar_, nk_capability_t caps_>
 struct dense_quads_chain;
 
@@ -3359,7 +3364,8 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::bf16_t, caps_> {
         chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, bf16_v128_inner_kit_t>,                      //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, bf16_powervsx_inner_kit_t>           //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3376,7 +3382,8 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::bf16_t, caps_> {
         chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, bf16_v128_angular_kit_t>,                      //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, bf16_powervsx_angular_kit_t>           //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3393,7 +3400,8 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::bf16_t, caps_> {
         chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, bf16_v128_euclidean_kit_t>,                      //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, bf16_powervsx_euclidean_kit_t>           //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3408,7 +3416,8 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::f16_t, caps_> {
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, f16_v128relaxed_inner_kit_t>, //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, f16_powervsx_inner_kit_t>           //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3423,7 +3432,8 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::f16_t, caps_> {
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, f16_v128relaxed_angular_kit_t>, //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, f16_powervsx_angular_kit_t>           //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3438,7 +3448,8 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::f16_t, caps_> {
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, f16_v128relaxed_euclidean_kit_t>, //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, f16_powervsx_euclidean_kit_t>           //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3454,7 +3465,8 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::e5m2_t, caps_> {
         chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e5m2_neonfhm_inner_kit_t>,            //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e5m2_v128relaxed_inner_kit_t> //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3470,7 +3482,8 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::e5m2_t, caps_> {
         chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e5m2_neonfhm_angular_kit_t>,            //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e5m2_v128relaxed_angular_kit_t> //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3486,7 +3499,8 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::e5m2_t, caps_> {
         chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e5m2_neonfhm_euclidean_kit_t>,            //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e5m2_v128relaxed_euclidean_kit_t> //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3502,7 +3516,8 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::e4m3_t, caps_> {
         chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e4m3_neonfhm_inner_kit_t>,            //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e4m3_v128relaxed_inner_kit_t> //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3518,7 +3533,8 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::e4m3_t, caps_> {
         chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e4m3_neonfhm_angular_kit_t>,            //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e4m3_v128relaxed_angular_kit_t> //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3534,7 +3550,8 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::e4m3_t, caps_> {
         chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e4m3_neonfhm_euclidean_kit_t>,            //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e4m3_v128relaxed_euclidean_kit_t> //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3548,7 +3565,8 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::e3m2_t, caps_> {
         chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e3m2_neonsdot_inner_kit_t>,         //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e3m2_v128relaxed_inner_kit_t> //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3562,7 +3580,8 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::e3m2_t, caps_> {
         chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e3m2_neonsdot_angular_kit_t>,         //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e3m2_v128relaxed_angular_kit_t> //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3576,7 +3595,8 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::e3m2_t, caps_> {
         chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e3m2_neonsdot_euclidean_kit_t>,         //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e3m2_v128relaxed_euclidean_kit_t> //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3592,7 +3612,8 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::e2m3_t, caps_> {
         chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e2m3_neonsdot_inner_kit_t>,         //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e2m3_v128relaxed_inner_kit_t> //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3608,7 +3629,8 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::e2m3_t, caps_> {
         chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e2m3_neonsdot_angular_kit_t>,         //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e2m3_v128relaxed_angular_kit_t> //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3624,7 +3646,8 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::e2m3_t, caps_> {
         chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e2m3_neonsdot_euclidean_kit_t>,         //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e2m3_v128relaxed_euclidean_kit_t> //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3641,7 +3664,8 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::i8_t, caps_> {
         chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, i8_v128_inner_kit_t>,                      //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, i8_powervsx_inner_kit_t>           //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3658,7 +3682,8 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::i8_t, caps_> {
         chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, i8_v128_angular_kit_t>,                      //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, i8_powervsx_angular_kit_t>           //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3675,7 +3700,8 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::i8_t, caps_> {
         chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, i8_v128_euclidean_kit_t>,                      //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, i8_powervsx_euclidean_kit_t>           //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3692,7 +3718,8 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::u8_t, caps_> {
         chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u8_v128_inner_kit_t>,                      //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u8_powervsx_inner_kit_t>           //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3709,7 +3736,8 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::u8_t, caps_> {
         chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u8_v128_angular_kit_t>,                      //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u8_powervsx_angular_kit_t>           //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3726,7 +3754,8 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::u8_t, caps_> {
         chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u8_v128_euclidean_kit_t>,                      //
         chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u8_powervsx_euclidean_kit_t>           //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3739,7 +3768,8 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::u4x2_t, caps_> {
         chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u4x2_neonsdot_inner_kit_t>,         //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u4x2_v128relaxed_inner_kit_t> //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3752,7 +3782,8 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::u4x2_t, caps_> {
         chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u4x2_neonsdot_angular_kit_t>,         //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u4x2_v128relaxed_angular_kit_t> //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3765,7 +3796,8 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::u4x2_t, caps_> {
         chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u4x2_neonsdot_euclidean_kit_t>,         //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u4x2_v128relaxed_euclidean_kit_t> //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3778,7 +3810,8 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::i4x2_t, caps_> {
         chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i4x2_neonsdot_inner_kit_t>,         //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i4x2_v128relaxed_inner_kit_t> //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3791,7 +3824,8 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::i4x2_t, caps_> {
         chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i4x2_neonsdot_angular_kit_t>,         //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i4x2_v128relaxed_angular_kit_t> //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -3804,7 +3838,8 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::i4x2_t, caps_> {
         chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i4x2_neonsdot_euclidean_kit_t>,         //
         chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i4x2_v128relaxed_euclidean_kit_t> //
         >::type;
-    /** @brief The capability bit of the layer that won - compare against the requested ceiling. */
+
+    /** The capability bit of the layer that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -4007,9 +4042,8 @@ template <std::size_t fan_out_, dense_quads_kit kit_>
  *  @brief Compute @c (sum,sumsq) of @p vec via the kit's @c compute_norms.
  *
  *  The capability cascade is the existing @c dense_quads_chain - the dot kernel's kit always
- *  exists when any kernel is wired up for the scalar, so we resolve through @c
- *  dense_quads_chain<nk_kernel_dot_k, scalar, caps>. Replaces the old @c struct @c dense_norms
- *  partial-specialization cascade with a single source of truth (the kit).
+ *  exists when any kernel is wired up for the scalar, so the resolution goes through
+ *  @c dense_quads_chain<nk_kernel_dot_k, scalar, caps> - one source of truth, the kit.
  */
 template <nk_capability_t caps_, nk::numeric_dtype scalar_>
 [[gnu::always_inline]] inline vector_norms<typename scalar_::dot_result_t> dense_norms(
@@ -4018,8 +4052,8 @@ template <nk_capability_t caps_, nk::numeric_dtype scalar_>
     return invoke_dense_norms_(kit_t::compute_norms, vec);
 }
 
-/** @brief The norms worth storing for @p kernel_: computed moments for the finalizes that
- *      read them. The dot sibling below skips the computation entirely. */
+/** The norms worth storing for @p kernel_: computed moments for the finalizes that
+ *  read them. The dot sibling below skips the computation entirely. */
 template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype scalar_>
     requires(kernel_ != nk_kernel_dot_k)
 [[gnu::always_inline]] inline vector_norms<typename scalar_::dot_result_t> dense_norms(
@@ -4027,16 +4061,16 @@ template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype sca
     return dense_norms<caps_, scalar_>(vec);
 }
 
-/** @brief Dot never reads norms: this sibling returns the empty stand-in without touching
- *      the vector, so storing-side callers skip both the compute and the write. */
+/** Dot never reads norms: this sibling returns the empty stand-in without touching
+ *  the vector, so storing-side callers skip both the compute and the write. */
 template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype scalar_>
     requires(kernel_ == nk_kernel_dot_k)
 [[gnu::always_inline]] inline no_norms_t dense_norms(nk::vector_view<scalar_>) noexcept {
     return {};
 }
 
-/** @brief Constrains a norms argument to the two records the kernels understand: the real
- *      moments, or the empty stand-in that widens to zeroed moments via @c moments_of. */
+/** Constrains a norms argument to the two records the kernels understand: the real
+ *  moments, or the empty stand-in that widens to zeroed moments via @c moments_of. */
 template <typename norms_type_, typename scalar_>
 concept norms_argument = std::is_same_v<norms_type_, vector_norms<typename scalar_::dot_result_t>> ||
                          std::is_same_v<norms_type_, no_norms_t>;
@@ -4061,9 +4095,7 @@ template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype sca
     return results[0];
 }
 
-/**
- *  @brief 1-to-4 distances from @c query to four @c candidates under @c kernel_.
- */
+/** 1-to-4 distances from @c query to four @c candidates under @c kernel_. */
 template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype scalar_, typename norms_type_>
     requires norms_argument<norms_type_, scalar_>
 [[gnu::always_inline]] inline std::array<f32_t, 4> distances( //
@@ -4076,8 +4108,8 @@ template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype sca
                                        moments_of<scalar_>(candidates_norms));
 }
 
-/** @brief Empty tile kit: the (kernel, scalar) pair has no matrix-engine backend on this
- *      target, so eager refinement stays unavailable and callers keep the lazy 4-way loops. */
+/** Empty tile kit: the (kernel, scalar) pair has no matrix-engine backend on this
+ *  target, so eager refinement stays unavailable and callers keep the lazy 4-way loops. */
 struct no_tiles_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_serial_k;
 };
@@ -4091,13 +4123,11 @@ struct bf16_sapphireamx_tiles_kit;
 
 #if NK_TARGET_SAPPHIREAMX
 
-/**
- *  @brief u8 tile kit for Sapphire Rapids AMX - the 4-way trio one power-of-two wider:
- *      @c init_tile / @c update_tile / @c finalize_tile over 16×16 accumulator tiles, plus
- *      the gather & pack that feed them. Finalizes through @p finalize_kit_type_ - the very
- *      kit the lazy path picked - so eager & lazy distances agree bit-for-bit. An SME twin
- *      fills the same slots with @c svmopa over ZA tiles, a CUDA twin with @c mma fragments.
- */
+/** u8 tile kit for Sapphire Rapids AMX - the 4-way trio one power-of-two wider:
+ *  @c init_tile / @c update_tile / @c finalize_tile over 16×16 accumulator tiles, plus
+ *  the gather & pack that feed them. Finalizes through @p finalize_kit_type_ - the very
+ *  kit the lazy path picked - so eager & lazy distances agree bit-for-bit. An SME twin
+ *  fills the same slots with @c svmopa over ZA tiles, a CUDA twin with @c mma fragments. */
 template <typename finalize_kit_type_>
 struct u8_sapphireamx_tiles_kit {
     inline static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
@@ -4107,42 +4137,45 @@ struct u8_sapphireamx_tiles_kit {
     using a_tile_t = nk_dots_u8_a16x64_sapphireamx_t;
     using b_tile_t = nk_dots_u8_b64x16_sapphireamx_t;
     using accumulator_tile_t = nk_dots_u8_state_sapphireamx_t;
-    /** @brief Demotes a gathered strip once the Gram has read it for the last time; every target
-     *      compiling this kit carries CLDEMOTE. */
+
+    /** Demotes a gathered strip once the Gram has read it for the last time; every target
+     *  compiling this kit carries CLDEMOTE. */
     using demote_candidate_t = demote_candidate_cldemote_t;
     inline static constexpr std::size_t tile_rows_k = 16;
     inline static constexpr std::size_t tile_columns_k = 16;
     inline static constexpr std::size_t tile_depth_k = 64;
 
-    /** @brief Row tiles covering @p count rows. */
+    /** Row tiles covering @p count rows. */
     static constexpr std::size_t row_tiles(std::size_t count) noexcept { return divide_round_up(count, tile_rows_k); }
-    /** @brief Column tiles covering @p count columns. */
+
+    /** Column tiles covering @p count columns. */
     static constexpr std::size_t column_tiles(std::size_t count) noexcept {
         return divide_round_up(count, tile_columns_k);
     }
-    /** @brief Depth tiles covering @p dimensions. */
+
+    /** Depth tiles covering @p dimensions. */
     static constexpr std::size_t depth_tiles(std::size_t dimensions) noexcept {
         return divide_round_up(dimensions, tile_depth_k);
     }
 
-    /** @brief Bytes of tile scratch one Gram over @p count rows of @p dimensions needs -
-     *      the packed B-tiles plus one row-tile of A-strips - derived from this kit's own
-     *      tile types, so every dtype & engine sizes itself. Includes one alignment margin:
-     *      generic byte allocators promise 16, the tile loads demand 64, and @c scratch_of
-     *      aligns the base up. */
+    /** Bytes of tile scratch one Gram over @p count rows of @p dimensions needs -
+     *  the packed B-tiles plus one row-tile of A-strips - derived from this kit's own
+     *  tile types, so every dtype & engine sizes itself. Includes one alignment margin:
+     *  generic byte allocators promise 16, the tile loads demand 64, and @c scratch_of
+     *  aligns the base up. */
     static constexpr std::size_t scratch_bytes(std::size_t count, std::size_t dimensions) noexcept {
         return row_tiles(count) * depth_tiles(dimensions) * sizeof(b_tile_t) +
                depth_tiles(dimensions) * sizeof(a_tile_t) + alignof(a_tile_t);
     }
 
-    /** @brief The two regions of one Gram's scratch: the packed B-tiles first, the A-strips after. */
+    /** The two regions of one Gram's scratch: the packed B-tiles first, the A-strips after. */
     struct scratch_t {
         b_tile_t* b_tiles;
         a_tile_t* a_tiles;
     };
 
-    /** @brief Lays @p packed_tiles B-tiles and the A-strips after them over @p scratch, from its first
-     *      address on the tiles' own alignment. */
+    /** Lays @p packed_tiles B-tiles and the A-strips after them over @p scratch, from its first
+     *  address on the tiles' own alignment. */
     static scratch_t scratch_of(byte_t* scratch, std::size_t packed_tiles) noexcept {
         std::uintptr_t const base = round_up_to_multiple(reinterpret_cast<std::uintptr_t>(scratch),
                                                          std::uintptr_t {alignof(a_tile_t)});
@@ -4150,13 +4183,13 @@ struct u8_sapphireamx_tiles_kit {
         return {b_tiles, reinterpret_cast<a_tile_t*>(b_tiles + packed_tiles)};
     }
 
-    /** @brief One palette programming per refinement - never per tile. */
+    /** One palette programming per refinement - never per tile. */
     static void configure_tiles() noexcept { nk_amx_tile_configure_sapphireamx_(); }
 
-    /** @brief Gathers one @c tile_depth_k -deep strip of all 16 @p rows - scattered views,
-     *      each touched once per depth sweep: the tile @b is the staging, no contiguous
-     *      matrix ever exists. Row pads repeat valid views, like the 4-way tails; the
-     *      depth tail zero-fills, adding nothing to any dot. */
+    /** Gathers one @c tile_depth_k -deep strip of all 16 @p rows - scattered views,
+     *  each touched once per depth sweep: the tile @b is the staging, no contiguous
+     *  matrix ever exists. Row pads repeat valid views, like the 4-way tails; the
+     *  depth tail zero-fills, adding nothing to any dot. */
     static void gather_a_tile(a_tile_t& a_tile, std::array<nk::vector_view<nk::u8_t>, tile_rows_k> const& rows,
                               std::size_t depth_offset) noexcept {
         std::size_t const remaining = rows[0].size() - depth_offset;
@@ -4168,19 +4201,19 @@ struct u8_sapphireamx_tiles_kit {
         }
     }
 
-    /** @brief The transpose network NumKong packs with: a gathered A-tile becomes its own
-     *      quad-interleaved B-tile - the Gram symmetry in one call. */
+    /** The transpose network NumKong packs with: a gathered A-tile becomes its own
+     *  quad-interleaved B-tile - the Gram symmetry in one call. */
     static void pack_b_tile(a_tile_t const& a_tile, b_tile_t& b_tile) noexcept {
         nk_dots_pack_u8_transposed_sapphireamx_(&a_tile, &b_tile);
     }
 
-    /** @brief Zeroes the accumulator ahead of a depth walk. */
+    /** Zeroes the accumulator ahead of a depth walk. */
     static void init_tile(accumulator_tile_t& tile) noexcept { nk_dots_u8_init_sapphireamx_(&tile); }
 
-    /** @brief tile += A × B for one depth step - @c TDPBUUD here. Deliberately single-step:
-     *      callers interleave the next tile's gather & pack between updates, hiding fetch
-     *      latency behind the matrix op - progressive fetching outweighs the accumulator's
-     *      per-step round-trip through memory. */
+    /** tile += A × B for one depth step - @c TDPBUUD here. Deliberately single-step:
+     *  callers interleave the next tile's gather & pack between updates, hiding fetch
+     *  latency behind the matrix op - progressive fetching outweighs the accumulator's
+     *  per-step round-trip through memory. */
     static void update_tile(accumulator_tile_t& tile, a_tile_t const& a_tile, b_tile_t const& b_tile) noexcept {
         nk_compiler_barrier_sapphireamx_();
         _tile_loadd(0, tile.data, 64);
@@ -4191,9 +4224,9 @@ struct u8_sapphireamx_tiles_kit {
         nk_compiler_barrier_sapphireamx_();
     }
 
-    /** @brief Distances through the stored norms for all 16×16 lanes: 4-lane groups through
-     *      the finalize kit's own @c convert_to_distances - the epilogue of
-     *      @c invoke_distances_, tiled. Pad lanes finalize too and are simply never read. */
+    /** Distances through the stored norms for all 16×16 lanes: 4-lane groups through
+     *  the finalize kit's own @c convert_to_distances - the epilogue of
+     *  @c invoke_distances_, tiled. Pad lanes finalize too and are simply never read. */
     static void finalize_tile(accumulator_tile_t const& tile, std::array<norms_t, tile_rows_k> const& a_norms,
                               std::array<norms_t, tile_columns_k> const& b_norms, f32_t* distances,
                               std::size_t stride) noexcept {
@@ -4214,12 +4247,10 @@ struct u8_sapphireamx_tiles_kit {
     }
 };
 
-/**
- *  @brief i8 tile kit for Sapphire Rapids AMX - the signed twin of the u8 kit, @c TDPBSSD
- *      over the same 16×64 strips and 16×16 accumulator tiles. Finalizes through
- *      @p finalize_kit_type_ - the very kit the lazy path picked - so eager & lazy distances
- *      agree bit-for-bit.
- */
+/** i8 tile kit for Sapphire Rapids AMX - the signed twin of the u8 kit, @c TDPBSSD
+ *  over the same 16×64 strips and 16×16 accumulator tiles. Finalizes through
+ *  @p finalize_kit_type_ - the very kit the lazy path picked - so eager & lazy distances
+ *  agree bit-for-bit. */
 template <typename finalize_kit_type_>
 struct i8_sapphireamx_tiles_kit {
     inline static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
@@ -4229,42 +4260,45 @@ struct i8_sapphireamx_tiles_kit {
     using a_tile_t = nk_dots_i8_a16x64_sapphireamx_t;
     using b_tile_t = nk_dots_i8_b64x16_sapphireamx_t;
     using accumulator_tile_t = nk_dots_i8_state_sapphireamx_t;
-    /** @brief Demotes a gathered strip once the Gram has read it for the last time; every target
-     *      compiling this kit carries CLDEMOTE. */
+
+    /** Demotes a gathered strip once the Gram has read it for the last time; every target
+     *  compiling this kit carries CLDEMOTE. */
     using demote_candidate_t = demote_candidate_cldemote_t;
     inline static constexpr std::size_t tile_rows_k = 16;
     inline static constexpr std::size_t tile_columns_k = 16;
     inline static constexpr std::size_t tile_depth_k = 64;
 
-    /** @brief Row tiles covering @p count rows. */
+    /** Row tiles covering @p count rows. */
     static constexpr std::size_t row_tiles(std::size_t count) noexcept { return divide_round_up(count, tile_rows_k); }
-    /** @brief Column tiles covering @p count columns. */
+
+    /** Column tiles covering @p count columns. */
     static constexpr std::size_t column_tiles(std::size_t count) noexcept {
         return divide_round_up(count, tile_columns_k);
     }
-    /** @brief Depth tiles covering @p dimensions. */
+
+    /** Depth tiles covering @p dimensions. */
     static constexpr std::size_t depth_tiles(std::size_t dimensions) noexcept {
         return divide_round_up(dimensions, tile_depth_k);
     }
 
-    /** @brief Bytes of tile scratch one Gram over @p count rows of @p dimensions needs -
-     *      the packed B-tiles plus one row-tile of A-strips - derived from this kit's own
-     *      tile types, so every dtype & engine sizes itself. Includes one alignment margin:
-     *      generic byte allocators promise 16, the tile loads demand 64, and @c scratch_of
-     *      aligns the base up. */
+    /** Bytes of tile scratch one Gram over @p count rows of @p dimensions needs -
+     *  the packed B-tiles plus one row-tile of A-strips - derived from this kit's own
+     *  tile types, so every dtype & engine sizes itself. Includes one alignment margin:
+     *  generic byte allocators promise 16, the tile loads demand 64, and @c scratch_of
+     *  aligns the base up. */
     static constexpr std::size_t scratch_bytes(std::size_t count, std::size_t dimensions) noexcept {
         return row_tiles(count) * depth_tiles(dimensions) * sizeof(b_tile_t) +
                depth_tiles(dimensions) * sizeof(a_tile_t) + alignof(a_tile_t);
     }
 
-    /** @brief The two regions of one Gram's scratch: the packed B-tiles first, the A-strips after. */
+    /** The two regions of one Gram's scratch: the packed B-tiles first, the A-strips after. */
     struct scratch_t {
         b_tile_t* b_tiles;
         a_tile_t* a_tiles;
     };
 
-    /** @brief Lays @p packed_tiles B-tiles and the A-strips after them over @p scratch, from its first
-     *      address on the tiles' own alignment. */
+    /** Lays @p packed_tiles B-tiles and the A-strips after them over @p scratch, from its first
+     *  address on the tiles' own alignment. */
     static scratch_t scratch_of(byte_t* scratch, std::size_t packed_tiles) noexcept {
         std::uintptr_t const base = round_up_to_multiple(reinterpret_cast<std::uintptr_t>(scratch),
                                                          std::uintptr_t {alignof(a_tile_t)});
@@ -4272,13 +4306,13 @@ struct i8_sapphireamx_tiles_kit {
         return {b_tiles, reinterpret_cast<a_tile_t*>(b_tiles + packed_tiles)};
     }
 
-    /** @brief One palette programming per refinement - never per tile. */
+    /** One palette programming per refinement - never per tile. */
     static void configure_tiles() noexcept { nk_amx_tile_configure_sapphireamx_(); }
 
-    /** @brief Gathers one @c tile_depth_k -deep strip of all 16 @p rows - scattered views,
-     *      each touched once per depth sweep: the tile @b is the staging, no contiguous
-     *      matrix ever exists. Row pads repeat valid views, like the 4-way tails; the
-     *      depth tail zero-fills, adding nothing to any dot. */
+    /** Gathers one @c tile_depth_k -deep strip of all 16 @p rows - scattered views,
+     *  each touched once per depth sweep: the tile @b is the staging, no contiguous
+     *  matrix ever exists. Row pads repeat valid views, like the 4-way tails; the
+     *  depth tail zero-fills, adding nothing to any dot. */
     static void gather_a_tile(a_tile_t& a_tile, std::array<nk::vector_view<nk::i8_t>, tile_rows_k> const& rows,
                               std::size_t depth_offset) noexcept {
         std::size_t const remaining = rows[0].size() - depth_offset;
@@ -4290,19 +4324,19 @@ struct i8_sapphireamx_tiles_kit {
         }
     }
 
-    /** @brief The transpose network NumKong packs with: a gathered A-tile becomes its own
-     *      quad-interleaved B-tile - the Gram symmetry in one call. */
+    /** The transpose network NumKong packs with: a gathered A-tile becomes its own
+     *  quad-interleaved B-tile - the Gram symmetry in one call. */
     static void pack_b_tile(a_tile_t const& a_tile, b_tile_t& b_tile) noexcept {
         nk_dots_pack_i8_transposed_sapphireamx_(&a_tile, &b_tile);
     }
 
-    /** @brief Zeroes the accumulator ahead of a depth walk. */
+    /** Zeroes the accumulator ahead of a depth walk. */
     static void init_tile(accumulator_tile_t& tile) noexcept { nk_dots_i8_init_sapphireamx_(&tile); }
 
-    /** @brief tile += A × B for one depth step - @c TDPBSSD here. Deliberately single-step:
-     *      callers interleave the next tile's gather & pack between updates, hiding fetch
-     *      latency behind the matrix op - progressive fetching outweighs the accumulator's
-     *      per-step round-trip through memory. */
+    /** tile += A × B for one depth step - @c TDPBSSD here. Deliberately single-step:
+     *  callers interleave the next tile's gather & pack between updates, hiding fetch
+     *  latency behind the matrix op - progressive fetching outweighs the accumulator's
+     *  per-step round-trip through memory. */
     static void update_tile(accumulator_tile_t& tile, a_tile_t const& a_tile, b_tile_t const& b_tile) noexcept {
         nk_compiler_barrier_sapphireamx_();
         _tile_loadd(0, tile.data, 64);
@@ -4313,9 +4347,9 @@ struct i8_sapphireamx_tiles_kit {
         nk_compiler_barrier_sapphireamx_();
     }
 
-    /** @brief Distances through the stored norms for all 16×16 lanes: 4-lane groups through
-     *      the finalize kit's own @c convert_to_distances - the epilogue of
-     *      @c invoke_distances_, tiled. Pad lanes finalize too and are simply never read. */
+    /** Distances through the stored norms for all 16×16 lanes: 4-lane groups through
+     *  the finalize kit's own @c convert_to_distances - the epilogue of
+     *  @c invoke_distances_, tiled. Pad lanes finalize too and are simply never read. */
     static void finalize_tile(accumulator_tile_t const& tile, std::array<norms_t, tile_rows_k> const& a_norms,
                               std::array<norms_t, tile_columns_k> const& b_norms, f32_t* distances,
                               std::size_t stride) noexcept {
@@ -4336,12 +4370,10 @@ struct i8_sapphireamx_tiles_kit {
     }
 };
 
-/**
- *  @brief bf16 tile kit for Sapphire Rapids AMX - @c TDPBF16PS over 16×32 strips, pair-interleaved
- *      B-tiles and f32 accumulator tiles, half the depth of the byte kits per step. Finalizes
- *      through @p finalize_kit_type_ - the very kit the lazy path picked - so eager & lazy
- *      distances agree bit-for-bit.
- */
+/** bf16 tile kit for Sapphire Rapids AMX - @c TDPBF16PS over 16×32 strips, pair-interleaved
+ *  B-tiles and f32 accumulator tiles, half the depth of the byte kits per step. Finalizes
+ *  through @p finalize_kit_type_ - the very kit the lazy path picked - so eager & lazy
+ *  distances agree bit-for-bit. */
 template <typename finalize_kit_type_>
 struct bf16_sapphireamx_tiles_kit {
     inline static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
@@ -4351,42 +4383,45 @@ struct bf16_sapphireamx_tiles_kit {
     using a_tile_t = nk_dots_bf16_a16x32_sapphireamx_t;
     using b_tile_t = nk_dots_bf16_b32x16_sapphireamx_t;
     using accumulator_tile_t = nk_dots_bf16_state_sapphireamx_t;
-    /** @brief Demotes a gathered strip once the Gram has read it for the last time; every target
-     *      compiling this kit carries CLDEMOTE. */
+
+    /** Demotes a gathered strip once the Gram has read it for the last time; every target
+     *  compiling this kit carries CLDEMOTE. */
     using demote_candidate_t = demote_candidate_cldemote_t;
     inline static constexpr std::size_t tile_rows_k = 16;
     inline static constexpr std::size_t tile_columns_k = 16;
     inline static constexpr std::size_t tile_depth_k = 32;
 
-    /** @brief Row tiles covering @p count rows. */
+    /** Row tiles covering @p count rows. */
     static constexpr std::size_t row_tiles(std::size_t count) noexcept { return divide_round_up(count, tile_rows_k); }
-    /** @brief Column tiles covering @p count columns. */
+
+    /** Column tiles covering @p count columns. */
     static constexpr std::size_t column_tiles(std::size_t count) noexcept {
         return divide_round_up(count, tile_columns_k);
     }
-    /** @brief Depth tiles covering @p dimensions. */
+
+    /** Depth tiles covering @p dimensions. */
     static constexpr std::size_t depth_tiles(std::size_t dimensions) noexcept {
         return divide_round_up(dimensions, tile_depth_k);
     }
 
-    /** @brief Bytes of tile scratch one Gram over @p count rows of @p dimensions needs -
-     *      the packed B-tiles plus one row-tile of A-strips - derived from this kit's own
-     *      tile types, so every dtype & engine sizes itself. Includes one alignment margin:
-     *      generic byte allocators promise 16, the tile loads demand 64, and @c scratch_of
-     *      aligns the base up. */
+    /** Bytes of tile scratch one Gram over @p count rows of @p dimensions needs -
+     *  the packed B-tiles plus one row-tile of A-strips - derived from this kit's own
+     *  tile types, so every dtype & engine sizes itself. Includes one alignment margin:
+     *  generic byte allocators promise 16, the tile loads demand 64, and @c scratch_of
+     *  aligns the base up. */
     static constexpr std::size_t scratch_bytes(std::size_t count, std::size_t dimensions) noexcept {
         return row_tiles(count) * depth_tiles(dimensions) * sizeof(b_tile_t) +
                depth_tiles(dimensions) * sizeof(a_tile_t) + alignof(a_tile_t);
     }
 
-    /** @brief The two regions of one Gram's scratch: the packed B-tiles first, the A-strips after. */
+    /** The two regions of one Gram's scratch: the packed B-tiles first, the A-strips after. */
     struct scratch_t {
         b_tile_t* b_tiles;
         a_tile_t* a_tiles;
     };
 
-    /** @brief Lays @p packed_tiles B-tiles and the A-strips after them over @p scratch, from its first
-     *      address on the tiles' own alignment. */
+    /** Lays @p packed_tiles B-tiles and the A-strips after them over @p scratch, from its first
+     *  address on the tiles' own alignment. */
     static scratch_t scratch_of(byte_t* scratch, std::size_t packed_tiles) noexcept {
         std::uintptr_t const base = round_up_to_multiple(reinterpret_cast<std::uintptr_t>(scratch),
                                                          std::uintptr_t {alignof(a_tile_t)});
@@ -4394,13 +4429,13 @@ struct bf16_sapphireamx_tiles_kit {
         return {b_tiles, reinterpret_cast<a_tile_t*>(b_tiles + packed_tiles)};
     }
 
-    /** @brief One palette programming per refinement - never per tile. */
+    /** One palette programming per refinement - never per tile. */
     static void configure_tiles() noexcept { nk_amx_tile_configure_sapphireamx_(); }
 
-    /** @brief Gathers one @c tile_depth_k -deep strip of all 16 @p rows - scattered views,
-     *      each touched once per depth sweep: the tile @b is the staging, no contiguous
-     *      matrix ever exists. Row pads repeat valid views, like the 4-way tails; the
-     *      depth tail zero-fills, adding nothing to any dot. */
+    /** Gathers one @c tile_depth_k -deep strip of all 16 @p rows - scattered views,
+     *  each touched once per depth sweep: the tile @b is the staging, no contiguous
+     *  matrix ever exists. Row pads repeat valid views, like the 4-way tails; the
+     *  depth tail zero-fills, adding nothing to any dot. */
     static void gather_a_tile(a_tile_t& a_tile, std::array<nk::vector_view<nk::bf16_t>, tile_rows_k> const& rows,
                               std::size_t depth_offset) noexcept {
         std::size_t const remaining = rows[0].size() - depth_offset;
@@ -4412,19 +4447,19 @@ struct bf16_sapphireamx_tiles_kit {
         }
     }
 
-    /** @brief The transpose network NumKong packs with: a gathered A-tile becomes its own
-     *      pair-interleaved B-tile - the Gram symmetry in one call. */
+    /** The transpose network NumKong packs with: a gathered A-tile becomes its own
+     *  pair-interleaved B-tile - the Gram symmetry in one call. */
     static void pack_b_tile(a_tile_t const& a_tile, b_tile_t& b_tile) noexcept {
         nk_dots_pack_bf16_transposed_sapphireamx_(&a_tile, &b_tile);
     }
 
-    /** @brief Zeroes the accumulator ahead of a depth walk. */
+    /** Zeroes the accumulator ahead of a depth walk. */
     static void init_tile(accumulator_tile_t& tile) noexcept { nk_dots_bf16_init_sapphireamx_(&tile); }
 
-    /** @brief tile += A × B for one depth step - @c TDPBF16PS here. Deliberately single-step:
-     *      callers interleave the next tile's gather & pack between updates, hiding fetch
-     *      latency behind the matrix op - progressive fetching outweighs the accumulator's
-     *      per-step round-trip through memory. */
+    /** tile += A × B for one depth step - @c TDPBF16PS here. Deliberately single-step:
+     *  callers interleave the next tile's gather & pack between updates, hiding fetch
+     *  latency behind the matrix op - progressive fetching outweighs the accumulator's
+     *  per-step round-trip through memory. */
     static void update_tile(accumulator_tile_t& tile, a_tile_t const& a_tile, b_tile_t const& b_tile) noexcept {
         nk_compiler_barrier_sapphireamx_();
         _tile_loadd(0, tile.data, 64);
@@ -4435,9 +4470,9 @@ struct bf16_sapphireamx_tiles_kit {
         nk_compiler_barrier_sapphireamx_();
     }
 
-    /** @brief Distances through the stored norms for all 16×16 lanes: 4-lane groups through
-     *      the finalize kit's own @c convert_to_distances - the epilogue of
-     *      @c invoke_distances_, tiled. Pad lanes finalize too and are simply never read. */
+    /** Distances through the stored norms for all 16×16 lanes: 4-lane groups through
+     *  the finalize kit's own @c convert_to_distances - the epilogue of
+     *  @c invoke_distances_, tiled. Pad lanes finalize too and are simply never read. */
     static void finalize_tile(accumulator_tile_t const& tile, std::array<norms_t, tile_rows_k> const& a_norms,
                               std::array<norms_t, tile_columns_k> const& b_norms, f32_t* distances,
                               std::size_t stride) noexcept {
@@ -4460,13 +4495,11 @@ struct bf16_sapphireamx_tiles_kit {
 
 #endif // NK_TARGET_SAPPHIREAMX
 
-/**
- *  @brief Tile-kernel capability cascade - a second, independent axis over the same
- *      @p caps_ bitmask as @c dense_quads_chain, so one machine picks icelake for 1-to-1
- *      kernels and sapphireamx for tiles simultaneously. The primary template resolves
- *      to @c no_tiles_kit_t, and only the specialized (kernel, scalar) pairs ever offer
- *      a matrix-engine backend - callers keep their lazy loops everywhere else.
- */
+/** Tile-kernel capability cascade - a second, independent axis over the same
+ *  @p caps_ bitmask as @c dense_quads_chain, so one machine picks icelake for 1-to-1
+ *  kernels and sapphireamx for tiles simultaneously. The primary template resolves
+ *  to @c no_tiles_kit_t, and only the specialized (kernel, scalar) pairs ever offer
+ *  a matrix-engine backend - callers keep their lazy loops everywhere else. */
 template <nk_kernel_kind_t kernel_, nk::numeric_dtype scalar_, nk_capability_t caps_>
 struct dense_tiles_chain {
     using kit_t = no_tiles_kit_t;

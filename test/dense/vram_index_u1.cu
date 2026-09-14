@@ -1,8 +1,8 @@
 /**
- *  @brief Smoke & concurrency tests for the GPU-resident dense index over packed binary cells.
- *  @author Ash Vardanian
  *  @file test/dense/vram_index_u1.cu
+ *  @author Ash Vardanian
  *  @date July 23, 2026
+ *  @brief Smoke & concurrency tests for the GPU-resident dense index over packed binary cells.
  */
 #include "dense/vram_index.cuh"
 

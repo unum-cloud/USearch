@@ -1,11 +1,12 @@
 /**
- *  @brief The CUDA-side suite composer for @c dense_vram_index smoke & concurrency tests,
- *      shared by the per-dtype shards - adapts the harness's host-side allocation ledger
- *      to device memory, so the same live-bytes-must-balance discipline audits the GPU
- *      planes.
- *  @author Ash Vardanian
  *  @file test/dense/vram_index.cuh
+ *  @author Ash Vardanian
  *  @date July 22, 2026
+ *  @brief The CUDA-side suite composer for @c dense_vram_index smoke & concurrency tests, shared by
+ *      the per-dtype shards.
+ *
+ *  Adapts the harness's host-side allocation ledger to device memory, so the same
+ *  live-bytes-must-balance discipline audits the GPU planes.
  */
 #pragma once
 
@@ -16,12 +17,10 @@
 namespace unum {
 namespace usearch {
 
-/**
- *  @brief Ledgered device allocator: the virtual-memory plane backend with every committed
- *      slab tallied into the harness's @c allocation_ledger_t, and a converting constructor
- *      from the harness's host-side @c counting_allocator - so @c make_ledgered_index
- *      constructs the CUDA index unchanged and the ledger provably balances device bytes.
- */
+/** Ledgered device allocator: the virtual-memory plane backend with every committed
+ *  slab tallied into the harness's @c allocation_ledger_t, and a converting constructor
+ *  from the harness's host-side @c counting_allocator - so @c make_ledgered_index
+ *  constructs the CUDA index unchanged and the ledger provably balances device bytes. */
 template <typename value_type_ = std::byte>
 struct counting_cuda_allocator {
     using value_type = value_type_;
@@ -68,12 +67,12 @@ struct counting_cuda_allocator {
     }
 };
 
-/** @brief The byte specialization every CUDA fixture places its index through. */
+/** The byte specialization every CUDA fixture places its index through. */
 using counting_cuda_allocator_t = counting_cuda_allocator<byte_t>;
 
 static_assert(cuda_reservable_allocator<counting_cuda_allocator_t>);
 
-/** @brief Composes one (dtype, kernel) cell's suite over the ledgered device allocator. */
+/** Composes one (dtype, kernel) cell's suite over the ledgered device allocator. */
 template <nk_kernel_kind_t kernel_, nk_dtype_t dtype_ = nk_i8_k>
 std::size_t test_cuda_configuration(char const* name) {
     using allocator_t = counting_cuda_allocator_t;
@@ -100,8 +99,8 @@ std::size_t test_cuda_configuration(char const* name) {
 
 #pragma region Suite Entry Points
 
-/** @brief Per-dtype CUDA suite entries the shard translation units define and the suite's
- *      @c main composes explicitly; each returns its shard's failure count. */
+/** Per-dtype CUDA suite entries the shard translation units define and the suite's
+ *  @c main composes explicitly; each returns its shard's failure count. */
 std::size_t test_dense_index_bf16_cuda();
 std::size_t test_dense_index_f16_cuda();
 std::size_t test_dense_index_i8_cuda();

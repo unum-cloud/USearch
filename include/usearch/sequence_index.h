@@ -1,10 +1,10 @@
 /**
- *  @brief The sequence-modality C interface: similarity search over variable-length
- *      sequences - textual documents, DNA, RNA, and protein strings - under Levenshtein,
- *      Needleman-Wunsch, Smith-Waterman, and Gotoh-affine scoring.
- *
- *  @author Ash Vardanian
  *  @file include/usearch/sequence_index.h
+ *  @author Ash Vardanian
+ *  @date August 14, 2026
+ *  @brief The sequence-modality C interface: similarity search over variable-length sequences -
+ *      textual documents, DNA, RNA, and protein strings - under Levenshtein, Needleman-Wunsch,
+ *      Smith-Waterman, and Gotoh-affine scoring.
  *
  *  Variable-length payloads cannot ride a strided matrix, so every batch input is a
  *  @b tape: one array of @c usearch_bytes_view_t views, each carrying its own base pointer and
@@ -47,11 +47,9 @@ extern "C" {
  */
 USEARCH_EXPORT typedef void* usearch_sequence_index_t;
 
-/**
- *  @brief A consistent snapshot cursor over the index contents. Captures the publication
- *      watermark at creation, so concurrent inserts never appear mid-iteration, and the
- *      walk is a sequential entry scan - export, migration, and visualization feed off it.
- */
+/** A consistent snapshot cursor over the index contents. Captures the publication
+ *  watermark at creation, so concurrent inserts never appear mid-iteration, and the
+ *  walk is a sequential entry scan - export, migration, and visualization feed off it. */
 USEARCH_EXPORT typedef void* usearch_sequence_cursor_t;
 
 /**
@@ -75,6 +73,7 @@ USEARCH_EXPORT typedef void* usearch_sequence_cursor_t;
  */
 USEARCH_EXPORT typedef enum usearch_sequence_metric_t {
     usearch_sequence_metric_unknown_k = 0,
+
     /**
      *  @brief Levenshtein edit distance over raw bytes.
      *
@@ -93,6 +92,7 @@ USEARCH_EXPORT typedef enum usearch_sequence_metric_t {
      *  @endcode
      */
     usearch_sequence_metric_levenshtein_bytes_k = 1,
+
     /**
      *  @brief Levenshtein edit distance over UTF-8 code points.
      *
@@ -100,6 +100,7 @@ USEARCH_EXPORT typedef enum usearch_sequence_metric_t {
      *  character costs one edit instead of the two or three its encoding occupies.
      */
     usearch_sequence_metric_levenshtein_utf8_k = 2,
+
     /**
      *  @brief Global alignment with linear gap costs - Needleman-Wunsch.
      *
@@ -119,6 +120,7 @@ USEARCH_EXPORT typedef enum usearch_sequence_metric_t {
      *  @endcode
      */
     usearch_sequence_metric_needleman_wunsch_k = 3,
+
     /**
      *  @brief Local alignment with affine gap costs - Smith-Waterman-Gotoh. Ranks only.
      *
@@ -134,6 +136,7 @@ USEARCH_EXPORT typedef enum usearch_sequence_metric_t {
      *  @endcode
      */
     usearch_sequence_metric_smith_waterman_gotoh_k = 4,
+
     /**
      *  @brief Global alignment with affine gap costs - Needleman-Wunsch-Gotoh.
      *
@@ -160,6 +163,7 @@ USEARCH_EXPORT typedef enum usearch_sequence_metric_t {
      *  @endcode
      */
     usearch_sequence_metric_needleman_wunsch_gotoh_k = 5,
+
     /**
      *  @brief Local alignment with linear gap costs - Smith-Waterman. Ranks only.
      *
@@ -181,18 +185,20 @@ USEARCH_EXPORT typedef enum usearch_sequence_metric_t {
     usearch_sequence_metric_smith_waterman_k = 6,
 } usearch_sequence_metric_t;
 
-/**
- *  @brief Construction & loading options of a sequence index. The @c residency field tags
- *      which union member is read; zeroed optional fields derive from the geometry.
- */
+/** Construction & loading options of a sequence index. The @c residency field tags
+ *  which union member is read; zeroed optional fields derive from the geometry. */
 USEARCH_EXPORT typedef struct usearch_sequence_options_t {
-    /** @brief The scoring kind; the constructor overload must match its family. */
+
+    /** The scoring kind; the constructor overload must match its family. */
     usearch_sequence_metric_t metric;
-    /** @brief The @b optional connections-per-node bound; zero derives. */
+
+    /** The @b optional connections-per-node bound; zero derives. */
     size_t connectivity;
-    /** @brief Upper bound on entries sharing one key; zero derives to one - unique keys. */
+
+    /** Upper bound on entries sharing one key; zero derives to one - unique keys. */
     size_t values_per_key;
-    /** @brief Selects the active member of the union below, and the meaning of "load". */
+
+    /** Selects the active member of the union below, and the meaning of "load". */
     usearch_residency_t residency;
     union {
         usearch_ram_options_t ram;
@@ -225,9 +231,7 @@ USEARCH_EXPORT usearch_sequence_index_t usearch_sequence_init_weighted( //
     int8_t const* substitution_matrix,                                  //
     int8_t gap_open, int8_t gap_extend, usearch_error_t* error);
 
-/**
- *  @brief Frees the resources associated with the index; cannot fail, so takes no error.
- */
+/** Frees the resources associated with the index; cannot fail, so takes no error. */
 USEARCH_EXPORT void usearch_sequence_free(usearch_sequence_index_t index);
 
 /**
@@ -238,54 +242,55 @@ USEARCH_EXPORT void usearch_sequence_free(usearch_sequence_index_t index);
 USEARCH_EXPORT void usearch_sequence_reserve( //
     usearch_sequence_index_t index, size_t entries, size_t payload_bytes, usearch_error_t* error);
 
-/**
- *  @brief Erases all entries, keeping the reserved capacity.
- */
+/** Erases all entries, keeping the reserved capacity. */
 USEARCH_EXPORT void usearch_sequence_clear(usearch_sequence_index_t index, usearch_error_t* error);
 
-/** @brief Reports the number of stored entries. */
+/** Reports the number of stored entries. */
 USEARCH_EXPORT size_t usearch_sequence_size(usearch_sequence_index_t index, usearch_error_t* error);
-/** @brief Reports the reserved capacity in entries. */
+
+/** Reports the reserved capacity in entries. */
 USEARCH_EXPORT size_t usearch_sequence_capacity(usearch_sequence_index_t index, usearch_error_t* error);
-/** @brief Reports the frozen connections-per-node bound of the graph. */
+
+/** Reports the frozen connections-per-node bound of the graph. */
 USEARCH_EXPORT size_t usearch_sequence_connectivity(usearch_sequence_index_t index, usearch_error_t* error);
-/** @brief Reports the memory usage of the index in bytes, payload arenas included. */
+
+/** Reports the memory usage of the index in bytes, payload arenas included. */
 USEARCH_EXPORT size_t usearch_sequence_memory_usage(usearch_sequence_index_t index, usearch_error_t* error);
-/** @brief Reports the capability codename the index dispatched to on this machine. */
+
+/** Reports the capability codename the index dispatched to on this machine. */
 USEARCH_EXPORT char const* usearch_sequence_capabilities(usearch_sequence_index_t index, usearch_error_t* error);
 
-/**
- *  @brief Optional per-call settings of @c usearch_sequence_add and @c usearch_sequence_refine -
- *      a pure input, never written. Passing @c NULL derives every setting.
- */
+/** Optional per-call settings of @c usearch_sequence_add and @c usearch_sequence_refine -
+ *  a pure input, never written. Passing @c NULL derives every setting. */
 USEARCH_EXPORT typedef struct usearch_sequence_insertion_options_t {
-    /** @brief The @b optional candidate-pool breadth the build walk explores - the @c ef of the
-     *      literature; zero derives. */
+
+    /** The @b optional candidate-pool breadth the build walk explores - the @c ef of the
+     *  literature; zero derives. */
     size_t expansion_factor;
 } usearch_sequence_insertion_options_t;
 
-/**
- *  @brief Optional per-call settings of @c usearch_sequence_search and
- *      @c usearch_sequence_search_if - a pure input, never written. Passing @c NULL derives
- *      every setting.
- */
+/** Optional per-call settings of @c usearch_sequence_search and
+ *  @c usearch_sequence_search_if - a pure input, never written. Passing @c NULL derives
+ *  every setting. */
 USEARCH_EXPORT typedef struct usearch_sequence_search_options_t {
-    /** @brief The @b optional candidate-pool breadth the walk explores - the @c ef of the
-     *      literature; zero derives. */
+
+    /** The @b optional candidate-pool breadth the walk explores - the @c ef of the
+     *  literature; zero derives. */
     size_t expansion_factor;
 } usearch_sequence_search_options_t;
 
-/**
- *  @brief Traversal telemetry, shared by insertion and both search forms - a pure output,
- *      fully overwritten by the call it is passed to. Passing @c NULL skips reporting.
- */
+/** Traversal telemetry, shared by insertion and both search forms - a pure output,
+ *  fully overwritten by the call it is passed to. Passing @c NULL skips reporting. */
 USEARCH_EXPORT typedef struct usearch_sequence_traversal_stats_t {
-    /** @brief Graph members visited while resolving the batch. */
+
+    /** Graph members visited while resolving the batch. */
     size_t visited_members;
-    /** @brief Distances computed while resolving the batch, diversity re-selections included. */
+
+    /** Distances computed while resolving the batch, diversity re-selections included. */
     size_t computed_distances;
-    /** @brief Starvation restarts - re-seedings after the frontier drained prematurely,
-     *      and a graph-connectivity health signal rather than a cost counter. */
+
+    /** Starvation restarts - re-seedings after the frontier drained prematurely,
+     *  and a graph-connectivity health signal rather than a cost counter. */
     size_t restarts;
 } usearch_sequence_traversal_stats_t;
 
@@ -408,13 +413,16 @@ USEARCH_EXPORT void usearch_sequence_search_if(                  //
     usearch_sequence_traversal_stats_t* stats,                   //
     usearch_error_t* error);
 
-/** @brief What one key holds, enough to size a buffer before retrieving any of it. */
+/** What one key holds, enough to size a buffer before retrieving any of it. */
 USEARCH_EXPORT typedef struct usearch_sequence_key_stats_t {
-    /** @brief Entries sharing the key; keys need not be unique. */
+
+    /** Entries sharing the key; keys need not be unique. */
     size_t entries;
-    /** @brief Bytes summed across those entries. */
+
+    /** Bytes summed across those entries. */
     size_t total_bytes;
-    /** @brief Bytes of the longest single entry - the per-entry stride one @c get needs. */
+
+    /** Bytes of the longest single entry - the per-entry stride one @c get needs. */
     size_t largest_bytes;
 } usearch_sequence_key_stats_t;
 
@@ -504,10 +512,10 @@ USEARCH_EXPORT size_t usearch_sequence_cursor_next(             //
     usearch_sequence_cursor_t cursor, usearch_keys_span_t keys, //
     usearch_bytes_view_t* sequences, usearch_error_t* error);
 
-/** @brief Releases the cursor. */
+/** Releases the cursor. */
 USEARCH_EXPORT void usearch_sequence_cursor_free(usearch_sequence_cursor_t cursor);
 
-/** @brief Bytes one monolith takes under the default layout; a manifest's parts sum to about the same. */
+/** Bytes one monolith takes under the default layout; a manifest's parts sum to about the same. */
 USEARCH_EXPORT size_t usearch_sequence_storage_requirements(usearch_sequence_index_t index, usearch_error_t* error);
 
 /**
@@ -552,9 +560,7 @@ USEARCH_EXPORT void usearch_sequence_load(                       //
     usearch_progress_callback_t progress, void* progress_state,  //
     usearch_error_t* error);
 
-/**
- *  @brief Reads a checkpoint's metric & geometry metadata into @p options without loading it.
- */
+/** Reads a checkpoint's metric & geometry metadata into @p options without loading it. */
 USEARCH_EXPORT void usearch_sequence_metadata( //
     usearch_bytes_view_t path, usearch_sequence_options_t* options, usearch_error_t* error);
 

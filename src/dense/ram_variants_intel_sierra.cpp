@@ -1,8 +1,8 @@
 /**
- *  @brief The intel_sierra unit: the AVX2 & AVX-VNNI kits under TPAUSE waits & CMPCCXADD atomics.
- *  @author Ash Vardanian
  *  @file src/dense/ram_variants_intel_sierra.cpp
+ *  @author Ash Vardanian
  *  @date September 7, 2026
+ *  @brief The intel_sierra unit: the AVX2 & AVX-VNNI kits under TPAUSE waits & CMPCCXADD atomics.
  */
 #include "dense_specializations.cuh"
 

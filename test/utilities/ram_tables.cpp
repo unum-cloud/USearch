@@ -1,10 +1,9 @@
 /**
- *  @brief Tests for the @c ram_tables.hpp concurrent multimap - the ceiling, rehash, clear,
- *      and reader-vs-writer paths the index suites never isolate.
- *
- *  @author Ash Vardanian
  *  @file test/utilities/ram_tables.cpp
+ *  @author Ash Vardanian
  *  @date August 26, 2026
+ *  @brief Tests for the @c ram_tables.hpp concurrent multimap - the ceiling, rehash, clear, and
+ *      reader-vs-writer paths the index suites never isolate.
  *
  *  Serial checks define the oracle through @c std::unordered_multimap; the concurrent
  *  checks plant disjoint value ranges whose encoding lets a reader re-derive the key any
@@ -25,7 +24,7 @@
 
 using namespace unum::usearch;
 
-/** @brief Sends every key to one bucket, so probe chains reach their worst case. */
+/** Sends every key to one bucket, so probe chains reach their worst case. */
 struct colliding_hash_t {
     std::size_t operator()(u64_t) const noexcept { return 0; }
 };
@@ -103,8 +102,8 @@ std::size_t check_multimap_ceiling_overflow() noexcept {
     return failures;
 }
 
-/** @brief The retry primitive @c load leans on: a cleared table forgets every entry &
- *      restores the whole ceiling, so a rebuild can never inherit stale duplicates. */
+/** The retry primitive @c load leans on: a cleared table forgets every entry &
+ *  restores the whole ceiling, so a rebuild can never inherit stale duplicates. */
 std::size_t check_multimap_clear_retry() noexcept {
     constexpr std::size_t ceiling_k = 24;
     std::size_t failures = 0;
@@ -128,9 +127,9 @@ std::size_t check_multimap_clear_retry() noexcept {
     return failures;
 }
 
-/** @brief Randomized parity against @c std::unordered_multimap across repeated growth
- *      cycles: every pair ever inserted must stay findable after every rehash, with
- *      matching multiplicities - the grown-into-unreachable audit. */
+/** Randomized parity against @c std::unordered_multimap across repeated growth
+ *  cycles: every pair ever inserted must stay findable after every rehash, with
+ *  matching multiplicities - the grown-into-unreachable audit. */
 std::size_t check_multimap_growth_parity(unsigned seed) noexcept {
     constexpr std::size_t growth_cycles_k = 4;
     constexpr std::size_t inserts_per_cycle_k = 200;
@@ -168,8 +167,8 @@ std::size_t check_multimap_growth_parity(unsigned seed) noexcept {
     return failures;
 }
 
-/** @brief All keys hash into one bucket & the table fills to its ceiling, so this audits the
- *      "load factor at most one half keeps probe chains terminating" claim directly. */
+/** All keys hash into one bucket & the table fills to its ceiling, so this audits the
+ *  "load factor at most one half keeps probe chains terminating" claim directly. */
 std::size_t check_multimap_probe_termination() noexcept {
     constexpr std::size_t ceiling_k = 32;
     std::size_t failures = 0;
@@ -186,8 +185,8 @@ std::size_t check_multimap_probe_termination() noexcept {
     return failures;
 }
 
-/** @brief N lanes insert disjoint value ranges under a shared key alphabet - the CAS-once
- *      claim protocol's only real audit: no lost inserts, no duplicates, exact counts. */
+/** N lanes insert disjoint value ranges under a shared key alphabet - the CAS-once
+ *  claim protocol's only real audit: no lost inserts, no duplicates, exact counts. */
 std::size_t check_multimap_concurrent_insert() noexcept {
     constexpr std::size_t lanes_k = 4;
     constexpr std::size_t inserts_per_lane_k = 512;
@@ -227,9 +226,9 @@ std::size_t check_multimap_concurrent_insert() noexcept {
     return failures;
 }
 
-/** @brief A reader lane probes while writers insert: every observed value must decode to
- *      the key it was filed under - so a building slot can never surface torn - and per-key
- *      counts must be monotone non-decreasing across successive reads. */
+/** A reader lane probes while writers insert: every observed value must decode to
+ *  the key it was filed under - so a building slot can never surface torn - and per-key
+ *  counts must be monotone non-decreasing across successive reads. */
 std::size_t check_multimap_reader_during_writers() noexcept {
     constexpr std::size_t writers_k = 3;
     constexpr std::size_t inserts_per_writer_k = 1024;
@@ -278,7 +277,7 @@ std::size_t check_multimap_reader_during_writers() noexcept {
     return failures;
 }
 
-/** @brief A starved rehash must leave the old table fully intact & retryable. */
+/** A starved rehash must leave the old table fully intact & retryable. */
 std::size_t check_multimap_starved_rehash() noexcept {
     constexpr std::size_t ceiling_k = 16;
     std::size_t failures = 0;

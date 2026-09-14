@@ -1,12 +1,12 @@
 /**
- *  @brief The bioinformatics unit of the basic-index suite: ACGT reads under an
- *      alignment distance with transition/transversion-weighted substitutions - the
- *      non-transparent, integer-exact, wide-id, @c unum::usearch::uuid_t-keyed corner, and the only
- *      unit whose serialized bytes differ from the in-RAM form.
- *
- *  @author Ash Vardanian
  *  @file test/basic/bioinformatics.cpp
+ *  @author Ash Vardanian
  *  @date August 26, 2026
+ *  @brief The bioinformatics unit of the basic-index suite.
+ *
+ *  ACGT reads under an alignment distance with transition/transversion-weighted substitutions - the
+ *  non-transparent, integer-exact, wide-ID, @c unum::usearch::uuid_t-keyed corner, and the only
+ *  unit whose serialized bytes differ from the in-RAM form.
  *
  *  Reads are drawn from planted reference sequences with a few point mutations & indels
  *  each, so alignment distances bimodalize the way real read-vs-reference data does. The
@@ -23,20 +23,20 @@
 
 using namespace unum::usearch;
 
-/** @brief One read: a plain string over the @c ACGT alphabet. */
+/** One read: a plain string over the @c ACGT alphabet. */
 using dna_t = std::string;
 
-/** @brief Substituting within a chemical class - purine ↔ purine, pyrimidine ↔
- *      pyrimidine - is a transition & costs half of a transversion. */
+/** Substituting within a chemical class - purine ↔ purine, pyrimidine ↔
+ *  pyrimidine - is a transition & costs half of a transversion. */
 static u64_t substitution_cost(char first, char second) noexcept {
     if (first == second) return 0;
     auto is_purine = [](char nucleotide) noexcept { return nucleotide == 'A' || nucleotide == 'G'; };
     return is_purine(first) == is_purine(second) ? 1u : 2u;
 }
 
-/** @brief Global alignment distance under the weighted substitutions & unit-gap cost of two -
- *      both the metric's kernel and the scenarios' oracle; the caller owns the rows, so a whole
- *      batch scores without allocating. */
+/** Global alignment distance under the weighted substitutions & unit-gap cost of two -
+ *  both the metric's kernel and the scenarios' oracle; the caller owns the rows, so a whole
+ *  batch scores without allocating. */
 static u64_t alignment_distance(std::string_view first, std::string_view second, std::vector<u64_t>& previous_row,
                                 std::vector<u64_t>& current_row) noexcept {
     constexpr u64_t gap_cost_k = 2;
@@ -55,8 +55,8 @@ static u64_t alignment_distance(std::string_view first, std::string_view second,
     return previous_row[second.size()];
 }
 
-/** @brief The unit's batched metric - deliberately non-transparent: queries must be
- *      stored-form reads, proving the same-type fallback of @c basic_query. */
+/** The unit's batched metric - deliberately non-transparent: queries must be
+ *  stored-form reads, proving the same-type fallback of @c basic_query. */
 struct alignment_metric_t {
     std::string_view query_;
     std::vector<std::string_view> staged_;
@@ -74,9 +74,9 @@ struct alignment_metric_t {
     }
 };
 
-/** @brief Packs nucleotides two bits each behind a @c u32_t base count, so the payload is
- *      about a quarter of the in-RAM form and @c load provably decodes; the count stays,
- *      since padding hides it from the byte length, so the bytes ride as opaque @c u8. */
+/** Packs nucleotides two bits each behind a @c u32_t base count, so the payload is
+ *  about a quarter of the in-RAM form and @c load provably decodes; the count stays,
+ *  since padding hides it from the byte length, so the bytes ride as opaque @c u8. */
 struct packed_dna_codec_t {
     inline static constexpr dtype_t value_dtype_k = dtype_t::u8_k;
 
@@ -122,7 +122,7 @@ struct packed_dna_codec_t {
     }
 };
 
-/** @brief The handmade triple: one transition, one transversion, both cheaper than gaps. */
+/** The handmade triple: one transition, one transversion, both cheaper than gaps. */
 struct bioinformatics_handmade_t {
     std::array<dna_t, 3> values;
     std::array<std::array<u64_t, 3>, 3> distances;
@@ -189,8 +189,8 @@ static_assert(!transparent_metric<alignment_metric_t>);
 static_assert(basic_query<dna_t, alignment_metric_t, dna_t>);
 static_assert(basic_value_codec<packed_dna_codec_t, dna_t>);
 
-/** @brief The codec on its own: a bit-exact pack/unpack roundtrip at every length modulo
- *      four, and a length prefix disagreeing with its slice refused as malformed. */
+/** The codec on its own: a bit-exact pack/unpack roundtrip at every length modulo
+ *  four, and a length prefix disagreeing with its slice refused as malformed. */
 static std::size_t check_bioinformatics_codec() {
     std::size_t failures = 0;
     packed_dna_codec_t const codec;
@@ -210,9 +210,9 @@ static std::size_t check_bioinformatics_codec() {
     return failures;
 }
 
-/** @brief Exhaustive alignment-tree search - enumerates every gap/substitution alignment
- *      instead of running the row DP, so a bug in the unit's shared metric-and-oracle
- *      kernel cannot cancel out. Exponential, so only short prefixes feed it. */
+/** Exhaustive alignment-tree search - enumerates every gap/substitution alignment
+ *  instead of running the row DP, so a bug in the unit's shared metric-and-oracle
+ *  kernel cannot cancel out. Exponential, so only short prefixes feed it. */
 static u64_t exhaustive_alignment_distance(std::string_view first, std::string_view second) noexcept {
     constexpr u64_t gap_cost_k = 2;
     if (first.empty()) return second.size() * gap_cost_k;
@@ -224,8 +224,8 @@ static u64_t exhaustive_alignment_distance(std::string_view first, std::string_v
     return std::min(substituted, std::min(erased, inserted));
 }
 
-/** @brief The independent-oracle audit: sampled read prefixes short enough for the
- *      exhaustive search, plus the handmade triple at full length. */
+/** The independent-oracle audit: sampled read prefixes short enough for the
+ *  exhaustive search, plus the handmade triple at full length. */
 static std::size_t check_bioinformatics_independent_oracle() {
     std::size_t failures = 0;
     std::vector<u64_t> previous_row, current_row;

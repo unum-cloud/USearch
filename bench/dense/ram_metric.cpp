@@ -1,10 +1,9 @@
 /**
+ *  @file bench/dense/ram_metric.cpp
+ *  @author Ash Vardanian
+ *  @date April 23, 2026
  *  @brief Throughput benchmarks for @c dense/ram_metric.hpp distance functions for 1-to-1, 1-to-4,
  *      and tiled kernels against NumKong's monolithic 1-to-1 reference.
- *
- *  @author Ash Vardanian
- *  @file bench/dense/ram_metric.cpp
- *  @date April 23, 2026
  *
  *  Mirrors the structure of @c test/dense_metric.hpp - the @c quads_supported concept
  *  gates each cell so unadapted (kernel, scalar, caps) tuples don't get registered, and
@@ -17,9 +16,10 @@
  *  16×16 tile of distances per iteration - gather, pack, and the depth walk - so the tile
  *  engine's primitive throughput reads next to 256 quads-path distances.
  */
+#include <cstdint>
+
 #include <algorithm>
 #include <array>
-#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -40,24 +40,18 @@ using namespace unum::usearch;
 
 constexpr std::array<std::size_t, 3> dimensions_to_bench = {256, 768, 1536};
 
-/**
- *  @brief True iff @c dense_quads_chain has a specialization for this (kernel, scalar, caps)
- *  tuple - unadapted tuples are skipped at registration time.
- */
+/** True iff @c dense_quads_chain has a specialization for this (kernel, scalar, caps)
+ *  tuple - unadapted tuples are skipped at registration time. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
 concept quads_supported = requires { typename dense_quads_chain<kernel_, scalar_, caps_>::kit_t; };
 
-/**
- *  @brief True iff USearch has any kit for this (kernel, scalar) pair across capability
- *  tiers - serial is the always-available floor, so checking it covers the matrix.
- */
+/** True iff USearch has any kit for this (kernel, scalar) pair across capability
+ *  tiers - serial is the always-available floor, so checking it covers the matrix. */
 template <nk_kernel_kind_t kernel_, typename scalar_>
 concept quads_in_scope = quads_supported<kernel_, scalar_, nk_cap_serial_k>;
 
-/**
- *  @brief Build a scalar from a small unsigned - sub-byte goes through @c sub_byte_ref as
- *  raw @c int8_t, float wrappers via @c from_f32, byte-or-larger ints via the integral ctor.
- */
+/** Build a scalar from a small unsigned - sub-byte goes through @c sub_byte_ref as
+ *  raw @c int8_t, float wrappers via @c from_f32, byte-or-larger ints via the integral ctor. */
 template <typename scalar_>
 static auto make_scalar(unsigned value) noexcept {
     if constexpr (nk::dimensions_per_value<scalar_>() > 1) return static_cast<i8_t>(value);
@@ -65,7 +59,7 @@ static auto make_scalar(unsigned value) noexcept {
     else return scalar_(value);
 }
 
-/** @brief Populates @p vec with cyclic small representable values at @p rotation. */
+/** Populates @p vec with cyclic small representable values at @p rotation. */
 template <typename scalar_>
 static void fill_cyclic(nk::vector_span<scalar_> vec, std::size_t rotation) noexcept {
     constexpr std::array<unsigned, 8> universally_representable_values = {0, 1, 2, 3, 4, 5, 6, 7};
@@ -74,28 +68,24 @@ static void fill_cyclic(nk::vector_span<scalar_> vec, std::size_t rotation) noex
             universally_representable_values[(dimension_index + rotation) % universally_representable_values.size()]);
 }
 
-/**
- *  @brief Round up to the next power of two so we can use a bitmask for cyclic indexing
- *  instead of a slow modulo on every loop iteration.
- */
+/** Round up to the next power of two so we can use a bitmask for cyclic indexing
+ *  instead of a slow modulo on every loop iteration. */
 static std::size_t round_up_pow2(std::size_t value) noexcept {
     std::size_t result = 1;
     while (result < value) result <<= 1;
     return result;
 }
 
-/** @brief Pool footprint target - well above any current x86 L3 (16-128 MiB), so candidate
+/** Pool footprint target - well above any current x86 L3 (16-128 MiB), so candidate
  *  rows stream from RAM rather than cache and the query-load amortization actually matters. */
 constexpr std::size_t candidate_pool_target_bytes_k = 1ull << 28; // 256 MiB
 
-/**
- *  @brief Synthetic L1 working-set noise modelling an HNSW worker's per-iteration touches
+/** Synthetic L1 working-set noise modelling an HNSW worker's per-iteration touches
  *  (neighbor list of @c u32_t IDs, visited bitset, top-K queue). Without this, the
  *  kernel-only microbench has no L1 contestants - the query stays resident and the cache
  *  hints inside the kits (PREFETCHT0 / PREFETCHT2 / CLDEMOTE) have nothing to optimize for.
  *  A pool larger than L1 (32 KiB on most x86) plus a random per-iter pick defeats the HW
- *  prefetcher and forces capacity pressure on the query lines.
- */
+ *  prefetcher and forces capacity pressure on the query lines. */
 struct adjacency_simulator_t {
     using node_id_t = u32_t;
     static constexpr std::size_t bytes_per_node_k = 256; // 4 cache lines / iter
@@ -109,7 +99,7 @@ struct adjacency_simulator_t {
         for (auto& id : pool) id = static_cast<node_id_t>(seed_generator());
     }
 
-    /** @brief Streaming xor over one "node"'s worth of IDs; one DoNotOptimize per call. */
+    /** Streaming xor over one "node"'s worth of IDs; one DoNotOptimize per call. */
     inline void touch(std::size_t random_index) noexcept {
         node_id_t const* node = pool.data() + (random_index & node_index_mask_k) * ids_per_node_k;
         node_id_t accumulator = 0;
@@ -118,19 +108,17 @@ struct adjacency_simulator_t {
     }
 };
 
-/** @brief Owning row-major candidate matrix plus per-row precomputed norms. Two fields only. */
+/** Owning row-major candidate matrix plus per-row precomputed norms. Two fields only. */
 template <typename scalar_>
 struct candidate_pool {
     nk::tensor<scalar_, nk::aligned_allocator<scalar_, 64>, 2> matrix;
     std::vector<vector_norms<typename scalar_::dot_result_t>> norms;
 };
 
-/**
- *  @brief Allocates a candidate matrix sized to overflow L3 and precomputes per-row norms.
+/** Allocates a candidate matrix sized to overflow L3 and precomputes per-row norms.
  *  Row count is rounded up to a power of two so the bench loop can mask instead of modulo.
  *  Each row is populated with a different cyclic rotation so the branch predictor can't
- *  shortcut on identical content; correctness isn't tested here.
- */
+ *  shortcut on identical content; correctness isn't tested here. */
 template <typename scalar_>
 static candidate_pool<scalar_> make_candidate_pool(std::size_t dim) {
     constexpr std::size_t dims_per_value = nk::dimensions_per_value<scalar_>();
@@ -148,11 +136,9 @@ static candidate_pool<scalar_> make_candidate_pool(std::size_t dim) {
     return pool;
 }
 
-/**
- *  @brief Reports per-cell counters - items/sec (distances), bytes/sec (candidate memory
+/** Reports per-cell counters - items/sec (distances), bytes/sec (candidate memory
  *  traffic; query is reused), and gso/s (giga scalar-operations per second; one distance
- *  is approximated as 2*dim multiply-add or bit-op pairs across all five kernels).
- */
+ *  is approximated as 2*dim multiply-add or bit-op pairs across all five kernels). */
 static void set_counters(bm::State& state, std::size_t dim, std::size_t distances_per_iter,
                          std::size_t bytes_loaded_per_iter) noexcept {
     state.SetItemsProcessed(state.iterations() * distances_per_iter);
@@ -162,13 +148,13 @@ static void set_counters(bm::State& state, std::size_t dim, std::size_t distance
                                           bm::Counter::kIs1000);
 }
 
-/** @brief Computes a row's contiguous byte width once per cell (used for bytes_processed). */
+/** Computes a row's contiguous byte width once per cell (used for bytes_processed). */
 template <typename scalar_>
 static constexpr std::size_t row_bytes_of(std::size_t dim) noexcept {
     return (dim / nk::dimensions_per_value<scalar_>()) * sizeof(scalar_);
 }
 
-/** @brief USearch 1-to-1 cell - random row pick per iter so candidates stream from RAM. */
+/** USearch 1-to-1 cell - random row pick per iter so candidates stream from RAM. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
 static void bench_distance(bm::State& state) {
     auto const dim = static_cast<std::size_t>(state.range(0));
@@ -191,7 +177,7 @@ static void bench_distance(bm::State& state) {
     set_counters(state, dim, /*distances_per_iter=*/1, /*bytes_loaded_per_iter=*/row_bytes_of<scalar_>(dim));
 }
 
-/** @brief USearch 1-to-4 cell - four random rows per iter; query is amortized 4x. */
+/** USearch 1-to-4 cell - four random rows per iter; query is amortized 4x. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
 static void bench_distances_quad(bm::State& state) {
     auto const dim = static_cast<std::size_t>(state.range(0));
@@ -221,10 +207,8 @@ static void bench_distances_quad(bm::State& state) {
     set_counters(state, dim, /*distances_per_iter=*/4, /*bytes_loaded_per_iter=*/4 * row_bytes_of<scalar_>(dim));
 }
 
-/**
- *  @brief NumKong monolithic 1-to-1 baseline using the default @c prefer_simd_k - one
- *  candidate per loop iter, randomly picked from the same overflowed pool as the USearch cells.
- */
+/** NumKong monolithic 1-to-1 baseline using the default @c prefer_simd_k - one
+ *  candidate per loop iter, randomly picked from the same overflowed pool as the USearch cells. */
 template <nk_kernel_kind_t kernel_, typename scalar_>
 static void bench_baseline(bm::State& state) {
     auto const dim = static_cast<std::size_t>(state.range(0));
@@ -269,12 +253,12 @@ static void bench_baseline(bm::State& state) {
     set_counters(state, dim, /*distances_per_iter=*/1, /*bytes_loaded_per_iter=*/row_bytes_of<scalar_>(dim));
 }
 
-/** @brief No-op overload picked when the (kernel, scalar, caps) tuple isn't wired up. */
+/** No-op overload picked when the (kernel, scalar, caps) tuple isn't wired up. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
     requires(!quads_supported<kernel_, scalar_, caps_>)
 static void register_quads(std::string_view, std::string_view, std::string_view) noexcept {}
 
-/** @brief Registers the 1-to-1 and 1-to-4 USearch cells for one supported tuple. */
+/** Registers the 1-to-1 and 1-to-4 USearch cells for one supported tuple. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
     requires quads_supported<kernel_, scalar_, caps_>
 static void register_quads(std::string_view kernel_name, std::string_view scalar_name,
@@ -288,15 +272,13 @@ static void register_quads(std::string_view kernel_name, std::string_view scalar
     register_with(&bench_distances_quad<kernel_, scalar_, caps_>, "1to4");
 }
 
-/** @brief No-op overload picked when this (kernel, scalar) pair isn't wired up by USearch. */
+/** No-op overload picked when this (kernel, scalar) pair isn't wired up by USearch. */
 template <nk_kernel_kind_t kernel_, typename scalar_>
     requires(!quads_in_scope<kernel_, scalar_>)
 static void register_baseline(std::string_view, std::string_view) noexcept {}
 
-/**
- *  @brief Registers the NumKong baseline cell for one (kernel, scalar) pair. Caps-agnostic
- *  - NumKong's default @c prefer_simd_k template arg picks the best backend at compile time.
- */
+/** Registers the NumKong baseline cell for one (kernel, scalar) pair. Caps-agnostic
+ *  - NumKong's default @c prefer_simd_k template arg picks the best backend at compile time. */
 template <nk_kernel_kind_t kernel_, typename scalar_>
     requires quads_in_scope<kernel_, scalar_>
 static void register_baseline(std::string_view kernel_name, std::string_view scalar_name) noexcept {
@@ -305,13 +287,13 @@ static void register_baseline(std::string_view kernel_name, std::string_view sca
     for (std::size_t const dim : dimensions_to_bench) registered->Arg(static_cast<i64_t>(dim));
 }
 
-/** @brief True iff a tile engine is compiled for this tuple - the tiles chain always names
- *      a kit, so the gate is its @c has_tiles_k verdict, never the alias's existence. */
+/** True iff a tile engine is compiled for this tuple - the tiles chain always names
+ *  a kit, so the gate is its @c has_tiles_k verdict, never the alias's existence. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
 concept tiles_supported = dense_tiles_chain<kernel_, scalar_, caps_>::has_tiles_k;
 
-/** @brief One 16×16 tile of distances per iteration - gather, pack, and the depth walk - the tile
- *      engine's primitive throughput, comparable against 256 quads-path distances. */
+/** One 16×16 tile of distances per iteration - gather, pack, and the depth walk - the tile
+ *  engine's primitive throughput, comparable against 256 quads-path distances. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
     requires tiles_supported<kernel_, scalar_, caps_>
 static void bench_distances_tile(bm::State& state) {
@@ -350,13 +332,13 @@ static void bench_distances_tile(bm::State& state) {
                  /*bytes_loaded_per_iter=*/rows_k * row_bytes_of<scalar_>(dim));
 }
 
-/** @brief No-op sibling when no tile engine exists for the tuple. */
+/** No-op sibling when no tile engine exists for the tuple. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
     requires(!tiles_supported<kernel_, scalar_, caps_>)
 static void register_tiles(std::string_view, std::string_view, std::string_view) noexcept {}
 
-/** @brief Registers the tile-engine Gram cell for one supported tuple, only where the
- *      machine actually offers the engine - a registered-but-crashing cell helps nobody. */
+/** Registers the tile-engine Gram cell for one supported tuple, only where the
+ *  machine actually offers the engine - a registered-but-crashing cell helps nobody. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
     requires tiles_supported<kernel_, scalar_, caps_>
 static void register_tiles(std::string_view kernel_name, std::string_view scalar_name,
@@ -403,7 +385,7 @@ static void register_scalar(std::string_view scalar_name) noexcept {
     register_kernel<nk_kernel_euclidean_k, scalar_>("euclidean", scalar_name);
 }
 
-/** @brief Binary inputs run dot/hamming/jaccard instead of dot/angular/euclidean. */
+/** Binary inputs run dot/hamming/jaccard instead of dot/angular/euclidean. */
 template <>
 void register_scalar<nk::u1x8_t>(std::string_view scalar_name) noexcept {
     register_kernel<nk_kernel_dot_k, nk::u1x8_t>("dot", scalar_name);

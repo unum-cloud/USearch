@@ -1,10 +1,9 @@
 /**
- *  @brief The matrix-modality C interface: similarity search over rank-2 tensors - sets of
- *      equidimensional rows whose count varies per entry - under set-to-set and transport
- *      scoring.
- *
- *  @author Ash Vardanian
  *  @file include/usearch/matrix_index.h
+ *  @author Ash Vardanian
+ *  @date August 15, 2026
+ *  @brief The matrix-modality C interface: similarity search over rank-2 tensors - sets of
+ *      equidimensional rows whose count varies per entry - under set-to-set and transport scoring.
  *
  *  One entry is a matrix: @c rows varies, @c columns is frozen index-wide. A molecular
  *  conformer is a few dozen atom positions of 3 columns; a point cloud is a few thousand of
@@ -95,11 +94,9 @@ extern "C" {
  */
 USEARCH_EXPORT typedef void* usearch_matrix_index_t;
 
-/**
- *  @brief A consistent snapshot cursor over the index contents. Captures the publication
- *      watermark at creation, so concurrent inserts never appear mid-iteration, and the
- *      walk is a sequential entry scan - export, migration, and visualization feed off it.
- */
+/** A consistent snapshot cursor over the index contents. Captures the publication
+ *  watermark at creation, so concurrent inserts never appear mid-iteration, and the
+ *  walk is a sequential entry scan - export, migration, and visualization feed off it. */
 USEARCH_EXPORT typedef void* usearch_matrix_cursor_t;
 
 /**
@@ -119,6 +116,7 @@ USEARCH_EXPORT typedef void* usearch_matrix_cursor_t;
  */
 USEARCH_EXPORT typedef enum usearch_matrix_metric_t {
     usearch_matrix_metric_unknown_k = 0,
+
     /**
      *  @brief Mean of each side's best partners, both directions summed.
      *
@@ -133,6 +131,7 @@ USEARCH_EXPORT typedef enum usearch_matrix_metric_t {
      *  @endcode
      */
     usearch_matrix_metric_chamfer_k = 1,
+
     /**
      *  @brief The worst of all best partners, both directions - the metric of the family.
      *
@@ -148,6 +147,7 @@ USEARCH_EXPORT typedef enum usearch_matrix_metric_t {
      *  @endcode
      */
     usearch_matrix_metric_hausdorff_k = 2,
+
     /**
      *  @brief Transport over each side's internal geometry - the molecular-shape kind.
      *
@@ -166,6 +166,7 @@ USEARCH_EXPORT typedef enum usearch_matrix_metric_t {
      *  @endcode
      */
     usearch_matrix_metric_gromov_wasserstein_k = 3,
+
     /**
      *  @brief Residual after the best rotation - Kabsch. Needs a fixed @c rows.
      *
@@ -184,6 +185,7 @@ USEARCH_EXPORT typedef enum usearch_matrix_metric_t {
      *  @endcode
      */
     usearch_matrix_metric_kabsch_k = 4,
+
     /**
      *  @brief Residual after the best rotation and uniform scaling - Umeyama. Ranks only.
      *
@@ -205,30 +207,35 @@ USEARCH_EXPORT typedef enum usearch_matrix_metric_t {
     usearch_matrix_metric_umeyama_k = 5,
 } usearch_matrix_metric_t;
 
-/**
- *  @brief Construction & loading options of a matrix index. The @c residency field tags
- *      which union member is read; zeroed optional fields derive from the geometry.
- */
+/** Construction & loading options of a matrix index. The @c residency field tags
+ *  which union member is read; zeroed optional fields derive from the geometry. */
 USEARCH_EXPORT typedef struct usearch_matrix_options_t {
-    /** @brief The kind comparing two matrices - @c usearch_matrix_metric_hausdorff_k for point
-     *      sets in one frame, @c usearch_matrix_metric_gromov_wasserstein_k for conformers. */
+
+    /** The kind comparing two matrices - @c usearch_matrix_metric_hausdorff_k for point
+     *  sets in one frame, @c usearch_matrix_metric_gromov_wasserstein_k for conformers. */
     usearch_matrix_metric_t metric;
-    /** @brief The scalar type rows are stored & quantized into. */
+
+    /** The scalar type rows are stored & quantized into. */
     usearch_scalar_t quantization;
-    /** @brief The frozen row width shared by every entry - 3 for a conformer, 6 for a pose;
-     *      zero defers the geometry to a later @c usearch_matrix_load. */
+
+    /** The frozen row width shared by every entry - 3 for a conformer, 6 for a pose;
+     *  zero defers the geometry to a later @c usearch_matrix_load. */
     size_t columns;
-    /** @brief The frozen row count, when every entry has one - a fixed-length backbone, a
-     *      landmark set, a conformer pool in one atom order. Zero is the default and admits
-     *      ragged heights; a non-zero value rejects insertions of any other height and is
-     *      what lets row @c i of one entry pair with row @c i of another, which the
-     *      superposition kinds need and the rest ignore. */
+
+    /** The frozen row count, when every entry has one - a fixed-length backbone, a
+     *  landmark set, a conformer pool in one atom order. Zero is the default and admits
+     *  ragged heights; a non-zero value rejects insertions of any other height and is
+     *  what lets row @c i of one entry pair with row @c i of another, which the
+     *  superposition kinds need and the rest ignore. */
     size_t rows;
-    /** @brief The @b optional connections-per-node bound; zero derives. */
+
+    /** The @b optional connections-per-node bound; zero derives. */
     size_t connectivity;
-    /** @brief Upper bound on entries sharing one key; zero derives to one - unique keys. */
+
+    /** Upper bound on entries sharing one key; zero derives to one - unique keys. */
     size_t values_per_key;
-    /** @brief Selects the active member of the union below, and the meaning of "load". */
+
+    /** Selects the active member of the union below, and the meaning of "load". */
     usearch_residency_t residency;
     union {
         usearch_ram_options_t ram;
@@ -246,9 +253,7 @@ USEARCH_EXPORT typedef struct usearch_matrix_options_t {
 USEARCH_EXPORT usearch_matrix_index_t usearch_matrix_init( //
     usearch_matrix_options_t const* options, usearch_error_t* error);
 
-/**
- *  @brief Frees the resources associated with the index; cannot fail, so takes no error.
- */
+/** Frees the resources associated with the index; cannot fail, so takes no error. */
 USEARCH_EXPORT void usearch_matrix_free(usearch_matrix_index_t index);
 
 /**
@@ -259,55 +264,58 @@ USEARCH_EXPORT void usearch_matrix_free(usearch_matrix_index_t index);
 USEARCH_EXPORT void usearch_matrix_reserve( //
     usearch_matrix_index_t index, size_t entries, size_t rows, usearch_error_t* error);
 
-/**
- *  @brief Erases all entries, keeping the reserved capacity and frozen geometry.
- */
+/** Erases all entries, keeping the reserved capacity and frozen geometry. */
 USEARCH_EXPORT void usearch_matrix_clear(usearch_matrix_index_t index, usearch_error_t* error);
 
-/** @brief Reports the number of stored entries. */
+/** Reports the number of stored entries. */
 USEARCH_EXPORT size_t usearch_matrix_size(usearch_matrix_index_t index, usearch_error_t* error);
-/** @brief Reports the reserved capacity in entries. */
+
+/** Reports the reserved capacity in entries. */
 USEARCH_EXPORT size_t usearch_matrix_capacity(usearch_matrix_index_t index, usearch_error_t* error);
-/** @brief Reports the frozen row width shared by every entry. */
+
+/** Reports the frozen row width shared by every entry. */
 USEARCH_EXPORT size_t usearch_matrix_columns(usearch_matrix_index_t index, usearch_error_t* error);
-/** @brief Reports the total number of stored rows across all entries. */
+
+/** Reports the total number of stored rows across all entries. */
 USEARCH_EXPORT size_t usearch_matrix_rows(usearch_matrix_index_t index, usearch_error_t* error);
-/** @brief Reports the frozen connections-per-node bound of the graph. */
+
+/** Reports the frozen connections-per-node bound of the graph. */
 USEARCH_EXPORT size_t usearch_matrix_connectivity(usearch_matrix_index_t index, usearch_error_t* error);
-/** @brief Reports the memory usage of the index in bytes, row arenas included. */
+
+/** Reports the memory usage of the index in bytes, row arenas included. */
 USEARCH_EXPORT size_t usearch_matrix_memory_usage(usearch_matrix_index_t index, usearch_error_t* error);
-/** @brief Reports the capability codename the index dispatched to on this machine. */
+
+/** Reports the capability codename the index dispatched to on this machine. */
 USEARCH_EXPORT char const* usearch_matrix_capabilities(usearch_matrix_index_t index, usearch_error_t* error);
 
-/**
- *  @brief Optional per-call settings of @c usearch_matrix_add and @c usearch_matrix_refine - a
- *      pure input, never written. Passing @c NULL derives every setting.
- */
+/** Optional per-call settings of @c usearch_matrix_add and @c usearch_matrix_refine - a
+ *  pure input, never written. Passing @c NULL derives every setting. */
 USEARCH_EXPORT typedef struct usearch_matrix_insertion_options_t {
-    /** @brief The @b optional candidate-pool breadth the build walk explores; zero derives. */
+
+    /** The @b optional candidate-pool breadth the build walk explores; zero derives. */
     size_t expansion_factor;
 } usearch_matrix_insertion_options_t;
 
-/**
- *  @brief Optional per-call settings of @c usearch_matrix_search and @c usearch_matrix_search_if -
- *      a pure input, never written. Passing @c NULL derives every setting.
- */
+/** Optional per-call settings of @c usearch_matrix_search and @c usearch_matrix_search_if -
+ *  a pure input, never written. Passing @c NULL derives every setting. */
 USEARCH_EXPORT typedef struct usearch_matrix_search_options_t {
-    /** @brief The @b optional candidate-pool breadth the walk explores; zero derives. */
+
+    /** The @b optional candidate-pool breadth the walk explores; zero derives. */
     size_t expansion_factor;
 } usearch_matrix_search_options_t;
 
-/**
- *  @brief Traversal telemetry, shared by insertion and both search forms - a pure output,
- *      fully overwritten by the call it is passed to. Passing @c NULL skips reporting.
- */
+/** Traversal telemetry, shared by insertion and both search forms - a pure output,
+ *  fully overwritten by the call it is passed to. Passing @c NULL skips reporting. */
 USEARCH_EXPORT typedef struct usearch_matrix_traversal_stats_t {
-    /** @brief Graph members visited while resolving the batch. */
+
+    /** Graph members visited while resolving the batch. */
     size_t visited_members;
-    /** @brief Distances computed while resolving the batch, diversity re-selections included. */
+
+    /** Distances computed while resolving the batch, diversity re-selections included. */
     size_t computed_distances;
-    /** @brief Starvation restarts - re-seedings after the frontier drained prematurely,
-     *      and a graph-connectivity health signal rather than a cost counter. */
+
+    /** Starvation restarts - re-seedings after the frontier drained prematurely,
+     *  and a graph-connectivity health signal rather than a cost counter. */
     size_t restarts;
 } usearch_matrix_traversal_stats_t;
 
@@ -382,10 +390,11 @@ USEARCH_EXPORT size_t usearch_matrix_refine(                    //
     usearch_error_t* error);
 
 /**
- *  @brief Performs k-Approximate Nearest Neighbors Search for a tape of query matrices -
- *      the native batch operation, parallelized internally; one query is a tape of one.
- *      Query row counts are unconstrained and need not match any indexed entry. Never
- *      writes to the graph, so any number may overlap with concurrent insertions.
+ *  @brief Performs k-Approximate Nearest Neighbors Search for a tape of query matrices - the native
+ *      batch operation, parallelized internally; one query is a tape of one. Query row counts are
+ *      unconstrained and need not match any indexed entry.
+ *
+ *  Never writes to the graph, so any number may overlap with concurrent insertions.
  *  @ref matrix_index_concurrency
  *
  *  @param[in] index The handle to be queried.
@@ -437,13 +446,16 @@ USEARCH_EXPORT void usearch_matrix_search_if(                   //
     usearch_matrix_traversal_stats_t* stats,                    //
     usearch_error_t* error);
 
-/** @brief What one key holds, enough to size a buffer before retrieving any of it. */
+/** What one key holds, enough to size a buffer before retrieving any of it. */
 USEARCH_EXPORT typedef struct usearch_matrix_key_stats_t {
-    /** @brief Entries sharing the key; keys need not be unique. */
+
+    /** Entries sharing the key; keys need not be unique. */
     size_t entries;
-    /** @brief Rows summed across those entries. */
+
+    /** Rows summed across those entries. */
     size_t total_rows;
-    /** @brief Rows of the tallest single entry - the buffer one @c get needs. */
+
+    /** Rows of the tallest single entry - the buffer one @c get needs. */
     size_t largest_rows;
 } usearch_matrix_key_stats_t;
 
@@ -532,10 +544,10 @@ USEARCH_EXPORT size_t usearch_matrix_cursor_next(             //
     usearch_matrix_cursor_t cursor, usearch_keys_span_t keys, //
     void const** matrices, size_t* row_counts, usearch_error_t* error);
 
-/** @brief Releases the cursor. */
+/** Releases the cursor. */
 USEARCH_EXPORT void usearch_matrix_cursor_free(usearch_matrix_cursor_t cursor);
 
-/** @brief Bytes one monolith takes under the default layout; a manifest's parts sum to about the same. */
+/** Bytes one monolith takes under the default layout; a manifest's parts sum to about the same. */
 USEARCH_EXPORT size_t usearch_matrix_storage_requirements(usearch_matrix_index_t index, usearch_error_t* error);
 
 /**
@@ -559,10 +571,11 @@ USEARCH_EXPORT void usearch_matrix_save(                        //
     usearch_error_t* error);
 
 /**
- *  @brief Loads a checkpoint into an initialized handle, with the handle's residency
- *      deciding the behavior: materialize into RAM, upload to the device, or open in place
- *      on disk - the read-only form, where mutating verbs fail. A handle whose geometry was
- *      left zeroed freezes it here, from the checkpoint's own headers.
+ *  @brief Loads a checkpoint into an initialized handle, with the handle's residency deciding the
+ *      behavior: materialize into RAM, upload to the device, or open in place on disk - the
+ *      read-only form, where mutating verbs fail.
+ *
+ *  A handle whose geometry was left zeroed freezes it here, from the checkpoint's own headers.
  *
  *  @param[inout] index The handle to be populated.
  *  @param[in] executor The threads and scratch the read fans out over, one shard per thread.
@@ -581,9 +594,7 @@ USEARCH_EXPORT void usearch_matrix_load(                        //
     usearch_progress_callback_t progress, void* progress_state, //
     usearch_error_t* error);
 
-/**
- *  @brief Reads a checkpoint's geometry & metric metadata into @p options without loading it.
- */
+/** Reads a checkpoint's geometry & metric metadata into @p options without loading it. */
 USEARCH_EXPORT void usearch_matrix_metadata( //
     usearch_bytes_view_t path, usearch_matrix_options_t* options, usearch_error_t* error);
 

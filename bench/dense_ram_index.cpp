@@ -1,9 +1,9 @@
 /**
- *  @brief The CLI entry of the single-index CPU benchmark: option parsing, the pool &
- *      topology setup, and the dataset-scalar hop into the per-dtype shards.
- *  @author Ash Vardanian
  *  @file bench/dense_ram_index.cpp
+ *  @author Ash Vardanian
  *  @date July 23, 2026
+ *  @brief The CLI entry of the single-index CPU benchmark: option parsing, the pool & topology
+ *      setup, and the dataset-scalar hop into the per-dtype shards.
  *
  *  The compile-time cascade lives in @c dense/ram_index.hpp; this translation unit stays
  *  dtype-free by extern-declaring the @c run_with_stored_dtype instantiations the per-dtype
@@ -87,7 +87,7 @@ extern template int us::run_with_stored_dtype<nk::f16_t, nk_u1_k>(bench_launch<n
 extern template int us::run_with_stored_dtype<nk::i8_t, nk_u1_k>(bench_launch<nk::i8_t> const&);
 extern template int us::run_with_stored_dtype<nk::u8_t, nk_u1_k>(bench_launch<nk::u8_t> const&);
 
-/** @brief Opens the dataset with the file-native scalar and enters the typed cascade. */
+/** Opens the dataset with the file-native scalar and enters the typed cascade. */
 template <typename dataset_scalar_type_>
 int open_and_run(bench_options_t const& options, fu_pool_t pool, fu_topology_t topology) {
     auto opened = persisted_dataset<dataset_scalar_type_>::open(options.vectors_path, options.queries_path,
@@ -235,7 +235,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Resolve `--memory-domain`: empty means one machine-wide heap index, and a single id
+    // Resolve `--memory-domain`: empty means one machine-wide heap index, and a single ID
     // pins memory & threads to that domain. This benchmark measures exactly one index - the
     // multi-domain arrangement is `usearch_bench_dense_ram_indexes`, driving the sharded index.
     if (!memory_domain_name.empty()) {

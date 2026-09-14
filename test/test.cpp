@@ -1,9 +1,9 @@
 /**
- *  @brief The dense suite's entry point: composes its areas' shards explicitly and rolls
- *      their failure counts into the exit code; the header-only areas run under @c test_header_only.cpp.
- *  @author Ash Vardanian
  *  @file test/test.cpp
+ *  @author Ash Vardanian
  *  @date July 23, 2026
+ *  @brief The dense suite's entry point: composes its areas' shards explicitly and rolls their
+ *      failure counts into the exit code; the header-only areas run under @c test_header_only.cpp.
  */
 #include <fmt/format.h>
 

@@ -1,11 +1,10 @@
 /**
- *  @brief The CPU-side suite composer for @c dense_ram_index smoke & concurrency tests,
- *      shared by the per-dtype shards - each names a curated set of (dtype, kernel)
- *      cells, never the whole combinatorial space.
- *
- *  @author Ash Vardanian
  *  @file test/dense/ram_index.hpp
+ *  @author Ash Vardanian
  *  @date July 17, 2026
+ *  @brief The CPU-side suite composer for @c dense_ram_index smoke & concurrency tests, shared by
+ *      the per-dtype shards - each names a curated set of (dtype, kernel) cells, never the whole
+ *      combinatorial space.
  *
  *  The scenarios themselves live in @c dense_index.cuh, templated over the index type;
  *  each shard names its instantiations, their compile-time & runtime gates, and composes
@@ -30,14 +29,14 @@
 namespace unum {
 namespace usearch {
 
-/** @brief Gate: a (dtype, kernel) cell is testable once its serial kernel kit is adapted. */
+/** Gate: a (dtype, kernel) cell is testable once its serial kernel kit is adapted. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 concept index_combo_supported = requires {
     typename dense_quads_chain<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>::kit_t;
 };
 
-/** @brief No-op sibling picked when the cell cannot be compiled on this target: its serial
- *      kernels are not adapted yet, or the requested kit is absent from the build. */
+/** No-op sibling picked when the cell cannot be compiled on this target: its serial
+ *  kernels are not adapted yet, or the requested kit is absent from the build. */
 template <                                       //
     nk_dtype_t dtype_, nk_kernel_kind_t kernel_, //
     typename waiter_type_ = dummy_waiter_t,      //
@@ -94,8 +93,8 @@ static std::size_t test_configuration(char const* name) {
     return report(name, failures_count);
 }
 
-/** @brief The starved cell: the same index over ledgered traversal scratch, so a refused re-table
- *      has somewhere to come from, walked by the saturation scenario alone. */
+/** The starved cell: the same index over ledgered traversal scratch, so a refused re-table
+ *  has somewhere to come from, walked by the saturation scenario alone. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
     requires(index_combo_supported<dtype_, kernel_>)
 static std::size_t test_starved_configuration(char const* name) {
@@ -112,8 +111,8 @@ static std::size_t test_starved_configuration(char const* name) {
 
 #pragma region Suite Entry Points
 
-/** @brief Per-dtype CPU index suite entries the shard translation units define and
- *      @c dense.cpp composes explicitly; each returns its shard's failure count. */
+/** Per-dtype CPU index suite entries the shard translation units define and
+ *  @c dense.cpp composes explicitly; each returns its shard's failure count. */
 std::size_t test_dense_index_f32();
 std::size_t test_dense_index_bf16();
 std::size_t test_dense_index_f16();

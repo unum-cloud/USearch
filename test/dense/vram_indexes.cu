@@ -1,9 +1,9 @@
 /**
- *  @brief Concurrency & misuse tests for the GPU-resident @c dense_vram_indexes over the
- *      cells the single-index CUDA suite already wires.
- *  @author Ash Vardanian
  *  @file test/dense/vram_indexes.cu
+ *  @author Ash Vardanian
  *  @date September 1, 2026
+ *  @brief Concurrency & misuse tests for the GPU-resident @c dense_vram_indexes over the cells the
+ *      single-index CUDA suite already wires.
  */
 #include "dense/vram_indexes.cuh"
 

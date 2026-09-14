@@ -1,8 +1,8 @@
 /**
- *  @brief Unit tests for the pure-C ABI of USearch (`usearch/dense_index.h`).
- *  @author Ash Vardanian
  *  @file c/test.c
+ *  @author Ash Vardanian
  *  @date June 25, 2023
+ *  @brief Unit tests for the pure-C ABI of USearch (`usearch/dense_index.h`).
  *
  *  Exercises the dense surface through the ABI every binding consumes: initialization and
  *  reservation, batch `add` and `search`, retrieval by key, and the error contract of
@@ -104,7 +104,7 @@ float* create_vectors(size_t const count, size_t const dimensions) {
     return data;
 }
 
-/** @brief Wraps an integer identity into the 128-bit key the ABI takes, low bytes last. */
+/** Wraps an integer identity into the 128-bit key the ABI takes, low bytes last. */
 usearch_key_t key_of(uint64_t value) {
     usearch_key_t key;
     memset(key.bytes, 0, sizeof(key.bytes));
@@ -113,7 +113,7 @@ usearch_key_t key_of(uint64_t value) {
     return key;
 }
 
-/** @brief An angular RAM index over @p dimensions -wide `f32` rows, every optional field derived. */
+/** An angular RAM index over @p dimensions -wide `f32` rows, every optional field derived. */
 usearch_dense_options_t create_options(size_t const dimensions) {
     usearch_dense_options_t options;
     memset(&options, 0, sizeof(options));
@@ -125,10 +125,8 @@ usearch_dense_options_t create_options(size_t const dimensions) {
     return options;
 }
 
-/**
- *  Initializes an index twice, checking the error slot at each step, and reserves capacity,
- *  verifying that size, capacity, dimensions, and connectivity read back as configured.
- */
+/** Initializes an index twice, checking the error slot at each step, and reserves capacity,
+ *  verifying that size, capacity, dimensions, and connectivity read back as configured. */
 void test_init(size_t const collection_size, size_t const dimensions) {
     printf("Test: Index Initialization... %zu vectors, %zu dimensions\n", collection_size, dimensions);
 
@@ -160,11 +158,9 @@ void test_init(size_t const collection_size, size_t const dimensions) {
     printf("Test: Index Initialization - PASSED\n");
 }
 
-/**
- *  Inserts a batch and queries every row back, which an exact self-search must answer with the
+/** Inserts a batch and queries every row back, which an exact self-search must answer with the
  *  row's own key. The batch is all-or-nothing, so a short return is a failure even without an
- *  error status.
- */
+ *  error status. */
 void test_add_and_search(size_t const collection_size, size_t const dimensions) {
     printf("Test: Add & Search... %zu vectors, %zu dimensions\n", collection_size, dimensions);
 
@@ -221,10 +217,8 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
     printf("Test: Add & Search - PASSED\n");
 }
 
-/**
- *  Reads entries back by key. `usearch_dense_get` reports the true entry count rather than the
- *  number written, so a probe with a NULL output is how a caller sizes its buffer.
- */
+/** Reads entries back by key. `usearch_dense_get` reports the true entry count rather than the
+ *  number written, so a probe with a NULL output is how a caller sizes its buffer. */
 void test_count_and_get(size_t const dimensions) {
     printf("Test: Count & Get... %zu dimensions\n", dimensions);
 
@@ -270,11 +264,9 @@ void test_count_and_get(size_t const dimensions) {
     printf("Test: Count & Get - PASSED\n");
 }
 
-/**
- *  A message is @c NULL exactly when the status is success, and the slot a caller reuses is
+/** A message is @c NULL exactly when the status is success, and the slot a caller reuses is
  *  fully overwritten - the contract every binding branches on. Only the success half is
- *  exercised here; the failing verbs are the ones `src/` has yet to instantiate.
- */
+ *  exercised here; the failing verbs are the ones `src/` has yet to instantiate. */
 void test_error_contract(size_t const dimensions) {
     printf("Test: Error Contract\n");
 
@@ -299,7 +291,7 @@ void test_error_contract(size_t const dimensions) {
     printf("Test: Error Contract - PASSED\n");
 }
 
-/** @brief The library-wide probes, which take no handle and cannot fail. */
+/** The library-wide probes, which take no handle and cannot fail. */
 void test_library_probes(void) {
     printf("Test: Library Probes\n");
     expect(usearch_version() != NULL, "The version must be reported");

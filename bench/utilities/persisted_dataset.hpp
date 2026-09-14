@@ -1,19 +1,18 @@
 /**
- *  @brief Datasets in the RetriEval binary layout: memory-mapped reads and dense writes.
- *
- *  @author Ash Vardanian
  *  @file bench/utilities/persisted_dataset.hpp
+ *  @author Ash Vardanian
  *  @date July 17, 2026
+ *  @brief Datasets in the RetriEval binary layout: memory-mapped reads and dense writes.
  *
  *  Each file starts with two little-endian `u32` counters - rows, then columns - followed
  *  by the row-major payload. The scalar type is not stored in the file; it is inferred
  *  from the extension: `.fbin` for f32, `.i8bin` / `.u8bin` / `.bf16bin` accordingly, and
- *  `.ibin` for `u32` neighbor ids in ground-truth files.
+ *  `.ibin` for `u32` neighbor IDs in ground-truth files.
  *
  *  The layout is the big-ANN-benchmarks `*bin` convention of the NeurIPS'21 billion-scale
  *  challenge and the DiskANN ecosystem, as codified by RetriEval - counter width, endianness,
  *  and the extension-to-dtype table pinned down. Benchmark checkpoints, dataset files, and
- *  ground-truth ids all share this one shape; @ref matrix_save writes it. Reads ride
+ *  ground-truth IDs all share this one shape; @ref matrix_save writes it. Reads ride
  *  @ref mapped_file_t, so a dataset costs the pages a run actually touches.
  *
  *  @see https://github.com/ashvardanian/RetriEval
@@ -37,8 +36,8 @@
 
 namespace unum::usearch {
 
-/** @brief Infers the payload dtype from the RetriEval extension family: `.fbin` → f32,
- *      `.bf16bin` / `.f16bin` / `.i8bin` / `.u8bin` accordingly, `.ibin` → u32 neighbor ids. */
+/** Infers the payload dtype from the RetriEval extension family: `.fbin` → f32,
+ *  `.bf16bin` / `.f16bin` / `.i8bin` / `.u8bin` accordingly, `.ibin` → u32 neighbor IDs. */
 inline nk_dtype_t dtype_of_extension(sz::string_view path) noexcept {
     if (path.ends_with(".fbin")) return nk_f32_k;
     if (path.ends_with(".i8bin")) return nk_i8_k;
@@ -49,17 +48,19 @@ inline nk_dtype_t dtype_of_extension(sz::string_view path) noexcept {
     return nk_dtype_unknown_k;
 }
 
-/** @brief Row and column counts of one matrix file - logical dimensions, sub-byte packing
- *      included. */
+/** Row and column counts of one matrix file - logical dimensions, sub-byte packing
+ *  included. */
 struct matrix_extents_t {
-    /** @brief Rows of the payload matrix. */
+
+    /** Rows of the payload matrix. */
     std::size_t rows = 0;
-    /** @brief Logical values per row - what the producing model emitted, not storage words. */
+
+    /** Logical values per row - what the producing model emitted, not storage words. */
     std::size_t columns = 0;
 };
 
-/** @brief Writes @p matrix as two little-endian @p counter_type_ counters - rows, then
- *      columns - and the dense row-major payload; the file extension names the element type. */
+/** Writes @p matrix as two little-endian @p counter_type_ counters - rows, then
+ *  columns - and the dense row-major payload; the file extension names the element type. */
 template <typename value_type_, typename counter_type_ = u32_t>
 status_t matrix_save(std::string_view path, nk::matrix_view<value_type_> matrix) noexcept {
     counter_type_ const counters[2] = {static_cast<counter_type_>(matrix.extent(0)),
@@ -76,10 +77,10 @@ status_t matrix_save(std::string_view path, nk::matrix_view<value_type_> matrix)
     return mapping.sync();
 }
 
-/** @brief Splits a mapped matrix file into its extents, validating that the payload holds
- *      enough @p scalar_type_ values - sub-byte packing included. The header is two
- *      little-endian @p counter_type_ counters, so both `u32`-headed and `u64`-headed
- *      exports parse with the right instantiation. */
+/** Splits a mapped matrix file into its extents, validating that the payload holds
+ *  enough @p scalar_type_ values - sub-byte packing included. The header is two
+ *  little-endian @p counter_type_ counters, so both `u32`-headed and `u64`-headed
+ *  exports parse with the right instantiation. */
 template <typename scalar_type_, typename counter_type_>
 expected<matrix_extents_t> parse_matrix_header(bytes_view_t mapping) noexcept {
     matrix_extents_t extents;
@@ -99,7 +100,7 @@ expected<matrix_extents_t> parse_matrix_header(bytes_view_t mapping) noexcept {
     return {extents, status_t::success_k};
 }
 
-/** @brief Views the payload behind a parsed matrix header as a NumKong matrix. */
+/** Views the payload behind a parsed matrix header as a NumKong matrix. */
 template <typename scalar_type_, typename counter_type_>
 nk::matrix_view<scalar_type_> view_matrix_payload(bytes_view_t mapping, std::size_t rows,
                                                   std::size_t columns) noexcept {
@@ -109,7 +110,7 @@ nk::matrix_view<scalar_type_> view_matrix_payload(bytes_view_t mapping, std::siz
 
 /**
  *  @brief The RetriEval dataset triple - base vectors, queries, and ground-truth neighbor
- *      ids - owning three whole-file mappings & spilling NumKong views, never copying a byte.
+ *      IDs - owning three whole-file mappings & spilling NumKong views, never copying a byte.
  *
  *  Deliberately not a set of @c nk::tensor members with a mapping allocator: tensors own
  *  and value-initialize their storage, while these bytes ARE the files, behind read-only
@@ -128,9 +129,9 @@ class persisted_dataset {
     using neighbor_id_t = neighbor_id_type_;
     using header_counter_t = header_counter_type_;
 
-    /** @brief Opens the triple, tolerating empty @p queries_path / @p neighbors_path, and
-     *      failing on dimensionality mismatches between vectors & queries, or row-count
-     *      mismatches between queries & ground truth. */
+    /** Opens the triple, tolerating empty @p queries_path / @p neighbors_path, and
+     *  failing on dimensionality mismatches between vectors & queries, or row-count
+     *  mismatches between queries & ground truth. */
     static expected<persisted_dataset> open(std::string_view vectors_path, std::string_view queries_path,
                                             std::string_view neighbors_path) noexcept {
         persisted_dataset dataset;

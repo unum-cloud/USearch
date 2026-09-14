@@ -1,13 +1,15 @@
 /**
- *  @brief GenMC client for the dense index's capacity protocol in `include/usearch/dense/ram_index.hpp`:
- *      `claim_capacity` electing one grower, `release_capacity` releasing rows onto a
- *      non-negative counter only, and a claim
- *      that fits, spelled line for line over the ForkUnion reference the index binds. The
- *      header itself runs under GenMC, but its first chunk is a thousand rows of sentinel
- *      stores, more events than the execution graph can hold, so the counters stand alone here.
- *  @author Ash Vardanian
  *  @file verification/dense_ram_index_capacity.cpp
+ *  @author Ash Vardanian
  *  @date September 9, 2026
+ *  @brief GenMC client for the dense index's capacity protocol in
+ *      `include/usearch/dense/ram_index.hpp`.
+ *
+ *  `claim_capacity` electing one grower, `release_capacity` releasing rows onto a non-negative
+ *  counter only, and a claim that fits, spelled line for line over the ForkUnion reference the
+ *  index binds. The header itself runs under GenMC, but its first chunk is a thousand rows of
+ *  sentinel stores, more events than the execution graph can hold, so the counters stand alone
+ *  here.
  *
  *  Thread 0 claims two rows, which grows the only chunk, and releases them; thread 1 claims
  *  one. Every claim's rows lie inside the chunks the claimer sees. The chunk directory is plain
@@ -55,15 +57,13 @@ u32_t claim_capacity(std::size_t count) noexcept {
         if (old_remaining >= 0 && new_remaining < 0) {
             // Elected: the one grower until its release lands.
             chunks_count += 1;
-            u32_t const first =
-                atomic_ref<u32_t>(last_allocated_id).fetch_add(count, std::memory_order_acq_rel);
+            u32_t const first = atomic_ref<u32_t>(last_allocated_id).fetch_add(count, std::memory_order_acq_rel);
             verify(first + count <= chunks_count * rows_per_chunk_k);
             atomic_ref<std::ptrdiff_t>(remaining_capacity).add(rows_per_chunk_k, release_order_k);
             return first;
         }
         if (new_remaining >= 0) {
-            u32_t const first =
-                atomic_ref<u32_t>(last_allocated_id).fetch_add(count, std::memory_order_acquire);
+            u32_t const first = atomic_ref<u32_t>(last_allocated_id).fetch_add(count, std::memory_order_acquire);
             verify(first + count <= chunks_count * rows_per_chunk_k);
             return first;
         }

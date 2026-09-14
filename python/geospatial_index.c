@@ -1,8 +1,9 @@
 /**
- *  @brief Similarity search over space and time - the CPython twin of
- *      `include/usearch/geospatial_index.h`.
  *  @file python/geospatial_index.c
  *  @author Ash Vardanian
+ *  @date August 16, 2026
+ *  @brief Similarity search over space and time - the CPython twin of
+ *      `include/usearch/geospatial_index.h`.
  *
  *  Entries are points, trajectories, and boundaries rather than embeddings, so the handle
  *  carries a layout, a structure, and a characteristic speed instead of a quantization, and

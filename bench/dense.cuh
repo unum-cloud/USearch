@@ -1,18 +1,15 @@
 /**
- *  @brief The backend-neutral benchmarking surface shared by every dense-index residency -
- *      volatile in-RAM, GPU-resident, and persisted alike.
- *
- *  @author Ash Vardanian
  *  @file bench/dense.cuh
+ *  @author Ash Vardanian
  *  @date July 22, 2026
+ *  @brief The backend-neutral benchmarking surface shared by every dense-index residency - volatile
+ *      in-RAM, GPU-resident, and persisted alike.
  *
  *  Only what every backend genuinely shares lives here: the CLI option set, the RetriEval
- *  checkpoint naming & layout, the dataset streaming trampoline, the telemetry aggregation,
- *  the post-clock result judgment, and the host-machine report. The run loops themselves -
- *  how rows reach an index and queries leave it - are backend property: each translation
- *  unit owns its pipeline and its concrete index instantiations, so this header names no
- *  index and reads no index-specific members, and the same surface compiles under host
- *  compilers and nvcc.
+ *  checkpoint naming and layout, the dataset streaming trampoline, the telemetry aggregation,
+ *  the post-clock result judgment, and the host-machine report. The run loops are backend
+ *  property, so this header names no index and reads no index-specific members - the same
+ *  surface compiles under host compilers and nvcc.
  */
 #pragma once
 
@@ -47,17 +44,16 @@ namespace unum::usearch {
 
 #pragma region Options and Styling
 
-/** @brief One named capability ceiling - the row shape the compute and schedule tables
- *      share, so their prefix-masks, name lookups, and prints are one machinery. */
+/** One named capability ceiling - the row shape the compute and schedule tables share. */
 template <typename capability_type_>
 struct capability_choice {
     char const* name;
     capability_type_ bit;
 };
 
-/** @brief Compute-capability ceilings the kernel chains adapt, in ascending preference per
- *      architecture, named by NumKong's microarchitecture vocabulary and split by its own
- *      target macros. The implicit floor the table never lists is the serial kernels. */
+/** Compute-capability ceilings the kernel chains adapt, ascending per architecture and named by
+ *  NumKong's microarchitecture vocabulary; the floor the table never lists is the serial
+ *  kernels. */
 inline constexpr capability_choice<nk_capability_t> compute_choices_k[] = {
 #if NK_TARGET_X8664_
     {"haswell", nk_cap_haswell_k}, {"skylake", nk_cap_skylake_k},         {"icelake", nk_cap_icelake_k},
@@ -72,11 +68,9 @@ inline constexpr capability_choice<nk_capability_t> compute_choices_k[] = {
 };
 inline constexpr std::size_t compute_choices_count_k = sizeof(compute_choices_k) / sizeof(compute_choices_k[0]);
 
-/** @brief Scheduling ceilings the harness instantiates waiters for, in ascending strength
- *      per architecture, named by ForkUnion's own instruction vocabulary and split by its
- *      own detection macros. The implicit floor is the STL yield, like serial for compute;
- *      Arm's `WFET` has no compile-time feature macro, so its row - like every row - is
- *      gated by the runtime capability mask at dispatch. */
+/** Scheduling ceilings the harness instantiates waiters for, ascending per architecture and named
+ *  by ForkUnion's instruction vocabulary; the floor is the STL yield. Every row is gated by the
+ *  runtime capability mask at dispatch, since Arm's @c WFET has no compile-time feature macro. */
 inline constexpr capability_choice<fu_capabilities_t> schedule_choices_k[] = {
 #if FU_DETECT_ARCH_X86_64_
     {"pause", fu_capability_x86_pause_k},
@@ -93,11 +87,11 @@ inline constexpr capability_choice<fu_capabilities_t> schedule_choices_k[] = {
 };
 inline constexpr std::size_t schedule_choices_count_k = sizeof(schedule_choices_k) / sizeof(schedule_choices_k[0]);
 
-/** @brief The tables as spans - the currency of the shared ceiling helpers below. */
+/** The tables as spans - the currency of the shared ceiling helpers below. */
 inline constexpr std::span<capability_choice<nk_capability_t> const> compute_span_k {compute_choices_k};
 inline constexpr std::span<capability_choice<fu_capabilities_t> const> schedule_span_k {schedule_choices_k};
 
-/** @brief Everything at or below the @p index-th ceiling of @p choices, as one allow-mask. */
+/** Everything at or below the @p index-th ceiling of @p choices, as one allow-mask. */
 template <typename capability_type_>
 constexpr capability_type_ prefix_mask(std::span<capability_choice<capability_type_> const> choices,
                                        std::size_t index) noexcept {
@@ -107,8 +101,8 @@ constexpr capability_type_ prefix_mask(std::span<capability_choice<capability_ty
     return mask;
 }
 
-/** @brief The @p floor name, then every choice of @p choices whose bit @p mask covers - a view
- *      the report joins in one print. */
+/** The @p floor name, then every choice of @p choices whose bit @p mask covers - a view the
+ *  report joins in one print. */
 template <typename capability_type_>
 auto named_choices(char const* floor, std::span<capability_choice<capability_type_> const> choices,
                    capability_type_ mask) noexcept {
@@ -121,7 +115,7 @@ auto named_choices(char const* floor, std::span<capability_choice<capability_typ
            });
 }
 
-/** @brief Names a single capability bit of @p choices; the unlisted @p floor backs them all. */
+/** Names a single capability bit of @p choices; the unlisted @p floor backs them all. */
 template <typename capability_type_>
 constexpr char const* bit_name(std::span<capability_choice<capability_type_> const> choices, capability_type_ bit,
                                char const* floor) noexcept {
@@ -130,7 +124,7 @@ constexpr char const* bit_name(std::span<capability_choice<capability_type_> con
     return floor;
 }
 
-/** @brief The newest table bit of @p choices inside @p mask, or @p floor when none is. */
+/** The newest table bit of @p choices inside @p mask, or @p floor when none is. */
 template <typename capability_type_>
 constexpr capability_type_ highest_bit(std::span<capability_choice<capability_type_> const> choices,
                                        capability_type_ mask, capability_type_ floor) noexcept {
@@ -140,8 +134,8 @@ constexpr capability_type_ highest_bit(std::span<capability_choice<capability_ty
     return highest;
 }
 
-/** @brief The index of the newest table row of @p choices inside @p mask, or @c choices.size()
- *      when the mask names none - the dispatch cascade's entry point into a table. */
+/** The index of the newest table row of @p choices inside @p mask, or @c choices.size() when the
+ *  mask names none - the dispatch cascade's entry point into a table. */
 template <typename capability_type_>
 constexpr std::size_t highest_index(std::span<capability_choice<capability_type_> const> choices,
                                     capability_type_ mask) noexcept {
@@ -151,8 +145,8 @@ constexpr std::size_t highest_index(std::span<capability_choice<capability_type_
     return highest;
 }
 
-/** @brief The index of the @p choices row named @p name, or @c choices.size() when unmatched -
- *      the CLI's entry point into a table, the naming inverse of @ref highest_index. */
+/** The index of the @p choices row named @p name, or @c choices.size() when unmatched - the CLI's
+ *  entry point into a table, the naming inverse of @ref highest_index. */
 template <typename capability_type_>
 inline std::size_t index_of_name(std::span<capability_choice<capability_type_> const> choices,
                                  std::string_view name) noexcept {
@@ -161,26 +155,20 @@ inline std::size_t index_of_name(std::span<capability_choice<capability_type_> c
     return choices.size();
 }
 
-/** @brief The schedule allow-mask intersected with what this machine actually offers - the
- *      one place the @c fu_capabilities_t & @c fu_runtime_capabilities C-enum arithmetic is
- *      re-typed, so its callers never re-cast. */
+/** The schedule allow-mask intersected with what this machine offers - the one place the
+ *  @c fu_capabilities_t C-enum arithmetic is re-typed, so its callers never re-cast. */
 inline fu_capabilities_t effective_schedule(fu_capabilities_t allow) noexcept {
     return static_cast<fu_capabilities_t>(allow & fu_runtime_capabilities());
 }
 
-/** @brief Every schedule bit except the waiter hints - the floor a `--max-schedule` ceiling
- *      builds on, keeping the pool-management toolbox while capping the wait instruction. */
+/** Every schedule bit except the waiter hints - the floor a `--max-schedule` ceiling builds on,
+ *  keeping the pool-management toolbox while capping the wait instruction. */
 inline constexpr fu_capabilities_t schedule_floor_k = static_cast<fu_capabilities_t>(fu_capabilities_all_k &
                                                                                      ~fu_capability_any_yield_k);
 
-/**
- *  @brief Lowers a runtime table position in `[0, count_)` to a compile-time index and hands it
- *      to @p on_row as an @c integral_constant; a position at or past the tail takes @p on_floor.
- *      The compute & schedule axes both ride this - "the newest row the mask allows, else a floor".
- *
- *  Every position instantiates its own @p on_row, so the whole per-row template grid is built at
- *  compile time and one branch is selected at runtime - the compile-time cascade, one axis deep.
- */
+/** Lowers a runtime table position in `[0, count_)` to a compile-time index and hands it to
+ *  @p on_row as an @c integral_constant; a position at or past the tail takes @p on_floor. Every
+ *  position instantiates its own @p on_row, so the whole grid is built at compile time. */
 template <std::size_t count_, std::size_t choice_ = 0>
 int dispatch_index(std::size_t position, auto on_row, auto on_floor) {
     if constexpr (choice_ < count_) {
@@ -190,12 +178,9 @@ int dispatch_index(std::size_t position, auto on_row, auto on_floor) {
     else return on_floor();
 }
 
-/**
- *  @brief Matches a runtime enum against a compile-time value set, handing the match to @p on_value
- *      as an @c integral_constant; an unlisted value goes to @p on_unknown as the raw runtime value,
- *      so its diagnostic can name what was rejected. The stored-dtype & kernel axes both ride this -
- *      "one of these instantiations, else an error".
- */
+/** Matches a runtime enum against a compile-time value set, handing the match to @p on_value as an
+ *  @c integral_constant; an unlisted value goes to @p on_unknown as the raw runtime value, so its
+ *  diagnostic can name what was rejected. */
 template <auto value_, auto... rest_>
 int dispatch_value(decltype(value_) runtime, auto on_value, auto on_unknown) {
     if (runtime == value_) return on_value(std::integral_constant<decltype(value_), value_> {});
@@ -203,124 +188,140 @@ int dispatch_value(decltype(value_) runtime, auto on_value, auto on_unknown) {
     else return dispatch_value<rest_...>(runtime, on_value, on_unknown);
 }
 
-/** @brief The file scalars the harness opens: what the RetriEval extensions name. */
+/** The file scalars the harness opens: what the RetriEval extensions name. */
 int dispatch_file_dtype(nk_dtype_t dtype, auto on_dtype, auto on_unknown) {
     return dispatch_value<nk_f32_k, nk_bf16_k, nk_f16_k, nk_i8_k, nk_u8_k>(dtype, on_dtype, on_unknown);
 }
 
-/** @brief The stored dtypes every benchmark carries, by shrinking dynamic range. */
+/** The stored dtypes every benchmark carries, by shrinking dynamic range. */
 int dispatch_stored_dtype(nk_dtype_t dtype, auto on_dtype, auto on_unknown) {
     return dispatch_value<nk_f32_k, nk_bf16_k, nk_f16_k, nk_e5m2_k, nk_e4m3_k, nk_e3m2_k, nk_e2m3_k, nk_i8_k, nk_i4_k,
                           nk_u8_k, nk_u4_k, nk_u1_k>(dtype, on_dtype, on_unknown);
 }
 
-/** @brief The kernels one stored dtype adapts: bit-packed vectors take the bit kernels. */
+/** The kernels one stored dtype adapts: bit-packed vectors take the bit kernels. */
 template <nk_dtype_t stored_dtype_>
     requires(stored_dtype_ == nk_u1_k)
 int dispatch_kernel(nk_kernel_kind_t kernel, auto on_kernel, auto on_unknown) {
     return dispatch_value<nk_kernel_dot_k, nk_kernel_hamming_k, nk_kernel_jaccard_k>(kernel, on_kernel, on_unknown);
 }
 
-/** @brief The kernels one stored dtype adapts: every other dtype takes the metric trio. */
+/** The kernels one stored dtype adapts: every other dtype takes the metric trio. */
 template <nk_dtype_t stored_dtype_>
     requires(stored_dtype_ != nk_u1_k)
 int dispatch_kernel(nk_kernel_kind_t kernel, auto on_kernel, auto on_unknown) {
     return dispatch_value<nk_kernel_dot_k, nk_kernel_angular_k, nk_kernel_euclidean_k>(kernel, on_kernel, on_unknown);
 }
 
-/** @brief Everything the CLI can configure; zeroes mean "infer from the dataset & machine". */
+/** Everything the CLI can configure; zeroes mean "infer from the dataset and machine". */
 struct bench_options_t {
-    /** @brief The base vectors file, in the RetriEval `.fbin` extension family. */
+
+    /** The base vectors file, in the RetriEval `.fbin` extension family. */
     std::string vectors_path;
-    /** @brief Optional query vectors of the same dtype; absent means self-queries. */
+
+    /** Optional query vectors of the same dtype; absent means self-queries. */
     std::string queries_path;
-    /** @brief Optional `.ibin` ground-truth neighbors; absent skips the quality judgment. */
+
+    /** Optional `.ibin` ground-truth neighbors; absent skips the quality judgment. */
     std::string neighbors_path;
-    /** @brief The representation vectors are stored in; unknown means "as the file". */
+
+    /** The representation vectors are stored in; unknown means "as the file". */
     nk_dtype_t stored_dtype = nk_dtype_unknown_k;
-    /** @brief Allow-mask over NumKong kernel capabilities, intersected with the runtime
-     *      detection - the native ceiling shape, so new bits need no new plumbing. */
+
+    /** Allow-mask over NumKong kernel capabilities, intersected with the runtime detection. */
     nk_capability_t max_compute = nk_cap_any_k;
-    /** @brief Allow-mask over ForkUnion scheduling capabilities, forwarded verbatim to
-     *      @c fu_pool_new and mirrored by the waiter type the index instantiates. */
+
+    /** Allow-mask over ForkUnion scheduling capabilities, forwarded verbatim to
+     *  @c fu_pool_new and mirrored by the waiter type the index instantiates. */
     fu_capabilities_t max_schedule = fu_capabilities_all_k;
-    /** @brief The distance kernel driving both construction & search. */
+
+    /** The distance kernel driving both construction and search. */
     nk_kernel_kind_t kernel = nk_kernel_angular_k;
-    /** @brief Engaged memory domains: empty is one machine-wide heap index, a single entry
-     *      pins memory & threads to it, and several build one index per listed domain. */
+
+    /** Engaged memory domains: empty is one machine-wide heap index, a single entry pins
+     *  memory and threads to it, and several build one index per listed domain. */
     std::vector<fu_memory_domain_id_t> memory_domains;
-    /** @brief Worker threads; zero takes 7/8 of the available logical cores. */
+
+    /** Worker threads; zero takes 7/8 of the available logical cores. */
     std::size_t threads = 0;
-    /** @brief Staging trampoline rows shared by all threads; zero takes 4 × threads. */
+
+    /** Staging trampoline rows shared by all threads; zero takes 4 × threads. */
     std::size_t batch = 0;
-    /** @brief Neighbors-list width per node; must match a `connectivity_t` tiling. */
+
+    /** Neighbors-list width per node; must match a `connectivity_t` tiling. */
     std::size_t connectivity = 32;
-    /** @brief Insertion candidate pool. Calibrated on SIFT 10M against @c expansion_search for
-     *      the build-once-search-forever regime: 256/96 clears 99.3% recall@10 at roughly half
-     *      the per-query distance work of 128/192, collapsing the p99 latency ~4x - build
-     *      compute spent once to keep every future query cheap. */
+
+    /** Insertion candidate pool, calibrated on SIFT 10M against @c expansion_search for the
+     *  build-once-search-forever regime. */
     std::size_t expansion_add = 256;
-    /** @brief Search candidate pool; see @c expansion_add for the calibration. */
+
+    /** Search candidate pool; see @c expansion_add for the calibration. */
     std::size_t expansion_search = 96;
-    /** @brief Matches per query to return & judge. */
+
+    /** Matches per query to return and judge. */
     std::size_t top_k = 10;
-    /** @brief Search every ingested vector for itself instead of the query file - the
-     *      calibration-free navigability probe, with a search phase as long as the ingestion. */
+
+    /** Search every ingested vector for itself instead of the query file - the
+     *  calibration-free navigability probe, with a search phase as long as the ingestion. */
     bool self_recall = false;
-    /** @brief Checkpoint name to serialize every domain index into after ingestion - resolved
-     *      through @ref checkpoint_paths_of, so the file name stamps the dtype, kernel, and
-     *      connectivity, and any backend matching them restores it. */
+
+    /** Checkpoint name to serialize every domain index into after ingestion, resolved through
+     *  @ref checkpoint_paths_of. */
     std::string save_name;
-    /** @brief Checkpoint name to restore domain indexes from before ingestion; pair it with
-     *      `--skip-vectors`, so only the unindexed topping streams in. */
+
+    /** Checkpoint name to restore domain indexes from before ingestion; pair it with
+     *  `--skip-vectors`, so only the unindexed topping streams in. */
     std::string load_name;
-    /** @brief Directory the checkpoint blobs land in. The tmpfs-backed default suits small
-     *      runs; point 100M-scale runs at a real disk. */
+
+    /** Directory the checkpoint blobs land in; point 100M-scale runs at a real disk. */
     std::string checkpoints_dir = "/tmp";
-    /** @brief Rows the loaded indexes already cover; ingestion resumes right after them. */
+
+    /** Rows the loaded indexes already cover; ingestion resumes right after them. */
     std::size_t skip_vectors = 0;
-    /** @brief Cap on ingested rows; zero ingests the whole file. */
+
+    /** Cap on ingested rows; zero ingests the whole file. */
     std::size_t max_vectors = 0;
-    /** @brief First dataset row to view - slices one file across independent runs, so N
-     *      processes can each build their own memory domain's share of a shared dataset. */
+
+    /** First dataset row to view - slices one file across independent runs. */
     std::size_t first_vector = 0;
-    /** @brief Huge pages the launcher provisioned before starting the process; zero expects
-     *      none, any other value is enforced - a run that silently fell back to base pages
-     *      must never masquerade as a huge-page result. */
+
+    /** Huge pages the launcher provisioned before starting the process; zero expects none, any
+     *  other value is enforced, so a base-page fallback cannot pass as a huge-page result. */
     std::size_t huge_pages = 0;
-    /** @brief CUDA device group for the multi-index pipeline: one shard index per listed
-     *      ordinal, ingest striped round-robin from one host thread. Empty runs the
-     *      single-device pipeline on `--device`. */
+
+    /** CUDA device group for the multi-index pipeline: one shard index per listed ordinal.
+     *  Empty runs the single-device pipeline on `--device`. */
     std::vector<int> devices;
-    /** @brief Merge the shards into ONE stitched graph after ingest and answer queries
-     *      with a single walk; false scatters every query to all shards and k-way merges
-     *      the hits on the host. */
+
+    /** Merge the shards into one stitched graph after ingest and answer queries with a single
+     *  walk; false scatters every query to all shards and k-way merges the hits on the host. */
     bool merge = false;
-    /** @brief Merge candidate pool; zero inherits `--expansion-add`. Halving it roughly
-     *      halves the merge wall for under a recall point. */
+
+    /** Merge candidate pool; zero inherits `--expansion-add`. */
     std::size_t expansion_merge = 0;
-    /** @brief Upper bound on refinement passes after ingestion or a load; a pass that re-selects
-     *      nothing ends the phase early, and zero skips it outright. */
+
+    /** Upper bound on refinement passes after ingestion or a load; a pass that re-selects
+     *  nothing ends the phase early, and zero skips it outright. */
     std::size_t max_refines = 0;
-    /** @brief Refinement candidate pool; zero inherits `--expansion-add`. */
+
+    /** Refinement candidate pool; zero inherits `--expansion-add`. */
     std::size_t expansion_refine = 0;
-    /** @brief Print the manual and exit. */
+
+    /** Print the manual and exit. */
     bool help = false;
 };
 
-/** @brief The three matrix files one checkpointed slot spans - each a RetriEval-layout dump. */
+/** The three matrix files one checkpointed slot spans - each a RetriEval-layout dump. */
 struct checkpoint_paths_t {
     std::string vectors;
     std::string neighbors;
     std::string rows;
 };
 
-/** @brief Resolves a user-facing checkpoint name into one slot's matrix-file paths. The
- *      stamp names exactly what the payload depends on - stored dtype, distance kernel, and
- *      connectivity - so any backend instantiating the same combination computes the same
- *      names: a graph built on the GPU restores on the CPU and back. A mismatched
- *      combination resolves to different file names and simply finds nothing; geometry
- *      inside the files is re-validated at load either way. */
+/** Resolves a user-facing checkpoint name into one slot's matrix-file paths. The stamp names what
+ *  the payload depends on - stored dtype, distance kernel, connectivity - so any backend
+ *  instantiating the same combination computes the same names, and a mismatched one finds
+ *  nothing. */
 template <typename index_type_>
 static checkpoint_paths_t checkpoint_paths_of(bench_options_t const& options, std::string_view name, std::size_t slot,
                                               std::size_t slot_count) {
@@ -331,7 +332,7 @@ static checkpoint_paths_t checkpoint_paths_of(bench_options_t const& options, st
             prefix + ".neighbors.ibin", prefix + ".rows.ibin"};
 }
 
-/** @brief Maps the CLI neighbor-list degree onto the closed @c connectivity_t tiling set. */
+/** Maps the CLI neighbor-list degree onto the closed @c connectivity_t tiling set. */
 inline connectivity_t connectivity_of(std::size_t degree) noexcept {
     if (degree == 16) return connectivity_16_k;
     if (degree == 32) return connectivity_32_k;
@@ -340,22 +341,16 @@ inline connectivity_t connectivity_of(std::size_t degree) noexcept {
 }
 
 /**
- *  @brief Restores one index slot from its three RetriEval-layout matrix dumps: maps the
- *      files, validates their headers against the run's frozen geometry, streams the
- *      vectors & neighbors through the index's own @c load, and refills the id → row map
- *      the recall bookkeeping needs. Backend-neutral: only the conformance surface every
- *      index category exposes is touched. Prints its own diagnostics.
+ *  @brief Restores one index slot from its three RetriEval-layout matrix dumps, refilling the
+ *      ID → row map the recall bookkeeping needs. Prints its own diagnostics.
  *
- *  @param[in] options Supplies @c load_name, @c checkpoints_dir, and the @c connectivity
- *      the neighbor matrix must agree with.
- *  @param[inout] index A virgin index already @c reserve() -d to the run's geometry - the
- *      load validates the files against that frozen shape.
- *  @param[in] dimensions Row width the vectors matrix must match; not recoverable from
- *      @p index, whose facade may not expose it.
- *  @param[out] id_to_row Landing for the restored id → dataset-row map; must span at least
- *      as many rows as the checkpoint holds.
- *  @param[in] slot This index's position among @p slot_count sibling slots - both are baked
- *      into the file names, so a multi-domain save only restores into the same placement.
+ *  @param[in] options Supplies @c load_name, @c checkpoints_dir and the @c connectivity.
+ *  @param[inout] index A virgin index already reserved to the run's geometry, which the mapped
+ *      headers are validated against.
+ *  @param[in] dimensions Row width the vectors matrix must match.
+ *  @param[out] id_to_row Landing for the restored map; spans at least the checkpoint's rows.
+ *  @param[in] slot This index's position among the sibling slots.
+ *  @param[in] slot_count Sibling slots the save spanned; both are baked into the file names.
  *  @return True on a fully restored slot; false after printing what failed.
  */
 template <typename index_type_>
@@ -387,7 +382,7 @@ static bool load_checkpoint(bench_options_t const& options, index_type_& index, 
                                                                                         loaded_nodes, dimensions);
     nk::matrix_view<u32_t> const neighbors_view = view_matrix_payload<u32_t, u32_t>(neighbors_mapping.view(),
                                                                                     loaded_nodes, options.connectivity);
-    // The index fills its own chunks straight from the mapped dumps, both dense, one byte move each.
+    // Both the chunks and the mapped dumps are dense, so a chunk is one byte move.
     std::size_t const vectors_row_bytes = static_cast<std::size_t>(vectors_view.stride_bytes(0));
     std::size_t const neighbors_row_bytes = static_cast<std::size_t>(neighbors_view.stride_bytes(0));
     bytes_view_t const vectors_source {reinterpret_cast<byte_t const*>(vectors_view.byte_data()),
@@ -407,17 +402,16 @@ static bool load_checkpoint(bench_options_t const& options, index_type_& index, 
 }
 
 /**
- *  @brief Serializes one index slot as three RetriEval-layout matrices - vectors, neighbors,
- *      and the id → row map - through the index's own @c saved_shape / @c save. Backend-
- *      neutral, like @ref load_checkpoint. Prints its own diagnostics.
+ *  @brief Serializes one index slot as three RetriEval-layout matrices - vectors, neighbors and
+ *      the ID → row map. Prints its own diagnostics.
  *
- *  @param[in] options Supplies @c save_name, @c checkpoints_dir, and the @c connectivity
- *      stamped into the file names.
- *  @param[inout] index The built index; @c save drains it under @c immutable_k, so no
- *      insertions may be in flight.
- *  @param[in] id_to_row The id → dataset-row map filled during ingestion; its first
- *      @c saved_shape().nodes entries ride along as the third matrix.
- *  @param[in] slot This index's position among @p slot_count sibling slots.
+ *  @param[in] options Supplies @c save_name, @c checkpoints_dir and the @c connectivity.
+ *  @param[inout] index The built index; @c save drains it under @c immutable_k, so no insertions
+ *      may be in flight.
+ *  @param[in] id_to_row The map filled during ingestion; its first @c saved_shape().nodes entries
+ *      ride along as the third matrix.
+ *  @param[in] slot This index's position among the sibling slots.
+ *  @param[in] slot_count Sibling slots the save spans; both are baked into the file names.
  *  @return The serialized byte volume, or zero on failure - a real checkpoint never is.
  */
 template <typename index_type_>
@@ -432,7 +426,7 @@ static std::size_t save_checkpoint(bench_options_t const& options, index_type_& 
         fmt::println("Failed to stage {} rows for serialization", shape.nodes);
         return 0;
     }
-    // The index hands out its chunks; the staged matrices are dense, so a chunk is one byte move each.
+    // The staged matrices are dense, so a chunk is one byte move.
     std::size_t const vectors_row_bytes = static_cast<std::size_t>(vectors.stride_bytes(0));
     std::size_t const neighbors_row_bytes = static_cast<std::size_t>(neighbors.stride_bytes(0));
     bytes_span_t const vectors_target {reinterpret_cast<byte_t*>(vectors.data()), shape.nodes * vectors_row_bytes};
@@ -469,24 +463,30 @@ static std::size_t save_checkpoint(bench_options_t const& options, index_type_& 
 
 #pragma region Telemetry and Judgment
 
-/** @brief Telemetry sums each thread accumulates privately, padded away from its neighbors. */
+/** Telemetry sums each thread accumulates privately, padded away from its neighbors. */
 struct alignas(default_alignment_k) telemetry_lane_t {
-    /** @brief Frontier candidates whose neighbor lists were expanded. */
+
+    /** Frontier candidates whose neighbor lists were expanded. */
     std::size_t visited_members = 0;
-    /** @brief Total distance computations, padding lanes excluded. */
+
+    /** Total distance computations, padding lanes excluded. */
     std::size_t computed_distances = 0;
-    /** @brief Subset of @c computed_distances spent in diversity selection. */
+
+    /** Subset of @c computed_distances spent in diversity selection. */
     std::size_t computed_distances_in_refines = 0;
-    /** @brief Subset of @c computed_distances spent re-selecting while back-linking. */
+
+    /** Subset of @c computed_distances spent re-selecting while back-linking. */
     std::size_t computed_distances_in_reverse_refines = 0;
-    /** @brief Starvation restarts - a graph-connectivity health signal. */
+
+    /** Starvation restarts - a graph-connectivity health signal. */
     std::size_t restarts = 0;
-    /** @brief Walks a scratch refusal ended early on the CPU; the GPU folds its starved visited-set
-     *      claims here, the receipt of the same degradation. */
+
+    /** Walks a scratch refusal ended early on the CPU; the GPU folds its starved visited-set
+     *  claims here. */
     std::size_t saturated_walks = 0;
 };
 
-/** @brief Sums the per-thread telemetry after a phase; the lanes stay untouched. */
+/** Sums the per-thread telemetry after a phase; the lanes stay untouched. */
 inline telemetry_lane_t summed_lanes(std::vector<telemetry_lane_t> const& lanes) noexcept {
     telemetry_lane_t sums;
     for (telemetry_lane_t const& lane : lanes) {
@@ -500,56 +500,73 @@ inline telemetry_lane_t summed_lanes(std::vector<telemetry_lane_t> const& lanes)
     return sums;
 }
 
-/** @brief The backend-neutral judgment state every backend's phases fill: the id → row
- *      bookkeeping, the merged hits with their distances & latencies, and the failure tally.
- *      Backend contexts embed one and add their own machinery around it. */
+/** The backend-neutral judgment state every backend's phases fill: the id → row bookkeeping, the
+ *  merged hits with their distances and latencies, and the failure tally. */
 struct bench_results_t {
-    /** @brief The @b [rows] recall bookkeeping: dense node id → global dataset row. */
+
+    /** The @b [rows] recall bookkeeping: dense node id → global dataset row. */
     std::vector<u32_t> id_to_row;
-    /** @brief The @b [queries,depth] expected neighbors; empty when absent or truncated
-     *      by `--max-vectors`. */
+
+    /** The @b [queries,depth] expected neighbors; empty when absent or truncated by
+     *  `--max-vectors`. */
     nk::matrix_view<u32_t> ground_truth;
-    /** @brief The @b [queries,top_k] merged global rows of every query's gathered hits. */
+
+    /** The @b [queries,top_k] merged global rows of every query's gathered hits. */
     nk::matrix<u32_t> hit_rows;
-    /** @brief The @b [queries,top_k] distances matching @c hit_rows entry-for-entry. */
+
+    /** The @b [queries,top_k] distances matching @c hit_rows entry-for-entry. */
     nk::matrix<dense_distance_t> hit_distances;
-    /** @brief Merged hits per query, sizing each row for the post-clock judgment. */
+
+    /** Merged hits per query, sizing each row for the post-clock judgment. */
     std::vector<u32_t> hit_counts;
-    /** @brief Per-query end-to-end lookup latencies, in microseconds. */
+
+    /** Per-query end-to-end lookup latencies, in microseconds. */
     std::vector<float> latencies_us;
-    /** @brief Tasks that returned an error in either phase; any non-zero fails the run. */
+
+    /** Tasks that returned an error in either phase; any non-zero fails the run. */
     std::atomic<std::size_t> failed_tasks {0};
 };
 
-/** @brief What the refinement phase measured, whichever backend ran it: the passes, the audit
- *      that followed them, and the traversal telemetry they cost. */
+/** What the refinement phase measured, whichever backend ran it: the passes, the audit that
+ *  followed them, and the traversal telemetry they cost. */
 struct refinement_report_t {
-    /** @brief Published nodes one pass sweeps. */
+
+    /** Published nodes one pass sweeps. */
     std::size_t nodes = 0;
-    /** @brief The candidate pool every pass re-selects under. */
+
+    /** The candidate pool every pass re-selects under. */
     std::size_t expansion = 0;
-    /** @brief Nodes each pass re-wired; its length is the passes that actually ran. */
+
+    /** Nodes each pass re-wired; its length is the passes that actually ran. */
     std::span<std::size_t const> changed_per_pass;
-    /** @brief Threads the passes fanned over; one on a device. */
+
+    /** Threads the passes fanned over; one on a device. */
     std::size_t threads = 0;
-    /** @brief Wall clock of the passes alone. */
+
+    /** Wall clock of the passes alone. */
     double refining_seconds = 0;
-    /** @brief Wall clock of the heal and its final audit. */
+
+    /** Wall clock of the heal and its final audit. */
     double healing_seconds = 0;
-    /** @brief Traversal telemetry summed across the passes. */
+
+    /** Traversal telemetry summed across the passes. */
     telemetry_lane_t sums;
-    /** @brief Nodes the heal's first audit found unreachable. */
+
+    /** Nodes the heal's first audit found unreachable. */
     std::size_t islands_found = 0;
-    /** @brief Islands the heal wired into a reachable pick. */
+
+    /** Islands the heal wired into a reachable pick. */
     std::size_t islands_reconnected = 0;
-    /** @brief Nodes a search still reaches once the heal returned. */
+
+    /** Nodes a search still reaches once the heal returned. */
     std::size_t reachable_nodes = 0;
-    /** @brief Level-synchronous sweeps the final audit took - a diameter proxy. */
+
+    /** Level-synchronous sweeps the final audit took - a diameter proxy. */
     std::size_t sweeps = 0;
 };
 
-/** @brief Prints the refinement phase - the passes, their cost, and the reachability the heal
- *      left behind; the one place the phase's shape is written down. */
+/** Prints the refinement phase - the passes, their cost, and the reachability the heal left
+ *  behind. */
 inline void report_refinement_metrics(refinement_report_t const& report) {
     std::size_t const passes = report.changed_per_pass.size();
     fmt::print(header_style(), "\nRefinement\n");
@@ -566,8 +583,8 @@ inline void report_refinement_metrics(refinement_report_t const& report) {
                  report.nodes, report.sweeps);
 }
 
-/** @brief Prints the search phase's wall clock, throughput, latency percentiles & traversal
- *      telemetry - the backend-neutral half of the report; @p latencies_us reorders in place. */
+/** Prints the search phase's wall clock, throughput, latency percentiles and traversal
+ *  telemetry; @p latencies_us reorders in place. */
 inline void report_search_metrics(bench_options_t const& options, std::size_t query_count, double seconds,
                                   std::size_t threads, telemetry_lane_t const& sums, std::span<float> latencies_us) {
     auto percentile = [&](double share) {
@@ -580,8 +597,7 @@ inline void report_search_metrics(bench_options_t const& options, std::size_t qu
     fmt::println("  threads: {}", threads);
     fmt::println("  wall: {:.2f} s", seconds);
     fmt::println("  throughput: {} QPS", humanize(double(query_count) / seconds));
-    // Batch-shaped backends have no honest per-query clock - an empty latency span asks
-    // for the mean instead of three identical pseudo-percentiles.
+    // An empty latency span means a batch-shaped backend with no per-query clock.
     if (latencies_us.empty())
         fmt::println("  latency: {:.0f} µs mean per query, batch-uniform", seconds * 1e6 / double(query_count));
     else
@@ -593,9 +609,8 @@ inline void report_search_metrics(bench_options_t const& options, std::size_t qu
     fmt::println("  saturated: {}", fmt::styled(sums.saturated_walks, verdict_style(sums.saturated_walks == 0)));
 }
 
-/** @brief Judges the merged hits after the clocks stopped - self-recall against own rows, or
- *      recall/overlap/ndcg against the ground truth - one sweep per query either way, so QPS
- *      never depends on how much we measure. The discount tables are built once. */
+/** Judges the merged hits after the clocks stopped - self-recall against own rows, or
+ *  recall/overlap/ndcg against the ground truth - one sweep per query either way. */
 inline void judge_hits(bench_options_t const& options, bench_results_t& results, std::size_t query_count) {
     if (options.self_recall) {
         std::size_t found_at_1 = 0, found_at_k = 0;
@@ -653,13 +668,12 @@ inline void judge_hits(bench_options_t const& options, bench_results_t& results,
 
 /**
  *  @brief The data-side of a run: typed views over the source rows and the bounded staging
- *      matrix the streaming `nk::cast`s trampoline through, one vector at a time.
+ *      matrix the streaming @c nk::cast trampolines through, one vector at a time.
  *
- *  The staging matrix holds `--batch` rows for ALL threads - never a whole-dataset copy.
- *  Each thread owns a contiguous area of it and rotates through that area as its tasks
- *  stream by, so concurrent tasks never share a row and no `malloc` follows the clocks.
- *  When the file scalar already matches the stored one, the staging is empty and every
- *  access is a zero-copy view into the mapping.
+ *  The staging matrix holds `--batch` rows for every thread together, never a whole-dataset
+ *  copy; each thread rotates through its own contiguous area, so concurrent tasks never share a
+ *  row. When the file scalar matches the stored one the staging is empty and every access is a
+ *  zero-copy view into the mapping.
  */
 template <typename dataset_scalar_type_, typename bench_context_type_>
 struct streamed_dataset {
@@ -669,34 +683,36 @@ struct streamed_dataset {
     using vector_view_t = typename bench_context_type_::vector_view_t;
     static constexpr bool zero_copy_k = std::is_same_v<dataset_scalar_type_, scalar_t>;
 
-    /** @brief Float sources downcast into integer targets only after a global symmetric
-     *      rescale into the target's range - a raw saturating cast collapses the value
-     *      distribution, degenerates the distances, and loops the graph traversal.
-     *      NumKong's own reflection drives both the classification and the range. */
+    /** Float sources downcast into integer targets only after a global symmetric rescale into
+     *  the target's range; a raw saturating cast collapses the value distribution. */
     static constexpr bool scaled_k = !zero_copy_k && !nk::is_integral_dtype<dataset_scalar_type_>() &&
                                      nk::is_integral_dtype<scalar_t>();
 
-    /** @brief The largest magnitude one stored dimension can carry, in the stored dtype. */
+    /** The largest magnitude one stored dimension can carry, in the stored dtype. */
     static constexpr float target_amplitude_k = dimension_amplitude<scalar_t>();
 
-    /** @brief The index-side state both phases feed - punned through the pool callbacks. */
+    /** The index-side state both phases feed - punned through the pool callbacks. */
     bench_context_type_& bench;
-    /** @brief The @b [rows,dimensions] mapped source rows, in the file's own scalar. */
+
+    /** The @b [rows,dimensions] mapped source rows, in the file's own scalar. */
     nk::matrix_view<dataset_scalar_type_> vectors;
-    /** @brief The @b [queries,dimensions] mapped query rows - or a prefix of @c vectors. */
+
+    /** The @b [queries,dimensions] mapped query rows - or a prefix of @c vectors. */
     nk::matrix_view<dataset_scalar_type_> queries;
-    /** @brief The @b [threads,rows_per_thread,dimensions] staging trampoline planes. */
+
+    /** The @b [threads,rows_per_thread,dimensions] staging trampoline planes. */
     nk::tensor_span<scalar_t, 3> staging;
-    /** @brief The @b [threads,rows_per_thread,dimensions] `f32` rescaling planes; only
-     *      set when @c scaled_k. */
+
+    /** The @b [threads,rows_per_thread,dimensions] `f32` rescaling planes; only set when
+     *  @c scaled_k. */
     nk::tensor_span<nk::f32_t, 3> rescaling;
-    /** @brief The global symmetric factor applied before integer downcasts. */
+
+    /** The global symmetric factor applied before integer downcasts. */
     float scale = 1.0f;
 
-    /** @brief One SIMD @c reduce_minmax pass over the whole source payload finds the
-     *      amplitude; the same factor then rescales every vector AND every query, keeping
-     *      their geometry consistent. Prints the chosen factor. A no-op unless this run
-     *      downcasts a non-integral source into an integral store. */
+    /** One @c reduce_minmax pass over the source payload finds the amplitude; the same factor
+     *  rescales every vector and every query, keeping their geometry consistent. A no-op unless
+     *  this run downcasts a non-integral source into an integral store. */
     void establish_scale() {
         if constexpr (scaled_k) {
             typename dataset_scalar_type_::reduce_minmax_value_t min_value {}, max_value {};
@@ -709,15 +725,14 @@ struct streamed_dataset {
         }
     }
 
-    /** @brief Converts one source row into the calling thread's own staging plane and views
-     *      it back; @p task rotates the row within the plane, so in-flight tasks never clash. */
+    /** Converts one source row into the calling thread's own staging plane and views it back;
+     *  @p task rotates the row within the plane, so in-flight tasks never clash. */
     vector_view_t stage(nk::vector_view<dataset_scalar_type_> source, std::size_t thread, std::size_t task) noexcept {
         std::size_t const dimensions = vectors.extent(1);
         std::size_t const rotation = task % staging.extent(1);
         auto landing = staging.row(thread).row(rotation).as_vector();
         if constexpr (scaled_k) {
-            // One SIMD `nk::scale` affine pass replaces a scalar multiply loop; an f32
-            // source feeds it straight from the mapping, skipping the widening cast.
+            // An f32 source feeds @c nk::scale straight from the mapping, skipping the widening cast.
             auto rescaled = rescaling.row(thread).row(rotation).as_vector();
             nk_f32_t const alpha = scale;
             nk_f32_t const beta = 0.0f;
@@ -736,12 +751,11 @@ struct streamed_dataset {
 
 #pragma endregion
 
-/** @brief Prints the machine as ForkUnion sees it: cores, compute & memory domains, and the
- *      NUMA fabric levels, next to the NumKong capability the kernels will actually use. */
+/** Prints the machine as ForkUnion sees it: cores, compute and memory domains, and the NUMA
+ *  fabric levels, next to the NumKong capability the kernels will use. */
 inline void print_machine(fu_topology_t topology, fu_fabric_t fabric, bench_options_t const& options,
                           std::size_t threads) {
-    // Every topology query reports through a status and writes its answer out; a machine
-    // description is worth printing even where one of them declines to answer.
+    // A machine description is worth printing even where one query declines to answer.
     std::size_t compute_domains = 0, memory_domains = 0, logical_cores = 0;
     [[maybe_unused]] fu_status_t const compute_status = fu_compute_domains_count(topology, &compute_domains);
     [[maybe_unused]] fu_status_t const memory_status = fu_memory_domains_count(topology, &memory_domains);

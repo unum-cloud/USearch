@@ -1,9 +1,9 @@
 /**
+ *  @file bench/dense/ram_indexes_bf16.cpp
+ *  @author Ash Vardanian
+ *  @date August 30, 2026
  *  @brief The bf16-stored shard of the sharded-index CPU benchmark: carries the
  *      run_with_stored_dtype instantiations the dtype-free CLI unit extern-declares.
- *  @author Ash Vardanian
- *  @file bench/dense/ram_indexes_bf16.cpp
- *  @date August 30, 2026
  */
 #include "dense/ram_indexes.hpp"
 

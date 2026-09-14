@@ -1,10 +1,10 @@
 /**
+ *  @file include/usearch/dense_index.h
+ *  @author Ash Vardanian
+ *  @date August 14, 2026
  *  @brief The dense-modality C interface: Vector Search over equidimensional embeddings with
  *      inner-product, angular, euclidean, hamming, and jaccard metrics - all derived from a single
  *      inner-product kernel with pre-computed magnitudes.
- *
- *  @author Ash Vardanian
- *  @file include/usearch/dense_index.h
  *
  *  Every batch input and output is a strided matrix: a base pointer, a row count, and a byte
  *  stride between consecutive rows - a zero stride means contiguous rows of the natural width, and
@@ -15,9 +15,9 @@
  *
  *  Checkpoints ride the SafeGraphs interchange format, and the path extension picks the layout. A
  *  @c .safegraphs path is one monolith: a self-describing file holding every shard's vectors,
- *  neighbor lists and keys as one graph, rows in placement order and node ids rebased. A
+ *  neighbor lists and keys as one graph, rows in placement order and node IDs rebased. A
  *  @c .safegraphs.json path is a manifest: a small JSON catalog of one monolith per shard - each
- *  with shard-local node ids, so neighbors never cross files - with every part resolved relative to
+ *  with shard-local node IDs, so neighbors never cross files - with every part resolved relative to
  *  the manifest. Loading reads the content, never the extension, so either form loads into any
  *  shard count: part @c p lands whole on shard @c p modulo the shard count. A manifest records
  *  where its parts were written, never where a reader must keep them, so a checkpoint written
@@ -149,29 +149,35 @@ USEARCH_EXPORT typedef void* usearch_dense_cursor_t;
  */
 USEARCH_EXPORT typedef void* usearch_dense_finder_t;
 
-/** @brief The dense metric kinds supported out of the box, with SIMD kernels dispatched by the
- *      machine's capabilities. The last two read their rows as @c usearch_scalar_u1x8_k bit sets
- *      and refuse any other quantization; the first four refuse that one. */
+/** The dense metric kinds supported out of the box, with SIMD kernels dispatched by the
+ *  machine's capabilities. The last two read their rows as @c usearch_scalar_u1x8_k bit sets
+ *  and refuse any other quantization; the first four refuse that one. */
 USEARCH_EXPORT typedef enum usearch_dense_metric_t {
-    /** @brief No built-in kind - @c metric_callback supplies the scoring and forfeits the SIMD
-     *      kernel chains. */
+
+    /** No built-in kind - @c metric_callback supplies the scoring and forfeits the SIMD
+     *  kernel chains. */
     usearch_dense_metric_unknown_k = 0,
-    /** @brief Sum of elementwise products, unnormalized and scale-sensitive; the only kind the
-     *      linear-algebra verbs accept, since a product and a softmax both need logits rather
-     *      than distances. */
+
+    /** Sum of elementwise products, unnormalized and scale-sensitive; the only kind the
+     *  linear-algebra verbs accept, since a product and a softmax both need logits rather
+     *  than distances. */
     usearch_dense_metric_inner_k = 1,
-    /** @brief Cosine distance in [0, 2], zero for identical directions and blind to magnitude,
-     *      which is precomputed once per row at insertion rather than per comparison. */
+
+    /** Cosine distance in [0, 2], zero for identical directions and blind to magnitude,
+     *  which is precomputed once per row at insertion rather than per comparison. */
     usearch_dense_metric_angular_k = 2,
-    /** @brief L2 distance, non-negative and zero only for identical rows - the scale-sensitive
-     *      counterpart to angular, where a doubled vector is far from its original rather than
-     *      identical to it. */
+
+    /** L2 distance, non-negative and zero only for identical rows - the scale-sensitive
+     *  counterpart to angular, where a doubled vector is far from its original rather than
+     *  identical to it. */
     usearch_dense_metric_euclidean_k = 3,
-    /** @brief Count of differing bits, so its range is the dimensionality and every bit weighs
-     *      the same. */
+
+    /** Count of differing bits, so its range is the dimensionality and every bit weighs
+     *  the same. */
     usearch_dense_metric_hamming_k = 4,
-    /** @brief Differing bits over union bits in [0, 1], ignoring the zeros both rows share - the
-     *      kind for sparse sets, where Hamming would call two nearly-empty rows identical. */
+
+    /** Differing bits over union bits in [0, 1], ignoring the zeros both rows share - the
+     *  kind for sparse sets, where Hamming would call two nearly-empty rows identical. */
     usearch_dense_metric_jaccard_k = 5,
 } usearch_dense_metric_t;
 
@@ -196,22 +202,30 @@ USEARCH_EXPORT typedef usearch_distance_t (*usearch_dense_metric_callback_t)( //
  *  every kernel runs tail-free; the arena is slightly larger for it, and that is not a knob.
  */
 USEARCH_EXPORT typedef struct usearch_dense_options_t {
-    /** @brief The metric kind used for distance calculations between vectors. */
+
+    /** The metric kind used for distance calculations between vectors. */
     usearch_dense_metric_t metric;
-    /** @brief The @b optional custom metric; must be set when @c metric is unknown. */
+
+    /** The @b optional custom metric; must be set when @c metric is unknown. */
     usearch_dense_metric_callback_t metric_callback;
-    /** @brief The @b optional opaque state forwarded into every @c metric_callback call. */
+
+    /** The @b optional opaque state forwarded into every @c metric_callback call. */
     void* metric_callback_state;
-    /** @brief The scalar type vectors are stored & quantized into. */
+
+    /** The scalar type vectors are stored & quantized into. */
     usearch_scalar_t quantization;
-    /** @brief The number of dimensions in the indexed vectors; zero defers the geometry to
-     *      a later @c usearch_dense_load, which reads it off the checkpoint. */
+
+    /** The number of dimensions in the indexed vectors; zero defers the geometry to
+     *  a later @c usearch_dense_load, which reads it off the checkpoint. */
     size_t dimensions;
-    /** @brief The @b optional connections-per-node bound; zero derives. */
+
+    /** The @b optional connections-per-node bound; zero derives. */
     size_t connectivity;
-    /** @brief Upper bound on entries sharing one key; zero derives to one - unique keys. */
+
+    /** Upper bound on entries sharing one key; zero derives to one - unique keys. */
     size_t values_per_key;
-    /** @brief Selects the active member of the union below, and the meaning of "load". */
+
+    /** Selects the active member of the union below, and the meaning of "load". */
     usearch_residency_t residency;
     union {
         usearch_ram_options_t ram;
@@ -220,11 +234,11 @@ USEARCH_EXPORT typedef struct usearch_dense_options_t {
     };
 } usearch_dense_options_t;
 
-/** @brief The canonical spelling of a metric kind, as @c usearch_dense_metric_inner_k spells
- *      "inner"; the same lifts @c usearch_scalar_name and its kin provide for the shared sets. */
+/** The canonical spelling of a metric kind, as @c usearch_dense_metric_inner_k spells
+ *  "inner"; the same lifts @c usearch_scalar_name and its kin provide for the shared sets. */
 USEARCH_EXPORT char const* usearch_dense_metric_name(usearch_dense_metric_t metric);
 
-/** @brief Reads a metric kind back; @c usearch_dense_metric_unknown_k when unrecognized. */
+/** Reads a metric kind back; @c usearch_dense_metric_unknown_k when unrecognized. */
 USEARCH_EXPORT usearch_dense_metric_t usearch_dense_metric_from_name(usearch_bytes_view_t name);
 
 /**
@@ -257,25 +271,29 @@ USEARCH_EXPORT void usearch_dense_reserve(usearch_dense_index_t index, size_t ca
  */
 USEARCH_EXPORT void usearch_dense_clear(usearch_dense_index_t index, usearch_error_t* error);
 
-/** @brief Reports the number of stored entries. */
+/** Reports the number of stored entries. */
 USEARCH_EXPORT size_t usearch_dense_size(usearch_dense_index_t index, usearch_error_t* error);
-/** @brief Reports the reserved capacity in entries. */
+
+/** Reports the reserved capacity in entries. */
 USEARCH_EXPORT size_t usearch_dense_capacity(usearch_dense_index_t index, usearch_error_t* error);
-/** @brief Reports the frozen dimensionality of the stored vectors. */
+
+/** Reports the frozen dimensionality of the stored vectors. */
 USEARCH_EXPORT size_t usearch_dense_dimensions(usearch_dense_index_t index, usearch_error_t* error);
-/** @brief Reports the frozen connections-per-node bound of the graph. */
+
+/** Reports the frozen connections-per-node bound of the graph. */
 USEARCH_EXPORT size_t usearch_dense_connectivity(usearch_dense_index_t index, usearch_error_t* error);
-/** @brief Reports the memory usage of the index in bytes. */
+
+/** Reports the memory usage of the index in bytes. */
 USEARCH_EXPORT size_t usearch_dense_memory_usage(usearch_dense_index_t index, usearch_error_t* error);
-/** @brief Reports the capability codename the index dispatched to on this machine. */
+
+/** Reports the capability codename the index dispatched to on this machine. */
 USEARCH_EXPORT char const* usearch_dense_capabilities(usearch_dense_index_t index, usearch_error_t* error);
 
-/**
- *  @brief Optional per-call settings of @c usearch_dense_add and @c usearch_dense_refine - a
- *      pure input, never written. Passing @c NULL derives every setting.
- */
+/** Optional per-call settings of @c usearch_dense_add and @c usearch_dense_refine - a
+ *  pure input, never written. Passing @c NULL derives every setting. */
 USEARCH_EXPORT typedef struct usearch_dense_insertion_options_t {
-    /** @brief The @b optional candidate-pool breadth the build walk explores; zero derives. */
+
+    /** The @b optional candidate-pool breadth the build walk explores; zero derives. */
     size_t expansion_factor;
 } usearch_dense_insertion_options_t;
 
@@ -287,21 +305,23 @@ USEARCH_EXPORT typedef struct usearch_dense_insertion_options_t {
  *  forms: their knob is the same breadth, read as emitted-pair density rather than as recall.
  */
 USEARCH_EXPORT typedef struct usearch_dense_search_options_t {
-    /** @brief The @b optional candidate-pool breadth the walk explores; zero derives. */
+
+    /** The @b optional candidate-pool breadth the walk explores; zero derives. */
     size_t expansion_factor;
 } usearch_dense_search_options_t;
 
-/**
- *  @brief Traversal telemetry, shared by every verb that walks the graph - a pure output, fully
- *      overwritten by the call it is passed to. Passing @c NULL skips reporting.
- */
+/** Traversal telemetry, shared by every verb that walks the graph - a pure output, fully
+ *  overwritten by the call it is passed to. Passing @c NULL skips reporting. */
 USEARCH_EXPORT typedef struct usearch_dense_traversal_stats_t {
-    /** @brief Graph members visited while resolving the batch. */
+
+    /** Graph members visited while resolving the batch. */
     size_t visited_members;
-    /** @brief Distances computed while resolving the batch, diversity re-selections included. */
+
+    /** Distances computed while resolving the batch, diversity re-selections included. */
     size_t computed_distances;
-    /** @brief Starvation restarts - re-seedings after the frontier drained prematurely,
-     *      and a graph-connectivity health signal rather than a cost counter. */
+
+    /** Starvation restarts - re-seedings after the frontier drained prematurely,
+     *  and a graph-connectivity health signal rather than a cost counter. */
     size_t restarts;
 } usearch_dense_traversal_stats_t;
 
@@ -551,7 +571,7 @@ USEARCH_EXPORT size_t usearch_dense_cursor_next(             //
     usearch_matrix_span_t const* vectors,                    //
     usearch_error_t* error);
 
-/** @brief Releases the cursor. */
+/** Releases the cursor. */
 USEARCH_EXPORT void usearch_dense_cursor_free(usearch_dense_cursor_t cursor);
 
 /**
@@ -591,14 +611,12 @@ USEARCH_EXPORT size_t usearch_dense_find_next(               //
     usearch_keys_span_t keys, usearch_distance_t* distances, //
     usearch_error_t* error);
 
-/** @brief Releases the finder and the traversal context it pinned. */
+/** Releases the finder and the traversal context it pinned. */
 USEARCH_EXPORT void usearch_dense_find_free(usearch_dense_finder_t finder);
 
-/**
- *  @brief Reports the bytes one monolith of the index takes under the default layout - what
- *      @c usearch_dense_save_buffer needs; a manifest checkpoint's parts sum to about the same,
- *      plus the manifest.
- */
+/** Reports the bytes one monolith of the index takes under the default layout - what
+ *  @c usearch_dense_save_buffer needs; a manifest checkpoint's parts sum to about the same,
+ *  plus the manifest. */
 USEARCH_EXPORT size_t usearch_dense_storage_requirements(usearch_dense_index_t index, usearch_error_t* error);
 
 /**
@@ -669,13 +687,17 @@ USEARCH_EXPORT void usearch_dense_load(                         //
  *  @c usearch_dense_init, and no caller has to know which fields this call filled.
  */
 USEARCH_EXPORT typedef struct usearch_dense_metadata_t {
-    /** @brief The metric kind the checkpoint scores with. */
+
+    /** The metric kind the checkpoint scores with. */
     usearch_dense_metric_t metric;
-    /** @brief The scalar type its rows are stored & quantized into. */
+
+    /** The scalar type its rows are stored & quantized into. */
     usearch_scalar_t quantization;
-    /** @brief Scalars per stored vector. */
+
+    /** Scalars per stored vector. */
     size_t dimensions;
-    /** @brief Connections per node the graph was built with. */
+
+    /** Connections per node the graph was built with. */
     size_t connectivity;
 } usearch_dense_metadata_t;
 
@@ -703,7 +725,7 @@ USEARCH_EXPORT void usearch_dense_metadata( //
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *
- *  The buffer holds one monolith of every shard - rows in placement order, node ids rebased - so
+ *  The buffer holds one monolith of every shard - rows in placement order, node IDs rebased - so
  *  it reads as one graph and loads into any shard count. It is the same shape the path-taking
  *  sibling writes into its own mapping, so the two produce identical bytes.
  *
@@ -822,24 +844,27 @@ USEARCH_EXPORT void usearch_dense_multiply(                     //
  *  they share an element rather than travelling as two arrays a caller could supply half of.
  */
 USEARCH_EXPORT typedef struct usearch_dense_softmax_state_t {
-    /** @brief Largest logit seen so far - the recurrence's @c m. */
+
+    /** Largest logit seen so far - the recurrence's @c m. */
     float maximum_score;
-    /** @brief Sum of exponentials taken against that maximum - the recurrence's @c l. */
+
+    /** Sum of exponentials taken against that maximum - the recurrence's @c l. */
     float partition;
 } usearch_dense_softmax_state_t;
 
-/**
- *  @brief Optional per-call settings of @c usearch_dense_attend - a pure input, never written.
- *      Passing @c NULL derives every setting.
- */
+/** Optional per-call settings of @c usearch_dense_attend - a pure input, never written.
+ *  Passing @c NULL derives every setting. */
 USEARCH_EXPORT typedef struct usearch_dense_attention_options_t {
-    /** @brief The @b optional candidate-pool breadth; zero derives. */
+
+    /** The @b optional candidate-pool breadth; zero derives. */
     size_t expansion_factor;
-    /** @brief The @b optional logit scale, conventionally the inverse square root of the head
-     *      dimensionality; zero derives it from the index's frozen geometry. */
+
+    /** The @b optional logit scale, conventionally the inverse square root of the head
+     *  dimensionality; zero derives it from the index's frozen geometry. */
     float score_scale;
-    /** @brief The @b optional residual-mass threshold the walk stops at, the mass-denominated
-     *      sibling of the radius a search terminates on; zero derives. */
+
+    /** The @b optional residual-mass threshold the walk stops at, the mass-denominated
+     *  sibling of the radius a search terminates on; zero derives. */
     float mass_tolerance;
 } usearch_dense_attention_options_t;
 

@@ -1,8 +1,8 @@
 /**
- *  @brief Smoke & concurrency tests for the GPU-resident dense index over i8 cells.
- *  @author Ash Vardanian
  *  @file test/dense/vram_index_i8.cu
+ *  @author Ash Vardanian
  *  @date July 23, 2026
+ *  @brief Smoke & concurrency tests for the GPU-resident dense index over i8 cells.
  */
 #include "dense/vram_index.cuh"
 

@@ -1,11 +1,12 @@
 /**
- *  @brief The geospatial-modality C interface: similarity search over positions on and
- *      above the ellipsoid, in space and in time - single positions, time-ordered tracks,
- *      and closed boundaries - under nearest, overlap, whole-shape, coverage, and
- *      order-respecting scoring.
- *
- *  @author Ash Vardanian
  *  @file include/usearch/geospatial_index.h
+ *  @author Ash Vardanian
+ *  @date August 14, 2026
+ *  @brief The geospatial-modality C interface.
+ *
+ *  Similarity search over positions on and above the ellipsoid, in space and in time - single
+ *  positions, time-ordered tracks, and closed boundaries - under nearest, overlap, whole-shape,
+ *  coverage, and order-respecting scoring.
  *
  *  Every entry is a @b point @b set: one or more positions sharing a key. A single
  *  position is a set of one, a vehicle track is a set of thousands, a parcel outline is a
@@ -80,71 +81,73 @@
 extern "C" {
 #endif
 
-/**
- *  @brief Similarity Search Index over point sets in space & time.
- */
+/** Similarity Search Index over point sets in space & time. */
 USEARCH_EXPORT typedef void* usearch_geospatial_index_t;
 
 /**
- *  @brief A query point set converted into the index's internal geometry once and reused
- *      across searches. Emplacing is the expensive half of a query - the geodetic
- *      conversion, the time scaling, and any per-set precomputation the metric needs -
- *      so a caller asking several questions of the same object pays it once.
+ *  @brief A query point set converted into the index's internal geometry once and reused across
+ *      searches.
+ *
+ *  Emplacing is the expensive half of a query - the geodetic conversion, the time scaling, and any
+ *  per-set precomputation the metric needs - so a caller asking several questions of the same
+ *  object pays it once.
  *
  *  @see usearch_geospatial_emplace To build one.
  *  @see usearch_geospatial_release To dispose of one.
  */
 USEARCH_EXPORT typedef void* usearch_geospatial_emplaced_t;
 
-/**
- *  @brief A consistent snapshot cursor over the index contents, capturing the publication
- *      watermark at creation - concurrent inserts never appear mid-iteration.
- */
+/** A consistent snapshot cursor over the index contents, capturing the publication
+ *  watermark at creation - concurrent inserts never appear mid-iteration. */
 USEARCH_EXPORT typedef void* usearch_geospatial_cursor_t;
 
-/**
- *  @brief Which axes each incoming position carries, and in which order. Fixed for the
- *      lifetime of the index: every point set must present the same width.
- */
+/** Which axes each incoming position carries, and in which order. Fixed for the
+ *  lifetime of the index: every point set must present the same width. */
 USEARCH_EXPORT typedef enum usearch_geospatial_layout_t {
     usearch_geospatial_layout_unknown_k = 0,
-    /** @brief Latitude, longitude - degrees on the WGS-84 ellipsoid. */
+
+    /** Latitude, longitude - degrees on the WGS-84 ellipsoid. */
     usearch_geospatial_layout_surface_k = 2,
-    /** @brief Latitude, longitude, altitude - degrees and metres above the ellipsoid. */
+
+    /** Latitude, longitude, altitude - degrees and metres above the ellipsoid. */
     usearch_geospatial_layout_elevated_k = 3,
-    /** @brief Latitude, longitude, seconds - a surface track through time. */
+
+    /** Latitude, longitude, seconds - a surface track through time. */
     usearch_geospatial_layout_timed_k = 4,
-    /** @brief Latitude, longitude, altitude, seconds - the full four-axis form. */
+
+    /** Latitude, longitude, altitude, seconds - the full four-axis form. */
     usearch_geospatial_layout_elevated_timed_k = 5,
 } usearch_geospatial_layout_t;
 
-/**
- *  @brief What the ordering of points within one set means. Decides which scoring modes
- *      the index will accept: route scoring is defined only for ordered sets.
- */
+/** What the ordering of points within one set means. Decides which scoring modes
+ *  the index will accept: route scoring is defined only for ordered sets. */
 USEARCH_EXPORT typedef enum usearch_geospatial_structure_t {
     usearch_geospatial_structure_unknown_k = 0,
-    /** @brief Order carries nothing - a scatter of observations, a bag of vertices. */
+
+    /** Order carries nothing - a scatter of observations, a bag of vertices. */
     usearch_geospatial_structure_cloud_k = 1,
-    /** @brief Order is the traversal - a vehicle track, a vessel voyage, a flight. */
+
+    /** Order is the traversal - a vehicle track, a vessel voyage, a flight. */
     usearch_geospatial_structure_path_k = 2,
-    /** @brief A closed boundary; the last point is understood to join the first. */
+
+    /** A closed boundary; the last point is understood to join the first. */
     usearch_geospatial_structure_ring_k = 3,
 } usearch_geospatial_structure_t;
 
-/**
- *  @brief Which axes participate in one search. The graph walks the surface chord alone;
- *      altitude and time enter when the candidates it found are scored, and a distance
- *      that adds them never falls below the surface chord, so narrowing the axes only
- *      widens the candidate set.
- */
+/** Which axes participate in one search. The graph walks the surface chord alone;
+ *  altitude and time enter when the candidates it found are scored, and a distance
+ *  that adds them never falls below the surface chord, so narrowing the axes only
+ *  widens the candidate set. */
 USEARCH_EXPORT typedef enum usearch_geospatial_axes_t {
     usearch_geospatial_axes_unknown_k = 0,
-    /** @brief Ground track only - altitude and time ignored. */
+
+    /** Ground track only - altitude and time ignored. */
     usearch_geospatial_axes_horizontal_k = 1,
-    /** @brief Position in three dimensions - time ignored. */
+
+    /** Position in three dimensions - time ignored. */
     usearch_geospatial_axes_spatial_k = 2,
-    /** @brief Every axis the layout carries, time included. */
+
+    /** Every axis the layout carries, time included. */
     usearch_geospatial_axes_full_k = 3,
 } usearch_geospatial_axes_t;
 
@@ -164,6 +167,7 @@ USEARCH_EXPORT typedef enum usearch_geospatial_axes_t {
  */
 USEARCH_EXPORT typedef enum usearch_geospatial_mode_t {
     usearch_geospatial_mode_unknown_k = 0,
+
     /**
      *  @brief Nearest approach - the smallest separation between any query point and any
      *      entry point.
@@ -182,6 +186,7 @@ USEARCH_EXPORT typedef enum usearch_geospatial_mode_t {
      *  @endcode
      */
     usearch_geospatial_mode_approach_k = 1,
+
     /**
      *  @brief Overlap - how many query points have an entry point within the tolerance,
      *      at the same moment when the tolerance carries seconds.
@@ -201,6 +206,7 @@ USEARCH_EXPORT typedef enum usearch_geospatial_mode_t {
      *  @endcode
      */
     usearch_geospatial_mode_overlap_k = 2,
+
     /**
      *  @brief Symmetric Hausdorff - the largest of all nearest approaches, in both directions.
      *
@@ -216,6 +222,7 @@ USEARCH_EXPORT typedef enum usearch_geospatial_mode_t {
      *  @endcode
      */
     usearch_geospatial_mode_shape_k = 3,
+
     /**
      *  @brief Directed Hausdorff from the query onto the entry - the worst-covered query point.
      *
@@ -231,6 +238,7 @@ USEARCH_EXPORT typedef enum usearch_geospatial_mode_t {
      *  @endcode
      */
     usearch_geospatial_mode_coverage_k = 4,
+
     /**
      *  @brief Discrete Frechet - the tightest leash for two walkers who may pause but never
      *      reverse.
@@ -255,24 +263,24 @@ USEARCH_EXPORT typedef enum usearch_geospatial_mode_t {
     usearch_geospatial_mode_route_k = 5,
 } usearch_geospatial_mode_t;
 
-/**
- *  @brief Construction & loading options of a geospatial index. The @c residency field
- *      tags which union member is read; zeroed optional fields derive from the geometry.
- */
+/** Construction & loading options of a geospatial index. The @c residency field
+ *  tags which union member is read; zeroed optional fields derive from the geometry. */
 USEARCH_EXPORT typedef struct usearch_geospatial_options_t {
 
-    /** @brief Which axes incoming positions carry. */
+    /** Which axes incoming positions carry. */
     usearch_geospatial_layout_t layout;
-    /** @brief What ordering within a point set means; paths carry a successor per point. */
+
+    /** What ordering within a point set means; paths carry a successor per point. */
     usearch_geospatial_structure_t structure;
 
-    /** @brief The @b optional connections-per-node bound; zero derives to twelve - eight
-     *      tangent-plane cones and four long-range links. */
+    /** The @b optional connections-per-node bound; zero derives to twelve - eight
+     *  tangent-plane cones and four long-range links. */
     size_t connectivity;
-    /** @brief Upper bound on points sharing one key; zero derives to one - unique keys. */
+
+    /** Upper bound on points sharing one key; zero derives to one - unique keys. */
     size_t values_per_key;
 
-    /** @brief Selects the active member of the union below, and the meaning of "load". */
+    /** Selects the active member of the union below, and the meaning of "load". */
     usearch_residency_t residency;
     union {
         usearch_ram_options_t ram;
@@ -291,9 +299,7 @@ USEARCH_EXPORT typedef struct usearch_geospatial_options_t {
 USEARCH_EXPORT usearch_geospatial_index_t usearch_geospatial_init( //
     usearch_geospatial_options_t const* options, usearch_error_t* error);
 
-/**
- *  @brief Frees the resources associated with the index; cannot fail, so takes no error.
- */
+/** Frees the resources associated with the index; cannot fail, so takes no error. */
 USEARCH_EXPORT void usearch_geospatial_free(usearch_geospatial_index_t index);
 
 /**
@@ -304,30 +310,31 @@ USEARCH_EXPORT void usearch_geospatial_free(usearch_geospatial_index_t index);
 USEARCH_EXPORT void usearch_geospatial_reserve( //
     usearch_geospatial_index_t index, size_t entries, size_t points, usearch_error_t* error);
 
-/**
- *  @brief Erases all entries, keeping the reserved capacity.
- */
+/** Erases all entries, keeping the reserved capacity. */
 USEARCH_EXPORT void usearch_geospatial_clear(usearch_geospatial_index_t index, usearch_error_t* error);
 
-/** @brief Reports the number of stored entries. */
+/** Reports the number of stored entries. */
 USEARCH_EXPORT size_t usearch_geospatial_size(usearch_geospatial_index_t index, usearch_error_t* error);
-/** @brief Reports the reserved capacity in entries. */
+
+/** Reports the reserved capacity in entries. */
 USEARCH_EXPORT size_t usearch_geospatial_capacity(usearch_geospatial_index_t index, usearch_error_t* error);
-/** @brief Reports the frozen connections-per-node bound of the graph. */
+
+/** Reports the frozen connections-per-node bound of the graph. */
 USEARCH_EXPORT size_t usearch_geospatial_connectivity(usearch_geospatial_index_t index, usearch_error_t* error);
-/** @brief Reports the memory usage of the index in bytes, point arenas included. */
+
+/** Reports the memory usage of the index in bytes, point arenas included. */
 USEARCH_EXPORT size_t usearch_geospatial_memory_usage(usearch_geospatial_index_t index, usearch_error_t* error);
-/** @brief Reports the capability codename the index dispatched to on this machine. */
+
+/** Reports the capability codename the index dispatched to on this machine. */
 USEARCH_EXPORT char const* usearch_geospatial_capabilities(usearch_geospatial_index_t index, usearch_error_t* error);
 
-/**
- *  @brief Optional per-call settings of @c usearch_geospatial_add and
- *      @c usearch_geospatial_refine - a pure input, never written. Passing @c NULL derives
- *      every setting.
- */
+/** Optional per-call settings of @c usearch_geospatial_add and
+ *  @c usearch_geospatial_refine - a pure input, never written. Passing @c NULL derives
+ *  every setting. */
 USEARCH_EXPORT typedef struct usearch_geospatial_insertion_options_t {
-    /** @brief The @b optional candidate-pool breadth the build walk explores - the @c ef of
-     *      the literature; zero derives. */
+
+    /** The @b optional candidate-pool breadth the build walk explores - the @c ef of
+     *  the literature; zero derives. */
     size_t expansion_factor;
 } usearch_geospatial_insertion_options_t;
 
@@ -340,8 +347,9 @@ USEARCH_EXPORT typedef struct usearch_geospatial_insertion_options_t {
  *  graph's spanner bound, so a caller-chosen breadth would only make the report incomplete.
  */
 USEARCH_EXPORT typedef struct usearch_geospatial_search_options_t {
-    /** @brief The @b optional candidate-pool breadth the walk explores - the @c ef of the
-     *      literature; zero derives. */
+
+    /** The @b optional candidate-pool breadth the walk explores - the @c ef of the
+     *  literature; zero derives. */
     size_t expansion_factor;
 } usearch_geospatial_search_options_t;
 
@@ -356,23 +364,26 @@ USEARCH_EXPORT typedef struct usearch_geospatial_search_options_t {
  *  confidence, and the scoring tightens back to the pair's own.
  */
 USEARCH_EXPORT typedef struct usearch_geospatial_tolerance_t {
-    /** @brief Radius in metres; zero derives as described above. */
+
+    /** Radius in metres; zero derives as described above. */
     double metres;
-    /** @brief Half-width of the time window in seconds; zero ignores time. */
+
+    /** Half-width of the time window in seconds; zero ignores time. */
     double seconds;
 } usearch_geospatial_tolerance_t;
 
-/**
- *  @brief Traversal telemetry, shared by insertion and every search form - a pure output,
- *      fully overwritten by the call it is passed to. Passing @c NULL skips reporting.
- */
+/** Traversal telemetry, shared by insertion and every search form - a pure output,
+ *  fully overwritten by the call it is passed to. Passing @c NULL skips reporting. */
 USEARCH_EXPORT typedef struct usearch_geospatial_traversal_stats_t {
-    /** @brief Graph members visited while resolving the batch. */
+
+    /** Graph members visited while resolving the batch. */
     size_t visited_members;
-    /** @brief Distances computed while resolving the batch, diversity re-selections included. */
+
+    /** Distances computed while resolving the batch, diversity re-selections included. */
     size_t computed_distances;
-    /** @brief Starvation restarts - re-seedings after the frontier drained prematurely,
-     *      and a graph-connectivity health signal rather than a cost counter. */
+
+    /** Starvation restarts - re-seedings after the frontier drained prematurely,
+     *  and a graph-connectivity health signal rather than a cost counter. */
     size_t restarts;
 } usearch_geospatial_traversal_stats_t;
 
@@ -462,9 +473,7 @@ USEARCH_EXPORT size_t usearch_geospatial_refine(                   //
 USEARCH_EXPORT usearch_geospatial_emplaced_t usearch_geospatial_emplace( //
     usearch_geospatial_index_t index, double const* points, size_t point_count, usearch_error_t* error);
 
-/**
- *  @brief Frees an emplaced query object. The index it was emplaced against must outlive it.
- */
+/** Frees an emplaced query object. The index it was emplaced against must outlive it. */
 USEARCH_EXPORT void usearch_geospatial_release( //
     usearch_geospatial_emplaced_t emplaced, usearch_error_t* error);
 
@@ -563,13 +572,16 @@ USEARCH_EXPORT void usearch_geospatial_search_if(                       //
     usearch_geospatial_traversal_stats_t* stats,                        //
     usearch_error_t* error);
 
-/** @brief What one key holds, enough to size a buffer before retrieving any of it. */
+/** What one key holds, enough to size a buffer before retrieving any of it. */
 USEARCH_EXPORT typedef struct usearch_geospatial_key_stats_t {
-    /** @brief Entries sharing the key; keys need not be unique. */
+
+    /** Entries sharing the key; keys need not be unique. */
     size_t entries;
-    /** @brief Positions summed across those entries. */
+
+    /** Positions summed across those entries. */
     size_t total_points;
-    /** @brief Positions of the longest single entry - the per-entry stride one @c get needs. */
+
+    /** Positions of the longest single entry - the per-entry stride one @c get needs. */
     size_t largest_points;
 } usearch_geospatial_key_stats_t;
 
@@ -661,10 +673,10 @@ USEARCH_EXPORT size_t usearch_geospatial_cursor_next(             //
     usearch_geospatial_cursor_t cursor, usearch_keys_span_t keys, //
     int32_t const** point_sets, size_t* point_counts, usearch_error_t* error);
 
-/** @brief Releases the cursor. */
+/** Releases the cursor. */
 USEARCH_EXPORT void usearch_geospatial_cursor_free(usearch_geospatial_cursor_t cursor);
 
-/** @brief Bytes one monolith takes under the default layout; a manifest's parts sum to about the same. */
+/** Bytes one monolith takes under the default layout; a manifest's parts sum to about the same. */
 USEARCH_EXPORT size_t usearch_geospatial_storage_requirements(usearch_geospatial_index_t index, usearch_error_t* error);
 
 /**
@@ -688,10 +700,11 @@ USEARCH_EXPORT void usearch_geospatial_save(                       //
     usearch_error_t* error);
 
 /**
- *  @brief Loads a checkpoint into an initialized handle, with the handle's residency
- *      deciding the behavior: materialize into RAM, upload to the device, or open in place
- *      on disk - the read-only form, where mutating verbs fail. A handle whose geometry was
- *      left zeroed freezes it here, from the checkpoint's own headers.
+ *  @brief Loads a checkpoint into an initialized handle, with the handle's residency deciding the
+ *      behavior: materialize into RAM, upload to the device, or open in place on disk - the
+ *      read-only form, where mutating verbs fail.
+ *
+ *  A handle whose geometry was left zeroed freezes it here, from the checkpoint's own headers.
  *
  *  @param[inout] index The handle to be populated.
  *  @param[in] executor The threads and scratch the read fans out over, one shard per thread.
@@ -710,9 +723,7 @@ USEARCH_EXPORT void usearch_geospatial_load(                       //
     usearch_progress_callback_t progress, void* progress_state,    //
     usearch_error_t* error);
 
-/**
- *  @brief Reads a checkpoint's geometry & metric metadata into @p options without loading it.
- */
+/** Reads a checkpoint's geometry & metric metadata into @p options without loading it. */
 USEARCH_EXPORT void usearch_geospatial_metadata( //
     usearch_bytes_view_t path, usearch_geospatial_options_t* options, usearch_error_t* error);
 

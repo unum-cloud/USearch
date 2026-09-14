@@ -1,8 +1,8 @@
 /**
- *  @brief Vector Search index for pre-constructed read-only graphs on block storage.
- *  @author Ash Vardanian
  *  @file include/usearch/dense/nvme_index.hpp
+ *  @author Ash Vardanian
  *  @date July 22, 2026
+ *  @brief Vector Search index for pre-constructed read-only graphs on block storage.
  *
  *  Unlike the mutation-oriented in-memory design, this header is built around one idea:
  *  a single graph traversal is a chain of dependent reads, each bounded by device latency,
@@ -41,21 +41,21 @@
  *  then Windows IoRing, then the portable & macOS path:
  *
  *  - @b Create - @c io_uring_setup plus the ring mappings; @c io_setup for AIO;
- *      @c CreateIoRing on Windows; nothing to create portably.
+ *  @c CreateIoRing on Windows; nothing to create portably.
  *  - @b Encode - an SQE written in the shared ring; an @c iocb in a caller array;
- *      @c BuildIoRingReadFile builds into the ring; portably a staged request.
+ *  @c BuildIoRingReadFile builds into the ring; portably a staged request.
  *  - @b Submit - one @c io_uring_enter per batch; @c io_submit; @c SubmitIoRing;
- *      portably a loop of @c pread calls.
+ *  portably a loop of @c pread calls.
  *  - @b Reap - the CQ ring drained in user space; @c io_getevents;
- *      @c PopIoRingCompletion, also syscall-free; portably inline with submission.
+ *  @c PopIoRingCompletion, also syscall-free; portably inline with submission.
  *  - @b Register @b buffers - @c IORING_REGISTER_BUFFERS;
- *      no AIO equivalent; @c BuildIoRingRegisterBuffers; none portably.
+ *  no AIO equivalent; @c BuildIoRingRegisterBuffers; none portably.
  *  - @b Register @b files - @c IORING_REGISTER_FILES;
- *      no AIO equivalent; @c BuildIoRingRegisterFileHandles; none portably.
+ *  no AIO equivalent; @c BuildIoRingRegisterFileHandles; none portably.
  *  - @b Cookie - @c user_data on the SQE & CQE; @c aio_data echoed in
- *      @c io_event.data; IoRing's @c UserData; portably staged alongside.
+ *  @c io_event.data; IoRing's @c UserData; portably staged alongside.
  *  - @b Probe - setup-flag @c EINVAL fallback chains; AIO is assumed present;
- *      @c IsIoRingOpSupported; the portable path is the fallback itself.
+ *  @c IsIoRingOpSupported; the portable path is the fallback itself.
  *
  *  The SQE fields a read actually consumes: @c opcode, @c flags, @c fd, @c off,
  *  @c addr, @c len, @c user_data - plus @c buf_index for @c READ_FIXED, where @c fd
@@ -68,7 +68,7 @@
  *
  *  The payload opens with the shared @c dense_index_header_t, then a plain array of
  *  @b [node_count+1] 64-bit byte offsets, then the node records. Each record is fully
- *  self-contained - neighbor ids, pre-computed norms, and the vector - padded to the
+ *  self-contained - neighbor IDs, pre-computed norms, and the vector - padded to the
  *  512-byte transfer block, so one read services one hop of one traversal. Neighbor
  *  lists are variable-length: the record stores its own count, and the offsets array
  *  is the only random-access directory.
@@ -152,57 +152,61 @@ namespace usearch {
 
 #pragma region Vocabulary
 
-/** @brief Transfer granularity of the record section: every record begins and ends on
- *      a 512-byte boundary, matching the finest NVMe logical block, so direct I/O works
- *      against 512e devices and wastes at most one block on 4Kn ones. */
+/** Transfer granularity of the record section: every record begins and ends on
+ *  a 512-byte boundary, matching the finest NVMe logical block, so direct I/O works
+ *  against 512e devices and wastes at most one block on 4Kn ones. */
 inline constexpr std::size_t dense_nvme_block_k = 512;
 
-/** @brief Alignment of every staging buffer - the strictest direct-I/O memory alignment
- *      any mainstream device demands, and a page, so one buffer never splits pages. */
+/** Alignment of every staging buffer - the strictest direct-I/O memory alignment
+ *  any mainstream device demands, and a page, so one buffer never splits pages. */
 inline constexpr std::size_t dense_nvme_alignment_k = 4096;
 
-/** @brief Identity of one in-flight traversal slot within a context's slot array -
- *      packed into the round-tripped tag and used to index the slots. */
+/** Identity of one in-flight traversal slot within a context's slot array -
+ *  packed into the round-tripped tag and used to index the slots. */
 using dense_traversal_slot_id_t = u32_t;
 
-/** @brief Index into an engine's staging-buffer arena - leased by the state machine,
- *      carried by every request, and the @c buf_index of registered-buffer submissions. */
+/** Index into an engine's staging-buffer arena - leased by the state machine,
+ *  carried by every request, and the @c buf_index of registered-buffer submissions. */
 using dense_staging_buffer_id_t = u32_t;
 
-/** @brief Index into an engine's registered-file table - one entry per shard of a
- *      multi-index group, so one ring serves every graph a thread traverses. A ring is
- *      kernel state, and per-(thread, shard) rings would multiply it by the shard count;
- *      the table keeps it per-thread, with the shard slot picking the file. */
+/** Index into an engine's registered-file table - one entry per shard of a
+ *  multi-index group, so one ring serves every graph a thread traverses. A ring is
+ *  kernel state, and per-(thread, shard) rings would multiply it by the shard count;
+ *  the table keeps it per-thread, with the shard slot picking the file. */
 using dense_io_file_slot_t = u32_t;
 
-/** @brief How a @c pump call treats completions: return with whatever is already
- *      reaped, or insist on at least one - the polling-vs-blocking axis shared by
- *      every engine. */
+/** How a @c pump call treats completions: return with whatever is already
+ *  reaped, or insist on at least one - the polling-vs-blocking axis shared by
+ *  every engine. */
 enum class dense_io_wait_t : u32_t {
-    /** @brief Submit & reap what's there; never sleep. */
+
+    /** Submit & reap what's there; never sleep. */
     nonblocking_k = 0,
-    /** @brief Submit, then hold until at least one completion lands. */
+
+    /** Submit, then hold until at least one completion lands. */
     blocking_k = 1,
 };
 
-/** @brief Whether the payload descriptor routes through the page cache or around it -
- *      @c O_DIRECT on Linux, @c F_NOCACHE on macOS, @c FILE_FLAG_NO_BUFFERING on Windows. */
+/** Whether the payload descriptor routes through the page cache or around it -
+ *  @c O_DIRECT on Linux, @c F_NOCACHE on macOS, @c FILE_FLAG_NO_BUFFERING on Windows. */
 enum class dense_io_caching_t : u32_t {
     cached_k = 0,
     direct_k = 1,
 };
 
-/** @brief Why a record was fetched; routes the completion inside the state machine. */
+/** Why a record was fetched; routes the completion inside the state machine. */
 enum class dense_io_purpose_t : u32_t {
-    /** @brief The record's vector will be scored against the slot's query. */
+
+    /** The record's vector will be scored against the slot's query. */
     score_k = 0,
-    /** @brief The record's neighbor list will extend the slot's frontier. */
+
+    /** The record's neighbor list will extend the slot's frontier. */
     expand_k = 1,
 };
 
-/** @brief Opaque per-read cookie: the issuing slot, the staging buffer, and the purpose,
- *      packed into the one 64-bit word every ring API round-trips untouched -
- *      @c sqe->user_data, @c iocb.aio_data, or IoRing's @c UserData. */
+/** Opaque per-read cookie: the issuing slot, the staging buffer, and the purpose,
+ *  packed into the one 64-bit word every ring API round-trips untouched -
+ *  @c sqe->user_data, @c iocb.aio_data, or IoRing's @c UserData. */
 struct dense_io_tag_t {
     dense_traversal_slot_id_t slot;
     dense_staging_buffer_id_t buffer : 31;
@@ -220,39 +224,44 @@ struct dense_io_tag_t {
     }
 };
 
-/** @brief One read order from the state machine to an engine: where, how much, into
- *      which arena slot, and the cookie to hand back. Offsets are always bytes from
- *      the start of the payload; LBA-addressed engines rescale internally. The
- *      destination address never appears - the engine derives it from @p buffer,
- *      which is also the @c buf_index of registered-buffer submissions. */
+/** One read order from the state machine to an engine: where, how much, into
+ *  which arena slot, and the cookie to hand back. Offsets are always bytes from
+ *  the start of the payload; LBA-addressed engines rescale internally. The
+ *  destination address never appears - the engine derives it from @p buffer,
+ *  which is also the @c buf_index of registered-buffer submissions. */
 struct dense_io_request_t {
-    /** @brief Byte offset of the record within the payload; block-aligned by format. */
+
+    /** Byte offset of the record within the payload; block-aligned by format. */
     u64_t offset;
-    /** @brief Bytes to transfer; a whole number of @ref dense_nvme_block_k blocks. */
+
+    /** Bytes to transfer; a whole number of @ref dense_nvme_block_k blocks. */
     u32_t length;
-    /** @brief Which registered file the read targets - the group slot of the shard
-     *      being traversed; a single-graph context registers one file at slot zero. */
+
+    /** Which registered file the read targets - the group slot of the shard
+     *  being traversed; a single-graph context registers one file at slot zero. */
     dense_io_file_slot_t file_slot;
-    /** @brief Index into the engine's staging arena - stays valid until the matching
-     *      completion is consumed & the state machine recycles the index. */
+
+    /** Index into the engine's staging arena - stays valid until the matching
+     *  completion is consumed & the state machine recycles the index. */
     dense_staging_buffer_id_t buffer;
-    /** @brief Round-tripped @ref dense_io_tag_t in packed form; opaque to engines. */
+
+    /** Round-tripped @ref dense_io_tag_t in packed form; opaque to engines. */
     u64_t tag;
 };
 
-/** @brief One completed read, surfaced by an engine's @c pop. A negative @c result is
- *      a negated @c errno -like error; otherwise it's the byte count transferred. */
+/** One completed read, surfaced by an engine's @c pop. A negative @c result is
+ *  a negated @c errno -like error; otherwise it's the byte count transferred. */
 struct dense_io_completion_t {
     u64_t tag;
     i64_t result;
 };
 
 /**
- *  @brief Compile-time contract every I/O engine satisfies. @c push only encodes -
- *      no syscall; @c pump submits everything encoded and reaps what completed,
- *      holding for at least one completion under @c blocking_k; @c pop drains
- *      reaped completions one at a time; @c buffer maps an arena index to the
- *      memory a completed read landed in.
+ *  @brief Compile-time contract every I/O engine satisfies.
+ *
+ *  @c push only encodes - no syscall; @c pump submits everything encoded and reaps what completed,
+ *  holding for at least one completion under @c blocking_k; @c pop drains reaped completions one at
+ *  a time; @c buffer maps an arena index to the memory a completed read landed in.
  *
  *  @c push and @c pop answer different kinds of question, so they answer in different
  *  types. A refused @c push is a failure - the submission ring is full or its staging
@@ -293,19 +302,20 @@ concept dense_io_engine = requires(engine_type_& engine, dense_io_request_t requ
  */
 struct dense_nvme_layout_t {
 
-    /** @brief Offsets array begins right after the 32-byte shared header. */
+    /** Offsets array begins right after the 32-byte shared header. */
     inline static constexpr std::size_t offsets_begin_k = sizeof(dense_index_header_t);
 
     inline static constexpr std::size_t offsets_bytes(std::size_t node_count) noexcept {
         return (node_count + 1) * sizeof(u64_t);
     }
-    /** @brief First byte of the record section - the metadata rounded up to a whole block. */
+
+    /** First byte of the record section - the metadata rounded up to a whole block. */
     inline static constexpr std::size_t records_begin(std::size_t node_count) noexcept {
         return fu::round_up_to_multiple(offsets_begin_k + offsets_bytes(node_count), dense_nvme_block_k);
     }
 
-    /** @brief The record's own id sits right after the count: fetched records identify
-     *      themselves, so completions need no side-channel id bookkeeping. */
+    /** The record's own id sits right after the count: fetched records identify
+     *  themselves, so completions need no side-channel ID bookkeeping. */
     inline static constexpr std::size_t self_id_offset_k = sizeof(dense_node_id_t);
     inline static constexpr std::size_t neighbor_ids_offset_k = 2 * sizeof(dense_node_id_t);
     inline static constexpr std::size_t norms_offset(std::size_t neighbors_count) noexcept {
@@ -321,12 +331,10 @@ struct dense_nvme_layout_t {
     }
 };
 
-/**
- *  @brief Decoded view over one staged record: the format arithmetic of
- *      @ref dense_nvme_layout_t in one place, every accessor a zero-copy pointer
- *      into the arena buffer DMA filled. Readers & future writers share it, so the
- *      offset choreography can never drift between them.
- */
+/** Decoded view over one staged record: the format arithmetic of
+ *  @ref dense_nvme_layout_t in one place, every accessor a zero-copy pointer
+ *  into the arena buffer DMA filled. Readers & future writers share it, so the
+ *  offset choreography can never drift between them. */
 struct dense_nvme_record_t {
     std::byte const* bytes;
 
@@ -354,8 +362,9 @@ struct dense_nvme_record_t {
 #pragma region Engines
 
 #if !defined(_WIN32)
-/** @brief Closes a POSIX descriptor at scope exit, so early returns need no manual
- *      teardown - the descriptor-side sibling of the ring's self-unmapping regions. */
+
+/** Closes a POSIX descriptor at scope exit, so early returns need no manual
+ *  teardown - the descriptor-side sibling of the ring's self-unmapping regions. */
 struct dense_posix_descriptor_t {
     int file_descriptor = -1;
 
@@ -369,12 +378,10 @@ struct dense_posix_descriptor_t {
 };
 #endif
 
-/**
- *  @brief The aligned staging arena every engine owns: @b [buffer_count] identically
- *      sized, page-aligned record buffers, allocated once from the caller's allocator -
- *      so a NUMA-domain allocator lands the arena on the requesting socket. Engines
- *      with registered buffers hand exactly these extents to the kernel.
- */
+/** The aligned staging arena every engine owns: @b [buffer_count] identically
+ *  sized, page-aligned record buffers, allocated once from the caller's allocator -
+ *  so a NUMA-domain allocator lands the arena on the requesting socket. Engines
+ *  with registered buffers hand exactly these extents to the kernel. */
 template <typename allocator_type_>
 struct dense_io_arena {
     using bytes_allocator_t = typename std::allocator_traits<allocator_type_>::template rebind_alloc<std::byte>;
@@ -382,8 +389,9 @@ struct dense_io_arena {
 
     bytes_tensor_t storage;
     std::size_t stride = 0;
-    /** @brief Cached aligned base: the arena never moves after @c reserve, so every
-     *      @c buffer lookup is one multiply-add instead of a repeated round-up. */
+
+    /** Cached aligned base: the arena never moves after @c reserve, so every
+     *  @c buffer lookup is one multiply-add instead of a repeated round-up. */
     std::byte* base_ = nullptr;
 
     inline status_t reserve(std::size_t buffer_count, std::size_t buffer_stride,
@@ -400,12 +408,10 @@ struct dense_io_arena {
     inline std::byte* buffer(dense_staging_buffer_id_t index) const noexcept { return base_ + index * stride; }
 };
 
-/**
- *  @brief Fixed-capacity completion queue of the engines that have no kernel-shared
- *      completion ring - the synchronous and AIO designs. The fill is the live shape
- *      over a frozen reservation, and completions drain last-first, which the state
- *      machine welcomes: any completion order drives a valid traversal.
- */
+/** Fixed-capacity completion queue of the engines that have no kernel-shared
+ *  completion ring - the synchronous and AIO designs. The fill is the live shape
+ *  over a frozen reservation, and completions drain last-first, which the state
+ *  machine welcomes: any completion order drives a valid traversal. */
 template <typename allocator_type_>
 struct dense_io_completions {
     using completions_allocator_t =
@@ -424,6 +430,7 @@ struct dense_io_completions {
         queue[fill] = completion;
         return status_t::success_k;
     }
+
     /** @return Whether a completion was waiting; an empty queue is ordinary, not a failure. */
     inline bool pop(dense_io_completion_t& completion) noexcept {
         std::size_t fill = queue.extent(0);
@@ -435,11 +442,9 @@ struct dense_io_completions {
     }
 };
 
-/**
- *  @brief Request & completion staging of the synchronous engine: the push-encodes /
- *      pump-submits contract forces requests to live somewhere between the two calls,
- *      and a blocking @c pread has no kernel-side queue to be that somewhere.
- */
+/** Request & completion staging of the synchronous engine: the push-encodes /
+ *  pump-submits contract forces requests to live somewhere between the two calls,
+ *  and a blocking @c pread has no kernel-side queue to be that somewhere. */
 template <typename allocator_type_>
 struct dense_io_staging {
     using requests_allocator_t =
@@ -465,10 +470,11 @@ struct dense_io_staging {
 };
 
 /**
- *  @brief Portable blocking engine: @c pump services every pending request with one
- *      @c pread apiece on the calling thread. The reference implementation of the
- *      concept, the debugging harness, and the macOS production path - where a pool
- *      of caller threads, each owning one context, is the realistic ceiling anyway.
+ *  @brief Portable blocking engine: @c pump services every pending request with one @c pread apiece
+ *      on the calling thread.
+ *
+ *  The reference implementation of the concept, the debugging harness, and the macOS production
+ *  path - where a pool of caller threads, each owning one context, is the realistic ceiling anyway.
  *
  *  macOS specifics: there is no async-file syscall surface - POSIX AIO is capped at
  *  a queue depth of ~16 by @c kern.aiomax -class sysctls and kqueue cannot watch
@@ -534,13 +540,13 @@ struct dense_posix_sync_engine {
 #if defined(__linux__)
 
 /**
- *  @brief Linux AIO engine over raw @c io_submit / @c io_getevents syscalls, with
- *      @c O_DIRECT descriptors. Roughly two thirds of io_uring's per-core throughput,
- *      but its syscalls predate every seccomp profile in existence - the engine for
- *      container platforms and hardened fleets where io_uring is administratively
- *      gated: default Docker/containerd seccomp profiles block the io_uring family,
- *      gVisor rejects it, and the 6.6+ @c kernel.io_uring_disabled sysctl can turn
- *      it off fleet-wide.
+ *  @brief Linux AIO engine over raw @c io_submit / @c io_getevents syscalls, with @c O_DIRECT
+ *      descriptors.
+ *
+ *  Roughly two thirds of io_uring's per-core throughput, but its syscalls predate every seccomp
+ *  profile in existence - the engine for container platforms and hardened fleets where io_uring is
+ *  administratively gated: default Docker/containerd seccomp profiles block the io_uring family,
+ *  gVisor rejects it, and the 6.6+ @c kernel.io_uring_disabled sysctl can turn it off fleet-wide.
  *
  *  The @c iocb fields a read consumes: @c aio_fildes, @c aio_lio_opcode, @c aio_buf,
  *  @c aio_nbytes, @c aio_offset & @c aio_data; the @c io_event returns @c data & @c res.
@@ -591,9 +597,9 @@ struct dense_linux_aio_engine {
 
     inline std::byte* buffer(dense_staging_buffer_id_t index) noexcept { return arena_.buffer(index); }
 
-    /** @brief Encodes the control block in place at push - matching the ring engines'
-     *      encode-at-push discipline - so pump only submits; the staged fill is the
-     *      control-block tensor's live shape. */
+    /** Encodes the control block in place at push - matching the ring engines'
+     *  encode-at-push discipline - so pump only submits; the staged fill is the
+     *  control-block tensor's live shape. */
     inline status_t push(dense_io_request_t request) noexcept {
         std::size_t staged = control_blocks_.extent(0);
         if (in_flight_ + staged == events_.extent(0)) return status_t::overflow_k;
@@ -651,10 +657,11 @@ struct dense_linux_aio_engine {
 };
 
 /**
- *  @brief Shared io_uring plumbing of the Linux ring engines: setup with graceful
- *      flag degradation, the ring mappings, submission-queue slot claims, resource
- *      registration, and completion-queue draining - parameterized by SQE & CQE
- *      strides at runtime, since NVMe passthrough doubles both.
+ *  @brief Shared io_uring plumbing of the Linux ring engines.
+ *
+ *  Setup with graceful flag degradation, the ring mappings, submission-queue slot claims, resource
+ *  registration, and completion-queue draining - parameterized by SQE & CQE strides at runtime,
+ *  since NVMe passthrough doubles both.
  *
  *  Setup prefers @c IORING_SETUP_SINGLE_ISSUER | @c IORING_SETUP_DEFER_TASKRUN -
  *  the 6.1+ mode where completion work runs batched exactly when the owning thread
@@ -663,40 +670,41 @@ struct dense_linux_aio_engine {
  *  @c io_uring_enter, so spinning on the CQ tail from user space is futile; the
  *  @c posting() accessor tells the pump loop which discipline applies.
  */
-/** @brief SQE geometry of one ring: 64-byte entries for block-layer reads, or the
- *      128-byte form whose inline command area carries NVMe passthrough. */
+
+/** SQE geometry of one ring: 64-byte entries for block-layer reads, or the
+ *  128-byte form whose inline command area carries NVMe passthrough. */
 enum class dense_uring_form_t : u32_t {
     compact_k = 0,
     nvme_k = 1,
 };
 
-/** @brief Completion discipline of one ring: interrupt-driven CQEs, or device-queue
- *      polling via @c IORING_SETUP_IOPOLL - which demands direct I/O & poll queues. */
+/** Completion discipline of one ring: interrupt-driven CQEs, or device-queue
+ *  polling via @c IORING_SETUP_IOPOLL - which demands direct I/O & poll queues. */
 enum class dense_uring_reaping_t : u32_t {
     interrupted_k = 0,
     polled_k = 1,
 };
 
-/** @brief When CQEs become visible: @c immediate_k rings post them asynchronously -
- *      a waiter can monitor the CQ tail from user space - while @c deferred_k rings
- *      run completion work only inside @c io_uring_enter, the single-issuer
- *      deferred-task-run discipline, making tail spinning pointless. */
+/** When CQEs become visible: @c immediate_k rings post them asynchronously -
+ *  a waiter can monitor the CQ tail from user space - while @c deferred_k rings
+ *  run completion work only inside @c io_uring_enter, the single-issuer
+ *  deferred-task-run discipline, making tail spinning pointless. */
 enum class dense_uring_posting_t : u32_t {
     immediate_k = 0,
     deferred_k = 1,
 };
 
-/** @brief Whether NVMe passthrough commands reference pre-registered arena buffers
- *      via @c IORING_URING_CMD_FIXED - honored by kernels 6.14 & newer, skipping the
- *      per-command page pinning - or pass plain addresses the kernel pins each time.
- *      Older kernels reject the flag per command, so this stays an explicit opt-in
- *      rather than a registration-success probe. */
+/** Whether NVMe passthrough commands reference pre-registered arena buffers
+ *  via @c IORING_URING_CMD_FIXED - honored by kernels 6.14 & newer, skipping the
+ *  per-command page pinning - or pass plain addresses the kernel pins each time.
+ *  Older kernels reject the flag per command, so this stays an explicit opt-in
+ *  rather than a registration-success probe. */
 enum class dense_uring_command_buffers_t : u32_t {
     plain_k = 0,
     fixed_k = 1,
 };
 
-/** @brief One @c mmap -ed ring region; unmaps itself, so teardown is member order. */
+/** One @c mmap -ed ring region; unmaps itself, so teardown is member order. */
 struct dense_uring_mapping_t {
     void* base = nullptr;
     std::size_t bytes = 0;
@@ -722,8 +730,8 @@ struct dense_uring_mapping_t {
     }
 };
 
-/** @brief Everything the submission side of one ring needs: the kernel-shared head &
- *      tail words, the index-order array, the wrap mask, and the SQE array. */
+/** Everything the submission side of one ring needs: the kernel-shared head &
+ *  tail words, the index-order array, the wrap mask, and the SQE array. */
 struct dense_uring_submissions_t {
     u32_t* head = nullptr;
     u32_t* tail = nullptr;
@@ -733,7 +741,7 @@ struct dense_uring_submissions_t {
     std::size_t stride = 0;
 };
 
-/** @brief The completion-side mirror: head & tail words, wrap mask, and CQE array. */
+/** The completion-side mirror: head & tail words, wrap mask, and CQE array. */
 struct dense_uring_completions_t {
     u32_t* head = nullptr;
     u32_t* tail = nullptr;
@@ -808,25 +816,26 @@ struct dense_uring_ring_t {
         return status_t::success_k;
     }
 
-    /** @brief Pins the arena's buffers into the ring's registered-buffer table, one
-     *      @c iovec per staging buffer, so @c READ_FIXED skips per-read page pinning. */
+    /** Pins the arena's buffers into the ring's registered-buffer table, one
+     *  @c iovec per staging buffer, so @c READ_FIXED skips per-read page pinning. */
     inline status_t register_buffers(std::span<struct iovec const> vectors) noexcept {
         long registered = syscall(SYS_io_uring_register, ring_descriptor_, IORING_REGISTER_BUFFERS, vectors.data(),
                                   static_cast<unsigned>(vectors.size()));
         return registered < 0 ? status_t::device_error_k : status_t::success_k;
     }
-    /** @brief Registers the payload descriptors as the ring's fixed-file table - one
-     *      entry per shard, addressed by @ref dense_io_request_t::file_slot - removing
-     *      per-read descriptor refcounting. */
+
+    /** Registers the payload descriptors as the ring's fixed-file table - one
+     *  entry per shard, addressed by @ref dense_io_request_t::file_slot - removing
+     *  per-read descriptor refcounting. */
     inline status_t register_files(std::span<int const> file_descriptors) noexcept {
         long registered = syscall(SYS_io_uring_register, ring_descriptor_, IORING_REGISTER_FILES,
                                   file_descriptors.data(), static_cast<unsigned>(file_descriptors.size()));
         return registered < 0 ? status_t::device_error_k : status_t::success_k;
     }
 
-    /** @brief Pins every buffer of @p arena into the ring's registered-buffer table -
-     *      one @c iovec per staging buffer - building the transient iovec array through
-     *      @p allocator, so even setup scratch honors the caller's memory domain. */
+    /** Pins every buffer of @p arena into the ring's registered-buffer table -
+     *  one @c iovec per staging buffer - building the transient iovec array through
+     *  @p allocator, so even setup scratch honors the caller's memory domain. */
     template <typename allocator_type_>
     inline status_t register_arena(dense_io_arena<allocator_type_> const& arena, std::size_t buffer_count,
                                    allocator_type_ const& allocator) noexcept {
@@ -840,10 +849,10 @@ struct dense_uring_ring_t {
         return register_buffers(std::span<struct iovec const> {buffer_regions.data(), buffer_count});
     }
 
-    /** @brief Claims the next SQE slot, or returns null when the ring is full. The caller
-     *      fills the returned entry in place; @ref enter publishes it. The claim cursor
-     *      is @c pending_tail_ - not the kernel-visible tail - so a batch of claims
-     *      lands in consecutive slots before one publication. */
+    /** Claims the next SQE slot, or returns null when the ring is full. The caller
+     *  fills the returned entry in place; @ref enter publishes it. The claim cursor
+     *  is @c pending_tail_ - not the kernel-visible tail - so a batch of claims
+     *  lands in consecutive slots before one publication. */
     inline struct io_uring_sqe* next_submission() noexcept {
         u32_t head = std::atomic_ref<u32_t>(*submissions_.head).load(std::memory_order_acquire);
         if (pending_tail_ - head == submissions_.mask + 1) return nullptr;
@@ -853,8 +862,8 @@ struct dense_uring_ring_t {
         return reinterpret_cast<struct io_uring_sqe*>(submissions_.entries + index * submissions_.stride);
     }
 
-    /** @brief Publishes claimed SQEs & performs one @c io_uring_enter with the given
-     *      completion demand; @p min_complete of zero submits without blocking. */
+    /** Publishes claimed SQEs & performs one @c io_uring_enter with the given
+     *  completion demand; @p min_complete of zero submits without blocking. */
     inline status_t enter(u32_t min_complete) noexcept {
         u32_t previous_tail = *submissions_.tail;
         u32_t to_submit = pending_tail_ - previous_tail;
@@ -876,8 +885,8 @@ struct dense_uring_ring_t {
         return status_t::success_k;
     }
 
-    /** @brief Drains one CQE into @p completion; NVMe passthrough status decoding is the
-     *      caller's job - this layer only surfaces the primary result word. */
+    /** Drains one CQE into @p completion; NVMe passthrough status decoding is the
+     *  caller's job - this layer only surfaces the primary result word. */
     inline bool pop(dense_io_completion_t& completion) noexcept {
         u32_t head = *completions_.head;
         u32_t tail = std::atomic_ref<u32_t>(*completions_.tail).load(std::memory_order_acquire);
@@ -890,11 +899,11 @@ struct dense_uring_ring_t {
         return true;
     }
 
-    /** @brief The full submit-and-reap discipline shared by every ring engine: nonblocking
-     *      submits & returns; blocking on an async-posting ring pays one capped @p wait_type_
-     *      monitor on the CQ tail before the blocking enter - a completion landing in that
-     *      window reaps for zero syscalls - while deferred & polled rings fuse the pending
-     *      batch and the wait into a single enter. */
+    /** The full submit-and-reap discipline shared by every ring engine: nonblocking
+     *  submits & returns; blocking on an async-posting ring pays one capped @p wait_type_
+     *  monitor on the CQ tail before the blocking enter - a completion landing in that
+     *  window reaps for zero syscalls - while deferred & polled rings fuse the pending
+     *  batch and the wait into a single enter. */
     template <typename wait_type_>
     inline status_t pump(dense_io_wait_t wait) noexcept {
         if (wait == dense_io_wait_t::nonblocking_k) return enter(0);
@@ -909,23 +918,25 @@ struct dense_uring_ring_t {
     }
 
   private:
-    /** @brief The CQ tail word - the address a ForkUnion waiter monitors while the
-     *      kernel completes reads in the background. */
+
+    /** The CQ tail word - the address a ForkUnion waiter monitors while the
+     *  kernel completes reads in the background. */
     inline u32_t const* completion_tail_word_() const noexcept { return completions_.tail; }
     inline u32_t completion_tail_seen_() const noexcept {
         return std::atomic_ref<u32_t>(*completions_.tail).load(std::memory_order_acquire);
     }
-    /** @brief True only when CQEs land in shared memory between syscalls - immediate
-     *      posting under interrupt-driven reaping. Deferred task-run and IOPOLL rings
-     *      post CQEs strictly inside @c io_uring_enter, so a user-space tail monitor
-     *      can never observe them and the submit & wait pair fuses into one enter. */
+
+    /** True only when CQEs land in shared memory between syscalls - immediate
+     *  posting under interrupt-driven reaping. Deferred task-run and IOPOLL rings
+     *  post CQEs strictly inside @c io_uring_enter, so a user-space tail monitor
+     *  can never observe them and the submit & wait pair fuses into one enter. */
     inline bool reaps_asynchronously_() const noexcept {
         return posting_ == dense_uring_posting_t::immediate_k && reaping_ == dense_uring_reaping_t::interrupted_k;
     }
 
-    /** @brief Registers the ring descriptor so every enter addresses it by index,
-     *      skipping the per-syscall descriptor-table lookup. Silent no-op fallback on
-     *      pre-5.18 kernels, where the registration opcode is simply rejected. */
+    /** Registers the ring descriptor so every enter addresses it by index,
+     *  skipping the per-syscall descriptor-table lookup. Silent no-op fallback on
+     *  pre-5.18 kernels, where the registration opcode is simply rejected. */
     inline void register_ring_descriptor_() noexcept {
         struct io_uring_rsrc_update ring_update {};
         ring_update.data = static_cast<u64_t>(ring_descriptor_);
@@ -951,11 +962,12 @@ struct dense_uring_ring_t {
 };
 
 /**
- *  @brief The baseline io_uring engine: @c IORING_OP_READ against a file or block
- *      device. Kernel floor 6.1 for the single-issuer deferred-task-run mode,
- *      degrading to a plain 5.x ring transparently. Pair with an @c O_DIRECT
- *      descriptor for the page-cache-free path the format's block alignment is
- *      designed around.
+ *  @brief The baseline io_uring engine: @c IORING_OP_READ against a file or block device. Kernel
+ *      floor 6.1 for the single-issuer deferred-task-run mode, degrading to a plain 5.x ring
+ *      transparently.
+ *
+ *  Pair with an @c O_DIRECT descriptor for the page-cache-free path the format's block alignment is
+ *  designed around.
  *
  *  The pump discipline: submit everything claimed, then - on rings where completions
  *  post asynchronously - give the ForkUnion waiter one capped monitor on the CQ tail
@@ -1013,13 +1025,11 @@ struct dense_linux_uring_read_engine {
     dense_io_arena<allocator_t> arena_;
 };
 
-/**
- *  @brief The default Linux fast path: @c IORING_OP_READ_FIXED over buffers pinned
- *      once via @c IORING_REGISTER_BUFFERS and the payload descriptor registered as
- *      fixed-file 0 - removing per-read page pinning & descriptor refcounting,
- *      roughly an 11% throughput gain at NVMe rates. Kernel floor matches the read
- *      engine; registration itself works on any ring.
- */
+/** The default Linux fast path: @c IORING_OP_READ_FIXED over buffers pinned
+ *  once via @c IORING_REGISTER_BUFFERS and the payload descriptor registered as
+ *  fixed-file 0 - removing per-read page pinning & descriptor refcounting,
+ *  roughly an 11% throughput gain at NVMe rates. Kernel floor matches the read
+ *  engine; registration itself works on any ring. */
 template <typename wait_type_ = fu::standard_yield_t, typename allocator_type_ = std::allocator<byte_t>>
 struct dense_linux_uring_fixed_engine {
     using wait_t = wait_type_;
@@ -1071,13 +1081,13 @@ struct dense_linux_uring_fixed_engine {
 };
 
 /**
- *  @brief The polled variant: the fixed engine plus @c IORING_SETUP_IOPOLL -
- *      completions are harvested from the device's queues inside @c io_uring_enter
- *      instead of arriving by interrupt, worth ~21% on top of the fixed path.
- *      Requires an @c O_DIRECT descriptor on a device with poll-capable queues:
- *      @c nvme.poll_queues=N for real drives, @c poll_queues in the null_blk
- *      configfs recipe above for emulation; cross-check any setup with
- *      @c fio --ioengine=io_uring --hipri.
+ *  @brief The polled variant: the fixed engine plus @c IORING_SETUP_IOPOLL - completions are
+ *      harvested from the device's queues inside @c io_uring_enter instead of arriving by
+ *      interrupt, worth ~21% on top of the fixed path.
+ *
+ *  Requires an @c O_DIRECT descriptor on a device with poll-capable queues: @c nvme.poll_queues=N
+ *  for real drives, @c poll_queues in the null_blk configfs recipe above for emulation; cross-check
+ *  any setup with @c fio --ioengine=io_uring --hipri.
  *
  *  The pump is a bounded poll loop: non-blocking reap attempts, each empty
  *  iteration paced by one capped ForkUnion monitor - @c TPAUSE / @c WFET class
@@ -1135,17 +1145,18 @@ struct dense_linux_uring_polled_engine {
 
 /**
  *  @brief NVMe passthrough engine: raw Read commands to the namespace character device
- *      @c /dev/ngXnY through 128-byte SQEs, bypassing the filesystem and the block
- *      layer - worth ~20-30% IOPS per core over the block path. Kernel floor 6.2 for
- *      unprivileged reads gated on the device node's file mode; a udev rule granting
- *      the service user read access to @c /dev/ng* suffices, no @c CAP_SYS_ADMIN.
+ *      @c /dev/ngXnY through 128-byte SQEs, bypassing the filesystem and the block layer - worth
+ *      ~20-30% IOPS per core over the block path.
+ *
+ *  Kernel floor 6.2 for unprivileged reads gated on the device node's file mode; a udev rule
+ *  granting the service user read access to @c /dev/ng* suffices, no @c CAP_SYS_ADMIN.
  *
  *  The payload must live on the namespace directly - offsets translate to LBAs by a
  *  plain shift, so call @c configure with the namespace's LBA size before @c open.
  *  Discover & reshape the geometry with @c nvme-cli:
  *
  *  @code{.sh}
- *  nvme id-ns /dev/nvme0n1            # `lbads:9` = 512e, `lbads:12` = 4Kn
+ *  nvme ID-ns /dev/nvme0n1            # `lbads:9` = 512e, `lbads:12` = 4Kn
  *  nvme format /dev/nvme0n1 --lbaf=0  # reformat, DESTROYS the namespace
  *  @endcode
  *
@@ -1167,9 +1178,9 @@ struct dense_linux_uring_nvme_engine {
     dense_linux_uring_nvme_engine(dense_linux_uring_nvme_engine const&) = delete;
     dense_linux_uring_nvme_engine& operator=(dense_linux_uring_nvme_engine const&) = delete;
 
-    /** @brief Presets the namespace LBA geometry - log2 of the LBA size, 9 for 512e,
-     *      12 for 4Kn - which @c open cannot derive without an admin Identify pass, and
-     *      the command-buffer mode, an explicit 6.14+ opt-in. */
+    /** Presets the namespace LBA geometry - log2 of the LBA size, 9 for 512e,
+     *  12 for 4Kn - which @c open cannot derive without an admin Identify pass, and
+     *  the command-buffer mode, an explicit 6.14+ opt-in. */
     inline void configure(u32_t lba_shift, dense_uring_command_buffers_t command_buffers =
                                                dense_uring_command_buffers_t::plain_k) noexcept {
         lba_shift_ = lba_shift;
@@ -1224,8 +1235,8 @@ struct dense_linux_uring_nvme_engine {
 
     inline status_t pump(dense_io_wait_t wait) noexcept { return ring_.pump<wait_t>(wait); }
 
-    /** @brief Rewrites the NVMe convention - zero result means the full transfer - into
-     *      the byte-count convention the state machine consumes. */
+    /** Rewrites the NVMe convention - zero result means the full transfer - into
+     *  the byte-count convention the state machine consumes. */
     inline bool pop(dense_io_completion_t& completion) noexcept {
         if (!ring_.pop(completion)) return false;
         if (completion.result > 0) completion.result = -EIO; // NVMe status codes are failures.
@@ -1246,12 +1257,13 @@ struct dense_linux_uring_nvme_engine {
 #if defined(_WIN32)
 
 /**
- *  @brief Windows I/O Rings engine - the closest io_uring sibling: shared rings,
- *      user-mode completion reaping, batched submission, and registered buffers &
- *      files mirroring the Linux fixed engine. Requires Windows 11 22H2 for
- *      @c IORING_VERSION_3; pair with @c FILE_FLAG_NO_BUFFERING handles, whose
- *      alignment contract matches this format: offsets, lengths & buffers aligned
- *      to the volume sector size - 512 or 4096, query via @c FILE_STORAGE_INFO.
+ *  @brief Windows I/O Rings engine - the closest io_uring sibling: shared rings, user-mode
+ *      completion reaping, batched submission, and registered buffers & files mirroring the Linux
+ *      fixed engine.
+ *
+ *  Requires Windows 11 22H2 for @c IORING_VERSION_3; pair with @c FILE_FLAG_NO_BUFFERING handles,
+ *  whose alignment contract matches this format: offsets, lengths & buffers aligned to the volume
+ *  sector size - 512 or 4096, query via @c FILE_STORAGE_INFO.
  *
  *  Registration ops are themselves asynchronous SQEs with implicit barrier
  *  semantics - later entries wait for them - so @c open enqueues both and lets the
@@ -1338,24 +1350,26 @@ struct dense_windows_ioring_engine {
 
 #pragma region State Machine
 
-/** @brief Progress of one in-flight traversal through its slot's lifecycle. */
+/** Progress of one in-flight traversal through its slot's lifecycle. */
 enum class dense_nvme_stage_t : u8_t {
-    /** @brief The slot is free; @c reset arms it with the next pending query. */
+
+    /** The slot is free; @c reset arms it with the next pending query. */
     idle_k,
-    /** @brief Fetches are outstanding; completions drive the traversal forward. */
+
+    /** Fetches are outstanding; completions drive the traversal forward. */
     traversing_k,
-    /** @brief A refused re-table ended the walk; in-flight scores still land, then it finishes. */
+
+    /** A refused re-table ended the walk; in-flight scores still land, then it finishes. */
     saturated_k,
-    /** @brief The traversal converged; results await copying out before recycling. */
+
+    /** The traversal converged; results await copying out before recycling. */
     finished_k,
 };
 
-/**
- *  @brief One in-flight query's entire mutable state: the scored frontier, the running
- *      results, the exact visited set, and the in-flight read counter. A plain struct
- *      of caller-allocated containers - the state machine in the index advances it,
- *      the engine never sees it.
- */
+/** One in-flight query's entire mutable state: the scored frontier, the running
+ *  results, the exact visited set, and the in-flight read counter. A plain struct
+ *  of caller-allocated containers - the state machine in the index advances it,
+ *  the engine never sees it. */
 template <                                            //
     nk_dtype_t vector_dtype_ = nk_bf16_k,             //
     typename allocator_type_ = std::allocator<byte_t> //
@@ -1366,60 +1380,70 @@ struct dense_nvme_slot {
     using vector_view_t = nk::vector_view<scalar_t>;
     using vector_norms_t = usearch::vector_norms<typename scalar_t::dot_result_t>;
 
-    /** @brief Default integer type to use for loops and indexing at sub-index scale. */
+    /** Default integer type to use for loops and indexing at sub-index scale. */
     using small_size_t = u32_t;
 
     using allocator_t = allocator_type_;
     using candidates_allocator_t =
         typename std::allocator_traits<allocator_t>::template rebind_alloc<dense_scored_node_t>;
-    /** @brief The hash-set allocates raw bytes and places ids itself, so it demands a byte allocator. */
+
+    /** The hash-set allocates raw bytes and places ids itself, so it demands a byte allocator. */
     using visits_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<std::byte>;
 
     using results_array_t = sorted_buffer<dense_scored_node_t, dense_closer_scored_node_t, candidates_allocator_t>;
-    /** @brief 8-ary: eight 8-byte scored nodes fill one cache line per level scan. */
+
+    /** 8-ary: eight 8-byte scored nodes fill one cache line per level scan. */
     using frontier_queue_t = max_heap_dary<8, dense_scored_node_t, dense_further_scored_node_t, candidates_allocator_t>;
     using visited_set_t = growing_hash_set<dense_node_id_t, std::hash<dense_node_id_t>, visits_allocator_t>;
 
     dense_nvme_stage_t stage = dense_nvme_stage_t::idle_k;
-    /** @brief Reads issued and not yet completed for this slot; the slot only advances
-     *      to its next hop when this drains to zero. */
+
+    /** Reads issued and not yet completed for this slot; the slot only advances
+     *  to its next hop when this drains to zero. */
     small_size_t inflight_reads = 0;
 
-    /** @brief The caller's query row; must outlive the batch. */
+    /** The caller's query row; must outlive the batch. */
     vector_view_t query;
     vector_norms_t query_norms {};
-    /** @brief Which batch row this slot is serving - indexes the output arrays. */
+
+    /** Which batch row this slot is serving - indexes the output arrays. */
     small_size_t query_index = 0;
-    /** @brief This search's result-pool breadth - at most the reserved capacity, which
-     *      container growth rounding can silently exceed; the traversal trusts only this. */
+
+    /** This search's result-pool breadth - at most the reserved capacity, which
+     *  container growth rounding can silently exceed; the traversal trusts only this. */
     small_size_t pool_limit = 0;
 
-    /** @brief Nodes we've already scored, kept ascending as the best results so far. */
+    /** Nodes we've already scored, kept ascending as the best results so far. */
     results_array_t results;
-    /** @brief Nodes we consider promising and want to expand next. */
+
+    /** Nodes we consider promising and want to expand next. */
     frontier_queue_t frontier;
-    /** @brief Nodes already fetched for scoring; exact by design - the recall ceiling
-     *      of a lossy filter is not worth its memory. */
+
+    /** Nodes already fetched for scoring; exact by design - the recall ceiling
+     *  of a lossy filter is not worth its memory. */
     visited_set_t visited;
-    /** @brief Leased buffer indexes of score completions awaiting a quad flush - drained
-     *      every fourth arrival, and once more when the hop's in-flight reads reach zero,
-     *      so deferral adds no latency. Stashing the index alone keeps the record bytes
-     *      where DMA left them until the one moment the quad kernel reads them. */
+
+    /** Leased buffer indexes of score completions awaiting a quad flush - drained
+     *  every fourth arrival, and once more when the hop's in-flight reads reach zero,
+     *  so deferral adds no latency. Stashing the index alone keeps the record bytes
+     *  where DMA left them until the one moment the quad kernel reads them. */
     fu::limited_array<dense_staging_buffer_id_t, 4> pending_scores;
-    /** @brief Pseudo-random generator for picking this slot's traversal starting points. */
+
+    /** Pseudo-random generator for picking this slot's traversal starting points. */
     splitmix64_t random_generator;
 
     dense_nvme_slot() = delete;
-    /** @brief Seats every queue on @p allocator, so the slot's scratch lands in the caller's
-     *      memory domain. */
+
+    /** Seats every queue on @p allocator, so the slot's scratch lands in the caller's
+     *  memory domain. */
     explicit dense_nvme_slot(candidates_allocator_t const& allocator) noexcept
         : results(allocator), frontier(allocator), visited(visits_allocator_t(allocator)) {}
     dense_nvme_slot(dense_nvme_slot&&) noexcept = default;
     dense_nvme_slot(dense_nvme_slot const&) = delete;
     dense_nvme_slot& operator=(dense_nvme_slot const&) = delete;
 
-    /** @brief Sizes every queue for @p expansion results and the visited volume one traversal
-     *      can touch. Called once per context, never per query. */
+    /** Sizes every queue for @p expansion results and the visited volume one traversal
+     *  can touch. Called once per context, never per query. */
     inline status_t reserve(std::size_t expansion, std::size_t connectivity_ceiling) noexcept {
         if (!results.reserve(expansion)) return status_t::bad_alloc_k;
         if (!frontier.reserve(expansion * connectivity_ceiling)) return status_t::bad_alloc_k;
@@ -1427,7 +1451,7 @@ struct dense_nvme_slot {
         return status_t::success_k;
     }
 
-    /** @brief Recycles the slot for @p new_query without touching any capacity. */
+    /** Recycles the slot for @p new_query without touching any capacity. */
     inline void reset(vector_view_t new_query, vector_norms_t new_query_norms, small_size_t new_query_index,
                       small_size_t new_pool_limit, u64_t seed) noexcept {
         stage = dense_nvme_stage_t::traversing_k;
@@ -1444,12 +1468,10 @@ struct dense_nvme_slot {
     }
 };
 
-/**
- *  @brief Per-thread traversal harness: the engine with its staging arena, the free
- *      buffer-index stack, and the slot array - everything one thread needs to keep
- *      many traversals in flight. Constructed once, recycled across batches; owns
- *      no index state whatsoever.
- */
+/** Per-thread traversal harness: the engine with its staging arena, the free
+ *  buffer-index stack, and the slot array - everything one thread needs to keep
+ *  many traversals in flight. Constructed once, recycled across batches; owns
+ *  no index state whatsoever. */
 template <                                                                 //
     nk_dtype_t vector_dtype_ = nk_bf16_k,                                  //
     typename engine_type_ = dense_posix_sync_engine<fu::standard_yield_t>, //
@@ -1470,21 +1492,24 @@ struct dense_nvme_context {
     engine_t engine;
     slots_array_t slots;
 
-    /** @brief Stack of free arena buffer indexes; the live shape is the stack depth,
-     *      so no separate top exists. The memory itself belongs to the engine - the
-     *      state machine only leases indexes. */
+    /** Stack of free arena buffer indexes; the live shape is the stack depth,
+     *  so no separate top exists. The memory itself belongs to the engine - the
+     *  state machine only leases indexes. */
     buffer_ids_tensor_t free_buffers;
 
-    /** @brief The reserved result-pool ceiling; per-search pools are capped by it. */
+    /** The reserved result-pool ceiling; per-search pools are capped by it. */
     std::size_t expansion_capacity = 0;
 
-    /** @brief Total one-to-one distance computations across the context's lifetime. */
+    /** Total one-to-one distance computations across the context's lifetime. */
     std::size_t computed_distances = 0;
-    /** @brief Frontier candidates whose neighbor lists were fetched & expanded. */
+
+    /** Frontier candidates whose neighbor lists were fetched & expanded. */
     std::size_t visited_members = 0;
-    /** @brief Reads issued across the context's lifetime, refetches included. */
+
+    /** Reads issued across the context's lifetime, refetches included. */
     std::size_t issued_reads = 0;
-    /** @brief Walks a refused re-table retired early, their rankings short. */
+
+    /** Walks a refused re-table retired early, their rankings short. */
     std::size_t saturated_walks = 0;
 
     dense_nvme_context(allocator_t const& allocator = {}) noexcept
@@ -1492,8 +1517,8 @@ struct dense_nvme_context {
     dense_nvme_context(dense_nvme_context const&) = delete;
     dense_nvme_context& operator=(dense_nvme_context const&) = delete;
 
-    /** @brief The allocator every slot & the engine inherit - exposed so the index can
-     *      thread it into @c engine.open, keeping NUMA-domain placement intact. */
+    /** The allocator every slot & the engine inherit - exposed so the index can
+     *  thread it into @c engine.open, keeping NUMA-domain placement intact. */
     inline allocator_t const& allocator() const noexcept { return allocator_; }
 
     /** @brief Claims every slot & queue this context will ever use; the engine's arena
@@ -1501,7 +1526,7 @@ struct dense_nvme_context {
      *
      *  @param[in] slot_count Traversals kept in flight simultaneously.
      *  @param[in] expansion Result-pool size each traversal converges on.
-     *  @param[in] connectivity_ceiling Most neighbor ids any record may carry.
+     *  @param[in] connectivity_ceiling Most neighbor IDs any record may carry.
      */
     inline status_t reserve(std::size_t slot_count, std::size_t expansion, std::size_t connectivity_ceiling) noexcept {
         // A slot's transient peak holds its expansion record while emitting up to
@@ -1584,9 +1609,10 @@ struct dense_nvme_index {
     using vector_product_result_t = typename scalar_t::dot_result_t;
     using distance_t = f32_t;
 
-    /** @brief Default integer type to use for loops and indexing at sub-index scale. */
+    /** Default integer type to use for loops and indexing at sub-index scale. */
     using small_size_t = u32_t;
-    /** @brief Node identifier within this sub-index - the class-local spelling of @c dense_node_id_t. */
+
+    /** Node identifier within this sub-index - the class-local spelling of @c dense_node_id_t. */
     using node_id_t = dense_node_id_t;
 
     using vector_view_t = nk::vector_view<scalar_t>;
@@ -1600,12 +1626,13 @@ struct dense_nvme_index {
     using offsets_allocator_t = typename std::allocator_traits<offsets_allocator_type_>::template rebind_alloc<u64_t>;
     using offsets_tensor_t = nk::tensor<u64_t, offsets_allocator_t, 1>;
 
-    /** @brief The capability bit of the distance kit the chain actually picked - lower than
-     *      @c capability_ when no SIMD kit is adapted for this dtype & metric pair yet. */
+    /** The capability bit of the distance kit the chain actually picked - lower than
+     *  @c capability_ when no SIMD kit is adapted for this dtype & metric pair yet. */
     inline static constexpr nk_capability_t picked_quads_capability_k =
         dense_quads_chain<kernel_kind_, scalar_t, capability_>::picked_k;
-    /** @brief The strongest @c synchronization_t contract this design honors: the payload
-     *      is immutable, so arbitrary readers share one instance with no fences at all. */
+
+    /** The strongest @c synchronization_t contract this design honors: the payload
+     *  is immutable, so arbitrary readers share one instance with no fences at all. */
     inline static constexpr synchronization_t synchronization_ceiling_k = synchronization_t::immutable_k;
 
     dense_nvme_index(offsets_allocator_type_ const& allocator = {}) noexcept
@@ -1670,52 +1697,61 @@ struct dense_nvme_index {
 #endif
     }
 
-    /** @brief Published nodes - the offsets directory minus its trailing sentinel. */
+    /** Published nodes - the offsets directory minus its trailing sentinel. */
     inline small_size_t size() const noexcept {
         std::size_t offsets_count = offsets_.extent(0);
         return offsets_count ? static_cast<small_size_t>(offsets_count - 1) : 0;
     }
     inline small_size_t dimensions() const noexcept { return dimensions_; }
     inline small_size_t connectivity_ceiling() const noexcept { return connectivity_ceiling_; }
-    /** @brief Longest record in the payload - the staging-buffer stride engines need. */
+
+    /** Longest record in the payload - the staging-buffer stride engines need. */
     inline std::size_t record_capacity() const noexcept { return record_capacity_; }
     inline int data_descriptor() const noexcept { return data_descriptor_; }
-    /** @brief The registered-file slot every read of this index names; zero for a lone index,
-     *      and the shard's position in the lease when a multi-index attached it. */
+
+    /** The registered-file slot every read of this index names; zero for a lone index,
+     *  and the shard's position in the lease when a multi-index attached it. */
     inline dense_io_file_slot_t file_slot() const noexcept { return file_slot_; }
     inline void route(dense_io_file_slot_t slot) noexcept { file_slot_ = slot; }
 
-    /** @brief Sizing of one traversal harness; passed to @c reserve. */
+    /** Sizing of one traversal harness; passed to @c reserve. */
     struct context_config_t {
-        /** @brief Traversals kept in flight simultaneously; must be non-zero. */
+
+        /** Traversals kept in flight simultaneously; must be non-zero. */
         std::size_t slot_count = 0;
-        /** @brief Ceiling on the per-traversal result pool; zero derives twice the
-         *      connectivity. Searches may ask for less, never for more. */
+
+        /** Ceiling on the per-traversal result pool; zero derives twice the
+         *  connectivity. Searches may ask for less, never for more. */
         small_size_t expansion_factor = 0;
     };
 
-    /** @brief Per-search tuning knobs; zeros mean "derive from connectivity". */
+    /** Per-search tuning knobs; zeros mean "derive from connectivity". */
     struct search_config_t {
-        /** @brief Breadth of each traversal's result pool; zero derives twice the
-         *      connectivity, and the context's reserved ceiling always caps it. */
+
+        /** Breadth of each traversal's result pool; zero derives twice the
+         *  connectivity, and the context's reserved ceiling always caps it. */
         small_size_t expansion_factor = 0;
     };
 
-    /** @brief Telemetry of one @c search() call; matches land in the caller's spans. */
+    /** Telemetry of one @c search() call; matches land in the caller's spans. */
     struct [[nodiscard]] search_result_t {
-        /** @brief Frontier candidates whose records were re-fetched & expanded. */
+
+        /** Frontier candidates whose records were re-fetched & expanded. */
         std::size_t visited_members = 0;
-        /** @brief Total distance computations across the batch. */
+
+        /** Total distance computations across the batch. */
         std::size_t computed_distances = 0;
-        /** @brief Reads issued for this batch, expansion refetches included. */
+
+        /** Reads issued for this batch, expansion refetches included. */
         std::size_t issued_reads = 0;
-        /** @brief Walks a refused re-table retired early, their rankings short. */
+
+        /** Walks a refused re-table retired early, their rankings short. */
         std::size_t saturated_walks = 0;
     };
 
-    /** @brief Sizes @p context per @p config against this payload, then opens its engine
-     *      on the data descriptor - threading the context's allocator through, so a
-     *      NUMA-domain allocator places the engine's arena alongside the slots it serves. */
+    /** Sizes @p context per @p config against this payload, then opens its engine
+     *  on the data descriptor - threading the context's allocator through, so a
+     *  NUMA-domain allocator places the engine's arena alongside the slots it serves. */
     inline status_t reserve(context_t& context, context_config_t config) noexcept {
         if (!config.slot_count) return status_t::config_mismatch_k;
         std::size_t expansion = derived_expansion_(config.expansion_factor);
@@ -1794,24 +1830,27 @@ struct dense_nvme_index {
     }
 
   private:
-    /** @brief The zeros-mean-derive rule shared by reserve- & search-side configs:
-     *      twice the connectivity, the classic breadth-vs-degree balance. */
+
+    /** The zeros-mean-derive rule shared by reserve- & search-side configs:
+     *  twice the connectivity, the classic breadth-vs-degree balance. */
     inline std::size_t derived_expansion_(small_size_t requested) const noexcept {
         return requested ? requested : 2 * max_of<std::size_t>(connectivity_ceiling_, 1);
     }
 
-    /** @brief Trampoline for @c usearch::dense_norms with hardened types. */
+    /** Trampoline for @c usearch::dense_norms with hardened types. */
     inline static vector_norms_t dense_norms(vector_view_t vec) noexcept {
         return usearch::dense_norms<capability_, scalar_t>(vec);
     }
-    /** @brief Trampoline for @c usearch::distance with hardened types. */
+
+    /** Trampoline for @c usearch::distance with hardened types. */
     inline static distance_t distance(                   //
         vector_view_t query, vector_norms_t query_norms, //
         vector_view_t candidate, vector_norms_t candidate_norms) noexcept {
         return usearch::distance<kernel_kind_, capability_, scalar_t>( //
             query, query_norms, candidate, candidate_norms);
     }
-    /** @brief Trampoline for @c usearch::distances with hardened types. */
+
+    /** Trampoline for @c usearch::distances with hardened types. */
     inline static std::array<distance_t, 4> distances(   //
         vector_view_t query, vector_norms_t query_norms, //
         std::array<vector_view_t, 4> candidates, std::array<vector_norms_t, 4> candidates_norms) noexcept {
@@ -1819,7 +1858,7 @@ struct dense_nvme_index {
             query, query_norms, candidates, candidates_norms);
     }
 
-    /** @brief Issues one record fetch on behalf of @p slot_index, leasing an arena index. */
+    /** Issues one record fetch on behalf of @p slot_index, leasing an arena index. */
     inline status_t emit_(context_t& context, dense_traversal_slot_id_t slot_index, node_id_t node,
                           dense_io_purpose_t purpose) noexcept {
         dense_staging_buffer_id_t buffer_index = context.acquire_buffer();
@@ -1836,8 +1875,8 @@ struct dense_nvme_index {
         return context.engine.push(request);
     }
 
-    /** @brief Arms every idle slot with the next pending query row & seeds its traversal -
-     *      the admission half of the pump loop. */
+    /** Arms every idle slot with the next pending query row & seeds its traversal -
+     *  the admission half of the pump loop. */
     inline status_t arm_slots_(context_t& context, vectors_view_t queries, small_size_t pool_limit,
                                small_size_t& next_query, small_size_t total_queries) noexcept {
         for (dense_traversal_slot_id_t slot_index = 0;
@@ -1856,9 +1895,9 @@ struct dense_nvme_index {
         return status_t::success_k;
     }
 
-    /** @brief Routes one completed read back into its slot & advances the traversal.
-     *      Score completions are deferred - only their leased buffer index is stashed -
-     *      so the quad kernel scores four arena-resident records per invocation. */
+    /** Routes one completed read back into its slot & advances the traversal.
+     *  Score completions are deferred - only their leased buffer index is stashed -
+     *  so the quad kernel scores four arena-resident records per invocation. */
     inline status_t consume_(context_t& context, dense_io_completion_t completion) noexcept {
         dense_io_tag_t tag = dense_io_tag_t::unpack(completion.tag);
         slot_t& slot = context.slots[tag.slot];
@@ -1883,8 +1922,8 @@ struct dense_nvme_index {
         return status_t::success_k;
     }
 
-    /** @brief Walks an expanded @p record's neighbor list & fetches every unvisited id
-     *      for scoring - the fan-out half of one hop. */
+    /** Walks an expanded @p record's neighbor list & fetches every unvisited id
+     *  for scoring - the fan-out half of one hop. */
     inline status_t expand_(context_t& context, dense_traversal_slot_id_t slot_index,
                             dense_nvme_record_t record) noexcept {
         slot_t& slot = context.slots[slot_index];
@@ -1907,11 +1946,11 @@ struct dense_nvme_index {
         return status_t::success_k;
     }
 
-    /** @brief Scores up to four deferred completions of one slot through a single quad
-     *      kernel, merges them with one batched top-k insert whose accept mask gates the
-     *      frontier, and releases their staging buffers. Short tails replicate lane 0 so
-     *      the kernel always streams four valid lanes; only real lanes reach the pool or
-     *      the telemetry. */
+    /** Scores up to four deferred completions of one slot through a single quad
+     *  kernel, merges them with one batched top-k insert whose accept mask gates the
+     *  frontier, and releases their staging buffers. Short tails replicate lane 0 so
+     *  the kernel always streams four valid lanes; only real lanes reach the pool or
+     *  the telemetry. */
     inline void flush_scores_(context_t& context, slot_t& slot) noexcept {
         small_size_t fill = static_cast<small_size_t>(slot.pending_scores.size());
         std::array<vector_view_t, 4> lane_vectors;
@@ -1933,9 +1972,9 @@ struct dense_nvme_index {
         slot.pending_scores.clear();
     }
 
-    /** @brief With nothing in flight, either expands the most promising frontier node
-     *      or declares convergence - the classic best-first termination: the closest
-     *      unexpanded candidate is already further than the worst kept result. */
+    /** With nothing in flight, either expands the most promising frontier node
+     *  or declares convergence - the classic best-first termination: the closest
+     *  unexpanded candidate is already further than the worst kept result. */
     inline void advance_(context_t& context, dense_traversal_slot_id_t slot_index) noexcept {
         slot_t& slot = context.slots[slot_index];
         // A saturated walk keeps what its in-flight scores ranked and expands nothing more.
@@ -1955,8 +1994,8 @@ struct dense_nvme_index {
         slot.stage = dense_nvme_stage_t::finished_k;
     }
 
-    /** @brief Copies every converged slot's ascending results into its output row &
-     *      recycles the slot - the retirement half of the pump loop. */
+    /** Copies every converged slot's ascending results into its output row &
+     *  recycles the slot - the retirement half of the pump loop. */
     inline void harvest_slots_(context_t& context, nk::matrix_span<dense_scored_node_t> results,
                                nk::vector_span<small_size_t> result_counts, small_size_t wanted,
                                small_size_t& finished_queries) noexcept {

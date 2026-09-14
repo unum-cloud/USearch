@@ -1,8 +1,9 @@
 /**
- *  @brief Machinery every modality's stand-in shares - errors, scalars, files, and the
- *      append-only store that keeps the headers' thread-safety promises.
- *
  *  @file src_stub/lib.hpp
+ *  @author Ash Vardanian
+ *  @date September 5, 2026
+ *  @brief Machinery every modality's stand-in shares - errors, scalars, files, and the append-only
+ *      store that keeps the headers' thread-safety promises.
  *
  *  Nothing here is part of the C ABI: each @c <modality>.cpp owns its verbs and includes this
  *  for the parts that have nothing to do with which modality it answers. The one shared lock is
@@ -60,7 +61,7 @@ inline std::string_view as_text(usearch_bytes_view_t bytes) {
     return {reinterpret_cast<char const*>(bytes.data), bytes.length};
 }
 
-/** @brief Whether @p name spells @p spelling exactly, with no terminator assumed on either side. */
+/** Whether @p name spells @p spelling exactly, with no terminator assumed on either side. */
 inline bool named(usearch_bytes_view_t name, char const* spelling) { return as_text(name) == spelling; }
 
 /**
@@ -73,12 +74,12 @@ inline usearch_bytes_view_t as_bytes(bytes_view_t bytes) {
     return {reinterpret_cast<std::uint8_t const*>(bytes.data()), bytes.size()};
 }
 
-/** @brief The writable twin, for the buffers a caller lends the engine to fill. */
+/** The writable twin, for the buffers a caller lends the engine to fill. */
 inline bytes_span_t as_writable_bytes(usearch_bytes_span_t bytes) {
     return {reinterpret_cast<byte_t*>(bytes.data), bytes.length};
 }
 
-/** @brief The read-only twin, for the buffers a caller lends the engine to read. */
+/** The read-only twin, for the buffers a caller lends the engine to read. */
 inline bytes_view_t as_readable_bytes(usearch_bytes_view_t bytes) {
     return {reinterpret_cast<byte_t const*>(bytes.data), bytes.length};
 }
@@ -91,20 +92,20 @@ inline void propagate_success(usearch_error_t* error) {
     if (error) { error->status = usearch_success_k, error->message = nullptr; }
 }
 
-/** @brief The one write path to @p error; the message is null exactly on success. */
+/** The one write path to @p error; the message is null exactly on success. */
 inline void propagate_error(usearch_status_t status, usearch_error_t* error, char const* message) {
     if (error) *error = usearch_error_t {status, status == usearch_success_k ? nullptr : message};
 }
 
-/** @brief Reports @p status through @p error when @p wrong, and answers whether it did - the
- *      one shape every guard below takes, so a caller reads `if (reject_if(...)) return;`. */
+/** Reports @p status through @p error when @p wrong, and answers whether it did - the
+ *  one shape every guard below takes, so a caller reads `if (reject_if(...)) return;`. */
 inline bool reject_if(bool wrong, usearch_status_t status, char const* message, usearch_error_t* error) {
     if (!wrong) return false;
     propagate_error(status, error, message);
     return true;
 }
 
-/** @brief Zeroes the telemetry, which every header calls a pure output fully overwritten. */
+/** Zeroes the telemetry, which every header calls a pure output fully overwritten. */
 template <typename stats_>
 void reset(stats_* stats) {
     if (stats) *stats = {};
@@ -114,25 +115,25 @@ void reset(stats_* stats) {
 
 #pragma region Runs
 
-/** @brief Refuses a key run that names no storage; a batch's identities are never optional. */
+/** Refuses a key run that names no storage; a batch's identities are never optional. */
 inline bool reject_keys(usearch_keys_view_t keys, usearch_error_t* error) {
     return reject_if(!keys.data, usearch_error_malformed_input_k, "The key run must name storage", error);
 }
 
-/** @brief Refuses a key run that does not pair one key with every row it accompanies. */
+/** Refuses a key run that does not pair one key with every row it accompanies. */
 inline bool reject_keys_pairing(usearch_keys_view_t keys, std::size_t rows, usearch_error_t* error) {
     if (reject_keys(keys, error)) return true;
     return reject_if(keys.count != rows, usearch_error_shape_mismatch_k,
                      "The key count does not match the row count it accompanies", error);
 }
 
-/** @brief The output twin of @c reject_keys, whose capacity bounds what a streaming verb writes. */
+/** The output twin of @c reject_keys, whose capacity bounds what a streaming verb writes. */
 inline bool reject_keys_span(usearch_keys_span_t keys, usearch_error_t* error) {
     if (reject_if(!keys.data, usearch_error_malformed_input_k, "The key run must name storage", error)) return true;
     return reject_if(!keys.capacity, usearch_error_shape_mismatch_k, "A batch must hold at least one key", error);
 }
 
-/** @brief Refuses a ranked-output triple that names no storage, resolving its two pitches. */
+/** Refuses a ranked-output triple that names no storage, resolving its two pitches. */
 inline bool reject_matches(usearch_matches_span_t const* matches, std::size_t& keys_stride, std::size_t& scores_stride,
                            usearch_error_t* error) {
     if (reject_if(!matches || !matches->keys || !matches->scores || !matches->counts, usearch_error_malformed_input_k,
@@ -159,23 +160,24 @@ inline bool reject_matches(usearch_matches_span_t const* matches, std::size_t& k
  *  null or wrong-kind executor refused at the same place.
  */
 struct executor_t {
-    /** @brief Worker threads the caller asked for; honoured by remembering, never by spawning. */
+
+    /** Worker threads the caller asked for; honoured by remembering, never by spawning. */
     std::size_t threads = 1;
 };
 
-/** @brief Refuses a null executor with the engine's own code and message; one stand-in serves
- *      every residency, so the engine's kind-mismatch refusal has nothing to mirror here. */
+/** Refuses a null executor with the engine's own code and message; one stand-in serves
+ *  every residency, so the engine's kind-mismatch refusal has nothing to mirror here. */
 inline bool reject_executor(usearch_executor_t executor, usearch_error_t* error) {
     return reject_if(!executor, usearch_error_malformed_input_k, "Executor must not be null", error);
 }
 
-/** @brief Ticks the caller's handler and answers whether to carry on; a null handler always does. */
+/** Ticks the caller's handler and answers whether to carry on; a null handler always does. */
 inline bool keep_going(usearch_progress_callback_t progress, void* progress_state, std::size_t completed,
                        std::size_t total) {
     return !progress || progress(completed, total, progress_state) == usearch_continue_k;
 }
 
-/** @brief Reports a handler's cancellation once a loop stopped short, and answers whether it did. */
+/** Reports a handler's cancellation once a loop stopped short, and answers whether it did. */
 inline bool reject_cancelled(std::size_t completed, std::size_t total, usearch_error_t* error) {
     return reject_if(completed < total, usearch_error_cancelled_k, "The caller's handler stopped the work", error);
 }
@@ -184,7 +186,7 @@ inline bool reject_cancelled(std::size_t completed, std::size_t total, usearch_e
 
 #pragma region Scalars
 
-/** @brief The stored width of one value, in bytes; zero names a kind the stand-ins reject. */
+/** The stored width of one value, in bytes; zero names a kind the stand-ins reject. */
 inline std::size_t scalar_bytes(usearch_scalar_t kind) {
     switch (kind) {
     case usearch_scalar_f64_k: return 8;
@@ -204,7 +206,7 @@ inline std::size_t scalar_bytes(usearch_scalar_t kind) {
     }
 }
 
-/** @brief How many logical dimensions share one stored value, as the @c xN suffixes spell. */
+/** How many logical dimensions share one stored value, as the @c xN suffixes spell. */
 inline std::size_t dimensions_per_value(usearch_scalar_t kind) {
     switch (kind) {
     case usearch_scalar_i4x2_k: return 2;
@@ -225,8 +227,8 @@ inline std::size_t row_extent(usearch_scalar_t kind, std::size_t dimensions) {
     return divide_round_up(dimensions, dimensions_per_value(kind)) * scalar_bytes(kind);
 }
 
-/** @brief Rejects a kind that names no scalar, rather than reading it as @c f32 - a wrong
- *      row-byte computation would otherwise pass. */
+/** Rejects a kind that names no scalar, rather than reading it as @c f32 - a wrong
+ *  row-byte computation would otherwise pass. */
 inline bool reject_scalar(usearch_scalar_t kind, usearch_error_t* error) {
     return reject_if(!scalar_bytes(kind), usearch_error_unknown_kind_k, "The kind names no scalar", error);
 }
@@ -252,10 +254,10 @@ inline u16_t write_half(double value) {
     return static_cast<u16_t>(sign | (static_cast<u32_t>(exponent) << 10) | mantissa);
 }
 
-/** @brief A brain float is the high half of a single, so widening is a shift. */
+/** A brain float is the high half of a single, so widening is a shift. */
 inline double read_brain(u16_t bits) { return std::bit_cast<float>(static_cast<u32_t>(bits) << 16); }
 
-/** @brief Narrows to the high half, rounding half to even and keeping a NaN a NaN. */
+/** Narrows to the high half, rounding half to even and keeping a NaN a NaN. */
 inline u16_t write_brain(double value) {
     u32_t const bits = std::bit_cast<u32_t>(static_cast<float>(value));
     bool const is_nan = (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu);
@@ -266,27 +268,33 @@ inline u16_t write_brain(double value) {
     return static_cast<u16_t>(rounded >> 16);
 }
 
-/** @brief Which of a mini-float's codes name something other than a number. */
+/** Which of a mini-float's codes name something other than a number. */
 enum class minifloat_specials_t {
-    /** @brief Every code is a number, as both six-bit kinds are. */
+
+    /** Every code is a number, as both six-bit kinds are. */
     none_k,
-    /** @brief The all-ones code of either sign is a NaN, and there are no infinities. */
+
+    /** The all-ones code of either sign is a NaN, and there are no infinities. */
     nan_only_k,
-    /** @brief A saturated exponent is an infinity, or a NaN once its mantissa is set. */
+
+    /** A saturated exponent is an infinity, or a NaN once its mantissa is set. */
     inf_and_nan_k,
 };
 
-/** @brief One mini-float's shape, which is all a codec needs beyond the byte itself. */
+/** One mini-float's shape, which is all a codec needs beyond the byte itself. */
 struct minifloat_t {
-    /** @brief Exponent bits, which fix both the bias and the dynamic range. */
+
+    /** Exponent bits, which fix both the bias and the dynamic range. */
     unsigned exponent_bits;
-    /** @brief Mantissa bits, which fix the step between neighbouring codes. */
+
+    /** Mantissa bits, which fix the step between neighbouring codes. */
     unsigned mantissa_bits;
-    /** @brief Which codes are not numbers, since only the eight-bit kinds reserve any. */
+
+    /** Which codes are not numbers, since only the eight-bit kinds reserve any. */
     minifloat_specials_t specials;
 };
 
-/** @brief The shape of @p kind, or a zeroed one for a kind that is not a mini-float. */
+/** The shape of @p kind, or a zeroed one for a kind that is not a mini-float. */
 inline minifloat_t minifloat_of(usearch_scalar_t kind) {
     switch (kind) {
     case usearch_scalar_e5m2_k: return {5, 2, minifloat_specials_t::inf_and_nan_k};
@@ -321,7 +329,7 @@ inline double read_minifloat(u8_t bits, minifloat_t format) {
     return sign * std::ldexp(static_cast<double>(significand), scale);
 }
 
-/** @brief Narrows to the nearest code, ties to even, saturating rather than wrapping. */
+/** Narrows to the nearest code, ties to even, saturating rather than wrapping. */
 inline u8_t write_minifloat(double value, minifloat_t format) {
     unsigned const width = 1 + format.exponent_bits + format.mantissa_bits;
     unsigned const mantissa_span = 1u << format.mantissa_bits;
@@ -357,14 +365,14 @@ inline u8_t write_minifloat(double value, minifloat_t format) {
     return static_cast<u8_t>(sign | std::min(code, largest));
 }
 
-/** @brief Widens a bit-set row, whose eight dimensions per byte ascend from the low bit. */
+/** Widens a bit-set row, whose eight dimensions per byte ascend from the low bit. */
 inline void widen_bits(bytes_view_t row, std::span<double> values) {
     u8_t const* packed = static_cast<u8_t const*>(static_cast<void const*>(row.data()));
     for (std::size_t position = 0; position != values.size(); ++position)
         values[position] = (packed[position / 8] >> (position % 8)) & 1 ? 1.0 : 0.0;
 }
 
-/** @brief Narrows to a bit-set row, where every value that is not a zero sets its bit. */
+/** Narrows to a bit-set row, where every value that is not a zero sets its bit. */
 inline void narrow_bits(bytes_span_t row, std::span<double const> values) {
     u8_t* packed = static_cast<u8_t*>(static_cast<void*>(row.data()));
     // The row's own extent is the packed byte count every caller sized through `row_extent`, so
@@ -374,7 +382,7 @@ inline void narrow_bits(bytes_span_t row, std::span<double const> values) {
         if (values[position] != 0) packed[position / 8] |= static_cast<u8_t>(1u << (position % 8));
 }
 
-/** @brief Widens a nibble row, whose even dimensions sit in the low half of each byte. */
+/** Widens a nibble row, whose even dimensions sit in the low half of each byte. */
 template <typename nibble_>
 void widen_nibbles(bytes_view_t row, std::span<double> values) {
     u8_t const* packed = static_cast<u8_t const*>(static_cast<void const*>(row.data()));
@@ -385,7 +393,7 @@ void widen_nibbles(bytes_view_t row, std::span<double> values) {
     }
 }
 
-/** @brief Narrows into a nibble row, clamping to the four bits each dimension is given. */
+/** Narrows into a nibble row, clamping to the four bits each dimension is given. */
 template <typename nibble_>
 void narrow_nibbles(bytes_span_t row, std::span<double const> values) {
     double const floor_value = std::is_signed_v<nibble_> ? -8.0 : 0.0;
@@ -398,14 +406,14 @@ void narrow_nibbles(bytes_span_t row, std::span<double const> values) {
     }
 }
 
-/** @brief Widens a whole row stored as @c scalar_, converting each element to a double. */
+/** Widens a whole row stored as @c scalar_, converting each element to a double. */
 template <typename scalar_>
 void widen_into(bytes_view_t row, std::span<double> values) {
     scalar_ const* typed = static_cast<scalar_ const*>(static_cast<void const*>(row.data()));
     for (std::size_t position = 0; position != values.size(); ++position) values[position] = typed[position];
 }
 
-/** @brief Narrows a whole row of doubles back into storage as @c scalar_. */
+/** Narrows a whole row of doubles back into storage as @c scalar_. */
 template <typename scalar_>
 void narrow_from(bytes_span_t row, std::span<double const> values) {
     scalar_* typed = static_cast<scalar_*>(static_cast<void*>(row.data()));
@@ -413,12 +421,10 @@ void narrow_from(bytes_span_t row, std::span<double const> values) {
         typed[position] = static_cast<scalar_>(values[position]);
 }
 
-/**
- *  @brief Widens one stored row into @p values, whose extent decides how much is read. The kind is
- *      fixed for the whole row, so it is switched on once here rather than once per element.
- *      Callers gate on @c scalar_bytes first, so an unreachable arm leaves @p values untouched
- *      rather than silently reinterpreting the row as another width.
- */
+/** Widens one stored row into @p values, whose extent decides how much is read. The kind is
+ *  fixed for the whole row, so it is switched on once here rather than once per element.
+ *  Callers gate on @c scalar_bytes first, so an unreachable arm leaves @p values untouched
+ *  rather than silently reinterpreting the row as another width. */
 inline void read_row(bytes_view_t row, usearch_scalar_t kind, std::span<double> values) {
     switch (kind) {
     case usearch_scalar_f64_k: return widen_into<double>(row, values);
@@ -449,7 +455,7 @@ inline void read_row(bytes_view_t row, usearch_scalar_t kind, std::span<double> 
         values[position] = kind == usearch_scalar_bf16_k ? read_brain(typed[position]) : read_half(typed[position]);
 }
 
-/** @brief Quantizes @p values back into one stored row, switching on the kind once. */
+/** Quantizes @p values back into one stored row, switching on the kind once. */
 inline void write_row(bytes_span_t row, usearch_scalar_t kind, std::span<double const> values) {
     switch (kind) {
     case usearch_scalar_f64_k: return narrow_from<double>(row, values);
@@ -478,14 +484,14 @@ inline void write_row(bytes_span_t row, usearch_scalar_t kind, std::span<double 
         typed[position] = kind == usearch_scalar_bf16_k ? write_brain(values[position]) : write_half(values[position]);
 }
 
-/** @brief The @p row -th row of a strided matrix, as @p count elements of @c value_type_. */
+/** The @p row -th row of a strided matrix, as @p count elements of @c value_type_. */
 template <typename value_type_>
 std::span<value_type_> row_at(void* base, std::size_t row, std::size_t stride, std::size_t count) {
     std::byte* const at = static_cast<std::byte*>(base) + row * stride;
     return std::span<value_type_>(static_cast<value_type_*>(static_cast<void*>(at)), count);
 }
 
-/** @brief The read-only sibling, for the matrices the ABI hands over as pure inputs. */
+/** The read-only sibling, for the matrices the ABI hands over as pure inputs. */
 template <typename value_type_>
 std::span<value_type_ const> row_at(void const* base, std::size_t row, std::size_t stride, std::size_t count) {
     std::byte const* const at = static_cast<std::byte const*>(base) + row * stride;
@@ -496,26 +502,22 @@ std::span<value_type_ const> row_at(void const* base, std::size_t row, std::size
 
 #pragma region Storage
 
-/**
- *  @brief Unwraps one of the ABI's opaque handles. Every verb's first act, and the only place a
- *      handle's cast is written - the C headers declare all of them as @c void*.
- */
+/** Unwraps one of the ABI's opaque handles. Every verb's first act, and the only place a
+ *  handle's cast is written - the C headers declare all of them as @c void*. */
 template <typename handle_type_>
 handle_type_& borrowed(void* handle) noexcept {
     return *static_cast<handle_type_*>(handle);
 }
 
-/** @brief One stored row: its key, and whatever the modality calls a payload. */
+/** One stored row: its key, and whatever the modality calls a payload. */
 template <typename payload_>
 struct entry {
     usearch_key_t key;
     payload_ payload;
 };
 
-/**
- *  @brief The project's own key type, which already knows how to hash and compare itself.
- *      Layout-identical to @c usearch_key_t, so the conversion is a reinterpretation.
- */
+/** The project's own key type, which already knows how to hash and compare itself.
+ *  Layout-identical to @c usearch_key_t, so the conversion is a reinterpretation. */
 inline uuid_t keyed(usearch_key_t const& key) noexcept { return std::bit_cast<uuid_t>(key); }
 
 /**
@@ -528,19 +530,23 @@ inline uuid_t keyed(usearch_key_t const& key) noexcept { return std::bit_cast<uu
  */
 template <typename payload_, typename options_>
 struct handle {
-    /** @brief The options the handle was initialized with, or a checkpoint later adopted. */
+
+    /** The options the handle was initialized with, or a checkpoint later adopted. */
     options_ options {};
-    /** @brief The rows themselves, in insertion order. */
+
+    /** The rows themselves, in insertion order. */
     std::vector<entry<payload_>> entries;
-    /** @brief Row positions under each key, so a lookup is not a scan; keys need not be unique. */
+
+    /** Row positions under each key, so a lookup is not a scan; keys need not be unique. */
     std::unordered_multimap<uuid_t, std::size_t> by_key;
-    /** @brief Held shared by every reader, exclusively by every mutation. */
+
+    /** Held shared by every reader, exclusively by every mutation. */
     mutable std::shared_mutex mutex;
 
-    /** @brief Drops every row, which @c clear promises without touching the frozen options. */
+    /** Drops every row, which @c clear promises without touching the frozen options. */
     void reset() noexcept { entries.clear(), by_key.clear(); }
 
-    /** @brief Sizes both containers for @p total entries, answering whether the memory came. */
+    /** Sizes both containers for @p total entries, answering whether the memory came. */
     bool accommodate(std::size_t total) {
         try {
             entries.reserve(total);
@@ -552,13 +558,13 @@ struct handle {
         return true;
     }
 
-    /** @brief Appends one row and indexes its key, the only way a row is ever added. */
+    /** Appends one row and indexes its key, the only way a row is ever added. */
     void append(usearch_key_t key, payload_ payload) {
         by_key.emplace(keyed(key), entries.size());
         entries.push_back({key, std::move(payload)});
     }
 
-    /** @brief Drops every row published past @p watermark, which an unwound batch reverts to. */
+    /** Drops every row published past @p watermark, which an unwound batch reverts to. */
     void unwind(std::size_t watermark) {
         for (std::size_t position = entries.size(); position != watermark; --position) {
             auto const range = by_key.equal_range(keyed(entries[position - 1].key));
@@ -594,11 +600,9 @@ bool reject_oversubscribed(handle_ const& index, usearch_keys_view_t keys, std::
     return false;
 }
 
-/**
- *  @brief Row positions under @p key, ascending - the insertion order every @c get promises.
- *      An unordered multimap keeps equivalent keys adjacent but in no stated order, so the
- *      ascending sort is what restores the contract rather than a tidiness.
- */
+/** Row positions under @p key, ascending - the insertion order every @c get promises.
+ *  An unordered multimap keeps equivalent keys adjacent but in no stated order, so the
+ *  ascending sort is what restores the contract rather than a tidiness. */
 template <typename handle_>
 std::vector<std::size_t> rows_under(handle_ const& index, usearch_key_t key) {
     std::vector<std::size_t> rows;
@@ -610,14 +614,14 @@ std::vector<std::size_t> rows_under(handle_ const& index, usearch_key_t key) {
 
 #pragma endregion Storage
 
-/** @brief Writes @p value's own bytes at the head of @p target - the serializer's one primitive. */
+/** Writes @p value's own bytes at the head of @p target - the serializer's one primitive. */
 template <typename value_>
 void write_pod(bytes_span_t target, value_ const& value) {
     std::array<std::byte, sizeof(value_)> const raw = std::bit_cast<std::array<std::byte, sizeof(value_)>>(value);
     std::copy(raw.begin(), raw.end(), target.begin());
 }
 
-/** @brief Reads one @c value_ back from the head of @p source. */
+/** Reads one @c value_ back from the head of @p source. */
 template <typename value_>
 value_ read_pod(bytes_view_t source) {
     std::array<std::byte, sizeof(value_)> raw {};
@@ -627,10 +631,10 @@ value_ read_pod(bytes_view_t source) {
 
 #pragma region Ranking
 
-/** @brief Whether a filtered search admits one key. Named states, never a bare @c bool. */
+/** Whether a filtered search admits one key. Named states, never a bare @c bool. */
 enum class admission_t : bool { rejected_k, admitted_k };
 
-/** @brief Wraps the ABI's predicate pair once, at the boundary; a null predicate admits every key. */
+/** Wraps the ABI's predicate pair once, at the boundary; a null predicate admits every key. */
 inline std::function<admission_t(usearch_key_t)> admitting(usearch_predicate_t predicate, void* state) {
     if (!predicate) return [](usearch_key_t) { return admission_t::admitted_k; };
     return [predicate, state](usearch_key_t key) {
@@ -638,18 +642,18 @@ inline std::function<admission_t(usearch_key_t)> admitting(usearch_predicate_t p
     };
 }
 
-/** @brief One scored pair, in the order a search reports them. */
+/** One scored pair, in the order a search reports them. */
 struct match_t {
-    /** @brief What the modality's kind scored the pair at; smaller is nearer. */
+
+    /** What the modality's kind scored the pair at; smaller is nearer. */
     double distance;
-    /** @brief The key of the entry scored. */
+
+    /** The key of the entry scored. */
     usearch_key_t key;
 };
 
-/**
- *  @brief Scores @p entries into @p ranked, nearest first. The sort is stable because every
- *      modality's docblock promises ties fall in insertion order.
- */
+/** Scores @p entries into @p ranked, nearest first. The sort is stable because every
+ *  modality's docblock promises ties fall in insertion order. */
 template <typename payload_>
 void rank(std::span<entry<payload_> const> entries, std::function<admission_t(usearch_key_t)> const& admits,
           std::function<double(payload_ const&)> const& score, std::vector<match_t>& ranked) {
@@ -667,20 +671,16 @@ void rank(std::span<entry<payload_> const> entries, std::function<admission_t(us
 
 #pragma region Files
 
-/**
- *  @brief The extent of a checkpoint, empty when that many rows cannot be addressed. Every
- *      modality's blob is a prefix followed by @p count entries of @p each bytes.
- */
+/** The extent of a checkpoint, empty when that many rows cannot be addressed. Every
+ *  modality's blob is a prefix followed by @p count entries of @p each bytes. */
 inline std::optional<std::size_t> blob_bytes(std::size_t prefix, std::size_t count, std::size_t each) {
     if (each && count > (SIZE_MAX - prefix) / each) return std::nullopt;
     return prefix + count * each;
 }
 
-/**
- *  @brief Whether @p blob is long enough for @p count records of @p each bytes past @p header,
- *      reporting through @p error which way it fell short. Every modality's @c parse_prefix
- *      ends in this check; only the extent it computes differs.
- */
+/** Whether @p blob is long enough for @p count records of @p each bytes past @p header,
+ *  reporting through @p error which way it fell short. Every modality's @c parse_prefix
+ *  ends in this check; only the extent it computes differs. */
 inline bool fits_blob(bytes_view_t blob, std::size_t header, std::size_t count, std::size_t each,
                       usearch_error_t* error) {
     std::optional<std::size_t> const needed = blob_bytes(header, count, each);

@@ -1,9 +1,8 @@
 /**
- *  @brief Logging & styling helpers shared by the benchmarking harnesses.
- *
- *  @author Ash Vardanian
  *  @file bench/bench.hpp
+ *  @author Ash Vardanian
  *  @date July 17, 2026
+ *  @brief Logging & styling helpers shared by the benchmarking harnesses.
  *
  *  Everything here is presentation-only: TTY-aware {fmt} styles that degrade to plain text
  *  when piped, human-readable count formatting, enum pretty-printers, and process-level
@@ -11,13 +10,13 @@
  */
 #pragma once
 
-#include <chrono>  // `std::chrono::steady_clock` for progress rates
 #include <cmath>   // `std::log2` for ranking gains
 #include <cstddef> // `std::size_t`
 #include <cstdio>  // `std::fopen` for `/proc/self/status`, `stdout` for the TTY probe
 #include <cstdlib> // `std::strtoull`
 #include <cstring> // `std::strncmp`
 
+#include <chrono> // `std::chrono::steady_clock` for progress rates
 #include <span>   // `std::span`
 #include <string> // `std::string`
 
@@ -44,18 +43,18 @@ inline bool stdout_is_terminal() noexcept {
 #endif
 }
 
-/** @brief Bold for section headers on a TTY; empty when piped, so logs stay ANSI-free. */
+/** Bold for section headers on a TTY; empty when piped, so logs stay ANSI-free. */
 inline fmt::text_style header_style() noexcept {
     return stdout_is_terminal() ? fmt::text_style(fmt::emphasis::bold) : fmt::text_style();
 }
 
-/** @brief Green when a judgment value looks healthy, orange otherwise; empty when piped. */
+/** Green when a judgment value looks healthy, orange otherwise; empty when piped. */
 inline fmt::text_style verdict_style(bool looks_healthy) noexcept {
     if (!stdout_is_terminal()) return {};
     return fg(looks_healthy ? fmt::color::green : fmt::color::orange);
 }
 
-/** @brief Renders large counts as "1.23 G" / "45.6 M" / "789 k" for scannable tables. */
+/** Renders large counts as "1.23 G" / "45.6 M" / "789 k" for scannable tables. */
 inline std::string humanize(double value) {
     if (value >= 1e9) return fmt::format("{:.2f} G", value / 1e9);
     if (value >= 1e6) return fmt::format("{:.2f} M", value / 1e6);
@@ -124,7 +123,7 @@ class progress_bar_t {
     }
 };
 
-/** @brief Names the benchmarked dtype subset; NumKong exposes no C-level name table yet. */
+/** Names the benchmarked dtype subset; NumKong exposes no C-level name table yet. */
 inline char const* dtype_name(nk_dtype_t dtype) noexcept {
     switch (dtype) {
     // Sorted by decreasing dynamic range, grouped floats, signed integers, unsigned.
@@ -162,19 +161,22 @@ inline void fill_discounts(std::span<double> discounts, std::span<double> ideal)
     }
 }
 
-/** @brief The verdicts of one query's judgment, produced together by @c judge_ranking. */
+/** The verdicts of one query's judgment, produced together by @c judge_ranking. */
 struct ranking_verdict_t {
-    /** @brief 1 when the true nearest neighbor appears among the returned keys. Averaged
-     *      over queries this is the production Recall@K - the probability of finding @b the
-     *      nearest neighbor within the top K - monotone in K, so Recall@1 never exceeds
-     *      Recall@10. */
+
+    /** 1 when the true nearest neighbor appears among the returned keys. Averaged
+     *  over queries this is the production Recall@K - the probability of finding @b the
+     *  nearest neighbor within the top K - monotone in K, so Recall@1 never exceeds
+     *  Recall@10. */
     std::size_t found_nearest = 0;
-    /** @brief The intersection size between the returned and expected sets - "overlap",
-     *      the set-coverage metric big-ANN leaderboards report. Stricter than Recall@K and
-     *      not monotone against it. */
+
+    /** The intersection size between the returned and expected sets - "overlap",
+     *  the set-coverage metric big-ANN leaderboards report. Stricter than Recall@K and
+     *  not monotone against it. */
     std::size_t overlap = 0;
-    /** @brief Unnormalized discounted cumulative gain: every returned key present in the
-     *      expected set earns its position's discount, so early hits weigh more. */
+
+    /** Unnormalized discounted cumulative gain: every returned key present in the
+     *  expected set earns its position's discount, so early hits weigh more. */
     double gain = 0;
 };
 
@@ -217,7 +219,7 @@ ranking_verdict_t judge_ranking(std::span<key_type_ const> returned, std::span<k
     return verdict;
 }
 
-/** @brief Peak resident set size from @c /proc/self/status in bytes, or zero when unknown. */
+/** Peak resident set size from @c /proc/self/status in bytes, or zero when unknown. */
 inline std::size_t peak_resident_bytes() noexcept {
     std::FILE* status = std::fopen("/proc/self/status", "r");
     if (!status) return 0;

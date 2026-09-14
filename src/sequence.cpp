@@ -1,9 +1,9 @@
 /**
- *  @brief The trampoline of the sequence index library: runtime dispatch over the
- *      variable-length sequence indexes.
- *  @author Ash Vardanian
  *  @file src/sequence.cpp
+ *  @author Ash Vardanian
  *  @date July 17, 2026
+ *  @brief The trampoline of the sequence index library: runtime dispatch over the variable-length
+ *      sequence indexes.
  *
  *  The sequence modality builds on the baseline tier: StringZilla-backed similarity
  *  measures - Levenshtein, Needleman-Wunsch, Smith-Waterman - over arbitrary-length
@@ -19,8 +19,8 @@
 namespace us = unum::usearch;
 namespace sz = ashvardanian::stringzilla;
 
-/** @brief Instantiates the sequence checkpoint verbs over the default index in both forms - the
- *      caller's bytes and a path this maps itself - so they compile here. */
+/** Instantiates the sequence checkpoint verbs over the default index in both forms - the
+ *  caller's bytes and a path this maps itself - so they compile here. */
 [[maybe_unused]] static us::status_t sequence_checkpoint_witness(us::sequence_ram_index_t& index,
                                                                  us::sequence_codec_t const& codec,
                                                                  us::forkunion_executor_t& executor,

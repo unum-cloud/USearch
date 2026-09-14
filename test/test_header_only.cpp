@@ -1,9 +1,9 @@
 /**
- *  @brief The header-only suite's entry point: the basic graph index and the utilities under it,
- *      on the standard library alone.
- *  @author Ash Vardanian
  *  @file test/test_header_only.cpp
+ *  @author Ash Vardanian
  *  @date September 7, 2026
+ *  @brief The header-only suite's entry point: the basic graph index and the utilities under it, on
+ *      the standard library alone.
  */
 #include <fmt/format.h>
 

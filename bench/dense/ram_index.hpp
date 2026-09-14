@@ -1,64 +1,56 @@
 /**
- *  @brief Profiling harness for the CPU-resident @c dense_ram_index over real persisted
- *      datasets, shared by the per-dtype benchmark shards.
- *
- *  @author Ash Vardanian
  *  @file bench/dense/ram_index.hpp
+ *  @author Ash Vardanian
  *  @date July 17, 2026
+ *  @brief Profiling harness for the CPU-resident @c dense_ram_index over real persisted datasets,
+ *      shared by the per-dtype benchmark shards.
  *
  *  The backend-neutral surface - options, checkpoints, dataset streaming, telemetry, result
- *  judgment, and the machine report - lives in @c dense.cuh; this header owns
- *  everything CPU: the ForkUnion run loops streaming one row or query per task, the
- *  NUMA-domain placement, the waiter dispatch, and the compile-time cascade resolving
- *  the CLI into one concrete @c dense_ram_index instantiation - sharded per stored dtype,
- *  so parallel translation units split the instantiation grid. A ready-made playground
- *  is the Unum Wiki 1M dataset:
+ *  judgment, and the machine report - lives in @c dense.cuh; this header owns everything CPU:
+ *  the ForkUnion run loops streaming one row or query per task, the NUMA-domain placement,
+ *  the waiter dispatch, and the compile-time cascade resolving the CLI into one concrete
+ *  @c dense_ram_index instantiation, sharded per stored dtype. A ready-made playground is
+ *  the Unum Wiki 1M dataset:
  *
  *  @code{.sh}
  *  mkdir -p ~/datasets/wiki_1M && cd ~/datasets/wiki_1M &&
- *      wget -nc https://huggingface.co/datasets/unum-cloud/ann-wiki-1m/resolve/main/base.1M.fbin &&
- *      wget -nc https://huggingface.co/datasets/unum-cloud/ann-wiki-1m/resolve/main/query.public.100K.fbin &&
- *      wget -nc https://huggingface.co/datasets/unum-cloud/ann-wiki-1m/resolve/main/groundtruth.public.100K.ibin
+ *  wget -nc https://huggingface.co/datasets/unum-cloud/ann-wiki-1m/resolve/main/base.1M.fbin &&
+ *  wget -nc https://huggingface.co/datasets/unum-cloud/ann-wiki-1m/resolve/main/query.public.100K.fbin &&
+ *  wget -nc https://huggingface.co/datasets/unum-cloud/ann-wiki-1m/resolve/main/groundtruth.public.100K.ibin
  *  usearch_bench_dense_ram_index --vectors ~/datasets/wiki_1M/base.1M.fbin \
- *      --queries ~/datasets/wiki_1M/query.public.100K.fbin \
- *      --neighbors ~/datasets/wiki_1M/groundtruth.public.100K.ibin --bf16
+ *  --queries ~/datasets/wiki_1M/query.public.100K.fbin \
+ *  --neighbors ~/datasets/wiki_1M/groundtruth.public.100K.ibin --bf16
  *  @endcode
  *
- *  Huge pages are provisioned outside the process, before it starts; `--huge-pages` then
- *  declares the expectation, which the harness logs and enforces - a mismatch fails the
- *  run instead of silently benchmarking base pages. The effect is anything but cosmetic:
- *  random vector gathers over a multi-GB pool miss the STLB on nearly every access under
- *  4 KB pages, stacking a page walk onto each already-cold load, and 2 MB pages have
- *  measured ~30% higher insertion throughput and ~20% higher search QPS on SIFT-10M on a
- *  dual-socket Sapphire Rapids box - the largest single-switch effect this harness knows:
+ *  Huge pages are provisioned outside the process; `--huge-pages` declares the expectation,
+ *  and a mismatch fails the run instead of silently benchmarking base pages:
  *
  *  @code{.sh}
  *  sudo sysctl vm.nr_hugepages=16384        # 32 GB of 2 MB pages, split across the domains
  *  usearch_bench_dense_ram_index --huge-pages 16384 \
- *      --vectors ~/datasets/sift_10M/base.10M.u8bin --memory-domain 0
+ *  --vectors ~/datasets/sift_10M/base.10M.u8bin --memory-domain 0
  *  @endcode
  *
  *  This binary holds exactly one index; plurality belongs to the operating system or to the
- *  sharded sibling. The zero-cross-traffic upper bound - N independent builds, one per memory
- *  domain, each pinned to every compute domain local to it and ingesting its own slice of one
- *  dataset - is an invocation rather than a code path:
+ *  sharded sibling. N independent builds, one per memory domain over its own slice of one
+ *  dataset, is an invocation rather than a code path:
  *
  *  @code{.sh}
  *  for domain in 0 1; do
- *      usearch_bench_dense_ram_index --memory-domain $domain --vectors base.10M.bf16bin \
- *          --first-vector $((domain * 5000000)) --max-vectors 5000000 --self-recall &
+ *  usearch_bench_dense_ram_index --memory-domain $domain --vectors base.10M.bf16bin \
+ *  --first-vector $((domain * 5000000)) --max-vectors 5000000 --self-recall &
  *  done; wait
  *  @endcode
  *
  *  Defaults are inferred and each is overridable:
  *  - the stored dtype matches the dataset file, unless `--f32`, `--bf16`, `--f16`, `--i8`, `--i4`,
- *    `--u8`, or `--u1` asks for a streaming `nk::cast` through a `--batch`-row trampoline on ingest;
+ *  `--u8`, or `--u1` asks for a streaming `nk::cast` through a `--batch`-row trampoline on ingest;
  *  - the newest runtime compute capability drives the distance kernels, unless
- *    `--max-compute` caps it by NumKong's microarchitecture names, like `icelake`;
+ *  `--max-compute` caps it by NumKong's microarchitecture names, like `icelake`;
  *  - the strongest offered wait instruction parks stalled threads, unless `--max-schedule`
- *    caps it by ForkUnion's instruction names, like `tpause`, down to the `standard` yield;
+ *  caps it by ForkUnion's instruction names, like `tpause`, down to the `standard` yield;
  *  - 7/8 of the logical cores participate, unless `--threads` overrides - full occupancy
- *    starves the ordered publication path and collapses throughput.
+ *  starves the ordered publication path and collapses throughput.
  */
 #pragma once
 
@@ -85,9 +77,10 @@ namespace usearch {
 
 #pragma region CPU Pipeline
 
-/** @brief The STL floor below the schedule table, correct on every machine. */
+/** The STL floor below the schedule table, correct on every machine. */
 using yield_waiter_t = fu::standard_yield_t;
-/** @brief The spin hint every core of this architecture runs. */
+
+/** The spin hint every core of this architecture runs. */
 #if FU_DETECT_ARCH_X86_64_
 using hint_waiter_t = fu::x86_pause_t;
 #elif FU_DETECT_ARCH_ARM64_
@@ -97,8 +90,9 @@ using hint_waiter_t = fu::risc5_pause_t;
 #else
 using hint_waiter_t = fu::standard_yield_t;
 #endif
-/** @brief The monitored wait this unit compiles, admitted against @c fu_runtime_capabilities before its row
- *      runs; with none compiled the row collapses onto the hint. */
+
+/** The monitored wait this unit compiles, admitted against @c fu_runtime_capabilities before its
+ *  row runs; with none compiled the row collapses onto the hint. */
 #if FU_TARGET_X86_TPAUSE
 using monitor_waiter_t = fu::x86_tpause_t;
 #elif FU_TARGET_ARM64_WFET
@@ -109,10 +103,8 @@ using monitor_waiter_t = fu::risc5_wrs_t;
 using monitor_waiter_t = hint_waiter_t;
 #endif
 
-/** @brief The waiter type each schedule table row instantiates, positionally - the data list the
- *      schedule axis indexes, mirroring how the compute axis indexes @c prefix_mask. Every real
- *      table has two rows; on the fallback arch both entries collapse onto the yield floor, so
- *      only row 0 is ever reachable. */
+/** The waiter type each schedule table row instantiates, positionally; on the fallback arch both
+ *  entries collapse onto the yield floor, so only row 0 is reachable. */
 using schedule_waiters_t = std::tuple<hint_waiter_t, monitor_waiter_t>;
 
 /**
@@ -120,10 +112,8 @@ using schedule_waiters_t = std::tuple<hint_waiter_t, monitor_waiter_t>;
  *      index, its per-thread traversal contexts, and the embedded backend-neutral judgment
  *      results.
  *
- *  The dataset never appears here - the data side lives in @c streamed_dataset, which
- *  bridges the file's scalar into the stored one vector-by-vector. One index, on one memory
- *  domain or the plain heap - the multi-domain arrangement is a different benchmark category
- *  with a different binary, driving @c dense_ram_indexes instead.
+ *  The dataset never appears here - the data side lives in @c streamed_dataset, which bridges
+ *  the file's scalar into the stored one vector-by-vector.
  */
 template <typename index_type_>
 struct bench_context {
@@ -138,24 +128,26 @@ struct bench_context {
 
     static constexpr nk_kernel_kind_t kernel_kind_k = index_t::kernel_kind_k;
 
+    /** The parsed CLI, borrowed for the run's lifetime. */
     bench_options_t const& options;
-    /** @brief The one index under measurement; the indirection buys address stability, as an
-     *      index holds atomics and never moves. */
+
+    /** The one index under measurement; the indirection buys address stability. */
     std::unique_ptr<index_t> index;
-    /** @brief One graph-walking context per pool thread, built by that thread itself with
-     *      its local memory domain's allocator. */
+
+    /** One graph-walking context per pool thread, built by that thread on its own domain. */
     std::vector<std::unique_ptr<traversal_t>> traversals;
-    /** @brief Per-thread telemetry sums, padded apart to stay contention-free. */
+
+    /** Per-thread telemetry sums, padded apart to stay contention-free. */
     std::vector<telemetry_lane_t> lanes;
-    /** @brief The backend-neutral judgment state both phases fill. */
+
+    /** The backend-neutral judgment state both phases fill. */
     bench_results_t results;
 
     bench_context(bench_options_t const& options) noexcept : options(options) {}
 };
 
-/** @brief Builds the index on the chosen memory domain, reserves it for the viewed rows, and
- *      sizes all per-thread state off the pool's actual thread count - everything fallible,
- *      before any clock starts. */
+/** Builds the index on the chosen memory domain, reserves it for the viewed rows, and sizes all
+ *  per-thread state off the pool's thread count - everything fallible, before any clock starts. */
 template <typename streamed_dataset_type_>
 bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool) {
     using bench_t = typename streamed_dataset_type_::bench_t;
@@ -182,34 +174,26 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool) {
         return false;
     }
 
-    // Placement: the chosen memory domain, or the plain heap. The index is reserved for the
-    // full row count: capacity is a counter and chunk storage allocates lazily, so the slack
-    // costs directory slots, not memory.
+    // Reserving the full row count is cheap: chunk storage allocates lazily.
     fu_memory_domain_id_t const domain = bench.options.memory_domains.empty() //
                                              ? fu_memory_domain_id_t {-1}
                                              : bench.options.memory_domains.front();
     bench.index = std::make_unique<index_t>(allocator_t {domain}, allocator_t {domain});
     bench.results.id_to_row.resize(rows);
 
-    // Reserving first freezes the CLI geometry and pre-grows capacity; a checkpoint then
-    // loads against that frozen geometry, so a header mismatch fails loudly below instead
-    // of restoring an incompatible graph.
+    // Reserving first freezes the CLI geometry a checkpoint then has to agree with.
     auto const [capacity, status] = bench.index->reserve({rows, connectivity, dimensions});
     if (failed(status)) {
         fmt::println("Failed to reserve {} × {}d", rows, dimensions);
         return false;
     }
 
-    // Three RetriEval-layout matrix dumps: the file name's dtype-kernel-connectivity stamp
-    // carries compatibility across backends, the two-counter headers carry the shapes, and
-    // any dataset tool opens them. The id → row map restores the recall bookkeeping the
-    // index itself never stores.
+    // The third dump is the ID → row map, the recall bookkeeping the index itself never stores.
     if (!bench.options.load_name.empty() &&
         !load_checkpoint(bench.options, *bench.index, dimensions, std::span {bench.results.id_to_row}, 0, 1))
         return false;
 
-    // The loaded base must cover exactly the skipped prefix - anything else would judge
-    // recall against rows the graph never saw.
+    // A base that misses the skipped prefix would judge recall against rows the graph never saw.
     std::size_t const loaded_rows = bench.index->size();
     if (loaded_rows != bench.options.skip_vectors) {
         fmt::println("Loaded index covers {} rows, but --skip-vectors says {}", loaded_rows,
@@ -217,13 +201,11 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool) {
         return false;
     }
 
-    // Every pool thread constructs its own traversal context, so the scratch - results,
-    // frontier, visited set - lands on the thread's local memory domain, not the caller's.
+    // Each thread builds its own context, so the scratch lands on its local memory domain.
     bench.traversals.resize(threads);
     auto traversals_init = [](fu_lambda_context_t punned, std::size_t thread, std::size_t) noexcept {
         auto& bench = *static_cast<bench_t*>(punned);
-        // AMX tile state needs a per-thread OS permission handshake before first use;
-        // NumKong's thread configurator performs it and no-ops everywhere else.
+        // AMX tile state needs a per-thread OS permission handshake before first use.
         nk_configure_thread(nk_capabilities_available());
         fu_memory_domain_id_t const domain = bench.options.memory_domains.empty()
                                                  ? fu_memory_domain_id_t {-1}
@@ -252,8 +234,8 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool) {
     return true;
 }
 
-/** @brief One vector per task, streamed: viewed in place when the scalars match, or cast
- *      through the thread's staging area, then inserted into the one index under measurement. */
+/** One vector per task: viewed in place when the scalars match, or cast through the thread's
+ *  staging area, then inserted into the one index under measurement. */
 template <typename streamed_dataset_type_>
 void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_t thread, std::size_t) noexcept {
     using bench_t = typename streamed_dataset_type_::bench_t;
@@ -348,35 +330,41 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     return true;
 }
 
-/** @brief The state one refinement or healing fan-out shares with its threads: the phase it is
- *      in, the plan that phase drives, and the tallies a task adds to. One index knows nothing
- *      of pools, so this is where a pool meets its plans. */
+/** The state one refinement or healing fan-out shares with its threads: the plan it drives and
+ *  the tallies its tasks add to. */
 template <typename bench_type_>
 struct refinement_fanout_t {
     using index_t = typename bench_type_::index_t;
     using heal_plan_t = typename index_t::heal_plan_t;
     using steps_t = indexed_range<typename index_t::health_plan_t>;
 
-    /** @brief The index under measurement and its per-thread traversal contexts. */
+    /** The index under measurement and its per-thread traversal contexts. */
     bench_type_& bench;
-    /** @brief The pool every pass re-selects under. */
+
+    /** The candidate pool every pass re-selects under. */
     typename index_t::refine_config_t config;
-    /** @brief The healing pass, once it is open; null while the refinement passes run. */
+
+    /** The healing pass, once it is open; null while the refinement passes run. */
     heal_plan_t* plan = nullptr;
-    /** @brief Nodes the current pass re-wired. */
+
+    /** Nodes the current pass re-wired. */
     std::atomic<std::size_t> changed {0};
-    /** @brief Frontier candidates the passes expanded. */
+
+    /** Frontier candidates the passes expanded. */
     std::atomic<std::size_t> visited_members {0};
-    /** @brief Distances the passes computed. */
+
+    /** Distances the passes computed. */
     std::atomic<std::size_t> computed_distances {0};
-    /** @brief Starvation restarts the passes hit. */
+
+    /** Starvation restarts the passes hit. */
     std::atomic<std::size_t> restarts {0};
-    /** @brief Tasks that returned an error; any non-zero fails the run. */
+
+    /** Tasks that returned an error; any non-zero fails the run. */
     std::atomic<std::size_t> failures {0};
 };
 
-/** @brief One chunk of node IDs per task, re-selected against the graph as it stands - the
- *      refinement's fan-out unit, matching the growth chunk the index allocates in. */
+/** One chunk of node IDs per task, re-selected against the graph as it stands - the fan-out unit,
+ *  matching the growth chunk the index allocates in. */
 template <typename bench_type_>
 void refinement_callback(fu_lambda_context_t punned, std::size_t task, std::size_t thread, std::size_t) noexcept {
     using index_t = typename bench_type_::index_t;
@@ -395,7 +383,7 @@ void refinement_callback(fu_lambda_context_t punned, std::size_t task, std::size
     fanout.restarts.fetch_add(refinement.restarts, std::memory_order_relaxed);
 }
 
-/** @brief One audit step per task: the reached nodes it holds expand their neighbors. */
+/** One audit step per task: the reached nodes it holds expand their neighbors. */
 template <typename bench_type_>
 void sweep_callback(fu_lambda_context_t punned, std::size_t task, std::size_t, std::size_t) noexcept {
     using steps_t = typename refinement_fanout_t<bench_type_>::steps_t;
@@ -404,7 +392,7 @@ void sweep_callback(fu_lambda_context_t punned, std::size_t task, std::size_t, s
     fanout.plan->sweep(steps[task]);
 }
 
-/** @brief One audit step per task: its islands re-select their neighbors from scratch. */
+/** One audit step per task: its islands re-select their neighbors from scratch. */
 template <typename bench_type_>
 void reselect_callback(fu_lambda_context_t punned, std::size_t task, std::size_t thread, std::size_t) noexcept {
     using steps_t = typename refinement_fanout_t<bench_type_>::steps_t;
@@ -415,7 +403,7 @@ void reselect_callback(fu_lambda_context_t punned, std::size_t task, std::size_t
     if (failed(reselected_status)) fanout.failures.fetch_add(1, std::memory_order_relaxed);
 }
 
-/** @brief One audit step per task: its islands land in a reached node's neighbor list. */
+/** One audit step per task: its islands land in a reached node's neighbor list. */
 template <typename bench_type_>
 void reconnect_callback(fu_lambda_context_t punned, std::size_t task, std::size_t thread, std::size_t) noexcept {
     using steps_t = typename refinement_fanout_t<bench_type_>::steps_t;
@@ -424,15 +412,8 @@ void reconnect_callback(fu_lambda_context_t punned, std::size_t task, std::size_
     fanout.plan->reconnect_islands(steps[task], *fanout.bench.traversals[thread]);
 }
 
-/**
- *  @brief Re-selects every node's neighbors, pass after pass, then re-links whatever no search
- *      can reach - the build step a cheap ingestion pays for.
- *
- *  The passes stop early once one re-wires nothing, since the next would re-select the same
- *  picks. The heal that follows sweeps to convergence, re-selects the islands, sweeps again, and
- *  reconnects what the diversity judgment still drops, round after round while the island
- *  population shrinks.
- */
+/** Re-selects every node's neighbors, pass after pass, then re-links whatever no search can
+ *  reach; a pass that re-wires nothing ends the phase. */
 template <typename streamed_dataset_type_>
 bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
     using clock_t = stdc::steady_clock;
@@ -495,8 +476,7 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
         fu_pool_for_n_dynamic(pool, audit_steps, &reconnect_callback<bench_t>, &fanout);
         plan.restart_sweep();
         sweep_to_convergence();
-        // A round that frees no island frees none on the next either - the picks it needs are
-        // themselves unreached - so the pass ends here and reports what still stands.
+        // A round that frees no island frees none on the next either: its picks are unreached too.
         std::size_t const islands_after = plan.islands_left();
         if (islands_after >= islands_before) break;
         islands_before = islands_after;
@@ -520,9 +500,8 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
     return true;
 }
 
-/** @brief Serializes the index as three RetriEval-layout matrices - vectors, neighbors, and
- *      the id → row map - so later runs @c --load the base and stream only the topping: a
- *      100M experiment then costs an mmap, not a half-hour rebuild. */
+/** Serializes the index as three RetriEval-layout matrices - vectors, neighbors, and the id → row
+ *  map - so later runs @c --load the base and stream only the topping. */
 template <typename streamed_dataset_type_>
 bool save_index(streamed_dataset_type_& streamed) {
     using clock_t = stdc::steady_clock;
@@ -536,9 +515,8 @@ bool save_index(streamed_dataset_type_& streamed) {
     return true;
 }
 
-/** @brief Every query is one task: cast through the thread's staging area if needed - before
- *      the clock - then searched and translated through the id → row map into the judged
- *      hits. The clock covers the whole lookup - the honest end-to-end latency. */
+/** Every query is one task: cast through the thread's staging area if needed - before the clock -
+ *  then searched and translated through the ID → row map into the judged hits. */
 template <typename streamed_dataset_type_>
 void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t thread, std::size_t) noexcept {
     using bench_t = typename streamed_dataset_type_::bench_t;
@@ -552,11 +530,9 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
 
     typename index_t::search_config_t config;
     config.expansion_factor = static_cast<small_size_t>(bench.options.expansion_search);
-    // The search phase runs strictly after ingestion, so the mutation-free contract holds by
-    // construction - certify it and measure the atomics-free traversal.
+    // The search phase runs strictly after ingestion, so the mutation-free contract holds.
     config.synchronization = synchronization_t::immutable_k;
-    // Under self-recall the "query file" is the base itself: every stored vector must find
-    // its own row - theorem-grade navigability probing with zero ground-truth files.
+    // Under self-recall the query file is the base itself: every stored vector must find its row.
     auto const source_row = bench.options.self_recall ? streamed.vectors.row(query) : streamed.queries.row(query);
     vector_view_t query_vector;
     if constexpr (streamed_dataset_type_::zero_copy_k) query_vector = source_row.as_vector();
@@ -565,8 +541,7 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
     u32_t* const merged_rows = bench.results.hit_rows.row(query).data();
     auto* const merged_distances = bench.results.hit_distances.row(query).data();
 
-    // The dense ids of the matches translate through the id → row map on the way out, since
-    // the index stores no keys and recall is judged in dataset rows.
+    // The index stores no keys, so matches translate through the ID → row map on the way out.
     typename bench_t::traversal_t& traversal = *bench.traversals[thread];
     std::span<u32_t> const rows_span {merged_rows, bench.options.top_k};
     std::span<dense_distance_t> const distances_span {merged_distances, bench.options.top_k};
@@ -614,7 +589,7 @@ bool run_search(streamed_dataset_type_& streamed, fu_pool_t pool) {
 
 #pragma region Dispatch Cascade
 
-/** @brief Bundles the launch state the cascade threads through its compile-time hops. */
+/** Bundles the launch state the cascade threads through its compile-time hops. */
 template <typename dataset_scalar_type_>
 struct bench_launch {
     persisted_dataset<dataset_scalar_type_> const& dataset;
@@ -623,15 +598,14 @@ struct bench_launch {
     fu_topology_t topology;
 };
 
-/** @brief Gate: a (stored dtype, kernel) cell is runnable once its kit chain is adapted in
- *      @c usearch/dense/ram_metric.hpp - unadapted combinations report as skipped and light up
- *      automatically when their kits land, exactly like the CUDA cascade. */
+/** Gate: a (stored dtype, kernel) cell is runnable once its kit chain is adapted in
+ *  @c usearch/dense/ram_metric.hpp; unadapted combinations report as skipped. */
 template <nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, nk_capability_t capability_>
 concept ram_kit_adapted = requires {
     sizeof(dense_quads_chain<kernel_, typename nk::type_for<stored_dtype_>::type, capability_>);
 };
 
-/** @brief No-op sibling picked when the cell's CPU kit chain is not adapted yet. */
+/** No-op sibling picked when the cell's CPU kit chain is not adapted yet. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_,
           nk_capability_t capability_, typename wait_type_>
     requires(!ram_kit_adapted<stored_dtype_, kernel_, capability_>)
@@ -640,16 +614,8 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const&) {
     return 0;
 }
 
-/**
- *  @brief The innermost hop: binds the concrete volatile-index instantiation, wires the
- *      typed source views and the bounded staging trampoline into a @c streamed_dataset,
- *      and runs both phases.
- *
- *  When the file scalar already matches the stored one, everything is a zero-copy view
- *  into the mappings; otherwise the staging matrix holds just `--batch` rows - typically a
- *  few per thread - and each vector streams through it on its way into the index. The
- *  dataset is never copied whole.
- */
+/** The innermost hop: binds the concrete volatile-index instantiation, wires the typed source
+ *  views and the bounded staging trampoline into a @c streamed_dataset, and runs both phases. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_,
           nk_capability_t capability_, typename wait_type_>
     requires(ram_kit_adapted<stored_dtype_, kernel_, capability_>)
@@ -685,7 +651,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
 
     // Owns the staging trampoline planes for the whole run.
     nk::tensor<scalar_t, std::allocator<scalar_t>, 3> staging;
-    // Owns the rescaling planes `streamed_dataset::rescaling` views.
+    // Owns the rescaling planes @c streamed_dataset::rescaling views.
     nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3> rescaling_planes;
     if constexpr (!streamed_t::zero_copy_k) {
         std::size_t threads = 0;
@@ -728,8 +694,8 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
     return 0;
 }
 
-/** @brief Kernel axis: lowers the runtime metric to a compile-time kernel kind, the terminal
- *      hop into @ref stage_and_run. */
+/** Kernel axis: lowers the runtime metric to a compile-time kernel kind, the terminal hop into
+ *  @ref stage_and_run. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename wait_type_>
 int run_with_metric(bench_launch<dataset_scalar_type_> const& launch) {
     return dispatch_kernel<stored_dtype_>(
@@ -743,10 +709,9 @@ int run_with_metric(bench_launch<dataset_scalar_type_> const& launch) {
         });
 }
 
-/** @brief Schedule axis: the newest schedule row the allow-mask admits - intersected with what
- *      this machine actually offers, which is what gates Arm's runtime-only `WFET` - picks the
- *      waiter from @ref schedule_waiters_t; the same mask already reached `fu_pool_new`, so the
- *      pool waits the same way. Past the table's tail sits the STL yield floor. */
+/** Schedule axis: the newest schedule row the allow-mask admits, intersected with what this
+ *  machine offers, picks the waiter from @ref schedule_waiters_t; past the tail sits the yield
+ *  floor. The same mask already reached @c fu_pool_new, so the pool waits the same way. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_>
 int run_with_schedule(bench_launch<dataset_scalar_type_> const& launch) {
     return dispatch_index<schedule_choices_count_k>(
@@ -758,10 +723,9 @@ int run_with_schedule(bench_launch<dataset_scalar_type_> const& launch) {
         [&] { return run_with_metric<dataset_scalar_type_, stored_dtype_, capability_, yield_waiter_t>(launch); });
 }
 
-/** @brief Compute axis: the allow-mask intersected with the runtime detection picks the newest
- *      table row, whose @ref prefix_mask ceiling instantiates @ref run_with_schedule. Past the
- *      table's tail sits the one ceiling every machine owns: the serial kernels - serving an
- *      explicit `--max-compute serial` and any CPU with no SIMD bits. */
+/** Compute axis: the allow-mask intersected with the runtime detection picks the newest table
+ *  row, whose @ref prefix_mask ceiling instantiates @ref run_with_schedule; past the tail sit the
+ *  serial kernels every machine owns. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
 int run_with_compute(bench_launch<dataset_scalar_type_> const& launch) {
     nk_capability_t const effective = launch.options.max_compute & nk_capabilities_available();
@@ -774,8 +738,8 @@ int run_with_compute(bench_launch<dataset_scalar_type_> const& launch) {
         [&] { return run_with_schedule<dataset_scalar_type_, stored_dtype_, nk_cap_serial_k>(launch); });
 }
 
-/** @brief The shard hop: everything below one stored dtype, so a per-dtype shard translation unit
- *      carries the whole instantiation grid of its dtype. */
+/** The shard hop: everything below one stored dtype, so a per-dtype shard translation unit
+ *  carries the whole instantiation grid of its dtype. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
 int run_with_stored_dtype(bench_launch<dataset_scalar_type_> const& launch) {
     return run_with_compute<dataset_scalar_type_, stored_dtype_>(launch);

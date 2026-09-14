@@ -1,8 +1,9 @@
 /**
- *  @brief Module glue of the USearch Node-API addon - the classes and functions it publishes,
- *      and the per-environment state its verbs type-check against.
  *  @file javascript/lib.c
  *  @author Ash Vardanian
+ *  @date September 9, 2026
+ *  @brief Module glue of the USearch Node-API addon - the classes and functions it publishes, and
+ *      the per-environment state its verbs type-check against.
  *
  *  Only @c <node_api.h> - no C++ wrapper, no exceptions, and nothing of the engine's own
  *  headers beyond its C surface, so one prebuilt shared library serves every Node release

@@ -1,8 +1,9 @@
 /**
- *  @brief The serial unit: every cell at the portable floor, no instruction set beyond the baseline.
- *  @author Ash Vardanian
  *  @file src/dense/ram_variants_serial.cpp
+ *  @author Ash Vardanian
  *  @date September 7, 2026
+ *  @brief The serial unit: every cell at the portable floor, no instruction set beyond the
+ *      baseline.
  */
 #include "dense_specializations.cuh"
 

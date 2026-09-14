@@ -1,8 +1,8 @@
 /**
- *  @brief Vector Search helper structures and types
- *  @author Ash Vardanian
  *  @file include/usearch/utilities/types.hpp
+ *  @author Ash Vardanian
  *  @date July 17, 2026
+ *  @brief Vector Search helper structures and types
  */
 #pragma once
 #include <cassert> // `assert` on the `to_span` contiguity contract
@@ -33,8 +33,8 @@
 #endif
 #endif
 
-/** @brief Pre-announced sister-library namespaces, so the project-wide shortcuts below are
- *      legal before any of their headers is included. */
+/** Pre-announced sister-library namespaces, so the project-wide shortcuts below are
+ *  legal before any of their headers is included. */
 namespace ashvardanian {
 namespace numkong {}
 namespace stringzilla {}
@@ -63,18 +63,19 @@ using u32_t = std::uint32_t;
 using u16_t = std::uint16_t;
 using u8_t = std::uint8_t;
 
-/** @brief One word of 64 packed single-bit lanes - the storage a membership bitset walks. An
- *      alias rather than an enumeration: only one of the seven atomic references admits an
- *      enumeration's width, and a bitset binds whichever one its CPU class names. */
+/** One word of 64 packed single-bit lanes - the storage a membership bitset walks. An
+ *  alias rather than an enumeration: only one of the seven atomic references admits an
+ *  enumeration's width, and a bitset binds whichever one its CPU class names. */
 using u1x64_t = u64_t;
-/** @brief The half-width sibling, for planes a device addresses in 32-bit words. */
+
+/** The half-width sibling, for planes a device addresses in 32-bit words. */
 using u1x32_t = u32_t;
 
-/** @brief "usearch3" read as a little-endian word - the one magic fronting every USearch
- *      payload; the word right after it discriminates the layout. */
+/** "usearch3" read as a little-endian word - the one magic fronting every USearch
+ *  payload; the word right after it discriminates the layout. */
 inline constexpr u64_t usearch_magic_k = 0x3368637261657375ull;
 
-/** @brief The 128-bit key default - the SafeGraphs @c uuid column, one UUID per node. */
+/** The 128-bit key default - the SafeGraphs @c uuid column, one UUID per node. */
 struct uuid_t {
     std::byte bytes[16];
 
@@ -82,63 +83,66 @@ struct uuid_t {
 };
 static_assert(std::is_trivially_copyable_v<uuid_t> && sizeof(uuid_t) == 16);
 
-/** @brief Dense node identifier within one sub-index - 32 bits, matching the 4-billion ceiling. */
+/** Dense node identifier within one sub-index - 32 bits, matching the 4-billion ceiling. */
 using dense_node_id_t = u32_t;
-/** @brief Distance representation shared by all metrics, regardless of the stored dtype. */
+
+/** Distance representation shared by all metrics, regardless of the stored dtype. */
 using dense_distance_t = f32_t;
 
-/** @brief Reserved all-ones value, never a valid node id within a sub-index. Doubles as the
- *      lock & empty-slot sentinel in neighbor lists of every index design. */
+/** Reserved all-ones value, never a valid node id within a sub-index. Doubles as the
+ *  lock & empty-slot sentinel in neighbor lists of every index design. */
 inline constexpr dense_node_id_t dense_node_id_unknown_k = 0xFFFFFFFFu;
 
-/** @brief The single-byte scalar every allocator deals in - the unit of raw storage. */
+/** The single-byte scalar every allocator deals in - the unit of raw storage. */
 using byte_t = std::byte;
 
-/** @brief A mutable run of raw bytes - the staging & carve currency of writers. */
+/** A mutable run of raw bytes - the staging & carve currency of writers. */
 using bytes_span_t = std::span<byte_t>;
 
-/** @brief A read-only run of raw bytes - the currency of readers & mapped payloads. */
+/** A read-only run of raw bytes - the currency of readers & mapped payloads. */
 using bytes_view_t = std::span<byte_t const>;
 
-/** @brief The bytes behind @p count typed elements at @p data, read-only. */
+/** The bytes behind @p count typed elements at @p data, read-only. */
 template <typename value_type_>
 bytes_view_t bytes_of(value_type_ const* data, std::size_t count) noexcept {
     return std::as_bytes(std::span {data, count});
 }
 
-/** @brief The bytes behind @p count typed elements at @p data, writable. */
+/** The bytes behind @p count typed elements at @p data, writable. */
 template <typename value_type_>
 bytes_span_t bytes_of(value_type_* data, std::size_t count) noexcept {
     return std::as_writable_bytes(std::span {data, count});
 }
 
-/** @brief The process-wide allocator, named rather than defaulted: a container takes this when
- *      no arena, memory domain or device owns its bytes, so every such placement is one grep
- *      away instead of hiding in an omitted argument. */
+/** The process-wide allocator, named rather than defaulted: a container takes this when
+ *  no arena, memory domain or device owns its bytes, so every such placement is one grep
+ *  away instead of hiding in an omitted argument. */
 struct global_allocator_t {};
 inline constexpr global_allocator_t global_allocator {};
 
-/** @brief The padding that keeps two threads' words off one line; see @c USEARCH_DEFAULT_ALIGNMENT. */
+/** The padding that keeps two threads' words off one line; see @c USEARCH_DEFAULT_ALIGNMENT. */
 inline constexpr std::size_t default_alignment_k = USEARCH_DEFAULT_ALIGNMENT;
 static_assert(default_alignment_k >= 8 && (default_alignment_k & (default_alignment_k - 1)) == 0,
               "USEARCH_DEFAULT_ALIGNMENT must be a power of two, no narrower than a pointer pair");
 
-/** @brief One traversal candidate: a node id paired with its distance to the query. */
+/** One traversal candidate: a node id paired with its distance to the query. */
 struct dense_scored_node_t {
-    /** @brief Identifier of the scored node within its sub-index. */
+
+    /** Identifier of the scored node within its sub-index. */
     dense_node_id_t node_id;
-    /** @brief Distance to the query, in the instantiated kernel's metric. */
+
+    /** Distance to the query, in the instantiated kernel's metric. */
     dense_distance_t distance;
 };
 
-/** @brief Orders scored nodes nearest-first; the comparator of the sorted results pool. */
+/** Orders scored nodes nearest-first; the comparator of the sorted results pool. */
 struct dense_closer_scored_node_t {
     inline bool operator()(dense_scored_node_t first, dense_scored_node_t second) const noexcept {
         return first.distance < second.distance;
     }
 };
 
-/** @brief Orders scored nodes furthest-first; the comparator of the max-heap frontier. */
+/** Orders scored nodes furthest-first; the comparator of the max-heap frontier. */
 struct dense_further_scored_node_t {
     inline bool operator()(dense_scored_node_t first, dense_scored_node_t second) const noexcept {
         return first.distance > second.distance;
@@ -156,82 +160,103 @@ struct dense_further_scored_node_t {
  *  conditions only a binding or a higher layer can see, and are never returned from here.
  */
 enum class [[nodiscard]] status_t : int {
-    /** @brief The call completed and any paired value is meaningful. */
+
+    /** The call completed and any paired value is meaningful. */
     success_k = usearch_success_k,
-    /** @brief The underlying allocator failed to provide memory; retrying a smaller batch may succeed. */
+
+    /** The underlying allocator failed to provide memory; retrying a smaller batch may succeed. */
     bad_alloc_k = usearch_error_out_of_memory_k,
-    /** @brief Dimensionality, row counts, or output capacity disagree. */
+
+    /** Dimensionality, row counts, or output capacity disagree. */
     shape_mismatch_k = usearch_error_shape_mismatch_k,
-    /** @brief A stride or packing no traversal can walk. */
+
+    /** A stride or packing no traversal can walk. */
     unsupported_layout_k = usearch_error_unsupported_layout_k,
-    /** @brief A scalar, metric, or residency tag this build does not know. */
+
+    /** A scalar, metric, or residency tag this build does not know. */
     unknown_kind_k = usearch_error_unknown_kind_k,
-    /** @brief A mutating verb on a structure that opens its checkpoint in place. */
+
+    /** A mutating verb on a structure that opens its checkpoint in place. */
     read_only_k = usearch_error_read_only_k,
-    /** @brief A file could not be opened, read, written, or parsed. */
+
+    /** A file could not be opened, read, written, or parsed. */
     io_k = usearch_error_io_k,
-    /** @brief An accelerator runtime call failed - the device state should be treated as
-     *      poisoned and the structure rebuilt. */
+
+    /** An accelerator runtime call failed - the device state should be treated as
+     *  poisoned and the structure rebuilt. */
     device_error_k = usearch_error_device_k,
-    /** @brief The serialized payload is truncated or does not describe this structure. */
+
+    /** The serialized payload is truncated or does not describe this structure. */
     malformed_k = usearch_error_malformed_input_k,
-    /** @brief Neither success nor a named failure was reported - a defect, not a state. */
+
+    /** Neither success nor a named failure was reported - a defect, not a state. */
     internal_k = usearch_error_internal_k,
-    /** @brief The structure reached a hard design ceiling, like the 2^32 id space; retrying can't help. */
+
+    /** The structure reached a hard design ceiling, like the 2^32 id space; retrying can't help. */
     overflow_k = usearch_error_overflow_k,
-    /** @brief The operation requires a prior successful @c reserve() -like initialization call. */
+
+    /** The operation requires a prior successful @c reserve() -like initialization call. */
     uninitialized_k = usearch_error_uninitialized_k,
-    /** @brief The requested configuration contradicts an already-frozen one, like re-reserving
-     *      with a different geometry; pass matching parameters or start a fresh structure. */
+
+    /** The requested configuration contradicts an already-frozen one, like re-reserving
+     *  with a different geometry; pass matching parameters or start a fresh structure. */
     config_mismatch_k = usearch_error_config_mismatch_k,
-    /** @brief A certified synchronization contract was violated by a concurrent operation;
-     *      discard any produced output and retry in a quieter phase. */
+
+    /** A certified synchronization contract was violated by a concurrent operation;
+     *  discard any produced output and retry in a quieter phase. */
     contended_k = usearch_error_contended_k,
-    /** @brief A progress callback asked the operation to stop; it unwound without publishing,
-     *      so the structure carries whatever it did before the call. */
+
+    /** A progress callback asked the operation to stop; it unwound without publishing,
+     *  so the structure carries whatever it did before the call. */
     cancelled_k = usearch_error_cancelled_k,
     /** @brief The verb is declared for every residency but this one does not implement it. */
     unsupported_k = usearch_error_unsupported_k,
 };
 
-/** @brief Whether @p status reports success. */
+/** Whether @p status reports success. */
 constexpr bool succeeded(status_t status) noexcept { return status == status_t::success_k; }
 
-/** @brief Whether @p status reports failure. */
+/** Whether @p status reports failure. */
 constexpr bool failed(status_t status) noexcept { return status != status_t::success_k; }
 
-/** @brief Copies @p source over @p destination; the sizes must agree. */
+/** Copies @p source over @p destination; the sizes must agree. */
 inline status_t copy_bytes(bytes_span_t destination, bytes_view_t source) noexcept {
     if (destination.size() != source.size()) return status_t::config_mismatch_k;
     if (!source.empty()) std::memcpy(destination.data(), source.data(), source.size());
     return status_t::success_k;
 }
 
-/** @brief Whether a filtered search admits one candidate or passes over it - rejected nodes
- *      still route the walk, they just never enter the reported pool. Mirrors
- *      @c usearch_admission_t value for value, so the two enums cannot drift. */
+/** Whether a filtered search admits one candidate or passes over it - rejected nodes
+ *  still route the walk, they just never enter the reported pool. Mirrors
+ *  @c usearch_admission_t value for value, so the two enums cannot drift. */
 enum class admission_t : int {
-    /** @brief Skip the node; the walk still routes through it. */
+
+    /** Skip the node; the walk still routes through it. */
     reject_k = usearch_reject_k,
-    /** @brief Report the node among the matches. */
+
+    /** Report the node among the matches. */
     admit_k = usearch_admit_k,
 };
 
-/** @brief Whether the operation a progress callback is watching carries on or unwinds.
- *      Mirrors @c usearch_continuation_t value for value, so the two enums cannot drift. */
+/** Whether the operation a progress callback is watching carries on or unwinds.
+ *  Mirrors @c usearch_continuation_t value for value, so the two enums cannot drift. */
 enum class continuation_t : int {
-    /** @brief Carry on to the next unit of work. */
+
+    /** Carry on to the next unit of work. */
     continue_k = usearch_continue_k,
-    /** @brief Unwind: the verb publishes nothing further and reports @c cancelled_k. */
+
+    /** Unwind: the verb publishes nothing further and reports @c cancelled_k. */
     cancel_k = usearch_cancel_k,
 };
 
-/** @brief Whether a verb returns when its work is done, or once it is merely queued on the
- *      executor. Mirrors @c usearch_completion_t value for value, so the two enums cannot drift. */
+/** Whether a verb returns when its work is done, or once it is merely queued on the
+ *  executor. Mirrors @c usearch_completion_t value for value, so the two enums cannot drift. */
 enum class completion_t : int {
-    /** @brief Return once the work is finished and its outputs are readable. */
+
+    /** Return once the work is finished and its outputs are readable. */
     blocking_k = usearch_completion_blocking_k,
-    /** @brief Return once the work is queued; outputs stay indeterminate until a drain. */
+
+    /** Return once the work is queued; outputs stay indeterminate until a drain. */
     deferred_k = usearch_completion_deferred_k,
 };
 
@@ -262,8 +287,8 @@ constexpr char const* status_to_string(status_t status) noexcept {
     return "an unrecognized status";
 }
 
-/** @brief A result paired with the @c status_t explaining it; the value is only meaningful
- *      on @c success_k. */
+/** A result paired with the @c status_t explaining it; the value is only meaningful
+ *  on @c success_k. */
 template <typename value_type_>
 struct [[nodiscard]] expected {
     value_type_ value;
@@ -272,9 +297,9 @@ struct [[nodiscard]] expected {
     explicit operator bool() const noexcept { return succeeded(status); }
 };
 
-/** @brief The borrowing face of @ref expected for reference results: there is no null
- *      reference, so the borrow is stored as an address and @c value() binds it only on
- *      @c success_k. */
+/** The borrowing face of @ref expected for reference results: there is no null
+ *  reference, so the borrow is stored as an address and @c value() binds it only on
+ *  @c success_k. */
 template <typename value_type_>
 struct [[nodiscard]] expected<value_type_&> {
     value_type_* borrowed;
@@ -284,13 +309,15 @@ struct [[nodiscard]] expected<value_type_&> {
     explicit operator bool() const noexcept { return succeeded(status); }
 };
 
-/** @brief A half-open interval of integer identifiers, iterable like the standard views -
- *      the unit callers partition work by, one contiguous run per core. */
+/** A half-open interval of integer identifiers, iterable like the standard views -
+ *  the unit callers partition work by, one contiguous run per core. */
 template <typename index_type_ = std::size_t>
 struct iota_view {
-    /** @brief The first identifier of the interval. */
+
+    /** The first identifier of the interval. */
     index_type_ first {0};
-    /** @brief One past the last identifier. */
+
+    /** One past the last identifier. */
     index_type_ bound {0};
 
     constexpr std::size_t size() const noexcept { return static_cast<std::size_t>(bound - first); }
@@ -308,15 +335,15 @@ struct iota_view {
     constexpr iterator end() const noexcept { return {bound}; }
 };
 
-/**
- *  @brief A range over an indexed accessor: @c owner[position] for every position below @p count,
- *      so a caller reads @c for(auto element : range) rather than counting positions itself.
- */
+/** A range over an indexed accessor: @c owner[position] for every position below @p count,
+ *  so a caller reads @c for(auto element : range) rather than counting positions itself. */
 template <typename owner_type_>
 struct indexed_range {
-    /** @brief What the positions are read from; borrowed, never owned. */
+
+    /** What the positions are read from; borrowed, never owned. */
     owner_type_ const* owner = nullptr;
-    /** @brief Positions the range covers, from zero. */
+
+    /** Positions the range covers, from zero. */
     std::size_t count = 0;
 
     constexpr std::size_t size() const noexcept { return count; }
@@ -336,9 +363,9 @@ struct indexed_range {
     constexpr iterator end() const noexcept { return {owner, count}; }
 };
 
-/** @brief Moves neighbor IDs between id spaces: an ID inside @p source_range lands at
- *      @c id-source_range.first+shift, every other ID folds onto @p sentinel, which a walk
- *      reads as naming no node. */
+/** Moves neighbor IDs between id spaces: an ID inside @p source_range lands at
+ *  @c id-source_range.first+shift, every other ID folds onto @p sentinel, which a walk
+ *  reads as naming no node. */
 template <std::unsigned_integral id_type_>
 constexpr void rebase_neighbors(std::span<id_type_> neighbors, iota_view<id_type_> source_range, id_type_ shift,
                                 id_type_ sentinel) noexcept {
@@ -349,13 +376,13 @@ constexpr void rebase_neighbors(std::span<id_type_> neighbors, iota_view<id_type
 }
 
 /**
- *  @brief Packs the surviving ids of each row of @p rows to its front and pads the tail with
+ *  @brief Packs the surviving IDs of each row of @p rows to its front and pads the tail with
  *      @p sentinel, writing @p first_row + row as a self-loop for a row nothing survived in.
  *
- *  A rebase folds every foreign id onto the sentinel wherever it sat, and a concurrent walk
+ *  A rebase folds every foreign ID onto the sentinel wherever it sat, and a concurrent walk
  *  reads a sentinel in slot 0 as a node locked by a live writer - which a loaded graph has none
  *  of, so it would spin forever. Compacting restores what a live index maintains: slot 0 is a
- *  real id, and the sentinel only ever ends a row.
+ *  real ID, and the sentinel only ever ends a row.
  */
 template <std::unsigned_integral id_type_>
 constexpr void compact_neighbors(std::span<id_type_> rows, std::size_t connectivity, id_type_ first_row,
@@ -371,45 +398,43 @@ constexpr void compact_neighbors(std::span<id_type_> rows, std::size_t connectiv
     }
 }
 
-/** @brief The concurrency environment a caller certifies for one operation. */
+/** The concurrency environment a caller certifies for one operation. */
 enum class synchronization_t : u32_t {
-    /** @brief Arbitrary readers & writers may be live - the safe default everywhere. */
+
+    /** Arbitrary readers & writers may be live - the safe default everywhere. */
     concurrent_k,
-    /** @brief Readers may be live, but no mutators: neighbor lists are read as plain memory -
-     *      no fences - and the locked-node retry branches compile out entirely. */
+
+    /** Readers may be live, but no mutators: neighbor lists are read as plain memory -
+     *  no fences - and the locked-node retry branches compile out entirely. */
     immutable_k,
-    /** @brief Sole ownership - nothing else touches the index, readers included. */
+
+    /** Sole ownership - nothing else touches the index, readers included. */
     exclusive_k,
 };
 
 enum connectivity_t : u32_t {
     connectivity_unknown_k = 0,
-    /**
-     *  @brief The minimal recommended graph connectivity level, expanding to 16x 32-bit neighbor IDs,
-     *      exactly matching the ZMM register size and cache-line width on x86, but half of the width
-     *      of coherency protocols of many CPUs and half the cache line width of many Arm CPUs.
-     */
+
+    /** The minimal recommended graph connectivity level, expanding to 16x 32-bit neighbor IDs,
+     *  exactly matching the ZMM register size and cache-line width on x86, but half of the width
+     *  of coherency protocols of many CPUs and half the cache line width of many Arm CPUs. */
     connectivity_16_k = 16,
-    /**
-     *  @brief The default recommended graph connectivity level, expanding to 32x 32-bit neighbor IDs,
-     *      perfect for in-memory billion-scale search indexes.
-     */
+
+    /** The default recommended graph connectivity level, expanding to 32x 32-bit neighbor IDs,
+     *  perfect for in-memory billion-scale search indexes. */
     connectivity_32_k = 32,
-    /**
-     *  @brief The minimal recommended graph connectivity level for on-disk billion- and trillion-scale
-     *      search indexes, matching the minimal 512-byte SSD sector size.
-     */
+
+    /** The minimal recommended graph connectivity level for on-disk billion- and trillion-scale
+     *  search indexes, matching the minimal 512-byte SSD sector size. */
     connectivity_128_k = 128,
 };
 
-/**
- *  @brief Element types USearch speaks when exchanging payloads - NumKong's numeric dtypes
- *      plus the packed, opaque, identity and text families that interchange formats carry
- *      and a compute library has no place for. Every storage width also has a neutral
- *      spelling naming that many opaque bits, and every other spelling is an alias adding
- *      a reading to the same width; this enum is the USearch-side vocabulary every reader
- *      parses those spellings into.
- */
+/** Element types USearch speaks when exchanging payloads - NumKong's numeric dtypes
+ *  plus the packed, opaque, identity and text families that interchange formats carry
+ *  and a compute library has no place for. Every storage width also has a neutral
+ *  spelling naming that many opaque bits, and every other spelling is an alias adding
+ *  a reading to the same width; this enum is the USearch-side vocabulary every reader
+ *  parses those spellings into. */
 enum class dtype_t : u32_t {
     unknown_k = 0,
     /* Floats, by shrinking dynamic range. */
@@ -445,7 +470,7 @@ enum class dtype_t : u32_t {
     utf8_k,
 };
 
-/** @brief The canonical spelling of @p dtype - the very strings interchange headers carry. */
+/** The canonical spelling of @p dtype - the very strings interchange headers carry. */
 constexpr char const* dtype_name(dtype_t dtype) noexcept {
     switch (dtype) {
     case dtype_t::f64_k: return "f64";
@@ -479,8 +504,8 @@ constexpr char const* dtype_name(dtype_t dtype) noexcept {
     return "unknown";
 }
 
-/** @brief Parses a canonical dtype spelling - the reverse of @ref dtype_name - mapping
- *      anything unrecognized onto @c unknown_k. */
+/** Parses a canonical dtype spelling - the reverse of @ref dtype_name - mapping
+ *  anything unrecognized onto @c unknown_k. */
 constexpr dtype_t dtype_named(std::string_view name) noexcept {
     if (name == "f64") return dtype_t::f64_k;
     if (name == "f32") return dtype_t::f32_k;
@@ -511,8 +536,8 @@ constexpr dtype_t dtype_named(std::string_view name) noexcept {
     return dtype_t::unknown_k;
 }
 
-/** @brief Bits one element of @p dtype occupies - eight for a byte-wide scalar, four or one
- *      for the packed families, zero for the variable-length and unknown ones. */
+/** Bits one element of @p dtype occupies - eight for a byte-wide scalar, four or one
+ *  for the packed families, zero for the variable-length and unknown ones. */
 constexpr std::size_t dtype_bits(dtype_t dtype) noexcept {
     switch (dtype) {
     case dtype_t::f64_k:
@@ -546,85 +571,91 @@ constexpr std::size_t dtype_bits(dtype_t dtype) noexcept {
     return 0;
 }
 
-/** @brief Bytes one element of @p dtype occupies; zero for the packed families, whose elements
- *      share a byte, and for the unknown one. */
+/** Bytes one element of @p dtype occupies; zero for the packed families, whose elements
+ *  share a byte, and for the unknown one. */
 constexpr std::size_t dtype_bytes(dtype_t dtype) noexcept {
     std::size_t const bits = dtype_bits(dtype);
     return bits && bits % 8 == 0 ? bits / 8 : 0;
 }
 
-/**
- *  @brief Fixed 32-byte descriptor fronting every serialized dense index payload - volatile
- *      in-RAM snapshots, GPU-resident uploads, and persisted on-NVMe layouts alike. It describes
- *      the graph & its frozen geometry, never the residency: what sections follow and how they
- *      are laid out is the per-storage contract versioned by @c version_k.
- */
+/** Fixed 32-byte descriptor fronting every serialized dense index payload - volatile
+ *  in-RAM snapshots, GPU-resident uploads, and persisted on-NVMe layouts alike. It describes
+ *  the graph & its frozen geometry, never the residency: what sections follow and how they
+ *  are laid out is the per-storage contract versioned by @c version_k. */
 struct dense_index_header_t {
-    /** @brief The expected @c magic contents: "usearch3" read as a little-endian word. */
+
+    /** The expected @c magic contents: "usearch3" read as a little-endian word. */
     inline static constexpr u64_t magic_k = usearch_magic_k;
-    /** @brief The layout revision this implementation writes and understands. */
+
+    /** The layout revision this implementation writes and understands. */
     inline static constexpr u32_t version_k = 1;
 
-    /** @brief Identifies USearch dense index payloads; must equal @c magic_k. */
+    /** Identifies USearch dense index payloads; must equal @c magic_k. */
     u64_t magic;
-    /** @brief Layout revision of the sections that follow. */
+
+    /** Layout revision of the sections that follow. */
     u32_t version;
-    /** @brief The stored @c nk_dtype_t; must match the loading instantiation. */
+
+    /** The stored @c nk_dtype_t; must match the loading instantiation. */
     u32_t dtype;
-    /** @brief The @c nk_kernel_kind_t metric; must match the loading instantiation. */
+
+    /** The @c nk_kernel_kind_t metric; must match the loading instantiation. */
     u32_t kernel;
-    /** @brief Scalar dimensions per vector - one half of the frozen geometry. */
+
+    /** Scalar dimensions per vector - one half of the frozen geometry. */
     u32_t dimensions;
-    /** @brief Neighbor ids per node - the other half of the frozen geometry. */
+
+    /** Neighbor ids per node - the other half of the frozen geometry. */
     u32_t connectivity;
-    /** @brief Published nodes in the payload; the chunk layout re-derives from it. */
+
+    /** Published nodes in the payload; the chunk layout re-derives from it. */
     u32_t node_count;
 };
 static_assert(sizeof(dense_index_header_t) == 32 && std::is_trivially_copyable_v<dense_index_header_t>);
 
-/** @brief Returns 2^ @p exponent as a value of the requested unsigned type. */
+/** Returns 2^ @p exponent as a value of the requested unsigned type. */
 template <typename result_type_>
 constexpr result_type_ power_of_two(u32_t exponent) noexcept {
     return result_type_(1) << exponent;
 }
 
-/** @brief Returns a mask selecting the lowest @p exponent bits, i.e. 2^ @p exponent - 1. */
+/** Returns a mask selecting the lowest @p exponent bits, i.e. 2^ @p exponent - 1. */
 template <typename result_type_>
 constexpr result_type_ power_of_two_mask(u32_t exponent) noexcept {
     return (result_type_(1) << exponent) - result_type_(1);
 }
 
-/** @brief Integer division rounding towards positive infinity; @p divisor must be non-zero. */
+/** Integer division rounding towards positive infinity; @p divisor must be non-zero. */
 template <typename value_type_>
 constexpr value_type_ divide_round_up(value_type_ value, value_type_ divisor) noexcept {
     return (value + divisor - value_type_(1)) / divisor;
 }
 
-/** @brief The smallest multiple of @p multiple at or above @p value; @p multiple must be non-zero. */
+/** The smallest multiple of @p multiple at or above @p value; @p multiple must be non-zero. */
 template <typename value_type_>
 constexpr value_type_ round_up_to_multiple(value_type_ value, value_type_ multiple) noexcept {
     return divide_round_up(value, multiple) * multiple;
 }
 
-/** @brief @p value with its two bytes reversed. */
+/** @p value with its two bytes reversed. */
 constexpr std::uint16_t reversed_bytes(std::uint16_t value) noexcept {
     return static_cast<std::uint16_t>((value << 8) | (value >> 8));
 }
 
-/** @brief @p value with its four bytes reversed. */
+/** @p value with its four bytes reversed. */
 constexpr std::uint32_t reversed_bytes(std::uint32_t value) noexcept {
     return (value << 24) | ((value & 0x0000FF00u) << 8) | ((value >> 8) & 0x0000FF00u) | (value >> 24);
 }
 
-/** @brief @p value with its eight bytes reversed, as the two halves swapped and each reversed. */
+/** @p value with its eight bytes reversed, as the two halves swapped and each reversed. */
 constexpr std::uint64_t reversed_bytes(std::uint64_t value) noexcept {
     return (static_cast<std::uint64_t>(reversed_bytes(static_cast<std::uint32_t>(value))) << 32) |
            reversed_bytes(static_cast<std::uint32_t>(value >> 32));
 }
 
-/** @brief @p value with its bytes in little-endian order, and the same call to read one back - the
- *      conversion is its own inverse, so one name serves both directions. A no-op where the host is
- *      already little-endian, and a @ref reversed_bytes where it is not. */
+/** @p value with its bytes in little-endian order, and the same call to read one back - the
+ *  conversion is its own inverse, so one name serves both directions. A no-op where the host is
+ *  already little-endian, and a @ref reversed_bytes where it is not. */
 template <typename value_type_>
 constexpr value_type_ little_endian(value_type_ value) noexcept {
     static_assert(std::is_unsigned_v<value_type_>, "Byte order is only defined for unsigned integers");
@@ -632,22 +663,22 @@ constexpr value_type_ little_endian(value_type_ value) noexcept {
     else return reversed_bytes(value);
 }
 
-/** @brief The smaller of @p first & @p second - @c std::min without the <algorithm> tax,
- *      named to also dodge the @c min macro of Windows headers. */
+/** The smaller of @p first & @p second - @c std::min without the <algorithm> tax,
+ *  named to also dodge the @c min macro of Windows headers. */
 template <typename value_type_>
 constexpr value_type_ min_of(value_type_ first, value_type_ second) noexcept {
     return second < first ? second : first;
 }
 
-/** @brief The larger of @p first & @p second - the @c max twin of @ref min_of. */
+/** The larger of @p first & @p second - the @c max twin of @ref min_of. */
 template <typename value_type_>
 constexpr value_type_ max_of(value_type_ first, value_type_ second) noexcept {
     return first < second ? second : first;
 }
 
-/** @brief The universal matrix-engine row count: Intel AMX tiles, Arm SME's ZA at SVL-512,
- *      and NVIDIA mma fragments all speak 16 rows natively - Hopper's warpgroups speak 4×16.
- *      Tiled paths across every index design derive their shapes from it, never tune it. */
+/** The universal matrix-engine row count: Intel AMX tiles, Arm SME's ZA at SVL-512,
+ *  and NVIDIA mma fragments all speak 16 rows natively - Hopper's warpgroups speak 4×16.
+ *  Tiled paths across every index design derive their shapes from it, never tune it. */
 inline constexpr std::size_t tile_span_k = 16;
 
 /**
@@ -699,10 +730,12 @@ constexpr auto to_span(vector_type_ const& vector) noexcept {
     return std::span<value_t> {vector.data(), vector.size()};
 }
 
-/** @brief The writable sibling of @ref to_span, for a run the caller owns and fills; named
+/**
+ *  @brief The writable sibling of @ref to_span, for a run the caller owns and fills; named
  *      apart rather than overloaded, since an overload would silently hand a mutable span to
  *      every existing caller holding a non-const run.
- *  @see @c std::as_bytes and @c std::as_writable_bytes, which separate the same pair. */
+ *  @see @c std::as_bytes and @c std::as_writable_bytes, which separate the same pair.
+ */
 template <typename vector_type_>
     requires requires(vector_type_& vector) {
         vector.data();
@@ -713,7 +746,7 @@ constexpr auto to_writable_span(vector_type_& vector) noexcept {
     return std::span<value_t> {vector.data(), vector.size()};
 }
 
-/** @brief The character sibling of @ref to_span: any contiguous run of @c char as a view. */
+/** The character sibling of @ref to_span: any contiguous run of @c char as a view. */
 template <typename characters_type_>
     requires requires(characters_type_ const& characters) {
         { characters.data() } -> std::convertible_to<char const*>;
@@ -723,8 +756,8 @@ constexpr std::string_view to_string_view(characters_type_ const& characters) no
     return std::string_view {characters.data(), characters.size()};
 }
 
-/** @brief Any entry pairing a graph-local @c node_id with a @c distance - the shape that
- *      search results share across index designs. */
+/** Any entry pairing a graph-local @c node_id with a @c distance - the shape that
+ *  search results share across index designs. */
 template <typename entry_type_>
 concept scored_node = requires(entry_type_ entry) {
     entry.node_id;
@@ -765,12 +798,12 @@ concept index_family = index_plan<typename index_type_::save_plan_t> && index_pl
  *  @brief Merges the ascending @p results of one search into the caller's bounded ranking,
  *      keeping it ascending by distance.
  *
- *  Indexes store no keys, so ids are translated into the caller's key space on the way in -
- *  letting several sub-indexes with colliding id spaces, like one per memory domain, gather
+ *  Indexes store no keys, so IDs are translated into the caller's key space on the way in -
+ *  letting several sub-indexes with colliding ID spaces, like one per memory domain, gather
  *  into one shared buffer. The parallel spans' common length is the ranking's capacity.
  *
  *  @param[in] results One index's search results, ascending by distance.
- *  @param[in] keys_of_ids Any id-to-key mapping with @c operator[] - a flat array, a raw
+ *  @param[in] keys_of_ids Any ID-to-key mapping with @c operator[] - a flat array, a raw
  *      pointer, or a custom type.
  *  @param[inout] keys Keys of the ranking, already holding @p old_count hits from other indexes.
  *  @param[inout] distances Distances of the same ranking, parallel to @p keys.
@@ -801,9 +834,10 @@ std::size_t merge_search_results(std::span<entry_type_ const> results, keys_of_i
     return merged_count;
 }
 
-/** @brief Tag: an uncapped monitored wait - the watched word is the only wake source. */
+/** Tag: an uncapped monitored wait - the watched word is the only wake source. */
 struct wait_uncapped_t {};
-/** @brief Tag: a capped monitored wait - re-checks on its own after a bounded pause. */
+
+/** Tag: a capped monitored wait - re-checks on its own after a bounded pause. */
 struct wait_capped_t {};
 
 /**
@@ -833,16 +867,16 @@ struct dummy_waiter_t {
     }
 };
 
-/** @brief The compiled-out default for optional callbacks, like an insertion's assigned-id
- *      observer: accepts any arguments and does nothing. */
+/** The compiled-out default for optional callbacks, like an insertion's assigned-id
+ *  observer: accepts any arguments and does nothing. */
 struct dummy_callback_t {
     template <typename... args_types_>
     void operator()(args_types_&&...) const noexcept {}
 };
 
-/** @brief The compiled-out default filter: admits anything it is asked about. Walks key on its
- *      @b type to skip the filtered machinery whole, so passing it explicitly costs nothing and
- *      answers the same. */
+/** The compiled-out default filter: admits anything it is asked about. Walks key on its
+ *  @b type to skip the filtered machinery whole, so passing it explicitly costs nothing and
+ *  answers the same. */
 struct dummy_predicate_t {
     template <typename... args_types_>
     constexpr admission_t operator()(args_types_&&...) const noexcept {
@@ -850,8 +884,8 @@ struct dummy_predicate_t {
     }
 };
 
-/** @brief The compiled-out default progress watcher: always carries on, so an unwatched long
- *      verb runs to completion with no cancellation checks surviving inlining. */
+/** The compiled-out default progress watcher: always carries on, so an unwatched long
+ *  verb runs to completion with no cancellation checks surviving inlining. */
 struct dummy_progress_t {
     template <typename... args_types_>
     constexpr continuation_t operator()(args_types_&&...) const noexcept {
@@ -859,81 +893,97 @@ struct dummy_progress_t {
     }
 };
 
-/**
- *  @brief The CPU families USearch ships tuned variants for - our own vocabulary, never an
- *      alias of a sister library's feature bits. Each class bundles the compute features,
- *      wait instruction, and atomics its silicon generation guarantees; explicit helpers
- *      lower a class onto NumKong, ForkUnion & StringZilla capability masks where those
- *      libraries are linked.
- */
+/** The CPU families USearch ships tuned variants for - our own vocabulary, never an
+ *  alias of a sister library's feature bits. Each class bundles the compute features,
+ *  wait instruction, and atomics its silicon generation guarantees; explicit helpers
+ *  lower a class onto NumKong, ForkUnion & StringZilla capability masks where those
+ *  libraries are linked. */
 enum class cpu_class_t : u32_t {
     unknown_k = 0,
-    /** @brief The portable floor: no SIMD assumptions, standard yields. */
+
+    /** The portable floor: no SIMD assumptions, standard yields. */
     serial_k,
-    /** @brief Haswell-class x86: AVX2 & FMA, the 256-bit floor. */
+
+    /** Haswell-class x86: AVX2 & FMA, the 256-bit floor. */
     intel_haswell_k,
-    /** @brief Sierra Forest-class x86 - the E-core Xeons: AVX-VNNI & its INT8 / IFMA / NE-CONVERT
-     *      successors without AVX-512, @c TPAUSE waits, @c CMPCCXADD conditional adds. */
+
+    /** Sierra Forest-class x86 - the E-core Xeons: AVX-VNNI & its INT8 / IFMA / NE-CONVERT
+     *  successors without AVX-512, @c TPAUSE waits, @c CMPCCXADD conditional adds. */
     intel_sierra_k,
-    /** @brief Skylake-class x86: the AVX-512 foundation tier. */
+
+    /** Skylake-class x86: the AVX-512 foundation tier. */
     intel_skylake_k,
-    /** @brief Icelake-class x86: AVX-512 VNNI & VPOPCNT - the integer & bit workhorse. */
+
+    /** Icelake-class x86: AVX-512 VNNI & VPOPCNT - the integer & bit workhorse. */
     intel_icelake_k,
-    /** @brief Genoa-class x86 - Zen 4 and newer: native @c bf16 dot products over AVX-512. */
+
+    /** Genoa-class x86 - Zen 4 and newer: native @c bf16 dot products over AVX-512. */
     amd_genoa_k,
-    /** @brief Diamond Rapids-class x86: the AVX-512 lineage plus AVX10.2's FP8 conversions and
-     *      the Sierra vector bundle, @c TPAUSE waits, @c CMPCCXADD conditional adds. */
+
+    /** Diamond Rapids-class x86: the AVX-512 lineage plus AVX10.2's FP8 conversions and
+     *  the Sierra vector bundle, @c TPAUSE waits, @c CMPCCXADD conditional adds. */
     intel_diamond_k,
-    /** @brief Graviton2-class Arm - Neoverse N1, the bare NEON floor; pre-v8.6 phones land
-     *      here too. */
+
+    /** Graviton2-class Arm - Neoverse N1, the bare NEON floor; pre-Armv8.6 phones land
+     *  here too. */
     aws_g2_k,
-    /** @brief Armv8.6+ NEON: dot products, @c bf16 & @c f16 fused multiplies. Named for
-     *      Apple M2; Cortex-A710 & X2 - Snapdragon 8 Gen 1, AmpereOne - carry the same. */
+
+    /** Armv8.6+ NEON: dot products, @c bf16 & @c f16 fused multiplies. Named for
+     *  Apple M2; Cortex-A710 & X2 - Snapdragon 8 Gen 1, AmpereOne - carry the same. */
     apple_m2_k,
-    /** @brief Graviton5-class Arm - Neoverse V3, Armv9.2: the @c apple_m2_k bundle with
-     *      @c FEAT_WFxT guaranteed, so waits monitor instead of spinning; M4-class too. */
+
+    /** Graviton5-class Arm - Neoverse V3, Armv9.2: the @c apple_m2_k bundle with
+     *  @c FEAT_WFxT guaranteed, so waits monitor instead of spinning; M4-class too. */
     aws_g5_k,
-    /** @brief Vera-class Arm - NVIDIA's v9.2+ cores with @c FEAT_FP8 dot products. */
+
+    /** Vera-class Arm - NVIDIA's Armv9.2+ cores with @c FEAT_FP8 dot products. */
     nvidia_vera_k,
-    /** @brief Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23: the vector extension with
-     *      @c Zvbb, @c Zawrs monitored waits, @c Zacas single-instruction compare-and-swap. */
+
+    /** Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23: the vector extension with
+     *  @c Zvbb, @c Zawrs monitored waits, @c Zacas single-instruction compare-and-swap. */
     alibaba_c930_k,
-    /** @brief WebAssembly every engine loads: 32-bit, one caller-inclusive thread, the fixed-width @c simd128
-     *      tier, so it runs on WebKit and in a page served without cross-origin isolation. */
+
+    /** WebAssembly every engine loads: 32-bit, one caller-inclusive thread, the fixed-width @c simd128
+     *  tier, so it runs on WebKit and in a page served without cross-origin isolation. */
     wasm32_v128_k,
-    /** @brief WebAssembly with relaxed SIMD, a shared memory for Web Worker pools and 64-bit addressing,
-     *      bundled because every engine that ships one ships the other two. */
+
+    /** WebAssembly with relaxed SIMD, a shared memory for Web Worker pools and 64-bit addressing,
+     *  bundled because every engine that ships one ships the other two. */
     wasm64_extended_k,
 };
 
-/**
- *  @brief The GPU families USearch ships tuned variants for, the device twin of
- *      @ref cpu_class_t: one class per generation of kernel kits, lowered onto CUDA
- *      architecture ceilings through explicit helpers where the CUDA SDK is linked.
- */
+/** The GPU families USearch ships tuned variants for, the device twin of
+ *  @ref cpu_class_t: one class per generation of kernel kits, lowered onto CUDA
+ *  architecture ceilings through explicit helpers where the CUDA SDK is linked. */
 enum class gpu_class_t : u32_t {
     unknown_k = 0,
-    /** @brief Hopper-class NVIDIA - H100 & H200: no TMA gather, DPX instructions. */
+
+    /** Hopper-class NVIDIA - H100 & H200: no TMA gather, DPX instructions. */
     nvidia_hopper_k,
-    /** @brief Blackwell-class NVIDIA - B200 & GB200: TMA @c gather4 scattered fetches
-     *      and @c tcgen05 tensor-core GEMMs. */
+
+    /** Blackwell-class NVIDIA - B200 & GB200: TMA @c gather4 scattered fetches
+     *  and @c tcgen05 tensor-core GEMMs. */
     nvidia_blackwell_k,
-    /** @brief Rubin-class NVIDIA - the Vera-Rubin platform's device half. */
+
+    /** Rubin-class NVIDIA - the Vera-Rubin platform's device half. */
     nvidia_rubin_k,
 };
 
-/** @brief Feature bits an I/O engine publishes through its @c capabilities_k constant, so
- *      callers, tests, and docs introspect variants uniformly instead of by type name. */
+/** Feature bits an I/O engine publishes through its @c capabilities_k constant, so
+ *  callers, tests, and docs introspect variants uniformly instead of by type name. */
 enum class io_capability_t : u32_t {
     none_k = 0,
-    /** @brief Staging buffers are pre-registered with the kernel/ring - no per-read
-     *      page pinning; roughly an 11% throughput gain at NVMe rates. */
+
+    /** Staging buffers are pre-registered with the kernel/ring - no per-read
+     *  page pinning; roughly an 11% throughput gain at NVMe rates. */
     fixed_buffers_k = 1u << 0,
-    /** @brief Completions are polled from device queues instead of interrupt-driven;
-     *      needs poll-capable queues & direct I/O; ~21% on top of the fixed path. */
+
+    /** Completions are polled from device queues instead of interrupt-driven;
+     *  needs poll-capable queues & direct I/O; ~21% on top of the fixed path. */
     polled_k = 1u << 1,
-    /** @brief Requests address raw LBAs on a namespace, not file offsets - the
-     *      filesystem & block layer are bypassed; ~20-30% over the block path. */
+
+    /** Requests address raw LBAs on a namespace, not file offsets - the
+     *  filesystem & block layer are bypassed; ~20-30% over the block path. */
     lba_addressing_k = 1u << 2,
 };
 
@@ -961,8 +1011,8 @@ constexpr word_type_ multiply_high(word_type_ first, word_type_ second) noexcept
     return first_high * second_high + (cross >> half_bits_k) + (cross_with_carry >> half_bits_k);
 }
 
-/** @brief Avalanches all 64 bits of @p word - the SplitMix64 finalizer, the one bit-mixing
- *      primitive behind the PRNG, the UUID hash, and the open-addressing probe starts. */
+/** Avalanches all 64 bits of @p word - the SplitMix64 finalizer, the one bit-mixing
+ *  primitive behind the PRNG, the UUID hash, and the open-addressing probe starts. */
 constexpr u64_t mix_bits(u64_t word) noexcept {
     word = (word ^ (word >> 30)) * 0xBF58476D1CE4E5B9ull;
     word = (word ^ (word >> 27)) * 0x94D049BB133111EBull;
@@ -989,15 +1039,16 @@ struct splitmix64_t {
     static constexpr u64_t min() noexcept { return 0; }
     static constexpr u64_t max() noexcept { return ~u64_t(0); }
 
-    /** @brief One SplitMix64 step: 64 fresh uniform bits. */
+    /** One SplitMix64 step: 64 fresh uniform bits. */
     constexpr u64_t operator()() noexcept { return mix_bits(state += 0x9E3779B97F4A7C15ull); }
 };
 
 /**
  *  @brief Uniform index distribution over [0, @c bound) - the cheap sibling of
- *      @c std::uniform_int_distribution: an aggregate holding one word, drawing through a
- *      single width-appropriate multiply-shift, no rejection loop. Bias is about
- *      @c bound / 2^w for the index's bit width w, negligible for entry-point selection.
+ *      @c std::uniform_int_distribution: an aggregate holding one word, drawing through a single
+ *      width-appropriate multiply-shift, no rejection loop.
+ *
+ *  Bias is about @c bound / 2^w for the index's bit width w, negligible for entry-point selection.
  *
  *  The random operand narrows to the index width @b before the multiply: wider surviving
  *  engine bits would land in the kept half and escape the bound.
@@ -1009,7 +1060,7 @@ template <>
 struct uniform_below<u32_t> {
     u32_t bound = 0;
 
-    /** @brief One draw, through plain 64-bit arithmetic. */
+    /** One draw, through plain 64-bit arithmetic. */
     template <typename generator_type_>
     constexpr u32_t operator()(generator_type_& generator) const noexcept {
         return static_cast<u32_t>(static_cast<u64_t>(static_cast<u32_t>(generator())) * bound >> 32u);
@@ -1020,7 +1071,7 @@ template <>
 struct uniform_below<u64_t> {
     u64_t bound = 0;
 
-    /** @brief One draw, through the high half of the 128-bit product. @ref multiply_high */
+    /** One draw, through the high half of the 128-bit product. @ref multiply_high */
     template <typename generator_type_>
     constexpr u64_t operator()(generator_type_& generator) const noexcept {
         return multiply_high(static_cast<u64_t>(generator()), bound);
@@ -1030,8 +1081,8 @@ struct uniform_below<u64_t> {
 } // namespace usearch
 } // namespace unum
 
-/** @brief Makes @c uuid_t a first-class key of standard-hash-keyed containers: fold one
- *      mixed half into the other, then mix again - @ref unum::usearch::mix_bits twice. */
+/** Makes @c uuid_t a first-class key of standard-hash-keyed containers: fold one
+ *  mixed half into the other, then mix again - @ref unum::usearch::mix_bits twice. */
 template <>
 struct std::hash<unum::usearch::uuid_t> {
     std::size_t operator()(unum::usearch::uuid_t const& key) const noexcept {

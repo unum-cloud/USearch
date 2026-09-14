@@ -1,8 +1,8 @@
 /**
- *  @brief Flat sequential containers for Graph traversals - buffers with an ordering discipline.
- *  @author Ash Vardanian
  *  @file include/usearch/utilities/ram_buffers.hpp
+ *  @author Ash Vardanian
  *  @date April 21, 2026
+ *  @brief Flat sequential containers for Graph traversals - buffers with an ordering discipline.
  *
  *  Standalone header providing baseline sequential structures for Graph traversals, like:
  *
@@ -35,10 +35,8 @@
 namespace unum {
 namespace usearch {
 
-/**
- *  @brief Assigns @p new_value to @p old_value and returns its previous contents -
- *      @c std::exchange respelled as unconditionally @c noexcept.
- */
+/** Assigns @p new_value to @p old_value and returns its previous contents -
+ *  @c std::exchange respelled as unconditionally @c noexcept. */
 template <typename value_type_, typename other_type_ = value_type_>
 inline value_type_ exchange(value_type_& old_value, other_type_&& new_value) noexcept {
     value_type_ previous = std::move(old_value);
@@ -68,13 +66,13 @@ constexpr std::size_t ceil2(std::size_t value) noexcept {
     return value;
 }
 
-/** @brief The capacity a fresh reservation of @p capacity entries rounds up to: a power of two, sixteen at least. */
+/** The capacity a fresh reservation of @p capacity entries rounds up to: a power of two, sixteen at least. */
 constexpr std::size_t reserved_capacity(std::size_t capacity) noexcept {
     return max_of<std::size_t>(ceil2(capacity), 16u);
 }
 
-/** @brief The allocator surface these containers use; narrower than the standard's, since none of
- *      them constructs or destroys through it. */
+/** The allocator surface these containers use; narrower than the standard's, since none of
+ *  them constructs or destroys through it. */
 template <typename allocator_>
 concept buffer_allocator = requires(allocator_ allocator, typename allocator_::value_type* pointer, std::size_t count) {
     typename allocator_::value_type;
@@ -190,9 +188,11 @@ class max_heap {
     allocator_t allocator_;
 
   public:
-    /** @brief Every heap names its allocator; nothing is placed by default. */
+
+    /** Every heap names its allocator; nothing is placed by default. */
     max_heap() = delete;
-    /** @brief The process-wide allocator, for a heap no arena or domain owns. */
+
+    /** The process-wide allocator, for a heap no arena or domain owns. */
     explicit max_heap(global_allocator_t) noexcept
         requires std::default_initializable<allocator_t>
         : max_heap(allocator_t {}) {}
@@ -237,9 +237,7 @@ class max_heap {
      */
     inline element_t const& top() const noexcept { return elements_[0]; }
 
-    /**
-     *  @brief Invalidates the "max-heap" property, transforming into ascending range.
-     */
+    /** Invalidates the "max-heap" property, transforming into ascending range. */
     inline void sort_ascending() noexcept { std::sort_heap(elements_, elements_ + size_, &less); }
 
     /**
@@ -274,9 +272,7 @@ class max_heap {
         return status_t::success_k;
     }
 
-    /**
-     *  @brief Inserts an element into the heap without reserving additional space.
-     */
+    /** Inserts an element into the heap without reserving additional space. */
     void insert_reserved(element_t&& element) noexcept {
         new (&elements_[size_]) element_t(element);
         size_++;
@@ -355,15 +351,15 @@ class max_heap {
         return comparator_t {}(first, second);
     }
 
-    /** @brief Moves the element at @p i up until the heap property is restored - the
-     *      companion of appending at the tail. */
+    /** Moves the element at @p i up until the heap property is restored - the
+     *  companion of appending at the tail. */
     void shift_up(std::size_t i) noexcept {
         for (; i && less(elements_[parent_idx(i)], elements_[i]); i = parent_idx(i))
             std::swap(elements_[parent_idx(i)], elements_[i]);
     }
 
-    /** @brief Moves the element at @p i down until the heap property is restored - the
-     *      companion of displacing the root during @ref pop. */
+    /** Moves the element at @p i down until the heap property is restored - the
+     *  companion of displacing the root during @ref pop. */
     void shift_down(std::size_t i) noexcept {
         std::size_t max_idx = i;
 
@@ -421,9 +417,11 @@ class max_heap_dary {
     allocator_t allocator_;
 
   public:
-    /** @brief Every heap names its allocator; nothing is placed by default. */
+
+    /** Every heap names its allocator; nothing is placed by default. */
     max_heap_dary() = delete;
-    /** @brief The process-wide allocator, for a heap no arena or domain owns. */
+
+    /** The process-wide allocator, for a heap no arena or domain owns. */
     explicit max_heap_dary(global_allocator_t) noexcept
         requires std::default_initializable<allocator_t>
         : max_heap_dary(allocator_t {}) {}
@@ -445,12 +443,12 @@ class max_heap_dary {
     max_heap_dary(max_heap_dary const&) = delete;
     max_heap_dary& operator=(max_heap_dary const&) = delete;
 
-    /** @brief Bytes a fresh reservation of @p capacity entries occupies. */
+    /** Bytes a fresh reservation of @p capacity entries occupies. */
     static constexpr std::size_t memory_usage(std::size_t capacity) noexcept {
         return reserved_capacity(capacity) * sizeof(element_t);
     }
 
-    /** @brief Bytes this heap currently occupies. */
+    /** Bytes this heap currently occupies. */
     std::size_t memory_usage() const noexcept { return memory_usage(capacity_); }
 
     ~max_heap_dary() noexcept { reset(); }
@@ -471,8 +469,8 @@ class max_heap_dary {
     inline void shrink(std::size_t n) noexcept { size_ = (std::min<std::size_t>)(n, size_); }
     inline element_t const& top() const noexcept { return elements_[0]; }
 
-    /** @brief Sorts the underlying array ascending. Uses @c std::sort because @c std::sort_heap
-     *      assumes binary-heap layout. */
+    /** Sorts the underlying array ascending. Uses @c std::sort because @c std::sort_heap
+     *  assumes binary-heap layout. */
     inline void sort_ascending() noexcept { std::sort(elements_, elements_ + size_, &less); }
 
     /** @return @c success_k, @c overflow_k when the rounded capacity wraps, @c bad_alloc_k otherwise. */
@@ -503,11 +501,9 @@ class max_heap_dary {
         shift_up(size_ - 1);
     }
 
-    /**
-     *  @brief Inserts @p count elements via append-then-heapify, picking between
-     *      @b Floyd bulk rebuild (for batches at least half the existing size) and
-     *      incremental @c shift_up (for smaller batches).
-     */
+    /** Inserts @p count elements via append-then-heapify, picking between
+     *  @b Floyd bulk rebuild (for batches at least half the existing size) and
+     *  incremental @c shift_up (for smaller batches). */
     status_t insert_many(element_t const* new_elements, std::size_t count) noexcept {
         if (count == 0) return status_t::success_k;
         if (status_t const grown = reserve(size_ + count); failed(grown)) return grown;
@@ -525,8 +521,8 @@ class max_heap_dary {
         return insert_many(batch.data(), batch_size_);
     }
 
-    /** @brief Drops every entry the comparator orders below @p bar and re-heapifies what remains in
-     *      one pass - a frontier keyed further-first sheds everything further than @p bar. */
+    /** Drops every entry the comparator orders below @p bar and re-heapifies what remains in
+     *  one pass - a frontier keyed further-first sheds everything further than @p bar. */
     std::size_t erase_below(element_t const& bar) noexcept {
         auto below = [&bar](element_t const& entry) noexcept { return less(entry, bar); };
         std::size_t const kept = static_cast<std::size_t>(std::remove_if(elements_, elements_ + size_, below) -
@@ -560,7 +556,7 @@ class max_heap_dary {
         return comparator_t {}(first, second);
     }
 
-    /** @brief Floyd's bottom-up heapify over the whole fill. */
+    /** Floyd's bottom-up heapify over the whole fill. */
     void rebuild_() noexcept {
         if (size_ < 2) return;
         for (std::size_t parent = (size_ - 2) / arity_ + 1; parent-- > 0;) shift_down(parent);
@@ -571,12 +567,10 @@ class max_heap_dary {
             std::swap(elements_[parent_idx(i)], elements_[i]);
     }
 
-    /**
-     *  @brief Iterative shift-down. Loads up to @p arity_ children per level, finds the
-     *      max via a scalar linear scan (well-predicted for small @p arity_), swaps with
-     *      parent if needed, descends. No recursion - the loop terminates when the heap
-     *      property is restored.
-     */
+    /** Iterative shift-down. Loads up to @p arity_ children per level, finds the
+     *  max via a scalar linear scan (well-predicted for small @p arity_), swaps with
+     *  parent if needed, descends. No recursion - the loop terminates when the heap
+     *  property is restored. */
     void shift_down(std::size_t i) noexcept {
         while (true) {
             std::size_t const first = first_child_idx(i);
@@ -592,11 +586,9 @@ class max_heap_dary {
     }
 };
 
-/**
- *  @brief Similar to @c std::priority_queue, but allows raw access to underlying
- *      memory and always keeps the data sorted. Ideal for small collections
- *      under 128 elements.
- */
+/** Similar to @c std::priority_queue, but allows raw access to underlying
+ *  memory and always keeps the data sorted. Ideal for small collections
+ *  under 128 elements. */
 template <                                                    //
     typename element_type_,                                   //
     typename comparator_type_ = std::less<void>,              //
@@ -619,9 +611,11 @@ class sorted_buffer {
     allocator_t allocator_;
 
   public:
-    /** @brief Every buffer names its allocator; nothing is placed by default. */
+
+    /** Every buffer names its allocator; nothing is placed by default. */
     sorted_buffer() = delete;
-    /** @brief The process-wide allocator, for a buffer no arena or domain owns. */
+
+    /** The process-wide allocator, for a buffer no arena or domain owns. */
     explicit sorted_buffer(global_allocator_t) noexcept
         requires std::default_initializable<allocator_t>
         : sorted_buffer(allocator_t {}) {}
@@ -643,12 +637,12 @@ class sorted_buffer {
     sorted_buffer(sorted_buffer const&) = delete;
     sorted_buffer& operator=(sorted_buffer const&) = delete;
 
-    /** @brief Bytes a fresh reservation of @p capacity entries occupies. */
+    /** Bytes a fresh reservation of @p capacity entries occupies. */
     static constexpr std::size_t memory_usage(std::size_t capacity) noexcept {
         return reserved_capacity(capacity) * sizeof(element_t);
     }
 
-    /** @brief Bytes this buffer currently occupies. */
+    /** Bytes this buffer currently occupies. */
     std::size_t memory_usage() const noexcept { return memory_usage(capacity_); }
 
     ~sorted_buffer() noexcept { reset(); }
@@ -758,7 +752,7 @@ class sorted_buffer {
         return result;
     }
 
-    /** @brief No-op for API parity with the heaps: the buffer is always sorted ascending. */
+    /** No-op for API parity with the heaps: the buffer is always sorted ascending. */
     void sort_ascending() noexcept {}
     inline void shrink(std::size_t n) noexcept { size_ = (std::min<std::size_t>)(n, size_); }
 
@@ -770,8 +764,8 @@ class sorted_buffer {
         return comparator_t {}(first, second);
     }
 
-    /** @brief Opens a slot at @p slot by moving the [@p slot, @p tail) range one position
-     *      right, back to front, so the overlap never clobbers unread elements. */
+    /** Opens a slot at @p slot by moving the [@p slot, @p tail) range one position
+     *  right, back to front, so the overlap never clobbers unread elements. */
     void shift_right(std::size_t slot, std::size_t tail) noexcept {
         std::size_t to_move = tail - slot;
         element_t* source = elements_ + tail - 1;
@@ -814,19 +808,22 @@ class growing_buffer {
     allocator_t allocator_;
 
   public:
-    /** @brief Every buffer names its allocator; nothing is placed by default. */
+
+    /** Every buffer names its allocator; nothing is placed by default. */
     growing_buffer() = delete;
-    /** @brief The process-wide allocator, for a buffer no arena or domain owns. */
+
+    /** The process-wide allocator, for a buffer no arena or domain owns. */
     explicit growing_buffer(global_allocator_t) noexcept
         requires std::default_initializable<allocator_type_>
         : growing_buffer(allocator_type_ {}) {}
-    /** @brief Takes the caller's allocator in its own element type; the rebind to @c element_t
-     *      happens here, so no consumer spells @c allocator_traits itself. */
+
+    /** Takes the caller's allocator in its own element type; the rebind to @c element_t
+     *  happens here, so no consumer spells @c allocator_traits itself. */
     explicit growing_buffer(allocator_type_ const& allocator) noexcept
         : elements_(nullptr), size_(0), capacity_(0), allocator_(allocator) {}
 
-    /** @brief Qualified, since an element type from @c std drags @c std::exchange into the
-     *      overload set through argument-dependent lookup and makes the call ambiguous. */
+    /** Qualified, since an element type from @c std drags @c std::exchange into the
+     *  overload set through argument-dependent lookup and makes the call ambiguous. */
     growing_buffer(growing_buffer&& other) noexcept
         : elements_(usearch::exchange(other.elements_, nullptr)), size_(usearch::exchange(other.size_, 0)),
           capacity_(usearch::exchange(other.capacity_, 0)), allocator_(std::move(other.allocator_)) {}
@@ -844,7 +841,7 @@ class growing_buffer {
 
     ~growing_buffer() noexcept { reset(); }
 
-    /** @brief Bytes this buffer currently occupies. */
+    /** Bytes this buffer currently occupies. */
     std::size_t memory_usage() const noexcept { return capacity_ * sizeof(element_t); }
 
     void reset() noexcept {
@@ -880,9 +877,11 @@ class growing_buffer {
     inline element_t* data() noexcept { return elements_; }
     inline element_t const* data() const noexcept { return elements_; }
 
-    /** @brief Grows capacity to at least @p new_capacity, rounding up to a power of two and
+    /**
+     *  @brief Grows capacity to at least @p new_capacity, rounding up to a power of two and
      *      at least doubling, so a repeatedly-growing loop amortizes. Live elements survive.
-     *  @return @c success_k, @c overflow_k when the rounded capacity wraps, @c bad_alloc_k otherwise. */
+     *  @return @c success_k, @c overflow_k when the rounded capacity wraps, @c bad_alloc_k otherwise.
+     */
     status_t reserve(std::size_t new_capacity) noexcept {
         if (new_capacity <= capacity_) return status_t::success_k;
 
@@ -890,8 +889,8 @@ class growing_buffer {
         return reserve_exactly(max_of<std::size_t>(reserved_capacity(new_capacity), capacity_ * 2u));
     }
 
-    /** @brief Grows capacity to exactly @p new_capacity, without the rounding @ref reserve applies -
-     *      the sizing form for a table whose extent the caller already knows and then freezes. */
+    /** Grows capacity to exactly @p new_capacity, without the rounding @ref reserve applies -
+     *  the sizing form for a table whose extent the caller already knows and then freezes. */
     status_t reserve_exactly(std::size_t new_capacity) noexcept {
         if (new_capacity <= capacity_) return status_t::success_k;
         auto new_elements = allocator_.allocate(new_capacity);
@@ -913,8 +912,8 @@ class growing_buffer {
         return status_t::success_k;
     }
 
-    /** @brief Reallocates to exactly @p count value-initialized elements, discarding any prior
-     *      contents - the sized-once form. Trivial elements are zero-filled in one @c memset. */
+    /** Reallocates to exactly @p count value-initialized elements, discarding any prior
+     *  contents - the sized-once form. Trivial elements are zero-filled in one @c memset. */
     status_t resize(std::size_t count) noexcept {
         reset();
         if (count == 0) return status_t::success_k;
@@ -928,9 +927,11 @@ class growing_buffer {
         return status_t::success_k;
     }
 
-    /** @brief Like @ref resize, but skips the zero fill so the caller owns the first touch.
+    /**
+     *  @brief Like @ref resize, but skips the zero fill so the caller owns the first touch.
      *  @note Trivial element types only - nothing is constructed, so every element must be
-     *      written before it is read. */
+     *      written before it is read.
+     */
     status_t resize_uninitialized(std::size_t count) noexcept {
         reset();
         if (count == 0) return status_t::success_k;
@@ -939,9 +940,9 @@ class growing_buffer {
         return status_t::success_k;
     }
 
-    /** @brief Moves the fill to @p count within reserved capacity, leaving the bytes untouched -
-     *      never allocates, never fails. This is the slice an arena hands out, where value-
-     *      constructing the run would cost a pass over every slice handed out. */
+    /** Moves the fill to @p count within reserved capacity, leaving the bytes untouched -
+     *  never allocates, never fails. This is the slice an arena hands out, where value-
+     *  constructing the run would cost a pass over every slice handed out. */
     inline void extend_uninitialized(std::size_t count) noexcept {
         static_assert(
             std::is_trivially_default_constructible<element_t>() && std::is_trivially_destructible<element_t>(),
@@ -950,15 +951,15 @@ class growing_buffer {
         size_ = count;
     }
 
-    /** @brief Appends @p element into pre-reserved capacity - the hot-path form. */
+    /** Appends @p element into pre-reserved capacity - the hot-path form. */
     inline void push_back_reserved(element_t element) noexcept {
         annotate_container(elements_, elements_ + capacity_, elements_ + size_, elements_ + size_ + 1);
         new (elements_ + size_) element_t(std::move(element));
         ++size_;
     }
 
-    /** @brief Appends @p element, doubling capacity when full. @ref push_back_reserved is the
-     *      form for a loop that reserved its whole extent up front. */
+    /** Appends @p element, doubling capacity when full. @ref push_back_reserved is the
+     *  form for a loop that reserved its whole extent up front. */
     inline status_t push_back(element_t element) noexcept {
         if (size_ == capacity_)
             if (status_t const grown = reserve(size_ + 1); failed(grown)) return grown;
@@ -973,9 +974,9 @@ class growing_buffer {
         return popped;
     }
 
-    /** @brief Moves the live fill to @p count within reserved capacity, value-constructing
-     *      growth and destroying shrinkage; never allocates. Instantiates only for
-     *      default-constructible elements. */
+    /** Moves the live fill to @p count within reserved capacity, value-constructing
+     *  growth and destroying shrinkage; never allocates. Instantiates only for
+     *  default-constructible elements. */
     inline void resize_reserved(std::size_t count) noexcept {
         std::size_t const previous = size_;
         for (; size_ > count; --size_) elements_[size_ - 1].~element_t();
@@ -984,56 +985,59 @@ class growing_buffer {
     }
 };
 
-/** @brief Per-thread bump arena: reservations bump inside the newest chunk, and one that cannot
- *      fit them stays alive under its slices while a chunk at least twice as wide opens - so
- *      addresses never move and slices outlive growth. The rewind keeps the widest chunk and
- *      drops the ones it outgrew; releasing a slice does nothing, the rewind is the release. */
+/** Per-thread bump arena: reservations bump inside the newest chunk, and one that cannot
+ *  fit them stays alive under its slices while a chunk at least twice as wide opens - so
+ *  addresses never move and slices outlive growth. The rewind keeps the widest chunk and
+ *  drops the ones it outgrew; releasing a slice does nothing, the rewind is the release. */
 template <typename upstream_allocator_ = std::allocator<byte_t>>
 class growing_arena {
     using upstream_t = typename std::allocator_traits<upstream_allocator_>::template rebind_alloc<std::byte>;
     using run_t = growing_buffer<std::byte, upstream_t>;
 
-    /** @brief One chunk: its run, and the chunk it outgrew. */
+    /** One chunk: its run, and the chunk it outgrew. */
     struct chunk_t {
         run_t run;
         std::unique_ptr<chunk_t> previous;
     };
 
-    /** @brief The newest chunk, the one reservations bump; null before the first reservation. */
+    /** The newest chunk, the one reservations bump; null before the first reservation. */
     std::unique_ptr<chunk_t> newest_;
-    /** @brief Places every run - the thread's memory domain. */
+
+    /** Places every run - the thread's memory domain. */
     upstream_t upstream_;
 
   public:
-    /** @brief Every arena names its upstream allocator; nothing is placed by default. */
+
+    /** Every arena names its upstream allocator; nothing is placed by default. */
     growing_arena() = delete;
-    /** @brief The process-wide allocator, for an arena no memory domain owns. */
+
+    /** The process-wide allocator, for an arena no memory domain owns. */
     explicit growing_arena(global_allocator_t) noexcept
         requires std::default_initializable<upstream_t>
         : growing_arena(upstream_t {}) {}
     explicit growing_arena(upstream_t upstream) noexcept : upstream_(upstream) {}
 
-    /** @brief The allocator every chunk of this arena comes from. */
+    /** The allocator every chunk of this arena comes from. */
     upstream_t const& upstream() const noexcept { return upstream_; }
     growing_arena(growing_arena&&) noexcept = default;
     growing_arena& operator=(growing_arena&&) noexcept = default;
 
-    /** @brief Bytes across chunks. */
+    /** Bytes across chunks. */
     std::size_t capacity() const noexcept {
         std::size_t bytes = 0;
         for (chunk_t const* chunk = newest_.get(); chunk; chunk = chunk->previous.get()) bytes += chunk->run.capacity();
         return bytes;
     }
 
-    /** @brief Opens the seed chunk at @p bytes, the width every later chunk doubles from; a
-     *      seeded arena answers in one compare. */
+    /** Opens the seed chunk at @p bytes, the width every later chunk doubles from; a
+     *  seeded arena answers in one compare. */
     status_t reserve_exactly(std::size_t bytes) noexcept {
         if (newest_) return status_t::success_k;
         return grow_(bytes);
     }
 
-    /** @brief Hands out @p bytes on an @p alignment boundary from the newest chunk, growing by one
-     *      at least twice as wide when it cannot fit them; null when the upstream refuses. */
+    /** Hands out @p bytes on an @p alignment boundary from the newest chunk, growing by one
+     *  at least twice as wide when it cannot fit them; null when the upstream refuses. */
     std::byte* allocate(std::size_t bytes, std::size_t alignment) noexcept {
         if (newest_)
             if (std::byte* const slice = slice_(newest_->run, bytes, alignment)) return slice;
@@ -1042,19 +1046,20 @@ class growing_arena {
         return slice_(newest_->run, bytes, alignment);
     }
 
-    /** @brief Rewinds the newest chunk and drops the ones it outgrew, so the next call starts at
-     *      the high-water mark. */
+    /** Rewinds the newest chunk and drops the ones it outgrew, so the next call starts at
+     *  the high-water mark. */
     void clear() noexcept {
         if (!newest_) return;
         newest_->previous.reset();
         newest_->run.clear();
     }
 
-    /** @brief Releases every chunk. */
+    /** Releases every chunk. */
     void reset() noexcept { newest_.reset(); }
 
   private:
-    /** @brief Grows by a chunk of @p width bytes, the newest from now on, the old one chained behind. */
+
+    /** Grows by a chunk of @p width bytes, the newest from now on, the old one chained behind. */
     status_t grow_(std::size_t width) noexcept {
         std::unique_ptr<chunk_t> grown {new (std::nothrow) chunk_t {run_t {upstream_}, nullptr}};
         if (!grown) return status_t::bad_alloc_k;
@@ -1064,7 +1069,7 @@ class growing_arena {
         return status_t::success_k;
     }
 
-    /** @brief The address-aligned slice at the end of @p run, or null when it cannot fit @p bytes. */
+    /** The address-aligned slice at the end of @p run, or null when it cannot fit @p bytes. */
     static std::byte* slice_(run_t& run, std::size_t bytes, std::size_t alignment) noexcept {
         // Aligned by address, not by offset: the upstream only promises what `malloc` does.
         std::uintptr_t const cursor = reinterpret_cast<std::uintptr_t>(run.data() + run.size());
@@ -1076,11 +1081,11 @@ class growing_arena {
     }
 };
 
-/** @brief Hands out slices of one @ref growing_arena it points at but does not own. Copies share
- *      the arena by pointer, so containers built from one reserve disjoint slices; releasing a
- *      slice does nothing - the arena's rewind is the release. Every slice starts on an
- *      @p alignment_ boundary, since the arena's raw bytes promise only what @c malloc does and
- *      the containers built over a slice issue the widest loads their kernels know. */
+/** Hands out slices of one @ref growing_arena it points at but does not own. Copies share
+ *  the arena by pointer, so containers built from one reserve disjoint slices; releasing a
+ *  slice does nothing - the arena's rewind is the release. Every slice starts on an
+ *  @p alignment_ boundary, since the arena's raw bytes promise only what @c malloc does and
+ *  the containers built over a slice issue the widest loads their kernels know. */
 template <typename value_type_ = std::byte, typename upstream_allocator_ = std::allocator<byte_t>,
           std::size_t alignment_ = default_alignment_k>
 struct arena_allocator {
@@ -1088,29 +1093,29 @@ struct arena_allocator {
     using size_type = std::size_t;
     using arena_t = growing_arena<upstream_allocator_>;
 
-    /** @brief Spelled out because the alignment's non-type parameter defeats the traits'
-     *      automatic first-argument replacement; the upstream and the alignment ride along. */
+    /** Spelled out because the alignment's non-type parameter defeats the traits'
+     *  automatic first-argument replacement; the upstream and the alignment ride along. */
     template <typename other_type_>
     struct rebind {
         using other = arena_allocator<other_type_, upstream_allocator_, alignment_>;
     };
 
-    /** @brief The boundary every reservation starts on; echoes the template argument. */
+    /** The boundary every reservation starts on; echoes the template argument. */
     inline static constexpr std::size_t alignment_k = alignment_;
 
-    /** @brief Bytes a reservation of @p bytes occupies here, the next one starting on its own boundary. */
+    /** Bytes a reservation of @p bytes occupies here, the next one starting on its own boundary. */
     static constexpr std::size_t reserved_bytes(std::size_t bytes) noexcept {
         return round_up_to_multiple(bytes, alignment_k);
     }
 
-    /** @brief The arena every rebound copy shares; null refuses every request. */
+    /** The arena every rebound copy shares; null refuses every request. */
     arena_t* arena = nullptr;
 
     constexpr arena_allocator() noexcept = default;
     explicit constexpr arena_allocator(arena_t& arena) noexcept : arena(&arena) {}
 
-    /** @brief The rebinding conversion @c std::allocator_traits performs - the upstream rides
-     *      along, and the arena is shared rather than copied. */
+    /** The rebinding conversion @c std::allocator_traits performs - the upstream rides
+     *  along, and the arena is shared rather than copied. */
     template <typename other_type_>
     constexpr arena_allocator(arena_allocator<other_type_, upstream_allocator_, alignment_> const& other) noexcept
         : arena(other.arena) {}

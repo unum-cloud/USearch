@@ -1,9 +1,9 @@
 /**
+ *  @file include/usearch/types.h
+ *  @author Ash Vardanian
+ *  @date August 14, 2026
  *  @brief Shared vocabulary of the USearch C interface: scalar types, keys, distances, error
  *      reporting, residency selection, and library introspection.
- *
- *  @author Ash Vardanian
- *  @file include/usearch/types.h
  *
  *  Everything the modality headers have in common - @c dense_index.h, @c sequence_index.h, and
  *  @c geospatial_index.h - and nothing they don't. Include a modality header directly, since it
@@ -29,7 +29,7 @@ extern "C" {
 #endif
 #endif
 
-/** @brief The library's version, which the release tooling rewrites in place. */
+/** The library's version, which the release tooling rewrites in place. */
 #define USEARCH_VERSION_MAJOR 3
 #define USEARCH_VERSION_MINOR 0
 #define USEARCH_VERSION_PATCH 0
@@ -45,10 +45,8 @@ USEARCH_EXPORT typedef struct usearch_key_t {
     uint8_t bytes[16];
 } usearch_key_t;
 
-/**
- *  @brief Distance or similarity score between two entries, in the metric of the index that
- *      produced it. Wide enough for every modality's scoring range.
- */
+/** Distance or similarity score between two entries, in the metric of the index that
+ *  produced it. Wide enough for every modality's scoring range. */
 USEARCH_EXPORT typedef double usearch_distance_t;
 
 /**
@@ -59,9 +57,11 @@ USEARCH_EXPORT typedef double usearch_distance_t;
  *  manufacturing a terminator none of them keeps.
  */
 USEARCH_EXPORT typedef struct usearch_bytes_view_t {
-    /** @brief First byte of the run; text is bytes that happen to decode. */
+
+    /** First byte of the run; text is bytes that happen to decode. */
     uint8_t const* data;
-    /** @brief Bytes the run spans, with no terminator assumed or written. */
+
+    /** Bytes the run spans, with no terminator assumed or written. */
     size_t length;
 } usearch_bytes_view_t;
 
@@ -73,9 +73,11 @@ USEARCH_EXPORT typedef struct usearch_bytes_view_t {
  *  unrepresentable, where two loose arguments only made it unlikely.
  */
 USEARCH_EXPORT typedef struct usearch_bytes_span_t {
-    /** @brief First byte of the run; text is bytes that happen to decode. */
+
+    /** First byte of the run; text is bytes that happen to decode. */
     uint8_t* data;
-    /** @brief Bytes the run can hold, with no terminator assumed or written. */
+
+    /** Bytes the run can hold, with no terminator assumed or written. */
     size_t length;
 } usearch_bytes_span_t;
 
@@ -86,9 +88,11 @@ USEARCH_EXPORT typedef struct usearch_bytes_span_t {
  *  rather than assumed equal, which is the check every binding otherwise writes for itself.
  */
 USEARCH_EXPORT typedef struct usearch_keys_view_t {
-    /** @brief First key of the run. */
+
+    /** First key of the run. */
     usearch_key_t const* data;
-    /** @brief Keys the run spans. */
+
+    /** Keys the run spans. */
     size_t count;
 } usearch_keys_view_t;
 
@@ -100,9 +104,11 @@ USEARCH_EXPORT typedef struct usearch_keys_view_t {
  *  and that bound travel as one argument rather than as two a caller could contradict.
  */
 USEARCH_EXPORT typedef struct usearch_keys_span_t {
-    /** @brief First key of the run. */
+
+    /** First key of the run. */
     usearch_key_t* data;
-    /** @brief Keys the run can hold. */
+
+    /** Keys the run can hold. */
     size_t capacity;
 } usearch_keys_span_t;
 
@@ -116,103 +122,125 @@ USEARCH_EXPORT typedef struct usearch_keys_span_t {
  *  failures, not this implementation's exits, so unused enumerators are deliberate.
  */
 USEARCH_EXPORT typedef enum usearch_status_t {
-    /** @brief The call completed; @c message carries nothing. */
+
+    /** The call completed; @c message carries nothing. */
     usearch_success_k = 0,
-    /** @brief An allocation or reservation could not be satisfied. */
+
+    /** An allocation or reservation could not be satisfied. */
     usearch_error_out_of_memory_k = 1,
-    /** @brief Dimensionality, row counts, or output capacity disagree. */
+
+    /** Dimensionality, row counts, or output capacity disagree. */
     usearch_error_shape_mismatch_k = 2,
-    /** @brief A stride or packing the engine cannot traverse. */
+
+    /** A stride or packing the engine cannot traverse. */
     usearch_error_unsupported_layout_k = 3,
-    /** @brief A scalar, metric, or residency tag this build does not know. */
+
+    /** A scalar, metric, or residency tag this build does not know. */
     usearch_error_unknown_kind_k = 4,
-    /** @brief A mutating verb on a handle that opens its checkpoint in place. */
+
+    /** A mutating verb on a handle that opens its checkpoint in place. */
     usearch_error_read_only_k = 5,
-    /** @brief A file could not be opened, read, written, or parsed. */
+
+    /** A file could not be opened, read, written, or parsed. */
     usearch_error_io_k = 6,
-    /** @brief A device could not be selected, or its memory could not be claimed. */
+
+    /** A device could not be selected, or its memory could not be claimed. */
     usearch_error_device_k = 7,
-    /** @brief A caller-supplied representation could not be decoded - a malformed key, a truncated
-     *      buffer, a checkpoint that ends early. */
+
+    /** A caller-supplied representation could not be decoded - a malformed key, a truncated
+     *  buffer, a checkpoint that ends early. */
     usearch_error_malformed_input_k = 8,
-    /** @brief The library reported neither success nor a failure - a contract violation rather
-     *      than a condition, so it names a defect and not a state. */
+
+    /** The library reported neither success nor a failure - a contract violation rather
+     *  than a condition, so it names a defect and not a state. */
     usearch_error_internal_k = 9,
-    /** @brief A hard design ceiling was reached, like the 32-bit id space; a smaller request
-     *      cannot help where a smaller allocation would. */
+
+    /** A hard design ceiling was reached, like the 32-bit id space; a smaller request
+     *  cannot help where a smaller allocation would. */
     usearch_error_overflow_k = 10,
-    /** @brief The verb needs a prior successful reservation that never happened. */
+
+    /** The verb needs a prior successful reservation that never happened. */
     usearch_error_uninitialized_k = 11,
-    /** @brief The request contradicts an already-frozen configuration, like re-reserving with
-     *      a different geometry. */
+
+    /** The request contradicts an already-frozen configuration, like re-reserving with
+     *  a different geometry. */
     usearch_error_config_mismatch_k = 12,
-    /** @brief A synchronization contract was violated by a concurrent operation; discard any
-     *      produced output and retry in a quieter phase. */
+
+    /** A synchronization contract was violated by a concurrent operation; discard any
+     *  produced output and retry in a quieter phase. */
     usearch_error_contended_k = 13,
-    /** @brief A progress handler asked the operation to stop; it unwound and published nothing,
-     *      so the handle carries whatever it did before the call. */
+
+    /** A progress handler asked the operation to stop; it unwound and published nothing,
+     *  so the handle carries whatever it did before the call. */
     usearch_error_cancelled_k = 14,
     /** @brief The verb is declared for every residency but this one does not implement it; no
      *      retry, option, or smaller request can help, so a caller picks another residency. */
     usearch_error_unsupported_k = 15,
 } usearch_status_t;
 
-/**
- *  @brief Outcome of one call: a status every binding can branch on, and a static message
- *      carrying the detail the status cannot. Messages are static and @b don't need to be
- *      deallocated, and are @c NULL exactly when the status is @c usearch_success_k.
- */
+/** Outcome of one call: a status every binding can branch on, and a static message
+ *  carrying the detail the status cannot. Messages are static and @b don't need to be
+ *  deallocated, and are @c NULL exactly when the status is @c usearch_success_k. */
 USEARCH_EXPORT typedef struct usearch_error_t {
     usearch_status_t status;
     char const* message;
 } usearch_error_t;
 
-/**
- *  @brief Scalar types the indexes store and exchange, named by width and encoding.
- *      Sub-byte types pack several dimensions per byte, as their @c xN suffixes spell.
- */
+/** Scalar types the indexes store and exchange, named by width and encoding.
+ *  Sub-byte types pack several dimensions per byte, as their @c xN suffixes spell. */
 USEARCH_EXPORT typedef enum usearch_scalar_t {
-    /** @brief No scalar named - an unset field, or a custom metric owning its own storage. */
+
+    /** No scalar named - an unset field, or a custom metric owning its own storage. */
     usearch_scalar_unknown_k = 0,
 
-    /** @brief IEEE-754 binary64: ±1.80e308, epsilon 2.22e-16, subnormals to 4.94e-324,
-     *      with infinities and NaNs. */
+    /** IEEE-754 binary64: ±1.80e308, epsilon 2.22e-16, subnormals to 4.94e-324,
+     *  with infinities and NaNs. */
     usearch_scalar_f64_k = 1,
-    /** @brief IEEE-754 binary32: ±3.40e38, epsilon 1.19e-7, subnormals to 1.40e-45, with
-     *      infinities and NaNs. */
+
+    /** IEEE-754 binary32: ±3.40e38, epsilon 1.19e-7, subnormals to 1.40e-45, with
+     *  infinities and NaNs. */
     usearch_scalar_f32_k = 2,
-    /** @brief Truncated f32 - 8-bit exponent, 7-bit mantissa: f32's range at ±3.39e38 and
-     *      epsilon 7.81e-3, with infinities and NaNs. */
+
+    /** Truncated f32 - 8-bit exponent, 7-bit mantissa: f32's range at ±3.39e38 and
+     *  epsilon 7.81e-3, with infinities and NaNs. */
     usearch_scalar_bf16_k = 3,
-    /** @brief IEEE-754 binary16: ±65504, epsilon 9.77e-4, subnormals to 5.96e-8, with
-     *      infinities and NaNs. */
+
+    /** IEEE-754 binary16: ±65504, epsilon 9.77e-4, subnormals to 5.96e-8, with
+     *  infinities and NaNs. */
     usearch_scalar_f16_k = 4,
-    /** @brief FP8 with a 5-bit exponent: ±57344, epsilon 0.25, with infinities and NaNs -
-     *      f16's dynamic range carried on two mantissa bits. */
+
+    /** FP8 with a 5-bit exponent: ±57344, epsilon 0.25, with infinities and NaNs -
+     *  f16's dynamic range carried on two mantissa bits. */
     usearch_scalar_e5m2_k = 5,
-    /** @brief FP8 with a 4-bit exponent: ±448, epsilon 0.125, no infinities, and two NaN
-     *      codes at 0x7F and 0xFF. */
+
+    /** FP8 with a 4-bit exponent: ±448, epsilon 0.125, no infinities, and two NaN
+     *  codes at 0x7F and 0xFF. */
     usearch_scalar_e4m3_k = 6,
-    /** @brief FP6 with a 3-bit exponent, byte-aligned with two padding bits: ±28, no
-     *      infinities or NaNs, so every one of its 64 codes is a number. */
+
+    /** FP6 with a 3-bit exponent, byte-aligned with two padding bits: ±28, no
+     *  infinities or NaNs, so every one of its 64 codes is a number. */
     usearch_scalar_e3m2_k = 7,
-    /** @brief FP6 with a 2-bit exponent, byte-aligned with two padding bits: ±7.5, no
-     *      infinities or NaNs, and 72% of its codes outside [-1, 1]. */
+
+    /** FP6 with a 2-bit exponent, byte-aligned with two padding bits: ±7.5, no
+     *  infinities or NaNs, and 72% of its codes outside [-1, 1]. */
     usearch_scalar_e2m3_k = 8,
 
-    /** @brief 8-bit signed integer spanning -128 to 127, every code a number. */
+    /** 8-bit signed integer spanning -128 to 127, every code a number. */
     usearch_scalar_i8_k = 10,
-    /** @brief Two signed nibbles per byte spanning -8 to 7, even dimensions in the low
-     *      nibble and odd ones in the high. */
+
+    /** Two signed nibbles per byte spanning -8 to 7, even dimensions in the low
+     *  nibble and odd ones in the high. */
     usearch_scalar_i4x2_k = 11,
 
-    /** @brief 8-bit unsigned integer spanning 0 to 255, every code a number. */
+    /** 8-bit unsigned integer spanning 0 to 255, every code a number. */
     usearch_scalar_u8_k = 20,
-    /** @brief Two unsigned nibbles per byte spanning 0 to 15, even dimensions in the low
-     *      nibble and odd ones in the high. */
+
+    /** Two unsigned nibbles per byte spanning 0 to 15, even dimensions in the low
+     *  nibble and odd ones in the high. */
     usearch_scalar_u4x2_k = 21,
-    /** @brief Eight single-bit dimensions per byte - the form the Hamming & Jaccard metrics
-     *      score, where only the set-bit count of a XOR or AND carries meaning. */
+
+    /** Eight single-bit dimensions per byte - the form the Hamming & Jaccard metrics
+     *  score, where only the set-bit count of a XOR or AND carries meaning. */
     usearch_scalar_u1x8_k = 22,
 
 } usearch_scalar_t;
@@ -229,30 +257,40 @@ USEARCH_EXPORT typedef enum usearch_scalar_t {
  *  past its end.
  */
 USEARCH_EXPORT typedef struct usearch_matrix_view_t {
-    /** @brief Base pointer of the first row. */
+
+    /** Base pointer of the first row. */
     void const* data;
-    /** @brief Rows the matrix carries. */
+
+    /** Rows the matrix carries. */
     size_t rows;
-    /** @brief Logical scalars per row, as the caller counts them. */
+
+    /** Logical scalars per row, as the caller counts them. */
     size_t columns;
-    /** @brief Bytes between the starts of consecutive rows; zero means contiguous. */
+
+    /** Bytes between the starts of consecutive rows; zero means contiguous. */
     size_t stride_bytes;
-    /** @brief The scalar type the rows hold, converted on the way in where it differs. */
+
+    /** The scalar type the rows hold, converted on the way in where it differs. */
     usearch_scalar_t scalar_kind;
 } usearch_matrix_view_t;
 
-/** @brief The writable twin of @c usearch_matrix_view_t, carried by every verb that
- *      lands rows in a matrix the caller allocated. */
+/** The writable twin of @c usearch_matrix_view_t, carried by every verb that
+ *  lands rows in a matrix the caller allocated. */
 USEARCH_EXPORT typedef struct usearch_matrix_span_t {
-    /** @brief Base pointer of the first row. */
+
+    /** Base pointer of the first row. */
     void* data;
-    /** @brief Rows the matrix can hold, which a verb writes up to and reports back. */
+
+    /** Rows the matrix can hold, which a verb writes up to and reports back. */
     size_t capacity;
-    /** @brief Logical scalars per row, as the caller counts them. */
+
+    /** Logical scalars per row, as the caller counts them. */
     size_t columns;
-    /** @brief Bytes between the starts of consecutive rows; zero means contiguous. */
+
+    /** Bytes between the starts of consecutive rows; zero means contiguous. */
     size_t stride_bytes;
-    /** @brief The scalar type to write, converted on the way out where it differs. */
+
+    /** The scalar type to write, converted on the way out where it differs. */
     usearch_scalar_t scalar_kind;
 } usearch_matrix_span_t;
 
@@ -267,88 +305,108 @@ USEARCH_EXPORT typedef struct usearch_matrix_span_t {
  *  ranking as @c 1 @c - @c dot, like every other distance.
  */
 USEARCH_EXPORT typedef struct usearch_matches_span_t {
-    /** @brief First row of the key output. */
+
+    /** First row of the key output. */
     usearch_key_t* keys;
-    /** @brief Bytes between the starts of consecutive key rows; zero packs them. */
+
+    /** Bytes between the starts of consecutive key rows; zero packs them. */
     size_t keys_stride_bytes;
-    /** @brief First row of the score output, positionally paired with @c keys. */
+
+    /** First row of the score output, positionally paired with @c keys. */
     usearch_distance_t* scores;
-    /** @brief Bytes between the starts of consecutive score rows; zero packs them. */
+
+    /** Bytes between the starts of consecutive score rows; zero packs them. */
     size_t scores_stride_bytes;
-    /** @brief Matches written per query - one entry per query, never strided. */
+
+    /** Matches written per query - one entry per query, never strided. */
     size_t* counts;
-    /** @brief Columns per row, and the upper bound on matches - the "k" in "kANN". */
+
+    /** Columns per row, and the upper bound on matches - the "k" in "kANN". */
     size_t wanted;
 } usearch_matches_span_t;
 
-/**
- *  @brief The CPU families USearch ships tuned variants for - dispatch reports its pick in
- *      this vocabulary, and callers may pin one. Each class bundles the compute features,
- *      wait instruction, and atomics its silicon generation guarantees.
- */
+/** The CPU families USearch ships tuned variants for - dispatch reports its pick in
+ *  this vocabulary, and callers may pin one. Each class bundles the compute features,
+ *  wait instruction, and atomics its silicon generation guarantees. */
 USEARCH_EXPORT typedef enum usearch_cpu_class_t {
     usearch_cpu_class_unknown_k = 0,
-    /** @brief The portable floor: no SIMD assumptions, standard yields. */
+
+    /** The portable floor: no SIMD assumptions, standard yields. */
     usearch_cpu_class_serial_k,
-    /** @brief Haswell-class x86: AVX2 & FMA, the 256-bit floor. */
+
+    /** Haswell-class x86: AVX2 & FMA, the 256-bit floor. */
     usearch_cpu_class_intel_haswell_k,
-    /** @brief Sierra Forest-class x86 - the E-core Xeons: AVX-VNNI and its successors without
-     *      AVX-512, TPAUSE waits, CMPCCXADD conditional adds. */
+
+    /** Sierra Forest-class x86 - the E-core Xeons: AVX-VNNI and its successors without
+     *  AVX-512, TPAUSE waits, CMPCCXADD conditional adds. */
     usearch_cpu_class_intel_sierra_k,
-    /** @brief Skylake-class x86: the AVX-512 foundation tier. */
+
+    /** Skylake-class x86: the AVX-512 foundation tier. */
     usearch_cpu_class_intel_skylake_k,
-    /** @brief Icelake-class x86: AVX-512 VNNI & VPOPCNT - the integer & bit workhorse. */
+
+    /** Icelake-class x86: AVX-512 VNNI & VPOPCNT - the integer & bit workhorse. */
     usearch_cpu_class_intel_icelake_k,
-    /** @brief Genoa-class x86 - Zen 4 and newer: native bf16 dot products over AVX-512. */
+
+    /** Genoa-class x86 - Zen 4 and newer: native bf16 dot products over AVX-512. */
     usearch_cpu_class_amd_genoa_k,
-    /** @brief Diamond Rapids-class x86: the AVX-512 lineage plus AVX10.2's FP8 conversions,
-     *      TPAUSE waits, CMPCCXADD conditional adds. */
+
+    /** Diamond Rapids-class x86: the AVX-512 lineage plus AVX10.2's FP8 conversions,
+     *  TPAUSE waits, CMPCCXADD conditional adds. */
     usearch_cpu_class_intel_diamond_k,
-    /** @brief Graviton2-class Arm - Neoverse N1, the bare NEON floor; phones predating
-     *      Armv8.6 land here too. */
+
+    /** Graviton2-class Arm - Neoverse N1, the bare NEON floor; phones predating
+     *  Armv8.6 land here too. */
     usearch_cpu_class_aws_g2_k,
-    /** @brief Armv8.6+ NEON: dot products, bf16 & f16 fused multiplies - Apple M2,
-     *      Cortex-A710 & X2 class silicon. */
+
+    /** Armv8.6+ NEON: dot products, bf16 & f16 fused multiplies - Apple M2,
+     *  Cortex-A710 & X2 class silicon. */
     usearch_cpu_class_apple_m2_k,
-    /** @brief Graviton5-class Arm - Neoverse V3, Armv9.2: monitored waits guaranteed. */
+
+    /** Graviton5-class Arm - Neoverse V3, Armv9.2: monitored waits guaranteed. */
     usearch_cpu_class_aws_g5_k,
-    /** @brief Vera-class Arm - NVIDIA's Armv9.2-generation cores with FP8 dot products. */
+
+    /** Vera-class Arm - NVIDIA's Armv9.2-generation cores with FP8 dot products. */
     usearch_cpu_class_nvidia_vera_k,
-    /** @brief Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23: vectors with Zvbb, Zawrs
-     *      monitored waits, Zacas single-instruction compare-and-swap. */
+
+    /** Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23: vectors with Zvbb, Zawrs
+     *  monitored waits, Zacas single-instruction compare-and-swap. */
     usearch_cpu_class_alibaba_c930_k,
-    /** @brief WebAssembly every engine loads: 32-bit, single-threaded, the fixed-width simd128 tier. */
+
+    /** WebAssembly every engine loads: 32-bit, single-threaded, the fixed-width simd128 tier. */
     usearch_cpu_class_wasm32_v128_k,
-    /** @brief WebAssembly with relaxed SIMD, shared memory for real thread pools, and the 64-bit
-     *      addressing that alone lets one module's memory pass 4 GiB. */
+
+    /** WebAssembly with relaxed SIMD, shared memory for real thread pools, and the 64-bit
+     *  addressing that alone lets one module's memory pass 4 GiB. */
     usearch_cpu_class_wasm64_extended_k,
 } usearch_cpu_class_t;
 
-/**
- *  @brief The GPU families USearch ships tuned variants for, the device twin of
- *      @c usearch_cpu_class_t: one class per generation of kernel kits.
- */
+/** The GPU families USearch ships tuned variants for, the device twin of
+ *  @c usearch_cpu_class_t: one class per generation of kernel kits. */
 USEARCH_EXPORT typedef enum usearch_gpu_class_t {
     usearch_gpu_class_unknown_k = 0,
-    /** @brief Hopper-class NVIDIA - H100 & H200: no TMA gather, DPX instructions. */
+
+    /** Hopper-class NVIDIA - H100 & H200: no TMA gather, DPX instructions. */
     usearch_gpu_class_nvidia_hopper_k,
-    /** @brief Blackwell-class NVIDIA - B200 & GB200: TMA gather4 scattered fetches. */
+
+    /** Blackwell-class NVIDIA - B200 & GB200: TMA gather4 scattered fetches. */
     usearch_gpu_class_nvidia_blackwell_k,
-    /** @brief Rubin-class NVIDIA - the Vera-Rubin platform's device half. */
+
+    /** Rubin-class NVIDIA - the Vera-Rubin platform's device half. */
     usearch_gpu_class_nvidia_rubin_k,
 } usearch_gpu_class_t;
 
-/**
- *  @brief Where an index's payload lives and which engine traverses it. Selects the active
- *      member of each modality's options union, and decides what "load" means: materialize
- *      into RAM, upload to a device, or open in place on disk.
- */
+/** Where an index's payload lives and which engine traverses it. Selects the active
+ *  member of each modality's options union, and decides what "load" means: materialize
+ *  into RAM, upload to a device, or open in place on disk. */
 USEARCH_EXPORT typedef enum usearch_residency_t {
-    /** @brief Volatile-memory index traversed by CPU threads - the concurrent baseline. */
+
+    /** Volatile-memory index traversed by CPU threads - the concurrent baseline. */
     usearch_residency_ram_k = 0,
-    /** @brief Accelerator-memory index traversed by GPU warps on a chosen device. */
+
+    /** Accelerator-memory index traversed by GPU warps on a chosen device. */
     usearch_residency_vram_k = 1,
-    /** @brief Persisted index traversed through pluggable I/O engines, sized past RAM. */
+
+    /** Persisted index traversed through pluggable I/O engines, sized past RAM. */
     usearch_residency_nvme_k = 2,
 } usearch_residency_t;
 
@@ -363,10 +421,12 @@ USEARCH_EXPORT typedef enum usearch_residency_t {
  *  Arenas always claim huge pages, falling back to base pages where no pool is provisioned.
  */
 USEARCH_EXPORT typedef struct usearch_ram_options_t {
-    /** @brief NUMA node ids to place shards on, borrowed for the duration of the call;
-     *      @c NULL derives every node the process may allocate on. */
+
+    /** NUMA node ids to place shards on, borrowed for the duration of the call;
+     *  @c NULL derives every node the process may allocate on. */
     int32_t const* memory_domains;
-    /** @brief Number of entries in @c memory_domains; zero derives. */
+
+    /** Number of entries in @c memory_domains; zero derives. */
     size_t memory_domains_count;
 } usearch_ram_options_t;
 
@@ -382,10 +442,12 @@ USEARCH_EXPORT typedef struct usearch_ram_options_t {
  *  fails rather than paging to the host, and the answer is to name more devices.
  */
 USEARCH_EXPORT typedef struct usearch_vram_options_t {
-    /** @brief CUDA device ordinals to place shards on, borrowed for the duration of the
-     *      call; @c NULL derives one free device. */
+
+    /** CUDA device ordinals to place shards on, borrowed for the duration of the
+     *  call; @c NULL derives one free device. */
     int32_t const* devices;
-    /** @brief Number of entries in @c devices; zero derives. */
+
+    /** Number of entries in @c devices; zero derives. */
     size_t devices_count;
 } usearch_vram_options_t;
 
@@ -410,34 +472,38 @@ USEARCH_EXPORT typedef struct usearch_vram_options_t {
  *  Reads always bypass the page cache where the filesystem admits @c O_DIRECT.
  */
 USEARCH_EXPORT typedef struct usearch_nvme_options_t {
-    /** @brief Devices or directories to place shards on, borrowed for the duration of the
-     *      call; @c NULL leaves every shard where its manifest points. */
+
+    /** Devices or directories to place shards on, borrowed for the duration of the
+     *  call; @c NULL leaves every shard where its manifest points. */
     usearch_bytes_view_t const* paths;
-    /** @brief Number of entries in @c paths; zero derives. */
+
+    /** Number of entries in @c paths; zero derives. */
     size_t paths_count;
 } usearch_nvme_options_t;
 
-/** @brief Whether a filtered search admits one candidate key or passes over it. */
+/** Whether a filtered search admits one candidate key or passes over it. */
 USEARCH_EXPORT typedef enum usearch_admission_t {
-    /** @brief Skip the key; the walk still routes through it. */
+
+    /** Skip the key; the walk still routes through it. */
     usearch_reject_k = 0,
-    /** @brief Report the key among the matches. */
+
+    /** Report the key among the matches. */
     usearch_admit_k = 1,
 } usearch_admission_t;
 
-/**
- *  @brief Type-punned per-key admission predicate for filtered searches. The batched
- *      span-admission form exists only in the C++ layer - a C callback per candidate quad
- *      would cost more than it amortizes.
- */
+/** Type-punned per-key admission predicate for filtered searches. The batched
+ *  span-admission form exists only in the C++ layer - a C callback per candidate quad
+ *  would cost more than it amortizes. */
 USEARCH_EXPORT typedef usearch_admission_t (*usearch_predicate_t)(usearch_key_t, void*);
 
-/** @brief Whether the operation a handler is watching carries on or unwinds. */
+/** Whether the operation a handler is watching carries on or unwinds. */
 USEARCH_EXPORT typedef enum usearch_continuation_t {
-    /** @brief Carry on to the next unit of work. */
+
+    /** Carry on to the next unit of work. */
     usearch_continue_k = 0,
-    /** @brief Stop and report @c usearch_error_cancelled_k; whether finished increments stand
-     *      is each verb's own contract. */
+
+    /** Stop and report @c usearch_error_cancelled_k; whether finished increments stand
+     *  is each verb's own contract. */
     usearch_cancel_k = 1,
 } usearch_continuation_t;
 
@@ -528,19 +594,23 @@ USEARCH_EXPORT usearch_executor_t usearch_executor_for_nvme( //
 USEARCH_EXPORT usearch_executor_t usearch_executor_for_vram( //
     usearch_vram_options_t const* vram, usearch_error_t* error);
 
-/** @brief What an executor does with its threads or streams once a call's work is done. */
+/** What an executor does with its threads or streams once a call's work is done. */
 USEARCH_EXPORT typedef enum usearch_mood_t {
-    /** @brief Park them; the next call pays a wake-up. */
+
+    /** Park them; the next call pays a wake-up. */
     usearch_mood_chill_k = 0,
-    /** @brief Keep them spinning, trading power for the next call's latency. */
+
+    /** Keep them spinning, trading power for the next call's latency. */
     usearch_mood_grind_k = 1,
 } usearch_mood_t;
 
-/** @brief Whether a verb returns when its work is done, or when it is merely queued. */
+/** Whether a verb returns when its work is done, or when it is merely queued. */
 USEARCH_EXPORT typedef enum usearch_completion_t {
-    /** @brief Return once the work is finished and its outputs are readable. */
+
+    /** Return once the work is finished and its outputs are readable. */
     usearch_completion_blocking_k = 0,
-    /** @brief Return once the work is queued; outputs stay indeterminate until a drain. */
+
+    /** Return once the work is queued; outputs stay indeterminate until a drain. */
     usearch_completion_deferred_k = 1,
 } usearch_completion_t;
 
@@ -553,9 +623,11 @@ USEARCH_EXPORT typedef enum usearch_completion_t {
  *  until @c usearch_executor_drain returns.
  */
 USEARCH_EXPORT typedef struct usearch_execution_options_t {
-    /** @brief What the threads or streams do between calls. */
+
+    /** What the threads or streams do between calls. */
     usearch_mood_t mood;
-    /** @brief Whether the verb waits for its own work. */
+
+    /** Whether the verb waits for its own work. */
     usearch_completion_t completion;
 } usearch_execution_options_t;
 
@@ -583,25 +655,25 @@ USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor);
  */
 USEARCH_EXPORT char const* usearch_status_name(usearch_status_t status);
 
-/** @brief Reads a status back from its canonical spelling. */
+/** Reads a status back from its canonical spelling. */
 USEARCH_EXPORT usearch_status_t usearch_status_from_name(usearch_bytes_view_t name);
 
-/** @brief The canonical spelling of a scalar kind, as @c usearch_scalar_f32_k spells "f32". */
+/** The canonical spelling of a scalar kind, as @c usearch_scalar_f32_k spells "f32". */
 USEARCH_EXPORT char const* usearch_scalar_name(usearch_scalar_t scalar_kind);
 
-/** @brief Reads a scalar kind back; @c usearch_scalar_unknown_k when unrecognized. */
+/** Reads a scalar kind back; @c usearch_scalar_unknown_k when unrecognized. */
 USEARCH_EXPORT usearch_scalar_t usearch_scalar_from_name(usearch_bytes_view_t name);
 
-/** @brief The canonical spelling of a residency, as @c usearch_residency_ram_k spells "ram". */
+/** The canonical spelling of a residency, as @c usearch_residency_ram_k spells "ram". */
 USEARCH_EXPORT char const* usearch_residency_name(usearch_residency_t residency);
 
-/** @brief Reads a residency back; @c usearch_residency_ram_k when unrecognized. */
+/** Reads a residency back; @c usearch_residency_ram_k when unrecognized. */
 USEARCH_EXPORT usearch_residency_t usearch_residency_from_name(usearch_bytes_view_t name);
 
-/** @brief The canonical spelling of a CPU class, as the dispatch ladder names its rungs. */
+/** The canonical spelling of a CPU class, as the dispatch ladder names its rungs. */
 USEARCH_EXPORT char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class);
 
-/** @brief The canonical spelling of a GPU class, as the dispatch ladder names its rungs. */
+/** The canonical spelling of a GPU class, as the dispatch ladder names its rungs. */
 USEARCH_EXPORT char const* usearch_gpu_class_name(usearch_gpu_class_t gpu_class);
 
 /**

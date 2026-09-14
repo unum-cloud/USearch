@@ -1,8 +1,9 @@
 /**
- *  @brief Vector search over equidimensional dense embeddings - the CPython twin of
- *      `include/usearch/dense_index.h`.
  *  @file python/dense_index.c
  *  @author Ash Vardanian
+ *  @date August 16, 2026
+ *  @brief Vector search over equidimensional dense embeddings - the CPython twin of
+ *      `include/usearch/dense_index.h`.
  *
  *  Every verb is a batch: a one-dimensional input is one row, so a memory-mapped dataset
  *  reaches the index with no reshape and no copy. The candidate-pool breadth rides the call
@@ -18,38 +19,46 @@
 
 #pragma region Handles
 
-/** @brief An owned index handle, plus the geometry the verbs need without a round-trip. */
+/** An owned index handle, plus the geometry the verbs need without a round-trip. */
 typedef struct DenseIndex {
     PyObject ob_base;
     usearch_dense_index_t handle;
 } DenseIndex;
 
-/** @brief What one cursor step yields. */
+/** What one cursor step yields. */
 typedef enum dense_cursor_yields_t {
-    /** @brief One @c (batch,16) matrix of identities. */
+
+    /** One @c (batch,16) matrix of identities. */
     dense_cursor_yields_keys_k = 0,
-    /** @brief A @c (keys,vectors) pair of matrices. */
+
+    /** A @c (keys,vectors) pair of matrices. */
     dense_cursor_yields_keys_and_vectors_k = 1,
 } dense_cursor_yields_t;
 
-/** @brief A snapshot walk over the entries an index held when the cursor opened. */
+/** A snapshot walk over the entries an index held when the cursor opened. */
 typedef struct DenseCursor {
     PyObject ob_base;
-    /** @brief The engine cursor, pinned to the watermark it opened at. */
+
+    /** The engine cursor, pinned to the watermark it opened at. */
     usearch_dense_cursor_t handle;
-    /** @brief Keeps the index alive for the cursor's whole life. */
+
+    /** Keeps the index alive for the cursor's whole life. */
     PyObject* index;
-    /** @brief Rows one step asks for. */
+
+    /** Rows one step asks for. */
     size_t batch;
-    /** @brief The index's frozen row width, cached at open. */
+
+    /** The index's frozen row width, cached at open. */
     size_t columns;
-    /** @brief The scalar type vectors are exported as. */
+
+    /** The scalar type vectors are exported as. */
     usearch_scalar_t scalar_kind;
-    /** @brief Whether a step carries vectors beside the identities. */
+
+    /** Whether a step carries vectors beside the identities. */
     dense_cursor_yields_t yields;
 } DenseCursor;
 
-/** @brief A resumable best-first stream of matches for one query. */
+/** A resumable best-first stream of matches for one query. */
 typedef struct DenseFinder {
     PyObject ob_base;
     usearch_dense_finder_t handle;
@@ -102,14 +111,14 @@ static char const doc_DenseIndex[] =                                            
     "  >>> index.capabilities is not None\n"                                                   //
     "  True";
 
-/** @brief Whether a keyword belonged to the shared geometry, to the factory's own arm, or to neither. */
+/** Whether a keyword belonged to the shared geometry, to the factory's own arm, or to neither. */
 typedef enum keyword_verdict_t {
     keyword_consumed_k,
     keyword_foreign_k,
     keyword_failed_k,
 } keyword_verdict_t;
 
-/** @brief Reads one geometry keyword into @p options, leaving the residency arm to the caller. */
+/** Reads one geometry keyword into @p options, leaving the residency arm to the caller. */
 static keyword_verdict_t geometry_from_keyword(usearch_dense_options_t* options, PyObject* name, PyObject* value) {
     if (PyUnicode_CompareWithASCIIString(name, "dimensions") == 0)
         return usearch_py_size_from_object(value, "dimensions", &options->dimensions) == 0 ? keyword_consumed_k
@@ -162,7 +171,7 @@ static int geometry_from_positionals(usearch_dense_options_t* options, char cons
     return 0;
 }
 
-/** @brief The geometry a factory starts from, before any argument touches it. */
+/** The geometry a factory starts from, before any argument touches it. */
 static void options_defaults(usearch_dense_options_t* options, usearch_residency_t residency) {
     memset(options, 0, sizeof(*options));
     options->metric = usearch_dense_metric_angular_k;
@@ -369,7 +378,7 @@ static void DenseIndex_dealloc(DenseIndex* self) {
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
-/** @brief Rejects a handle already consumed by `merge`. */
+/** Rejects a handle already consumed by `merge`. */
 static int index_alive(DenseIndex const* self) {
     if (self->handle) return 0;
     usearch_py_raise(usearch_error_uninitialized_k, "the index handle was consumed by a merge");
@@ -396,11 +405,13 @@ static int executor_named(usearch_executor_t executor, char const* verb) {
 
 #pragma region Progress
 
-/** @brief What one watched verb hands its progress trampoline. */
+/** What one watched verb hands its progress trampoline. */
 typedef struct progress_state_t {
-    /** @brief The caller's progress callable, or NULL when the verb was handed none. */
+
+    /** The caller's progress callable, or NULL when the verb was handed none. */
     PyObject* callable;
-    /** @brief The first exception any report raised; NULL while none has. */
+
+    /** The first exception any report raised; NULL while none has. */
     PyObject* raised;
 } progress_state_t;
 
@@ -448,7 +459,7 @@ static int progress_from_object(PyObject* value, PyObject** callable) {
     return 0;
 }
 
-/** @brief The trampoline to register for @p state, or NULL when the verb was handed no handler. */
+/** The trampoline to register for @p state, or NULL when the verb was handed no handler. */
 static usearch_progress_callback_t progress_registered(progress_state_t const* state) {
     return state->callable ? progress_trampoline : NULL;
 }
@@ -468,7 +479,7 @@ static int progress_raised(progress_state_t* state) {
 
 #pragma region Introspection
 
-/** @brief The whole family of `(handle, error) → size_t` probes, through one call site. */
+/** The whole family of `(handle, error) → size_t` probes, through one call site. */
 static PyObject* measure(DenseIndex* self, size_t (*probe)(usearch_dense_index_t, usearch_error_t*)) {
     if (index_alive(self) != 0) return NULL;
     usearch_error_t error = {0};
@@ -829,31 +840,41 @@ static PyObject* DenseIndex_refine(PyObject* self, PyObject* const* args, Py_ssi
 
 #pragma region Search
 
-/** @brief What every ranked verb agrees on before it calls the library. */
+/** What every ranked verb agrees on before it calls the library. */
 typedef struct search_request_t {
-    /** @brief The borrowed query matrix. */
+
+    /** The borrowed query matrix. */
     usearch_matrix_view_t queries;
-    /** @brief Storage the query view points into. */
+
+    /** Storage the query view points into. */
     usearch_py_buffer_backing_t queries_backing;
-    /** @brief Matches wanted per query - the "k" in "kANN". */
+
+    /** Matches wanted per query - the "k" in "kANN". */
     size_t wanted;
-    /** @brief Candidate-pool breadth for this call; zero derives. */
+
+    /** Candidate-pool breadth for this call; zero derives. */
     size_t expansion_factor;
-    /** @brief The admission callable, or NULL for an unfiltered walk. */
+
+    /** The admission callable, or NULL for an unfiltered walk. */
     PyObject* predicate;
-    /** @brief The progress callable, or NULL for an unwatched walk. */
+
+    /** The progress callable, or NULL for an unwatched walk. */
     PyObject* progress;
-    /** @brief The @c Stats to overwrite, or NULL to skip reporting. */
+
+    /** The @c Stats to overwrite, or NULL to skip reporting. */
     PyObject* stats_object;
-    /** @brief The workers this call fans out over. */
+
+    /** The workers this call fans out over. */
     usearch_executor_t executor;
 } search_request_t;
 
-/** @brief What one filtered search hands its trampoline. */
+/** What one filtered search hands its trampoline. */
 typedef struct predicate_state_t {
-    /** @brief The caller's admission callable. */
+
+    /** The caller's admission callable. */
     PyObject* callable;
-    /** @brief The first exception any callback raised; NULL while none has. */
+
+    /** The first exception any callback raised; NULL while none has. */
     PyObject* raised;
 } predicate_state_t;
 
@@ -986,7 +1007,7 @@ static int matches_outputs_borrow(PyObject* const* outputs, char const* const* f
     return 0;
 }
 
-/** @brief Releases the three outputs @c matches_outputs_borrow acquired. */
+/** Releases the three outputs @c matches_outputs_borrow acquired. */
 static void matches_outputs_release(usearch_py_buffer_backing_t* backings) {
     for (size_t borrowed = 3; borrowed--;) usearch_py_buffer_release(&backings[borrowed]);
 }
@@ -1920,11 +1941,13 @@ static PyObject* DenseIndex_find(PyObject* self, PyObject* const* args, Py_ssize
 
 #pragma region Serialization
 
-/** @brief Where a checkpoint lives, as the argument's own type spells it. */
+/** Where a checkpoint lives, as the argument's own type spells it. */
 typedef enum checkpoint_source_t {
-    /** @brief A @c str , @c bytes , or @c os.PathLike naming a file. */
+
+    /** A @c str , @c bytes , or @c os.PathLike naming a file. */
     checkpoint_source_path_k,
-    /** @brief An exported buffer holding one serialized monolith. */
+
+    /** An exported buffer holding one serialized monolith. */
     checkpoint_source_buffer_k,
 } checkpoint_source_t;
 
@@ -1941,7 +1964,7 @@ static checkpoint_source_t checkpoint_source(PyObject* object) {
     return checkpoint_source_buffer_k;
 }
 
-/** @brief Borrows a whole checkpoint blob, whatever its length. */
+/** Borrows a whole checkpoint blob, whatever its length. */
 static int checkpoint_borrow(PyObject* object, usearch_py_matrix_access_t access,
                              usearch_py_buffer_backing_t* backing) {
     backing->synthesized_owner = NULL;
@@ -1953,7 +1976,7 @@ static int checkpoint_borrow(PyObject* object, usearch_py_matrix_access_t access
     return 0;
 }
 
-/** @brief Walks the two keywords `save` and `load` accept beyond their positional target. */
+/** Walks the two keywords `save` and `load` accept beyond their positional target. */
 static int checkpoint_keywords_parse(PyObject* const* args, Py_ssize_t positional_args_count,
                                      PyObject* args_names_tuple, Py_ssize_t args_names_count,
                                      usearch_executor_t* executor, progress_state_t* progress_state) {

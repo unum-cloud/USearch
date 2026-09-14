@@ -1,8 +1,9 @@
 /**
- *  @brief A brute-force stand-in for the @c usearch_sequence_* C ABI, scoring every stored
- *      sequence against every query so a binding can be exercised without the engine.
- *
  *  @file src_stub/sequence.cpp
+ *  @author Ash Vardanian
+ *  @date September 5, 2026
+ *  @brief A brute-force stand-in for the @c usearch_sequence_* C ABI, scoring every stored sequence
+ *      against every query so a binding can be exercised without the engine.
  *
  *  Variable-length payloads cannot ride a strided matrix, so this modality's batches are tapes
  *  of @c usearch_bytes_view_t views - the shape most worth testing here, because a binding that
@@ -41,21 +42,23 @@ namespace {
 
 #pragma region Storage
 
-/** @brief The alphabet of a byte-level substitution matrix, one row and column per byte. */
+/** The alphabet of a byte-level substitution matrix, one row and column per byte. */
 constexpr std::size_t alphabet_k = 256;
 
-/**
- *  @brief What a handle froze at construction: the ABI's options, plus the scoring parameters
- *      only the weighted constructor supplies.
- */
+/** What a handle froze at construction: the ABI's options, plus the scoring parameters
+ *  only the weighted constructor supplies. */
 struct sequence_options_t {
-    /** @brief The options the caller passed, or a checkpoint later adopted. */
+
+    /** The options the caller passed, or a checkpoint later adopted. */
     usearch_sequence_options_t options {};
-    /** @brief Row-major @c alphabet_k × @c alphabet_k scores; empty under a uniform metric. */
+
+    /** Row-major @c alphabet_k × @c alphabet_k scores; empty under a uniform metric. */
     std::vector<us::i8_t> substitution;
-    /** @brief Cost of opening a gap, and the flat gap cost of the linear kind. */
+
+    /** Cost of opening a gap, and the flat gap cost of the linear kind. */
     us::i8_t gap_open = 0;
-    /** @brief Cost of extending an open gap; the linear kind ignores it. */
+
+    /** Cost of extending an open gap; the linear kind ignores it. */
     us::i8_t gap_extend = 0;
 };
 
@@ -67,21 +70,24 @@ static_assert(std::is_nothrow_move_constructible_v<entry_t>, "reallocation must 
 using index_t = handle<payload_t, sequence_options_t>;
 
 struct cursor_t {
-    /** @brief The index being walked; it must outlive the cursor. */
+
+    /** The index being walked; it must outlive the cursor. */
     index_t* index;
-    /** @brief The next entry to hand out. */
+
+    /** The next entry to hand out. */
     std::size_t position;
-    /** @brief The watermark captured at creation, which later insertions cannot raise. */
+
+    /** The watermark captured at creation, which later insertions cannot raise. */
     std::size_t limit;
 };
 
-/** @brief Whether the kind scores without scoring parameters, which decides the constructor. */
+/** Whether the kind scores without scoring parameters, which decides the constructor. */
 bool levenshtein_metric(usearch_sequence_metric_t metric) {
     return metric == usearch_sequence_metric_levenshtein_bytes_k ||
            metric == usearch_sequence_metric_levenshtein_utf8_k;
 }
 
-/** @brief Whether the kind reads a substitution matrix and gap costs. */
+/** Whether the kind reads a substitution matrix and gap costs. */
 bool alignment_metric(usearch_sequence_metric_t metric) {
     return metric == usearch_sequence_metric_needleman_wunsch_k ||
            metric == usearch_sequence_metric_needleman_wunsch_gotoh_k ||
@@ -89,14 +95,14 @@ bool alignment_metric(usearch_sequence_metric_t metric) {
            metric == usearch_sequence_metric_smith_waterman_gotoh_k;
 }
 
-/** @brief Whether the kind is one this build implements at all. */
+/** Whether the kind is one this build implements at all. */
 bool known_metric(usearch_sequence_metric_t metric) { return levenshtein_metric(metric) || alignment_metric(metric); }
 
 #pragma endregion Storage
 
 #pragma region Scoring
 
-/** @brief Decodes UTF-8 into code points, treating a malformed byte as its own code point. */
+/** Decodes UTF-8 into code points, treating a malformed byte as its own code point. */
 void decode_utf8(bytes_view_t bytes, std::vector<us::u32_t>& points) {
     points.clear();
     for (std::size_t position = 0; position != bytes.size();) {
@@ -120,7 +126,7 @@ void decode_utf8(bytes_view_t bytes, std::vector<us::u32_t>& points) {
     }
 }
 
-/** @brief Levenshtein distance with unit substitution, insertion, and deletion costs. */
+/** Levenshtein distance with unit substitution, insertion, and deletion costs. */
 template <typename unit_>
 double levenshtein(std::span<unit_ const> first, std::span<unit_ const> second, std::vector<std::size_t>& row) {
     row.resize(second.size() + 1);
@@ -137,11 +143,9 @@ double levenshtein(std::span<unit_ const> first, std::span<unit_ const> second, 
     return static_cast<double>(row[second.size()]);
 }
 
-/**
- *  @brief Global alignment with affine gaps - Needleman-Wunsch-Gotoh - as a negated similarity.
- *      Three recurrences run together: an aligned pair, a gap in the first, a gap in the second.
- *      An @p extend equal to @c gap_open collapses it to the flat-gap Needleman-Wunsch kind.
- */
+/** Global alignment with affine gaps - Needleman-Wunsch-Gotoh - as a negated similarity.
+ *  Three recurrences run together: an aligned pair, a gap in the first, a gap in the second.
+ *  An @p extend equal to @c gap_open collapses it to the flat-gap Needleman-Wunsch kind. */
 double global_alignment(bytes_view_t first, bytes_view_t second, sequence_options_t const& parameters, us::i64_t extend,
                         std::vector<us::i64_t>& scratch) {
     us::i64_t const open = parameters.gap_open;
@@ -177,11 +181,9 @@ double global_alignment(bytes_view_t first, bytes_view_t second, sequence_option
     return -static_cast<double>(aligned[second.size()]);
 }
 
-/**
- *  @brief Local alignment with affine gaps - Smith-Waterman-Gotoh - as a negated similarity.
- *      The same three recurrences under a zero floor, reporting the best cell anywhere in the
- *      table. An @p extend equal to @c gap_open collapses it to the flat-gap Smith-Waterman kind.
- */
+/** Local alignment with affine gaps - Smith-Waterman-Gotoh - as a negated similarity.
+ *  The same three recurrences under a zero floor, reporting the best cell anywhere in the
+ *  table. An @p extend equal to @c gap_open collapses it to the flat-gap Smith-Waterman kind. */
 double local_alignment(bytes_view_t first, bytes_view_t second, sequence_options_t const& parameters, us::i64_t extend,
                        std::vector<us::i64_t>& scratch) {
     us::i64_t const open = parameters.gap_open;
@@ -214,7 +216,7 @@ double local_alignment(bytes_view_t first, bytes_view_t second, sequence_options
     return -static_cast<double>(best);
 }
 
-/** @brief Reusable buffers, so scoring a whole corpus allocates once rather than per pair. */
+/** Reusable buffers, so scoring a whole corpus allocates once rather than per pair. */
 struct scratch_t {
     std::vector<us::u32_t> query_points;
     std::vector<us::u32_t> entry_points;
@@ -222,10 +224,8 @@ struct scratch_t {
     std::vector<us::i64_t> signed_row;
 };
 
-/**
- *  @brief Scores one pair under the frozen kind. Both constructors and @c adopt refuse a kind
- *      this build does not know, so every enumerator reaching here is one of the six.
- */
+/** Scores one pair under the frozen kind. Both constructors and @c adopt refuse a kind
+ *  this build does not know, so every enumerator reaching here is one of the six. */
 double distance(index_t const& index, bytes_view_t query, bytes_view_t stored, scratch_t& scratch) {
     sequence_options_t const& parameters = index.options;
     switch (parameters.options.metric) {
@@ -297,21 +297,27 @@ std::size_t search_tape(index_t& index, usearch_bytes_view_t const* queries, std
  *  fixed-width rows, and the prefix carries their summed extent to size the read.
  */
 struct prefix_t {
-    /** @brief The connections-per-node bound the handle was built with. */
+
+    /** The connections-per-node bound the handle was built with. */
     std::size_t connectivity;
-    /** @brief How many entries follow the prefix. */
+
+    /** How many entries follow the prefix. */
     std::size_t entries;
-    /** @brief Bytes of entry payload that follow, keys and lengths included. */
+
+    /** Bytes of entry payload that follow, keys and lengths included. */
     std::size_t payload_bytes;
-    /** @brief What entries are compared by; it alone says whether a matrix follows. */
+
+    /** What entries are compared by; it alone says whether a matrix follows. */
     usearch_sequence_metric_t metric;
-    /** @brief Cost of opening a gap, and the flat gap cost of the linear kinds. */
+
+    /** Cost of opening a gap, and the flat gap cost of the linear kinds. */
     us::i8_t gap_open;
-    /** @brief Cost of extending an open gap. */
+
+    /** Cost of extending an open gap. */
     us::i8_t gap_extend;
 };
 
-/** @brief The per-entry overhead of the blob: the key, then the byte length that follows it. */
+/** The per-entry overhead of the blob: the key, then the byte length that follows it. */
 constexpr std::size_t record_overhead_k = sizeof(usearch_key_t) + sizeof(std::size_t);
 
 std::size_t payload_extent(index_t const& index, std::size_t rows) {
@@ -355,7 +361,7 @@ void write_into(index_t const& index, std::size_t rows, bytes_span_t target) {
     }
 }
 
-/** @brief Reads the prefix and checks the blob is long enough for what it claims. */
+/** Reads the prefix and checks the blob is long enough for what it claims. */
 bool parse_prefix(prefix_t& prefix, bytes_view_t blob, usearch_error_t* error) {
     if (reject_if(blob.size() < sizeof(prefix_t), usearch_error_malformed_input_k, "The checkpoint ends early", error))
         return false;
@@ -364,7 +370,7 @@ bool parse_prefix(prefix_t& prefix, bytes_view_t blob, usearch_error_t* error) {
     return fits_blob(blob, sizeof(prefix_t) + table, prefix.payload_bytes, 1, error);
 }
 
-/** @brief Adopts a checkpoint's configuration, answering whether its metric is one we know. */
+/** Adopts a checkpoint's configuration, answering whether its metric is one we know. */
 bool adopt(usearch_sequence_options_t& options, prefix_t const& prefix) {
     if (!known_metric(prefix.metric)) return false;
     options.metric = prefix.metric;
@@ -372,7 +378,7 @@ bool adopt(usearch_sequence_options_t& options, prefix_t const& prefix) {
     return true;
 }
 
-/** @brief Replaces the contents of @p index; the caller holds both locks exclusively. */
+/** Replaces the contents of @p index; the caller holds both locks exclusively. */
 bool read_from(index_t& index, bytes_view_t blob, usearch_error_t* error) {
     prefix_t prefix {};
     if (!parse_prefix(prefix, blob, error)) return false;
@@ -595,7 +601,7 @@ std::size_t usearch_sequence_refine(usearch_sequence_index_t handle, usearch_exe
     return 0;
 }
 
-/** @brief The shared body of both search doors; the unfiltered one admits with a null predicate. */
+/** The shared body of both search doors; the unfiltered one admits with a null predicate. */
 void search_sequence_tape(usearch_sequence_index_t handle, usearch_executor_t executor,
                           usearch_bytes_view_t const* queries, std::size_t queries_count,
                           usearch_matches_span_t const* matches, usearch_sequence_search_options_t const* options,

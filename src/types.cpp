@@ -1,7 +1,8 @@
 /**
- *  @brief The library-wide probes of the C interface - the twin of `include/usearch/types.h`.
- *  @author Ash Vardanian
  *  @file src/types.cpp
+ *  @author Ash Vardanian
+ *  @date August 27, 2026
+ *  @brief The library-wide probes of the C interface - the twin of `include/usearch/types.h`.
  *
  *  The functions that take no handle and cannot fail: what version this is, which kernel
  *  families it was compiled with, which of those the machine in front of it can run, and the
@@ -21,7 +22,7 @@
 
 namespace {
 
-/** @brief Rendered once on first use, so the pointer the C interface hands out stays valid. */
+/** Rendered once on first use, so the pointer the C interface hands out stays valid. */
 char const* rendered_version() {
     static char rendered[32] = {0};
     if (!rendered[0])
@@ -30,7 +31,7 @@ char const* rendered_version() {
     return rendered;
 }
 
-/** @brief The kernel families a capability mask can name, newest class last. */
+/** The kernel families a capability mask can name, newest class last. */
 constexpr struct {
     nk_capability_t bit;
     char const* name;
@@ -44,7 +45,7 @@ constexpr struct {
     {nk_cap_v128_k, "v128"},         {nk_cap_v128relaxed_k, "v128relaxed"},
 };
 
-/** @brief Composes @p mask into @p rendered as a comma-separated list, once. */
+/** Composes @p mask into @p rendered as a comma-separated list, once. */
 char const* render_capabilities(char* rendered, size_t capacity, nk_capability_t mask) {
     if (rendered[0]) return rendered;
     char* cursor = rendered;

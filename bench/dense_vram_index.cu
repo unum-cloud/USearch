@@ -1,9 +1,9 @@
 /**
- *  @brief The CLI entry of the CUDA dense-index benchmark: option parsing, the device
- *      probe, and the dataset-scalar & stored-dtype hops into the per-dtype shards.
- *  @author Ash Vardanian
  *  @file bench/dense_vram_index.cu
+ *  @author Ash Vardanian
  *  @date July 22, 2026
+ *  @brief The CLI entry of the CUDA dense-index benchmark: option parsing, the device probe, and
+ *      the dataset-scalar & stored-dtype hops into the per-dtype shards.
  *
  *  The CUDA pipeline and its compile-time cascade live in @c dense/vram_index.cuh; this
  *  translation unit stays dtype-free by extern-declaring the @c run_with_stored_dtype
@@ -113,8 +113,8 @@ extern template int us::run_with_stored_dtype<nk::i8_t, nk_u1_k>( //
 extern template int us::run_with_stored_dtype<nk::u8_t, nk_u1_k>( //
     us::persisted_dataset<nk::u8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
 
-/** @brief Opens the dataset with the file-native scalar and lowers the stored dtype onto
- *      the shard-carried cascade - or reports the dtypes that carry device kits. */
+/** Opens the dataset with the file-native scalar and lowers the stored dtype onto
+ *  the shard-carried cascade - or reports the dtypes that carry device kits. */
 template <typename dataset_scalar_type_>
 static int open_and_run(bench_options_t const& options, int device, cuda_arch_t arch_ceiling,
                         cuda_address_space_t plane_space) {

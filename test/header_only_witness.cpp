@@ -1,11 +1,12 @@
 /**
- *  @brief The header-only tier's proof: everything under @c utilities/, @c basic/ &
- *      @c geospatial/ compiles & runs with the standard library alone - only @c -Iinclude,
- *      no submodule paths, no third-party targets - and this translation unit instantiates
- *      the whole public surface to witness it.
- *  @author Ash Vardanian
  *  @file test/header_only_witness.cpp
+ *  @author Ash Vardanian
  *  @date August 27, 2026
+ *  @brief The header-only tier's proof.
+ *
+ *  Everything under @c utilities/, @c basic/ & @c geospatial/ compiles & runs with the standard
+ *  library alone - only @c -Iinclude, no submodule paths, no third-party targets - and this
+ *  translation unit instantiates the whole public surface to witness it.
  *
  *  @c utilities/serialization.hpp is deliberately absent: it consumes yyjson for the
  *  SafeGraphs JSON header, so it sits outside the tier this file vouches for. Checks are
@@ -29,12 +30,12 @@
 
 using namespace unum::usearch;
 
-/** @brief The geospatial tier's witnesses: its metric, codec & index alias satisfy the basic concepts. */
+/** The geospatial tier's witnesses: its metric, codec & index alias satisfy the basic concepts. */
 static_assert(basic_metric<chord_metric_t, earth_fixed_t, i64_t>);
 static_assert(basic_value_codec<earth_fixed_codec_t, earth_fixed_t>);
 static_assert(basic_selector<surface_keep_octants_t, geospatial_ram_index_t, chord_metric_t>);
 
-/** @brief Hamming distance over eight-byte tags - the smallest metric the concept admits. */
+/** Hamming distance over eight-byte tags - the smallest metric the concept admits. */
 struct header_only_metric_t {
     std::array<char, 8> query_ {};
     std::array<u64_t, 64> differences_ {};
@@ -54,12 +55,12 @@ struct header_only_metric_t {
     }
 };
 
-/** @brief The same metric with the transparency tag - a compile-only concept witness. */
+/** The same metric with the transparency tag - a compile-only concept witness. */
 struct header_only_transparent_metric_t : header_only_metric_t {
     using is_transparent = void;
 };
 
-/** @brief Identity-bytes codec for the fixed-width tags. */
+/** Identity-bytes codec for the fixed-width tags. */
 struct header_only_codec_t {
     std::size_t storage_requirements(std::array<char, 8> const&) const noexcept { return 8; }
     status_t save(std::array<char, 8> const& value, bytes_span_t output) const noexcept {
@@ -100,7 +101,7 @@ static_assert(std::is_move_constructible_v<narrow_index_t::load_plan_t> &&
 static_assert(
     std::is_same_v<wide_index_t::columns_view_t, basic_columns<uuid_t const, u64_t const, byte_t const, u64_t const>>);
 
-/** @brief The tags the index probes store: distinct leading letters, shared tails. */
+/** The tags the index probes store: distinct leading letters, shared tails. */
 static std::array<char, 8> make_tag(std::size_t ordinal) noexcept {
     return {static_cast<char>('a' + ordinal % 26), static_cast<char>('a' + ordinal / 26), 0, 0, 0, 0, 0, 0};
 }
@@ -242,7 +243,7 @@ int main() {
     if (restored.key_of(0).value != index.key_of(0).value) return 1;
     if (restored.degree_of(3).value != index.degree_of(3).value) return 1;
 
-    // The wide instantiation: uuid keys through `std::hash<uuid_t>`, 64-bit ids.
+    // The wide instantiation: uuid keys through `std::hash<uuid_t>`, 64-bit IDs.
     wide_index_t wide_index;
     if (failed(wide_index.reserve(4).status)) return 1;
     std::array<uuid_t, 2> const wide_keys {std::bit_cast<uuid_t>(std::array<u64_t, 2> {1, 2}),

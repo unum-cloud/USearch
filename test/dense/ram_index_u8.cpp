@@ -1,9 +1,9 @@
 /**
+ *  @file test/dense/ram_index_u8.cpp
+ *  @author Ash Vardanian
+ *  @date July 23, 2026
  *  @brief Smoke & concurrency tests for the CPU-resident @c dense_ram_index over u8 cells,
  *      including the tiled matrix-engine tier where the machine offers it.
- *  @author Ash Vardanian
- *  @file test/dense/ram_index_u8.cpp
- *  @date July 23, 2026
  */
 #include "dense/ram_index.hpp"
 

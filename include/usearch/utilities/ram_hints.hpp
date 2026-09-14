@@ -1,15 +1,15 @@
 /**
- *  @brief Cache-control & prefetch hints for 1-to-N graph-traversal distance compute.
- *  @author Ash Vardanian
  *  @file include/usearch/utilities/ram_hints.hpp
+ *  @author Ash Vardanian
  *  @date April 22, 2026
+ *  @brief Cache-control & prefetch hints for 1-to-N graph-traversal distance compute.
  */
 #pragma once
 
 namespace unum {
 namespace usearch {
 
-/** @brief No-op fallback used as the primary-template base for every role. */
+/** No-op fallback used as the primary-template base for every role. */
 struct dummy_memory_hint_t {
     inline void operator()(void const*) const noexcept {}
 };
