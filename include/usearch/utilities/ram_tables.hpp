@@ -25,7 +25,7 @@
 #include <type_traits> // `std::is_integral`, `std::is_trivially_copyable_v`
 #include <utility>     // `std::swap`, `std::move`
 
-#if defined(__AVX512F__)
+#if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h> // `_mm512_cmpeq_epi32_mask` - the sixteen-slot group scan
 #endif
 
@@ -76,36 +76,55 @@ struct serial_visits_hash_set_kit_t {
     }
 };
 
-#if defined(__AVX512F__)
+/** @brief The group scan for u32 slots, defined below wherever the intrinsics exist. Declared
+ *      unconditionally, so a capability chain can name it on every target and its own tier flag
+ *      alone decides whether a class takes it - an unselected layer never needs a body. */
+struct u32_skylake_visits_hash_set_kit_t;
+
+#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("avx512f"))), apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("avx512f")
+#endif
+
 /**
- *  @brief The group scan for u32 slots on AVX-512 units: one 512-bit load compares sixteen
- *      slots against the element and against the empty sentinel, so a probe touches cache
- *      lines, not slots.
+ *  @brief The group scan for u32 slots on AVX-512 units: one 512-bit load compares sixteen slots
+ *      against the element and against the empty sentinel, so a probe touches cache lines rather
+ *      than slots.
  *
  *  Placement is group-ordered: an element may land @b before its exact hashed slot inside its
- *  starting group, and every reader replicates that order, so a group holding any empty lane
- *  ends the walk. Groups are 16-aligned and the capacity is a power of two, so once it reaches
- *  16 no load straddles the table's end; smaller tables take the serial walk.
+ *  starting group, and every reader replicates that order, so a group holding any empty lane ends
+ *  the walk. Groups are 16-aligned and the capacity is a power of two, so once it reaches 16 no
+ *  load straddles the table's end; smaller tables take the serial walk. The scan carries its own
+ *  ISA, so any unit compiles it whatever flags that unit was given.
  */
 struct u32_skylake_visits_hash_set_kit_t {
     template <typename hasher_type_>
     static inline u32_t* locate_slot(u32_t* slots, std::size_t capacity, hasher_type_ const& hasher,
                                      u32_t element) noexcept {
         if (capacity < 16) return serial_visits_hash_set_kit_t::locate_slot(slots, capacity, hasher, element);
-        __m512i const key = _mm512_set1_epi32(static_cast<int>(element));
-        __m512i const empty = _mm512_set1_epi32(static_cast<int>(unused_hash_slot_value<u32_t>()));
+        __m512i const key_u32x16 = _mm512_set1_epi32(static_cast<int>(element));
+        __m512i const empty_u32x16 = _mm512_set1_epi32(static_cast<int>(unused_hash_slot_value<u32_t>()));
         std::size_t group = (hasher(element) & (capacity - 1)) & ~std::size_t {15};
         while (true) {
-            __m512i const block = _mm512_loadu_si512(slots + group);
-            __mmask16 const key_lanes = _mm512_cmpeq_epi32_mask(block, key);
-            if (key_lanes) return slots + group + std::countr_zero(static_cast<unsigned>(key_lanes));
-            __mmask16 const empty_lanes = _mm512_cmpeq_epi32_mask(block, empty);
-            if (empty_lanes) return slots + group + std::countr_zero(static_cast<unsigned>(empty_lanes));
+            __m512i const slots_u32x16 = _mm512_loadu_si512(slots + group);
+            __mmask16 const key_mask_m16 = _mm512_cmpeq_epi32_mask(slots_u32x16, key_u32x16);
+            if (key_mask_m16) return slots + group + std::countr_zero(static_cast<unsigned>(key_mask_m16));
+            __mmask16 const empty_mask_m16 = _mm512_cmpeq_epi32_mask(slots_u32x16, empty_u32x16);
+            if (empty_mask_m16) return slots + group + std::countr_zero(static_cast<unsigned>(empty_mask_m16));
             group = (group + 16) & (capacity - 1);
         }
     }
 };
-#endif // __AVX512F__
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#endif // defined(__x86_64__) || defined(_M_X64)
 
 /**
  *  @brief Minimalistic open-addressing hash-set, used to track visited nodes during graph
