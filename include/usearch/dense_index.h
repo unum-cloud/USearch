@@ -17,7 +17,7 @@
  *  @c .safegraphs path is one monolith: a self-describing file holding every shard's vectors,
  *  neighbor lists and keys as one graph, rows in placement order and node ids rebased. A
  *  @c .safegraphs.json path is a manifest: a small JSON catalog of one monolith per shard - each
- *  with shard-local node ids, so edges never cross files - with every part resolved relative to
+ *  with shard-local node ids, so neighbors never cross files - with every part resolved relative to
  *  the manifest. Loading reads the content, never the extension, so either form loads into any
  *  shard count: part @c p lands whole on shard @c p modulo the shard count. A manifest records
  *  where its parts were written, never where a reader must keep them, so a checkpoint written
@@ -325,7 +325,7 @@ USEARCH_EXPORT size_t usearch_dense_add(                        //
 
 /**
  *  @brief Re-selects the neighbors of every stored entry against the finished graph, improving
- *      edges that were chosen when the graph around them was still incomplete.
+ *      neighbors chosen when the graph around them was still incomplete.
  *
  *  @param[inout] index The handle to be refined.
  *  @param[in] executor The executor to fan out over; its kind must match the residency.
@@ -334,22 +334,24 @@ USEARCH_EXPORT size_t usearch_dense_add(                        //
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
- *  @return Number of nodes whose edges changed; zero means the graph has settled.
+ *  @return Number of nodes whose neighbors changed; zero means the graph has settled.
  *
  *  This is a build step rather than a repair. A cheap insertion pass followed by one refinement
  *  reaches a better graph, in less total time, than a single expensive insertion pass - so a wide
  *  @c expansion_factor belongs here rather than in @c usearch_dense_add.
  *
  *  Cancelling is safe, which is what makes a whole-graph sweep affordable. Re-selecting a node's
- *  edges is idempotent and claims no identity, so a stopped pass leaves the graph correct and
- *  merely less improved - nothing unwinds, and no @c usearch_error_cancelled_k is reported. The
- *  sweep resumes where it stopped, so calling under a time budget converges across calls, and a
- *  caller loops until the return falls below whatever change rate they consider settled.
+ *  neighbors is idempotent and claims no identity, so a stopped pass leaves the graph correct and
+ *  merely less improved - nothing unwinds, and no @c usearch_error_cancelled_k is reported. That
+ *  idempotence is also why a stopped pass needs nothing remembered: the next call sweeps the graph
+ *  again and re-selecting a settled node changes nothing, so calling under a time budget still
+ *  converges, and a caller loops until the return falls below whatever change rate they consider
+ *  settled.
  *
- *  Searches may run throughout. Edge re-selection publishes one row at a time and never removes a
- *  node, so a concurrent walk sees either the old neighbors or the new ones and reaches the same
- *  entries by either. Insertions may not: a handle whose checkpoint is read-only refuses with
- *  @c usearch_error_read_only_k, like every other mutating verb.
+ *  Searches may run throughout. Neighbor re-selection publishes one node at a time and never
+ *  removes a node, so a concurrent walk sees either the old neighbors or the new ones and reaches
+ *  the same entries by either. Insertions may not: a handle whose checkpoint is read-only refuses
+ *  with @c usearch_error_read_only_k, like every other mutating verb.
  */
 USEARCH_EXPORT size_t usearch_dense_refine(                     //
     usearch_dense_index_t index, usearch_executor_t executor,   //
@@ -470,7 +472,7 @@ USEARCH_EXPORT size_t usearch_dense_get(            //
 
 /**
  *  @brief Absorbs every handle in @p donors into @p index - cheaper than re-inserting their
- *      vectors one by one, wiring cross-links via landmark stitching. Donor handles are consumed
+ *      vectors one by one, linking across donors via landmark stitching. Donor handles are consumed
  *      and must not be used afterwards, not even for @c usearch_dense_free.
  *
  *  @param[inout] index The handle absorbing the donors.

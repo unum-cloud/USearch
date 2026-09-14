@@ -51,6 +51,13 @@ using u32_t = std::uint32_t;
 using u16_t = std::uint16_t;
 using u8_t = std::uint8_t;
 
+/** @brief One word of 64 packed single-bit lanes - the storage a membership bitset walks. An
+ *      alias rather than an enumeration: only one of the seven atomic references admits an
+ *      enumeration's width, and a bitset binds whichever one its CPU class names. */
+using u1x64_t = u64_t;
+/** @brief The half-width sibling, for planes a device addresses in 32-bit words. */
+using u1x32_t = u32_t;
+
 /** @brief "usearch3" read as a little-endian word - the one magic fronting every USearch
  *      payload; the word right after it discriminates the layout. */
 inline constexpr u64_t usearch_magic_k = 0x3368637261657375ull;
