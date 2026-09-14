@@ -513,6 +513,23 @@ struct dense_ram_index {
         return {count, frozen.dimensions(), frozen.connectivity()};
     }
 
+    /** @brief Where a save lands: two row-major planes the caller sized from @ref saved_shape,
+     *      handed over at planning so no step names a destination of its own. */
+    struct columns_t {
+        /** @brief The vectors plane, one packed row per node. */
+        bytes_span_t vectors;
+        /** @brief The neighbors plane, @c connectivity IDs per node. */
+        bytes_span_t neighbors;
+    };
+
+    /** @brief Where a load reads from - the read-only twin of @ref columns_t. */
+    struct columns_view_t {
+        /** @brief The vectors plane, one packed row per node. */
+        bytes_view_t vectors;
+        /** @brief The neighbors plane, @c connectivity IDs per node. */
+        bytes_view_t neighbors;
+    };
+
 #pragma endregion Measures
 
 #pragma region Reservation
@@ -737,7 +754,7 @@ struct dense_ram_index {
         // all our nodes, and this thread must roll forward to publishing every ID it claims.
         auto [batch_claim, granted] = claim(incoming_vectors_count);
         if (failed(granted)) return {{size()}, granted};
-        insert_reserved(new_vectors, assigned_ids, context, std::move(batch_claim), config);
+        insert(std::move(batch_claim), new_vectors, assigned_ids, context, config);
 
         insert_result_t result;
         result.new_size = size();
@@ -848,9 +865,9 @@ struct dense_ram_index {
      *  watermark turn and no reachable node can be observed without it.
      */
     template <typename callback_type_ = dummy_callback_t>
-    void insert_reserved(vectors_view_t new_vectors, node_ids_span_t assigned_ids, dense_traversal_context_t& context,
-                         capacity_claim_t&& claim, insert_config_t config = {},
-                         callback_type_&& on_assigned = {}) noexcept {
+    void insert(capacity_claim_t&& claim, vectors_view_t new_vectors, node_ids_span_t assigned_ids,
+                dense_traversal_context_t& context, insert_config_t config = {},
+                callback_type_&& on_assigned = {}) noexcept {
         // Consumed: from here every row dispenses an ID, and a dispensed ID is never returnable.
         claim.consume();
         std::size_t const incoming_vectors_count = new_vectors.extent(0);
@@ -1580,6 +1597,10 @@ struct dense_ram_index {
      *  surfaces as @c contended_k instead of a silently torn snapshot.
      */
     struct [[nodiscard]] save_plan_t {
+        /** @brief Where the rows land, vetted against the cut at planning. */
+        columns_t columns {};
+        /** @brief What an ID under the cut moves by - the row this shard starts at. */
+        node_id_t id_shift = 0;
         /** @brief The contract the caller certified. */
         synchronization_t synchronization = synchronization_t::concurrent_k;
         /** @brief Rows under the cut - the watermark at planning. */
@@ -1594,13 +1615,16 @@ struct dense_ram_index {
         std::size_t covered_neighbors = 0;
 
         save_plan_t() noexcept = default;
-        /** @brief The index being snapshotted under @p synchronization; only @ref plan_save calls it. */
-        save_plan_t(dense_ram_index const& index, synchronization_t synchronization) noexcept
-            : synchronization(synchronization), index_(&index) {}
+        /** @brief The index being snapshotted into @p columns under @p synchronization, its IDs
+         *      shifted by @p id_shift; only @ref plan_save calls it. */
+        save_plan_t(dense_ram_index const& index, columns_t columns, synchronization_t synchronization,
+                    node_id_t id_shift) noexcept
+            : columns(columns), id_shift(id_shift), synchronization(synchronization), index_(&index) {}
         save_plan_t(save_plan_t&& other) noexcept
-            : synchronization(other.synchronization), visible(other.visible), dispensed(other.dispensed),
-              allocated(other.allocated), covered_vectors(other.covered_vectors),
-              covered_neighbors(other.covered_neighbors), index_(std::exchange(other.index_, nullptr)) {}
+            : columns(other.columns), id_shift(other.id_shift), synchronization(other.synchronization),
+              visible(other.visible), dispensed(other.dispensed), allocated(other.allocated),
+              covered_vectors(other.covered_vectors), covered_neighbors(other.covered_neighbors),
+              index_(std::exchange(other.index_, nullptr)) {}
         save_plan_t& operator=(save_plan_t&&) = delete;
         // The tallies are this plan's own: a copy would tally into a twin `finish` never reads.
         save_plan_t(save_plan_t const&) = delete;
@@ -1617,9 +1641,9 @@ struct dense_ram_index {
             iota_view<node_id_t> index_rows;
             /** @brief Where they sit in the caller's buffer, counted from its first row. */
             iota_view<node_id_t> source_rows;
-            /** @brief Bytes this step's vector rows occupy - what @ref save_vectors demands. */
+            /** @brief Bytes this step's vector rows occupy inside the plan's vectors column. */
             std::size_t vectors_bytes = 0;
-            /** @brief Bytes this step's neighbor rows occupy - what @ref save_neighbors demands. */
+            /** @brief Bytes this step's neighbor rows occupy inside the plan's neighbors column. */
             std::size_t neighbors_bytes = 0;
         };
 
@@ -1646,59 +1670,56 @@ struct dense_ram_index {
             return {this, count};
         }
 
-        /** @brief Copies step @p step 's vector rows into @p destination - straight from chunk
-         *      memory, since published vectors never change.
+        /** @brief Copies step @p step 's rows into the plan's own columns: the vectors straight
+         *      from chunk memory, since published vectors never change, and the neighbors rebased
+         *      through @p scratch - every ID under the cut shifted by @c id_shift, every other
+         *      folded to the sentinel.
          *
          *  @param[in] step The step to copy, as @ref steps hands them out.
-         *  @param[out] destination The step's own bytes, sized by @c step.vectors_bytes.
-         */
-        status_t save_vectors(step_t const& step, bytes_span_t destination) noexcept {
-            if (!index_) return status_t::uninitialized_k;
-            iota_view<node_id_t> const rows = step.index_rows;
-            if (rows.empty()) return status_t::config_mismatch_k;
-            std::size_t const row_values = stored_row_values(index_->geometry());
-            std::size_t const values = rows.size() * row_values;
-            if (destination.size() != step.vectors_bytes) return status_t::config_mismatch_k;
-            chunked_location_t const location = index_->chunked_location(rows.first);
-            vectors_view_t const vectors = index_->vectors_chunks_[location.chunk_index].view()(
-                nk::range {location.index_in_chunk, location.index_in_chunk + rows.size()}, nk::slice);
-            [[maybe_unused]] status_t const copied = copy_bytes(destination, bytes_of(vectors.data(), values));
-            atomic_ref<std::size_t>(covered_vectors).add(rows.size(), std::memory_order_release);
-            return status_t::success_k;
-        }
-
-        /** @brief Copies step @p step 's neighbor rows into @p destination, every ID under the
-         *      cut shifted by @p id_shift and every other folded to the sentinel.
-         *
-         *  @param[in] step The step to copy, as @ref steps hands them out.
-         *  @param[out] destination The step's own bytes, sized by @c step.neighbors_bytes.
-         *  @param[in] id_shift What an ID under the cut moves by - the row this shard starts at.
          *  @param[inout] scratch One step of IDs the caller reserved, where the rebase happens.
          */
-        status_t save_neighbors(step_t const& step, bytes_span_t destination, node_id_t id_shift,
-                                nk::matrix_span<node_id_t> scratch) noexcept {
+        status_t save(step_t const& step, nk::matrix_span<node_id_t> scratch) noexcept {
             if (!index_) return status_t::uninitialized_k;
             iota_view<node_id_t> const rows = step.index_rows;
             if (rows.empty()) return status_t::config_mismatch_k;
-            std::size_t const connectivity = index_->geometry().connectivity();
-            std::size_t const words = rows.size() * connectivity;
-            if (destination.size() != step.neighbors_bytes) return status_t::config_mismatch_k;
+            geometry_t const frozen = index_->geometry();
+            std::size_t const row_values = stored_row_values(frozen);
+            std::size_t const connectivity = frozen.connectivity();
+            std::size_t const step_scalars = rows.size() * row_values;
+            std::size_t const step_slots = rows.size() * connectivity;
+            std::size_t const vectors_first = step.source_rows.first * row_values * sizeof(scalar_t);
+            std::size_t const neighbors_first = step.source_rows.first * connectivity * sizeof(node_id_t);
+            if (step.vectors_bytes != step_scalars * sizeof(scalar_t) ||
+                step.neighbors_bytes != step_slots * sizeof(node_id_t))
+                return status_t::config_mismatch_k;
+            if (vectors_first > columns.vectors.size() || neighbors_first > columns.neighbors.size() ||
+                columns.vectors.size() - vectors_first < step.vectors_bytes ||
+                columns.neighbors.size() - neighbors_first < step.neighbors_bytes)
+                return status_t::config_mismatch_k;
             if (scratch.extent(0) < rows.size() || scratch.extent(1) != connectivity || !scratch.is_contiguous())
                 return status_t::config_mismatch_k;
+
             chunked_location_t const location = index_->chunked_location(rows.first);
+            vectors_view_t const stored = index_->vectors_chunks_[location.chunk_index].view()(
+                nk::range {location.index_in_chunk, location.index_in_chunk + rows.size()}, nk::slice);
+            [[maybe_unused]] status_t const copied_vectors = copy_bytes(
+                columns.vectors.subspan(vectors_first, step.vectors_bytes), bytes_of(stored.data(), step_scalars));
+            atomic_ref<std::size_t>(covered_vectors).add(rows.size(), std::memory_order_release);
+
             node_id_t const* source =
                 index_->neighbors_chunks_[location.chunk_index].view().row(location.index_in_chunk).data();
             node_id_t* staged = scratch.data();
             // The `const_cast` is the pre-P3323 currency for atomics living in const memory.
             if (synchronization == synchronization_t::concurrent_k)
-                for (std::size_t word = 0; word != words; ++word)
+                for (std::size_t word = 0; word != step_slots; ++word)
                     staged[word] =
                         atomic_ref<node_id_t>(const_cast<node_id_t&>(source[word])).load(std::memory_order_relaxed);
-            else std::copy_n(source, words, staged);
-            for (std::size_t word = 0; word != words; ++word)
+            else std::copy_n(source, step_slots, staged);
+            for (std::size_t word = 0; word != step_slots; ++word)
                 staged[word] = staged[word] < visible ? static_cast<node_id_t>(staged[word] + id_shift)
                                                       : dense_node_id_unknown_k;
-            [[maybe_unused]] status_t const copied = copy_bytes(destination, bytes_of(staged, words));
+            [[maybe_unused]] status_t const copied_neighbors = copy_bytes(
+                columns.neighbors.subspan(neighbors_first, step.neighbors_bytes), bytes_of(staged, step_slots));
             atomic_ref<std::size_t>(covered_neighbors).add(rows.size(), std::memory_order_release);
             return status_t::success_k;
         }
@@ -1734,19 +1755,41 @@ struct dense_ram_index {
     };
 
     /**
-     *  @brief Opens a save under @p synchronization: takes the cut and, under @c concurrent_k,
-     *      refuses while an insert is mid-flight - the settlement probe, trailing counter first,
-     *      since the pair is monotone with visible ≤ dispensed at every instant. @c exclusive_k
-     *      reads like @c immutable_k.
+     *  @brief Opens a save into @p columns under @p synchronization: takes the cut and, under
+     *      @c concurrent_k, refuses while an insert is mid-flight - the settlement probe, trailing
+     *      counter first, since the pair is monotone with visible ≤ dispensed at every instant.
+     *      @c exclusive_k reads like @c immutable_k. Columns too short for the rows under the cut
+     *      are refused here, so no step ever writes past them.
+     *
+     *  @param[out] columns Where the rows land, sized from @ref saved_shape.
+     *  @param[in] synchronization The contract the caller certifies.
+     *  @param[in] id_shift What an ID under the cut moves by - the row this shard starts at.
      */
-    expected<save_plan_t> plan_save(synchronization_t synchronization) const noexcept {
-        if (!geometry()) return {{}, status_t::config_mismatch_k};
-        save_plan_t plan {*this, synchronization};
+    expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization,
+                                    node_id_t id_shift = 0) const noexcept {
+        geometry_t const frozen = geometry();
+        if (!frozen) return {{}, status_t::config_mismatch_k};
+        save_plan_t plan {*this, columns, synchronization, id_shift};
         plan.visible = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
         plan.dispensed = atomic_ref<node_id_t>(next_visible_id_).load(std::memory_order_acquire);
         plan.allocated = atomic_ref<node_id_t>(last_allocated_id_).load(std::memory_order_acquire);
         if (plan.visible != plan.dispensed) return {{}, status_t::contended_k};
+        std::size_t const rows = static_cast<std::size_t>(plan.visible);
+        if (columns.vectors.size() < rows * stored_row_values(frozen) * sizeof(scalar_t) ||
+            columns.neighbors.size() < rows * frozen.connectivity() * sizeof(node_id_t))
+            return {{}, status_t::config_mismatch_k};
         return {std::move(plan), status_t::success_k};
+    }
+
+    /** @brief Serializes every row under the cut into @p columns on the calling thread - the
+     *      one-shot over @ref plan_save for a caller with no threads to fan the steps out over. */
+    status_t save(columns_t columns, synchronization_t synchronization,
+                  nk::matrix_span<node_id_t> scratch) const noexcept {
+        auto [plan, planned] = plan_save(columns, synchronization);
+        if (failed(planned)) return planned;
+        for (typename save_plan_t::step_t const step : plan.steps())
+            if (status_t const saved = plan.save(step, scratch); failed(saved)) return saved;
+        return plan.finish();
     }
 
     /**
@@ -1761,6 +1804,10 @@ struct dense_ram_index {
      *  at the same base and the rows it half-filled are never published.
      */
     struct [[nodiscard]] load_plan_t {
+        /** @brief Where the rows come from, vetted against them at planning. */
+        columns_view_t columns {};
+        /** @brief The ID space the source's rows speak. */
+        iota_view<node_id_t> source_range {};
         /** @brief The first appended ID - the row the claim landed at. */
         node_id_t base = 0;
         /** @brief Rows the plan appends. */
@@ -1771,12 +1818,16 @@ struct dense_ram_index {
         std::size_t covered_neighbors = 0;
 
         load_plan_t() noexcept = default;
-        /** @brief The index appended to at @p base, and the claim the rows ride in - empty for a
-         *      plan of no rows; only @ref plan_load calls it. */
-        load_plan_t(dense_ram_index& index, node_id_t base, capacity_claim_t&& claim) noexcept
-            : base(base), rows(claim.rows()), index_(&index), claim_(std::move(claim)) {}
+        /** @brief The index appended to at @p base, the @p columns the rows come from under
+         *      @p source_range, and the claim they ride in - empty for a plan of no rows; only
+         *      @ref plan_load calls it. */
+        load_plan_t(dense_ram_index& index, columns_view_t columns, iota_view<node_id_t> source_range, node_id_t base,
+                    capacity_claim_t&& claim) noexcept
+            : columns(columns), source_range(source_range), base(base), rows(claim.rows()), index_(&index),
+              claim_(std::move(claim)) {}
         load_plan_t(load_plan_t&& other) noexcept
-            : base(other.base), rows(std::exchange(other.rows, 0)), covered_vectors(other.covered_vectors),
+            : columns(other.columns), source_range(other.source_range), base(other.base),
+              rows(std::exchange(other.rows, 0)), covered_vectors(other.covered_vectors),
               covered_neighbors(other.covered_neighbors), index_(std::exchange(other.index_, nullptr)),
               claim_(std::move(other.claim_)) {}
         load_plan_t& operator=(load_plan_t&&) = delete;
@@ -1794,9 +1845,9 @@ struct dense_ram_index {
             iota_view<node_id_t> index_rows;
             /** @brief Where they come from in the caller's buffer, from its first row. */
             iota_view<node_id_t> source_rows;
-            /** @brief Bytes this step's vector rows occupy - what @ref load_vectors demands. */
+            /** @brief Bytes this step's vector rows occupy inside the plan's vectors column. */
             std::size_t vectors_bytes = 0;
-            /** @brief Bytes this step's neighbor rows occupy - what @ref load_neighbors demands. */
+            /** @brief Bytes this step's neighbor rows occupy inside the plan's neighbors column. */
             std::size_t neighbors_bytes = 0;
         };
 
@@ -1827,23 +1878,47 @@ struct dense_ram_index {
             return {this, count};
         }
 
-        /** @brief Copies step @p step 's vector rows out of @p source straight into chunk
-         *      memory, deriving their norms as they land.
+        /** @brief Copies step @p step 's rows out of the plan's own columns straight into chunk
+         *      memory: the vectors with their norms derived as they land, then the neighbors with
+         *      every ID inside @c source_range folded onto the appended range and every other onto
+         *      the sentinel.
          *
          *  @param[in] step The step to fill, as @ref steps hands them out.
-         *  @param[in] source The step's own bytes, sized by @c step.vectors_bytes.
          */
-        status_t load_vectors(step_t const& step, bytes_view_t source) noexcept {
+        status_t load(step_t const& step) noexcept { return load(step, columns, source_range); }
+
+        /** @brief The same copy out of @p columns under @p source_range rather than the plan's
+         *      own - what a sharded plan drives, one part's slice at a time, its step naming the
+         *      rows in that part's row and ID spaces.
+         *
+         *  @param[in] step The step to fill; its source rows address @p columns.
+         *  @param[in] columns The part's own planes.
+         *  @param[in] source_range The ID space the part's rows speak.
+         */
+        status_t load(step_t const& step, columns_view_t columns, iota_view<node_id_t> source_range) noexcept {
             if (!index_) return status_t::uninitialized_k;
             iota_view<node_id_t> const range = step.index_rows;
             if (range.empty()) return status_t::config_mismatch_k;
-            std::size_t const row_values = stored_row_values(index_->geometry());
-            std::size_t const values = range.size() * row_values;
-            if (source.size() != values * sizeof(scalar_t)) return status_t::config_mismatch_k;
+            geometry_t const frozen = index_->geometry();
+            std::size_t const row_values = stored_row_values(frozen);
+            std::size_t const connectivity = frozen.connectivity();
+            std::size_t const step_scalars = range.size() * row_values;
+            std::size_t const step_slots = range.size() * connectivity;
+            std::size_t const vectors_first = step.source_rows.first * row_values * sizeof(scalar_t);
+            std::size_t const neighbors_first = step.source_rows.first * connectivity * sizeof(node_id_t);
+            if (step.vectors_bytes != step_scalars * sizeof(scalar_t) ||
+                step.neighbors_bytes != step_slots * sizeof(node_id_t))
+                return status_t::config_mismatch_k;
+            if (vectors_first > columns.vectors.size() || neighbors_first > columns.neighbors.size() ||
+                columns.vectors.size() - vectors_first < step.vectors_bytes ||
+                columns.neighbors.size() - neighbors_first < step.neighbors_bytes)
+                return status_t::config_mismatch_k;
+
             chunked_location_t const location = index_->chunked_location(range.first);
             nk::matrix_span<scalar_t> const vectors = index_->vectors_chunks_[location.chunk_index].span()(
                 nk::range {location.index_in_chunk, location.index_in_chunk + range.size()}, nk::slice);
-            [[maybe_unused]] status_t const copied = copy_bytes(bytes_of(vectors.data(), values), source);
+            [[maybe_unused]] status_t const copied_vectors = copy_bytes(
+                bytes_of(vectors.data(), step_scalars), columns.vectors.subspan(vectors_first, step.vectors_bytes));
             // Norms come from the same kernels the insertion path uses.
             if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>)
                 for (std::size_t offset_in_chunk = 0; offset_in_chunk != range.size(); ++offset_in_chunk) {
@@ -1852,30 +1927,17 @@ struct dense_ram_index {
                     index_->norm_ref_for(row) = dense_norms(index_->vector_for(row));
                 }
             atomic_ref<std::size_t>(covered_vectors).add(range.size(), std::memory_order_release);
-            return status_t::success_k;
-        }
 
-        /** @brief Copies step @p step 's neighbor rows out of @p source straight into chunk
-         *      memory, then folds every ID inside @p source_range onto the appended range and
-         *      every other onto the sentinel.
-         *
-         *  @param[in] step The step to fill, as @ref steps hands them out.
-         *  @param[in] source The step's own bytes, sized by @c step.neighbors_bytes.
-         *  @param[in] source_range The ID space the source's rows speak.
-         */
-        status_t load_neighbors(step_t const& step, bytes_view_t source, iota_view<node_id_t> source_range) noexcept {
-            if (!index_) return status_t::uninitialized_k;
-            iota_view<node_id_t> const range = step.index_rows;
-            if (range.empty()) return status_t::config_mismatch_k;
-            std::size_t const connectivity = index_->geometry().connectivity();
-            std::size_t const words = range.size() * connectivity;
-            if (source.size() != words * sizeof(node_id_t)) return status_t::config_mismatch_k;
-            chunked_location_t const location = index_->chunked_location(range.first);
             nk::matrix_span<node_id_t> const neighbors = index_->neighbors_chunks_[location.chunk_index].span()(
                 nk::range {location.index_in_chunk, location.index_in_chunk + range.size()}, nk::slice);
-            [[maybe_unused]] status_t const copied = copy_bytes(bytes_of(neighbors.data(), words), source);
-            std::span<node_id_t> const landed {neighbors.data(), words};
-            rebase_neighbors(landed, source_range, static_cast<node_id_t>(base), dense_node_id_unknown_k);
+            [[maybe_unused]] status_t const copied_neighbors = copy_bytes(
+                bytes_of(neighbors.data(), step_slots),
+                columns.neighbors.subspan(neighbors_first, step.neighbors_bytes));
+            std::span<node_id_t> const landed {neighbors.data(), step_slots};
+            // The part's rows land at this step's own index rows, so an ID's shift follows from
+            // the step rather than from the plan's base - the two agree for a one-part plan.
+            node_id_t const shift = static_cast<node_id_t>(range.first - step.source_rows.first + source_range.first);
+            rebase_neighbors(landed, source_range, shift, dense_node_id_unknown_k);
             compact_neighbors(landed, connectivity, range.first, dense_node_id_unknown_k);
             atomic_ref<std::size_t>(covered_neighbors).add(range.size(), std::memory_order_release);
             return status_t::success_k;
@@ -1912,22 +1974,53 @@ struct dense_ram_index {
     };
 
     /**
-     *  @brief Opens a load of @p rows after the published prefix: claims them through the ordinary
-     *      capacity protocol, so a preceding @c reserve is consumed rather than duplicated and
-     *      chunks grow only on a genuine deficit. Refuses an unfrozen geometry, an insert
-     *      mid-flight, and rows past the ID space.
+     *  @brief Opens a load of @p rows from @p columns after the published prefix: claims them
+     *      through the ordinary capacity protocol, so a preceding @c reserve is consumed rather
+     *      than duplicated and chunks grow only on a genuine deficit. Refuses an unfrozen
+     *      geometry, columns shorter than the rows, an insert mid-flight, and rows past the ID
+     *      space.
+     *
+     *  @param[in] columns Where the rows come from, both planes sized for @p rows.
+     *  @param[in] rows Rows to append.
+     *  @param[in] source_range The ID space the source's rows speak.
      */
+    expected<load_plan_t> plan_load(columns_view_t columns, std::size_t rows,
+                                    iota_view<node_id_t> source_range) noexcept {
+        geometry_t const frozen = geometry();
+        if (!frozen) return {{}, status_t::config_mismatch_k};
+        if (columns.vectors.size() < rows * stored_row_values(frozen) * sizeof(scalar_t) ||
+            columns.neighbors.size() < rows * frozen.connectivity() * sizeof(node_id_t))
+            return {{}, status_t::config_mismatch_k};
+        auto [plan, planned] = plan_load(rows);
+        if (failed(planned)) return {{}, planned};
+        plan.columns = columns;
+        plan.source_range = source_range;
+        return {std::move(plan), planned};
+    }
+
+    /** @brief Opens a load of @p rows the caller sources per step - what a sharded plan drives,
+     *      its parts arriving one slice at a time rather than as one pair of columns. */
     expected<load_plan_t> plan_load(std::size_t rows) noexcept {
         if (!geometry()) return {{}, status_t::config_mismatch_k};
         node_id_t const visible = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
-        if (!rows) return {load_plan_t {*this, visible, {}}, status_t::success_k};
+        if (!rows) return {load_plan_t {*this, {}, {}, visible, {}}, status_t::success_k};
         if (visible != atomic_ref<node_id_t>(next_visible_id_).load(std::memory_order_acquire))
             return {{}, status_t::contended_k};
         if (rows > max_node_count_k - visible) return {{}, status_t::overflow_k};
         auto [claimed, granted] = claim(rows);
         if (failed(granted)) return {{}, granted};
         if (claimed.base() != visible) return {{}, status_t::contended_k}; // The claim dies and releases.
-        return {load_plan_t {*this, visible, std::move(claimed)}, status_t::success_k};
+        return {load_plan_t {*this, {}, {}, visible, std::move(claimed)}, status_t::success_k};
+    }
+
+    /** @brief Appends the whole source on the calling thread - the one-shot over @ref plan_load
+     *      for a caller with no threads to fan the steps out over. */
+    status_t load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range) noexcept {
+        auto [plan, planned] = plan_load(columns, rows, source_range);
+        if (failed(planned)) return planned;
+        for (typename load_plan_t::step_t const step : plan.steps())
+            if (status_t const loaded = plan.load(step); failed(loaded)) return loaded;
+        return plan.finish();
     }
 
 #pragma endregion Checkpoints

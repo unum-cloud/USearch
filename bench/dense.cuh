@@ -331,24 +331,6 @@ static checkpoint_paths_t checkpoint_paths_of(bench_options_t const& options, st
             prefix + ".neighbors.ibin", prefix + ".rows.ibin"};
 }
 
-/** @brief Whether an index lives on a device, so its plans take a stream. */
-template <typename index_type_>
-constexpr bool device_resident_k = requires(index_type_ const& index) { index.device_specs(); };
-
-/** @brief Opens a save plan on either residency, the device one on the null stream. */
-template <typename index_type_>
-static auto plan_save_of(index_type_ const& index, synchronization_t synchronization) noexcept {
-    if constexpr (device_resident_k<index_type_>) return index.plan_save(synchronization, nullptr);
-    else return index.plan_save(synchronization);
-}
-
-/** @brief Opens a load plan of @p rows on either residency, the device one on the null stream. */
-template <typename index_type_>
-static auto plan_load_of(index_type_& index, std::size_t rows) noexcept {
-    if constexpr (device_resident_k<index_type_>) return index.plan_load(rows, nullptr);
-    else return index.plan_load(rows);
-}
-
 /** @brief Maps the CLI neighbor-list degree onto the closed @c connectivity_t tiling set. */
 inline connectivity_t connectivity_of(std::size_t degree) noexcept {
     if (degree == 16) return connectivity_16_k;
@@ -415,20 +397,9 @@ static bool load_checkpoint(bench_options_t const& options, index_type_& index, 
                                        loaded_nodes * vectors_row_bytes};
     bytes_view_t const neighbors_source {reinterpret_cast<byte_t const*>(neighbors_view.byte_data()),
                                          loaded_nodes * neighbors_row_bytes};
-    auto planned = plan_load_of(index, loaded_nodes);
     using node_id_t = typename index_type_::node_id_t;
-    iota_view<node_id_t> const local {0, static_cast<node_id_t>(loaded_nodes)};
-    status_t loaded = planned.status;
-    for (auto const step : planned.value.steps()) {
-        if (failed(loaded)) break;
-        std::size_t const first_row = step.source_rows.first;
-        loaded = planned.value.load_vectors(step,
-                                            vectors_source.subspan(first_row * vectors_row_bytes, step.vectors_bytes));
-        if (succeeded(loaded))
-            loaded = planned.value.load_neighbors(
-                step, neighbors_source.subspan(first_row * neighbors_row_bytes, step.neighbors_bytes), local);
-    }
-    if (succeeded(loaded)) loaded = planned.value.finish();
+    status_t const loaded = index.load({vectors_source, neighbors_source}, loaded_nodes,
+                                       {0, static_cast<node_id_t>(loaded_nodes)});
     if (loaded != status_t::success_k) {
         fmt::println("Failed to restore {}: status {}", paths.vectors, int(loaded));
         return false;
@@ -471,23 +442,15 @@ static std::size_t save_checkpoint(bench_options_t const& options, index_type_& 
     bytes_span_t const vectors_target {reinterpret_cast<byte_t*>(vectors.data()), shape.nodes * vectors_row_bytes};
     bytes_span_t const neighbors_target {reinterpret_cast<byte_t*>(neighbors.data()),
                                          shape.nodes * neighbors_row_bytes};
-    auto planned = plan_save_of(index, synchronization_t::immutable_k);
-    status_t saved = planned.status;
-    std::size_t widest = 0;
-    for (auto const step : planned.value.steps()) widest = std::max(widest, step.index_rows.size());
-    auto scratch = nk::matrix<node_id_t>::try_zeros({widest, shape.connectivity});
-    if (succeeded(saved) && widest && scratch.empty()) saved = status_t::bad_alloc_k;
-    for (auto const step : planned.value.steps()) {
-        if (failed(saved)) break;
-        std::size_t const first_row = step.source_rows.first;
-        saved = planned.value.save_vectors(step,
-                                           vectors_target.subspan(first_row * vectors_row_bytes, step.vectors_bytes));
-        if (succeeded(saved))
-            saved = planned.value.save_neighbors(
-                step, neighbors_target.subspan(first_row * neighbors_row_bytes, step.neighbors_bytes), node_id_t {0},
-                scratch.span());
+    // One step's rows at most: a storage chunk never holds more, and the device plan ignores it.
+    auto scratch = nk::matrix<node_id_t>::try_zeros(
+        {min_of(shape.nodes, power_of_two<std::size_t>(20)), shape.connectivity});
+    if (shape.nodes && scratch.empty()) {
+        fmt::println("Failed to stage the neighbor scratch for index {}", slot);
+        return 0;
     }
-    if (succeeded(saved)) saved = planned.value.finish();
+    status_t const saved = index.save({vectors_target, neighbors_target}, synchronization_t::immutable_k,
+                                      scratch.span());
     if (saved != status_t::success_k) {
         fmt::println("Failed to serialize index {}: status {}", slot, int(saved));
         return 0;

@@ -1000,18 +1000,13 @@ struct dense_vram_indexes {
         auto [held, claimed] = executor.claim();
         if (failed(claimed)) return claimed;
 
-        // One plan per shard is the cut, and the row base each shard writes from follows.
+        // The row base each shard writes from comes first, so every plan can be cut against the
+        // columns it owns; a shard that grew since is refused at its own planning.
         growing_buffer<typename index_t::save_plan_t, forkunion_allocator_t> plans {allocator_};
         growing_buffer<std::size_t, forkunion_allocator_t> bases {allocator_};
         if (failed(plans.reserve_exactly(shards)) || failed(bases.resize(shards + 1))) return status_t::bad_alloc_k;
-        for (std::size_t shard = 0; shard != shards; ++shard) {
-            index_t& one = *shards_[shard].index;
-            if (cudaSetDevice(one.device_specs().ordinal) != cudaSuccess) return status_t::device_error_k;
-            auto [plan, planned] = one.plan_save(config.synchronization, executor.stream(shard).handle);
-            if (failed(planned)) return planned;
-            bases[shard + 1] = bases[shard] + plan.visible;
-            plans.push_back_reserved(std::move(plan));
-        }
+        for (std::size_t shard = 0; shard != shards; ++shard)
+            bases[shard + 1] = bases[shard] + shards_[shard].index->size();
 
         growing_buffer<safegraphs_custom_field_t, forkunion_allocator_t> fields {allocator_};
         if (failed(custom_fields_(fields, config))) return status_t::bad_alloc_k;
@@ -1019,15 +1014,22 @@ struct dense_vram_indexes {
         if (failed(framed)) return framed;
         if (monolith.size() < header.monolith_bytes()) return status_t::overflow_k;
 
+        // One plan per shard is the cut, each owning its own slice of the two columns.
+        for (std::size_t shard = 0; shard != shards; ++shard) {
+            index_t& one = *shards_[shard].index;
+            if (cudaSetDevice(one.device_specs().ordinal) != cudaSuccess) return status_t::device_error_k;
+            std::size_t const nodes = bases[shard + 1] - bases[shard];
+            typename index_t::columns_t const columns {header.rows_of(monolith, header.value, bases[shard], nodes),
+                                                       header.rows_of(monolith, header.neighbors, bases[shard], nodes)};
+            auto [plan, planned] = one.plan_save(columns, config.synchronization, executor.stream(shard).handle,
+                                                 static_cast<dense_node_id_t>(bases[shard]));
+            if (failed(planned)) return planned;
+            plans.push_back_reserved(std::move(plan));
+        }
+
         // Every step is one slice of one column, so a device writes where no other does.
         auto save_step = [&](std::size_t shard, auto const& step) noexcept {
-            iota_view<dense_node_id_t> const rows = step.index_rows;
-            bytes_span_t const vectors = header.rows_of(monolith, header.value, bases[shard] + rows.first, rows.size());
-            bytes_span_t const neighbors = header.rows_of(monolith, header.neighbors, bases[shard] + rows.first,
-                                                          rows.size());
-            if (status_t const saved = plans[shard].save_vectors(step, vectors); failed(saved)) return saved;
-            return plans[shard].save_neighbors(step, neighbors, static_cast<dense_node_id_t>(bases[shard]),
-                                               nk::matrix_span<dense_node_id_t> {});
+            return plans[shard].save(step, nk::matrix_span<dense_node_id_t> {});
         };
         if (status_t const landed = round_robin_steps_(plans, save_step); failed(landed)) return landed;
 
@@ -1069,29 +1071,26 @@ struct dense_vram_indexes {
         for (std::size_t shard = 0; shard != shards; ++shard) {
             index_t& one = *shards_[shard].index;
             if (cudaSetDevice(one.device_specs().ordinal) != cudaSuccess) return status_t::device_error_k;
-            auto [plan, planned] = one.plan_save(config.synchronization, executor.stream(shard).handle);
-            if (failed(planned)) return planned;
-            auto const [header, framed] = monolith_header_(plan.visible, config, named);
+            std::size_t const nodes = one.size();
+            auto const [header, framed] = monolith_header_(nodes, config, named);
             if (failed(framed)) return framed;
             auto const [file_path, formatted] = safegraphs_part_path(part_path, stem, shard, shards);
             if (failed(formatted)) return formatted;
             auto [mapping, mapped] = mapped_file_t::write(file_path, header.monolith_bytes());
             if (failed(mapped)) return mapped;
-            plans.push_back_reserved(std::move(plan));
             headers.push_back_reserved(header);
             mappings.push_back_reserved(std::move(mapping));
+            // A part's ids stay shard-local, so its rows travel verbatim under the sentinel convention.
+            typename index_t::columns_t const columns {
+                header.rows_of(mappings[shard].span(), header.value, 0, nodes),
+                header.rows_of(mappings[shard].span(), header.neighbors, 0, nodes)};
+            auto [plan, planned] = one.plan_save(columns, config.synchronization, executor.stream(shard).handle);
+            if (failed(planned)) return planned;
+            plans.push_back_reserved(std::move(plan));
         }
 
-        // A part's ids stay shard-local, so its rows travel verbatim under the sentinel convention.
         auto save_step = [&](std::size_t shard, auto const& step) noexcept {
-            safegraphs_header_t const& header = headers[shard];
-            bytes_span_t const monolith = mappings[shard].span();
-            iota_view<dense_node_id_t> const rows = step.index_rows;
-            bytes_span_t const vectors = header.rows_of(monolith, header.value, rows.first, rows.size());
-            bytes_span_t const neighbors = header.rows_of(monolith, header.neighbors, rows.first, rows.size());
-            if (status_t const saved = plans[shard].save_vectors(step, vectors); failed(saved)) return saved;
-            return plans[shard].save_neighbors(step, neighbors, dense_node_id_t {0},
-                                               nk::matrix_span<dense_node_id_t> {});
+            return plans[shard].save(step, nk::matrix_span<dense_node_id_t> {});
         };
         if (status_t const landed = round_robin_steps_(plans, save_step); failed(landed)) return landed;
 
@@ -1260,16 +1259,17 @@ struct dense_vram_indexes {
             auto load_step = [&](std::size_t shard, auto const& step) noexcept {
                 checkpoint_assignment_t const& assignment = taken[shard];
                 part_t const& part = parts[assignment.part];
-                iota_view<dense_node_id_t> const range = step.index_rows;
-                std::size_t const first_row = assignment.rows.first + step.source_rows.first;
-                bytes_view_t const vectors = part.header.rows_of(part.monolith, part.header.value, first_row,
-                                                                 range.size());
-                bytes_view_t const neighbors = part.header.rows_of(part.monolith, part.header.neighbors, first_row,
-                                                                   range.size());
-                if (status_t const loaded = plans[shard].load_vectors(step, vectors); failed(loaded)) return loaded;
-                return plans[shard].load_neighbors(step, neighbors,
-                                                   {static_cast<dense_node_id_t>(assignment.rows.first),
-                                                    static_cast<dense_node_id_t>(assignment.rows.bound)});
+                typename index_t::columns_view_t const columns {
+                    part.header.rows_of(part.monolith, part.header.value, 0, part.nodes),
+                    part.header.rows_of(part.monolith, part.header.neighbors, 0, part.nodes)};
+                iota_view<dense_node_id_t> const source_range {static_cast<dense_node_id_t>(assignment.rows.first),
+                                                               static_cast<dense_node_id_t>(assignment.rows.bound)};
+                // The shard plan counts its source rows from its own first one, while the part's
+                // columns and ids count from the part's - the assignment's base bridges the two.
+                typename index_t::load_plan_t::step_t inner = step;
+                inner.source_rows = {static_cast<dense_node_id_t>(source_range.first + step.source_rows.first),
+                                     static_cast<dense_node_id_t>(source_range.first + step.source_rows.bound)};
+                return plans[shard].load(inner, columns, source_range);
             };
             if (status_t const landed = round_robin_steps_(plans, load_step); failed(landed)) return landed;
 
