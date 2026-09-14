@@ -295,8 +295,8 @@ class growing_hash_set {
  *  as end-of-chain - so a half-published entry is merely invisible, never wrong. Growth is
  *  explicit: @c reserve may be called repeatedly to rehash into a larger array, but it
  *  demands a mutation-free phase - concurrent inserts never trigger a hidden migration,
- *  they fail with @c overflow_k when the quota is spent. The slot count stays at least
- *  twice the entry quota, so every probe chain terminates.
+ *  they fail with @c overflow_k when the ceiling is spent. The slot count stays at least
+ *  twice the entry ceiling, so every probe chain terminates.
  */
 template <typename key_type_, typename value_type_,          //
           typename hash_type_ = std::hash<key_type_>,        //
@@ -334,7 +334,7 @@ class growing_multimap {
 
     growing_multimap(growing_multimap&& other) noexcept
         : slots_(exchange(other.slots_, nullptr)), states_(exchange(other.states_, nullptr)),
-          slots_count_(exchange(other.slots_count_, 0)), entries_quota_(exchange(other.entries_quota_, 0)),
+          slots_count_(exchange(other.slots_count_, 0)), entries_ceiling_(exchange(other.entries_ceiling_, 0)),
           inserted_count_(other.inserted_count_.load(std::memory_order_relaxed)), hash_(std::move(other.hash_)),
           allocator_(std::move(other.allocator_)) {
         other.inserted_count_.store(0, std::memory_order_relaxed);
@@ -346,7 +346,7 @@ class growing_multimap {
         std::swap(slots_, other.slots_);
         std::swap(states_, other.states_);
         std::swap(slots_count_, other.slots_count_);
-        std::swap(entries_quota_, other.entries_quota_);
+        std::swap(entries_ceiling_, other.entries_ceiling_);
         std::size_t const inserted = inserted_count_.load(std::memory_order_relaxed);
         inserted_count_.store(other.inserted_count_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         other.inserted_count_.store(inserted, std::memory_order_relaxed);
@@ -355,14 +355,14 @@ class growing_multimap {
         return *this;
     }
 
-    /** @brief Forgets every entry, keeping the slot array & quota - single-threaded, like
+    /** @brief Forgets every entry, keeping the slot array & ceiling - single-threaded, like
      *      @c reserve: the caller certifies no concurrent readers or writers for the call. */
     void clear() noexcept {
         for (std::size_t position = 0; position != slots_count_; ++position) states_[position] = slot_state_t::empty_k;
         inserted_count_.store(0, std::memory_order_relaxed);
     }
 
-    /** @brief Bytes @p slots_count slots occupy - one allocation carrying both planes: the
+    /** @brief Bytes @p slots_count slots occupy - one allocation carrying both arrays: the
      *      slots, then the control bytes. */
     static std::size_t memory_usage(std::size_t slots_count) noexcept {
         return slots_count * (sizeof(slot_t) + sizeof(slot_state_t));
@@ -377,7 +377,7 @@ class growing_multimap {
         slots_ = nullptr;
         states_ = nullptr;
         slots_count_ = 0;
-        entries_quota_ = 0;
+        entries_ceiling_ = 0;
         inserted_count_.store(0, std::memory_order_relaxed);
     }
 
@@ -385,7 +385,7 @@ class growing_multimap {
      *      half. Repeatable: a larger @p capacity rehashes into a fresh array, single-
      *      threaded - the caller certifies no concurrent readers or writers for the call. */
     status_t reserve(std::size_t capacity) noexcept {
-        if (capacity <= entries_quota_) return status_t::success_k;
+        if (capacity <= entries_ceiling_) return status_t::success_k;
 
         std::size_t const new_slots_count = ceil2(max_of<std::size_t>(capacity * 2u, 16u));
         std::byte* const new_bytes = bytes_allocator_t(allocator_).allocate(memory_usage(new_slots_count));
@@ -411,20 +411,20 @@ class growing_multimap {
         slots_ = new_slots;
         states_ = new_states;
         slots_count_ = new_slots_count;
-        entries_quota_ = capacity;
+        entries_ceiling_ = capacity;
         return status_t::success_k;
     }
 
     /** @brief Claims one slot along the probe path of @p key - safe under arbitrary
-     *      concurrent inserts & lookups; fails with @c overflow_k once the quota is spent. */
+     *      concurrent inserts & lookups; fails with @c overflow_k once the ceiling is spent. */
     status_t insert(key_t const& key, value_t value) noexcept {
         if (!slots_count_) return status_t::uninitialized_k;
-        // Claim quota before touching any slot, so probe chains stay bounded by construction
+        // Claim a seat under the ceiling before touching any slot, so probe chains stay bounded by construction
         // and `size()` never passes `capacity()`, not even while a refusal is in flight.
         std::size_t inserted = inserted_count_.load(std::memory_order_relaxed);
-        while (inserted < entries_quota_ &&
+        while (inserted < entries_ceiling_ &&
                !inserted_count_.compare_exchange_weak(inserted, inserted + 1, std::memory_order_relaxed)) {}
-        if (inserted >= entries_quota_) return status_t::overflow_k;
+        if (inserted >= entries_ceiling_) return status_t::overflow_k;
         std::size_t chain = first_probe_of(key, slots_count_);
         while (true) {
             std::atomic_ref<slot_state_t> state(states_[chain]);
@@ -477,7 +477,7 @@ class growing_multimap {
     std::size_t size() const noexcept { return inserted_count_.load(std::memory_order_relaxed); }
 
     /** @brief Total entries the current slot array can host. */
-    std::size_t capacity() const noexcept { return entries_quota_; }
+    std::size_t capacity() const noexcept { return entries_ceiling_; }
 
   private:
     /** @brief One probe slot: the key beside its value; its lifecycle lives in the
@@ -498,7 +498,7 @@ class growing_multimap {
     slot_t* slots_ = nullptr;
     slot_state_t* states_ = nullptr;
     std::size_t slots_count_ = 0;
-    std::size_t entries_quota_ = 0;
+    std::size_t entries_ceiling_ = 0;
     std::atomic<std::size_t> inserted_count_ {0};
 
     [[no_unique_address]] hash_t hash_;

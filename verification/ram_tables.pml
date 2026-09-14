@@ -1,37 +1,37 @@
 /**
  *  `growing_multimap` from `include/usearch/utilities/ram_tables.hpp`: the insert-only
  *  linear-probe multimap whose slot states advance `empty` → `building` → `published` once,
- *  whose quota is claimed on `inserted_count_` before any slot is touched, and whose readers
+ *  whose ceiling is claimed on `inserted_count_` before any slot is touched, and whose readers
  *  walk the control bytes with acquire loads, wait-free.
  *
- *  Three inserters and one finder over two slots and the constant terminator at position 2,
- *  under a quota of two. Every inserter hashes to chain 0, two carry key A and one key B, so
+ *  Three inserters and one prober over two slots and the constant terminator at position 2,
+ *  under a ceiling of two. Every inserter hashes to chain 0, two carry key A and one key B, so
  *  the counter refuses one of them and the other two contend for the two slots. An inserter
- *  claims quota with a relaxed compare-exchange that never passes the quota, and else probes:
+ *  claims a seat with a relaxed compare-exchange that never passes the ceiling, and else probes:
  *  a relaxed load of the state, an acquire compare-exchange from `empty` to `building`, the
  *  key and the value stored relaxed, and the state stored `published` with a release. The
- *  finder walks the chain with acquire loads until the terminator, and on a published slot
+ *  prober walks the chain with acquire loads until the terminator, and on a published slot
  *  carrying key A reads the value. A sizer reads the counter relaxed, as `size()` does.
  *
  *  Invariants:
  *  - bound: no inserter probes past the terminator, the ghost count of admitted entries never
- *    exceeds the quota, and neither does the counter itself, at any instant and under any
+ *    exceeds the ceiling, and neither does the counter itself, at any instant and under any
  *    memory model - the counter alone bounds every chain, and `size()` never passes
- *    `capacity()`. `-Dwithout_bounded_quota` restores the claim the header had, an
- *    unconditional add handed back with a subtract on refusal, and the sizer reads the
- *    counter one past the quota while a refusal is in flight;
- *  - visibility: the value a finder reads beside a matching key on a published slot is that
+ *    `capacity()`. `-Dwithout_bounded_ceiling` restores the claim the header had, an
+ *    unconditional add released with a subtract on refusal, and the sizer reads the
+ *    counter one past the ceiling while a refusal is in flight;
+ *  - visibility: the value a prober reads beside a matching key on a published slot is that
  *    key's value, never the slot half-written. The release on the publication and the acquire
  *    on the probe carry the key and value stores: `-Dwithout_publish_release` makes the
  *    publication relaxed, `-Dwithout_probe_acquire` makes the probe relaxed, and each fails on
- *    a finder that reads the new key beside the initial value;
- *  - completeness, under `-Dmemory=sequential`: a key published before the finder started is
+ *    a prober that reads the new key beside the initial value;
+ *  - completeness, under `-Dmemory=sequential`: a key published before the prober started is
  *    found, since a `building` slot is occupied and never the end of the chain.
  */
 #include "weak_memory.pml"
 
 // The threads, by role, apart from the processes that play them; the inserters name themselves as they start.
-#define finder_thread 3
+#define prober_thread 3
 #define sizer_thread 4
 
 // The words: each slot's control byte, key and value, and the counter; position 2 is the
@@ -42,9 +42,9 @@
 #define inserted_count 6
 #define terminator 2
 
-// The sizes and values: the quota, the states of `slot_state_t`, the keys the inserters carry,
+// The sizes and values: the ceiling, the states of `slot_state_t`, the keys the inserters carry,
 // and the value each key maps to; the keys and values stay apart from the zero a word starts at.
-#define quota 2
+#define ceiling 2
 #define empty 0
 #define building 1
 #define published 2
@@ -67,35 +67,35 @@
 
 byte inserters_started;
 byte claimed;                // entries the counter admitted
-bool probing;                // the finder has read its first state
-bool published_before_probe; // key A was published before the finder read its first state
+bool probing;                // the prober has read its first state
+bool published_before_probe; // key A was published before the prober read its first state
 
 active [3] proctype inserter() {
     byte me, chain;
     int observed, expected, seen;
     bool succeeded;
     atomic { me = inserters_started; inserters_started++ };
-#ifdef without_bounded_quota
-    // the claim the header had: an unconditional add, handed back with a subtract on refusal
+#ifdef without_bounded_ceiling
+    // the claim the header had: an unconditional add, released with a subtract on refusal
     atomic {
         read_modify_write(me, inserted_count, order_relaxed, observed, observed + 1);
-        if :: observed < quota -> claimed++ :: else fi;
-        assert(claimed <= quota)
+        if :: observed < ceiling -> claimed++ :: else fi;
+        assert(claimed <= ceiling)
     };
     if
-    :: observed >= quota ->
+    :: observed >= ceiling ->
         read_modify_write(me, inserted_count, order_relaxed, observed, observed - 1);
         goto refused
     :: else
     fi;
 #else
-    // the quota, claimed before any slot is touched and never passed: ram_tables.hpp:417-420
+    // the ceiling, claimed before any slot is touched and never passed: ram_tables.hpp:417-420
     atomic {
-        read_modify_write_if(me, inserted_count, order_relaxed, observed < quota, observed, observed + 1);
-        if :: observed < quota -> claimed++ :: else fi;
-        assert(claimed <= quota)
+        read_modify_write_if(me, inserted_count, order_relaxed, observed < ceiling, observed, observed + 1);
+        if :: observed < ceiling -> claimed++ :: else fi;
+        assert(claimed <= ceiling)
     };
-    if :: observed >= quota -> goto refused :: else fi;
+    if :: observed >= ceiling -> goto refused :: else fi;
 #endif
 probe:
     // the chain: a relaxed peek, then the acquire claim of an empty slot: ram_tables.hpp:421-427, 433
@@ -122,7 +122,7 @@ refused:
     skip
 }
 
-active proctype finder() {
+active proctype prober() {
     byte chain;
     int seen, seen_key, seen_value;
     bool found;
@@ -133,17 +133,17 @@ probe:
     fi;
     // the walk: one acquire load per control byte, the terminator ends it: ram_tables.hpp:450-452
     atomic {
-        load(finder_thread, state(chain), probe_order, seen);
+        load(prober_thread, state(chain), probe_order, seen);
         probing = true
     };
     if
     :: seen == empty -> goto done
     :: seen == published ->
         // the payload, plain reads beside the published state: ram_tables.hpp:454
-        load(finder_thread, key(chain), order_relaxed, seen_key);
+        load(prober_thread, key(chain), order_relaxed, seen_key);
         if
         :: seen_key == key_a ->
-            load(finder_thread, value(chain), order_relaxed, seen_value);
+            load(prober_thread, value(chain), order_relaxed, seen_value);
             assert(seen_value == value_for(key_a));
             found = true
         :: else
@@ -160,9 +160,9 @@ done:
 #endif
 }
 
-// size(): one relaxed load of the counter, which never reads past the quota: ram_tables.hpp:470
+// size(): one relaxed load of the counter, which never reads past the ceiling: ram_tables.hpp:470
 active proctype sizer() {
     int seen;
     load(sizer_thread, inserted_count, order_relaxed, seen);
-    assert(seen <= quota)
+    assert(seen <= ceiling)
 }

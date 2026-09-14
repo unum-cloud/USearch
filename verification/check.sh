@@ -33,10 +33,10 @@ verify dense_ram_index_watermark.pml fail -Dmemory=sequential -Dscenario=keyed -
 verify dense_ram_index_watermark.pml pass -Dmemory=sequential -Dscenario=cursor
 verify dense_ram_index_watermark.pml pass -Dscenario=cursor
 verify dense_ram_index_watermark.pml fail -Dscenario=cursor -Dwithout_watermark_release
-verify dense_ram_index_watermark.pml pass -Dmemory=sequential -Dscenario=regions
-verify dense_ram_index_watermark.pml pass -Dscenario=regions
-verify dense_ram_index_watermark.pml pass -Dmemory=far -Dscenario=regions
-verify dense_ram_index_watermark.pml fail -Dscenario=regions -Dwithout_covered_release
+verify dense_ram_index_watermark.pml pass -Dmemory=sequential -Dscenario=steps
+verify dense_ram_index_watermark.pml pass -Dscenario=steps
+verify dense_ram_index_watermark.pml pass -Dmemory=far -Dscenario=steps
+verify dense_ram_index_watermark.pml fail -Dscenario=steps -Dwithout_covered_release
 verify dense_ram_index_watermark.pml pass -Dmemory=sequential -Dscenario=savers
 verify dense_ram_index_watermark.pml pass -Dscenario=savers
 verify dense_ram_index_watermark.pml fail -Dscenario=savers -Dwithout_release_fence
@@ -101,14 +101,14 @@ verify dense_ram_index_capacity.pml pass -Dscenario=reservers
 verify dense_ram_index_capacity.pml pass -Dmemory=far -Dscenario=reservers
 verify dense_ram_index_capacity.pml pass -Dmemory=sequential -Dscenario=reservers -Dsame_geometry
 verify dense_ram_index_capacity.pml fail -Dmemory=far -Dscenario=reservers -Dwithout_deflation_release
-verify dense_ram_index_capacity.pml fail -Dmemory=sequential -Dscenario=reservers -Dwithout_whole_credit
+verify dense_ram_index_capacity.pml fail -Dmemory=sequential -Dscenario=reservers -Dwithout_whole_release
 verify dense_ram_index_capacity.pml fail -Dscenario=reservers -Dwithout_take_release
 verify dense_ram_index_capacity.pml pass -Dmemory=sequential -Dscenario=loaders
 verify dense_ram_index_capacity.pml pass -Dscenario=loaders
 verify dense_ram_index_capacity.pml pass -Dmemory=far -Dscenario=loaders
 verify dense_ram_index_capacity.pml fail -Dmemory=sequential -Dscenario=loaders -Dwithout_abandon_release
 
-section "dense_ram_indexes.pml: the shards' claims, keys before the turn, the monolith cut per shard, and the load path's keys"
+section "dense_ram_indexes.pml: the shards' claims, keys before the turn, the monolith save's watermark per shard, and the load path's keys"
 verify dense_ram_indexes.pml pass -Dmemory=sequential
 verify dense_ram_indexes.pml pass
 verify dense_ram_indexes.pml fail -Dmemory=sequential -Dwithout_key_before_watermark
@@ -126,7 +126,7 @@ verify dense_ram_indexes.pml pass -Dmemory=far -Dscenario=loading
 verify dense_ram_indexes.pml fail -Dmemory=sequential -Dscenario=loading -Dwithout_keys_before_finish
 verify dense_ram_indexes.pml fail -Dscenario=loading -Dwithout_keys_before_finish
 
-section "basic_ram_index_rows.pml: the rows under their mutex, what the gate carries, the traversal's frontier, and the load path's regions"
+section "basic_ram_index_rows.pml: the rows under their mutex, what the gate carries, the traversal's frontier, and the load path's steps"
 verify basic_ram_index_rows.pml pass -Dmemory=sequential
 verify basic_ram_index_rows.pml pass
 verify basic_ram_index_rows.pml fail -Dwithout_watermark_release
@@ -134,12 +134,12 @@ verify basic_ram_index_rows.pml fail -Dwithout_row_lock_acquire
 verify basic_ram_index_rows.pml fail -Dwithout_row_unlock_release
 verify basic_ram_index_rows.pml fail -Dwithout_unlock_shared_release
 verify basic_ram_index_rows.pml fail -Dmemory=sequential -Dwithout_watermark_filter
-verify basic_ram_index_rows.pml pass -Dmemory=sequential -Dscenario=regions
-verify basic_ram_index_rows.pml pass -Dscenario=regions
-verify basic_ram_index_rows.pml pass -Dmemory=far -Dscenario=regions
-verify basic_ram_index_rows.pml fail -Dscenario=regions -Dwithout_covered_release
-verify basic_ram_index_rows.pml fail -Dmemory=far -Dscenario=regions -Dwithout_covered_release
-verify basic_ram_index_rows.pml fail -Dscenario=regions -Dwithout_counters_before_watermark
+verify basic_ram_index_rows.pml pass -Dmemory=sequential -Dscenario=steps
+verify basic_ram_index_rows.pml pass -Dscenario=steps
+verify basic_ram_index_rows.pml pass -Dmemory=far -Dscenario=steps
+verify basic_ram_index_rows.pml fail -Dscenario=steps -Dwithout_covered_release
+verify basic_ram_index_rows.pml fail -Dmemory=far -Dscenario=steps -Dwithout_covered_release
+verify basic_ram_index_rows.pml fail -Dscenario=steps -Dwithout_counters_before_watermark
 
 section "basic_ram_index.pml: add, search, save, health and load interleaved on one index, and a failed load's leftovers"
 verify basic_ram_index.pml pass
@@ -147,22 +147,22 @@ verify basic_ram_index.pml fail -Dwithout_row_clear
 verify basic_ram_index.pml fail -Dwithout_map_clear
 verify basic_ram_index.pml fail -Dtwice_finished
 
-section "ram_tables.pml: the multimap's quota, its slot claim, and what a finder sees beside a published state"
+section "ram_tables.pml: the multimap's ceiling, its slot claim, and what a prober sees beside a published state"
 verify ram_tables.pml pass -Dmemory=sequential
 verify ram_tables.pml pass
 verify ram_tables.pml pass -Dmemory=far
 verify ram_tables.pml fail -Dwithout_publish_release
 verify ram_tables.pml fail -Dwithout_probe_acquire
-verify ram_tables.pml fail -Dmemory=sequential -Dwithout_bounded_quota
-verify ram_tables.pml fail -Dwithout_bounded_quota
+verify ram_tables.pml fail -Dmemory=sequential -Dwithout_bounded_ceiling
+verify ram_tables.pml fail -Dwithout_bounded_ceiling
 
 section "GenMC clients over the real headers"
 if genmc_ready; then
     verify_client basic_shared_mutex.cpp pass -I../include -I../forkunion/include
-    verify_client dense_ram_index_watermark.cpp pass -I../forkunion/include
-    verify_client dense_ram_index_watermark.cpp fail -I../forkunion/include -Dwithout_release_fence
-    verify_client dense_ram_index_capacity.cpp pass -I../forkunion/include
-    verify_client dense_ram_index_capacity.cpp fail -I../forkunion/include -Dwithout_credit_release
+    verify_client dense_ram_index_watermark.cpp pass -I../include -I../forkunion/include
+    verify_client dense_ram_index_watermark.cpp fail -I../include -I../forkunion/include -Dwithout_release_fence
+    verify_client dense_ram_index_capacity.cpp pass -I../include -I../forkunion/include
+    verify_client dense_ram_index_capacity.cpp fail -I../include -I../forkunion/include -Dwithout_ordered_release
 fi
 
 finish

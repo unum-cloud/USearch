@@ -453,8 +453,8 @@ struct dense_ram_index {
     std::size_t dimensions() const noexcept { return geometry().dimensions(); }
 
     /** @brief Rows hosted without growing again - unclaimed plus claimed, the invariant tying the
-     *      two counters together. The credit is read first: @ref release_capacity deflates the
-     *      claim before it credits, so a credit seen here carries its deflation, and one missed
+     *      two counters together. The release is read first: @ref release_capacity deflates the
+     *      claim before it releases, so a release seen here carries its deflation, and one missed
      *      only dips the sum. A transient dip while a grower is mid-flight is the same
      *      conservative side, which is what @c reserve compares against. */
     std::size_t capacity() const noexcept {
@@ -791,7 +791,7 @@ struct dense_ram_index {
         capacity_claim_t& operator=(capacity_claim_t&& other) noexcept { return swap(other), *this; }
         capacity_claim_t(capacity_claim_t const&) = delete;
         capacity_claim_t& operator=(capacity_claim_t const&) = delete;
-        /** @brief Credits back whatever was never consumed; a consumed claim releases nothing. */
+        /** @brief Releases whatever was never consumed; a consumed claim releases nothing. */
         ~capacity_claim_t() noexcept {
             if (index_ && rows_) index_->release_capacity(rows_);
         }
@@ -808,15 +808,15 @@ struct dense_ram_index {
         node_id_t base() const noexcept { return base_; }
         explicit operator bool() const noexcept { return rows_ != 0; }
 
-        /** @brief Marks the rows as taken, so destruction credits nothing back - what an insertion
+        /** @brief Marks the rows as taken, so destruction releases nothing - what an insertion
          *      spread over several threads calls once every one of its rows has claimed an ID. */
         void consume() noexcept { rows_ = 0; }
 
       private:
-        /** @brief The granting index, reached only to credit back; null marks the empty state a
+        /** @brief The granting index, reached only to release; null marks the empty state a
          *      default construction and a move-out both leave behind. */
         dense_ram_index* index_ = nullptr;
-        /** @brief Rows still held; zero once consumed, so destruction credits nothing. */
+        /** @brief Rows still held; zero once consumed, so destruction releases nothing. */
         std::size_t rows_ = 0;
         /** @brief The first granted row. */
         node_id_t base_ = 0;
@@ -831,14 +831,14 @@ struct dense_ram_index {
     }
 
     /** @brief Returns @p count rows no ID was dispensed against. Deflating the claim watermark
-     *      before crediting the capacity is load-bearing: a reader taking the credit with its
+     *      before releasing the capacity is load-bearing: a reader taking the release with its
      *      acquire sees the deflation too, so the physical-rows sum it forms is conservative and
      *      a concurrent reservation can only over-grow. The deflation releases as well: a posted,
-     *      order-free subtract could land after the credit.
+     *      order-free subtract could land after the release.
      *
-     *  The credit lands only on a whole counter. A negative one has a grower inside, and a credit
+     *  The release lands only on a whole counter. A negative one has a grower inside, and a release
      *  lifting it back across zero would elect a second grower off the next claim, against the
-     *  plain chunk directory; every growth ends by crediting at least its deficit, so the wait is
+     *  plain chunk directory; every growth ends by releasing at least its deficit, so the wait is
      *  as long as one growth. */
     void release_capacity(std::size_t count) noexcept {
         atomic_ref<node_id_t>(last_allocated_id_).sub(static_cast<node_id_t>(count), std::memory_order_release);
@@ -861,7 +861,7 @@ struct dense_ram_index {
      *      refused as a whole. Consumes @p claim; telemetry accrues in @p context.
      *
      *  @p on_assigned fires per row with the assigned node ID, before the walk and before
-     *  publication - so an outer layer's per-ID state, like a key plane, is written ahead of the
+     *  publication - so an outer layer's per-ID state, like a key column, is written ahead of the
      *  watermark turn and no reachable node can be observed without it.
      */
     template <typename callback_type_ = dummy_callback_t>
@@ -890,7 +890,7 @@ struct dense_ram_index {
             // The `acq_rel` order chains a happens-before edge from the growth of the hosting
             // chunk through the all-RMW dispenser to this thread.
             node_id_t const new_node_id =
-                atomic_ref<node_id_t>(next_visible_id_).fetch_add(1, std::memory_order_acq_rel);
+                atomic_ref<node_id_t>(next_dispensed_id_).fetch_add(1, std::memory_order_acq_rel);
             chunked_location_t const new_location = chunked_location(new_node_id);
             if (report_assigned_ids) assigned_ids[incoming_index] = new_node_id;
             on_assigned(new_node_id);
@@ -1586,7 +1586,7 @@ struct dense_ram_index {
 #pragma region Checkpoints
 
     /**
-     *  @brief One save in flight: the cut it took, the contract it runs under, and the storage
+     *  @brief One save in flight: the watermark it took, the contract it runs under, and the storage
      *      chunks it hands out to any number of threads. Vectors and sentinel-padded neighbor rows
      *      are what a snapshot holds; norms re-derive on load.
      *
@@ -1597,13 +1597,13 @@ struct dense_ram_index {
      *  surfaces as @c contended_k instead of a silently torn snapshot.
      */
     struct [[nodiscard]] save_plan_t {
-        /** @brief Where the rows land, vetted against the cut at planning. */
+        /** @brief Where the rows land, vetted against the watermark at planning. */
         columns_t columns {};
-        /** @brief What an ID under the cut moves by - the row this shard starts at. */
+        /** @brief What an ID under the watermark moves by - the row this shard starts at. */
         node_id_t id_shift = 0;
         /** @brief The contract the caller certified. */
         synchronization_t synchronization = synchronization_t::concurrent_k;
-        /** @brief Rows under the cut - the watermark at planning. */
+        /** @brief Rows under the watermark at planning. */
         node_id_t visible = 0;
         /** @brief The dispenser at planning; equal to @c visible, else no plan was made. */
         node_id_t dispensed = 0;
@@ -1629,11 +1629,11 @@ struct dense_ram_index {
         // The tallies are this plan's own: a copy would tally into a twin `finish` never reads.
         save_plan_t(save_plan_t const&) = delete;
         save_plan_t& operator=(save_plan_t const&) = delete;
-        /** @brief A cut owns nothing - no rows were claimed and no lock taken - so a dying plan
+        /** @brief A save owns nothing - no rows were claimed and no lock taken - so a dying plan
          *      leaves the index as it found it. */
         ~save_plan_t() noexcept = default;
 
-        /** @brief One step of the plan: one storage chunk's share of the rows under the cut. */
+        /** @brief One step of the plan: one storage chunk's share of the rows under the watermark. */
         struct step_t {
             /** @brief The step's position in the plan - what a fan-out hands to a thread. */
             std::size_t position = 0;
@@ -1663,7 +1663,7 @@ struct dense_ram_index {
             return step;
         }
 
-        /** @brief The steps the cut spans - one per storage chunk it reaches; none once spent. */
+        /** @brief The steps the save spans - one per storage chunk it reaches; none once spent. */
         indexed_range<save_plan_t> steps() const noexcept {
             std::size_t const count =
                 index_ && visible ? index_->chunked_location(static_cast<node_id_t>(visible - 1)).chunk_index + 1u : 0u;
@@ -1672,7 +1672,7 @@ struct dense_ram_index {
 
         /** @brief Copies step @p step 's rows into the plan's own columns: the vectors straight
          *      from chunk memory, since published vectors never change, and the neighbors rebased
-         *      through @p scratch - every ID under the cut shifted by @c id_shift, every other
+         *      through @p scratch - every ID under the watermark shifted by @c id_shift, every other
          *      folded to the sentinel.
          *
          *  @param[in] step The step to copy, as @ref steps hands them out.
@@ -1740,7 +1740,7 @@ struct dense_ram_index {
                 std::atomic_thread_fence(std::memory_order_acquire);
                 bool const settled =
                     atomic_ref<node_id_t>(index_->last_visible_id_).load(std::memory_order_relaxed) == visible &&
-                    atomic_ref<node_id_t>(index_->next_visible_id_).load(std::memory_order_relaxed) == dispensed &&
+                    atomic_ref<node_id_t>(index_->next_dispensed_id_).load(std::memory_order_relaxed) == dispensed &&
                     atomic_ref<node_id_t>(index_->last_allocated_id_).load(std::memory_order_relaxed) == allocated;
                 if (!settled) return status_t::contended_k;
             }
@@ -1750,20 +1750,20 @@ struct dense_ram_index {
 
       private:
         /** @brief The index being snapshotted; null in the empty plan a refused @ref plan_save
-         *      hands back, and once @c finish succeeded. */
+         *      returns, and once @c finish succeeded. */
         dense_ram_index const* index_ = nullptr;
     };
 
     /**
-     *  @brief Opens a save into @p columns under @p synchronization: takes the cut and, under
+     *  @brief Opens a save into @p columns under @p synchronization: takes the watermark and, under
      *      @c concurrent_k, refuses while an insert is mid-flight - the settlement probe, trailing
      *      counter first, since the pair is monotone with visible ≤ dispensed at every instant.
-     *      @c exclusive_k reads like @c immutable_k. Columns too short for the rows under the cut
-     *      are refused here, so no step ever writes past them.
+     *      @c exclusive_k reads like @c immutable_k. Columns too short for the rows under it are refused
+     *      here, so no step ever writes past them.
      *
      *  @param[out] columns Where the rows land, sized from @ref saved_shape.
      *  @param[in] synchronization The contract the caller certifies.
-     *  @param[in] id_shift What an ID under the cut moves by - the row this shard starts at.
+     *  @param[in] id_shift What an ID under the watermark moves by - the row this shard starts at.
      */
     expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization,
                                     node_id_t id_shift = 0) const noexcept {
@@ -1771,7 +1771,7 @@ struct dense_ram_index {
         if (!frozen) return {{}, status_t::config_mismatch_k};
         save_plan_t plan {*this, columns, synchronization, id_shift};
         plan.visible = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
-        plan.dispensed = atomic_ref<node_id_t>(next_visible_id_).load(std::memory_order_acquire);
+        plan.dispensed = atomic_ref<node_id_t>(next_dispensed_id_).load(std::memory_order_acquire);
         plan.allocated = atomic_ref<node_id_t>(last_allocated_id_).load(std::memory_order_acquire);
         if (plan.visible != plan.dispensed) return {{}, status_t::contended_k};
         std::size_t const rows = static_cast<std::size_t>(plan.visible);
@@ -1781,8 +1781,8 @@ struct dense_ram_index {
         return {std::move(plan), status_t::success_k};
     }
 
-    /** @brief Serializes every row under the cut into @p columns on the calling thread - the
-     *      one-shot over @ref plan_save for a caller with no threads to fan the steps out over. */
+    /** @brief Serializes every row under the watermark into @p columns on the calling thread - the one-shot over
+     *      @ref plan_save for a caller with no threads to fan the steps out over. */
     status_t save(columns_t columns, synchronization_t synchronization,
                   nk::matrix_span<node_id_t> scratch) const noexcept {
         auto [plan, planned] = plan_save(columns, synchronization);
@@ -1793,7 +1793,7 @@ struct dense_ram_index {
     }
 
     /**
-     *  @brief One load in flight: the rows claimed after the published prefix and the storage
+     *  @brief One load in flight: the rows claimed after the watermark and the storage
      *      chunks they span, filled by any number of threads; @ref finish publishes them.
      *
      *  Demands sole ownership of an index whose geometry is already frozen. A source's IDs are
@@ -1956,7 +1956,7 @@ struct dense_ram_index {
                 return status_t::config_mismatch_k;
             if (rows) {
                 claim_.consume();
-                atomic_ref<node_id_t>(index_->next_visible_id_)
+                atomic_ref<node_id_t>(index_->next_dispensed_id_)
                     .add(static_cast<node_id_t>(rows), std::memory_order_release);
                 atomic_ref<node_id_t>(index_->last_visible_id_)
                     .store(static_cast<node_id_t>(base + rows), std::memory_order_release);
@@ -1974,7 +1974,7 @@ struct dense_ram_index {
     };
 
     /**
-     *  @brief Opens a load of @p rows from @p columns after the published prefix: claims them
+     *  @brief Opens a load of @p rows from @p columns after the watermark: claims them
      *      through the ordinary capacity protocol, so a preceding @c reserve is consumed rather
      *      than duplicated and chunks grow only on a genuine deficit. Refuses an unfrozen
      *      geometry, columns shorter than the rows, an insert mid-flight, and rows past the ID
@@ -2004,7 +2004,7 @@ struct dense_ram_index {
         if (!geometry()) return {{}, status_t::config_mismatch_k};
         node_id_t const visible = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
         if (!rows) return {load_plan_t {*this, {}, {}, visible, {}}, status_t::success_k};
-        if (visible != atomic_ref<node_id_t>(next_visible_id_).load(std::memory_order_acquire))
+        if (visible != atomic_ref<node_id_t>(next_dispensed_id_).load(std::memory_order_acquire))
             return {{}, status_t::contended_k};
         if (rows > max_node_count_k - visible) return {{}, status_t::overflow_k};
         auto [claimed, granted] = claim(rows);
@@ -2223,7 +2223,7 @@ struct dense_ram_index {
      *  @brief Allocates & publishes chunks until at least @p minimal_capacity fresh rows are added,
      *      following the growth schedule of @ref dense_ram_index_malloc.
      *  @return The number of added rows - possibly non-zero even when the status is a failure,
-     *      in which case the caller must still credit them back to @c remaining_capacity_.
+     *      in which case the caller must still release them back into @c remaining_capacity_.
      *
      *  Only one thread may run this at a time: the "responsible" one that dropped
      *  @c remaining_capacity_ below zero. Successive responsible threads are ordered by the
@@ -2292,9 +2292,9 @@ struct dense_ram_index {
      *
      *  Spins while other threads are mid-growth, covering all interleavings of the capacity state
      *  machine. Claims @b storage only, never identity: node IDs are dispensed one-by-one from
-     *  @c next_visible_id_ at wiring time. On success, enough sentinel-filled rows exist for
+     *  @c next_dispensed_id_ at wiring time. On success, enough sentinel-filled rows exist for
      *  @p count dispenses, and the caller must roll forward to wiring & publishing them all -
-     *  claimed capacity cannot be handed back once IDs are dispensed against it, or the
+     *  claimed capacity cannot be released once IDs are dispensed against it, or the
      *  visibility watermark would stall forever. @ref dense_ram_index_concurrency
      */
     expected<node_id_t> claim_capacity(std::size_t count) noexcept {
@@ -2315,18 +2315,18 @@ struct dense_ram_index {
             // The thread that moved the counter from non-negative to negative is responsible for
             // the next allocation. Accepting `old == 0` is load-bearing: capacity may rest at
             // exactly zero, and `old > 0` would then elect nobody - a proven livelock. Nothing lifts
-            // a negative counter but this thread's own credit: `release_capacity` waits for a whole
+            // a negative counter but this thread's own release: `release_capacity` waits for a whole
             // one, so no second crossing happens while a grower is inside.
             if (old_remaining_capacity >= 0 && new_remaining_capacity < 0) {
                 auto [added_capacity, chunk_status] = create_next_chunk(count);
                 if (chunk_status != status_t::success_k) {
-                    // Revert our claim - crediting any partially added chunks along the way -
+                    // Revert our claim - releasing any partially added chunks along the way -
                     // so that a smaller insertion may succeed later.
                     atomic_ref<std::ptrdiff_t>(remaining_capacity_)
                         .add(count + added_capacity, std::memory_order_release);
                     return {dense_node_id_unknown_k, chunk_status};
                 }
-                // The take releases too: a claimer that fit on the old credit but whose rows this
+                // The take releases too: a claimer that fit on the counter before the growth but whose rows this
                 // take pushes into the new chunk reaches the directory through this word alone.
                 node_id_t const first_id =
                     atomic_ref<node_id_t>(last_allocated_id_).fetch_add(count, std::memory_order_acq_rel);
@@ -2341,7 +2341,7 @@ struct dense_ram_index {
             // Corner case: the index has 10 free slots, thread Y is growing it for its 20 entries,
             // and we want a 100 - even freshly added capacity may not be enough for us.
             else {
-                // Revert the counter, then wait for it to move - any credit or claim wakes the
+                // Revert the counter, then wait for it to move - any release or claim wakes the
                 // capped monitored wait, and we re-poll regardless once the cap expires.
                 std::ptrdiff_t const reverted_capacity =
                     atomic_ref<std::ptrdiff_t>(remaining_capacity_).fetch_add(count, std::memory_order_release) +
@@ -3223,7 +3223,7 @@ struct dense_ram_index {
                 // Predicate admission is independent of navigation: a matching node enters the
                 // admitted pool even when the navigation pool rejects it, and a non-matching
                 // node keeps routing - filtering the walk itself would strand it in islands.
-                // The re-sort only normalizes what a reordering predicate may hand back - for
+                // The re-sort only normalizes what a reordering predicate may return - for
                 // order-preserving ones the network fires no exchanges.
                 if constexpr (predicated_k) {
                     dense_admissions_t admissions;
@@ -3310,7 +3310,7 @@ struct dense_ram_index {
      *      at wiring time, so IDs follow the global wiring-start order and each thread holds at most
      *      one unpublished ID. @ref dense_ram_index_concurrency
      */
-    alignas(default_alignment_k) mutable node_id_t next_visible_id_ {0};
+    alignas(default_alignment_k) mutable node_id_t next_dispensed_id_ {0};
     /**
      *  @brief The visibility watermark: every ID strictly below it is published, its vector, norms &
      *      neighbors readable - the safe bound for random landmark sampling. Advanced strictly in
@@ -3323,12 +3323,12 @@ struct dense_ram_index {
 
     /** @brief Constructed chunks per directory. Deliberately non-atomic: only the one elected grower
      *      mutates it, and successive growers are ordered by the acquire/release pair on
-     *      @c remaining_capacity_, which no hand-back lifts while one is inside. @ref create_next_chunk */
+     *      @c remaining_capacity_, which no release lifts while one is inside. @ref create_next_chunk */
     small_size_t chunks_count_ = 0;
 };
 
 /**
- *  @brief External reader's cursor over the published prefix of one @c dense_ram_index:
+ *  @brief External reader's cursor over the watermark of one @c dense_ram_index:
  *      random access & ID-order iteration over nodes, plus neighbor-following through a privately
  *      staged copy of the current node's neighbors.
  *

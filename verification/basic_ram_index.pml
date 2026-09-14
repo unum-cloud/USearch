@@ -19,8 +19,8 @@
  *  - a certified search saw no acquisition of the gate and the same watermark twice;
  *  - a row is wired from nothing: `insert` clears its row before wiring, so a failed load's
  *    leftover never reaches a published node. `-Dwithout_row_clear` skips the clear;
- *  - a key is registered once: a plan that dies before `finish` wipes the keys its regions
- *    registered, whether its regions fell short or nobody finished it, so an unpublished
+ *  - a key is registered once: a plan that dies before `finish` wipes the keys its steps
+ *    registered, whether its steps fell short or nobody finished it, so an unpublished
  *    load's entries never meet a retry's or an insert's. `-Dwithout_map_clear` skips the wipe;
  *  - a hold is dropped once: a successful `finish` spends the plan, so a second call answers a
  *    status instead of unlocking again. `-Dtwice_finished` unlocks twice, and the gate names it
@@ -175,7 +175,7 @@ active [2] proctype loader() {
                 for (id : 0 .. loaded_rows - 1) { published[id] = true };
                 atomic { claimed = loaded_rows; dispensed = loaded_rows; visible = loaded_rows }
             :: else
-                // the dying plan wipes the keys its regions registered, still under its hold
+                // the dying plan wipes the keys its steps registered, still under its hold
 #ifndef without_map_clear
                 for (id : 0 .. loaded_rows - 1) { keyed[id] = false }
 #endif

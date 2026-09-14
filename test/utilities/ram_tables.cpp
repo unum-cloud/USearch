@@ -1,5 +1,5 @@
 /**
- *  @brief Tests for the @c ram_tables.hpp concurrent multimap - the quota, rehash, clear,
+ *  @brief Tests for the @c ram_tables.hpp concurrent multimap - the ceiling, rehash, clear,
  *      and reader-vs-writer paths the index suites never isolate.
  *
  *  @author Ash Vardanian
@@ -84,15 +84,15 @@ std::size_t check_multimap_duplicate_keys() noexcept {
     return failures;
 }
 
-std::size_t check_multimap_quota_overflow() noexcept {
-    constexpr std::size_t quota_k = 16;
+std::size_t check_multimap_ceiling_overflow() noexcept {
+    constexpr std::size_t ceiling_k = 16;
     std::size_t failures = 0;
     growing_multimap<u64_t, u32_t> multimap {global_allocator};
-    failures += expect(succeeded(multimap.reserve(quota_k)));
+    failures += expect(succeeded(multimap.reserve(ceiling_k)));
     std::size_t const capacity = multimap.capacity();
     for (u32_t entry = 0; entry != capacity; ++entry) failures += expect(succeeded(multimap.insert(entry, entry)));
 
-    // The rejected insert must roll its quota claim back, or capacity is lost forever.
+    // The rejected insert must roll its ceiling claim back, or capacity is lost forever.
     failures += expect_eq(multimap.insert(999, 999), status_t::overflow_k);
     failures += expect_eq(multimap.size(), capacity);
     failures += expect(!multimap.contains(999));
@@ -104,12 +104,12 @@ std::size_t check_multimap_quota_overflow() noexcept {
 }
 
 /** @brief The retry primitive @c load leans on: a cleared table forgets every entry &
- *      restores the whole quota, so a rebuild can never inherit stale duplicates. */
+ *      restores the whole ceiling, so a rebuild can never inherit stale duplicates. */
 std::size_t check_multimap_clear_retry() noexcept {
-    constexpr std::size_t quota_k = 24;
+    constexpr std::size_t ceiling_k = 24;
     std::size_t failures = 0;
     growing_multimap<u64_t, u32_t> multimap {global_allocator};
-    failures += expect(succeeded(multimap.reserve(quota_k)));
+    failures += expect(succeeded(multimap.reserve(ceiling_k)));
     std::size_t const capacity = multimap.capacity();
     for (u32_t entry = 0; entry != capacity; ++entry) failures += expect(succeeded(multimap.insert(entry, entry)));
 
@@ -118,7 +118,7 @@ std::size_t check_multimap_clear_retry() noexcept {
     failures += expect_eq(multimap.capacity(), capacity);
     failures += expect(!multimap.contains(0));
 
-    // The full quota is available again, and only the fresh values surface.
+    // The full ceiling is available again, and only the fresh values surface.
     for (u32_t entry = 0; entry != capacity; ++entry)
         failures += expect(succeeded(multimap.insert(entry, entry + 1000)));
     failures += expect_eq(multimap.size(), capacity);
@@ -168,13 +168,13 @@ std::size_t check_multimap_growth_parity(unsigned seed) noexcept {
     return failures;
 }
 
-/** @brief All keys hash into one bucket & the table fills to its quota, so this audits the
+/** @brief All keys hash into one bucket & the table fills to its ceiling, so this audits the
  *      "load factor at most one half keeps probe chains terminating" claim directly. */
 std::size_t check_multimap_probe_termination() noexcept {
-    constexpr std::size_t quota_k = 32;
+    constexpr std::size_t ceiling_k = 32;
     std::size_t failures = 0;
     growing_multimap<u64_t, u32_t, colliding_hash_t> multimap {global_allocator};
-    failures += expect(succeeded(multimap.reserve(quota_k)));
+    failures += expect(succeeded(multimap.reserve(ceiling_k)));
     std::size_t const capacity = multimap.capacity();
     for (u32_t entry = 0; entry != capacity; ++entry) failures += expect(succeeded(multimap.insert(entry, entry)));
 
@@ -280,40 +280,40 @@ std::size_t check_multimap_reader_during_writers() noexcept {
 
 /** @brief A starved rehash must leave the old table fully intact & retryable. */
 std::size_t check_multimap_starved_rehash() noexcept {
-    constexpr std::size_t quota_k = 16;
+    constexpr std::size_t ceiling_k = 16;
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
         growing_multimap<u64_t, u32_t, std::hash<u64_t>, counting_allocator_t> multimap {counting_allocator_t {ledger}};
-        failures += expect(succeeded(multimap.reserve(quota_k)));
-        for (u32_t entry = 0; entry != quota_k; ++entry) failures += expect(succeeded(multimap.insert(entry, entry)));
+        failures += expect(succeeded(multimap.reserve(ceiling_k)));
+        for (u32_t entry = 0; entry != ceiling_k; ++entry) failures += expect(succeeded(multimap.insert(entry, entry)));
 
         ledger.byte_budget.store(ledger.live_bytes.load());
-        failures += expect_eq(multimap.reserve(quota_k * 8), status_t::bad_alloc_k);
-        failures += expect_eq(multimap.capacity(), quota_k);
-        failures += expect_eq(multimap.size(), quota_k);
-        for (u64_t key = 0; key != quota_k; ++key) failures += expect(multimap.contains(key));
+        failures += expect_eq(multimap.reserve(ceiling_k * 8), status_t::bad_alloc_k);
+        failures += expect_eq(multimap.capacity(), ceiling_k);
+        failures += expect_eq(multimap.size(), ceiling_k);
+        for (u64_t key = 0; key != ceiling_k; ++key) failures += expect(multimap.contains(key));
 
         ledger.byte_budget.store(PTRDIFF_MAX);
-        failures += expect(succeeded(multimap.reserve(quota_k * 8)));
-        for (u64_t key = 0; key != quota_k; ++key) failures += expect(multimap.contains(key));
+        failures += expect(succeeded(multimap.reserve(ceiling_k * 8)));
+        for (u64_t key = 0; key != ceiling_k; ++key) failures += expect(multimap.contains(key));
     }
     failures += expect_eq(ledger.live_bytes.load(), 0);
     return failures;
 }
 
 std::size_t check_multimap_move() noexcept {
-    constexpr std::size_t quota_k = 16;
+    constexpr std::size_t ceiling_k = 16;
     std::size_t failures = 0;
     growing_multimap<u64_t, u32_t> source {global_allocator};
-    failures += expect(succeeded(source.reserve(quota_k)));
-    for (u32_t entry = 0; entry != quota_k; ++entry) failures += expect(succeeded(source.insert(entry, entry)));
+    failures += expect(succeeded(source.reserve(ceiling_k)));
+    for (u32_t entry = 0; entry != ceiling_k; ++entry) failures += expect(succeeded(source.insert(entry, entry)));
 
     growing_multimap<u64_t, u32_t> destination {std::move(source)};
     failures += expect_eq(source.size(), 0u);
     failures += expect_eq(source.capacity(), 0u);
-    failures += expect_eq(destination.size(), quota_k);
-    for (u64_t key = 0; key != quota_k; ++key) failures += expect(destination.contains(key));
+    failures += expect_eq(destination.size(), ceiling_k);
+    for (u64_t key = 0; key != ceiling_k; ++key) failures += expect(destination.contains(key));
     return failures;
 }
 
@@ -322,7 +322,7 @@ std::size_t test_ram_tables() {
     failures += check_multimap_uninitialized();
     failures += check_multimap_single_key();
     failures += check_multimap_duplicate_keys();
-    failures += check_multimap_quota_overflow();
+    failures += check_multimap_ceiling_overflow();
     failures += check_multimap_clear_retry();
     failures += check_multimap_growth_parity(0x600D5EEDu);
     failures += check_multimap_probe_termination();

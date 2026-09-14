@@ -1,6 +1,6 @@
 /**
  *  The dense index's publication protocol from `include/usearch/dense/ram_index.hpp`: identity
- *  dispensed one id at a time from `next_visible_id_`, rows written and unlocked below it, the
+ *  dispensed one id at a time from `next_dispensed_id_`, rows written and unlocked below it, the
  *  hole-free `last_visible_id_` watermark advanced in dispensed order, and the readers that
  *  rest on the watermark - a traversal, a cursor, and a concurrent save with its settlement probe.
  *
@@ -17,14 +17,14 @@
  *  - settlement: a settled save copied no locked row and no torn edit. The release fence at the
  *    head of `back_link_neighbors` is what carries the relaxed tail stores into the re-check;
  *    `-Dwithout_release_fence` drops it, and a settled copy holds a new tail beside an old slot;
- *  - `-Dscenario=appender`: the load path's `finish`, one release no-return add on `next_visible_id_`
+ *  - `-Dscenario=appender`: the load path's `finish`, one release no-return add on `next_dispensed_id_`
  *    before the watermark's release store. A saver that acquired the watermark must read the
  *    dispenser level with it. `-Dwithout_appender_release` makes the add relaxed: still carried under
  *    the C++ model, but posted under `-Dmemory=far`, where it may be in flight when the
  *    watermark lands and the plan reports contention on a settled index. A successful `finish`
  *    spends the plan; `-Dtwice_finished` publishes twice, and the saver finds the dispenser
  *    past the watermark for good;
- *  - `-Dscenario=keyed`: the sharded index's key plane, written in `on_assigned` right after the
+ *  - `-Dscenario=keyed`: the sharded index's key column, written in `on_assigned` right after the
  *    dispense, before the walk and the publication, so every row a reader locates carries its
  *    key. The searcher then walks: one relaxed read of row 0's tail, and the id it holds is
  *    located only below the snapshot - the traversal's `neighbor_id >= first_invisible_id`
@@ -39,7 +39,7 @@
  *    out the stale sentinel a traversal would trip on, and the row it follows rides the
  *    back-link fence into even a relaxed watermark store, so the follower itself reads a
  *    followed row stale only when `-Dwithout_release_fence` drops that fence as well;
- *  - `-Dscenario=regions`: the load path's fan-out: two regions land one row each and tally it
+ *  - `-Dscenario=steps`: the load path's fan-out: two steps land one row each and tally it
  *    on `covered` with a release add, as `load_vectors` and `load_neighbors` do; the finisher
  *    acquires the tally and, when whole, bumps the dispenser and releases the watermark. The
  *    tally's release is what carries the rows into the watermark: `-Dwithout_covered_release`
@@ -55,13 +55,13 @@
 #define appender 2
 #define keyed 3
 #define cursor 4
-#define regions 5
+#define steps 5
 #define savers 6
 #ifndef scenario
 #define scenario inserters
 #endif
 
-// The threads, by role, apart from the processes that play them; the inserters, the regions and the savers name themselves as they start.
+// The threads, by role, apart from the processes that play them; the inserters, the steps and the savers name themselves as they start.
 #define loader_thread 0
 #define searcher_thread 2
 #define saver_thread 3
@@ -69,8 +69,8 @@
 #define finisher_thread 3
 
 // The words, by the index member each stands for; a row is its lock word and one tail slot.
-// The key plane and the load plan's tally take the last words in turn: no scenario has both.
-#define next_visible_id 0
+// The key column and the load plan's tally take the last words in turn: no scenario has both.
+#define next_dispensed_id 0
 #define last_visible_id 1
 #define last_allocated_id 2
 #define row_lock(id) (3 + (id) * 2)
@@ -115,14 +115,14 @@
 #endif
 
 byte inserters_started;
-byte regions_started;
+byte steps_started;
 byte savers_started;
 bool editing; // row 0 is under its lock
 #if memory != sequential
 byte published_at[2]; // the history index of each row's publication
 #endif
 
-// a traversal's read of slot zero below the watermark it acquired, and of the key plane behind it
+// a traversal's read of slot zero below the watermark it acquired, and of the key column behind it
 inline read_published(t, id, seen) {
     atomic {
         load(t, row_lock(id), order_acquire, seen);
@@ -149,20 +149,20 @@ active proctype loader() {
     published_at[0] = newest[row_lock(0)];
     published_at[1] = newest[row_lock(1)];
 #endif
-    add_no_return(loader_thread, next_visible_id, appender_order, 2);
+    add_no_return(loader_thread, next_dispensed_id, appender_order, 2);
     store(loader_thread, last_visible_id, watermark_order, 2);
 #ifdef twice_finished
     // a second `finish` on a spent plan: the dispenser moves again, the watermark does not
-    add_no_return(loader_thread, next_visible_id, appender_order, 2);
+    add_no_return(loader_thread, next_dispensed_id, appender_order, 2);
     store(loader_thread, last_visible_id, watermark_order, 2);
 #endif
     landed(loader_thread)
 }
-#elif scenario == regions
-// the load fan-out: each region lands one row as the loader does, then tallies it on the plan
-active [2] proctype region() {
+#elif scenario == steps
+// the load fan-out: each step lands one row as the loader does, then tallies it on the plan
+active [2] proctype step() {
     byte me;
-    atomic { me = regions_started; regions_started++ };
+    atomic { me = steps_started; steps_started++ };
     store(me, row_tail(me), order_relaxed, published(me));
     atomic {
         store(me, row_lock(me), order_relaxed, published(me));
@@ -180,7 +180,7 @@ active proctype finisher() {
     load(finisher_thread, covered, order_acquire, tally);
     if
     :: tally == 2 ->
-        add_no_return(finisher_thread, next_visible_id, appender_order, 2);
+        add_no_return(finisher_thread, next_dispensed_id, appender_order, 2);
         store(finisher_thread, last_visible_id, watermark_order, 2)
     :: else
     fi;
@@ -192,9 +192,9 @@ active [2] proctype inserter() {
     int id, first_invisible, seen, displaced, watermark;
     atomic { me = inserters_started; inserters_started++ };
     // identity, one id per node, chaining the hosting chunk's growth through the dispenser
-    read_modify_write(me, next_visible_id, order_acq_rel, id, id + 1);
+    read_modify_write(me, next_dispensed_id, order_acq_rel, id, id + 1);
 #if (scenario == keyed || scenario == cursor) && !defined(without_key_before_turn)
-    // on_assigned: the sharded index writes the key plane before the walk and the publication
+    // on_assigned: the sharded index writes the key column before the walk and the publication
     store(me, key(id), order_relaxed, named(id));
 #endif
     load(me, last_visible_id, order_acquire, first_invisible);
@@ -313,16 +313,16 @@ seek:
 past_end:
     skip
 }
-#elif scenario != regions
+#elif scenario != steps
 active [saver_count] proctype saver() {
     byte me, covered_rows;
     int visible, dispensed, allocated, again;
     int lock_copy_0, tail_copy_0, lock_copy_1, tail_copy_1;
     // a second saver takes the searcher's thread
     atomic { me = saver_thread - savers_started; savers_started++ };
-    // plan_save: the cut, refused while an insert is mid-flight
+    // plan_save: the watermark, refused while an insert is mid-flight
     load(me, last_visible_id, order_acquire, visible);
-    load(me, next_visible_id, order_acquire, dispensed);
+    load(me, next_dispensed_id, order_acquire, dispensed);
     load(me, last_allocated_id, order_acquire, allocated);
 #if scenario == appender
     assert(visible == 0 || dispensed == visible);
@@ -348,7 +348,7 @@ active [saver_count] proctype saver() {
     :: again != visible -> goto contended
     :: else
     fi;
-    load(me, next_visible_id, order_relaxed, again);
+    load(me, next_dispensed_id, order_relaxed, again);
     if
     :: again != dispensed -> goto contended
     :: else

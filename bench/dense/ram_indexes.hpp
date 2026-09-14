@@ -75,7 +75,7 @@ using schedule_waiters_t = std::tuple<hint_waiter_t, monitor_waiter_t>;
  *
  *  The dataset never appears here - the data side lives in @c streamed_dataset, which bridges
  *  the file's scalar into the stored one batch by batch. The sharded index owns its shards and
- *  key planes; the executor owns its pool and per-thread arenas; nothing else exists.
+ *  key columns; the executor owns its pool and per-thread arenas; nothing else exists.
  */
 template <typename indexes_type_>
 struct bench_indexes_context {

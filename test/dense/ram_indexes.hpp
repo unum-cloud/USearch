@@ -8,7 +8,7 @@
  *
  *  The scenarios live in @c dense.cuh, templated over the sharded-index type; this composer
  *  names a curated handful of cells rather than the per-dtype grid, since the routing, key
- *  planes, and executor logic under test are dtype-independent. The counting-allocator
+ *  columns, and executor logic under test are dtype-independent. The counting-allocator
  *  ledger stays with the single-index suite: the sharded index bakes its own placement
  *  allocators, so its leak discipline is the sanitizers' job rather than the ledger's.
  */

@@ -599,7 +599,7 @@ std::size_t test_dense_save_load_roundtrip(make_index_type_ const& make_index) {
         failures += expect_eq(restored.size(), shape.nodes);
 
         // A restored index must re-save on every contract: the settlement counters arrive
-        // fully credited, so the optimistic arm's probe sees a quiescent chain, and the
+        // fully released, so the optimistic arm's probe sees a quiescent chain, and the
         // re-saved bytes mirror the originals exactly.
         auto resaved_vectors = nk::matrix<scalar_t>::try_zeros({shape.nodes, shape.dimensions});
         auto resaved_neighbors = nk::matrix<node_id_t>::try_zeros({shape.nodes, shape.connectivity});
@@ -754,7 +754,7 @@ std::size_t test_dense_load_hostile(make_index_type_ const& make_index) {
             failures += expect_eq(abandoned.size(), nodes_count);
         }
 
-        // A save plan refuses a step past its cut, and a finish with nothing landed.
+        // A save plan refuses a step past its watermark, and a finish with nothing landed.
         {
             auto [plan, planned] = index.plan_save(
                 {dense_matrix_bytes(saved_vectors), dense_matrix_bytes(saved_neighbors)},
@@ -1390,7 +1390,7 @@ std::size_t test_dense_indexes_arena_growth() {
 }
 
 /**
- *  @brief One key, several rows: the reverse plane's whole reason to exist, driven through
+ *  @brief One key, several rows: the locator map's whole reason to exist, driven through
  *      the single-row @c insert with a caller-built arena context.
  */
 template <typename indexes_type_>
@@ -1874,7 +1874,7 @@ std::size_t test_dense_indexes_concurrent_add() {
     for (std::size_t which = 0; which != executors_count; ++which) {
         if (failed(drivers[which].status)) return failures + expect(false);
         slices.push_back(make_vectors<scalar_t>(rows_per_executor, dimensions, dense_seed_indexes_add_k + which));
-        // Keys never take the value zero, so a stale read of a zero-filled key plane can
+        // Keys never take the value zero, so a stale read of a zero-filled key column can
         // never masquerade as a legitimate identity.
         std::vector<key_t> range(rows_per_executor);
         for (std::size_t row = 0; row != rows_per_executor; ++row)
@@ -1943,7 +1943,7 @@ std::size_t test_dense_indexes_concurrent_add() {
 /**
  *  @brief A reader thread races one executor-driven batched @c insert into the shards, asserting
  *      the key-visibility invariant: a search may reach a node the moment it publishes, so
- *      the key it resolves must already be written - never the plane's zero-fill, never
+ *      the key it resolves must already be written - never the key column's zero-fill, never
  *      outside the assigned range. RAM only: a VRAM index admits no search during a mutation.
  */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>

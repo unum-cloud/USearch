@@ -651,14 +651,14 @@ while IFS= read -r -d '' file; do
         check_stl_dynamic_containers
         check_boolean_parameters
         ;;&
-    include/*.hpp | include/*.cuh | src/*.cpp | src/*.cuh)
+    include/*.hpp | include/*.cuh | src/*.cpp | src/*.cuh | verification/*.cpp)
         check_hand_minmax
         check_preferred_aliases
         ;;&
-    src/*.cpp | src/*.cuh | test/*.cpp | test/*.hpp | test/*.cu | test/*.cuh | bench/*.cpp | bench/*.hpp | bench/*.cuh | c/*.cpp)
+    src/*.cpp | src/*.cuh | test/*.cpp | test/*.hpp | test/*.cu | test/*.cuh | bench/*.cpp | bench/*.hpp | bench/*.cuh | c/*.cpp | verification/*.cpp)
         check_qualified_namespace
         ;;&
-    src/*.cpp | src/*.cuh | test/*.cpp | test/*.hpp | bench/*.cpp | bench/*.hpp | include/*.hpp)
+    src/*.cpp | src/*.cuh | test/*.cpp | test/*.hpp | bench/*.cpp | bench/*.hpp | include/*.hpp | verification/*.cpp)
         check_printf
         check_partial_prints
         check_memcpy

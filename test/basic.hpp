@@ -368,15 +368,15 @@ std::size_t test_basic_guards(fixture_type_ const& fixture) {
     using node_id_t = typename index_t::node_id_t;
     using key_t = typename index_t::key_t;
     using context_t = typename index_t::traversal_context_t;
-    constexpr std::size_t quota_k = 8;
+    constexpr std::size_t ceiling_k = 8;
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
         context_t context {basic_seed_guards_k, counting_allocator_t {ledger}};
-        auto values = fixture.make_values(quota_k + 1, basic_seed_guards_k);
-        std::vector<key_t> keys(quota_k + 1);
+        auto values = fixture.make_values(ceiling_k + 1, basic_seed_guards_k);
+        std::vector<key_t> keys(ceiling_k + 1);
         for (std::size_t ordinal = 0; ordinal != keys.size(); ++ordinal) keys[ordinal] = fixture.make_key(ordinal);
 
         // Everything is defined before the first reserve, and nothing is usable.
@@ -398,14 +398,14 @@ std::size_t test_basic_guards(fixture_type_ const& fixture) {
         failures += expect_eq(index.reserve(0).status, status_t::config_mismatch_k);
         if constexpr (sizeof(node_id_t) == 4)
             failures += expect_eq(index.reserve(std::size_t {1} << 32).status, status_t::overflow_k);
-        auto const reserved = index.reserve(quota_k);
+        auto const reserved = index.reserve(ceiling_k);
         failures += expect_eq(reserved.status, status_t::success_k);
-        failures += expect_eq(reserved.value, quota_k);
-        failures += expect_eq(index.reserve(quota_k).status, status_t::success_k);
-        failures += expect_eq(index.reserve(quota_k - 1).status, status_t::success_k);
-        failures += expect_eq(index.reserve(quota_k + 1).status, status_t::overflow_k);
-        failures += expect_eq(index.reserve(quota_k + 1).value, quota_k);
-        failures += expect_eq(index.capacity(), quota_k);
+        failures += expect_eq(reserved.value, ceiling_k);
+        failures += expect_eq(index.reserve(ceiling_k).status, status_t::success_k);
+        failures += expect_eq(index.reserve(ceiling_k - 1).status, status_t::success_k);
+        failures += expect_eq(index.reserve(ceiling_k + 1).status, status_t::overflow_k);
+        failures += expect_eq(index.reserve(ceiling_k + 1).value, ceiling_k);
+        failures += expect_eq(index.capacity(), ceiling_k);
 
         // Argument guards, each with zero side effects.
         std::vector<node_id_t> assigned_ids(1);
@@ -423,19 +423,19 @@ std::size_t test_basic_guards(fixture_type_ const& fixture) {
 
         // A rejected over-capacity batch must roll its claim back completely.
         failures += expect_eq(
-            index.insert({values.data(), quota_k + 1}, {keys.data(), quota_k + 1}, metric, {}, context).status,
+            index.insert({values.data(), ceiling_k + 1}, {keys.data(), ceiling_k + 1}, metric, {}, context).status,
             status_t::overflow_k);
         failures += expect_eq(index.size(), 0u);
         failures += expect_eq(index
-                                  .insert({values.data(), quota_k}, {keys.data(), quota_k}, metric, {}, context,
+                                  .insert({values.data(), ceiling_k}, {keys.data(), ceiling_k}, metric, {}, context,
                                           basic_keep_diverse_t {basic_connectivity_k})
                                   .status,
                               status_t::success_k);
-        failures += expect_eq(index.size(), quota_k);
+        failures += expect_eq(index.size(), ceiling_k);
         failures += expect_eq(
-            index.insert({values.data() + quota_k, 1}, {keys.data() + quota_k, 1}, metric, {}, context).status,
+            index.insert({values.data() + ceiling_k, 1}, {keys.data() + ceiling_k, 1}, metric, {}, context).status,
             status_t::overflow_k);
-        failures += expect_eq(index.size(), quota_k);
+        failures += expect_eq(index.size(), ceiling_k);
 
         // The index's planes are provably on the ledger, not the plain heap.
         failures += expect(ledger.live_bytes.load() > 0);
@@ -2161,7 +2161,7 @@ std::size_t test_basic_overflow_race(fixture_type_ const& fixture) {
     return failures;
 }
 
-/** @brief The reader's cursor: id-order iteration over the published prefix, snapshot
+/** @brief The reader's cursor: id-order iteration over the watermark, snapshot
  *      discipline, edge-following, refresh widening, and a thread racing live mutators. */
 template <typename fixture_type_>
 std::size_t test_basic_cursor(fixture_type_ const& fixture) {

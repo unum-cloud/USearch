@@ -35,26 +35,26 @@
  *  - `-Dwithout_watermark_filter`, under `-Dmemory=sequential`: the reader follows an edge to
  *    an id at or above its snapshot, and reads a record its snapshot never covered.
  *
- *  `-Dscenario=regions`: the load path. Two regions each store their key and add their count
+ *  `-Dscenario=steps`: the load path. Two steps each store their key and add their count
  *  to `covered` with a release; the finisher, holding the unique side, acquires the tally,
  *  reads both keys, stores the claim and identity counters relaxed and the watermark with a
- *  release, and unlocks. A reader runs `published_prefix_` and `key_of`: a watermark it
+ *  release, and unlocks. A reader runs `watermark_` and `key_of`: a watermark it
  *  acquired at 2 must show the dispenser at 2 and node 1's key.
  *  - `-Dwithout_covered_release`: the tally add is relaxed, and the finisher reads no key; under
  *    `-Dmemory=far` the add is posted, and lands carrying nothing;
  *  - `-Dwithout_counters_before_watermark`: the watermark goes first, and a reader that acquired
- *    it reads the dispenser behind it, so `published_prefix_` reports a settled load contended.
+ *    it reads the dispenser behind it, so `watermark_` reports a settled load contended.
  */
 #include "weak_memory.pml"
 
-// The scenarios: the rows under their mutex, or the load path's regions.
+// The scenarios: the rows under their mutex, or the load path's steps.
 #define rows 1
-#define regions 2
+#define steps 2
 #ifndef scenario
 #define scenario rows
 #endif
 
-// The threads, by role, apart from the processes that play them; the regions name themselves as they start.
+// The threads, by role, apart from the processes that play them; the steps name themselves as they start.
 #define linker_thread 0
 #define inserter_thread 1
 #define reader_thread 2
@@ -297,13 +297,13 @@ proctype unique_taker() {
     fi
 }
 #else
-#define region_count 2
-byte regions_started;
+#define step_count 2
+byte steps_started;
 
-// load_plan_t::load: the region's records, then its share of the tally
-active [region_count] proctype region() {
+// load_plan_t::load: the step's records, then its share of the tally
+active [step_count] proctype step() {
     byte me;
-    atomic { me = regions_started; regions_started++ };
+    atomic { me = steps_started; steps_started++ };
     store(me, key(me), order_relaxed, keyed(me));
     add_no_return(me, covered, covered_order, 1);
     landed(me)
@@ -315,35 +315,35 @@ active proctype finisher() {
     bool succeeded;
     try_lock(finisher_thread, observed, succeeded);
     assert(succeeded);
-    (newest_value(covered) == region_count);
+    (newest_value(covered) == step_count);
     load(finisher_thread, covered, order_acquire, tally);
     if
-    :: tally == region_count ->
+    :: tally == step_count ->
         load(finisher_thread, key(0), order_relaxed, first);
         load(finisher_thread, key(1), order_relaxed, second);
         assert(first == keyed(0) && second == keyed(1));
 #ifdef without_counters_before_watermark
-        store(finisher_thread, last_visible_id, order_release, region_count);
-        store(finisher_thread, claimed_count, order_relaxed, region_count);
-        store(finisher_thread, next_dispensed_id, order_relaxed, region_count)
+        store(finisher_thread, last_visible_id, order_release, step_count);
+        store(finisher_thread, claimed_count, order_relaxed, step_count);
+        store(finisher_thread, next_dispensed_id, order_relaxed, step_count)
 #else
-        store(finisher_thread, claimed_count, order_relaxed, region_count);
-        store(finisher_thread, next_dispensed_id, order_relaxed, region_count);
-        store(finisher_thread, last_visible_id, order_release, region_count)
+        store(finisher_thread, claimed_count, order_relaxed, step_count);
+        store(finisher_thread, next_dispensed_id, order_relaxed, step_count);
+        store(finisher_thread, last_visible_id, order_release, step_count)
 #endif
     :: else
     fi;
     unlock(finisher_thread, observed)
 }
 
-// published_prefix_ and key_of: a watermark acquired at the row count shows the dispenser there and the keys
+// watermark_ and key_of: a watermark acquired at the row count shows the dispenser there and the keys
 active proctype reader() {
     int watermark, dispensed, seen;
     load(reader_thread, last_visible_id, order_acquire, watermark);
     if
-    :: watermark == region_count ->
+    :: watermark == step_count ->
         load(reader_thread, next_dispensed_id, order_acquire, dispensed);
-        assert(dispensed == region_count);
+        assert(dispensed == step_count);
         load(reader_thread, key(1), order_relaxed, seen);
         assert(seen == keyed(1))
     :: else

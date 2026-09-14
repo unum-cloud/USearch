@@ -959,7 +959,7 @@ __device__ __forceinline__ void dense_cuda_insert_one( //
     typename kit_::query_state_t const query_state = kit_::make_query_state(new_norms);
     __syncwarp();
 
-    // Walk the published prefix - a virgin index publishes an empty node instead.
+    // Walk the watermark - a virgin index publishes an empty node instead.
     if (new_node_id != 0)
         dense_cuda_search_around<kit_>( //
             planes, query_span, query_state, new_node_id, visited, gathered_ids, gathered_scored, context, lane);
@@ -2378,8 +2378,8 @@ struct dense_vram_index {
 #pragma region Checkpoints
 
     /**
-     *  @brief One save in flight: the cut it took, the stream its copies ride, and the batches it
-     *      hands out - one pinned bounce of rows at a time, since a device plane cannot be read
+     *  @brief One save in flight: the watermark it took, the stream its copies ride, and the batches
+     *      it hands out - one pinned bounce of rows at a time, since a device plane cannot be read
      *      in place. Vectors travel as logical rows with the fragment padding stripped, neighbors
      *      verbatim under the positional sentinel convention; norms re-derive on load.
      *
@@ -2388,15 +2388,15 @@ struct dense_vram_index {
      *  tallies keep the shape a threaded caller expects.
      */
     struct [[nodiscard]] save_plan_t {
-        /** @brief Where the rows land, vetted against the cut at planning. */
+        /** @brief Where the rows land, vetted against the watermark at planning. */
         columns_t columns {};
-        /** @brief What an ID under the cut moves by - the row this shard starts at. */
+        /** @brief What an ID under the watermark moves by - the row this shard starts at. */
         node_id_t id_shift = 0;
         /** @brief The stream every device-to-host copy queues on, drained before its bytes move. */
         cudaStream_t stream = nullptr;
         /** @brief Page-locked host bytes: one batch of packed vector rows, then its neighbor ids. */
         bounce_t bounce {cuda_pinned_allocator_t {}};
-        /** @brief Rows under the cut - the claimed rows at planning. */
+        /** @brief Rows under the watermark - the claimed rows at planning. */
         node_id_t visible = 0;
         /** @brief Rows one batch carries - a bounce's worth, or every row when fewer. */
         std::size_t batch_rows = 0;
@@ -2406,7 +2406,7 @@ struct dense_vram_index {
         std::size_t covered_neighbors = 0;
 
         save_plan_t() noexcept = default;
-        /** @brief The index snapshotted into @p columns on @p stream under the cut at @p visible,
+        /** @brief The index snapshotted into @p columns on @p stream under the watermark at @p visible,
          *      its IDs shifted by @p id_shift; only @ref plan_save calls it, and sizes the bounce
          *      afterwards. */
         save_plan_t(dense_vram_index const& index, columns_t columns, node_id_t id_shift, cudaStream_t stream,
@@ -2423,10 +2423,10 @@ struct dense_vram_index {
         // The tallies are this plan's own: a copy would tally into a twin `finish` never reads.
         save_plan_t(save_plan_t const&) = delete;
         save_plan_t& operator=(save_plan_t const&) = delete;
-        /** @brief A cut owns nothing but its bounce, so a dying plan leaves the index as it found it. */
+        /** @brief A save owns nothing but its bounce, so a dying plan leaves the index as it found it. */
         ~save_plan_t() noexcept = default;
 
-        /** @brief One step of the plan: one bounce-sized batch of the rows under the cut. */
+        /** @brief One step of the plan: one bounce-sized batch of the rows under the watermark. */
         struct step_t {
             /** @brief The step's position in the plan - what a fan-out hands to a stream. */
             std::size_t position = 0;
@@ -2454,14 +2454,14 @@ struct dense_vram_index {
             return step;
         }
 
-        /** @brief The steps the cut spans - one bounce-sized batch each. */
+        /** @brief The steps the save spans - one bounce-sized batch each. */
         indexed_range<save_plan_t> steps() const noexcept {
             return {this, index_ && batch_rows ? divide_round_up<std::size_t>(visible, batch_rows) : 0};
         }
 
         /** @brief Copies step @p step 's rows off the device into the plan's own columns: the
          *      vectors with the fragment padding stripped, then the neighbors with every ID under
-         *      the cut shifted by @c id_shift and every other folded to the sentinel.
+         *      the watermark shifted by @c id_shift and every other folded to the sentinel.
          *
          *  @param[in] step The step to copy, as @ref steps hands them out.
          *  @param[inout] scratch Unused here, since the bounce is already host memory; it rides
@@ -2527,21 +2527,21 @@ struct dense_vram_index {
 
       private:
         /** @brief The index being snapshotted; null in the empty plan a refused @ref plan_save
-         *      hands back, and once @c finish succeeded. */
+         *      returns, and once @c finish succeeded. */
         dense_vram_index const* index_ = nullptr;
     };
 
     /**
-     *  @brief Opens a save into @p columns under @p synchronization on @p stream: takes the cut
+     *  @brief Opens a save into @p columns under @p synchronization on @p stream: takes the watermark
      *      and sizes one bounce for it. @c concurrent_k answers @c config_mismatch_k, since the
      *      device planes cannot be probed for settlement; @c exclusive_k reads like
-     *      @c immutable_k. Columns too short for the rows under the cut are refused here, so no
-     *      step ever writes past them.
+     *      @c immutable_k. Columns too short for the rows under it are refused here, so no step ever
+     *      writes past them.
      *
      *  @param[out] columns Where the rows land, sized from @ref saved_shape.
      *  @param[in] synchronization The contract the caller certifies.
      *  @param[in] stream The stream every copy queues on.
-     *  @param[in] id_shift What an ID under the cut moves by - the row this shard starts at.
+     *  @param[in] id_shift What an ID under the watermark moves by - the row this shard starts at.
      */
     expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization, cudaStream_t stream = nullptr,
                                     node_id_t id_shift = 0) const noexcept {
@@ -2557,8 +2557,8 @@ struct dense_vram_index {
         return {std::move(plan), status_t::success_k};
     }
 
-    /** @brief Serializes every row under the cut into @p columns on the calling thread - the
-     *      one-shot over @ref plan_save for a caller with no streams to fan the steps out over. */
+    /** @brief Serializes every row under the watermark into @p columns on the calling thread - the one-shot over
+     *      @ref plan_save for a caller with no streams to fan the steps out over. */
     status_t save(columns_t columns, synchronization_t synchronization, nk::matrix_span<node_id_t> scratch,
                   cudaStream_t stream = nullptr) const noexcept {
         auto [plan, planned] = plan_save(columns, synchronization, stream);
@@ -2749,8 +2749,8 @@ struct dense_vram_index {
         }
 
       private:
-        /** @brief The index appended to; null in the empty plan a refused @ref plan_load hands
-         *      back, and once @c finish published. */
+        /** @brief The index appended to; null in the empty plan a refused @ref plan_load returns,
+         *      and once @c finish published. */
         dense_vram_index* index_ = nullptr;
         /** @brief The claim held from planning to publication, dropped by its own death otherwise. */
         std::unique_lock<fu::spin_mutex_t> claiming_;

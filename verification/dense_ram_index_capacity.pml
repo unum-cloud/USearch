@@ -25,7 +25,7 @@
  *    rows past the end of the chunks it can see;
  *  - `-Dwithout_take_release` makes the grower's take an acquire, and a lucky taker the grower
  *    pushed into the fresh chunk has no edge to it;
- *  - `-Dwithout_whole_credit` lets a release lift a negative counter, and a second grower is
+ *  - `-Dwithout_whole_release` lets a release lift a negative counter, and a second grower is
  *    elected into the plain chunk directory;
  *  - progress: `-Dscenario=regrow` reserves two rows, then three. The second reservation's
  *    deficit is one row and two free rows are sitting on the counter, so the header's
@@ -92,13 +92,13 @@ byte claims;     // claims the reservers made between them
 // for the header's acquire loads before the wait: ram_index.hpp:834-846
 inline release_capacity(t, count) {
     add_no_return(t, last_allocated_id, deflation_order, 0 - count);
-#ifdef without_whole_credit
+#ifdef without_whole_release
     add_no_return(t, remaining_capacity, order_release, count)
 #else
     do
     :: (newest_value(remaining_capacity) >= 0);
-       read_modify_write_if(t, remaining_capacity, order_release, credited >= 0, credited, credited + count);
-       if :: credited >= 0 -> break :: else fi
+       read_modify_write_if(t, remaining_capacity, order_release, whole >= 0, whole, whole + count);
+       if :: whole >= 0 -> break :: else fi
     od
 #endif
 }
@@ -133,7 +133,7 @@ inline claim(t, count, first) {
            assert(first + count <= seen_chunks * rows_per_chunk);
            break
        :: else ->
-           // a deficit someone else is filling: hand the subtract back and wait. The wait is
+           // a deficit someone else is filling: release the subtract and wait. The wait is
            // capped, so the retry comes at some moment the counter is whole again
            read_modify_write(t, remaining_capacity, order_release, reverted, reverted + count);
            (newest_value(remaining_capacity) >= 0)
@@ -154,7 +154,7 @@ inline capacity(t, claimed_rows, total) {
 }
 
 // `reserve`: grow until the rows are there, claiming every free row along with the deficit so the
-// subtract elects a grower, and handing the whole claim back
+// subtract elects a grower, and releasing the whole claim
 inline reserve(t, target, rounds) {
     rounds = 0;
     do
@@ -179,7 +179,7 @@ inline reserve(t, target, rounds) {
 byte claimers_started;
 
 active proctype grower() {
-    int old_remaining, reverted, seen_chunks, first, credited, added;
+    int old_remaining, reverted, seen_chunks, first, whole, added;
     claim(grower_thread, 2, first);
     release_capacity(grower_thread, 2);
     landed(grower_thread)
@@ -187,7 +187,7 @@ active proctype grower() {
 
 active proctype claimer() {
     byte me;
-    int old_remaining, reverted, seen_chunks, first, credited, added;
+    int old_remaining, reverted, seen_chunks, first, whole, added;
     atomic { me = claimer_thread + claimers_started; claimers_started++ };
     claim(me, 1, first)
 }
@@ -196,7 +196,7 @@ byte abandoned; // the first plan died
 
 // `plan_load`'s claim of two rows, then the plan's death: the claim it owns releases them
 active proctype abandoner() {
-    int old_remaining, reverted, seen_chunks, first, credited, added;
+    int old_remaining, reverted, seen_chunks, first, whole, added;
     claim(abandoner_thread, 2, first);
     assert(first == 0);
 #ifndef without_abandon_release
@@ -208,7 +208,7 @@ active proctype abandoner() {
 
 // the next `plan_load`: its rows start at the watermark again, and no second chunk grew
 active proctype retrier() {
-    int old_remaining, reverted, seen_chunks, first, credited, unclaimed, total, claimed_rows, added;
+    int old_remaining, reverted, seen_chunks, first, whole, unclaimed, total, claimed_rows, added;
     (abandoned == 1);
     claim(retrier_thread, 2, first);
     assert(first == 0);
@@ -219,7 +219,7 @@ active proctype retrier() {
 // `reserve` twice over one index: two rows, then three. The second call's deficit is one row and
 // two free rows are sitting on the counter - the shape that hangs today
 active proctype regrower() {
-    int old_remaining, reverted, seen_chunks, first, credited, added;
+    int old_remaining, reverted, seen_chunks, first, whole, added;
     int unclaimed, total, claimed_rows, deficit, rounds;
     reserve(regrower_thread, 2, rounds);
     capacity(regrower_thread, claimed_rows, total);
@@ -234,7 +234,7 @@ byte reservers_started;
 
 active [2] proctype reserver() {
     byte me;
-    int old_remaining, reverted, seen_chunks, first, credited, added;
+    int old_remaining, reverted, seen_chunks, first, whole, added;
     int unclaimed, total, claimed_rows, deficit, desired, observed, rounds;
     bool succeeded;
     atomic { me = reservers_started; reservers_started++ };
@@ -254,7 +254,7 @@ active [2] proctype reserver() {
     };
     if
     :: succeeded || observed == desired ->
-        // grow through the claimer's election and hand the whole claim back until the rows are
+        // grow through the claimer's election and release the whole claim until the rows are
         // there. Two reservers can still send each other round, each reading the other's
         // transient dip; three claims between them fit the histories
         capacity(me, claimed_rows, total);

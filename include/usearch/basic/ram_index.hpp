@@ -585,7 +585,7 @@ struct basic_ram_index {
         : nodes_array_(allocator), key_map_(allocator), allocator_(std::move(allocator)) {}
 
     /** @brief Exclusive: the record array destroys every value in place, the key multimap
-     *      frees its planes wholesale. */
+     *      frees its columns wholesale. */
     ~basic_ram_index() noexcept = default;
 
     /** @brief Sizes the node records & the key multimap for @p capacity entries - once:
@@ -691,7 +691,7 @@ struct basic_ram_index {
         shared_lock_t shared_lock {shared_mutex_};
 
         // Claims convert one-to-one into dispensed ids, so dispensing, wiring into
-        // pre-reserved rows, and the quota-matched key publication can never fail. The
+        // pre-reserved rows, and the ceiling-matched key publication can never fail. The
         // claim commits only within capacity, so peers never observe an overshoot. A speculative
         // add with a rollback was considered: cheaper under contention, but a peer can see the
         // overshoot, and claims are per batch, so the exact form is affordable.
@@ -745,7 +745,7 @@ struct basic_ram_index {
             atomic_ref<node_id_t>(last_visible_id_).store(new_node_id + 1, std::memory_order_release);
 
             // Post-turn: the key becomes findable only for a published node, and the
-            // quota matches the capacity claim, so this insert cannot fail.
+            // ceiling matches the capacity claim, so this insert cannot fail.
             [[maybe_unused]] status_t const keyed = key_map_.insert(record.key, new_node_id);
 
             back_link_<synchronization_>(new_node_id, metric, selector, context);
@@ -888,8 +888,8 @@ struct basic_ram_index {
             auto const entry_probe = shared_mutex_.snapshot();
             if (!entry_probe.unlocked()) return {{}, status_t::contended_k};
             entry_generation = entry_probe.generation;
-            auto const [published, settled] = published_prefix_();
-            if (failed(settled)) return {{}, settled};
+            auto const [published, taken] = watermark_();
+            if (failed(taken)) return {{}, taken};
             first_invisible_id = published;
         }
         if (!first_invisible_id) return {};
@@ -1032,9 +1032,9 @@ struct basic_ram_index {
             report.status = status_t::contended_k;
             return report;
         }
-        auto const [visible, settled] = published_prefix_();
-        if (failed(settled)) {
-            report.status = settled;
+        auto const [visible, taken] = watermark_();
+        if (failed(taken)) {
+            report.status = taken;
             return report;
         }
         std::size_t const node_count = static_cast<std::size_t>(visible);
@@ -1120,13 +1120,13 @@ struct basic_ram_index {
 
 #pragma region Serialization
 
-    /** @brief One region-parallel save in flight: the caller's five columns, the covered-node
+    /** @brief One step-parallel save in flight: the caller's five columns, the covered-node
      *      tally, and the shared mutex's unique hold - released when the plan dies or @c finish
      *      pronounces the columns complete. */
     struct [[nodiscard]] save_plan_t {
-        /** @brief The caller-placed columns every region writes disjoint slices of. */
+        /** @brief The caller-placed columns every step writes disjoint slices of. */
         columns_t columns {};
-        /** @brief Nodes the regions covered so far, mutated through @c atomic_ref. */
+        /** @brief Nodes the steps covered so far, mutated through @c atomic_ref. */
         std::size_t covered = 0;
 
         save_plan_t() noexcept = default;
@@ -1139,39 +1139,39 @@ struct basic_ram_index {
         /** @brief A save publishes nothing, so a dying plan only drops its hold - the lock's own job. */
         ~save_plan_t() noexcept = default;
 
-        /** @brief Copies one id region's keys, neighbor ids & encoded values into the columns -
-         *      disjoint slices, so any number of caller threads run their regions concurrently;
+        /** @brief Copies the node range's keys, neighbor ids & encoded values into the columns -
+         *      disjoint slices, so any number of caller threads run their steps concurrently;
          *      every slice starts where the plan's prefix sums say. */
         template <typename value_codec_type_>
             requires basic_value_codec<value_codec_type_, value_t>
-        status_t save(iota_view<node_id_t> region, value_codec_type_ const& codec) noexcept {
+        status_t save(iota_view<node_id_t> node_range, value_codec_type_ const& codec) noexcept {
             if (!index_) return status_t::uninitialized_k;
             std::size_t const node_count = columns.keys.size();
-            if (region.bound < region.first || static_cast<std::size_t>(region.bound) > node_count)
+            if (node_range.bound < node_range.first || static_cast<std::size_t>(node_range.bound) > node_count)
                 return status_t::config_mismatch_k;
 
-            for (node_id_t const node : region) columns.keys[node] = index_->nodes_array_[node].key;
+            for (node_id_t const node : node_range) columns.keys[node] = index_->nodes_array_[node].key;
 
-            std::size_t ids_cursor = columns.neighbor_offsets[region.first];
-            for (node_id_t const node : region) {
+            std::size_t ids_cursor = columns.neighbor_offsets[node_range.first];
+            for (node_id_t const node : node_range) {
                 neighbors_buffer_t const& row = index_->nodes_array_[node].neighbors;
                 for (std::size_t link = 0; link != row.size(); ++link) columns.neighbor_ids[ids_cursor++] = row[link];
             }
 
             // Each value fills exactly the slice its sum reserved; a codec needing more refuses itself.
-            for (node_id_t const node : region) {
+            for (node_id_t const node : node_range) {
                 std::size_t const first = columns.value_offsets[node];
                 std::size_t const bound = columns.value_offsets[node + 1];
                 status_t const encoded = codec.save(index_->nodes_array_[node].value,
                                                     columns.values.subspan(first, bound - first));
                 if (failed(encoded)) return encoded;
             }
-            atomic_add(atomic_ref<std::size_t>(covered), region.size(), std::memory_order_release);
+            atomic_add(atomic_ref<std::size_t>(covered), node_range.size(), std::memory_order_release);
             return status_t::success_k;
         }
 
         /** @brief Pronounces the columns complete & releases the hold: @c config_mismatch_k
-         *      unless the regions' sizes sum to the row count - overlapping regions that still
+         *      unless the steps' sizes sum to the row count - overlapping steps that still
          *      sum right are the caller's own lie. A success spends the plan, so a second call
          *      answers @c uninitialized_k instead of unlocking a hold it no longer owns. */
         status_t finish() noexcept {
@@ -1185,15 +1185,15 @@ struct basic_ram_index {
 
       private:
         /** @brief The index being serialized, whose unique side @c hold_ occupies; null in the
-         *      empty plan a refused @ref plan_save hands back, and once @c finish succeeded. */
+         *      empty plan a refused @ref plan_save returns, and once @c finish succeeded. */
         basic_ram_index const* index_ = nullptr;
         /** @brief The unique hold spanning the plan's whole lifetime. */
         unique_lock_t hold_;
     };
 
-    /** @brief Opens a region-parallel save: takes the shared mutex's unique side - held
+    /** @brief Opens a step-parallel save: takes the shared mutex's unique side - held
      *      inside the returned plan until its @c finish or its death - sizes the columns
-     *      against the published prefix, and writes both prefix-sum columns up front, so the
+     *      against the watermark, and writes both prefix-sum columns up front, so the
      *      plan's own @c save calls copy the per-node bulk into slices already named. Live
      *      mutators answer @c contended_k; a mutator call from the plan-holding thread
      *      deadlocks on its own hold, by construction.
@@ -1205,8 +1205,8 @@ struct basic_ram_index {
     expected<save_plan_t> plan_save(columns_t columns, value_codec_type_ const& codec) const noexcept {
         unique_lock_t hold {shared_mutex_, std::try_to_lock};
         if (!hold) return {{}, status_t::contended_k};
-        auto const [visible, settled] = published_prefix_();
-        if (failed(settled)) return {{}, settled};
+        auto const [visible, taken] = watermark_();
+        if (failed(taken)) return {{}, taken};
         std::size_t const node_count = static_cast<std::size_t>(visible);
         if (status_t const sized = sized_exactly_(columns.keys.size(), node_count); failed(sized)) return {{}, sized};
         if (status_t const sized = sized_exactly_(columns.neighbor_offsets.size(), node_count + 1); failed(sized))
@@ -1242,8 +1242,8 @@ struct basic_ram_index {
     expected<basic_columns_extents_t> columns_extents(value_codec_type_ const& codec) const noexcept {
         unique_lock_t unique_lock {shared_mutex_, std::try_to_lock};
         if (!unique_lock) return {{}, status_t::contended_k};
-        auto const [visible, settled] = published_prefix_();
-        if (failed(settled)) return {{}, settled};
+        auto const [visible, taken] = watermark_();
+        if (failed(taken)) return {{}, taken};
         basic_columns_extents_t extents {static_cast<std::size_t>(visible), 0, 0};
         for (std::size_t node = 0; node != extents.nodes; ++node) {
             node_t const& record = nodes_array_[node];
@@ -1253,7 +1253,7 @@ struct basic_ram_index {
         return {extents, status_t::success_k};
     }
 
-    /** @brief Serializes the snapshot into @p columns as one plan with a single region.
+    /** @brief Serializes the snapshot into @p columns as one plan with a single step.
      *      Takes the shared mutex's unique side for the whole copy - live mutators answer
      *      @c contended_k at entry, none can start until the columns are complete, and
      *      searches keep running throughout.
@@ -1270,13 +1270,13 @@ struct basic_ram_index {
         return planned.value.finish();
     }
 
-    /** @brief One region-parallel load in flight - the mirror of @ref save_plan_t: the
+    /** @brief One step-parallel load in flight - the mirror of @ref save_plan_t: the
      *      vetted columns, the covered-node tally, and the shared mutex's unique hold,
      *      released when the plan dies or @c finish publishes the loaded graph. */
     struct [[nodiscard]] load_plan_t {
         /** @brief The vetted columns being decoded. */
         columns_view_t columns {};
-        /** @brief Nodes the regions covered so far, mutated through @c atomic_ref. */
+        /** @brief Nodes the steps covered so far, mutated through @c atomic_ref. */
         std::size_t covered = 0;
 
         load_plan_t() noexcept = default;
@@ -1286,26 +1286,26 @@ struct basic_ram_index {
             : columns(other.columns), covered(other.covered), index_(std::exchange(other.index_, nullptr)),
               hold_(std::move(other.hold_)) {}
         load_plan_t& operator=(load_plan_t&&) = delete;
-        /** @brief A plan that dies before @c finish wipes the keys its regions registered, still
+        /** @brief A plan that dies before @c finish wipes the keys its steps registered, still
          *      under its hold: an insert on the empty index would otherwise dispense ids the
-         *      unpublished attempt's keys still name, and burn quota on the leftovers. */
+         *      unpublished attempt's keys still name, and spend the map's ceiling on the leftovers. */
         ~load_plan_t() noexcept {
             if (index_) index_->key_map_.clear();
         }
 
-        /** @brief Decodes one id region's keys, neighbor rows & values into its
+        /** @brief Decodes the node range's keys, neighbor rows & values into its
          *      pre-constructed records and registers the keys - the multimap inserts are
-         *      concurrency-safe, so any number of caller threads run their regions. */
+         *      concurrency-safe, so any number of caller threads run their steps. */
         template <typename value_codec_type_>
             requires basic_value_codec<value_codec_type_, value_t>
-        status_t load(iota_view<node_id_t> region, value_codec_type_ const& codec) noexcept {
+        status_t load(iota_view<node_id_t> node_range, value_codec_type_ const& codec) noexcept {
             if (!index_) return status_t::uninitialized_k;
             std::size_t const node_count = columns.keys.size();
-            if (region.bound < region.first || static_cast<std::size_t>(region.bound) > node_count)
+            if (node_range.bound < node_range.first || static_cast<std::size_t>(node_range.bound) > node_count)
                 return status_t::config_mismatch_k;
 
             // The plan vetted both prefix-sum columns and every id, so the slices are trusted.
-            for (node_id_t const node : region) {
+            for (node_id_t const node : node_range) {
                 node_t& record = index_->nodes_array_[node];
                 record.key = columns.keys[node];
 
@@ -1326,13 +1326,13 @@ struct basic_ram_index {
 
                 if (status_t const keyed = index_->key_map_.insert(record.key, node); failed(keyed)) return keyed;
             }
-            atomic_add(atomic_ref<std::size_t>(covered), region.size(), std::memory_order_release);
+            atomic_add(atomic_ref<std::size_t>(covered), node_range.size(), std::memory_order_release);
             return status_t::success_k;
         }
 
         /** @brief Publishes the loaded graph in the tier-wide order - claims, identity,
          *      watermark last - and releases the hold: @c config_mismatch_k unless the
-         *      regions' sizes sum to the row count. */
+         *      steps' sizes sum to the row count. */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
             std::size_t const node_count = columns.keys.size();
@@ -1350,13 +1350,13 @@ struct basic_ram_index {
 
       private:
         /** @brief The index being repopulated, whose unique side @c hold_ occupies; null in the
-         *      empty plan a refused @ref plan_load hands back, and once @c finish published. */
+         *      empty plan a refused @ref plan_load returns, and once @c finish published. */
         basic_ram_index* index_ = nullptr;
         /** @brief The unique hold spanning the plan's whole lifetime. */
         unique_lock_t hold_;
     };
 
-    /** @brief Opens a region-parallel load into this reserved, empty index: takes the
+    /** @brief Opens a step-parallel load into this reserved, empty index: takes the
      *      shared mutex's unique side - held inside the returned plan until its
      *      @c finish or its death - vets both prefix-sum columns and every neighbor id
      *      in full, and wipes the key multimap. The plan's own @c load calls then decode
@@ -1380,7 +1380,7 @@ struct basic_ram_index {
     }
 
     /** @brief Loads a snapshot into this reserved, empty index as one plan with a single
-     *      region - exclusive: decodes each value into its pre-constructed record,
+     *      step - exclusive: decodes each value into its pre-constructed record,
      *      rebuilds the key multimap, and publishes the watermark last. The key map is
      *      wiped at planning, so a failed attempt may be retried with corrected columns.
      *
@@ -1685,10 +1685,10 @@ struct basic_ram_index {
         }
     }
 
-    /** @brief The published prefix at unique acquisition; @c contended_k when the dispenser has
+    /** @brief The watermark at unique acquisition; @c contended_k when the dispenser has
      *      run ahead of the watermark, which only an exclusive-certified mutator lying mid-turn
      *      can do with the gate held. */
-    expected<node_id_t> published_prefix_() const noexcept {
+    expected<node_id_t> watermark_() const noexcept {
         node_id_t const visible = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
         return {visible, visible == atomic_ref<node_id_t>(next_dispensed_id_).load(std::memory_order_acquire) //
                              ? status_t::success_k
@@ -1723,7 +1723,7 @@ struct basic_ram_index {
     }
 
     /** @brief Vets untrusted columns in full - both prefix-sum columns sized to the rows and
-     *      monotone over their element columns, every neighbor id naming a row - so the region
+     *      monotone over their element columns, every neighbor id naming a row - so the step
      *      decoders trust every slice they read. */
     static status_t vetted_columns_(columns_view_t columns) noexcept {
         std::size_t const node_count = columns.keys.size();
@@ -1777,7 +1777,7 @@ struct basic_ram_index {
 };
 
 /**
- *  @brief External reader's cursor over the published prefix of one @c basic_ram_index:
+ *  @brief External reader's cursor over the watermark of one @c basic_ram_index:
  *      id-order iteration, random seeks, and edge-following through a privately staged
  *      copy of the current node's row.
  *
