@@ -121,7 +121,7 @@ struct seekable_file_t {
 
 #if defined(_WIN32)
 
-inline auto seekable_file_t::open_(char const* path, file_mode_t mode) noexcept -> descriptor_t {
+inline seekable_file_t::descriptor_t seekable_file_t::open_(char const* path, file_mode_t mode) noexcept {
     if (mode == file_mode_t::read_k)
         return ::CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
                              nullptr);
@@ -176,7 +176,7 @@ inline status_t seekable_file_t::close() noexcept {
 
 #else
 
-inline auto seekable_file_t::open_(char const* path, file_mode_t mode) noexcept -> descriptor_t {
+inline seekable_file_t::descriptor_t seekable_file_t::open_(char const* path, file_mode_t mode) noexcept {
     int const flags = mode == file_mode_t::read_k ? O_RDONLY : (O_RDWR | O_CREAT | O_TRUNC);
     return ::open(path, flags | O_CLOEXEC, 0644);
 }

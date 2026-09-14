@@ -397,6 +397,21 @@ check_hand_ceils() {
         "$file hand-rolls a ceiling division - use divide_round_up from usearch/utilities/types.hpp:"
 }
 
+# A function that opens with `auto` and names its result after the signature buries the one thing a
+# reader scans a header for. Spell the type first, qualifying it where an out-of-class definition
+# needs it. Lambdas, deduction guides and `requires` clauses keep their arrows - they have no other
+# spelling - so the rejected shapes are a declaration opening with `auto`, and a wrapped signature
+# whose continuation line opens with the arrow. Member access binds its arrow tight, which is what
+# separates `index->search` from a return type.
+check_trailing_returns() {
+    local trailing
+    trailing=$(printf '%s\n' "$added" |
+        grep -nE '^[[:space:]]*((static|inline|constexpr|friend)[[:space:]]+)*auto[[:space:]]+[A-Za-z_].*->[[:space:]]|^[[:space:]]*->[[:space:]]' |
+        grep -vE '\[[^]]*\][[:space:]]*\(|requires|concept' || true)
+    [ -z "$trailing" ] || fail "$trailing" \
+        "$file declares a trailing return type - name the type before the function:"
+}
+
 # `std::min` / `std::max` re-derive what the shared vocabulary already names, and the parenthesized
 # `(std::min<...>)` spelling exists only to dodge the `windows.h` min/max macros - a ritual that
 # `min_of` / `max_of` remove outright. Library code says what it means; tests and benches, where the
@@ -623,6 +638,7 @@ while IFS= read -r -d '' file; do
         check_doxygen_glued
         check_section_spacing
         check_hand_ceils
+        check_trailing_returns
         check_region_labels
         check_iterator_laundering
         ;;&
