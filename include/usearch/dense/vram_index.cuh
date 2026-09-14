@@ -1577,8 +1577,8 @@ static __global__ void dense_cuda_reachability_islands_kernel(u32_t const* visit
 /** @brief Grafts each island: the island ID lands among the neighbors of its nearest
  *      reachable forward pick, bypassing the diversity judgment that kept dropping it; the
  *      heuristics build good graphs, this guarantees connected ones. Exclusive pass. */
-static __global__ void dense_cuda_graft_island_kernel(u32_t* neighbors, u32_t connectivity, u32_t const* island_ids,
-                                                      u32_t islands_count, u32_t const* visited_words) {
+static __global__ void dense_cuda_reconnect_island_kernel(u32_t* neighbors, u32_t connectivity, u32_t const* island_ids,
+                                                          u32_t islands_count, u32_t const* visited_words) {
     u32_t const island_index = blockIdx.x * blockDim.x + threadIdx.x;
     if (island_index >= islands_count) return;
     u32_t const island = island_ids[island_index];
@@ -2283,9 +2283,9 @@ struct dense_vram_index {
         health_result_t health;
         /** @brief Nodes the audit found unreachable - all re-walked and re-selected. */
         std::size_t islands_found = 0;
-        /** @brief Nodes the diverse heal left unreached, each then grafted into its nearest
+        /** @brief Nodes the diverse heal left unreached, each then reconnected into its nearest
          *      forward pick. */
-        std::size_t islands_grafted = 0;
+        std::size_t islands_reconnected = 0;
         /** @brief Frontier candidates expanded across the islands' re-walks. */
         std::size_t visited_members = 0;
         /** @brief Distances computed across the islands' re-walks and the merge. */
@@ -2294,7 +2294,7 @@ struct dense_vram_index {
 
     /** @brief Audits reachability, then re-links every unreached node: each island member re-walks
      *      the graph over a live-copied shadow, the reverse merge points reachable nodes at it, and
-     *      whatever the diverse heal still leaves unreached is grafted into a reachable
+     *      whatever the diverse heal still leaves unreached is reconnected into a reachable
      *      pick, round by round, until the graph is whole. Knob-free; demands an exclusive
      *      caller, like @c refine(). */
     expected<heal_result_t> heal(dense_traversal_context_t& context) noexcept {
@@ -2331,13 +2331,13 @@ struct dense_vram_index {
         result.visited_members = healed.visited_members;
         result.computed_distances = healed.computed_distances;
 
-        // The diverse heal loses the islands every target's judgment drops; each grafting round wires
-        // those into a reachable pick, and intra-island neighbors carry the rest on the next sweep.
-        constexpr u32_t force_rounds_cap_k = 8;
-        for (u32_t round = 0; round != force_rounds_cap_k; ++round) {
+        // The diverse heal loses the islands every target's judgment drops; a round wires those into
+        // a reachable pick, and intra-island neighbors carry the rest on the next sweep. A round
+        // that frees none frees none on the next either, so the pass ends rather than spinning.
+        for (u32_t islands_before = 0, round = 0;; ++round) {
             plan.reset();
-            std::size_t forced_sweeps = 0;
-            if (status_t swept = sweep_reachability_(context, plan, words, forced_sweeps); swept != status_t::success_k)
+            std::size_t healed_sweeps = 0;
+            if (status_t swept = sweep_reachability_(context, plan, words, healed_sweeps); swept != status_t::success_k)
                 return {{}, swept};
             u32_t* const healed_words = reinterpret_cast<u32_t*>(plan.get() + sizeof(unsigned long long));
             cudaMemsetAsync(islands_cursor, 0, sizeof(u32_t), stream);
@@ -2348,12 +2348,13 @@ struct dense_vram_index {
                     cudaSuccess ||
                 cudaStreamSynchronize(stream) != cudaSuccess)
                 return {{}, status_t::device_error_k};
-            result.health = {nodes - residual_count, forced_sweeps};
-            if (!round) result.islands_grafted = residual_count;
-            if (!residual_count) break;
-            u32_t const force_blocks = static_cast<u32_t>(
+            result.health = {nodes - residual_count, healed_sweeps};
+            if (!round) result.islands_reconnected = residual_count;
+            if (!residual_count || (round && residual_count >= islands_before)) break;
+            islands_before = residual_count;
+            u32_t const residual_blocks = static_cast<u32_t>(
                 divide_round_up<std::size_t>(residual_count, block_threads_k));
-            dense_cuda_graft_island_kernel<<<force_blocks, block_threads_k, 0, stream>>>(
+            dense_cuda_reconnect_island_kernel<<<residual_blocks, block_threads_k, 0, stream>>>(
                 reinterpret_cast<u32_t*>(neighbors_plane_.base()), static_cast<u32_t>(connectivity()), island_ids,
                 residual_count, healed_words);
             if (cudaStreamSynchronize(stream) != cudaSuccess) return {{}, status_t::device_error_k};

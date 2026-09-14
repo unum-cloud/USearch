@@ -124,6 +124,10 @@ struct dense_ram_indexes {
     using insert_config_t = typename index_t::insert_config_t;
     using insert_result_t = typename index_t::insert_result_t;
     using search_result_t = typename index_t::search_result_t;
+    using refine_config_t = typename index_t::refine_config_t;
+    using refine_result_t = typename index_t::refine_result_t;
+    using health_result_t = typename index_t::health_result_t;
+    using heal_result_t = typename index_t::heal_result_t;
     using reserve_capacity_t = typename index_t::reserve_capacity_t;
 
     /** @brief The stored scalar vocabulary, re-exported for dispatchers gating crossing rows. */
@@ -424,6 +428,235 @@ struct dense_ram_indexes {
     }
 
 #pragma endregion Insertion
+
+#pragma region Refinement
+
+    /** @brief One shard's share of a refinement sweep: its published ids cut into steps a fan-out
+     *      pulls, the same shape the checkpoint plans take. */
+    struct refine_plan_t {
+
+        /** @brief One unit of the sweep's fan-out. */
+        struct step_t {
+            /** @brief The step's position in the plan - what a fan-out hands to a thread. */
+            std::size_t position = 0;
+            /** @brief The ids this step re-selects. */
+            iota_view<dense_node_id_t> nodes;
+        };
+
+        /** @brief The swept shard; null on a default plan, which holds no steps. */
+        index_t* index_ = nullptr;
+
+        /** @brief Ids one step covers - the first chunk's rows, so a step is one growth unit. */
+        inline static constexpr std::size_t step_nodes_k = power_of_two<std::size_t>(index_t::first_chunk_rows_log2_k);
+
+        /** @brief Step @p position of the plan; an empty step past the end. */
+        step_t operator[](std::size_t position) const noexcept {
+            step_t step;
+            if (position >= steps().size()) return step;
+            std::size_t const first = position * step_nodes_k;
+            std::size_t const bound = min_of(first + step_nodes_k, index_->size());
+            step.position = position;
+            step.nodes = {static_cast<dense_node_id_t>(first), static_cast<dense_node_id_t>(bound)};
+            return step;
+        }
+
+        /** @brief The plan's steps, positionally. */
+        indexed_range<refine_plan_t> steps() const noexcept {
+            return {this, index_ ? divide_round_up(index_->size(), step_nodes_k) : 0u};
+        }
+    };
+
+    /**
+     *  @brief Re-selects the neighbors of every published node across the shards - an insertion's
+     *      wiring, replayed over stored nodes.
+     *
+     *  Every thread pulls steps from its home shard first and steals from the rest in the tail,
+     *  so a sweep costs one pass over the graph however the shards are filled. Re-selection
+     *  claims no identity and moves no watermark, so searches run throughout, a stopped sweep
+     *  leaves the graph correct and merely less improved, and the next call simply sweeps again -
+     *  re-selecting a settled node changes nothing, so nothing needs to remember where one
+     *  stopped. Insertions may not overlap.
+     *
+     *  @param[inout] executor The threads and their scratch.
+     *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity"
+     *  @param[in] on_visited Fires per step with the nodes visited so far and the population; a
+     *      @c cancel_k answer stops the sweep at that step's boundary, reported as @c cancelled_k.
+     */
+    template <typename progress_type_ = dummy_progress_t>
+    refine_result_t refine(executor_t& executor, refine_config_t config = {},
+                           progress_type_&& on_visited = {}) noexcept {
+        refine_result_t result;
+        std::size_t const shards = shards_.size();
+        if (!shards) return result.status = status_t::uninitialized_k, result;
+
+        // A re-selection walks like any other query, so it sizes like one.
+        auto [held, claimed] = executor.claim();
+        if (failed(claimed)) return result.status = claimed, result;
+        insert_config_t const walk_config {config.expansion_factor};
+        if (status_t const sized = executor.reserve(shards_[0].index->traversal_memory_usage(walk_config));
+            failed(sized))
+            return result.status = sized, result;
+        growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
+        if (status_t const ready = reserve_traversals_(traversals, executor, walk_config); failed(ready))
+            return result.status = ready, result;
+
+        growing_buffer<refine_plan_t, forkunion_allocator_t> plans {allocator_};
+        growing_buffer<std::size_t, forkunion_allocator_t> cursors {allocator_};
+        if (failed(plans.resize(shards)) || failed(cursors.resize(shards)))
+            return result.status = status_t::bad_alloc_k, result;
+        for (std::size_t shard = 0; shard != shards; ++shard) plans[shard].index_ = shards_[shard].index.get();
+
+        // One tally per thread keeps the sweep's counters off every shared line.
+        growing_buffer<refine_result_t, forkunion_allocator_t> tallies {allocator_};
+        if (failed(tallies.resize(executor.size()))) return result.status = status_t::bad_alloc_k, result;
+
+        std::size_t const published = size();
+        std::atomic<std::size_t> swept {0};
+        auto sweep_step = [&](std::size_t shard, typename refine_plan_t::step_t const& step, std::size_t thread,
+                              nk::matrix_span<dense_node_id_t>) noexcept -> status_t {
+            refine_result_t const part = shards_[shard].index->refine(step.nodes, traversals[thread], config);
+            if (!part) return part.status;
+            tallies[thread].visited_nodes += part.visited_nodes;
+            tallies[thread].changed_nodes += part.changed_nodes;
+            std::size_t const done = swept.fetch_add(part.visited_nodes, std::memory_order_relaxed) +
+                                     part.visited_nodes;
+            return on_visited(done, published) == continuation_t::cancel_k ? status_t::cancelled_k
+                                                                           : status_t::success_k;
+        };
+        result.status = drain_steps_(plans, to_writable_span(cursors), executor, 0, sweep_step);
+
+        for (refine_result_t const& tally : tallies) {
+            result.visited_nodes += tally.visited_nodes;
+            result.changed_nodes += tally.changed_nodes;
+        }
+        for (traversal_t const& traversal : traversals) {
+            result.visited_members += traversal.visited_members;
+            result.computed_distances += traversal.computed_distances;
+            result.computed_distances_in_refines += traversal.computed_distances_in_refines;
+            result.computed_distances_in_reverse_refines += traversal.computed_distances_in_reverse_refines;
+            result.restarts += traversal.restarts;
+            result.saturated_walks += traversal.saturated_walks;
+        }
+        return result;
+    }
+
+#pragma endregion Refinement
+
+#pragma region Health
+
+    /**
+     *  @brief Reachability of every shard from as many landmarks as one search draws, swept level
+     *      by level over the threads. Read-only, so concurrent insertions leave fresh nodes uncounted.
+     *
+     *  @param[inout] executor The threads and their scratch; the bitsets land on the first thread's
+     *      arena, which the reservation has already grown.
+     */
+    expected<health_result_t> health(executor_t& executor) noexcept {
+        std::size_t const shards = shards_.size();
+        if (!shards) return {{}, status_t::uninitialized_k};
+        auto [held, claimed] = executor.claim();
+        if (failed(claimed)) return {{}, claimed};
+
+        growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
+        growing_buffer<std::size_t, forkunion_allocator_t> cursors {allocator_};
+        if (status_t const ready = reserve_audit_(traversals, cursors, executor); failed(ready)) return {{}, ready};
+
+        growing_buffer<typename index_t::health_plan_t, forkunion_allocator_t> plans {allocator_};
+        if (failed(plans.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
+        for (std::size_t shard = 0; shard != shards; ++shard) {
+            auto [plan, planned] = shards_[shard].index->plan_health(traversals[0]);
+            if (failed(planned)) return {{}, planned};
+            plans.push_back_reserved(std::move(plan));
+        }
+        if (status_t const audited = sweep_reachability_(plans, to_writable_span(cursors), executor); failed(audited))
+            return {{}, audited};
+
+        health_result_t result;
+        for (typename index_t::health_plan_t const& plan : plans) {
+            expected<health_result_t> const audited = plan.finish();
+            if (failed(audited.status)) return {{}, audited.status};
+            combine_health_(result, audited.value);
+        }
+        return {result, status_t::success_k};
+    }
+
+    /**
+     *  @brief Re-links whatever no search can reach: the audit's islands are re-selected, the graph
+     *      is re-swept, and whatever the diversity judgment still drops is reconnected into a
+     *      reached pick - round after round while the island population shrinks, so a graph no
+     *      round can improve ends the pass rather than spinning. Insertions may not overlap.
+     *
+     *  @param[inout] executor The threads and their scratch.
+     */
+    expected<heal_result_t> heal(executor_t& executor) noexcept {
+        std::size_t const shards = shards_.size();
+        if (!shards) return {{}, status_t::uninitialized_k};
+        auto [held, claimed] = executor.claim();
+        if (failed(claimed)) return {{}, claimed};
+
+        growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
+        growing_buffer<std::size_t, forkunion_allocator_t> cursors {allocator_};
+        if (status_t const ready = reserve_audit_(traversals, cursors, executor); failed(ready)) return {{}, ready};
+
+        growing_buffer<typename index_t::heal_plan_t, forkunion_allocator_t> plans {allocator_};
+        if (failed(plans.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
+        for (std::size_t shard = 0; shard != shards; ++shard) {
+            auto [plan, planned] = shards_[shard].index->plan_heal(traversals[0]);
+            if (failed(planned)) return {{}, planned};
+            plans.push_back_reserved(std::move(plan));
+        }
+
+        auto reselect_step = [&](std::size_t shard, auto const& step, std::size_t thread,
+                                 nk::matrix_span<dense_node_id_t>) noexcept {
+            return plans[shard].reselect_islands(step, traversals[thread]).status;
+        };
+        auto reconnect_step = [&](std::size_t shard, auto const& step, std::size_t thread,
+                                  nk::matrix_span<dense_node_id_t>) noexcept {
+            return plans[shard].reconnect_islands(step, traversals[thread]), status_t::success_k;
+        };
+        auto islands_left = [&]() noexcept {
+            std::size_t left = 0;
+            for (typename index_t::heal_plan_t const& plan : plans) left += plan.islands_left();
+            return left;
+        };
+
+        std::span<std::size_t> const cursors_span = to_writable_span(cursors);
+        if (status_t const audited = sweep_reachability_(plans, cursors_span, executor); failed(audited))
+            return {{}, audited};
+        for (std::size_t islands_before = islands_left(); islands_before;) {
+            std::memset(cursors_span.data(), 0, cursors_span.size_bytes());
+            if (status_t const reselected = drain_steps_(plans, cursors_span, executor, 0, reselect_step);
+                failed(reselected))
+                return {{}, reselected};
+            if (status_t const audited = sweep_reachability_(plans, cursors_span, executor); failed(audited))
+                return {{}, audited};
+            if (!islands_left()) break;
+            std::memset(cursors_span.data(), 0, cursors_span.size_bytes());
+            if (status_t const forced = drain_steps_(plans, cursors_span, executor, 0, reconnect_step); failed(forced))
+                return {{}, forced};
+            if (status_t const audited = sweep_reachability_(plans, cursors_span, executor); failed(audited))
+                return {{}, audited};
+            // A round that frees no island frees none on the next either - the picks it needs are
+            // themselves unreached - so the pass ends here and reports what still stands.
+            std::size_t const islands_after = islands_left();
+            if (islands_after >= islands_before) break;
+            islands_before = islands_after;
+        }
+
+        heal_result_t result;
+        for (typename index_t::heal_plan_t const& plan : plans) {
+            expected<heal_result_t> const healed = plan.finish();
+            if (failed(healed.status)) return {{}, healed.status};
+            combine_health_(result.health, healed.value.health);
+            result.islands_found += healed.value.islands_found;
+            result.islands_reconnected += healed.value.islands_reconnected;
+            result.visited_members += healed.value.visited_members;
+            result.computed_distances += healed.value.computed_distances;
+        }
+        return {result, status_t::success_k};
+    }
+
+#pragma endregion Health
 
 #pragma region Search
 
@@ -799,6 +1032,50 @@ struct dense_ram_indexes {
 
 #pragma endregion Insertion
 
+#pragma region Health
+
+    /** @brief Sizes what an audit runs on: one context per thread, one cursor per shard. The
+     *      reservation comes first, since it rewinds every arena, and the plans opened after it
+     *      keep their bitsets. */
+    status_t reserve_audit_(growing_buffer<traversal_t, forkunion_allocator_t>& traversals,
+                            growing_buffer<std::size_t, forkunion_allocator_t>& cursors,
+                            executor_t& executor) noexcept {
+        if (status_t const sized = executor.reserve(shards_[0].index->traversal_memory_usage()); failed(sized))
+            return sized;
+        if (status_t const ready = reserve_traversals_(traversals, executor, {}); failed(ready)) return ready;
+        return cursors.resize(shards_.size());
+    }
+
+    /** @brief One reachability audit over every shard's plan: the bitsets restart, then every level
+     *      sweeps every step and advances each plan once, until no level expands a node - what
+     *      @ref health reports and what each round of @ref heal re-runs. */
+    template <typename plan_type_>
+    status_t sweep_reachability_(growing_buffer<plan_type_, forkunion_allocator_t>& plans,
+                                 std::span<std::size_t> cursors, executor_t& executor) noexcept {
+        for (plan_type_& plan : plans) plan.restart_sweep();
+        auto sweep_step = [&](std::size_t shard, auto const& step, std::size_t,
+                              nk::matrix_span<dense_node_id_t>) noexcept {
+            return plans[shard].sweep(step), status_t::success_k;
+        };
+        for (std::size_t expanded = 1; expanded;) {
+            std::memset(cursors.data(), 0, cursors.size_bytes());
+            if (status_t const drained = drain_steps_(plans, cursors, executor, 0, sweep_step); failed(drained))
+                return drained;
+            expanded = 0;
+            for (plan_type_& plan : plans) expanded += plan.advance_level();
+        }
+        return status_t::success_k;
+    }
+
+    /** @brief Folds one shard's audit into the index's: populations add, and the depth is the
+     *      deepest shard's, since a searcher waits for the last one. */
+    static void combine_health_(health_result_t& into, health_result_t const& one) noexcept {
+        into.reachable_nodes += one.reachable_nodes;
+        into.sweeps = max_of(into.sweeps, one.sweeps);
+    }
+
+#pragma endregion Health
+
 #pragma region Checkpoints
 
     /** @brief One monolith of a checkpoint: where it is, what its header says, and the tokens
@@ -886,15 +1163,18 @@ struct dense_ram_indexes {
     /**
      *  @brief Fans every plan's chunks out over the executor's threads: each thread drains its
      *      home shard first, then helps the rest, one atomic cursor per shard being the whole
-     *      schedule. @p per_step lands one step with the thread's scratch - @p scratch_rows of
-     *      neighbor ids, none when zero - and answers a status; the first failure wins.
+     *      schedule. @p per_step lands one step on the thread that pulled it, with that thread's
+     *      scratch - @p scratch_rows of neighbor ids, none when zero - and answers a status; the
+     *      first failure wins.
+     *
+     *  @p cursors is the caller's, one entry per plan, so an audit reuses one across its levels
+     *  rather than allocating per level.
      */
     template <typename plan_type_, typename per_step_type_>
-    status_t drain_steps_(growing_buffer<plan_type_, forkunion_allocator_t>& plans, executor_t& executor,
-                          std::size_t scratch_rows, per_step_type_& per_step) noexcept {
+    status_t drain_steps_(growing_buffer<plan_type_, forkunion_allocator_t>& plans, std::span<std::size_t> cursors,
+                          executor_t& executor, std::size_t scratch_rows, per_step_type_& per_step) noexcept {
         std::size_t const shards = plans.size();
-        growing_buffer<std::size_t, forkunion_allocator_t> cursors {allocator_};
-        if (failed(cursors.resize(shards))) return status_t::bad_alloc_k;
+        if (cursors.size() != shards) return status_t::config_mismatch_k;
         std::atomic<status_t> outcome {status_t::success_k};
         auto drain = [&](std::size_t thread, std::size_t) noexcept {
             nk::matrix_span<dense_node_id_t> scratch;
@@ -914,7 +1194,7 @@ struct dense_ram_indexes {
                 for (std::size_t position = cursor.fetch_add(1, std::memory_order_relaxed); position < steps.size();
                      position = cursor.fetch_add(1, std::memory_order_relaxed)) {
                     if (failed(outcome.load(std::memory_order_relaxed))) return;
-                    status_t const landed = per_step(shard, steps[position], scratch);
+                    status_t const landed = per_step(shard, steps[position], thread, scratch);
                     if (succeeded(landed)) continue;
                     status_t expected_status = status_t::success_k;
                     outcome.compare_exchange_strong(expected_status, landed, std::memory_order_relaxed);
@@ -958,7 +1238,8 @@ struct dense_ram_indexes {
         if (monolith.size() < header.monolith_bytes()) return status_t::overflow_k;
 
         // Every step is one slice of one column, so a thread writes where nothing else does.
-        auto save_step = [&](std::size_t shard, auto const& step, nk::matrix_span<dense_node_id_t> scratch) noexcept {
+        auto save_step = [&](std::size_t shard, auto const& step, std::size_t,
+                             nk::matrix_span<dense_node_id_t> scratch) noexcept {
             iota_view<dense_node_id_t> const rows = step.index_rows;
             bytes_span_t const vectors = header.rows_of(monolith, header.value, bases[shard] + rows.first, rows.size());
             bytes_span_t const neighbors = header.rows_of(monolith, header.neighbors, bases[shard] + rows.first,
@@ -966,7 +1247,10 @@ struct dense_ram_indexes {
             if (status_t const saved = plans[shard].save_vectors(step, vectors); failed(saved)) return saved;
             return plans[shard].save_neighbors(step, neighbors, static_cast<dense_node_id_t>(bases[shard]), scratch);
         };
-        if (status_t const drained = drain_steps_(plans, executor, scratch_rows, save_step); failed(drained))
+        growing_buffer<std::size_t, forkunion_allocator_t> cursors {allocator_};
+        if (failed(cursors.resize(shards))) return status_t::bad_alloc_k;
+        if (status_t const drained = drain_steps_(plans, to_writable_span(cursors), executor, scratch_rows, save_step);
+            failed(drained))
             return drained;
 
         for (std::size_t shard = 0; shard != shards; ++shard) {
@@ -1023,7 +1307,8 @@ struct dense_ram_indexes {
         }
 
         // A part's ids stay shard-local, so its rows travel verbatim under the sentinel convention.
-        auto save_step = [&](std::size_t shard, auto const& step, nk::matrix_span<dense_node_id_t> scratch) noexcept {
+        auto save_step = [&](std::size_t shard, auto const& step, std::size_t,
+                             nk::matrix_span<dense_node_id_t> scratch) noexcept {
             safegraphs_header_t const& header = headers[shard];
             bytes_span_t const monolith = mappings[shard].span();
             iota_view<dense_node_id_t> const rows = step.index_rows;
@@ -1032,7 +1317,10 @@ struct dense_ram_indexes {
             if (status_t const saved = plans[shard].save_vectors(step, vectors); failed(saved)) return saved;
             return plans[shard].save_neighbors(step, neighbors, dense_node_id_t {0}, scratch);
         };
-        if (status_t const drained = drain_steps_(plans, executor, scratch_rows, save_step); failed(drained))
+        growing_buffer<std::size_t, forkunion_allocator_t> cursors {allocator_};
+        if (failed(cursors.resize(shards))) return status_t::bad_alloc_k;
+        if (status_t const drained = drain_steps_(plans, to_writable_span(cursors), executor, scratch_rows, save_step);
+            failed(drained))
             return drained;
 
         std::size_t nodes = 0;
@@ -1194,7 +1482,8 @@ struct dense_ram_indexes {
             }
 
             // Every step is one slice of one part's column, so a thread reads where nothing writes.
-            auto load_step = [&](std::size_t shard, auto const& step, nk::matrix_span<dense_node_id_t>) noexcept {
+            auto load_step = [&](std::size_t shard, auto const& step, std::size_t,
+                                 nk::matrix_span<dense_node_id_t>) noexcept {
                 checkpoint_assignment_t const& assignment = taken[shard];
                 part_t const& part = parts[assignment.part];
                 iota_view<dense_node_id_t> const range = step.index_rows;
@@ -1208,7 +1497,11 @@ struct dense_ram_indexes {
                                                    {static_cast<dense_node_id_t>(assignment.rows.first),
                                                     static_cast<dense_node_id_t>(assignment.rows.bound)});
             };
-            if (status_t const drained = drain_steps_(plans, executor, 0, load_step); failed(drained)) return drained;
+            growing_buffer<std::size_t, forkunion_allocator_t> cursors {allocator_};
+            if (failed(cursors.resize(shards))) return status_t::bad_alloc_k;
+            if (status_t const drained = drain_steps_(plans, to_writable_span(cursors), executor, 0, load_step);
+                failed(drained))
+                return drained;
 
             // The keys at the append base and the reverse plane first, then the publication - the
             // order an insert keeps, so a search never reaches a published row without its key.

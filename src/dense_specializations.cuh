@@ -418,11 +418,21 @@ struct shard_ticks_t {
         : progress(progress), state(state), total(total) {}
 
     continuation_t operator()(std::size_t) noexcept {
-        std::size_t const finished = done.fetch_add(1, std::memory_order_relaxed) + 1;
+        return report_(done.fetch_add(1, std::memory_order_relaxed) + 1, total);
+    }
+
+    /** @brief The sibling for verbs that count their own units and know their own population -
+     *      a refinement ticks the nodes visited so far, which no counter here could derive. */
+    continuation_t operator()(std::size_t finished, std::size_t population) noexcept {
+        return report_(finished, population);
+    }
+
+  private:
+    continuation_t report_(std::size_t finished, std::size_t population) noexcept {
         if (!progress) return continuation_t::continue_k;
         std::lock_guard guard {mutex};
-        return progress(finished, total, state) == usearch_cancel_k ? continuation_t::cancel_k
-                                                                    : continuation_t::continue_k;
+        return progress(finished, population, state) == usearch_cancel_k ? continuation_t::cancel_k
+                                                                         : continuation_t::continue_k;
     }
 };
 
@@ -443,6 +453,9 @@ struct specialized_index {
     using insert_result_t = typename index_type_::insert_result_t;
     using search_config_t = typename index_type_::search_config_t;
     using search_result_t = typename index_type_::search_result_t;
+    using refine_config_t = typename index_type_::refine_config_t;
+    using refine_result_t = typename index_type_::refine_result_t;
+    using heal_result_t = typename index_type_::heal_result_t;
     using keys_span_t = std::span<key_t>;
     using distances_span_t = std::span<typename index_type_::distance_t>;
     using counts_span_t = std::span<std::size_t>;
@@ -469,6 +482,8 @@ struct specialized_index {
     status_t clear() noexcept;
     insert_result_t add(std::span<key_t const> keys, vectors_view_t rows, executor_t& executor,
                         insert_config_t config) noexcept;
+    refine_result_t refine(executor_t& executor, refine_config_t config, shard_ticks_t& ticks) noexcept;
+    expected<heal_result_t> heal(executor_t& executor) noexcept;
     search_result_t search(vectors_view_t queries, executor_t& executor, search_config_t config, std::size_t wanted,
                            keys_span_t keys, distances_span_t distances, counts_span_t counts) noexcept;
     search_result_t search_if(vectors_view_t queries, executor_t& executor, search_config_t config, std::size_t wanted,
@@ -549,21 +564,31 @@ status_t specialized_index<index_type_>::clear() noexcept {
     return index.clear();
 }
 template <typename index_type_>
-auto specialized_index<index_type_>::add(std::span<key_t const> keys, vectors_view_t rows, executor_t& executor,
-                                         insert_config_t config) noexcept -> insert_result_t {
+typename specialized_index<index_type_>::insert_result_t specialized_index<index_type_>::add(
+    std::span<key_t const> keys, vectors_view_t rows, executor_t& executor, insert_config_t config) noexcept {
     return index.add(keys, rows, executor, config);
 }
 template <typename index_type_>
-auto specialized_index<index_type_>::search(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                            std::size_t wanted, keys_span_t keys, distances_span_t distances,
-                                            counts_span_t counts) noexcept -> search_result_t {
+typename specialized_index<index_type_>::refine_result_t specialized_index<index_type_>::refine(
+    executor_t& executor, refine_config_t config, shard_ticks_t& ticks) noexcept {
+    return index.refine(executor, config,
+                        [&](std::size_t swept, std::size_t population) noexcept { return ticks(swept, population); });
+}
+template <typename index_type_>
+expected<typename specialized_index<index_type_>::heal_result_t> specialized_index<index_type_>::heal(
+    executor_t& executor) noexcept {
+    return index.heal(executor);
+}
+template <typename index_type_>
+typename specialized_index<index_type_>::search_result_t specialized_index<index_type_>::search(
+    vectors_view_t queries, executor_t& executor, search_config_t config, std::size_t wanted, keys_span_t keys,
+    distances_span_t distances, counts_span_t counts) noexcept {
     return index.search(queries, executor, config, wanted, keys, distances, counts);
 }
 template <typename index_type_>
-auto specialized_index<index_type_>::search_if(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                               std::size_t wanted, keys_span_t keys, distances_span_t distances,
-                                               counts_span_t counts, key_predicate_t& predicate) noexcept
-    -> search_result_t
+typename specialized_index<index_type_>::search_result_t specialized_index<index_type_>::search_if(
+    vectors_view_t queries, executor_t& executor, search_config_t config, std::size_t wanted, keys_span_t keys,
+    distances_span_t distances, counts_span_t counts, key_predicate_t& predicate) noexcept
     requires is_ram_index<index_type_>
 {
     return index.search(queries, executor, config, wanted, keys, distances, counts, predicate);

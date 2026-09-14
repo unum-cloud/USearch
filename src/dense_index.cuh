@@ -1190,9 +1190,10 @@ struct punned_executor_t {
 template <typename multi_type_>
 static typename multi_type_::executor_t* executor_of(usearch_executor_t punned_executor,
                                                      usearch_error_t* error) noexcept {
+    if (!punned_executor)
+        return propagate_error(usearch_error_malformed_input_k, error, "Executor must not be null"), nullptr;
     punned_executor_t* const state = static_cast<punned_executor_t*>(punned_executor);
-    typename multi_type_::executor_t* const typed =
-        state ? std::get_if<typename multi_type_::executor_t>(&state->executor) : nullptr;
+    typename multi_type_::executor_t* const typed = std::get_if<typename multi_type_::executor_t>(&state->executor);
     if (!typed) propagate_error(usearch_error_device_k, error, "The executor's kind must match the handle's residency");
     return typed;
 }
@@ -1488,6 +1489,43 @@ USEARCH_EXPORT size_t usearch_dense_add(                             //
                            published;
             }
             return propagate_success(error), count;
+        },
+        punned_index->variants);
+}
+
+USEARCH_EXPORT size_t usearch_dense_refine(                          //
+    usearch_dense_index_t index, usearch_executor_t punned_executor, //
+    usearch_dense_insertion_options_t const* options,                //
+    usearch_progress_callback_t progress, void* progress_state,      //
+    usearch_dense_traversal_stats_t* stats,                          //
+    usearch_error_t* error) {
+    auto* punned_index = reinterpret_cast<punned_dense_index_t*>(index);
+    if (stats) *stats = {};
+    return std::visit(
+        [&]<typename variant_type_>(variant_type_& variant) -> size_t {
+            typename variant_type_::executor_t* const executor = executor_of<variant_type_>(punned_executor, error);
+            if (!executor) return 0ul;
+            typename variant_type_::refine_config_t config {};
+            if (options) config.expansion_factor = static_cast<u32_t>(options->expansion_factor);
+            shard_ticks_t ticks {progress, progress_state, specialized_index {variant}.size()};
+            typename variant_type_::refine_result_t const refined = specialized_index {variant}.refine(*executor,
+                                                                                                       config, ticks);
+            accumulate_stats(stats, refined);
+            // A stopped sweep is not a failure: the graph stands, every node it did reach keeps
+            // its fresh neighbors, and the next call sweeps again toward the same fixed point.
+            if (failed(refined.status) && refined.status != status_t::cancelled_k)
+                return propagate_error(refined.status, error), 0ul;
+
+            // Re-selection alone can strand a node no search reaches, so every sweep closes with
+            // the repair that finds them; its reconnections are neighbor rewrites the caller's
+            // settling loop must see, so they join the count.
+            expected<typename variant_type_::heal_result_t> const healed = specialized_index {variant}.heal(*executor);
+            if (failed(healed.status)) return propagate_error(healed.status, error), refined.changed_nodes;
+            if (stats) {
+                stats->visited_members += healed.value.visited_members;
+                stats->computed_distances += healed.value.computed_distances;
+            }
+            return propagate_success(error), refined.changed_nodes + healed.value.islands_reconnected;
         },
         punned_index->variants);
 }

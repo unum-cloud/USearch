@@ -1061,7 +1061,7 @@ struct dense_ram_index {
      *      so concurrent insertions merely leave fresh nodes uncounted.
      *
      *  Steps are first-chunk-sized ID ranges, disjoint, so any number of threads may @ref sweep
-     *  different steps of one level at once; @ref advance is the level boundary, one caller.
+     *  different steps of one level at once; @ref advance_level is the level boundary, one caller.
      *  Reached bits only turn on and a node expands once, so re-sweeping until a level expands
      *  nothing converges to the exact reachable set.
      */
@@ -1228,7 +1228,7 @@ struct dense_ram_index {
         growing_bitset_t expanded_;
         /** @brief Nodes the current level expanded so far, summed through @c atomic_ref. */
         std::size_t expanded_in_level_ = 0;
-        /** @brief Levels completed since the last @ref restart. */
+        /** @brief Levels completed since the last @ref restart_sweep. */
         std::size_t sweeps_ = 0;
     };
 
@@ -1261,8 +1261,8 @@ struct dense_ram_index {
         health_result_t health;
         /** @brief Nodes the first audit found unreachable - all re-selected. */
         std::size_t islands_found = 0;
-        /** @brief Nodes the re-selection left unreached, each then grafted into a reachable pick. */
-        std::size_t islands_grafted = 0;
+        /** @brief Nodes the re-selection left unreached, each then reconnected into a reachable pick. */
+        std::size_t islands_reconnected = 0;
         /** @brief Frontier candidates expanded across the islands' re-selection walks. */
         std::size_t visited_members = 0;
         /** @brief Distances computed across the islands' re-selection. */
@@ -1272,17 +1272,17 @@ struct dense_ram_index {
     /**
      *  @brief One healing pass in flight over an audit: the islands the sweep leaves are
      *      re-selected through the refinement, the bitsets restart, and whatever the diversity
-     *      judgment still drops is grafted into a reachable forward pick, round by round.
+     *      judgment still drops is reconnected into a reachable forward pick, round by round.
      *
-     *  Every phase fans out over the audit's steps on any threads: @ref sweep and @ref advance
-     *  sweep, @ref reselect and @ref force edit under the per-node locks like an insertion. The
-     *  round structure is the caller's: sweep to convergence, re-select, restart and sweep,
-     *  force, restart and sweep, until @ref islands_left is zero. Insertions may not overlap.
+     *  Every phase fans out over the audit's steps on any threads; @ref reselect_islands and
+     *  @ref reconnect_islands edit under the per-node locks like an insertion. The round structure
+     *  is the caller's: sweep to convergence, re-select, restart and sweep, reconnect, restart and
+     *  sweep, while @ref islands_left keeps shrinking. Insertions may not overlap.
      */
     struct heal_plan_t {
         using step_t = typename health_plan_t::step_t;
 
-        /** @brief The audit the pass heals against; @ref restart it between phases. */
+        /** @brief The audit the pass heals against; @ref restart_sweep it between phases. */
         health_plan_t audit;
 
         /** @brief An unbound pass over @p allocator - what a refused heal answers with. */
@@ -1290,7 +1290,7 @@ struct dense_ram_index {
         heal_plan_t(dense_ram_index& index, health_plan_t&& audit) noexcept : audit(std::move(audit)), index_(&index) {}
         heal_plan_t(heal_plan_t&& other) noexcept
             : audit(std::move(other.audit)), index_(std::exchange(other.index_, nullptr)),
-              islands_found_(other.islands_found_), islands_grafted_(other.islands_grafted_),
+              islands_found_(other.islands_found_), islands_reconnected_(other.islands_reconnected_),
               visited_members_(other.visited_members_), computed_distances_(other.computed_distances_) {}
         heal_plan_t(heal_plan_t const&) = delete;
         heal_plan_t& operator=(heal_plan_t const&) = delete;
@@ -1331,11 +1331,11 @@ struct dense_ram_index {
          *      otherwise spread across the tail, so island clusters sharing one target heal in one
          *      round rather than overwriting each other. An island whose neighbors are all islands
          *      waits for a round in which one of them got connected.
-         *  @return The islands this call grafted.
+         *  @return The islands this call reconnected.
          */
-        std::size_t graft_islands(step_t const& step, dense_traversal_context_t& context) noexcept {
+        std::size_t reconnect_islands(step_t const& step, dense_traversal_context_t& context) noexcept {
             if (!index_) return 0;
-            std::size_t grafted = 0;
+            std::size_t reconnected = 0;
             small_size_t const connectivity = static_cast<small_size_t>(index_->connectivity());
             small_size_t const spread = min_of<small_size_t>(16u, connectivity / 2);
             for (node_id_t island = step.nodes.first; island < step.nodes.bound; ++island) {
@@ -1358,7 +1358,7 @@ struct dense_ram_index {
                 node_id_t const displaced = target_neighbors.lock();
                 if (displaced == target) { // Published with no neighbors: the island becomes the only one.
                     target_neighbors.unlock(island);
-                    ++grafted;
+                    ++reconnected;
                     continue;
                 }
                 small_size_t landing = connectivity - 1 - static_cast<small_size_t>(island % spread);
@@ -1373,12 +1373,12 @@ struct dense_ram_index {
                 }
                 if (!present) {
                     target_neighbors.store_slot(landing, island);
-                    ++grafted;
+                    ++reconnected;
                 }
                 target_neighbors.unlock(displaced);
             }
-            atomic_ref<std::size_t>(islands_grafted_).fetch_add(grafted, std::memory_order_relaxed);
-            return grafted;
+            atomic_ref<std::size_t>(islands_reconnected_).fetch_add(reconnected, std::memory_order_relaxed);
+            return reconnected;
         }
 
         /** @brief Islands left after the last converged sweep - the caller's stopping test. */
@@ -1396,7 +1396,7 @@ struct dense_ram_index {
             heal_result_t result;
             result.health = audited.value;
             result.islands_found = islands_found_;
-            result.islands_grafted = islands_grafted_;
+            result.islands_reconnected = islands_reconnected_;
             result.visited_members = visited_members_;
             result.computed_distances = computed_distances_;
             return {result, status_t::success_k};
@@ -1407,8 +1407,8 @@ struct dense_ram_index {
         dense_ram_index* index_ = nullptr;
         /** @brief Islands re-selected across the pass, summed through @c atomic_ref. */
         std::size_t islands_found_ = 0;
-        /** @brief Islands grafted across the pass, summed through @c atomic_ref. */
-        std::size_t islands_grafted_ = 0;
+        /** @brief Islands reconnected across the pass, summed through @c atomic_ref. */
+        std::size_t islands_reconnected_ = 0;
         /** @brief Frontier candidates the re-selection walks expanded, summed through @c atomic_ref. */
         std::size_t visited_members_ = 0;
         /** @brief Distances the re-selection computed, summed through @c atomic_ref. */
