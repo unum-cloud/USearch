@@ -305,34 +305,6 @@ function (usearch_setup_target TARGET_NAME)
     endif ()
     set_target_properties(${TARGET_NAME} PROPERTIES CXX_STANDARD 20)
 
-    # On Windows, when using multi-configuration CMake builds, the paths will be nested, resulting in
-    # "build_debug\Debug" on Windows instead of "build_debug". That's why we override all the configs to use the same
-    # output directory.
-    set_target_properties(
-        ${TARGET_NAME}
-        PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
-                   ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
-                   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
-    )
-    set_target_properties(
-        ${TARGET_NAME}
-        PROPERTIES RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}"
-                   ARCHIVE_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}"
-                   LIBRARY_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}"
-    )
-    set_target_properties(
-        ${TARGET_NAME}
-        PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}"
-                   ARCHIVE_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}"
-                   LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}"
-    )
-    set_target_properties(
-        ${TARGET_NAME}
-        PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}"
-                   ARCHIVE_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}"
-                   LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}"
-    )
-
     # Every library carries the `lib` prefix, Windows included, so one file name serves every platform.
     get_target_property(TARGET_TYPE ${TARGET_NAME} TYPE)
 
@@ -388,6 +360,19 @@ function (usearch_sibling NAME LINK_TARGET REPOSITORY TAG)
         INTERFACE $<TARGET_PROPERTY:${LINK_TARGET},INTERFACE_INCLUDE_DIRECTORIES>
     )
 endfunction ()
+
+# Every artifact lands at the top of the build tree, however deep the directory that declares it - one `-L`, one path to
+# a binary, no guessing which subdirectory a target chose. Multi-configuration generators would nest a second level,
+# `build_debug\Debug` on Windows, so each configuration is pinned to the same place as the default. Set before any
+# target exists, since these seed a target's properties at creation.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach (USEARCH_CONFIGURATION DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${USEARCH_CONFIGURATION} "${CMAKE_BINARY_DIR}")
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${USEARCH_CONFIGURATION} "${CMAKE_BINARY_DIR}")
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${USEARCH_CONFIGURATION} "${CMAKE_BINARY_DIR}")
+endforeach ()
 
 # The compiled siblings land as archives inside our shared objects, so every one is position-independent. NumKong
 # defines its archive under the same switch as its shared library, so the switch is set before the subdirectory lands.

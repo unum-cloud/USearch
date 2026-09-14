@@ -133,10 +133,10 @@
       }
     },
     {
-      "name": "fleet",
+      "name": "release_cuda",
       "inherits": "dev",
-      "displayName": "Fleet - CUDA fat binary, Ampere through Blackwell",
-      "description": "Same targets as `dev`, emitting every architecture the fleet spans - what shipping artifacts and cross-machine runs need.",
+      "displayName": "Release CUDA - every architecture, Ampere through Blackwell",
+      "description": "Same targets as `dev`, at Release and emitting every architecture rather than the host GPU - what shipping artifacts and cross-machine runs need.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "USEARCH_CUDA_ARCHITECTURES": "80;90a;100a;120a"
@@ -185,8 +185,8 @@
       "jobs": 0
     },
     {
-      "name": "fleet",
-      "configurePreset": "fleet",
+      "name": "release_cuda",
+      "configurePreset": "release_cuda",
       "jobs": 0
     }
   ],

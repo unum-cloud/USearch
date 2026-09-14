@@ -24,15 +24,15 @@ The `Queries` block reports the throughput in QPS, the latency, the distances an
 
 ### Building
 
-Every number below comes from a Release build: the `release` preset for the two CPU binaries, and `fleet` for the CUDA one, narrowed to the host GPU with `-DUSEARCH_CUDA_ARCHITECTURES=native` when iterating on one machine.
+Every number below comes from a Release build: the `release` preset for the two CPU binaries, and `release_cuda` for the CUDA one, narrowed to the host GPU with `-DUSEARCH_CUDA_ARCHITECTURES=native` when iterating on one machine.
 The `profile` preset keeps the same optimization and adds the symbols `perf` needs; `dev` is the `-O2` iteration tree and measures nothing.
 
 ```sh
 cmake --preset release && cmake --build --preset release --target usearch_bench_dense_ram_index usearch_bench_dense_ram_indexes
-cmake --preset fleet -DUSEARCH_CUDA_ARCHITECTURES=native && cmake --build build_fleet --target usearch_bench_dense_vram_index
+cmake --preset release_cuda -DUSEARCH_CUDA_ARCHITECTURES=native && cmake --build build_release_cuda --target usearch_bench_dense_vram_index
 ```
 
-The CPU binaries land in `build_release/`, the CUDA one in `build_fleet/bench/`.
+Every binary lands at the top of its build tree, so the CPU ones are in `build_release/` and the CUDA one in `build_release_cuda/`.
 Every benchmark is memory-hungry at 100M and above, so run it under a cgroup cap rather than trusting it to refuse.
 
 ```sh
@@ -77,7 +77,7 @@ A heal follows, re-linking whatever no search can reach, and the report ends wit
 This is what a cheap ingestion pays for - a narrow `--expansion-add` topped with one or two wide passes, rather than one expensive build:
 
 ```sh
-build_fleet/bench/usearch_bench_dense_vram_index \
+build_release_cuda/usearch_bench_dense_vram_index \
     --vectors data/sift-10m/base.10M.u8bin --queries data/sift-10m/query.public.10K.u8bin \
     --neighbors data/sift-10m/groundtruth.public.10K.ibin --u8 --euclidean \
     --connectivity 16 --expansion-add 32 --expansion-search 64 --max-refines 2 --expansion-refine 128
@@ -91,7 +91,7 @@ A checkpoint is a name under `--checkpoints-dir`, stamped with the dtype, the me
 The GPU builds a base an order of magnitude faster than the CPU, so the fast way to a large CPU graph is a GPU base topped up on the CPU: build the first rows on the device, save, then reload on the CPU and insert the rest.
 
 ```sh
-build_fleet/bench/usearch_bench_dense_vram_index --vectors data/sift-100m/base.100M.u8bin --u8 --euclidean --max-vectors 90000000 --save sift90m
+build_release_cuda/usearch_bench_dense_vram_index --vectors data/sift-100m/base.100M.u8bin --u8 --euclidean --max-vectors 90000000 --save sift90m
 build_release/usearch_bench_dense_ram_index --vectors data/sift-100m/base.100M.u8bin --queries ... --neighbors ... --u8 --euclidean --load sift90m --skip-vectors 90000000
 ```
 

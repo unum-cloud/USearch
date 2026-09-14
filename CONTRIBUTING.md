@@ -63,14 +63,14 @@ build_relwithdebinfo/usearch_test
 Those three configurations, and the benchmarking one from [bench/README.md](bench/README.md), are also packaged as CMake presets, so the flag soup below is optional:
 
 ```sh
-cmake --list-presets              # debug, relwithdebinfo, release, profile, dev, trace, fleet
+cmake --list-presets              # debug, relwithdebinfo, release, profile, dev, trace, release_cuda
 cmake --preset release            # configures into `build_release`
 cmake --build --preset release    # builds it
 ctest --preset release            # runs the suites
 ```
 
 Every preset writes into `build_<preset name>`, exports a `compile_commands.json` for the language server, links with `lld`, and builds with LLVM through Ninja.
-Two of them are about GPUs: `dev` compiles the CUDA suites for the host GPU alone, which is the fastest way to iterate and the tree the repo's `.clangd` reads, while `fleet` emits a fat binary spanning every architecture from the Ampere floor through both Blackwell lines.
+Two of them are about GPUs: `dev` compiles the CUDA suites for the host GPU alone, which is the fastest way to iterate and the tree the repo's `.clangd` reads, while `release_cuda` emits a fat binary spanning every architecture from the Ampere floor through both Blackwell lines.
 `trace` adds `-ftime-trace`, dropping a profile beside every object for when a translation unit starts dominating the build.
 Machine-specific overrides - a different compiler, `ccache`, a CUDA toolkit outside the default prefix - belong in an untracked `CMakeUserPresets.json` beside it:
 
