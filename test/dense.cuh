@@ -1284,8 +1284,8 @@ std::size_t test_dense_indexes_guards() {
     // Verbs before any shard exists refuse rather than write.
     indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect_eq(indexes
-                              .add(std::span<key_t const> {keys.data(), rows}, vectors.view(), //
-                                   executor)
+                              .insert(std::span<key_t const> {keys.data(), rows}, vectors.view(), //
+                                      executor)
                               .status,
                           status_t::uninitialized_k);
     failures += expect_eq(indexes.reserve({rows, connectivity_16_k, dimensions}).status, status_t::uninitialized_k);
@@ -1300,8 +1300,8 @@ std::size_t test_dense_indexes_guards() {
 
     // A keys span disagreeing with the batch's rows refuses before anything is taken.
     failures += expect_eq(indexes
-                              .add(std::span<key_t const> {keys.data(), rows - 1}, vectors.view(), //
-                                   executor)
+                              .insert(std::span<key_t const> {keys.data(), rows - 1}, vectors.view(), //
+                                      executor)
                               .status,
                           status_t::config_mismatch_k);
 
@@ -1312,14 +1312,14 @@ std::size_t test_dense_indexes_guards() {
         failures += expect(succeeded(claimed));
         failures += expect_eq(executor.claim().status, status_t::contended_k);
         failures += expect_eq(indexes
-                                  .add(std::span<key_t const> {keys.data(), rows}, vectors.view(), //
-                                       executor)
+                                  .insert(std::span<key_t const> {keys.data(), rows}, vectors.view(), //
+                                          executor)
                                   .status,
                               status_t::contended_k);
     }
     failures += expect(succeeded(indexes
-                                     .add(std::span<key_t const> {keys.data(), rows}, vectors.view(), //
-                                          executor)
+                                     .insert(std::span<key_t const> {keys.data(), rows}, vectors.view(), //
+                                             executor)
                                      .status));
     failures += expect_eq(indexes.size(), rows);
     std::size_t rows_in_shards = 0;
@@ -1329,8 +1329,8 @@ std::size_t test_dense_indexes_guards() {
     // A batch past the reservation grows into it - whole, with no id holes - and the capacity
     // reported afterwards covers every row that landed.
     failures += expect(succeeded(indexes
-                                     .add(std::span<key_t const> {keys.data(), rows + 1}, oversized.view(), //
-                                          executor)
+                                     .insert(std::span<key_t const> {keys.data(), rows + 1}, oversized.view(), //
+                                             executor)
                                      .status));
     failures += expect_eq(indexes.size(), 2 * rows + 1);
     failures += expect(indexes.capacity() >= indexes.size());
@@ -1365,10 +1365,11 @@ std::size_t test_dense_indexes_arena_growth() {
     auto vectors = make_vectors<scalar_t>(rows + queries, dimensions, dense_seed_upstream_k);
     std::vector<key_t> keys(rows);
     for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
-    auto const [added, landed] = indexes.add(std::span<key_t const> {keys},
-                                             vectors.view()(nk::range(0, rows), nk::slice), executor);
+    auto const [inserted, landed] = indexes.insert(std::span<key_t const> {keys},
+                                                   vectors.view()(nk::range(0, rows), nk::slice), //
+                                                   executor);
     failures += expect(succeeded(landed));
-    failures += expect_eq(added.saturated_walks, 0u);
+    failures += expect_eq(inserted.saturated_walks, 0u);
 
     // Sixteen keys match; with the pool as wide as the reservation every walk visits its whole shard,
     // so all eight surface - a narrower pool could promise only that what surfaces is admitted and ranked.
@@ -1390,7 +1391,7 @@ std::size_t test_dense_indexes_arena_growth() {
 
 /**
  *  @brief One key, several rows: the reverse plane's whole reason to exist, driven through
- *      the single-row @c add with a caller-built arena context.
+ *      the single-row @c insert with a caller-built arena context.
  */
 template <typename indexes_type_>
 std::size_t test_dense_indexes_duplicate_keys() {
@@ -1416,7 +1417,7 @@ std::size_t test_dense_indexes_duplicate_keys() {
     for (std::size_t row = 0; row != rows; ++row) {
         key_t const key = row % 2 ? shared : static_cast<key_t>(1 + row);
         failures += expect(
-            succeeded(indexes.add(key, vectors.view().row(row).as_vector(), rows_driver.handle()).status));
+            succeeded(indexes.insert(key, vectors.view().row(row).as_vector(), rows_driver.handle()).status));
     }
     failures += expect_eq(indexes.size(), rows);
     failures += expect_eq(indexes.count(shared), rows / 2);
@@ -1477,8 +1478,8 @@ std::size_t dense_indexes_build(indexes_type_& indexes, executor_type_& executor
     failures += expect(succeeded(place_shards(indexes)));
     failures += expect(succeeded(indexes.reserve({rows, connectivity_16_k, dimensions}).status));
     failures += expect(succeeded(indexes
-                                     .add(std::span<key_t const> {keys.data(), rows}, vectors.view(), //
-                                          executor)
+                                     .insert(std::span<key_t const> {keys.data(), rows}, vectors.view(), //
+                                             executor)
                                      .status));
     return failures;
 }
@@ -1690,6 +1691,60 @@ std::size_t test_dense_indexes_split_load() {
 }
 
 /**
+ *  @brief Any number of lanes may take steps from one sharded plan: a shared cursor hands them
+ *      out regardless of which shard they read, the plan finishes once, and the monolith they
+ *      wrote restores into the same graph the one-shot save writes.
+ */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+std::size_t test_dense_indexes_pooled_save() {
+    using index_t = typename indexes_type_::index_t;
+    using scalar_t = typename index_t::scalar_t;
+    using node_id_t = typename index_t::node_id_t;
+    using key_t = typename indexes_type_::key_t;
+    std::size_t failures = 0;
+    std::size_t const rows = 2 * dense_thread_nodes_k;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+
+    dense_indexes_executor<indexes_type_> driver;
+    if (failed(driver.status)) return failures + expect(false);
+    auto& executor = driver.executor;
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, dense_seed_roundtrip_k + 5);
+    std::vector<key_t> keys(rows);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+
+    indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
+    failures += dense_indexes_build(indexes, executor, vectors, keys, dimensions);
+    save_config_t const monolith = dense_indexes_save_config<indexes_type_>(checkpoint_layout_t::monolith_k);
+    auto const [bytes, measured] = indexes.storage_requirements(monolith);
+    failures += expect(succeeded(measured));
+
+    std::vector<std::byte> buffer(bytes);
+    auto planned = indexes.plan_save(bytes_span_t {buffer}, monolith);
+    failures += expect(succeeded(planned.status));
+    auto const steps = planned.value.steps();
+    failures += expect(steps.size() >= indexes.shards_count());
+
+    std::atomic<std::size_t> cursor {0};
+    std::atomic<std::size_t> lane_failures {0};
+    fu::flat_pool_t pool;
+    if (fu::failed(pool.spawn(3))) return failures + expect(false);
+    pool.for_threads([&](std::size_t) noexcept {
+        auto scratch = nk::matrix<node_id_t>::try_zeros({rows, connectivity_16_k});
+        if (scratch.empty()) return void(lane_failures.fetch_add(1));
+        for (std::size_t position = cursor.fetch_add(1); position < steps.size(); position = cursor.fetch_add(1))
+            if (failed(planned.value.save(steps[position], scratch.span()))) lane_failures.fetch_add(1);
+    });
+    failures += expect_eq(lane_failures.load(), 0u);
+    failures += expect_eq(planned.value.finish(), status_t::success_k);
+
+    indexes_type_ restored {forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(restored)));
+    failures += expect(succeeded(restored.load(bytes_view_t {buffer}, load_config_t {}, executor)));
+    failures += dense_indexes_expect_restored(restored, vectors, keys, dimensions);
+    return failures;
+}
+
+/**
  *  @brief Buffers hold one consolidated monolith: @c storage_requirements sizes it, the summary reads from
  *      it, a fresh index restores from it, and a short buffer, a distributed layout, or a
  *      cancelled save leave nothing a reader accepts.
@@ -1790,7 +1845,7 @@ std::size_t test_dense_indexes_cancelled_load() {
 
 /**
  *  @brief Two executors drive one sharded index concurrently: disjoint key ranges, one
- *      batched @c add per executor, both interleaving into the same shards - asserted
+ *      batched @c insert per executor, both interleaving into the same shards - asserted
  *      through the public surface only.
  *
  *  A RAM index admits both batches at once. A VRAM index admits one mutation at a time and
@@ -1833,16 +1888,16 @@ std::size_t test_dense_indexes_concurrent_add() {
     pool.for_threads([&](std::size_t thread) noexcept {
         if (thread >= executors_count) return;
         outcomes[thread] = indexes
-                               .add(std::span<key_t const> {keys[thread].data(), rows_per_executor},
-                                    slices[thread].view(), drivers[thread].executor)
+                               .insert(std::span<key_t const> {keys[thread].data(), rows_per_executor},
+                                       slices[thread].view(), drivers[thread].executor)
                                .status;
         assert_no_locks_held();
     });
     for (std::size_t which = 0; which != executors_count; ++which) {
         if (outcomes[which] == status_t::contended_k && !ram_indexes<indexes_type_>)
             outcomes[which] = indexes
-                                  .add(std::span<key_t const> {keys[which].data(), rows_per_executor},
-                                       slices[which].view(), drivers[which].executor)
+                                  .insert(std::span<key_t const> {keys[which].data(), rows_per_executor},
+                                          slices[which].view(), drivers[which].executor)
                                   .status;
         failures += expect_eq(outcomes[which], status_t::success_k);
     }
@@ -1886,7 +1941,7 @@ std::size_t test_dense_indexes_concurrent_add() {
 }
 
 /**
- *  @brief A reader thread races one executor-driven batched @c add into the shards, asserting
+ *  @brief A reader thread races one executor-driven batched @c insert into the shards, asserting
  *      the key-visibility invariant: a search may reach a node the moment it publishes, so
  *      the key it resolves must already be written - never the plane's zero-fill, never
  *      outside the assigned range. RAM only: a VRAM index admits no search during a mutation.
@@ -1920,8 +1975,9 @@ std::size_t test_dense_indexes_search_race() {
     std::atomic<std::size_t> thread_failures {0};
     pool.for_threads([&](std::size_t thread) noexcept {
         if (thread == 0) {
-            auto added = indexes.add(std::span<key_t const> {keys.data(), nodes_count}, vectors.view(), executor);
-            if (added.status != status_t::success_k) thread_failures.fetch_add(1);
+            auto [inserted, landed] = indexes.insert(std::span<key_t const> {keys.data(), nodes_count}, vectors.view(),
+                                                     executor);
+            if (landed != status_t::success_k) thread_failures.fetch_add(1);
             writer_done.store(true, std::memory_order_release);
             assert_no_locks_held();
             return;

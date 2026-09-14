@@ -590,7 +590,7 @@ status_t specialized_index<index_type_>::clear() noexcept {
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::insert_result_t> specialized_index<index_type_>::add(
     std::span<key_t const> keys, vectors_view_t rows, executor_t& executor, insert_config_t config) noexcept {
-    return index.add(keys, rows, executor, config);
+    return index.insert(keys, rows, executor, config);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::refine_result_t> specialized_index<index_type_>::refine(

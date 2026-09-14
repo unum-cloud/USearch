@@ -99,8 +99,9 @@ std::size_t test_dense_indexes_search_race() {
                               status_t::contended_k);
     }
 
-    auto added = indexes.add(std::span<key_t const> {keys.data(), nodes_count}, vectors.view(), executor);
-    failures += expect_eq(added.status, status_t::success_k);
+    auto [inserted, landed] = indexes.insert(std::span<key_t const> {keys.data(), nodes_count}, vectors.view(),
+                                             executor);
+    failures += expect_eq(landed, status_t::success_k);
     failures += expect_eq(indexes.size(), nodes_count);
 
     // Every published row resolves to a key inside the assigned range - never the plane's zero-fill.

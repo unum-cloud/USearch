@@ -267,8 +267,8 @@ bool run_insertion(streamed_dataset_type_& streamed) {
             batch = vectors_view_t {streamed.staging.row(0).data(), count, dimensions};
         }
 
-        auto const [added, landed] = bench.indexes.add(std::span<key_t const> {keys.data(), count}, batch,
-                                                       bench.executor, config);
+        auto const [added, landed] = bench.indexes.insert(std::span<key_t const> {keys.data(), count}, batch,
+                                                          bench.executor, config);
         if (failed(landed)) {
             fmt::println("Insertion refused a batch of {} rows at row {}: {}", count, base, status_to_string(landed));
             return false;

@@ -718,6 +718,36 @@ concept scored_node = requires(entry_type_ entry) {
     entry.distance;
 };
 
+/** @brief A two-stage save or load in flight: move-only and never assigned over, its steps
+ *      handed to threads one at a time, spent by @c finish. */
+template <typename plan_type_>
+concept index_plan = std::move_constructible<plan_type_> && !std::copy_constructible<plan_type_> &&
+                     !std::is_copy_assignable_v<plan_type_> && !std::is_move_assignable_v<plan_type_> &&
+                     requires(plan_type_ plan) {
+                         plan.steps().size();
+                         { plan.finish() } noexcept -> std::same_as<status_t>;
+                     };
+
+/** @brief Rows taken against a ceiling: move-only, released by its own death unless consumed. */
+template <typename claim_type_>
+concept index_claim = std::move_constructible<claim_type_> && !std::copy_constructible<claim_type_> &&
+                      requires(claim_type_ claim) {
+                          { claim.rows() } noexcept -> std::same_as<std::size_t>;
+                          { claim.consume() } noexcept;
+                      };
+
+/** @brief The protocol every dense index answers, at one shard and across many: the verbs a
+ *      sharded layer drives its shards by, and the plans they hand out. */
+template <typename index_type_>
+concept index_family = index_plan<typename index_type_::save_plan_t> && index_plan<typename index_type_::load_plan_t> &&
+                       requires(index_type_& index, index_type_ const& constant) {
+                           { constant.size() } noexcept -> std::same_as<std::size_t>;
+                           { constant.capacity() } noexcept -> std::same_as<std::size_t>;
+                           {
+                               index.reserve(typename index_type_::reserve_capacity_t {})
+                           } noexcept -> std::same_as<expected<std::size_t>>;
+                       };
+
 /**
  *  @brief Merges the ascending @p results of one search into the caller's bounded ranking,
  *      keeping it ascending by distance.

@@ -61,6 +61,7 @@ static std::size_t test_configuration(char const* name) {
     failures_count += test_dense_indexes_duplicate_keys<indexes_t>();
     failures_count += test_dense_indexes_save_load<indexes_t, kernel_>();
     failures_count += test_dense_indexes_split_load<indexes_t, kernel_>();
+    failures_count += test_dense_indexes_pooled_save<indexes_t, kernel_>();
     failures_count += test_dense_indexes_buffer_roundtrip<indexes_t, kernel_>();
     failures_count += test_dense_indexes_cancelled_load<indexes_t, kernel_>();
     failures_count += test_dense_indexes_concurrent_add<indexes_t, kernel_>();
