@@ -91,9 +91,9 @@ extern template int us::run_with_stored_dtype<nk::u8_t, nk_u1_k>(bench_launch<nk
 /** @brief Opens the dataset with the file-native scalar and enters the typed cascade. */
 template <typename dataset_scalar_type_>
 int open_and_run(bench_options_t const& options, fu_topology_t topology) {
-    auto opened = persisted_dataset<dataset_scalar_type_>::open(options.vectors_path, options.queries_path,
-                                                                options.neighbors_path);
-    if (opened.status != status_t::success_k) {
+    auto [dataset, status] = persisted_dataset<dataset_scalar_type_>::open(options.vectors_path, options.queries_path,
+                                                                           options.neighbors_path);
+    if (status != status_t::success_k) {
         fmt::println("Failed to open the dataset: {}", options.vectors_path);
         return 1;
     }
@@ -101,7 +101,7 @@ int open_and_run(bench_options_t const& options, fu_topology_t topology) {
         options.stored_dtype,
         [&](auto dtype) {
             return run_with_stored_dtype<dataset_scalar_type_, dtype.value>(
-                bench_launch<dataset_scalar_type_> {opened.value, options, topology});
+                bench_launch<dataset_scalar_type_> {dataset, options, topology});
         },
         [&](auto dtype) {
             fmt::println("Stored dtype {} has no adapted kernels; override with {}", dtype_name(dtype),
@@ -247,12 +247,12 @@ int main(int argc, char** argv) {
     // The executor spawns inside the run with the same default; this only feeds the machine report.
     std::size_t threads = options.threads;
     if (!threads) {
-        us::expected<std::size_t> const defaulted = us::forkunion_executor_t::default_threads(topology);
-        if (us::failed(defaulted.status)) {
+        auto const [threads_created, threads_status] = us::forkunion_executor_t::default_threads(topology);
+        if (us::failed(threads_status)) {
             fmt::println("Failed to count the logical cores");
             return 1;
         }
-        threads = defaulted.value;
+        threads = threads_created;
     }
     print_machine(topology, fabric, options, threads);
 

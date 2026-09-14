@@ -349,10 +349,10 @@ class mapped_file_t {
 
 inline expected<mapped_file_t> mapped_file_t::read(std::string_view path) noexcept {
     mapped_file_t mapping;
-    auto [file, opened] = seekable_file_t::open(path, file_mode_t::read_k);
-    if (failed(opened)) return {std::move(mapping), opened};
-    auto const [bytes, measured] = file.length();
-    if (failed(measured)) return {std::move(mapping), measured};
+    auto [file, open_status] = seekable_file_t::open(path, file_mode_t::read_k);
+    if (failed(open_status)) return {std::move(mapping), open_status};
+    auto const [bytes, length_status] = file.length();
+    if (failed(length_status)) return {std::move(mapping), length_status};
     if (!bytes) return {std::move(mapping), status_t::malformed_k};
     mapping.file_handle_ = file.release();
     mapping.mapping_handle_ = ::CreateFileMappingA(mapping.file_handle_, nullptr, PAGE_READONLY, 0, 0, nullptr);
@@ -367,8 +367,8 @@ inline expected<mapped_file_t> mapped_file_t::read(std::string_view path) noexce
 inline expected<mapped_file_t> mapped_file_t::write(std::string_view path, std::size_t bytes) noexcept {
     mapped_file_t mapping;
     if (!bytes) return {std::move(mapping), status_t::config_mismatch_k};
-    auto [file, opened] = seekable_file_t::open(path, file_mode_t::write_k);
-    if (failed(opened)) return {std::move(mapping), opened};
+    auto [file, status] = seekable_file_t::open(path, file_mode_t::write_k);
+    if (failed(status)) return {std::move(mapping), status};
     if (status_t const sized = file.truncate(bytes); failed(sized)) return {std::move(mapping), sized};
     mapping.file_handle_ = file.release();
     mapping.mapping_handle_ = ::CreateFileMappingA(mapping.file_handle_, nullptr, PAGE_READWRITE, 0, 0, nullptr);
@@ -400,10 +400,10 @@ inline void mapped_file_t::unmap_() noexcept {
 
 inline expected<mapped_file_t> mapped_file_t::read(std::string_view path) noexcept {
     mapped_file_t mapping;
-    auto [file, opened] = seekable_file_t::open(path, file_mode_t::read_k);
-    if (failed(opened)) return {std::move(mapping), opened};
-    auto const [bytes, measured] = file.length();
-    if (failed(measured)) return {std::move(mapping), measured};
+    auto [file, open_status] = seekable_file_t::open(path, file_mode_t::read_k);
+    if (failed(open_status)) return {std::move(mapping), open_status};
+    auto const [bytes, length_status] = file.length();
+    if (failed(length_status)) return {std::move(mapping), length_status};
     if (!bytes) return {std::move(mapping), status_t::malformed_k};
     byte_t* base = std::allocator<byte_t> {}.allocate(bytes);
     if (!base) return {std::move(mapping), status_t::bad_alloc_k};
@@ -419,8 +419,8 @@ inline expected<mapped_file_t> mapped_file_t::read(std::string_view path) noexce
 inline expected<mapped_file_t> mapped_file_t::write(std::string_view path, std::size_t bytes) noexcept {
     mapped_file_t mapping;
     if (!bytes) return {std::move(mapping), status_t::config_mismatch_k};
-    auto [file, opened] = seekable_file_t::open(path, file_mode_t::write_k);
-    if (failed(opened)) return {std::move(mapping), opened};
+    auto [file, status] = seekable_file_t::open(path, file_mode_t::write_k);
+    if (failed(status)) return {std::move(mapping), status};
     if (status_t const sized = file.truncate(bytes); failed(sized)) return {std::move(mapping), sized};
     byte_t* base = std::allocator<byte_t> {}.allocate(bytes);
     if (!base) return {std::move(mapping), status_t::bad_alloc_k};
@@ -450,10 +450,10 @@ inline void mapped_file_t::unmap_() noexcept {
 
 inline expected<mapped_file_t> mapped_file_t::read(std::string_view path) noexcept {
     mapped_file_t mapping;
-    auto [file, opened] = seekable_file_t::open(path, file_mode_t::read_k);
-    if (failed(opened)) return {std::move(mapping), opened};
-    auto const [bytes, measured] = file.length();
-    if (failed(measured)) return {std::move(mapping), measured};
+    auto [file, open_status] = seekable_file_t::open(path, file_mode_t::read_k);
+    if (failed(open_status)) return {std::move(mapping), open_status};
+    auto const [bytes, length_status] = file.length();
+    if (failed(length_status)) return {std::move(mapping), length_status};
     if (!bytes) return {std::move(mapping), status_t::malformed_k};
     mapping.descriptor_ = file.release();
     void* base = ::mmap(nullptr, bytes, PROT_READ, MAP_SHARED, mapping.descriptor_, 0);
@@ -466,8 +466,8 @@ inline expected<mapped_file_t> mapped_file_t::read(std::string_view path) noexce
 inline expected<mapped_file_t> mapped_file_t::write(std::string_view path, std::size_t bytes) noexcept {
     mapped_file_t mapping;
     if (!bytes) return {std::move(mapping), status_t::config_mismatch_k};
-    auto [file, opened] = seekable_file_t::open(path, file_mode_t::write_k);
-    if (failed(opened)) return {std::move(mapping), opened};
+    auto [file, status] = seekable_file_t::open(path, file_mode_t::write_k);
+    if (failed(status)) return {std::move(mapping), status};
     if (status_t const sized = file.truncate(bytes); failed(sized)) return {std::move(mapping), sized};
     mapping.descriptor_ = file.release();
     void* base = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, mapping.descriptor_, 0);

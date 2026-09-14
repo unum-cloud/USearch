@@ -888,9 +888,9 @@ struct basic_ram_index {
             auto const entry_probe = shared_mutex_.snapshot();
             if (!entry_probe.unlocked()) return {{}, status_t::contended_k};
             entry_generation = entry_probe.generation;
-            auto const [published, taken] = watermark_();
-            if (failed(taken)) return {{}, taken};
-            first_invisible_id = published;
+            auto const [watermark, watermark_status] = watermark_();
+            if (failed(watermark_status)) return {{}, watermark_status};
+            first_invisible_id = watermark;
         }
         if (!first_invisible_id) return {};
 
@@ -1032,9 +1032,9 @@ struct basic_ram_index {
             report.status = status_t::contended_k;
             return report;
         }
-        auto const [visible, taken] = watermark_();
-        if (failed(taken)) {
-            report.status = taken;
+        auto const [visible, status] = watermark_();
+        if (failed(status)) {
+            report.status = status;
             return report;
         }
         std::size_t const node_count = static_cast<std::size_t>(visible);
@@ -1205,8 +1205,8 @@ struct basic_ram_index {
     expected<save_plan_t> plan_save(columns_t columns, value_codec_type_ const& codec) const noexcept {
         unique_lock_t hold {shared_mutex_, std::try_to_lock};
         if (!hold) return {{}, status_t::contended_k};
-        auto const [visible, taken] = watermark_();
-        if (failed(taken)) return {{}, taken};
+        auto const [visible, status] = watermark_();
+        if (failed(status)) return {{}, status};
         std::size_t const node_count = static_cast<std::size_t>(visible);
         if (status_t const sized = sized_exactly_(columns.keys.size(), node_count); failed(sized)) return {{}, sized};
         if (status_t const sized = sized_exactly_(columns.neighbor_offsets.size(), node_count + 1); failed(sized))
@@ -1242,8 +1242,8 @@ struct basic_ram_index {
     expected<basic_columns_extents_t> columns_extents(value_codec_type_ const& codec) const noexcept {
         unique_lock_t unique_lock {shared_mutex_, std::try_to_lock};
         if (!unique_lock) return {{}, status_t::contended_k};
-        auto const [visible, taken] = watermark_();
-        if (failed(taken)) return {{}, taken};
+        auto const [visible, status] = watermark_();
+        if (failed(status)) return {{}, status};
         basic_columns_extents_t extents {static_cast<std::size_t>(visible), 0, 0};
         for (std::size_t node = 0; node != extents.nodes; ++node) {
             node_t const& record = nodes_array_[node];
@@ -1263,11 +1263,11 @@ struct basic_ram_index {
     template <typename value_codec_type_>
         requires basic_value_codec<value_codec_type_, value_t>
     status_t save(columns_t columns, value_codec_type_ const& codec) const noexcept {
-        expected<save_plan_t> planned = plan_save(columns, codec);
-        if (failed(planned.status)) return planned.status;
-        node_id_t const node_count = static_cast<node_id_t>(planned.value.columns.keys.size());
-        if (status_t const copied = planned.value.save({0, node_count}, codec); failed(copied)) return copied;
-        return planned.value.finish();
+        auto [plan, status] = plan_save(columns, codec);
+        if (failed(status)) return status;
+        node_id_t const node_count = static_cast<node_id_t>(plan.columns.keys.size());
+        if (status_t const copied = plan.save({0, node_count}, codec); failed(copied)) return copied;
+        return plan.finish();
     }
 
     /** @brief One step-parallel load in flight - the mirror of @ref save_plan_t: the
@@ -1389,11 +1389,11 @@ struct basic_ram_index {
     template <typename value_codec_type_>
         requires basic_value_codec<value_codec_type_, value_t>
     status_t load(columns_view_t columns, value_codec_type_ const& codec) noexcept {
-        expected<load_plan_t> planned = plan_load(columns);
-        if (failed(planned.status)) return planned.status;
-        node_id_t const node_count = static_cast<node_id_t>(planned.value.columns.keys.size());
-        if (status_t const decoded = planned.value.load({0, node_count}, codec); failed(decoded)) return decoded;
-        return planned.value.finish();
+        auto [plan, status] = plan_load(columns);
+        if (failed(status)) return status;
+        node_id_t const node_count = static_cast<node_id_t>(plan.columns.keys.size());
+        if (status_t const decoded = plan.load({0, node_count}, codec); failed(decoded)) return decoded;
+        return plan.finish();
     }
 
 #pragma endregion Serialization
@@ -1503,15 +1503,14 @@ struct basic_ram_index {
             }
 
             std::size_t const segment_start = context.staged_ids.size();
-            expected<std::size_t> const copied = copy_row_<synchronization_>(best.node_id, context);
-            if (failed(copied.status) || failed(context.visited.reserve(context.visited.size() + copied.value))) {
+            auto const [degree, status] = copy_row_<synchronization_>(best.node_id, context);
+            if (failed(status) || failed(context.visited.reserve(context.visited.size() + degree))) {
                 // Drop the raw row copy: only pushed, filtered ids may reach the drain.
                 // The entry stays on the frontier - nothing is lost, only postponed.
                 context.staged_ids.resize_reserved(segment_start);
                 ++context.telemetry.saturated_walks;
                 return basic_expansion_round_t::saturated_k;
             }
-            std::size_t const degree = copied.value;
             context.frontier.pop();
             ++context.telemetry.visited_members;
 

@@ -253,8 +253,8 @@ struct dense_ram_indexes {
             return {0, indexed};
         // A shard rounds up to whole chunks; its key column is sized to what it really holds.
         for (shard_t& one : shards_) {
-            auto const [shard_capacity, reserved] = one.index->reserve(per_shard);
-            if (failed(reserved)) return {0, reserved};
+            auto const [shard_capacity, status] = one.index->reserve(per_shard);
+            if (failed(status)) return {0, status};
             if (failed(one.keys.resize(shard_capacity))) return {0, status_t::bad_alloc_k};
         }
         return {capacity(), status_t::success_k};
@@ -291,12 +291,12 @@ struct dense_ram_indexes {
         shard_capacity_claim_t claim;
         std::size_t probe = 0;
         for (; probe != shards; ++probe) {
-            auto [attempt, granted] = shards_[(routing_base + probe) % shards].index->claim(1);
-            if (succeeded(granted)) {
-                claim = std::move(attempt);
+            auto [shard_claim, claim_status] = shards_[(routing_base + probe) % shards].index->claim(1);
+            if (succeeded(claim_status)) {
+                claim = std::move(shard_claim);
                 break;
             }
-            if (granted != status_t::overflow_k) return {result, granted};
+            if (claim_status != status_t::overflow_k) return {result, claim_status};
         }
         if (probe == shards) return {result, status_t::overflow_k};
         std::size_t const shard = (routing_base + probe) % shards;
@@ -352,9 +352,9 @@ struct dense_ram_indexes {
         insert_result_t result;
         result.new_size = size();
         if (keys.size() != new_vectors.extent(0)) return {result, status_t::config_mismatch_k};
-        auto [claim, granted] = this->claim(new_vectors.extent(0));
-        if (failed(granted)) return {result, granted};
-        return insert(std::move(claim), keys, new_vectors, executor, config);
+        auto [shard_claim, status] = claim(new_vectors.extent(0));
+        if (failed(status)) return {result, status};
+        return insert(std::move(shard_claim), keys, new_vectors, executor, config);
     }
 
     /**
@@ -414,9 +414,9 @@ struct dense_ram_indexes {
         if (failed(claimed.claims_.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
         claimed.rotation_ = atomic_ref<std::size_t>(routed_rows_).fetch_add(rows, std::memory_order_relaxed) % shards;
         for (std::size_t shard = 0; shard != shards; ++shard) {
-            auto [one, granted] = shards_[shard].index->claim(share_of_(shard, rows, claimed.rotation_));
-            if (failed(granted)) return {{}, granted};
-            claimed.claims_.push_back_reserved(std::move(one));
+            auto [shard_claim, status] = shards_[shard].index->claim(share_of_(shard, rows, claimed.rotation_));
+            if (failed(status)) return {{}, status};
+            claimed.claims_.push_back_reserved(std::move(shard_claim));
         }
         return {std::move(claimed), status_t::success_k};
     }
@@ -443,8 +443,8 @@ struct dense_ram_indexes {
 
         // One caller per executor, and the arenas grow to the widest geometry ever asked of them -
         // no caller guesses a byte count, the frozen geometry already knows it.
-        auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return {result, claimed};
+        auto [executor_claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return {result, claim_status};
         if (status_t const sized = executor.reserve(shards_[0].index->traversal_memory_usage(config)); failed(sized))
             return {result, sized};
 
@@ -546,8 +546,8 @@ struct dense_ram_indexes {
         if (!shards) return {{}, status_t::uninitialized_k};
 
         // A re-selection walks like any other query, so it sizes like one.
-        auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return {{}, claimed};
+        auto [executor_claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return {{}, claim_status};
         insert_config_t const walk_config {config.expansion_factor};
         if (status_t const sized = executor.reserve(shards_[0].index->traversal_memory_usage(walk_config));
             failed(sized))
@@ -569,8 +569,8 @@ struct dense_ram_indexes {
         std::atomic<std::size_t> swept {0};
         auto sweep_step = [&](std::size_t shard, typename refine_plan_t::step_t const& step, std::size_t thread,
                               nk::matrix_span<dense_node_id_t>) noexcept -> status_t {
-            auto const [part, refined] = shards_[shard].index->refine(step.nodes, traversals[thread], config);
-            if (failed(refined)) return refined;
+            auto const [part, status] = shards_[shard].index->refine(step.nodes, traversals[thread], config);
+            if (failed(status)) return status;
             tallies[thread].visited_nodes += part.visited_nodes;
             tallies[thread].changed_nodes += part.changed_nodes;
             std::size_t const done = swept.fetch_add(part.visited_nodes, std::memory_order_relaxed) +
@@ -610,8 +610,8 @@ struct dense_ram_indexes {
     expected<health_result_t> health(executor_t& executor) noexcept {
         std::size_t const shards = shards_.size();
         if (!shards) return {{}, status_t::uninitialized_k};
-        auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return {{}, claimed};
+        auto [executor_claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return {{}, claim_status};
 
         growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
         growing_buffer<std::size_t, forkunion_allocator_t> cursors {allocator_};
@@ -620,8 +620,8 @@ struct dense_ram_indexes {
         growing_buffer<typename index_t::health_plan_t, forkunion_allocator_t> plans {allocator_};
         if (failed(plans.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
         for (std::size_t shard = 0; shard != shards; ++shard) {
-            auto [plan, planned] = shards_[shard].index->plan_health(traversals[0]);
-            if (failed(planned)) return {{}, planned};
+            auto [plan, status] = shards_[shard].index->plan_health(traversals[0]);
+            if (failed(status)) return {{}, status};
             plans.push_back_reserved(std::move(plan));
         }
         if (status_t const audited = sweep_reachability_(plans, to_writable_span(cursors), executor); failed(audited))
@@ -629,9 +629,9 @@ struct dense_ram_indexes {
 
         health_result_t result;
         for (typename index_t::health_plan_t const& plan : plans) {
-            expected<health_result_t> const audited = plan.finish();
-            if (failed(audited.status)) return {{}, audited.status};
-            combine_health_(result, audited.value);
+            auto const [shard_health, status] = plan.finish();
+            if (failed(status)) return {{}, status};
+            combine_health_(result, shard_health);
         }
         return {result, status_t::success_k};
     }
@@ -647,8 +647,8 @@ struct dense_ram_indexes {
     expected<heal_result_t> heal(executor_t& executor) noexcept {
         std::size_t const shards = shards_.size();
         if (!shards) return {{}, status_t::uninitialized_k};
-        auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return {{}, claimed};
+        auto [executor_claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return {{}, claim_status};
 
         growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
         growing_buffer<std::size_t, forkunion_allocator_t> cursors {allocator_};
@@ -657,8 +657,8 @@ struct dense_ram_indexes {
         growing_buffer<typename index_t::heal_plan_t, forkunion_allocator_t> plans {allocator_};
         if (failed(plans.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
         for (std::size_t shard = 0; shard != shards; ++shard) {
-            auto [plan, planned] = shards_[shard].index->plan_heal(traversals[0]);
-            if (failed(planned)) return {{}, planned};
+            auto [plan, status] = shards_[shard].index->plan_heal(traversals[0]);
+            if (failed(status)) return {{}, status};
             plans.push_back_reserved(std::move(plan));
         }
 
@@ -701,13 +701,13 @@ struct dense_ram_indexes {
 
         heal_result_t result;
         for (typename index_t::heal_plan_t const& plan : plans) {
-            expected<heal_result_t> const healed = plan.finish();
-            if (failed(healed.status)) return {{}, healed.status};
-            combine_health_(result.health, healed.value.health);
-            result.islands_found += healed.value.islands_found;
-            result.islands_reconnected += healed.value.islands_reconnected;
-            result.visited_members += healed.value.visited_members;
-            result.computed_distances += healed.value.computed_distances;
+            auto const [repair, status] = plan.finish();
+            if (failed(status)) return {{}, status};
+            combine_health_(result.health, repair.health);
+            result.islands_found += repair.islands_found;
+            result.islands_reconnected += repair.islands_reconnected;
+            result.visited_members += repair.visited_members;
+            result.computed_distances += repair.computed_distances;
         }
         return {result, status_t::success_k};
     }
@@ -735,15 +735,15 @@ struct dense_ram_indexes {
         search_result_t merged;
         status_t status = status_t::success_k;
         for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
-            auto const found = shards_[shard].index->search(query_vector, traversal, config);
-            if (!found) {
-                status = found.status;
+            auto const [search_result, search_status] = shards_[shard].index->search(query_vector, traversal, config);
+            if (failed(search_status)) {
+                status = search_status;
                 break;
             }
-            merged.visited_members += found.value.visited_members;
-            merged.computed_distances += found.value.computed_distances;
-            merged.restarts += found.value.restarts;
-            merged.saturated_walks += found.value.saturated_walks;
+            merged.visited_members += search_result.visited_members;
+            merged.computed_distances += search_result.computed_distances;
+            merged.restarts += search_result.restarts;
+            merged.saturated_walks += search_result.saturated_walks;
             merged.count = merge_search_results(to_span(traversal.results), shards_[shard].keys, keys, distances,
                                                 merged.count);
         }
@@ -782,8 +782,8 @@ struct dense_ram_indexes {
         if (!queries_count) return {merged, status_t::success_k};
 
         // One caller per executor, and the arenas grow to the widest geometry ever asked of them.
-        auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return {{}, claimed};
+        auto [executor_claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return {{}, claim_status};
         if (status_t const sized = executor.reserve(
                 shards_[0].index->traversal_memory_usage(insert_config_t {config.expansion_factor}));
             failed(sized))
@@ -850,9 +850,9 @@ struct dense_ram_indexes {
         // allocation failure the caller must see rather than a zero it would size a file by.
         status_t framing = status_t::success_k;
         auto part_bytes = [&](std::size_t nodes) noexcept {
-            auto const [header, framed] = monolith_header_(nodes, config, fields_span);
-            if (failed(framed)) framing = framed;
-            return failed(framed) ? 0 : header.monolith_bytes();
+            auto const [header, status] = monolith_header_(nodes, config, fields_span);
+            if (failed(status)) framing = status;
+            return failed(status) ? 0 : header.monolith_bytes();
         };
         if (config.layout == checkpoint_layout_t::monolith_k) {
             std::size_t const monolith = part_bytes(size());
@@ -863,12 +863,12 @@ struct dense_ram_indexes {
         growing_buffer<char, forkunion_allocator_t> entry_path {allocator_};
         auto part_at = [&](std::size_t part) noexcept {
             std::size_t const nodes = shards_[part].index->size();
-            auto const [name, formatted] = safegraphs_part_path(entry_path, "index", part, shards_.size());
-            if (failed(formatted)) framing = formatted;
+            auto const [name, status] = safegraphs_part_path(entry_path, "index", part, shards_.size());
+            if (failed(status)) framing = status;
             return safegraphs_part_t {name, part_bytes(nodes), nodes};
         };
-        auto const [manifest, measured] = safegraphs_manifest_bytes(shards_.size(), part_at);
-        if (failed(measured)) return {0, measured};
+        auto const [manifest, status] = safegraphs_manifest_bytes(shards_.size(), part_at);
+        if (failed(status)) return {0, status};
         if (failed(framing)) return {0, framing};
         return {total + manifest, status_t::success_k};
     }
@@ -1010,7 +1010,7 @@ struct dense_ram_indexes {
             std::string_view const base = safegraphs_basename(safegraphs_stem(path));
             growing_buffer<char, forkunion_allocator_t> entry_path {owner_->allocator_};
             auto part_at = [&](std::size_t shard) noexcept {
-                auto const [name, formatted] = safegraphs_part_path(entry_path, base, shard, shards);
+                auto const [name, status] = safegraphs_part_path(entry_path, base, shard, shards);
                 return safegraphs_part_t {name, headers_[shard].monolith_bytes(), plans_[shard].visible};
             };
             return safegraphs_write_manifest(path, shards, part_at);
@@ -1058,10 +1058,10 @@ struct dense_ram_indexes {
             if (status_t const opened = open_save_parts_(plan, config); failed(opened)) return {{}, opened};
             return {std::move(plan), status_t::success_k};
         }
-        auto const [bytes, measured] = storage_requirements(config);
-        if (failed(measured)) return {{}, measured};
-        auto [mapping, mapped] = mapped_file_t::write(path, bytes);
-        if (failed(mapped)) return {{}, mapped};
+        auto const [bytes, measure_status] = storage_requirements(config);
+        if (failed(measure_status)) return {{}, measure_status};
+        auto [mapping, map_status] = mapped_file_t::write(path, bytes);
+        if (failed(map_status)) return {{}, map_status};
         if (failed(plan.mappings_.push_back(std::move(mapping)))) return {{}, status_t::bad_alloc_k};
         if (status_t const opened = open_save_monolith_(plan, plan.mappings_[0].span(), config); failed(opened))
             return {{}, opened};
@@ -1251,8 +1251,8 @@ struct dense_ram_indexes {
     template <typename progress_type_ = dummy_progress_t>
     status_t save(std::string_view path, save_config_t const& config, executor_t& executor,
                   progress_type_&& on_saved = {}) noexcept {
-        auto [plan, planned] = plan_save(path, config);
-        if (failed(planned)) return planned;
+        auto [plan, status] = plan_save(path, config);
+        if (failed(status)) return status;
         if (status_t const drained = drain_steps_(plan, executor); failed(drained)) return drained;
         return plan.finish(on_saved);
     }
@@ -1262,8 +1262,8 @@ struct dense_ram_indexes {
     template <typename progress_type_ = dummy_progress_t>
     status_t save(bytes_span_t monolith, save_config_t const& config, executor_t& executor,
                   progress_type_&& on_saved = {}) noexcept {
-        auto [plan, planned] = plan_save(monolith, config);
-        if (failed(planned)) return planned;
+        auto [plan, status] = plan_save(monolith, config);
+        if (failed(status)) return status;
         if (status_t const drained = drain_steps_(plan, executor); failed(drained)) return drained;
         return plan.finish(on_saved);
     }
@@ -1280,8 +1280,8 @@ struct dense_ram_indexes {
                   progress_type_&& on_loaded = {}) noexcept {
         status_t settled = status_t::success_k;
         {
-            auto [plan, planned] = plan_load(path, config);
-            if (failed(planned)) return planned; // Nothing was claimed, so nothing needs undoing.
+            auto [plan, status] = plan_load(path, config);
+            if (failed(status)) return status; // Nothing was claimed, so nothing needs undoing.
             settled = drain_steps_(plan, executor);
             if (succeeded(settled)) settled = plan.finish(on_loaded);
         }
@@ -1299,8 +1299,8 @@ struct dense_ram_indexes {
                   progress_type_&& on_loaded = {}) noexcept {
         status_t settled = status_t::success_k;
         {
-            auto [plan, planned] = plan_load(monolith, config);
-            if (failed(planned)) return planned; // Nothing was claimed, so nothing needs undoing.
+            auto [plan, status] = plan_load(monolith, config);
+            if (failed(status)) return status; // Nothing was claimed, so nothing needs undoing.
             settled = drain_steps_(plan, executor);
             if (succeeded(settled)) settled = plan.finish(on_loaded);
         }
@@ -1570,8 +1570,8 @@ struct dense_ram_indexes {
                                            nk::matrix_span<dense_node_id_t> scratch) { planned.save(step, scratch); };
         std::size_t const scratch_rows = saving_k ? power_of_two<std::size_t>(index_t::slab_rows_log2_k) : 0;
 
-        auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return claimed;
+        auto [executor_claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return claim_status;
         if (scratch_rows)
             if (status_t const sized = executor.reserve(scratch_rows * connectivity() * sizeof(dense_node_id_t));
                 failed(sized))
@@ -1625,9 +1625,9 @@ struct dense_ram_indexes {
                               save_config_t const& config) noexcept {
         typename index_t::columns_t const columns {header.rows_of(target, header.value, first_row, nodes),
                                                    header.rows_of(target, header.neighbors, first_row, nodes)};
-        auto [inner, planned] = shards_[shard].index->plan_save(columns, config.synchronization,
-                                                                static_cast<dense_node_id_t>(first_row));
-        if (failed(planned)) return planned;
+        auto [inner, status] = shards_[shard].index->plan_save(columns, config.synchronization,
+                                                               static_cast<dense_node_id_t>(first_row));
+        if (failed(status)) return status;
         plan.plans_.push_back_reserved(std::move(inner));
         return status_t::success_k;
     }
@@ -1650,8 +1650,8 @@ struct dense_ram_indexes {
             shard_rows.push_back_reserved(shards_[shard].index->size());
             rows += shard_rows[shard];
         }
-        auto const [header, framed] = monolith_header_(rows, config, to_span(plan.fields_));
-        if (failed(framed)) return framed;
+        auto const [header, status] = monolith_header_(rows, config, to_span(plan.fields_));
+        if (failed(status)) return status;
         if (monolith.size() < header.monolith_bytes()) return status_t::overflow_k;
         plan.headers_.push_back_reserved(header);
         for (std::size_t shard = 0, base = 0; shard != shards; base += shard_rows[shard], ++shard)
@@ -1678,12 +1678,12 @@ struct dense_ram_indexes {
         growing_buffer<char, forkunion_allocator_t> part_path {allocator_};
         for (std::size_t shard = 0; shard != shards; ++shard) {
             std::size_t const nodes = shards_[shard].index->size();
-            auto const [header, framed] = monolith_header_(nodes, config, fields);
-            if (failed(framed)) return framed;
-            auto const [file_path, formatted] = safegraphs_part_path(part_path, stem, shard, shards);
-            if (failed(formatted)) return formatted;
-            auto [mapping, mapped] = mapped_file_t::write(file_path, header.monolith_bytes());
-            if (failed(mapped)) return mapped;
+            auto const [header, frame_status] = monolith_header_(nodes, config, fields);
+            if (failed(frame_status)) return frame_status;
+            auto const [file_path, path_status] = safegraphs_part_path(part_path, stem, shard, shards);
+            if (failed(path_status)) return path_status;
+            auto [mapping, map_status] = mapped_file_t::write(file_path, header.monolith_bytes());
+            if (failed(map_status)) return map_status;
             plan.headers_.push_back_reserved(header);
             plan.mappings_.push_back_reserved(std::move(mapping));
             if (status_t const opened = open_save_shard_(plan, shard, plan.mappings_[shard].span(),
@@ -1701,8 +1701,8 @@ struct dense_ram_indexes {
             if (field.key == "metric") part.metric = safegraphs_name_t {field.value};
             if (field.key == "quantization") part.quantization = safegraphs_name_t {field.value};
         };
-        auto const [header, parsed] = safegraphs_read_header(part.monolith, allocator_, per_custom_field);
-        if (failed(parsed)) return parsed;
+        auto const [header, status] = safegraphs_read_header(part.monolith, allocator_, per_custom_field);
+        if (failed(status)) return status;
         part.header = header;
         part.nodes = header.nodes();
         return status_t::success_k;
@@ -1725,8 +1725,8 @@ struct dense_ram_indexes {
      */
     status_t catalog_(std::string_view path, growing_buffer<mapped_file_t, forkunion_allocator_t>& mappings,
                       growing_buffer<part_t, forkunion_allocator_t>& parts) const noexcept {
-        auto [mapping, mapped] = mapped_file_t::read(path);
-        if (failed(mapped)) return mapped;
+        auto [mapping, map_status] = mapped_file_t::read(path);
+        if (failed(map_status)) return map_status;
         bytes_view_t const checkpoint = mapping.view();
         if (checkpoint.size() >= safegraphs_prefix_t::magic_k.size() &&
             std::memcmp(checkpoint.data(), safegraphs_prefix_t::magic_k.data(), safegraphs_prefix_t::magic_k.size()) ==
@@ -1745,18 +1745,18 @@ struct dense_ram_indexes {
             part.path = {offset, paths_arena.size()};
             if (failed(parts.push_back(part))) kept = status_t::bad_alloc_k;
         };
-        auto const [summary, listed] = safegraphs_read_manifest(path, allocator_, per_part);
-        if (failed(listed)) return listed;
+        auto const [summary, summary_status] = safegraphs_read_manifest(path, allocator_, per_part);
+        if (failed(summary_status)) return summary_status;
         if (failed(kept)) return kept;
         if (parts.empty()) return status_t::malformed_k;
         if (failed(mappings.reserve_exactly(parts.size()))) return status_t::bad_alloc_k;
         growing_buffer<char, forkunion_allocator_t> part_path {allocator_};
         for (part_t& part : parts) {
-            auto const [resolved, joined] = safegraphs_sibling_path(
+            auto const [sibling, sibling_status] = safegraphs_sibling_path(
                 part_path, path, std::string_view {paths_arena.data() + part.path.first, part.path.size()});
-            if (failed(joined)) return joined;
-            auto [part_mapping, part_mapped] = mapped_file_t::read(resolved);
-            if (failed(part_mapped)) return part_mapped;
+            if (failed(sibling_status)) return sibling_status;
+            auto [part_mapping, part_status] = mapped_file_t::read(sibling);
+            if (failed(part_status)) return part_status;
             part.monolith = part_mapping.view();
             if (status_t const described = describe_part_(part); failed(described)) return described;
             mappings.push_back_reserved(std::move(part_mapping));
@@ -1849,8 +1849,8 @@ struct dense_ram_indexes {
         std::size_t const vectors_row_bytes = row_values_() * sizeof(scalar_t);
         std::size_t const neighbors_row_bytes = connectivity * sizeof(dense_node_id_t);
         for (std::size_t shard = 0; shard != shards; ++shard) {
-            auto [inner, planned] = shards_[shard].index->plan_load(shard_rows[shard]);
-            if (failed(planned)) return planned;
+            auto [inner, status] = shards_[shard].index->plan_load(shard_rows[shard]);
+            if (failed(status)) return status;
             plan.plans_.push_back_reserved(std::move(inner));
             typename index_t::load_plan_t const& opened = plan.plans_[shard];
             std::size_t first_row = opened.base;

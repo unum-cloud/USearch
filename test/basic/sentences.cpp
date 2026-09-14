@@ -175,9 +175,9 @@ static std::size_t check_sentences_transparent_search() {
         std::vector<u32_t> assigned_ids;
         failures += basic_build(fixture, index, metric, values, assigned_ids, context, basic_keep_diverse_t {4});
 
-        auto const [found, searched] = index.search(std::string_view {copied_value}, metric, context);
-        failures += expect_eq(searched, status_t::success_k);
-        failures += expect(found.count > 0);
+        auto const [result, status] = index.search(std::string_view {copied_value}, metric, context);
+        failures += expect_eq(status, status_t::success_k);
+        failures += expect(result.count > 0);
         failures += expect_eq(context.results[0].distance, u64_t {0});
     }
     failures += expect_eq(ledger.live_bytes.load(), 0);
@@ -200,13 +200,13 @@ static std::size_t check_sentences_codec_poison() {
         std::vector<u32_t> assigned_ids;
         failures += basic_build(fixture, index, metric, values, assigned_ids, context, basic_keep_diverse_t {4});
 
-        auto saved = basic_saved_columns(index, codec);
-        failures += expect(bool(saved));
-        saved.value.values.back() = std::byte {0xFF}; // Poisons the last value's final byte.
+        auto [columns, status] = basic_saved_columns(index, codec);
+        failures += expect(succeeded(status));
+        columns.values.back() = std::byte {0xFF}; // Poisons the last value's final byte.
 
         auto poisoned = sentences_fixture_t::make_index(ledger);
         failures += expect(bool(poisoned.reserve(values.size())));
-        failures += expect_eq(poisoned.load(saved.value.view(), codec), status_t::malformed_k);
+        failures += expect_eq(poisoned.load(columns.view(), codec), status_t::malformed_k);
     }
     failures += expect_eq(ledger.live_bytes.load(), 0);
     return failures;

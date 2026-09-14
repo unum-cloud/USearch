@@ -197,18 +197,19 @@ int main() {
 
     // All three search arms answer, ranked & settled-equal.
     auto const query = make_tag(0);
-    auto const [concurrent_found, concurrent_status] = index.search(query, metric, context);
-    auto const [immutable_found, immutable_status] = index.template search<synchronization_t::immutable_k>(
+    auto const [concurrent_result, concurrent_status] = index.search(query, metric, context);
+    auto const [immutable_result, immutable_status] = index.template search<synchronization_t::immutable_k>(
         query, metric, context);
-    auto const [exclusive_found, exclusive_status] = index.template search<synchronization_t::exclusive_k>(
+    auto const [exclusive_result, exclusive_status] = index.template search<synchronization_t::exclusive_k>(
         query, metric, context);
     if (failed(concurrent_status) || failed(immutable_status) || failed(exclusive_status)) return 1;
-    if (!concurrent_found.count) return 1;
-    if (immutable_found.count != concurrent_found.count || exclusive_found.count != concurrent_found.count) return 1;
+    if (!concurrent_result.count) return 1;
+    if (immutable_result.count != concurrent_result.count || exclusive_result.count != concurrent_result.count)
+        return 1;
 
     // Manual wiring, the checked readers, and the keyed lookups.
-    auto const linked = index.link(0, 1);
-    if (failed(linked.status)) return 1;
+    auto const [membership, link_status] = index.link(0, 1);
+    if (failed(link_status)) return 1;
     if (index.unlink(0, 1) != status_t::success_k) return 1;
     if (index.unlink(0, 1) != status_t::malformed_k) return 1;
     if (!index.key_of(0) || index.key_of(0).value != 100) return 1;
@@ -225,13 +226,13 @@ int main() {
     if (failed(health.status) || !health.connected_components) return 1;
 
     // The snapshot round-trip needs nothing outside the tier either: five columns in vectors.
-    auto const extents = index.columns_extents(codec);
-    if (failed(extents.status)) return 1;
-    std::vector<u64_t> keys_column(extents.value.nodes);
-    std::vector<u64_t> neighbor_offsets(extents.value.nodes + 1);
-    std::vector<u32_t> neighbor_ids(extents.value.neighbors);
-    std::vector<u64_t> value_offsets(extents.value.nodes + 1);
-    std::vector<std::byte> values(extents.value.value_bytes);
+    auto const [extents, measure_status] = index.columns_extents(codec);
+    if (failed(measure_status)) return 1;
+    std::vector<u64_t> keys_column(extents.nodes);
+    std::vector<u64_t> neighbor_offsets(extents.nodes + 1);
+    std::vector<u32_t> neighbor_ids(extents.neighbors);
+    std::vector<u64_t> value_offsets(extents.nodes + 1);
+    std::vector<std::byte> values(extents.value_bytes);
     narrow_index_t::columns_t const columns {keys_column, neighbor_offsets, neighbor_ids, value_offsets, values};
     if (index.save(columns, codec) != status_t::success_k) return 1;
     narrow_index_t restored;

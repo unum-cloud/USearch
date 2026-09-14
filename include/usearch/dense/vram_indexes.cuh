@@ -286,8 +286,8 @@ struct dense_vram_indexes {
         if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {result, paired};
         if (!new_vectors.extent(0)) return {result, status_t::success_k};
         // Two holds: the executor's guards the scratch, the index's keeps batches from interleaving claims.
-        auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return {result, claimed};
+        auto [claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return {result, claim_status};
         if (!mutating_.lock_if_free()) return {result, status_t::contended_k};
         std::lock_guard const mutating {mutating_, std::adopt_lock};
         return insert_gated_(keys, new_vectors, executor, config);
@@ -327,8 +327,8 @@ struct dense_vram_indexes {
         if (!shards) return {{}, status_t::uninitialized_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (status_t const paired = pairs_with_(executor); failed(paired)) return {{}, paired};
-        auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return {{}, claimed};
+        auto [claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return {{}, claim_status};
         if (!mutating_.lock_if_free()) return {{}, status_t::contended_k};
         std::lock_guard const mutating {mutating_, std::adopt_lock};
 
@@ -343,9 +343,9 @@ struct dense_vram_indexes {
         for (std::size_t shard = 0; shard != shards; ++shard) {
             index_t& one = *shards_[shard].index;
             if (cudaSetDevice(one.device_specs().ordinal) != cudaSuccess) return {{}, status_t::device_error_k};
-            auto const [part, refined] = one.refine({0, static_cast<dense_node_id_t>(one.size())}, traversals[shard],
-                                                    config);
-            if (failed(refined)) return {{}, refined};
+            auto const [part, status] = one.refine({0, static_cast<dense_node_id_t>(one.size())}, traversals[shard],
+                                                   config);
+            if (failed(status)) return {{}, status};
             combine_refinement_(result, part);
             if (on_visited(result.visited_nodes, published) == continuation_t::cancel_k)
                 return {result, status_t::cancelled_k};
@@ -361,8 +361,8 @@ struct dense_vram_indexes {
         if (!shards) return {{}, status_t::uninitialized_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (status_t const paired = pairs_with_(executor); failed(paired)) return {{}, paired};
-        auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return {{}, claimed};
+        auto [claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return {{}, claim_status};
 
         growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
         if (status_t const ready = reserve_traversals_(traversals, executor, 1, insert_config_t {}); failed(ready))
@@ -372,9 +372,9 @@ struct dense_vram_indexes {
         for (std::size_t shard = 0; shard != shards; ++shard) {
             index_t& one = *shards_[shard].index;
             if (cudaSetDevice(one.device_specs().ordinal) != cudaSuccess) return {{}, status_t::device_error_k};
-            expected<health_result_t> const audited = one.health(traversals[shard]);
-            if (failed(audited.status)) return {{}, audited.status};
-            combine_health_(result, audited.value);
+            auto const [shard_health, status] = one.health(traversals[shard]);
+            if (failed(status)) return {{}, status};
+            combine_health_(result, shard_health);
         }
         return {result, status_t::success_k};
     }
@@ -388,8 +388,8 @@ struct dense_vram_indexes {
         if (!shards) return {{}, status_t::uninitialized_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (status_t const paired = pairs_with_(executor); failed(paired)) return {{}, paired};
-        auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return {{}, claimed};
+        auto [claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return {{}, claim_status};
         if (!mutating_.lock_if_free()) return {{}, status_t::contended_k};
         std::lock_guard const mutating {mutating_, std::adopt_lock};
 
@@ -401,13 +401,13 @@ struct dense_vram_indexes {
         for (std::size_t shard = 0; shard != shards; ++shard) {
             index_t& one = *shards_[shard].index;
             if (cudaSetDevice(one.device_specs().ordinal) != cudaSuccess) return {{}, status_t::device_error_k};
-            expected<heal_result_t> const healed = one.heal(traversals[shard]);
-            if (failed(healed.status)) return {{}, healed.status};
-            combine_health_(result.health, healed.value.health);
-            result.islands_found += healed.value.islands_found;
-            result.islands_reconnected += healed.value.islands_reconnected;
-            result.visited_members += healed.value.visited_members;
-            result.computed_distances += healed.value.computed_distances;
+            auto const [repair, status] = one.heal(traversals[shard]);
+            if (failed(status)) return {{}, status};
+            combine_health_(result.health, repair.health);
+            result.islands_found += repair.islands_found;
+            result.islands_reconnected += repair.islands_reconnected;
+            result.visited_members += repair.visited_members;
+            result.computed_distances += repair.computed_distances;
         }
         return {result, status_t::success_k};
     }
@@ -438,24 +438,24 @@ struct dense_vram_indexes {
         search_result_t merged;
         if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {merged, paired};
         // The executor serializes, never the index: a second caller with its own executor searches concurrently.
-        auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return {merged, claimed};
+        auto [claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return {merged, claim_status};
         growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
         if (status_t const readied = reserve_traversals_(traversals, executor, 1, config); failed(readied))
             return {merged, readied};
         status_t status = status_t::success_k;
         for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
             traversal_t& traversal = traversals[shard];
-            expected<search_result_t> const found = shards_[shard].index->search(query_vector, traversal, config);
-            if (!found) {
-                status = found.status;
+            auto const [search_result, search_status] = shards_[shard].index->search(query_vector, traversal, config);
+            if (failed(search_status)) {
+                status = search_status;
                 break;
             }
-            merged.visited_members += found.value.visited_members;
-            merged.computed_distances += found.value.computed_distances;
-            merged.restarts += found.value.restarts;
-            merged.tail_drops += found.value.tail_drops;
-            merged.visited_saturations += found.value.visited_saturations;
+            merged.visited_members += search_result.visited_members;
+            merged.computed_distances += search_result.computed_distances;
+            merged.restarts += search_result.restarts;
+            merged.tail_drops += search_result.tail_drops;
+            merged.visited_saturations += search_result.visited_saturations;
             merged.count = merge_search_results(to_span(traversal.results), shards_[shard].keys, keys, distances,
                                                 merged.count);
         }
@@ -501,8 +501,8 @@ struct dense_vram_indexes {
 
         // The executor serializes, never the index: a second caller with its own executor
         // searches concurrently, a second on this one is refused before any scratch is carved.
-        auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return {{}, claimed};
+        auto [claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return {{}, claim_status};
 
         // The host landing: every shard's matches, one wide matrix each, shard columns
         // side by side - the exact destination the pitched writeback was built for. Function
@@ -532,10 +532,10 @@ struct dense_vram_indexes {
                 nk::all, nk::range {queued * config.count, (queued + 1) * config.count}, nk::slice);
             nk::matrix_span<dense_distance_t> const shard_distances = distances_wide(
                 nk::all, nk::range {queued * config.count, (queued + 1) * config.count}, nk::slice);
-            expected<search_result_t> const landed = shards_[queued].index->search(
+            auto const [result, status] = shards_[queued].index->search(
                 queries, shard_ids, shard_distances, traversals[queued], config, completion_t::deferred_k);
-            if (!landed) {
-                first_refusal = landed.status;
+            if (failed(status)) {
+                first_refusal = status;
                 break;
             }
         }
@@ -593,9 +593,9 @@ struct dense_vram_indexes {
         // allocation failure the caller must see rather than a zero it would size a file by.
         status_t framing = status_t::success_k;
         auto part_bytes = [&](std::size_t nodes) noexcept {
-            auto const [header, framed] = monolith_header_(nodes, config, fields_span);
-            if (failed(framed)) framing = framed;
-            return failed(framed) ? 0 : header.monolith_bytes();
+            auto const [header, status] = monolith_header_(nodes, config, fields_span);
+            if (failed(status)) framing = status;
+            return failed(status) ? 0 : header.monolith_bytes();
         };
         if (config.layout == checkpoint_layout_t::monolith_k) {
             std::size_t const monolith = part_bytes(size());
@@ -606,12 +606,12 @@ struct dense_vram_indexes {
         growing_buffer<char, forkunion_allocator_t> entry_path {allocator_};
         auto part_at = [&](std::size_t part) noexcept {
             std::size_t const nodes = shards_[part].index->size();
-            auto const [name, formatted] = safegraphs_part_path(entry_path, "index", part, shards_.size());
-            if (failed(formatted)) framing = formatted;
+            auto const [name, status] = safegraphs_part_path(entry_path, "index", part, shards_.size());
+            if (failed(status)) framing = status;
             return safegraphs_part_t {name, part_bytes(nodes), nodes};
         };
-        auto const [manifest, measured] = safegraphs_manifest_bytes(shards_.size(), part_at);
-        if (failed(measured)) return {0, measured};
+        auto const [manifest, status] = safegraphs_manifest_bytes(shards_.size(), part_at);
+        if (failed(status)) return {0, status};
         if (failed(framing)) return {0, framing};
         return {total + manifest, status_t::success_k};
     }
@@ -756,7 +756,7 @@ struct dense_vram_indexes {
             std::string_view const base = safegraphs_basename(safegraphs_stem(path));
             growing_buffer<char, forkunion_allocator_t> entry_path {owner_->allocator_};
             auto part_at = [&](std::size_t shard) noexcept {
-                auto const [name, formatted] = safegraphs_part_path(entry_path, base, shard, shards);
+                auto const [name, status] = safegraphs_part_path(entry_path, base, shard, shards);
                 return safegraphs_part_t {name, headers_[shard].monolith_bytes(), plans_[shard].visible};
             };
             return safegraphs_write_manifest(path, shards, part_at);
@@ -800,18 +800,18 @@ struct dense_vram_indexes {
     expected<save_plan_t> plan_save(std::string_view path, save_config_t const& config, executor_t& executor) noexcept {
         if (status_t const ready = saveable_(config, executor); failed(ready)) return {{}, ready};
         save_plan_t plan {allocator_};
-        auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return {{}, claimed};
-        plan.streams_ = std::move(held);
+        auto [claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return {{}, claim_status};
+        plan.streams_ = std::move(claim);
         if (status_t const kept = keep_path_(plan.path_, path); failed(kept)) return {{}, kept};
         if (config.layout == checkpoint_layout_t::distributed_k) {
             if (status_t const opened = open_save_parts_(plan, config, executor); failed(opened)) return {{}, opened};
             return {std::move(plan), status_t::success_k};
         }
-        auto const [bytes, measured] = storage_requirements(config);
-        if (failed(measured)) return {{}, measured};
-        auto [mapping, mapped] = mapped_file_t::write(path, bytes);
-        if (failed(mapped)) return {{}, mapped};
+        auto const [bytes, bytes_status] = storage_requirements(config);
+        if (failed(bytes_status)) return {{}, bytes_status};
+        auto [mapping, mapping_status] = mapped_file_t::write(path, bytes);
+        if (failed(mapping_status)) return {{}, mapping_status};
         if (failed(plan.mappings_.push_back(std::move(mapping)))) return {{}, status_t::bad_alloc_k};
         if (status_t const opened = open_save_monolith_(plan, plan.mappings_[0].span(), config, executor);
             failed(opened))
@@ -826,9 +826,9 @@ struct dense_vram_indexes {
         if (status_t const ready = saveable_(config, executor); failed(ready)) return {{}, ready};
         if (config.layout != checkpoint_layout_t::monolith_k) return {{}, status_t::config_mismatch_k};
         save_plan_t plan {allocator_};
-        auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return {{}, claimed};
-        plan.streams_ = std::move(held);
+        auto [claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return {{}, claim_status};
+        plan.streams_ = std::move(claim);
         if (status_t const opened = open_save_monolith_(plan, monolith, config, executor); failed(opened))
             return {{}, opened};
         return {std::move(plan), status_t::success_k};
@@ -1019,8 +1019,8 @@ struct dense_vram_indexes {
     template <typename progress_type_ = dummy_progress_t>
     status_t save(std::string_view path, save_config_t const& config, executor_t& executor,
                   progress_type_&& on_saved = {}) noexcept {
-        auto [plan, planned] = plan_save(path, config, executor);
-        if (failed(planned)) return planned;
+        auto [plan, status] = plan_save(path, config, executor);
+        if (failed(status)) return status;
         if (status_t const landed = drain_steps_(plan); failed(landed)) return landed;
         return plan.finish(on_saved);
     }
@@ -1030,8 +1030,8 @@ struct dense_vram_indexes {
     template <typename progress_type_ = dummy_progress_t>
     status_t save(bytes_span_t monolith, save_config_t const& config, executor_t& executor,
                   progress_type_&& on_saved = {}) noexcept {
-        auto [plan, planned] = plan_save(monolith, config, executor);
-        if (failed(planned)) return planned;
+        auto [plan, status] = plan_save(monolith, config, executor);
+        if (failed(status)) return status;
         if (status_t const landed = drain_steps_(plan); failed(landed)) return landed;
         return plan.finish(on_saved);
     }
@@ -1050,8 +1050,8 @@ struct dense_vram_indexes {
                   progress_type_&& on_loaded = {}) noexcept {
         status_t settled = status_t::success_k;
         {
-            auto [plan, planned] = plan_load(path, config, executor);
-            if (failed(planned)) return planned; // Nothing was claimed, so nothing needs undoing.
+            auto [plan, status] = plan_load(path, config, executor);
+            if (failed(status)) return status; // Nothing was claimed, so nothing needs undoing.
             settled = drain_steps_(plan);
             if (succeeded(settled)) settled = plan.finish(on_loaded);
         }
@@ -1069,8 +1069,8 @@ struct dense_vram_indexes {
                   progress_type_&& on_loaded = {}) noexcept {
         status_t settled = status_t::success_k;
         {
-            auto [plan, planned] = plan_load(monolith, config, executor);
-            if (failed(planned)) return planned; // Nothing was claimed, so nothing needs undoing.
+            auto [plan, status] = plan_load(monolith, config, executor);
+            if (failed(status)) return status; // Nothing was claimed, so nothing needs undoing.
             settled = drain_steps_(plan);
             if (succeeded(settled)) settled = plan.finish(on_loaded);
         }
@@ -1376,9 +1376,9 @@ struct dense_vram_indexes {
         if (cudaSetDevice(one.device_specs().ordinal) != cudaSuccess) return status_t::device_error_k;
         typename index_t::columns_t const columns {header.rows_of(target, header.value, first_row, nodes),
                                                    header.rows_of(target, header.neighbors, first_row, nodes)};
-        auto [inner, planned] = one.plan_save(columns, config.synchronization, executor.stream(shard).handle,
-                                              static_cast<dense_node_id_t>(first_row));
-        if (failed(planned)) return planned;
+        auto [inner, status] = one.plan_save(columns, config.synchronization, executor.stream(shard).handle,
+                                             static_cast<dense_node_id_t>(first_row));
+        if (failed(status)) return status;
         plan.plans_.push_back_reserved(std::move(inner));
         return status_t::success_k;
     }
@@ -1402,8 +1402,8 @@ struct dense_vram_indexes {
             shard_rows.push_back_reserved(shards_[shard].index->size());
             rows += shard_rows[shard];
         }
-        auto const [header, framed] = monolith_header_(rows, config, to_span(plan.fields_));
-        if (failed(framed)) return framed;
+        auto const [header, status] = monolith_header_(rows, config, to_span(plan.fields_));
+        if (failed(status)) return status;
         if (monolith.size() < header.monolith_bytes()) return status_t::overflow_k;
         plan.headers_.push_back_reserved(header);
         for (std::size_t shard = 0, base = 0; shard != shards; base += shard_rows[shard], ++shard)
@@ -1430,12 +1430,12 @@ struct dense_vram_indexes {
         growing_buffer<char, forkunion_allocator_t> part_path {allocator_};
         for (std::size_t shard = 0; shard != shards; ++shard) {
             std::size_t const nodes = shards_[shard].index->size();
-            auto const [header, framed] = monolith_header_(nodes, config, fields);
-            if (failed(framed)) return framed;
-            auto const [file_path, formatted] = safegraphs_part_path(part_path, stem, shard, shards);
-            if (failed(formatted)) return formatted;
-            auto [mapping, mapped] = mapped_file_t::write(file_path, header.monolith_bytes());
-            if (failed(mapped)) return mapped;
+            auto const [header, header_status] = monolith_header_(nodes, config, fields);
+            if (failed(header_status)) return header_status;
+            auto const [file_path, path_status] = safegraphs_part_path(part_path, stem, shard, shards);
+            if (failed(path_status)) return path_status;
+            auto [mapping, mapping_status] = mapped_file_t::write(file_path, header.monolith_bytes());
+            if (failed(mapping_status)) return mapping_status;
             plan.headers_.push_back_reserved(header);
             plan.mappings_.push_back_reserved(std::move(mapping));
             if (status_t const opened = open_save_shard_(plan, shard, plan.mappings_[shard].span(),
@@ -1453,8 +1453,8 @@ struct dense_vram_indexes {
             if (field.key == "metric") part.metric = safegraphs_name_t {field.value};
             if (field.key == "quantization") part.quantization = safegraphs_name_t {field.value};
         };
-        auto const [header, parsed] = safegraphs_read_header(part.monolith, allocator_, per_custom_field);
-        if (failed(parsed)) return parsed;
+        auto const [header, status] = safegraphs_read_header(part.monolith, allocator_, per_custom_field);
+        if (failed(status)) return status;
         part.header = header;
         part.nodes = header.nodes();
         return status_t::success_k;
@@ -1477,8 +1477,8 @@ struct dense_vram_indexes {
      */
     status_t catalog_(std::string_view path, growing_buffer<mapped_file_t, forkunion_allocator_t>& mappings,
                       growing_buffer<part_t, forkunion_allocator_t>& parts) const noexcept {
-        auto [mapping, mapped] = mapped_file_t::read(path);
-        if (failed(mapped)) return mapped;
+        auto [mapping, mapping_status] = mapped_file_t::read(path);
+        if (failed(mapping_status)) return mapping_status;
         bytes_view_t const checkpoint = mapping.view();
         if (checkpoint.size() >= safegraphs_prefix_t::magic_k.size() &&
             std::memcmp(checkpoint.data(), safegraphs_prefix_t::magic_k.data(), safegraphs_prefix_t::magic_k.size()) ==
@@ -1497,18 +1497,18 @@ struct dense_vram_indexes {
             part.path = {offset, paths_arena.size()};
             if (failed(parts.push_back(part))) kept = status_t::bad_alloc_k;
         };
-        auto const [summary, listed] = safegraphs_read_manifest(path, allocator_, per_part);
-        if (failed(listed)) return listed;
+        auto const [summary, summary_status] = safegraphs_read_manifest(path, allocator_, per_part);
+        if (failed(summary_status)) return summary_status;
         if (failed(kept)) return kept;
         if (parts.empty()) return status_t::malformed_k;
         if (failed(mappings.reserve_exactly(parts.size()))) return status_t::bad_alloc_k;
         growing_buffer<char, forkunion_allocator_t> part_path {allocator_};
         for (part_t& part : parts) {
-            auto const [sibling, joined] = safegraphs_sibling_path(
+            auto const [sibling, sibling_status] = safegraphs_sibling_path(
                 part_path, path, std::string_view {paths_arena.data() + part.path.first, part.path.size()});
-            if (failed(joined)) return joined;
-            auto [part_mapping, part_mapped] = mapped_file_t::read(sibling);
-            if (failed(part_mapped)) return part_mapped;
+            if (failed(sibling_status)) return sibling_status;
+            auto [part_mapping, part_mapping_status] = mapped_file_t::read(sibling);
+            if (failed(part_mapping_status)) return part_mapping_status;
             part.monolith = part_mapping.view();
             if (status_t const described = describe_part_(part); failed(described)) return described;
             mappings.push_back_reserved(std::move(part_mapping));
@@ -1543,9 +1543,9 @@ struct dense_vram_indexes {
      *      gate - and re-checks emptiness beneath them: a batch admitted between the entry check
      *      and the gate would be overwritten by the total this load stores at its end. */
     status_t gate_load_(load_plan_t& plan, executor_t& executor) noexcept {
-        auto [held, claimed] = executor.claim();
-        if (failed(claimed)) return claimed;
-        plan.streams_ = std::move(held);
+        auto [claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return claim_status;
+        plan.streams_ = std::move(claim);
         if (!mutating_.lock_if_free()) return status_t::contended_k;
         plan.mutating_ = std::unique_lock<fu::spin_mutex_t> {mutating_, std::adopt_lock};
         return size() ? status_t::config_mismatch_k : status_t::success_k;
@@ -1613,8 +1613,8 @@ struct dense_vram_indexes {
         for (std::size_t shard = 0; shard != shards; ++shard) {
             index_t& one = *shards_[shard].index;
             if (cudaSetDevice(one.device_specs().ordinal) != cudaSuccess) return status_t::device_error_k;
-            auto [inner, planned] = one.plan_load(shard_rows[shard], executor.stream(shard).handle);
-            if (failed(planned)) return planned;
+            auto [inner, status] = one.plan_load(shard_rows[shard], executor.stream(shard).handle);
+            if (failed(status)) return status;
             plan.plans_.push_back_reserved(std::move(inner));
             typename index_t::load_plan_t const& opened = plan.plans_[shard];
             std::size_t first_row = opened.base;

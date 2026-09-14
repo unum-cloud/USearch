@@ -201,9 +201,9 @@ std::size_t basic_build(fixture_type_ const& fixture, index_type_& index, metric
     for (std::size_t ordinal = 0; ordinal != count; ++ordinal) keys[ordinal] = fixture.make_key(ordinal);
     for (std::size_t begin = 0; begin < count; begin += batch_size_k) {
         std::size_t const batch = std::min(batch_size_k, count - begin);
-        auto const inserted = index.insert({values.data() + begin, batch}, {keys.data() + begin, batch}, metric,
-                                           {assigned_ids.data() + begin, batch}, context, selector);
-        failures += expect_eq(inserted.status, status_t::success_k);
+        auto const [result, status] = index.insert({values.data() + begin, batch}, {keys.data() + begin, batch}, metric,
+                                                   {assigned_ids.data() + begin, batch}, context, selector);
+        failures += expect_eq(status, status_t::success_k);
     }
     return failures;
 }
@@ -315,9 +315,9 @@ struct basic_columns_storage {
 /** @brief Sizes fresh columns from @p index and saves into them in one call. */
 template <typename index_type_, typename codec_type_>
 expected<basic_columns_storage<index_type_>> basic_saved_columns(index_type_ const& index, codec_type_ const& codec) {
-    auto const extents = index.columns_extents(codec);
-    if (failed(extents.status)) return {{}, extents.status};
-    basic_columns_storage<index_type_> storage {extents.value};
+    auto const [extents, status] = index.columns_extents(codec);
+    if (failed(status)) return {{}, status};
+    basic_columns_storage<index_type_> storage {extents};
     status_t const saved = index.save(storage.columns(), codec);
     return {std::move(storage), saved};
 }
@@ -398,9 +398,9 @@ std::size_t test_basic_guards(fixture_type_ const& fixture) {
         failures += expect_eq(index.reserve(0).status, status_t::config_mismatch_k);
         if constexpr (sizeof(node_id_t) == 4)
             failures += expect_eq(index.reserve(std::size_t {1} << 32).status, status_t::overflow_k);
-        auto const reserved = index.reserve(ceiling_k);
-        failures += expect_eq(reserved.status, status_t::success_k);
-        failures += expect_eq(reserved.value, ceiling_k);
+        auto const [capacity, status] = index.reserve(ceiling_k);
+        failures += expect_eq(status, status_t::success_k);
+        failures += expect_eq(capacity, ceiling_k);
         failures += expect_eq(index.reserve(ceiling_k).status, status_t::success_k);
         failures += expect_eq(index.reserve(ceiling_k - 1).status, status_t::success_k);
         failures += expect_eq(index.reserve(ceiling_k + 1).status, status_t::overflow_k);
@@ -473,9 +473,9 @@ std::size_t test_basic_handmade(fixture_type_ const& fixture) {
                     handmade.distances[row][column]);
 
         for (std::size_t row = 0; row != 3; ++row) {
-            auto const [found, searched] = index.search(queries.values[row], metric, context);
-            failures += expect_eq(searched, status_t::success_k);
-            failures += expect(found.count >= 3);
+            auto const [result, status] = index.search(queries.values[row], metric, context);
+            failures += expect_eq(status, status_t::success_k);
+            failures += expect(result.count >= 3);
             failures += basic_expect_distance<fixture_type_>(context.results[0].distance,
                                                              typename index_t::distance_t {});
             auto runner_up = handmade.distances[row][(row + 1) % 3];
@@ -520,9 +520,9 @@ std::size_t test_basic_growth_and_recall(fixture_type_ const& fixture) {
 
         std::size_t found_best_count = 0;
         for (auto const& query : queries) {
-            auto const [found, searched] = index.search(query, metric, context);
-            failures += expect_eq(searched, status_t::success_k);
-            failures += expect(found.count > 0 && found.count <= connectivity_32_k * 2);
+            auto const [result, status] = index.search(query, metric, context);
+            failures += expect_eq(status, status_t::success_k);
+            failures += expect(result.count > 0 && result.count <= connectivity_32_k * 2);
             failures += basic_expect_ascending(context);
             bool found_best = false;
             failures += basic_audit_search(fixture, index, query, context, found_best);
@@ -538,8 +538,8 @@ std::size_t test_basic_growth_and_recall(fixture_type_ const& fixture) {
         for (auto const config : {typename index_t::search_config_t {0, 1},  //
                                   typename index_t::search_config_t {32, 8}, //
                                   typename index_t::search_config_t {basic_growth_nodes_k, 0}}) {
-            auto const found = index.search(queries[0], metric, context, config);
-            failures += expect_eq(found.status, status_t::success_k);
+            auto const [result, status] = index.search(queries[0], metric, context, config);
+            failures += expect_eq(status, status_t::success_k);
             failures += basic_expect_ascending(context);
         }
         typename index_t::search_config_t const exhaustive_config {basic_growth_nodes_k, 0};
@@ -589,8 +589,8 @@ std::size_t test_basic_selectors(fixture_type_ const& fixture) {
 
             std::size_t found_best_count = 0;
             for (auto const& query : queries) {
-                auto const found = index.search(query, metric, context);
-                failures += expect_eq(found.status, status_t::success_k);
+                auto const [result, status] = index.search(query, metric, context);
+                failures += expect_eq(status, status_t::success_k);
                 bool found_best = false;
                 failures += basic_audit_search(fixture, index, query, context, found_best);
                 found_best_count += found_best;
@@ -645,10 +645,10 @@ std::size_t test_basic_keys(fixture_type_ const& fixture) {
         for (std::size_t ordinal = 0; ordinal != unique_k; ++ordinal) {
             failures += expect(index.contains(keys[ordinal]));
             failures += expect_eq(index.count(keys[ordinal]), 1u);
-            auto const found = index.find(keys[ordinal]);
-            failures += expect(bool(found));
-            failures += expect(index.key_of(found.value).value == keys[ordinal]);
-            all_found_ids.push_back(static_cast<std::size_t>(found.value));
+            auto const [match, status] = index.find(keys[ordinal]);
+            failures += expect(succeeded(status));
+            failures += expect(index.key_of(match).value == keys[ordinal]);
+            all_found_ids.push_back(static_cast<std::size_t>(match));
         }
         for (std::size_t shared = 0; shared != shared_keys_k; ++shared) {
             key_t const key = fixture.make_key(1000 + shared);
@@ -708,13 +708,13 @@ std::size_t test_basic_wiring(fixture_type_ const& fixture) {
         [[maybe_unused]] status_t const cleared = index.unlink(from, to); // Absent or not, now absent.
         std::size_t const degree_before = index.degree_of(from).value;
 
-        auto const linked = index.link(from, to);
-        failures += expect_eq(linked.status, status_t::success_k);
-        failures += expect(linked.value == membership_t::absent_k);
+        auto const [membership, link_status] = index.link(from, to);
+        failures += expect_eq(link_status, status_t::success_k);
+        failures += expect(membership == membership_t::absent_k);
         failures += expect_eq(index.degree_of(from).value, degree_before + 1);
-        auto const relinked = index.link(from, to);
-        failures += expect_eq(relinked.status, status_t::success_k);
-        failures += expect(relinked.value == membership_t::present_k);
+        auto const [relink_membership, relink_status] = index.link(from, to);
+        failures += expect_eq(relink_status, status_t::success_k);
+        failures += expect(relink_membership == membership_t::present_k);
         failures += expect_eq(index.degree_of(from).value, degree_before + 1);
         failures += expect_eq(index.unlink(from, to), status_t::success_k);
         failures += expect_eq(index.degree_of(from).value, degree_before);
@@ -733,11 +733,11 @@ std::size_t test_basic_wiring(fixture_type_ const& fixture) {
         failures += expect_eq(index.health(context).status, status_t::success_k);
 
         // Variable degrees survive the snapshot as they are - each row's own prefix sums say its degree.
-        auto const saved = basic_saved_columns(index, codec);
-        failures += expect(bool(saved));
+        auto const [columns, save_status] = basic_saved_columns(index, codec);
+        failures += expect(succeeded(save_status));
         index_t restored = fixture.make_index(ledger);
         failures += expect(bool(restored.reserve(nodes_k)));
-        failures += expect_eq(restored.load(saved.value.view(), codec), status_t::success_k);
+        failures += expect_eq(restored.load(columns.view(), codec), status_t::success_k);
         failures += basic_expect_mirrored(fixture, restored, index, nodes_k);
     }
     failures += expect_eq(ledger.live_bytes.load(), 0);
@@ -781,17 +781,17 @@ std::size_t test_basic_allocation_budget(fixture_type_ const& fixture) {
         std::size_t fresh_links = 0;
         node_id_t refused_target = 0;
         for (std::size_t target = 1; target != linked_nodes_k && !refused_target; ++target) {
-            auto const linked = index.link(0, static_cast<node_id_t>(target));
-            if (linked.status == status_t::bad_alloc_k) refused_target = static_cast<node_id_t>(target);
-            else if (succeeded(linked.status) && linked.value == membership_t::absent_k) ++fresh_links;
+            auto const [membership, status] = index.link(0, static_cast<node_id_t>(target));
+            if (status == status_t::bad_alloc_k) refused_target = static_cast<node_id_t>(target);
+            else if (succeeded(status) && membership == membership_t::absent_k) ++fresh_links;
         }
         failures += expect(refused_target != 0);
         failures += expect_eq(index.degree_of(0).value, degree_before + fresh_links);
 
         ledger.byte_budget.store(PTRDIFF_MAX);
-        auto const retried = index.link(0, refused_target);
-        failures += expect_eq(retried.status, status_t::success_k);
-        failures += expect(retried.value == membership_t::absent_k);
+        auto const [retry_membership, retry_status] = index.link(0, refused_target);
+        failures += expect_eq(retry_status, status_t::success_k);
+        failures += expect(retry_membership == membership_t::absent_k);
         failures += expect_eq(index.degree_of(0).value, degree_before + fresh_links + 1);
     }
     failures += expect_eq(ledger.live_bytes.load(), 0);
@@ -860,10 +860,10 @@ std::size_t test_basic_starved(fixture_type_ const& fixture) {
         // business, so the receipt is asserted across the batch and every answer stays ranked.
         std::size_t saturations = 0;
         for (std::size_t sample = 0; sample != nodes_k; ++sample) {
-            auto const [walked, searched] = index.search(values[sample], metric, small_context, {8, 1});
-            failures += expect_eq(searched, status_t::success_k);
+            auto const [result, status] = index.search(values[sample], metric, small_context, {8, 1});
+            failures += expect_eq(status, status_t::success_k);
             failures += basic_expect_ascending(small_context);
-            saturations += walked.telemetry.saturated_walks;
+            saturations += result.telemetry.saturated_walks;
         }
         failures += expect(saturations > 0);
 
@@ -876,15 +876,15 @@ std::size_t test_basic_starved(fixture_type_ const& fixture) {
         failures += expect_eq(index.size(), nodes_k + 2);
 
         // A starved load fails mid-decode with the watermark unpublished, then retries.
-        auto const saved = basic_saved_columns(index, codec);
-        failures += expect(bool(saved));
+        auto const [columns, status] = basic_saved_columns(index, codec);
+        failures += expect(succeeded(status));
         index_t restored = fixture.make_index(ledger);
         failures += expect(bool(restored.reserve(nodes_k + 2)));
         ledger.byte_budget.store(ledger.live_bytes.load());
-        failures += expect_eq(restored.load(saved.value.view(), codec), status_t::bad_alloc_k);
+        failures += expect_eq(restored.load(columns.view(), codec), status_t::bad_alloc_k);
         failures += expect_eq(restored.size(), 0u);
         ledger.byte_budget.store(PTRDIFF_MAX);
-        failures += expect_eq(restored.load(saved.value.view(), codec), status_t::success_k);
+        failures += expect_eq(restored.load(columns.view(), codec), status_t::success_k);
         failures += expect_eq(restored.size(), index.size());
     }
     failures += expect_eq(ledger.live_bytes.load(), 0);
@@ -918,13 +918,12 @@ std::size_t test_basic_snapshot_roundtrip(fixture_type_ const& fixture) {
         failures += basic_build(fixture, index, metric, values, assigned_ids, context,
                                 basic_keep_diverse_t {basic_connectivity_k});
 
-        auto const extents = index.columns_extents(codec);
-        failures += expect(bool(extents));
-        auto const extents_again = index.columns_extents(codec); // Sizing is repeatable.
-        failures += expect(extents_again.value.nodes == extents.value.nodes &&
-                           extents_again.value.neighbors == extents.value.neighbors &&
-                           extents_again.value.value_bytes == extents.value.value_bytes);
-        basic_columns_storage<index_t> storage {extents.value};
+        auto const [extents, measure_status] = index.columns_extents(codec);
+        failures += expect(succeeded(measure_status));
+        auto const [resized_extents, resized_status] = index.columns_extents(codec); // Sizing is repeatable.
+        failures += expect(resized_extents.nodes == extents.nodes && resized_extents.neighbors == extents.neighbors &&
+                           resized_extents.value_bytes == extents.value_bytes);
+        basic_columns_storage<index_t> storage {extents};
         auto const columns = storage.columns();
         // A column short by one element overflows; one long by an element disagrees about the rows.
         auto short_values = columns;
@@ -936,7 +935,7 @@ std::size_t test_basic_snapshot_roundtrip(fixture_type_ const& fixture) {
         auto short_ids = columns;
         short_ids.neighbor_ids = columns.neighbor_ids.first(columns.neighbor_ids.size() - 1);
         failures += expect_eq(index.save(short_ids, codec), status_t::overflow_k);
-        std::vector<key_t> longer_keys(extents.value.nodes + 1);
+        std::vector<key_t> longer_keys(extents.nodes + 1);
         auto long_keys = columns;
         long_keys.keys = longer_keys;
         failures += expect_eq(index.save(long_keys, codec), status_t::config_mismatch_k);
@@ -954,11 +953,11 @@ std::size_t test_basic_snapshot_roundtrip(fixture_type_ const& fixture) {
             context_t restored_context {basic_seed_snapshot_k + 7, counting_allocator_t {ledger}};
             auto original_metric = fixture.make_metric();
             auto restored_metric = fixture.make_metric();
-            auto const [original_found, original_status] = index.search(query, original_metric, original_context);
-            auto const [restored_found, restored_status] = restored.search(query, restored_metric, restored_context);
+            auto const [original_result, original_status] = index.search(query, original_metric, original_context);
+            auto const [restored_result, restored_status] = restored.search(query, restored_metric, restored_context);
             failures += expect_eq(original_status, restored_status);
-            failures += expect_eq(original_found.count, restored_found.count);
-            for (std::size_t position = 0; position != original_found.count; ++position) {
+            failures += expect_eq(original_result.count, restored_result.count);
+            for (std::size_t position = 0; position != original_result.count; ++position) {
                 failures += expect_eq(original_context.results[position].node_id,
                                       restored_context.results[position].node_id);
                 failures += basic_expect_distance<fixture_type_>(restored_context.results[position].distance,
@@ -998,9 +997,9 @@ std::size_t test_basic_snapshot_hostile(fixture_type_ const& fixture) {
         // serialized neighbor id to corrupt.
         [[maybe_unused]] auto const bumped = index.link(0, static_cast<node_id_t>(nodes_k / 2));
 
-        auto const saved = basic_saved_columns(index, codec);
-        failures += expect(bool(saved));
-        storage_t const& storage = saved.value;
+        auto const [columns, status] = basic_saved_columns(index, codec);
+        failures += expect(succeeded(status));
+        storage_t const& storage = columns;
         failures += expect(storage.neighbor_ids.size() > 0u);
         failures += expect(storage.values.size() > 0u);
 
@@ -1064,20 +1063,20 @@ std::size_t test_basic_snapshot_regions(fixture_type_ const& fixture) {
         failures += basic_build(fixture, index, metric, values, assigned_ids, context,
                                 basic_keep_diverse_t {basic_connectivity_k});
 
-        auto const single = basic_saved_columns(index, codec);
-        failures += expect(bool(single));
-        auto const extents = index.columns_extents(codec);
-        failures += expect(bool(extents));
+        auto const [single, single_status] = basic_saved_columns(index, codec);
+        failures += expect(succeeded(single_status));
+        auto const [extents, measure_status] = index.columns_extents(codec);
+        failures += expect(succeeded(measure_status));
 
         // Uneven splits from a pool must land identically to the single call.
-        basic_columns_storage<index_t> pooled {extents.value, std::byte {0xEE}};
+        basic_columns_storage<index_t> pooled {extents, std::byte {0xEE}};
         std::array<iota_view<node_id_t>, 3> const regions {iota_view<node_id_t> {0, 7}, iota_view<node_id_t> {7, 61},
                                                            iota_view<node_id_t> {61, nodes_k}};
         {
-            auto planned = index.plan_save(pooled.columns(), codec);
-            failures += expect(bool(planned));
-            failures += expect_eq(planned.value.finish(), status_t::config_mismatch_k); // Nothing covered yet.
-            failures += expect_eq(planned.value.save({0, nodes_k + 1}, codec), status_t::config_mismatch_k);
+            auto [plan, status] = index.plan_save(pooled.columns(), codec);
+            failures += expect(succeeded(status));
+            failures += expect_eq(plan.finish(), status_t::config_mismatch_k); // Nothing covered yet.
+            failures += expect_eq(plan.save({0, nodes_k + 1}, codec), status_t::config_mismatch_k);
             failures += expect_eq(index.columns_extents(codec).status, status_t::contended_k); // The plan holds unique.
 
             fu::flat_pool_t pool;
@@ -1086,19 +1085,19 @@ std::size_t test_basic_snapshot_regions(fixture_type_ const& fixture) {
             // No lock-held check in these threads: the calling thread runs one thread itself
             // while legitimately holding the plan's unique side for the whole pool.
             pool.for_threads([&](std::size_t thread) noexcept {
-                if (planned.value.save(regions[thread], codec) != status_t::success_k) thread_failures.fetch_add(1);
+                if (plan.save(regions[thread], codec) != status_t::success_k) thread_failures.fetch_add(1);
             });
             failures += expect_eq(thread_failures.load(), 0u);
-            failures += expect_eq(planned.value.finish(), status_t::success_k);
-            failures += expect_eq(planned.value.finish(), status_t::uninitialized_k); // Spent: no second unlock.
+            failures += expect_eq(plan.finish(), status_t::success_k);
+            failures += expect_eq(plan.finish(), status_t::uninitialized_k); // Spent: no second unlock.
         }
-        failures += expect(pooled == single.value);
+        failures += expect(pooled == single);
         failures += expect(bool(index.columns_extents(codec))); // The finished plan released its hold.
 
         // A dropped save plan releases the hold without pronouncing anything.
         {
-            auto planned = index.plan_save(pooled.columns(), codec);
-            failures += expect(bool(planned));
+            auto [plan, status] = index.plan_save(pooled.columns(), codec);
+            failures += expect(succeeded(status));
         }
         failures += expect(bool(index.columns_extents(codec)));
 
@@ -1106,40 +1105,40 @@ std::size_t test_basic_snapshot_regions(fixture_type_ const& fixture) {
         index_t restored = fixture.make_index(ledger);
         failures += expect(bool(restored.reserve(nodes_k)));
         {
-            auto planned = restored.plan_load(single.value.view());
-            failures += expect(bool(planned));
-            failures += expect_eq(planned.value.finish(), status_t::config_mismatch_k); // Nothing covered yet.
-            failures += expect_eq(restored.size(), 0u);                                 // Nothing published either.
+            auto [plan, status] = restored.plan_load(single.view());
+            failures += expect(succeeded(status));
+            failures += expect_eq(plan.finish(), status_t::config_mismatch_k); // Nothing covered yet.
+            failures += expect_eq(restored.size(), 0u);                        // Nothing published either.
 
             fu::flat_pool_t pool;
             if (fu::failed(pool.spawn(regions.size()))) return failures + expect(false);
             std::atomic<std::size_t> thread_failures {0};
             pool.for_threads([&](std::size_t thread) noexcept {
-                if (planned.value.load(regions[thread], codec) != status_t::success_k) thread_failures.fetch_add(1);
+                if (plan.load(regions[thread], codec) != status_t::success_k) thread_failures.fetch_add(1);
             });
             failures += expect_eq(thread_failures.load(), 0u);
             failures += expect_eq(restored.size(), 0u); // Still unpublished before the finish.
-            failures += expect_eq(planned.value.finish(), status_t::success_k);
-            failures += expect_eq(planned.value.finish(), status_t::uninitialized_k); // Spent: no second publish.
+            failures += expect_eq(plan.finish(), status_t::success_k);
+            failures += expect_eq(plan.finish(), status_t::uninitialized_k); // Spent: no second publish.
             failures += expect_eq(restored.size(), static_cast<std::size_t>(nodes_k));
         }
         failures += basic_expect_mirrored(fixture, restored, index, nodes_k);
 
         // Closure: the region-loaded graph re-saves to the very same columns.
-        basic_columns_storage<index_t> resaved {extents.value, std::byte {0x77}};
+        basic_columns_storage<index_t> resaved {extents, std::byte {0x77}};
         failures += expect_eq(restored.save(resaved.columns(), codec), status_t::success_k);
-        failures += expect(resaved == single.value);
+        failures += expect(resaved == single);
 
         // A dropped load plan publishes nothing and leaves a clean retry behind.
         index_t abandoned = fixture.make_index(ledger);
         failures += expect(bool(abandoned.reserve(nodes_k)));
         {
-            auto planned = abandoned.plan_load(single.value.view());
-            failures += expect(bool(planned));
-            failures += expect_eq(planned.value.load(regions[0], codec), status_t::success_k);
+            auto [plan, status] = abandoned.plan_load(single.view());
+            failures += expect(succeeded(status));
+            failures += expect_eq(plan.load(regions[0], codec), status_t::success_k);
         }
         failures += expect_eq(abandoned.size(), 0u);
-        failures += expect_eq(abandoned.load(single.value.view(), codec), status_t::success_k);
+        failures += expect_eq(abandoned.load(single.view(), codec), status_t::success_k);
         failures += expect_eq(abandoned.size(), index.size());
     }
     failures += expect_eq(ledger.live_bytes.load(), 0);
@@ -1175,12 +1174,12 @@ std::size_t test_basic_plan_race(fixture_type_ const& fixture) {
         failures += basic_build(fixture, index, metric, values, assigned_ids, context,
                                 basic_keep_diverse_t {basic_connectivity_k});
 
-        auto const reference = basic_saved_columns(index, codec);
-        failures += expect(bool(reference));
-        auto const extents = index.columns_extents(codec);
-        failures += expect(bool(extents));
-        basic_columns_storage<index_t> held {extents.value, std::byte {0xEE}};
-        basic_columns_storage<index_t> prober {extents.value};
+        auto const [reference, save_status] = basic_saved_columns(index, codec);
+        failures += expect(succeeded(save_status));
+        auto const [extents, measure_status] = index.columns_extents(codec);
+        failures += expect(succeeded(measure_status));
+        basic_columns_storage<index_t> held {extents, std::byte {0xEE}};
+        basic_columns_storage<index_t> prober {extents};
         auto one_more = fixture.make_values(1, basic_seed_plan_race_k ^ salt_extras_k);
         key_t const one_more_key = fixture.make_key(nodes_k);
         auto query = fixture.make_values(1, basic_seed_plan_race_k ^ salt_queries_k);
@@ -1190,18 +1189,18 @@ std::size_t test_basic_plan_race(fixture_type_ const& fixture) {
         std::atomic<std::size_t> thread_failures {0};
 
         auto planner_thread = [&]() noexcept { // Waits on the prober only - never on the inserter.
-            auto planned = index.plan_save(held.columns(), codec);
-            if (failed(planned.status)) {
+            auto [plan, status] = index.plan_save(held.columns(), codec);
+            if (failed(status)) {
                 thread_failures.fetch_add(1);
                 plan_abandoned.store(true, std::memory_order_release);
             }
             plan_held.store(true, std::memory_order_release);
-            if (failed(planned.status)) return;
+            if (failed(status)) return;
             if (!spin_until([&]() noexcept { return prober_done.load(std::memory_order_acquire); }))
                 thread_failures.fetch_add(1); // Finish regardless - the hold must die.
-            if (planned.value.save({0, static_cast<node_id_t>(nodes_k)}, codec) != status_t::success_k)
+            if (plan.save({0, static_cast<node_id_t>(nodes_k)}, codec) != status_t::success_k)
                 thread_failures.fetch_add(1);
-            if (planned.value.finish() != status_t::success_k) thread_failures.fetch_add(1);
+            if (plan.finish() != status_t::success_k) thread_failures.fetch_add(1);
         };
         auto inserter_thread = [&]() noexcept { // Provably parked at the shared gate.
             if (!spin_until([&]() noexcept { return plan_held.load(std::memory_order_acquire); }))
@@ -1209,9 +1208,9 @@ std::size_t test_basic_plan_race(fixture_type_ const& fixture) {
             inserter_started.store(true, std::memory_order_release);
             auto thread_metric = fixture.make_metric();
             context_t thread_context {basic_seed_plan_race_k + 1, counting_allocator_t {ledger}};
-            auto const inserted = index.insert({one_more.data(), 1}, {&one_more_key, 1}, thread_metric, {},
-                                               thread_context, basic_keep_diverse_t {basic_connectivity_k});
-            if (inserted.status != status_t::success_k) thread_failures.fetch_add(1);
+            auto const [result, status] = index.insert({one_more.data(), 1}, {&one_more_key, 1}, thread_metric, {},
+                                                       thread_context, basic_keep_diverse_t {basic_connectivity_k});
+            if (status != status_t::success_k) thread_failures.fetch_add(1);
             assert_no_locks_held();
         };
         auto prober_thread = [&]() noexcept { // Every check runs strictly inside the hold.
@@ -1233,7 +1232,7 @@ std::size_t test_basic_plan_race(fixture_type_ const& fixture) {
             if (index.columns_extents(codec).status != status_t::contended_k) thread_failures.fetch_add(1);
             if (index.health(prober_context).status != status_t::contended_k) thread_failures.fetch_add(1);
             if (index.plan_save(prober.columns(), codec).status != status_t::contended_k) thread_failures.fetch_add(1);
-            if (index.plan_load(reference.value.view()).status != status_t::contended_k) thread_failures.fetch_add(1);
+            if (index.plan_load(reference.view()).status != status_t::contended_k) thread_failures.fetch_add(1);
             if (index.template search<synchronization_t::immutable_k>(query[0], prober_metric, prober_context).status !=
                 status_t::contended_k)
                 thread_failures.fetch_add(1);
@@ -1241,8 +1240,8 @@ std::size_t test_basic_plan_race(fixture_type_ const& fixture) {
                 status_t::contended_k)
                 thread_failures.fetch_add(1);
             // The concurrent arm and the wait-free readers stay fully served meanwhile.
-            auto const found = index.search(query[0], prober_metric, prober_context);
-            if (found.status != status_t::success_k) thread_failures.fetch_add(1);
+            auto const [result, status] = index.search(query[0], prober_metric, prober_context);
+            if (status != status_t::success_k) thread_failures.fetch_add(1);
             thread_failures.fetch_add(scored_failures(prober_context.results.data(), prober_context.results.size(),
                                                       nodes_k, connectivity_32_k * 2));
             for (std::size_t node = 0; node != nodes_k; ++node) {
@@ -1271,7 +1270,7 @@ std::size_t test_basic_plan_race(fixture_type_ const& fixture) {
         failures += expect_eq(index.size(), nodes_k + 1); // The parked insert landed after the finish.
         // The graph provably could not move under the hold: the held columns mirror the
         // pre-race reference element for element.
-        failures += expect(held == reference.value);
+        failures += expect(held == reference);
         // The refusal was the hold, not the graph: a settled certified search succeeds.
         context_t settled_context {basic_seed_plan_race_k + 3, counting_allocator_t {ledger}};
         auto settled_metric = fixture.make_metric();
@@ -1311,32 +1310,32 @@ std::size_t test_basic_plan_contention(fixture_type_ const& fixture) {
         failures += basic_build(fixture, index, metric, values, assigned_ids, context,
                                 basic_keep_diverse_t {basic_connectivity_k});
 
-        auto const reference = basic_saved_columns(index, codec);
-        failures += expect(bool(reference));
-        auto const extents = index.columns_extents(codec);
-        failures += expect(bool(extents));
+        auto const [reference, save_status] = basic_saved_columns(index, codec);
+        failures += expect(succeeded(save_status));
+        auto const [extents, measure_status] = index.columns_extents(codec);
+        failures += expect(succeeded(measure_status));
 
         fu::flat_pool_t pool;
         if (fu::failed(pool.spawn(planner_threads_k))) return failures + expect(false);
         std::array<basic_columns_storage<index_t>, planner_threads_k> thread_storages;
-        for (auto& thread_storage : thread_storages) thread_storage = basic_columns_storage<index_t> {extents.value};
+        for (auto& thread_storage : thread_storages) thread_storage = basic_columns_storage<index_t> {extents};
 
         // Phase A - a deterministic refusal round: thread 0 provably holds while the rest try.
         std::atomic<bool> plan_held {false};
         std::atomic<std::size_t> refusals_confirmed {0}, thread_failures {0};
         pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) {
-                auto planned = index.plan_save(thread_storages[0].columns(), codec);
-                if (failed(planned.status)) thread_failures.fetch_add(1);
+                auto [plan, status] = index.plan_save(thread_storages[0].columns(), codec);
+                if (failed(status)) thread_failures.fetch_add(1);
                 plan_held.store(true, std::memory_order_release);
-                if (failed(planned.status)) return;
+                if (failed(status)) return;
                 if (!spin_until([&]() noexcept {
                         return refusals_confirmed.load(std::memory_order_acquire) == planner_threads_k - 1;
                     }))
                     thread_failures.fetch_add(1); // Finish regardless - the hold must die.
-                if (planned.value.save({0, static_cast<node_id_t>(nodes_k)}, codec) != status_t::success_k)
+                if (plan.save({0, static_cast<node_id_t>(nodes_k)}, codec) != status_t::success_k)
                     thread_failures.fetch_add(1);
-                if (planned.value.finish() != status_t::success_k) thread_failures.fetch_add(1);
+                if (plan.finish() != status_t::success_k) thread_failures.fetch_add(1);
                 return;
             }
             if (!spin_until([&]() noexcept { return plan_held.load(std::memory_order_acquire); }))
@@ -1352,11 +1351,11 @@ std::size_t test_basic_plan_contention(fixture_type_ const& fixture) {
         std::array<status_t, planner_threads_k> round_statuses {};
         for (std::size_t round = 0; round != plan_rounds_k; ++round) {
             pool.for_threads([&](std::size_t thread) noexcept {
-                auto planned = index.plan_save(thread_storages[thread].columns(), codec);
-                round_statuses[thread] = planned.status;
-                if (failed(planned.status)) return;
-                if (planned.value.save({0, static_cast<node_id_t>(nodes_k)}, codec) != status_t::success_k ||
-                    planned.value.finish() != status_t::success_k)
+                auto [plan, status] = index.plan_save(thread_storages[thread].columns(), codec);
+                round_statuses[thread] = status;
+                if (failed(status)) return;
+                if (plan.save({0, static_cast<node_id_t>(nodes_k)}, codec) != status_t::success_k ||
+                    plan.finish() != status_t::success_k)
                     round_statuses[thread] = status_t::internal_k;
                 assert_no_locks_held();
             });
@@ -1366,7 +1365,7 @@ std::size_t test_basic_plan_contention(fixture_type_ const& fixture) {
                     ++winners_this_round;
                     // A settled graph serializes deterministically: every winner's columns
                     // equal the reference's - the strongest reload proof.
-                    failures += expect(thread_storages[thread] == reference.value);
+                    failures += expect(thread_storages[thread] == reference);
                 }
                 else failures += expect_eq(round_statuses[thread], status_t::contended_k);
             }
@@ -1379,7 +1378,7 @@ std::size_t test_basic_plan_contention(fixture_type_ const& fixture) {
         failures += expect(bool(target.reserve(nodes_k)));
         auto pair_values = fixture.make_values(2, basic_seed_plan_contention_k ^ salt_extras_k);
         std::array<key_t, 2> const pair_keys {fixture.make_key(nodes_k), fixture.make_key(nodes_k + 1)};
-        basic_columns_storage<index_t> prober {extents.value};
+        basic_columns_storage<index_t> prober {extents};
         std::atomic<bool> entered {false}, released {false};
         // Phase A already proved the counter zero, so Phase C keeps accumulating into it.
         pool.for_threads([&](std::size_t thread) noexcept {
@@ -1387,9 +1386,10 @@ std::size_t test_basic_plan_contention(fixture_type_ const& fixture) {
                 basic_gated_metric<metric_t, typename index_t::distance_t> gated {fixture.make_metric(), &entered,
                                                                                   &released};
                 context_t parked_context {basic_seed_plan_contention_k + 7, counting_allocator_t {ledger}};
-                auto const inserted = target.insert({pair_values.data(), 2}, {pair_keys.data(), 2}, gated, {},
-                                                    parked_context, basic_keep_diverse_t {basic_connectivity_k});
-                if (inserted.status != status_t::success_k) thread_failures.fetch_add(1);
+                auto const [result, status] = target.insert({pair_values.data(), 2}, {pair_keys.data(), 2}, gated, {},
+                                                            parked_context,
+                                                            basic_keep_diverse_t {basic_connectivity_k});
+                if (status != status_t::success_k) thread_failures.fetch_add(1);
                 assert_no_locks_held();
                 return;
             }
@@ -1399,7 +1399,7 @@ std::size_t test_basic_plan_contention(fixture_type_ const& fixture) {
                 released.store(true, std::memory_order_release); // The gate opens even on failure.
                 return;
             }
-            if (target.plan_load(reference.value.view()).status != status_t::contended_k) thread_failures.fetch_add(1);
+            if (target.plan_load(reference.view()).status != status_t::contended_k) thread_failures.fetch_add(1);
             if (target.plan_save(prober.columns(), codec).status != status_t::contended_k) thread_failures.fetch_add(1);
             if (target.columns_extents(codec).status != status_t::contended_k) thread_failures.fetch_add(1);
             released.store(true, std::memory_order_release);
@@ -1407,7 +1407,7 @@ std::size_t test_basic_plan_contention(fixture_type_ const& fixture) {
         failures += expect_eq(thread_failures.load(), 0u);
         failures += expect_eq(target.size(), 2u);
         // Settled & non-empty: the refusal decays into the documented misuse status.
-        failures += expect_eq(target.plan_load(reference.value.view()).status, status_t::config_mismatch_k);
+        failures += expect_eq(target.plan_load(reference.view()).status, status_t::config_mismatch_k);
     }
     failures += expect_eq(ledger.live_bytes.load(), 0);
     return failures;
@@ -1474,9 +1474,9 @@ std::size_t test_basic_health(fixture_type_ const& fixture) {
                 basic_gated_metric<metric_t, typename index_t::distance_t> gated {fixture.make_metric(), &entered,
                                                                                   &released};
                 context_t parked_context {basic_seed_health_k + 1, counting_allocator_t {ledger}};
-                auto const inserted = index.insert({one_more.data(), 1}, {&one_more_key, 1}, gated, {}, parked_context,
-                                                   basic_keep_diverse_t {basic_connectivity_k});
-                if (inserted.status != status_t::success_k) thread_failures.fetch_add(1);
+                auto const [result, status] = index.insert({one_more.data(), 1}, {&one_more_key, 1}, gated, {},
+                                                           parked_context, basic_keep_diverse_t {basic_connectivity_k});
+                if (status != status_t::success_k) thread_failures.fetch_add(1);
                 return;
             }
             if (thread != 1) return;
@@ -1548,17 +1548,17 @@ std::size_t test_basic_certified(fixture_type_ const& fixture) {
             context_t immutable_arm {basic_seed_certified_k + 7, counting_allocator_t {ledger}};
             context_t exclusive_arm {basic_seed_certified_k + 7, counting_allocator_t {ledger}};
             auto arm_metric = fixture.make_metric();
-            auto const [concurrent_found, concurrent_status] = exclusive_index.search(query, arm_metric,
-                                                                                      concurrent_arm);
-            auto const [immutable_found, immutable_status] =
+            auto const [concurrent_result, concurrent_status] = exclusive_index.search(query, arm_metric,
+                                                                                       concurrent_arm);
+            auto const [immutable_result, immutable_status] =
                 exclusive_index.template search<synchronization_t::immutable_k>(query, arm_metric, immutable_arm);
-            auto const [exclusive_found, exclusive_status] =
+            auto const [exclusive_result, exclusive_status] =
                 exclusive_index.template search<synchronization_t::exclusive_k>(query, arm_metric, exclusive_arm);
             failures += expect_eq(immutable_status, concurrent_status);
             failures += expect_eq(exclusive_status, concurrent_status);
-            failures += expect_eq(immutable_found.count, concurrent_found.count);
-            failures += expect_eq(exclusive_found.count, concurrent_found.count);
-            for (std::size_t position = 0; position != concurrent_found.count; ++position) {
+            failures += expect_eq(immutable_result.count, concurrent_result.count);
+            failures += expect_eq(exclusive_result.count, concurrent_result.count);
+            for (std::size_t position = 0; position != concurrent_result.count; ++position) {
                 failures += expect_eq(immutable_arm.results[position].node_id,
                                       concurrent_arm.results[position].node_id);
                 failures += expect_eq(exclusive_arm.results[position].node_id,
@@ -1578,10 +1578,10 @@ std::size_t test_basic_certified(fixture_type_ const& fixture) {
                 basic_gated_metric<metric_t, typename index_t::distance_t> gated {fixture.make_metric(), &entered,
                                                                                   &released};
                 context_t parked_context {basic_seed_certified_k + 9, counting_allocator_t {ledger}};
-                auto const inserted = exclusive_index.insert({one_more.data(), 1}, {&one_more_key, 1}, gated, {},
-                                                             parked_context,
-                                                             basic_keep_diverse_t {basic_connectivity_k});
-                if (inserted.status != status_t::success_k) thread_failures.fetch_add(1);
+                auto const [result, status] = exclusive_index.insert({one_more.data(), 1}, {&one_more_key, 1}, gated,
+                                                                     {}, parked_context,
+                                                                     basic_keep_diverse_t {basic_connectivity_k});
+                if (status != status_t::success_k) thread_failures.fetch_add(1);
                 return;
             }
             if (thread != 1) return;
@@ -1655,9 +1655,9 @@ std::size_t test_basic_torn_bracket(fixture_type_ const& fixture) {
                     basic_gated_metric<metric_t, typename index_t::distance_t> gated {fixture.make_metric(), &entered,
                                                                                       &released};
                     context_t parked_context {basic_seed_torn_bracket_k + 2, counting_allocator_t {ledger}};
-                    auto const certified = index.template search<synchronization_t::immutable_k>(query[0], gated,
-                                                                                                 parked_context);
-                    parked_status.store(static_cast<u32_t>(certified.status), std::memory_order_relaxed);
+                    auto const [result, status] = index.template search<synchronization_t::immutable_k>(query[0], gated,
+                                                                                                        parked_context);
+                    parked_status.store(static_cast<u32_t>(status), std::memory_order_relaxed);
                     return;
                 }
                 if (thread != 1) return; // The mutator: runs strictly inside the parked walk.
@@ -1668,9 +1668,9 @@ std::size_t test_basic_torn_bracket(fixture_type_ const& fixture) {
                 }
                 auto thread_metric = fixture.make_metric();
                 context_t thread_context {basic_seed_torn_bracket_k + 3, counting_allocator_t {ledger}};
-                auto const inserted = index.insert({one_more.data(), 1}, {&one_more_key, 1}, thread_metric, {},
-                                                   thread_context, basic_keep_diverse_t {basic_connectivity_k});
-                if (inserted.status != status_t::success_k) thread_failures.fetch_add(1);
+                auto const [result, status] = index.insert({one_more.data(), 1}, {&one_more_key, 1}, thread_metric, {},
+                                                           thread_context, basic_keep_diverse_t {basic_connectivity_k});
+                if (status != status_t::success_k) thread_failures.fetch_add(1);
                 released.store(true, std::memory_order_release); // Every path - the search must resume.
                 assert_no_locks_held();
             });
@@ -1733,8 +1733,8 @@ std::size_t test_basic_metric_contract(fixture_type_ const& fixture) {
         // Armed refusal: the walk must survive every saturation path & stay ranked.
         for (std::size_t budget : {basic_connectivity_k, std::size_t {1}, std::size_t {0}}) {
             metric.arm(budget);
-            auto const found = index.search(queries[0], metric, context);
-            failures += expect_eq(found.status, status_t::success_k);
+            auto const [result, status] = index.search(queries[0], metric, context);
+            failures += expect_eq(status, status_t::success_k);
             failures += basic_expect_ascending(context);
             metric.disarm();
         }
@@ -1798,9 +1798,9 @@ std::size_t test_basic_restarts(fixture_type_ const& fixture) {
         bool any_restarts = false;
         for (std::size_t attempt = 0; attempt != attempts_k; ++attempt) {
             context_t attempt_context {basic_seed_restarts_k + 1 + attempt, counting_allocator_t {ledger}};
-            auto const [found, searched] = index.search(query, metric, attempt_context, {nodes_k, 0});
-            failures += expect_eq(searched, status_t::success_k);
-            failures += expect_eq(found.count, nodes_k); // The islands included - full coverage.
+            auto const [result, status] = index.search(query, metric, attempt_context, {nodes_k, 0});
+            failures += expect_eq(status, status_t::success_k);
+            failures += expect_eq(result.count, nodes_k); // The islands included - full coverage.
             any_restarts = any_restarts || attempt_context.telemetry.restarts > 0;
         }
         failures += expect(any_restarts);
@@ -1835,11 +1835,11 @@ std::size_t test_basic_concurrent_build(fixture_type_ const& fixture) {
         std::atomic<std::size_t> thread_failures {0};
         pool.for_threads([&](std::size_t thread) noexcept {
             if (thread >= basic_threads_k) return;
-            auto const inserted = index.insert(
+            auto const [result, status] = index.insert(
                 {threads.values[thread]}, {threads.keys[thread]}, threads.metrics[thread],
                 {assigned_ids.data() + thread * basic_thread_nodes_k, basic_thread_nodes_k}, threads.contexts[thread],
                 basic_keep_diverse_t {basic_connectivity_k});
-            if (inserted.status != status_t::success_k) thread_failures.fetch_add(1);
+            if (status != status_t::success_k) thread_failures.fetch_add(1);
             assert_no_locks_held();
         });
 
@@ -1900,10 +1900,10 @@ std::size_t test_basic_concurrent_search(fixture_type_ const& fixture) {
         std::atomic<std::size_t> writer_threads_remaining {writer_threads_k};
         pool.for_threads([&](std::size_t thread) noexcept {
             if (thread < writer_threads_k) {
-                auto const inserted = index.insert({threads.values[thread]}, {threads.keys[thread]},
-                                                   threads.metrics[thread], {}, threads.contexts[thread],
-                                                   basic_keep_diverse_t {basic_connectivity_k});
-                if (inserted.status != status_t::success_k) thread_failures.fetch_add(1);
+                auto const [result, status] = index.insert({threads.values[thread]}, {threads.keys[thread]},
+                                                           threads.metrics[thread], {}, threads.contexts[thread],
+                                                           basic_keep_diverse_t {basic_connectivity_k});
+                if (status != status_t::success_k) thread_failures.fetch_add(1);
                 writer_threads_remaining.fetch_sub(1, std::memory_order_release);
                 assert_no_locks_held();
                 return;
@@ -1918,18 +1918,18 @@ std::size_t test_basic_concurrent_search(fixture_type_ const& fixture) {
             while (writer_threads_remaining.load(std::memory_order_acquire) != 0 ||
                    searches < basic_reader_minimal_searches_k) {
                 auto const& query = queries[searches % queries.size()];
-                auto const found = index.search(query, reader_metric, reader_context);
-                if (found.status != status_t::success_k) thread_failures.fetch_add(1);
+                auto const [search_result, search_status] = index.search(query, reader_metric, reader_context);
+                if (search_status != status_t::success_k) thread_failures.fetch_add(1);
                 thread_failures.fetch_add(scored_failures(reader_context.results.data(), reader_context.results.size(),
                                                           index.size(), results_bound));
                 // Any id is a legal input to the checked readers, published or not.
                 node_id_t const probe = static_cast<node_id_t>(probe_distribution(reader_random));
                 std::size_t const published_before = index.size();
-                auto const probed_key = index.key_of(probe);
+                auto const [probed_key, key_status] = index.key_of(probe);
                 auto const probed_degree = index.degree_of(probe);
                 if (static_cast<std::size_t>(probe) < published_before)
-                    if (!probed_key || !probed_degree) thread_failures.fetch_add(1);
-                if (!probed_key && probed_key.status != status_t::malformed_k) thread_failures.fetch_add(1);
+                    if (failed(key_status) || !probed_degree) thread_failures.fetch_add(1);
+                if (failed(key_status) && key_status != status_t::malformed_k) thread_failures.fetch_add(1);
                 ++searches;
             }
             assert_no_locks_held();
@@ -1991,18 +1991,17 @@ std::size_t test_basic_wiring_race(fixture_type_ const& fixture) {
             // regions - the same hold, so both alternately meet the same racers.
             auto attempt_save = [&]() noexcept {
                 std::size_t const attempt = save_attempts++;
-                auto const extents = index.columns_extents(codec);
-                if (failed(extents.status)) return extents.status;
-                storage = basic_columns_storage<index_t> {extents.value};
+                auto const [extents, measure_status] = index.columns_extents(codec);
+                if (failed(measure_status)) return measure_status;
+                storage = basic_columns_storage<index_t> {extents};
                 if (attempt % 2 == 0) return index.save(storage.columns(), codec);
-                auto planned = index.plan_save(storage.columns(), codec);
-                if (failed(planned.status)) return planned.status;
-                node_id_t const covered_bound = static_cast<node_id_t>(planned.value.columns.keys.size());
+                auto [plan, plan_status] = index.plan_save(storage.columns(), codec);
+                if (failed(plan_status)) return plan_status;
+                node_id_t const covered_bound = static_cast<node_id_t>(plan.columns.keys.size());
                 node_id_t const covered_middle = covered_bound / 2;
-                if (status_t const front = planned.value.save({0, covered_middle}, codec); failed(front)) return front;
-                if (status_t const back = planned.value.save({covered_middle, covered_bound}, codec); failed(back))
-                    return back;
-                return planned.value.finish();
+                if (status_t const front = plan.save({0, covered_middle}, codec); failed(front)) return front;
+                if (status_t const back = plan.save({covered_middle, covered_bound}, codec); failed(back)) return back;
+                return plan.finish();
             };
             // The race phase runs as long as the racers do - contention & post-sizing
             // growth are the expected answers, anything else is a defect.
@@ -2027,9 +2026,9 @@ std::size_t test_basic_wiring_race(fixture_type_ const& fixture) {
         auto inserter_thread = [&]() noexcept {
             auto thread_metric = fixture.make_metric();
             context_t thread_context {basic_seed_wiring_race_k + 1, counting_allocator_t {ledger}};
-            auto const inserted = index.insert({insert_values}, {insert_keys}, thread_metric, {}, thread_context,
-                                               basic_keep_diverse_t {basic_connectivity_k});
-            if (inserted.status != status_t::success_k) record_unexpected(1, inserted.status);
+            auto const [result, status] = index.insert({insert_values}, {insert_keys}, thread_metric, {},
+                                                       thread_context, basic_keep_diverse_t {basic_connectivity_k});
+            if (status != status_t::success_k) record_unexpected(1, status);
             inserting_done.store(true, std::memory_order_release);
             assert_no_locks_held();
         };
@@ -2041,8 +2040,8 @@ std::size_t test_basic_wiring_race(fixture_type_ const& fixture) {
                  ++round) {
                 node_id_t const from = static_cast<node_id_t>(round % 8);
                 node_id_t const to = static_cast<node_id_t>(8 + round % 8);
-                auto const linked = index.link(from, to);
-                if (failed(linked.status)) record_unexpected(2, linked.status);
+                auto const [membership, status] = index.link(from, to);
+                if (failed(status)) record_unexpected(2, status);
                 // A racing reverse re-selection may prune the manual edge first -
                 // the documented advisory-wiring semantics - so absence is legal.
                 status_t const unlinked = index.unlink(from, to);
@@ -2058,8 +2057,9 @@ std::size_t test_basic_wiring_race(fixture_type_ const& fixture) {
             std::size_t searches = 0;
             while (!wiring_done.load(std::memory_order_acquire) || !inserting_done.load(std::memory_order_acquire) ||
                    searches < basic_reader_minimal_searches_k) {
-                auto const found = index.search(queries[searches % queries.size()], thread_metric, thread_context);
-                if (found.status != status_t::success_k) record_unexpected(3, found.status);
+                auto const [result, status] = index.search(queries[searches % queries.size()], thread_metric,
+                                                           thread_context);
+                if (status != status_t::success_k) record_unexpected(3, status);
                 if (scored_failures(thread_context.results.data(), thread_context.results.size(), index.size(),
                                     connectivity_32_k * 2))
                     record_unexpected(3, status_t::internal_k);
@@ -2087,9 +2087,9 @@ std::size_t test_basic_wiring_race(fixture_type_ const& fixture) {
                                   status_t::malformed_k);
 
         // The settled columns must hold duplicate-free rows and reload - the B2 audit.
-        auto const saved = basic_saved_columns(index, codec);
-        failures += expect(bool(saved));
-        basic_columns_storage<index_t> const& columns = saved.value;
+        auto const [storage, status] = basic_saved_columns(index, codec);
+        failures += expect(succeeded(status));
+        basic_columns_storage<index_t> const& columns = storage;
         for (std::size_t node = 0; node != columns.keys.size(); ++node) {
             std::vector<node_id_t> row(columns.neighbor_ids.begin() + columns.neighbor_offsets[node],
                                        columns.neighbor_ids.begin() + columns.neighbor_offsets[node + 1]);
@@ -2244,9 +2244,10 @@ std::size_t test_basic_cursor(fixture_type_ const& fixture) {
                 std::vector<key_t> thread_keys(racing_inserts_k);
                 for (std::size_t ordinal = 0; ordinal != racing_inserts_k; ++ordinal)
                     thread_keys[ordinal] = fixture.make_key(nodes_k + 1 + ordinal);
-                auto const inserted = index.insert({extras.data() + 1, racing_inserts_k}, {thread_keys}, thread_metric,
-                                                   {}, thread_context, basic_keep_diverse_t {basic_connectivity_k});
-                if (inserted.status != status_t::success_k) thread_failures.fetch_add(1);
+                auto const [result, status] = index.insert({extras.data() + 1, racing_inserts_k}, {thread_keys},
+                                                           thread_metric, {}, thread_context,
+                                                           basic_keep_diverse_t {basic_connectivity_k});
+                if (status != status_t::success_k) thread_failures.fetch_add(1);
                 for (std::size_t round = 0; round != 512; ++round) {
                     [[maybe_unused]] auto const linked = index.link(1, 2 + round % 8);
                     [[maybe_unused]] status_t const unlinked = index.unlink(1, 2 + round % 8);
@@ -2324,60 +2325,57 @@ std::size_t test_basic_safegraphs_roundtrip(fixture_type_ const& fixture, std::s
         failures += basic_build(fixture, index, metric, values, assigned_ids, context, basic_keep_diverse_t {4});
         // One manual edge de-uniformizes the degrees: the irregular-neighbors mapping.
         [[maybe_unused]] auto const bumped = index.link(0, static_cast<node_id_t>(nodes_k / 2));
-        auto const extents = index.columns_extents(codec);
-        failures += expect(bool(extents));
+        auto const [extents, measure_status] = index.columns_extents(codec);
+        failures += expect(succeeded(measure_status));
         serial_executor_t serial;
 
         // One monolith in memory under @p alignment, parsed back field by field and restored.
         auto roundtrip_in_memory = [&](std::size_t alignment, auto& executor) {
             save_config_t config;
             config.alignment = alignment;
-            auto const bytes = safegraphs_storage_requirements(index, codec, config, metric_token);
-            failures += expect(bool(bytes));
-            std::vector<std::byte> monolith(bytes.value);
+            auto const [bytes, bytes_status] = safegraphs_storage_requirements(index, codec, config, metric_token);
+            failures += expect(succeeded(bytes_status));
+            std::vector<std::byte> monolith(bytes);
             bytes_span_t const target {monolith};
             failures += expect_eq(safegraphs_write_index(target, index, codec, executor, config, metric_token),
                                   status_t::success_k);
 
             bytes_view_t const source {monolith};
             std::string metric_seen;
-            auto const parsed = safegraphs_read_header(
+            auto const [header, header_status] = safegraphs_read_header(
                 source, std::allocator<byte_t> {}, [&](safegraphs_custom_field_t field) noexcept {
                     if (field.key == "metric") metric_seen.assign(field.value.data(), field.value.size());
                 });
-            failures += expect(bool(parsed));
-            if (parsed) {
-                failures += expect_eq(parsed.value.nodes(), extents.value.nodes);
-                failures += expect_eq(parsed.value.alignment, alignment);
-                failures += expect_eq(parsed.value.data_offset % alignment, 0u);
-                failures += expect(!parsed.value.key.offsets);
-                failures += expect(std::string_view {dtype_name(parsed.value.key.dtype)} == key_dtype_name);
-                failures += expect_eq(parsed.value.key.data.size(),
-                                      extents.value.nodes * sizeof(typename index_t::key_t));
-                failures += expect(parsed.value.value.dtype == codec_t::value_dtype_k);
+            failures += expect(succeeded(header_status));
+            if (succeeded(header_status)) {
+                failures += expect_eq(header.nodes(), extents.nodes);
+                failures += expect_eq(header.alignment, alignment);
+                failures += expect_eq(header.data_offset % alignment, 0u);
+                failures += expect(!header.key.offsets);
+                failures += expect(std::string_view {dtype_name(header.key.dtype)} == key_dtype_name);
+                failures += expect_eq(header.key.data.size(), extents.nodes * sizeof(typename index_t::key_t));
+                failures += expect(header.value.dtype == codec_t::value_dtype_k);
                 // A codec of fixed-width values writes a column addressed by multiplication;
                 // anything else carries the prefix sums that address its rows.
-                failures += expect_eq(parsed.value.value.offsets.has_value(), !safegraphs_value_is_fixed<codec_t>());
-                if (parsed.value.value.offsets) {
-                    failures += expect(parsed.value.value.offsets->dtype == dtype_t::u64_k);
-                    failures += expect_eq(parsed.value.value.offsets->bytes.size(),
-                                          (extents.value.nodes + 1) * sizeof(u64_t));
+                failures += expect_eq(header.value.offsets.has_value(), !safegraphs_value_is_fixed<codec_t>());
+                if (header.value.offsets) {
+                    failures += expect(header.value.offsets->dtype == dtype_t::u64_k);
+                    failures += expect_eq(header.value.offsets->bytes.size(), (extents.nodes + 1) * sizeof(u64_t));
                 }
-                failures += expect_eq(parsed.value.value.data.size(), extents.value.value_bytes);
-                failures += expect(parsed.value.neighbors.offsets.has_value());
-                failures += expect_eq(parsed.value.neighbors.data.size(), extents.value.neighbors * sizeof(node_id_t));
-                failures += expect_eq(parsed.value.neighbors.offsets->bytes.size(),
-                                      (extents.value.nodes + 1) * sizeof(u64_t));
+                failures += expect_eq(header.value.data.size(), extents.value_bytes);
+                failures += expect(header.neighbors.offsets.has_value());
+                failures += expect_eq(header.neighbors.data.size(), extents.neighbors * sizeof(node_id_t));
+                failures += expect_eq(header.neighbors.offsets->bytes.size(), (extents.nodes + 1) * sizeof(u64_t));
                 failures += expect(metric_seen == metric_token);
             }
-            auto const metadata = safegraphs_read_index_metadata(source);
-            failures += expect(bool(metadata));
-            failures += expect_eq(metadata.value.nodes, extents.value.nodes);
-            failures += expect_eq(metadata.value.neighbors, extents.value.neighbors);
-            failures += expect_eq(metadata.value.value_bytes, extents.value.value_bytes);
-            failures += expect_eq(metadata.value.alignment, alignment);
-            failures += expect(metadata.value.value_dtype == codec_t::value_dtype_k);
-            failures += expect(metadata.value.metric.view() == metric_token);
+            auto const [summary, summary_status] = safegraphs_read_index_metadata(source);
+            failures += expect(succeeded(summary_status));
+            failures += expect_eq(summary.nodes, extents.nodes);
+            failures += expect_eq(summary.neighbors, extents.neighbors);
+            failures += expect_eq(summary.value_bytes, extents.value_bytes);
+            failures += expect_eq(summary.alignment, alignment);
+            failures += expect(summary.value_dtype == codec_t::value_dtype_k);
+            failures += expect(summary.metric.view() == metric_token);
 
             index_t restored = fixture.make_index(ledger);
             failures += expect_eq(safegraphs_read_index(source, restored, codec, executor, load_config_t {}),
@@ -2400,16 +2398,16 @@ std::size_t test_basic_safegraphs_roundtrip(fixture_type_ const& fixture, std::s
         std::snprintf(path, sizeof(path), "/tmp/usearch-basic-%08x.safegraphs",
                       static_cast<unsigned>(basic_seed_safegraphs_k ^ reinterpret_cast<std::uintptr_t>(&index)));
         {
-            auto [mapping, mapped] = mapped_file_t::write(path, monolith.size());
-            failures += expect(succeeded(mapped));
+            auto [mapping, status] = mapped_file_t::write(path, monolith.size());
+            failures += expect(succeeded(status));
             failures += expect_eq(
                 safegraphs_write_index(mapping.span(), index, codec, serial, save_config_t {}, metric_token),
                 status_t::success_k);
             failures += expect_eq(mapping.sync(), status_t::success_k);
         }
         {
-            auto [mapping, mapped] = mapped_file_t::read(path);
-            failures += expect(succeeded(mapped));
+            auto [mapping, status] = mapped_file_t::read(path);
+            failures += expect(succeeded(status));
             failures += expect_eq(mapping.size(), monolith.size());
             bytes_view_t const read_back = mapping.view();
             failures += expect(std::equal(read_back.begin(), read_back.end(), monolith.begin(), monolith.end()));
@@ -2477,13 +2475,14 @@ std::size_t test_basic_safegraphs_distributed(fixture_type_ const& fixture, std:
         save_config_t config;
         for (std::size_t part = 0; part != parts_k; ++part) {
             growing_buffer<char> formatted {global_allocator};
-            auto const [named_path, named] = safegraphs_part_path(formatted, stem, part, parts_k);
-            failures += expect(succeeded(named));
+            auto const [named_path, name_status] = safegraphs_part_path(formatted, stem, part, parts_k);
+            failures += expect(succeeded(name_status));
             part_paths[part] = std::string {named_path};
-            auto const [part_size, sized] = safegraphs_storage_requirements(indexes[part], codec, config, metric_token);
-            failures += expect(succeeded(sized));
-            auto [mapping, mapped] = mapped_file_t::write(part_paths[part], part_size);
-            failures += expect(succeeded(mapped));
+            auto const [part_size, measure_status] = safegraphs_storage_requirements(indexes[part], codec, config,
+                                                                                     metric_token);
+            failures += expect(succeeded(measure_status));
+            auto [mapping, map_status] = mapped_file_t::write(part_paths[part], part_size);
+            failures += expect(succeeded(map_status));
             failures += expect_eq(
                 safegraphs_write_index(mapping.span(), indexes[part], codec, serial, config, metric_token),
                 status_t::success_k);
@@ -2496,25 +2495,26 @@ std::size_t test_basic_safegraphs_distributed(fixture_type_ const& fixture, std:
         failures += expect_eq(safegraphs_write_manifest(manifest_path, parts_k, part_at), status_t::success_k);
 
         // The summary is answered by content, never by extension, and by the first part's header.
-        auto const [listed, sniffed] = safegraphs_read_metadata(manifest_path);
-        failures += expect(succeeded(sniffed));
-        failures += expect_eq(listed.parts, parts_k);
-        failures += expect_eq(listed.nodes, nodes_k);
-        failures += expect(listed.metric.view() == metric_token);
+        auto const [summary, summary_status] = safegraphs_read_metadata(manifest_path);
+        failures += expect(succeeded(summary_status));
+        failures += expect_eq(summary.parts, parts_k);
+        failures += expect_eq(summary.nodes, nodes_k);
+        failures += expect(summary.metric.view() == metric_token);
 
         // Every entry resolves beside the manifest and restores into a mirror of its own half.
         std::vector<std::string> relative_paths;
         auto per_part = [&](safegraphs_part_t part) noexcept { relative_paths.emplace_back(part.path); };
-        auto const [catalog, cataloged] = safegraphs_read_manifest(manifest_path, {}, per_part);
-        failures += expect(succeeded(cataloged));
+        auto const [catalog, catalog_status] = safegraphs_read_manifest(manifest_path, {}, per_part);
+        failures += expect(succeeded(catalog_status));
         failures += expect_eq(relative_paths.size(), parts_k);
         for (std::size_t part = 0; part != parts_k && part != relative_paths.size(); ++part) {
             growing_buffer<char> resolved {global_allocator};
-            auto const [part_path, joined] = safegraphs_sibling_path(resolved, manifest_path, relative_paths[part]);
-            failures += expect(succeeded(joined));
+            auto const [part_path, join_status] = safegraphs_sibling_path(resolved, manifest_path,
+                                                                          relative_paths[part]);
+            failures += expect(succeeded(join_status));
             failures += expect(std::string_view {part_path} == part_paths[part]);
-            auto [mapping, mapped] = mapped_file_t::read(part_path);
-            failures += expect(succeeded(mapped));
+            auto [mapping, map_status] = mapped_file_t::read(part_path);
+            failures += expect(succeeded(map_status));
             index_t restored = fixture.make_index(ledger);
             failures += expect_eq(safegraphs_read_index(mapping.view(), restored, codec, serial, load_config_t {}),
                                   status_t::success_k);
@@ -2553,15 +2553,16 @@ std::size_t test_basic_safegraphs_hostile(fixture_type_ const& fixture, std::str
         [[maybe_unused]] auto const bumped = index.link(0, static_cast<node_id_t>(nodes_k / 2));
         serial_executor_t serial;
 
-        auto const bytes = safegraphs_storage_requirements(index, codec, save_config_t {}, metric_token);
-        failures += expect(bool(bytes));
-        std::vector<std::byte> monolith(bytes.value);
+        auto const [bytes, bytes_status] = safegraphs_storage_requirements(index, codec, save_config_t {},
+                                                                           metric_token);
+        failures += expect(succeeded(bytes_status));
+        std::vector<std::byte> monolith(bytes);
         bytes_span_t const target {monolith};
         failures += expect_eq(safegraphs_write_index(target, index, codec, serial, save_config_t {}, metric_token),
                               status_t::success_k);
-        auto const parsed = safegraphs_read_header(bytes_view_t {monolith});
-        failures += expect(bool(parsed));
-        safegraphs_header_t const header = parsed.value;
+        auto const [parsed_header, header_status] = safegraphs_read_header(bytes_view_t {monolith});
+        failures += expect(succeeded(header_status));
+        safegraphs_header_t const header = parsed_header;
 
         auto expect_refused = [&](auto mutate, status_t wanted) {
             std::vector<std::byte> corrupted = monolith;

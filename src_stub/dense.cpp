@@ -943,8 +943,8 @@ void usearch_dense_maxsim(usearch_dense_index_t handle, usearch_executor_t execu
     std::vector<std::vector<std::size_t>> token_rows;
     std::unordered_map<us::uuid_t, std::size_t> position_of;
     for (std::size_t row = 0; row != index.entries.size(); ++row) {
-        auto const [slot, fresh] = position_of.emplace(keyed(index.entries[row].key), documents.size());
-        if (fresh) documents.push_back(index.entries[row].key), token_rows.emplace_back();
+        auto const [slot, emplace_status] = position_of.emplace(keyed(index.entries[row].key), documents.size());
+        if (emplace_status) documents.push_back(index.entries[row].key), token_rows.emplace_back();
         token_rows[slot->second].push_back(row);
     }
 

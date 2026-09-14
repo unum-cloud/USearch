@@ -1993,9 +1993,9 @@ struct dense_vram_index {
             // The primary context must exist before any driver-API mapping, since the planes live in it.
             if (cudaSetDevice(device_.ordinal) != cudaSuccess || cudaFree(nullptr) != cudaSuccess)
                 return {0, status_t::device_error_k};
-            expected<cuda_device_specs_t> const specs = cuda_device_specs_t::query(device_.ordinal);
-            if (specs.status != status_t::success_k) return {0, specs.status};
-            device_ = specs.value;
+            auto const [specs, status] = cuda_device_specs_t::query(device_.ordinal);
+            if (failed(status)) return {0, status};
+            device_ = specs;
             // Geometry no launch can seat is refused here, not by a mid-fan-out launch rejection.
             if (static_cast<std::size_t>(dense_cuda_warps_per_block_k) *
                     max_of(insert_scratch_bytes_per_warp(), merge_scratch_bytes_per_warp()) >
@@ -2561,8 +2561,8 @@ struct dense_vram_index {
      *      @ref plan_save for a caller with no streams to fan the steps out over. */
     status_t save(columns_t columns, synchronization_t synchronization, nk::matrix_span<node_id_t> scratch,
                   cudaStream_t stream = nullptr) const noexcept {
-        auto [plan, planned] = plan_save(columns, synchronization, stream);
-        if (failed(planned)) return planned;
+        auto [plan, status] = plan_save(columns, synchronization, stream);
+        if (failed(status)) return status;
         for (typename save_plan_t::step_t const step : plan.steps())
             if (status_t const saved = plan.save(step, scratch); failed(saved)) return saved;
         return plan.finish();
@@ -2773,11 +2773,11 @@ struct dense_vram_index {
         if (columns.vectors.size() < rows * packed_row_bytes() ||
             columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t))
             return {{}, status_t::config_mismatch_k};
-        auto [plan, planned] = plan_load(rows, stream);
-        if (failed(planned)) return {{}, planned};
+        auto [plan, status] = plan_load(rows, stream);
+        if (failed(status)) return {{}, status};
         plan.columns = columns;
         plan.source_range = source_range;
-        return {std::move(plan), planned};
+        return {std::move(plan), status};
     }
 
     /** @brief Opens a load of @p rows the caller sources per step - what a sharded plan drives,
@@ -2804,8 +2804,8 @@ struct dense_vram_index {
      *      for a caller with no streams to fan the steps out over. */
     status_t load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range,
                   cudaStream_t stream = nullptr) noexcept {
-        auto [plan, planned] = plan_load(columns, rows, source_range, stream);
-        if (failed(planned)) return planned;
+        auto [plan, status] = plan_load(columns, rows, source_range, stream);
+        if (failed(status)) return status;
         for (typename load_plan_t::step_t const step : plan.steps())
             if (status_t const loaded = plan.load(step); failed(loaded)) return loaded;
         return plan.finish();

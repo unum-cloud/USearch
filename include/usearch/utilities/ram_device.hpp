@@ -162,9 +162,9 @@ struct forkunion_executor_t {
     /** @brief Spawns @p threads over @p topology and takes the pool; zero means @ref default_threads. */
     static expected<forkunion_executor_t> spawn(fu_topology_t topology, std::size_t threads) noexcept {
         if (!threads) {
-            expected<std::size_t> const defaulted = default_threads(topology);
-            if (failed(defaulted.status)) return {{}, defaulted.status};
-            threads = defaulted.value;
+            auto const [count, status] = default_threads(topology);
+            if (failed(status)) return {{}, status};
+            threads = count;
         }
         fu_pool_t pool = nullptr;
         if (fu_pool_new(pool_name_k, fu_capabilities_all_k, &pool) != fu_success_k) return {{}, status_t::bad_alloc_k};

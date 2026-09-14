@@ -50,9 +50,9 @@ std::size_t check_multimap_single_key() noexcept {
     for (u32_t entry = 0; entry != 8; ++entry) failures += expect(succeeded(multimap.insert(100 + entry, entry)));
     failures += expect_eq(multimap.size(), 8u);
     for (u32_t entry = 0; entry != 8; ++entry) {
-        expected<u32_t> const found = multimap.find(100 + entry);
-        failures += expect(bool(found));
-        failures += expect_eq(found.value, entry);
+        auto const [match, status] = multimap.find(100 + entry);
+        failures += expect(succeeded(status));
+        failures += expect_eq(match, entry);
         failures += expect(multimap.contains(100 + entry));
         failures += expect_eq(multimap.count(100 + entry), 1u);
     }
@@ -78,9 +78,9 @@ std::size_t check_multimap_duplicate_keys() noexcept {
     for (std::size_t position = 0; position != observed.size(); ++position)
         failures += expect_eq(observed[position], static_cast<u32_t>(position));
 
-    expected<u32_t> const one_of = multimap.find(7);
-    failures += expect(bool(one_of));
-    failures += expect(one_of.value < multiplicity_k);
+    auto const [one_of, one_of_status] = multimap.find(7);
+    failures += expect(succeeded(one_of_status));
+    failures += expect(one_of < multiplicity_k);
     return failures;
 }
 
@@ -122,9 +122,9 @@ std::size_t check_multimap_clear_retry() noexcept {
     for (u32_t entry = 0; entry != capacity; ++entry)
         failures += expect(succeeded(multimap.insert(entry, entry + 1000)));
     failures += expect_eq(multimap.size(), capacity);
-    expected<u32_t> const refreshed = multimap.find(0);
-    failures += expect(bool(refreshed));
-    failures += expect_eq(refreshed.value, 1000u);
+    auto const [refreshed, refreshed_status] = multimap.find(0);
+    failures += expect(succeeded(refreshed_status));
+    failures += expect_eq(refreshed, 1000u);
     return failures;
 }
 

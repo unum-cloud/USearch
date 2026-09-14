@@ -582,8 +582,8 @@ struct dense_ram_index {
             // crossing the free rows elects a grower, and one growth covers it.
             std::size_t const claimed_rows = atomic_ref<node_id_t>(last_allocated_id_).load(std::memory_order_acquire);
             std::size_t const claim_rows = config.capacity - claimed_rows;
-            auto const [first_row, granted] = claim_capacity(claim_rows);
-            if (failed(granted)) return {capacity(), granted};
+            auto const [first_row, status] = claim_capacity(claim_rows);
+            if (failed(status)) return {capacity(), status};
             release_capacity(claim_rows);
         }
     }
@@ -752,8 +752,8 @@ struct dense_ram_index {
 
         // Claim storage for the whole batch: from here on enough sentinel-filled rows exist for
         // all our nodes, and this thread must roll forward to publishing every ID it claims.
-        auto [batch_claim, granted] = claim(incoming_vectors_count);
-        if (failed(granted)) return {{size()}, granted};
+        auto [batch_claim, status] = claim(incoming_vectors_count);
+        if (failed(status)) return {{size()}, status};
         insert(std::move(batch_claim), new_vectors, assigned_ids, context, config);
 
         insert_result_t result;
@@ -825,8 +825,8 @@ struct dense_ram_index {
     /** @brief Claims storage for @p count rows without assigning any identity - the step a batch
      *      spanning several indexes runs on every one of them before touching any. */
     expected<capacity_claim_t> claim(std::size_t count) noexcept {
-        auto const [first_row, granted] = claim_capacity(count);
-        if (failed(granted)) return {capacity_claim_t {}, granted};
+        auto const [first_row, status] = claim_capacity(count);
+        if (failed(status)) return {capacity_claim_t {}, status};
         return {capacity_claim_t {*this, count, first_row}, status_t::success_k};
     }
 
@@ -1388,18 +1388,17 @@ struct dense_ram_index {
 
         /** @brief Islands left after the last converged sweep - the caller's stopping test. */
         std::size_t islands_left() const noexcept {
-            expected<health_result_t> const audited = audit.finish();
-            return succeeded(audited.status) ? static_cast<std::size_t>(audit.visible) - audited.value.reachable_nodes
-                                             : 0;
+            auto const [health, status] = audit.finish();
+            return succeeded(status) ? static_cast<std::size_t>(audit.visible) - health.reachable_nodes : 0;
         }
 
         /** @brief The report of the whole pass, the converged audit inside it. */
         expected<heal_result_t> finish() const noexcept {
             if (!index_) return {{}, status_t::uninitialized_k};
-            expected<health_result_t> const audited = audit.finish();
-            if (failed(audited.status)) return {{}, audited.status};
+            auto const [health, status] = audit.finish();
+            if (failed(status)) return {{}, status};
             heal_result_t result;
-            result.health = audited.value;
+            result.health = health;
             result.islands_found = islands_found_;
             result.islands_reconnected = islands_reconnected_;
             result.visited_members = visited_members_;
@@ -1422,10 +1421,10 @@ struct dense_ram_index {
 
     /** @brief Opens a healing pass over a fresh audit - @ref plan_health with the same seeds. */
     expected<heal_plan_t> plan_heal(dense_traversal_context_t& context) noexcept {
-        expected<health_plan_t> audit = plan_health(context);
-        if (failed(audit.status))
-            return {heal_plan_t {typename health_plan_t::bitset_allocator_t {context.allocator_}}, audit.status};
-        return {heal_plan_t {*this, std::move(audit.value)}, status_t::success_k};
+        auto [audit, status] = plan_health(context);
+        if (failed(status))
+            return {heal_plan_t {typename health_plan_t::bitset_allocator_t {context.allocator_}}, status};
+        return {heal_plan_t {*this, std::move(audit)}, status_t::success_k};
     }
 
 #pragma endregion Health
@@ -1785,8 +1784,8 @@ struct dense_ram_index {
      *      @ref plan_save for a caller with no threads to fan the steps out over. */
     status_t save(columns_t columns, synchronization_t synchronization,
                   nk::matrix_span<node_id_t> scratch) const noexcept {
-        auto [plan, planned] = plan_save(columns, synchronization);
-        if (failed(planned)) return planned;
+        auto [plan, status] = plan_save(columns, synchronization);
+        if (failed(status)) return status;
         for (typename save_plan_t::step_t const step : plan.steps())
             if (status_t const saved = plan.save(step, scratch); failed(saved)) return saved;
         return plan.finish();
@@ -1991,11 +1990,11 @@ struct dense_ram_index {
         if (columns.vectors.size() < rows * stored_row_values(frozen) * sizeof(scalar_t) ||
             columns.neighbors.size() < rows * frozen.connectivity() * sizeof(node_id_t))
             return {{}, status_t::config_mismatch_k};
-        auto [plan, planned] = plan_load(rows);
-        if (failed(planned)) return {{}, planned};
+        auto [plan, status] = plan_load(rows);
+        if (failed(status)) return {{}, status};
         plan.columns = columns;
         plan.source_range = source_range;
-        return {std::move(plan), planned};
+        return {std::move(plan), status};
     }
 
     /** @brief Opens a load of @p rows the caller sources per step - what a sharded plan drives,
@@ -2007,17 +2006,17 @@ struct dense_ram_index {
         if (visible != atomic_ref<node_id_t>(next_dispensed_id_).load(std::memory_order_acquire))
             return {{}, status_t::contended_k};
         if (rows > max_node_count_k - visible) return {{}, status_t::overflow_k};
-        auto [claimed, granted] = claim(rows);
-        if (failed(granted)) return {{}, granted};
-        if (claimed.base() != visible) return {{}, status_t::contended_k}; // The claim dies and releases.
-        return {load_plan_t {*this, {}, {}, visible, std::move(claimed)}, status_t::success_k};
+        auto [capacity_claim, status] = claim(rows);
+        if (failed(status)) return {{}, status};
+        if (capacity_claim.base() != visible) return {{}, status_t::contended_k}; // The claim dies and releases.
+        return {load_plan_t {*this, {}, {}, visible, std::move(capacity_claim)}, status_t::success_k};
     }
 
     /** @brief Appends the whole source on the calling thread - the one-shot over @ref plan_load
      *      for a caller with no threads to fan the steps out over. */
     status_t load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range) noexcept {
-        auto [plan, planned] = plan_load(columns, rows, source_range);
-        if (failed(planned)) return planned;
+        auto [plan, status] = plan_load(columns, rows, source_range);
+        if (failed(status)) return status;
         for (typename load_plan_t::step_t const step : plan.steps())
             if (status_t const loaded = plan.load(step); failed(loaded)) return loaded;
         return plan.finish();
@@ -3109,10 +3108,10 @@ struct dense_ram_index {
         // gathered in 4-way batches to amortize the loop overhead over unrolled "gathers".
         small_size_t const landmark_batches = divide_round_up<small_size_t>(node_connectivity, 4);
         for (small_size_t landmarks_batch = 0; landmarks_batch != landmark_batches; ++landmarks_batch) {
-            expected<std::size_t> const seeded = sample_landmarks<synchronization_>(
+            auto const [landmarks, seed_status] = sample_landmarks<synchronization_>(
                 query, query_norms, first_invisible_id, expansion_factor, context, seeds, predicate);
-            if (failed(seeded.status)) return seeded.status;
-            if (!seeded.value) break; // Everything published is already visited.
+            if (failed(seed_status)) return seed_status;
+            if (!landmarks) break; // Everything published is already visited.
         }
 
         // Greedily walk the frontier nearest-first, keeping the best `expansion_factor` in `results`.
@@ -3129,10 +3128,10 @@ struct dense_ram_index {
                 // set's growth toward the published ID space.
                 std::size_t const filled = predicated_k ? context.refining_candidates.size() : results.size();
                 if (filled >= expansion_factor) break;
-                expected<std::size_t> const seeded = sample_landmarks<synchronization_>(
+                auto const [landmarks, seed_status] = sample_landmarks<synchronization_>(
                     query, query_norms, first_invisible_id, expansion_factor, context, seeds, predicate);
-                if (failed(seeded.status)) return seeded.status;
-                if (!seeded.value) break; // Nothing fresh left to restart from.
+                if (failed(seed_status)) return seed_status;
+                if (!landmarks) break; // Nothing fresh left to restart from.
                 ++context.restarts;
                 continue;
             }

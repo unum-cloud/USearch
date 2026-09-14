@@ -363,32 +363,29 @@ static bool load_checkpoint(bench_options_t const& options, index_type_& index, 
                             std::span<u32_t> id_to_row, std::size_t slot, std::size_t slot_count) {
     using scalar_t = typename index_type_::scalar_t;
     checkpoint_paths_t const paths = checkpoint_paths_of<index_type_>(options, options.load_name, slot, slot_count);
-    auto mapped_vectors = mapped_file_t::read(paths.vectors);
-    auto mapped_neighbors = mapped_file_t::read(paths.neighbors);
-    auto mapped_rows = mapped_file_t::read(paths.rows);
-    if (mapped_vectors.status != status_t::success_k || mapped_neighbors.status != status_t::success_k ||
-        mapped_rows.status != status_t::success_k) {
+    auto [vectors_mapping, vectors_map_status] = mapped_file_t::read(paths.vectors);
+    auto [neighbors_mapping, neighbors_map_status] = mapped_file_t::read(paths.neighbors);
+    auto [rows_mapping, rows_map_status] = mapped_file_t::read(paths.rows);
+    if (failed(vectors_map_status) || failed(neighbors_map_status) || failed(rows_map_status)) {
         fmt::println("Failed to map the {} checkpoint for slot {}", options.load_name, slot);
         return false;
     }
 
-    auto const vectors_extents = parse_matrix_header<scalar_t, u32_t>(mapped_vectors.value.view());
-    auto const neighbors_extents = parse_matrix_header<u32_t, u32_t>(mapped_neighbors.value.view());
-    auto const map_extents = parse_matrix_header<u32_t, u32_t>(mapped_rows.value.view());
-    bool const parsed = vectors_extents.status == status_t::success_k &&
-                        neighbors_extents.status == status_t::success_k && map_extents.status == status_t::success_k;
-    std::size_t const loaded_nodes = vectors_extents.value.rows;
-    if (!parsed || vectors_extents.value.columns != dimensions ||
-        neighbors_extents.value.columns != options.connectivity || map_extents.value.columns != 1 ||
-        neighbors_extents.value.rows != loaded_nodes || map_extents.value.rows != loaded_nodes ||
+    auto const [vectors_extents, vectors_status] = parse_matrix_header<scalar_t, u32_t>(vectors_mapping.view());
+    auto const [neighbors_extents, neighbors_status] = parse_matrix_header<u32_t, u32_t>(neighbors_mapping.view());
+    auto const [map_extents, map_status] = parse_matrix_header<u32_t, u32_t>(rows_mapping.view());
+    bool const parsed = succeeded(vectors_status) && succeeded(neighbors_status) && succeeded(map_status);
+    std::size_t const loaded_nodes = vectors_extents.rows;
+    if (!parsed || vectors_extents.columns != dimensions || neighbors_extents.columns != options.connectivity ||
+        map_extents.columns != 1 || neighbors_extents.rows != loaded_nodes || map_extents.rows != loaded_nodes ||
         loaded_nodes > id_to_row.size()) {
         fmt::println("Checkpoint {} disagrees with the run's geometry", options.load_name);
         return false;
     }
 
-    nk::matrix_view<scalar_t> const vectors_view = view_matrix_payload<scalar_t, u32_t>(mapped_vectors.value.view(),
+    nk::matrix_view<scalar_t> const vectors_view = view_matrix_payload<scalar_t, u32_t>(vectors_mapping.view(),
                                                                                         loaded_nodes, dimensions);
-    nk::matrix_view<u32_t> const neighbors_view = view_matrix_payload<u32_t, u32_t>(mapped_neighbors.value.view(),
+    nk::matrix_view<u32_t> const neighbors_view = view_matrix_payload<u32_t, u32_t>(neighbors_mapping.view(),
                                                                                     loaded_nodes, options.connectivity);
     // The index fills its own chunks straight from the mapped dumps, both dense, one byte move each.
     std::size_t const vectors_row_bytes = static_cast<std::size_t>(vectors_view.stride_bytes(0));
@@ -404,8 +401,7 @@ static bool load_checkpoint(bench_options_t const& options, index_type_& index, 
         fmt::println("Failed to restore {}: status {}", paths.vectors, int(loaded));
         return false;
     }
-    nk::matrix_view<u32_t> const rows_view = view_matrix_payload<u32_t, u32_t>(mapped_rows.value.view(), loaded_nodes,
-                                                                               1);
+    nk::matrix_view<u32_t> const rows_view = view_matrix_payload<u32_t, u32_t>(rows_mapping.view(), loaded_nodes, 1);
     std::copy_n(rows_view.data(), loaded_nodes, id_to_row.data());
     return true;
 }

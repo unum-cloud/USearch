@@ -691,13 +691,13 @@ inline bool fits_blob(bytes_view_t blob, std::size_t header, std::size_t count, 
 }
 
 inline bool read_file(usearch_bytes_view_t path, std::vector<std::byte>& blob, usearch_error_t* error) {
-    auto [file, opened] = seekable_file_t::open(as_text(path), file_mode_t::read_k);
-    if (failed(opened)) {
+    auto [file, status] = seekable_file_t::open(as_text(path), file_mode_t::read_k);
+    if (failed(status)) {
         propagate_error(usearch_error_io_k, error, "The checkpoint could not be opened for reading");
         return false;
     }
-    auto const [bytes, measured] = file.length();
-    if (failed(measured)) {
+    auto const [bytes, length_status] = file.length();
+    if (failed(length_status)) {
         propagate_error(usearch_error_io_k, error, "The checkpoint could not be read");
         return false;
     }
@@ -710,8 +710,8 @@ inline bool read_file(usearch_bytes_view_t path, std::vector<std::byte>& blob, u
 }
 
 inline bool write_file(usearch_bytes_view_t path, bytes_view_t blob, usearch_error_t* error) {
-    auto [file, opened] = seekable_file_t::open(as_text(path), file_mode_t::write_k);
-    if (failed(opened)) {
+    auto [file, status] = seekable_file_t::open(as_text(path), file_mode_t::write_k);
+    if (failed(status)) {
         propagate_error(usearch_error_io_k, error, "The checkpoint could not be opened for writing");
         return false;
     }

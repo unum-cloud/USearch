@@ -396,8 +396,9 @@ expected<safegraphs_header_t> safegraphs_read_header(bytes_view_t monolith, allo
     std::size_t const header_length = static_cast<std::size_t>(little_endian(prefix.header_length));
     if (header_length > monolith.size() - sizeof(prefix)) return {header, status_t::malformed_k};
     safegraphs_yyjson_allocator_<allocator_type_> trampoline {allocator};
-    auto [document, parsed] = safegraphs_read_document_(monolith.subspan(sizeof(prefix), header_length), trampoline);
-    if (failed(parsed)) return {header, parsed};
+    auto [document, parse_status] = safegraphs_read_document_(monolith.subspan(sizeof(prefix), header_length),
+                                                              trampoline);
+    if (failed(parse_status)) return {header, parse_status};
 
     yyjson_val* root = yyjson_doc_get_root(document);
     if (yyjson_val* metadata = yyjson_obj_get(root, "__metadata__"); yyjson_is_obj(metadata)) {
@@ -410,11 +411,11 @@ expected<safegraphs_header_t> safegraphs_read_header(bytes_view_t monolith, allo
                 per_custom_field(safegraphs_custom_field_t {safegraphs_string_(key), safegraphs_string_(value)});
     }
     // Each column parses whole, and `malformed_k` is the only verdict any of them can reach.
-    auto const [key, key_parsed] = safegraphs_parse_column_(yyjson_obj_get(root, "key"));
-    auto const [value, value_parsed] = safegraphs_parse_column_(yyjson_obj_get(root, "value"));
-    auto const [neighbors, neighbors_parsed] = safegraphs_parse_column_(yyjson_obj_get(root, "neighbors"));
+    auto const [key, key_status] = safegraphs_parse_column_(yyjson_obj_get(root, "key"));
+    auto const [value, value_status] = safegraphs_parse_column_(yyjson_obj_get(root, "value"));
+    auto const [neighbors, neighbors_status] = safegraphs_parse_column_(yyjson_obj_get(root, "neighbors"));
     yyjson_doc_free(document);
-    if (failed(key_parsed) || failed(value_parsed) || failed(neighbors_parsed)) return {header, status_t::malformed_k};
+    if (failed(key_status) || failed(value_status) || failed(neighbors_status)) return {header, status_t::malformed_k};
     header.key = key, header.value = value, header.neighbors = neighbors;
 
     // The data segment starts on the declared alignment boundary at or past the JSON's end.
@@ -427,8 +428,8 @@ expected<safegraphs_header_t> safegraphs_read_header(bytes_view_t monolith, allo
 template <typename allocator_type_ = std::allocator<byte_t>, typename callback_type_ = dummy_callback_t>
 expected<safegraphs_header_t> safegraphs_read_header(std::string_view path, allocator_type_ allocator = {},
                                                      callback_type_&& per_custom_field = {}) noexcept {
-    auto [mapping, mapped] = mapped_file_t::read(path);
-    if (failed(mapped)) return {safegraphs_header_t {}, mapped};
+    auto [mapping, map_status] = mapped_file_t::read(path);
+    if (failed(map_status)) return {safegraphs_header_t {}, map_status};
     return safegraphs_read_header(mapping.view(), allocator, std::forward<callback_type_>(per_custom_field));
 }
 
@@ -609,9 +610,9 @@ expected<safegraphs_header_t> safegraphs_regular_header(safegraphs_regular_shape
     header.neighbors.shape = vector_shape_t {shape.connectivity};
     header.neighbors.data.first = round_up_to_multiple(header.value.data.bound, alignment);
     header.neighbors.data.bound = header.neighbors.data.first + shape.nodes * header.neighbors.row_bytes();
-    auto const [data_offset, framed] = safegraphs_data_offset(header, custom_fields, allocator);
+    auto const [data_offset, status] = safegraphs_data_offset(header, custom_fields, allocator);
     header.data_offset = data_offset;
-    return {header, framed};
+    return {header, status};
 }
 
 #pragma endregion Columns
@@ -826,11 +827,11 @@ template <typename allocator_type_ = std::allocator<byte_t>, typename callback_t
 expected<safegraphs_metadata_t> safegraphs_read_manifest(std::string_view path, allocator_type_ allocator = {},
                                                          callback_type_&& per_part = {}) noexcept {
     safegraphs_metadata_t metadata;
-    auto [mapping, mapped] = mapped_file_t::read(path);
-    if (failed(mapped)) return {metadata, mapped};
+    auto [mapping, map_status] = mapped_file_t::read(path);
+    if (failed(map_status)) return {metadata, map_status};
     safegraphs_yyjson_allocator_<allocator_type_> trampoline {allocator};
-    auto [document, parsed] = safegraphs_read_document_(mapping.view(), trampoline);
-    if (failed(parsed)) return {metadata, parsed};
+    auto [document, parse_status] = safegraphs_read_document_(mapping.view(), trampoline);
+    if (failed(parse_status)) return {metadata, parse_status};
 
     yyjson_val* root = yyjson_doc_get_root(document);
     yyjson_val* files = yyjson_obj_get(root, "files");
@@ -855,16 +856,16 @@ expected<safegraphs_metadata_t> safegraphs_read_manifest(std::string_view path, 
 
     // The schema lives in the parts, so the first one's header answers every question about it.
     growing_buffer<char, allocator_type_> sibling {allocator};
-    auto const [first_path, resolved] = safegraphs_sibling_path(sibling, path, first_relative);
-    if (failed(resolved)) return {metadata, resolved};
+    auto const [first_path, resolve_status] = safegraphs_sibling_path(sibling, path, first_relative);
+    if (failed(resolve_status)) return {metadata, resolve_status};
     safegraphs_name_t metric;
     safegraphs_name_t quantization;
     auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
         if (field.key == "metric") metric = safegraphs_name_t {field.value};
         if (field.key == "quantization") quantization = safegraphs_name_t {field.value};
     };
-    auto const [header, parsed_header] = safegraphs_read_header(first_path, allocator, per_custom_field);
-    if (failed(parsed_header)) return {metadata, parsed_header};
+    auto const [header, header_status] = safegraphs_read_header(first_path, allocator, per_custom_field);
+    if (failed(header_status)) return {metadata, header_status};
     std::size_t const parts = metadata.parts;
     std::size_t const nodes = metadata.nodes;
     metadata = safegraphs_metadata_of_(header, metric, quantization);
@@ -884,8 +885,8 @@ status_t safegraphs_write_manifest(std::string_view path, std::size_t parts, cal
     return safegraphs_print_(
         safegraphs_manifest_document_(parts, part_at, custom_fields, allocator_abi), allocator_abi,
         [&](std::string_view json) noexcept {
-            auto [mapping, mapped] = mapped_file_t::write(path, json.size());
-            if (failed(mapped)) return mapped;
+            auto [mapping, map_status] = mapped_file_t::write(path, json.size());
+            if (failed(map_status)) return map_status;
             if (status_t const wrote = copy_bytes(mapping.span(), bytes_of(json.data(), json.size())); failed(wrote))
                 return wrote;
             return mapping.sync();
@@ -902,8 +903,8 @@ expected<safegraphs_metadata_t> safegraphs_read_metadata(bytes_view_t monolith,
         if (field.key == "metric") metric = safegraphs_name_t {field.value};
         if (field.key == "quantization") quantization = safegraphs_name_t {field.value};
     };
-    auto const [header, parsed] = safegraphs_read_header(monolith, allocator, per_custom_field);
-    if (failed(parsed)) return {safegraphs_metadata_t {}, parsed};
+    auto const [header, parse_status] = safegraphs_read_header(monolith, allocator, per_custom_field);
+    if (failed(parse_status)) return {safegraphs_metadata_t {}, parse_status};
     return {safegraphs_metadata_of_(header, metric, quantization), status_t::success_k};
 }
 
@@ -912,8 +913,8 @@ expected<safegraphs_metadata_t> safegraphs_read_metadata(bytes_view_t monolith,
 template <typename allocator_type_ = std::allocator<byte_t>>
 expected<safegraphs_metadata_t> safegraphs_read_metadata(std::string_view path,
                                                          allocator_type_ allocator = {}) noexcept {
-    auto [mapping, mapped] = mapped_file_t::read(path);
-    if (failed(mapped)) return {safegraphs_metadata_t {}, mapped};
+    auto [mapping, map_status] = mapped_file_t::read(path);
+    if (failed(map_status)) return {safegraphs_metadata_t {}, map_status};
     bytes_view_t const monolith = mapping.view();
     if (monolith.size() >= safegraphs_prefix_t::magic_k.size() &&
         std::memcmp(monolith.data(), safegraphs_prefix_t::magic_k.data(), safegraphs_prefix_t::magic_k.size()) == 0)
@@ -1014,8 +1015,8 @@ expected<safegraphs_index_layout_t> safegraphs_index_layout(std::size_t nodes, s
     adjacency.data.first = round_up_to_multiple(adjacency.offsets->bytes.bound, alignment);
     adjacency.data.bound = adjacency.data.first + neighbors * sizeof(node_id_type_);
     layout.segment_bytes = adjacency.data.bound;
-    auto const [data_offset, framed] = safegraphs_data_offset(header, custom_fields, allocator);
-    if (failed(framed)) return {layout, framed};
+    auto const [data_offset, status] = safegraphs_data_offset(header, custom_fields, allocator);
+    if (failed(status)) return {layout, status};
     header.data_offset = data_offset;
     layout.monolith_bytes = header.data_offset + layout.segment_bytes;
     return {layout, status_t::success_k};
@@ -1046,14 +1047,14 @@ template <typename index_type_, typename codec_type_, typename allocator_type_ =
 expected<std::size_t> safegraphs_storage_requirements(index_type_ const& index, codec_type_ const& codec,
                                                       save_config_t const& config, std::string_view metric,
                                                       allocator_type_ allocator = {}) noexcept {
-    auto const [extents, measured] = index.columns_extents(codec);
-    if (failed(measured)) return {0, measured};
+    auto const [extents, measure_status] = index.columns_extents(codec);
+    if (failed(measure_status)) return {0, measure_status};
     growing_buffer<safegraphs_custom_field_t, allocator_type_> fields {allocator};
     if (status_t const named = safegraphs_index_fields_(fields, metric, config); failed(named)) return {0, named};
-    auto const [layout, laid] =
+    auto const [layout, layout_status] =
         safegraphs_index_layout<typename index_type_::key_t, typename index_type_::node_id_t, codec_type_>(
             extents.nodes, extents.neighbors, extents.value_bytes, config, to_span(fields), allocator);
-    return {layout.monolith_bytes, laid};
+    return {layout.monolith_bytes, layout_status};
 }
 
 /**
@@ -1086,13 +1087,13 @@ status_t safegraphs_write_index(bytes_span_t monolith, index_type_ const& index,
     constexpr column_shape_t shape = safegraphs_value_shape<codec_type_>();
     constexpr std::size_t element_bytes = dtype_bytes(codec_type_::value_dtype_k);
 
-    auto const [extents, measured] = index.columns_extents(codec);
-    if (failed(measured)) return measured;
+    auto const [extents, measure_status] = index.columns_extents(codec);
+    if (failed(measure_status)) return measure_status;
     growing_buffer<safegraphs_custom_field_t, allocator_type_> fields {allocator};
     if (status_t const named = safegraphs_index_fields_(fields, metric, config); failed(named)) return named;
-    auto const [layout, laid] = safegraphs_index_layout<key_t, node_id_t, codec_type_>(
+    auto const [layout, layout_status] = safegraphs_index_layout<key_t, node_id_t, codec_type_>(
         extents.nodes, extents.neighbors, extents.value_bytes, config, to_span(fields), allocator);
-    if (failed(laid)) return laid;
+    if (failed(layout_status)) return layout_status;
     safegraphs_header_t const& header = layout.header;
     std::size_t const nodes = extents.nodes;
 
@@ -1189,8 +1190,8 @@ expected<safegraphs_index_metadata_t> safegraphs_read_index_metadata(bytes_view_
     auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
         if (field.key == "metric") metadata.metric = safegraphs_name_t {field.value};
     };
-    auto const [header, parsed] = safegraphs_read_header(monolith, allocator, per_custom_field);
-    if (failed(parsed)) return {metadata, parsed};
+    auto const [header, parse_status] = safegraphs_read_header(monolith, allocator, per_custom_field);
+    if (failed(parse_status)) return {metadata, parse_status};
     safegraphs_column_t const& value = header.value;
     std::size_t const id_bytes = dtype_bytes(header.neighbors.dtype);
     metadata.nodes = header.nodes();
@@ -1233,8 +1234,8 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
     constexpr column_shape_t shape = safegraphs_value_shape<codec_type_>();
     constexpr std::size_t element_bytes = dtype_bytes(codec_type_::value_dtype_k);
 
-    auto const [header, parsed] = safegraphs_read_header(monolith, allocator);
-    if (failed(parsed)) return parsed;
+    auto const [header, parse_status] = safegraphs_read_header(monolith, allocator);
+    if (failed(parse_status)) return parse_status;
 
     // Every column's dtype, layout and extent is vetted before a payload byte lands.
     constexpr bool fixed_width = safegraphs_value_is_fixed<codec_type_>();

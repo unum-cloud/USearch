@@ -31,9 +31,9 @@ struct dense_indexes_executor<indexes_type_> {
 
     dense_indexes_executor() noexcept {
         int const device = 0;
-        expected<executor_t> spawned = executor_t::spawn(std::span<int const> {&device, 1});
-        status = spawned.status;
-        executor = std::move(spawned.value);
+        auto [executor, spawn_status] = executor_t::spawn(std::span<int const> {&device, 1});
+        status = spawn_status;
+        this->executor = std::move(executor);
     }
     dense_indexes_executor(dense_indexes_executor const&) = delete;
     dense_indexes_executor& operator=(dense_indexes_executor const&) = delete;
@@ -90,8 +90,8 @@ std::size_t test_dense_indexes_search_race() {
 
     // A claimed executor refuses the search outright, before any scratch is carved.
     {
-        auto [held, claimed] = executor.claim();
-        failures += expect(succeeded(claimed));
+        auto [claim, claim_status] = executor.claim();
+        failures += expect(succeeded(claim_status));
         failures += expect_eq(indexes
                                   .search(vectors.view().row(0).as_vector(), executor, {},
                                           std::span<key_t> {found_keys}, std::span {found_distances})
@@ -99,18 +99,19 @@ std::size_t test_dense_indexes_search_race() {
                               status_t::contended_k);
     }
 
-    auto [inserted, landed] = indexes.insert(std::span<key_t const> {keys.data(), nodes_count}, vectors.view(),
-                                             executor);
-    failures += expect_eq(landed, status_t::success_k);
+    auto [insert_result, insert_status] = indexes.insert(std::span<key_t const> {keys.data(), nodes_count},
+                                                         vectors.view(), executor);
+    failures += expect_eq(insert_status, status_t::success_k);
     failures += expect_eq(indexes.size(), nodes_count);
 
     // Every published row resolves to a key inside the assigned range - never the key column's zero-fill.
     std::size_t mislabeled = 0;
     for (std::size_t searches = 0; searches != dense_reader_minimal_searches_k; ++searches) {
-        auto const [found, searched] = indexes.search(vectors.view().row(searches % nodes_count).as_vector(), executor,
-                                                      {}, std::span<key_t> {found_keys}, std::span {found_distances});
-        failures += expect_eq(searched, status_t::success_k);
-        for (std::size_t match = 0; match != found.count; ++match)
+        auto const [search_result, search_status] = indexes.search(
+            vectors.view().row(searches % nodes_count).as_vector(), executor, {}, std::span<key_t> {found_keys},
+            std::span {found_distances});
+        failures += expect_eq(search_status, status_t::success_k);
+        for (std::size_t match = 0; match != search_result.count; ++match)
             mislabeled += found_keys[match] < key_t {1} || found_keys[match] > static_cast<key_t>(nodes_count);
     }
     failures += expect_eq(mislabeled, 0u);

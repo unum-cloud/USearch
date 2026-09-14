@@ -194,8 +194,8 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool) {
     // Reserving first freezes the CLI geometry and pre-grows capacity; a checkpoint then
     // loads against that frozen geometry, so a header mismatch fails loudly below instead
     // of restoring an incompatible graph.
-    auto reserved = bench.index->reserve({rows, connectivity, dimensions});
-    if (reserved.status != status_t::success_k) {
+    auto const [capacity, status] = bench.index->reserve({rows, connectivity, dimensions});
+    if (failed(status)) {
         fmt::println("Failed to reserve {} × {}d", rows, dimensions);
         return false;
     }
@@ -274,20 +274,20 @@ void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_
 
     dense_node_id_t local_id = 0;
     vectors_view_t const one_row {vector.data(), 1, streamed.vectors.extent(1)};
-    auto const [inserted, landed] = bench.index->insert(one_row, {&local_id, std::size_t {1}},
-                                                        *bench.traversals[thread], config);
-    if (failed(landed)) {
+    auto const [result, status] = bench.index->insert(one_row, {&local_id, std::size_t {1}}, *bench.traversals[thread],
+                                                      config);
+    if (failed(status)) {
         bench.results.failed_tasks.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
     telemetry_lane_t& lane = bench.lanes[thread];
-    lane.visited_members += inserted.visited_members;
-    lane.computed_distances += inserted.computed_distances;
-    lane.computed_distances_in_refines += inserted.computed_distances_in_refines;
-    lane.computed_distances_in_reverse_refines += inserted.computed_distances_in_reverse_refines;
-    lane.restarts += inserted.restarts;
-    lane.saturated_walks += inserted.saturated_walks;
+    lane.visited_members += result.visited_members;
+    lane.computed_distances += result.computed_distances;
+    lane.computed_distances_in_refines += result.computed_distances_in_refines;
+    lane.computed_distances_in_reverse_refines += result.computed_distances_in_reverse_refines;
+    lane.restarts += result.restarts;
+    lane.saturated_walks += result.saturated_walks;
     bench.results.id_to_row[local_id] = static_cast<u32_t>(row);
 }
 
@@ -386,9 +386,9 @@ void refinement_callback(fu_lambda_context_t punned, std::size_t task, std::size
     node_id_t const first = static_cast<node_id_t>(task * step_nodes_k);
     node_id_t const bound = static_cast<node_id_t>(
         min_of(task * step_nodes_k + step_nodes_k, fanout.bench.index->size()));
-    auto const [refinement, refined] = fanout.bench.index->refine({first, bound}, *fanout.bench.traversals[thread],
-                                                                  fanout.config);
-    if (failed(refined)) return fanout.failures.fetch_add(1, std::memory_order_relaxed), void();
+    auto const [refinement, status] = fanout.bench.index->refine({first, bound}, *fanout.bench.traversals[thread],
+                                                                 fanout.config);
+    if (failed(status)) return fanout.failures.fetch_add(1, std::memory_order_relaxed), void();
     fanout.changed.fetch_add(refinement.changed_nodes, std::memory_order_relaxed);
     fanout.visited_members.fetch_add(refinement.visited_members, std::memory_order_relaxed);
     fanout.computed_distances.fetch_add(refinement.computed_distances, std::memory_order_relaxed);
@@ -476,9 +476,9 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
     }
 
     started = clock_t::now();
-    auto [plan, planned] = bench.index->plan_heal(*bench.traversals[0]);
-    if (failed(planned)) {
-        fmt::println("Failed to open the healing pass: status {}", int(planned));
+    auto [plan, plan_status] = bench.index->plan_heal(*bench.traversals[0]);
+    if (failed(plan_status)) {
+        fmt::println("Failed to open the healing pass: status {}", int(plan_status));
         return false;
     }
     fanout.plan = &plan;
@@ -501,20 +501,20 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
         if (islands_after >= islands_before) break;
         islands_before = islands_after;
     }
-    auto const healed = plan.finish();
-    if (!healed) {
-        fmt::println("Healing failed: status {}", int(healed.status));
+    auto const [repair, heal_status] = plan.finish();
+    if (failed(heal_status)) {
+        fmt::println("Healing failed: status {}", int(heal_status));
         return false;
     }
     report.healing_seconds = stdc::duration<double>(clock_t::now() - started).count();
-    report.islands_found = healed.value.islands_found;
-    report.islands_reconnected = healed.value.islands_reconnected;
-    report.reachable_nodes = healed.value.health.reachable_nodes;
-    report.sweeps = healed.value.health.sweeps;
+    report.islands_found = repair.islands_found;
+    report.islands_reconnected = repair.islands_reconnected;
+    report.reachable_nodes = repair.health.reachable_nodes;
+    report.sweeps = repair.health.sweeps;
 
-    report.sums.visited_members = fanout.visited_members.load(std::memory_order_relaxed) + healed.value.visited_members;
+    report.sums.visited_members = fanout.visited_members.load(std::memory_order_relaxed) + repair.visited_members;
     report.sums.computed_distances = fanout.computed_distances.load(std::memory_order_relaxed) +
-                                     healed.value.computed_distances;
+                                     repair.computed_distances;
     report.sums.restarts = fanout.restarts.load(std::memory_order_relaxed);
     report_refinement_metrics(report);
     return true;
@@ -571,15 +571,15 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
     std::span<u32_t> const rows_span {merged_rows, bench.options.top_k};
     std::span<dense_distance_t> const distances_span {merged_distances, bench.options.top_k};
     auto started = clock_t::now();
-    auto const [found, searched] = bench.index->search(query_vector, traversal, config);
-    if (failed(searched)) {
+    auto const [result, status] = bench.index->search(query_vector, traversal, config);
+    if (failed(status)) {
         bench.results.failed_tasks.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    lane.visited_members += found.visited_members;
-    lane.computed_distances += found.computed_distances;
-    lane.restarts += found.restarts;
-    lane.saturated_walks += found.saturated_walks;
+    lane.visited_members += result.visited_members;
+    lane.computed_distances += result.computed_distances;
+    lane.restarts += result.restarts;
+    lane.saturated_walks += result.saturated_walks;
     std::size_t const merged_count = merge_search_results(to_span(traversal.results), bench.results.id_to_row.data(),
                                                           rows_span, distances_span, std::size_t {0});
     bench.results.latencies_us[query] = stdc::duration<float, std::micro>(clock_t::now() - started).count();

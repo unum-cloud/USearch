@@ -95,8 +95,8 @@ bool prepare(streamed_dataset_type_& streamed) {
     // Reserving first freezes the CLI geometry and pre-maps capacity; a checkpoint then
     // loads against that frozen geometry, so a header mismatch fails loudly below instead
     // of restoring an incompatible graph.
-    auto reserved = index.reserve({rows, connectivity, dimensions});
-    if (reserved.status != status_t::success_k) {
+    auto const [capacity, status] = index.reserve({rows, connectivity, dimensions});
+    if (failed(status)) {
         fmt::println("Failed to reserve {} × {}d on device {}", rows, dimensions, bench.device);
         return false;
     }
@@ -183,17 +183,16 @@ bool run_insertion(streamed_dataset_type_& streamed) {
         std::size_t const first_row = bench.options.skip_vectors + offset;
         std::size_t const batch = std::min(batch_rows, inserted_rows - offset);
         auto const staged = stage_batch(streamed, streamed.vectors, first_row, batch);
-        auto const [inserted, landed] = bench.index->insert(staged, {batch_ids.data(), batch}, *bench.traversal,
-                                                            config);
-        if (failed(landed)) {
-            fmt::println("Insertion failed at row {}: status {}", first_row, int(landed));
+        auto const [result, status] = bench.index->insert(staged, {batch_ids.data(), batch}, *bench.traversal, config);
+        if (failed(status)) {
+            fmt::println("Insertion failed at row {}: status {}", first_row, int(status));
             return false;
         }
         for (std::size_t row = 0; row != batch; ++row)
             bench.id_to_row[batch_ids[row]] = static_cast<u32_t>(first_row + row);
-        bench.lane.visited_members += inserted.visited_members;
-        bench.lane.computed_distances += inserted.computed_distances;
-        bench.lane.restarts += inserted.restarts;
+        bench.lane.visited_members += result.visited_members;
+        bench.lane.computed_distances += result.computed_distances;
+        bench.lane.restarts += result.restarts;
         bench.lane.saturated_walks += inserted.visited_saturations;
         offset += batch;
         progress.tick(offset);
@@ -245,33 +244,34 @@ bool run_refinement(streamed_dataset_type_& streamed) {
     progress_bar_t progress {"refining", max_refines};
     auto started = clock_t::now();
     for (std::size_t pass = 0; pass != max_refines; ++pass) {
-        auto refined = bench.index->refine({0, static_cast<node_id_t>(nodes)}, *bench.traversal, config);
-        if (!refined) {
-            fmt::println("Refinement failed on pass {}: status {}", pass, int(refined.status));
+        auto const [refinement, refine_status] = bench.index->refine({0, static_cast<node_id_t>(nodes)},
+                                                                     *bench.traversal, config);
+        if (failed(refine_status)) {
+            fmt::println("Refinement failed on pass {}: status {}", pass, int(refine_status));
             return false;
         }
-        changed_per_pass.push_back(refined.changed_nodes);
-        report.sums.visited_members += refined.visited_members;
-        report.sums.computed_distances += refined.computed_distances;
-        report.sums.restarts += refined.restarts;
+        changed_per_pass.push_back(refinement.changed_nodes);
+        report.sums.visited_members += refinement.visited_members;
+        report.sums.computed_distances += refinement.computed_distances;
+        report.sums.restarts += refinement.restarts;
         progress.tick(pass + 1);
-        if (!refined.changed_nodes) break; // Settled: another pass would re-select the same picks.
+        if (!refinement.changed_nodes) break; // Settled: another pass would re-select the same picks.
     }
     progress.finish();
     report.refining_seconds = stdc::duration<double>(clock_t::now() - started).count();
     report.changed_per_pass = changed_per_pass;
 
     started = clock_t::now();
-    auto const healed = bench.index->heal(*bench.traversal);
-    if (!healed) {
-        fmt::println("Healing failed: status {}", int(healed.status));
+    auto const [repair, heal_status] = bench.index->heal(*bench.traversal);
+    if (failed(heal_status)) {
+        fmt::println("Healing failed: status {}", int(heal_status));
         return false;
     }
     report.healing_seconds = stdc::duration<double>(clock_t::now() - started).count();
-    report.islands_found = healed.value.islands_found;
-    report.islands_reconnected = healed.value.islands_reconnected;
-    report.reachable_nodes = healed.value.health.reachable_nodes;
-    report.sweeps = healed.value.health.sweeps;
+    report.islands_found = repair.islands_found;
+    report.islands_reconnected = repair.islands_reconnected;
+    report.reachable_nodes = repair.health.reachable_nodes;
+    report.sweeps = repair.health.sweeps;
     report_refinement_metrics(report);
     return true;
 }
@@ -327,18 +327,18 @@ bool run_search(streamed_dataset_type_& streamed) {
         auto const staged = stage_batch(streamed, source, offset, batch);
 
         auto started = clock_t::now();
-        auto const [found, searched] = bench.index->search(
+        auto const [result, status] = bench.index->search(
             staged, nk::matrix_span<node_id_t> {found_ids.data(), {batch, top_k}},
             nk::matrix_span<dense_distance_t> {found_distances.data(), {batch, top_k}}, *bench.traversal, config);
         double const batch_seconds = stdc::duration<double>(clock_t::now() - started).count();
-        if (failed(searched)) {
-            fmt::println("Search failed at query {}: status {}", offset, int(searched));
+        if (failed(status)) {
+            fmt::println("Search failed at query {}: status {}", offset, int(status));
             return false;
         }
         seconds += batch_seconds;
-        bench.lane.visited_members += found.visited_members;
-        bench.lane.computed_distances += found.computed_distances;
-        bench.lane.restarts += found.restarts;
+        bench.lane.visited_members += result.visited_members;
+        bench.lane.computed_distances += result.computed_distances;
+        bench.lane.restarts += result.restarts;
         bench.lane.saturated_walks += found.visited_saturations;
 
         for (std::size_t row = 0; row != batch; ++row) {

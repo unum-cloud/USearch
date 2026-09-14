@@ -972,8 +972,8 @@ template <typename multi_type_>
     requires is_vram_index<multi_type_>
 static void compose_capabilities(punned_dense_index_t& handle, multi_type_& variant) noexcept {
     if (!specialized_index {variant}.shards_count()) return;
-    auto const [specs, queried] = cuda_device_specs_t::query(specialized_index {variant}.device());
-    if (failed(queried)) return;
+    auto const [specs, status] = cuda_device_specs_t::query(specialized_index {variant}.device());
+    if (failed(status)) return;
     for (gpu_class_name_t const& named : gpu_class_names_k)
         if (cuda_arch_of(named.gpu_class) == specs.arch()) return append_capability(handle, named.name);
 }
@@ -1664,8 +1664,8 @@ USEARCH_EXPORT void usearch_dense_metadata( //
     if (!path.data || !path.length || !metadata)
         return propagate_error(usearch_error_malformed_input_k, error, "The path and metadata must not be null"),
                void();
-    auto const [source, read] = safegraphs_read_metadata(as_text(path));
-    if (failed(read)) return propagate_error(read, error), void();
+    auto const [source, status] = safegraphs_read_metadata(as_text(path));
+    if (failed(status)) return propagate_error(status, error), void();
     adopt_metadata(source, metadata);
     propagate_success(error);
 }
@@ -1716,9 +1716,9 @@ USEARCH_EXPORT void usearch_dense_metadata_buffer( //
     if (!buffer.data || !buffer.length || !metadata)
         return propagate_error(usearch_error_malformed_input_k, error, "The buffer and metadata must not be null"),
                void();
-    auto const [source, read] = safegraphs_read_metadata(
+    auto const [source, status] = safegraphs_read_metadata(
         bytes_view_t {reinterpret_cast<byte_t const*>(buffer.data), buffer.length});
-    if (failed(read)) return propagate_error(read, error), void();
+    if (failed(status)) return propagate_error(status, error), void();
     adopt_metadata(source, metadata);
     propagate_success(error);
 }
@@ -1732,8 +1732,8 @@ USEARCH_EXPORT usearch_executor_t usearch_executor_for_ram([[maybe_unused]] usea
     fu_topology_t topology = nullptr;
     if (fu_topology_new(&topology) != fu_success_k)
         return propagate_error(usearch_error_device_k, error, "Topology discovery failed"), nullptr;
-    auto [executor, spawned] = forkunion_executor_t::spawn(topology, threads);
-    if (failed(spawned)) return fu_topology_delete(topology), propagate_error(spawned, error), nullptr;
+    auto [executor, status] = forkunion_executor_t::spawn(topology, threads);
+    if (failed(status)) return fu_topology_delete(topology), propagate_error(status, error), nullptr;
     punned_executor_t* const state = new (std::nothrow) punned_executor_t {};
     if (!state)
         return fu_topology_delete(topology),
@@ -1752,8 +1752,8 @@ USEARCH_EXPORT usearch_executor_t usearch_executor_for_vram([[maybe_unused]] use
                                              ? std::span {reinterpret_cast<int const*>(vram->devices),
                                                           vram->devices_count}
                                              : std::span {&fallback_device, 1};
-    auto [executor, spawned] = cuda_executor_t::spawn(devices);
-    if (failed(spawned)) return propagate_error(spawned, error), nullptr;
+    auto [executor, status] = cuda_executor_t::spawn(devices);
+    if (failed(status)) return propagate_error(status, error), nullptr;
     punned_executor_t* const state = new (std::nothrow) punned_executor_t {};
     if (!state)
         return propagate_error(usearch_error_out_of_memory_k, error, "Failed to allocate the executor"), nullptr;

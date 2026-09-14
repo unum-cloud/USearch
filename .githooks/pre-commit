@@ -616,6 +616,20 @@ check_workflow_names() {
         "            checks reference them by it, so every job and step must carry one:"
 }
 
+# A two-way structured binding is an `expected` taken apart, so its halves read `[thing, status]`:
+# the status half is `status` or `<verb>_status`, never a participle, and the payload half never
+# carries the suffix. A `std::pair` binds under the same rule; `[first, second]` says nothing either.
+check_expected_bindings() {
+    local participle suffixed
+    participle=$(printf '%s\n' "$added" | grep -vE '^\+[[:space:]]*(//|/?\*)' |
+        grep -E 'auto( const)?&? \[[a-z_]+, [a-z_]+\] =' |
+        grep -vE 'auto( const)?&? \[[a-z_]+, (status|[a-z]+(_[a-z]+)*_status)\] =' || true)
+    suffixed=$(printf '%s\n' "$added" | grep -vE '^\+[[:space:]]*(//|/?\*)' |
+        grep -E 'auto( const)?&? \[[a-z_]+_status, ' || true)
+    [ -z "$participle$suffixed" ] || fail "$participle$suffixed" \
+        "$file binds an expected as [payload, participle] - the status half is \`status\` or \`<verb>_status\`:"
+}
+
 # One pass: enumerate the staged files once, diff each once, and dispatch by extension. The list is
 # NUL-delimited so a filename with spaces can never split.
 core_files=$(dependency_free_core_files)
@@ -641,6 +655,7 @@ while IFS= read -r -d '' file; do
         check_trailing_returns
         check_region_labels
         check_iterator_laundering
+        check_expected_bindings
         ;;&
     *.cu | *.cuh)
         check_host_threads

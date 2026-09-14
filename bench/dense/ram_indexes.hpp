@@ -167,12 +167,12 @@ bool prepare(streamed_dataset_type_& streamed, fu_topology_t topology) {
                 return false;
             }
     // The executor spawns machine-wide and owns its pool outright.
-    auto spawned = forkunion_executor_t::spawn(topology, bench.options.threads);
-    if (failed(spawned.status)) {
+    auto [executor, status] = forkunion_executor_t::spawn(topology, bench.options.threads);
+    if (failed(status)) {
         fmt::println("Failed to spawn the executor's worker threads");
         return false;
     }
-    bench.executor = std::move(spawned.value);
+    bench.executor = std::move(executor);
 
     // AMX tile state needs a per-thread OS permission handshake before first use; NumKong's
     // thread configurator performs it and no-ops everywhere else.
@@ -267,18 +267,18 @@ bool run_insertion(streamed_dataset_type_& streamed) {
             batch = vectors_view_t {streamed.staging.row(0).data(), count, dimensions};
         }
 
-        auto const [added, landed] = bench.indexes.insert(std::span<key_t const> {keys.data(), count}, batch,
-                                                          bench.executor, config);
-        if (failed(landed)) {
-            fmt::println("Insertion refused a batch of {} rows at row {}: {}", count, base, status_to_string(landed));
+        auto const [result, status] = bench.indexes.insert(std::span<key_t const> {keys.data(), count}, batch,
+                                                           bench.executor, config);
+        if (failed(status)) {
+            fmt::println("Insertion refused a batch of {} rows at row {}: {}", count, base, status_to_string(status));
             return false;
         }
-        sums.visited_members += added.visited_members;
-        sums.computed_distances += added.computed_distances;
-        sums.computed_distances_in_refines += added.computed_distances_in_refines;
-        sums.computed_distances_in_reverse_refines += added.computed_distances_in_reverse_refines;
-        sums.restarts += added.restarts;
-        sums.saturated_walks += added.saturated_walks;
+        sums.visited_members += result.visited_members;
+        sums.computed_distances += result.computed_distances;
+        sums.computed_distances_in_refines += result.computed_distances_in_refines;
+        sums.computed_distances_in_reverse_refines += result.computed_distances_in_reverse_refines;
+        sums.restarts += result.restarts;
+        sums.saturated_walks += result.saturated_walks;
         base += count;
     }
     double const seconds = stdc::duration<double>(clock_t::now() - started).count();
@@ -369,18 +369,18 @@ bool run_refinement(streamed_dataset_type_& streamed) {
     report.changed_per_pass = changed_per_pass;
 
     started = clock_t::now();
-    auto const healed = bench.indexes.heal(bench.executor);
-    if (!healed) {
-        fmt::println("Healing failed: status {}", int(healed.status));
+    auto const [repair, status] = bench.indexes.heal(bench.executor);
+    if (failed(status)) {
+        fmt::println("Healing failed: status {}", int(status));
         return false;
     }
     report.healing_seconds = stdc::duration<double>(clock_t::now() - started).count();
-    report.sums.visited_members += healed.value.visited_members;
-    report.sums.computed_distances += healed.value.computed_distances;
-    report.islands_found = healed.value.islands_found;
-    report.islands_reconnected = healed.value.islands_reconnected;
-    report.reachable_nodes = healed.value.health.reachable_nodes;
-    report.sweeps = healed.value.health.sweeps;
+    report.sums.visited_members += repair.visited_members;
+    report.sums.computed_distances += repair.computed_distances;
+    report.islands_found = repair.islands_found;
+    report.islands_reconnected = repair.islands_reconnected;
+    report.reachable_nodes = repair.health.reachable_nodes;
+    report.sweeps = repair.health.sweeps;
     report_refinement_metrics(report);
     return true;
 }
@@ -430,20 +430,19 @@ bool run_search(streamed_dataset_type_& streamed) {
             batch = vectors_view_t {streamed.staging.row(0).data(), count, dimensions};
         }
 
-        auto const [found, searched] = bench.indexes.search(
+        auto const [result, status] = bench.indexes.search(
             batch, bench.executor, config, wanted,
             std::span<key_t> {bench.results.hit_rows.row(base).data(), count * wanted},
             std::span<dense_distance_t> {bench.results.hit_distances.row(base).data(), count * wanted},
             std::span<std::size_t> {counts.data(), count});
-        if (failed(searched)) {
-            fmt::println("Search refused a batch of {} queries at query {}: {}", count, base,
-                         status_to_string(searched));
+        if (failed(status)) {
+            fmt::println("Search refused a batch of {} queries at query {}: {}", count, base, status_to_string(status));
             return false;
         }
-        sums.visited_members += found.visited_members;
-        sums.computed_distances += found.computed_distances;
-        sums.restarts += found.restarts;
-        sums.saturated_walks += found.saturated_walks;
+        sums.visited_members += result.visited_members;
+        sums.computed_distances += result.computed_distances;
+        sums.restarts += result.restarts;
+        sums.saturated_walks += result.saturated_walks;
         for (std::size_t query = 0; query != count; ++query)
             bench.results.hit_counts[base + query] = static_cast<u32_t>(counts[query]);
         base += count;

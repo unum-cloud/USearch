@@ -66,8 +66,8 @@ status_t matrix_save(std::string_view path, nk::matrix_view<value_type_> matrix)
                                        static_cast<counter_type_>(matrix.extent(1))};
     if (counters[0] != matrix.extent(0) || counters[1] != matrix.extent(1)) return status_t::overflow_k;
     std::size_t const payload_bytes = matrix.extent(0) * static_cast<std::size_t>(matrix.stride_bytes(0));
-    auto [mapping, mapped] = mapped_file_t::write(path, sizeof(counters) + payload_bytes);
-    if (failed(mapped)) return mapped;
+    auto [mapping, status] = mapped_file_t::write(path, sizeof(counters) + payload_bytes);
+    if (failed(status)) return status;
     bytes_span_t const image = mapping.span();
     if (failed(copy_bytes(image.subspan(0, sizeof(counters)), bytes_of(counters, 2)))) return status_t::io_k;
     if (failed(copy_bytes(image.subspan(sizeof(counters), payload_bytes),
