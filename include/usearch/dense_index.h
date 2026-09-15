@@ -66,6 +66,22 @@
  *  thread its own executor - a single-thread one spawns no operating-system threads, so "use my
  *  thread" needs no special case - or share one and let it serialize them.
  *
+ *  @section dense_index_residencies Verbs per Residency
+ *
+ *  Every verb this header declares is exported by the engine and by the stand-in alike, so a
+ *  residency that lacks one answers @c usearch_error_unsupported_k rather than a missing symbol.
+ *
+ *  @c usearch_dense_add, @c usearch_dense_search, @c usearch_dense_get, @c usearch_dense_count,
+ *  @c usearch_dense_refine and the whole serialization family answer on a RAM handle and on a
+ *  VRAM one alike. @c usearch_dense_search_if answers on RAM and is refused on VRAM with
+ *  @c usearch_error_device_k, since a host predicate cannot narrow a device walk.
+ *  @c usearch_dense_cursor answers on RAM only; VRAM rows are read back through a search.
+ *  @c usearch_dense_find, @c usearch_dense_merge, @c usearch_dense_multiply,
+ *  @c usearch_dense_attend and @c usearch_dense_maxsim are unsupported on both.
+ *
+ *  An NVMe residency is refused at @c usearch_dense_init with @c usearch_error_unsupported_k: its
+ *  checkpoints carry no keys and no shard wrapper, so no C verb can answer on it yet.
+ *
  *  @section dense_index_linear_algebra Approximate Products & Attention
  *
  *  Three opt-in verbs at the end of this header read the graph as linear algebra rather than as a
@@ -114,9 +130,13 @@ extern "C" {
 USEARCH_EXPORT typedef void* usearch_dense_index_t;
 
 /**
- *  @brief A consistent snapshot cursor over the index contents. Captures the publication
- *      watermark at creation, so concurrent inserts never appear mid-iteration, and the
- *      walk is a sequential row scan - export, migration, and visualization feed off it.
+ *  @brief A sequential row scan over the index contents - export, migration, and visualization
+ *      feed off it. Each shard's publication watermark is read as the walk enters that shard, so
+ *      a row once passed is never revisited, while a later shard may still carry rows published
+ *      after the walk began.
+ *
+ *  The cursor borrows the index rather than owning a share of it: free the cursor before the
+ *  index it walks.
  */
 USEARCH_EXPORT typedef void* usearch_dense_cursor_t;
 
@@ -482,6 +502,7 @@ USEARCH_EXPORT size_t usearch_dense_get(            //
  *  @param[in] progress The @b optional handler, called with donors absorbed; @c NULL skips it.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
+ *  @retval usearch_error_unsupported_k No residency absorbs donor handles yet.
  *
  *  Readers of @p index may keep searching throughout, since unpublished rows hide behind the
  *  watermark. Absorbing a group costs the wall clock of its largest source rather than the sum of
@@ -505,8 +526,10 @@ USEARCH_EXPORT void usearch_dense_merge(                        //
     usearch_error_t* error);
 
 /**
- *  @brief Opens a snapshot cursor over the current contents; see @c usearch_dense_cursor_t.
+ *  @brief Opens a row scan over the current contents; see @c usearch_dense_cursor_t.
  *  @return The cursor, or @c NULL on failure.
+ *
+ *  The cursor borrows @p index and must be freed before it.
  */
 USEARCH_EXPORT usearch_dense_cursor_t usearch_dense_cursor(usearch_dense_index_t index, usearch_error_t* error);
 
@@ -518,7 +541,7 @@ USEARCH_EXPORT usearch_dense_cursor_t usearch_dense_cursor(usearch_dense_index_t
  *  @param[out] vectors Output matrix of up to @c keys.capacity rows; @c NULL skips vector export.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *  @retval usearch_error_shape_mismatch_k @c vectors->capacity is below @c keys.capacity.
- *  @return Number of rows written; zero when the snapshot is exhausted.
+ *  @return Number of rows written; zero when the walk is exhausted.
  *
  *  The keys are what every batch carries, so their capacity is the batch size and a vector export
  *  must have room for as many - which is what lets the key-only form bound itself.
@@ -538,6 +561,7 @@ USEARCH_EXPORT void usearch_dense_cursor_free(usearch_dense_cursor_t cursor);
  *  @param[in] executor The executor the stream draws from; one of its threads stays pinned until freed.
  *  @param[in] query The single query row, whose @c rows must be one.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
+ *  @retval usearch_error_unsupported_k No residency implements the stream yet.
  *  @return The finder, or @c NULL on failure.
  *
  *  A live finder holds its thread for as long as it exists, so an executor with few threads and many
@@ -741,6 +765,7 @@ USEARCH_EXPORT void usearch_dense_metadata_buffer( //
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *  @retval usearch_error_shape_mismatch_k @c left->columns disagrees with the frozen geometry.
+ *  @retval usearch_error_unsupported_k No residency walks the approximate product yet.
  *
  *  A walk scores many times the pairs a search reports, and each of them is an exact product the
  *  caller would otherwise recompute - this verb hands them all back. Pairs arrive in traversal
@@ -837,6 +862,7 @@ USEARCH_EXPORT typedef struct usearch_dense_attention_options_t {
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
+ *  @retval usearch_error_unsupported_k No residency folds attention over the walk yet.
  *
  *  The index holds the keys and @p values holds the value rows, addressed by key: an entry's key
  *  is its row offset into @p values, parked in the low bytes with the rest zeroed. Token positions
@@ -908,6 +934,7 @@ USEARCH_EXPORT void usearch_dense_attend(                       //
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *  @retval usearch_error_shape_mismatch_k @c queries->columns disagrees with the frozen geometry,
  *      or @c queries->rows is not a whole multiple of @p rows_per_query.
+ *  @retval usearch_error_unsupported_k No residency scores late interaction yet.
  *
  *  This is what @c values_per_key above one exists for. A document is one key holding its token
  *  rows, and the walk stays over individual tokens under a plain inner product - no set-to-set

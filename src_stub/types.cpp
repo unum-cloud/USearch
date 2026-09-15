@@ -39,7 +39,7 @@ usearch_executor_t usearch_executor_for_ram(usearch_ram_options_t const*, std::s
 }
 
 usearch_executor_t usearch_executor_for_nvme(usearch_nvme_options_t const*, std::size_t, usearch_error_t* error) {
-    propagate_error(usearch_error_device_k, error, "This build carries no NVMe backends");
+    propagate_error(usearch_error_unsupported_k, error, "This build carries no NVMe residency");
     return nullptr;
 }
 
@@ -75,12 +75,13 @@ char const* usearch_status_name(usearch_status_t status) {
     case usearch_error_config_mismatch_k: return "config-mismatch";
     case usearch_error_contended_k: return "contended";
     case usearch_error_cancelled_k: return "cancelled";
+    case usearch_error_unsupported_k: return "unsupported";
     default: return "unrecognized";
     }
 }
 
 usearch_status_t usearch_status_from_name(usearch_bytes_view_t name) {
-    for (int code = usearch_success_k; code <= usearch_error_cancelled_k; ++code) {
+    for (int code = usearch_success_k; code <= usearch_error_unsupported_k; ++code) {
         usearch_status_t const status = static_cast<usearch_status_t>(code);
         if (named(name, usearch_status_name(status))) return status;
     }

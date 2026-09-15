@@ -152,6 +152,9 @@ USEARCH_EXPORT typedef enum usearch_status_t {
     /** @brief A progress handler asked the operation to stop; it unwound and published nothing,
      *      so the handle carries whatever it did before the call. */
     usearch_error_cancelled_k = 14,
+    /** @brief The verb is declared for every residency but this one does not implement it; no
+     *      retry, option, or smaller request can help, so a caller picks another residency. */
+    usearch_error_unsupported_k = 15,
 } usearch_status_t;
 
 /**

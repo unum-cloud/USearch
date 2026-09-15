@@ -1112,8 +1112,8 @@ static usearch_dense_index_t with_residency(usearch_dense_options_t const* optio
     case usearch_residency_ram_k: return make_ram_index<dtype_, kernel_>(options, error);
     case usearch_residency_vram_k: return make_vram_index<dtype_, kernel_>(options, error);
     case usearch_residency_nvme_k:
-        return propagate_error(usearch_error_config_mismatch_k, error,
-                               "The NVMe variants join this dispatch with the normalized batched search"),
+        return propagate_error(usearch_error_unsupported_k, error,
+                               "NVMe checkpoints carry no keys and no shard wrapper, so no C verb answers on them yet"),
                nullptr;
     default: return propagate_error(usearch_error_unknown_kind_k, error, "Unknown residency"), nullptr;
     }
@@ -1223,6 +1223,39 @@ static nk::matrix_view<typename multi_type_::scalar_t> stored_rows_of( //
     return {reinterpret_cast<char const*>(staged.data()), rows_shape_of<scalar_t>(rows_count, 0, dimensions)};
 }
 
+/**
+ *  @brief The export tail every row reader shares: @p fill produces up to @c rows.extent(0) rows
+ *      in the stored type and reports how many, landing in the caller's own plane when the two
+ *      types agree and in a staged one converted row by row otherwise.
+ */
+template <typename scalar_type_, typename fill_type_>
+static std::size_t export_rows(usearch_matrix_span_t const* vectors, std::size_t dimensions, nk_dtype_t stored_dtype,
+                               fill_type_&& fill, usearch_error_t* error) noexcept {
+    std::size_t const wanted = vectors->capacity;
+    std::size_t const stride = vectors->stride_bytes;
+    nk_dtype_t const target_dtype = nk_dtype_of(vectors->scalar_kind);
+    if (target_dtype == nk_dtype_unknown_k)
+        return propagate_error(usearch_error_unknown_kind_k, error, "Unknown scalar kind"), 0ul;
+    if (vectors->columns != dimensions)
+        return propagate_error(usearch_error_shape_mismatch_k, error, "The output rows are not as wide as the index"),
+               0ul;
+    if (target_dtype == stored_dtype) {
+        nk::matrix_span<scalar_type_> const rows {static_cast<char*>(vectors->data),
+                                                  rows_shape_of<scalar_type_>(wanted, stride, dimensions)};
+        return propagate_success(error), fill(rows);
+    }
+    nk::matrix<scalar_type_> staged = nk::matrix<scalar_type_>::try_zeros({wanted, dimensions});
+    if (wanted && staged.empty())
+        return propagate_error(usearch_error_out_of_memory_k, error, "Failed to stage the exported rows"), 0ul;
+    std::size_t const total = fill(staged.span());
+    std::size_t const row_bytes = stride ? stride
+                                         : divide_round_up<std::size_t>(nk_dtype_bits(target_dtype) * dimensions, 8);
+    for (std::size_t row = 0; row != min_of(total, wanted); ++row)
+        nk_cast(staged.span().row(row).as_vector().byte_data(), stored_dtype, dimensions,
+                static_cast<char*>(vectors->data) + row * row_bytes, target_dtype);
+    return propagate_success(error), total;
+}
+
 /** @brief The one search engine both C verbs drive: chunked, staged, scattered; a real predicate
  *      narrows it to CPU handles. */
 template <typename predicate_type_>
@@ -1324,6 +1357,28 @@ static void search_dense_rows(usearch_dense_index_t index, usearch_executor_t pu
 
 #pragma endregion Multi Verbs
 
+/** @brief The cursor of a RAM arm; a device arm reads its rows through a search and has none. */
+template <typename variant_type_>
+struct cursor_of {
+    using type = std::monostate;
+};
+template <typename variant_type_>
+    requires is_ram_index<variant_type_>
+struct cursor_of<variant_type_> {
+    using type = typename variant_type_::cursor_t;
+};
+
+/** @brief The cursors of every arm of @p variants_type_, as one variant of their own. */
+template <typename variants_type_>
+struct cursors_of;
+template <typename... alternatives_>
+struct cursors_of<std::variant<alternatives_...>> {
+    using type = std::variant<std::monostate, typename cursor_of<alternatives_>::type...>;
+};
+
+/** @brief What @c usearch_dense_cursor_t owns: the borrowed index's own cursor, one alternative per arm. */
+using punned_dense_cursor_t = typename cursors_of<punned_dense_index_t::variants_t>::type;
+
 extern "C" {
 
 #pragma region Lifetime
@@ -1358,6 +1413,26 @@ USEARCH_EXPORT void usearch_dense_clear(usearch_dense_index_t index, usearch_err
 #pragma endregion Lifetime
 
 #pragma region Introspection
+
+USEARCH_EXPORT char const* usearch_dense_metric_name(usearch_dense_metric_t metric) {
+    switch (metric) {
+    case usearch_dense_metric_inner_k: return "inner";
+    case usearch_dense_metric_angular_k: return "angular";
+    case usearch_dense_metric_euclidean_k: return "euclidean";
+    case usearch_dense_metric_hamming_k: return "hamming";
+    case usearch_dense_metric_jaccard_k: return "jaccard";
+    default: return "unknown";
+    }
+}
+
+USEARCH_EXPORT usearch_dense_metric_t usearch_dense_metric_from_name(usearch_bytes_view_t name) {
+    std::string_view const spelled {reinterpret_cast<char const*>(name.data), name.length};
+    for (int code = usearch_dense_metric_inner_k; code <= usearch_dense_metric_jaccard_k; ++code) {
+        usearch_dense_metric_t const metric = static_cast<usearch_dense_metric_t>(code);
+        if (spelled == usearch_dense_metric_name(metric)) return metric;
+    }
+    return usearch_dense_metric_unknown_k;
+}
 
 USEARCH_EXPORT size_t usearch_dense_size(usearch_dense_index_t index, usearch_error_t* error) {
     auto* punned_index = reinterpret_cast<punned_dense_index_t*>(index);
@@ -1566,36 +1641,147 @@ USEARCH_EXPORT size_t usearch_dense_get(            //
             if (!vectors || !vectors->data)
                 return propagate_success(error), specialized_index {variant}.count(uuid_of(key));
             std::size_t const wanted = vectors->capacity;
-            std::size_t const stride = vectors->stride_bytes;
-            nk_dtype_t const target_dtype = nk_dtype_of(vectors->scalar_kind);
-            if (target_dtype == nk_dtype_unknown_k)
-                return propagate_error(usearch_error_unknown_kind_k, error, "Unknown scalar kind"), 0ul;
-            std::size_t const dimensions = specialized_index {variant}.dimensions();
-            if (vectors->columns != dimensions)
-                return propagate_error(usearch_error_shape_mismatch_k, error,
-                                       "The output rows are not as wide as the index"),
-                       0ul;
-            if (target_dtype == variant_type_::vector_dtype_k) {
-                nk::matrix_span<scalar_t> const rows {static_cast<char*>(vectors->data),
-                                                      rows_shape_of<scalar_t>(wanted, stride, dimensions)};
-                return propagate_success(error), specialized_index {variant}.get(uuid_of(key), rows, wanted);
-            }
-            // A foreign export stages the stored rows and converts each into the caller's type.
-            nk::matrix<scalar_t> staged = nk::matrix<scalar_t>::try_zeros({wanted, dimensions});
-            if (wanted && staged.empty())
-                return propagate_error(usearch_error_out_of_memory_k, error, "Failed to stage the exported rows"), 0ul;
-            std::size_t const total = specialized_index {variant}.get(uuid_of(key), staged.span(), wanted);
-            std::size_t const row_bytes =
-                stride ? stride : divide_round_up<std::size_t>(nk_dtype_bits(target_dtype) * dimensions, 8);
-            for (std::size_t row = 0; row != min_of(total, wanted); ++row)
-                nk_cast(staged.span().row(row).as_vector().byte_data(), variant_type_::vector_dtype_k, dimensions,
-                        static_cast<char*>(vectors->data) + row * row_bytes, target_dtype);
-            return propagate_success(error), total;
+            return export_rows<scalar_t>(
+                vectors, specialized_index {variant}.dimensions(), variant_type_::vector_dtype_k,
+                [&](nk::matrix_span<scalar_t> rows) {
+                    return specialized_index {variant}.get(uuid_of(key), rows, wanted);
+                },
+                error);
         },
         punned_index->variants);
 }
 
 #pragma endregion Insertion and Search
+
+#pragma region Finders
+
+USEARCH_EXPORT usearch_dense_finder_t usearch_dense_find( //
+    usearch_dense_index_t, usearch_executor_t,            //
+    usearch_matrix_view_t const*,                         //
+    usearch_error_t* error) {
+    return propagate_error(usearch_error_unsupported_k, error, "No residency streams matches yet"), nullptr;
+}
+
+USEARCH_EXPORT size_t usearch_dense_find_next( //
+    usearch_dense_finder_t,                    //
+    usearch_keys_span_t, usearch_distance_t*,  //
+    usearch_error_t* error) {
+    return propagate_error(usearch_error_unsupported_k, error, "No residency streams matches yet"), 0ul;
+}
+
+USEARCH_EXPORT void usearch_dense_find_free(usearch_dense_finder_t) {}
+
+#pragma endregion Finders
+
+#pragma region Cursors
+
+USEARCH_EXPORT usearch_dense_cursor_t usearch_dense_cursor(usearch_dense_index_t index, usearch_error_t* error) {
+    auto* punned_index = reinterpret_cast<punned_dense_index_t*>(index);
+    return std::visit(
+        [&]<typename variant_type_>(variant_type_& variant) -> usearch_dense_cursor_t {
+            if constexpr (!is_ram_index<variant_type_>)
+                return propagate_error(usearch_error_unsupported_k, error,
+                                       "A cursor walks host rows; device rows are read through a search"),
+                       nullptr;
+            else {
+                auto* const opened = new (std::nothrow)
+                    punned_dense_cursor_t {std::in_place_type<typename variant_type_::cursor_t>, variant};
+                if (!opened)
+                    return propagate_error(usearch_error_out_of_memory_k, error, "Failed to allocate the cursor"),
+                           nullptr;
+                return propagate_success(error), opened;
+            }
+        },
+        punned_index->variants);
+}
+
+USEARCH_EXPORT size_t usearch_dense_cursor_next(             //
+    usearch_dense_cursor_t cursor, usearch_keys_span_t keys, //
+    usearch_matrix_span_t const* vectors,                    //
+    usearch_error_t* error) {
+    if (!cursor) return propagate_error(usearch_error_malformed_input_k, error, "The cursor must not be null"), 0ul;
+    if (!keys.data) return propagate_error(usearch_error_malformed_input_k, error, "The keys must name storage"), 0ul;
+    if (vectors && vectors->data && vectors->capacity < keys.capacity)
+        return propagate_error(usearch_error_shape_mismatch_k, error,
+                               "The vector output holds fewer rows than the key run"),
+               0ul;
+    return std::visit(
+        [&]<typename cursor_type_>(cursor_type_& walk) -> size_t {
+            if constexpr (std::is_same_v<cursor_type_, std::monostate>)
+                return propagate_error(usearch_error_unsupported_k, error,
+                                       "A cursor walks host rows; device rows are read through a search"),
+                       0ul;
+            else {
+                using scalar_t = typename cursor_type_::scalar_t;
+                using key_t = typename cursor_type_::key_t;
+                std::span<key_t> const identities {reinterpret_cast<key_t*>(keys.data), keys.capacity};
+                if (vectors && vectors->data)
+                    return export_rows<scalar_t>(
+                        vectors, walk.indexes().dimensions(), cursor_type_::indexes_t::vector_dtype_k,
+                        [&](nk::matrix_span<scalar_t> rows) { return walk.read(identities, rows); }, error);
+                return propagate_success(error), walk.read(identities, {});
+            }
+        },
+        *static_cast<punned_dense_cursor_t*>(cursor));
+}
+
+USEARCH_EXPORT void usearch_dense_cursor_free(usearch_dense_cursor_t cursor) {
+    delete static_cast<punned_dense_cursor_t*>(cursor);
+}
+
+#pragma endregion Cursors
+
+#pragma region Merging
+
+USEARCH_EXPORT void usearch_dense_merge(       //
+    usearch_dense_index_t, usearch_executor_t, //
+    usearch_dense_index_t*, size_t,            //
+    usearch_progress_callback_t, void*,        //
+    usearch_error_t* error) {
+    propagate_error(usearch_error_unsupported_k, error, "No residency absorbs donor handles yet");
+}
+
+#pragma endregion Merging
+
+#pragma region Linear Algebra
+
+USEARCH_EXPORT void usearch_dense_multiply(    //
+    usearch_dense_index_t, usearch_executor_t, //
+    usearch_matrix_view_t const*,              //
+    usearch_matches_span_t const*,             //
+    usearch_dense_search_options_t const*,     //
+    usearch_progress_callback_t, void*,        //
+    usearch_dense_traversal_stats_t*,          //
+    usearch_error_t* error) {
+    propagate_error(usearch_error_unsupported_k, error, "No residency walks the approximate product yet");
+}
+
+USEARCH_EXPORT void usearch_dense_attend(      //
+    usearch_dense_index_t, usearch_executor_t, //
+    usearch_matrix_view_t const*,              //
+    usearch_matrix_view_t const*,              //
+    usearch_matrix_span_t const*,              //
+    usearch_dense_softmax_state_t*,            //
+    usearch_dense_attention_options_t const*,  //
+    usearch_progress_callback_t, void*,        //
+    usearch_dense_traversal_stats_t*,          //
+    usearch_error_t* error) {
+    propagate_error(usearch_error_unsupported_k, error, "No residency folds attention over the walk yet");
+}
+
+USEARCH_EXPORT void usearch_dense_maxsim(      //
+    usearch_dense_index_t, usearch_executor_t, //
+    usearch_matrix_view_t const*,              //
+    size_t,                                    //
+    usearch_matches_span_t const*,             //
+    usearch_dense_search_options_t const*,     //
+    usearch_progress_callback_t, void*,        //
+    usearch_dense_traversal_stats_t*,          //
+    usearch_error_t* error) {
+    propagate_error(usearch_error_unsupported_k, error, "No residency scores late interaction yet");
+}
+
+#pragma endregion Linear Algebra
 
 #pragma region Serialization
 
@@ -1762,6 +1948,11 @@ USEARCH_EXPORT usearch_executor_t usearch_executor_for_vram([[maybe_unused]] use
 #else
     return propagate_error(usearch_error_device_k, error, "This build carries no CUDA executor"), nullptr;
 #endif
+}
+
+USEARCH_EXPORT usearch_executor_t usearch_executor_for_nvme(usearch_nvme_options_t const*, size_t,
+                                                            usearch_error_t* error) {
+    return propagate_error(usearch_error_unsupported_k, error, "This build carries no NVMe residency"), nullptr;
 }
 
 USEARCH_EXPORT void usearch_executor_drain(usearch_executor_t punned_executor, usearch_error_t* error) {

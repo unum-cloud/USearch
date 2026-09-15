@@ -180,6 +180,8 @@ enum class [[nodiscard]] status_t : int {
     /** @brief A progress callback asked the operation to stop; it unwound without publishing,
      *      so the structure carries whatever it did before the call. */
     cancelled_k = usearch_error_cancelled_k,
+    /** @brief The verb is declared for every residency but this one does not implement it. */
+    unsupported_k = usearch_error_unsupported_k,
 };
 
 /** @brief Whether @p status reports success. */
@@ -245,6 +247,7 @@ constexpr char const* status_to_string(status_t status) noexcept {
     case status_t::config_mismatch_k: return "the request contradicts the frozen configuration";
     case status_t::contended_k: return "a synchronization contract was violated concurrently";
     case status_t::cancelled_k: return "a progress callback asked the operation to stop";
+    case status_t::unsupported_k: return "this residency does not implement the verb";
     }
     return "an unrecognized status";
 }

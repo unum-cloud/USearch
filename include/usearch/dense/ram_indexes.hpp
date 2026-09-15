@@ -38,6 +38,9 @@
 namespace unum {
 namespace usearch {
 
+template <typename indexes_type_>
+struct dense_ram_indexes_cursor;
+
 /**
  *  @brief The sharded index: same-geometry CPU-resident shards viewed as one.
  *
@@ -56,6 +59,10 @@ template <                                                                    //
     typename key_hash_type_ = std::hash<key_type_>                            //
     >
 struct dense_ram_indexes {
+    friend struct dense_ram_indexes_cursor<dense_ram_indexes>;
+    /** @brief A reader's walk over every shard's published rows in placement order. */
+    using cursor_t = dense_ram_indexes_cursor<dense_ram_indexes>;
+
     /** @brief The caller-visible identity, opaque to every shard - indexes store no keys, so the
      *      whole key vocabulary begins here. */
     using key_t = key_type_;
@@ -1884,7 +1891,7 @@ struct dense_ram_indexes {
 #pragma endregion Checkpoints
 
     /** @brief The owned shards, graph and keys together. A shard's key column is sized at
-     *      @ref reserve and never grown, since a search reads it while rows are still landing. */
+     *      @ref reserve to what the shard holds, since a search reads it while rows are still landing. */
     growing_buffer<shard_t, forkunion_allocator_t> shards_;
     /** @brief Every key's entries. Duplicates coexist as separate slots, which is exactly what
      *      several values under one key means, and costs one slot per row rather than per key. */
@@ -1895,6 +1902,86 @@ struct dense_ram_indexes {
     /** @brief Rows routed so far - the next row's shard and the next batch's rotation base.
      *      @c mutable since the pre-P3323 @c std::atomic_ref binds no const word, not even to load it. */
     mutable std::size_t routed_rows_ {0};
+};
+
+/**
+ *  @brief External reader's cursor over the published rows of one @c dense_ram_indexes: keys
+ *      and vectors in placement order, shard by shard.
+ *
+ *  Strictly read-only - the index is never written through, so readers never stall writers.
+ *  A shard's watermark is snapshotted as the walk enters it, so a row once passed is never
+ *  revisited, while a later shard may carry rows published after the walk began.
+ */
+template <typename indexes_type_>
+struct dense_ram_indexes_cursor {
+
+    using indexes_t = indexes_type_;
+    using key_t = typename indexes_t::key_t;
+    using scalar_t = typename indexes_t::scalar_t;
+    using vector_view_t = typename indexes_t::vector_view_t;
+    using vectors_span_t = typename indexes_t::vectors_span_t;
+
+    /** @brief Binds the cursor and enters the first shard. */
+    explicit dense_ram_indexes_cursor(indexes_t const& indexes) noexcept : indexes_(indexes) { enter_(); }
+
+    dense_ram_indexes_cursor(dense_ram_indexes_cursor const&) = delete;
+    dense_ram_indexes_cursor& operator=(dense_ram_indexes_cursor const&) = delete;
+    dense_ram_indexes_cursor(dense_ram_indexes_cursor&&) = default;
+    dense_ram_indexes_cursor& operator=(dense_ram_indexes_cursor&&) = delete;
+
+    /** @brief @c true while the cursor points at a readable row. */
+    explicit operator bool() const noexcept { return shard_ < indexes_.shards_.size(); }
+    /** @brief The current row's key; meaningless past the end. */
+    key_t key() const noexcept { return indexes_.shards_[shard_].keys[node_]; }
+    /** @brief Immutable view of the current row's vector; meaningless past the end. */
+    vector_view_t vector() const noexcept { return indexes_.shards_[shard_].index->vector(node_); }
+    /** @brief The walked index. */
+    indexes_t const& indexes() const noexcept { return indexes_; }
+
+    /** @brief Moves to the next row below the shard's snapshot, or into the next shard. */
+    dense_ram_indexes_cursor& operator++() noexcept {
+        if (++node_ != visible_) return *this;
+        ++shard_;
+        enter_();
+        return *this;
+    }
+    dense_ram_indexes_cursor operator++(int) = delete;
+
+    /**
+     *  @brief Copies up to @p keys.size() rows into @p keys - and their vectors in the stored
+     *      scalar type into @p vectors, unless it holds no rows - advancing past them and
+     *      reporting the rows written. An export wanting vectors must offer at least as many
+     *      rows as @p keys, each wide enough for a stored row, or nothing is read.
+     */
+    std::size_t read(std::span<key_t> keys, vectors_span_t vectors) noexcept {
+        bool const with_vectors = vectors.extent(0) != 0;
+        std::size_t const row_values = indexes_.row_values_();
+        if (with_vectors && (vectors.extent(0) < keys.size() || vectors.extent(1) < row_values)) return 0;
+        std::size_t const row_bytes = row_values * sizeof(scalar_t);
+        std::size_t written = 0;
+        for (; written != keys.size() && *this; ++written, ++*this) {
+            keys[written] = key();
+            if (with_vectors)
+                std::memcpy(vectors.row(written).as_vector().byte_data(), vector().byte_data(), row_bytes);
+        }
+        return written;
+    }
+
+  private:
+    /** @brief Snapshots the current shard's watermark, skipping shards with nothing published. */
+    void enter_() noexcept {
+        for (node_ = 0; shard_ < indexes_.shards_.size(); ++shard_)
+            if ((visible_ = static_cast<dense_node_id_t>(indexes_.shards_[shard_].index->size())) != 0) return;
+    }
+
+    /** @brief The walked index - never written through. */
+    indexes_t const& indexes_;
+    /** @brief The shard being read, positional in placement order; the shard count past the end. */
+    std::size_t shard_ = 0;
+    /** @brief The current row inside that shard. */
+    dense_node_id_t node_ = 0;
+    /** @brief That shard's watermark snapshot: rows strictly below it are readable. */
+    dense_node_id_t visible_ = 0;
 };
 
 } // namespace usearch
