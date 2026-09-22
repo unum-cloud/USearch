@@ -40,9 +40,12 @@ int main() {
     std::size_t failures_count = 0;
     failures_count += test_dense_index_bf16_cuda();
     failures_count += test_dense_index_f16_cuda();
+    failures_count += test_dense_index_e5m2_cuda();
+    failures_count += test_dense_index_e4m3_cuda();
     failures_count += test_dense_index_i8_cuda();
     failures_count += test_dense_index_i4_cuda();
     failures_count += test_dense_index_u8_cuda();
+    failures_count += test_dense_index_u4_cuda();
     failures_count += test_dense_index_u1_cuda();
     failures_count += test_dense_indexes_cuda();
     return failures_count ? 1 : 0;

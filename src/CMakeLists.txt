@@ -164,8 +164,15 @@ if (USEARCH_BUILD_CUDA)
 
     add_library(
         usearch_dense_vram_variants OBJECT
-        dense/vram_variants_bf16.cu dense/vram_variants_f16.cu dense/vram_variants_i8.cu dense/vram_variants_i4.cu
-        dense/vram_variants_u8.cu dense/vram_variants_u1.cu
+        dense/vram_variants_bf16.cu
+        dense/vram_variants_f16.cu
+        dense/vram_variants_e5m2.cu
+        dense/vram_variants_e4m3.cu
+        dense/vram_variants_i8.cu
+        dense/vram_variants_i4.cu
+        dense/vram_variants_u8.cu
+        dense/vram_variants_u4.cu
+        dense/vram_variants_u1.cu
     )
     target_include_directories(
         usearch_dense_vram_variants PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>

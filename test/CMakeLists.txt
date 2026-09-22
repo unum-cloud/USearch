@@ -63,9 +63,12 @@ if (USEARCH_BUILD_CUDA)
         dense.cu
         dense/vram_index_bf16.cu
         dense/vram_index_f16.cu
+        dense/vram_index_e5m2.cu
+        dense/vram_index_e4m3.cu
         dense/vram_index_i8.cu
         dense/vram_index_i4.cu
         dense/vram_index_u8.cu
+        dense/vram_index_u4.cu
         dense/vram_index_u1.cu
         dense/vram_indexes.cu
     )

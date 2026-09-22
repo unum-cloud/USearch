@@ -103,9 +103,12 @@ std::size_t test_cuda_configuration(char const* name) {
  *  @c main composes explicitly; each returns its shard's failure count. */
 std::size_t test_dense_index_bf16_cuda();
 std::size_t test_dense_index_f16_cuda();
+std::size_t test_dense_index_e5m2_cuda();
+std::size_t test_dense_index_e4m3_cuda();
 std::size_t test_dense_index_i8_cuda();
 std::size_t test_dense_index_i4_cuda();
 std::size_t test_dense_index_u8_cuda();
+std::size_t test_dense_index_u4_cuda();
 std::size_t test_dense_index_u1_cuda();
 
 #pragma endregion Suite Entry Points

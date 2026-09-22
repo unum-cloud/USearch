@@ -564,194 +564,219 @@ struct u8_ampere_euclidean_kit_t : u8_ampere_sqeuclidean_kit_t {
 
 #pragma region Byte Sized Floats
 
+/** The Ampere floor has no fp8 conversion, so each byte's fields are placed into an f32 by hand:
+ *  subnormals scale by 2⁻⁹, and the all-ones magnitude is the format's only NaN. */
+struct e4m3_ampere_widening_t {
+    static __device__ __forceinline__ f32_t byte_to_float(u32_t byte) noexcept {
+        u32_t const exponent = (byte >> 3) & 0xF, mantissa = byte & 0x7;
+        f32_t const magnitude = (byte & 0x7F) == 0x7F ? __int_as_float(0x7FC00000)
+                                : exponent
+                                    ? __int_as_float(static_cast<int>(((exponent + 120u) << 23) | (mantissa << 20)))
+                                    : static_cast<f32_t>(mantissa) * 0x1p-9f;
+        return byte & 0x80 ? -magnitude : magnitude;
+    }
+    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
+        return {byte_to_float(packed_pair & 0xFF), byte_to_float((packed_pair >> 8) & 0xFF)};
+    }
+};
+
+/** The Ampere floor for @c e5m2, which is exactly the high byte of a half: shifting each byte up
+ *  is the whole conversion, infinities and NaNs included. */
+struct e5m2_ampere_widening_t {
+    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
+        u32_t const half_pair = ((packed_pair & 0xFF) << 8) | ((packed_pair & 0xFF00) << 16);
+        return __half22float2(*reinterpret_cast<__half2 const*>(&half_pair));
+    }
+};
+
+struct e4m3_ada_widening_t;
+struct e5m2_ada_widening_t;
+struct e4m3_blackwell_widening_t;
+struct e5m2_blackwell_widening_t;
+
 #if __CUDA_ARCH__ >= 890 || !defined(__CUDA_ARCH__)
 
-/** The @c e4m3 dot base: no generation has fp8 arithmetic - conversion is all the
- *  ISA offers - so pairs widen through the sm_89+ @c cvt.rn.f16x2.e4m3x2 and
- *  accumulate like the 16-bit float kits; hence the @c ada architecture slot. */
-struct e4m3_ada_inner_kit_t {
-    using scalar_t = nk::e4m3_t;
-    using fragment_t = uint4;
-    using accumulator_t = f32_t;
-    using dot_t = f32_t;
-    struct norms_t {
-        f32_t sum, sumsq;
-    };
-    using norms_accumulator_t = float2;
-    struct query_state_t {
-        f32_t rsqrt;
-        f32_t sumsq;
-    };
-
-    inline static constexpr u32_t fragment_bytes_k = 16;
-    inline static constexpr u32_t max_gathers_in_flight_k = 8;
-    inline static constexpr bool has_norms_k = true;
-
-    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
+/** Ada widens a pair in one sm_89+ @c cvt.rn.f16x2.e4m3x2, hence the @c ada architecture slot. */
+struct e4m3_ada_widening_t {
+    static __device__ __forceinline__ u32_t pair_to_halves(u32_t packed_pair) noexcept {
         u32_t half_pair;
         asm("{cvt.rn.f16x2.e4m3x2 %0, %1;}" : "=r"(half_pair) : "h"(static_cast<unsigned short>(packed_pair)));
+        return half_pair;
+    }
+    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
+        u32_t const half_pair = pair_to_halves(packed_pair);
         return __half22float2(*reinterpret_cast<__half2 const*>(&half_pair));
     }
-
-    static __device__ __forceinline__ accumulator_t zero_accumulator() noexcept { return 0.0f; }
-    static __device__ __forceinline__ accumulator_t accumulate_dot(fragment_t a, fragment_t b,
-                                                                   accumulator_t accumulator) noexcept {
-        u32_t const words_a[4] = {a.x, a.y, a.z, a.w};
-        u32_t const words_b[4] = {b.x, b.y, b.z, b.w};
-#pragma unroll
-        for (u32_t word = 0; word != 4; ++word)
-#pragma unroll
-            for (u32_t pair = 0; pair != 2; ++pair) {
-                float2 const values_a = pair_to_floats(words_a[word] >> (16 * pair));
-                float2 const values_b = pair_to_floats(words_b[word] >> (16 * pair));
-                accumulator += values_a.x * values_b.x + values_a.y * values_b.y;
-            }
-        return accumulator;
-    }
-    static __device__ __forceinline__ dot_t partial_to_dot(accumulator_t accumulator) noexcept { return accumulator; }
-
-    static __device__ __forceinline__ norms_accumulator_t zero_norms_accumulator() noexcept { return {0.0f, 0.0f}; }
-    static __device__ __forceinline__ norms_accumulator_t accumulate_norms(fragment_t a,
-                                                                           norms_accumulator_t accumulator) noexcept {
-        u32_t const words[4] = {a.x, a.y, a.z, a.w};
-#pragma unroll
-        for (u32_t word = 0; word != 4; ++word)
-#pragma unroll
-            for (u32_t pair = 0; pair != 2; ++pair) {
-                float2 const values = pair_to_floats(words[word] >> (16 * pair));
-                accumulator.x += values.x + values.y;
-                accumulator.y += values.x * values.x + values.y * values.y;
-            }
-        return accumulator;
-    }
-    static __device__ __forceinline__ norms_t partials_to_norms(norms_accumulator_t accumulator) noexcept {
-        return {accumulator.x, accumulator.y};
-    }
-    static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
-        return {norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f, norms.sumsq};
-    }
-
-    /** The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
-     *  a distance as @b 1-dot, monotone decreasing and negative-safe. */
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
-        return 1.0f - dot;
-    }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return ranked;
-    }
 };
 
-struct e4m3_ada_angular_kit_t : e4m3_ada_inner_kit_t {
-    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, query_state_t query_state,
-                                                                norms_t norms) noexcept {
-        return 1.0f - dot * query_state.rsqrt * (norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f);
-    }
-};
-struct e4m3_ada_sqeuclidean_kit_t : e4m3_ada_inner_kit_t {
-    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, query_state_t query_state,
-                                                                norms_t norms) noexcept {
-        return query_state.sumsq + norms.sumsq - 2.0f * dot;
-    }
-};
-struct e4m3_ada_euclidean_kit_t : e4m3_ada_sqeuclidean_kit_t {
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return sqrtf(ranked);
-    }
-};
-
-/** The @c e5m2 dot base - the wide-exponent fp8, widening through
- *  @c cvt.rn.f16x2.e5m2x2. */
-struct e5m2_ada_inner_kit_t {
-    using scalar_t = nk::e5m2_t;
-    using fragment_t = uint4;
-    using accumulator_t = f32_t;
-    using dot_t = f32_t;
-    struct norms_t {
-        f32_t sum, sumsq;
-    };
-    using norms_accumulator_t = float2;
-    struct query_state_t {
-        f32_t rsqrt;
-        f32_t sumsq;
-    };
-
-    inline static constexpr u32_t fragment_bytes_k = 16;
-    inline static constexpr u32_t max_gathers_in_flight_k = 8;
-    inline static constexpr bool has_norms_k = true;
-
-    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
+/** Ada widens a pair in one sm_89+ @c cvt.rn.f16x2.e5m2x2. */
+struct e5m2_ada_widening_t {
+    static __device__ __forceinline__ u32_t pair_to_halves(u32_t packed_pair) noexcept {
         u32_t half_pair;
         asm("{cvt.rn.f16x2.e5m2x2 %0, %1;}" : "=r"(half_pair) : "h"(static_cast<unsigned short>(packed_pair)));
+        return half_pair;
+    }
+    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
+        u32_t const half_pair = pair_to_halves(packed_pair);
         return __half22float2(*reinterpret_cast<__half2 const*>(&half_pair));
-    }
-
-    static __device__ __forceinline__ accumulator_t zero_accumulator() noexcept { return 0.0f; }
-    static __device__ __forceinline__ accumulator_t accumulate_dot(fragment_t a, fragment_t b,
-                                                                   accumulator_t accumulator) noexcept {
-        u32_t const words_a[4] = {a.x, a.y, a.z, a.w};
-        u32_t const words_b[4] = {b.x, b.y, b.z, b.w};
-#pragma unroll
-        for (u32_t word = 0; word != 4; ++word)
-#pragma unroll
-            for (u32_t pair = 0; pair != 2; ++pair) {
-                float2 const values_a = pair_to_floats(words_a[word] >> (16 * pair));
-                float2 const values_b = pair_to_floats(words_b[word] >> (16 * pair));
-                accumulator += values_a.x * values_b.x + values_a.y * values_b.y;
-            }
-        return accumulator;
-    }
-    static __device__ __forceinline__ dot_t partial_to_dot(accumulator_t accumulator) noexcept { return accumulator; }
-
-    static __device__ __forceinline__ norms_accumulator_t zero_norms_accumulator() noexcept { return {0.0f, 0.0f}; }
-    static __device__ __forceinline__ norms_accumulator_t accumulate_norms(fragment_t a,
-                                                                           norms_accumulator_t accumulator) noexcept {
-        u32_t const words[4] = {a.x, a.y, a.z, a.w};
-#pragma unroll
-        for (u32_t word = 0; word != 4; ++word)
-#pragma unroll
-            for (u32_t pair = 0; pair != 2; ++pair) {
-                float2 const values = pair_to_floats(words[word] >> (16 * pair));
-                accumulator.x += values.x + values.y;
-                accumulator.y += values.x * values.x + values.y * values.y;
-            }
-        return accumulator;
-    }
-    static __device__ __forceinline__ norms_t partials_to_norms(norms_accumulator_t accumulator) noexcept {
-        return {accumulator.x, accumulator.y};
-    }
-    static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
-        return {norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f, norms.sumsq};
-    }
-
-    /** The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
-     *  a distance as @b 1-dot, monotone decreasing and negative-safe. */
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
-        return 1.0f - dot;
-    }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return ranked;
-    }
-};
-
-struct e5m2_ada_angular_kit_t : e5m2_ada_inner_kit_t {
-    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, query_state_t query_state,
-                                                                norms_t norms) noexcept {
-        return 1.0f - dot * query_state.rsqrt * (norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f);
-    }
-};
-struct e5m2_ada_sqeuclidean_kit_t : e5m2_ada_inner_kit_t {
-    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, query_state_t query_state,
-                                                                norms_t norms) noexcept {
-        return query_state.sumsq + norms.sumsq - 2.0f * dot;
-    }
-};
-struct e5m2_ada_euclidean_kit_t : e5m2_ada_sqeuclidean_kit_t {
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return sqrtf(ranked);
     }
 };
 
 #endif
+
+#if __CUDA_ARCH__ >= 1000 || !defined(__CUDA_ARCH__)
+
+/** Blackwell keeps both pairs in halves and multiplies them straight into the f32 sum through
+ *  sm_100+ @c fma.rn.f32.f16, so the dot never widens to f32 - the norms still do. */
+template <typename ada_widening_type_>
+struct dense_fp8_blackwell_widening : ada_widening_type_ {
+    static __device__ __forceinline__ f32_t accumulate_pair(u32_t first_pair, u32_t second_pair,
+                                                            f32_t accumulator) noexcept {
+        u32_t const first_halves = ada_widening_type_::pair_to_halves(first_pair);
+        u32_t const second_halves = ada_widening_type_::pair_to_halves(second_pair);
+        asm("{.reg .b16 first_low, first_high, second_low, second_high;\n\t" //
+            "mov.b32 {first_low, first_high}, %1;\n\t"                       //
+            "mov.b32 {second_low, second_high}, %2;\n\t"                     //
+            "fma.rn.f32.f16 %0, first_low, second_low, %0;\n\t"              //
+            "fma.rn.f32.f16 %0, first_high, second_high, %0;}"
+            : "+f"(accumulator)
+            : "r"(first_halves), "r"(second_halves));
+        return accumulator;
+    }
+};
+
+struct e4m3_blackwell_widening_t : dense_fp8_blackwell_widening<e4m3_ada_widening_t> {};
+struct e5m2_blackwell_widening_t : dense_fp8_blackwell_widening<e5m2_ada_widening_t> {};
+
+#endif
+
+/** The fp8 dot base over any widening: no generation has fp8 arithmetic - conversion is all the
+ *  ISA offers - so pairs widen and accumulate like the 16-bit float kits, and one generation's
+ *  row differs from another's only in @p widening_type_. */
+template <typename scalar_type_, typename widening_type_>
+struct dense_fp8_inner_kit {
+    using scalar_t = scalar_type_;
+    using fragment_t = uint4;
+    using accumulator_t = f32_t;
+    using dot_t = f32_t;
+    struct norms_t {
+        f32_t sum, sumsq;
+    };
+    using norms_accumulator_t = float2;
+    struct query_state_t {
+        f32_t rsqrt;
+        f32_t sumsq;
+    };
+
+    inline static constexpr u32_t fragment_bytes_k = 16;
+    inline static constexpr u32_t max_gathers_in_flight_k = 8;
+    inline static constexpr bool has_norms_k = true;
+
+    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
+        return widening_type_::pair_to_floats(packed_pair);
+    }
+
+    static __device__ __forceinline__ accumulator_t zero_accumulator() noexcept { return 0.0f; }
+    static __device__ __forceinline__ accumulator_t accumulate_dot(fragment_t a, fragment_t b,
+                                                                   accumulator_t accumulator) noexcept {
+        u32_t const words_a[4] = {a.x, a.y, a.z, a.w};
+        u32_t const words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+        for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+            for (u32_t pair = 0; pair != 2; ++pair) {
+                u32_t const pair_a = words_a[word] >> (16 * pair), pair_b = words_b[word] >> (16 * pair);
+                if constexpr (requires { widening_type_::accumulate_pair(pair_a, pair_b, accumulator); })
+                    accumulator = widening_type_::accumulate_pair(pair_a, pair_b, accumulator);
+                else {
+                    float2 const values_a = pair_to_floats(pair_a);
+                    float2 const values_b = pair_to_floats(pair_b);
+                    accumulator += values_a.x * values_b.x + values_a.y * values_b.y;
+                }
+            }
+        return accumulator;
+    }
+    static __device__ __forceinline__ dot_t partial_to_dot(accumulator_t accumulator) noexcept { return accumulator; }
+
+    static __device__ __forceinline__ norms_accumulator_t zero_norms_accumulator() noexcept { return {0.0f, 0.0f}; }
+    static __device__ __forceinline__ norms_accumulator_t accumulate_norms(fragment_t a,
+                                                                           norms_accumulator_t accumulator) noexcept {
+        u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+        for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+            for (u32_t pair = 0; pair != 2; ++pair) {
+                float2 const values = pair_to_floats(words[word] >> (16 * pair));
+                accumulator.x += values.x + values.y;
+                accumulator.y += values.x * values.x + values.y * values.y;
+            }
+        return accumulator;
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(norms_accumulator_t accumulator) noexcept {
+        return {accumulator.x, accumulator.y};
+    }
+    static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
+        return {norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f, norms.sumsq};
+    }
+
+    /** The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
+     *  a distance as @b 1-dot, monotone decreasing and negative-safe. */
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
+        return 1.0f - dot;
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
+        return ranked;
+    }
+};
+
+template <typename scalar_type_, typename widening_type_>
+struct dense_fp8_angular_kit : dense_fp8_inner_kit<scalar_type_, widening_type_> {
+    using inner_t = dense_fp8_inner_kit<scalar_type_, widening_type_>;
+    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, typename inner_t::query_state_t query_state,
+                                                                typename inner_t::norms_t norms) noexcept {
+        return 1.0f - dot * query_state.rsqrt * (norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f);
+    }
+};
+template <typename scalar_type_, typename widening_type_>
+struct dense_fp8_sqeuclidean_kit : dense_fp8_inner_kit<scalar_type_, widening_type_> {
+    using inner_t = dense_fp8_inner_kit<scalar_type_, widening_type_>;
+    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, typename inner_t::query_state_t query_state,
+                                                                typename inner_t::norms_t norms) noexcept {
+        return query_state.sumsq + norms.sumsq - 2.0f * dot;
+    }
+};
+template <typename scalar_type_, typename widening_type_>
+struct dense_fp8_euclidean_kit : dense_fp8_sqeuclidean_kit<scalar_type_, widening_type_> {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
+        return sqrtf(ranked);
+    }
+};
+
+using e4m3_ampere_inner_kit_t = dense_fp8_inner_kit<nk::e4m3_t, e4m3_ampere_widening_t>;
+using e4m3_ampere_angular_kit_t = dense_fp8_angular_kit<nk::e4m3_t, e4m3_ampere_widening_t>;
+using e4m3_ampere_sqeuclidean_kit_t = dense_fp8_sqeuclidean_kit<nk::e4m3_t, e4m3_ampere_widening_t>;
+using e4m3_ampere_euclidean_kit_t = dense_fp8_euclidean_kit<nk::e4m3_t, e4m3_ampere_widening_t>;
+using e4m3_ada_inner_kit_t = dense_fp8_inner_kit<nk::e4m3_t, e4m3_ada_widening_t>;
+using e4m3_ada_angular_kit_t = dense_fp8_angular_kit<nk::e4m3_t, e4m3_ada_widening_t>;
+using e4m3_ada_sqeuclidean_kit_t = dense_fp8_sqeuclidean_kit<nk::e4m3_t, e4m3_ada_widening_t>;
+using e4m3_ada_euclidean_kit_t = dense_fp8_euclidean_kit<nk::e4m3_t, e4m3_ada_widening_t>;
+using e4m3_blackwell_inner_kit_t = dense_fp8_inner_kit<nk::e4m3_t, e4m3_blackwell_widening_t>;
+using e4m3_blackwell_angular_kit_t = dense_fp8_angular_kit<nk::e4m3_t, e4m3_blackwell_widening_t>;
+using e4m3_blackwell_sqeuclidean_kit_t = dense_fp8_sqeuclidean_kit<nk::e4m3_t, e4m3_blackwell_widening_t>;
+using e4m3_blackwell_euclidean_kit_t = dense_fp8_euclidean_kit<nk::e4m3_t, e4m3_blackwell_widening_t>;
+
+using e5m2_ampere_inner_kit_t = dense_fp8_inner_kit<nk::e5m2_t, e5m2_ampere_widening_t>;
+using e5m2_ampere_angular_kit_t = dense_fp8_angular_kit<nk::e5m2_t, e5m2_ampere_widening_t>;
+using e5m2_ampere_sqeuclidean_kit_t = dense_fp8_sqeuclidean_kit<nk::e5m2_t, e5m2_ampere_widening_t>;
+using e5m2_ampere_euclidean_kit_t = dense_fp8_euclidean_kit<nk::e5m2_t, e5m2_ampere_widening_t>;
+using e5m2_ada_inner_kit_t = dense_fp8_inner_kit<nk::e5m2_t, e5m2_ada_widening_t>;
+using e5m2_ada_angular_kit_t = dense_fp8_angular_kit<nk::e5m2_t, e5m2_ada_widening_t>;
+using e5m2_ada_sqeuclidean_kit_t = dense_fp8_sqeuclidean_kit<nk::e5m2_t, e5m2_ada_widening_t>;
+using e5m2_ada_euclidean_kit_t = dense_fp8_euclidean_kit<nk::e5m2_t, e5m2_ada_widening_t>;
+using e5m2_blackwell_inner_kit_t = dense_fp8_inner_kit<nk::e5m2_t, e5m2_blackwell_widening_t>;
+using e5m2_blackwell_angular_kit_t = dense_fp8_angular_kit<nk::e5m2_t, e5m2_blackwell_widening_t>;
+using e5m2_blackwell_sqeuclidean_kit_t = dense_fp8_sqeuclidean_kit<nk::e5m2_t, e5m2_blackwell_widening_t>;
+using e5m2_blackwell_euclidean_kit_t = dense_fp8_euclidean_kit<nk::e5m2_t, e5m2_blackwell_widening_t>;
 
 #pragma endregion
 
@@ -1157,24 +1182,67 @@ template <>
 struct dense_cuda_kit_for<nk_u8_k, nk_kernel_euclidean_k> {
     using kit_t = u8_ampere_euclidean_kit_t;
 };
-#if __CUDA_ARCH__ >= 890 || !defined(__CUDA_ARCH__)
-template <>
-struct dense_cuda_kit_for<nk_e4m3_k, nk_kernel_angular_k> {
-    using kit_t = e4m3_ada_angular_kit_t;
+
+/** The fp8 cells chain like the CPU's: a software floor every pass compiles, the Ada conversion
+ *  from sm_89, and the Blackwell half-precision multiply from sm_100. */
+template <cuda_arch_t arch_ceiling_>
+struct dense_cuda_kit_chain<nk_e5m2_k, nk_kernel_dot_k, arch_ceiling_> {
+    using selected_t = dense_cuda_first_available_kit<
+        e5m2_ampere_inner_kit_t,
+        dense_cuda_arch_layer<cuda_arch_blackwell_k, arch_ceiling_, e5m2_blackwell_inner_kit_t>,
+        dense_cuda_arch_layer<cuda_arch_ada_k, arch_ceiling_, e5m2_ada_inner_kit_t>>;
+    using kit_t = typename selected_t::type;
+    static constexpr cuda_arch_t picked_arch_k = selected_t::picked_arch_k;
+};
+template <cuda_arch_t arch_ceiling_>
+struct dense_cuda_kit_chain<nk_e5m2_k, nk_kernel_angular_k, arch_ceiling_> {
+    using selected_t = dense_cuda_first_available_kit<
+        e5m2_ampere_angular_kit_t,
+        dense_cuda_arch_layer<cuda_arch_blackwell_k, arch_ceiling_, e5m2_blackwell_angular_kit_t>,
+        dense_cuda_arch_layer<cuda_arch_ada_k, arch_ceiling_, e5m2_ada_angular_kit_t>>;
+    using kit_t = typename selected_t::type;
+    static constexpr cuda_arch_t picked_arch_k = selected_t::picked_arch_k;
+};
+template <cuda_arch_t arch_ceiling_>
+struct dense_cuda_kit_chain<nk_e5m2_k, nk_kernel_euclidean_k, arch_ceiling_> {
+    using selected_t = dense_cuda_first_available_kit<
+        e5m2_ampere_euclidean_kit_t,
+        dense_cuda_arch_layer<cuda_arch_blackwell_k, arch_ceiling_, e5m2_blackwell_euclidean_kit_t>,
+        dense_cuda_arch_layer<cuda_arch_ada_k, arch_ceiling_, e5m2_ada_euclidean_kit_t>>;
+    using kit_t = typename selected_t::type;
+    static constexpr cuda_arch_t picked_arch_k = selected_t::picked_arch_k;
+};
+template <cuda_arch_t arch_ceiling_>
+struct dense_cuda_kit_chain<nk_e4m3_k, nk_kernel_dot_k, arch_ceiling_> {
+    using selected_t = dense_cuda_first_available_kit<
+        e4m3_ampere_inner_kit_t,
+        dense_cuda_arch_layer<cuda_arch_blackwell_k, arch_ceiling_, e4m3_blackwell_inner_kit_t>,
+        dense_cuda_arch_layer<cuda_arch_ada_k, arch_ceiling_, e4m3_ada_inner_kit_t>>;
+    using kit_t = typename selected_t::type;
+    static constexpr cuda_arch_t picked_arch_k = selected_t::picked_arch_k;
+};
+template <cuda_arch_t arch_ceiling_>
+struct dense_cuda_kit_chain<nk_e4m3_k, nk_kernel_angular_k, arch_ceiling_> {
+    using selected_t = dense_cuda_first_available_kit<
+        e4m3_ampere_angular_kit_t,
+        dense_cuda_arch_layer<cuda_arch_blackwell_k, arch_ceiling_, e4m3_blackwell_angular_kit_t>,
+        dense_cuda_arch_layer<cuda_arch_ada_k, arch_ceiling_, e4m3_ada_angular_kit_t>>;
+    using kit_t = typename selected_t::type;
+    static constexpr cuda_arch_t picked_arch_k = selected_t::picked_arch_k;
+};
+template <cuda_arch_t arch_ceiling_>
+struct dense_cuda_kit_chain<nk_e4m3_k, nk_kernel_euclidean_k, arch_ceiling_> {
+    using selected_t = dense_cuda_first_available_kit<
+        e4m3_ampere_euclidean_kit_t,
+        dense_cuda_arch_layer<cuda_arch_blackwell_k, arch_ceiling_, e4m3_blackwell_euclidean_kit_t>,
+        dense_cuda_arch_layer<cuda_arch_ada_k, arch_ceiling_, e4m3_ada_euclidean_kit_t>>;
+    using kit_t = typename selected_t::type;
+    static constexpr cuda_arch_t picked_arch_k = selected_t::picked_arch_k;
 };
 template <>
-struct dense_cuda_kit_for<nk_e4m3_k, nk_kernel_euclidean_k> {
-    using kit_t = e4m3_ada_euclidean_kit_t;
+struct dense_cuda_kit_for<nk_i4_k, nk_kernel_dot_k> {
+    using kit_t = i4x2_ampere_inner_kit_t;
 };
-template <>
-struct dense_cuda_kit_for<nk_e5m2_k, nk_kernel_angular_k> {
-    using kit_t = e5m2_ada_angular_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_e5m2_k, nk_kernel_euclidean_k> {
-    using kit_t = e5m2_ada_euclidean_kit_t;
-};
-#endif
 template <>
 struct dense_cuda_kit_for<nk_i4_k, nk_kernel_angular_k> {
     using kit_t = i4x2_ampere_angular_kit_t;
@@ -1182,6 +1250,10 @@ struct dense_cuda_kit_for<nk_i4_k, nk_kernel_angular_k> {
 template <>
 struct dense_cuda_kit_for<nk_i4_k, nk_kernel_euclidean_k> {
     using kit_t = i4x2_ampere_euclidean_kit_t;
+};
+template <>
+struct dense_cuda_kit_for<nk_u4_k, nk_kernel_dot_k> {
+    using kit_t = u4x2_ampere_inner_kit_t;
 };
 template <>
 struct dense_cuda_kit_for<nk_u4_k, nk_kernel_angular_k> {

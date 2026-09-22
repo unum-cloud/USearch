@@ -10,6 +10,8 @@ using namespace unum::usearch;
 
 std::size_t test_dense_index_u8_cuda() {
     std::size_t failures_count = 0;
+    failures_count += test_cuda_configuration<nk_kernel_dot_k, nk_u8_k>("cuda-u8+dot");
+    failures_count += test_cuda_configuration<nk_kernel_angular_k, nk_u8_k>("cuda-u8+angular");
     failures_count += test_cuda_configuration<nk_kernel_euclidean_k, nk_u8_k>("cuda-u8+euclidean");
     return failures_count;
 }

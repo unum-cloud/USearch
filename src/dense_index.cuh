@@ -414,14 +414,31 @@ struct punned_dense_index_t {
 #endif
 #endif
 #if USEARCH_BUILD_CUDA
+        vram_index<nk_bf16_k, nk_kernel_dot_k>,       //
         vram_index<nk_bf16_k, nk_kernel_angular_k>,   //
         vram_index<nk_bf16_k, nk_kernel_euclidean_k>, //
+        vram_index<nk_f16_k, nk_kernel_dot_k>,        //
         vram_index<nk_f16_k, nk_kernel_angular_k>,    //
+        vram_index<nk_f16_k, nk_kernel_euclidean_k>,  //
+        vram_index<nk_e5m2_k, nk_kernel_dot_k>,       //
+        vram_index<nk_e5m2_k, nk_kernel_angular_k>,   //
+        vram_index<nk_e5m2_k, nk_kernel_euclidean_k>, //
+        vram_index<nk_e4m3_k, nk_kernel_dot_k>,       //
+        vram_index<nk_e4m3_k, nk_kernel_angular_k>,   //
+        vram_index<nk_e4m3_k, nk_kernel_euclidean_k>, //
+        vram_index<nk_i8_k, nk_kernel_dot_k>,         //
         vram_index<nk_i8_k, nk_kernel_angular_k>,     //
         vram_index<nk_i8_k, nk_kernel_euclidean_k>,   //
+        vram_index<nk_i4_k, nk_kernel_dot_k>,         //
         vram_index<nk_i4_k, nk_kernel_angular_k>,     //
+        vram_index<nk_i4_k, nk_kernel_euclidean_k>,   //
+        vram_index<nk_u8_k, nk_kernel_dot_k>,         //
         vram_index<nk_u8_k, nk_kernel_angular_k>,     //
         vram_index<nk_u8_k, nk_kernel_euclidean_k>,   //
+        vram_index<nk_u4_k, nk_kernel_dot_k>,         //
+        vram_index<nk_u4_k, nk_kernel_angular_k>,     //
+        vram_index<nk_u4_k, nk_kernel_euclidean_k>,   //
+        vram_index<nk_u1_k, nk_kernel_dot_k>,         //
         vram_index<nk_u1_k, nk_kernel_hamming_k>,     //
         vram_index<nk_u1_k, nk_kernel_jaccard_k>,     //
 #endif
@@ -848,14 +865,31 @@ extern template struct specialized_index<ram_index<nk_u4_k, nk_kernel_euclidean_
 #endif
 #endif
 #if USEARCH_BUILD_CUDA
+extern template struct specialized_index<vram_index<nk_bf16_k, nk_kernel_dot_k>>;
 extern template struct specialized_index<vram_index<nk_bf16_k, nk_kernel_angular_k>>;
 extern template struct specialized_index<vram_index<nk_bf16_k, nk_kernel_euclidean_k>>;
+extern template struct specialized_index<vram_index<nk_f16_k, nk_kernel_dot_k>>;
 extern template struct specialized_index<vram_index<nk_f16_k, nk_kernel_angular_k>>;
+extern template struct specialized_index<vram_index<nk_f16_k, nk_kernel_euclidean_k>>;
+extern template struct specialized_index<vram_index<nk_e5m2_k, nk_kernel_dot_k>>;
+extern template struct specialized_index<vram_index<nk_e5m2_k, nk_kernel_angular_k>>;
+extern template struct specialized_index<vram_index<nk_e5m2_k, nk_kernel_euclidean_k>>;
+extern template struct specialized_index<vram_index<nk_e4m3_k, nk_kernel_dot_k>>;
+extern template struct specialized_index<vram_index<nk_e4m3_k, nk_kernel_angular_k>>;
+extern template struct specialized_index<vram_index<nk_e4m3_k, nk_kernel_euclidean_k>>;
+extern template struct specialized_index<vram_index<nk_i8_k, nk_kernel_dot_k>>;
 extern template struct specialized_index<vram_index<nk_i8_k, nk_kernel_angular_k>>;
 extern template struct specialized_index<vram_index<nk_i8_k, nk_kernel_euclidean_k>>;
+extern template struct specialized_index<vram_index<nk_i4_k, nk_kernel_dot_k>>;
 extern template struct specialized_index<vram_index<nk_i4_k, nk_kernel_angular_k>>;
+extern template struct specialized_index<vram_index<nk_i4_k, nk_kernel_euclidean_k>>;
+extern template struct specialized_index<vram_index<nk_u8_k, nk_kernel_dot_k>>;
 extern template struct specialized_index<vram_index<nk_u8_k, nk_kernel_angular_k>>;
 extern template struct specialized_index<vram_index<nk_u8_k, nk_kernel_euclidean_k>>;
+extern template struct specialized_index<vram_index<nk_u4_k, nk_kernel_dot_k>>;
+extern template struct specialized_index<vram_index<nk_u4_k, nk_kernel_angular_k>>;
+extern template struct specialized_index<vram_index<nk_u4_k, nk_kernel_euclidean_k>>;
+extern template struct specialized_index<vram_index<nk_u1_k, nk_kernel_dot_k>>;
 extern template struct specialized_index<vram_index<nk_u1_k, nk_kernel_hamming_k>>;
 extern template struct specialized_index<vram_index<nk_u1_k, nk_kernel_jaccard_k>>;
 #endif
@@ -1078,12 +1112,18 @@ static usearch_dense_index_t make_ram_index(usearch_dense_options_t const* optio
 /** The VRAM cells with adapted CUDA kits - the device half of the variant list. */
 constexpr bool vram_cell_wired(nk_dtype_t dtype, nk_kernel_kind_t kernel) noexcept {
     switch (dtype) {
-    case nk_i8_k: return kernel == nk_kernel_angular_k || kernel == nk_kernel_euclidean_k;
-    case nk_u8_k: return kernel == nk_kernel_angular_k || kernel == nk_kernel_euclidean_k;
-    case nk_f16_k: return kernel == nk_kernel_angular_k;
-    case nk_bf16_k: return kernel == nk_kernel_angular_k || kernel == nk_kernel_euclidean_k;
-    case nk_i4_k: return kernel == nk_kernel_angular_k;
-    case nk_u1_k: return kernel == nk_kernel_hamming_k || kernel == nk_kernel_jaccard_k;
+    case nk_bf16_k:
+        return kernel == nk_kernel_dot_k || kernel == nk_kernel_angular_k || kernel == nk_kernel_euclidean_k;
+    case nk_f16_k: return kernel == nk_kernel_dot_k || kernel == nk_kernel_angular_k || kernel == nk_kernel_euclidean_k;
+    case nk_e5m2_k:
+        return kernel == nk_kernel_dot_k || kernel == nk_kernel_angular_k || kernel == nk_kernel_euclidean_k;
+    case nk_e4m3_k:
+        return kernel == nk_kernel_dot_k || kernel == nk_kernel_angular_k || kernel == nk_kernel_euclidean_k;
+    case nk_i8_k: return kernel == nk_kernel_dot_k || kernel == nk_kernel_angular_k || kernel == nk_kernel_euclidean_k;
+    case nk_i4_k: return kernel == nk_kernel_dot_k || kernel == nk_kernel_angular_k || kernel == nk_kernel_euclidean_k;
+    case nk_u8_k: return kernel == nk_kernel_dot_k || kernel == nk_kernel_angular_k || kernel == nk_kernel_euclidean_k;
+    case nk_u4_k: return kernel == nk_kernel_dot_k || kernel == nk_kernel_angular_k || kernel == nk_kernel_euclidean_k;
+    case nk_u1_k: return kernel == nk_kernel_dot_k || kernel == nk_kernel_hamming_k || kernel == nk_kernel_jaccard_k;
     default: return false;
     }
 }
