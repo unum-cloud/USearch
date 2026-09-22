@@ -390,7 +390,7 @@ usearch_sibling(
 )
 usearch_sibling(
     stringzilla stringzilla::header https://github.com/ashvardanian/StringZilla
-    93fa8cc1e0a14a50b6f6a2e8cd90affcbb944d56
+    36b32746d1fa29252af3beade1b07adc433a495e
 )
 usearch_sibling(
     smashtable smashtable::header https://github.com/ashvardanian/SmashTable f69cd0732842189dc3bede2e70712af8b525b70c
