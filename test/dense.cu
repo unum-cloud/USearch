@@ -19,6 +19,8 @@
 #include "dense/vram_indexes.cuh"
 
 using namespace unum::usearch;
+using namespace unum::usearch::test;
+using namespace unum::usearch::test::dense;
 
 /** The device plans are move-only and never assigned over. */
 using witnessed_index_t = dense_vram_index<>;
@@ -35,18 +37,18 @@ int main() {
     int devices_count = 0;
     cudaError_t const probed = cudaGetDeviceCount(&devices_count);
     if (probed != cudaSuccess || !devices_count)
-        return static_cast<int>(us::report("cuda", "no CUDA device reachable"));
+        return static_cast<int>(us::test::report("cuda", "no CUDA device reachable"));
     fmt::println("CUDA devices: {}", devices_count);
     std::size_t failures_count = 0;
-    failures_count += test_dense_index_bf16_cuda();
-    failures_count += test_dense_index_f16_cuda();
-    failures_count += test_dense_index_e5m2_cuda();
-    failures_count += test_dense_index_e4m3_cuda();
-    failures_count += test_dense_index_i8_cuda();
-    failures_count += test_dense_index_i4_cuda();
-    failures_count += test_dense_index_u8_cuda();
-    failures_count += test_dense_index_u4_cuda();
-    failures_count += test_dense_index_u1_cuda();
-    failures_count += test_dense_indexes_cuda();
+    failures_count += dense::check_vram_index_bf16();
+    failures_count += dense::check_vram_index_f16();
+    failures_count += dense::check_vram_index_e5m2();
+    failures_count += dense::check_vram_index_e4m3();
+    failures_count += dense::check_vram_index_i8();
+    failures_count += dense::check_vram_index_i4();
+    failures_count += dense::check_vram_index_u8();
+    failures_count += dense::check_vram_index_u4();
+    failures_count += dense::check_vram_index_u1();
+    failures_count += dense::check_vram_indexes();
     return failures_count ? 1 : 0;
 }

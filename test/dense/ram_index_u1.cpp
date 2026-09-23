@@ -9,7 +9,7 @@
 
 using namespace unum::usearch;
 
-std::size_t test_dense_index_u1() {
+std::size_t test::dense::check_ram_index_u1() {
     std::size_t failures_count = 0;
     failures_count += test_configuration<nk_u1_k, nk_kernel_hamming_k>("u1+hamming");
     failures_count += test_configuration<nk_u1_k, nk_kernel_jaccard_k>("u1+jaccard");

@@ -8,7 +8,7 @@
 
 using namespace unum::usearch;
 
-std::size_t test_dense_index_u4_cuda() {
+std::size_t test::dense::check_vram_index_u4() {
     std::size_t failures_count = 0;
     failures_count += test_cuda_configuration<nk_kernel_dot_k, nk_u4_k>("cuda-u4+dot");
     failures_count += test_cuda_configuration<nk_kernel_angular_k, nk_u4_k>("cuda-u4+angular");

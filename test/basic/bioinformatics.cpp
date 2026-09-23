@@ -22,6 +22,7 @@
 #include "basic.hpp"
 
 using namespace unum::usearch;
+using namespace unum::usearch::test;
 
 /** One read: a plain string over the @c ACGT alphabet. */
 using dna_t = std::string;
@@ -244,7 +245,7 @@ static std::size_t check_bioinformatics_independent_oracle() {
     return failures;
 }
 
-std::size_t test_bioinformatics() {
+std::size_t test::basic::check_bioinformatics() {
     bioinformatics_fixture_t const fixture;
     std::size_t failures = 0;
     failures += test_basic_scenarios(fixture);

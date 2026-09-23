@@ -9,7 +9,7 @@
 
 using namespace unum::usearch;
 
-std::size_t test_dense_index_i8() {
+std::size_t test::dense::check_ram_index_i8() {
     std::size_t failures_count = 0;
     failures_count += test_configuration<nk_i8_k, nk_kernel_euclidean_k>("i8+euclidean");
     failures_count += test_configuration<nk_i8_k, nk_kernel_euclidean_k, flaky_waiter_t>("i8+euclidean+flaky");

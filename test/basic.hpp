@@ -39,8 +39,7 @@
 #include "usearch/basic/ram_index.hpp"
 #include "usearch/utilities/safegraphs_format.hpp"
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::test {
 
 #pragma region Constants and Seeds
 
@@ -2682,5 +2681,4 @@ std::size_t test_basic_scenarios(fixture_type_ const& fixture) {
     return failures;
 }
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::test

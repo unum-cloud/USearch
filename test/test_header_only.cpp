@@ -10,15 +10,16 @@
 #include "test.hpp"
 
 using namespace unum::usearch;
+using namespace unum::usearch::test;
 
 int main() {
     std::size_t failures_count = 0;
 
-    failures_count += test_ram_buffers();
-    failures_count += test_ram_tables();
-    failures_count += test_sentences();
-    failures_count += test_bioinformatics();
-    failures_count += test_meshes();
+    failures_count += utilities::check_ram_buffers();
+    failures_count += utilities::check_ram_tables();
+    failures_count += basic::check_sentences();
+    failures_count += basic::check_bioinformatics();
+    failures_count += basic::check_meshes();
 
     return report("total", failures_count) ? 1 : 0;
 }

@@ -29,8 +29,7 @@
 #include "dense.cuh"
 #include "utilities/persisted_dataset.hpp"
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::bench::dense {
 
 #pragma region CUDA Pipeline
 
@@ -387,7 +386,7 @@ concept cuda_kit_adapted = requires { typename dense_cuda_kit_for<dtype_, kernel
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t arch_ceiling_,
           typename plane_allocator_>
     requires(!cuda_kit_adapted<stored_dtype_, kernel_>)
-int stage_and_run(persisted_dataset<dataset_scalar_type_> const&, bench_options_t const& options, int) {
+int stage_and_run(utilities::persisted_dataset<dataset_scalar_type_> const&, bench_options_t const& options, int) {
     fmt::println("skipped: no device kit adapted for {} · {}", dtype_name(options.stored_dtype),
                  nk_kernel_name(options.kernel));
     return 0;
@@ -398,7 +397,8 @@ int stage_and_run(persisted_dataset<dataset_scalar_type_> const&, bench_options_
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t arch_ceiling_,
           typename plane_allocator_>
     requires(cuda_kit_adapted<stored_dtype_, kernel_>)
-int stage_and_run(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options, int device) {
+int stage_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
+                  int device) {
     using index_t = dense_vram_index<stored_dtype_, kernel_, arch_ceiling_, plane_allocator_, plane_allocator_,
                                      cuda_device_allocator_t>;
     using bench_context_t = cuda_bench_context<index_t>;
@@ -460,7 +460,7 @@ int stage_and_run(persisted_dataset<dataset_scalar_type_> const& dataset, bench_
 /** Kernel axis: lowers the runtime metric to a compile-time kernel kind, the terminal hop into
  *  @ref stage_and_run. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, cuda_arch_t arch_ceiling_, typename plane_allocator_>
-int run_with_metric(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
+int run_with_metric(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
                     int device) {
     return dispatch_kernel<stored_dtype_>(
         options.kernel,
@@ -477,8 +477,8 @@ int run_with_metric(persisted_dataset<dataset_scalar_type_> const& dataset, benc
 /** Generation axis: the CLI's architecture ceiling picks which kit-chain rows every cell below
  *  may select, so two runs on one device compare generation codegen side by side. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, typename plane_allocator_>
-int run_with_arch(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options, int device,
-                  cuda_arch_t arch_ceiling) {
+int run_with_arch(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
+                  int device, cuda_arch_t arch_ceiling) {
     switch (arch_ceiling) {
     case cuda_arch_ampere_k:
         return run_with_metric<dataset_scalar_type_, stored_dtype_, cuda_arch_ampere_k, plane_allocator_>( //
@@ -504,8 +504,9 @@ int run_with_arch(persisted_dataset<dataset_scalar_type_> const& dataset, bench_
  *  oversubscribe it through the pager, the bigger-than-VRAM build path.
  */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
-int run_with_stored_dtype(persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
-                          int device, cuda_arch_t arch_ceiling, cuda_address_space_t plane_space) {
+int run_with_stored_dtype(utilities::persisted_dataset<dataset_scalar_type_> const& dataset,
+                          bench_options_t const& options, int device, cuda_arch_t arch_ceiling,
+                          cuda_address_space_t plane_space) {
     return plane_space == cuda_address_space_t::managed_k
                ? run_with_arch<dataset_scalar_type_, stored_dtype_, cuda_managed_allocator<std::byte>>( //
                      dataset, options, device, arch_ceiling)
@@ -513,5 +514,4 @@ int run_with_stored_dtype(persisted_dataset<dataset_scalar_type_> const& dataset
                      dataset, options, device, arch_ceiling);
 }
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::bench::dense

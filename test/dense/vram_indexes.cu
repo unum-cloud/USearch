@@ -9,7 +9,7 @@
 
 using namespace unum::usearch;
 
-std::size_t test_dense_indexes_cuda() {
+std::size_t test::dense::check_vram_indexes() {
     std::size_t failures_count = 0;
     failures_count += test_cuda_indexes_configuration<nk_bf16_k, nk_kernel_dot_k>("cuda-sharded bf16+dot");
     failures_count += test_cuda_indexes_configuration<nk_bf16_k, nk_kernel_angular_k>("cuda-sharded bf16+angular");

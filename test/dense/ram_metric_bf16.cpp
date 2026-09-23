@@ -7,7 +7,8 @@
 #include "dense/ram_metric.hpp"
 
 using namespace unum::usearch;
+using namespace unum::usearch::test::dense;
 
 static_assert(scalar_wired<nk::bf16_t>);
 
-std::size_t test_dense_metric_bf16() { return static_cast<std::size_t>(check_scalar<nk::bf16_t>()); }
+std::size_t test::dense::check_ram_metric_bf16() { return static_cast<std::size_t>(check_scalar<nk::bf16_t>()); }

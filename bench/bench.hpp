@@ -31,7 +31,7 @@
 
 #include "usearch/utilities/types.hpp"
 
-namespace unum::usearch {
+namespace unum::usearch::bench {
 
 namespace stdc = std::chrono;
 
@@ -234,4 +234,4 @@ inline std::size_t peak_resident_bytes() noexcept {
     return resident_bytes;
 }
 
-} // namespace unum::usearch
+} // namespace unum::usearch::bench

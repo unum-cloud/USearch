@@ -26,8 +26,7 @@
 
 #include "dense.cuh"
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::test::dense {
 
 /** Gate: a (dtype, kernel) cell is testable once its serial kernel kit is adapted. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
@@ -106,20 +105,19 @@ static std::size_t test_starved_configuration(char const* name) {
     return report(name, test_dense_saturated<index_t>(make_index));
 }
 
-} // namespace usearch
-} // namespace unum
-
 #pragma region Suite Entry Points
 
 /** Per-dtype CPU index suite entries the shard translation units define and
  *  @c dense.cpp composes explicitly; each returns its shard's failure count. */
-std::size_t test_dense_index_f32();
-std::size_t test_dense_index_bf16();
-std::size_t test_dense_index_f16();
-std::size_t test_dense_index_e5m2();
-std::size_t test_dense_index_i8();
-std::size_t test_dense_index_i4();
-std::size_t test_dense_index_u8();
-std::size_t test_dense_index_u1();
+std::size_t check_ram_index_f32();
+std::size_t check_ram_index_bf16();
+std::size_t check_ram_index_f16();
+std::size_t check_ram_index_e5m2();
+std::size_t check_ram_index_i8();
+std::size_t check_ram_index_i4();
+std::size_t check_ram_index_u8();
+std::size_t check_ram_index_u1();
 
 #pragma endregion Suite Entry Points
+
+} // namespace unum::usearch::test::dense

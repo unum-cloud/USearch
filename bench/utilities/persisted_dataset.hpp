@@ -34,7 +34,7 @@
 #include "usearch/utilities/safegraphs_format.hpp"
 #include "usearch/utilities/types.hpp"
 
-namespace unum::usearch {
+namespace unum::usearch::bench::utilities {
 
 /** Infers the payload dtype from the RetriEval extension family: `.fbin` → f32,
  *  `.bf16bin` / `.f16bin` / `.i8bin` / `.u8bin` accordingly, `.ibin` → u32 neighbor IDs. */
@@ -188,4 +188,4 @@ class persisted_dataset {
     explicit operator bool() const noexcept { return static_cast<bool>(vectors_mapping_); }
 };
 
-} // namespace unum::usearch
+} // namespace unum::usearch::bench::utilities

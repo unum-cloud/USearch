@@ -40,7 +40,7 @@
 #include "utilities/persisted_dataset.hpp" // `mapped_file_t`, `parse_matrix_header`, `matrix_save`
 #include "test.hpp"
 
-namespace unum::usearch {
+namespace unum::usearch::bench {
 
 #pragma region Options and Styling
 
@@ -366,9 +366,11 @@ static bool load_checkpoint(bench_options_t const& options, index_type_& index, 
         return false;
     }
 
-    auto const [vectors_extents, vectors_status] = parse_matrix_header<scalar_t, u32_t>(vectors_mapping.view());
-    auto const [neighbors_extents, neighbors_status] = parse_matrix_header<u32_t, u32_t>(neighbors_mapping.view());
-    auto const [map_extents, map_status] = parse_matrix_header<u32_t, u32_t>(rows_mapping.view());
+    auto const [vectors_extents,
+                vectors_status] = utilities::parse_matrix_header<scalar_t, u32_t>(vectors_mapping.view());
+    auto const [neighbors_extents,
+                neighbors_status] = utilities::parse_matrix_header<u32_t, u32_t>(neighbors_mapping.view());
+    auto const [map_extents, map_status] = utilities::parse_matrix_header<u32_t, u32_t>(rows_mapping.view());
     bool const parsed = succeeded(vectors_status) && succeeded(neighbors_status) && succeeded(map_status);
     std::size_t const loaded_nodes = vectors_extents.rows;
     if (!parsed || vectors_extents.columns != dimensions || neighbors_extents.columns != options.connectivity ||
@@ -378,10 +380,10 @@ static bool load_checkpoint(bench_options_t const& options, index_type_& index, 
         return false;
     }
 
-    nk::matrix_view<scalar_t> const vectors_view = view_matrix_payload<scalar_t, u32_t>(vectors_mapping.view(),
-                                                                                        loaded_nodes, dimensions);
-    nk::matrix_view<u32_t> const neighbors_view = view_matrix_payload<u32_t, u32_t>(neighbors_mapping.view(),
-                                                                                    loaded_nodes, options.connectivity);
+    nk::matrix_view<scalar_t> const vectors_view = utilities::view_matrix_payload<scalar_t, u32_t>(
+        vectors_mapping.view(), loaded_nodes, dimensions);
+    nk::matrix_view<u32_t> const neighbors_view = utilities::view_matrix_payload<u32_t, u32_t>(
+        neighbors_mapping.view(), loaded_nodes, options.connectivity);
     // Both the chunks and the mapped dumps are dense, so a chunk is one byte move.
     std::size_t const vectors_row_bytes = static_cast<std::size_t>(vectors_view.stride_bytes(0));
     std::size_t const neighbors_row_bytes = static_cast<std::size_t>(neighbors_view.stride_bytes(0));
@@ -396,7 +398,8 @@ static bool load_checkpoint(bench_options_t const& options, index_type_& index, 
         fmt::println("Failed to restore {}: status {}", paths.vectors, int(loaded));
         return false;
     }
-    nk::matrix_view<u32_t> const rows_view = view_matrix_payload<u32_t, u32_t>(rows_mapping.view(), loaded_nodes, 1);
+    nk::matrix_view<u32_t> const rows_view = utilities::view_matrix_payload<u32_t, u32_t>(rows_mapping.view(),
+                                                                                          loaded_nodes, 1);
     std::copy_n(rows_view.data(), loaded_nodes, id_to_row.data());
     return true;
 }
@@ -448,9 +451,10 @@ static std::size_t save_checkpoint(bench_options_t const& options, index_type_& 
 
     checkpoint_paths_t const paths = checkpoint_paths_of<index_type_>(options, options.save_name, slot, slot_count);
     nk::matrix_view<u32_t> const rows_map_view {id_to_row.data(), {shape.nodes, 1}};
-    bool const written = matrix_save<scalar_t>(paths.vectors.c_str(), vectors.view()) == status_t::success_k &&
-                         matrix_save<node_id_t>(paths.neighbors.c_str(), neighbors.view()) == status_t::success_k &&
-                         matrix_save<u32_t>(paths.rows.c_str(), rows_map_view) == status_t::success_k;
+    bool const written =
+        utilities::matrix_save<scalar_t>(paths.vectors.c_str(), vectors.view()) == status_t::success_k &&
+        utilities::matrix_save<node_id_t>(paths.neighbors.c_str(), neighbors.view()) == status_t::success_k &&
+        utilities::matrix_save<u32_t>(paths.rows.c_str(), rows_map_view) == status_t::success_k;
     if (!written) {
         fmt::println("Failed to write the {} checkpoint for slot {}", options.save_name, slot);
         return 0;
@@ -689,7 +693,7 @@ struct streamed_dataset {
                                      nk::is_integral_dtype<scalar_t>();
 
     /** The largest magnitude one stored dimension can carry, in the stored dtype. */
-    static constexpr float target_amplitude_k = dimension_amplitude<scalar_t>();
+    static constexpr float target_amplitude_k = test::dimension_amplitude<scalar_t>();
 
     /** The index-side state both phases feed - punned through the pool callbacks. */
     bench_context_type_& bench;
@@ -794,4 +798,4 @@ inline void print_machine(fu_topology_t topology, fu_fabric_t fabric, bench_opti
     fmt::println("  kernels requested: {} · {}", dtype_name(options.stored_dtype), nk_kernel_name(options.kernel));
 }
 
-} // namespace unum::usearch
+} // namespace unum::usearch::bench

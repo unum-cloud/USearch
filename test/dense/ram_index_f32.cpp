@@ -8,7 +8,7 @@
 
 using namespace unum::usearch;
 
-std::size_t test_dense_index_f32() {
+std::size_t test::dense::check_ram_index_f32() {
     std::size_t failures_count = 0;
     failures_count += test_configuration<nk_f32_k, nk_kernel_dot_k>("f32+dot");
     failures_count += test_configuration<nk_f32_k, nk_kernel_angular_k>("f32+angular");

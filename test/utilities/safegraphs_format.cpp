@@ -23,6 +23,7 @@
 #include "usearch/utilities/safegraphs_format.hpp"
 
 using namespace unum::usearch;
+using namespace unum::usearch::test;
 
 #pragma region Embeddings
 
@@ -125,7 +126,7 @@ static_assert(interchange_value_codec<embedding_codec_t>);
 /** The shared basic-tier scenarios over the embeddings fixture - a fixed-width value
  *  column, which no modality unit has: monolith, hostile header battery, and the
  *  distributed form, each at every alignment and executor the scenarios cover. */
-std::size_t test_safegraphs_format() {
+std::size_t test::utilities::check_safegraphs_format() {
     embeddings_fixture_t const fixture;
     std::size_t failures = 0;
     failures += test_basic_safegraphs_roundtrip(fixture, "u64", embeddings_fixture_t::metric_k);

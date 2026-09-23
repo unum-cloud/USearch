@@ -15,6 +15,8 @@
 #include "dense/ram_indexes.hpp"
 
 using namespace unum::usearch;
+using namespace unum::usearch::test;
+using namespace unum::usearch::test::dense;
 
 /** The plans and claims are move-only, and the plans are never assigned over. */
 using witnessed_index_t = dense_ram_index<>;
@@ -29,33 +31,33 @@ static_assert(std::is_move_constructible_v<witnessed_index_t::load_plan_t> &&
 static_assert(std::is_move_constructible_v<witnessed_index_t::capacity_claim_t> &&
               !std::is_copy_constructible_v<witnessed_index_t::capacity_claim_t>);
 
-std::size_t test_dense_all() {
+std::size_t test::check_dense() {
     std::size_t failures_count = 0;
 
-    failures_count += test_dense_metric_f64();
-    failures_count += test_dense_metric_f32();
-    failures_count += test_dense_metric_bf16();
-    failures_count += test_dense_metric_f16();
-    failures_count += test_dense_metric_e5m2();
-    failures_count += test_dense_metric_e4m3();
-    failures_count += test_dense_metric_e3m2();
-    failures_count += test_dense_metric_e2m3();
-    failures_count += test_dense_metric_i8();
-    failures_count += test_dense_metric_i4();
-    failures_count += test_dense_metric_u8();
-    failures_count += test_dense_metric_u4();
-    failures_count += test_dense_metric_u1();
+    failures_count += dense::check_ram_metric_f64();
+    failures_count += dense::check_ram_metric_f32();
+    failures_count += dense::check_ram_metric_bf16();
+    failures_count += dense::check_ram_metric_f16();
+    failures_count += dense::check_ram_metric_e5m2();
+    failures_count += dense::check_ram_metric_e4m3();
+    failures_count += dense::check_ram_metric_e3m2();
+    failures_count += dense::check_ram_metric_e2m3();
+    failures_count += dense::check_ram_metric_i8();
+    failures_count += dense::check_ram_metric_i4();
+    failures_count += dense::check_ram_metric_u8();
+    failures_count += dense::check_ram_metric_u4();
+    failures_count += dense::check_ram_metric_u1();
 
-    failures_count += test_dense_index_f32();
-    failures_count += test_dense_index_bf16();
-    failures_count += test_dense_index_f16();
-    failures_count += test_dense_index_e5m2();
-    failures_count += test_dense_index_i8();
-    failures_count += test_dense_index_i4();
-    failures_count += test_dense_index_u8();
-    failures_count += test_dense_index_u1();
+    failures_count += dense::check_ram_index_f32();
+    failures_count += dense::check_ram_index_bf16();
+    failures_count += dense::check_ram_index_f16();
+    failures_count += dense::check_ram_index_e5m2();
+    failures_count += dense::check_ram_index_i8();
+    failures_count += dense::check_ram_index_i4();
+    failures_count += dense::check_ram_index_u8();
+    failures_count += dense::check_ram_index_u1();
 
-    failures_count += test_dense_indexes();
+    failures_count += dense::check_ram_indexes();
 
     return failures_count;
 }

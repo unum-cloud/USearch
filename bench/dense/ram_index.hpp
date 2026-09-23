@@ -72,8 +72,7 @@
 #include "dense.cuh"
 #include "utilities/persisted_dataset.hpp"
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::bench::dense {
 
 #pragma region CPU Pipeline
 
@@ -592,7 +591,7 @@ bool run_search(streamed_dataset_type_& streamed, fu_pool_t pool) {
 /** Bundles the launch state the cascade threads through its compile-time hops. */
 template <typename dataset_scalar_type_>
 struct bench_launch {
-    persisted_dataset<dataset_scalar_type_> const& dataset;
+    utilities::persisted_dataset<dataset_scalar_type_> const& dataset;
     bench_options_t const& options;
     fu_pool_t pool;
     fu_topology_t topology;
@@ -627,7 +626,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
     using streamed_t = streamed_dataset<dataset_scalar_type_, bench_context_type_>;
     using scalar_t = typename bench_context_type_::scalar_t;
 
-    persisted_dataset<dataset_scalar_type_> const& dataset = launch.dataset;
+    utilities::persisted_dataset<dataset_scalar_type_> const& dataset = launch.dataset;
     std::size_t const dimensions = dataset.dimensions();
     std::size_t const total_rows = dataset.vectors().extent(0);
     std::size_t const first_row = launch.options.first_vector;
@@ -747,5 +746,4 @@ int run_with_stored_dtype(bench_launch<dataset_scalar_type_> const& launch) {
 
 #pragma endregion
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::bench::dense

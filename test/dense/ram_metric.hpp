@@ -49,8 +49,7 @@
 #include "test.hpp"
 #include "usearch/dense/ram_metric.hpp"
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::test::dense {
 
 constexpr std::array<std::size_t, 7> dimensions_to_test = {7, 8, 32, 64, 128, 257, 1024};
 
@@ -284,25 +283,24 @@ int check_scalar<nk::u1x8_t>() noexcept {
 template <typename scalar_>
 concept scalar_wired = quads_supported<nk_kernel_dot_k, scalar_, nk_cap_serial_k>;
 
-} // namespace usearch
-} // namespace unum
-
 #pragma region Suite Entry Points
 
 /** Per-dtype metric suite entries the shard translation units define and
  *  @c dense.cpp composes explicitly; each returns its shard's failure count. */
-std::size_t test_dense_metric_f64();
-std::size_t test_dense_metric_f32();
-std::size_t test_dense_metric_bf16();
-std::size_t test_dense_metric_f16();
-std::size_t test_dense_metric_e5m2();
-std::size_t test_dense_metric_e4m3();
-std::size_t test_dense_metric_e3m2();
-std::size_t test_dense_metric_e2m3();
-std::size_t test_dense_metric_i8();
-std::size_t test_dense_metric_i4();
-std::size_t test_dense_metric_u8();
-std::size_t test_dense_metric_u4();
-std::size_t test_dense_metric_u1();
+std::size_t check_ram_metric_f64();
+std::size_t check_ram_metric_f32();
+std::size_t check_ram_metric_bf16();
+std::size_t check_ram_metric_f16();
+std::size_t check_ram_metric_e5m2();
+std::size_t check_ram_metric_e4m3();
+std::size_t check_ram_metric_e3m2();
+std::size_t check_ram_metric_e2m3();
+std::size_t check_ram_metric_i8();
+std::size_t check_ram_metric_i4();
+std::size_t check_ram_metric_u8();
+std::size_t check_ram_metric_u4();
+std::size_t check_ram_metric_u1();
 
 #pragma endregion Suite Entry Points
+
+} // namespace unum::usearch::test::dense

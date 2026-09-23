@@ -10,12 +10,13 @@
 #include "test.hpp"
 
 using namespace unum::usearch;
+using namespace unum::usearch::test;
 
 int main() {
     std::size_t failures_count = 0;
 
-    failures_count += test_safegraphs_format();
-    failures_count += test_dense_all();
+    failures_count += utilities::check_safegraphs_format();
+    failures_count += check_dense();
 
     return report("total", failures_count) ? 1 : 0;
 }

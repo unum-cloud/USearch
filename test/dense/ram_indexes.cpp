@@ -9,7 +9,7 @@
 
 using namespace unum::usearch;
 
-std::size_t test_dense_indexes() {
+std::size_t test::dense::check_ram_indexes() {
     std::size_t failures_count = 0;
     failures_count += test_configuration<nk_bf16_k, nk_kernel_angular_k>("sharded bf16+angular");
     failures_count += test_configuration<nk_bf16_k, nk_kernel_angular_k, flaky_waiter_t>("sharded bf16+angular+flaky");

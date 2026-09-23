@@ -47,8 +47,7 @@
 #include "usearch/utilities/safegraphs_format.hpp" // `save_config_t`, `safegraphs_read_header` - the checkpoints' surface
 #include "usearch/dense/ram_metric.hpp"            // `usearch::distance`, `usearch::dense_norms` - the oracle's kernels
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::test {
 
 #pragma region Constants and Seeds
 
@@ -254,13 +253,18 @@ struct dense_indexes_executor<indexes_type_> {
     }
     dense_indexes_executor(dense_indexes_executor const&) = delete;
     dense_indexes_executor& operator=(dense_indexes_executor const&) = delete;
+
+    /** Places the shards one sharded scenario drives: two RAM shards on the heap domain. */
+    static status_t place_shards(indexes_type_& indexes) noexcept {
+        if (status_t const placed = indexes.emplace(no_memory_domain_k); failed(placed)) return placed;
+        return indexes.emplace(no_memory_domain_k);
+    }
 };
 
-/** Places the shards one sharded scenario drives: two RAM shards on the heap domain. */
-template <ram_indexes indexes_type_>
+/** Places the shards one sharded scenario drives, the way its residency's executor does. */
+template <typename indexes_type_>
 status_t place_shards(indexes_type_& indexes) noexcept {
-    if (status_t const placed = indexes.emplace(no_memory_domain_k); failed(placed)) return placed;
-    return indexes.emplace(no_memory_domain_k);
+    return dense_indexes_executor<indexes_type_>::place_shards(indexes);
 }
 
 /** What the one-row verbs walk with; @c status reports its construction. Defined per
@@ -2712,5 +2716,4 @@ std::size_t test_dense_overflow_race(make_index_type_ const& make_index) {
 
 #pragma endregion Allocation Budgets
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::test

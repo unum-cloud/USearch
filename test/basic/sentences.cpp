@@ -19,6 +19,7 @@
 #include "basic.hpp"
 
 using namespace unum::usearch;
+using namespace unum::usearch::test;
 
 /** Unit-cost Levenshtein through the classic two-row Wagner-Fischer recurrence - both
  *  the metric's kernel and the scenarios' oracle, so the two always agree; the caller owns
@@ -257,7 +258,7 @@ static std::size_t check_sentences_independent_oracle() {
     return failures;
 }
 
-std::size_t test_sentences() {
+std::size_t test::basic::check_sentences() {
     sentences_fixture_t const fixture;
     std::size_t failures = 0;
     failures += test_basic_scenarios(fixture);

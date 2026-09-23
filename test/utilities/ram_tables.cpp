@@ -23,6 +23,7 @@
 #include "test.hpp"
 
 using namespace unum::usearch;
+using namespace unum::usearch::test;
 
 /** Sends every key to one bucket, so probe chains reach their worst case. */
 struct colliding_hash_t {
@@ -316,7 +317,7 @@ std::size_t check_multimap_move() noexcept {
     return failures;
 }
 
-std::size_t test_ram_tables() {
+std::size_t test::utilities::check_ram_tables() {
     std::size_t failures = 0;
     failures += check_multimap_uninitialized();
     failures += check_multimap_single_key();

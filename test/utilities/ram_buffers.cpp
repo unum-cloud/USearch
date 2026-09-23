@@ -33,6 +33,7 @@
 #include "test.hpp"
 
 using namespace unum::usearch;
+using namespace unum::usearch::test;
 
 #pragma region Sorted Buffer
 
@@ -413,7 +414,7 @@ std::size_t check_max_heap_pop_many() noexcept {
 
 #pragma endregion Max Heap
 
-std::size_t test_ram_buffers() {
+std::size_t test::utilities::check_ram_buffers() {
     std::size_t failures = 0;
     failures += check_sorted_buffer_single_element();
     failures += check_sorted_buffer_batch_parity<4>(0xABCD1234u);

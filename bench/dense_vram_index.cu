@@ -19,99 +19,116 @@
 #include "dense/vram_index.cuh"
 
 using namespace unum::usearch;
+using namespace unum::usearch::bench;
+using namespace unum::usearch::bench::dense;
+using namespace unum::usearch::bench::utilities;
 namespace us = unum::usearch;
 
-extern template int us::run_with_stored_dtype<nk::f32_t, nk_f32_k>( //
-    us::persisted_dataset<nk::f32_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::f32_t, nk_f32_k>( //
+    utilities::persisted_dataset<nk::f32_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::bf16_t, nk_f32_k>( //
-    us::persisted_dataset<nk::bf16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::bf16_t, nk_f32_k>( //
+    utilities::persisted_dataset<nk::bf16_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::f16_t, nk_f32_k>( //
-    us::persisted_dataset<nk::f16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::f16_t, nk_f32_k>( //
+    utilities::persisted_dataset<nk::f16_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::i8_t, nk_f32_k>( //
-    us::persisted_dataset<nk::i8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::u8_t, nk_f32_k>( //
-    us::persisted_dataset<nk::u8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::f32_t, nk_bf16_k>( //
-    us::persisted_dataset<nk::f32_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::i8_t, nk_f32_k>( //
+    utilities::persisted_dataset<nk::i8_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::bf16_t, nk_bf16_k>( //
-    us::persisted_dataset<nk::bf16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::u8_t, nk_f32_k>( //
+    utilities::persisted_dataset<nk::u8_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::f16_t, nk_bf16_k>( //
-    us::persisted_dataset<nk::f16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::f32_t, nk_bf16_k>( //
+    utilities::persisted_dataset<nk::f32_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::i8_t, nk_bf16_k>( //
-    us::persisted_dataset<nk::i8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::u8_t, nk_bf16_k>( //
-    us::persisted_dataset<nk::u8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::f32_t, nk_f16_k>( //
-    us::persisted_dataset<nk::f32_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::bf16_t, nk_bf16_k>( //
+    utilities::persisted_dataset<nk::bf16_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::bf16_t, nk_f16_k>( //
-    us::persisted_dataset<nk::bf16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::f16_t, nk_bf16_k>( //
+    utilities::persisted_dataset<nk::f16_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::f16_t, nk_f16_k>( //
-    us::persisted_dataset<nk::f16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::i8_t, nk_bf16_k>( //
+    utilities::persisted_dataset<nk::i8_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::i8_t, nk_f16_k>( //
-    us::persisted_dataset<nk::i8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::u8_t, nk_f16_k>( //
-    us::persisted_dataset<nk::u8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::f32_t, nk_i8_k>( //
-    us::persisted_dataset<nk::f32_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::u8_t, nk_bf16_k>( //
+    utilities::persisted_dataset<nk::u8_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::bf16_t, nk_i8_k>( //
-    us::persisted_dataset<nk::bf16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::f32_t, nk_f16_k>( //
+    utilities::persisted_dataset<nk::f32_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::f16_t, nk_i8_k>( //
-    us::persisted_dataset<nk::f16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::bf16_t, nk_f16_k>( //
+    utilities::persisted_dataset<nk::bf16_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::i8_t, nk_i8_k>( //
-    us::persisted_dataset<nk::i8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::u8_t, nk_i8_k>( //
-    us::persisted_dataset<nk::u8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::f32_t, nk_i4_k>( //
-    us::persisted_dataset<nk::f32_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::f16_t, nk_f16_k>( //
+    utilities::persisted_dataset<nk::f16_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::bf16_t, nk_i4_k>( //
-    us::persisted_dataset<nk::bf16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::i8_t, nk_f16_k>( //
+    utilities::persisted_dataset<nk::i8_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::f16_t, nk_i4_k>( //
-    us::persisted_dataset<nk::f16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::u8_t, nk_f16_k>( //
+    utilities::persisted_dataset<nk::u8_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::i8_t, nk_i4_k>( //
-    us::persisted_dataset<nk::i8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::u8_t, nk_i4_k>( //
-    us::persisted_dataset<nk::u8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::f32_t, nk_u8_k>( //
-    us::persisted_dataset<nk::f32_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::f32_t, nk_i8_k>( //
+    utilities::persisted_dataset<nk::f32_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::bf16_t, nk_u8_k>( //
-    us::persisted_dataset<nk::bf16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::bf16_t, nk_i8_k>( //
+    utilities::persisted_dataset<nk::bf16_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::f16_t, nk_u8_k>( //
-    us::persisted_dataset<nk::f16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::f16_t, nk_i8_k>( //
+    utilities::persisted_dataset<nk::f16_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::i8_t, nk_u8_k>( //
-    us::persisted_dataset<nk::i8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::u8_t, nk_u8_k>( //
-    us::persisted_dataset<nk::u8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::f32_t, nk_u1_k>( //
-    us::persisted_dataset<nk::f32_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::i8_t, nk_i8_k>( //
+    utilities::persisted_dataset<nk::i8_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::bf16_t, nk_u1_k>( //
-    us::persisted_dataset<nk::bf16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::u8_t, nk_i8_k>( //
+    utilities::persisted_dataset<nk::u8_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::f16_t, nk_u1_k>( //
-    us::persisted_dataset<nk::f16_t> const&, us::bench_options_t const&, int, us::cuda_arch_t,
+extern template int us::bench::dense::run_with_stored_dtype<nk::f32_t, nk_i4_k>( //
+    utilities::persisted_dataset<nk::f32_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::i8_t, nk_u1_k>( //
-    us::persisted_dataset<nk::i8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
-extern template int us::run_with_stored_dtype<nk::u8_t, nk_u1_k>( //
-    us::persisted_dataset<nk::u8_t> const&, us::bench_options_t const&, int, us::cuda_arch_t, us::cuda_address_space_t);
+extern template int us::bench::dense::run_with_stored_dtype<nk::bf16_t, nk_i4_k>( //
+    utilities::persisted_dataset<nk::bf16_t> const&, bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::bench::dense::run_with_stored_dtype<nk::f16_t, nk_i4_k>( //
+    utilities::persisted_dataset<nk::f16_t> const&, bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::bench::dense::run_with_stored_dtype<nk::i8_t, nk_i4_k>( //
+    utilities::persisted_dataset<nk::i8_t> const&, bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::bench::dense::run_with_stored_dtype<nk::u8_t, nk_i4_k>( //
+    utilities::persisted_dataset<nk::u8_t> const&, bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::bench::dense::run_with_stored_dtype<nk::f32_t, nk_u8_k>( //
+    utilities::persisted_dataset<nk::f32_t> const&, bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::bench::dense::run_with_stored_dtype<nk::bf16_t, nk_u8_k>( //
+    utilities::persisted_dataset<nk::bf16_t> const&, bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::bench::dense::run_with_stored_dtype<nk::f16_t, nk_u8_k>( //
+    utilities::persisted_dataset<nk::f16_t> const&, bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::bench::dense::run_with_stored_dtype<nk::i8_t, nk_u8_k>( //
+    utilities::persisted_dataset<nk::i8_t> const&, bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::bench::dense::run_with_stored_dtype<nk::u8_t, nk_u8_k>( //
+    utilities::persisted_dataset<nk::u8_t> const&, bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::bench::dense::run_with_stored_dtype<nk::f32_t, nk_u1_k>( //
+    utilities::persisted_dataset<nk::f32_t> const&, bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::bench::dense::run_with_stored_dtype<nk::bf16_t, nk_u1_k>( //
+    utilities::persisted_dataset<nk::bf16_t> const&, bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::bench::dense::run_with_stored_dtype<nk::f16_t, nk_u1_k>( //
+    utilities::persisted_dataset<nk::f16_t> const&, bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::bench::dense::run_with_stored_dtype<nk::i8_t, nk_u1_k>( //
+    utilities::persisted_dataset<nk::i8_t> const&, bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
+extern template int us::bench::dense::run_with_stored_dtype<nk::u8_t, nk_u1_k>( //
+    utilities::persisted_dataset<nk::u8_t> const&, bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
 
 /** Opens the dataset with the file-native scalar and lowers the stored dtype onto
  *  the shard-carried cascade - or reports the dtypes that carry device kits. */

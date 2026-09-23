@@ -14,49 +14,11 @@
 
 #include "dense.cuh"
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::test::dense {
 
 /** Whether a sharded index runs on CUDA streams - the VRAM residency. */
 template <typename indexes_type_>
 concept vram_indexes = std::is_same_v<typename indexes_type_::executor_t, cuda_executor_t>;
-
-/** The VRAM form: one stream on device zero. */
-template <vram_indexes indexes_type_>
-struct dense_indexes_executor<indexes_type_> {
-    using executor_t = cuda_executor_t;
-
-    executor_t executor;
-    status_t status = status_t::uninitialized_k;
-
-    dense_indexes_executor() noexcept {
-        int const device = 0;
-        auto [executor, spawn_status] = executor_t::spawn(std::span<int const> {&device, 1});
-        status = spawn_status;
-        this->executor = std::move(executor);
-    }
-    dense_indexes_executor(dense_indexes_executor const&) = delete;
-    dense_indexes_executor& operator=(dense_indexes_executor const&) = delete;
-};
-
-/** Places the shards one sharded scenario drives: one VRAM shard on device zero, since
- *  the index refuses two on one device. */
-template <vram_indexes indexes_type_>
-status_t place_shards(indexes_type_& indexes) noexcept {
-    return indexes.emplace(0);
-}
-
-/** The VRAM form: the one-row verbs take the executor itself, as no single context can
- *  walk every device. */
-template <vram_indexes indexes_type_>
-struct dense_indexes_row_driver<indexes_type_> {
-    cuda_executor_t& executor;
-    status_t status = status_t::success_k;
-
-    dense_indexes_row_driver(indexes_type_&, dense_indexes_executor<indexes_type_>& driver) noexcept
-        : executor(driver.executor) {}
-    cuda_executor_t& handle() noexcept { return executor; }
-};
 
 /** The VRAM reading of the search race: the index admits no search during a mutation,
  *  so the exclusion is the executor's - a search on a claimed executor is refused, and the
@@ -138,13 +100,49 @@ std::size_t test_cuda_indexes_configuration(char const* name) {
     return report(name, failures_count);
 }
 
-} // namespace usearch
-} // namespace unum
-
 #pragma region Suite Entry Points
 
 /** The sharded CUDA suite entry its translation unit defines and the suite's @c main
  *  composes explicitly; returns the suite's failure count. */
-std::size_t test_dense_indexes_cuda();
+std::size_t check_vram_indexes();
 
 #pragma endregion Suite Entry Points
+
+} // namespace unum::usearch::test::dense
+
+/*  The residency forms specialize templates of the enclosing @c test namespace, which only a
+ *  scope enclosing it may do, so they follow the namespace at file scope and qualify what they name. */
+
+/** The VRAM form: one stream on device zero. */
+template <us::test::dense::vram_indexes indexes_type_>
+struct us::test::dense_indexes_executor<indexes_type_> {
+    using executor_t = us::cuda_executor_t;
+
+    executor_t executor;
+    us::status_t status = us::status_t::uninitialized_k;
+
+    dense_indexes_executor() noexcept {
+        int const device = 0;
+        auto [executor, spawn_status] = executor_t::spawn(std::span<int const> {&device, 1});
+        status = spawn_status;
+        this->executor = std::move(executor);
+    }
+    dense_indexes_executor(dense_indexes_executor const&) = delete;
+    dense_indexes_executor& operator=(dense_indexes_executor const&) = delete;
+
+    /** Places the shards one sharded scenario drives: one VRAM shard on device zero, since
+     *  the index refuses two on one device. */
+    static us::status_t place_shards(indexes_type_& indexes) noexcept { return indexes.emplace(0); }
+};
+
+/** The VRAM form: the one-row verbs take the executor itself, as no single context can
+ *  walk every device. */
+template <us::test::dense::vram_indexes indexes_type_>
+struct us::test::dense_indexes_row_driver<indexes_type_> {
+    us::cuda_executor_t& executor;
+    us::status_t status = us::status_t::success_k;
+
+    dense_indexes_row_driver(indexes_type_&, us::test::dense_indexes_executor<indexes_type_>& driver) noexcept
+        : executor(driver.executor) {}
+    us::cuda_executor_t& handle() noexcept { return executor; }
+};

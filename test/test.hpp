@@ -33,7 +33,7 @@
  *  ambiguous - Darwin declares a global `uuid_t` too - or unwanted, as inside foreign specializations. */
 namespace us = unum::usearch;
 
-namespace unum::usearch {
+namespace unum::usearch::test {
 
 #define expect(cond) expect_((bool)(cond), #cond, __FILE__, __LINE__)
 inline std::size_t expect_(bool condition, char const* expression, char const* file, int line) {
@@ -301,7 +301,26 @@ nk::matrix<scalar_> make_vectors(std::size_t count, std::size_t dimensions, u64_
     }
     return vectors;
 }
-} // namespace unum::usearch
+
+#pragma region Suite Entry Points
+
+std::size_t check_dense();
+
+namespace utilities {
+std::size_t check_ram_buffers();
+std::size_t check_ram_tables();
+std::size_t check_safegraphs_format();
+} // namespace utilities
+
+namespace basic {
+std::size_t check_sentences();
+std::size_t check_bioinformatics();
+std::size_t check_meshes();
+} // namespace basic
+
+#pragma endregion Suite Entry Points
+
+} // namespace unum::usearch::test
 
 /** Teaches the expect verbs to print statuses by name - @c status_t is the most
  *  compared enum in the suite, and {fmt} refuses unknown enums at compile time. */
@@ -311,21 +330,3 @@ struct fmt::formatter<unum::usearch::status_t> : fmt::formatter<char const*> {
         return fmt::formatter<char const*>::format(us::status_to_string(status), context);
     }
 };
-
-#pragma region Suite Entry Points
-
-std::size_t test_ram_buffers();
-
-std::size_t test_ram_tables();
-
-std::size_t test_safegraphs_format();
-
-std::size_t test_dense_all();
-
-std::size_t test_sentences();
-
-std::size_t test_bioinformatics();
-
-std::size_t test_meshes();
-
-#pragma endregion Suite Entry Points

@@ -20,8 +20,7 @@
 
 #include "dense.cuh"
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::test::dense {
 
 /** Gate: a (dtype, kernel) cell is testable once its serial kernel kit is adapted. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
@@ -69,13 +68,10 @@ static std::size_t test_configuration(char const* name) {
     return report(name, failures_count);
 }
 
-} // namespace usearch
-} // namespace unum
-
 #pragma region Suite Entry Points
 
 /** The sharded-index suite entry its translation unit defines and @c dense.cpp
  *  composes explicitly; returns the suite's failure count. */
-std::size_t test_dense_indexes();
+std::size_t check_ram_indexes();
 
 #pragma endregion Suite Entry Points

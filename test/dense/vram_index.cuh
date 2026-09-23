@@ -14,8 +14,7 @@
 
 #include "dense.cuh"
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::test::dense {
 
 /** Ledgered device allocator: the virtual-memory plane backend with every committed
  *  slab tallied into the harness's @c allocation_ledger_t, and a converting constructor
@@ -94,21 +93,20 @@ std::size_t test_cuda_configuration(char const* name) {
     return report(name, failures_count);
 }
 
-} // namespace usearch
-} // namespace unum
-
 #pragma region Suite Entry Points
 
 /** Per-dtype CUDA suite entries the shard translation units define and the suite's
  *  @c main composes explicitly; each returns its shard's failure count. */
-std::size_t test_dense_index_bf16_cuda();
-std::size_t test_dense_index_f16_cuda();
-std::size_t test_dense_index_e5m2_cuda();
-std::size_t test_dense_index_e4m3_cuda();
-std::size_t test_dense_index_i8_cuda();
-std::size_t test_dense_index_i4_cuda();
-std::size_t test_dense_index_u8_cuda();
-std::size_t test_dense_index_u4_cuda();
-std::size_t test_dense_index_u1_cuda();
+std::size_t check_vram_index_bf16();
+std::size_t check_vram_index_f16();
+std::size_t check_vram_index_e5m2();
+std::size_t check_vram_index_e4m3();
+std::size_t check_vram_index_i8();
+std::size_t check_vram_index_i4();
+std::size_t check_vram_index_u8();
+std::size_t check_vram_index_u4();
+std::size_t check_vram_index_u1();
 
 #pragma endregion Suite Entry Points
+
+} // namespace unum::usearch::test::dense

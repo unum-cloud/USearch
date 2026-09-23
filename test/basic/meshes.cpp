@@ -24,6 +24,7 @@
 #include "basic.hpp"
 
 using namespace unum::usearch;
+using namespace unum::usearch::test;
 
 /** One vertex; plain floats, so codec roundtrips are bit-exact. */
 struct point3_t {
@@ -271,7 +272,7 @@ static std::size_t check_meshes_kernel_parity() {
     return failures;
 }
 
-std::size_t test_meshes() {
+std::size_t test::basic::check_meshes() {
     meshes_fixture_t const fixture;
     std::size_t failures = 0;
     failures += test_basic_scenarios(fixture);

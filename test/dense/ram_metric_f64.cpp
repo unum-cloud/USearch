@@ -8,4 +8,4 @@
 
 using namespace unum::usearch;
 
-std::size_t test_dense_metric_f64() { return static_cast<std::size_t>(check_scalar<nk::f64_t>()); }
+std::size_t test::dense::check_ram_metric_f64() { return static_cast<std::size_t>(check_scalar<nk::f64_t>()); }
