@@ -21,6 +21,18 @@
 
 #include "usearch/types.h" // `usearch_status_t`, so the C++ mirror cannot drift from the ABI
 
+/*  The `alignas` width that keeps two threads' words off one cache line, picked from the target as
+ *  ForkUnion picks `FU_DEFAULT_ALIGNMENT`; `ram_device.hpp` asserts the two agree. */
+#if !defined(USEARCH_DEFAULT_ALIGNMENT)
+#if defined(__s390x__)
+#define USEARCH_DEFAULT_ALIGNMENT 256
+#elif defined(__wasm__) || defined(__EMSCRIPTEN__)
+#define USEARCH_DEFAULT_ALIGNMENT 64
+#else
+#define USEARCH_DEFAULT_ALIGNMENT 128
+#endif
+#endif
+
 /** @brief Pre-announced sister-library namespaces, so the project-wide shortcuts below are
  *      legal before any of their headers is included. */
 namespace ashvardanian {
@@ -106,12 +118,10 @@ bytes_span_t bytes_of(value_type_* data, std::size_t count) noexcept {
 struct global_allocator_t {};
 inline constexpr global_allocator_t global_allocator {};
 
-/** @brief The one project-wide default alignment: 128 bytes covers x86's adjacent-line
- *      prefetcher, the 128-byte cache lines of Apple's and other Arm cores, and a CUDA
- *      coalesced transaction alike, where a 64-byte guess serves only one of them.
- *  @see @c fu::default_alignment_k in ForkUnion's @c types.hpp, which settles on the same
- *      value and documents why @c std::hardware_destructive_interference_size cannot. */
-inline constexpr std::size_t default_alignment_k = 128;
+/** @brief The padding that keeps two threads' words off one line; see @c USEARCH_DEFAULT_ALIGNMENT. */
+inline constexpr std::size_t default_alignment_k = USEARCH_DEFAULT_ALIGNMENT;
+static_assert(default_alignment_k >= 8 && (default_alignment_k & (default_alignment_k - 1)) == 0,
+              "USEARCH_DEFAULT_ALIGNMENT must be a power of two, no narrower than a pointer pair");
 
 /** @brief One traversal candidate: a node id paired with its distance to the query. */
 struct dense_scored_node_t {

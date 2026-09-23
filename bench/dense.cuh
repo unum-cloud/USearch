@@ -470,7 +470,7 @@ static std::size_t save_checkpoint(bench_options_t const& options, index_type_& 
 #pragma region Telemetry and Judgment
 
 /** @brief Telemetry sums each thread accumulates privately, padded away from its neighbors. */
-struct alignas(64) telemetry_lane_t {
+struct alignas(default_alignment_k) telemetry_lane_t {
     /** @brief Frontier candidates whose neighbor lists were expanded. */
     std::size_t visited_members = 0;
     /** @brief Total distance computations, padding lanes excluded. */

@@ -386,7 +386,7 @@ usearch_sibling(
     numkong numkong::header https://github.com/ashvardanian/NumKong 649d1a72bfa2247089eb42303138a616e47a0372
 )
 usearch_sibling(
-    forkunion forkunion::header https://github.com/ashvardanian/ForkUnion 5cb8fb7dd022cd47754ee9db19c7187882d73e84
+    forkunion forkunion::header https://github.com/ashvardanian/ForkUnion 0f5986fe62a77a2cc683a0e252482ac0d4400995
 )
 usearch_sibling(
     stringzilla stringzilla::header https://github.com/ashvardanian/StringZilla
