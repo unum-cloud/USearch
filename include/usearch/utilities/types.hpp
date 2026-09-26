@@ -149,6 +149,29 @@ struct dense_further_scored_node_t {
     }
 };
 
+/** What one batch of landmarks achieved for a walk. */
+enum class landmarks_seeding_t : u32_t {
+
+    /** Fresh landmarks entered the frontier, so the walk goes on. */
+    queued_k,
+
+    /** Nothing fresh was left to seed from, so the walk ends. */
+    exhausted_k,
+
+    /** The walk's fold asked to stop, so the walk ends with what it holds. */
+    sated_k,
+};
+
+/** A fold's answer to each batch a walk scores: keep walking, or end the walk successfully. */
+enum class walk_demand_t : bool {
+
+    /** Keep walking. */
+    continue_k,
+
+    /** End the walk now, successfully, with what the fold holds. */
+    sated_k,
+};
+
 /**
  *  @brief Why a call failed, in the vocabulary the engine and every binding share.
  *

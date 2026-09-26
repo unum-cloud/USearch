@@ -9,6 +9,7 @@
 #include <cassert> // `assert`
 #include <cstring> // `std::memcpy`
 
+#include <array>       // `std::array`
 #include <bit>         // `std::bit_width`, `std::bit_floor`, `std::has_single_bit`
 #include <limits>      // `std::numeric_limits`
 #include <span>        // `std::span`
@@ -97,6 +98,65 @@ inline void invoke_admission(predicate_type_& predicate, std::span<dense_scored_
                 [[maybe_unused]] fu::status_t const admitted = admissions.push_back(candidate);
             }
 }
+
+/** The default fold: reads nothing and never ends the walk, so a walk that folds nothing inlines
+ *  the axis away. */
+struct dummy_fold_t {
+    template <typename dot_result_type_>
+    constexpr walk_demand_t absorb(std::span<dense_scored_node_t const>,
+                                   std::span<dot_result_type_ const>) const noexcept {
+        return walk_demand_t::continue_k;
+    }
+};
+
+/** Filtered search as a fold: each quad's matches merge into the admitted pool, while the walk
+ *  keeps routing through whatever the predicate rejects. */
+template <typename predicate_type_, typename pool_type_>
+struct dense_filtering_fold {
+
+    /** The caller's filter, per-node or batched - see @c invoke_admission. */
+    predicate_type_& predicate;
+
+    /** The pool matches merge into, ascending by distance. */
+    pool_type_& admitted;
+
+    /** The breadth @c admitted is capped at. */
+    std::size_t expansion_factor;
+
+    template <typename dot_result_type_>
+    walk_demand_t absorb(std::span<dense_scored_node_t const> scored_nodes,
+                         std::span<dot_result_type_ const>) noexcept {
+        dense_admissions_t admissions;
+        invoke_admission(predicate, scored_nodes, admissions);
+        network_sort(std::span(admissions), dense_closer_scored_node_t {});
+        admitted.insert(std::span(admissions), expansion_factor);
+        return walk_demand_t::continue_k;
+    }
+};
+
+/** Reads every scored quad - live lanes in kernel order beside their native dots, both valid only
+ *  for the call - and answers whether the walk should go on. */
+template <typename fold_type_, typename dot_result_type_>
+concept dense_fold = requires(fold_type_& fold, std::span<dense_scored_node_t const> scored_nodes,
+                              std::span<dot_result_type_ const> dots) {
+    { fold.absorb(scored_nodes, dots) } noexcept -> std::same_as<walk_demand_t>;
+};
+
+/** The vector a query scores with. */
+template <typename scalar_type_>
+nk::vector_view<scalar_type_> dense_query_vector(nk::vector_view<scalar_type_> query) noexcept {
+    return query;
+}
+
+/** A plain vector's scores need no correction. */
+template <typename scalar_type_, typename node_id_type_, typename dot_type_, std::size_t fan_out_>
+void dense_correct_scores(nk::vector_view<scalar_type_>, std::array<node_id_type_, fan_out_> const&,
+                          std::array<nk::vector_view<scalar_type_>, fan_out_> const&,
+                          dense_scores<dot_type_, fan_out_>&, std::size_t) noexcept {}
+
+/** A query the dense walk accepts. */
+template <typename query_type_, typename scalar_type_>
+concept dense_query = std::same_as<query_type_, nk::vector_view<scalar_type_>>;
 
 /** Per-thread traversal scratch: candidate queues, visited set, neighbor selection buffers and
  *  the running telemetry counters - one instance per scanning thread. */
@@ -926,7 +986,8 @@ struct dense_ram_index {
             // The row is already claimed, so a refused walk wires a thinner node rather than
             // abandoning an ID nothing will ever publish.
             if (first_invisible_id != 0 &&
-                failed(search_around(owned_vector, new_norms, first_invisible_id, expansion_factor, context)))
+                failed(search_around(vector_view_t(owned_vector), new_norms, first_invisible_id, expansion_factor,
+                                     context, context.results)))
                 ++context.saturated_walks;
 
             // No reader can arrive before slot 0 turns non-sentinel, so relaxed stores into slots
@@ -1487,11 +1548,29 @@ struct dense_ram_index {
      *      @c context.results, ascending by distance - the nearest first.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      */
-    expected<search_result_t> search(vector_view_t query_vector, dense_traversal_context_t& context,
+    template <dense_query<scalar_t> query_type_ = vector_view_t>
+    expected<search_result_t> search(query_type_ const& query_vector, dense_traversal_context_t& context,
                                      search_config_t config = {}) noexcept {
+        return search(query_vector, dummy_fold_t {}, context, config);
+    }
+
+    /**
+     *  @brief Walks exactly like @c search while @p fold reads every quad the walk scores - the
+     *      entry point for verbs that reduce a walk to something other than its nearest matches.
+     *
+     *  @param[in] query_vector The query, in the index's own dtype & frozen dimensionality.
+     *  @param[inout] fold The reader of every scored quad - see @c dense_fold.
+     *  @param[inout] context The calling thread's scratch & telemetry: the nearest published
+     *      candidates end up in @c context.results, ascending by distance.
+     *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
+     */
+    template <dense_query<scalar_t> query_type_, typename fold_type_>
+        requires dense_fold<std::remove_cvref_t<fold_type_>, vector_product_result_t>
+    expected<search_result_t> search(query_type_ const& query_vector, fold_type_&& fold,
+                                     dense_traversal_context_t& context, search_config_t config = {}) noexcept {
         if (config.synchronization != synchronization_t::concurrent_k)
-            return search_typed<synchronization_t::immutable_k>(query_vector, context, config);
-        return search_typed<synchronization_t::concurrent_k>(query_vector, context, config);
+            return search_typed<synchronization_t::immutable_k>(query_vector, context, config, fold, context.results);
+        return search_typed<synchronization_t::concurrent_k>(query_vector, context, config, fold, context.results);
     }
 
     /**
@@ -1515,31 +1594,40 @@ struct dense_ram_index {
     template <typename predicate_type_>
     expected<search_result_t> search_if(vector_view_t query_vector, predicate_type_&& predicate,
                                         dense_traversal_context_t& context, search_config_t config = {}) noexcept {
-        if (config.synchronization != synchronization_t::concurrent_k)
-            return search_typed<synchronization_t::immutable_k>(query_vector, context, config,
-                                                                std::forward<predicate_type_>(predicate));
-        return search_typed<synchronization_t::concurrent_k>(query_vector, context, config,
-                                                             std::forward<predicate_type_>(predicate));
+        // Matches admit into the re-selection buffer, idle during any search and reserved beside the
+        // navigation pool; it bounds the walk once full, then swaps into `context.results`.
+        context.refining_candidates.clear();
+        dense_filtering_fold<std::remove_reference_t<predicate_type_>, results_array_t> filtering {
+            predicate, context.refining_candidates, non_zero_expansion_factor(config)};
+        expected<search_result_t> const result =
+            config.synchronization != synchronization_t::concurrent_k
+                ? search_typed<synchronization_t::immutable_k>(query_vector, context, config, filtering,
+                                                               context.refining_candidates)
+                : search_typed<synchronization_t::concurrent_k>(query_vector, context, config, filtering,
+                                                                context.refining_candidates);
+        std::swap(context.results, context.refining_candidates);
+        return result;
     }
 
-    /** The compile-time form of @c search() & @c search_if(): one whole-traversal instantiation
-     *  per @p synchronization_ contract and per predicate type, so a certified contract carries
-     *  no atomics and @c dummy_predicate_t compiles every admission check out. */
-    template <synchronization_t synchronization_, typename predicate_type_ = dummy_predicate_t>
-    expected<search_result_t> search_typed(vector_view_t query_vector, dense_traversal_context_t& context,
-                                           search_config_t config = {},
-                                           predicate_type_&& predicate = predicate_type_ {}) noexcept {
-        constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, dummy_predicate_t>;
+    /** The compile-time form of @c search() & @c search_if(): one whole-traversal instantiation per
+     *  @p synchronization_ contract and per fold type, so a certified contract carries no atomics
+     *  and @c dummy_fold_t inlines the fold away. The walk ends against @p bound once it fills -
+     *  @c context.results itself for every walk but a filtered one. */
+    template <synchronization_t synchronization_, typename fold_type_, dense_query<scalar_t> query_type_>
+        requires dense_fold<std::remove_cvref_t<fold_type_>, vector_product_result_t>
+    expected<search_result_t> search_typed(query_type_ const& query_vector, dense_traversal_context_t& context,
+                                           search_config_t config, fold_type_&& fold,
+                                           results_array_t const& bound) noexcept {
+        // Every distance kernel takes its width from the geometry, so a narrower query would be over-read.
+        geometry_t const frozen = geometry();
+        if (frozen && dense_query_vector(query_vector).size() != frozen.dimensions())
+            return {{}, status_t::config_mismatch_k};
+        std::size_t const expansion_factor = non_zero_expansion_factor(config);
 
-        std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
-                                                                     : connectivity() * 2;
-
-        // The same reservations `insert` makes; a predicated walk also owns the admitted pool -
-        // the re-selection buffer, idle during any search - which the same sizes cover.
+        // The same reservations `insert` makes, which also size the buffer `search_if` admits into.
         if (status_t const sized = reserve_queues_(context, queue_sizes_(expansion_factor, connectivity()));
             failed(sized))
             return {{}, sized};
-        if constexpr (predicated_k) context.refining_candidates.clear();
         context.results.clear();
         context.frontier.clear();
         context.visited.clear();
@@ -1550,7 +1638,8 @@ struct dense_ram_index {
                                                             ? std::memory_order_acquire
                                                             : std::memory_order_relaxed;
         node_id_t const first_invisible_id = atomic_ref<node_id_t>(last_visible_id_).load(watermark_order_k);
-        if (first_invisible_id == 0) return {{}, status_t::success_k};
+        // An unfrozen geometry read before a racing first insert left the query width unchecked.
+        if (first_invisible_id == 0 || !frozen) return {{}, status_t::success_k};
 
         // Snapshot the context's running telemetry, to report this query's share on return.
         std::size_t const visited_members_before = context.visited_members;
@@ -1558,20 +1647,15 @@ struct dense_ram_index {
         std::size_t const restarts_before = context.restarts;
         std::size_t const saturated_walks_before = context.saturated_walks;
 
-        vector_norms_t const query_norms = dense_norms(query_vector);
+        vector_norms_t const query_norms = dense_norms(dense_query_vector(query_vector));
         status_t const walked = search_around<synchronization_>(query_vector, query_norms, first_invisible_id,
-                                                                expansion_factor, context, //
-                                                                std::forward<predicate_type_>(predicate));
-
-        // Matches always land in `context.results`, so a predicated walk swaps its admitted pool
-        // into place; the navigation leftovers are cleared by whichever call reuses that scratch.
-        if constexpr (predicated_k) std::swap(context.results, context.refining_candidates);
+                                                                expansion_factor, context, bound, fold);
 
         // A refused walk still ranked what it reached; the counter says the ranking is short
         // because scratch ran out, not because the graph had nothing better.
         if (failed(walked)) ++context.saturated_walks;
         search_result_t result;
-        result.count = context.results.size();
+        result.count = bound.size();
         result.visited_members = context.visited_members - visited_members_before;
         result.computed_distances = context.computed_distances - computed_distances_before;
         result.restarts = context.restarts - restarts_before;
@@ -2087,6 +2171,14 @@ struct dense_ram_index {
         vector_view_t query, vector_norms_t query_norms, //
         std::array<vector_view_t, 4> candidates, std::array<vector_norms_t, 4> candidates_norms) noexcept {
         return usearch::distances<kernel_kind_, capability_, scalar_t>( //
+            query, query_norms, candidates, candidates_norms);
+    }
+
+    /** Trampoline for @c usearch::scores with hardened types - the walk's scoring, whose dots a fold reads. */
+    inline static dense_scores<vector_product_result_t, 4> scores( //
+        vector_view_t query, vector_norms_t query_norms,           //
+        std::array<vector_view_t, 4> candidates, std::array<vector_norms_t, 4> candidates_norms) noexcept {
+        return usearch::scores<kernel_kind_, capability_, scalar_t>( //
             query, query_norms, candidates, candidates_norms);
     }
 
@@ -2952,8 +3044,8 @@ struct dense_ram_index {
         [[maybe_unused]] membership_t const self_marked = context.visited.insert(node_id);
         small_size_t const staged_count = stage_neighbors_(own_neighbors, node_id, context);
         std::span<node_id_t const> const seeds {context.staged_ids.data(), staged_count};
-        if (failed(search_around(own_vector, own_norms, first_invisible_id, expansion_factor, context,
-                                 dummy_predicate_t {}, seeds)))
+        if (failed(search_around(own_vector, own_norms, first_invisible_id, expansion_factor, context, context.results,
+                                 dummy_fold_t {}, seeds)))
             ++context.saturated_walks;
 
         selection_t& selected = context.selected_neighbors;
@@ -2987,22 +3079,21 @@ struct dense_ram_index {
     /**
      *  @brief Samples one 4-way batch of distinct, unvisited, published landmarks, scores them
      *      against the @p query, and queues them into the frontier & the result pool.
-     *  @return The landmarks queued; @c 0 on @c success_k means every published node is already
-     *      visited, which ends the walk rather than failing it. A failed status means scratch
-     *      could not grow, which is a different answer the caller may want to report.
+     *  @return @c queued_k, @c exhausted_k once every published node is already visited, or
+     *      @c sated_k once the fold asks the walk to end - the last two end the walk rather than
+     *      failing it. A failed status means scratch could not grow.
      *
      *  Uniform draws that collide with @c visited fall back to cyclic linear probing over the ID
      *  space, so every call makes strict progress without retry budgets. Only transiently locked
      *  nodes are re-rolled, like the traversal itself.
      */
-    template <synchronization_t synchronization_ = synchronization_t::concurrent_k,
-              typename predicate_type_ = dummy_predicate_t>
-    expected<std::size_t> sample_landmarks(vector_view_t query, vector_norms_t query_norms,
-                                           node_id_t first_invisible_id, std::size_t expansion_factor,
-                                           dense_traversal_context_t& context, std::span<node_id_t const>& seeds,
-                                           predicate_type_&& predicate = predicate_type_ {}) noexcept {
-        constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, dummy_predicate_t>;
-
+    template <synchronization_t synchronization_ = synchronization_t::concurrent_k, typename fold_type_ = dummy_fold_t,
+              dense_query<scalar_t> query_type_ = vector_view_t>
+    expected<landmarks_seeding_t> sample_landmarks(query_type_ const& query, vector_norms_t query_norms,
+                                                   node_id_t first_invisible_id, std::size_t expansion_factor,
+                                                   dense_traversal_context_t& context,
+                                                   std::span<node_id_t const>& seeds,
+                                                   fold_type_&& fold = fold_type_ {}) noexcept {
         results_array_t& results = context.results;
         frontier_queue_t& frontier = context.frontier;
         visited_set_t& visited = context.visited;
@@ -3013,7 +3104,7 @@ struct dense_ram_index {
         small_size_t landmarks_in_batch = 0;
 
         if (status_t const seen = visited.reserve(visited.size() + landmarks_ids.size()); failed(seen))
-            return {0, seen};
+            return {landmarks_seeding_t::exhausted_k, seen};
         // `visited` may also hold above-watermark IDs discovered through fresh back-linking, so the
         // size check is conservative: it can only under-sample, never let the probe loop spin.
         while (landmarks_in_batch != landmarks_ids.size() && visited.size() < first_invisible_id) {
@@ -3043,7 +3134,7 @@ struct dense_ram_index {
             landmarks_norms[landmarks_in_batch] = norm_for(landmark_location);
             ++landmarks_in_batch;
         }
-        if (!landmarks_in_batch) return {0, status_t::success_k};
+        if (!landmarks_in_batch) return {landmarks_seeding_t::exhausted_k, status_t::success_k};
 
         // Pad the tail lanes with lane zero; the padded outputs are never consumed.
         for (small_size_t lane = landmarks_in_batch; lane != landmarks_ids.size(); ++lane) {
@@ -3051,39 +3142,26 @@ struct dense_ram_index {
             landmarks_vectors[lane] = landmarks_vectors[0];
             landmarks_norms[lane] = landmarks_norms[0];
         }
-        std::array<distance_t, 4> const landmark_distances = distances( //
-            query, query_norms, landmarks_vectors, landmarks_norms);
+        dense_scores<vector_product_result_t, 4> landmark_scores = scores( //
+            dense_query_vector(query), query_norms, landmarks_vectors, landmarks_norms);
+        dense_correct_scores(query, landmarks_ids, landmarks_vectors, landmark_scores, landmarks_in_batch);
         context.computed_distances += landmarks_in_batch;
         std::array<dense_scored_node_t, 4> landmarks_scored;
         for (small_size_t lane = 0; lane != landmarks_in_batch; ++lane)
-            landmarks_scored[lane] = dense_scored_node_t(landmarks_ids[lane], landmark_distances[lane]);
+            landmarks_scored[lane] = dense_scored_node_t(landmarks_ids[lane], landmark_scores.distances[lane]);
         std::span const scored = std::span(landmarks_scored).first(landmarks_in_batch);
+        // Landmarks fold right here, in lane order: they are marked visited, so the walk never
+        // re-scores them and this is their one chance to be absorbed.
+        if (fold.absorb(scored,
+                        std::span<vector_product_result_t const>(landmark_scores.dots).first(landmarks_in_batch)) ==
+            walk_demand_t::sated_k)
+            return {landmarks_seeding_t::sated_k, status_t::success_k};
         network_sort(scored, dense_closer_scored_node_t {});
-
-        // Matching landmarks enter the admitted pool right here: they are marked visited, so
-        // the walk never re-scores them and this is their one admission opportunity.
-        if constexpr (predicated_k) {
-            dense_admissions_t admissions;
-            invoke_admission(predicate, scored, admissions);
-            network_sort(std::span(admissions), dense_closer_scored_node_t {});
-            context.refining_candidates.insert(std::span(admissions), expansion_factor);
-        }
         results.insert(scored, expansion_factor);
         for (small_size_t lane = 0; lane != landmarks_in_batch; ++lane)
             if (status_t const queued = frontier.insert(dense_scored_node_t(scored[lane])); failed(queued))
-                return {lane, queued};
-        return {landmarks_in_batch, status_t::success_k};
-    }
-
-    /** The pool whose radius governs a walk's termination: the admitted one once it fills, since
-     *  that radius is the wider one, the navigation pool until then. */
-    template <typename predicate_type_>
-    static results_array_t const& governing_pool_(dense_traversal_context_t const& context,
-                                                  std::size_t expansion_factor) noexcept {
-        constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, dummy_predicate_t>;
-        if constexpr (predicated_k)
-            if (context.refining_candidates.size() == expansion_factor) return context.refining_candidates;
-        return context.results;
+                return {landmarks_seeding_t::queued_k, queued};
+        return {landmarks_seeding_t::queued_k, status_t::success_k};
     }
 
     /**
@@ -3097,20 +3175,19 @@ struct dense_ram_index {
      *  @param[in] expansion_factor Breadth of the candidate pool - the walk's stopping radius.
      *  @param[inout] context Scratch & telemetry; must arrive pre-reserved & pre-cleared, and ends
      *      with up to @p expansion_factor nearest published candidates in @c context.results.
-     *  @param[in] predicate Optional admission filter - see @c search_if. Non-matching nodes
-     *      still score and route the walk; only matching ones enter @c context.refining_candidates,
-     *      whose radius governs termination once that pool fills.
+     *  @param[in] bound The pool whose fill ends restarts and whose radius bounds the walk once full:
+     *      @c context.results itself, or a filtered walk's admitted pool.
+     *  @param[in] fold Optional reader of every scored quad - see @c dense_fold. It never steers the
+     *      walk, except that a @c sated_k from it ends the walk successfully.
      *  @param[in] seeds Optional landmarks to start from ahead of the random draws - a
      *      re-selection hands in the node's own neighbors, so every one already wired competes.
      */
-    template <synchronization_t synchronization_ = synchronization_t::concurrent_k,
-              typename predicate_type_ = dummy_predicate_t>
-    status_t search_around(vector_view_t query, vector_norms_t query_norms, node_id_t first_invisible_id,
+    template <synchronization_t synchronization_ = synchronization_t::concurrent_k, typename fold_type_ = dummy_fold_t,
+              dense_query<scalar_t> query_type_ = vector_view_t>
+    status_t search_around(query_type_ const& query, vector_norms_t query_norms, node_id_t first_invisible_id,
                            std::size_t expansion_factor, dense_traversal_context_t& context,
-                           predicate_type_&& predicate = predicate_type_ {},
+                           results_array_t const& bound, fold_type_&& fold = fold_type_ {},
                            std::span<node_id_t const> seeds = {}) noexcept {
-        constexpr bool predicated_k = !std::is_same_v<std::remove_cvref_t<predicate_type_>, dummy_predicate_t>;
-
         results_array_t& results = context.results;
         frontier_queue_t& frontier = context.frontier;
         visited_set_t& visited = context.visited;
@@ -3120,10 +3197,11 @@ struct dense_ram_index {
         // About as many landmarks as the connectivity - a stochastic multi-start in 4-way batches.
         small_size_t const landmark_batches = divide_round_up<small_size_t>(node_connectivity, 4);
         for (small_size_t landmarks_batch = 0; landmarks_batch != landmark_batches; ++landmarks_batch) {
-            auto const [landmarks, seed_status] = sample_landmarks<synchronization_>(
-                query, query_norms, first_invisible_id, expansion_factor, context, seeds, predicate);
+            auto const [seeding, seed_status] = sample_landmarks<synchronization_>(
+                query, query_norms, first_invisible_id, expansion_factor, context, seeds, fold);
             if (failed(seed_status)) return seed_status;
-            if (!landmarks) break; // Everything published is already visited.
+            if (seeding == landmarks_seeding_t::sated_k) return status_t::success_k;
+            if (seeding == landmarks_seeding_t::exhausted_k) break; // Everything published is already visited.
         }
 
         // Greedily walk the frontier nearest-first, keeping the best `expansion_factor` in `results`.
@@ -3132,14 +3210,14 @@ struct dense_ram_index {
             // reachable from its seeds, so re-seed and continue. Every successful batch strictly
             // grows `visited` and `results`, so restarts are self-limiting without a budget.
             if (frontier.empty()) {
-                // A predicated walk re-seeds until the admitted pool fills - matches may hide in
-                // regions the drained frontier never reached.
-                std::size_t const filled = predicated_k ? context.refining_candidates.size() : results.size();
-                if (filled >= expansion_factor) break;
-                auto const [landmarks, seed_status] = sample_landmarks<synchronization_>(
-                    query, query_norms, first_invisible_id, expansion_factor, context, seeds, predicate);
+                // Re-seed until the bound fills - a filtered walk's matches may hide in regions the
+                // drained frontier never reached.
+                if (bound.size() >= expansion_factor) break;
+                auto const [seeding, seed_status] = sample_landmarks<synchronization_>(
+                    query, query_norms, first_invisible_id, expansion_factor, context, seeds, fold);
                 if (failed(seed_status)) return seed_status;
-                if (!landmarks) break; // Nothing fresh left to restart from.
+                if (seeding == landmarks_seeding_t::sated_k) return status_t::success_k;
+                if (seeding == landmarks_seeding_t::exhausted_k) break; // Nothing fresh left to restart from.
                 ++context.restarts;
                 continue;
             }
@@ -3147,7 +3225,8 @@ struct dense_ram_index {
             // Peek - don't pop yet: the chosen node's neighbors may be locked, in which case
             // we retry the selection rather than dropping it from the frontier.
             dense_scored_node_t const candidate = frontier.top();
-            results_array_t const& pool = governing_pool_<predicate_type_>(context, expansion_factor);
+            // The bound governs once it fills, since a filtered walk's radius is the wider one.
+            results_array_t const& pool = bound.size() == expansion_factor ? bound : results;
             bool const pool_full = pool.size() == expansion_factor;
             // Once the nearest unexpanded node is past a full pool's radius, nothing deeper can
             // improve the answer.
@@ -3212,24 +3291,21 @@ struct dense_ram_index {
                     gathered_vectors[lane] = gathered_vectors[0];
                     gathered_norms[lane] = gathered_norms[0];
                 }
-                std::array<distance_t, 4> const gathered_distances = distances( //
-                    query, query_norms, gathered_vectors, gathered_norms);
+                dense_scores<vector_product_result_t, 4> gathered_scores = scores( //
+                    dense_query_vector(query), query_norms, gathered_vectors, gathered_norms);
+                dense_correct_scores(query, gathered_ids, gathered_vectors, gathered_scores, gathered_count);
                 context.computed_distances += gathered_count;
                 std::array<dense_scored_node_t, 4> scored_batch;
                 for (small_size_t lane = 0; lane != gathered_count; ++lane)
-                    scored_batch[lane] = dense_scored_node_t(gathered_ids[lane], gathered_distances[lane]);
+                    scored_batch[lane] = dense_scored_node_t(gathered_ids[lane], gathered_scores.distances[lane]);
                 std::span const scored = std::span(scored_batch).first(gathered_count);
+                // Folding is independent of navigation: a fold reads every scored quad in lane order,
+                // including what the navigation pool rejects, and never decides where the walk routes.
+                if (fold.absorb(scored,
+                                std::span<vector_product_result_t const>(gathered_scores.dots).first(gathered_count)) ==
+                    walk_demand_t::sated_k)
+                    return status_t::success_k;
                 network_sort(scored, dense_closer_scored_node_t {});
-
-                // Admission is independent of navigation: a matching node enters the admitted pool
-                // even when the navigation pool rejects it, and a non-matching node keeps routing.
-                // The re-sort only normalizes what a reordering predicate may return.
-                if constexpr (predicated_k) {
-                    dense_admissions_t admissions;
-                    invoke_admission(predicate, scored, admissions);
-                    network_sort(std::span(admissions), dense_closer_scored_node_t {});
-                    context.refining_candidates.insert(std::span(admissions), expansion_factor);
-                }
 
                 // One merge folds the ascending quad into the pool; only its accepted prefix
                 // enters the frontier. The merge precedes the marks, so a refusal keeps the quad.

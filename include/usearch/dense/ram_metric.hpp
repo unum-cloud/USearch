@@ -30,7 +30,7 @@
  *  Unsupported @c (kernel,scalar) pairs simply have no specialization. Adding an ISA
  *  tier is one row and zero preprocessor lines.
  *
- *  @b Trampoline - @c invoke_distances_<fan_out,kit> is the one place the load, update,
+ *  @b Trampoline - @c invoke_scores_<fan_out,kit> is the one place the load, update,
  *  finalize, through, prefetch, demote choreography lives. Reads everything it needs -
  *  @c scalar_t, @c distance_lane_t, @c convert_to_distances, ... - off the kit. Lane fan-out
  *  is unrolled via @c std::index_sequence so the same body emits clean code for both
@@ -105,7 +105,7 @@
 #include "usearch/utilities/ram_tables.hpp"
 
 /**
- *  @brief Per-step cache-hint feature gates for the @c invoke_distances_ trampoline.
+ *  @brief Per-step cache-hint feature gates for the @c invoke_scores_ trampoline.
  *
  *  Both default to off. With the gates off the kit's hint type aliases still resolve, but
  *  the call sites are elided via @c if @c constexpr - no PREFETCHT* or CLDEMOTE micro-ops
@@ -3861,6 +3861,17 @@ struct dense_quads_chain<nk_kernel_jaccard_k, nk::u1x8_t, caps_> {
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
+/** One finalize read two ways: the native dots, and the distances derived from them. */
+template <typename dot_result_type_, std::size_t fan_out_>
+struct dense_scores {
+
+    /** Native dot products in kernel lane order, before any distance conversion. */
+    std::array<dot_result_type_, fan_out_> dots;
+
+    /** The distances derived from @c dots, lane for lane. */
+    std::array<f32_t, fan_out_> distances;
+};
+
 /**
  *  @brief The only place the load, update, finalize, through, prefetch, demote choreography lives.
  *
@@ -3874,10 +3885,10 @@ struct dense_quads_chain<nk_kernel_jaccard_k, nk::u1x8_t, caps_> {
  *  exposing @c reduce_accumulators as a direct @c nk_* alias rather than a wrapper.
  */
 template <std::size_t fan_out_, dense_quads_kit kit_>
-[[gnu::always_inline]] inline std::array<f32_t, fan_out_> invoke_distances_(   //
-    nk::vector_view<typename kit_::scalar_t> query,                            //
-    vector_norms<typename kit_::scalar_t::dot_result_t> query_norms,           //
-    std::array<nk::vector_view<typename kit_::scalar_t>, fan_out_> candidates, //
+[[gnu::always_inline]] inline dense_scores<typename kit_::scalar_t::dot_result_t, fan_out_> invoke_scores_( //
+    nk::vector_view<typename kit_::scalar_t> query,                                                         //
+    vector_norms<typename kit_::scalar_t::dot_result_t> query_norms,                                        //
+    std::array<nk::vector_view<typename kit_::scalar_t>, fan_out_> candidates,                              //
     std::array<vector_norms<typename kit_::scalar_t::dot_result_t>, fan_out_> candidates_norms) noexcept {
 
     static_assert(fan_out_ == 1 || fan_out_ == 4, "Only 1-to-1 and 1-to-4 fan-outs are supported");
@@ -4010,11 +4021,15 @@ template <std::size_t fan_out_, dense_quads_kit kit_>
     // angular: u32 dot in, f32 distance out).
     auto const& distances_array = *reinterpret_cast<std::array<distance_lane_t, 4> const*>(
         &distances_from_dot_products_vec);
-    std::array<f32_t, fan_out_> result_array;
+    static_assert(sizeof(finalized_vec_t) == 4 * sizeof(dot_result_t), "A finalize holds four dot lanes");
+    std::array<dot_result_t, 4> const& dots_array = *reinterpret_cast<std::array<dot_result_t, 4> const*>(
+        &dot_products_vec);
+    dense_scores<dot_result_t, fan_out_> scores;
     [&]<std::size_t... lane_index>(std::index_sequence<lane_index...>) {
-        ((result_array[lane_index] = static_cast<f32_t>(distances_array[lane_index])), ...);
+        ((scores.dots[lane_index] = dots_array[lane_index]), ...);
+        ((scores.distances[lane_index] = static_cast<f32_t>(distances_array[lane_index])), ...);
     }(std::make_index_sequence<fan_out_> {});
-    return result_array;
+    return scores;
 }
 
 /**
@@ -4068,10 +4083,10 @@ template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype sca
     nk::vector_view<scalar_> candidate,       //
     norms_type_ candidate_norms) noexcept {
     using kit_t = typename dense_quads_chain<kernel_, scalar_, caps_>::kit_t;
-    auto results = invoke_distances_<1, kit_t>( //
-        query, moments_of<scalar_>(query_norms), std::array<nk::vector_view<scalar_>, 1> {candidate},
-        std::array {moments_of<scalar_>(candidate_norms)});
-    return results[0];
+    return invoke_scores_<1, kit_t>( //
+               query, moments_of<scalar_>(query_norms), std::array<nk::vector_view<scalar_>, 1> {candidate},
+               std::array {moments_of<scalar_>(candidate_norms)})
+        .distances[0];
 }
 
 /** 1-to-4 distances from @c query to four @c candidates under @c kernel_. */
@@ -4083,8 +4098,22 @@ template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype sca
     std::array<nk::vector_view<scalar_>, 4> candidates,       //
     std::array<norms_type_, 4> candidates_norms) noexcept {
     using kit_t = typename dense_quads_chain<kernel_, scalar_, caps_>::kit_t;
-    return invoke_distances_<4, kit_t>(query, moments_of<scalar_>(query_norms), candidates,
-                                       moments_of<scalar_>(candidates_norms));
+    return invoke_scores_<4, kit_t>(query, moments_of<scalar_>(query_norms), candidates,
+                                    moments_of<scalar_>(candidates_norms))
+        .distances;
+}
+
+/** 1-to-4 native dots and the distances derived from them, from one finalize, under @c kernel_. */
+template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype scalar_, typename norms_type_>
+    requires norms_argument<norms_type_, scalar_>
+[[gnu::always_inline]] inline dense_scores<typename scalar_::dot_result_t, 4> scores( //
+    nk::vector_view<scalar_> query,                                                   //
+    norms_type_ query_norms,                                                          //
+    std::array<nk::vector_view<scalar_>, 4> candidates,                               //
+    std::array<norms_type_, 4> candidates_norms) noexcept {
+    using kit_t = typename dense_quads_chain<kernel_, scalar_, caps_>::kit_t;
+    return invoke_scores_<4, kit_t>(query, moments_of<scalar_>(query_norms), candidates,
+                                    moments_of<scalar_>(candidates_norms));
 }
 
 /** Empty tile kit: the (kernel, scalar) pair has no matrix-engine backend on this
@@ -4205,7 +4234,7 @@ struct u8_sapphireamx_tiles_kit {
 
     /** Distances through the stored norms for all 16×16 lanes: 4-lane groups through
      *  the finalize kit's own @c convert_to_distances - the epilogue of
-     *  @c invoke_distances_, tiled. Pad lanes finalize too and are simply never read. */
+     *  @c invoke_scores_, tiled. Pad lanes finalize too and are simply never read. */
     static void finalize_tile(accumulator_tile_t const& tile, std::array<norms_t, tile_rows_k> const& a_norms,
                               std::array<norms_t, tile_columns_k> const& b_norms, f32_t* distances,
                               std::size_t stride) noexcept {
@@ -4328,7 +4357,7 @@ struct i8_sapphireamx_tiles_kit {
 
     /** Distances through the stored norms for all 16×16 lanes: 4-lane groups through
      *  the finalize kit's own @c convert_to_distances - the epilogue of
-     *  @c invoke_distances_, tiled. Pad lanes finalize too and are simply never read. */
+     *  @c invoke_scores_, tiled. Pad lanes finalize too and are simply never read. */
     static void finalize_tile(accumulator_tile_t const& tile, std::array<norms_t, tile_rows_k> const& a_norms,
                               std::array<norms_t, tile_columns_k> const& b_norms, f32_t* distances,
                               std::size_t stride) noexcept {
@@ -4451,7 +4480,7 @@ struct bf16_sapphireamx_tiles_kit {
 
     /** Distances through the stored norms for all 16×16 lanes: 4-lane groups through
      *  the finalize kit's own @c convert_to_distances - the epilogue of
-     *  @c invoke_distances_, tiled. Pad lanes finalize too and are simply never read. */
+     *  @c invoke_scores_, tiled. Pad lanes finalize too and are simply never read. */
     static void finalize_tile(accumulator_tile_t const& tile, std::array<norms_t, tile_rows_k> const& a_norms,
                               std::array<norms_t, tile_columns_k> const& b_norms, f32_t* distances,
                               std::size_t stride) noexcept {
