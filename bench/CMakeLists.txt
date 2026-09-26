@@ -53,12 +53,16 @@ if (USEARCH_BUILD_CUDA)
     add_executable(
         usearch_bench_dense_vram_index
         dense_vram_index.cu
-        dense/vram_index_f32.cu
         dense/vram_index_bf16.cu
         dense/vram_index_f16.cu
+        dense/vram_index_e5m2.cu
+        dense/vram_index_e4m3.cu
+        dense/vram_index_e3m2.cu
+        dense/vram_index_e2m3.cu
         dense/vram_index_i8.cu
         dense/vram_index_i4.cu
         dense/vram_index_u8.cu
+        dense/vram_index_u4.cu
         dense/vram_index_u1.cu
     )
     target_include_directories(
@@ -72,6 +76,9 @@ if (USEARCH_BUILD_CUDA)
                    CUDA_ARCHITECTURES "${USEARCH_CUDA_ARCHITECTURES}"
     )
     target_compile_options(usearch_bench_dense_vram_index PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
+    # A generation's kits join the bench only when every listed architecture runs them.
+    usearch_cuda_tiers(bench_cuda_tiers_ "${USEARCH_CUDA_ARCHITECTURES}")
+    target_compile_definitions(usearch_bench_dense_vram_index PRIVATE ${bench_cuda_tiers_})
     target_link_libraries(
         usearch_bench_dense_vram_index PRIVATE clipp fmt::fmt yyjson CUDA::cuda_driver forkunion::static
                                                stringzilla::header

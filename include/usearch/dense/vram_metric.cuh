@@ -1109,105 +1109,105 @@ struct u1x8_ampere_kit {
 
 /** The dispatch entry every index instantiation resolves through - the CPU chains' twin: one row per
  *  generation, newest first, each gated on its tier being compiled in and admitted by the caller's
- *  @p ceiling_, over the Ampere floor. Two ceilings in one binary run different rows on one device. */
-template <nk_dtype_t vector_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
+ *  @p caps_, over the Ampere floor. Two ceilings in one binary run different rows on one device. */
+template <nk_dtype_t vector_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t caps_>
 struct dense_cuda_kit_chain;
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
-struct dense_cuda_kit_chain<nk_f16_k, kernel_, ceiling_> {
-    using kit_t = typename first_available_kit<                                                                       //
-        f16_ampere_kit<kernel_>,                                                                                      //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && ceiling_ >= cuda_arch_blackwellrtx_k, f16_blackwell_kit<kernel_>>, //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && ceiling_ >= cuda_arch_blackwell_k, f16_blackwell_kit<kernel_>>        //
+template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
+struct dense_cuda_kit_chain<nk_f16_k, kernel_, caps_> {
+    using kit_t = typename first_available_kit<                                                                    //
+        f16_ampere_kit<kernel_>,                                                                                   //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && caps_ >= cuda_arch_blackwellrtx_k, f16_blackwell_kit<kernel_>>, //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && caps_ >= cuda_arch_blackwell_k, f16_blackwell_kit<kernel_>>        //
         >::type;
     static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
-struct dense_cuda_kit_chain<nk_bf16_k, kernel_, ceiling_> {
+template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
+struct dense_cuda_kit_chain<nk_bf16_k, kernel_, caps_> {
     using kit_t = typename first_available_kit< //
         bf16_ampere_kit<kernel_>,               //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && ceiling_ >= cuda_arch_blackwellrtx_k,
-                    bf16_blackwell_kit<kernel_>>,                                                               //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && ceiling_ >= cuda_arch_blackwell_k, bf16_blackwell_kit<kernel_>> //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && caps_ >= cuda_arch_blackwellrtx_k,
+                    bf16_blackwell_kit<kernel_>>,                                                            //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && caps_ >= cuda_arch_blackwell_k, bf16_blackwell_kit<kernel_>> //
         >::type;
     static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
-struct dense_cuda_kit_chain<nk_i8_k, kernel_, ceiling_> {
+template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
+struct dense_cuda_kit_chain<nk_i8_k, kernel_, caps_> {
     using kit_t = i8_ampere_kit<kernel_>;
     static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
-struct dense_cuda_kit_chain<nk_u8_k, kernel_, ceiling_> {
+template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
+struct dense_cuda_kit_chain<nk_u8_k, kernel_, caps_> {
     using kit_t = u8_ampere_kit<kernel_>;
     static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
-struct dense_cuda_kit_chain<nk_e5m2_k, kernel_, ceiling_> {
+template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
+struct dense_cuda_kit_chain<nk_e5m2_k, kernel_, caps_> {
     using kit_t = typename first_available_kit< //
         e5m2_ampere_kit<kernel_>,               //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && ceiling_ >= cuda_arch_blackwellrtx_k,
-                    e5m2_blackwell_kit<kernel_>>,                                                                //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && ceiling_ >= cuda_arch_blackwell_k, e5m2_blackwell_kit<kernel_>>, //
-        chain_layer<NUMKONG_TARGET_ADA && ceiling_ >= cuda_arch_ada_k,
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && caps_ >= cuda_arch_blackwellrtx_k,
+                    e5m2_blackwell_kit<kernel_>>,                                                             //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && caps_ >= cuda_arch_blackwell_k, e5m2_blackwell_kit<kernel_>>, //
+        chain_layer<NUMKONG_TARGET_ADA && caps_ >= cuda_arch_ada_k,
                     e5m2_ada_kit<kernel_>> //
         >::type;
     static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
-struct dense_cuda_kit_chain<nk_e4m3_k, kernel_, ceiling_> {
+template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
+struct dense_cuda_kit_chain<nk_e4m3_k, kernel_, caps_> {
     using kit_t = typename first_available_kit< //
         e4m3_ampere_kit<kernel_>,               //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && ceiling_ >= cuda_arch_blackwellrtx_k,
-                    e4m3_blackwell_kit<kernel_>>,                                                                //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && ceiling_ >= cuda_arch_blackwell_k, e4m3_blackwell_kit<kernel_>>, //
-        chain_layer<NUMKONG_TARGET_ADA && ceiling_ >= cuda_arch_ada_k,
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && caps_ >= cuda_arch_blackwellrtx_k,
+                    e4m3_blackwell_kit<kernel_>>,                                                             //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && caps_ >= cuda_arch_blackwell_k, e4m3_blackwell_kit<kernel_>>, //
+        chain_layer<NUMKONG_TARGET_ADA && caps_ >= cuda_arch_ada_k,
                     e4m3_ada_kit<kernel_>> //
         >::type;
     static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
-struct dense_cuda_kit_chain<nk_e3m2_k, kernel_, ceiling_> {
+template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
+struct dense_cuda_kit_chain<nk_e3m2_k, kernel_, caps_> {
     using kit_t = typename first_available_kit< //
         e3m2_ampere_kit<kernel_>,               //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && ceiling_ >= cuda_arch_blackwellrtx_k,
-                    e3m2_blackwell_kit<kernel_>>,                                                               //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && ceiling_ >= cuda_arch_blackwell_k, e3m2_blackwell_kit<kernel_>> //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && caps_ >= cuda_arch_blackwellrtx_k,
+                    e3m2_blackwell_kit<kernel_>>,                                                            //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && caps_ >= cuda_arch_blackwell_k, e3m2_blackwell_kit<kernel_>> //
         >::type;
     static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
-struct dense_cuda_kit_chain<nk_e2m3_k, kernel_, ceiling_> {
+template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
+struct dense_cuda_kit_chain<nk_e2m3_k, kernel_, caps_> {
     using kit_t = typename first_available_kit< //
         e2m3_ampere_kit<kernel_>,               //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && ceiling_ >= cuda_arch_blackwellrtx_k,
-                    e2m3_blackwell_kit<kernel_>>,                                                               //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && ceiling_ >= cuda_arch_blackwell_k, e2m3_blackwell_kit<kernel_>> //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && caps_ >= cuda_arch_blackwellrtx_k,
+                    e2m3_blackwell_kit<kernel_>>,                                                            //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && caps_ >= cuda_arch_blackwell_k, e2m3_blackwell_kit<kernel_>> //
         >::type;
     static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
-struct dense_cuda_kit_chain<nk_i4_k, kernel_, ceiling_> {
+template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
+struct dense_cuda_kit_chain<nk_i4_k, kernel_, caps_> {
     using kit_t = i4x2_ampere_kit<kernel_>;
     static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
-struct dense_cuda_kit_chain<nk_u4_k, kernel_, ceiling_> {
+template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
+struct dense_cuda_kit_chain<nk_u4_k, kernel_, caps_> {
     using kit_t = u4x2_ampere_kit<kernel_>;
     static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
-struct dense_cuda_kit_chain<nk_u1_k, kernel_, ceiling_> {
+template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
+struct dense_cuda_kit_chain<nk_u1_k, kernel_, caps_> {
     using kit_t = u1x8_ampere_kit<kernel_>;
     static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };

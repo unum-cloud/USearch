@@ -195,15 +195,15 @@ int main(int argc, char** argv) {
     // intersects with the runtime bits anyway.
     if (max_compute_name == "serial") { options.max_compute = nk_cap_serial_k; }
     else if (!max_compute_name.empty()) {
-        std::size_t const named = index_of_name(compute_span_k, max_compute_name);
-        if (named == compute_choices_count_k) {
+        std::size_t const named = index_of_name(compute_choices_k, max_compute_name);
+        if (named == std::size(compute_choices_k)) {
             fmt::println("Unknown --max-compute {}; this table offers: {}", max_compute_name,
-                         fmt::join(named_choices("serial", compute_span_k, //
-                                                 prefix_mask(compute_span_k, compute_choices_count_k)),
+                         fmt::join(named_choices("serial", compute_choices_k, //
+                                                 prefix_mask(compute_choices_k, std::size(compute_choices_k))),
                                    " "));
             return 1;
         }
-        options.max_compute = nk_cap_serial_k | prefix_mask(compute_span_k, named);
+        options.max_compute = nk_cap_serial_k | prefix_mask(compute_choices_k, named);
     }
 
     // A schedule ceiling caps only the waiter bits; the pool-management bits - topology,
@@ -212,15 +212,16 @@ int main(int argc, char** argv) {
     // legitimately owns the "yield" row.
     if (max_schedule_name == "standard") { options.max_schedule = schedule_floor_k; }
     else if (!max_schedule_name.empty()) {
-        std::size_t const named = index_of_name(schedule_span_k, max_schedule_name);
-        if (named == schedule_choices_count_k) {
+        std::size_t const named = index_of_name(schedule_choices_k, max_schedule_name);
+        if (named == std::size(schedule_choices_k)) {
             fmt::println("Unknown --max-schedule {}; this table offers: {}", max_schedule_name,
-                         fmt::join(named_choices("standard", schedule_span_k, //
-                                                 prefix_mask(schedule_span_k, schedule_choices_count_k)),
+                         fmt::join(named_choices("standard", schedule_choices_k, //
+                                                 prefix_mask(schedule_choices_k, std::size(schedule_choices_k))),
                                    " "));
             return 1;
         }
-        options.max_schedule = static_cast<fu_capabilities_t>(schedule_floor_k | prefix_mask(schedule_span_k, named));
+        options.max_schedule = static_cast<fu_capabilities_t>(schedule_floor_k |
+                                                              prefix_mask(schedule_choices_k, named));
     }
 
     fu_topology_t topology = nullptr;

@@ -285,10 +285,10 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     fmt::println("  shape: {} × {}d", rows, dimensions);
     fmt::println("  quads: {} · {} · {} kit", scalar_t::dtype_name(),
                  nk_kernel_name(streamed_dataset_type_::bench_t::kernel_kind_k),
-                 bit_name(compute_span_k, index_t::picked_quads_capability_k, "serial"));
+                 bit_name(compute_choices_k, index_t::picked_quads_capability_k, "serial"));
     if constexpr (index_t::has_tiles_k)
         fmt::println("  tiles: {} · reverse refinement",
-                     bit_name(compute_span_k, index_t::picked_tiles_capability_k, "none"));
+                     bit_name(compute_choices_k, index_t::picked_tiles_capability_k, "none"));
     if (index_t::picked_quads_capability_k == nk_cap_serial_k &&
         (bench.options.max_compute & nk_capabilities_available() & ~nk_cap_serial_k))
         fmt::print(verdict_style(false), "  ⚠ scalar fallback: no SIMD kit is adapted for this dtype & metric\n");
@@ -556,8 +556,8 @@ int run_with_metric(bench_launch<dataset_scalar_type_> const& launch) {
  *  floor. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_>
 int run_with_schedule(bench_launch<dataset_scalar_type_> const& launch) {
-    return dispatch_index<schedule_choices_count_k>(
-        highest_index(schedule_span_k, effective_schedule(launch.options.max_schedule)),
+    return dispatch_index<std::size(schedule_choices_k)>(
+        highest_index(schedule_choices_k, effective_schedule(launch.options.max_schedule)),
         [&](auto row) {
             using wait_type_ = std::tuple_element_t<row.value, schedule_waiters_t>;
             return run_with_metric<dataset_scalar_type_, stored_dtype_, capability_, wait_type_>(launch);
@@ -571,10 +571,10 @@ int run_with_schedule(bench_launch<dataset_scalar_type_> const& launch) {
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
 int run_with_compute(bench_launch<dataset_scalar_type_> const& launch) {
     nk_capability_t const effective = launch.options.max_compute & nk_capabilities_available();
-    return dispatch_index<compute_choices_count_k>(
-        highest_index(compute_span_k, effective),
+    return dispatch_index<std::size(compute_choices_k)>(
+        highest_index(compute_choices_k, effective),
         [&](auto row) {
-            return run_with_schedule<dataset_scalar_type_, stored_dtype_, prefix_mask(compute_span_k, row.value)>(
+            return run_with_schedule<dataset_scalar_type_, stored_dtype_, prefix_mask(compute_choices_k, row.value)>(
                 launch);
         },
         [&] { return run_with_schedule<dataset_scalar_type_, stored_dtype_, nk_cap_serial_k>(launch); });

@@ -53,7 +53,7 @@ template <                                               //
     typename key_type_ = uuid_t,                         //
     nk_dtype_t vector_dtype_ = nk_i8_k,                  //
     nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k, //
-    cuda_arch_t arch_ceiling_ = cuda_arch_ampere_k,      //
+    cuda_arch_t capability_ = cuda_arch_ampere_k,        //
     typename key_hash_type_ = std::hash<key_type_>       //
     >
 struct dense_vram_indexes {
@@ -80,7 +80,7 @@ struct dense_vram_indexes {
     using locators_map_t = growing_multimap<key_t, key_locator_t, key_hash_type_, forkunion_allocator_t>;
 
     /** The shard type - geometry parameters in the shard's own order, so the two never disagree. */
-    using index_t = dense_vram_index<vector_dtype_, kernel_kind_, arch_ceiling_>;
+    using index_t = dense_vram_index<vector_dtype_, kernel_kind_, capability_>;
     static_assert(index_family<index_t>);
 
     /** The streams and their scratch every bulk verb runs on; it names no index, so one executor
@@ -123,8 +123,8 @@ struct dense_vram_indexes {
     /** The distance kernel this instantiation walks with. */
     inline static constexpr nk_kernel_kind_t kernel_kind_k = kernel_kind_;
 
-    /** The generation ceiling the kernel kits compiled up to. */
-    inline static constexpr cuda_arch_t arch_ceiling_k = arch_ceiling_;
+    /** The compute-capability ceiling the kernels compiled under. */
+    inline static constexpr cuda_arch_t capability_k = capability_;
 
 #pragma region Placement
 

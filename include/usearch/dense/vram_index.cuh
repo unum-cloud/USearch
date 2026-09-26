@@ -1772,7 +1772,7 @@ struct dense_cuda_traversal_context {
 template <                                                                      //
     nk_dtype_t vector_dtype_ = nk_i8_k,                                         //
     nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k,                        //
-    cuda_arch_t arch_ceiling_ = cuda_arch_ampere_k,                             //
+    cuda_arch_t capability_ = cuda_arch_ampere_k,                               //
     typename vectors_allocator_type_ = cuda_virtual_memory_allocator<byte_t>,   //
     typename neighbors_allocator_type_ = cuda_virtual_memory_allocator<byte_t>, //
     typename traversals_allocator_type_ = cuda_arena_allocator_t>               //
@@ -1780,7 +1780,7 @@ struct dense_vram_index {
 
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
 
-    using kit_chain_t = dense_cuda_kit_chain<vector_dtype_, kernel_kind_, arch_ceiling_>;
+    using kit_chain_t = dense_cuda_kit_chain<vector_dtype_, kernel_kind_, capability_>;
     using kit_t = typename kit_chain_t::kit_t;
     using vectors_allocator_t = vectors_allocator_type_;
     using neighbors_allocator_t = neighbors_allocator_type_;
@@ -1813,9 +1813,9 @@ struct dense_vram_index {
     /** Capability labels for the shared reports: the GPU picks no CPU SIMD tier. */
     inline static constexpr nk_capability_t picked_quads_capability_k = nk_cap_serial_k;
 
-    /** The generation row the kit chain selected under this instantiation's ceiling - the GPU twin
-     *  of @c picked_quads_capability_k, surfaced in the bench reports. */
-    inline static constexpr cuda_arch_t picked_arch_k = kit_chain_t::picked_k;
+    /** The tier of the kit the chain picked under @c capability_ - the GPU twin of
+     *  @c picked_quads_capability_k, surfaced in the bench reports. */
+    inline static constexpr cuda_arch_t picked_capability_k = kit_chain_t::picked_k;
     inline static constexpr bool has_tiles_k = false;
     inline static constexpr nk_capability_t picked_tiles_capability_k = nk_cap_serial_k;
 

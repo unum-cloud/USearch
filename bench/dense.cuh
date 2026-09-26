@@ -66,7 +66,6 @@ inline constexpr capability_choice<nk_capability_t> compute_choices_k[] = {
     {"serial", nk_cap_serial_k},
 #endif
 };
-inline constexpr std::size_t compute_choices_count_k = sizeof(compute_choices_k) / sizeof(compute_choices_k[0]);
 
 /** Scheduling ceilings the harness instantiates waiters for, ascending per architecture and named
  *  by ForkUnion's instruction vocabulary; the floor is the STL yield. Every row is gated by the
@@ -85,39 +84,34 @@ inline constexpr capability_choice<fu_capabilities_t> schedule_choices_k[] = {
     {"standard", fu_capabilities_unknown_k},
 #endif
 };
-inline constexpr std::size_t schedule_choices_count_k = sizeof(schedule_choices_k) / sizeof(schedule_choices_k[0]);
-
-/** The tables as spans - the currency of the shared ceiling helpers below. */
-inline constexpr std::span<capability_choice<nk_capability_t> const> compute_span_k {compute_choices_k};
-inline constexpr std::span<capability_choice<fu_capabilities_t> const> schedule_span_k {schedule_choices_k};
 
 /** Everything at or below the @p index-th ceiling of @p choices, as one allow-mask. */
-template <typename capability_type_>
-constexpr capability_type_ prefix_mask(std::span<capability_choice<capability_type_> const> choices,
+template <typename capability_type_, std::size_t count_>
+constexpr capability_type_ prefix_mask(capability_choice<capability_type_> const (&choices)[count_],
                                        std::size_t index) noexcept {
     capability_type_ mask {};
-    for (std::size_t choice = 0; choice <= index && choice < choices.size(); ++choice)
+    for (std::size_t choice = 0; choice <= index && choice < count_; ++choice)
         mask = static_cast<capability_type_>(mask | choices[choice].bit);
     return mask;
 }
 
 /** The @p floor name, then every choice of @p choices whose bit @p mask covers - a view the
  *  report joins in one print. */
-template <typename capability_type_>
-auto named_choices(char const* floor, std::span<capability_choice<capability_type_> const> choices,
+template <typename capability_type_, std::size_t count_>
+auto named_choices(char const* floor, capability_choice<capability_type_> const (&choices)[count_],
                    capability_type_ mask) noexcept {
-    return std::views::iota(std::size_t {0}, choices.size() + 1) |
-           std::views::filter([choices, mask](std::size_t position) noexcept {
+    return std::views::iota(std::size_t {0}, count_ + 1) |
+           std::views::filter([&choices, mask](std::size_t position) noexcept {
                return position == 0 || (choices[position - 1].bit & mask) != 0;
            }) |
-           std::views::transform([floor, choices](std::size_t position) noexcept {
+           std::views::transform([floor, &choices](std::size_t position) noexcept {
                return position ? choices[position - 1].name : floor;
            });
 }
 
 /** Names a single capability bit of @p choices; the unlisted @p floor backs them all. */
-template <typename capability_type_>
-constexpr char const* bit_name(std::span<capability_choice<capability_type_> const> choices, capability_type_ bit,
+template <typename capability_type_, std::size_t count_>
+constexpr char const* bit_name(capability_choice<capability_type_> const (&choices)[count_], capability_type_ bit,
                                char const* floor) noexcept {
     for (capability_choice<capability_type_> const& choice : choices)
         if (choice.bit == bit) return choice.name;
@@ -125,8 +119,8 @@ constexpr char const* bit_name(std::span<capability_choice<capability_type_> con
 }
 
 /** The newest table bit of @p choices inside @p mask, or @p floor when none is. */
-template <typename capability_type_>
-constexpr capability_type_ highest_bit(std::span<capability_choice<capability_type_> const> choices,
+template <typename capability_type_, std::size_t count_>
+constexpr capability_type_ highest_bit(capability_choice<capability_type_> const (&choices)[count_],
                                        capability_type_ mask, capability_type_ floor) noexcept {
     capability_type_ highest = floor;
     for (capability_choice<capability_type_> const& choice : choices)
@@ -134,25 +128,25 @@ constexpr capability_type_ highest_bit(std::span<capability_choice<capability_ty
     return highest;
 }
 
-/** The index of the newest table row of @p choices inside @p mask, or @c choices.size() when the
+/** The index of the newest table row of @p choices inside @p mask, or @c count_ when the
  *  mask names none - the dispatch cascade's entry point into a table. */
-template <typename capability_type_>
-constexpr std::size_t highest_index(std::span<capability_choice<capability_type_> const> choices,
+template <typename capability_type_, std::size_t count_>
+constexpr std::size_t highest_index(capability_choice<capability_type_> const (&choices)[count_],
                                     capability_type_ mask) noexcept {
-    std::size_t highest = choices.size();
-    for (std::size_t choice = 0; choice != choices.size(); ++choice)
+    std::size_t highest = count_;
+    for (std::size_t choice = 0; choice != count_; ++choice)
         if (mask & choices[choice].bit) highest = choice;
     return highest;
 }
 
-/** The index of the @p choices row named @p name, or @c choices.size() when unmatched - the CLI's
+/** The index of the @p choices row named @p name, or @c count_ when unmatched - the CLI's
  *  entry point into a table, the naming inverse of @ref highest_index. */
-template <typename capability_type_>
-inline std::size_t index_of_name(std::span<capability_choice<capability_type_> const> choices,
+template <typename capability_type_, std::size_t count_>
+inline std::size_t index_of_name(capability_choice<capability_type_> const (&choices)[count_],
                                  std::string_view name) noexcept {
-    for (std::size_t choice = 0; choice != choices.size(); ++choice)
+    for (std::size_t choice = 0; choice != count_; ++choice)
         if (name == choices[choice].name) return choice;
-    return choices.size();
+    return count_;
 }
 
 /** The schedule allow-mask intersected with what this machine offers - the one place the
@@ -657,8 +651,8 @@ inline void judge_hits(bench_options_t const& options, bench_results_t& results,
         double const recall_at_k = 100.0 * double(found_at_k) / queries;
         double const overlap_at_k = 100.0 * double(shared) / (queries * double(judged_depth));
         double const gain_at_k = 100.0 * gain / (queries * ideal[judged_depth - 1]);
-        fmt::println("  recall@1: {:.1f}%", fmt::styled(recall_at_1, verdict_style(recall_at_1 >= 90.0)));
-        fmt::println("  recall@{}: {:.1f}%", judged_depth,
+        fmt::println("  recall@1: {:.3f}%", fmt::styled(recall_at_1, verdict_style(recall_at_1 >= 90.0)));
+        fmt::println("  recall@{}: {:.3f}%", judged_depth,
                      fmt::styled(recall_at_k, verdict_style(recall_at_k >= 99.0)));
         fmt::println("  overlap@{}: {:.1f}%", judged_depth, overlap_at_k);
         fmt::println("  ndcg@{}: {:.1f}%", judged_depth, gain_at_k);
@@ -690,10 +684,7 @@ struct streamed_dataset {
     /** Float sources downcast into integer targets only after a global symmetric rescale into
      *  the target's range; a raw saturating cast collapses the value distribution. */
     static constexpr bool scaled_k = !zero_copy_k && !nk::is_integral_dtype<dataset_scalar_type_>() &&
-                                     nk::is_integral_dtype<scalar_t>();
-
-    /** The largest magnitude one stored dimension can carry, in the stored dtype. */
-    static constexpr float target_amplitude_k = test::dimension_amplitude<scalar_t>();
+                                     (nk::is_integral_dtype<scalar_t>() || sizeof(scalar_t) == 1);
 
     /** The index-side state both phases feed - punned through the pool callbacks. */
     bench_context_type_& bench;
@@ -721,9 +712,13 @@ struct streamed_dataset {
         if constexpr (scaled_k) {
             typename dataset_scalar_type_::reduce_minmax_value_t min_value {}, max_value {};
             std::size_t min_index = 0, max_index = 0;
-            nk::reduce_minmax(vectors.as_vector(), &min_value, &min_index, &max_value, &max_index);
+            // `as_vector` answers only rank-1 views, so the contiguous payload is flattened by hand.
+            nk::vector_view<dataset_scalar_type_> const payload {vectors.data(), vectors.extent(0) * vectors.extent(1)};
+            nk::reduce_minmax(payload, &min_value, &min_index, &max_value, &max_index);
             float const max_amplitude = std::max(std::abs(float(min_value)), std::abs(float(max_value)));
-            if (max_amplitude > 0) scale = target_amplitude_k / max_amplitude;
+            // The stored dtype's largest magnitude; not a constant expression for nvcc's byte floats.
+            float const target_amplitude = test::dimension_amplitude<scalar_t>();
+            if (max_amplitude > 0) scale = target_amplitude / max_amplitude;
             fmt::println("Rescaling {} → {} by ×{:.4f} before the downcast", dataset_scalar_type_::dtype_name(),
                          scalar_t::dtype_name(), scale);
         }
@@ -786,13 +781,13 @@ inline void print_machine(fu_topology_t topology, fu_fabric_t fabric, bench_opti
     fmt::println("  scheduling detected: {}", scheduling_names);
 
     nk_capability_t const available = nk_capabilities_available();
-    fmt::println("  compute detected: {}", fmt::join(named_choices("serial", compute_span_k, available), " "));
+    fmt::println("  compute detected: {}", fmt::join(named_choices("serial", compute_choices_k, available), " "));
     fmt::println("  compute ceiling: {}",
-                 bit_name(compute_span_k, highest_bit(compute_span_k, options.max_compute & available, nk_cap_serial_k),
-                          "serial"));
+                 bit_name(compute_choices_k,
+                          highest_bit(compute_choices_k, options.max_compute & available, nk_cap_serial_k), "serial"));
     fmt::println("  scheduling ceiling: {}",
-                 bit_name(schedule_span_k,
-                          highest_bit(schedule_span_k, effective_schedule(options.max_schedule), //
+                 bit_name(schedule_choices_k,
+                          highest_bit(schedule_choices_k, effective_schedule(options.max_schedule), //
                                       fu_capabilities_unknown_k),
                           "standard"));
     fmt::println("  kernels requested: {} · {}", dtype_name(options.stored_dtype), nk_kernel_name(options.kernel));

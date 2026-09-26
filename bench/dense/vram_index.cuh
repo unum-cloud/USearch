@@ -15,7 +15,7 @@
 
 #include <cmath> // `std::abs`
 
-#include <algorithm> // `std::max`, `std::min`, `std::copy_n`
+#include <algorithm> // `std::max`, `std::min`, `std::copy_n`, `std::ranges::find`
 #include <chrono>    // `std::chrono::steady_clock`
 #include <memory>    // `std::unique_ptr`
 #include <string>    // `std::string`
@@ -211,8 +211,8 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     fmt::print(header_style(), "\nInsertions\n");
     fmt::println("  shape: {} × {}d", inserted_rows, streamed.vectors.extent(1));
     if (bench.options.skip_vectors) fmt::println("  topping: {} loaded rows", bench.options.skip_vectors);
-    fmt::println("  kit: {} · {} · device {}", scalar_t::dtype_name(), nk_kernel_name(bench.options.kernel),
-                 bench.device);
+    fmt::println("  kit: {} · {} · {} kit · device {}", scalar_t::dtype_name(), nk_kernel_name(bench.options.kernel),
+                 bit_name(cuda_compute_choices_k, index_t::picked_capability_k, "ampere"), bench.device);
     fmt::println("  batch: {} rows per launch", batch_rows);
     fmt::println("  wall: {:.2f} s", seconds);
     fmt::println("  throughput: {} IPS", humanize(double(inserted_rows) / seconds));
@@ -377,29 +377,13 @@ bool run_search(streamed_dataset_type_& streamed) {
 
 #pragma region Dispatch Cascade
 
-/** Gate: a (stored dtype, kernel) cell is runnable once its device kit is adapted in
- *  @c dense/vram_metric.cuh; unadapted combinations report as skipped. */
-template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
-concept cuda_kit_adapted = requires { typename dense_cuda_kit_for<dtype_, kernel_>::kit_t; };
-
-/** No-op sibling picked when the pair's device kit is not adapted yet. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t arch_ceiling_,
-          typename plane_allocator_>
-    requires(!cuda_kit_adapted<stored_dtype_, kernel_>)
-int stage_and_run(utilities::persisted_dataset<dataset_scalar_type_> const&, bench_options_t const& options, int) {
-    fmt::println("skipped: no device kit adapted for {} · {}", dtype_name(options.stored_dtype),
-                 nk_kernel_name(options.kernel));
-    return 0;
-}
-
 /** The innermost hop: binds the concrete CUDA-index instantiation, wires the typed source views
  *  and the staging trampoline, and runs the phases in checkpoint order. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t arch_ceiling_,
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t capability_,
           typename plane_allocator_>
-    requires(cuda_kit_adapted<stored_dtype_, kernel_>)
 int stage_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
                   int device) {
-    using index_t = dense_vram_index<stored_dtype_, kernel_, arch_ceiling_, plane_allocator_, plane_allocator_,
+    using index_t = dense_vram_index<stored_dtype_, kernel_, capability_, plane_allocator_, plane_allocator_,
                                      cuda_device_allocator_t>;
     using bench_context_t = cuda_bench_context<index_t>;
     using streamed_t = streamed_dataset<dataset_scalar_type_, bench_context_t>;
@@ -459,13 +443,13 @@ int stage_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& data
 
 /** Kernel axis: lowers the runtime metric to a compile-time kernel kind, the terminal hop into
  *  @ref stage_and_run. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, cuda_arch_t arch_ceiling_, typename plane_allocator_>
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, cuda_arch_t capability_, typename plane_allocator_>
 int run_with_metric(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
                     int device) {
     return dispatch_kernel<stored_dtype_>(
         options.kernel,
         [&](auto kernel) {
-            return stage_and_run<dataset_scalar_type_, stored_dtype_, kernel.value, arch_ceiling_, plane_allocator_>(
+            return stage_and_run<dataset_scalar_type_, stored_dtype_, kernel.value, capability_, plane_allocator_>(
                 dataset, options, device);
         },
         [&](auto metric) {
@@ -474,25 +458,31 @@ int run_with_metric(utilities::persisted_dataset<dataset_scalar_type_> const& da
         });
 }
 
-/** Generation axis: the CLI's architecture ceiling picks which kit-chain rows every cell below
- *  may select, so two runs on one device compare generation codegen side by side. */
+/** Compute ceilings the device kit chains adapt, ascending and named by NumKong's GPU tiers; the floor
+ *  the table never lists is the Ampere kits. */
+inline constexpr capability_choice<cuda_arch_t> cuda_compute_choices_k[] = {
+    {"ada", cuda_arch_ada_k},
+    {"hopper", cuda_arch_hopper_k},
+    {"blackwell", cuda_arch_blackwell_k},
+    {"blackwellrtx", cuda_arch_blackwellrtx_k},
+};
+
+/** Compute axis: the named table row's ceiling instantiates every cell below, so two runs on one device
+ *  compare generations side by side; past the tail sit the Ampere kits every GPU runs. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, typename plane_allocator_>
-int run_with_arch(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
-                  int device, cuda_arch_t arch_ceiling) {
-    switch (arch_ceiling) {
-    case cuda_arch_ampere_k:
-        return run_with_metric<dataset_scalar_type_, stored_dtype_, cuda_arch_ampere_k, plane_allocator_>( //
-            dataset, options, device);
-    case cuda_arch_ada_k:
-        return run_with_metric<dataset_scalar_type_, stored_dtype_, cuda_arch_ada_k, plane_allocator_>( //
-            dataset, options, device);
-    case cuda_arch_hopper_k:
-        return run_with_metric<dataset_scalar_type_, stored_dtype_, cuda_arch_hopper_k, plane_allocator_>( //
-            dataset, options, device);
-    default:
-        return run_with_metric<dataset_scalar_type_, stored_dtype_, cuda_arch_blackwell_k, plane_allocator_>( //
-            dataset, options, device);
-    }
+int run_with_compute(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
+                     int device, cuda_arch_t max_compute) {
+    auto const named = std::ranges::find(cuda_compute_choices_k, max_compute, &capability_choice<cuda_arch_t>::bit);
+    return dispatch_index<std::size(cuda_compute_choices_k)>(
+        static_cast<std::size_t>(named - std::begin(cuda_compute_choices_k)),
+        [&](auto row) {
+            return run_with_metric<dataset_scalar_type_, stored_dtype_, cuda_compute_choices_k[row.value].bit,
+                                   plane_allocator_>(dataset, options, device);
+        },
+        [&] {
+            return run_with_metric<dataset_scalar_type_, stored_dtype_, cuda_arch_ampere_k, plane_allocator_>(
+                dataset, options, device);
+        });
 }
 
 /**
@@ -505,13 +495,13 @@ int run_with_arch(utilities::persisted_dataset<dataset_scalar_type_> const& data
  */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
 int run_with_stored_dtype(utilities::persisted_dataset<dataset_scalar_type_> const& dataset,
-                          bench_options_t const& options, int device, cuda_arch_t arch_ceiling,
+                          bench_options_t const& options, int device, cuda_arch_t max_compute,
                           cuda_address_space_t plane_space) {
     return plane_space == cuda_address_space_t::managed_k
-               ? run_with_arch<dataset_scalar_type_, stored_dtype_, cuda_managed_allocator<std::byte>>( //
-                     dataset, options, device, arch_ceiling)
-               : run_with_arch<dataset_scalar_type_, stored_dtype_, cuda_virtual_memory_allocator<std::byte>>( //
-                     dataset, options, device, arch_ceiling);
+               ? run_with_compute<dataset_scalar_type_, stored_dtype_, cuda_managed_allocator<std::byte>>( //
+                     dataset, options, device, max_compute)
+               : run_with_compute<dataset_scalar_type_, stored_dtype_, cuda_virtual_memory_allocator<std::byte>>( //
+                     dataset, options, device, max_compute);
 }
 
 } // namespace unum::usearch::bench::dense
