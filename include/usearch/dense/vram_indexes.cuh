@@ -53,7 +53,7 @@ template <                                               //
     typename key_type_ = uuid_t,                         //
     nk_dtype_t vector_dtype_ = nk_i8_k,                  //
     nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k, //
-    cuda_arch_t arch_ceiling_ = cuda_arch_blackwell_k,   //
+    cuda_arch_t arch_ceiling_ = cuda_arch_ampere_k,      //
     typename key_hash_type_ = std::hash<key_type_>       //
     >
 struct dense_vram_indexes {

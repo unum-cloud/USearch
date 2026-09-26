@@ -84,7 +84,7 @@ template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 std::size_t test_cuda_indexes_configuration(char const* name) {
     if (failed(cuda_device_specs_t::query(0).status)) return report(name, "no CUDA device reachable");
 
-    using indexes_t = dense_vram_indexes<u32_t, dtype_, kernel_, cuda_arch_blackwell_k>;
+    using indexes_t = dense_vram_indexes<u32_t, dtype_, kernel_, cuda_arch_blackwellrtx_k>;
 
     // The suite is composed here, not reflected: every call below is a capability claim
     // this sharded, executor-driven category makes about itself.

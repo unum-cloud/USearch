@@ -16,7 +16,7 @@
 #include <functional>  // `std::hash` - specialized for `uuid_t` below
 #include <span>        // `std::span`
 #include <string_view> // `std::string_view`
-#include <type_traits> // `std::type_identity_t`
+#include <type_traits> // `std::type_identity_t`, `std::conditional_t` - the kit cascades
 #include <thread>      // `std::this_thread::yield`
 
 #include "usearch/types.h" // `usearch_status_t`, so the C++ mirror cannot drift from the ABI
@@ -990,6 +990,45 @@ enum class io_capability_t : u32_t {
 inline constexpr io_capability_t operator|(io_capability_t first, io_capability_t second) noexcept {
     return static_cast<io_capability_t>(static_cast<u32_t>(first) | static_cast<u32_t>(second));
 }
+
+/** Per-vector header carrying L2 norm and row-sum (used by DPBUSD compensation).
+ *  Both fields share width @c dot_result_type_ - the lane width every downstream finalize
+ *  and through-from-dot helper consumes. */
+template <typename dot_result_type_>
+struct vector_norms {
+    dot_result_type_ sum;
+    dot_result_type_ sumsq;
+};
+
+/**
+ *  @brief One row in a capability cascade - pairs an availability flag with a candidate kit.
+ *
+ *  The flag is the @c &&-of a @c NUMKONG_TARGET_* (always 0/1) and the class's ceiling test - a CPU
+ *  capability bit or a GPU architecture - so rows for tiers that aren't compiled-in fold to @c false
+ *  at preprocessing time and the unselected kit's body never has to exist on the current target.
+ */
+template <bool available_, typename kit_>
+struct chain_layer {
+    static constexpr bool available = available_;
+    using kit_t = kit_;
+};
+
+/**
+ *  @brief Picks the first @c chain_layer whose @c available flag is true, else @c fallback_.
+ *
+ *  Lets capability cascades be written linearly with one row per tier and a single closing
+ *  @c >::type - no nested @c std::conditional_t pile.
+ */
+template <typename fallback_, typename... layers_>
+struct first_available_kit {
+    using type = fallback_;
+};
+
+template <typename fallback_, typename head_, typename... tail_>
+struct first_available_kit<fallback_, head_, tail_...> {
+    using type = std::conditional_t<head_::available, typename head_::kit_t,
+                                    typename first_available_kit<fallback_, tail_...>::type>;
+};
 
 /**
  *  @brief The high half of the full @p first x @p second product - the multiply-shift

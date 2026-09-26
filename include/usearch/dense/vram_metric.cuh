@@ -4,30 +4,32 @@
  *  @date July 22, 2026
  *  @brief Device metric kits for the dense VRAM indexes - the GPU twin of @c ram_metric.hpp.
  *
- *  A kit binds one storage dtype to one metric on one GPU generation, named like the CPU
- *  kits: @b dtype_arch_metric_kit_t, where the dot-product base takes the @c inner slot
- *  and the architecture slot names the oldest generation whose instructions it needs -
- *  @c ampere for the sm_80 floor, @c ada for the fp8 conversions, @c blackwell reserved
- *  for the sm_100-family formats. Fragments are 16-byte register tiles, and metrics with
- *  precomputable norms finalize "through the dot". Row geometry - how many fragments span
- *  one vector, how many lanes cooperate on a row - is runtime state of the planes view,
- *  not the kit: dimensions are frozen by the first @c reserve, never by a type. The
- *  cross-lane reduction is deliberately not a kit member - one shuffle tree serves every
- *  kit. Symmetric candidate-to-candidate distances reuse
- *  @c distance(dot, make_query_state(norms_a), norms_b).
+ *  A kit binds one storage dtype to one GPU generation, named like the CPU kits -
+ *  @b dtype_generation_kit - with the metric as its parameter. The generation slot names the oldest
+ *  tier whose instructions the kit needs: @c ampere for the sm_80 floor, @c ada for the fp8
+ *  conversions, @c blackwell for the mixed-precision multiply-adds and the fp6 conversions. Each
+ *  tier's kits sit behind its @c NUMKONG_TARGET_* gate and a chain picks among them under the
+ *  caller's ceiling, exactly like the CPU chains, so a unit compiled for one architecture compiles
+ *  the kits that architecture runs. The arithmetic lives in named device primitives; a kit binds them.
  *
- *  Families sort from the widest numeric types to the smallest & most exotic: 16-bit
- *  floats, 8-bit integers, 8-bit floats, packed nibbles, packed bits. Every family is a
- *  concrete struct per dtype - no flag parameters selecting behavior, and each kit owns
- *  its record types outright, so the unsigned families accumulate in unsigned words with
- *  defined wrapping and no cast chatter, while @c i8 keeps the CPU planes' signed
- *  @b {sum,sumsq} layout.
+ *  Fragments are 16-byte register tiles, and metrics with precomputable norms finalize "through the
+ *  dot". Row geometry - how many fragments span one vector, how many lanes cooperate on a row - is
+ *  runtime state of the planes view, not the kit: dimensions are frozen by the first @c reserve,
+ *  never by a type. The cross-lane reduction is deliberately not a kit member - one shuffle tree
+ *  serves every kit. Distances take both sides' norms, as the CPU finalizers do, so a symmetric
+ *  candidate-to-candidate distance is the same call.
+ *
+ *  Families sort from the widest numeric types to the smallest & most exotic: 16-bit floats, 8-bit
+ *  integers, minifloats, packed nibbles, packed bits. Norms are the CPU's @c vector_norms over each
+ *  kit's dot type, so the unsigned families accumulate in unsigned words with defined wrapping and no
+ *  cast chatter, while @c i8 keeps the CPU planes' signed @b {sum,sumsq} layout.
  */
 #pragma once
 
 #include <cuda_bf16.h> // `__nv_bfloat162` packed math, sm_80+
 #include <cuda_fp16.h> // `__half2` packed math
 
+#include <numkong/capabilities.h> // `nk_kernel_kind_t` - the chains key on it
 #include <numkong/numkong.hpp>
 
 #include "usearch/utilities/types.hpp"
@@ -38,40 +40,16 @@
 namespace unum {
 namespace usearch {
 
-/** The generation this compilation pass can encode: the device passes carry their
- *  target's @c __CUDA_ARCH__, the host pass admits only the floor - harmless, since
- *  generation rows inherit their floor's record layouts and the host touches layouts
- *  alone. Kit-chain layers intersect their architecture requirement with this AND with
- *  the caller's ceiling, the CPU-style side-by-side selector. */
-#if defined(__CUDA_ARCH__)
-inline constexpr cuda_arch_t dense_cuda_target_arch_k = static_cast<cuda_arch_t>(__CUDA_ARCH__);
-#else
-inline constexpr cuda_arch_t dense_cuda_target_arch_k = cuda_arch_ampere_k;
-#endif
-
 template <typename kit_>
-concept dense_cuda_kit = requires(typename kit_::fragment_t fragment, typename kit_::accumulator_t accumulator,
+concept dense_cuda_kit = requires(typename kit_::fragment_t fragment, typename kit_::dot_t dot,
                                   typename kit_::norms_accumulator_t norms_accumulator, typename kit_::norms_t norms,
-                                  typename kit_::query_state_t query_state, typename kit_::dot_t dot,
                                   dense_distance_t ranked) {
     typename kit_::scalar_t;
-    typename kit_::fragment_t;
-    typename kit_::accumulator_t;
-    typename kit_::dot_t;
-    typename kit_::norms_t;
-    typename kit_::norms_accumulator_t;
-    typename kit_::query_state_t;
-    { kit_::fragment_bytes_k } -> std::convertible_to<u32_t>;
-    { kit_::max_gathers_in_flight_k } -> std::convertible_to<u32_t>;
-    { kit_::has_norms_k } -> std::convertible_to<bool>;
-    { kit_::zero_accumulator() } -> std::same_as<typename kit_::accumulator_t>;
-    { kit_::accumulate_dot(fragment, fragment, accumulator) } -> std::same_as<typename kit_::accumulator_t>;
-    { kit_::partial_to_dot(accumulator) } -> std::same_as<typename kit_::dot_t>;
-    { kit_::zero_norms_accumulator() } -> std::same_as<typename kit_::norms_accumulator_t>;
+    { kit_::arch_k } -> std::convertible_to<cuda_arch_t>;
+    { kit_::accumulate_dot(fragment, fragment, dot) } -> std::same_as<typename kit_::dot_t>;
     { kit_::accumulate_norms(fragment, norms_accumulator) } -> std::same_as<typename kit_::norms_accumulator_t>;
     { kit_::partials_to_norms(norms_accumulator) } -> std::same_as<typename kit_::norms_t>;
-    { kit_::make_query_state(norms) } -> std::same_as<typename kit_::query_state_t>;
-    { kit_::distance(dot, query_state, norms) } -> std::same_as<dense_distance_t>;
+    { kit_::distance(dot, norms, norms) } -> std::same_as<dense_distance_t>;
     { kit_::convert_to_distance(ranked) } -> std::same_as<dense_distance_t>;
 };
 
@@ -129,440 +107,431 @@ __device__ __forceinline__ float2 dense_cuda_broadcast_norms(float2 reduced) noe
     return reduced;
 }
 
-#pragma region Single Precision Floats
+#pragma region Metrics
 
-/** The @c f32 dot base over 4-value fragments - plain fused multiply-adds, the
- *  reference arithmetic every narrower family approximates. */
-struct f32_ampere_inner_kit_t {
-    using scalar_t = nk::f32_t;
-    using fragment_t = uint4;
-    using accumulator_t = f32_t;
-    using dot_t = f32_t;
-    struct norms_t {
-        f32_t sum, sumsq;
-    };
-    using norms_accumulator_t = float2;
-    struct query_state_t {
-        f32_t rsqrt;
-        f32_t sumsq;
-    };
+/** Angular distance from a dot and both sides' squared norms, finalized exactly like the CPU's
+ *  @c nk_angular_through_f32_from_dot: clamped at zero, and a zero-norm side scores zero against a
+ *  vanishing dot and one otherwise. The query's root is loop-invariant, so the compiler hoists it. */
+__device__ __forceinline__ dense_distance_t dense_cuda_angular_through_dot(f32_t dot, f32_t query_sumsq,
+                                                                           f32_t target_sumsq) noexcept {
+    if (query_sumsq > 0.0f && target_sumsq > 0.0f)
+        return fmaxf(1.0f - dot * (rsqrtf(query_sumsq) * rsqrtf(target_sumsq)), 0.0f);
+    return dot == 0.0f ? 0.0f : 1.0f;
+}
 
-    inline static constexpr u32_t fragment_bytes_k = 16;
-    inline static constexpr u32_t max_gathers_in_flight_k = 8;
-    inline static constexpr bool has_norms_k = true;
+/** A numeric kit's distance for @p kernel_ "through the dot": @b 1-dot for the inner product, monotone
+ *  decreasing and negative-safe, the clamped angular, and the squared Euclidean the walk ranks by. */
+template <nk_kernel_kind_t kernel_, typename dot_type_>
+__device__ __forceinline__ dense_distance_t dense_cuda_distance(dot_type_ dot, vector_norms<dot_type_> query,
+                                                                vector_norms<dot_type_> target) noexcept {
+    f32_t const dot_value = static_cast<f32_t>(dot);
+    if constexpr (kernel_ == nk_kernel_dot_k) return 1.0f - dot_value;
+    else if constexpr (kernel_ == nk_kernel_angular_k)
+        return dense_cuda_angular_through_dot(dot_value, static_cast<f32_t>(query.sumsq),
+                                              static_cast<f32_t>(target.sumsq));
+    else {
+        static_assert(kernel_ == nk_kernel_sqeuclidean_k || kernel_ == nk_kernel_euclidean_k,
+                      "Numeric vectors score by dot, angular or euclidean");
+        return static_cast<f32_t>(query.sumsq) + static_cast<f32_t>(target.sumsq) - 2.0f * dot_value;
+    }
+}
 
-    static __device__ __forceinline__ accumulator_t zero_accumulator() noexcept { return 0.0f; }
-    static __device__ __forceinline__ accumulator_t accumulate_dot(fragment_t a, fragment_t b,
-                                                                   accumulator_t accumulator) noexcept {
-        accumulator = fmaf(__uint_as_float(a.x), __uint_as_float(b.x), accumulator);
-        accumulator = fmaf(__uint_as_float(a.y), __uint_as_float(b.y), accumulator);
-        accumulator = fmaf(__uint_as_float(a.z), __uint_as_float(b.z), accumulator);
-        return fmaf(__uint_as_float(a.w), __uint_as_float(b.w), accumulator);
-    }
-    static __device__ __forceinline__ dot_t partial_to_dot(accumulator_t accumulator) noexcept { return accumulator; }
+/** Output-boundary finalize, the CPU kits' @c convert_to_distances in miniature: the traversal ranks
+ *  on raw @c distance values end to end, and only the matches a caller receives pass through here -
+ *  identity unless a metric owes a monotone transform, like Euclidean's square root. */
+template <nk_kernel_kind_t kernel_>
+__device__ __forceinline__ dense_distance_t dense_cuda_convert_to_distance(dense_distance_t ranked) noexcept {
+    if constexpr (kernel_ == nk_kernel_euclidean_k) return sqrtf(fmaxf(ranked, 0.0f));
+    else return ranked;
+}
 
-    static __device__ __forceinline__ norms_accumulator_t zero_norms_accumulator() noexcept { return {0.0f, 0.0f}; }
-    static __device__ __forceinline__ norms_accumulator_t accumulate_norms(fragment_t a,
-                                                                           norms_accumulator_t accumulator) noexcept {
-        u32_t const words[4] = {a.x, a.y, a.z, a.w};
-#pragma unroll
-        for (u32_t word = 0; word != 4; ++word) {
-            f32_t const value = __uint_as_float(words[word]);
-            accumulator.x += value;
-            accumulator.y = fmaf(value, value, accumulator.y);
-        }
-        return accumulator;
-    }
-    static __device__ __forceinline__ norms_t partials_to_norms(norms_accumulator_t accumulator) noexcept {
-        return {accumulator.x, accumulator.y};
-    }
-    static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
-        return {norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f, norms.sumsq};
-    }
+#pragma endregion Metrics
 
-    /** The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
-     *  a distance as @b 1-dot, monotone decreasing and negative-safe. */
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
-        return 1.0f - dot;
-    }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return ranked;
-    }
-};
-
-struct f32_ampere_angular_kit_t : f32_ampere_inner_kit_t {
-    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, query_state_t query_state,
-                                                                norms_t norms) noexcept {
-        return 1.0f - dot * query_state.rsqrt * (norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f);
-    }
-};
-struct f32_ampere_sqeuclidean_kit_t : f32_ampere_inner_kit_t {
-    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, query_state_t query_state,
-                                                                norms_t norms) noexcept {
-        return query_state.sumsq + norms.sumsq - 2.0f * dot;
-    }
-};
-struct f32_ampere_euclidean_kit_t : f32_ampere_sqeuclidean_kit_t {
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return sqrtf(ranked);
-    }
-};
-
-#pragma endregion
+/** The kits every chain names, declared whether or not their tier is compiled in. */
+template <nk_kernel_kind_t kernel_>
+struct f16_ampere_kit;
+template <nk_kernel_kind_t kernel_>
+struct f16_blackwell_kit;
+template <nk_kernel_kind_t kernel_>
+struct bf16_ampere_kit;
+template <nk_kernel_kind_t kernel_>
+struct bf16_blackwell_kit;
+template <nk_kernel_kind_t kernel_>
+struct i8_ampere_kit;
+template <nk_kernel_kind_t kernel_>
+struct u8_ampere_kit;
+template <nk_kernel_kind_t kernel_>
+struct e5m2_ampere_kit;
+template <nk_kernel_kind_t kernel_>
+struct e5m2_ada_kit;
+template <nk_kernel_kind_t kernel_>
+struct e5m2_blackwell_kit;
+template <nk_kernel_kind_t kernel_>
+struct e4m3_ampere_kit;
+template <nk_kernel_kind_t kernel_>
+struct e4m3_ada_kit;
+template <nk_kernel_kind_t kernel_>
+struct e4m3_blackwell_kit;
+template <nk_kernel_kind_t kernel_>
+struct e3m2_ampere_kit;
+template <nk_kernel_kind_t kernel_>
+struct e3m2_blackwell_kit;
+template <nk_kernel_kind_t kernel_>
+struct e2m3_ampere_kit;
+template <nk_kernel_kind_t kernel_>
+struct e2m3_blackwell_kit;
+template <nk_kernel_kind_t kernel_>
+struct i4x2_ampere_kit;
+template <nk_kernel_kind_t kernel_>
+struct u4x2_ampere_kit;
+template <nk_kernel_kind_t kernel_>
+struct u1x8_ampere_kit;
 
 #pragma region Half Precision Floats
 
-/** The @c f16 dot base over 8-value fragments: packed multiplies widened into an
- *  @c f32 accumulator every fragment, so no half-range overflow can accumulate. */
-struct f16_ampere_inner_kit_t {
+/** Eight @c f16 products of a fragment pair, each rounded to half by @c hmul2, summed in f32 per fragment
+ *  so no half-range overflow can accumulate. */
+__device__ __forceinline__ f32_t dense_cuda_dot_f16x8_ampere(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        float2 const products = __half22float2(__hmul2(*reinterpret_cast<__half2 const*>(&words_a[word]),
+                                                       *reinterpret_cast<__half2 const*>(&words_b[word])));
+        sum += products.x + products.y;
+    }
+    return sum;
+}
+
+/** An @c f16 fragment's sum & sum of squares, widened to f32. */
+__device__ __forceinline__ float2 dense_cuda_moments_f16x8_ampere(uint4 a, float2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        float2 const values = __half22float2(*reinterpret_cast<__half2 const*>(&words[word]));
+        moments.x += values.x + values.y;
+        moments.y += values.x * values.x + values.y * values.y;
+    }
+    return moments;
+}
+
+/** The @c bf16 twin of @ref dense_cuda_dot_f16x8_ampere, through the @c bf16x2 instructions that land
+ *  exactly at the sm_80 floor. */
+__device__ __forceinline__ f32_t dense_cuda_dot_bf16x8_ampere(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        float2 const products = __bfloat1622float2(__hmul2(*reinterpret_cast<__nv_bfloat162 const*>(&words_a[word]),
+                                                           *reinterpret_cast<__nv_bfloat162 const*>(&words_b[word])));
+        sum += products.x + products.y;
+    }
+    return sum;
+}
+
+/** A @c bf16 fragment's sum & sum of squares, widened to f32. */
+__device__ __forceinline__ float2 dense_cuda_moments_bf16x8_ampere(uint4 a, float2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        float2 const values = __bfloat1622float2(*reinterpret_cast<__nv_bfloat162 const*>(&words[word]));
+        moments.x += values.x + values.y;
+        moments.y += values.x * values.x + values.y * values.y;
+    }
+    return moments;
+}
+
+/** f16 kit - the sm_80 floor. */
+template <nk_kernel_kind_t kernel_>
+struct f16_ampere_kit {
+    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
     using scalar_t = nk::f16_t;
     using fragment_t = uint4;
-    using accumulator_t = f32_t;
     using dot_t = f32_t;
-    struct norms_t {
-        f32_t sum, sumsq;
-    };
+    using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = float2;
-    struct query_state_t {
-        f32_t rsqrt;
-        f32_t sumsq;
-    };
 
-    inline static constexpr u32_t fragment_bytes_k = 16;
-
-    /** Ceiling on concurrently in-flight candidate-vector gathers per lane - the
-     *  memory-parallelism window over the @b candidate axis, never the dimension axis. */
-    inline static constexpr u32_t max_gathers_in_flight_k = 8;
-    inline static constexpr bool has_norms_k = true;
-
-    static __device__ __forceinline__ float2 pair_products(u32_t word_a, u32_t word_b) noexcept {
-        __half2 const packed_a = *reinterpret_cast<__half2 const*>(&word_a);
-        __half2 const packed_b = *reinterpret_cast<__half2 const*>(&word_b);
-        return __half22float2(__hmul2(packed_a, packed_b));
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_cuda_dot_f16x8_ampere(a, b, sum);
     }
-    static __device__ __forceinline__ float2 pair_values(u32_t word) noexcept {
-        return __half22float2(*reinterpret_cast<__half2 const*>(&word));
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return dense_cuda_moments_f16x8_ampere(a, moments);
     }
-
-    static __device__ __forceinline__ accumulator_t zero_accumulator() noexcept { return 0.0f; }
-    static __device__ __forceinline__ accumulator_t accumulate_dot(fragment_t a, fragment_t b,
-                                                                   accumulator_t accumulator) noexcept {
-        float2 const products_x = pair_products(a.x, b.x), products_y = pair_products(a.y, b.y);
-        float2 const products_z = pair_products(a.z, b.z), products_w = pair_products(a.w, b.w);
-        return accumulator + (products_x.x + products_x.y) + (products_y.x + products_y.y) +
-               (products_z.x + products_z.y) + (products_w.x + products_w.y);
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ dot_t partial_to_dot(accumulator_t accumulator) noexcept { return accumulator; }
-
-    static __device__ __forceinline__ norms_accumulator_t zero_norms_accumulator() noexcept { return {0.0f, 0.0f}; }
-    static __device__ __forceinline__ norms_accumulator_t accumulate_norms(fragment_t a,
-                                                                           norms_accumulator_t accumulator) noexcept {
-        u32_t const words[4] = {a.x, a.y, a.z, a.w};
-#pragma unroll
-        for (u32_t word = 0; word != 4; ++word) {
-            float2 const values = pair_values(words[word]);
-            accumulator.x += values.x + values.y;
-            accumulator.y += values.x * values.x + values.y * values.y;
-        }
-        return accumulator;
-    }
-    static __device__ __forceinline__ norms_t partials_to_norms(norms_accumulator_t accumulator) noexcept {
-        return {accumulator.x, accumulator.y};
-    }
-    static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
-        return {norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f, norms.sumsq};
-    }
-
-    /** The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
-     *  a distance as @b 1-dot, monotone decreasing and negative-safe. */
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
-        return 1.0f - dot;
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
+        return dense_cuda_distance<kernel_>(dot, query, target);
     }
     static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return ranked;
+        return dense_cuda_convert_to_distance<kernel_>(ranked);
     }
 };
 
-struct f16_ampere_angular_kit_t : f16_ampere_inner_kit_t {
-    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, query_state_t query_state,
-                                                                norms_t norms) noexcept {
-        return 1.0f - dot * query_state.rsqrt * (norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f);
-    }
-};
-struct f16_ampere_sqeuclidean_kit_t : f16_ampere_inner_kit_t {
-    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, query_state_t query_state,
-                                                                norms_t norms) noexcept {
-        return query_state.sumsq + norms.sumsq - 2.0f * dot;
-    }
-};
-struct f16_ampere_euclidean_kit_t : f16_ampere_sqeuclidean_kit_t {
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return sqrtf(ranked);
-    }
-};
-
-/** The @c bf16 dot base - the same widening discipline as f16 through the
- *  @c bf16x2 instructions that land exactly at the sm_80 floor. */
-struct bf16_ampere_inner_kit_t {
+/** bf16 kit - the sm_80 floor. */
+template <nk_kernel_kind_t kernel_>
+struct bf16_ampere_kit {
+    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
     using scalar_t = nk::bf16_t;
     using fragment_t = uint4;
-    using accumulator_t = f32_t;
     using dot_t = f32_t;
-    struct norms_t {
-        f32_t sum, sumsq;
-    };
+    using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = float2;
-    struct query_state_t {
-        f32_t rsqrt;
-        f32_t sumsq;
-    };
 
-    inline static constexpr u32_t fragment_bytes_k = 16;
-    inline static constexpr u32_t max_gathers_in_flight_k = 8;
-    inline static constexpr bool has_norms_k = true;
-
-    static __device__ __forceinline__ float2 pair_products(u32_t word_a, u32_t word_b) noexcept {
-        __nv_bfloat162 const packed_a = *reinterpret_cast<__nv_bfloat162 const*>(&word_a);
-        __nv_bfloat162 const packed_b = *reinterpret_cast<__nv_bfloat162 const*>(&word_b);
-        return __bfloat1622float2(__hmul2(packed_a, packed_b));
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_cuda_dot_bf16x8_ampere(a, b, sum);
     }
-    static __device__ __forceinline__ float2 pair_values(u32_t word) noexcept {
-        return __bfloat1622float2(*reinterpret_cast<__nv_bfloat162 const*>(&word));
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return dense_cuda_moments_bf16x8_ampere(a, moments);
     }
-
-    static __device__ __forceinline__ accumulator_t zero_accumulator() noexcept { return 0.0f; }
-    static __device__ __forceinline__ accumulator_t accumulate_dot(fragment_t a, fragment_t b,
-                                                                   accumulator_t accumulator) noexcept {
-        float2 const products_x = pair_products(a.x, b.x), products_y = pair_products(a.y, b.y);
-        float2 const products_z = pair_products(a.z, b.z), products_w = pair_products(a.w, b.w);
-        return accumulator + (products_x.x + products_x.y) + (products_y.x + products_y.y) +
-               (products_z.x + products_z.y) + (products_w.x + products_w.y);
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ dot_t partial_to_dot(accumulator_t accumulator) noexcept { return accumulator; }
-
-    static __device__ __forceinline__ norms_accumulator_t zero_norms_accumulator() noexcept { return {0.0f, 0.0f}; }
-    static __device__ __forceinline__ norms_accumulator_t accumulate_norms(fragment_t a,
-                                                                           norms_accumulator_t accumulator) noexcept {
-        u32_t const words[4] = {a.x, a.y, a.z, a.w};
-#pragma unroll
-        for (u32_t word = 0; word != 4; ++word) {
-            float2 const values = pair_values(words[word]);
-            accumulator.x += values.x + values.y;
-            accumulator.y += values.x * values.x + values.y * values.y;
-        }
-        return accumulator;
-    }
-    static __device__ __forceinline__ norms_t partials_to_norms(norms_accumulator_t accumulator) noexcept {
-        return {accumulator.x, accumulator.y};
-    }
-    static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
-        return {norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f, norms.sumsq};
-    }
-
-    /** The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
-     *  a distance as @b 1-dot, monotone decreasing and negative-safe. */
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
-        return 1.0f - dot;
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
+        return dense_cuda_distance<kernel_>(dot, query, target);
     }
     static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return ranked;
+        return dense_cuda_convert_to_distance<kernel_>(ranked);
     }
 };
 
-struct bf16_ampere_angular_kit_t : bf16_ampere_inner_kit_t {
-    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, query_state_t query_state,
-                                                                norms_t norms) noexcept {
-        return 1.0f - dot * query_state.rsqrt * (norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f);
+#if NUMKONG_TARGET_BLACKWELL || NUMKONG_TARGET_BLACKWELLRTX
+
+/** Both halves of two @c f16x2 words multiplied straight into an f32 sum by @c fma.rn.f32.f16 - exact
+ *  products, so none rounds to half or overflows its range. */
+__device__ __forceinline__ f32_t dense_cuda_fma_f16x2_blackwell(u32_t first_pair, u32_t second_pair,
+                                                                f32_t sum) noexcept {
+    asm("{.reg .b16 first_low, first_high, second_low, second_high;\n\t" //
+        "mov.b32 {first_low, first_high}, %1;\n\t"                       //
+        "mov.b32 {second_low, second_high}, %2;\n\t"                     //
+        "fma.rn.f32.f16 %0, first_low, second_low, %0;\n\t"              //
+        "fma.rn.f32.f16 %0, first_high, second_high, %0;}"
+        : "+f"(sum)
+        : "r"(first_pair), "r"(second_pair));
+    return sum;
+}
+
+/** The @c bf16x2 twin of @ref dense_cuda_fma_f16x2_blackwell, through @c fma.rn.f32.bf16. */
+__device__ __forceinline__ f32_t dense_cuda_fma_bf16x2_blackwell(u32_t first_pair, u32_t second_pair,
+                                                                 f32_t sum) noexcept {
+    asm("{.reg .b16 first_low, first_high, second_low, second_high;\n\t" //
+        "mov.b32 {first_low, first_high}, %1;\n\t"                       //
+        "mov.b32 {second_low, second_high}, %2;\n\t"                     //
+        "fma.rn.f32.bf16 %0, first_low, second_low, %0;\n\t"             //
+        "fma.rn.f32.bf16 %0, first_high, second_high, %0;}"
+        : "+f"(sum)
+        : "r"(first_pair), "r"(second_pair));
+    return sum;
+}
+
+/** Eight @c f16 products of a fragment pair, each exact, fused straight into the f32 sum. */
+__device__ __forceinline__ f32_t dense_cuda_dot_f16x8_blackwell(uint4 a, uint4 b, f32_t sum) noexcept {
+    sum = dense_cuda_fma_f16x2_blackwell(a.x, b.x, sum);
+    sum = dense_cuda_fma_f16x2_blackwell(a.y, b.y, sum);
+    sum = dense_cuda_fma_f16x2_blackwell(a.z, b.z, sum);
+    return dense_cuda_fma_f16x2_blackwell(a.w, b.w, sum);
+}
+
+/** Eight @c bf16 products of a fragment pair, each exact, fused straight into the f32 sum. */
+__device__ __forceinline__ f32_t dense_cuda_dot_bf16x8_blackwell(uint4 a, uint4 b, f32_t sum) noexcept {
+    sum = dense_cuda_fma_bf16x2_blackwell(a.x, b.x, sum);
+    sum = dense_cuda_fma_bf16x2_blackwell(a.y, b.y, sum);
+    sum = dense_cuda_fma_bf16x2_blackwell(a.z, b.z, sum);
+    return dense_cuda_fma_bf16x2_blackwell(a.w, b.w, sum);
+}
+
+/** f16 kit - Blackwell, @c fma.rn.f32.f16. */
+template <nk_kernel_kind_t kernel_>
+struct f16_blackwell_kit {
+    inline static constexpr cuda_arch_t arch_k = cuda_arch_blackwell_k;
+    using scalar_t = nk::f16_t;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_cuda_dot_f16x8_blackwell(a, b, sum);
     }
-};
-struct bf16_ampere_sqeuclidean_kit_t : bf16_ampere_inner_kit_t {
-    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, query_state_t query_state,
-                                                                norms_t norms) noexcept {
-        return query_state.sumsq + norms.sumsq - 2.0f * dot;
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return dense_cuda_moments_f16x8_ampere(a, moments);
     }
-};
-struct bf16_ampere_euclidean_kit_t : bf16_ampere_sqeuclidean_kit_t {
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
+        return dense_cuda_distance<kernel_>(dot, query, target);
+    }
     static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return sqrtf(ranked);
+        return dense_cuda_convert_to_distance<kernel_>(ranked);
     }
 };
 
-#pragma endregion
+/** bf16 kit - Blackwell, @c fma.rn.f32.bf16. */
+template <nk_kernel_kind_t kernel_>
+struct bf16_blackwell_kit {
+    inline static constexpr cuda_arch_t arch_k = cuda_arch_blackwell_k;
+    using scalar_t = nk::bf16_t;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_cuda_dot_bf16x8_blackwell(a, b, sum);
+    }
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return dense_cuda_moments_bf16x8_ampere(a, moments);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
+        return dense_cuda_distance<kernel_>(dot, query, target);
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    }
+};
+
+#endif // NUMKONG_TARGET_BLACKWELL || NUMKONG_TARGET_BLACKWELLRTX
+
+#pragma endregion Half Precision Floats
 
 #pragma region Byte Sized Integers
 
-/** The @c i8 dot base - one signed @c dp4a per fragment word, norms via the same
- *  instruction against splat-one and self. Signed records throughout: sums are
- *  genuinely negative, and the layout matches the CPU planes' @b {sum,sumsq}. */
-struct i8_ampere_inner_kit_t {
+/** Sixteen signed @c i8 products of a fragment pair, one @c dp4a per word. */
+__device__ __forceinline__ int dense_cuda_dot_i8x16_ampere(uint4 a, uint4 b, int sum) noexcept {
+    sum = __dp4a(static_cast<int>(a.x), static_cast<int>(b.x), sum);
+    sum = __dp4a(static_cast<int>(a.y), static_cast<int>(b.y), sum);
+    sum = __dp4a(static_cast<int>(a.z), static_cast<int>(b.z), sum);
+    return __dp4a(static_cast<int>(a.w), static_cast<int>(b.w), sum);
+}
+
+/** An @c i8 fragment's sum & sum of squares, through the same instruction against splat-one and self. */
+__device__ __forceinline__ int2 dense_cuda_moments_i8x16_ampere(uint4 a, int2 moments) noexcept {
+    moments.x = __dp4a(static_cast<int>(a.x), 0x01010101, moments.x);
+    moments.x = __dp4a(static_cast<int>(a.y), 0x01010101, moments.x);
+    moments.x = __dp4a(static_cast<int>(a.z), 0x01010101, moments.x);
+    moments.x = __dp4a(static_cast<int>(a.w), 0x01010101, moments.x);
+    moments.y = __dp4a(static_cast<int>(a.x), static_cast<int>(a.x), moments.y);
+    moments.y = __dp4a(static_cast<int>(a.y), static_cast<int>(a.y), moments.y);
+    moments.y = __dp4a(static_cast<int>(a.z), static_cast<int>(a.z), moments.y);
+    moments.y = __dp4a(static_cast<int>(a.w), static_cast<int>(a.w), moments.y);
+    return moments;
+}
+
+/** Sixteen unsigned @c u8 products of a fragment pair - the unsigned @c dp4a form, whose native operand
+ *  types need no cast chatter; the dot alone can pass the signed range at wide rows. */
+__device__ __forceinline__ u32_t dense_cuda_dot_u8x16_ampere(uint4 a, uint4 b, u32_t sum) noexcept {
+    sum = __dp4a(a.x, b.x, sum);
+    sum = __dp4a(a.y, b.y, sum);
+    sum = __dp4a(a.z, b.z, sum);
+    return __dp4a(a.w, b.w, sum);
+}
+
+/** A @c u8 fragment's sum & sum of squares. */
+__device__ __forceinline__ uint2 dense_cuda_moments_u8x16_ampere(uint4 a, uint2 moments) noexcept {
+    moments.x = __dp4a(a.x, 0x01010101u, moments.x);
+    moments.x = __dp4a(a.y, 0x01010101u, moments.x);
+    moments.x = __dp4a(a.z, 0x01010101u, moments.x);
+    moments.x = __dp4a(a.w, 0x01010101u, moments.x);
+    moments.y = __dp4a(a.x, a.x, moments.y);
+    moments.y = __dp4a(a.y, a.y, moments.y);
+    moments.y = __dp4a(a.z, a.z, moments.y);
+    moments.y = __dp4a(a.w, a.w, moments.y);
+    return moments;
+}
+
+/** i8 kit - the sm_80 floor. */
+template <nk_kernel_kind_t kernel_>
+struct i8_ampere_kit {
+    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
     using scalar_t = nk::i8_t;
     using fragment_t = uint4;
-    using accumulator_t = int;
     using dot_t = int;
-    struct norms_t {
-        int sum, sumsq;
-    };
+    using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = int2;
-    struct query_state_t {
-        f32_t rsqrt;
-        int sumsq;
-    };
 
-    inline static constexpr u32_t fragment_bytes_k = 16;
-    inline static constexpr u32_t max_gathers_in_flight_k = 8;
-    inline static constexpr bool has_norms_k = true;
-
-    static __device__ __forceinline__ accumulator_t zero_accumulator() noexcept { return 0; }
-    static __device__ __forceinline__ accumulator_t accumulate_dot(fragment_t a, fragment_t b,
-                                                                   accumulator_t accumulator) noexcept {
-        accumulator = __dp4a(static_cast<int>(a.x), static_cast<int>(b.x), accumulator);
-        accumulator = __dp4a(static_cast<int>(a.y), static_cast<int>(b.y), accumulator);
-        accumulator = __dp4a(static_cast<int>(a.z), static_cast<int>(b.z), accumulator);
-        return __dp4a(static_cast<int>(a.w), static_cast<int>(b.w), accumulator);
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_cuda_dot_i8x16_ampere(a, b, sum);
     }
-    static __device__ __forceinline__ dot_t partial_to_dot(accumulator_t accumulator) noexcept { return accumulator; }
-
-    static __device__ __forceinline__ norms_accumulator_t zero_norms_accumulator() noexcept { return {0, 0}; }
-    static __device__ __forceinline__ norms_accumulator_t accumulate_norms(fragment_t a,
-                                                                           norms_accumulator_t accumulator) noexcept {
-        accumulator.x = __dp4a(static_cast<int>(a.x), 0x01010101, accumulator.x);
-        accumulator.x = __dp4a(static_cast<int>(a.y), 0x01010101, accumulator.x);
-        accumulator.x = __dp4a(static_cast<int>(a.z), 0x01010101, accumulator.x);
-        accumulator.x = __dp4a(static_cast<int>(a.w), 0x01010101, accumulator.x);
-        accumulator.y = __dp4a(static_cast<int>(a.x), static_cast<int>(a.x), accumulator.y);
-        accumulator.y = __dp4a(static_cast<int>(a.y), static_cast<int>(a.y), accumulator.y);
-        accumulator.y = __dp4a(static_cast<int>(a.z), static_cast<int>(a.z), accumulator.y);
-        accumulator.y = __dp4a(static_cast<int>(a.w), static_cast<int>(a.w), accumulator.y);
-        return accumulator;
+    static __device__ __forceinline__ int2 accumulate_norms(fragment_t a, int2 moments) noexcept {
+        return dense_cuda_moments_i8x16_ampere(a, moments);
     }
-    static __device__ __forceinline__ norms_t partials_to_norms(norms_accumulator_t accumulator) noexcept {
-        return {accumulator.x, accumulator.y};
+    static __device__ __forceinline__ norms_t partials_to_norms(int2 moments) noexcept {
+        return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
-        return {norms.sumsq ? rsqrtf(static_cast<f32_t>(norms.sumsq)) : 0.0f, norms.sumsq};
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
+        return dense_cuda_distance<kernel_>(dot, query, target);
     }
-
-    /** The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
-     *  a distance as @b 1-dot, monotone decreasing and negative-safe. */
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
-        return 1.0f - static_cast<f32_t>(dot);
-    }
-
-    /** Output-boundary finalize, the CPU kits' @c convert_to_distances in miniature:
-     *  the traversal ranks on raw @c distance values end to end, and only the matches a
-     *  caller receives pass through here - identity unless a metric owes a monotone
-     *  transform, like Euclidean's square root. */
     static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return ranked;
+        return dense_cuda_convert_to_distance<kernel_>(ranked);
     }
 };
 
-struct i8_ampere_angular_kit_t : i8_ampere_inner_kit_t {
-    static __device__ __forceinline__ dense_distance_t distance(int dot, query_state_t query_state,
-                                                                norms_t norms) noexcept {
-        return 1.0f - static_cast<f32_t>(dot) * query_state.rsqrt *
-                          (norms.sumsq ? rsqrtf(static_cast<f32_t>(norms.sumsq)) : 0.0f);
-    }
-};
-struct i8_ampere_sqeuclidean_kit_t : i8_ampere_inner_kit_t {
-    static __device__ __forceinline__ dense_distance_t distance(int dot, query_state_t query_state,
-                                                                norms_t norms) noexcept {
-        return static_cast<f32_t>(query_state.sumsq) + static_cast<f32_t>(norms.sumsq) - 2.0f * static_cast<f32_t>(dot);
-    }
-};
-
-/** Metric-true Euclidean over the squared-distance walk: rankings are identical
- *  under the monotone square root, so only reported matches pay one @c sqrtf each -
- *  numerically matching the CPU euclidean kits. */
-struct i8_ampere_euclidean_kit_t : i8_ampere_sqeuclidean_kit_t {
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return sqrtf(ranked);
-    }
-};
-
-/** The @c u8 dot base - the unsigned @c dp4a form with unsigned records: every
- *  quantity is non-negative, the dot alone can pass the signed range at wide rows,
- *  and the instruction's native operand types need no cast chatter. */
-struct u8_ampere_inner_kit_t {
+/** u8 kit - the sm_80 floor. */
+template <nk_kernel_kind_t kernel_>
+struct u8_ampere_kit {
+    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
     using scalar_t = nk::u8_t;
     using fragment_t = uint4;
-    using accumulator_t = u32_t;
     using dot_t = u32_t;
-    struct norms_t {
-        u32_t sum, sumsq;
-    };
+    using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = uint2;
-    struct query_state_t {
-        f32_t rsqrt;
-        u32_t sumsq;
-    };
 
-    inline static constexpr u32_t fragment_bytes_k = 16;
-    inline static constexpr u32_t max_gathers_in_flight_k = 8;
-    inline static constexpr bool has_norms_k = true;
-
-    static __device__ __forceinline__ accumulator_t zero_accumulator() noexcept { return 0; }
-    static __device__ __forceinline__ accumulator_t accumulate_dot(fragment_t a, fragment_t b,
-                                                                   accumulator_t accumulator) noexcept {
-        accumulator = __dp4a(a.x, b.x, accumulator);
-        accumulator = __dp4a(a.y, b.y, accumulator);
-        accumulator = __dp4a(a.z, b.z, accumulator);
-        return __dp4a(a.w, b.w, accumulator);
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_cuda_dot_u8x16_ampere(a, b, sum);
     }
-    static __device__ __forceinline__ dot_t partial_to_dot(accumulator_t accumulator) noexcept { return accumulator; }
-
-    static __device__ __forceinline__ norms_accumulator_t zero_norms_accumulator() noexcept { return {0, 0}; }
-    static __device__ __forceinline__ norms_accumulator_t accumulate_norms(fragment_t a,
-                                                                           norms_accumulator_t accumulator) noexcept {
-        accumulator.x = __dp4a(a.x, 0x01010101u, accumulator.x);
-        accumulator.x = __dp4a(a.y, 0x01010101u, accumulator.x);
-        accumulator.x = __dp4a(a.z, 0x01010101u, accumulator.x);
-        accumulator.x = __dp4a(a.w, 0x01010101u, accumulator.x);
-        accumulator.y = __dp4a(a.x, a.x, accumulator.y);
-        accumulator.y = __dp4a(a.y, a.y, accumulator.y);
-        accumulator.y = __dp4a(a.z, a.z, accumulator.y);
-        accumulator.y = __dp4a(a.w, a.w, accumulator.y);
-        return accumulator;
+    static __device__ __forceinline__ uint2 accumulate_norms(fragment_t a, uint2 moments) noexcept {
+        return dense_cuda_moments_u8x16_ampere(a, moments);
     }
-    static __device__ __forceinline__ norms_t partials_to_norms(norms_accumulator_t accumulator) noexcept {
-        return {accumulator.x, accumulator.y};
+    static __device__ __forceinline__ norms_t partials_to_norms(uint2 moments) noexcept {
+        return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
-        return {norms.sumsq ? rsqrtf(static_cast<f32_t>(norms.sumsq)) : 0.0f, norms.sumsq};
-    }
-
-    /** The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
-     *  a distance as @b 1-dot, monotone decreasing and negative-safe. */
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
-        return 1.0f - static_cast<f32_t>(dot);
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
+        return dense_cuda_distance<kernel_>(dot, query, target);
     }
     static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return ranked;
+        return dense_cuda_convert_to_distance<kernel_>(ranked);
     }
 };
 
-struct u8_ampere_angular_kit_t : u8_ampere_inner_kit_t {
-    static __device__ __forceinline__ dense_distance_t distance(u32_t dot, query_state_t query_state,
-                                                                norms_t norms) noexcept {
-        return 1.0f - static_cast<f32_t>(dot) * query_state.rsqrt *
-                          (norms.sumsq ? rsqrtf(static_cast<f32_t>(norms.sumsq)) : 0.0f);
-    }
-};
-struct u8_ampere_sqeuclidean_kit_t : u8_ampere_inner_kit_t {
-    static __device__ __forceinline__ dense_distance_t distance(u32_t dot, query_state_t query_state,
-                                                                norms_t norms) noexcept {
-        return static_cast<f32_t>(query_state.sumsq) + static_cast<f32_t>(norms.sumsq) - 2.0f * static_cast<f32_t>(dot);
-    }
-};
-struct u8_ampere_euclidean_kit_t : u8_ampere_sqeuclidean_kit_t {
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return sqrtf(ranked);
-    }
-};
+#pragma endregion Byte Sized Integers
 
-#pragma endregion
+#pragma region Minifloats
 
-#pragma region Byte Sized Floats
+/*  No generation has fp8 or fp6 arithmetic outside the tensor cores - conversion is all the ISA offers -
+ *  so every minifloat kit widens byte pairs and accumulates like the 16-bit float kits, and one
+ *  generation's kit differs from another's only in its widening. */
+
+/** Sixteen minifloat products of a fragment pair, each byte pair widened by @p widening_type_ into f32. */
+template <typename widening_type_>
+__device__ __forceinline__ f32_t dense_cuda_dot_minifloats_ampere(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values_a = widening_type_::pair_to_floats(words_a[word] >> (16 * pair));
+            float2 const values_b = widening_type_::pair_to_floats(words_b[word] >> (16 * pair));
+            sum += values_a.x * values_b.x + values_a.y * values_b.y;
+        }
+    return sum;
+}
+
+/** A minifloat fragment's sum & sum of squares, each byte pair widened by @p widening_type_ into f32. */
+template <typename widening_type_>
+__device__ __forceinline__ float2 dense_cuda_moments_minifloats_ampere(uint4 a, float2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = widening_type_::pair_to_floats(words[word] >> (16 * pair));
+            moments.x += values.x + values.y;
+            moments.y += values.x * values.x + values.y * values.y;
+        }
+    return moments;
+}
 
 /** The Ampere floor has no fp8 conversion, so each byte's fields are placed into an f32 by hand:
  *  subnormals scale by 2⁻⁹, and the all-ones magnitude is the format's only NaN. */
@@ -589,14 +558,143 @@ struct e5m2_ampere_widening_t {
     }
 };
 
-struct e4m3_ada_widening_t;
-struct e5m2_ada_widening_t;
-struct e4m3_blackwell_widening_t;
-struct e5m2_blackwell_widening_t;
+/** The OCP fp6 formats sit low in a byte - sign at bit 5, no infinities or NaN - so the floor widens a
+ *  pair by hand: the five magnitude bits drop into a half's exponent and mantissa fields as they stand,
+ *  the sign moves to bit 15, and one exact power-of-two product rebiases, subnormals too. */
+template <u32_t mantissa_bits_, u32_t rebias_log2_>
+__device__ __forceinline__ float2 dense_cuda_fp6x2_to_f32x2_ampere(u32_t packed_pair) noexcept {
+    u32_t const magnitudes = ((packed_pair & 0x001Fu) | ((packed_pair & 0x1F00u) << 8)) << (10 - mantissa_bits_);
+    u32_t const signs = ((packed_pair & 0x0020u) | ((packed_pair & 0x2000u) << 8)) << 10;
+    u32_t const unscaled = magnitudes | signs;
+    __half2 const scale = __half2half2(__ushort_as_half(static_cast<unsigned short>((15u + rebias_log2_) << 10)));
+    return __half22float2(__hmul2(*reinterpret_cast<__half2 const*>(&unscaled), scale));
+}
 
-#if __CUDA_ARCH__ >= 890 || !defined(__CUDA_ARCH__)
+/** @c e3m2 by hand: two mantissa bits, bias 3 against the half's 15. */
+struct e3m2_ampere_widening_t {
+    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
+        return dense_cuda_fp6x2_to_f32x2_ampere<2, 12>(packed_pair);
+    }
+};
 
-/** Ada widens a pair in one sm_89+ @c cvt.rn.f16x2.e4m3x2, hence the @c ada architecture slot. */
+/** @c e2m3 by hand: three mantissa bits, bias 1 against the half's 15. */
+struct e2m3_ampere_widening_t {
+    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
+        return dense_cuda_fp6x2_to_f32x2_ampere<3, 14>(packed_pair);
+    }
+};
+
+/** e5m2 kit - the sm_80 floor, widening by shifts. */
+template <nk_kernel_kind_t kernel_>
+struct e5m2_ampere_kit {
+    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+    using scalar_t = nk::e5m2_t;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_cuda_dot_minifloats_ampere<e5m2_ampere_widening_t>(a, b, sum);
+    }
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return dense_cuda_moments_minifloats_ampere<e5m2_ampere_widening_t>(a, moments);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
+        return dense_cuda_distance<kernel_>(dot, query, target);
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    }
+};
+
+/** e4m3 kit - the sm_80 floor, widening by hand. */
+template <nk_kernel_kind_t kernel_>
+struct e4m3_ampere_kit {
+    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+    using scalar_t = nk::e4m3_t;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_cuda_dot_minifloats_ampere<e4m3_ampere_widening_t>(a, b, sum);
+    }
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return dense_cuda_moments_minifloats_ampere<e4m3_ampere_widening_t>(a, moments);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
+        return dense_cuda_distance<kernel_>(dot, query, target);
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    }
+};
+
+/** e3m2 kit - the sm_80 floor, widening by hand. */
+template <nk_kernel_kind_t kernel_>
+struct e3m2_ampere_kit {
+    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+    using scalar_t = nk::e3m2_t;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_cuda_dot_minifloats_ampere<e3m2_ampere_widening_t>(a, b, sum);
+    }
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return dense_cuda_moments_minifloats_ampere<e3m2_ampere_widening_t>(a, moments);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
+        return dense_cuda_distance<kernel_>(dot, query, target);
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    }
+};
+
+/** e2m3 kit - the sm_80 floor, widening by hand. */
+template <nk_kernel_kind_t kernel_>
+struct e2m3_ampere_kit {
+    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+    using scalar_t = nk::e2m3_t;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_cuda_dot_minifloats_ampere<e2m3_ampere_widening_t>(a, b, sum);
+    }
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return dense_cuda_moments_minifloats_ampere<e2m3_ampere_widening_t>(a, moments);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
+        return dense_cuda_distance<kernel_>(dot, query, target);
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    }
+};
+
+#if NUMKONG_TARGET_ADA
+
+/** Ada and every tier since widens an fp8 pair in one @c cvt.rn.f16x2.e4m3x2. */
 struct e4m3_ada_widening_t {
     static __device__ __forceinline__ u32_t pair_to_halves(u32_t packed_pair) noexcept {
         u32_t half_pair;
@@ -609,7 +707,7 @@ struct e4m3_ada_widening_t {
     }
 };
 
-/** Ada widens a pair in one sm_89+ @c cvt.rn.f16x2.e5m2x2. */
+/** The @c e5m2 twin of @ref e4m3_ada_widening_t, through @c cvt.rn.f16x2.e5m2x2. */
 struct e5m2_ada_widening_t {
     static __device__ __forceinline__ u32_t pair_to_halves(u32_t packed_pair) noexcept {
         u32_t half_pair;
@@ -622,659 +720,499 @@ struct e5m2_ada_widening_t {
     }
 };
 
-#endif
-
-#if __CUDA_ARCH__ >= 1000 || !defined(__CUDA_ARCH__)
-
-/** Blackwell keeps both pairs in halves and multiplies them straight into the f32 sum through
- *  sm_100+ @c fma.rn.f32.f16, so the dot never widens to f32 - the norms still do. */
-template <typename ada_widening_type_>
-struct dense_fp8_blackwell_widening : ada_widening_type_ {
-    static __device__ __forceinline__ f32_t accumulate_pair(u32_t first_pair, u32_t second_pair,
-                                                            f32_t accumulator) noexcept {
-        u32_t const first_halves = ada_widening_type_::pair_to_halves(first_pair);
-        u32_t const second_halves = ada_widening_type_::pair_to_halves(second_pair);
-        asm("{.reg .b16 first_low, first_high, second_low, second_high;\n\t" //
-            "mov.b32 {first_low, first_high}, %1;\n\t"                       //
-            "mov.b32 {second_low, second_high}, %2;\n\t"                     //
-            "fma.rn.f32.f16 %0, first_low, second_low, %0;\n\t"              //
-            "fma.rn.f32.f16 %0, first_high, second_high, %0;}"
-            : "+f"(accumulator)
-            : "r"(first_halves), "r"(second_halves));
-        return accumulator;
-    }
-};
-
-struct e4m3_blackwell_widening_t : dense_fp8_blackwell_widening<e4m3_ada_widening_t> {};
-struct e5m2_blackwell_widening_t : dense_fp8_blackwell_widening<e5m2_ada_widening_t> {};
-
-#endif
-
-/** The fp8 dot base over any widening: no generation has fp8 arithmetic - conversion is all the
- *  ISA offers - so pairs widen and accumulate like the 16-bit float kits, and one generation's
- *  row differs from another's only in @p widening_type_. */
-template <typename scalar_type_, typename widening_type_>
-struct dense_fp8_inner_kit {
-    using scalar_t = scalar_type_;
+/** e5m2 kit - Ada, widening through the conversion. */
+template <nk_kernel_kind_t kernel_>
+struct e5m2_ada_kit {
+    inline static constexpr cuda_arch_t arch_k = cuda_arch_ada_k;
+    using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
-    using accumulator_t = f32_t;
     using dot_t = f32_t;
-    struct norms_t {
-        f32_t sum, sumsq;
-    };
+    using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = float2;
-    struct query_state_t {
-        f32_t rsqrt;
-        f32_t sumsq;
-    };
 
-    inline static constexpr u32_t fragment_bytes_k = 16;
-    inline static constexpr u32_t max_gathers_in_flight_k = 8;
-    inline static constexpr bool has_norms_k = true;
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_cuda_dot_minifloats_ampere<e5m2_ada_widening_t>(a, b, sum);
+    }
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return dense_cuda_moments_minifloats_ampere<e5m2_ada_widening_t>(a, moments);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
+        return dense_cuda_distance<kernel_>(dot, query, target);
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    }
+};
 
+/** e4m3 kit - Ada, widening through the conversion. */
+template <nk_kernel_kind_t kernel_>
+struct e4m3_ada_kit {
+    inline static constexpr cuda_arch_t arch_k = cuda_arch_ada_k;
+    using scalar_t = nk::e4m3_t;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_cuda_dot_minifloats_ampere<e4m3_ada_widening_t>(a, b, sum);
+    }
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return dense_cuda_moments_minifloats_ampere<e4m3_ada_widening_t>(a, moments);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
+        return dense_cuda_distance<kernel_>(dot, query, target);
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    }
+};
+
+#endif // NUMKONG_TARGET_ADA
+
+#if NUMKONG_TARGET_BLACKWELL || NUMKONG_TARGET_BLACKWELLRTX
+
+/** Sixteen minifloat products of a fragment pair, each byte pair widened by @p widening_type_ into
+ *  halves and multiplied straight into the f32 sum, so the dot never widens to f32 - the norms still do. */
+template <typename widening_type_>
+__device__ __forceinline__ f32_t dense_cuda_dot_minifloats_blackwell(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair)
+            sum = dense_cuda_fma_f16x2_blackwell(widening_type_::pair_to_halves(words_a[word] >> (16 * pair)),
+                                                 widening_type_::pair_to_halves(words_b[word] >> (16 * pair)), sum);
+    return sum;
+}
+
+/** Blackwell widens an fp6 pair in one @c cvt.rn.f16x2.e3m2x2, which only family-specific code encodes. */
+struct e3m2_blackwell_widening_t {
+    static __device__ __forceinline__ u32_t pair_to_halves(u32_t packed_pair) noexcept {
+        u32_t half_pair;
+        asm("{cvt.rn.f16x2.e3m2x2 %0, %1;}" : "=r"(half_pair) : "h"(static_cast<unsigned short>(packed_pair)));
+        return half_pair;
+    }
     static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
-        return widening_type_::pair_to_floats(packed_pair);
+        u32_t const half_pair = pair_to_halves(packed_pair);
+        return __half22float2(*reinterpret_cast<__half2 const*>(&half_pair));
     }
+};
 
-    static __device__ __forceinline__ accumulator_t zero_accumulator() noexcept { return 0.0f; }
-    static __device__ __forceinline__ accumulator_t accumulate_dot(fragment_t a, fragment_t b,
-                                                                   accumulator_t accumulator) noexcept {
-        u32_t const words_a[4] = {a.x, a.y, a.z, a.w};
-        u32_t const words_b[4] = {b.x, b.y, b.z, b.w};
-#pragma unroll
-        for (u32_t word = 0; word != 4; ++word)
-#pragma unroll
-            for (u32_t pair = 0; pair != 2; ++pair) {
-                u32_t const pair_a = words_a[word] >> (16 * pair), pair_b = words_b[word] >> (16 * pair);
-                if constexpr (requires { widening_type_::accumulate_pair(pair_a, pair_b, accumulator); })
-                    accumulator = widening_type_::accumulate_pair(pair_a, pair_b, accumulator);
-                else {
-                    float2 const values_a = pair_to_floats(pair_a);
-                    float2 const values_b = pair_to_floats(pair_b);
-                    accumulator += values_a.x * values_b.x + values_a.y * values_b.y;
-                }
-            }
-        return accumulator;
+/** The @c e2m3 twin of @ref e3m2_blackwell_widening_t, through @c cvt.rn.f16x2.e2m3x2. */
+struct e2m3_blackwell_widening_t {
+    static __device__ __forceinline__ u32_t pair_to_halves(u32_t packed_pair) noexcept {
+        u32_t half_pair;
+        asm("{cvt.rn.f16x2.e2m3x2 %0, %1;}" : "=r"(half_pair) : "h"(static_cast<unsigned short>(packed_pair)));
+        return half_pair;
     }
-    static __device__ __forceinline__ dot_t partial_to_dot(accumulator_t accumulator) noexcept { return accumulator; }
+    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
+        u32_t const half_pair = pair_to_halves(packed_pair);
+        return __half22float2(*reinterpret_cast<__half2 const*>(&half_pair));
+    }
+};
 
-    static __device__ __forceinline__ norms_accumulator_t zero_norms_accumulator() noexcept { return {0.0f, 0.0f}; }
-    static __device__ __forceinline__ norms_accumulator_t accumulate_norms(fragment_t a,
-                                                                           norms_accumulator_t accumulator) noexcept {
-        u32_t const words[4] = {a.x, a.y, a.z, a.w};
-#pragma unroll
-        for (u32_t word = 0; word != 4; ++word)
-#pragma unroll
-            for (u32_t pair = 0; pair != 2; ++pair) {
-                float2 const values = pair_to_floats(words[word] >> (16 * pair));
-                accumulator.x += values.x + values.y;
-                accumulator.y += values.x * values.x + values.y * values.y;
-            }
-        return accumulator;
-    }
-    static __device__ __forceinline__ norms_t partials_to_norms(norms_accumulator_t accumulator) noexcept {
-        return {accumulator.x, accumulator.y};
-    }
-    static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
-        return {norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f, norms.sumsq};
-    }
+/** e5m2 kit - Blackwell, converted halves through @c fma.rn.f32.f16. */
+template <nk_kernel_kind_t kernel_>
+struct e5m2_blackwell_kit {
+    inline static constexpr cuda_arch_t arch_k = cuda_arch_blackwell_k;
+    using scalar_t = nk::e5m2_t;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
 
-    /** The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
-     *  a distance as @b 1-dot, monotone decreasing and negative-safe. */
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
-        return 1.0f - dot;
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_cuda_dot_minifloats_blackwell<e5m2_ada_widening_t>(a, b, sum);
+    }
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return dense_cuda_moments_minifloats_ampere<e5m2_ada_widening_t>(a, moments);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
+        return dense_cuda_distance<kernel_>(dot, query, target);
     }
     static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return ranked;
+        return dense_cuda_convert_to_distance<kernel_>(ranked);
     }
 };
 
-template <typename scalar_type_, typename widening_type_>
-struct dense_fp8_angular_kit : dense_fp8_inner_kit<scalar_type_, widening_type_> {
-    using inner_t = dense_fp8_inner_kit<scalar_type_, widening_type_>;
-    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, typename inner_t::query_state_t query_state,
-                                                                typename inner_t::norms_t norms) noexcept {
-        return 1.0f - dot * query_state.rsqrt * (norms.sumsq > 0.0f ? rsqrtf(norms.sumsq) : 0.0f);
+/** e4m3 kit - Blackwell, converted halves through @c fma.rn.f32.f16. */
+template <nk_kernel_kind_t kernel_>
+struct e4m3_blackwell_kit {
+    inline static constexpr cuda_arch_t arch_k = cuda_arch_blackwell_k;
+    using scalar_t = nk::e4m3_t;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_cuda_dot_minifloats_blackwell<e4m3_ada_widening_t>(a, b, sum);
     }
-};
-template <typename scalar_type_, typename widening_type_>
-struct dense_fp8_sqeuclidean_kit : dense_fp8_inner_kit<scalar_type_, widening_type_> {
-    using inner_t = dense_fp8_inner_kit<scalar_type_, widening_type_>;
-    static __device__ __forceinline__ dense_distance_t distance(f32_t dot, typename inner_t::query_state_t query_state,
-                                                                typename inner_t::norms_t norms) noexcept {
-        return query_state.sumsq + norms.sumsq - 2.0f * dot;
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return dense_cuda_moments_minifloats_ampere<e4m3_ada_widening_t>(a, moments);
     }
-};
-template <typename scalar_type_, typename widening_type_>
-struct dense_fp8_euclidean_kit : dense_fp8_sqeuclidean_kit<scalar_type_, widening_type_> {
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
+        return dense_cuda_distance<kernel_>(dot, query, target);
+    }
     static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return sqrtf(ranked);
+        return dense_cuda_convert_to_distance<kernel_>(ranked);
     }
 };
 
-using e4m3_ampere_inner_kit_t = dense_fp8_inner_kit<nk::e4m3_t, e4m3_ampere_widening_t>;
-using e4m3_ampere_angular_kit_t = dense_fp8_angular_kit<nk::e4m3_t, e4m3_ampere_widening_t>;
-using e4m3_ampere_sqeuclidean_kit_t = dense_fp8_sqeuclidean_kit<nk::e4m3_t, e4m3_ampere_widening_t>;
-using e4m3_ampere_euclidean_kit_t = dense_fp8_euclidean_kit<nk::e4m3_t, e4m3_ampere_widening_t>;
-using e4m3_ada_inner_kit_t = dense_fp8_inner_kit<nk::e4m3_t, e4m3_ada_widening_t>;
-using e4m3_ada_angular_kit_t = dense_fp8_angular_kit<nk::e4m3_t, e4m3_ada_widening_t>;
-using e4m3_ada_sqeuclidean_kit_t = dense_fp8_sqeuclidean_kit<nk::e4m3_t, e4m3_ada_widening_t>;
-using e4m3_ada_euclidean_kit_t = dense_fp8_euclidean_kit<nk::e4m3_t, e4m3_ada_widening_t>;
-using e4m3_blackwell_inner_kit_t = dense_fp8_inner_kit<nk::e4m3_t, e4m3_blackwell_widening_t>;
-using e4m3_blackwell_angular_kit_t = dense_fp8_angular_kit<nk::e4m3_t, e4m3_blackwell_widening_t>;
-using e4m3_blackwell_sqeuclidean_kit_t = dense_fp8_sqeuclidean_kit<nk::e4m3_t, e4m3_blackwell_widening_t>;
-using e4m3_blackwell_euclidean_kit_t = dense_fp8_euclidean_kit<nk::e4m3_t, e4m3_blackwell_widening_t>;
+/** e3m2 kit - Blackwell, the one-instruction conversion into @c fma.rn.f32.f16. */
+template <nk_kernel_kind_t kernel_>
+struct e3m2_blackwell_kit {
+    inline static constexpr cuda_arch_t arch_k = cuda_arch_blackwell_k;
+    using scalar_t = nk::e3m2_t;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
 
-using e5m2_ampere_inner_kit_t = dense_fp8_inner_kit<nk::e5m2_t, e5m2_ampere_widening_t>;
-using e5m2_ampere_angular_kit_t = dense_fp8_angular_kit<nk::e5m2_t, e5m2_ampere_widening_t>;
-using e5m2_ampere_sqeuclidean_kit_t = dense_fp8_sqeuclidean_kit<nk::e5m2_t, e5m2_ampere_widening_t>;
-using e5m2_ampere_euclidean_kit_t = dense_fp8_euclidean_kit<nk::e5m2_t, e5m2_ampere_widening_t>;
-using e5m2_ada_inner_kit_t = dense_fp8_inner_kit<nk::e5m2_t, e5m2_ada_widening_t>;
-using e5m2_ada_angular_kit_t = dense_fp8_angular_kit<nk::e5m2_t, e5m2_ada_widening_t>;
-using e5m2_ada_sqeuclidean_kit_t = dense_fp8_sqeuclidean_kit<nk::e5m2_t, e5m2_ada_widening_t>;
-using e5m2_ada_euclidean_kit_t = dense_fp8_euclidean_kit<nk::e5m2_t, e5m2_ada_widening_t>;
-using e5m2_blackwell_inner_kit_t = dense_fp8_inner_kit<nk::e5m2_t, e5m2_blackwell_widening_t>;
-using e5m2_blackwell_angular_kit_t = dense_fp8_angular_kit<nk::e5m2_t, e5m2_blackwell_widening_t>;
-using e5m2_blackwell_sqeuclidean_kit_t = dense_fp8_sqeuclidean_kit<nk::e5m2_t, e5m2_blackwell_widening_t>;
-using e5m2_blackwell_euclidean_kit_t = dense_fp8_euclidean_kit<nk::e5m2_t, e5m2_blackwell_widening_t>;
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_cuda_dot_minifloats_blackwell<e3m2_blackwell_widening_t>(a, b, sum);
+    }
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return dense_cuda_moments_minifloats_ampere<e3m2_blackwell_widening_t>(a, moments);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
+        return dense_cuda_distance<kernel_>(dot, query, target);
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    }
+};
 
-#pragma endregion
+/** e2m3 kit - Blackwell, the one-instruction conversion into @c fma.rn.f32.f16. */
+template <nk_kernel_kind_t kernel_>
+struct e2m3_blackwell_kit {
+    inline static constexpr cuda_arch_t arch_k = cuda_arch_blackwell_k;
+    using scalar_t = nk::e2m3_t;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_cuda_dot_minifloats_blackwell<e2m3_blackwell_widening_t>(a, b, sum);
+    }
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return dense_cuda_moments_minifloats_ampere<e2m3_blackwell_widening_t>(a, moments);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
+        return dense_cuda_distance<kernel_>(dot, query, target);
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    }
+};
+
+#endif // NUMKONG_TARGET_BLACKWELL || NUMKONG_TARGET_BLACKWELLRTX
+
+#pragma endregion Minifloats
 
 #pragma region Packed Nibbles
 
-/** The @c i4x2 dot base: SWAR-unpacks each word of 8 signed nibbles into two
- *  byte-lane words - sign-extended through the classic xor-sub bias - and feeds the
- *  byte engine, two @c dp4a per source word. Signed records, like @c i8. */
-struct i4x2_ampere_inner_kit_t {
+/** Unpacks a word of eight signed nibbles into two byte-lane words, sign-extended through an xor-add-xor
+ *  bias, since a word-wide subtraction would borrow across lanes. */
+__device__ __forceinline__ uint2 dense_cuda_unpack_i4x8_ampere(u32_t word) noexcept {
+    u32_t const low = (((word & 0x0F0F0F0Fu) ^ 0x08080808u) + 0x78787878u) ^ 0x80808080u;
+    u32_t const high = ((((word >> 4) & 0x0F0F0F0Fu) ^ 0x08080808u) + 0x78787878u) ^ 0x80808080u;
+    return {low, high};
+}
+
+/** Thirty-two signed @c i4 products of a fragment pair, two @c dp4a per source word. */
+__device__ __forceinline__ int dense_cuda_dot_i4x32_ampere(uint4 a, uint4 b, int sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        uint2 const unpacked_a = dense_cuda_unpack_i4x8_ampere(words_a[word]);
+        uint2 const unpacked_b = dense_cuda_unpack_i4x8_ampere(words_b[word]);
+        sum = __dp4a(static_cast<int>(unpacked_a.x), static_cast<int>(unpacked_b.x), sum);
+        sum = __dp4a(static_cast<int>(unpacked_a.y), static_cast<int>(unpacked_b.y), sum);
+    }
+    return sum;
+}
+
+/** An @c i4 fragment's sum & sum of squares. */
+__device__ __forceinline__ int2 dense_cuda_moments_i4x32_ampere(uint4 a, int2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        uint2 const unpacked = dense_cuda_unpack_i4x8_ampere(words[word]);
+        moments.x = __dp4a(static_cast<int>(unpacked.x), 0x01010101, moments.x);
+        moments.x = __dp4a(static_cast<int>(unpacked.y), 0x01010101, moments.x);
+        moments.y = __dp4a(static_cast<int>(unpacked.x), static_cast<int>(unpacked.x), moments.y);
+        moments.y = __dp4a(static_cast<int>(unpacked.y), static_cast<int>(unpacked.y), moments.y);
+    }
+    return moments;
+}
+
+/** Unpacks a word of eight unsigned nibbles into two byte-lane words. */
+__device__ __forceinline__ uint2 dense_cuda_unpack_u4x8_ampere(u32_t word) noexcept {
+    return {word & 0x0F0F0F0Fu, (word >> 4) & 0x0F0F0F0Fu};
+}
+
+/** Thirty-two unsigned @c u4 products of a fragment pair, two @c dp4a per source word. */
+__device__ __forceinline__ u32_t dense_cuda_dot_u4x32_ampere(uint4 a, uint4 b, u32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        uint2 const unpacked_a = dense_cuda_unpack_u4x8_ampere(words_a[word]);
+        uint2 const unpacked_b = dense_cuda_unpack_u4x8_ampere(words_b[word]);
+        sum = __dp4a(unpacked_a.x, unpacked_b.x, sum);
+        sum = __dp4a(unpacked_a.y, unpacked_b.y, sum);
+    }
+    return sum;
+}
+
+/** A @c u4 fragment's sum & sum of squares. */
+__device__ __forceinline__ uint2 dense_cuda_moments_u4x32_ampere(uint4 a, uint2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        uint2 const unpacked = dense_cuda_unpack_u4x8_ampere(words[word]);
+        moments.x = __dp4a(unpacked.x, 0x01010101u, moments.x);
+        moments.x = __dp4a(unpacked.y, 0x01010101u, moments.x);
+        moments.y = __dp4a(unpacked.x, unpacked.x, moments.y);
+        moments.y = __dp4a(unpacked.y, unpacked.y, moments.y);
+    }
+    return moments;
+}
+
+/** i4x2 kit - the sm_80 floor, the byte engine over unpacked nibbles. */
+template <nk_kernel_kind_t kernel_>
+struct i4x2_ampere_kit {
+    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
     using scalar_t = nk::i4x2_t;
     using fragment_t = uint4;
-    using accumulator_t = int;
     using dot_t = int;
-    struct norms_t {
-        int sum, sumsq;
-    };
+    using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = int2;
-    struct query_state_t {
-        f32_t rsqrt;
-        int sumsq;
-    };
 
-    inline static constexpr u32_t fragment_bytes_k = 16;
-    inline static constexpr u32_t max_gathers_in_flight_k = 8;
-    inline static constexpr bool has_norms_k = true;
-
-    static __device__ __forceinline__ uint2 unpack(u32_t word) noexcept {
-        u32_t const low = ((word & 0x0F0F0F0Fu) ^ 0x08080808u) - 0x08080808u;
-        u32_t const high = (((word >> 4) & 0x0F0F0F0Fu) ^ 0x08080808u) - 0x08080808u;
-        return {low, high};
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_cuda_dot_i4x32_ampere(a, b, sum);
     }
-
-    static __device__ __forceinline__ accumulator_t zero_accumulator() noexcept { return 0; }
-    static __device__ __forceinline__ accumulator_t accumulate_dot(fragment_t a, fragment_t b,
-                                                                   accumulator_t accumulator) noexcept {
-        u32_t const words_a[4] = {a.x, a.y, a.z, a.w};
-        u32_t const words_b[4] = {b.x, b.y, b.z, b.w};
-#pragma unroll
-        for (u32_t word = 0; word != 4; ++word) {
-            uint2 const unpacked_a = unpack(words_a[word]), unpacked_b = unpack(words_b[word]);
-            accumulator = __dp4a(static_cast<int>(unpacked_a.x), static_cast<int>(unpacked_b.x), accumulator);
-            accumulator = __dp4a(static_cast<int>(unpacked_a.y), static_cast<int>(unpacked_b.y), accumulator);
-        }
-        return accumulator;
+    static __device__ __forceinline__ int2 accumulate_norms(fragment_t a, int2 moments) noexcept {
+        return dense_cuda_moments_i4x32_ampere(a, moments);
     }
-    static __device__ __forceinline__ dot_t partial_to_dot(accumulator_t accumulator) noexcept { return accumulator; }
-
-    static __device__ __forceinline__ norms_accumulator_t zero_norms_accumulator() noexcept { return {0, 0}; }
-    static __device__ __forceinline__ norms_accumulator_t accumulate_norms(fragment_t a,
-                                                                           norms_accumulator_t accumulator) noexcept {
-        u32_t const words[4] = {a.x, a.y, a.z, a.w};
-#pragma unroll
-        for (u32_t word = 0; word != 4; ++word) {
-            uint2 const unpacked = unpack(words[word]);
-            accumulator.x = __dp4a(static_cast<int>(unpacked.x), 0x01010101, accumulator.x);
-            accumulator.x = __dp4a(static_cast<int>(unpacked.y), 0x01010101, accumulator.x);
-            accumulator.y = __dp4a(static_cast<int>(unpacked.x), static_cast<int>(unpacked.x), accumulator.y);
-            accumulator.y = __dp4a(static_cast<int>(unpacked.y), static_cast<int>(unpacked.y), accumulator.y);
-        }
-        return accumulator;
+    static __device__ __forceinline__ norms_t partials_to_norms(int2 moments) noexcept {
+        return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ norms_t partials_to_norms(norms_accumulator_t accumulator) noexcept {
-        return {accumulator.x, accumulator.y};
-    }
-    static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
-        return {norms.sumsq ? rsqrtf(static_cast<f32_t>(norms.sumsq)) : 0.0f, norms.sumsq};
-    }
-
-    /** The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
-     *  a distance as @b 1-dot, monotone decreasing and negative-safe. */
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
-        return 1.0f - static_cast<f32_t>(dot);
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
+        return dense_cuda_distance<kernel_>(dot, query, target);
     }
     static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return ranked;
+        return dense_cuda_convert_to_distance<kernel_>(ranked);
     }
 };
 
-struct i4x2_ampere_angular_kit_t : i4x2_ampere_inner_kit_t {
-    static __device__ __forceinline__ dense_distance_t distance(int dot, query_state_t query_state,
-                                                                norms_t norms) noexcept {
-        return 1.0f - static_cast<f32_t>(dot) * query_state.rsqrt *
-                          (norms.sumsq ? rsqrtf(static_cast<f32_t>(norms.sumsq)) : 0.0f);
-    }
-};
-struct i4x2_ampere_sqeuclidean_kit_t : i4x2_ampere_inner_kit_t {
-    static __device__ __forceinline__ dense_distance_t distance(int dot, query_state_t query_state,
-                                                                norms_t norms) noexcept {
-        return static_cast<f32_t>(query_state.sumsq) + static_cast<f32_t>(norms.sumsq) - 2.0f * static_cast<f32_t>(dot);
-    }
-};
-struct i4x2_ampere_euclidean_kit_t : i4x2_ampere_sqeuclidean_kit_t {
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return sqrtf(ranked);
-    }
-};
-
-/** The @c u4x2 dot base - the unsigned unpack, no sign bias, unsigned records. */
-struct u4x2_ampere_inner_kit_t {
+/** u4x2 kit - the sm_80 floor, the byte engine over unpacked nibbles. */
+template <nk_kernel_kind_t kernel_>
+struct u4x2_ampere_kit {
+    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
     using scalar_t = nk::u4x2_t;
     using fragment_t = uint4;
-    using accumulator_t = u32_t;
     using dot_t = u32_t;
-    struct norms_t {
-        u32_t sum, sumsq;
-    };
+    using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = uint2;
-    struct query_state_t {
-        f32_t rsqrt;
-        u32_t sumsq;
-    };
 
-    inline static constexpr u32_t fragment_bytes_k = 16;
-    inline static constexpr u32_t max_gathers_in_flight_k = 8;
-    inline static constexpr bool has_norms_k = true;
-
-    static __device__ __forceinline__ uint2 unpack(u32_t word) noexcept {
-        return {word & 0x0F0F0F0Fu, (word >> 4) & 0x0F0F0F0Fu};
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_cuda_dot_u4x32_ampere(a, b, sum);
     }
-
-    static __device__ __forceinline__ accumulator_t zero_accumulator() noexcept { return 0; }
-    static __device__ __forceinline__ accumulator_t accumulate_dot(fragment_t a, fragment_t b,
-                                                                   accumulator_t accumulator) noexcept {
-        u32_t const words_a[4] = {a.x, a.y, a.z, a.w};
-        u32_t const words_b[4] = {b.x, b.y, b.z, b.w};
-#pragma unroll
-        for (u32_t word = 0; word != 4; ++word) {
-            uint2 const unpacked_a = unpack(words_a[word]), unpacked_b = unpack(words_b[word]);
-            accumulator = __dp4a(unpacked_a.x, unpacked_b.x, accumulator);
-            accumulator = __dp4a(unpacked_a.y, unpacked_b.y, accumulator);
-        }
-        return accumulator;
+    static __device__ __forceinline__ uint2 accumulate_norms(fragment_t a, uint2 moments) noexcept {
+        return dense_cuda_moments_u4x32_ampere(a, moments);
     }
-    static __device__ __forceinline__ dot_t partial_to_dot(accumulator_t accumulator) noexcept { return accumulator; }
-
-    static __device__ __forceinline__ norms_accumulator_t zero_norms_accumulator() noexcept { return {0, 0}; }
-    static __device__ __forceinline__ norms_accumulator_t accumulate_norms(fragment_t a,
-                                                                           norms_accumulator_t accumulator) noexcept {
-        u32_t const words[4] = {a.x, a.y, a.z, a.w};
-#pragma unroll
-        for (u32_t word = 0; word != 4; ++word) {
-            uint2 const unpacked = unpack(words[word]);
-            accumulator.x = __dp4a(unpacked.x, 0x01010101u, accumulator.x);
-            accumulator.x = __dp4a(unpacked.y, 0x01010101u, accumulator.x);
-            accumulator.y = __dp4a(unpacked.x, unpacked.x, accumulator.y);
-            accumulator.y = __dp4a(unpacked.y, unpacked.y, accumulator.y);
-        }
-        return accumulator;
+    static __device__ __forceinline__ norms_t partials_to_norms(uint2 moments) noexcept {
+        return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ norms_t partials_to_norms(norms_accumulator_t accumulator) noexcept {
-        return {accumulator.x, accumulator.y};
-    }
-    static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
-        return {norms.sumsq ? rsqrtf(static_cast<f32_t>(norms.sumsq)) : 0.0f, norms.sumsq};
-    }
-
-    /** The inner base IS the dot-kernel kit, like the CPU's: similarity flips into
-     *  a distance as @b 1-dot, monotone decreasing and negative-safe. */
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
-        return 1.0f - static_cast<f32_t>(dot);
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
+        return dense_cuda_distance<kernel_>(dot, query, target);
     }
     static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return ranked;
+        return dense_cuda_convert_to_distance<kernel_>(ranked);
     }
 };
 
-struct u4x2_ampere_angular_kit_t : u4x2_ampere_inner_kit_t {
-    static __device__ __forceinline__ dense_distance_t distance(u32_t dot, query_state_t query_state,
-                                                                norms_t norms) noexcept {
-        return 1.0f - static_cast<f32_t>(dot) * query_state.rsqrt *
-                          (norms.sumsq ? rsqrtf(static_cast<f32_t>(norms.sumsq)) : 0.0f);
-    }
-};
-struct u4x2_ampere_sqeuclidean_kit_t : u4x2_ampere_inner_kit_t {
-    static __device__ __forceinline__ dense_distance_t distance(u32_t dot, query_state_t query_state,
-                                                                norms_t norms) noexcept {
-        return static_cast<f32_t>(query_state.sumsq) + static_cast<f32_t>(norms.sumsq) - 2.0f * static_cast<f32_t>(dot);
-    }
-};
-struct u4x2_ampere_euclidean_kit_t : u4x2_ampere_sqeuclidean_kit_t {
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return sqrtf(ranked);
-    }
-};
-
-#pragma endregion
+#pragma endregion Packed Nibbles
 
 #pragma region Packed Bits
 
-/** The @c u1x8 base over 128-bit fragments: the "dot" is the intersection popcount
- *  via two 64-bit @c popc per fragment - the counter, not the logic, limits throughput,
- *  so XOR/AND fold in front of as few @c popc as possible. Unsigned records: popcounts
- *  are counts; the norms store each row's set-bit count, the currency of Jaccard's
- *  union, mirrored into both fields. */
-struct u1x8_ampere_inner_kit_t {
+/** The intersection popcount of a fragment pair via two 64-bit @c popc - the counter, not the logic,
+ *  limits throughput, so the AND folds in front of as few @c popc as possible. */
+__device__ __forceinline__ u32_t dense_cuda_intersect_u1x128_ampere(uint4 a, uint4 b) noexcept {
+    u64_t const low = (static_cast<u64_t>(a.y) << 32 | a.x) & (static_cast<u64_t>(b.y) << 32 | b.x);
+    u64_t const high = (static_cast<u64_t>(a.w) << 32 | a.z) & (static_cast<u64_t>(b.w) << 32 | b.z);
+    return static_cast<u32_t>(__popcll(low) + __popcll(high));
+}
+
+/** u1x8 kit - the sm_80 floor: the "dot" is the intersection popcount, and the norms store each row's
+ *  set-bit count, the currency of Jaccard's union, mirrored into both fields. */
+template <nk_kernel_kind_t kernel_>
+struct u1x8_ampere_kit {
+    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
     using scalar_t = nk::u1x8_t;
     using fragment_t = uint4;
-    using accumulator_t = u32_t;
     using dot_t = u32_t;
-    struct norms_t {
-        u32_t sum, sumsq;
-    };
+    using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = uint2;
-    struct query_state_t {
-        f32_t rsqrt;
-        u32_t sumsq;
-    };
 
-    inline static constexpr u32_t fragment_bytes_k = 16;
-    inline static constexpr u32_t max_gathers_in_flight_k = 8;
-    inline static constexpr bool has_norms_k = true;
-
-    static __device__ __forceinline__ u32_t intersect_count(fragment_t a, fragment_t b) noexcept {
-        u64_t const low = (static_cast<u64_t>(a.y) << 32 | a.x) & (static_cast<u64_t>(b.y) << 32 | b.x);
-        u64_t const high = (static_cast<u64_t>(a.w) << 32 | a.z) & (static_cast<u64_t>(b.w) << 32 | b.z);
-        return static_cast<u32_t>(__popcll(low) + __popcll(high));
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return sum + dense_cuda_intersect_u1x128_ampere(a, b);
+    }
+    static __device__ __forceinline__ uint2 accumulate_norms(fragment_t a, uint2 moments) noexcept {
+        moments.x += dense_cuda_intersect_u1x128_ampere(a, a);
+        return moments;
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(uint2 moments) noexcept {
+        return {moments.x, moments.x};
     }
 
-    static __device__ __forceinline__ accumulator_t zero_accumulator() noexcept { return 0; }
-    static __device__ __forceinline__ accumulator_t accumulate_dot(fragment_t a, fragment_t b,
-                                                                   accumulator_t accumulator) noexcept {
-        return accumulator + intersect_count(a, b);
-    }
-    static __device__ __forceinline__ dot_t partial_to_dot(accumulator_t accumulator) noexcept { return accumulator; }
-
-    static __device__ __forceinline__ norms_accumulator_t zero_norms_accumulator() noexcept { return {0, 0}; }
-    static __device__ __forceinline__ norms_accumulator_t accumulate_norms(fragment_t a,
-                                                                           norms_accumulator_t accumulator) noexcept {
-        accumulator.x += intersect_count(a, a);
-        return accumulator;
-    }
-    static __device__ __forceinline__ norms_t partials_to_norms(norms_accumulator_t accumulator) noexcept {
-        return {accumulator.x, accumulator.x};
-    }
-    static __device__ __forceinline__ query_state_t make_query_state(norms_t norms) noexcept {
-        return {0.0f, norms.sum};
-    }
-
-    /** The inner base IS the dot-kernel kit: for bit vectors the dot is the
-     *  intersection popcount, flipped into a distance as @b 1-dot. */
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, query_state_t, norms_t) noexcept {
-        return 1.0f - static_cast<f32_t>(dot);
+    /** Hamming is |a| + |b| - 2·intersection, never negative since the intersection is bounded by either
+     *  count; Jaccard is 1 - intersection / union, and two empty sets are identical, distance zero. */
+    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
+        if constexpr (kernel_ == nk_kernel_dot_k) return 1.0f - static_cast<f32_t>(dot);
+        else if constexpr (kernel_ == nk_kernel_hamming_k) return static_cast<f32_t>(query.sum + target.sum - 2 * dot);
+        else {
+            static_assert(kernel_ == nk_kernel_jaccard_k, "Bit vectors score by dot, hamming or jaccard");
+            u32_t const unions = query.sum + target.sum - dot;
+            return unions ? 1.0f - static_cast<f32_t>(dot) / static_cast<f32_t>(unions) : 0.0f;
+        }
     }
     static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
         return ranked;
     }
 };
 
-/** Hamming distance: differing bits = |a| + |b| - 2·intersection - never negative,
- *  since the intersection is bounded by either operand's count - so the stored
- *  popcount norms turn the intersection dot into the XOR count without a second pass. */
-struct u1x8_ampere_hamming_kit_t : u1x8_ampere_inner_kit_t {
-    static __device__ __forceinline__ dense_distance_t distance(u32_t dot, query_state_t query_state,
-                                                                norms_t norms) noexcept {
-        return static_cast<f32_t>(query_state.sumsq + norms.sum - 2 * dot);
-    }
+#pragma endregion Packed Bits
+
+#pragma region Chains
+
+/** The dispatch entry every index instantiation resolves through - the CPU chains' twin: one row per
+ *  generation, newest first, each gated on its tier being compiled in and admitted by the caller's
+ *  @p ceiling_, over the Ampere floor. Two ceilings in one binary run different rows on one device. */
+template <nk_dtype_t vector_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
+struct dense_cuda_kit_chain;
+
+template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
+struct dense_cuda_kit_chain<nk_f16_k, kernel_, ceiling_> {
+    using kit_t = typename first_available_kit<                                                                       //
+        f16_ampere_kit<kernel_>,                                                                                      //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && ceiling_ >= cuda_arch_blackwellrtx_k, f16_blackwell_kit<kernel_>>, //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && ceiling_ >= cuda_arch_blackwell_k, f16_blackwell_kit<kernel_>>        //
+        >::type;
+    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
 
-/** Jaccard distance: 1 - intersection / union, union = |a| + |b| - intersection;
- *  two empty sets are identical, distance zero. */
-struct u1x8_ampere_jaccard_kit_t : u1x8_ampere_inner_kit_t {
-    static __device__ __forceinline__ dense_distance_t distance(u32_t dot, query_state_t query_state,
-                                                                norms_t norms) noexcept {
-        u32_t const unions = query_state.sumsq + norms.sum - dot;
-        return unions ? 1.0f - static_cast<f32_t>(dot) / static_cast<f32_t>(unions) : 0.0f;
-    }
+template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
+struct dense_cuda_kit_chain<nk_bf16_k, kernel_, ceiling_> {
+    using kit_t = typename first_available_kit< //
+        bf16_ampere_kit<kernel_>,               //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && ceiling_ >= cuda_arch_blackwellrtx_k,
+                    bf16_blackwell_kit<kernel_>>,                                                               //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && ceiling_ >= cuda_arch_blackwell_k, bf16_blackwell_kit<kernel_>> //
+        >::type;
+    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
 
-#pragma endregion
-
-/** One selectable generation row of a kit chain - the CPU @c chain_layer's twin.
- *  A row is admissible when its architecture requirement clears both gates: the
- *  caller's ceiling - the ask - and this compilation pass's target - the can. */
-template <cuda_arch_t required_arch_, cuda_arch_t arch_ceiling_, typename kit_>
-struct dense_cuda_arch_layer {
-    static constexpr bool available_k = required_arch_ <= arch_ceiling_ && required_arch_ <= dense_cuda_target_arch_k;
-    static constexpr cuda_arch_t required_arch_k = required_arch_;
-    using kit_t = kit_;
+template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
+struct dense_cuda_kit_chain<nk_i8_k, kernel_, ceiling_> {
+    using kit_t = i8_ampere_kit<kernel_>;
+    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
 
-/** The CPU's @c first_available_kit, verbatim in spirit: the first admissible layer
- *  wins, the floor backs them all, and @c picked_arch_k names the winner for reports. */
-template <typename fallback_, typename... layers_>
-struct dense_cuda_first_available_kit {
-    using type = fallback_;
-    static constexpr cuda_arch_t picked_arch_k = cuda_arch_ampere_k;
-};
-template <typename fallback_, typename head_, typename... tail_>
-struct dense_cuda_first_available_kit<fallback_, head_, tail_...> {
-    using next_t = dense_cuda_first_available_kit<fallback_, tail_...>;
-    using type = std::conditional_t<head_::available_k, typename head_::kit_t, typename next_t::type>;
-    static constexpr cuda_arch_t picked_arch_k = head_::available_k ? head_::required_arch_k : next_t::picked_arch_k;
+template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
+struct dense_cuda_kit_chain<nk_u8_k, kernel_, ceiling_> {
+    using kit_t = u8_ampere_kit<kernel_>;
+    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
 
-/** Maps a (dtype, metric) pair onto its Ampere-floor device kit; unsupported pairs
- *  fail the index instantiation with a one-line constraint error. Rows sort like the
- *  kit families: widest types first, packed bits last. */
-template <nk_dtype_t vector_dtype_, nk_kernel_kind_t kernel_kind_>
-struct dense_cuda_kit_for;
-
-/**
- *  @brief The dispatch entry every index instantiation resolves through: (dtype, kernel,
- *      ceiling) to one kit, side-by-side comparable like the CPU chains - two ceilings in
- *      one binary run different rows on the same device.
- *
- *  The generic body serves the floor from @c dense_cuda_kit_for; a cell earns its own
- *  specialization enumerating @c dense_cuda_arch_layer rows the moment a newer generation lands, e.g.:
- *
- *  @code{.cpp}
- *  template <cuda_arch_t arch_ceiling_>
- *  struct dense_cuda_kit_chain<nk_bf16_k, nk_kernel_angular_k, arch_ceiling_> {
- *      using selected_t = dense_cuda_first_available_kit<
- *          bf16_ampere_angular_kit_t,
- *          dense_cuda_arch_layer<cuda_arch_blackwell_k, arch_ceiling_, bf16_blackwell_angular_kit_t>>;
- *      using kit_t = typename selected_t::type;
- *      static constexpr cuda_arch_t picked_arch_k = selected_t::picked_arch_k;
- *  };
- *  @endcode
- */
-template <nk_dtype_t vector_dtype_, nk_kernel_kind_t kernel_kind_, cuda_arch_t arch_ceiling_ = cuda_arch_blackwell_k>
-struct dense_cuda_kit_chain {
-    using kit_t = typename dense_cuda_kit_for<vector_dtype_, kernel_kind_>::kit_t;
-    static constexpr cuda_arch_t picked_arch_k = cuda_arch_ampere_k;
+template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
+struct dense_cuda_kit_chain<nk_e5m2_k, kernel_, ceiling_> {
+    using kit_t = typename first_available_kit< //
+        e5m2_ampere_kit<kernel_>,               //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && ceiling_ >= cuda_arch_blackwellrtx_k,
+                    e5m2_blackwell_kit<kernel_>>,                                                                //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && ceiling_ >= cuda_arch_blackwell_k, e5m2_blackwell_kit<kernel_>>, //
+        chain_layer<NUMKONG_TARGET_ADA && ceiling_ >= cuda_arch_ada_k,
+                    e5m2_ada_kit<kernel_>> //
+        >::type;
+    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
 
-template <>
-struct dense_cuda_kit_for<nk_f32_k, nk_kernel_dot_k> {
-    using kit_t = f32_ampere_inner_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_f32_k, nk_kernel_angular_k> {
-    using kit_t = f32_ampere_angular_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_f32_k, nk_kernel_sqeuclidean_k> {
-    using kit_t = f32_ampere_sqeuclidean_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_f32_k, nk_kernel_euclidean_k> {
-    using kit_t = f32_ampere_euclidean_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_f16_k, nk_kernel_dot_k> {
-    using kit_t = f16_ampere_inner_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_f16_k, nk_kernel_angular_k> {
-    using kit_t = f16_ampere_angular_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_f16_k, nk_kernel_sqeuclidean_k> {
-    using kit_t = f16_ampere_sqeuclidean_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_f16_k, nk_kernel_euclidean_k> {
-    using kit_t = f16_ampere_euclidean_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_bf16_k, nk_kernel_dot_k> {
-    using kit_t = bf16_ampere_inner_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_bf16_k, nk_kernel_angular_k> {
-    using kit_t = bf16_ampere_angular_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_bf16_k, nk_kernel_sqeuclidean_k> {
-    using kit_t = bf16_ampere_sqeuclidean_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_bf16_k, nk_kernel_euclidean_k> {
-    using kit_t = bf16_ampere_euclidean_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_i8_k, nk_kernel_dot_k> {
-    using kit_t = i8_ampere_inner_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_i8_k, nk_kernel_angular_k> {
-    using kit_t = i8_ampere_angular_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_i8_k, nk_kernel_sqeuclidean_k> {
-    using kit_t = i8_ampere_sqeuclidean_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_i8_k, nk_kernel_euclidean_k> {
-    using kit_t = i8_ampere_euclidean_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_u8_k, nk_kernel_dot_k> {
-    using kit_t = u8_ampere_inner_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_u8_k, nk_kernel_angular_k> {
-    using kit_t = u8_ampere_angular_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_u8_k, nk_kernel_sqeuclidean_k> {
-    using kit_t = u8_ampere_sqeuclidean_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_u8_k, nk_kernel_euclidean_k> {
-    using kit_t = u8_ampere_euclidean_kit_t;
+template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
+struct dense_cuda_kit_chain<nk_e4m3_k, kernel_, ceiling_> {
+    using kit_t = typename first_available_kit< //
+        e4m3_ampere_kit<kernel_>,               //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && ceiling_ >= cuda_arch_blackwellrtx_k,
+                    e4m3_blackwell_kit<kernel_>>,                                                                //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && ceiling_ >= cuda_arch_blackwell_k, e4m3_blackwell_kit<kernel_>>, //
+        chain_layer<NUMKONG_TARGET_ADA && ceiling_ >= cuda_arch_ada_k,
+                    e4m3_ada_kit<kernel_>> //
+        >::type;
+    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
 
-/** The fp8 cells chain like the CPU's: a software floor every pass compiles, the Ada conversion
- *  from sm_89, and the Blackwell half-precision multiply from sm_100. */
-template <cuda_arch_t arch_ceiling_>
-struct dense_cuda_kit_chain<nk_e5m2_k, nk_kernel_dot_k, arch_ceiling_> {
-    using selected_t = dense_cuda_first_available_kit<
-        e5m2_ampere_inner_kit_t,
-        dense_cuda_arch_layer<cuda_arch_blackwell_k, arch_ceiling_, e5m2_blackwell_inner_kit_t>,
-        dense_cuda_arch_layer<cuda_arch_ada_k, arch_ceiling_, e5m2_ada_inner_kit_t>>;
-    using kit_t = typename selected_t::type;
-    static constexpr cuda_arch_t picked_arch_k = selected_t::picked_arch_k;
+template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
+struct dense_cuda_kit_chain<nk_e3m2_k, kernel_, ceiling_> {
+    using kit_t = typename first_available_kit< //
+        e3m2_ampere_kit<kernel_>,               //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && ceiling_ >= cuda_arch_blackwellrtx_k,
+                    e3m2_blackwell_kit<kernel_>>,                                                               //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && ceiling_ >= cuda_arch_blackwell_k, e3m2_blackwell_kit<kernel_>> //
+        >::type;
+    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
-template <cuda_arch_t arch_ceiling_>
-struct dense_cuda_kit_chain<nk_e5m2_k, nk_kernel_angular_k, arch_ceiling_> {
-    using selected_t = dense_cuda_first_available_kit<
-        e5m2_ampere_angular_kit_t,
-        dense_cuda_arch_layer<cuda_arch_blackwell_k, arch_ceiling_, e5m2_blackwell_angular_kit_t>,
-        dense_cuda_arch_layer<cuda_arch_ada_k, arch_ceiling_, e5m2_ada_angular_kit_t>>;
-    using kit_t = typename selected_t::type;
-    static constexpr cuda_arch_t picked_arch_k = selected_t::picked_arch_k;
+
+template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
+struct dense_cuda_kit_chain<nk_e2m3_k, kernel_, ceiling_> {
+    using kit_t = typename first_available_kit< //
+        e2m3_ampere_kit<kernel_>,               //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && ceiling_ >= cuda_arch_blackwellrtx_k,
+                    e2m3_blackwell_kit<kernel_>>,                                                               //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && ceiling_ >= cuda_arch_blackwell_k, e2m3_blackwell_kit<kernel_>> //
+        >::type;
+    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
-template <cuda_arch_t arch_ceiling_>
-struct dense_cuda_kit_chain<nk_e5m2_k, nk_kernel_euclidean_k, arch_ceiling_> {
-    using selected_t = dense_cuda_first_available_kit<
-        e5m2_ampere_euclidean_kit_t,
-        dense_cuda_arch_layer<cuda_arch_blackwell_k, arch_ceiling_, e5m2_blackwell_euclidean_kit_t>,
-        dense_cuda_arch_layer<cuda_arch_ada_k, arch_ceiling_, e5m2_ada_euclidean_kit_t>>;
-    using kit_t = typename selected_t::type;
-    static constexpr cuda_arch_t picked_arch_k = selected_t::picked_arch_k;
+
+template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
+struct dense_cuda_kit_chain<nk_i4_k, kernel_, ceiling_> {
+    using kit_t = i4x2_ampere_kit<kernel_>;
+    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
-template <cuda_arch_t arch_ceiling_>
-struct dense_cuda_kit_chain<nk_e4m3_k, nk_kernel_dot_k, arch_ceiling_> {
-    using selected_t = dense_cuda_first_available_kit<
-        e4m3_ampere_inner_kit_t,
-        dense_cuda_arch_layer<cuda_arch_blackwell_k, arch_ceiling_, e4m3_blackwell_inner_kit_t>,
-        dense_cuda_arch_layer<cuda_arch_ada_k, arch_ceiling_, e4m3_ada_inner_kit_t>>;
-    using kit_t = typename selected_t::type;
-    static constexpr cuda_arch_t picked_arch_k = selected_t::picked_arch_k;
+
+template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
+struct dense_cuda_kit_chain<nk_u4_k, kernel_, ceiling_> {
+    using kit_t = u4x2_ampere_kit<kernel_>;
+    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
-template <cuda_arch_t arch_ceiling_>
-struct dense_cuda_kit_chain<nk_e4m3_k, nk_kernel_angular_k, arch_ceiling_> {
-    using selected_t = dense_cuda_first_available_kit<
-        e4m3_ampere_angular_kit_t,
-        dense_cuda_arch_layer<cuda_arch_blackwell_k, arch_ceiling_, e4m3_blackwell_angular_kit_t>,
-        dense_cuda_arch_layer<cuda_arch_ada_k, arch_ceiling_, e4m3_ada_angular_kit_t>>;
-    using kit_t = typename selected_t::type;
-    static constexpr cuda_arch_t picked_arch_k = selected_t::picked_arch_k;
+
+template <nk_kernel_kind_t kernel_, cuda_arch_t ceiling_>
+struct dense_cuda_kit_chain<nk_u1_k, kernel_, ceiling_> {
+    using kit_t = u1x8_ampere_kit<kernel_>;
+    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
 };
-template <cuda_arch_t arch_ceiling_>
-struct dense_cuda_kit_chain<nk_e4m3_k, nk_kernel_euclidean_k, arch_ceiling_> {
-    using selected_t = dense_cuda_first_available_kit<
-        e4m3_ampere_euclidean_kit_t,
-        dense_cuda_arch_layer<cuda_arch_blackwell_k, arch_ceiling_, e4m3_blackwell_euclidean_kit_t>,
-        dense_cuda_arch_layer<cuda_arch_ada_k, arch_ceiling_, e4m3_ada_euclidean_kit_t>>;
-    using kit_t = typename selected_t::type;
-    static constexpr cuda_arch_t picked_arch_k = selected_t::picked_arch_k;
-};
-template <>
-struct dense_cuda_kit_for<nk_i4_k, nk_kernel_dot_k> {
-    using kit_t = i4x2_ampere_inner_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_i4_k, nk_kernel_angular_k> {
-    using kit_t = i4x2_ampere_angular_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_i4_k, nk_kernel_euclidean_k> {
-    using kit_t = i4x2_ampere_euclidean_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_u4_k, nk_kernel_dot_k> {
-    using kit_t = u4x2_ampere_inner_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_u4_k, nk_kernel_angular_k> {
-    using kit_t = u4x2_ampere_angular_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_u4_k, nk_kernel_euclidean_k> {
-    using kit_t = u4x2_ampere_euclidean_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_u1_k, nk_kernel_dot_k> {
-    using kit_t = u1x8_ampere_inner_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_u1_k, nk_kernel_hamming_k> {
-    using kit_t = u1x8_ampere_hamming_kit_t;
-};
-template <>
-struct dense_cuda_kit_for<nk_u1_k, nk_kernel_jaccard_k> {
-    using kit_t = u1x8_ampere_jaccard_kit_t;
-};
+
+#pragma endregion Chains
 
 } // namespace usearch
 } // namespace unum

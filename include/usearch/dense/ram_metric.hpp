@@ -129,15 +129,6 @@
 namespace unum {
 namespace usearch {
 
-/** Per-vector header carrying L2 norm and row-sum (used by DPBUSD compensation).
- *  Both fields share width @c dot_result_type_ - the lane width every downstream finalize
- *  and through-from-dot helper consumes. */
-template <typename dot_result_type_>
-struct vector_norms {
-    dot_result_type_ sum;
-    dot_result_type_ sumsq;
-};
-
 /** Zero-size stand-in for @c vector_norms wherever a kernel's finalize never reads
  *  them - dot is the pure product. Storage of it vanishes, gathers copy nothing, and
  *  every norms-shaped call site stays uniform. */
@@ -3304,36 +3295,6 @@ struct u1x8_powervsx_jaccard_kit_t : public u1x8_powervsx_inner_kit_t {
     static constexpr auto convert_to_distances = nk_jaccard_f32x4_from_dot_powervsx_;
 };
 #endif // NUMKONG_TARGET_POWERVSX
-
-/**
- *  @brief One row in a capability cascade - pairs an availability flag with a candidate kit.
- *
- *  The flag is the @c &&-of @c NUMKONG_TARGET_* (always 0/1) and the runtime-caps bit test, so
- *  rows for ISAs that aren't compiled-in fold to @c false at preprocessing time and the
- *  unselected kit's body never has to exist on the current target.
- */
-template <bool available_, typename kit_>
-struct chain_layer {
-    static constexpr bool available = available_;
-    using kit_t = kit_;
-};
-
-/**
- *  @brief Picks the first @c chain_layer whose @c available flag is true, else @c fallback_.
- *
- *  Lets capability cascades be written linearly with one row per tier and a single closing
- *  @c >::type - no nested @c std::conditional_t pile.
- */
-template <typename fallback_, typename... layers_>
-struct first_available_kit {
-    using type = fallback_;
-};
-
-template <typename fallback_, typename head_, typename... tail_>
-struct first_available_kit<fallback_, head_, tail_...> {
-    using type = std::conditional_t<head_::available, typename head_::kit_t,
-                                    typename first_available_kit<fallback_, tail_...>::type>;
-};
 
 /** The visited set's kit for one capability ceiling: the Skylake group scan where the
  *  class carries AVX-512, the serial walk otherwise. */

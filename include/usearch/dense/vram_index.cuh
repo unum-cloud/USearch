@@ -45,6 +45,10 @@ inline constexpr u32_t dense_cuda_warps_per_block_k = 4;
  *  bounds, so the register allocator sizes to it; small-pool search kernels fit four. */
 inline constexpr u32_t dense_cuda_resident_blocks_per_multiprocessor_k = 3;
 
+/** Ceiling on concurrently in-flight candidate-vector gathers per lane - the memory-parallelism window
+ *  over the @b candidate axis, never the dimension axis. */
+inline constexpr u32_t dense_cuda_max_gathers_in_flight_k = 8;
+
 /** Rows of the per-warp shared candidate cache; also bounds the diversity-selection pool prefix
  *  and the staging arrays. */
 inline constexpr u32_t dense_cuda_cache_rows_k = 64;
@@ -274,12 +278,12 @@ struct dense_cuda_warp_context {
 template <dense_cuda_kit kit_, u32_t resident_blocks_ = dense_cuda_resident_blocks_per_multiprocessor_k>
 __device__ __forceinline__ dense_cuda_scored_node_t dense_cuda_score_batch( //
     dense_cuda_planes_view<kit_> const& planes, typename kit_::fragment_t const* query_span,
-    typename kit_::query_state_t query_state, u32_t const (&gathered_ids)[dense_cuda_cache_rows_k],
+    typename kit_::norms_t query_state, u32_t const (&gathered_ids)[dense_cuda_cache_rows_k],
     dense_cuda_scored_node_t (&gathered_scored)[32], u32_t gathered_count, int lane, u32_t first_row = 0) noexcept {
 
     using norms_t = typename kit_::norms_t;
     // 128 concurrent random gathers saturate the HBM path, so the window is 128 over the resident warps.
-    constexpr u32_t gathers_in_flight_k = min_of(kit_::max_gathers_in_flight_k,
+    constexpr u32_t gathers_in_flight_k = min_of(dense_cuda_max_gathers_in_flight_k,
                                                  128u / (dense_cuda_warps_per_block_k * resident_blocks_));
     u32_t const lanes_log2 = 31 - __clz(planes.lanes_per_row);
     u32_t const rows_per_gather = 32u >> lanes_log2;
@@ -294,12 +298,12 @@ __device__ __forceinline__ dense_cuda_scored_node_t dense_cuda_score_batch( //
 #pragma unroll
         for (u32_t slot = 0; slot != gathers_in_flight_k; ++slot) {
             u32_t const row = (group_base + slot) * rows_per_gather + subwarp;
-            if (kit_::has_norms_k && leader && group_base + slot < planes.lanes_per_row && row < gathered_count)
+            if (leader && group_base + slot < planes.lanes_per_row && row < gathered_count)
                 batch_norms[slot] = planes.norm_for(gathered_ids[first_row + row]);
         }
-        typename kit_::accumulator_t accumulators[gathers_in_flight_k];
+        typename kit_::dot_t accumulators[gathers_in_flight_k];
 #pragma unroll
-        for (u32_t slot = 0; slot != gathers_in_flight_k; ++slot) accumulators[slot] = kit_::zero_accumulator();
+        for (u32_t slot = 0; slot != gathers_in_flight_k; ++slot) accumulators[slot] = {};
 #pragma unroll 1
         for (u32_t step = 0; step != planes.steps_per_row; ++step) {
             u32_t const fragment_index = lane_in_row + (step << lanes_log2);
@@ -322,8 +326,7 @@ __device__ __forceinline__ dense_cuda_scored_node_t dense_cuda_score_batch( //
         }
 #pragma unroll
         for (u32_t slot = 0; slot != gathers_in_flight_k; ++slot) {
-            typename kit_::dot_t const dot = dense_cuda_reduce(kit_::partial_to_dot(accumulators[slot]),
-                                                               planes.lanes_per_row);
+            typename kit_::dot_t const dot = dense_cuda_reduce(accumulators[slot], planes.lanes_per_row);
             u32_t const row = (group_base + slot) * rows_per_gather + subwarp;
             if (leader && group_base + slot < planes.lanes_per_row && row < gathered_count) {
                 dense_distance_t const distance = kit_::distance(dot, query_state, batch_norms[slot]);
@@ -341,7 +344,7 @@ template <dense_cuda_kit kit_, u32_t resident_blocks_ = dense_cuda_resident_bloc
           typename frontier_>
 __device__ __forceinline__ void dense_cuda_score_into_frontier( //
     dense_cuda_planes_view<kit_> const& planes, typename kit_::fragment_t const* query_span,
-    typename kit_::query_state_t query_state, u32_t const (&gathered_ids)[dense_cuda_cache_rows_k],
+    typename kit_::norms_t query_state, u32_t const (&gathered_ids)[dense_cuda_cache_rows_k],
     dense_cuda_scored_node_t (&gathered_scored)[32], u32_t gathered_count, dense_cuda_warp_context<frontier_>& context,
     int lane) noexcept {
     context.telemetry.scored += gathered_count;
@@ -393,7 +396,7 @@ template <dense_cuda_kit kit_, u32_t resident_blocks_ = dense_cuda_resident_bloc
           typename frontier_>
 __device__ __forceinline__ void dense_cuda_search_ahead( //
     dense_cuda_planes_view<kit_> const& planes, typename kit_::fragment_t const* query_span,
-    typename kit_::query_state_t query_state, dense_node_id_t sampling_bound, dense_cuda_visited_set_t& visited,
+    typename kit_::norms_t query_state, dense_node_id_t sampling_bound, dense_cuda_visited_set_t& visited,
     u32_t (&gathered_ids)[dense_cuda_cache_rows_k], dense_cuda_scored_node_t (&gathered_scored)[32],
     dense_cuda_warp_context<frontier_>& context, int lane) noexcept {
 
@@ -485,7 +488,7 @@ template <dense_cuda_kit kit_, u32_t resident_blocks_ = dense_cuda_resident_bloc
           typename frontier_>
 __device__ __forceinline__ void dense_cuda_search_around( //
     dense_cuda_planes_view<kit_> const& planes, typename kit_::fragment_t const* query_span,
-    typename kit_::query_state_t query_state, dense_node_id_t sampling_bound, dense_cuda_visited_set_t& visited,
+    typename kit_::norms_t query_state, dense_node_id_t sampling_bound, dense_cuda_visited_set_t& visited,
     u32_t (&gathered_ids)[dense_cuda_cache_rows_k], dense_cuda_scored_node_t (&gathered_scored)[32],
     dense_cuda_warp_context<frontier_>& context, int lane) noexcept {
     context.frontier.reset(lane);
@@ -600,8 +603,7 @@ __device__ __forceinline__ u32_t dense_cuda_select_diverse( //
     }
     __pipeline_commit();
     __pipeline_wait_prior(0);
-    if (kit_::has_norms_k)
-        for (u32_t row = lane; row < candidates_count; row += 32) cache_norms[row] = planes.norm_for(gathered_ids[row]);
+    for (u32_t row = lane; row < candidates_count; row += 32) cache_norms[row] = planes.norm_for(gathered_ids[row]);
     __syncwarp();
 
     u32_t selected_count = 0;
@@ -613,12 +615,11 @@ __device__ __forceinline__ u32_t dense_cuda_select_diverse( //
             bool lane_diverse = true;
             if (base + lane < selected_count) {
                 u32_t const kept_position = selected_ids[base + lane];
-                typename kit_::accumulator_t accumulator = kit_::zero_accumulator();
+                typename kit_::dot_t accumulator = {};
                 for (u32_t fragment = 0; fragment != planes.row_fragments; ++fragment)
                     accumulator = kit_::accumulate_dot(cache.at(candidate_index, fragment),
                                                        cache.at(kept_position, fragment), accumulator);
-                f32_t const between = kit_::distance(kit_::partial_to_dot(accumulator),
-                                                     kit_::make_query_state(cache_norms[candidate_index]),
+                f32_t const between = kit_::distance(accumulator, cache_norms[candidate_index],
                                                      cache_norms[kept_position]);
                 lane_diverse = between >= to_query;
                 ++context.telemetry.scored;
@@ -704,14 +705,14 @@ __device__ __forceinline__ void dense_cuda_back_link_neighbors( //
         for (u32_t word = lane; word < planes.row_fragments; word += 32)
             cache.at(target_row_k, word) = planes.vector_for(target, word);
         __syncwarp();
-        typename kit_::query_state_t const target_state = kit_::make_query_state(planes.norm_for(target));
+        typename kit_::norms_t const target_state = planes.norm_for(target);
 
         // The newcomer's distance to the target, from its freshly-owned vector row.
-        typename kit_::accumulator_t accumulator = kit_::zero_accumulator();
+        typename kit_::dot_t accumulator = {};
         for (u32_t word = lane; word < planes.row_fragments; word += 32)
             accumulator = kit_::accumulate_dot(planes.vector_for(new_node_id, word), cache.at(target_row_k, word),
                                                accumulator);
-        typename kit_::dot_t const self_dot = dense_cuda_reduce(kit_::partial_to_dot(accumulator), 32u);
+        typename kit_::dot_t const self_dot = dense_cuda_reduce(accumulator, 32u);
         f32_t const newcomer_distance = kit_::distance(__shfl_sync(0xFFFFFFFFu, self_dot, 0), target_state, new_norms);
         telemetry.scored += connectivity + 1;
 
@@ -767,12 +768,11 @@ __device__ __forceinline__ void dense_cuda_back_link_neighbors( //
                 bool lane_diverse = true;
                 if (base + lane < refined_count) {
                     u32_t const kept_position = selection.kept_positions[base + lane];
-                    typename kit_::accumulator_t pair_accumulator = kit_::zero_accumulator();
+                    typename kit_::dot_t pair_accumulator = {};
                     for (u32_t fragment = 0; fragment != planes.row_fragments; ++fragment)
                         pair_accumulator = kit_::accumulate_dot(cache.at(candidate_position, fragment),
                                                                 cache.at(kept_position, fragment), pair_accumulator);
-                    f32_t const between = kit_::distance(kit_::partial_to_dot(pair_accumulator),
-                                                         kit_::make_query_state(cache_norms[candidate_position]),
+                    f32_t const between = kit_::distance(pair_accumulator, cache_norms[candidate_position],
                                                          cache_norms[kept_position]);
                     lane_diverse = between >= candidate_distance;
                     ++telemetry.scored;
@@ -966,7 +966,7 @@ __device__ __forceinline__ void dense_cuda_insert_one( //
     typename kit_::fragment_t const* staging_row =
         view.staging + static_cast<std::size_t>(new_node_id - view.first_id) * planes.row_fragments;
     typename kit_::fragment_t* owned_row = planes.vector_span_for(new_node_id);
-    typename kit_::norms_accumulator_t norms_accumulator = kit_::zero_norms_accumulator();
+    typename kit_::norms_accumulator_t norms_accumulator = {};
     for (u32_t fragment = lane; fragment < planes.row_fragments; fragment += 32) {
         typename kit_::fragment_t const value = staging_row[fragment];
         owned_row[fragment] = value;
@@ -977,7 +977,7 @@ __device__ __forceinline__ void dense_cuda_insert_one( //
     norms_accumulator = dense_cuda_broadcast_norms(norms_accumulator);
     typename kit_::norms_t const new_norms = kit_::partials_to_norms(norms_accumulator);
     if (lane == 0) planes.norm_ref_for(new_node_id) = new_norms;
-    typename kit_::query_state_t const query_state = kit_::make_query_state(new_norms);
+    typename kit_::norms_t const query_state = new_norms;
     __syncwarp();
 
     // Walk the watermark - a virgin index publishes an empty node instead.
@@ -1123,7 +1123,7 @@ __device__ __forceinline__ void dense_cuda_refine_one( //
     // The query is the node's own stored vector; its norms are already derived state.
     for (u32_t fragment = lane; fragment < planes.row_fragments; fragment += 32)
         query_span[fragment] = planes.vector_for(node_id, fragment);
-    typename kit_::query_state_t const query_state = kit_::make_query_state(planes.norm_for(node_id));
+    typename kit_::norms_t const query_state = planes.norm_for(node_id);
     __syncwarp();
 
     // The node itself never joins its own candidate pool - visited before anything stages.
@@ -1244,7 +1244,7 @@ __device__ __forceinline__ void dense_cuda_merge_links_one( //
     constexpr u32_t query_row_k = dense_cuda_cache_rows_k - 1;
     for (u32_t fragment = lane; fragment < planes.row_fragments; fragment += 32)
         cache.at(query_row_k, fragment) = planes.vector_for(node_id, fragment);
-    typename kit_::query_state_t const query_state = kit_::make_query_state(planes.norm_for(node_id));
+    typename kit_::norms_t const query_state = planes.norm_for(node_id);
     __syncwarp();
 
     // Stage the forward picks; the shadow neighbors are this pass's own output, already distinct.
@@ -1320,12 +1320,11 @@ __device__ __forceinline__ void dense_cuda_merge_links_one( //
             bool lane_diverse = true;
             if (base + lane < refined_count) {
                 u32_t const kept_position = kept_positions[base + lane];
-                typename kit_::accumulator_t pair_accumulator = kit_::zero_accumulator();
+                typename kit_::dot_t pair_accumulator = {};
                 for (u32_t fragment = 0; fragment != planes.row_fragments; ++fragment)
                     pair_accumulator = kit_::accumulate_dot(cache.at(candidate_position, fragment),
                                                             cache.at(kept_position, fragment), pair_accumulator);
-                f32_t const between = kit_::distance(kit_::partial_to_dot(pair_accumulator),
-                                                     kit_::make_query_state(cache_norms[candidate_position]),
+                f32_t const between = kit_::distance(pair_accumulator, cache_norms[candidate_position],
                                                      cache_norms[kept_position]);
                 lane_diverse = between >= to_query;
                 ++telemetry.scored;
@@ -1418,7 +1417,7 @@ __device__ __forceinline__ void dense_cuda_search_one( //
 
     typename kit_::fragment_t const* query_row = view.queries +
                                                  static_cast<std::size_t>(query_index) * view.planes.row_fragments;
-    typename kit_::norms_accumulator_t norms_accumulator = kit_::zero_norms_accumulator();
+    typename kit_::norms_accumulator_t norms_accumulator = {};
     for (u32_t fragment = lane; fragment < view.planes.row_fragments; fragment += 32) {
         typename kit_::fragment_t const value = query_row[fragment];
         query_span[fragment] = value;
@@ -1427,7 +1426,7 @@ __device__ __forceinline__ void dense_cuda_search_one( //
     norms_accumulator = dense_cuda_reduce_norms(norms_accumulator);
     norms_accumulator = dense_cuda_broadcast_norms(norms_accumulator);
     typename kit_::norms_t const query_norms = kit_::partials_to_norms(norms_accumulator);
-    typename kit_::query_state_t const query_state = kit_::make_query_state(query_norms);
+    typename kit_::norms_t const query_state = query_norms;
     __syncwarp();
 
     dense_cuda_warp_context<frontier_> context;
@@ -1512,7 +1511,7 @@ __global__ void dense_cuda_derive_norms_kernel(dense_cuda_planes_view<kit_> plan
     int const lane = threadIdx.x % 32;
     std::size_t const warps = gridDim.x * static_cast<std::size_t>(blockDim.x) / 32;
     for (std::size_t row = first_row + warp_index; row < first_row + rows_count; row += warps) {
-        typename kit_::norms_accumulator_t accumulator = kit_::zero_norms_accumulator();
+        typename kit_::norms_accumulator_t accumulator = {};
         for (u32_t fragment = lane; fragment < planes.row_fragments; fragment += 32)
             accumulator = kit_::accumulate_norms(planes.vector_for(static_cast<dense_node_id_t>(row), fragment),
                                                  accumulator);
@@ -1773,7 +1772,7 @@ struct dense_cuda_traversal_context {
 template <                                                                      //
     nk_dtype_t vector_dtype_ = nk_i8_k,                                         //
     nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k,                        //
-    cuda_arch_t arch_ceiling_ = cuda_arch_blackwell_k,                          //
+    cuda_arch_t arch_ceiling_ = cuda_arch_ampere_k,                             //
     typename vectors_allocator_type_ = cuda_virtual_memory_allocator<byte_t>,   //
     typename neighbors_allocator_type_ = cuda_virtual_memory_allocator<byte_t>, //
     typename traversals_allocator_type_ = cuda_arena_allocator_t>               //
@@ -1816,7 +1815,7 @@ struct dense_vram_index {
 
     /** The generation row the kit chain selected under this instantiation's ceiling - the GPU twin
      *  of @c picked_quads_capability_k, surfaced in the bench reports. */
-    inline static constexpr cuda_arch_t picked_arch_k = kit_chain_t::picked_arch_k;
+    inline static constexpr cuda_arch_t picked_arch_k = kit_chain_t::picked_k;
     inline static constexpr bool has_tiles_k = false;
     inline static constexpr nk_capability_t picked_tiles_capability_k = nk_cap_serial_k;
 
@@ -1901,13 +1900,13 @@ struct dense_vram_index {
 
     /** Fragments per vector row, derived from the frozen geometry like every row measure. */
     u32_t row_fragments() const noexcept {
-        return divide_round_up<u32_t>(static_cast<u32_t>(packed_row_bytes()), kit_t::fragment_bytes_k);
+        return divide_round_up<u32_t>(static_cast<u32_t>(packed_row_bytes()), sizeof(typename kit_t::fragment_t));
     }
 
     /** The vector row's byte length, rounded up to whole fragments; the tail bytes stay zero so
      *  every dot-derived metric is unaffected. */
     std::size_t row_bytes() const noexcept {
-        return static_cast<std::size_t>(row_fragments()) * kit_t::fragment_bytes_k;
+        return static_cast<std::size_t>(row_fragments()) * sizeof(typename kit_t::fragment_t);
     }
 
     /** Lanes cooperating on one row: the smallest power of two covering its fragments, at most a

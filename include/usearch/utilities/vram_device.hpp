@@ -33,21 +33,37 @@
 namespace unum {
 namespace usearch {
 
-/** GPU generations on the @c __CUDA_ARCH__ scale - a plain enum, so tiers order
- *  against each other and against that macro directly. */
+/**
+ *  @brief GPU generations, one compile target each, named like NumKong's GPU tiers and numbered on the
+ *      @c __CUDA_ARCH__ scale, so tiers order against each other.
+ *
+ *  NVCC compiles three kinds of target, and none of them runs on a GPU older than it names. A plain one,
+ *  like @c 80 or @c 89, runs on its own compute capability and every later one of the same major - an 8.0
+ *  cubin runs on 8.6 and 8.9 - and the PTX it embeds is JIT-compiled for any newer GPU, which makes it
+ *  the only forward-compatible kind. An @c a target, like @c 90a, adds what only that exact part keeps,
+ *  like @c wgmma, so its cubin runs on 9.0 alone and its PTX nowhere else. An @c f target, from CUDA 12.9
+ *  and compute capability 10 on, adds what a whole family shares: @c 100f runs on 10.0 and 10.3, @c 120f
+ *  on 12.0 and 12.1, and neither on any other family. A GPU newer than the newest tier therefore runs the
+ *  Ampere unit's PTX until a tier of its own lands.
+ */
 enum cuda_arch_t : int {
 
-    /** The sm_80 floor: @c dp4a, packed-half & bf16x2 fma, @c cp.async. */
+    /** @c 80, the floor - A100, A10 & RTX 30: @c dp4a, packed-half & bf16x2 fma, @c cp.async. */
     cuda_arch_ampere_k = 800,
 
-    /** sm_89 adds the fp8 conversions - the e4m3/e5m2 kits' requirement. */
+    /** @c 89 - L4, L40S & RTX 40: the fp8 conversions and FP8 @c mma.sync. */
     cuda_arch_ada_k = 890,
 
-    /** sm_90 adds TMA, thread-block clusters, and distributed shared memory. */
+    /** @c 90a - H100 & H200: TMA, thread-block clusters, distributed shared memory, and @c wgmma. */
     cuda_arch_hopper_k = 900,
 
-    /** sm_100 adds Tensor Memory, fp6/fp4 conversions, and scalar @c fma.f32.f16. */
+    /** @c 100f - B200, B300 & GB300: mixed-precision @c fma.f32.f16 & @c fma.f32.bf16, 256-bit loads, TMA
+     *  @c gather4, the fp6 & fp4 conversions, and @c tcgen05. */
     cuda_arch_blackwell_k = 1000,
+
+    /** @c 120f - RTX 50, RTX PRO 6000 & DGX Spark: Blackwell's multiply-adds & conversions, without
+     *  @c tcgen05. */
+    cuda_arch_blackwellrtx_k = 1200,
 };
 
 /** One GPU's hardware specification - the facts runtime dispatch consults; hardware only,
