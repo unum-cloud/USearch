@@ -298,10 +298,10 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     fmt::println("  shards: {}, one per memory domain, filled {}", bench.indexes.shards_count(),
                  fmt::join(shard_sizes, " "));
     fmt::println("  wall: {:.2f} s", seconds);
-    fmt::println("  throughput: {} IPS", humanize(double(rows) / seconds));
-    fmt::println("  distances: {} ({:.1f}% refines, {:.1f}% reverse)", humanize(double(sums.computed_distances)),
-                 refine_share, reverse_share);
-    fmt::println("  visited: {}", humanize(double(sums.visited_members)));
+    fmt::println("  throughput: {} IPS", humanized(double(rows) / seconds));
+    fmt::println("  distances: {} ({:.1f}% refines, {:.1f}% reverse)", humanized(sums.computed_distances), refine_share,
+                 reverse_share);
+    fmt::println("  visited: {}", humanized(sums.visited_members));
     fmt::println("  restarts: {}", fmt::styled(sums.restarts, verdict_style(sums.restarts < rows / 100 + 1)));
     fmt::println("  saturated: {}", fmt::styled(sums.saturated_walks, verdict_style(sums.saturated_walks == 0)));
     if (std::size_t resident = peak_resident_bytes(); resident)

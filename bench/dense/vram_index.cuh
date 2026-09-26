@@ -201,7 +201,7 @@ bool run_insertion(streamed_dataset_type_& streamed) {
         bench.lane.visited_members += result.visited_members;
         bench.lane.computed_distances += result.computed_distances;
         bench.lane.restarts += result.restarts;
-        bench.lane.saturated_walks += inserted.visited_saturations;
+        bench.lane.saturated_walks += result.visited_saturations;
         offset += batch;
         progress.tick(offset);
     }
@@ -215,9 +215,9 @@ bool run_insertion(streamed_dataset_type_& streamed) {
                  bit_name(cuda_compute_choices_k, index_t::picked_capability_k, "ampere"), bench.device);
     fmt::println("  batch: {} rows per launch", batch_rows);
     fmt::println("  wall: {:.2f} s", seconds);
-    fmt::println("  throughput: {} IPS", humanize(double(inserted_rows) / seconds));
-    fmt::println("  distances: {}", humanize(double(bench.lane.computed_distances)));
-    fmt::println("  visited: {}", humanize(double(bench.lane.visited_members)));
+    fmt::println("  throughput: {} IPS", humanized(double(inserted_rows) / seconds));
+    fmt::println("  distances: {}", humanized(bench.lane.computed_distances));
+    fmt::println("  visited: {}", humanized(bench.lane.visited_members));
     fmt::println("  restarts: {}",
                  fmt::styled(bench.lane.restarts, verdict_style(bench.lane.restarts < inserted_rows / 100 + 1)));
     fmt::println("  saturated: {}",
@@ -345,7 +345,7 @@ bool run_search(streamed_dataset_type_& streamed) {
         bench.lane.visited_members += result.visited_members;
         bench.lane.computed_distances += result.computed_distances;
         bench.lane.restarts += result.restarts;
-        bench.lane.saturated_walks += found.visited_saturations;
+        bench.lane.saturated_walks += result.visited_saturations;
 
         for (std::size_t row = 0; row != batch; ++row) {
             u32_t* const merged_rows = bench.results.hit_rows.row(offset + row).data();

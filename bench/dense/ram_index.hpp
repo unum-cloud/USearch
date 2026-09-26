@@ -318,10 +318,10 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     [[maybe_unused]] fu_status_t const counted = fu_pool_threads_count(pool, &reported_threads);
     fmt::println("  threads: {}", reported_threads);
     fmt::println("  wall: {:.2f} s", seconds);
-    fmt::println("  throughput: {} IPS", humanize(double(inserted_rows) / seconds));
-    fmt::println("  distances: {} ({:.1f}% refines, {:.1f}% reverse)", humanize(double(sums.computed_distances)),
-                 refine_share, reverse_share);
-    fmt::println("  visited: {}", humanize(double(sums.visited_members)));
+    fmt::println("  throughput: {} IPS", humanized(double(inserted_rows) / seconds));
+    fmt::println("  distances: {} ({:.1f}% refines, {:.1f}% reverse)", humanized(sums.computed_distances), refine_share,
+                 reverse_share);
+    fmt::println("  visited: {}", humanized(sums.visited_members));
     fmt::println("  restarts: {}", fmt::styled(sums.restarts, verdict_style(sums.restarts < inserted_rows / 100 + 1)));
     fmt::println("  saturated: {}", fmt::styled(sums.saturated_walks, verdict_style(sums.saturated_walks == 0)));
     if (std::size_t resident = peak_resident_bytes(); resident)

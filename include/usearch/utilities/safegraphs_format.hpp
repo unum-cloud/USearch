@@ -894,12 +894,12 @@ expected<safegraphs_metadata_t> safegraphs_read_manifest(std::string_view path, 
         metadata.nodes += nodes;
         per_part(safegraphs_part_t {relative, bytes, nodes});
     }
-    yyjson_doc_free(document);
-    if (first_relative.empty()) return {metadata, status_t::malformed_k};
 
     // The schema lives in the parts, so the first one's header answers every question about it.
     growing_buffer<char, allocator_type_> sibling {allocator};
     auto const [first_path, resolve_status] = safegraphs_sibling_path(sibling, path, first_relative);
+    yyjson_doc_free(document); // Only now: `first_relative` points into it
+    if (first_relative.empty()) return {metadata, status_t::malformed_k};
     if (failed(resolve_status)) return {metadata, resolve_status};
     safegraphs_name_t metric;
     safegraphs_name_t quantization;

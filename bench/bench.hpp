@@ -18,7 +18,6 @@
 
 #include <chrono> // `std::chrono::steady_clock` for progress rates
 #include <span>   // `std::span`
-#include <string> // `std::string`
 
 #if !defined(_WIN32)
 #include <unistd.h> // `isatty`
@@ -33,13 +32,41 @@
 
 namespace unum::usearch::bench {
 
+/** A count or rate rendered as "1.23 G" / "45.6 M" / "789 k" for scannable tables. */
+template <typename value_type_>
+struct humanized {
+    value_type_ value;
+    explicit humanized(value_type_ value) noexcept : value(value) {}
+};
+
+} // namespace unum::usearch::bench
+
+namespace us = unum::usearch;
+
+/** Renders straight into the output, so a progress tick allocates nothing. */
+template <typename value_type_>
+struct fmt::formatter<unum::usearch::bench::humanized<value_type_>> {
+    constexpr auto parse(format_parse_context& context) { return context.begin(); }
+    auto format(us::bench::humanized<value_type_> wrapped, format_context& context) const {
+        double const value = static_cast<double>(wrapped.value);
+        if (value >= 1e9) return fmt::format_to(context.out(), "{:.2f} G", value / 1e9);
+        if (value >= 1e6) return fmt::format_to(context.out(), "{:.2f} M", value / 1e6);
+        if (value >= 1e3) return fmt::format_to(context.out(), "{:.2f} k", value / 1e3);
+        return fmt::format_to(context.out(), "{:.0f}", value);
+    }
+};
+
+namespace unum::usearch::bench {
+
 namespace stdc = std::chrono;
 
+/** Whether stdout is a TTY, probed once: a progress tick asks on every call. */
 inline bool stdout_is_terminal() noexcept {
 #if defined(_WIN32)
     return false;
 #else
-    return isatty(fileno(stdout)) != 0;
+    static bool const terminal = isatty(fileno(stdout)) != 0;
+    return terminal;
 #endif
 }
 
@@ -52,14 +79,6 @@ inline fmt::text_style header_style() noexcept {
 inline fmt::text_style verdict_style(bool looks_healthy) noexcept {
     if (!stdout_is_terminal()) return {};
     return fg(looks_healthy ? fmt::color::green : fmt::color::orange);
-}
-
-/** Renders large counts as "1.23 G" / "45.6 M" / "789 k" for scannable tables. */
-inline std::string humanize(double value) {
-    if (value >= 1e9) return fmt::format("{:.2f} G", value / 1e9);
-    if (value >= 1e6) return fmt::format("{:.2f} M", value / 1e6);
-    if (value >= 1e3) return fmt::format("{:.2f} k", value / 1e3);
-    return fmt::format("{:.0f}", value);
 }
 
 /**
@@ -102,12 +121,10 @@ class progress_bar_t {
         if (!final && now - rendered_ < stdc::milliseconds(100)) return; // The work outruns the terminal.
         rendered_ = now;
         std::size_t const filled_cells = total_ ? bar_cells_k * completed / total_ : bar_cells_k;
-        std::string cells;
-        for (std::size_t cell = 0; cell != bar_cells_k; ++cell) cells += cell < filled_cells ? "█" : "░";
         double const rate = rate_per_second_(completed);
         double const eta_seconds = rate > 0 ? static_cast<double>(total_ - completed) / rate : 0;
-        fmt::print("\r\033[K  {} {} {} / {} · {}/s · eta {:.0f} s", label_, cells, humanize(double(completed)),
-                   humanize(double(total_)), humanize(rate), eta_seconds);
+        fmt::print("\r\033[K  {} {:█<{}}{:░<{}} {} / {} · {}/s · eta {:.0f} s", label_, "", filled_cells, "",
+                   bar_cells_k - filled_cells, humanized(completed), humanized(total_), humanized(rate), eta_seconds);
         std::fflush(stdout);
     }
 
@@ -115,8 +132,8 @@ class progress_bar_t {
         std::size_t const deciles = total_ ? 10 * completed / total_ : 10;
         if (completed != total_ && deciles == reported_deciles_) return;
         reported_deciles_ = deciles;
-        fmt::println("  {}: {} / {} · {}/s", label_, humanize(double(completed)), humanize(double(total_)),
-                     humanize(rate_per_second_(completed)));
+        fmt::println("  {}: {} / {} · {}/s", label_, humanized(completed), humanized(total_),
+                     humanized(rate_per_second_(completed)));
         // A piped stdout is block-buffered: without the flush a decile line can lag its
         // phase by minutes in `tee`-style logs, which exist precisely to watch progress.
         std::fflush(stdout);

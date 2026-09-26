@@ -11,7 +11,7 @@
 
 #include <atomic>  // `std::atomic` row claiming across concurrent inserting contexts
 #include <mutex>   // `std::unique_lock` while one context grows the planes and claims
-#include <bit>     // `std::bit_width` for hash-prefix widths
+#include <bit>     // `std::bit_width` for hash-prefix widths, `std::has_single_bit` for connectivity
 #include <span>    // `std::span` - the run a context maps its buffers onto
 #include <utility> // `std::exchange` - a moved-from plan forgets its index
 
@@ -615,7 +615,7 @@ __device__ __forceinline__ u32_t dense_cuda_select_diverse( //
             bool lane_diverse = true;
             if (base + lane < selected_count) {
                 u32_t const kept_position = selected_ids[base + lane];
-                typename kit_::dot_t accumulator = {};
+                typename kit_::dot_t accumulator {};
                 for (u32_t fragment = 0; fragment != planes.row_fragments; ++fragment)
                     accumulator = kit_::accumulate_dot(cache.at(candidate_index, fragment),
                                                        cache.at(kept_position, fragment), accumulator);
@@ -708,7 +708,7 @@ __device__ __forceinline__ void dense_cuda_back_link_neighbors( //
         typename kit_::norms_t const target_state = planes.norm_for(target);
 
         // The newcomer's distance to the target, from its freshly-owned vector row.
-        typename kit_::dot_t accumulator = {};
+        typename kit_::dot_t accumulator {};
         for (u32_t word = lane; word < planes.row_fragments; word += 32)
             accumulator = kit_::accumulate_dot(planes.vector_for(new_node_id, word), cache.at(target_row_k, word),
                                                accumulator);
@@ -768,7 +768,7 @@ __device__ __forceinline__ void dense_cuda_back_link_neighbors( //
                 bool lane_diverse = true;
                 if (base + lane < refined_count) {
                     u32_t const kept_position = selection.kept_positions[base + lane];
-                    typename kit_::dot_t pair_accumulator = {};
+                    typename kit_::dot_t pair_accumulator {};
                     for (u32_t fragment = 0; fragment != planes.row_fragments; ++fragment)
                         pair_accumulator = kit_::accumulate_dot(cache.at(candidate_position, fragment),
                                                                 cache.at(kept_position, fragment), pair_accumulator);
@@ -966,7 +966,7 @@ __device__ __forceinline__ void dense_cuda_insert_one( //
     typename kit_::fragment_t const* staging_row =
         view.staging + static_cast<std::size_t>(new_node_id - view.first_id) * planes.row_fragments;
     typename kit_::fragment_t* owned_row = planes.vector_span_for(new_node_id);
-    typename kit_::norms_accumulator_t norms_accumulator = {};
+    typename kit_::norms_accumulator_t norms_accumulator {};
     for (u32_t fragment = lane; fragment < planes.row_fragments; fragment += 32) {
         typename kit_::fragment_t const value = staging_row[fragment];
         owned_row[fragment] = value;
@@ -1320,7 +1320,7 @@ __device__ __forceinline__ void dense_cuda_merge_links_one( //
             bool lane_diverse = true;
             if (base + lane < refined_count) {
                 u32_t const kept_position = kept_positions[base + lane];
-                typename kit_::dot_t pair_accumulator = {};
+                typename kit_::dot_t pair_accumulator {};
                 for (u32_t fragment = 0; fragment != planes.row_fragments; ++fragment)
                     pair_accumulator = kit_::accumulate_dot(cache.at(candidate_position, fragment),
                                                             cache.at(kept_position, fragment), pair_accumulator);
@@ -1417,7 +1417,7 @@ __device__ __forceinline__ void dense_cuda_search_one( //
 
     typename kit_::fragment_t const* query_row = view.queries +
                                                  static_cast<std::size_t>(query_index) * view.planes.row_fragments;
-    typename kit_::norms_accumulator_t norms_accumulator = {};
+    typename kit_::norms_accumulator_t norms_accumulator {};
     for (u32_t fragment = lane; fragment < view.planes.row_fragments; fragment += 32) {
         typename kit_::fragment_t const value = query_row[fragment];
         query_span[fragment] = value;
@@ -1511,7 +1511,7 @@ __global__ void dense_cuda_derive_norms_kernel(dense_cuda_planes_view<kit_> plan
     int const lane = threadIdx.x % 32;
     std::size_t const warps = gridDim.x * static_cast<std::size_t>(blockDim.x) / 32;
     for (std::size_t row = first_row + warp_index; row < first_row + rows_count; row += warps) {
-        typename kit_::norms_accumulator_t accumulator = {};
+        typename kit_::norms_accumulator_t accumulator {};
         for (u32_t fragment = lane; fragment < planes.row_fragments; fragment += 32)
             accumulator = kit_::accumulate_norms(planes.vector_for(static_cast<dense_node_id_t>(row), fragment),
                                                  accumulator);
@@ -1877,6 +1877,12 @@ struct dense_vram_index {
     }
     std::size_t dimensions() const noexcept { return geometry_dimensions(geometry_.load(std::memory_order_acquire)); }
 
+    /** The walk breadth @p config asks for, or twice the connectivity when it asks for none. */
+    template <typename config_type_>
+    std::size_t non_zero_expansion_factor(config_type_ const& config) const noexcept {
+        return config.expansion_factor ? config.expansion_factor : connectivity() * 2;
+    }
+
     /** The pinned device's identity and limits, queried once at the first @c reserve. */
     cuda_device_specs_t const& device_specs() const noexcept { return device_; }
 
@@ -2023,7 +2029,8 @@ struct dense_vram_index {
      *  later ones only map slabs. */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
         if (neighbors_plane_.device() != device_.ordinal) return {0, status_t::config_mismatch_k};
-        if (!config.dimensions || !config.connectivity) return {0, status_t::config_mismatch_k};
+        if (!config.dimensions || !std::has_single_bit(static_cast<u32_t>(config.connectivity)))
+            return {0, status_t::config_mismatch_k};
         // The first success freezes both axes at once; later calls must agree with what they observe.
         packed_geometry_id_t const requested = pack_geometry(config.dimensions,
                                                              static_cast<std::size_t>(config.connectivity));
@@ -2234,8 +2241,7 @@ struct dense_vram_index {
         context.results.count_ = 0;
         if (!size()) return {{}, status_t::success_k}; // An empty index matches nothing, touches nothing.
         // Up to the expansion factor, defaulting to twice the connectivity, clipped to the landing and the graph.
-        u32_t const expansion = config.expansion_factor ? config.expansion_factor
-                                                        : static_cast<u32_t>(connectivity()) * 2;
+        u32_t const expansion = static_cast<u32_t>(non_zero_expansion_factor(config));
         u32_t const count = min_of<u32_t>(min_of<u32_t>(dense_traversal_context_t::results_capacity_k, expansion),
                                           static_cast<u32_t>(size()));
         dense_node_id_t staged_ids[dense_traversal_context_t::results_capacity_k];
@@ -2785,6 +2791,12 @@ struct dense_vram_index {
                 columns.vectors.size() - vectors_first < step.vectors_bytes ||
                 columns.neighbors.size() - neighbors_first < step.neighbors_bytes)
                 return status_t::config_mismatch_k;
+            // The part's rows land at this step's own index rows, so an ID's shift follows from
+            // the step rather than from the plan's base - the two agree for a one-part plan.
+            node_id_t const shift = static_cast<node_id_t>(range.first - step.source_rows.first + source_range.first);
+            // The device indexes its buckets by neighbor id unchecked, so every rebased id must land in this plan.
+            if (static_cast<std::size_t>(shift) + source_range.size() > static_cast<std::size_t>(base) + rows)
+                return status_t::config_mismatch_k;
             [[maybe_unused]] status_t const staged_vectors = copy_bytes(
                 bytes_of(bounce.data(), step.vectors_bytes),
                 columns.vectors.subspan(vectors_first, step.vectors_bytes));
@@ -2801,9 +2813,6 @@ struct dense_vram_index {
                 bytes_of(bounce_neighbors, step.neighbors_bytes),
                 columns.neighbors.subspan(neighbors_first, step.neighbors_bytes));
             node_id_t* const landed = reinterpret_cast<node_id_t*>(bounce_neighbors);
-            // The part's rows land at this step's own index rows, so an ID's shift follows from
-            // the step rather than from the plan's base - the two agree for a one-part plan.
-            node_id_t const shift = static_cast<node_id_t>(range.first - step.source_rows.first + source_range.first);
             rebase_neighbors(std::span<node_id_t> {landed, step_slots}, source_range, shift, dense_node_id_unknown_k);
             compact_neighbors(std::span<node_id_t> {landed, step_slots}, connectivity, range.first,
                               dense_node_id_unknown_k);

@@ -6,9 +6,10 @@
  */
 #pragma once
 
+#include <cassert> // `assert`
 #include <cstring> // `std::memcpy`
 
-#include <bit>         // `std::bit_width`, `std::bit_floor`
+#include <bit>         // `std::bit_width`, `std::bit_floor`, `std::has_single_bit`
 #include <limits>      // `std::numeric_limits`
 #include <span>        // `std::span`
 #include <type_traits> // `std::has_unique_object_representations_v`
@@ -451,6 +452,12 @@ struct dense_ram_index {
     /** Neighbor slots per node - the full fixed capacity, none lost to bookkeeping. */
     std::size_t connectivity() const noexcept { return geometry().connectivity(); }
 
+    /** The walk breadth @p config asks for, or twice the connectivity when it asks for none. */
+    template <typename config_type_>
+    std::size_t non_zero_expansion_factor(config_type_ const& config) const noexcept {
+        return config.expansion_factor ? config.expansion_factor : connectivity() * 2;
+    }
+
     /** Scalar dimensions per stored vector; zero until the first reservation freezes it. */
     std::size_t dimensions() const noexcept { return geometry().dimensions(); }
 
@@ -566,10 +573,13 @@ struct dense_ram_index {
      *  Safe to call concurrently with insertions, searches and other reservations: growth runs
      *  the same grower-election protocol as @c insert, and the geometry freezes exactly once
      *  through a single cold-path compare-exchange. A later call naming a different geometry
-     *  receives @c status_t::config_mismatch_k. Constructors allocate nothing, so every storage
+     *  receives @c status_t::config_mismatch_k, as does a geometry with no dimensions or with a
+     *  connectivity that is not a power of two. Constructors allocate nothing, so every storage
      *  failure surfaces here, in the returned status.
      */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
+        if (!config.dimensions || !std::has_single_bit(static_cast<u32_t>(config.connectivity)))
+            return {0, status_t::config_mismatch_k};
 
         // Freeze the geometry exactly once; competing first-reservations are decided by one CAS.
         geometry_t const desired_geometry {config.dimensions, config.connectivity};
@@ -634,8 +644,7 @@ struct dense_ram_index {
         geometry_t const frozen = geometry();
         if (!frozen) return 0;
         std::size_t const node_connectivity = frozen.connectivity();
-        std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
-                                                                     : node_connectivity * 2;
+        std::size_t const expansion_factor = non_zero_expansion_factor(config);
         using context_t = dense_traversal_context_t;
         using arena_t = arena_allocator<std::byte>;
         queue_sizes_t const sizes = queue_sizes_(expansion_factor, node_connectivity);
@@ -665,8 +674,7 @@ struct dense_ram_index {
         geometry_t const frozen = geometry();
         if (!frozen) return status_t::uninitialized_k;
         std::size_t const node_connectivity = frozen.connectivity();
-        std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
-                                                                     : node_connectivity * 2;
+        std::size_t const expansion_factor = non_zero_expansion_factor(config);
 
         // `sorted_buffer::insert(.., limit)` never grows on its own, and `growing_hash_set::set`
         // never rehashes, so these reservations are load-bearing rather than an optimization.
@@ -881,8 +889,7 @@ struct dense_ram_index {
         bool const report_assigned_ids = assigned_ids.size() != 0;
         geometry_t const frozen = geometry();
         std::size_t const node_connectivity = frozen.connectivity();
-        std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
-                                                                     : node_connectivity * 2;
+        std::size_t const expansion_factor = non_zero_expansion_factor(config);
 
         // Sub-byte types pack several dimensions per storage value - count storage bytes.
         std::size_t const vector_bytes = stored_row_values(frozen) * sizeof(scalar_t);
@@ -1013,9 +1020,7 @@ struct dense_ram_index {
                                      refine_config_t config = {}) noexcept {
         geometry_t const frozen = geometry();
         if (!frozen) return {{}, status_t::uninitialized_k};
-        std::size_t const node_connectivity = frozen.connectivity();
-        std::size_t const expansion_factor = config.expansion_factor ? config.expansion_factor //
-                                                                     : node_connectivity * 2;
+        std::size_t const expansion_factor = non_zero_expansion_factor(config);
         if (status_t const sized = reserve_traversal(context, insert_config_t {config.expansion_factor}); failed(sized))
             return {{}, sized};
 
@@ -1312,7 +1317,7 @@ struct dense_ram_index {
          *  per-node pass. Counts the islands as found on the first call per pass. */
         expected<refine_result_t> reselect_islands(step_t const& step, dense_traversal_context_t& context) noexcept {
             if (!index_) return {{}, status_t::uninitialized_k};
-            std::size_t const expansion_factor = index_->connectivity() * 2;
+            std::size_t const expansion_factor = index_->non_zero_expansion_factor(refine_config_t {});
             if (status_t const sized = index_->reserve_traversal(context); failed(sized)) return {{}, sized};
             refine_result_t result;
             std::size_t const visited_before = context.visited_members;
@@ -1939,6 +1944,12 @@ struct dense_ram_index {
                 columns.vectors.size() - vectors_first < step.vectors_bytes ||
                 columns.neighbors.size() - neighbors_first < step.neighbors_bytes)
                 return status_t::config_mismatch_k;
+            // The part's rows land at this step's own index rows, so an ID's shift follows from
+            // the step rather than from the plan's base - the two agree for a one-part plan.
+            node_id_t const shift = static_cast<node_id_t>(range.first - step.source_rows.first + source_range.first);
+            // A rebased id past this plan would name whichever row a later insert fills.
+            if (static_cast<std::size_t>(shift) + source_range.size() > static_cast<std::size_t>(base) + rows)
+                return status_t::config_mismatch_k;
 
             chunked_location_t const location = index_->chunked_location(range.first);
             nk::matrix_span<scalar_t> const vectors = index_->vectors_chunks_[location.chunk_index].span()(
@@ -1959,9 +1970,6 @@ struct dense_ram_index {
                 bytes_of(neighbors.data(), step_slots),
                 columns.neighbors.subspan(neighbors_first, step.neighbors_bytes));
             std::span<node_id_t> const landed {neighbors.data(), step_slots};
-            // The part's rows land at this step's own index rows, so an ID's shift follows from
-            // the step rather than from the plan's base - the two agree for a one-part plan.
-            node_id_t const shift = static_cast<node_id_t>(range.first - step.source_rows.first + source_range.first);
             rebase_neighbors(landed, source_range, shift, dense_node_id_unknown_k);
             compact_neighbors(landed, connectivity, range.first, dense_node_id_unknown_k);
             atomic_ref<std::size_t>(covered_neighbors).add(range.size(), std::memory_order_release);
@@ -2113,6 +2121,7 @@ struct dense_ram_index {
      *  few adds - cheap enough for every traversal hop. @ref dense_ram_index_malloc
      */
     inline chunked_location_t chunked_location(node_id_t node_id) const noexcept {
+        assert(node_id != dense_node_id_unknown_k && "The sentinel names no row, and would land past every chunk");
         if (node_id < doubling_phase_capacity_k) {
             // Biasing by the first chunk's size makes the leading bit of the ID encode the chunk index.
             node_id_t const biased_id = node_id + power_of_two<node_id_t>(first_chunk_rows_log2_k);
@@ -2201,7 +2210,21 @@ struct dense_ram_index {
         /** Release-stores @p first_value into slot 0 - unlocking and simultaneously republishing
          *  the edited neighbors to every future acquiring reader. */
         inline void unlock(node_id_t first_value) const noexcept {
+            assert(holds_well_formed_row_(first_value) && "A published row names distinct nodes, then sentinels");
             atomic_ref<node_id_t>(row_[0]).store(first_value, std::memory_order_release);
+        }
+
+        /** Whether the held row, headed by @p first_value, names distinct nodes with sentinels only as
+         *  its tail; slots 1.. are read plain, since their one writer is the lock holder. */
+        inline bool holds_well_formed_row_(node_id_t first_value) const noexcept {
+            small_size_t live = 1;
+            while (live != capacity() && row_[live] != dense_node_id_unknown_k) ++live;
+            for (small_size_t slot = live; slot != capacity(); ++slot)
+                if (row_[slot] != dense_node_id_unknown_k) return false;
+            for (small_size_t slot = 1; slot != live; ++slot)
+                for (small_size_t earlier = 0; earlier != slot; ++earlier)
+                    if (row_[slot] == (earlier ? row_[earlier] : first_value)) return false;
+            return first_value != dense_node_id_unknown_k;
         }
     };
 
@@ -3092,6 +3115,7 @@ struct dense_ram_index {
         frontier_queue_t& frontier = context.frontier;
         visited_set_t& visited = context.visited;
         std::size_t const node_connectivity = connectivity();
+        assert(results.capacity() >= expansion_factor && "A pool short of the expansion never tightens the radius");
 
         // About as many landmarks as the connectivity - a stochastic multi-start in 4-way batches.
         small_size_t const landmark_batches = divide_round_up<small_size_t>(node_connectivity, 4);

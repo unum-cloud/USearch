@@ -5,7 +5,7 @@
  *  @brief Vector Search helper structures and types
  */
 #pragma once
-#include <cassert> // `assert` on the `to_span` contiguity contract
+#include <cassert> // `assert` on the `to_span` and `compact_neighbors` contracts
 #include <cstddef> // `std::byte`
 #include <cstdint> // `std::uint32_t`, `std::uint64_t`
 #include <cstring> // `std::memmove`, `std::memcmp`, `std::memcpy`
@@ -388,6 +388,7 @@ template <std::unsigned_integral id_type_>
 constexpr void compact_neighbors(std::span<id_type_> rows, std::size_t connectivity, id_type_ first_row,
                                  id_type_ sentinel) noexcept {
     if (!connectivity) return;
+    assert(rows.size() % connectivity == 0 && "A partial row never matches the loop's exit");
     for (std::size_t row = 0; row * connectivity != rows.size(); ++row) {
         std::span<id_type_> const slots = rows.subspan(row * connectivity, connectivity);
         std::size_t kept = 0;

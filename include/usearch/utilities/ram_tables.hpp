@@ -11,7 +11,7 @@
  */
 #pragma once
 
-#include <cassert> // `assert` - every `insert` follows a `reserve`
+#include <cassert> // `assert` - every `insert` follows a `reserve`, and never inserts the sentinel
 #include <cstddef> // `std::size_t`
 #include <cstdint> // `std::uint64_t` - batched membership masks
 #include <cstring> // `std::memset` - the all-ones sentinel fill
@@ -229,6 +229,8 @@ class growing_hash_set {
      */
     [[nodiscard]] inline membership_t insert(element_t const& element) noexcept {
         assert(slots_ && (count_ + 1) * 5u / 3u <= capacity_);
+        assert(element != unused_hash_slot_value<element_t>() &&
+               "The sentinel marks empty slots, so it can never be a member");
         element_t* slot = hash_set_kit_t::locate_slot(slots_, capacity_, hasher_, element);
         if (*slot == element) return membership_t::present_k;
         *slot = element;

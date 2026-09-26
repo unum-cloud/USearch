@@ -1,8 +1,8 @@
 /**
- *  @brief Similarity Search over variable-length byte sequences - text, DNA, or protein.
- *  @author Ash Vardanian
  *  @file include/usearch/sequence/ram_index.hpp
+ *  @author Ash Vardanian
  *  @date August 28, 2026
+ *  @brief Similarity Search over variable-length byte sequences - text, DNA, or protein.
  *
  *  A stored payload is a @c sz_string_view_t into a @ref sequence_tape the caller reserves
  *  once, so a node costs sixteen bytes and no insertion ever allocates. Scoring is batched:
@@ -63,11 +63,13 @@ class sequence_tape {
   public:
     using allocator_t = allocator_type_;
 
-    /** @brief What one @ref append answers: where the bytes landed, or why they did not. */
+    /** What one @ref append answers: where the bytes landed, or why they did not. */
     struct append_result_t {
-        /** @brief Success, or @c overflow_k once the reservation is exhausted. */
+
+        /** Success, or @c overflow_k once the reservation is exhausted. */
         status_t status = status_t::success_k;
-        /** @brief The stable view over the appended copy; empty on failure. */
+
+        /** The stable view over the appended copy; empty on failure. */
         sz_string_view_t view {};
 
         explicit operator bool() const noexcept { return status == status_t::success_k; }
@@ -92,13 +94,13 @@ class sequence_tape {
         return *this;
     }
 
-    /** @brief Sizes the tape's single allocation; legal only before the first @ref append. */
+    /** Sizes the tape's single allocation; legal only before the first @ref append. */
     status_t reserve(std::size_t bytes) noexcept {
         if (taken_.load(std::memory_order_acquire)) return status_t::config_mismatch_k;
         return bytes_.resize_uninitialized(bytes);
     }
 
-    /** @brief Copies @p length bytes from @p data into the tape, answering a stable view. */
+    /** Copies @p length bytes from @p data into the tape, answering a stable view. */
     append_result_t append(char const* data, std::size_t length) noexcept {
         std::size_t const offset = taken_.fetch_add(length, std::memory_order_acq_rel);
         if (offset + length > bytes_.size()) {
@@ -110,13 +112,13 @@ class sequence_tape {
         return {status_t::success_k, sz_string_view_t {destination, length}};
     }
 
-    /** @brief Copies the bytes @p view spans into the tape, answering a stable view. */
+    /** Copies the bytes @p view spans into the tape, answering a stable view. */
     append_result_t append(sz_string_view_t view) noexcept { return append(view.start, view.length); }
 
-    /** @brief Bytes handed out so far. */
+    /** Bytes handed out so far. */
     std::size_t used_bytes() const noexcept { return taken_.load(std::memory_order_acquire); }
 
-    /** @brief Bytes the single reservation covers. */
+    /** Bytes the single reservation covers. */
     std::size_t reserved_bytes() const noexcept { return bytes_.size(); }
 };
 
@@ -143,12 +145,13 @@ class sequence_codec {
     tape_t* tape_ = nullptr;
 
   public:
-    /** @brief The interchange token of the elements a value emits: raw UTF-8 bytes. */
+
+    /** The interchange token of the elements a value emits: raw UTF-8 bytes. */
     inline static constexpr dtype_t value_dtype_k = dtype_t::utf8_k;
 
     explicit sequence_codec(tape_t& tape) noexcept : tape_(&tape) {}
 
-    /** @brief The tape restored values are appended into. */
+    /** The tape restored values are appended into. */
     tape_t& tape() const noexcept { return *tape_; }
 
     std::size_t storage_requirements(sz_string_view_t const& value) const noexcept { return value.length; }
@@ -161,8 +164,8 @@ class sequence_codec {
     }
 
     status_t load(bytes_view_t input, sz_string_view_t& value) const noexcept {
-        typename tape_t::append_result_t const appended =
-            tape_->append(reinterpret_cast<char const*>(input.data()), input.size());
+        typename tape_t::append_result_t const appended = tape_->append(reinterpret_cast<char const*>(input.data()),
+                                                                        input.size());
         if (!appended) return appended.status;
         value = appended.view;
         return status_t::success_k;
@@ -194,8 +197,8 @@ status_t sequence_save(bytes_span_t monolith, index_type_ const& index, sequence
                                   std::forward<progress_type_>(progress));
 }
 
-/** @brief Writes the monolith at @p path: sized from the index, created fresh, mapped, and
- *      flushed once every region landed. */
+/** Writes the monolith at @p path: sized from the index, created fresh, mapped, and
+ *  flushed once every region landed. */
 template <typename index_type_, typename allocator_type_, typename executor_type_,
           typename progress_type_ = dummy_progress_t>
 status_t sequence_save(std::string_view path, index_type_ const& index, sequence_codec<allocator_type_> const& codec,
@@ -239,7 +242,7 @@ status_t sequence_load(bytes_view_t monolith, index_type_& index, sequence_codec
     return safegraphs_read_index(monolith, index, codec, executor, config, std::forward<progress_type_>(progress));
 }
 
-/** @brief Restores the index from the monolith at @p path, mapped read-only. */
+/** Restores the index from the monolith at @p path, mapped read-only. */
 template <typename index_type_, typename allocator_type_, typename executor_type_,
           typename progress_type_ = dummy_progress_t>
 status_t sequence_load(std::string_view path, index_type_& index, sequence_codec<allocator_type_> const& codec,
@@ -249,12 +252,12 @@ status_t sequence_load(std::string_view path, index_type_& index, sequence_codec
     return sequence_load(mapping.view(), index, codec, executor, config, std::forward<progress_type_>(progress));
 }
 
-/** @brief What the monolith @p monolith holds says about itself, the tape's byte need included. */
+/** What the monolith @p monolith holds says about itself, the tape's byte need included. */
 inline expected<safegraphs_index_metadata_t> sequence_metadata(bytes_view_t monolith) noexcept {
     return safegraphs_read_index_metadata(monolith);
 }
 
-/** @brief The metadata of the monolith at @p path, mapped read-only. */
+/** The metadata of the monolith at @p path, mapped read-only. */
 inline expected<safegraphs_index_metadata_t> sequence_metadata(std::string_view path) noexcept {
     auto [mapping, mapped] = mapped_file_t::read(path);
     if (failed(mapped)) return {safegraphs_index_metadata_t {}, mapped};
@@ -265,11 +268,9 @@ inline expected<safegraphs_index_metadata_t> sequence_metadata(std::string_view 
 
 #pragma region Index
 
-/**
- *  @brief Similarity Search over byte sequences: tape-backed views, integer distances,
- *      and a metric chosen per call - so a graph built under one kernel is queried under
- *      another without rebuilding.
- */
+/** Similarity Search over byte sequences: tape-backed views, integer distances, and a metric
+ *  chosen per call - so a graph built under one kernel is queried under another without
+ *  rebuilding. */
 template <typename key_type_ = uuid_t, typename node_id_type_ = u32_t, typename wait_type_ = dummy_waiter_t,
           template <typename> class atomic_ref_template_ = std::atomic_ref,
           typename allocator_type_ = std::allocator<byte_t>>

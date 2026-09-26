@@ -239,7 +239,9 @@ static int check_tiles() noexcept {
 template <nk_kernel_kind_t kernel_, typename scalar_>
 static int check_kernel() noexcept {
     int failures = 0;
-    for (std::size_t const dim : dimensions_to_test) {
+    for (std::size_t const requested : dimensions_to_test) {
+        // Packed scalars hold whole bytes of dimensions, so a ragged request rounds up to the next byte.
+        std::size_t const dim = round_up_to_multiple<std::size_t>(requested, nk::dimensions_per_value<scalar_>());
         // Newest silicon first, so a reader sees the strongest tier at the top. x86 by
         // generation, then Arm by extension, then the remaining architectures.
         failures += check_quads<kernel_, scalar_, nk_cap_diamond_k>(dim);

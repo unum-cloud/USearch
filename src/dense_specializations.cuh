@@ -395,17 +395,6 @@ inline bool crossed(expected<value_type_> const& result, usearch_dense_traversal
 /** The C key struct and the engine's @c us::uuid_t share sixteen bytes - one bit cast in. */
 inline us::uuid_t uuid_of(usearch_key_t key) noexcept { return std::bit_cast<us::uuid_t>(key); }
 
-/** Slices the low eight key bytes as the hash: keys arrive pre-mixed, UUIDs and content hashes
- *  alike. */
-struct uuid_slice_hash_t {
-    std::size_t operator()(us::uuid_t const& uuid) const noexcept {
-        struct halves_t {
-            u64_t low, high;
-        };
-        return static_cast<std::size_t>(std::bit_cast<halves_t>(uuid).low);
-    }
-};
-
 #pragma endregion Scaffolding
 
 #pragma region Specialized Index
@@ -425,9 +414,8 @@ inline constexpr bool is_vram_index = false;
 /** One RAM alternative: the CPU class alone names the rung, lowering onto its NumKong mask, its waiter
  *  and its atomic reference. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, cpu_class_t cpu_class_>
-using ram_index =
-    dense_ram_indexes<us::uuid_t, dtype_, kernel_, numkong_capabilities_of(cpu_class_), waiter_of<cpu_class_>,
-                      atomic_ref_for_cpu_class<cpu_class_>::template type, uuid_slice_hash_t>;
+using ram_index = dense_ram_indexes<us::uuid_t, dtype_, kernel_, numkong_capabilities_of(cpu_class_),
+                                    waiter_of<cpu_class_>, atomic_ref_for_cpu_class<cpu_class_>::template type>;
 #if USEARCH_BUILD_CUDA
 
 /** One VRAM alternative: the GPU class alone names the rung, lowering onto its architecture ceiling;

@@ -572,9 +572,9 @@ inline void report_refinement_metrics(refinement_report_t const& report) {
     fmt::println("  changed: {}", fmt::join(report.changed_per_pass, " → "));
     fmt::println("  threads: {}", report.threads);
     fmt::println("  wall: {:.2f} s refining · {:.2f} s healing", report.refining_seconds, report.healing_seconds);
-    fmt::println("  throughput: {} nodes/s", humanize(double(report.nodes * passes) / report.refining_seconds));
-    fmt::println("  distances: {}", humanize(double(report.sums.computed_distances)));
-    fmt::println("  visited: {}", humanize(double(report.sums.visited_members)));
+    fmt::println("  throughput: {} nodes/s", humanized(double(report.nodes * passes) / report.refining_seconds));
+    fmt::println("  distances: {}", humanized(report.sums.computed_distances));
+    fmt::println("  visited: {}", humanized(report.sums.visited_members));
     fmt::println("  islands: {} found, {} reconnected", report.islands_found, report.islands_reconnected);
     fmt::println("  reachable: {} of {} · {} sweeps",
                  fmt::styled(report.reachable_nodes, verdict_style(report.reachable_nodes == report.nodes)),
@@ -594,15 +594,15 @@ inline void report_search_metrics(bench_options_t const& options, std::size_t qu
     fmt::println("  queries: {} at top-{}{}", query_count, options.top_k, options.self_recall ? " · self-recall" : "");
     fmt::println("  threads: {}", threads);
     fmt::println("  wall: {:.2f} s", seconds);
-    fmt::println("  throughput: {} QPS", humanize(double(query_count) / seconds));
+    fmt::println("  throughput: {} QPS", humanized(double(query_count) / seconds));
     // An empty latency span means a batch-shaped backend with no per-query clock.
     if (latencies_us.empty())
         fmt::println("  latency: {:.0f} µs mean per query, batch-uniform", seconds * 1e6 / double(query_count));
     else
         fmt::println("  latency: p50 {:.0f} µs · p90 {:.0f} µs · p99 {:.0f} µs", percentile(0.50), percentile(0.90),
                      percentile(0.99));
-    fmt::println("  distances/query: {}", humanize(double(sums.computed_distances) / double(query_count)));
-    fmt::println("  visited/query: {}", humanize(double(sums.visited_members) / double(query_count)));
+    fmt::println("  distances/query: {}", humanized(double(sums.computed_distances) / double(query_count)));
+    fmt::println("  visited/query: {}", humanized(double(sums.visited_members) / double(query_count)));
     fmt::println("  restarts: {}", sums.restarts);
     fmt::println("  saturated: {}", fmt::styled(sums.saturated_walks, verdict_style(sums.saturated_walks == 0)));
 }
@@ -654,8 +654,8 @@ inline void judge_hits(bench_options_t const& options, bench_results_t& results,
         fmt::println("  recall@1: {:.3f}%", fmt::styled(recall_at_1, verdict_style(recall_at_1 >= 90.0)));
         fmt::println("  recall@{}: {:.3f}%", judged_depth,
                      fmt::styled(recall_at_k, verdict_style(recall_at_k >= 99.0)));
-        fmt::println("  overlap@{}: {:.1f}%", judged_depth, overlap_at_k);
-        fmt::println("  ndcg@{}: {:.1f}%", judged_depth, gain_at_k);
+        fmt::println("  overlap@{}: {:.3f}%", judged_depth, overlap_at_k);
+        fmt::println("  ndcg@{}: {:.3f}%", judged_depth, gain_at_k);
     }
     else { fmt::println("  recall: skipped, no ground-truth neighbors provided"); }
 }
