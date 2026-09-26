@@ -71,9 +71,10 @@ static std::size_t test_configuration(char const* name) {
     failures_count += test_dense_three_vectors<index_t, kernel_>(make_index);
     failures_count += test_dense_growth_and_recall<index_t, kernel_>(make_index);
     failures_count += test_dense_refine_settles<index_t, kernel_>(make_index);
-    failures_count += test_dense_health_audits<index_t>(make_index);
+    failures_count += test_dense_health_audits<index_t, kernel_>(make_index);
     failures_count += test_dense_heal_islands<index_t>(make_index);
     failures_count += test_dense_predicated_search<index_t, kernel_>(make_index);
+    failures_count += test_dense_multiply<index_t, kernel_>(make_index);
     failures_count += test_dense_save_load_roundtrip<index_t, kernel_>(make_index);
     failures_count += test_dense_load_hostile<index_t, kernel_>(make_index);
     failures_count += test_dense_load_append<index_t, kernel_>(make_index);

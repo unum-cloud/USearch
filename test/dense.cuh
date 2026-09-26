@@ -91,6 +91,7 @@ constexpr u64_t dense_seed_roundtrip_k = 0x5AFE10ADull;
 constexpr u64_t dense_seed_load_hostile_k = 0x10ADBADDull;
 constexpr u64_t dense_seed_concurrent_build_k = 0xB111DACEull;
 constexpr u64_t dense_seed_concurrent_search_k = 0x5EA2CACEull;
+constexpr u64_t dense_seed_multiply_k = 0x0D07D07Eull;
 constexpr u64_t dense_seed_indexes_add_k = 0x62009ADDull;
 constexpr u64_t dense_seed_indexes_race_k = 0x62009ACEull;
 constexpr u64_t dense_seed_save_race_k = 0x5AFECACEull;
@@ -1075,7 +1076,7 @@ std::size_t test_dense_refine_settles(make_index_type_ const& make_index) {
 /** The audit's contract on a graph nothing stranded: an empty index reaches nothing, a
  *  healthy one reaches everything, and two audits of one graph agree - the landmarks are
  *  stride-spread, so the answer is a property of the graph rather than of the draw. */
-template <typename index_type_, typename make_index_type_>
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 std::size_t dense_expect_health_audits(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
     using scalar_t = typename index_type_::scalar_t;
     std::size_t failures = 0;
@@ -1094,11 +1095,13 @@ std::size_t dense_expect_health_audits(make_index_type_ const& make_index, alloc
 
     // An insertion wires each node against the graph as it stood, so a few can end up with no
     // in-edge any search follows; reaching every one of them is what the repair is for, and
-    // what the healing scenario asserts. Here the claim is that the audit sees the bulk.
+    // what the healing scenario asserts. Here the claim is that the audit sees the bulk, which
+    // a dot graph's hubs never promise.
     auto const [health, audit_status] = dense_audit_health(index, context);
     failures += expect(succeeded(audit_status));
     failures += expect(health.reachable_nodes <= index.size());
-    failures += expect(health.reachable_nodes * 100 >= index.size() * dense_minimal_recall_percent_k);
+    if constexpr (kernel_ != nk_kernel_dot_k)
+        failures += expect(health.reachable_nodes * 100 >= index.size() * dense_minimal_recall_percent_k);
     failures += expect(health.sweeps >= 1);
 
     auto const [again_health, again_status] = dense_audit_health(index, context);
@@ -1109,10 +1112,10 @@ std::size_t dense_expect_health_audits(make_index_type_ const& make_index, alloc
 }
 
 /** @ref dense_expect_health_audits, then the ledger it left must balance. */
-template <typename index_type_, typename make_index_type_>
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 std::size_t test_dense_health_audits(make_index_type_ const& make_index) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_health_audits<index_type_>(make_index, ledger);
+    std::size_t const failures = dense_expect_health_audits<index_type_, kernel_>(make_index, ledger);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
@@ -1209,6 +1212,83 @@ std::size_t test_dense_heal_islands(make_index_type_ const& make_index) {
 }
 
 #pragma endregion Refinement
+
+#pragma region Folds
+
+/** Graph products against the index's own kernels: each row's kept pairs are distinct nodes carrying
+ *  their dots, a narrow row keeps its first pairs while counting past them, and mismatched spans refuse. */
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+    requires(!dense_device_resident_k<index_type_>)
+std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+    using scalar_t = typename index_type_::scalar_t;
+    constexpr nk_capability_t caps_k = index_type_::picked_quads_capability_k;
+    constexpr std::size_t nodes_count = dense_thread_nodes_k;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    std::size_t failures = 0;
+    index_type_ index = make_index(ledger);
+    typename index_type_::dense_traversal_context_t context {{}};
+    auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, dense_seed_multiply_k);
+    failures += expect(index.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
+
+    std::array<dense_node_id_t, nodes_count> node_ids;
+    std::array<typename index_type_::vector_product_result_t, nodes_count> products;
+    node_ids.fill(dense_node_id_unknown_k);
+    auto const empty = index.multiply(vectors.view().row(0).as_vector(), context, node_ids, products);
+    failures += expect(empty.status == status_t::success_k && empty.value.count == 0);
+    failures += expect(node_ids[0] == dense_node_id_unknown_k);
+
+    auto assigned_ids = nk::vector<dense_node_id_t>::try_zeros(nodes_count);
+    failures += expect(index.insert(vectors.view(), assigned_ids.span(), context).status == status_t::success_k);
+
+    // The oracle scores through the very 4-way kernels the walk dispatches, so a kept dot matches exactly.
+    auto oracle_dot = [&](std::size_t row, dense_node_id_t node_id) noexcept {
+        auto left = vectors.view().row(row).as_vector(), right = vectors.view().row(node_id).as_vector();
+        auto right_norms = usearch::dense_norms<kernel_, caps_k, scalar_t>(right);
+        return usearch::scores<kernel_, caps_k, scalar_t>(left, usearch::dense_norms<kernel_, caps_k, scalar_t>(left),
+                                                          {right, right, right, right},
+                                                          {right_norms, right_norms, right_norms, right_norms})
+            .dots[0];
+    };
+    typename index_type_::search_config_t const exhaustive {
+        static_cast<typename index_type_::small_size_t>(nodes_count)};
+    for (std::size_t const width : {nodes_count, std::size_t {4}})
+        for (std::size_t row = 0; row != 4; ++row) {
+            auto const [multiplied, status] = index.multiply(vectors.view().row(row).as_vector(), context,
+                                                             std::span {node_ids}.first(width),
+                                                             std::span {products}.first(width), exhaustive);
+            failures += expect(status == status_t::success_k);
+            failures += expect(multiplied.count > 0 && multiplied.count <= nodes_count);
+            failures += expect_eq(multiplied.computed_distances, multiplied.count);
+            if (width < nodes_count) failures += expect(multiplied.count > width);
+            std::array<bool, nodes_count> seen {};
+            for (std::size_t pair = 0; pair != min_of<std::size_t>(multiplied.count, width); ++pair) {
+                dense_node_id_t const node_id = node_ids[pair];
+                failures += expect(node_id < nodes_count && !seen[node_id]);
+                if (node_id >= nodes_count || seen[node_id]) continue;
+                seen[node_id] = true;
+                failures += expect(products[pair] == oracle_dot(row, node_id));
+            }
+        }
+
+    auto const refused = index.multiply(vectors.view().row(0).as_vector(), context, node_ids,
+                                        std::span {products}.first(3));
+    failures += expect(refused.status == status_t::config_mismatch_k);
+    return failures;
+}
+
+/** @ref dense_expect_multiply for the dot kernel, then the ledger it left must balance. */
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+    requires(!dense_device_resident_k<index_type_>)
+std::size_t test_dense_multiply(make_index_type_ const& make_index) {
+    if constexpr (kernel_ != nk_kernel_dot_k) return 0;
+    else {
+        allocation_ledger_t ledger;
+        std::size_t const failures = dense_expect_multiply<index_type_, kernel_>(make_index, ledger);
+        return failures + expect_eq(ledger.live_bytes.load(), 0);
+    }
+}
+
+#pragma endregion Folds
 
 #pragma region Races
 

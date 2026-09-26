@@ -11,6 +11,7 @@
 
 #include <array>       // `std::array`
 #include <bit>         // `std::bit_width`, `std::bit_floor`, `std::has_single_bit`
+#include <functional>  // `std::identity` - the single index's resolver
 #include <limits>      // `std::numeric_limits`
 #include <span>        // `std::span`
 #include <type_traits> // `std::has_unique_object_representations_v`
@@ -140,6 +141,39 @@ template <typename fold_type_, typename dot_result_type_>
 concept dense_fold = requires(fold_type_& fold, std::span<dense_scored_node_t const> scored_nodes,
                               std::span<dot_result_type_ const> dots) {
     { fold.absorb(scored_nodes, dots) } noexcept -> std::same_as<walk_demand_t>;
+};
+
+/** Graph products of one left-hand row as a fold: each scored pair appends its resolved ID and native
+ *  dot until the row is full, while @c scored keeps counting past it. */
+template <typename id_type_, typename dot_result_type_, typename resolve_type_ = std::identity>
+struct dense_multiply_fold {
+
+    /** The row's ID output. */
+    std::span<id_type_> ids;
+
+    /** The row's product output, positionally paired with @c ids. */
+    std::span<dot_result_type_> products;
+
+    /** Maps a walked node ID to the ID the row reports. */
+    resolve_type_ resolve = {};
+
+    /** Pairs written so far. */
+    std::size_t written = 0;
+
+    /** Pairs scored, written or not - above the row's width when it was truncated. */
+    std::size_t scored = 0;
+
+    walk_demand_t absorb(std::span<dense_scored_node_t const> scored_nodes,
+                         std::span<dot_result_type_ const> dots) noexcept {
+        std::size_t const writable = min_of<std::size_t>(scored_nodes.size(), ids.size() - written);
+        for (std::size_t lane = 0; lane != writable; ++lane) {
+            ids[written + lane] = resolve(scored_nodes[lane].node_id);
+            products[written + lane] = dots[lane];
+        }
+        written += writable;
+        scored += scored_nodes.size();
+        return walk_demand_t::continue_k;
+    }
 };
 
 /** The vector a query scores with. */
@@ -1607,6 +1641,30 @@ struct dense_ram_index {
                                                                 context.refining_candidates);
         std::swap(context.results, context.refining_candidates);
         return result;
+    }
+
+    /**
+     *  @brief Graph products of one left-hand row: every pair the walk scores, node IDs beside native
+     *      dots, written until the spans fill.
+     *
+     *  @param[in] left The left-hand row, in the index's own dtype & frozen dimensionality.
+     *  @param[inout] context The calling thread's scratch & telemetry.
+     *  @param[out] node_ids The node ID of each kept pair, in walk order.
+     *  @param[out] products The dot of each kept pair, parallel to @p node_ids.
+     *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
+     *  @return The pairs scored in @c count - above the spans' width when they were truncated.
+     */
+    template <dense_query<scalar_t> query_type_ = vector_view_t>
+    expected<search_result_t> multiply(query_type_ const& left, dense_traversal_context_t& context,
+                                       std::span<dense_node_id_t> node_ids, std::span<vector_product_result_t> products,
+                                       search_config_t config = {}) noexcept
+        requires(kernel_kind_ == nk_kernel_dot_k)
+    {
+        if (products.size() != node_ids.size()) return {{}, status_t::config_mismatch_k};
+        dense_multiply_fold<dense_node_id_t, vector_product_result_t> fold {node_ids, products};
+        expected<search_result_t> walked = search(left, fold, context, config);
+        walked.value.count = fold.scored;
+        return walked;
     }
 
     /** The compile-time form of @c search() & @c search_if(): one whole-traversal instantiation per

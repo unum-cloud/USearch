@@ -11,6 +11,7 @@ using namespace unum::usearch;
 
 std::size_t test::dense::check_ram_index_bf16() {
     std::size_t failures_count = 0;
+    failures_count += test_configuration<nk_bf16_k, nk_kernel_dot_k>("bf16+dot");
     failures_count += test_configuration<nk_bf16_k, nk_kernel_angular_k>("bf16+angular");
     failures_count += test_configuration<nk_bf16_k, nk_kernel_angular_k, flaky_waiter_t>("bf16+angular+flaky");
     failures_count += test_configuration<nk_bf16_k, nk_kernel_angular_k, dummy_waiter_t, nk_cap_neonbfdot_k>( //
