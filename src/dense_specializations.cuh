@@ -315,8 +315,11 @@ struct gpu_class_name_t {
     char const* name;
 };
 inline constexpr gpu_class_name_t gpu_class_names_k[] = {
-    {gpu_class_t::nvidia_ampere_k, "nvidia_ampere"},       {gpu_class_t::nvidia_hopper_k, "nvidia_hopper"},
-    {gpu_class_t::nvidia_blackwell_k, "nvidia_blackwell"}, {gpu_class_t::nvidia_blackwellrtx_k, "nvidia_blackwellrtx"},
+    {gpu_class_t::nvidia_ampere_k, "nvidia_ampere"},
+    {gpu_class_t::nvidia_ada_k, "nvidia_ada"},
+    {gpu_class_t::nvidia_hopper_k, "nvidia_hopper"},
+    {gpu_class_t::nvidia_blackwell_k, "nvidia_blackwell"},
+    {gpu_class_t::nvidia_blackwellrtx_k, "nvidia_blackwellrtx"},
     {gpu_class_t::nvidia_rubin_k, "nvidia_rubin"},
 };
 
@@ -326,6 +329,7 @@ inline constexpr gpu_class_name_t gpu_class_names_k[] = {
  *  Blackwell ceiling until its own kits land. */
 constexpr cuda_arch_t cuda_arch_of(gpu_class_t gpu_class) noexcept {
     switch (gpu_class) {
+    case gpu_class_t::nvidia_ada_k: return cuda_arch_ada_k;
     case gpu_class_t::nvidia_hopper_k: return cuda_arch_hopper_k;
     case gpu_class_t::nvidia_blackwell_k:
     case gpu_class_t::nvidia_rubin_k: return cuda_arch_blackwell_k;
@@ -338,6 +342,7 @@ constexpr cuda_arch_t cuda_arch_of(gpu_class_t gpu_class) noexcept {
  *  without a class of its own runs the Ampere unit, natively on 8.x and through its PTX past that. */
 constexpr gpu_class_t gpu_class_of(int arch) noexcept {
     switch (arch / 100) {
+    case 8: return arch >= cuda_arch_ada_k ? gpu_class_t::nvidia_ada_k : gpu_class_t::nvidia_ampere_k;
     case 9: return gpu_class_t::nvidia_hopper_k;
     case 10: return gpu_class_t::nvidia_blackwell_k;
     case 12: return gpu_class_t::nvidia_blackwellrtx_k;

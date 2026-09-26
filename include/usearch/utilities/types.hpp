@@ -958,8 +958,11 @@ enum class cpu_class_t : u32_t {
 enum class gpu_class_t : u32_t {
     unknown_k = 0,
 
-    /** Ampere-class NVIDIA and every GPU without a class of its own - A100, L4, L40S, RTX 30 & 40. */
+    /** Ampere-class NVIDIA and every GPU without a class of its own - A100, A10 & RTX 30. */
     nvidia_ampere_k,
+
+    /** Ada-class NVIDIA - L4, L40S & RTX 40: the fp8 conversions. */
+    nvidia_ada_k,
 
     /** Hopper-class NVIDIA - H100 & H200: no TMA gather, DPX instructions. */
     nvidia_hopper_k,

@@ -198,6 +198,7 @@ if (USEARCH_BUILD_CUDA)
     usearch_dense_vram_variant(
         nvidia_ampere --generate-code=arch=compute_80,code=sm_80 --generate-code=arch=compute_80,code=compute_80
     )
+    usearch_dense_vram_variant(nvidia_ada --generate-code=arch=compute_89,code=sm_89)
     usearch_dense_vram_variant(nvidia_hopper --generate-code=arch=compute_90a,code=sm_90a)
     usearch_dense_vram_variant(nvidia_blackwell --generate-code=arch=compute_100f,code=sm_100f)
     usearch_dense_vram_variant(nvidia_blackwellrtx --generate-code=arch=compute_120f,code=sm_120f)
@@ -210,7 +211,11 @@ if (USEARCH_BUILD_CUDA)
                    CUDA_ARCHITECTURES "${USEARCH_CUDA_ARCHITECTURES}"
                    POSITION_INDEPENDENT_CODE ON
     )
-    target_compile_options(usearch_punned PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
+    # The variant over every arm nests one union per alternative, past the front end's default of 200 in flight.
+    target_compile_options(
+        usearch_punned PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+                               "$<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xcudafe --pending_instantiations=1024>"
+    )
     target_link_libraries(usearch_punned PRIVATE CUDA::cuda_driver)
 else ()
     target_sources(usearch_punned PRIVATE dense_index.cpp)

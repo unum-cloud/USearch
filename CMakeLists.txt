@@ -51,9 +51,9 @@ option(USEARCH_BUILD_LIB_NODE "Compile the Node addon; `cmake-js` switches it on
 option(USEARCH_BUILD_CUDA "Compile CUDA index tests & benchmarks" ${USEARCH_CAN_BUILD_CUDA})
 
 # The library compiles one unit per GPU class, each for its own architecture alone - "80" with its PTX for every GPU
-# without a class, "90a", "100f" and "120f" - and ignores this list. The CUDA tests, benchmarks and the dispatch unit
-# compile one pass per entry, and a NumKong GPU tier turns on in them only when every entry runs it, so iterate on one
-# GPU with its family code, like "100f", to test that generation's kits.
+# without a class, "89", "90a", "100f" and "120f" - and ignores this list. The CUDA tests, benchmarks and the dispatch
+# unit compile one pass per entry, and a NumKong GPU tier turns on in them only when every entry runs it, so iterate on
+# one GPU with its family code, like "100f", to test that generation's kits.
 set(USEARCH_CUDA_ARCHITECTURES
     "80;90a;100f;120f"
     CACHE STRING "GPU architectures the CUDA tests, benchmarks & dispatch unit compile for"

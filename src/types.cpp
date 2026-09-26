@@ -179,6 +179,7 @@ USEARCH_EXPORT char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class)
 USEARCH_EXPORT char const* usearch_gpu_class_name(usearch_gpu_class_t gpu_class) {
     switch (gpu_class) {
     case usearch_gpu_class_nvidia_ampere_k: return "nvidia-ampere";
+    case usearch_gpu_class_nvidia_ada_k: return "nvidia-ada";
     case usearch_gpu_class_nvidia_hopper_k: return "nvidia-hopper";
     case usearch_gpu_class_nvidia_blackwell_k: return "nvidia-blackwell";
     case usearch_gpu_class_nvidia_blackwellrtx_k: return "nvidia-blackwellrtx";
