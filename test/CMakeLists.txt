@@ -65,6 +65,8 @@ if (USEARCH_BUILD_CUDA)
         dense/vram_index_f16.cu
         dense/vram_index_e5m2.cu
         dense/vram_index_e4m3.cu
+        dense/vram_index_e3m2.cu
+        dense/vram_index_e2m3.cu
         dense/vram_index_i8.cu
         dense/vram_index_i4.cu
         dense/vram_index_u8.cu
@@ -82,6 +84,9 @@ if (USEARCH_BUILD_CUDA)
                    CUDA_STANDARD 20
                    CUDA_ARCHITECTURES "${USEARCH_CUDA_ARCHITECTURES}"
     )
+    # A generation's kits join the suite only when every listed architecture runs them.
+    usearch_cuda_tiers(test_cuda_tiers_ "${USEARCH_CUDA_ARCHITECTURES}")
+    target_compile_definitions(usearch_test_cuda PRIVATE ${test_cuda_tiers_})
     target_compile_options(usearch_test_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
     target_link_libraries(usearch_test_cuda PRIVATE fmt::fmt yyjson CUDA::cuda_driver forkunion::static)
 endif ()

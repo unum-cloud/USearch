@@ -50,21 +50,60 @@ option(USEARCH_BUILD_LIB_PYTHON "Compile the CPython extension; `scikit-build-co
 option(USEARCH_BUILD_LIB_NODE "Compile the Node addon; `cmake-js` switches it on" OFF)
 option(USEARCH_BUILD_CUDA "Compile CUDA index tests & benchmarks" ${USEARCH_CAN_BUILD_CUDA})
 
-# One list feeds every CUDA target, so a fat binary from this tree runs on the whole fleet. Ampere is the floor: its
-# cubins stay loadable on every later 8.x part, so "80" alone covers 86 and 89. Hopper and both Blackwell lines are
-# architecture-specific ("a" suffix) because the kernels reach for `wgmma` and the tensor-memory instructions, which
-# carry no forward-compatible PTX - each needs its own entry. Override with a single architecture, or with "native",
-# when iterating on one machine and the extra compile time is not worth paying.
+# The library compiles one unit per GPU class, each for its own architecture alone - "80" with its PTX for every GPU
+# without a class, "90a", "100f" and "120f" - and ignores this list. The CUDA tests, benchmarks and the dispatch unit
+# compile one pass per entry, and a NumKong GPU tier turns on in them only when every entry runs it, so iterate on one
+# GPU with its family code, like "100f", to test that generation's kits.
 set(USEARCH_CUDA_ARCHITECTURES
-    "80;90a;100a;120a"
-    CACHE STRING "GPU architectures baked into the CUDA targets: Ampere floor, Hopper, Blackwell datacenter & consumer"
+    "80;90a;100f;120f"
+    CACHE STRING "GPU architectures the CUDA tests, benchmarks & dispatch unit compile for"
 )
 
-# Three-digit "a" entries are only understood from CMake 3.31 onward, while the CPU-only build stays on the 3.28 floor
-# that stock Ubuntu 24.04 ships. The floor follows the architectures actually asked for, so a single-architecture build
-# on a distribution CMake is never refused for a capability it does not use.
+# Sets @p output to NUMKONG_TARGET_<tier>=1 where every one of the architectures, without CMake's "-real" or "-virtual",
+# is one of the tier's, and to NUMKONG_TARGET_<tier>=0 otherwise. NumKong's one-code units need any of them; a unit here
+# compiles every listed code, and a kit compiled into one pass is compiled into all.
+function (usearch_cuda_tier tier architectures tier_architectures output)
+    set(enabled_ 1)
+    foreach (architecture_ IN LISTS architectures)
+        string(REGEX REPLACE "-(real|virtual)$" "" architecture_ "${architecture_}")
+        if (NOT architecture_ IN_LIST tier_architectures)
+            set(enabled_ 0)
+        endif ()
+    endforeach ()
+    set(${output}
+        NUMKONG_TARGET_${tier}=${enabled_}
+        PARENT_SCOPE
+    )
+endfunction ()
+
+# The NumKong GPU tiers the CUDA codes run, as the definitions a target compiles with, over NumKong's own code lists.
+function (usearch_cuda_tiers output architectures)
+    # `mma.sync`: A100, A30, A40, RTX 30, Jetson Orin, L40, RTX 40, and every GPU since.
+    usearch_cuda_tier(
+        AMPERE "${architectures}"
+        "80;86;87;88;89;90;90a;100;100a;100f;103;103a;103f;110;110a;110f;120;120a;120f;121;121a;121f" ampere_
+    )
+    # FP8 `mma.sync`: L4, L40S, RTX 40, and every GPU since.
+    usearch_cuda_tier(
+        ADA "${architectures}" "89;90;90a;100;100a;100f;103;103a;103f;110;110a;110f;120;120a;120f;121;121a;121f" ada_
+    )
+    # `wgmma`: H100, H200, GH200.
+    usearch_cuda_tier(HOPPER "${architectures}" "90a" hopper_)
+    # `tcgen05`: B200, GB200, B300, GB300.
+    usearch_cuda_tier(BLACKWELL "${architectures}" "100a;100f;103a;103f" blackwell_)
+    # FP6/FP4 `mma.sync`: RTX 50, RTX PRO 6000, DGX Spark.
+    usearch_cuda_tier(BLACKWELLRTX "${architectures}" "120a;120f;121a;121f" blackwellrtx_)
+    set(${output}
+        ${ampere_} ${ada_} ${hopper_} ${blackwell_} ${blackwellrtx_}
+        PARENT_SCOPE
+    )
+endfunction ()
+
+# Three-digit "a" & "f" entries are only understood from CMake 3.31 onward, while the CPU-only build stays on the 3.28
+# floor that stock Ubuntu 24.04 ships. The floor follows the architectures actually asked for, so a single-architecture
+# build on a distribution CMake is never refused for a capability it does not use.
 if (USEARCH_BUILD_CUDA AND CMAKE_VERSION VERSION_LESS 3.31)
-    string(REGEX MATCH "1[0-9][0-9]a" architectures_needing_cmake_331 "${USEARCH_CUDA_ARCHITECTURES}")
+    string(REGEX MATCH "1[0-9][0-9][af]" architectures_needing_cmake_331 "${USEARCH_CUDA_ARCHITECTURES}")
     if (architectures_needing_cmake_331)
         message(
             FATAL_ERROR
@@ -383,7 +422,7 @@ set(NUMKONG_BUILD_SHARED
 )
 
 usearch_sibling(
-    numkong numkong::header https://github.com/ashvardanian/NumKong ee77089dcfb7ead01274ca6a0365c566aa0521d8
+    numkong numkong::header https://github.com/ashvardanian/NumKong 4cf519f02a04f280d0399e528b46a0085ead2bc5
 )
 usearch_sibling(
     forkunion forkunion::header https://github.com/ashvardanian/ForkUnion dcad1d684b6f17cad8ab11059922c9ba9834d3bc

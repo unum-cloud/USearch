@@ -385,11 +385,17 @@ USEARCH_EXPORT typedef enum usearch_cpu_class_t {
 USEARCH_EXPORT typedef enum usearch_gpu_class_t {
     usearch_gpu_class_unknown_k = 0,
 
+    /** Ampere-class NVIDIA and every GPU without a class of its own - A100, L4, L40S, RTX 30 & 40. */
+    usearch_gpu_class_nvidia_ampere_k,
+
     /** Hopper-class NVIDIA - H100 & H200: no TMA gather, DPX instructions. */
     usearch_gpu_class_nvidia_hopper_k,
 
-    /** Blackwell-class NVIDIA - B200 & GB200: TMA gather4 scattered fetches. */
+    /** Blackwell-class NVIDIA - B200, B300 & GB300: TMA gather4 scattered fetches. */
     usearch_gpu_class_nvidia_blackwell_k,
+
+    /** Consumer Blackwell NVIDIA - RTX 50, RTX PRO 6000 & DGX Spark. */
+    usearch_gpu_class_nvidia_blackwellrtx_k,
 
     /** Rubin-class NVIDIA - the Vera-Rubin platform's device half. */
     usearch_gpu_class_nvidia_rubin_k,

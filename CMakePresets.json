@@ -139,7 +139,7 @@
       "description": "Same targets as `dev`, at Release and emitting every architecture rather than the host GPU - what shipping artifacts and cross-machine runs need.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "USEARCH_CUDA_ARCHITECTURES": "80;90a;100a;120a"
+        "USEARCH_CUDA_ARCHITECTURES": "80;90a;100f;120f"
       }
     }
   ],

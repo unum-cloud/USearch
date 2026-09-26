@@ -162,38 +162,48 @@ if (USEARCH_BUILD_CUDA)
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
 
-    add_library(
-        usearch_dense_vram_variants OBJECT
-        dense/vram_variants_bf16.cu
-        dense/vram_variants_f16.cu
-        dense/vram_variants_e5m2.cu
-        dense/vram_variants_e4m3.cu
-        dense/vram_variants_i8.cu
-        dense/vram_variants_i4.cu
-        dense/vram_variants_u8.cu
-        dense/vram_variants_u4.cu
-        dense/vram_variants_u1.cu
+    # One unit per GPU class, compiled for its own architecture alone - the device twin of the CPU classes' per-unit ISA
+    # flags - so no cubin carries another generation's kernels. Every unit sees the same NumKong GPU tiers, as the CPU
+    # units see the same probe verdicts, so the arms' types agree across units, and each class's ceiling keeps its arms
+    # within its generation. The codes reach NVCC directly, since CMake spells family-specific ones only from 3.31.
+    set(usearch_cuda_tiers_ NUMKONG_TARGET_AMPERE=1 NUMKONG_TARGET_ADA=1 NUMKONG_TARGET_HOPPER=1
+                            NUMKONG_TARGET_BLACKWELL=1 NUMKONG_TARGET_BLACKWELLRTX=1
     )
-    target_include_directories(
-        usearch_dense_vram_variants PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
-                                            ${CMAKE_CURRENT_SOURCE_DIR}
+    function (usearch_dense_vram_variant class)
+        set(target_ usearch_dense_vram_variants_${class})
+        add_library(${target_} OBJECT dense/vram_variants_${class}.cu)
+        target_include_directories(
+            ${target_} PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
+                               ${CMAKE_CURRENT_SOURCE_DIR}
+        )
+        # Skips `usearch_setup_target`, whose host-compiler flags the CUDA driver rejects, so it takes the list by hand.
+        target_compile_definitions(
+            ${target_} PRIVATE "USEARCH_BUILD_CUDA=1" ${usearch_compile_definitions_} ${usearch_cuda_tiers_}
+        )
+        set_target_properties(
+            ${target_}
+            PROPERTIES CXX_STANDARD 20
+                       CUDA_STANDARD 20
+                       CUDA_ARCHITECTURES OFF
+                       POSITION_INDEPENDENT_CODE ON
+        )
+        target_compile_options(${target_} PRIVATE --expt-relaxed-constexpr ${ARGN})
+        target_link_libraries(${target_} PRIVATE yyjson CUDA::cuda_driver forkunion::static)
+        set(USEARCH_PUNNED_LIBRARIES
+            ${USEARCH_PUNNED_LIBRARIES} ${target_}
+            PARENT_SCOPE
+        )
+    endfunction ()
+
+    usearch_dense_vram_variant(
+        nvidia_ampere --generate-code=arch=compute_80,code=sm_80 --generate-code=arch=compute_80,code=compute_80
     )
-    # Skips `usearch_setup_target`, whose host-compiler flags the CUDA driver rejects, so it takes the list by hand.
-    target_compile_definitions(
-        usearch_dense_vram_variants PRIVATE "USEARCH_BUILD_CUDA=1" ${usearch_compile_definitions_}
-    )
-    set_target_properties(
-        usearch_dense_vram_variants
-        PROPERTIES CXX_STANDARD 20
-                   CUDA_STANDARD 20
-                   CUDA_ARCHITECTURES "${USEARCH_CUDA_ARCHITECTURES}"
-                   POSITION_INDEPENDENT_CODE ON
-    )
-    target_compile_options(usearch_dense_vram_variants PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
-    target_link_libraries(usearch_dense_vram_variants PRIVATE yyjson CUDA::cuda_driver forkunion::static)
+    usearch_dense_vram_variant(nvidia_hopper --generate-code=arch=compute_90a,code=sm_90a)
+    usearch_dense_vram_variant(nvidia_blackwell --generate-code=arch=compute_100f,code=sm_100f)
+    usearch_dense_vram_variant(nvidia_blackwellrtx --generate-code=arch=compute_120f,code=sm_120f)
 
     target_sources(usearch_punned PRIVATE dense_index.cu)
-    target_compile_definitions(usearch_punned PRIVATE "USEARCH_BUILD_CUDA=1")
+    target_compile_definitions(usearch_punned PRIVATE "USEARCH_BUILD_CUDA=1" ${usearch_cuda_tiers_})
     set_target_properties(
         usearch_punned
         PROPERTIES CUDA_STANDARD 20
@@ -202,7 +212,6 @@ if (USEARCH_BUILD_CUDA)
     )
     target_compile_options(usearch_punned PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
     target_link_libraries(usearch_punned PRIVATE CUDA::cuda_driver)
-    list(APPEND USEARCH_PUNNED_LIBRARIES usearch_dense_vram_variants)
 else ()
     target_sources(usearch_punned PRIVATE dense_index.cpp)
     target_compile_definitions(usearch_punned PRIVATE "USEARCH_BUILD_CUDA=0")

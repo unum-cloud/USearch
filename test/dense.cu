@@ -44,6 +44,8 @@ int main() {
     failures_count += dense::check_vram_index_f16();
     failures_count += dense::check_vram_index_e5m2();
     failures_count += dense::check_vram_index_e4m3();
+    failures_count += dense::check_vram_index_e3m2();
+    failures_count += dense::check_vram_index_e2m3();
     failures_count += dense::check_vram_index_i8();
     failures_count += dense::check_vram_index_i4();
     failures_count += dense::check_vram_index_u8();

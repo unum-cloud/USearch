@@ -101,6 +101,8 @@ std::size_t check_vram_index_bf16();
 std::size_t check_vram_index_f16();
 std::size_t check_vram_index_e5m2();
 std::size_t check_vram_index_e4m3();
+std::size_t check_vram_index_e3m2();
+std::size_t check_vram_index_e2m3();
 std::size_t check_vram_index_i8();
 std::size_t check_vram_index_i4();
 std::size_t check_vram_index_u8();

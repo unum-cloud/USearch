@@ -315,21 +315,33 @@ struct gpu_class_name_t {
     char const* name;
 };
 inline constexpr gpu_class_name_t gpu_class_names_k[] = {
-    {gpu_class_t::nvidia_hopper_k, "nvidia_hopper"},
-    {gpu_class_t::nvidia_blackwell_k, "nvidia_blackwell"},
+    {gpu_class_t::nvidia_ampere_k, "nvidia_ampere"},       {gpu_class_t::nvidia_hopper_k, "nvidia_hopper"},
+    {gpu_class_t::nvidia_blackwell_k, "nvidia_blackwell"}, {gpu_class_t::nvidia_blackwellrtx_k, "nvidia_blackwellrtx"},
     {gpu_class_t::nvidia_rubin_k, "nvidia_rubin"},
 };
 
 #if USEARCH_BUILD_CUDA
 
 /** Lowers one GPU class onto the CUDA architecture ceiling its kits compile up to; Rubin rides the
- *  newest compiled ceiling until its own kits land. */
+ *  Blackwell ceiling until its own kits land. */
 constexpr cuda_arch_t cuda_arch_of(gpu_class_t gpu_class) noexcept {
     switch (gpu_class) {
     case gpu_class_t::nvidia_hopper_k: return cuda_arch_hopper_k;
     case gpu_class_t::nvidia_blackwell_k:
     case gpu_class_t::nvidia_rubin_k: return cuda_arch_blackwell_k;
+    case gpu_class_t::nvidia_blackwellrtx_k: return cuda_arch_blackwellrtx_k;
     default: return cuda_arch_ampere_k;
+    }
+}
+
+/** The class whose unit carries cubins for a device of compute capability @p arch; any generation
+ *  without a class of its own runs the Ampere unit, natively on 8.x and through its PTX past that. */
+constexpr gpu_class_t gpu_class_of(int arch) noexcept {
+    switch (arch / 100) {
+    case 9: return gpu_class_t::nvidia_hopper_k;
+    case 10: return gpu_class_t::nvidia_blackwell_k;
+    case 12: return gpu_class_t::nvidia_blackwellrtx_k;
+    default: return gpu_class_t::nvidia_ampere_k;
     }
 }
 #endif
@@ -413,10 +425,10 @@ using ram_index =
                       atomic_ref_for_cpu_class<cpu_class_>::template type, uuid_slice_hash_t>;
 #if USEARCH_BUILD_CUDA
 
-/** One VRAM alternative: the GPU class is a compilation ceiling, not a target, since the index dispatches
- *  by the actual device's generation at runtime, so the newest class serves the whole fleet. */
-template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, gpu_class_t gpu_class_ = gpu_class_t::nvidia_blackwell_k>
-using vram_index = dense_vram_indexes<us::uuid_t, dtype_, kernel_, cuda_arch_of(gpu_class_), uuid_slice_hash_t>;
+/** One VRAM alternative: the GPU class alone names the rung, lowering onto its architecture ceiling;
+ *  its kernels come from that class's unit, compiled for its architecture alone. */
+template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, gpu_class_t gpu_class_>
+using vram_index = dense_vram_indexes<us::uuid_t, dtype_, kernel_, cuda_arch_of(gpu_class_)>;
 #endif
 
 /** The C predicate lifted onto the index's key vocabulary. */

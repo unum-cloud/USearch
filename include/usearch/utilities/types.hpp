@@ -953,17 +953,24 @@ enum class cpu_class_t : u32_t {
 };
 
 /** The GPU families USearch ships tuned variants for, the device twin of
- *  @ref cpu_class_t: one class per generation of kernel kits, lowered onto CUDA
- *  architecture ceilings through explicit helpers where the CUDA SDK is linked. */
+ *  @ref cpu_class_t: one class per generation of kernel kits, each compiled for its own
+ *  architecture alone and lowered onto a CUDA architecture ceiling where the CUDA SDK is linked. */
 enum class gpu_class_t : u32_t {
     unknown_k = 0,
+
+    /** Ampere-class NVIDIA and every GPU without a class of its own - A100, L4, L40S, RTX 30 & 40. */
+    nvidia_ampere_k,
 
     /** Hopper-class NVIDIA - H100 & H200: no TMA gather, DPX instructions. */
     nvidia_hopper_k,
 
-    /** Blackwell-class NVIDIA - B200 & GB200: TMA @c gather4 scattered fetches
+    /** Blackwell-class NVIDIA - B200, B300 & GB300: TMA @c gather4 scattered fetches
      *  and @c tcgen05 tensor-core GEMMs. */
     nvidia_blackwell_k,
+
+    /** Consumer Blackwell NVIDIA - RTX 50, RTX PRO 6000 & DGX Spark: Blackwell's conversions
+     *  without @c tcgen05. */
+    nvidia_blackwellrtx_k,
 
     /** Rubin-class NVIDIA - the Vera-Rubin platform's device half. */
     nvidia_rubin_k,
