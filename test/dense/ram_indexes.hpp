@@ -75,3 +75,5 @@ static std::size_t test_configuration(char const* name) {
 std::size_t check_ram_indexes();
 
 #pragma endregion Suite Entry Points
+
+} // namespace unum::usearch::test::dense

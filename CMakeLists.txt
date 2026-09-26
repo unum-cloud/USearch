@@ -314,7 +314,7 @@ function (usearch_setup_target TARGET_NAME)
 
     # NumKong's archive answers the capability queries and the punned kernels through its dispatch table, so every
     # artifact carries it whole and none needs a `libnumkong.so` beside it.
-    target_compile_definitions(${TARGET_NAME} PRIVATE "NK_RUNTIME_DISPATCH=1")
+    target_compile_definitions(${TARGET_NAME} PRIVATE "NUMKONG_RUNTIME_DISPATCH=1")
     target_link_libraries(${TARGET_NAME} PRIVATE numkong::static)
 
 endfunction ()
@@ -377,23 +377,23 @@ endforeach ()
 # The compiled siblings land as archives inside our shared objects, so every one is position-independent. NumKong
 # defines its archive under the same switch as its shared library, so the switch is set before the subdirectory lands.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-set(NK_BUILD_SHARED
+set(NUMKONG_BUILD_SHARED
     ON
     CACHE BOOL "" FORCE
 )
 
 usearch_sibling(
-    numkong numkong::header https://github.com/ashvardanian/NumKong 649d1a72bfa2247089eb42303138a616e47a0372
+    numkong numkong::header https://github.com/ashvardanian/NumKong ee77089dcfb7ead01274ca6a0365c566aa0521d8
 )
 usearch_sibling(
-    forkunion forkunion::header https://github.com/ashvardanian/ForkUnion 0f5986fe62a77a2cc683a0e252482ac0d4400995
+    forkunion forkunion::header https://github.com/ashvardanian/ForkUnion dcad1d684b6f17cad8ab11059922c9ba9834d3bc
 )
 usearch_sibling(
     stringzilla stringzilla::header https://github.com/ashvardanian/StringZilla
-    36b32746d1fa29252af3beade1b07adc433a495e
+    493e4c0c138a50e6ad9c2d05101cb097ea070d5a
 )
 usearch_sibling(
-    smashtable smashtable::header https://github.com/ashvardanian/SmashTable f69cd0732842189dc3bede2e70712af8b525b70c
+    smashtable smashtable::header https://github.com/ashvardanian/SmashTable 5e65aa63c80086fa3ff54f20ed634d23dca4975f
 )
 
 # The siblings' compile verdicts, one list: every unit that admits rungs at runtime takes it whole, so the class units,

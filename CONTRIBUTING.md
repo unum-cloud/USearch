@@ -322,12 +322,12 @@ RUN npm init -y
 RUN yum install tar git python3 cmake gcc-c++ -y && yum groupinstall "Development Tools" -y
 
 # Assuming AWS Linux 2 uses old compilers:
-ENV NK_TARGET_HASWELL 1
-ENV NK_TARGET_SKYLAKE 0
-ENV NK_TARGET_ICELAKE 0
-ENV NK_TARGET_SAPPHIRE 0
-ENV NK_TARGET_NEON 1
-ENV NK_TARGET_SVE 0
+ENV NUMKONG_TARGET_HASWELL 1
+ENV NUMKONG_TARGET_SKYLAKE 0
+ENV NUMKONG_TARGET_ICELAKE 0
+ENV NUMKONG_TARGET_SAPPHIRE 0
+ENV NUMKONG_TARGET_NEON 1
+ENV NUMKONG_TARGET_SVE 0
 
 # For specific PR:
 # RUN npm install --build-from-source unum-cloud/USearch#pull/302/head

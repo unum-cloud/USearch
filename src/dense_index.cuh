@@ -48,8 +48,8 @@
 struct punned_dense_index_t {
 
     using variants_t = std::variant<
-#if NK_TARGET_X8664_
-#if NK_TARGET_HASWELL
+#if NUMKONG_ARCH_X86_64_
+#if NUMKONG_TARGET_HASWELL
         // intel_haswell over serial by haswell: every dtype, 33 arms
         ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>,       //
         ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>,   //
@@ -85,7 +85,7 @@ struct punned_dense_index_t {
         ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::intel_haswell_k>,     //
         ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::intel_haswell_k>,     //
 #endif
-#if FU_TARGET_X86_TPAUSE || FU_TARGET_X86_CMPCCXADD
+#if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
         // intel_sierra over intel_haswell by x86_tpause, x86_cmpccxadd: bf16 f16 e5m2 e4m3 e3m2 i4 u4 u1, 24 arms
         ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::intel_sierra_k>,       //
         ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::intel_sierra_k>,   //
@@ -112,7 +112,7 @@ struct punned_dense_index_t {
         ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::intel_sierra_k>,     //
         ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::intel_sierra_k>,     //
 #endif
-#if FU_TARGET_X86_TPAUSE || FU_TARGET_X86_CMPCCXADD || NK_TARGET_ALDER || NK_TARGET_SIERRA
+#if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
         // intel_sierra over intel_haswell by x86_tpause, x86_cmpccxadd, alder, sierra: e2m3 i8 u8, 9 arms
         ram_index<nk_e2m3_k, nk_kernel_dot_k, cpu_class_t::intel_sierra_k>,       //
         ram_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::intel_sierra_k>,   //
@@ -124,7 +124,7 @@ struct punned_dense_index_t {
         ram_index<nk_u8_k, nk_kernel_angular_k, cpu_class_t::intel_sierra_k>,     //
         ram_index<nk_u8_k, nk_kernel_euclidean_k, cpu_class_t::intel_sierra_k>,   //
 #endif
-#if NK_TARGET_SKYLAKE
+#if NUMKONG_TARGET_SKYLAKE
         // intel_skylake over intel_haswell by skylake: bf16 f16 e5m2 e4m3 e3m2 e2m3, 18 arms
         ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::intel_skylake_k>,       //
         ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>,   //
@@ -145,7 +145,7 @@ struct punned_dense_index_t {
         ram_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>,   //
         ram_index<nk_e2m3_k, nk_kernel_euclidean_k, cpu_class_t::intel_skylake_k>, //
 #endif
-#if NK_TARGET_ICELAKE
+#if NUMKONG_TARGET_ICELAKE
         // intel_icelake over intel_skylake by icelake: i8 i4 u8 u4 u1, 15 arms
         ram_index<nk_i8_k, nk_kernel_dot_k, cpu_class_t::intel_icelake_k>,       //
         ram_index<nk_i8_k, nk_kernel_angular_k, cpu_class_t::intel_icelake_k>,   //
@@ -163,7 +163,7 @@ struct punned_dense_index_t {
         ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::intel_icelake_k>,   //
         ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::intel_icelake_k>,   //
 #endif
-#if NK_TARGET_GENOA
+#if NUMKONG_TARGET_GENOA
         // amd_genoa over intel_icelake by genoa: bf16 e5m2 e4m3, 9 arms
         ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::amd_genoa_k>,       //
         ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::amd_genoa_k>,   //
@@ -175,7 +175,7 @@ struct punned_dense_index_t {
         ram_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::amd_genoa_k>,   //
         ram_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::amd_genoa_k>, //
 #endif
-#if FU_TARGET_X86_TPAUSE || FU_TARGET_X86_CMPCCXADD
+#if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
         // intel_diamond over amd_genoa by x86_tpause, x86_cmpccxadd: bf16 f16 e3m2 i4 u4 u1, 18 arms
         ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::intel_diamond_k>,       //
         ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::intel_diamond_k>,   //
@@ -196,7 +196,7 @@ struct punned_dense_index_t {
         ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::intel_diamond_k>,     //
         ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::intel_diamond_k>,     //
 #endif
-#if FU_TARGET_X86_TPAUSE || FU_TARGET_X86_CMPCCXADD || NK_TARGET_DIAMOND
+#if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_DIAMOND
         // intel_diamond over amd_genoa by x86_tpause, x86_cmpccxadd, diamond: e5m2 e4m3, 6 arms
         ram_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::intel_diamond_k>,       //
         ram_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::intel_diamond_k>,   //
@@ -205,7 +205,7 @@ struct punned_dense_index_t {
         ram_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::intel_diamond_k>,   //
         ram_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::intel_diamond_k>, //
 #endif
-#if FU_TARGET_X86_TPAUSE || FU_TARGET_X86_CMPCCXADD || NK_TARGET_ALDER || NK_TARGET_SIERRA
+#if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
         // intel_diamond over amd_genoa by x86_tpause, x86_cmpccxadd, alder, sierra: e2m3 i8 u8, 9 arms
         ram_index<nk_e2m3_k, nk_kernel_dot_k, cpu_class_t::intel_diamond_k>,       //
         ram_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::intel_diamond_k>,   //
@@ -217,8 +217,8 @@ struct punned_dense_index_t {
         ram_index<nk_u8_k, nk_kernel_angular_k, cpu_class_t::intel_diamond_k>,     //
         ram_index<nk_u8_k, nk_kernel_euclidean_k, cpu_class_t::intel_diamond_k>,   //
 #endif
-#elif NK_TARGET_ARM64_
-#if NK_TARGET_NEON
+#elif NUMKONG_ARCH_ARM64_
+#if NUMKONG_TARGET_NEON
         // aws_g2 over serial by neon: bf16 f16 u1, 9 arms
         ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::aws_g2_k>,       //
         ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::aws_g2_k>,   //
@@ -230,13 +230,13 @@ struct punned_dense_index_t {
         ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::aws_g2_k>,     //
         ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::aws_g2_k>,     //
 #endif
-#if FU_TARGET_ARM64_LSE || FU_TARGET_ARM64_RCPC || NK_TARGET_NEONBFDOT
+#if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONBFDOT
         // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonbfdot: bf16, 3 arms
         ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>,       //
         ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>,   //
         ram_index<nk_bf16_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>, //
 #endif
-#if FU_TARGET_ARM64_LSE || FU_TARGET_ARM64_RCPC || NK_TARGET_NEONFHM
+#if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONFHM
         // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonfhm: f16 e5m2 e4m3, 9 arms
         ram_index<nk_f16_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>,        //
         ram_index<nk_f16_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>,    //
@@ -248,7 +248,7 @@ struct punned_dense_index_t {
         ram_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>,   //
         ram_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>, //
 #endif
-#if FU_TARGET_ARM64_LSE || FU_TARGET_ARM64_RCPC || NK_TARGET_NEONSDOT
+#if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONSDOT
         // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonsdot: e3m2 e2m3 i8 i4 u8 u4, 18 arms
         ram_index<nk_e3m2_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>,       //
         ram_index<nk_e3m2_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>,   //
@@ -269,13 +269,13 @@ struct punned_dense_index_t {
         ram_index<nk_u4_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>,     //
         ram_index<nk_u4_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>,   //
 #endif
-#if FU_TARGET_ARM64_LSE || FU_TARGET_ARM64_RCPC
+#if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC
         // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc: u1, 3 arms
         ram_index<nk_u1_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>,     //
         ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::apple_m2_k>, //
         ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::apple_m2_k>, //
 #endif
-#if FU_TARGET_ARM64_WFET
+#if FORKUNION_TARGET_ARM64_WFET
         // aws_g5 over apple_m2 by arm64_wfet: every dtype, 33 arms
         ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::aws_g5_k>,       //
         ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::aws_g5_k>,   //
@@ -311,7 +311,7 @@ struct punned_dense_index_t {
         ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::aws_g5_k>,     //
         ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::aws_g5_k>,     //
 #endif
-#if NK_TARGET_NEONFP8
+#if NUMKONG_TARGET_NEONFP8
         // nvidia_vera over aws_g5 by neonfp8: e5m2 e4m3 e3m2 e2m3, 12 arms
         ram_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::nvidia_vera_k>,       //
         ram_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::nvidia_vera_k>,   //
@@ -326,8 +326,8 @@ struct punned_dense_index_t {
         ram_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::nvidia_vera_k>,   //
         ram_index<nk_e2m3_k, nk_kernel_euclidean_k, cpu_class_t::nvidia_vera_k>, //
 #endif
-#elif NK_TARGET_RISCV64_
-#if FU_TARGET_RISC5_WRS || FU_TARGET_RISC5_ZACAS
+#elif NUMKONG_ARCH_RISCV64_
+#if FORKUNION_TARGET_RISC5_WRS || FORKUNION_TARGET_RISC5_ZACAS
         // alibaba_c930 over serial by risc5_wrs, risc5_zacas: every dtype, 33 arms
         ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::alibaba_c930_k>,       //
         ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::alibaba_c930_k>,   //
@@ -363,8 +363,8 @@ struct punned_dense_index_t {
         ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::alibaba_c930_k>,     //
         ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::alibaba_c930_k>,     //
 #endif
-#elif NK_TARGET_WASM_
-#if NK_TARGET_V128
+#elif NUMKONG_ARCH_WASM_
+#if NUMKONG_TARGET_V128
         // wasm32_v128 over serial by v128: bf16 i8 u8 u1, 12 arms
         ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::wasm32_v128_k>,       //
         ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::wasm32_v128_k>,   //
@@ -379,7 +379,7 @@ struct punned_dense_index_t {
         ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::wasm32_v128_k>,     //
         ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::wasm32_v128_k>,     //
 #endif
-#if NK_TARGET_V128RELAXED
+#if NUMKONG_TARGET_V128RELAXED
         // wasm64_extended over wasm32_v128 by v128relaxed: bf16 f16 e5m2 e4m3 e3m2 e2m3 i8 i4 u8 u4, 30 arms
         ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>,       //
         ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>,   //
@@ -499,8 +499,8 @@ struct punned_dense_index_t {
 
 /** The arms' explicit instantiation declarations: every body compiles in its class's unit, so this
  *  unit only visits. */
-#if NK_TARGET_X8664_
-#if NK_TARGET_HASWELL
+#if NUMKONG_ARCH_X86_64_
+#if NUMKONG_TARGET_HASWELL
 /* intel_haswell over serial by haswell: every dtype, 33 arms */
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>>;
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>>;
@@ -536,7 +536,7 @@ extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_dot_k, cpu
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::intel_haswell_k>>;
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::intel_haswell_k>>;
 #endif
-#if FU_TARGET_X86_TPAUSE || FU_TARGET_X86_CMPCCXADD
+#if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
 /* intel_sierra over intel_haswell by x86_tpause, x86_cmpccxadd: bf16 f16 e5m2 e4m3 e3m2 i4 u4 u1, 24 arms */
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::intel_sierra_k>>;
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::intel_sierra_k>>;
@@ -563,7 +563,7 @@ extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_dot_k, cpu
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::intel_sierra_k>>;
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::intel_sierra_k>>;
 #endif
-#if FU_TARGET_X86_TPAUSE || FU_TARGET_X86_CMPCCXADD || NK_TARGET_ALDER || NK_TARGET_SIERRA
+#if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
 /* intel_sierra over intel_haswell by x86_tpause, x86_cmpccxadd, alder, sierra: e2m3 i8 u8, 9 arms */
 extern template struct specialized_index<ram_index<nk_e2m3_k, nk_kernel_dot_k, cpu_class_t::intel_sierra_k>>;
 extern template struct specialized_index<ram_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::intel_sierra_k>>;
@@ -575,7 +575,7 @@ extern template struct specialized_index<ram_index<nk_u8_k, nk_kernel_dot_k, cpu
 extern template struct specialized_index<ram_index<nk_u8_k, nk_kernel_angular_k, cpu_class_t::intel_sierra_k>>;
 extern template struct specialized_index<ram_index<nk_u8_k, nk_kernel_euclidean_k, cpu_class_t::intel_sierra_k>>;
 #endif
-#if NK_TARGET_SKYLAKE
+#if NUMKONG_TARGET_SKYLAKE
 /* intel_skylake over intel_haswell by skylake: bf16 f16 e5m2 e4m3 e3m2 e2m3, 18 arms */
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::intel_skylake_k>>;
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>>;
@@ -596,7 +596,7 @@ extern template struct specialized_index<ram_index<nk_e2m3_k, nk_kernel_dot_k, c
 extern template struct specialized_index<ram_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>>;
 extern template struct specialized_index<ram_index<nk_e2m3_k, nk_kernel_euclidean_k, cpu_class_t::intel_skylake_k>>;
 #endif
-#if NK_TARGET_ICELAKE
+#if NUMKONG_TARGET_ICELAKE
 /* intel_icelake over intel_skylake by icelake: i8 i4 u8 u4 u1, 15 arms */
 extern template struct specialized_index<ram_index<nk_i8_k, nk_kernel_dot_k, cpu_class_t::intel_icelake_k>>;
 extern template struct specialized_index<ram_index<nk_i8_k, nk_kernel_angular_k, cpu_class_t::intel_icelake_k>>;
@@ -614,7 +614,7 @@ extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_dot_k, cpu
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::intel_icelake_k>>;
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::intel_icelake_k>>;
 #endif
-#if NK_TARGET_GENOA
+#if NUMKONG_TARGET_GENOA
 /* amd_genoa over intel_icelake by genoa: bf16 e5m2 e4m3, 9 arms */
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::amd_genoa_k>>;
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::amd_genoa_k>>;
@@ -626,7 +626,7 @@ extern template struct specialized_index<ram_index<nk_e4m3_k, nk_kernel_dot_k, c
 extern template struct specialized_index<ram_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::amd_genoa_k>>;
 extern template struct specialized_index<ram_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::amd_genoa_k>>;
 #endif
-#if FU_TARGET_X86_TPAUSE || FU_TARGET_X86_CMPCCXADD
+#if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
 /* intel_diamond over amd_genoa by x86_tpause, x86_cmpccxadd: bf16 f16 e3m2 i4 u4 u1, 18 arms */
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::intel_diamond_k>>;
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::intel_diamond_k>>;
@@ -647,7 +647,7 @@ extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_dot_k, cpu
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::intel_diamond_k>>;
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::intel_diamond_k>>;
 #endif
-#if FU_TARGET_X86_TPAUSE || FU_TARGET_X86_CMPCCXADD || NK_TARGET_DIAMOND
+#if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_DIAMOND
 /* intel_diamond over amd_genoa by x86_tpause, x86_cmpccxadd, diamond: e5m2 e4m3, 6 arms */
 extern template struct specialized_index<ram_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::intel_diamond_k>>;
 extern template struct specialized_index<ram_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::intel_diamond_k>>;
@@ -656,7 +656,7 @@ extern template struct specialized_index<ram_index<nk_e4m3_k, nk_kernel_dot_k, c
 extern template struct specialized_index<ram_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::intel_diamond_k>>;
 extern template struct specialized_index<ram_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::intel_diamond_k>>;
 #endif
-#if FU_TARGET_X86_TPAUSE || FU_TARGET_X86_CMPCCXADD || NK_TARGET_ALDER || NK_TARGET_SIERRA
+#if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
 /* intel_diamond over amd_genoa by x86_tpause, x86_cmpccxadd, alder, sierra: e2m3 i8 u8, 9 arms */
 extern template struct specialized_index<ram_index<nk_e2m3_k, nk_kernel_dot_k, cpu_class_t::intel_diamond_k>>;
 extern template struct specialized_index<ram_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::intel_diamond_k>>;
@@ -668,8 +668,8 @@ extern template struct specialized_index<ram_index<nk_u8_k, nk_kernel_dot_k, cpu
 extern template struct specialized_index<ram_index<nk_u8_k, nk_kernel_angular_k, cpu_class_t::intel_diamond_k>>;
 extern template struct specialized_index<ram_index<nk_u8_k, nk_kernel_euclidean_k, cpu_class_t::intel_diamond_k>>;
 #endif
-#elif NK_TARGET_ARM64_
-#if NK_TARGET_NEON
+#elif NUMKONG_ARCH_ARM64_
+#if NUMKONG_TARGET_NEON
 /* aws_g2 over serial by neon: bf16 f16 u1, 9 arms */
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::aws_g2_k>>;
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::aws_g2_k>>;
@@ -681,13 +681,13 @@ extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_dot_k, cpu
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::aws_g2_k>>;
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::aws_g2_k>>;
 #endif
-#if FU_TARGET_ARM64_LSE || FU_TARGET_ARM64_RCPC || NK_TARGET_NEONBFDOT
+#if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONBFDOT
 /* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonbfdot: bf16, 3 arms */
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>>;
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>>;
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>>;
 #endif
-#if FU_TARGET_ARM64_LSE || FU_TARGET_ARM64_RCPC || NK_TARGET_NEONFHM
+#if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONFHM
 /* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonfhm: f16 e5m2 e4m3, 9 arms */
 extern template struct specialized_index<ram_index<nk_f16_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>>;
 extern template struct specialized_index<ram_index<nk_f16_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>>;
@@ -699,7 +699,7 @@ extern template struct specialized_index<ram_index<nk_e4m3_k, nk_kernel_dot_k, c
 extern template struct specialized_index<ram_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>>;
 extern template struct specialized_index<ram_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>>;
 #endif
-#if FU_TARGET_ARM64_LSE || FU_TARGET_ARM64_RCPC || NK_TARGET_NEONSDOT
+#if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONSDOT
 /* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonsdot: e3m2 e2m3 i8 i4 u8 u4, 18 arms */
 extern template struct specialized_index<ram_index<nk_e3m2_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>>;
 extern template struct specialized_index<ram_index<nk_e3m2_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>>;
@@ -720,13 +720,13 @@ extern template struct specialized_index<ram_index<nk_u4_k, nk_kernel_dot_k, cpu
 extern template struct specialized_index<ram_index<nk_u4_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>>;
 extern template struct specialized_index<ram_index<nk_u4_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>>;
 #endif
-#if FU_TARGET_ARM64_LSE || FU_TARGET_ARM64_RCPC
+#if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC
 /* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc: u1, 3 arms */
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>>;
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::apple_m2_k>>;
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::apple_m2_k>>;
 #endif
-#if FU_TARGET_ARM64_WFET
+#if FORKUNION_TARGET_ARM64_WFET
 /* aws_g5 over apple_m2 by arm64_wfet: every dtype, 33 arms */
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::aws_g5_k>>;
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::aws_g5_k>>;
@@ -762,7 +762,7 @@ extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_dot_k, cpu
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::aws_g5_k>>;
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::aws_g5_k>>;
 #endif
-#if NK_TARGET_NEONFP8
+#if NUMKONG_TARGET_NEONFP8
 /* nvidia_vera over aws_g5 by neonfp8: e5m2 e4m3 e3m2 e2m3, 12 arms */
 extern template struct specialized_index<ram_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::nvidia_vera_k>>;
 extern template struct specialized_index<ram_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::nvidia_vera_k>>;
@@ -777,8 +777,8 @@ extern template struct specialized_index<ram_index<nk_e2m3_k, nk_kernel_dot_k, c
 extern template struct specialized_index<ram_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::nvidia_vera_k>>;
 extern template struct specialized_index<ram_index<nk_e2m3_k, nk_kernel_euclidean_k, cpu_class_t::nvidia_vera_k>>;
 #endif
-#elif NK_TARGET_RISCV64_
-#if FU_TARGET_RISC5_WRS || FU_TARGET_RISC5_ZACAS
+#elif NUMKONG_ARCH_RISCV64_
+#if FORKUNION_TARGET_RISC5_WRS || FORKUNION_TARGET_RISC5_ZACAS
 /* alibaba_c930 over serial by risc5_wrs, risc5_zacas: every dtype, 33 arms */
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::alibaba_c930_k>>;
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::alibaba_c930_k>>;
@@ -814,8 +814,8 @@ extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_dot_k, cpu
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::alibaba_c930_k>>;
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::alibaba_c930_k>>;
 #endif
-#elif NK_TARGET_WASM_
-#if NK_TARGET_V128
+#elif NUMKONG_ARCH_WASM_
+#if NUMKONG_TARGET_V128
 /* wasm32_v128 over serial by v128: bf16 i8 u8 u1, 12 arms */
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::wasm32_v128_k>>;
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::wasm32_v128_k>>;
@@ -830,7 +830,7 @@ extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_dot_k, cpu
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::wasm32_v128_k>>;
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::wasm32_v128_k>>;
 #endif
-#if NK_TARGET_V128RELAXED
+#if NUMKONG_TARGET_V128RELAXED
 /* wasm64_extended over wasm32_v128 by v128relaxed: bf16 f16 e5m2 e4m3 e3m2 e2m3 i8 i4 u8 u4, 30 arms */
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::wasm64_extended_k>>;
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>>;
@@ -1088,18 +1088,18 @@ static usearch_dense_index_t descend_ram_ladder(usearch_dense_options_t const* o
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 static usearch_dense_index_t make_ram_index(usearch_dense_options_t const* options, usearch_error_t* error) noexcept {
     nk_capability_t const available = nk_capabilities_available();
-#if NK_TARGET_X8664_
+#if NUMKONG_ARCH_X86_64_
     return descend_ram_ladder<dtype_, kernel_, cpu_class_t::intel_diamond_k, cpu_class_t::amd_genoa_k,
                               cpu_class_t::intel_icelake_k, cpu_class_t::intel_skylake_k, cpu_class_t::intel_sierra_k,
                               cpu_class_t::intel_haswell_k>( //
         options, available, error);
-#elif NK_TARGET_ARM64_
+#elif NUMKONG_ARCH_ARM64_
     return descend_ram_ladder<dtype_, kernel_, cpu_class_t::nvidia_vera_k, cpu_class_t::aws_g5_k,
                               cpu_class_t::apple_m2_k, cpu_class_t::aws_g2_k>( //
         options, available, error);
-#elif NK_TARGET_RISCV64_
+#elif NUMKONG_ARCH_RISCV64_
     return descend_ram_ladder<dtype_, kernel_, cpu_class_t::alibaba_c930_k>(options, available, error);
-#elif NK_TARGET_WASM_
+#elif NUMKONG_ARCH_WASM_
     return descend_ram_ladder<dtype_, kernel_, cpu_class_t::wasm64_extended_k, cpu_class_t::wasm32_v128_k>( //
         options, available, error);
 #else

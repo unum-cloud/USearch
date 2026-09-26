@@ -55,10 +55,10 @@ struct capability_choice {
  *  NumKong's microarchitecture vocabulary; the floor the table never lists is the serial
  *  kernels. */
 inline constexpr capability_choice<nk_capability_t> compute_choices_k[] = {
-#if NK_TARGET_X8664_
+#if NUMKONG_ARCH_X86_64_
     {"haswell", nk_cap_haswell_k}, {"skylake", nk_cap_skylake_k},         {"icelake", nk_cap_icelake_k},
     {"genoa", nk_cap_genoa_k},     {"sapphireamx", nk_cap_sapphireamx_k},
-#elif NK_TARGET_ARM64_
+#elif NUMKONG_ARCH_ARM64_
     {"neon", nk_cap_neon_k},
     {"neonsdot", nk_cap_neonsdot_k},
     {"neonbfdot", nk_cap_neonbfdot_k},
@@ -72,13 +72,13 @@ inline constexpr std::size_t compute_choices_count_k = sizeof(compute_choices_k)
  *  by ForkUnion's instruction vocabulary; the floor is the STL yield. Every row is gated by the
  *  runtime capability mask at dispatch, since Arm's @c WFET has no compile-time feature macro. */
 inline constexpr capability_choice<fu_capabilities_t> schedule_choices_k[] = {
-#if FU_DETECT_ARCH_X86_64_
+#if FORKUNION_ARCH_X86_64_
     {"pause", fu_capability_x86_pause_k},
     {"tpause", fu_capability_x86_tpause_k},
-#elif FU_DETECT_ARCH_ARM64_
+#elif FORKUNION_ARCH_ARM64_
     {"yield", fu_capability_arm64_yield_k},
     {"wfet", fu_capability_arm64_wfet_k},
-#elif FU_DETECT_ARCH_RISC5_
+#elif FORKUNION_ARCH_RISCV64_
     {"pause", fu_capability_risc5_pause_k},
     {"wrs", fu_capability_risc5_wrs_k},
 #else

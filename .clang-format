@@ -82,11 +82,10 @@ PenaltyBreakBeforeFirstCallParameter: 1
 
 # NumKong visibility macros treated as attributes so they don't confuse declarations.
 AttributeMacros:
-  - NK_PUBLIC
-  - NK_INTERNAL
-  - NK_DYNAMIC
+  - NUMKONG_API_COMPTIME
+  - NUMKONG_API_RUNTIME
 
-# Align consecutive macro definitions (useful for NK_TARGET_* flags)
+# Align consecutive macro definitions (useful for NUMKONG_TARGET_* flags)
 AlignConsecutiveMacros:
   Enabled: true
   AcrossEmptyLines: false

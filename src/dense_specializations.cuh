@@ -154,12 +154,12 @@ constexpr cpu_class_t parent_class_of(cpu_class_t cpu_class) noexcept {
 
 /** The wait instruction one CPU class pairs: x86 spins PAUSE, the WAITPKG Xeons and the monitored
  *  Arm & RISC-V classes arm TPAUSE, WFET & WRS, everything else yields - as does any class whose
- *  @c FU_TARGET_<BIT> is off in the probe list. */
+ *  @c FORKUNION_TARGET_<BIT> is off in the probe list. */
 template <cpu_class_t cpu_class_>
 struct waiter_for_cpu_class {
     using type = fu::standard_yield_t;
 };
-#if FU_TARGET_X86_PAUSE
+#if FORKUNION_TARGET_X86_PAUSE
 template <>
 struct waiter_for_cpu_class<cpu_class_t::intel_haswell_k> {
     using type = fu::x86_pause_t;
@@ -177,7 +177,7 @@ struct waiter_for_cpu_class<cpu_class_t::amd_genoa_k> {
     using type = fu::x86_pause_t;
 };
 #endif
-#if FU_TARGET_X86_TPAUSE
+#if FORKUNION_TARGET_X86_TPAUSE
 template <>
 struct waiter_for_cpu_class<cpu_class_t::intel_sierra_k> {
     using type = fu::x86_tpause_t;
@@ -187,7 +187,7 @@ struct waiter_for_cpu_class<cpu_class_t::intel_diamond_k> {
     using type = fu::x86_tpause_t;
 };
 #endif
-#if FU_TARGET_ARM64_YIELD
+#if FORKUNION_TARGET_ARM64_YIELD
 template <>
 struct waiter_for_cpu_class<cpu_class_t::aws_g2_k> {
     using type = fu::arm64_yield_t;
@@ -197,7 +197,7 @@ struct waiter_for_cpu_class<cpu_class_t::apple_m2_k> {
     using type = fu::arm64_yield_t;
 };
 #endif
-#if FU_TARGET_ARM64_WFET
+#if FORKUNION_TARGET_ARM64_WFET
 template <>
 struct waiter_for_cpu_class<cpu_class_t::aws_g5_k> {
     using type = fu::arm64_wfet_t;
@@ -207,7 +207,7 @@ struct waiter_for_cpu_class<cpu_class_t::nvidia_vera_k> {
     using type = fu::arm64_wfet_t;
 };
 #endif
-#if FU_TARGET_RISC5_WRS
+#if FORKUNION_TARGET_RISC5_WRS
 template <>
 struct waiter_for_cpu_class<cpu_class_t::alibaba_c930_k> {
     using type = fu::risc5_wrs_t;
@@ -220,14 +220,14 @@ using waiter_of = typename waiter_for_cpu_class<cpu_class_>::type;
 
 /** The atomic reference one CPU class pairs: single-instruction LSE read-modify-writes under RCpc
  *  acquiring loads on the Armv8.3+ classes, conditional adds on the CMPCCXADD Xeons, @c amocas on
- *  Zacas RISC-V - the floors, the older classes, and any class whose @c FU_TARGET_<BIT> is off in
+ *  Zacas RISC-V - the floors, the older classes, and any class whose @c FORKUNION_TARGET_<BIT> is off in
  *  the probe list take the standard one. */
 template <cpu_class_t cpu_class_>
 struct atomic_ref_for_cpu_class {
     template <typename value_type_>
     using type = fu::standard_atomic_ref<value_type_>;
 };
-#if FU_TARGET_X86_CMPCCXADD
+#if FORKUNION_TARGET_X86_CMPCCXADD
 template <>
 struct atomic_ref_for_cpu_class<cpu_class_t::intel_sierra_k> {
     template <typename value_type_>
@@ -239,7 +239,7 @@ struct atomic_ref_for_cpu_class<cpu_class_t::intel_diamond_k> {
     using type = fu::x86_cmpccxadd_atomic_ref<value_type_>;
 };
 #endif
-#if FU_TARGET_ARM64_RCPC
+#if FORKUNION_TARGET_ARM64_RCPC
 template <>
 struct atomic_ref_for_cpu_class<cpu_class_t::apple_m2_k> {
     template <typename value_type_>
@@ -255,7 +255,7 @@ struct atomic_ref_for_cpu_class<cpu_class_t::nvidia_vera_k> {
     template <typename value_type_>
     using type = fu::arm64_rcpc_atomic_ref<value_type_>;
 };
-#elif FU_TARGET_ARM64_LSE
+#elif FORKUNION_TARGET_ARM64_LSE
 template <>
 struct atomic_ref_for_cpu_class<cpu_class_t::apple_m2_k> {
     template <typename value_type_>
@@ -272,7 +272,7 @@ struct atomic_ref_for_cpu_class<cpu_class_t::nvidia_vera_k> {
     using type = fu::arm64_lse_atomic_ref<value_type_>;
 };
 #endif
-#if FU_TARGET_RISC5_ZACAS
+#if FORKUNION_TARGET_RISC5_ZACAS
 template <>
 struct atomic_ref_for_cpu_class<cpu_class_t::alibaba_c930_k> {
     template <typename value_type_>

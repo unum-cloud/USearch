@@ -26,7 +26,7 @@
  *
  *  @b Chains - one @c dense_quads_chain<kernel,scalar,caps> per supported tuple. A linear
  *  list of @c chain_layer rows fed to @c first_available_kit picks the first kit whose
- *  @c NK_TARGET_* is on AND whose runtime-caps bit is set, else falls back to serial.
+ *  @c NUMKONG_TARGET_* is on AND whose runtime-caps bit is set, else falls back to serial.
  *  Unsupported @c (kernel,scalar) pairs simply have no specialization. Adding an ISA
  *  tier is one row and zero preprocessor lines.
  *
@@ -55,8 +55,8 @@
  *
  *  @section Design Goals & Decisions
  *
- *  1. @b Avoid-call-overhead. All NumKong logic is inlined from @c NK_PUBLIC ISA-specific
- *  APIs - the @c NK_DYNAMIC stack-frame construction in the shared lib is skipped.
+ *  1. @b Avoid-call-overhead. All NumKong logic is inlined from @c NUMKONG_API_COMPTIME ISA-specific
+ *  APIs - the @c NUMKONG_API_RUNTIME stack-frame construction in the shared lib is skipped.
  *
  *  2. @b Amortize-arithmetic-reductions. Both Euclidean (L2) and Angular (Cos) distances
  *  can be inferred from the inner product if the norms are known. This means @b 2-by-D
@@ -257,7 +257,7 @@ inline vector_norms<typename scalar_type_::dot_result_t> invoke_dense_norms_( //
     return {static_cast<dot_result_t>(native_sum), static_cast<dot_result_t>(native_sumsq)};
 }
 
-/** Forward declarations for every "kit" regardless of @c NK_TARGET_* availability,
+/** Forward declarations for every "kit" regardless of @c NUMKONG_TARGET_* availability,
  *  so @c dense_quads_chain backend resolution chains name-resolve on every build. */
 struct bf16_serial_inner_kit_t;
 struct bf16_serial_angular_kit_t;
@@ -531,7 +531,7 @@ struct bf16_serial_euclidean_kit_t : public bf16_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 
-#if NK_TARGET_HASWELL
+#if NUMKONG_TARGET_HASWELL
 
 /** bf16 inner-product distance kit - Intel Haswell AVX2. */
 struct bf16_haswell_inner_kit_t {
@@ -563,9 +563,9 @@ struct bf16_haswell_angular_kit_t : public bf16_haswell_inner_kit_t {
 struct bf16_haswell_euclidean_kit_t : public bf16_haswell_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
-#endif // NK_TARGET_HASWELL
+#endif // NUMKONG_TARGET_HASWELL
 
-#if NK_TARGET_SKYLAKE
+#if NUMKONG_TARGET_SKYLAKE
 
 /** bf16 inner-product distance kit - Intel Skylake-X AVX-512 Foundation. */
 struct bf16_skylake_inner_kit_t {
@@ -597,9 +597,9 @@ struct bf16_skylake_angular_kit_t : public bf16_skylake_inner_kit_t {
 struct bf16_skylake_euclidean_kit_t : public bf16_skylake_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
-#endif // NK_TARGET_SKYLAKE
+#endif // NUMKONG_TARGET_SKYLAKE
 
-#if NK_TARGET_GENOA
+#if NUMKONG_TARGET_GENOA
 
 /** bf16 inner-product distance kit - AMD Genoa AVX-512 + VNNI BF16. */
 struct bf16_genoa_inner_kit_t {
@@ -631,9 +631,9 @@ struct bf16_genoa_angular_kit_t : public bf16_genoa_inner_kit_t {
 struct bf16_genoa_euclidean_kit_t : public bf16_genoa_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
-#endif // NK_TARGET_GENOA
+#endif // NUMKONG_TARGET_GENOA
 
-#if NK_TARGET_NEON
+#if NUMKONG_TARGET_NEON
 
 /** bf16 inner-product distance kit - Arm NEON. */
 struct bf16_neon_inner_kit_t {
@@ -667,9 +667,9 @@ struct bf16_neon_euclidean_kit_t : public bf16_neon_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
-#endif // NK_TARGET_NEON
+#endif // NUMKONG_TARGET_NEON
 
-#if NK_TARGET_NEONBFDOT
+#if NUMKONG_TARGET_NEONBFDOT
 
 /** bf16 inner-product distance kit - Arm BFDOT. */
 struct bf16_neonbfdot_inner_kit_t {
@@ -703,9 +703,9 @@ struct bf16_neonbfdot_euclidean_kit_t : public bf16_neonbfdot_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
-#endif // NK_TARGET_NEONBFDOT
+#endif // NUMKONG_TARGET_NEONBFDOT
 
-#if NK_TARGET_V128
+#if NUMKONG_TARGET_V128
 
 /** bf16 inner-product distance kit - WebAssembly SIMD128. */
 struct bf16_v128_inner_kit_t {
@@ -737,9 +737,9 @@ struct bf16_v128_angular_kit_t : public bf16_v128_inner_kit_t {
 struct bf16_v128_euclidean_kit_t : public bf16_v128_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
 };
-#endif // NK_TARGET_V128
+#endif // NUMKONG_TARGET_V128
 
-#if NK_TARGET_V128RELAXED
+#if NUMKONG_TARGET_V128RELAXED
 
 /** bf16 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct bf16_v128relaxed_inner_kit_t {
@@ -771,9 +771,9 @@ struct bf16_v128relaxed_angular_kit_t : public bf16_v128relaxed_inner_kit_t {
 struct bf16_v128relaxed_euclidean_kit_t : public bf16_v128relaxed_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
 };
-#endif // NK_TARGET_V128RELAXED
+#endif // NUMKONG_TARGET_V128RELAXED
 
-#if NK_TARGET_POWERVSX
+#if NUMKONG_TARGET_POWERVSX
 
 /** bf16 inner-product distance kit - IBM POWER VSX. NumKong has no bf16 moments
  *  kernel for this tier, so the norms come from the serial one. */
@@ -806,7 +806,7 @@ struct bf16_powervsx_angular_kit_t : public bf16_powervsx_inner_kit_t {
 struct bf16_powervsx_euclidean_kit_t : public bf16_powervsx_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_powervsx_;
 };
-#endif // NK_TARGET_POWERVSX
+#endif // NUMKONG_TARGET_POWERVSX
 
 /** f16 inner-product distance kit - serial reference. */
 struct f16_serial_inner_kit_t {
@@ -839,7 +839,7 @@ struct f16_serial_euclidean_kit_t : public f16_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 
-#if NK_TARGET_HASWELL
+#if NUMKONG_TARGET_HASWELL
 
 /**
  *  @brief f16 inner-product distance kit - Intel Haswell AVX2 + F16C.
@@ -878,9 +878,9 @@ struct f16_haswell_angular_kit_t : public f16_haswell_inner_kit_t {
 struct f16_haswell_euclidean_kit_t : public f16_haswell_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
-#endif // NK_TARGET_HASWELL
+#endif // NUMKONG_TARGET_HASWELL
 
-#if NK_TARGET_SKYLAKE
+#if NUMKONG_TARGET_SKYLAKE
 
 /** f16 inner-product distance kit - Intel Skylake-X AVX-512, widening on load. */
 struct f16_skylake_inner_kit_t {
@@ -912,9 +912,9 @@ struct f16_skylake_angular_kit_t : public f16_skylake_inner_kit_t {
 struct f16_skylake_euclidean_kit_t : public f16_skylake_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
-#endif // NK_TARGET_SKYLAKE
+#endif // NUMKONG_TARGET_SKYLAKE
 
-#if NK_TARGET_NEON
+#if NUMKONG_TARGET_NEON
 
 /** f16 inner-product distance kit - Arm NEON. */
 struct f16_neon_inner_kit_t {
@@ -946,9 +946,9 @@ struct f16_neon_angular_kit_t : public f16_neon_inner_kit_t {
 struct f16_neon_euclidean_kit_t : public f16_neon_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_neon_;
 };
-#endif // NK_TARGET_NEON
+#endif // NUMKONG_TARGET_NEON
 
-#if NK_TARGET_NEONFHM
+#if NUMKONG_TARGET_NEONFHM
 
 /** f16 inner-product distance kit - Arm FP16 FML. NumKong has no f16 moments
  *  kernel for this tier, so the norms come from the serial one. */
@@ -981,9 +981,9 @@ struct f16_neonfhm_angular_kit_t : public f16_neonfhm_inner_kit_t {
 struct f16_neonfhm_euclidean_kit_t : public f16_neonfhm_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
-#endif // NK_TARGET_NEONFHM
+#endif // NUMKONG_TARGET_NEONFHM
 
-#if NK_TARGET_V128RELAXED
+#if NUMKONG_TARGET_V128RELAXED
 
 /** f16 inner-product distance kit - WebAssembly relaxed SIMD, widening on load.
  *  Four dimensions per step, since the widened f32 quad fills the 128-bit vec. */
@@ -1016,9 +1016,9 @@ struct f16_v128relaxed_angular_kit_t : public f16_v128relaxed_inner_kit_t {
 struct f16_v128relaxed_euclidean_kit_t : public f16_v128relaxed_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
 };
-#endif // NK_TARGET_V128RELAXED
+#endif // NUMKONG_TARGET_V128RELAXED
 
-#if NK_TARGET_POWERVSX
+#if NUMKONG_TARGET_POWERVSX
 
 /** f16 inner-product distance kit - IBM POWER VSX. NumKong has no f16 moments
  *  kernel for this tier, so the norms come from the serial one. */
@@ -1051,7 +1051,7 @@ struct f16_powervsx_angular_kit_t : public f16_powervsx_inner_kit_t {
 struct f16_powervsx_euclidean_kit_t : public f16_powervsx_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_powervsx_;
 };
-#endif // NK_TARGET_POWERVSX
+#endif // NUMKONG_TARGET_POWERVSX
 
 /** e5m2 inner-product distance kit - serial reference. */
 struct e5m2_serial_inner_kit_t {
@@ -1084,7 +1084,7 @@ struct e5m2_serial_euclidean_kit_t : public e5m2_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 
-#if NK_TARGET_HASWELL
+#if NUMKONG_TARGET_HASWELL
 
 /**
  *  @brief e5m2 inner-product distance kit - Intel Haswell AVX2.
@@ -1121,9 +1121,9 @@ struct e5m2_haswell_angular_kit_t : public e5m2_haswell_inner_kit_t {
 struct e5m2_haswell_euclidean_kit_t : public e5m2_haswell_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
-#endif // NK_TARGET_HASWELL
+#endif // NUMKONG_TARGET_HASWELL
 
-#if NK_TARGET_SKYLAKE
+#if NUMKONG_TARGET_SKYLAKE
 
 /** e5m2 inner-product distance kit - Intel Skylake-X AVX-512, widening in the update. */
 struct e5m2_skylake_inner_kit_t {
@@ -1155,9 +1155,9 @@ struct e5m2_skylake_angular_kit_t : public e5m2_skylake_inner_kit_t {
 struct e5m2_skylake_euclidean_kit_t : public e5m2_skylake_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
-#endif // NK_TARGET_SKYLAKE
+#endif // NUMKONG_TARGET_SKYLAKE
 
-#if NK_TARGET_DIAMOND
+#if NUMKONG_TARGET_DIAMOND
 
 /** e5m2 inner-product distance kit - Intel Diamond Rapids AVX10.2. The loaders
  *  widen each step to f16 with a native FP8 convert, so the dot rides the FP16
@@ -1192,9 +1192,9 @@ struct e5m2_diamond_angular_kit_t : public e5m2_diamond_inner_kit_t {
 struct e5m2_diamond_euclidean_kit_t : public e5m2_diamond_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
-#endif // NK_TARGET_DIAMOND
+#endif // NUMKONG_TARGET_DIAMOND
 
-#if NK_TARGET_GENOA
+#if NUMKONG_TARGET_GENOA
 
 /** e5m2 inner-product distance kit - AMD Genoa AVX-512 + VNNI BF16. The loaders
  *  widen each step to bf16 so the dot rides the BF16 accumulator. */
@@ -1227,9 +1227,9 @@ struct e5m2_genoa_angular_kit_t : public e5m2_genoa_inner_kit_t {
 struct e5m2_genoa_euclidean_kit_t : public e5m2_genoa_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
-#endif // NK_TARGET_GENOA
+#endif // NUMKONG_TARGET_GENOA
 
-#if NK_TARGET_NEONFHM
+#if NUMKONG_TARGET_NEONFHM
 
 /** e5m2 inner-product distance kit - Arm FP16 FML. */
 struct e5m2_neonfhm_inner_kit_t {
@@ -1261,9 +1261,9 @@ struct e5m2_neonfhm_angular_kit_t : public e5m2_neonfhm_inner_kit_t {
 struct e5m2_neonfhm_euclidean_kit_t : public e5m2_neonfhm_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
-#endif // NK_TARGET_NEONFHM
+#endif // NUMKONG_TARGET_NEONFHM
 
-#if NK_TARGET_NEONFP8
+#if NUMKONG_TARGET_NEONFP8
 
 /** e5m2 inner-product distance kit - Arm FP8 DOT. NumKong has no e5m2 moments
  *  kernel for this tier, so the norms come from the serial one. */
@@ -1296,9 +1296,9 @@ struct e5m2_neonfp8_angular_kit_t : public e5m2_neonfp8_inner_kit_t {
 struct e5m2_neonfp8_euclidean_kit_t : public e5m2_neonfp8_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
-#endif // NK_TARGET_NEONFP8
+#endif // NUMKONG_TARGET_NEONFP8
 
-#if NK_TARGET_V128RELAXED
+#if NUMKONG_TARGET_V128RELAXED
 
 /** e5m2 inner-product distance kit - WebAssembly relaxed SIMD, widening on load.
  *  Four dimensions per step, since the widened f32 quad fills the 128-bit vec. */
@@ -1331,7 +1331,7 @@ struct e5m2_v128relaxed_angular_kit_t : public e5m2_v128relaxed_inner_kit_t {
 struct e5m2_v128relaxed_euclidean_kit_t : public e5m2_v128relaxed_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
 };
-#endif // NK_TARGET_V128RELAXED
+#endif // NUMKONG_TARGET_V128RELAXED
 
 /** e4m3 inner-product distance kit - serial reference. */
 struct e4m3_serial_inner_kit_t {
@@ -1364,7 +1364,7 @@ struct e4m3_serial_euclidean_kit_t : public e4m3_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 
-#if NK_TARGET_HASWELL
+#if NUMKONG_TARGET_HASWELL
 
 /** e4m3 inner-product distance kit - Intel Haswell AVX2, widening in the update. */
 struct e4m3_haswell_inner_kit_t {
@@ -1396,9 +1396,9 @@ struct e4m3_haswell_angular_kit_t : public e4m3_haswell_inner_kit_t {
 struct e4m3_haswell_euclidean_kit_t : public e4m3_haswell_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
-#endif // NK_TARGET_HASWELL
+#endif // NUMKONG_TARGET_HASWELL
 
-#if NK_TARGET_SKYLAKE
+#if NUMKONG_TARGET_SKYLAKE
 
 /** e4m3 inner-product distance kit - Intel Skylake-X AVX-512, widening on load. */
 struct e4m3_skylake_inner_kit_t {
@@ -1430,9 +1430,9 @@ struct e4m3_skylake_angular_kit_t : public e4m3_skylake_inner_kit_t {
 struct e4m3_skylake_euclidean_kit_t : public e4m3_skylake_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
-#endif // NK_TARGET_SKYLAKE
+#endif // NUMKONG_TARGET_SKYLAKE
 
-#if NK_TARGET_DIAMOND
+#if NUMKONG_TARGET_DIAMOND
 
 /** e4m3 inner-product distance kit - Intel Diamond Rapids AVX10.2. The loaders
  *  widen each step to f16 with a native FP8 convert, so the dot rides the FP16
@@ -1467,9 +1467,9 @@ struct e4m3_diamond_angular_kit_t : public e4m3_diamond_inner_kit_t {
 struct e4m3_diamond_euclidean_kit_t : public e4m3_diamond_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
-#endif // NK_TARGET_DIAMOND
+#endif // NUMKONG_TARGET_DIAMOND
 
-#if NK_TARGET_GENOA
+#if NUMKONG_TARGET_GENOA
 
 /** e4m3 inner-product distance kit - AMD Genoa AVX-512 + VNNI BF16. The loaders
  *  widen each step to bf16 so the dot rides the BF16 accumulator. */
@@ -1502,9 +1502,9 @@ struct e4m3_genoa_angular_kit_t : public e4m3_genoa_inner_kit_t {
 struct e4m3_genoa_euclidean_kit_t : public e4m3_genoa_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
-#endif // NK_TARGET_GENOA
+#endif // NUMKONG_TARGET_GENOA
 
-#if NK_TARGET_NEONFHM
+#if NUMKONG_TARGET_NEONFHM
 
 /** e4m3 inner-product distance kit - Arm FP16 FML. */
 struct e4m3_neonfhm_inner_kit_t {
@@ -1536,9 +1536,9 @@ struct e4m3_neonfhm_angular_kit_t : public e4m3_neonfhm_inner_kit_t {
 struct e4m3_neonfhm_euclidean_kit_t : public e4m3_neonfhm_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
-#endif // NK_TARGET_NEONFHM
+#endif // NUMKONG_TARGET_NEONFHM
 
-#if NK_TARGET_NEONFP8
+#if NUMKONG_TARGET_NEONFP8
 
 /** e4m3 inner-product distance kit - Arm FP8 DOT. NumKong has no e4m3 moments
  *  kernel for this tier, so the norms come from the serial one. */
@@ -1571,9 +1571,9 @@ struct e4m3_neonfp8_angular_kit_t : public e4m3_neonfp8_inner_kit_t {
 struct e4m3_neonfp8_euclidean_kit_t : public e4m3_neonfp8_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
-#endif // NK_TARGET_NEONFP8
+#endif // NUMKONG_TARGET_NEONFP8
 
-#if NK_TARGET_V128RELAXED
+#if NUMKONG_TARGET_V128RELAXED
 
 /** e4m3 inner-product distance kit - WebAssembly relaxed SIMD, widening on load.
  *  Four dimensions per step, since the widened f32 quad fills the 128-bit vec. */
@@ -1606,7 +1606,7 @@ struct e4m3_v128relaxed_angular_kit_t : public e4m3_v128relaxed_inner_kit_t {
 struct e4m3_v128relaxed_euclidean_kit_t : public e4m3_v128relaxed_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
 };
-#endif // NK_TARGET_V128RELAXED
+#endif // NUMKONG_TARGET_V128RELAXED
 
 /**
  *  @brief e3m2 inner-product distance kit - serial reference.
@@ -1645,7 +1645,7 @@ struct e3m2_serial_euclidean_kit_t : public e3m2_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 
-#if NK_TARGET_HASWELL
+#if NUMKONG_TARGET_HASWELL
 
 /** e3m2 inner-product distance kit - Intel Haswell AVX2. */
 struct e3m2_haswell_inner_kit_t {
@@ -1677,9 +1677,9 @@ struct e3m2_haswell_angular_kit_t : public e3m2_haswell_inner_kit_t {
 struct e3m2_haswell_euclidean_kit_t : public e3m2_haswell_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
-#endif // NK_TARGET_HASWELL
+#endif // NUMKONG_TARGET_HASWELL
 
-#if NK_TARGET_SKYLAKE
+#if NUMKONG_TARGET_SKYLAKE
 
 /** e3m2 inner-product distance kit - Intel Skylake-X AVX-512 Foundation. */
 struct e3m2_skylake_inner_kit_t {
@@ -1711,9 +1711,9 @@ struct e3m2_skylake_angular_kit_t : public e3m2_skylake_inner_kit_t {
 struct e3m2_skylake_euclidean_kit_t : public e3m2_skylake_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
-#endif // NK_TARGET_SKYLAKE
+#endif // NUMKONG_TARGET_SKYLAKE
 
-#if NK_TARGET_NEONSDOT
+#if NUMKONG_TARGET_NEONSDOT
 
 /** e3m2 inner-product distance kit - Arm SDOT. NumKong has no e3m2 moments kernel
  *  for this tier, so the norms come from the serial one. */
@@ -1746,9 +1746,9 @@ struct e3m2_neonsdot_angular_kit_t : public e3m2_neonsdot_inner_kit_t {
 struct e3m2_neonsdot_euclidean_kit_t : public e3m2_neonsdot_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
-#endif // NK_TARGET_NEONSDOT
+#endif // NUMKONG_TARGET_NEONSDOT
 
-#if NK_TARGET_NEONFP8
+#if NUMKONG_TARGET_NEONFP8
 
 /** e3m2 inner-product distance kit - Arm FP8 DOT. NumKong has no e3m2 moments
  *  kernel for this tier, so the norms come from the serial one. */
@@ -1781,9 +1781,9 @@ struct e3m2_neonfp8_angular_kit_t : public e3m2_neonfp8_inner_kit_t {
 struct e3m2_neonfp8_euclidean_kit_t : public e3m2_neonfp8_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
-#endif // NK_TARGET_NEONFP8
+#endif // NUMKONG_TARGET_NEONFP8
 
-#if NK_TARGET_V128RELAXED
+#if NUMKONG_TARGET_V128RELAXED
 
 /** e3m2 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct e3m2_v128relaxed_inner_kit_t {
@@ -1815,7 +1815,7 @@ struct e3m2_v128relaxed_angular_kit_t : public e3m2_v128relaxed_inner_kit_t {
 struct e3m2_v128relaxed_euclidean_kit_t : public e3m2_v128relaxed_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
 };
-#endif // NK_TARGET_V128RELAXED
+#endif // NUMKONG_TARGET_V128RELAXED
 
 /** e2m3 inner-product distance kit - serial reference. One element per byte. */
 struct e2m3_serial_inner_kit_t {
@@ -1848,7 +1848,7 @@ struct e2m3_serial_euclidean_kit_t : public e2m3_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
 
-#if NK_TARGET_HASWELL
+#if NUMKONG_TARGET_HASWELL
 
 /** e2m3 inner-product distance kit - Intel Haswell AVX2. */
 struct e2m3_haswell_inner_kit_t {
@@ -1880,9 +1880,9 @@ struct e2m3_haswell_angular_kit_t : public e2m3_haswell_inner_kit_t {
 struct e2m3_haswell_euclidean_kit_t : public e2m3_haswell_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
-#endif // NK_TARGET_HASWELL
+#endif // NUMKONG_TARGET_HASWELL
 
-#if NK_TARGET_SKYLAKE
+#if NUMKONG_TARGET_SKYLAKE
 
 /** e2m3 inner-product distance kit - Intel Skylake-X AVX-512 Foundation. */
 struct e2m3_skylake_inner_kit_t {
@@ -1914,9 +1914,9 @@ struct e2m3_skylake_angular_kit_t : public e2m3_skylake_inner_kit_t {
 struct e2m3_skylake_euclidean_kit_t : public e2m3_skylake_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
-#endif // NK_TARGET_SKYLAKE
+#endif // NUMKONG_TARGET_SKYLAKE
 
-#if NK_TARGET_ALDER
+#if NUMKONG_TARGET_ALDER
 
 /** e2m3 inner-product distance kit - Intel Alder Lake AVX-VNNI. */
 struct e2m3_alder_inner_kit_t {
@@ -1948,9 +1948,9 @@ struct e2m3_alder_angular_kit_t : public e2m3_alder_inner_kit_t {
 struct e2m3_alder_euclidean_kit_t : public e2m3_alder_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
-#endif // NK_TARGET_ALDER
+#endif // NUMKONG_TARGET_ALDER
 
-#if NK_TARGET_SIERRA
+#if NUMKONG_TARGET_SIERRA
 
 /** e2m3 inner-product distance kit - Intel Sierra Forest AVX-VNNI. */
 struct e2m3_sierra_inner_kit_t {
@@ -1982,9 +1982,9 @@ struct e2m3_sierra_angular_kit_t : public e2m3_sierra_inner_kit_t {
 struct e2m3_sierra_euclidean_kit_t : public e2m3_sierra_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_haswell_;
 };
-#endif // NK_TARGET_SIERRA
+#endif // NUMKONG_TARGET_SIERRA
 
-#if NK_TARGET_NEONSDOT
+#if NUMKONG_TARGET_NEONSDOT
 
 /** e2m3 inner-product distance kit - Arm SDOT. */
 struct e2m3_neonsdot_inner_kit_t {
@@ -2016,9 +2016,9 @@ struct e2m3_neonsdot_angular_kit_t : public e2m3_neonsdot_inner_kit_t {
 struct e2m3_neonsdot_euclidean_kit_t : public e2m3_neonsdot_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
-#endif // NK_TARGET_NEONSDOT
+#endif // NUMKONG_TARGET_NEONSDOT
 
-#if NK_TARGET_NEONFP8
+#if NUMKONG_TARGET_NEONFP8
 
 /** e2m3 inner-product distance kit - Arm FP8 DOT. */
 struct e2m3_neonfp8_inner_kit_t {
@@ -2050,9 +2050,9 @@ struct e2m3_neonfp8_angular_kit_t : public e2m3_neonfp8_inner_kit_t {
 struct e2m3_neonfp8_euclidean_kit_t : public e2m3_neonfp8_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_serial_;
 };
-#endif // NK_TARGET_NEONFP8
+#endif // NUMKONG_TARGET_NEONFP8
 
-#if NK_TARGET_V128RELAXED
+#if NUMKONG_TARGET_V128RELAXED
 
 /** e2m3 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct e2m3_v128relaxed_inner_kit_t {
@@ -2084,7 +2084,7 @@ struct e2m3_v128relaxed_angular_kit_t : public e2m3_v128relaxed_inner_kit_t {
 struct e2m3_v128relaxed_euclidean_kit_t : public e2m3_v128relaxed_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_f32_from_dot_v128_;
 };
-#endif // NK_TARGET_V128RELAXED
+#endif // NUMKONG_TARGET_V128RELAXED
 
 /** u8 inner-product distance kit - serial reference. */
 struct u8_serial_inner_kit_t {
@@ -2119,7 +2119,7 @@ struct u8_serial_euclidean_kit_t : public u8_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
 };
 
-#if NK_TARGET_HASWELL
+#if NUMKONG_TARGET_HASWELL
 
 /** u8 inner-product distance kit - Haswell AVX2. */
 struct u8_haswell_inner_kit_t {
@@ -2153,9 +2153,9 @@ struct u8_haswell_euclidean_kit_t : public u8_haswell_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
 };
-#endif // NK_TARGET_HASWELL
+#endif // NUMKONG_TARGET_HASWELL
 
-#if NK_TARGET_ICELAKE
+#if NUMKONG_TARGET_ICELAKE
 
 /** u8 inner-product distance kit - Intel Ice Lake AVX-512 + VNNI VPDPBUSD. */
 struct u8_icelake_inner_kit_t {
@@ -2189,9 +2189,9 @@ struct u8_icelake_euclidean_kit_t : public u8_icelake_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
 };
-#endif // NK_TARGET_ICELAKE
+#endif // NUMKONG_TARGET_ICELAKE
 
-#if NK_TARGET_ALDER
+#if NUMKONG_TARGET_ALDER
 
 /** u8 inner-product distance kit - Intel Alder Lake AVX-VNNI. */
 struct u8_alder_inner_kit_t {
@@ -2225,9 +2225,9 @@ struct u8_alder_euclidean_kit_t : public u8_alder_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
 };
-#endif // NK_TARGET_ALDER
+#endif // NUMKONG_TARGET_ALDER
 
-#if NK_TARGET_SIERRA
+#if NUMKONG_TARGET_SIERRA
 
 /** u8 inner-product distance kit - Intel Sierra Forest AVX-VNNI. */
 struct u8_sierra_inner_kit_t {
@@ -2261,9 +2261,9 @@ struct u8_sierra_euclidean_kit_t : public u8_sierra_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
 };
-#endif // NK_TARGET_SIERRA
+#endif // NUMKONG_TARGET_SIERRA
 
-#if NK_TARGET_NEONSDOT
+#if NUMKONG_TARGET_NEONSDOT
 
 /** u8 inner-product distance kit - Arm UDOT. */
 struct u8_neonsdot_inner_kit_t {
@@ -2297,9 +2297,9 @@ struct u8_neonsdot_euclidean_kit_t : public u8_neonsdot_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
 };
-#endif // NK_TARGET_NEONSDOT
+#endif // NUMKONG_TARGET_NEONSDOT
 
-#if NK_TARGET_V128
+#if NUMKONG_TARGET_V128
 
 /** u8 inner-product distance kit - WebAssembly SIMD128. */
 struct u8_v128_inner_kit_t {
@@ -2333,9 +2333,9 @@ struct u8_v128_euclidean_kit_t : public u8_v128_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128_;
 };
-#endif // NK_TARGET_V128
+#endif // NUMKONG_TARGET_V128
 
-#if NK_TARGET_V128RELAXED
+#if NUMKONG_TARGET_V128RELAXED
 
 /** u8 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct u8_v128relaxed_inner_kit_t {
@@ -2369,9 +2369,9 @@ struct u8_v128relaxed_euclidean_kit_t : public u8_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128_;
 };
-#endif // NK_TARGET_V128RELAXED
+#endif // NUMKONG_TARGET_V128RELAXED
 
-#if NK_TARGET_POWERVSX
+#if NUMKONG_TARGET_POWERVSX
 
 /** u8 inner-product distance kit - IBM POWER VSX. */
 struct u8_powervsx_inner_kit_t {
@@ -2405,7 +2405,7 @@ struct u8_powervsx_euclidean_kit_t : public u8_powervsx_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_powervsx_;
 };
-#endif // NK_TARGET_POWERVSX
+#endif // NUMKONG_TARGET_POWERVSX
 
 /** i8 inner-product distance kit - serial reference. */
 struct i8_serial_inner_kit_t {
@@ -2440,7 +2440,7 @@ struct i8_serial_euclidean_kit_t : public i8_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
 };
 
-#if NK_TARGET_HASWELL
+#if NUMKONG_TARGET_HASWELL
 
 /** i8 inner-product distance kit - Intel Haswell AVX2. */
 struct i8_haswell_inner_kit_t {
@@ -2474,9 +2474,9 @@ struct i8_haswell_euclidean_kit_t : public i8_haswell_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
 };
-#endif // NK_TARGET_HASWELL
+#endif // NUMKONG_TARGET_HASWELL
 
-#if NK_TARGET_ICELAKE
+#if NUMKONG_TARGET_ICELAKE
 
 /** i8 inner-product distance kit - Intel Ice Lake AVX-512 + VNNI VPDPBUSD compensation. */
 struct i8_icelake_inner_kit_t {
@@ -2510,9 +2510,9 @@ struct i8_icelake_euclidean_kit_t : public i8_icelake_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
 };
-#endif // NK_TARGET_ICELAKE
+#endif // NUMKONG_TARGET_ICELAKE
 
-#if NK_TARGET_ALDER
+#if NUMKONG_TARGET_ALDER
 
 /** i8 inner-product distance kit - Intel Alder Lake AVX-VNNI. NumKong has no
  *  signed-i8 moments kernel for this tier, so the norms come from the AVX2 one,
@@ -2548,9 +2548,9 @@ struct i8_alder_euclidean_kit_t : public i8_alder_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
 };
-#endif // NK_TARGET_ALDER
+#endif // NUMKONG_TARGET_ALDER
 
-#if NK_TARGET_SIERRA
+#if NUMKONG_TARGET_SIERRA
 
 /** i8 inner-product distance kit - Intel Sierra Forest AVX-VNNI. */
 struct i8_sierra_inner_kit_t {
@@ -2584,9 +2584,9 @@ struct i8_sierra_euclidean_kit_t : public i8_sierra_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
 };
-#endif // NK_TARGET_SIERRA
+#endif // NUMKONG_TARGET_SIERRA
 
-#if NK_TARGET_NEONSDOT
+#if NUMKONG_TARGET_NEONSDOT
 
 /** i8 inner-product distance kit - Arm SDOT. */
 struct i8_neonsdot_inner_kit_t {
@@ -2620,9 +2620,9 @@ struct i8_neonsdot_euclidean_kit_t : public i8_neonsdot_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
 };
-#endif // NK_TARGET_NEONSDOT
+#endif // NUMKONG_TARGET_NEONSDOT
 
-#if NK_TARGET_V128
+#if NUMKONG_TARGET_V128
 
 /** i8 inner-product distance kit - WebAssembly SIMD128. */
 struct i8_v128_inner_kit_t {
@@ -2656,9 +2656,9 @@ struct i8_v128_euclidean_kit_t : public i8_v128_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128_;
 };
-#endif // NK_TARGET_V128
+#endif // NUMKONG_TARGET_V128
 
-#if NK_TARGET_V128RELAXED
+#if NUMKONG_TARGET_V128RELAXED
 
 /** i8 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct i8_v128relaxed_inner_kit_t {
@@ -2692,9 +2692,9 @@ struct i8_v128relaxed_euclidean_kit_t : public i8_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128_;
 };
-#endif // NK_TARGET_V128RELAXED
+#endif // NUMKONG_TARGET_V128RELAXED
 
-#if NK_TARGET_POWERVSX
+#if NUMKONG_TARGET_POWERVSX
 
 /** i8 inner-product distance kit - IBM POWER VSX. */
 struct i8_powervsx_inner_kit_t {
@@ -2728,7 +2728,7 @@ struct i8_powervsx_euclidean_kit_t : public i8_powervsx_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_powervsx_;
 };
-#endif // NK_TARGET_POWERVSX
+#endif // NUMKONG_TARGET_POWERVSX
 
 /** u4x2 inner-product distance kit - serial reference. Two unsigned nibbles per
  *  byte, so a step of 16 dimensions rides in a 64-bit vec. The dot lanes land in
@@ -2765,7 +2765,7 @@ struct u4x2_serial_euclidean_kit_t : public u4x2_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
 };
 
-#if NK_TARGET_HASWELL
+#if NUMKONG_TARGET_HASWELL
 
 /** u4x2 inner-product distance kit - Intel Haswell AVX2. */
 struct u4x2_haswell_inner_kit_t {
@@ -2799,9 +2799,9 @@ struct u4x2_haswell_euclidean_kit_t : public u4x2_haswell_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
 };
-#endif // NK_TARGET_HASWELL
+#endif // NUMKONG_TARGET_HASWELL
 
-#if NK_TARGET_ICELAKE
+#if NUMKONG_TARGET_ICELAKE
 
 /** u4x2 inner-product distance kit - Ice Lake VNNI. */
 struct u4x2_icelake_inner_kit_t {
@@ -2835,9 +2835,9 @@ struct u4x2_icelake_euclidean_kit_t : public u4x2_icelake_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
 };
-#endif // NK_TARGET_ICELAKE
+#endif // NUMKONG_TARGET_ICELAKE
 
-#if NK_TARGET_NEONSDOT
+#if NUMKONG_TARGET_NEONSDOT
 
 /** u4x2 inner-product distance kit - Arm UDOT. */
 struct u4x2_neonsdot_inner_kit_t {
@@ -2871,9 +2871,9 @@ struct u4x2_neonsdot_euclidean_kit_t : public u4x2_neonsdot_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
 };
-#endif // NK_TARGET_NEONSDOT
+#endif // NUMKONG_TARGET_NEONSDOT
 
-#if NK_TARGET_V128RELAXED
+#if NUMKONG_TARGET_V128RELAXED
 
 /** u4x2 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct u4x2_v128relaxed_inner_kit_t {
@@ -2907,7 +2907,7 @@ struct u4x2_v128relaxed_euclidean_kit_t : public u4x2_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128_;
 };
-#endif // NK_TARGET_V128RELAXED
+#endif // NUMKONG_TARGET_V128RELAXED
 
 /** i4x2 inner-product distance kit - serial reference. */
 struct i4x2_serial_inner_kit_t {
@@ -2943,7 +2943,7 @@ struct i4x2_serial_euclidean_kit_t : public i4x2_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
 };
 
-#if NK_TARGET_HASWELL
+#if NUMKONG_TARGET_HASWELL
 
 /** i4x2 inner-product distance kit - Haswell AVX2. */
 struct i4x2_haswell_inner_kit_t {
@@ -2979,9 +2979,9 @@ struct i4x2_haswell_angular_kit_t : public i4x2_haswell_inner_kit_t {
     static constexpr auto convert_to_distances = nk_angular_through_i32_from_dot_haswell_;
 };
 
-#endif // NK_TARGET_HASWELL
+#endif // NUMKONG_TARGET_HASWELL
 
-#if NK_TARGET_ICELAKE
+#if NUMKONG_TARGET_ICELAKE
 
 /** i4 inner-product distance kit - Ice Lake VNNI. */
 struct i4x2_icelake_inner_kit_t {
@@ -3015,9 +3015,9 @@ struct i4x2_icelake_euclidean_kit_t : public i4x2_icelake_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_haswell_;
 };
-#endif // NK_TARGET_ICELAKE
+#endif // NUMKONG_TARGET_ICELAKE
 
-#if NK_TARGET_NEONSDOT
+#if NUMKONG_TARGET_NEONSDOT
 
 /** i4 inner-product distance kit - Arm SDOT. */
 struct i4x2_neonsdot_inner_kit_t {
@@ -3051,9 +3051,9 @@ struct i4x2_neonsdot_euclidean_kit_t : public i4x2_neonsdot_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_serial_;
 };
-#endif // NK_TARGET_NEONSDOT
+#endif // NUMKONG_TARGET_NEONSDOT
 
-#if NK_TARGET_V128RELAXED
+#if NUMKONG_TARGET_V128RELAXED
 
 /** i4x2 inner-product distance kit - WebAssembly relaxed SIMD. NumKong has no
  *  4-bit moments kernel for this tier, so the norms come from the serial one. */
@@ -3088,7 +3088,7 @@ struct i4x2_v128relaxed_euclidean_kit_t : public i4x2_v128relaxed_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_euclidean_through_i32_from_dot_v128_;
 };
-#endif // NK_TARGET_V128RELAXED
+#endif // NUMKONG_TARGET_V128RELAXED
 
 /** u1x8 inner-product distance kit - serial reference (binary AND-popcount). */
 struct u1x8_serial_inner_kit_t {
@@ -3123,7 +3123,7 @@ struct u1x8_serial_jaccard_kit_t : public u1x8_serial_inner_kit_t {
     static constexpr auto convert_to_distances = nk_jaccard_f32x4_from_dot_serial_;
 };
 
-#if NK_TARGET_HASWELL
+#if NUMKONG_TARGET_HASWELL
 
 /** u1x8 inner-product distance kit - Intel Haswell AVX2 + POPCNT. */
 struct u1x8_haswell_inner_kit_t {
@@ -3157,9 +3157,9 @@ struct u1x8_haswell_jaccard_kit_t : public u1x8_haswell_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_jaccard_f32x4_from_dot_haswell_;
 };
-#endif // NK_TARGET_HASWELL
+#endif // NUMKONG_TARGET_HASWELL
 
-#if NK_TARGET_ICELAKE
+#if NUMKONG_TARGET_ICELAKE
 
 /** u1x8 inner-product distance kit - Intel Ice Lake AVX-512 + VPOPCNTQ. */
 struct u1x8_icelake_inner_kit_t {
@@ -3193,9 +3193,9 @@ struct u1x8_icelake_jaccard_kit_t : public u1x8_icelake_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_jaccard_f32x4_from_dot_icelake_;
 };
-#endif // NK_TARGET_ICELAKE
+#endif // NUMKONG_TARGET_ICELAKE
 
-#if NK_TARGET_NEON
+#if NUMKONG_TARGET_NEON
 
 /** u1x8 inner-product distance kit - Arm NEON (binary AND-popcount). */
 struct u1x8_neon_inner_kit_t {
@@ -3229,9 +3229,9 @@ struct u1x8_neon_jaccard_kit_t : public u1x8_neon_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_jaccard_f32x4_from_dot_neon_;
 };
-#endif // NK_TARGET_NEON
+#endif // NUMKONG_TARGET_NEON
 
-#if NK_TARGET_V128
+#if NUMKONG_TARGET_V128
 
 /** u1x8 inner-product distance kit - WebAssembly SIMD128. NumKong has no
  *  binary moments kernel for this tier, so the norms come from the serial one. */
@@ -3266,9 +3266,9 @@ struct u1x8_v128_jaccard_kit_t : public u1x8_v128_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_jaccard_f32x4_from_dot_v128_;
 };
-#endif // NK_TARGET_V128
+#endif // NUMKONG_TARGET_V128
 
-#if NK_TARGET_POWERVSX
+#if NUMKONG_TARGET_POWERVSX
 
 /** u1x8 inner-product distance kit - IBM POWER VSX. NumKong has no binary moments
  *  kernel for this tier, so the norms come from the serial one. */
@@ -3303,12 +3303,12 @@ struct u1x8_powervsx_jaccard_kit_t : public u1x8_powervsx_inner_kit_t {
     using distance_lane_t = nk_f32_t;
     static constexpr auto convert_to_distances = nk_jaccard_f32x4_from_dot_powervsx_;
 };
-#endif // NK_TARGET_POWERVSX
+#endif // NUMKONG_TARGET_POWERVSX
 
 /**
  *  @brief One row in a capability cascade - pairs an availability flag with a candidate kit.
  *
- *  The flag is the @c &&-of @c NK_TARGET_* (always 0/1) and the runtime-caps bit test, so
+ *  The flag is the @c &&-of @c NUMKONG_TARGET_* (always 0/1) and the runtime-caps bit test, so
  *  rows for ISAs that aren't compiled-in fold to @c false at preprocessing time and the
  *  unselected kit's body never has to exist on the current target.
  */
@@ -3339,9 +3339,9 @@ struct first_available_kit<fallback_, head_, tail_...> {
  *  class carries AVX-512, the serial walk otherwise. */
 template <nk_capability_t caps_>
 struct dense_visits_hash_set_chain {
-    using kit_t = typename first_available_kit<                                                              //
-        serial_visits_hash_set_kit_t,                                                                        //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, u32_skylake_visits_hash_set_kit_t> //
+    using kit_t = typename first_available_kit<                                                                   //
+        serial_visits_hash_set_kit_t,                                                                             //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, u32_skylake_visits_hash_set_kit_t> //
         >::type;
 };
 
@@ -3353,16 +3353,16 @@ struct dense_quads_chain;
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_dot_k, nk::bf16_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                  //
-        bf16_serial_inner_kit_t,                                                                                 //
-        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, bf16_genoa_inner_kit_t>,                   //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, bf16_skylake_inner_kit_t>,             //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, bf16_haswell_inner_kit_t>,             //
-        chain_layer<NK_TARGET_NEONBFDOT && (caps_ & nk_cap_neonbfdot_k) != 0, bf16_neonbfdot_inner_kit_t>,       //
-        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, bf16_neon_inner_kit_t>,                      //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, bf16_v128relaxed_inner_kit_t>, //
-        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, bf16_v128_inner_kit_t>,                      //
-        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, bf16_powervsx_inner_kit_t>           //
+    using kit_t = typename first_available_kit<                                                                       //
+        bf16_serial_inner_kit_t,                                                                                      //
+        chain_layer<NUMKONG_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, bf16_genoa_inner_kit_t>,                   //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, bf16_skylake_inner_kit_t>,             //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, bf16_haswell_inner_kit_t>,             //
+        chain_layer<NUMKONG_TARGET_NEONBFDOT && (caps_ & nk_cap_neonbfdot_k) != 0, bf16_neonbfdot_inner_kit_t>,       //
+        chain_layer<NUMKONG_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, bf16_neon_inner_kit_t>,                      //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, bf16_v128relaxed_inner_kit_t>, //
+        chain_layer<NUMKONG_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, bf16_v128_inner_kit_t>,                      //
+        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, bf16_powervsx_inner_kit_t>           //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3371,16 +3371,17 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::bf16_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_angular_k, nk::bf16_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                    //
-        bf16_serial_angular_kit_t,                                                                                 //
-        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, bf16_genoa_angular_kit_t>,                   //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, bf16_skylake_angular_kit_t>,             //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, bf16_haswell_angular_kit_t>,             //
-        chain_layer<NK_TARGET_NEONBFDOT && (caps_ & nk_cap_neonbfdot_k) != 0, bf16_neonbfdot_angular_kit_t>,       //
-        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, bf16_neon_angular_kit_t>,                      //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, bf16_v128relaxed_angular_kit_t>, //
-        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, bf16_v128_angular_kit_t>,                      //
-        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, bf16_powervsx_angular_kit_t>           //
+    using kit_t = typename first_available_kit<                                                                   //
+        bf16_serial_angular_kit_t,                                                                                //
+        chain_layer<NUMKONG_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, bf16_genoa_angular_kit_t>,             //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, bf16_skylake_angular_kit_t>,       //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, bf16_haswell_angular_kit_t>,       //
+        chain_layer<NUMKONG_TARGET_NEONBFDOT && (caps_ & nk_cap_neonbfdot_k) != 0, bf16_neonbfdot_angular_kit_t>, //
+        chain_layer<NUMKONG_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, bf16_neon_angular_kit_t>,                //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0,
+                    bf16_v128relaxed_angular_kit_t>,                                                          //
+        chain_layer<NUMKONG_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, bf16_v128_angular_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, bf16_powervsx_angular_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3389,16 +3390,17 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::bf16_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_euclidean_k, nk::bf16_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                      //
-        bf16_serial_euclidean_kit_t,                                                                                 //
-        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, bf16_genoa_euclidean_kit_t>,                   //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, bf16_skylake_euclidean_kit_t>,             //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, bf16_haswell_euclidean_kit_t>,             //
-        chain_layer<NK_TARGET_NEONBFDOT && (caps_ & nk_cap_neonbfdot_k) != 0, bf16_neonbfdot_euclidean_kit_t>,       //
-        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, bf16_neon_euclidean_kit_t>,                      //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, bf16_v128relaxed_euclidean_kit_t>, //
-        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, bf16_v128_euclidean_kit_t>,                      //
-        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, bf16_powervsx_euclidean_kit_t>           //
+    using kit_t = typename first_available_kit<                                                                     //
+        bf16_serial_euclidean_kit_t,                                                                                //
+        chain_layer<NUMKONG_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, bf16_genoa_euclidean_kit_t>,             //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, bf16_skylake_euclidean_kit_t>,       //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, bf16_haswell_euclidean_kit_t>,       //
+        chain_layer<NUMKONG_TARGET_NEONBFDOT && (caps_ & nk_cap_neonbfdot_k) != 0, bf16_neonbfdot_euclidean_kit_t>, //
+        chain_layer<NUMKONG_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, bf16_neon_euclidean_kit_t>,                //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0,
+                    bf16_v128relaxed_euclidean_kit_t>,                                                          //
+        chain_layer<NUMKONG_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, bf16_v128_euclidean_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, bf16_powervsx_euclidean_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3407,14 +3409,14 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::bf16_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_dot_k, nk::f16_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                 //
-        f16_serial_inner_kit_t,                                                                                 //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, f16_skylake_inner_kit_t>,             //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, f16_haswell_inner_kit_t>,             //
-        chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, f16_neonfhm_inner_kit_t>,             //
-        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, f16_neon_inner_kit_t>,                      //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, f16_v128relaxed_inner_kit_t>, //
-        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, f16_powervsx_inner_kit_t>           //
+    using kit_t = typename first_available_kit<                                                                      //
+        f16_serial_inner_kit_t,                                                                                      //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, f16_skylake_inner_kit_t>,             //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, f16_haswell_inner_kit_t>,             //
+        chain_layer<NUMKONG_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, f16_neonfhm_inner_kit_t>,             //
+        chain_layer<NUMKONG_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, f16_neon_inner_kit_t>,                      //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, f16_v128relaxed_inner_kit_t>, //
+        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, f16_powervsx_inner_kit_t>           //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3423,14 +3425,15 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::f16_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_angular_k, nk::f16_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                   //
-        f16_serial_angular_kit_t,                                                                                 //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, f16_skylake_angular_kit_t>,             //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, f16_haswell_angular_kit_t>,             //
-        chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, f16_neonfhm_angular_kit_t>,             //
-        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, f16_neon_angular_kit_t>,                      //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, f16_v128relaxed_angular_kit_t>, //
-        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, f16_powervsx_angular_kit_t>           //
+    using kit_t = typename first_available_kit<                                                            //
+        f16_serial_angular_kit_t,                                                                          //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, f16_skylake_angular_kit_t>, //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, f16_haswell_angular_kit_t>, //
+        chain_layer<NUMKONG_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, f16_neonfhm_angular_kit_t>, //
+        chain_layer<NUMKONG_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, f16_neon_angular_kit_t>,          //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0,
+                    f16_v128relaxed_angular_kit_t>,                                                          //
+        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, f16_powervsx_angular_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3439,14 +3442,15 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::f16_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_euclidean_k, nk::f16_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                     //
-        f16_serial_euclidean_kit_t,                                                                                 //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, f16_skylake_euclidean_kit_t>,             //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, f16_haswell_euclidean_kit_t>,             //
-        chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, f16_neonfhm_euclidean_kit_t>,             //
-        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, f16_neon_euclidean_kit_t>,                      //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, f16_v128relaxed_euclidean_kit_t>, //
-        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, f16_powervsx_euclidean_kit_t>           //
+    using kit_t = typename first_available_kit<                                                              //
+        f16_serial_euclidean_kit_t,                                                                          //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, f16_skylake_euclidean_kit_t>, //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, f16_haswell_euclidean_kit_t>, //
+        chain_layer<NUMKONG_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, f16_neonfhm_euclidean_kit_t>, //
+        chain_layer<NUMKONG_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, f16_neon_euclidean_kit_t>,          //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0,
+                    f16_v128relaxed_euclidean_kit_t>,                                                          //
+        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, f16_powervsx_euclidean_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3457,13 +3461,13 @@ template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_dot_k, nk::e5m2_t, caps_> {
     using kit_t = typename first_available_kit< //
         e5m2_serial_inner_kit_t,                //
-        chain_layer<NK_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e5m2_diamond_inner_kit_t>,
-        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, e5m2_genoa_inner_kit_t>,                  //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e5m2_skylake_inner_kit_t>,            //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e5m2_haswell_inner_kit_t>,            //
-        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e5m2_neonfp8_inner_kit_t>,            //
-        chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e5m2_neonfhm_inner_kit_t>,            //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e5m2_v128relaxed_inner_kit_t> //
+        chain_layer<NUMKONG_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e5m2_diamond_inner_kit_t>,
+        chain_layer<NUMKONG_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, e5m2_genoa_inner_kit_t>,                  //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e5m2_skylake_inner_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e5m2_haswell_inner_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e5m2_neonfp8_inner_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e5m2_neonfhm_inner_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e5m2_v128relaxed_inner_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3474,13 +3478,14 @@ template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_angular_k, nk::e5m2_t, caps_> {
     using kit_t = typename first_available_kit< //
         e5m2_serial_angular_kit_t,              //
-        chain_layer<NK_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e5m2_diamond_angular_kit_t>,
-        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, e5m2_genoa_angular_kit_t>,                  //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e5m2_skylake_angular_kit_t>,            //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e5m2_haswell_angular_kit_t>,            //
-        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e5m2_neonfp8_angular_kit_t>,            //
-        chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e5m2_neonfhm_angular_kit_t>,            //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e5m2_v128relaxed_angular_kit_t> //
+        chain_layer<NUMKONG_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e5m2_diamond_angular_kit_t>,
+        chain_layer<NUMKONG_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, e5m2_genoa_angular_kit_t>,       //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e5m2_skylake_angular_kit_t>, //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e5m2_haswell_angular_kit_t>, //
+        chain_layer<NUMKONG_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e5m2_neonfp8_angular_kit_t>, //
+        chain_layer<NUMKONG_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e5m2_neonfhm_angular_kit_t>, //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0,
+                    e5m2_v128relaxed_angular_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3491,13 +3496,14 @@ template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_euclidean_k, nk::e5m2_t, caps_> {
     using kit_t = typename first_available_kit< //
         e5m2_serial_euclidean_kit_t,            //
-        chain_layer<NK_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e5m2_diamond_euclidean_kit_t>,
-        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, e5m2_genoa_euclidean_kit_t>,                  //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e5m2_skylake_euclidean_kit_t>,            //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e5m2_haswell_euclidean_kit_t>,            //
-        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e5m2_neonfp8_euclidean_kit_t>,            //
-        chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e5m2_neonfhm_euclidean_kit_t>,            //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e5m2_v128relaxed_euclidean_kit_t> //
+        chain_layer<NUMKONG_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e5m2_diamond_euclidean_kit_t>,
+        chain_layer<NUMKONG_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, e5m2_genoa_euclidean_kit_t>,       //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e5m2_skylake_euclidean_kit_t>, //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e5m2_haswell_euclidean_kit_t>, //
+        chain_layer<NUMKONG_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e5m2_neonfp8_euclidean_kit_t>, //
+        chain_layer<NUMKONG_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e5m2_neonfhm_euclidean_kit_t>, //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0,
+                    e5m2_v128relaxed_euclidean_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3508,13 +3514,13 @@ template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_dot_k, nk::e4m3_t, caps_> {
     using kit_t = typename first_available_kit< //
         e4m3_serial_inner_kit_t,                //
-        chain_layer<NK_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e4m3_diamond_inner_kit_t>,
-        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, e4m3_genoa_inner_kit_t>,                  //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e4m3_skylake_inner_kit_t>,            //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e4m3_haswell_inner_kit_t>,            //
-        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e4m3_neonfp8_inner_kit_t>,            //
-        chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e4m3_neonfhm_inner_kit_t>,            //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e4m3_v128relaxed_inner_kit_t> //
+        chain_layer<NUMKONG_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e4m3_diamond_inner_kit_t>,
+        chain_layer<NUMKONG_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, e4m3_genoa_inner_kit_t>,                  //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e4m3_skylake_inner_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e4m3_haswell_inner_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e4m3_neonfp8_inner_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e4m3_neonfhm_inner_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e4m3_v128relaxed_inner_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3525,13 +3531,14 @@ template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_angular_k, nk::e4m3_t, caps_> {
     using kit_t = typename first_available_kit< //
         e4m3_serial_angular_kit_t,              //
-        chain_layer<NK_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e4m3_diamond_angular_kit_t>,
-        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, e4m3_genoa_angular_kit_t>,                  //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e4m3_skylake_angular_kit_t>,            //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e4m3_haswell_angular_kit_t>,            //
-        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e4m3_neonfp8_angular_kit_t>,            //
-        chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e4m3_neonfhm_angular_kit_t>,            //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e4m3_v128relaxed_angular_kit_t> //
+        chain_layer<NUMKONG_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e4m3_diamond_angular_kit_t>,
+        chain_layer<NUMKONG_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, e4m3_genoa_angular_kit_t>,       //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e4m3_skylake_angular_kit_t>, //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e4m3_haswell_angular_kit_t>, //
+        chain_layer<NUMKONG_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e4m3_neonfp8_angular_kit_t>, //
+        chain_layer<NUMKONG_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e4m3_neonfhm_angular_kit_t>, //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0,
+                    e4m3_v128relaxed_angular_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3542,13 +3549,14 @@ template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_euclidean_k, nk::e4m3_t, caps_> {
     using kit_t = typename first_available_kit< //
         e4m3_serial_euclidean_kit_t,            //
-        chain_layer<NK_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e4m3_diamond_euclidean_kit_t>,
-        chain_layer<NK_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, e4m3_genoa_euclidean_kit_t>,                  //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e4m3_skylake_euclidean_kit_t>,            //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e4m3_haswell_euclidean_kit_t>,            //
-        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e4m3_neonfp8_euclidean_kit_t>,            //
-        chain_layer<NK_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e4m3_neonfhm_euclidean_kit_t>,            //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e4m3_v128relaxed_euclidean_kit_t> //
+        chain_layer<NUMKONG_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e4m3_diamond_euclidean_kit_t>,
+        chain_layer<NUMKONG_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, e4m3_genoa_euclidean_kit_t>,       //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e4m3_skylake_euclidean_kit_t>, //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e4m3_haswell_euclidean_kit_t>, //
+        chain_layer<NUMKONG_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e4m3_neonfp8_euclidean_kit_t>, //
+        chain_layer<NUMKONG_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e4m3_neonfhm_euclidean_kit_t>, //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0,
+                    e4m3_v128relaxed_euclidean_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3557,13 +3565,13 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::e4m3_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_dot_k, nk::e3m2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                 //
-        e3m2_serial_inner_kit_t,                                                                                //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e3m2_skylake_inner_kit_t>,            //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e3m2_haswell_inner_kit_t>,            //
-        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e3m2_neonfp8_inner_kit_t>,            //
-        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e3m2_neonsdot_inner_kit_t>,         //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e3m2_v128relaxed_inner_kit_t> //
+    using kit_t = typename first_available_kit<                                                                      //
+        e3m2_serial_inner_kit_t,                                                                                     //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e3m2_skylake_inner_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e3m2_haswell_inner_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e3m2_neonfp8_inner_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e3m2_neonsdot_inner_kit_t>,         //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e3m2_v128relaxed_inner_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3572,13 +3580,14 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::e3m2_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_angular_k, nk::e3m2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                   //
-        e3m2_serial_angular_kit_t,                                                                                //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e3m2_skylake_angular_kit_t>,            //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e3m2_haswell_angular_kit_t>,            //
-        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e3m2_neonfp8_angular_kit_t>,            //
-        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e3m2_neonsdot_angular_kit_t>,         //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e3m2_v128relaxed_angular_kit_t> //
+    using kit_t = typename first_available_kit<                                                                //
+        e3m2_serial_angular_kit_t,                                                                             //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e3m2_skylake_angular_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e3m2_haswell_angular_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e3m2_neonfp8_angular_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e3m2_neonsdot_angular_kit_t>, //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0,
+                    e3m2_v128relaxed_angular_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3587,13 +3596,14 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::e3m2_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_euclidean_k, nk::e3m2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                     //
-        e3m2_serial_euclidean_kit_t,                                                                                //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e3m2_skylake_euclidean_kit_t>,            //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e3m2_haswell_euclidean_kit_t>,            //
-        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e3m2_neonfp8_euclidean_kit_t>,            //
-        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e3m2_neonsdot_euclidean_kit_t>,         //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e3m2_v128relaxed_euclidean_kit_t> //
+    using kit_t = typename first_available_kit<                                                                  //
+        e3m2_serial_euclidean_kit_t,                                                                             //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e3m2_skylake_euclidean_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e3m2_haswell_euclidean_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e3m2_neonfp8_euclidean_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e3m2_neonsdot_euclidean_kit_t>, //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0,
+                    e3m2_v128relaxed_euclidean_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3602,15 +3612,15 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::e3m2_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_dot_k, nk::e2m3_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                 //
-        e2m3_serial_inner_kit_t,                                                                                //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e2m3_skylake_inner_kit_t>,            //
-        chain_layer<NK_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, e2m3_sierra_inner_kit_t>,               //
-        chain_layer<NK_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, e2m3_alder_inner_kit_t>,                  //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e2m3_haswell_inner_kit_t>,            //
-        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e2m3_neonfp8_inner_kit_t>,            //
-        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e2m3_neonsdot_inner_kit_t>,         //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e2m3_v128relaxed_inner_kit_t> //
+    using kit_t = typename first_available_kit<                                                                      //
+        e2m3_serial_inner_kit_t,                                                                                     //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e2m3_skylake_inner_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, e2m3_sierra_inner_kit_t>,               //
+        chain_layer<NUMKONG_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, e2m3_alder_inner_kit_t>,                  //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e2m3_haswell_inner_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e2m3_neonfp8_inner_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e2m3_neonsdot_inner_kit_t>,         //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e2m3_v128relaxed_inner_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3619,15 +3629,16 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::e2m3_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_angular_k, nk::e2m3_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                   //
-        e2m3_serial_angular_kit_t,                                                                                //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e2m3_skylake_angular_kit_t>,            //
-        chain_layer<NK_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, e2m3_sierra_angular_kit_t>,               //
-        chain_layer<NK_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, e2m3_alder_angular_kit_t>,                  //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e2m3_haswell_angular_kit_t>,            //
-        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e2m3_neonfp8_angular_kit_t>,            //
-        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e2m3_neonsdot_angular_kit_t>,         //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e2m3_v128relaxed_angular_kit_t> //
+    using kit_t = typename first_available_kit<                                                                //
+        e2m3_serial_angular_kit_t,                                                                             //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e2m3_skylake_angular_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, e2m3_sierra_angular_kit_t>,       //
+        chain_layer<NUMKONG_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, e2m3_alder_angular_kit_t>,          //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e2m3_haswell_angular_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e2m3_neonfp8_angular_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e2m3_neonsdot_angular_kit_t>, //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0,
+                    e2m3_v128relaxed_angular_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3636,15 +3647,16 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::e2m3_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_euclidean_k, nk::e2m3_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                     //
-        e2m3_serial_euclidean_kit_t,                                                                                //
-        chain_layer<NK_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e2m3_skylake_euclidean_kit_t>,            //
-        chain_layer<NK_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, e2m3_sierra_euclidean_kit_t>,               //
-        chain_layer<NK_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, e2m3_alder_euclidean_kit_t>,                  //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e2m3_haswell_euclidean_kit_t>,            //
-        chain_layer<NK_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e2m3_neonfp8_euclidean_kit_t>,            //
-        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e2m3_neonsdot_euclidean_kit_t>,         //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e2m3_v128relaxed_euclidean_kit_t> //
+    using kit_t = typename first_available_kit<                                                                  //
+        e2m3_serial_euclidean_kit_t,                                                                             //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e2m3_skylake_euclidean_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, e2m3_sierra_euclidean_kit_t>,       //
+        chain_layer<NUMKONG_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, e2m3_alder_euclidean_kit_t>,          //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e2m3_haswell_euclidean_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e2m3_neonfp8_euclidean_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e2m3_neonsdot_euclidean_kit_t>, //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0,
+                    e2m3_v128relaxed_euclidean_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3653,16 +3665,16 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::e2m3_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_dot_k, nk::i8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                //
-        i8_serial_inner_kit_t,                                                                                 //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i8_icelake_inner_kit_t>,             //
-        chain_layer<NK_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, i8_sierra_inner_kit_t>,                //
-        chain_layer<NK_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, i8_alder_inner_kit_t>,                   //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i8_haswell_inner_kit_t>,             //
-        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i8_neonsdot_inner_kit_t>,          //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i8_v128relaxed_inner_kit_t>, //
-        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, i8_v128_inner_kit_t>,                      //
-        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, i8_powervsx_inner_kit_t>           //
+    using kit_t = typename first_available_kit<                                                                     //
+        i8_serial_inner_kit_t,                                                                                      //
+        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i8_icelake_inner_kit_t>,             //
+        chain_layer<NUMKONG_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, i8_sierra_inner_kit_t>,                //
+        chain_layer<NUMKONG_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, i8_alder_inner_kit_t>,                   //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i8_haswell_inner_kit_t>,             //
+        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i8_neonsdot_inner_kit_t>,          //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i8_v128relaxed_inner_kit_t>, //
+        chain_layer<NUMKONG_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, i8_v128_inner_kit_t>,                      //
+        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, i8_powervsx_inner_kit_t>           //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3671,16 +3683,16 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::i8_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_angular_k, nk::i8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                  //
-        i8_serial_angular_kit_t,                                                                                 //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i8_icelake_angular_kit_t>,             //
-        chain_layer<NK_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, i8_sierra_angular_kit_t>,                //
-        chain_layer<NK_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, i8_alder_angular_kit_t>,                   //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i8_haswell_angular_kit_t>,             //
-        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i8_neonsdot_angular_kit_t>,          //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i8_v128relaxed_angular_kit_t>, //
-        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, i8_v128_angular_kit_t>,                      //
-        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, i8_powervsx_angular_kit_t>           //
+    using kit_t = typename first_available_kit<                                                                       //
+        i8_serial_angular_kit_t,                                                                                      //
+        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i8_icelake_angular_kit_t>,             //
+        chain_layer<NUMKONG_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, i8_sierra_angular_kit_t>,                //
+        chain_layer<NUMKONG_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, i8_alder_angular_kit_t>,                   //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i8_haswell_angular_kit_t>,             //
+        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i8_neonsdot_angular_kit_t>,          //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i8_v128relaxed_angular_kit_t>, //
+        chain_layer<NUMKONG_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, i8_v128_angular_kit_t>,                      //
+        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, i8_powervsx_angular_kit_t>           //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3689,16 +3701,17 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::i8_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_euclidean_k, nk::i8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                    //
-        i8_serial_euclidean_kit_t,                                                                                 //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i8_icelake_euclidean_kit_t>,             //
-        chain_layer<NK_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, i8_sierra_euclidean_kit_t>,                //
-        chain_layer<NK_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, i8_alder_euclidean_kit_t>,                   //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i8_haswell_euclidean_kit_t>,             //
-        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i8_neonsdot_euclidean_kit_t>,          //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i8_v128relaxed_euclidean_kit_t>, //
-        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, i8_v128_euclidean_kit_t>,                      //
-        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, i8_powervsx_euclidean_kit_t>           //
+    using kit_t = typename first_available_kit<                                                                //
+        i8_serial_euclidean_kit_t,                                                                             //
+        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i8_icelake_euclidean_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, i8_sierra_euclidean_kit_t>,       //
+        chain_layer<NUMKONG_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, i8_alder_euclidean_kit_t>,          //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i8_haswell_euclidean_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i8_neonsdot_euclidean_kit_t>, //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0,
+                    i8_v128relaxed_euclidean_kit_t>,                                                          //
+        chain_layer<NUMKONG_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, i8_v128_euclidean_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, i8_powervsx_euclidean_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3707,16 +3720,16 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::i8_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_dot_k, nk::u8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                //
-        u8_serial_inner_kit_t,                                                                                 //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u8_icelake_inner_kit_t>,             //
-        chain_layer<NK_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, u8_sierra_inner_kit_t>,                //
-        chain_layer<NK_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, u8_alder_inner_kit_t>,                   //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u8_haswell_inner_kit_t>,             //
-        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u8_neonsdot_inner_kit_t>,          //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u8_v128relaxed_inner_kit_t>, //
-        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u8_v128_inner_kit_t>,                      //
-        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u8_powervsx_inner_kit_t>           //
+    using kit_t = typename first_available_kit<                                                                     //
+        u8_serial_inner_kit_t,                                                                                      //
+        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u8_icelake_inner_kit_t>,             //
+        chain_layer<NUMKONG_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, u8_sierra_inner_kit_t>,                //
+        chain_layer<NUMKONG_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, u8_alder_inner_kit_t>,                   //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u8_haswell_inner_kit_t>,             //
+        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u8_neonsdot_inner_kit_t>,          //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u8_v128relaxed_inner_kit_t>, //
+        chain_layer<NUMKONG_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u8_v128_inner_kit_t>,                      //
+        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u8_powervsx_inner_kit_t>           //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3725,16 +3738,16 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::u8_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_angular_k, nk::u8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                  //
-        u8_serial_angular_kit_t,                                                                                 //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u8_icelake_angular_kit_t>,             //
-        chain_layer<NK_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, u8_sierra_angular_kit_t>,                //
-        chain_layer<NK_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, u8_alder_angular_kit_t>,                   //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u8_haswell_angular_kit_t>,             //
-        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u8_neonsdot_angular_kit_t>,          //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u8_v128relaxed_angular_kit_t>, //
-        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u8_v128_angular_kit_t>,                      //
-        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u8_powervsx_angular_kit_t>           //
+    using kit_t = typename first_available_kit<                                                                       //
+        u8_serial_angular_kit_t,                                                                                      //
+        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u8_icelake_angular_kit_t>,             //
+        chain_layer<NUMKONG_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, u8_sierra_angular_kit_t>,                //
+        chain_layer<NUMKONG_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, u8_alder_angular_kit_t>,                   //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u8_haswell_angular_kit_t>,             //
+        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u8_neonsdot_angular_kit_t>,          //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u8_v128relaxed_angular_kit_t>, //
+        chain_layer<NUMKONG_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u8_v128_angular_kit_t>,                      //
+        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u8_powervsx_angular_kit_t>           //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3743,16 +3756,17 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::u8_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_euclidean_k, nk::u8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                    //
-        u8_serial_euclidean_kit_t,                                                                                 //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u8_icelake_euclidean_kit_t>,             //
-        chain_layer<NK_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, u8_sierra_euclidean_kit_t>,                //
-        chain_layer<NK_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, u8_alder_euclidean_kit_t>,                   //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u8_haswell_euclidean_kit_t>,             //
-        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u8_neonsdot_euclidean_kit_t>,          //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u8_v128relaxed_euclidean_kit_t>, //
-        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u8_v128_euclidean_kit_t>,                      //
-        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u8_powervsx_euclidean_kit_t>           //
+    using kit_t = typename first_available_kit<                                                                //
+        u8_serial_euclidean_kit_t,                                                                             //
+        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u8_icelake_euclidean_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, u8_sierra_euclidean_kit_t>,       //
+        chain_layer<NUMKONG_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, u8_alder_euclidean_kit_t>,          //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u8_haswell_euclidean_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u8_neonsdot_euclidean_kit_t>, //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0,
+                    u8_v128relaxed_euclidean_kit_t>,                                                          //
+        chain_layer<NUMKONG_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u8_v128_euclidean_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u8_powervsx_euclidean_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3761,12 +3775,12 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::u8_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_dot_k, nk::u4x2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                 //
-        u4x2_serial_inner_kit_t,                                                                                //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u4x2_icelake_inner_kit_t>,            //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u4x2_haswell_inner_kit_t>,            //
-        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u4x2_neonsdot_inner_kit_t>,         //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u4x2_v128relaxed_inner_kit_t> //
+    using kit_t = typename first_available_kit<                                                                      //
+        u4x2_serial_inner_kit_t,                                                                                     //
+        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u4x2_icelake_inner_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u4x2_haswell_inner_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u4x2_neonsdot_inner_kit_t>,         //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u4x2_v128relaxed_inner_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3775,12 +3789,13 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::u4x2_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_angular_k, nk::u4x2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                   //
-        u4x2_serial_angular_kit_t,                                                                                //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u4x2_icelake_angular_kit_t>,            //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u4x2_haswell_angular_kit_t>,            //
-        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u4x2_neonsdot_angular_kit_t>,         //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u4x2_v128relaxed_angular_kit_t> //
+    using kit_t = typename first_available_kit<                                                                //
+        u4x2_serial_angular_kit_t,                                                                             //
+        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u4x2_icelake_angular_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u4x2_haswell_angular_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u4x2_neonsdot_angular_kit_t>, //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0,
+                    u4x2_v128relaxed_angular_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3789,12 +3804,13 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::u4x2_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_euclidean_k, nk::u4x2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                     //
-        u4x2_serial_euclidean_kit_t,                                                                                //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u4x2_icelake_euclidean_kit_t>,            //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u4x2_haswell_euclidean_kit_t>,            //
-        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u4x2_neonsdot_euclidean_kit_t>,         //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u4x2_v128relaxed_euclidean_kit_t> //
+    using kit_t = typename first_available_kit<                                                                  //
+        u4x2_serial_euclidean_kit_t,                                                                             //
+        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u4x2_icelake_euclidean_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u4x2_haswell_euclidean_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u4x2_neonsdot_euclidean_kit_t>, //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0,
+                    u4x2_v128relaxed_euclidean_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3803,12 +3819,12 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::u4x2_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_dot_k, nk::i4x2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                 //
-        i4x2_serial_inner_kit_t,                                                                                //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i4x2_icelake_inner_kit_t>,            //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i4x2_haswell_inner_kit_t>,            //
-        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i4x2_neonsdot_inner_kit_t>,         //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i4x2_v128relaxed_inner_kit_t> //
+    using kit_t = typename first_available_kit<                                                                      //
+        i4x2_serial_inner_kit_t,                                                                                     //
+        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i4x2_icelake_inner_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i4x2_haswell_inner_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i4x2_neonsdot_inner_kit_t>,         //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i4x2_v128relaxed_inner_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3817,12 +3833,13 @@ struct dense_quads_chain<nk_kernel_dot_k, nk::i4x2_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_angular_k, nk::i4x2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                   //
-        i4x2_serial_angular_kit_t,                                                                                //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i4x2_icelake_angular_kit_t>,            //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i4x2_haswell_angular_kit_t>,            //
-        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i4x2_neonsdot_angular_kit_t>,         //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i4x2_v128relaxed_angular_kit_t> //
+    using kit_t = typename first_available_kit<                                                                //
+        i4x2_serial_angular_kit_t,                                                                             //
+        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i4x2_icelake_angular_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i4x2_haswell_angular_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i4x2_neonsdot_angular_kit_t>, //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0,
+                    i4x2_v128relaxed_angular_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3831,12 +3848,13 @@ struct dense_quads_chain<nk_kernel_angular_k, nk::i4x2_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_euclidean_k, nk::i4x2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                     //
-        i4x2_serial_euclidean_kit_t,                                                                                //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i4x2_icelake_euclidean_kit_t>,            //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i4x2_haswell_euclidean_kit_t>,            //
-        chain_layer<NK_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i4x2_neonsdot_euclidean_kit_t>,         //
-        chain_layer<NK_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i4x2_v128relaxed_euclidean_kit_t> //
+    using kit_t = typename first_available_kit<                                                                  //
+        i4x2_serial_euclidean_kit_t,                                                                             //
+        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i4x2_icelake_euclidean_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i4x2_haswell_euclidean_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i4x2_neonsdot_euclidean_kit_t>, //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0,
+                    i4x2_v128relaxed_euclidean_kit_t> //
         >::type;
 
     /** The capability bit of the layer that won - compare against the requested ceiling. */
@@ -3845,39 +3863,39 @@ struct dense_quads_chain<nk_kernel_euclidean_k, nk::i4x2_t, caps_> {
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_dot_k, nk::u1x8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                        //
-        u1x8_serial_inner_kit_t,                                                                       //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_inner_kit_t>,   //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_inner_kit_t>,   //
-        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, u1x8_neon_inner_kit_t>,            //
-        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u1x8_v128_inner_kit_t>,            //
-        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u1x8_powervsx_inner_kit_t> //
+    using kit_t = typename first_available_kit<                                                             //
+        u1x8_serial_inner_kit_t,                                                                            //
+        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_inner_kit_t>,   //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_inner_kit_t>,   //
+        chain_layer<NUMKONG_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, u1x8_neon_inner_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u1x8_v128_inner_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u1x8_powervsx_inner_kit_t> //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_hamming_k, nk::u1x8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                          //
-        u1x8_serial_hamming_kit_t,                                                                       //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_hamming_kit_t>,   //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_hamming_kit_t>,   //
-        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, u1x8_neon_hamming_kit_t>,            //
-        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u1x8_v128_hamming_kit_t>,            //
-        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u1x8_powervsx_hamming_kit_t> //
+    using kit_t = typename first_available_kit<                                                               //
+        u1x8_serial_hamming_kit_t,                                                                            //
+        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_hamming_kit_t>,   //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_hamming_kit_t>,   //
+        chain_layer<NUMKONG_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, u1x8_neon_hamming_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u1x8_v128_hamming_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u1x8_powervsx_hamming_kit_t> //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
 struct dense_quads_chain<nk_kernel_jaccard_k, nk::u1x8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                          //
-        u1x8_serial_jaccard_kit_t,                                                                       //
-        chain_layer<NK_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_jaccard_kit_t>,   //
-        chain_layer<NK_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_jaccard_kit_t>,   //
-        chain_layer<NK_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, u1x8_neon_jaccard_kit_t>,            //
-        chain_layer<NK_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u1x8_v128_jaccard_kit_t>,            //
-        chain_layer<NK_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u1x8_powervsx_jaccard_kit_t> //
+    using kit_t = typename first_available_kit<                                                               //
+        u1x8_serial_jaccard_kit_t,                                                                            //
+        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_jaccard_kit_t>,   //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_jaccard_kit_t>,   //
+        chain_layer<NUMKONG_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, u1x8_neon_jaccard_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u1x8_v128_jaccard_kit_t>,            //
+        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u1x8_powervsx_jaccard_kit_t> //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
@@ -3918,7 +3936,7 @@ template <std::size_t fan_out_, dense_quads_kit kit_>
     // scalar variants - and its caller contract is that every slot it reads is initialized,
     // even when the 1-to-1 instantiation only extracts lane 0. Three zero-stores buy a
     // well-defined finalize on every path.
-    NK_ALIGN64 accumulator_t accumulators[4];
+    NUMKONG_ALIGN64_ accumulator_t accumulators[4];
     kit_::init_accumulator(&accumulators[0]);
     kit_::init_accumulator(&accumulators[1]);
     kit_::init_accumulator(&accumulators[2]);
@@ -3940,8 +3958,8 @@ template <std::size_t fan_out_, dense_quads_kit kit_>
     std::size_t const tail_dimensions = total_dimensions % kit_::step_dimensions;
     std::size_t passed_dimensions = 0;
 
-    NK_ALIGN64 step_vec_t query_step_vec;
-    NK_ALIGN64 step_vec_t candidate_step_vecs[fan_out_];
+    NUMKONG_ALIGN64_ step_vec_t query_step_vec;
+    NUMKONG_ALIGN64_ step_vec_t candidate_step_vecs[fan_out_];
     for (; passed_dimensions + kit_::step_dimensions <= total_dimensions; passed_dimensions += kit_::step_dimensions) {
         std::size_t const value_offset = passed_dimensions / dims_per_value;
         std::size_t const next_value_offset = (passed_dimensions + kit_::step_dimensions) / dims_per_value;
@@ -3993,7 +4011,7 @@ template <std::size_t fan_out_, dense_quads_kit kit_>
     // u8/i8 finalize takes 8 args (DPBUSD bias correction); float-path takes 6. Detected
     // via `std::is_invocable_v` so kits keep `reduce_accumulators` as a raw alias.
     using finalized_vec_t = typename kit_::finalized_vec_t;
-    NK_ALIGN64 finalized_vec_t dot_products_vec;
+    NUMKONG_ALIGN64_ finalized_vec_t dot_products_vec;
     constexpr bool needs_compensation = std::is_invocable_v<                                    //
         decltype(kit_::reduce_accumulators),                                                    //
         accumulator_t const*, accumulator_t const*, accumulator_t const*, accumulator_t const*, //
@@ -4015,7 +4033,7 @@ template <std::size_t fan_out_, dense_quads_kit kit_>
     // Now infer the angular/euclidean distance from the inner product, in vec form.
     // The through helper (`nk_*_through_*_from_dot_*` or our `inner_product_distance_`)
     // takes the dots vec, query sumsq, candidate sumsqs vec, and writes a distances vec.
-    NK_ALIGN64 finalized_vec_t distances_from_dot_products_vec;
+    NUMKONG_ALIGN64_ finalized_vec_t distances_from_dot_products_vec;
     {
         alignas(16) std::array<dot_result_t, 4> candidates_sumsqs_array {};
         [&]<std::size_t... lane_index>(std::index_sequence<lane_index...>) {
@@ -4121,7 +4139,7 @@ struct i8_sapphireamx_tiles_kit;
 template <typename finalize_kit_type_>
 struct bf16_sapphireamx_tiles_kit;
 
-#if NK_TARGET_SAPPHIREAMX
+#if NUMKONG_TARGET_SAPPHIREAMX
 
 /** u8 tile kit for Sapphire Rapids AMX - the 4-way trio one power-of-two wider:
  *  @c init_tile / @c update_tile / @c finalize_tile over 16×16 accumulator tiles, plus
@@ -4493,7 +4511,7 @@ struct bf16_sapphireamx_tiles_kit {
     }
 };
 
-#endif // NK_TARGET_SAPPHIREAMX
+#endif // NUMKONG_TARGET_SAPPHIREAMX
 
 /** Tile-kernel capability cascade - a second, independent axis over the same
  *  @p caps_ bitmask as @c dense_quads_chain, so one machine picks icelake for 1-to-1
@@ -4512,7 +4530,7 @@ struct dense_tiles_chain<nk_kernel_euclidean_k, nk::u8_t, caps_> {
     using kit_t = typename first_available_kit< //
         no_tiles_kit_t,                         //
         chain_layer<
-            NK_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
+            NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
             u8_sapphireamx_tiles_kit<typename dense_quads_chain<nk_kernel_euclidean_k, nk::u8_t, caps_>::kit_t>>> //
         ::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
@@ -4524,7 +4542,7 @@ struct dense_tiles_chain<nk_kernel_angular_k, nk::u8_t, caps_> {
     using kit_t = typename first_available_kit< //
         no_tiles_kit_t,                         //
         chain_layer<
-            NK_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
+            NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
             u8_sapphireamx_tiles_kit<typename dense_quads_chain<nk_kernel_angular_k, nk::u8_t, caps_>::kit_t>>> //
         ::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
@@ -4536,7 +4554,7 @@ struct dense_tiles_chain<nk_kernel_euclidean_k, nk::i8_t, caps_> {
     using kit_t = typename first_available_kit< //
         no_tiles_kit_t,                         //
         chain_layer<
-            NK_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
+            NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
             i8_sapphireamx_tiles_kit<typename dense_quads_chain<nk_kernel_euclidean_k, nk::i8_t, caps_>::kit_t>>> //
         ::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
@@ -4548,7 +4566,7 @@ struct dense_tiles_chain<nk_kernel_angular_k, nk::i8_t, caps_> {
     using kit_t = typename first_available_kit< //
         no_tiles_kit_t,                         //
         chain_layer<
-            NK_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
+            NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
             i8_sapphireamx_tiles_kit<typename dense_quads_chain<nk_kernel_angular_k, nk::i8_t, caps_>::kit_t>>> //
         ::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
@@ -4560,7 +4578,7 @@ struct dense_tiles_chain<nk_kernel_euclidean_k, nk::bf16_t, caps_> {
     using kit_t = typename first_available_kit< //
         no_tiles_kit_t,                         //
         chain_layer<
-            NK_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
+            NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
             bf16_sapphireamx_tiles_kit<typename dense_quads_chain<nk_kernel_euclidean_k, nk::bf16_t, caps_>::kit_t>>> //
         ::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
@@ -4572,7 +4590,7 @@ struct dense_tiles_chain<nk_kernel_angular_k, nk::bf16_t, caps_> {
     using kit_t = typename first_available_kit< //
         no_tiles_kit_t,                         //
         chain_layer<
-            NK_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
+            NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
             bf16_sapphireamx_tiles_kit<typename dense_quads_chain<nk_kernel_angular_k, nk::bf16_t, caps_>::kit_t>>> //
         ::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;

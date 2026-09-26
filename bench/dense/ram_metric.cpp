@@ -354,7 +354,7 @@ static void register_kernel(std::string_view kernel_name, std::string_view scala
     register_baseline<kernel_, scalar_>(kernel_name, scalar_name);
     // Newest silicon first, split by the architecture-family macros like the test's tier
     // sweep - the concept-gated no-ops silently absorb any tier without a kit.
-#if NK_TARGET_X8664_
+#if NUMKONG_ARCH_X86_64_
     register_quads<kernel_, scalar_, nk_cap_diamond_k>(kernel_name, scalar_name, "diamond");
     register_quads<kernel_, scalar_, nk_cap_sierra_k>(kernel_name, scalar_name, "sierra");
     register_quads<kernel_, scalar_, nk_cap_genoa_k>(kernel_name, scalar_name, "genoa");
@@ -363,16 +363,16 @@ static void register_kernel(std::string_view kernel_name, std::string_view scala
     register_quads<kernel_, scalar_, nk_cap_skylake_k>(kernel_name, scalar_name, "skylake");
     register_quads<kernel_, scalar_, nk_cap_haswell_k>(kernel_name, scalar_name, "haswell");
     register_tiles<kernel_, scalar_, nk_cap_sapphireamx_k>(kernel_name, scalar_name, "sapphireamx");
-#elif NK_TARGET_ARM64_
+#elif NUMKONG_ARCH_ARM64_
     register_quads<kernel_, scalar_, nk_cap_neonfp8_k>(kernel_name, scalar_name, "neonfp8");
     register_quads<kernel_, scalar_, nk_cap_neonfhm_k>(kernel_name, scalar_name, "neonfhm");
     register_quads<kernel_, scalar_, nk_cap_neonbfdot_k>(kernel_name, scalar_name, "neonbfdot");
     register_quads<kernel_, scalar_, nk_cap_neonsdot_k>(kernel_name, scalar_name, "neonsdot");
     register_quads<kernel_, scalar_, nk_cap_neon_k>(kernel_name, scalar_name, "neon");
-#elif NK_TARGET_WASM_
+#elif NUMKONG_ARCH_WASM_
     register_quads<kernel_, scalar_, nk_cap_v128relaxed_k>(kernel_name, scalar_name, "v128relaxed");
     register_quads<kernel_, scalar_, nk_cap_v128_k>(kernel_name, scalar_name, "v128");
-#elif NK_TARGET_POWER64_
+#elif NUMKONG_ARCH_PPC64_
     register_quads<kernel_, scalar_, nk_cap_powervsx_k>(kernel_name, scalar_name, "powervsx");
 #endif
     register_quads<kernel_, scalar_, nk_cap_serial_k>(kernel_name, scalar_name, "serial");

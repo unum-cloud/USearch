@@ -30,7 +30,7 @@ namespace usearch {
  *  cannot see each other - `utilities/types.hpp` forward-declares the sister namespaces rather
  *  than including them. This is the first point both are visible, so it is where drift surfaces. */
 static_assert(default_alignment_k == fu::default_alignment_k,
-              "USEARCH_DEFAULT_ALIGNMENT and FU_DEFAULT_ALIGNMENT disagree");
+              "USEARCH_DEFAULT_ALIGNMENT and FORKUNION_DEFAULT_ALIGNMENT disagree");
 
 #pragma region Placement
 

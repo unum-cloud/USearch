@@ -22,7 +22,7 @@
 #include "usearch/types.h" // `usearch_status_t`, so the C++ mirror cannot drift from the ABI
 
 /*  The `alignas` width that keeps two threads' words off one cache line, picked from the target as
- *  ForkUnion picks `FU_DEFAULT_ALIGNMENT`; `ram_device.hpp` asserts the two agree. */
+ *  ForkUnion picks `FORKUNION_DEFAULT_ALIGNMENT`; `ram_device.hpp` asserts the two agree. */
 #if !defined(USEARCH_DEFAULT_ALIGNMENT)
 #if defined(__s390x__)
 #define USEARCH_DEFAULT_ALIGNMENT 256
