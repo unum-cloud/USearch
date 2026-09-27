@@ -59,7 +59,7 @@ struct levenshtein_metric_t {
         if (staged_.size() == staging_limit_k) return basic_metric_staging_t::refused_k;
         return staged_.push_back(value), basic_metric_staging_t::staged_k;
     }
-    void drain(std::span<u64_t> distances) noexcept {
+    void drain(std::span<u64_t> distances, u64_t) noexcept {
         for (std::size_t lane = 0; lane != distances.size(); ++lane)
             distances[lane] = levenshtein_distance(query_, staged_[lane], previous_row_, current_row_);
         staged_.clear();

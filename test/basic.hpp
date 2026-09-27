@@ -137,10 +137,10 @@ struct basic_auditing_metric {
         --budget_left, ++pushes, ++pushes_this_round;
         return basic_metric_staging_t::staged_k;
     }
-    void drain(std::span<distance_type_> distances) noexcept {
+    void drain(std::span<distance_type_> distances, distance_type_ radius) noexcept {
         if (!resets) ++violations;
         if (distances.size() != pushes_this_round) ++violations; // The drain-width contract.
-        inner.drain(distances);
+        inner.drain(distances, radius);
         ++drains;
         pushes_this_round = 0;
     }
@@ -167,7 +167,7 @@ struct basic_gated_metric {
         while (!released->load(std::memory_order_acquire)) std::this_thread::yield();
         return inner.push(staged);
     }
-    void drain(std::span<distance_type_> distances) noexcept { inner.drain(distances); }
+    void drain(std::span<distance_type_> distances, distance_type_ radius) noexcept { inner.drain(distances, radius); }
 };
 
 #pragma endregion Instrumented Metrics
@@ -1703,15 +1703,30 @@ std::size_t test_basic_torn_bracket(fixture_type_ const& fixture) {
 #pragma region Contracts
 
 /** The metric-contract audit: every drain sized to its round's pushes, no round
- *  abandoned mid-flight, telemetry equal to the audited push count, and armed
- *  refusals driving the saturation paths without ever breaking a walk. */
+ *  abandoned mid-flight, telemetry equal to the audited push count, a fold absorbing
+ *  every drained round whole, a sated fold ending its walk early and successfully, and
+ *  armed refusals driving the saturation paths without ever breaking a walk. */
 template <typename fixture_type_>
 std::size_t test_basic_metric_contract(fixture_type_ const& fixture) {
     using index_t = typename fixture_type_::index_t;
+    using node_id_t = typename index_t::node_id_t;
     using distance_t = typename index_t::distance_t;
     using context_t = typename index_t::traversal_context_t;
     using metric_t = decltype(fixture.make_metric());
     constexpr std::size_t nodes_k = 48;
+
+    /** Tallies the rounds & pairs a walk scores, sated once it has seen @c rounds_limit rounds. */
+    struct counting_fold_t {
+        std::size_t rounds_limit = SIZE_MAX;
+        std::size_t rounds = 0;
+        std::size_t pairs = 0;
+
+        walk_demand_t absorb(std::span<node_id_t const> node_ids, std::span<distance_t const>) noexcept {
+            ++rounds, pairs += node_ids.size();
+            return rounds == rounds_limit ? walk_demand_t::sated_k : walk_demand_t::continue_k;
+        }
+    };
+
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
@@ -1731,10 +1746,25 @@ std::size_t test_basic_metric_contract(fixture_type_ const& fixture) {
         failures += expect_eq(context.telemetry.computed_distances, metric.pushes);
 
         for (auto const& query : queries) {
-            failures += expect_eq(index.search(query, metric, context).status, status_t::success_k);
+            counting_fold_t fold;
+            std::size_t const drains_before = metric.drains;
+            auto const [result, status] = index.search(query, metric, fold, context);
+            failures += expect_eq(status, status_t::success_k);
             failures += basic_expect_ascending(context);
+            failures += expect_eq(fold.rounds, metric.drains - drains_before);
+            failures += expect_eq(fold.pairs, result.telemetry.computed_distances);
         }
         failures += expect_eq(metric.violations, 0u);
+
+        // Sated by its landmarks, a walk ends before they reach the pool, scoring less than a whole-graph walk.
+        counting_fold_t sated {1};
+        auto const [sated_result, sated_status] = index.search(queries[0], metric, sated, context);
+        failures += expect_eq(sated_status, status_t::success_k);
+        failures += expect_eq(sated.rounds, 1u);
+        failures += expect_eq(sated_result.count, 0u);
+        auto const [unfolded_result, unfolded_status] = index.search(queries[0], metric, context);
+        failures += expect_eq(unfolded_status, status_t::success_k);
+        failures += expect(sated_result.telemetry.computed_distances < unfolded_result.telemetry.computed_distances);
 
         // Armed refusal: the walk must survive every saturation path & stay ranked.
         for (std::size_t budget : {basic_connectivity_k, std::size_t {1}, std::size_t {0}}) {
@@ -2501,7 +2531,7 @@ std::size_t test_basic_safegraphs_distributed(fixture_type_ const& fixture, std:
         failures += expect_eq(safegraphs_write_manifest(manifest_path, parts_k, part_at), status_t::success_k);
 
         // The summary is answered by content, never by extension, and by the first part's header.
-        auto const [summary, summary_status] = safegraphs_read_metadata(manifest_path);
+        auto const [summary, summary_status] = safegraphs_read_metadata(manifest_path, counting_allocator_t {ledger});
         failures += expect(succeeded(summary_status));
         failures += expect_eq(summary.parts, parts_k);
         failures += expect_eq(summary.nodes, nodes_k);
@@ -2510,7 +2540,8 @@ std::size_t test_basic_safegraphs_distributed(fixture_type_ const& fixture, std:
         // Every entry resolves beside the manifest and restores into a mirror of its own half.
         std::vector<std::string> relative_paths;
         auto per_part = [&](safegraphs_part_t part) noexcept { relative_paths.emplace_back(part.path); };
-        auto const [catalog, catalog_status] = safegraphs_read_manifest(manifest_path, {}, per_part);
+        auto const [catalog, catalog_status] = safegraphs_read_manifest(manifest_path, counting_allocator_t {ledger},
+                                                                        per_part);
         failures += expect(succeeded(catalog_status));
         failures += expect_eq(relative_paths.size(), parts_k);
         for (std::size_t part = 0; part != parts_k && part != relative_paths.size(); ++part) {

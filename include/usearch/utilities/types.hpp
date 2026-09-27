@@ -83,16 +83,6 @@ struct uuid_t {
 };
 static_assert(std::is_trivially_copyable_v<uuid_t> && sizeof(uuid_t) == 16);
 
-/** Dense node identifier within one sub-index - 32 bits, matching the 4-billion ceiling. */
-using dense_node_id_t = u32_t;
-
-/** Distance representation shared by all metrics, regardless of the stored dtype. */
-using dense_distance_t = f32_t;
-
-/** Reserved all-ones value, never a valid node id within a sub-index. Doubles as the
- *  lock & empty-slot sentinel in neighbor lists of every index design. */
-inline constexpr dense_node_id_t dense_node_id_unknown_k = 0xFFFFFFFFu;
-
 /** The single-byte scalar every allocator deals in - the unit of raw storage. */
 using byte_t = std::byte;
 
@@ -125,38 +115,18 @@ inline constexpr std::size_t default_alignment_k = USEARCH_DEFAULT_ALIGNMENT;
 static_assert(default_alignment_k >= 8 && (default_alignment_k & (default_alignment_k - 1)) == 0,
               "USEARCH_DEFAULT_ALIGNMENT must be a power of two, no narrower than a pointer pair");
 
-/** One traversal candidate: a node id paired with its distance to the query. */
-struct dense_scored_node_t {
+/** How one step of a walk - a batch of landmarks or one expansion round - left it, in every tier. */
+enum class walk_step_t : u32_t {
 
-    /** Identifier of the scored node within its sub-index. */
-    dense_node_id_t node_id;
+    /** The walk goes on: landmarks entered the frontier, or a round staged candidates to drain. */
+    advanced_k,
 
-    /** Distance to the query, in the instantiated kernel's metric. */
-    dense_distance_t distance;
-};
-
-/** Orders scored nodes nearest-first; the comparator of the sorted results pool. */
-struct dense_closer_scored_node_t {
-    inline bool operator()(dense_scored_node_t first, dense_scored_node_t second) const noexcept {
-        return first.distance < second.distance;
-    }
-};
-
-/** Orders scored nodes furthest-first; the comparator of the max-heap frontier. */
-struct dense_further_scored_node_t {
-    inline bool operator()(dense_scored_node_t first, dense_scored_node_t second) const noexcept {
-        return first.distance > second.distance;
-    }
-};
-
-/** What one batch of landmarks achieved for a walk. */
-enum class landmarks_seeding_t : u32_t {
-
-    /** Fresh landmarks entered the frontier, so the walk goes on. */
-    queued_k,
-
-    /** Nothing fresh was left to seed from, so the walk ends. */
+    /** Nothing left can improve the pool: every landmark is visited, or the frontier's nearest lies
+     *  past a full pool's radius. */
     exhausted_k,
+
+    /** Scratch or metric staging refused mid-step: drain what staged, then stop. */
+    saturated_k,
 
     /** The walk's fold asked to stop, so the walk ends with what it holds. */
     sated_k,
@@ -170,6 +140,15 @@ enum class walk_demand_t : bool {
 
     /** End the walk now, successfully, with what the fold holds. */
     sated_k,
+};
+
+/** The default fold of every tier: reads nothing and never ends the walk, so a walk that folds
+ *  nothing inlines the axis away. */
+struct dummy_fold_t {
+    template <typename... batch_types_>
+    constexpr walk_demand_t absorb(batch_types_ const&...) const noexcept {
+        return walk_demand_t::continue_k;
+    }
 };
 
 /**
@@ -601,41 +580,6 @@ constexpr std::size_t dtype_bytes(dtype_t dtype) noexcept {
     std::size_t const bits = dtype_bits(dtype);
     return bits && bits % 8 == 0 ? bits / 8 : 0;
 }
-
-/** Fixed 32-byte descriptor fronting every serialized dense index payload - volatile
- *  in-RAM snapshots, GPU-resident uploads, and persisted on-NVMe layouts alike. It describes
- *  the graph & its frozen geometry, never the residency: what sections follow and how they
- *  are laid out is the per-storage contract versioned by @c version_k. */
-struct dense_index_header_t {
-
-    /** The expected @c magic contents: "usearch3" read as a little-endian word. */
-    inline static constexpr u64_t magic_k = usearch_magic_k;
-
-    /** The layout revision this implementation writes and understands. */
-    inline static constexpr u32_t version_k = 1;
-
-    /** Identifies USearch dense index payloads; must equal @c magic_k. */
-    u64_t magic;
-
-    /** Layout revision of the sections that follow. */
-    u32_t version;
-
-    /** The stored @c nk_dtype_t; must match the loading instantiation. */
-    u32_t dtype;
-
-    /** The @c nk_kernel_kind_t metric; must match the loading instantiation. */
-    u32_t kernel;
-
-    /** Scalar dimensions per vector - one half of the frozen geometry. */
-    u32_t dimensions;
-
-    /** Neighbor ids per node - the other half of the frozen geometry. */
-    u32_t connectivity;
-
-    /** Published nodes in the payload; the chunk layout re-derives from it. */
-    u32_t node_count;
-};
-static_assert(sizeof(dense_index_header_t) == 32 && std::is_trivially_copyable_v<dense_index_header_t>);
 
 /** Returns 2^ @p exponent as a value of the requested unsigned type. */
 template <typename result_type_>

@@ -91,7 +91,7 @@ struct spectra_metric_t {
     basic_metric_staging_t push(mesh_t const& value) noexcept {
         return staged_.push_back(value.spectrum), basic_metric_staging_t::staged_k;
     }
-    void drain(std::span<f64_t> distances) noexcept {
+    void drain(std::span<f64_t> distances, f64_t) noexcept {
         for (std::size_t lane = 0; lane != distances.size(); ++lane)
             distances[lane] = spectra_distance(query_spectrum_, staged_[lane]);
         staged_.clear();

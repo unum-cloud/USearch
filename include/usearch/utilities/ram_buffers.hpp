@@ -26,7 +26,7 @@
 #include <functional>  // `std::less`
 #include <memory>      // `std::allocator`, `std::unique_ptr` - the arena's chunk chain
 #include <new>         // `new (ptr) element_t(value)` for "placement-new"
-#include <type_traits> // `std::is_trivially_destructible`, `std::is_integral`
+#include <type_traits> // `std::is_trivially_destructible`, `std::is_trivially_copyable`, `std::is_integral`
 #include <utility>     // `std::swap`, `std::move`, `std::forward`
 
 #include "usearch/utilities/types.hpp"      // `status_t`, `succeeded`, `failed`
@@ -81,27 +81,6 @@ concept buffer_allocator = requires(allocator_ allocator, typename allocator_::v
 };
 
 static_assert(buffer_allocator<std::allocator<byte_t>>);
-
-/**
- *  @brief Sorts up to four @p values ascending by @p comparator_type_ through fully-unrolled
- *      sorting networks - no loops, no recursion, no library sort; the four-element network
- *      is the optimal five compare-exchanges.
- *
- *  Exchanges fire only on strict inversions, so equal elements keep their original order -
- *  the stability the sorted-batch @c sorted_buffer::insert relies on for reproducible ties.
- */
-template <typename element_type_, std::size_t extent_, typename comparator_type_ = std::less<void>>
-inline void network_sort(std::span<element_type_, extent_> values, comparator_type_ comparator = {}) noexcept {
-    auto exchange = [&](std::size_t left, std::size_t right) noexcept {
-        if (comparator(values[right], values[left])) std::swap(values[left], values[right]);
-    };
-    switch (values.size()) {
-    case 4: exchange(0, 1), exchange(2, 3), exchange(0, 2), exchange(1, 3), exchange(1, 2); return;
-    case 3: exchange(0, 1), exchange(0, 2), exchange(1, 2); return;
-    case 2: exchange(0, 1); return;
-    default: return; // Zero or one element is sorted by definition.
-    }
-}
 
 /**
  *  @brief Similar to @c std::priority_queue, but allows raw access to underlying
@@ -929,7 +908,7 @@ class growing_buffer {
 
     /**
      *  @brief Like @ref resize, but skips the zero fill so the caller owns the first touch.
-     *  @note Trivial element types only - nothing is constructed, so every element must be
+     *  @note Implicit-lifetime element types only - nothing is constructed, so every element must be
      *      written before it is read.
      */
     status_t resize_uninitialized(std::size_t count) noexcept {
@@ -944,9 +923,10 @@ class growing_buffer {
      *  never allocates, never fails. This is the slice an arena hands out, where value-
      *  constructing the run would cost a pass over every slice handed out. */
     inline void extend_uninitialized(std::size_t count) noexcept {
-        static_assert(
-            std::is_trivially_default_constructible<element_t>() && std::is_trivially_destructible<element_t>(),
-            "Uninitialized storage is only safe for trivial element types");
+        // Trivially copyable types begin their lifetime with the first write, even NumKong's scalars, whose
+        // default constructor zeroes.
+        static_assert(std::is_trivially_copyable<element_t>(),
+                      "Uninitialized storage is only safe for implicit-lifetime element types");
         annotate_container(elements_, elements_ + capacity_, elements_ + size_, elements_ + count);
         size_ = count;
     }

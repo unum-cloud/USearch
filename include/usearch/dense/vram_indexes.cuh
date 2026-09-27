@@ -34,6 +34,7 @@
 #include "usearch/utilities/ram_device.hpp"        // `forkunion_allocator` - the host columns' placement
 #include "usearch/utilities/ram_tables.hpp"        // `growing_multimap` - the locator map
 #include "usearch/utilities/safegraphs_format.hpp" // SafeGraphs monoliths & manifests - the checkpoints
+#include "usearch/dense/types.hpp"
 #include "usearch/dense/vram_index.cuh"
 
 namespace unum {
@@ -89,6 +90,7 @@ struct dense_vram_indexes {
     using traversal_t = typename index_t::dense_traversal_context_t;
     using distance_t = typename index_t::distance_t;
     using scalar_t = typename index_t::scalar_t;
+    using dot_result_t = typename scalar_t::dot_result_t;
     using vector_view_t = typename index_t::vector_view_t;
     using vectors_view_t = typename index_t::vectors_view_t;
     using vectors_span_t = nk::matrix_span<scalar_t>;
@@ -500,22 +502,17 @@ struct dense_vram_indexes {
     expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
                                      std::size_t wanted, std::span<key_t> keys, std::span<distance_t> distances,
                                      std::span<std::size_t> counts) noexcept {
-        search_result_t merged;
         std::size_t const queries_count = queries.extent(0);
         std::size_t const shards = shards_.size();
         if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {{}, paired};
         if (counts.size() != queries_count || keys.size() < queries_count * wanted ||
             distances.size() < queries_count * wanted)
             return {{}, status_t::config_mismatch_k};
-        if (!queries_count) return {merged, status_t::success_k};
+        if (!queries_count) return {{}, status_t::success_k};
         // Vetted before anything is claimed or carved; the shards would refuse only after the
         // landing and the runs had been sized for a doomed call.
         if (queries.extent(1) != dimensions() || config.count > dense_cuda_sorted_pool<16>::capacity_k)
             return {{}, status_t::config_mismatch_k};
-
-        // The executor serializes, never the index: a second caller with its own executor searches concurrently.
-        auto [claim, claim_status] = executor.claim();
-        if (failed(claim_status)) return {{}, claim_status};
 
         // The host landing: every shard's matches, one wide matrix each, shard columns side by
         // side; never zeroed, since only columns a drained shard wrote are ever read.
@@ -529,38 +526,17 @@ struct dense_vram_indexes {
         nk::matrix_span<dense_distance_t> const distances_wide {distances_landing.data(), queries_count,
                                                                 shards * config.count};
 
-        growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
-        if (status_t const readied = reserve_traversals_(traversals, executor, queries_count, config); failed(readied))
-            return {{}, readied};
-
-        // Queue every shard before awaiting any, so the batch costs the slowest device rather than
-        // the sum. From here to the drain there must be no return: the queries and the landing are
-        // DMA targets on every queued stream.
-        status_t first_refusal = status_t::success_k;
-        std::size_t queued = 0;
-        for (; queued != shards; ++queued) {
+        auto search_shard = [&](std::size_t shard, traversal_t& traversal) noexcept {
             nk::matrix_span<dense_node_id_t> const shard_ids = ids_wide(
-                nk::all, nk::range {queued * config.count, (queued + 1) * config.count}, nk::slice);
+                nk::all, nk::range {shard * config.count, (shard + 1) * config.count}, nk::slice);
             nk::matrix_span<dense_distance_t> const shard_distances = distances_wide(
-                nk::all, nk::range {queued * config.count, (queued + 1) * config.count}, nk::slice);
-            auto const [result, status] = shards_[queued].index->search(
-                queries, shard_ids, shard_distances, traversals[queued], config, completion_t::deferred_k);
-            if (failed(status)) {
-                first_refusal = status;
-                break;
-            }
-        }
-
-        // Await every stream that may carry queued transfers - the refuser included, since its
-        // upload may already be reading the caller's rows - and merge each drained shard's columns.
-        for (std::size_t& count : counts) count = 0;
-        dense_scored_node_t frame[dense_cuda_sorted_pool<16>::capacity_k];
-        for (std::size_t shard = 0; shard != shards && shard <= queued; ++shard) {
-            if (status_t const drained = traversals[shard].drain(); failed(drained)) {
-                if (succeeded(first_refusal)) first_refusal = drained;
-                continue; // An undrained landing is unreadable - this shard merges nothing.
-            }
-            if (shard == queued) continue; // The refuser drained for the caller's sake, landed nothing.
+                nk::all, nk::range {shard * config.count, (shard + 1) * config.count}, nk::slice);
+            expected<search_result_t> const found = shards_[shard].index->search(
+                queries, shard_ids, shard_distances, traversal, config, completion_t::deferred_k);
+            return found.status;
+        };
+        auto merge_shard = [&](std::size_t shard) noexcept {
+            dense_scored_node_t frame[dense_cuda_sorted_pool<16>::capacity_k];
             for (std::size_t query = 0; query != queries_count; ++query) {
                 std::size_t const landed_offset = (query * shards + shard) * config.count;
                 std::size_t const live = repack_landed_matches_(
@@ -570,19 +546,129 @@ struct dense_vram_indexes {
                 counts[query] = merge_search_results(std::span<dense_scored_node_t const> {frame, live},
                                                      shards_[shard].keys, keys_row, distances_row, counts[query]);
             }
-        }
+        };
+        for (std::size_t& count : counts) count = 0;
+        return for_each_shard_(executor, queries_count, config, search_shard, merge_shard, counts);
+    }
 
-        // Every drained context's sink holds this call's spend on its shard.
-        for (std::size_t shard = 0; shard != shards && shard <= queued; ++shard) {
-            dense_cuda_telemetry_block_t const spent = traversals[shard].spent();
-            merged.visited_members += spent.hops;
-            merged.computed_distances += spent.scored;
-            merged.restarts += spent.restarts;
-            merged.tail_drops += spent.tail_drops;
-            merged.visited_saturations += spent.visited_saturations;
-        }
-        for (std::size_t const count : counts) merged.count += count;
-        return {merged, first_refusal};
+    /**
+     *  @brief Graph products of a whole matrix of left-hand rows against every shard: each row keeps
+     *      the pairs its walks scored, keys resolved and dots at their native width.
+     *
+     *  @param[in] left The left-hand rows, one walk per row, in the shards' stored scalar type.
+     *  @param[inout] executor The contexts and streams, paired positionally with the shards.
+     *  @param[in] config The per-shard walk configuration, applied uniformly.
+     *  @param[in] wanted Pairs kept per row - the row width of @p keys and @p products.
+     *  @param[out] keys The key of each kept pair, @b [rows,wanted] row-major.
+     *  @param[out] products The dot of each kept pair, parallel to @p keys.
+     *  @param[out] counts Pairs scored per row across every shard, above @p wanted when truncated.
+     *
+     *  A full row keeps an arbitrary subset of its pairs. A refused shard stops the fan-out but keeps
+     *  every shard already landed, so the pairs and the counts always agree; the first refusal is what
+     *  the merged result reports.
+     */
+    expected<search_result_t> multiply(vectors_view_t left, executor_t& executor, search_config_t config,
+                                       std::size_t wanted, std::span<key_t> keys, std::span<dot_result_t> products,
+                                       std::span<std::size_t> counts) noexcept
+        requires(kernel_kind_ == nk_kernel_dot_k)
+    {
+        std::size_t const rows_count = left.extent(0);
+        std::size_t const shards = shards_.size();
+        if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {{}, paired};
+        if (counts.size() != rows_count || keys.size() < rows_count * wanted || products.size() < rows_count * wanted)
+            return {{}, status_t::config_mismatch_k};
+        if (!rows_count) return {{}, status_t::success_k};
+        if (left.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
+
+        // Every shard lands its own columns of one host landing, and its context is sized for that width.
+        config.count = static_cast<typename index_t::small_size_t>(wanted);
+        std::size_t const landing_entries = rows_count * shards * wanted;
+        growing_buffer<dense_node_id_t, forkunion_allocator_t> ids_landing {allocator_};
+        growing_buffer<dot_result_t, forkunion_allocator_t> products_landing {allocator_};
+        growing_buffer<u32_t, forkunion_allocator_t> counts_landing {allocator_};
+        if (failed(ids_landing.resize_uninitialized(landing_entries)) ||
+            failed(products_landing.resize_uninitialized(landing_entries)) ||
+            failed(counts_landing.resize_uninitialized(shards * rows_count)))
+            return {{}, status_t::bad_alloc_k};
+        nk::matrix_span<dense_node_id_t> const ids_wide {ids_landing.data(), rows_count, shards * wanted};
+        nk::matrix_span<dot_result_t> const products_wide {products_landing.data(), rows_count, shards * wanted};
+
+        auto multiply_shard = [&](std::size_t shard, traversal_t& traversal) noexcept {
+            nk::matrix_span<dense_node_id_t> const shard_ids = ids_wide(
+                nk::all, nk::range {shard * wanted, (shard + 1) * wanted}, nk::slice);
+            nk::matrix_span<dot_result_t> const shard_products = products_wide(
+                nk::all, nk::range {shard * wanted, (shard + 1) * wanted}, nk::slice);
+            std::span<u32_t> const shard_counts {counts_landing.data() + shard * rows_count, rows_count};
+            expected<search_result_t> const multiplied = shards_[shard].index->multiply(
+                left, shard_ids, shard_products, shard_counts, traversal, config, completion_t::deferred_k);
+            return multiplied.status;
+        };
+        // Shards append in placement order until a row fills, so rows truncate exactly as on the host.
+        auto merge_shard = [&](std::size_t shard) noexcept {
+            for (std::size_t row = 0; row != rows_count; ++row) {
+                std::size_t const landed_offset = (row * shards + shard) * wanted;
+                std::size_t const kept = min_of(counts[row], wanted);
+                std::size_t const scored = counts_landing[shard * rows_count + row];
+                for (std::size_t pair = 0; pair != min_of(scored, wanted - kept); ++pair) {
+                    keys[row * wanted + kept + pair] = shards_[shard].keys[ids_landing[landed_offset + pair]];
+                    products[row * wanted + kept + pair] = products_landing[landed_offset + pair];
+                }
+                counts[row] += scored;
+            }
+        };
+        for (std::size_t& count : counts) count = 0;
+        return for_each_shard_(executor, rows_count, config, multiply_shard, merge_shard, counts);
+    }
+
+    /**
+     *  @brief Late-interaction scores of query groups against every shard: each query row takes its
+     *      best dot within a key among the tokens it ranked, and those maxima sum to that key's score.
+     *
+     *  @param[in] queries The token rows of every query, @p rows_per_query consecutive rows each.
+     *  @param[in] rows_per_query Rows in every query; the row count must be a whole multiple of it.
+     *  @param[inout] executor The contexts and streams, paired positionally with the shards.
+     *  @param[in] config The per-shard walk configuration, applied uniformly; each row ranks as many
+     *      tokens as its expansion factor, and one wider than the device search can land refuses.
+     *  @param[in] wanted Keys kept per query - the row width of @p keys and @p scores.
+     *  @param[out] keys The best-scoring keys of each query, @b [queries,wanted] row-major.
+     *  @param[out] scores Their summed maxima, largest first, parallel to @p keys.
+     *  @param[out] counts Keys written per query, at most @p wanted.
+     *
+     *  A key some row never ranked misses that row's maximum, so with non-negative per-row maxima
+     *  a score lands below its exact value, never above.
+     */
+    expected<search_result_t> maxsim(vectors_view_t queries, std::size_t rows_per_query, executor_t& executor,
+                                     search_config_t config, std::size_t wanted, std::span<key_t> keys,
+                                     std::span<f64_t> scores, std::span<std::size_t> counts) noexcept
+        requires(kernel_kind_ == nk_kernel_dot_k)
+    {
+        std::size_t const rows_count = queries.extent(0);
+        if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {{}, paired};
+        if (!rows_per_query || rows_count % rows_per_query) return {{}, status_t::shape_mismatch_k};
+        std::size_t const groups_count = rows_count / rows_per_query;
+        if (counts.size() != groups_count || keys.size() < groups_count * wanted ||
+            scores.size() < groups_count * wanted)
+            return {{}, status_t::config_mismatch_k};
+        if (!groups_count) return {{}, status_t::success_k};
+
+        // Every token row keeps its whole ranked pool, its keys resolved and merged across the shards.
+        std::size_t const width = shards_[0].index->non_zero_expansion_factor(config);
+        config.count = static_cast<typename index_t::small_size_t>(width);
+        growing_buffer<key_t, forkunion_allocator_t> row_keys {allocator_};
+        growing_buffer<distance_t, forkunion_allocator_t> row_distances {allocator_};
+        growing_buffer<std::size_t, forkunion_allocator_t> row_counts {allocator_};
+        dense_maxsim_reducer<key_t, forkunion_allocator_t> reduce {allocator_};
+        if (failed(row_keys.resize_uninitialized(rows_count * width)) ||
+            failed(row_distances.resize_uninitialized(rows_count * width)) ||
+            failed(row_counts.resize_uninitialized(rows_count)) ||
+            failed(reduce.reserve(rows_per_query, width, wanted)))
+            return {{}, status_t::bad_alloc_k};
+        expected<search_result_t> ranked = search(queries, executor, config, width, to_writable_span(row_keys),
+                                                  to_writable_span(row_distances), to_writable_span(row_counts));
+        if (!ranked) return ranked;
+        ranked.value.count = reduce(to_span(row_keys), to_span(row_distances), to_span(row_counts), keys, scores,
+                                    counts);
+        return ranked;
     }
 
 #pragma endregion Search
@@ -1197,6 +1283,10 @@ struct dense_vram_indexes {
             failed(readied))
             return {result, readied};
 
+        // Every shard must seat its build launch before any row is admitted, or a mixed fleet inserts partially.
+        for (shard_t const& one : shards_)
+            if (!one.index->build_scratch_fits()) return {result, status_t::config_mismatch_k};
+
         // Admission before anything is taken: past the ceiling, an ID has no key-column slot.
         std::size_t const rows_ceiling = capacity();
         std::size_t routing_base = admitted_rows_.load(std::memory_order_relaxed);
@@ -1288,6 +1378,57 @@ struct dense_vram_indexes {
         for (; live != count && landed_ids[live] != dense_node_id_unknown_k; ++live)
             frame[live] = dense_scored_node_t {landed_ids[live], landed_distances[live]};
         return live;
+    }
+
+    /** Claims @p executor, sizes one context per shard for @p rows_count rows under @p config, queues
+     *  @p submit on every shard before awaiting any, drains every queued stream, hands each drained
+     *  shard to @p merge, and sums the telemetry & the rows' @p counts; the first refusal is the one kept. */
+    template <typename submit_type_, typename merge_type_>
+    expected<search_result_t> for_each_shard_(executor_t& executor, std::size_t rows_count, search_config_t config,
+                                              submit_type_&& submit, merge_type_&& merge,
+                                              std::span<std::size_t const> counts) noexcept {
+        // The executor serializes, never the index: a second caller with its own executor searches concurrently.
+        auto [claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return {{}, claim_status};
+        growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
+        if (status_t const readied = reserve_traversals_(traversals, executor, rows_count, config); failed(readied))
+            return {{}, readied};
+
+        // Queue every shard before awaiting any, so the batch costs the slowest device rather than
+        // the sum. From here to the drain there must be no return: the caller's rows and the landing
+        // are DMA targets on every queued stream.
+        std::size_t const shards = shards_.size();
+        status_t first_refusal = status_t::success_k;
+        std::size_t queued = 0;
+        for (; queued != shards; ++queued)
+            if (status_t const submitted = submit(queued, traversals[queued]); failed(submitted)) {
+                first_refusal = submitted;
+                break;
+            }
+
+        // Await every stream that may carry queued transfers - the refuser included, since its
+        // upload may already be reading the caller's rows - and merge each drained shard's columns.
+        for (std::size_t shard = 0; shard != shards && shard <= queued; ++shard) {
+            if (status_t const drained = traversals[shard].drain(); failed(drained)) {
+                if (succeeded(first_refusal)) first_refusal = drained;
+                continue; // An undrained landing is unreadable - this shard merges nothing.
+            }
+            if (shard == queued) continue; // The refuser drained for the caller's sake, landed nothing.
+            merge(shard);
+        }
+
+        // Every drained context's sink holds this call's spend on its shard.
+        search_result_t merged;
+        for (std::size_t shard = 0; shard != shards && shard <= queued; ++shard) {
+            dense_cuda_telemetry_block_t const spent = traversals[shard].spent();
+            merged.visited_members += spent.hops;
+            merged.computed_distances += spent.scored;
+            merged.restarts += spent.restarts;
+            merged.tail_drops += spent.tail_drops;
+            merged.visited_saturations += spent.visited_saturations;
+        }
+        for (std::size_t const count : counts) merged.count += count;
+        return {merged, first_refusal};
     }
 
 #pragma endregion Search

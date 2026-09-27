@@ -139,8 +139,6 @@ inline bool reject_matches(usearch_matches_span_t const* matches, std::size_t& k
     if (reject_if(!matches || !matches->keys || !matches->scores || !matches->counts, usearch_error_malformed_input_k,
                   "The matches span must name all three outputs", error))
         return true;
-    if (reject_if(!matches->wanted, usearch_error_shape_mismatch_k, "A run must want at least one match", error))
-        return true;
     keys_stride = matches->keys_stride_bytes ? matches->keys_stride_bytes : matches->wanted * sizeof(usearch_key_t);
     scores_stride = matches->scores_stride_bytes ? matches->scores_stride_bytes
                                                  : matches->wanted * sizeof(usearch_distance_t);

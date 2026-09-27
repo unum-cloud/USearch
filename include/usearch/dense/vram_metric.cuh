@@ -34,6 +34,7 @@
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_device.hpp"
+#include "usearch/dense/types.hpp"
 
 #if defined(__CUDACC__)
 

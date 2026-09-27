@@ -1577,14 +1577,14 @@ static typename multi_type_::executor_t* executor_of(usearch_executor_t punned_e
     return typed;
 }
 
-/** One strided C matrix's rank-2 shape: extents in storage values, so packed dtypes count bytes;
- *  a zero stride means contiguous rows. */
+/** One strided C matrix's rank-2 shape: NumKong counts the last extent in logical dimensions, so
+ *  a packed row is as wide as the index; a zero stride means contiguous rows. */
 template <typename scalar_type_>
 static nk::shape_storage_<2> rows_shape_of(std::size_t rows_count, std::size_t stride,
                                            std::size_t dimensions) noexcept {
     std::size_t const row_values = divide_round_up<std::size_t>(dimensions, nk::dimensions_per_value<scalar_type_>());
     std::ptrdiff_t const row_bytes = static_cast<std::ptrdiff_t>(stride ? stride : row_values * sizeof(scalar_type_));
-    return {{rows_count, row_values}, {row_bytes, static_cast<std::ptrdiff_t>(sizeof(scalar_type_))}, 2};
+    return {{rows_count, dimensions}, {row_bytes, static_cast<std::ptrdiff_t>(sizeof(scalar_type_))}, 2};
 }
 
 /** A chunk's rows in @p multi_type_ 's stored scalar: the caller's own when they match, else cast
@@ -1633,103 +1633,122 @@ static std::size_t export_rows(usearch_matrix_span_t const* vectors, std::size_t
     return propagate_success(error), total;
 }
 
-/** The one search engine both C verbs drive: chunked, staged, scattered; a real predicate narrows
- *  it to CPU handles. */
-template <typename predicate_type_>
-static void search_dense_rows(usearch_dense_index_t index, usearch_executor_t punned_executor,        //
-                              void const* queries, size_t queries_count, size_t queries_columns,      //
-                              size_t queries_stride, usearch_scalar_t scalar_kind, size_t wanted,     //
-                              usearch_dense_search_options_t const* options,                          //
-                              predicate_type_ predicate,                                              //
-                              usearch_progress_callback_t progress, void* progress_state,             //
-                              usearch_key_t* keys, size_t keys_stride,                                //
-                              usearch_distance_t* distances, size_t distances_stride, size_t* counts, //
-                              usearch_dense_traversal_stats_t* stats, usearch_error_t* error) noexcept {
-    punned_dense_index_t* const punned_index = reinterpret_cast<punned_dense_index_t*>(index);
-    if (!queries || !keys || !distances || !counts)
-        return propagate_error(usearch_error_malformed_input_k, error,
-                               "Queries and all three output planes must not be null"),
-               void();
+/**
+ *  @brief The one loop every row verb drives on an arm that serves it: converts @p rows chunk by
+ *      chunk and hands each chunk to the sink @p make_sink builds.
+ *
+ *  Chunks hold whole queries of @p rows_per_query rows, and progress counts queries. The sink is built
+ *  once per call, so its staging is too, and it writes its own outputs.
+ */
+template <typename variant_type_, typename make_sink_type_>
+static void for_each_dense_chunk(variant_type_& variant, usearch_executor_t punned_executor,     //
+                                 usearch_matrix_view_t const& rows, std::size_t rows_per_query,  //
+                                 std::size_t expansion_factor,                                   //
+                                 usearch_progress_callback_t progress, void* progress_state,     //
+                                 usearch_dense_traversal_stats_t* stats, usearch_error_t* error, //
+                                 make_sink_type_&& make_sink) noexcept {
+    if (!rows.data)
+        return propagate_error(usearch_error_malformed_input_k, error, "The rows must name storage"), void();
     if (stats) *stats = {};
-    if (!queries_count) return propagate_success(error);
-    std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) {
-            constexpr bool filtered_k = !std::is_same_v<predicate_type_, dummy_predicate_t>;
-            if constexpr (filtered_k && !is_ram_index<variant_type_>)
-                propagate_error(usearch_error_device_k, error, "Filtered search needs a CPU-resident handle");
-            else {
-                nk_dtype_t const source_dtype = nk_dtype_of(scalar_kind);
-                if (source_dtype == nk_dtype_unknown_k)
-                    return propagate_error(usearch_error_unknown_kind_k, error, "Unknown scalar kind"), void();
-                typename variant_type_::executor_t* const executor = executor_of<variant_type_>(punned_executor, error);
-                if (!executor) return;
-                using scalar_t = typename variant_type_::scalar_t;
-                using distance_t = typename variant_type_::distance_t;
-                using key_t = typename variant_type_::key_t;
-                typename variant_type_::search_config_t search_config {};
-                if (options) search_config.expansion_factor = static_cast<u32_t>(options->expansion_factor);
+    if (!rows.rows) return propagate_success(error);
+    nk_dtype_t const source_dtype = nk_dtype_of(rows.scalar_kind);
+    if (source_dtype == nk_dtype_unknown_k)
+        return propagate_error(usearch_error_unknown_kind_k, error, "Unknown scalar kind"), void();
+    typename variant_type_::executor_t* const executor = executor_of<variant_type_>(punned_executor, error);
+    if (!executor) return;
+    using scalar_t = typename variant_type_::scalar_t;
+    typename variant_type_::search_config_t search_config {};
+    search_config.expansion_factor = static_cast<u32_t>(expansion_factor);
 
-                std::size_t const dimensions = specialized_index {variant}.dimensions();
-                if (queries_columns != dimensions)
-                    return propagate_error(usearch_error_shape_mismatch_k, error,
-                                           "The queries are not as wide as the index"),
-                           void();
-                std::size_t const query_bytes = queries_stride ? queries_stride
-                                                               : divide_round_up<std::size_t>(
-                                                                     nk_dtype_bits(source_dtype) * dimensions, 8);
-                std::size_t const keys_bytes = keys_stride ? keys_stride : wanted * sizeof(usearch_key_t);
-                std::size_t const distances_bytes = distances_stride ? distances_stride
-                                                                     : wanted * sizeof(usearch_distance_t);
+    std::size_t const dimensions = specialized_index {variant}.dimensions();
+    if (rows.columns != dimensions)
+        return propagate_error(usearch_error_shape_mismatch_k, error, "The rows are not as wide as the index"), void();
+    std::size_t const packed_bytes = divide_round_up<std::size_t>(nk_dtype_bits(source_dtype) * dimensions, 8);
+    if (rows.stride_bytes && rows.stride_bytes < packed_bytes)
+        return propagate_error(usearch_error_unsupported_layout_k, error, "The stride is shorter than one row"), void();
+    std::size_t const row_bytes = rows.stride_bytes ? rows.stride_bytes : packed_bytes;
 
-                // The engines score in f32 and the ABI in double, so every ranking is staged and
-                // scattered; queries in a foreign scalar type convert chunk by chunk.
-                std::size_t const chunk = min_of(queries_count, increment_rows_k);
-                growing_buffer<key_t> staged_keys {global_allocator};
-                growing_buffer<distance_t> staged_distances {global_allocator};
-                if (failed(staged_keys.resize(chunk * wanted)) || failed(staged_distances.resize(chunk * wanted)))
-                    return propagate_error(usearch_error_out_of_memory_k, error, "Failed to stage the output planes"),
-                           void();
-                nk::matrix<scalar_t> staged_queries;
-                if (source_dtype != variant_type_::vector_dtype_k) {
-                    staged_queries = nk::matrix<scalar_t>::try_zeros({chunk, dimensions});
-                    if (staged_queries.empty())
-                        return propagate_error(usearch_error_out_of_memory_k, error,
-                                               "Failed to stage the converted queries"),
-                               void();
-                }
+    // Rows in a foreign scalar type convert chunk by chunk, never splitting a query.
+    std::size_t const chunk = rows_per_query *
+                              max_of<std::size_t>(1, min_of(rows.rows, increment_rows_k) / rows_per_query);
+    status_t staged = status_t::success_k;
+    auto sink = make_sink(chunk, staged);
+    if (failed(staged))
+        return propagate_error(usearch_error_out_of_memory_k, error, "Failed to stage the outputs"), void();
+    nk::matrix<scalar_t> staged_rows;
+    if (source_dtype != variant_type_::vector_dtype_k) {
+        staged_rows = nk::matrix<scalar_t>::try_zeros({chunk, dimensions});
+        if (staged_rows.empty())
+            return propagate_error(usearch_error_out_of_memory_k, error, "Failed to stage the converted rows"), void();
+    }
 
-                char const* const queries_base = static_cast<char const*>(queries);
-                char* const keys_base = reinterpret_cast<char*>(keys);
-                char* const distances_base = reinterpret_cast<char*>(distances);
-                std::size_t resolved = 0;
-                while (resolved != queries_count) {
-                    std::size_t const taking = min_of(chunk, queries_count - resolved);
-                    nk::matrix_view<scalar_t> const chunk_queries = stored_rows_of<variant_type_>(
-                        queries_base + resolved * query_bytes, taking, query_bytes, source_dtype, dimensions,
-                        staged_queries);
-                    std::span<key_t> const keys_span {staged_keys.data(), taking * wanted};
-                    std::span<distance_t> const distances_span {staged_distances.data(), taking * wanted};
-                    std::span<std::size_t> const counts_span {counts + resolved, taking};
-                    // The predicate's type picks the overload: a dummy one takes the unfiltered walk.
-                    auto const found = specialized_index {variant}.search(chunk_queries, *executor, search_config,
-                                                                          wanted, keys_span, distances_span,
-                                                                          counts_span, predicate);
-                    if (!crossed(found, stats, error)) return;
-                    for (std::size_t query = 0; query != taking; ++query) {
-                        std::memcpy(keys_base + (resolved + query) * keys_bytes, staged_keys.data() + query * wanted,
-                                    wanted * sizeof(key_t));
-                        nk_cast(staged_distances.data() + query * wanted, nk_f32_k, wanted,
-                                distances_base + (resolved + query) * distances_bytes, nk_f64_k);
-                    }
-                    resolved += taking;
-                    if (progress && progress(resolved, queries_count, progress_state) == usearch_cancel_k)
-                        return propagate_error(usearch_error_cancelled_k, error, "The handler stopped the search"),
-                               void();
-                }
-                propagate_success(error);
+    char const* const rows_base = static_cast<char const*>(rows.data);
+    std::size_t resolved = 0;
+    while (resolved != rows.rows) {
+        std::size_t const taking = min_of(chunk, rows.rows - resolved);
+        nk::matrix_view<scalar_t> const chunk_rows = stored_rows_of<variant_type_>(
+            rows_base + resolved * row_bytes, taking, row_bytes, source_dtype, dimensions, staged_rows);
+        expected<typename variant_type_::search_result_t> const found = sink(
+            specialized_index {variant}, chunk_rows, *executor, search_config, resolved, taking);
+        if (!crossed(found, stats, error)) return;
+        resolved += taking;
+        if (progress &&
+            progress(resolved / rows_per_query, rows.rows / rows_per_query, progress_state) == usearch_cancel_k)
+            return propagate_error(usearch_error_cancelled_k, error, "The handler stopped the call"), void();
+    }
+    propagate_success(error);
+}
+
+/** The matching verbs' sink on one serving arm: keys and @p score_type_ scores, tagged
+ *  @p score_dtype, stage at the engine's width and widen to the ABI's double one output row at a
+ *  time; @p rows_per_query input rows share one output row. */
+template <typename score_type_, typename variant_type_, typename verb_type_>
+static void match_dense_rows(variant_type_& variant, usearch_executor_t punned_executor,     //
+                             usearch_matrix_view_t const& rows, std::size_t rows_per_query,  //
+                             usearch_matches_span_t const& matches, nk_dtype_t score_dtype,  //
+                             usearch_dense_search_options_t const* options,                  //
+                             usearch_progress_callback_t progress, void* progress_state,     //
+                             usearch_dense_traversal_stats_t* stats, usearch_error_t* error, //
+                             verb_type_&& verb) noexcept {
+    if (!matches.keys || !matches.scores || !matches.counts)
+        return propagate_error(usearch_error_malformed_input_k, error, "All three output planes must not be null"),
+               void();
+    using key_t = typename variant_type_::key_t;
+    std::size_t const wanted = matches.wanted;
+    std::size_t const keys_bytes = matches.keys_stride_bytes ? matches.keys_stride_bytes
+                                                             : wanted * sizeof(usearch_key_t);
+    std::size_t const scores_bytes = matches.scores_stride_bytes ? matches.scores_stride_bytes
+                                                                 : wanted * sizeof(usearch_distance_t);
+    char* const keys_base = reinterpret_cast<char*>(matches.keys);
+    char* const scores_base = reinterpret_cast<char*>(matches.scores);
+    auto make_sink = [&](std::size_t chunk, status_t& staged) noexcept {
+        std::size_t const matches_per_chunk = chunk / rows_per_query;
+        growing_buffer<key_t> staged_keys {global_allocator};
+        growing_buffer<score_type_> staged_scores {global_allocator};
+        if (failed(staged_keys.resize(matches_per_chunk * wanted)) ||
+            failed(staged_scores.resize(matches_per_chunk * wanted)))
+            staged = status_t::bad_alloc_k;
+        return [&, staged_keys = std::move(staged_keys), staged_scores = std::move(staged_scores)](
+                   specialized_index<variant_type_> view, typename variant_type_::vectors_view_t chunk_rows,
+                   typename variant_type_::executor_t& executor, typename variant_type_::search_config_t config,
+                   std::size_t resolved, std::size_t taking) mutable noexcept {
+            std::size_t const first = resolved / rows_per_query, matched = taking / rows_per_query;
+            expected<typename variant_type_::search_result_t> const found = verb(
+                view, chunk_rows, executor, config, std::span<key_t> {staged_keys.data(), matched * wanted},
+                std::span<score_type_> {staged_scores.data(), matched * wanted},
+                std::span<std::size_t> {matches.counts + first, matched});
+            if (!found) return found;
+            for (std::size_t match = 0; match != matched; ++match) {
+                std::memcpy(keys_base + (first + match) * keys_bytes, staged_keys.data() + match * wanted,
+                            wanted * sizeof(key_t));
+                nk_cast(staged_scores.data() + match * wanted, score_dtype, wanted,
+                        scores_base + (first + match) * scores_bytes, nk_f64_k);
             }
-        },
-        punned_index->variants);
+            return found;
+        };
+    };
+    for_each_dense_chunk(variant, punned_executor, rows, rows_per_query, options ? options->expansion_factor : 0,
+                         progress, progress_state, stats, error, make_sink);
 }
 
 #pragma endregion Multi Verbs
@@ -1976,10 +1995,16 @@ USEARCH_EXPORT void usearch_dense_search(                            //
         return propagate_error(usearch_error_malformed_input_k, error,
                                "The queries and the matches span must not be null"),
                void();
-    search_dense_rows(index, punned_executor, queries->data, queries->rows, queries->columns, queries->stride_bytes,
-                      queries->scalar_kind, matches->wanted, options, dummy_predicate_t {}, progress, progress_state,
-                      matches->keys, matches->keys_stride_bytes, matches->scores, matches->scores_stride_bytes,
-                      matches->counts, stats, error);
+    std::visit(
+        [&]<typename variant_type_>(variant_type_& variant) noexcept {
+            match_dense_rows<typename variant_type_::distance_t>(
+                variant, punned_executor, *queries, 1, *matches, nk_f32_k, options, progress, progress_state, stats,
+                error, [&](auto view, auto rows, auto& executor, auto config, auto keys, auto distances, auto counts) {
+                    return view.search(rows, executor, config, matches->wanted, keys, distances, counts,
+                                       dummy_predicate_t {});
+                });
+        },
+        reinterpret_cast<punned_dense_index_t*>(index)->variants);
 }
 
 USEARCH_EXPORT void usearch_dense_search_if(                         //
@@ -1999,11 +2024,20 @@ USEARCH_EXPORT void usearch_dense_search_if(                         //
     if (!predicate)
         return usearch_dense_search(index, punned_executor, queries, matches, options, progress, progress_state, stats,
                                     error);
-    key_predicate_t const admitted {predicate, predicate_state};
-    search_dense_rows(index, punned_executor, queries->data, queries->rows, queries->columns, queries->stride_bytes,
-                      queries->scalar_kind, matches->wanted, options, admitted, progress, progress_state, matches->keys,
-                      matches->keys_stride_bytes, matches->scores, matches->scores_stride_bytes, matches->counts, stats,
-                      error);
+    key_predicate_t keyed {predicate, predicate_state};
+    std::visit(
+        [&]<typename variant_type_>(variant_type_& variant) noexcept {
+            if constexpr (!is_ram_index<variant_type_>)
+                propagate_error(usearch_error_device_k, error, "`search_if` needs a CPU-resident handle");
+            else
+                match_dense_rows<typename variant_type_::distance_t>(
+                    variant, punned_executor, *queries, 1, *matches, nk_f32_k, options, progress, progress_state, stats,
+                    error,
+                    [&](auto view, auto rows, auto& executor, auto config, auto keys, auto distances, auto counts) {
+                        return view.search(rows, executor, config, matches->wanted, keys, distances, counts, keyed);
+                    });
+        },
+        reinterpret_cast<punned_dense_index_t*>(index)->variants);
 }
 
 USEARCH_EXPORT size_t usearch_dense_get(            //
@@ -2121,15 +2155,34 @@ USEARCH_EXPORT void usearch_dense_merge(       //
 
 #pragma region Linear Algebra
 
-USEARCH_EXPORT void usearch_dense_multiply(    //
-    usearch_dense_index_t, usearch_executor_t, //
-    usearch_matrix_view_t const*,              //
-    usearch_matches_span_t const*,             //
-    usearch_dense_search_options_t const*,     //
-    usearch_progress_callback_t, void*,        //
-    usearch_dense_traversal_stats_t*,          //
+USEARCH_EXPORT void usearch_dense_multiply(                          //
+    usearch_dense_index_t index, usearch_executor_t punned_executor, //
+    usearch_matrix_view_t const* left,                               //
+    usearch_matches_span_t const* products,                          //
+    usearch_dense_search_options_t const* options,                   //
+    usearch_progress_callback_t progress, void* progress_state,      //
+    usearch_dense_traversal_stats_t* stats,                          //
     usearch_error_t* error) {
-    propagate_error(usearch_error_unsupported_k, error, "No residency walks the approximate product yet");
+    if (!left || !products)
+        return propagate_error(usearch_error_malformed_input_k, error,
+                               "The left rows and the products span must not be null"),
+               void();
+    std::visit(
+        [&]<typename variant_type_>(variant_type_& variant) noexcept {
+            if constexpr (variant_type_::kernel_kind_k != nk_kernel_dot_k)
+                propagate_error(usearch_error_config_mismatch_k, error,
+                                "A product is a dot, so the kind must be inner product");
+            else {
+                using dot_result_t = typename variant_type_::dot_result_t;
+                match_dense_rows<dot_result_t>(
+                    variant, punned_executor, *left, 1, *products, dot_result_t::dtype(), options, progress,
+                    progress_state, stats, error,
+                    [&](auto view, auto rows, auto& executor, auto config, auto keys, auto dots, auto counts) {
+                        return view.multiply(rows, executor, config, products->wanted, keys, dots, counts);
+                    });
+            }
+        },
+        reinterpret_cast<punned_dense_index_t*>(index)->variants);
 }
 
 USEARCH_EXPORT void usearch_dense_attend(      //
@@ -2145,16 +2198,38 @@ USEARCH_EXPORT void usearch_dense_attend(      //
     propagate_error(usearch_error_unsupported_k, error, "No residency folds attention over the walk yet");
 }
 
-USEARCH_EXPORT void usearch_dense_maxsim(      //
-    usearch_dense_index_t, usearch_executor_t, //
-    usearch_matrix_view_t const*,              //
-    size_t,                                    //
-    usearch_matches_span_t const*,             //
-    usearch_dense_search_options_t const*,     //
-    usearch_progress_callback_t, void*,        //
-    usearch_dense_traversal_stats_t*,          //
+USEARCH_EXPORT void usearch_dense_maxsim(                            //
+    usearch_dense_index_t index, usearch_executor_t punned_executor, //
+    usearch_matrix_view_t const* queries,                            //
+    size_t rows_per_query,                                           //
+    usearch_matches_span_t const* matches,                           //
+    usearch_dense_search_options_t const* options,                   //
+    usearch_progress_callback_t progress, void* progress_state,      //
+    usearch_dense_traversal_stats_t* stats,                          //
     usearch_error_t* error) {
-    propagate_error(usearch_error_unsupported_k, error, "No residency scores late interaction yet");
+    if (!queries || !matches)
+        return propagate_error(usearch_error_malformed_input_k, error,
+                               "The queries and the matches span must not be null"),
+               void();
+    if (!rows_per_query || queries->rows % rows_per_query)
+        return propagate_error(usearch_error_shape_mismatch_k, error,
+                               "The query rows are not a whole multiple of the rows per query"),
+               void();
+    std::visit(
+        [&]<typename variant_type_>(variant_type_& variant) noexcept {
+            if constexpr (variant_type_::kernel_kind_k != nk_kernel_dot_k)
+                propagate_error(usearch_error_config_mismatch_k, error,
+                                "A maximum over logits needs the inner-product kind");
+            else
+                match_dense_rows<f64_t>(
+                    variant, punned_executor, *queries, rows_per_query, *matches, nk_f64_k, options, progress,
+                    progress_state, stats, error,
+                    [&](auto view, auto rows, auto& executor, auto config, auto keys, auto scores, auto counts) {
+                        return view.maxsim(rows, rows_per_query, executor, config, matches->wanted, keys, scores,
+                                           counts);
+                    });
+        },
+        reinterpret_cast<punned_dense_index_t*>(index)->variants);
 }
 
 #pragma endregion Linear Algebra

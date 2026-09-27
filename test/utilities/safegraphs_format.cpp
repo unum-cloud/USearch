@@ -51,7 +51,7 @@ struct angular_metric_t {
     basic_metric_staging_t push(embedding_t const& value) noexcept {
         return staged_.push_back(value), basic_metric_staging_t::staged_k;
     }
-    void drain(std::span<f32_t> distances) noexcept {
+    void drain(std::span<f32_t> distances, f32_t) noexcept {
         for (std::size_t lane = 0; lane != distances.size(); ++lane)
             distances[lane] = angular_distance(query_, staged_[lane]);
         staged_.clear();

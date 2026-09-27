@@ -145,6 +145,7 @@
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_buffers.hpp"
 #include "usearch/utilities/ram_tables.hpp"
+#include "usearch/dense/types.hpp"
 #include "usearch/dense/ram_metric.hpp"
 
 namespace unum {
@@ -1606,7 +1607,7 @@ struct dense_nvme_index {
     inline static constexpr nk_kernel_kind_t kernel_kind_k = kernel_kind_;
 
     using scalar_t = typename nk::type_for<vector_dtype_>::type;
-    using vector_product_result_t = typename scalar_t::dot_result_t;
+    using dot_result_t = typename scalar_t::dot_result_t;
     using distance_t = f32_t;
 
     /** Default integer type to use for loops and indexing at sub-index scale. */
@@ -1617,7 +1618,7 @@ struct dense_nvme_index {
 
     using vector_view_t = nk::vector_view<scalar_t>;
     using vectors_view_t = nk::matrix_view<scalar_t>;
-    using vector_norms_t = vector_norms<vector_product_result_t>;
+    using vector_norms_t = vector_norms<dot_result_t>;
 
     using engine_t = engine_type_;
     using context_t = dense_nvme_context<vector_dtype_, engine_t, offsets_allocator_type_>;

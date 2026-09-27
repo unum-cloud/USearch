@@ -16,6 +16,8 @@ std::size_t test::dense::check_ram_indexes() {
     failures_count +=
         test_configuration<nk_bf16_k, nk_kernel_angular_k, dummy_waiter_t, nk_cap_serial_k, fu::preferred_atomic_ref>(
             "sharded bf16+angular+preferred-atomics");
+    failures_count += test_configuration<nk_bf16_k, nk_kernel_dot_k>("sharded bf16+dot");
+    failures_count += test_configuration<nk_i8_k, nk_kernel_dot_k>("sharded i8+dot");
     failures_count += test_configuration<nk_i8_k, nk_kernel_euclidean_k>("sharded i8+euclidean");
     return failures_count;
 }

@@ -173,6 +173,7 @@ target_sources(
               include/usearch/utilities/types.hpp
               include/usearch/utilities/sanitizers.hpp
               include/usearch/utilities/ram_buffers.hpp
+              include/usearch/utilities/ram_sorts.hpp
               include/usearch/utilities/ram_tables.hpp
               include/usearch/basic/ram_index.hpp
 )

@@ -71,6 +71,78 @@ using counting_cuda_allocator_t = counting_cuda_allocator<byte_t>;
 
 static_assert(cuda_reservable_allocator<counting_cuda_allocator_t>);
 
+#pragma region Folds
+
+/** Device graph products against the native dots: every scored pair is counted, a narrow row keeps its width
+ *  while counting past it, a short row ends in sentinels, every kept pair names a distinct stored row with its
+ *  exact dot, and mismatched spans refuse. */
+template <typename index_type_, typename make_index_type_>
+    requires dense_device_resident_k<index_type_>
+std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+    using scalar_t = typename index_type_::scalar_t;
+    using dot_result_t = typename index_type_::dot_result_t;
+    using search_config_t = typename index_type_::search_config_t;
+    constexpr std::size_t rows_count = dense_thread_nodes_k, left_count = 4;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    std::size_t failures = 0;
+    index_type_ index = make_index(ledger);
+    typename index_type_::dense_traversal_context_t context {{}};
+    failures += expect(index.reserve({rows_count, connectivity_16_k, dimensions}).status == status_t::success_k);
+    auto vectors = make_vectors<scalar_t>(rows_count, dimensions, dense_seed_multiply_k);
+    auto const left = vectors.view()(nk::range {std::size_t {0}, left_count}, nk::slice);
+
+    std::array<dense_node_id_t, left_count * rows_count> node_ids;
+    std::array<dot_result_t, left_count * rows_count> products;
+    std::array<u32_t, left_count> counts;
+    auto multiply = [&](std::size_t wanted, std::size_t products_width, search_config_t config) noexcept {
+        return index.multiply(left, nk::matrix_span<dense_node_id_t> {node_ids.data(), left_count, wanted},
+                              nk::matrix_span<dot_result_t> {products.data(), left_count, products_width}, counts,
+                              context, config);
+    };
+
+    // An empty index scores nothing, and every row it leaves short ends in sentinels.
+    node_ids.fill(0);
+    auto const empty = multiply(4, 4, {});
+    failures += expect(empty.status == status_t::success_k && empty.value.count == 0);
+    failures += expect(std::all_of(node_ids.begin(), node_ids.begin() + left_count * 4,
+                                   [](dense_node_id_t id) { return id == dense_node_id_unknown_k; }));
+
+    auto assigned_ids = nk::vector<dense_node_id_t>::try_zeros(rows_count);
+    failures += expect(index.insert(vectors.view(), assigned_ids.span(), context).status == status_t::success_k);
+
+    search_config_t const exhaustive {static_cast<typename index_type_::small_size_t>(rows_count)};
+    for (std::size_t const wanted : {rows_count, std::size_t {4}}) {
+        auto const [multiplied, status] = multiply(wanted, wanted, exhaustive);
+        failures += expect(status == status_t::success_k);
+        failures += expect_eq(multiplied.count, multiplied.computed_distances);
+        std::size_t scored_count = 0;
+        for (std::size_t row = 0; row != left_count; ++row) {
+            scored_count += counts[row];
+            failures += expect(counts[row] > 0 && counts[row] <= rows_count);
+            if (wanted < rows_count) failures += expect(counts[row] > wanted);
+            failures += dense_expect_product_row<rows_count>(
+                left.row(row).as_vector(), vectors.view(), node_ids.data() + row * wanted,
+                products.data() + row * wanted, min_of<std::size_t>(counts[row], wanted),
+                [](dense_node_id_t id) noexcept { return std::size_t {id}; });
+        }
+        failures += expect_eq(multiplied.count, scored_count);
+    }
+
+    failures += expect(multiply(4, 3, {}).status == status_t::config_mismatch_k);
+    return failures;
+}
+
+/** @ref dense_expect_multiply, then the ledger it left must balance. */
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+    requires(kernel_ == nk_kernel_dot_k && dense_device_resident_k<index_type_>)
+std::size_t test_dense_multiply(make_index_type_ const& make_index) {
+    allocation_ledger_t ledger;
+    std::size_t const failures = dense_expect_multiply<index_type_>(make_index, ledger);
+    return failures + expect_eq(ledger.live_bytes.load(), 0);
+}
+
+#pragma endregion Folds
+
 /** Composes one (dtype, kernel) cell's suite over the ledgered device allocator. */
 template <nk_kernel_kind_t kernel_, nk_dtype_t dtype_ = nk_i8_k>
 std::size_t test_cuda_configuration(char const* name) {
@@ -90,6 +162,7 @@ std::size_t test_cuda_configuration(char const* name) {
     failures_count += test_dense_load_append<index_t, kernel_>(make_index);
     failures_count += test_dense_concurrent_build<index_t, kernel_>(make_index);
     failures_count += test_dense_concurrent_search<index_t, kernel_>(make_index);
+    failures_count += test_dense_multiply<index_t, kernel_>(make_index);
     return report(name, failures_count);
 }
 

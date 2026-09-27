@@ -14,6 +14,7 @@
 #pragma once
 
 #include "usearch/utilities/types.hpp"
+#include "usearch/dense/types.hpp"
 
 namespace unum {
 namespace usearch {

@@ -5,7 +5,7 @@
  *  @brief Unit tests for the pure-C ABI of USearch (`usearch/dense_index.h`).
  *
  *  Exercises the dense surface through the ABI every binding consumes: initialization and
- *  reservation, batch `add` and `search`, retrieval by key, and the error contract of
+ *  reservation, batch `add`, `search` and `multiply`, retrieval by key, and the error contract of
  *  `usearch_error_t`. Scoped to the verbs `src/` instantiates today - the header runs ahead of
  *  the implementation, and a smoke test that cannot link proves nothing. The harness is
  *  intentionally dependency-free so it can run in the same matrix as the C++ tests and on
@@ -264,6 +264,59 @@ void test_count_and_get(size_t const dimensions) {
     printf("Test: Count & Get - PASSED\n");
 }
 
+/** A packed kind's row is as wide as its logical dimensions, so every product spans all of them -
+ *  a row read at its storage width is either refused or scored over half its dimensions. */
+void test_multiply_packed(void) {
+    printf("Test: Multiply Packed Rows\n");
+
+    enum { rows_count = 8, dimensions = 16 };
+    usearch_dense_options_t options = create_options(dimensions);
+    options.metric = usearch_dense_metric_inner_k;
+    options.quantization = usearch_scalar_i4x2_k;
+    usearch_error_t error = {0};
+    usearch_dense_index_t index = usearch_dense_init(&options, &error);
+    expect(!error.message, error.message);
+    usearch_dense_reserve(index, rows_count, &error);
+    expect(!error.message, error.message);
+    usearch_executor_t const executor = usearch_executor_for_ram(&options.ram, 0, &error);
+    expect(!error.message, error.message);
+
+    // Small integers survive the cast into `i4` exactly, so every product is known up front.
+    float data[rows_count * dimensions];
+    usearch_key_t keys[rows_count];
+    for (size_t row = 0; row != rows_count; ++row) {
+        keys[row] = key_of(row);
+        for (size_t column = 0; column != dimensions; ++column)
+            data[row * dimensions + column] = (float)((row + column) % 5) - 2;
+    }
+    usearch_keys_view_t const key_run = {keys, rows_count};
+    usearch_matrix_view_t const rows = {data, rows_count, dimensions, 0, usearch_scalar_f32_k};
+    usearch_dense_add(index, executor, key_run, &rows, NULL, NULL, NULL, NULL, &error);
+    expect(!error.message, error.message);
+
+    usearch_key_t columns[rows_count * rows_count];
+    usearch_distance_t products[rows_count * rows_count];
+    size_t counts[rows_count];
+    usearch_matches_span_t const pairs = {columns, 0, products, 0, counts, rows_count};
+    usearch_dense_multiply(index, executor, &rows, &pairs, NULL, NULL, NULL, NULL, &error);
+    expect(!error.message, error.message);
+
+    for (size_t row = 0; row != rows_count; ++row) {
+        expect(counts[row] != 0, "Every walk scores at least its entry point");
+        for (size_t pair = 0; pair != counts[row] && pair != rows_count; ++pair) {
+            size_t const named = columns[row * rows_count + pair].bytes[15];
+            double exact = 0;
+            for (size_t column = 0; column != dimensions; ++column)
+                exact += data[row * dimensions + column] * data[named * dimensions + column];
+            expect(products[row * rows_count + pair] == exact, "A product must span every packed dimension");
+        }
+    }
+
+    usearch_executor_free(executor);
+    usearch_dense_free(index);
+    printf("Test: Multiply Packed Rows - PASSED\n");
+}
+
 /** A message is @c NULL exactly when the status is success, and the slot a caller reuses is
  *  fully overwritten - the contract every binding branches on. Only the success half is
  *  exercised here; the failing verbs are the ones `src/` has yet to instantiate. */
@@ -320,6 +373,7 @@ int main(int argc, char* argv[]) {
             test_add_and_search(collection_sizes[size_index], dimension_counts[dimension_index]);
         }
     test_count_and_get(dimension_counts[0]);
+    test_multiply_packed();
 
     printf("All tests passed!\n");
     return 0;

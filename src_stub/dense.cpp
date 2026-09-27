@@ -805,23 +805,17 @@ void usearch_dense_multiply(usearch_dense_index_t handle, usearch_executor_t exe
 
     std::fill(counts_column.begin(), counts_column.end(), 0);
     std::vector<double> left_row(dimensions);
-    std::vector<match_t> scored;
     std::size_t multiplied = 0;
     for (std::size_t row = 0; row != rows_count; ++row) {
         read_row(row_at<std::byte>(left->data, row, left_stride, row_bytes), scalar_kind, left_row);
         std::span<usearch_key_t> const keys_row = row_at<usearch_key_t>(products->keys, row, keys_stride, wanted);
         std::span<usearch_distance_t> const products_row = row_at<usearch_distance_t>(products->scores, row,
                                                                                       scores_stride, wanted);
-        scored.clear();
-        scored.reserve(indexed);
-        for (entry_t const& entry : index.entries) scored.push_back({dot_product(left_row, entry.payload), entry.key});
-        // A truncated row keeps its nearest pairs, and a product is a similarity, so the largest
-        // rank first - the pairs dropped are the small-magnitude ones the header names.
-        std::stable_sort(scored.begin(), scored.end(),
-                         [](match_t const& first, match_t const& second) { return first.distance > second.distance; });
+        // A truncated row keeps an arbitrary subset of the pairs scored - here, the first in storage order.
         std::size_t const written = std::min(wanted, indexed);
         for (std::size_t column = 0; column != written; ++column)
-            keys_row[column] = scored[column].key, products_row[column] = scored[column].distance;
+            keys_row[column] = index.entries[column].key,
+            products_row[column] = dot_product(left_row, index.entries[column].payload);
         // The true count, which the header allows to exceed `wanted` to signal truncation.
         counts_column[row] = indexed;
         if (stats) stats->computed_distances += indexed;

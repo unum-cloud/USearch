@@ -23,8 +23,10 @@
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_buffers.hpp"
+#include "usearch/utilities/ram_sorts.hpp"
 #include "usearch/utilities/ram_tables.hpp"
 #include "usearch/utilities/ram_hints.hpp"
+#include "usearch/dense/types.hpp"
 #include "usearch/basic/ram_index.hpp"
 #include "usearch/geospatial/ram_index.hpp"
 
@@ -49,7 +51,7 @@ struct header_only_metric_t {
         differences_[staged_++] = difference;
         return staged_ != differences_.size() ? basic_metric_staging_t::staged_k : basic_metric_staging_t::refused_k;
     }
-    void drain(std::span<u64_t> distances) noexcept {
+    void drain(std::span<u64_t> distances, u64_t) noexcept {
         for (std::size_t lane = 0; lane != distances.size(); ++lane) distances[lane] = differences_[lane];
         staged_ = 0;
     }
@@ -88,7 +90,7 @@ static_assert(basic_query<std::array<char, 8>, header_only_metric_t, std::array<
 static_assert(basic_value_codec<header_only_codec_t, std::array<char, 8>>);
 static_assert(basic_selector<basic_keep_closest_t, narrow_index_t, header_only_metric_t>);
 static_assert(basic_selector<basic_keep_diverse_t, wide_index_t, header_only_metric_t>);
-static_assert(basic_expansion_round_t::converged_k != basic_expansion_round_t::advanced_k);
+static_assert(walk_step_t::exhausted_k != walk_step_t::advanced_k);
 static_assert(std::is_same_v<narrow_index_t::columns_t, basic_columns<u64_t, u32_t, byte_t, u64_t>>);
 static_assert(std::is_move_constructible_v<narrow_index_t::save_plan_t> &&
               !std::is_copy_constructible_v<narrow_index_t::save_plan_t> &&

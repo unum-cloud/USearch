@@ -85,16 +85,16 @@
  *  @section dense_index_linear_algebra Approximate Products & Attention
  *
  *  Three opt-in verbs at the end of this header read the graph as linear algebra rather than as a
- *  search. All four verbs share one walk and differ only in what they reduce it to: a search keeps
- *  the top matches, @c usearch_dense_multiply keeps every scored pair, @c usearch_dense_attend
- *  folds a softmax over them, and @c usearch_dense_maxsim takes a maximum per query row and sums
- *  those, grouped by key.
+ *  search. Each is one graph walk per query row, like a search, differing only in what it keeps:
+ *  a search keeps the nearest matches, @c usearch_dense_multiply every scored pair,
+ *  @c usearch_dense_attend an online softmax over them, and @c usearch_dense_maxsim each row's
+ *  best score, summed per key.
  *
  *  @c usearch_dense_multiply is an approximate `A × Bᵀ` in the shape of BLAS' `?GEMM`,
  *  with the indexed rows as `B`, and a sparse output: every pair the traversal scored, not only
  *  the nearest. Unlike a sparse `?GEMM`, the output pattern is not implied by the operands' own
  *  pattern - it is whatever the walk touched - so the product is dense-in, sparse-out, and its
- *  sparsity is magnitude-driven.
+ *  sparsity follows the dots: the walk ranks by `1 - dot`, so it skips the low and negative ones.
  *
  *  @c usearch_dense_attend folds a softmax over that same walk. A running maximum, partition,
  *  and weighted value sum update per scored batch and rescale whenever the maximum moves - the
@@ -787,7 +787,6 @@ USEARCH_EXPORT void usearch_dense_metadata_buffer( //
  *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *  @retval usearch_error_shape_mismatch_k @c left->columns disagrees with the frozen geometry.
- *  @retval usearch_error_unsupported_k No residency walks the approximate product yet.
  *
  *  A walk scores many times the pairs a search reports, and each of them is an exact product the
  *  caller would otherwise recompute - this verb hands them all back. Pairs arrive in traversal
@@ -796,12 +795,12 @@ USEARCH_EXPORT void usearch_dense_metadata_buffer( //
  *  emitted pattern, that breadth being what decides how much the walk touches.
  *
  *  Each entry of @c products->counts reports the @b true number of pairs scored, never the number
- *  written. A value above @c products->wanted means that row was truncated to its nearest pairs,
- *  so raise @c wanted and call again.
+ *  written. A value above @c products->wanted means that row kept only the first pairs its walks
+ *  scored, shard by shard in placement order, so raise @c wanted and call again.
  *
  *  Cost is not `O(m·n·k)` but roughly `O(rows_count × expansion × connectivity × dimensions)`,
  *  sublinear in the indexed rows, which is the whole point of reading a product off a graph. The
- *  result is approximate, and the pairs it omits are the small-magnitude ones.
+ *  result is approximate, and the pairs the walk never reaches are the low and negative dots.
  *
  *  Runs on the inner-product kinds, whose traversal scores are the products themselves. A graph
  *  frozen under a distance kind scored a different quantity, so the products it would report are
@@ -814,8 +813,8 @@ USEARCH_EXPORT void usearch_dense_metadata_buffer( //
  *  cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, m, n, k,
  *              1.0f, a, lda, b, ldb, 0.0f, c, ldc);
  *
- *  // Here: B was built once and is the index, C is `m x wanted` and magnitude-sparse,
- *  // and the executor carries what a cuBLAS handle plus its stream would.
+ *  // Here: B was built once and is the index, C is `m x wanted` and holds only the pairs the
+ *  // walk scored, and the executor carries what a cuBLAS handle plus its stream would.
  *  usearch_matrix_view_t const left = {a, m, k, a_stride, usearch_scalar_f32_k};
  *  usearch_matches_span_t const pairs = {columns, 0, products, 0, counts, 64};
  *  usearch_dense_multiply(index, executor, &left, &pairs, NULL, NULL, NULL, NULL, &error);
@@ -951,7 +950,7 @@ USEARCH_EXPORT void usearch_dense_attend(                       //
  *  @param[in] rows_per_query Rows in every query; uniform, so ColBERT's padding applies as is.
  *      @c queries->rows must be a whole multiple of it, and the quotient is the query count.
  *  @param[out] matches Where the scored keys land - @c wanted is the "k" over documents, not rows,
- *      and @c scores carries each key's summed maxima.
+ *      and @c scores carries each key's summed maxima, largest first.
  *  @param[in] options The @b optional per-call settings; @c NULL derives every setting.
  *  @param[in] progress The @b optional handler, called with queries resolved; @c NULL skips it.
  *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
@@ -959,16 +958,15 @@ USEARCH_EXPORT void usearch_dense_attend(                       //
  *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *  @retval usearch_error_shape_mismatch_k @c queries->columns disagrees with the frozen geometry,
  *      or @c queries->rows is not a whole multiple of @p rows_per_query.
- *  @retval usearch_error_unsupported_k No residency scores late interaction yet.
  *
  *  This is what @c values_per_key above one exists for. A document is one key holding its token
  *  rows, and the walk stays over individual tokens under a plain inner product - no set-to-set
  *  metric is ever evaluated, since the grouping happens in the reduction rather than in the graph.
  *  That is also why an entry's rows need no ordering and two documents need not share a row count.
  *
- *  Approximate in the same way its siblings are: a token whose neighborhood the walk never entered
- *  contributes no maximum, so a key can score below its exact value but never above it. Widening
- *  the expansion factor narrows that gap.
+ *  Approximate in the same way its siblings are: each query row contributes only the tokens its walk
+ *  ranked - as many as the expansion factor - so a key whose per-row maxima are non-negative can
+ *  score below its exact value but never above it. Widening the expansion factor narrows that gap.
  *
  *  Runs on the inner-product kinds, since a maximum over logits is what late interaction sums.
  *  A graph frozen under a distance kind refuses with @c usearch_error_config_mismatch_k.

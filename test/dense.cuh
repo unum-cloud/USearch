@@ -94,6 +94,8 @@ constexpr u64_t dense_seed_concurrent_search_k = 0x5EA2CACEull;
 constexpr u64_t dense_seed_multiply_k = 0x0D07D07Eull;
 constexpr u64_t dense_seed_indexes_add_k = 0x62009ADDull;
 constexpr u64_t dense_seed_indexes_race_k = 0x62009ACEull;
+constexpr u64_t dense_seed_indexes_products_k = 0x62009D07ull;
+constexpr u64_t dense_seed_indexes_maxsim_k = 0x62009A55ull;
 constexpr u64_t dense_seed_save_race_k = 0x5AFECACEull;
 constexpr u64_t dense_seed_immutable_parity_k = 0x5E771ED0ull;
 constexpr u64_t dense_seed_cursor_k = 0x17E2A702ull;
@@ -1215,77 +1217,98 @@ std::size_t test_dense_heal_islands(make_index_type_ const& make_index) {
 
 #pragma region Folds
 
-/** Graph products against the index's own kernels: each row's kept pairs are distinct nodes carrying
- *  their dots, a narrow row keeps its first pairs while counting past them, and mismatched spans refuse. */
-template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+/** The dot a walk reports for @p left against @p right. Test rows hold small integers, so every kernel and
+ *  accumulation order lands it exactly, and the serial kernel stands in for every residency's. */
+template <typename scalar_type_>
+typename scalar_type_::dot_result_t dense_native_dot(nk::vector_view<scalar_type_> left,
+                                                     nk::vector_view<scalar_type_> right) noexcept {
+    auto const right_norms = usearch::dense_norms<nk_kernel_dot_k, nk_cap_serial_k, scalar_type_>(right);
+    return usearch::scores<nk_kernel_dot_k, nk_cap_serial_k, scalar_type_>(
+               left, usearch::dense_norms<nk_kernel_dot_k, nk_cap_serial_k, scalar_type_>(left),
+               {right, right, right, right}, {right_norms, right_norms, right_norms, right_norms})
+        .dots[0];
+}
+
+/** One row of graph products: every kept pair names a distinct row of @p vectors, through @p row_of, and
+ *  carries its exact dot against @p left. */
+template <std::size_t rows_count_, typename scalar_type_, typename id_type_, typename dot_type_, typename row_of_type_>
+std::size_t dense_expect_product_row(nk::vector_view<scalar_type_> left, nk::matrix_view<scalar_type_> vectors,
+                                     id_type_ const* ids, dot_type_ const* products, std::size_t kept,
+                                     row_of_type_&& row_of) {
+    std::size_t failures = 0;
+    std::array<bool, rows_count_> seen {};
+    for (std::size_t pair = 0; pair != kept; ++pair) {
+        std::size_t const row = row_of(ids[pair]);
+        failures += expect(row < rows_count_ && !seen[row]);
+        if (row >= rows_count_ || seen[row]) continue;
+        seen[row] = true;
+        failures += expect(products[pair] == dense_native_dot(left, vectors.row(row).as_vector()));
+    }
+    return failures;
+}
+
+/** Graph products against the native dots: every scored pair is counted, a narrow row keeps its width
+ *  while counting past it, every kept pair names a distinct stored row with its exact dot, and mismatched
+ *  spans refuse. */
+template <typename index_type_, typename make_index_type_>
     requires(!dense_device_resident_k<index_type_>)
 std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
     using scalar_t = typename index_type_::scalar_t;
-    constexpr nk_capability_t caps_k = index_type_::picked_quads_capability_k;
-    constexpr std::size_t nodes_count = dense_thread_nodes_k;
+    constexpr std::size_t rows_count = dense_thread_nodes_k, left_count = 4;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     std::size_t failures = 0;
     index_type_ index = make_index(ledger);
     typename index_type_::dense_traversal_context_t context {{}};
-    auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, dense_seed_multiply_k);
-    failures += expect(index.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
+    failures += expect(index.reserve({rows_count, connectivity_16_k, dimensions}).status == status_t::success_k);
+    auto vectors = make_vectors<scalar_t>(rows_count, dimensions, dense_seed_multiply_k);
 
-    std::array<dense_node_id_t, nodes_count> node_ids;
-    std::array<typename index_type_::vector_product_result_t, nodes_count> products;
+    // An empty index scores nothing and writes nothing.
+    std::array<dense_node_id_t, rows_count> node_ids;
+    std::array<typename index_type_::dot_result_t, rows_count> products;
     node_ids.fill(dense_node_id_unknown_k);
-    auto const empty = index.multiply(vectors.view().row(0).as_vector(), context, node_ids, products);
+    auto const empty = index.multiply(vectors.view().row(0).as_vector(), node_ids, products, context);
     failures += expect(empty.status == status_t::success_k && empty.value.count == 0);
     failures += expect(node_ids[0] == dense_node_id_unknown_k);
 
-    auto assigned_ids = nk::vector<dense_node_id_t>::try_zeros(nodes_count);
+    auto assigned_ids = nk::vector<dense_node_id_t>::try_zeros(rows_count);
     failures += expect(index.insert(vectors.view(), assigned_ids.span(), context).status == status_t::success_k);
 
-    // The oracle scores through the very 4-way kernels the walk dispatches, so a kept dot matches exactly.
-    auto oracle_dot = [&](std::size_t row, dense_node_id_t node_id) noexcept {
-        auto left = vectors.view().row(row).as_vector(), right = vectors.view().row(node_id).as_vector();
-        auto right_norms = usearch::dense_norms<kernel_, caps_k, scalar_t>(right);
-        return usearch::scores<kernel_, caps_k, scalar_t>(left, usearch::dense_norms<kernel_, caps_k, scalar_t>(left),
-                                                          {right, right, right, right},
-                                                          {right_norms, right_norms, right_norms, right_norms})
-            .dots[0];
-    };
     typename index_type_::search_config_t const exhaustive {
-        static_cast<typename index_type_::small_size_t>(nodes_count)};
-    for (std::size_t const width : {nodes_count, std::size_t {4}})
-        for (std::size_t row = 0; row != 4; ++row) {
-            auto const [multiplied, status] = index.multiply(vectors.view().row(row).as_vector(), context,
-                                                             std::span {node_ids}.first(width),
-                                                             std::span {products}.first(width), exhaustive);
+        static_cast<typename index_type_::small_size_t>(rows_count)};
+    for (std::size_t const wanted : {rows_count, std::size_t {4}})
+        for (std::size_t row = 0; row != left_count; ++row) {
+            auto const left = vectors.view().row(row).as_vector();
+            auto const [multiplied, status] = index.multiply(left, std::span {node_ids}.first(wanted),
+                                                             std::span {products}.first(wanted), context, exhaustive);
             failures += expect(status == status_t::success_k);
-            failures += expect(multiplied.count > 0 && multiplied.count <= nodes_count);
-            failures += expect_eq(multiplied.computed_distances, multiplied.count);
-            if (width < nodes_count) failures += expect(multiplied.count > width);
-            std::array<bool, nodes_count> seen {};
-            for (std::size_t pair = 0; pair != min_of<std::size_t>(multiplied.count, width); ++pair) {
-                dense_node_id_t const node_id = node_ids[pair];
-                failures += expect(node_id < nodes_count && !seen[node_id]);
-                if (node_id >= nodes_count || seen[node_id]) continue;
-                seen[node_id] = true;
-                failures += expect(products[pair] == oracle_dot(row, node_id));
-            }
+            failures += expect_eq(multiplied.count, multiplied.computed_distances);
+            failures += expect(multiplied.count > 0 && multiplied.count <= rows_count);
+            if (wanted < rows_count) failures += expect(multiplied.count > wanted);
+            failures += dense_expect_product_row<rows_count>(
+                left, vectors.view(), node_ids.data(), products.data(), min_of<std::size_t>(multiplied.count, wanted),
+                [](dense_node_id_t id) noexcept { return std::size_t {id}; });
         }
 
-    auto const refused = index.multiply(vectors.view().row(0).as_vector(), context, node_ids,
-                                        std::span {products}.first(3));
+    auto const refused = index.multiply(vectors.view().row(0).as_vector(), node_ids, std::span {products}.first(3),
+                                        context);
     failures += expect(refused.status == status_t::config_mismatch_k);
     return failures;
 }
 
-/** @ref dense_expect_multiply for the dot kernel, then the ledger it left must balance. */
+/** Graph products are a dot-kernel verb, so every other kernel has nothing to check. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-    requires(!dense_device_resident_k<index_type_>)
+    requires(kernel_ != nk_kernel_dot_k)
+std::size_t test_dense_multiply(make_index_type_ const&) {
+    return 0;
+}
+
+/** @ref dense_expect_multiply, then the ledger it left must balance. */
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+    requires(kernel_ == nk_kernel_dot_k && !dense_device_resident_k<index_type_>)
 std::size_t test_dense_multiply(make_index_type_ const& make_index) {
-    if constexpr (kernel_ != nk_kernel_dot_k) return 0;
-    else {
-        allocation_ledger_t ledger;
-        std::size_t const failures = dense_expect_multiply<index_type_, kernel_>(make_index, ledger);
-        return failures + expect_eq(ledger.live_bytes.load(), 0);
-    }
+    allocation_ledger_t ledger;
+    std::size_t const failures = dense_expect_multiply<index_type_>(make_index, ledger);
+    return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
 #pragma endregion Folds
@@ -1549,7 +1572,7 @@ std::size_t test_dense_indexes_arena_growth() {
     std::vector<key_t> found_keys(queries * wanted);
     std::vector<typename indexes_type_::distance_t> found_distances(queries * wanted);
     std::vector<std::size_t> counts(queries);
-    auto const [search_result, search_status] = indexes.search(
+    auto const [search_result, search_status] = indexes.search_if(
         vectors.view()(nk::range(rows, rows + queries), nk::slice), executor, exhaustive, wanted,
         std::span {found_keys}, std::span {found_distances}, std::span {counts}, sparse);
     failures += expect(succeeded(search_status));
@@ -2168,6 +2191,152 @@ std::size_t test_dense_indexes_search_race() {
     });
     failures += expect_eq(thread_failures.load(), 0u);
     failures += expect_eq(indexes.size(), nodes_count);
+    return failures;
+}
+
+/** Sharded graph products are a dot-kernel verb, so every other kernel has nothing to check. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+    requires(kernel_ != nk_kernel_dot_k)
+std::size_t test_dense_indexes_products() {
+    return 0;
+}
+
+/** Sharded graph products against the native dots: every scored pair is counted, a narrow row keeps its
+ *  width while counting past it, every kept pair names a distinct stored row with its exact dot, and
+ *  mismatched spans refuse. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+    requires(kernel_ == nk_kernel_dot_k)
+std::size_t test_dense_indexes_products() {
+    using scalar_t = typename indexes_type_::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    constexpr std::size_t rows_count = dense_thread_nodes_k, left_count = 4;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    std::size_t failures = 0;
+
+    dense_indexes_executor<indexes_type_> driver;
+    if (failed(driver.status)) return failures + expect(false);
+    indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(indexes)));
+    failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
+    auto vectors = make_vectors<scalar_t>(rows_count, dimensions, dense_seed_indexes_products_k);
+    std::array<key_t, rows_count> keys;
+    for (std::size_t row = 0; row != rows_count; ++row) keys[row] = static_cast<key_t>(1 + row);
+    failures += expect(
+        succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
+
+    auto const left = vectors.view()(nk::range {std::size_t {0}, left_count}, nk::slice);
+    std::array<key_t, left_count * rows_count> found_keys;
+    std::array<typename indexes_type_::dot_result_t, left_count * rows_count> found_products;
+    std::array<std::size_t, left_count> counts;
+    auto multiply = [&](std::size_t wanted, std::span<std::size_t> counts_span) noexcept {
+        return indexes.multiply(left, driver.executor, {}, wanted, std::span {found_keys}, std::span {found_products},
+                                counts_span);
+    };
+    for (std::size_t const wanted : {rows_count, std::size_t {4}}) {
+        auto const [multiplied, status] = multiply(wanted, counts);
+        failures += expect(succeeded(status));
+        failures += expect_eq(multiplied.count, multiplied.computed_distances);
+        for (std::size_t row = 0; row != left_count; ++row) {
+            failures += expect(counts[row] > 0 && counts[row] <= rows_count);
+            if (wanted < rows_count) failures += expect(counts[row] > wanted);
+            failures += dense_expect_product_row<rows_count>(
+                left.row(row).as_vector(), vectors.view(), found_keys.data() + row * wanted,
+                found_products.data() + row * wanted, min_of(counts[row], wanted),
+                [](key_t key) noexcept { return static_cast<std::size_t>(key) - 1; });
+        }
+    }
+
+    failures += expect(multiply(rows_count, std::span {counts}.first(left_count - 1)).status ==
+                       status_t::config_mismatch_k);
+    return failures;
+}
+
+/** Sharded MaxSim is a dot-kernel verb, so every other kernel has nothing to check. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+    requires(kernel_ != nk_kernel_dot_k)
+std::size_t test_dense_indexes_maxsim() {
+    return 0;
+}
+
+/** Sharded MaxSim against the native dots: 64 documents of 4 token rows share their keys, a walk as wide as
+ *  the index ranks exactly the oracle's best documents at their exact scores, a default one never scores a
+ *  key above its own, and a ragged batch refuses. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+    requires(kernel_ == nk_kernel_dot_k)
+std::size_t test_dense_indexes_maxsim() {
+    using scalar_t = typename indexes_type_::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    using search_config_t = typename indexes_type_::search_config_t;
+    constexpr std::size_t rows_count = dense_thread_nodes_k, tokens_per_document = 4;
+    constexpr std::size_t documents_count = rows_count / tokens_per_document;
+    constexpr std::size_t rows_per_query = 4, queries_count = 3, wanted = 5;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    std::size_t failures = 0;
+
+    dense_indexes_executor<indexes_type_> driver;
+    if (failed(driver.status)) return failures + expect(false);
+    indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(indexes)));
+    failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
+    auto vectors = make_vectors<scalar_t>(rows_count, dimensions, dense_seed_indexes_maxsim_k);
+    std::array<key_t, rows_count> keys;
+    for (std::size_t row = 0; row != rows_count; ++row) keys[row] = static_cast<key_t>(1 + row / tokens_per_document);
+    failures += expect(
+        succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
+
+    // Each document's exact score per query: every query row's best dot among its tokens, summed. Test rows
+    // are non-negative, so every dot is too, and a row that misses a document only lowers its score.
+    auto const queries = vectors.view()(nk::range {std::size_t {0}, queries_count * rows_per_query}, nk::slice);
+    std::array<std::array<f64_t, documents_count>, queries_count> exact {};
+    for (std::size_t row = 0; row != queries_count * rows_per_query; ++row)
+        for (std::size_t document = 0; document != documents_count; ++document) {
+            f64_t best = 0;
+            for (std::size_t token = 0; token != tokens_per_document; ++token)
+                best = max_of(best, static_cast<f64_t>(dense_native_dot(
+                                        queries.row(row).as_vector(),
+                                        vectors.view().row(document * tokens_per_document + token).as_vector())));
+            exact[row / rows_per_query][document] += best;
+        }
+
+    std::array<key_t, queries_count * wanted> found_keys;
+    std::array<f64_t, queries_count * wanted> found_scores;
+    std::array<std::size_t, queries_count> counts;
+    auto maxsim = [&](nk::matrix_view<scalar_t> rows, search_config_t config) noexcept {
+        return indexes.maxsim(rows, rows_per_query, driver.executor, config, wanted, std::span {found_keys},
+                              std::span {found_scores}, std::span {counts});
+    };
+    auto document_of = [&](std::size_t query, std::size_t rank) noexcept {
+        return static_cast<std::size_t>(found_keys[query * wanted + rank]) - 1;
+    };
+
+    // A walk as wide as the index ranks every token, so the best documents land at their exact scores.
+    search_config_t const exhaustive {static_cast<typename indexes_type_::index_t::small_size_t>(rows_count)};
+    failures += expect(succeeded(maxsim(queries, exhaustive).status));
+    for (std::size_t query = 0; query != queries_count; ++query) {
+        std::array<f64_t, documents_count> ranked = exact[query];
+        std::sort(ranked.rbegin(), ranked.rend());
+        failures += expect_eq(counts[query], wanted);
+        for (std::size_t rank = 0; rank != counts[query]; ++rank) {
+            std::size_t const document = document_of(query, rank);
+            failures += expect(document < documents_count);
+            if (document >= documents_count) continue;
+            failures += expect_eq(found_scores[query * wanted + rank], ranked[rank]) +
+                        expect_eq(found_scores[query * wanted + rank], exact[query][document]);
+        }
+    }
+
+    // A default walk may miss a row's best token, so no document scores above its exact value.
+    failures += expect(succeeded(maxsim(queries, {}).status));
+    for (std::size_t query = 0; query != queries_count; ++query)
+        for (std::size_t rank = 0; rank != counts[query]; ++rank) {
+            std::size_t const document = document_of(query, rank);
+            failures += expect(document < documents_count);
+            if (document >= documents_count) continue;
+            failures += expect(found_scores[query * wanted + rank] <= exact[query][document]);
+        }
+
+    failures += expect(maxsim(queries(nk::range {std::size_t {0}, rows_per_query + 1}, nk::slice), {}).status ==
+                       status_t::shape_mismatch_k);
     return failures;
 }
 

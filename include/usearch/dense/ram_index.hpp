@@ -22,7 +22,9 @@
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_buffers.hpp"
+#include "usearch/utilities/ram_sorts.hpp" // `network_sort` - the scored quads
 #include "usearch/utilities/ram_tables.hpp"
+#include "usearch/dense/types.hpp"
 #include "usearch/dense/ram_metric.hpp"
 
 namespace unum {
@@ -99,16 +101,6 @@ inline void invoke_admission(predicate_type_& predicate, std::span<dense_scored_
                 [[maybe_unused]] fu::status_t const admitted = admissions.push_back(candidate);
             }
 }
-
-/** The default fold: reads nothing and never ends the walk, so a walk that folds nothing inlines
- *  the axis away. */
-struct dummy_fold_t {
-    template <typename dot_result_type_>
-    constexpr walk_demand_t absorb(std::span<dense_scored_node_t const>,
-                                   std::span<dot_result_type_ const>) const noexcept {
-        return walk_demand_t::continue_k;
-    }
-};
 
 /** Filtered search as a fold: each quad's matches merge into the admitted pool, while the walk
  *  keeps routing through whatever the predicate rejects. */
@@ -364,7 +356,7 @@ struct dense_ram_index {
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
 
     using scalar_t = typename nk::type_for<vector_dtype_>::type;
-    using vector_product_result_t = typename scalar_t::dot_result_t;
+    using dot_result_t = typename scalar_t::dot_result_t;
     using distance_t = f32_t;
     using candidate_t = dense_scored_node_t;
 
@@ -1599,7 +1591,7 @@ struct dense_ram_index {
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      */
     template <dense_query<scalar_t> query_type_, typename fold_type_>
-        requires dense_fold<std::remove_cvref_t<fold_type_>, vector_product_result_t>
+        requires dense_fold<std::remove_cvref_t<fold_type_>, dot_result_t>
     expected<search_result_t> search(query_type_ const& query_vector, fold_type_&& fold,
                                      dense_traversal_context_t& context, search_config_t config = {}) noexcept {
         if (config.synchronization != synchronization_t::concurrent_k)
@@ -1648,20 +1640,20 @@ struct dense_ram_index {
      *      dots, written until the spans fill.
      *
      *  @param[in] left The left-hand row, in the index's own dtype & frozen dimensionality.
-     *  @param[inout] context The calling thread's scratch & telemetry.
      *  @param[out] node_ids The node ID of each kept pair, in walk order.
      *  @param[out] products The dot of each kept pair, parallel to @p node_ids.
+     *  @param[inout] context The calling thread's scratch & telemetry.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      *  @return The pairs scored in @c count - above the spans' width when they were truncated.
      */
     template <dense_query<scalar_t> query_type_ = vector_view_t>
-    expected<search_result_t> multiply(query_type_ const& left, dense_traversal_context_t& context,
-                                       std::span<dense_node_id_t> node_ids, std::span<vector_product_result_t> products,
+    expected<search_result_t> multiply(query_type_ const& left, std::span<dense_node_id_t> node_ids,
+                                       std::span<dot_result_t> products, dense_traversal_context_t& context,
                                        search_config_t config = {}) noexcept
         requires(kernel_kind_ == nk_kernel_dot_k)
     {
         if (products.size() != node_ids.size()) return {{}, status_t::config_mismatch_k};
-        dense_multiply_fold<dense_node_id_t, vector_product_result_t> fold {node_ids, products};
+        dense_multiply_fold<dense_node_id_t, dot_result_t> fold {node_ids, products};
         expected<search_result_t> walked = search(left, fold, context, config);
         walked.value.count = fold.scored;
         return walked;
@@ -1672,7 +1664,7 @@ struct dense_ram_index {
      *  and @c dummy_fold_t inlines the fold away. The walk ends against @p bound once it fills -
      *  @c context.results itself for every walk but a filtered one. */
     template <synchronization_t synchronization_, typename fold_type_, dense_query<scalar_t> query_type_>
-        requires dense_fold<std::remove_cvref_t<fold_type_>, vector_product_result_t>
+        requires dense_fold<std::remove_cvref_t<fold_type_>, dot_result_t>
     expected<search_result_t> search_typed(query_type_ const& query_vector, dense_traversal_context_t& context,
                                            search_config_t config, fold_type_&& fold,
                                            results_array_t const& bound) noexcept {
@@ -2233,8 +2225,8 @@ struct dense_ram_index {
     }
 
     /** Trampoline for @c usearch::scores with hardened types - the walk's scoring, whose dots a fold reads. */
-    inline static dense_scores<vector_product_result_t, 4> scores( //
-        vector_view_t query, vector_norms_t query_norms,           //
+    inline static dense_scores<dot_result_t, 4> scores(  //
+        vector_view_t query, vector_norms_t query_norms, //
         std::array<vector_view_t, 4> candidates, std::array<vector_norms_t, 4> candidates_norms) noexcept {
         return usearch::scores<kernel_kind_, capability_, scalar_t>( //
             query, query_norms, candidates, candidates_norms);
@@ -3137,7 +3129,7 @@ struct dense_ram_index {
     /**
      *  @brief Samples one 4-way batch of distinct, unvisited, published landmarks, scores them
      *      against the @p query, and queues them into the frontier & the result pool.
-     *  @return @c queued_k, @c exhausted_k once every published node is already visited, or
+     *  @return @c advanced_k, @c exhausted_k once every published node is already visited, or
      *      @c sated_k once the fold asks the walk to end - the last two end the walk rather than
      *      failing it. A failed status means scratch could not grow.
      *
@@ -3147,11 +3139,10 @@ struct dense_ram_index {
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k, typename fold_type_ = dummy_fold_t,
               dense_query<scalar_t> query_type_ = vector_view_t>
-    expected<landmarks_seeding_t> sample_landmarks(query_type_ const& query, vector_norms_t query_norms,
-                                                   node_id_t first_invisible_id, std::size_t expansion_factor,
-                                                   dense_traversal_context_t& context,
-                                                   std::span<node_id_t const>& seeds,
-                                                   fold_type_&& fold = fold_type_ {}) noexcept {
+    expected<walk_step_t> sample_landmarks(query_type_ const& query, vector_norms_t query_norms,
+                                           node_id_t first_invisible_id, std::size_t expansion_factor,
+                                           dense_traversal_context_t& context, std::span<node_id_t const>& seeds,
+                                           fold_type_&& fold = fold_type_ {}) noexcept {
         results_array_t& results = context.results;
         frontier_queue_t& frontier = context.frontier;
         visited_set_t& visited = context.visited;
@@ -3162,7 +3153,7 @@ struct dense_ram_index {
         small_size_t landmarks_in_batch = 0;
 
         if (status_t const seen = visited.reserve(visited.size() + landmarks_ids.size()); failed(seen))
-            return {landmarks_seeding_t::exhausted_k, seen};
+            return {walk_step_t::exhausted_k, seen};
         // `visited` may also hold above-watermark IDs discovered through fresh back-linking, so the
         // size check is conservative: it can only under-sample, never let the probe loop spin.
         while (landmarks_in_batch != landmarks_ids.size() && visited.size() < first_invisible_id) {
@@ -3192,7 +3183,7 @@ struct dense_ram_index {
             landmarks_norms[landmarks_in_batch] = norm_for(landmark_location);
             ++landmarks_in_batch;
         }
-        if (!landmarks_in_batch) return {landmarks_seeding_t::exhausted_k, status_t::success_k};
+        if (!landmarks_in_batch) return {walk_step_t::exhausted_k, status_t::success_k};
 
         // Pad the tail lanes with lane zero; the padded outputs are never consumed.
         for (small_size_t lane = landmarks_in_batch; lane != landmarks_ids.size(); ++lane) {
@@ -3200,7 +3191,7 @@ struct dense_ram_index {
             landmarks_vectors[lane] = landmarks_vectors[0];
             landmarks_norms[lane] = landmarks_norms[0];
         }
-        dense_scores<vector_product_result_t, 4> landmark_scores = scores( //
+        dense_scores<dot_result_t, 4> landmark_scores = scores( //
             dense_query_vector(query), query_norms, landmarks_vectors, landmarks_norms);
         dense_correct_scores(query, landmarks_ids, landmarks_vectors, landmark_scores, landmarks_in_batch);
         context.computed_distances += landmarks_in_batch;
@@ -3210,16 +3201,15 @@ struct dense_ram_index {
         std::span const scored = std::span(landmarks_scored).first(landmarks_in_batch);
         // Landmarks fold right here, in lane order: they are marked visited, so the walk never
         // re-scores them and this is their one chance to be absorbed.
-        if (fold.absorb(scored,
-                        std::span<vector_product_result_t const>(landmark_scores.dots).first(landmarks_in_batch)) ==
+        if (fold.absorb(scored, std::span<dot_result_t const>(landmark_scores.dots).first(landmarks_in_batch)) ==
             walk_demand_t::sated_k)
-            return {landmarks_seeding_t::sated_k, status_t::success_k};
+            return {walk_step_t::sated_k, status_t::success_k};
         network_sort(scored, dense_closer_scored_node_t {});
         results.insert(scored, expansion_factor);
         for (small_size_t lane = 0; lane != landmarks_in_batch; ++lane)
             if (status_t const queued = frontier.insert(dense_scored_node_t(scored[lane])); failed(queued))
-                return {landmarks_seeding_t::queued_k, queued};
-        return {landmarks_seeding_t::queued_k, status_t::success_k};
+                return {walk_step_t::advanced_k, queued};
+        return {walk_step_t::advanced_k, status_t::success_k};
     }
 
     /**
@@ -3258,8 +3248,8 @@ struct dense_ram_index {
             auto const [seeding, seed_status] = sample_landmarks<synchronization_>(
                 query, query_norms, first_invisible_id, expansion_factor, context, seeds, fold);
             if (failed(seed_status)) return seed_status;
-            if (seeding == landmarks_seeding_t::sated_k) return status_t::success_k;
-            if (seeding == landmarks_seeding_t::exhausted_k) break; // Everything published is already visited.
+            if (seeding == walk_step_t::sated_k) return status_t::success_k;
+            if (seeding == walk_step_t::exhausted_k) break; // Everything published is already visited.
         }
 
         // Greedily walk the frontier nearest-first, keeping the best `expansion_factor` in `results`.
@@ -3274,8 +3264,8 @@ struct dense_ram_index {
                 auto const [seeding, seed_status] = sample_landmarks<synchronization_>(
                     query, query_norms, first_invisible_id, expansion_factor, context, seeds, fold);
                 if (failed(seed_status)) return seed_status;
-                if (seeding == landmarks_seeding_t::sated_k) return status_t::success_k;
-                if (seeding == landmarks_seeding_t::exhausted_k) break; // Nothing fresh left to restart from.
+                if (seeding == walk_step_t::sated_k) return status_t::success_k;
+                if (seeding == walk_step_t::exhausted_k) break; // Nothing fresh left to restart from.
                 ++context.restarts;
                 continue;
             }
@@ -3349,7 +3339,7 @@ struct dense_ram_index {
                     gathered_vectors[lane] = gathered_vectors[0];
                     gathered_norms[lane] = gathered_norms[0];
                 }
-                dense_scores<vector_product_result_t, 4> gathered_scores = scores( //
+                dense_scores<dot_result_t, 4> gathered_scores = scores( //
                     dense_query_vector(query), query_norms, gathered_vectors, gathered_norms);
                 dense_correct_scores(query, gathered_ids, gathered_vectors, gathered_scores, gathered_count);
                 context.computed_distances += gathered_count;
@@ -3359,8 +3349,7 @@ struct dense_ram_index {
                 std::span const scored = std::span(scored_batch).first(gathered_count);
                 // Folding is independent of navigation: a fold reads every scored quad in lane order,
                 // including what the navigation pool rejects, and never decides where the walk routes.
-                if (fold.absorb(scored,
-                                std::span<vector_product_result_t const>(gathered_scores.dots).first(gathered_count)) ==
+                if (fold.absorb(scored, std::span<dot_result_t const>(gathered_scores.dots).first(gathered_count)) ==
                     walk_demand_t::sated_k)
                     return status_t::success_k;
                 network_sort(scored, dense_closer_scored_node_t {});

@@ -33,6 +33,7 @@
 #include "usearch/utilities/ram_device.hpp"        // `forkunion_allocator`, `forkunion_executor_t`
 #include "usearch/utilities/ram_tables.hpp"        // `growing_multimap`
 #include "usearch/utilities/safegraphs_format.hpp" // SafeGraphs monoliths & manifests
+#include "usearch/dense/types.hpp"
 #include "usearch/dense/ram_index.hpp"
 
 namespace unum {
@@ -40,6 +41,16 @@ namespace usearch {
 
 template <typename indexes_type_>
 struct dense_ram_indexes_cursor;
+
+/** Resolves a walked node ID to its key through one shard's key plane, rebound per shard. */
+template <typename key_type_>
+struct dense_keyed_ids {
+
+    /** The key of each node ID in the shard being walked. */
+    std::span<key_type_ const> keys = {};
+
+    key_type_ operator()(dense_node_id_t node_id) const noexcept { return keys[node_id]; }
+};
 
 /**
  *  @brief The sharded index: same-geometry CPU-resident shards viewed as one.
@@ -115,6 +126,7 @@ struct dense_ram_indexes {
     using executor_t = forkunion_executor_t;
     using distance_t = typename index_t::distance_t;
     using scalar_t = typename index_t::scalar_t;
+    using dot_result_t = typename scalar_t::dot_result_t;
     using vectors_span_t = nk::matrix_span<scalar_t>;
     using traversal_t = typename index_t::dense_traversal_context_t;
     using vector_view_t = typename index_t::vector_view_t;
@@ -782,44 +794,39 @@ struct dense_ram_indexes {
      *  @param[out] keys Merged rankings, @b [queries,wanted] row-major.
      *  @param[out] distances Distances of the same rankings, parallel to @p keys.
      *  @param[out] counts Per-query merged hit counts, one per query row.
-     *  @param[in] predicate Optional per-key admission filter; the default admits everything
-     *      and compiles the filtered machinery out. Shards test node IDs, so each one's keys
-     *      column translates before the predicate sees a candidate.
      *
      *  A thread that fails stops its own query and leaves the rest to finish; the first failure is
      *  what the merged result reports, and every other query's outputs stand.
      */
-    template <typename predicate_type_ = dummy_predicate_t>
     expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
                                      std::size_t wanted, std::span<key_t> keys, std::span<distance_t> distances,
-                                     std::span<std::size_t> counts, predicate_type_&& predicate = {}) noexcept {
-        search_result_t merged;
+                                     std::span<std::size_t> counts) noexcept {
+        return search_if(queries, executor, config, wanted, keys, distances, counts, dummy_predicate_t {});
+    }
+
+    /**
+     *  @brief The filtered sibling of the batched @ref search, sharing its whole contract.
+     *
+     *  @param[in] predicate The per-key admission filter; @c dummy_predicate_t admits everything and
+     *      compiles the filtered machinery out. Shards test node IDs, so each one's keys column
+     *      translates before the predicate sees a candidate.
+     */
+    template <typename predicate_type_>
+    expected<search_result_t> search_if(vectors_view_t queries, executor_t& executor, search_config_t config,
+                                        std::size_t wanted, std::span<key_t> keys, std::span<distance_t> distances,
+                                        std::span<std::size_t> counts, predicate_type_&& predicate) noexcept {
         std::size_t const queries_count = queries.extent(0);
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         if (counts.size() != queries_count || keys.size() < queries_count * wanted ||
             distances.size() < queries_count * wanted)
             return {{}, status_t::config_mismatch_k};
-        if (!queries_count) return {merged, status_t::success_k};
+        if (!queries_count) return {{}, status_t::success_k};
 
-        // One caller per executor, and the arenas grow to the widest geometry ever asked of them.
-        auto [executor_claim, claim_status] = executor.claim();
-        if (failed(claim_status)) return {{}, claim_status};
-        if (status_t const sized = executor.reserve(
-                shards_[0].index->traversal_memory_usage(insert_config_t {config.expansion_factor}));
-            failed(sized))
-            return {{}, sized};
-
-        growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
-        if (status_t const ready = reserve_traversals_(traversals, executor, insert_config_t {config.expansion_factor});
-            failed(ready))
-            return {{}, ready};
-
-        std::atomic<status_t> first_refusal {status_t::success_k};
-        auto scatter_query = [&](std::size_t query, std::size_t thread, std::size_t) noexcept {
-            traversal_t& traversal = traversals[thread];
+        auto search_row = [&](std::size_t query, std::size_t, traversal_t& traversal) noexcept {
             std::span<key_t> const keys_row {keys.data() + query * wanted, wanted};
             std::span<distance_t> const distances_row {distances.data() + query * wanted, wanted};
             std::size_t found_count = 0;
+            status_t refusal = status_t::success_k;
             for (shard_t const& one : shards_) {
                 expected<search_result_t> found {};
                 if constexpr (std::is_same_v<std::decay_t<predicate_type_>, dummy_predicate_t>)
@@ -829,26 +836,112 @@ struct dense_ram_indexes {
                     found = one.index->search_if(queries.row(query).as_vector(), keyed, traversal, config);
                 }
                 if (!found) {
-                    status_t expected_status = status_t::success_k;
-                    first_refusal.compare_exchange_strong(expected_status, found.status, std::memory_order_relaxed);
+                    refusal = found.status;
                     break;
                 }
                 found_count = merge_search_results(to_span(traversal.results), one.keys, keys_row, distances_row, //
                                                    found_count);
             }
             counts[query] = found_count;
+            return refusal;
         };
-        if (status_t const fanned = executor.for_tasks(queries_count, scatter_query); failed(fanned))
-            return {{}, fanned};
+        return for_each_row_(queries_count, executor, config, search_row, counts);
+    }
 
-        for (traversal_t const& traversal : traversals) {
-            merged.visited_members += traversal.visited_members;
-            merged.computed_distances += traversal.computed_distances;
-            merged.restarts += traversal.restarts;
-            merged.saturated_walks += traversal.saturated_walks;
-        }
-        for (std::size_t const count : counts) merged.count += count;
-        return {merged, first_refusal.load(std::memory_order_relaxed)};
+    /**
+     *  @brief Graph products of a whole matrix of left-hand rows against every shard: each row keeps
+     *      the pairs its walks scored, keys resolved and dots at their native width.
+     *
+     *  @param[in] left The left-hand rows, one walk per row, in the shards' stored scalar type.
+     *  @param[inout] executor The threads and their scratch; one row occupies one at a time.
+     *  @param[in] config The per-shard walk configuration, applied uniformly.
+     *  @param[in] wanted Pairs kept per row - the row width of @p keys and @p products.
+     *  @param[out] keys The key of each kept pair, @b [rows,wanted] row-major.
+     *  @param[out] products The dot of each kept pair, parallel to @p keys.
+     *  @param[out] counts Pairs scored per row across every shard, above @p wanted when truncated.
+     *
+     *  A full row keeps an arbitrary subset of its pairs. A thread that fails stops its own row and
+     *  leaves the rest to finish; the first failure is what the merged result reports.
+     */
+    expected<search_result_t> multiply(vectors_view_t left, executor_t& executor, search_config_t config,
+                                       std::size_t wanted, std::span<key_t> keys, std::span<dot_result_t> products,
+                                       std::span<std::size_t> counts) noexcept
+        requires(kernel_kind_ == nk_kernel_dot_k)
+    {
+        std::size_t const rows_count = left.extent(0);
+        if (shards_.empty()) return {{}, status_t::uninitialized_k};
+        if (counts.size() != rows_count || keys.size() < rows_count * wanted || products.size() < rows_count * wanted)
+            return {{}, status_t::config_mismatch_k};
+        if (!rows_count) return {{}, status_t::success_k};
+
+        auto multiply_row = [&](std::size_t row, std::size_t, traversal_t& traversal) noexcept {
+            dense_multiply_fold<key_t, dot_result_t, dense_keyed_ids<key_t>> fold {
+                {keys.data() + row * wanted, wanted},
+                {products.data() + row * wanted, wanted}};
+            status_t refusal = status_t::success_k;
+            for (shard_t const& one : shards_) {
+                fold.resolve.keys = to_span(one.keys);
+                expected<search_result_t> const walked = one.index->search(left.row(row).as_vector(), fold, traversal,
+                                                                           config);
+                if (!walked) {
+                    refusal = walked.status;
+                    break;
+                }
+            }
+            counts[row] = fold.scored;
+            return refusal;
+        };
+        return for_each_row_(rows_count, executor, config, multiply_row, counts);
+    }
+
+    /**
+     *  @brief Late-interaction scores of query groups against every shard: each query row takes its
+     *      best dot within a key among the tokens it ranked, and those maxima sum to that key's score.
+     *
+     *  @param[in] queries The token rows of every query, @p rows_per_query consecutive rows each.
+     *  @param[in] rows_per_query Rows in every query; the row count must be a whole multiple of it.
+     *  @param[inout] executor The threads and their scratch; one token row occupies one at a time.
+     *  @param[in] config The per-shard walk configuration, applied uniformly; each row ranks as many
+     *      tokens as its expansion factor.
+     *  @param[in] wanted Keys kept per query - the row width of @p keys and @p scores.
+     *  @param[out] keys The best-scoring keys of each query, @b [queries,wanted] row-major.
+     *  @param[out] scores Their summed maxima, largest first, parallel to @p keys.
+     *  @param[out] counts Keys written per query, at most @p wanted.
+     *
+     *  A key some row never ranked misses that row's maximum, so with non-negative per-row maxima
+     *  a score lands below its exact value, never above.
+     */
+    expected<search_result_t> maxsim(vectors_view_t queries, std::size_t rows_per_query, executor_t& executor,
+                                     search_config_t config, std::size_t wanted, std::span<key_t> keys,
+                                     std::span<f64_t> scores, std::span<std::size_t> counts) noexcept
+        requires(kernel_kind_ == nk_kernel_dot_k)
+    {
+        std::size_t const rows_count = queries.extent(0);
+        if (shards_.empty()) return {{}, status_t::uninitialized_k};
+        if (!rows_per_query || rows_count % rows_per_query) return {{}, status_t::shape_mismatch_k};
+        std::size_t const groups_count = rows_count / rows_per_query;
+        if (counts.size() != groups_count || keys.size() < groups_count * wanted ||
+            scores.size() < groups_count * wanted)
+            return {{}, status_t::config_mismatch_k};
+        if (!groups_count) return {{}, status_t::success_k};
+
+        // Every token row keeps its whole ranked pool, its keys resolved and merged across the shards.
+        std::size_t const width = shards_[0].index->non_zero_expansion_factor(config);
+        growing_buffer<key_t, forkunion_allocator_t> row_keys {allocator_};
+        growing_buffer<distance_t, forkunion_allocator_t> row_distances {allocator_};
+        growing_buffer<std::size_t, forkunion_allocator_t> row_counts {allocator_};
+        dense_maxsim_reducer<key_t, forkunion_allocator_t> reduce {allocator_};
+        if (failed(row_keys.resize_uninitialized(rows_count * width)) ||
+            failed(row_distances.resize_uninitialized(rows_count * width)) ||
+            failed(row_counts.resize_uninitialized(rows_count)) ||
+            failed(reduce.reserve(rows_per_query, width, wanted)))
+            return {{}, status_t::bad_alloc_k};
+        expected<search_result_t> ranked = search(queries, executor, config, width, to_writable_span(row_keys),
+                                                  to_writable_span(row_distances), to_writable_span(row_counts));
+        if (!ranked) return ranked;
+        ranked.value.count = reduce(to_span(row_keys), to_span(row_distances), to_span(row_counts), keys, scores,
+                                    counts);
+        return ranked;
     }
 
 #pragma endregion Search
@@ -1466,6 +1559,49 @@ struct dense_ram_indexes {
     }
 
 #pragma endregion Health
+
+#pragma region Search
+
+    /** Claims @p executor, sizes one traversal per thread, runs @p per_row over every row with its
+     *  thread and that thread's traversal, and sums the threads' telemetry & the rows' @p counts; a row
+     *  that refuses stops itself, and the first refusal is the one kept. */
+    template <typename per_row_type_>
+    expected<search_result_t> for_each_row_(std::size_t rows_count, executor_t& executor, search_config_t config,
+                                            per_row_type_&& per_row, std::span<std::size_t const> counts) noexcept {
+        // One caller per executor, and the arenas grow to the widest geometry ever asked of them.
+        auto [executor_claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return {{}, claim_status};
+        if (status_t const sized = executor.reserve(
+                shards_[0].index->traversal_memory_usage(insert_config_t {config.expansion_factor}));
+            failed(sized))
+            return {{}, sized};
+
+        growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
+        if (status_t const ready = reserve_traversals_(traversals, executor, insert_config_t {config.expansion_factor});
+            failed(ready))
+            return {{}, ready};
+
+        std::atomic<status_t> first_refusal {status_t::success_k};
+        auto each_row = [&](std::size_t row, std::size_t thread, std::size_t) noexcept {
+            status_t const refusal = per_row(row, thread, traversals[thread]);
+            if (succeeded(refusal)) return;
+            status_t expected_status = status_t::success_k;
+            first_refusal.compare_exchange_strong(expected_status, refusal, std::memory_order_relaxed);
+        };
+        if (status_t const fanned = executor.for_tasks(rows_count, each_row); failed(fanned)) return {{}, fanned};
+
+        search_result_t merged;
+        for (std::size_t const count : counts) merged.count += count;
+        for (traversal_t const& traversal : traversals) {
+            merged.visited_members += traversal.visited_members;
+            merged.computed_distances += traversal.computed_distances;
+            merged.restarts += traversal.restarts;
+            merged.saturated_walks += traversal.saturated_walks;
+        }
+        return {merged, first_refusal.load(std::memory_order_relaxed)};
+    }
+
+#pragma endregion Search
 
 #pragma region Checkpoints
 

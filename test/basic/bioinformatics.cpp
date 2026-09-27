@@ -68,7 +68,7 @@ struct alignment_metric_t {
     basic_metric_staging_t push(dna_t const& value) noexcept {
         return staged_.push_back(value), basic_metric_staging_t::staged_k;
     }
-    void drain(std::span<u64_t> distances) noexcept {
+    void drain(std::span<u64_t> distances, u64_t) noexcept {
         for (std::size_t lane = 0; lane != distances.size(); ++lane)
             distances[lane] = alignment_distance(query_, staged_[lane], previous_row_, current_row_);
         staged_.clear();

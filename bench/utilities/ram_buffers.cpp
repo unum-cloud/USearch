@@ -28,6 +28,7 @@
 #include <benchmark/benchmark.h>
 
 #include "usearch/utilities/ram_buffers.hpp"
+#include "usearch/utilities/ram_sorts.hpp"
 #include "usearch/utilities/ram_tables.hpp"
 
 namespace bm = benchmark;

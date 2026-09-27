@@ -3,8 +3,10 @@
  *  @author Ash Vardanian
  *  @date April 24, 2026
  *  @brief Smoke tests for the @c ram_buffers.hpp & @c ram_tables.hpp containers - @c max_heap,
- *      @c sorted_buffer, and @c growing_hash_set - including their four-wide and larger-N batch
- *      overloads plus @c insert_many / @c pop_many on the heap.
+ *      @c sorted_buffer, and @c growing_hash_set - and the @c ram_sorts.hpp @c radix_group.
+ *
+ *  The containers' four-wide and larger-N batch overloads are covered, plus @c insert_many and @c pop_many
+ *  on the heap.
  *
  *  Mirrors the structure of @c test/dense_metric.hpp:
  *
@@ -28,6 +30,7 @@
 #include <fmt/format.h>
 
 #include "usearch/utilities/ram_buffers.hpp"
+#include "usearch/utilities/ram_sorts.hpp"
 #include "usearch/utilities/ram_tables.hpp"
 
 #include "test.hpp"
@@ -101,6 +104,45 @@ std::size_t check_sorted_buffer_batch_parity(unsigned seed) noexcept {
 }
 
 #pragma endregion Sorted Buffer
+
+#pragma region Radix Group
+
+/** One radix grouping of @p keys: every value survives with its own key, and every key forms one run. */
+template <typename key_type_>
+std::size_t check_radix_group(std::vector<key_type_> const& keys) noexcept {
+    struct value_t {
+        key_type_ key;
+        u32_t arrival;
+    };
+    std::vector<value_t> values(keys.size());
+    for (u32_t arrival = 0; arrival != keys.size(); ++arrival) values[arrival] = {keys[arrival], arrival};
+    radix_group(std::span {values}, &value_t::key);
+
+    std::size_t failures = 0;
+    std::vector<bool> survived(keys.size());
+    std::vector<key_type_> closed;
+    for (std::size_t rank = 0; rank != values.size(); ++rank) {
+        value_t const& value = values[rank];
+        failures += expect(!survived[value.arrival] && keys[value.arrival] == value.key);
+        survived[value.arrival] = true;
+        if (!rank || value.key == values[rank - 1].key) continue;
+        failures += expect(std::find(closed.begin(), closed.end(), value.key) == closed.end());
+        closed.push_back(values[rank - 1].key);
+    }
+    return failures;
+}
+
+/** Radix groupings of words differing in two of their bytes, and of UUIDs differing in one middle byte. */
+std::size_t check_radix_groups(unsigned seed) noexcept {
+    std::mt19937 random_generator {seed};
+    std::vector<u64_t> words(1000);
+    for (u64_t& word : words) word = (random_generator() % 8) | (u64_t {random_generator() % 4} << 32);
+    std::vector<uuid_t> uuids(1000);
+    for (uuid_t& uuid : uuids) uuid.bytes[7] = static_cast<std::byte>(random_generator() % 16);
+    return check_radix_group(words) + check_radix_group(uuids);
+}
+
+#pragma endregion Radix Group
 
 #pragma region Growing Hash Set
 
@@ -419,6 +461,7 @@ std::size_t test::utilities::check_ram_buffers() {
     failures += check_sorted_buffer_single_element();
     failures += check_sorted_buffer_batch_parity<4>(0xABCD1234u);
     failures += check_sorted_buffer_batch_parity<16>(0x13572468u);
+    failures += check_radix_groups(0x5A7D1C00u);
 
     failures += check_hash_set_single_element();
     failures += check_hash_set_growth_parity(0xAB5EEDEDu);

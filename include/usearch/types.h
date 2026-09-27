@@ -301,8 +301,9 @@ USEARCH_EXPORT typedef struct usearch_matrix_span_t {
  *  copy is a second thing to disagree. The strides stay because a caller may land results inside
  *  a wider host matrix, which @c wanted alone cannot express.
  *
- *  @c scores are nearest-first, whichever kind the index froze - the inner kind reaches the
- *  ranking as @c 1 @c - @c dot, like every other distance.
+ *  What @c scores hold is each verb's own: a search writes distances nearest-first, whichever kind
+ *  the index froze - the inner kind as @c 1 @c - @c dot - while the linear-algebra verbs write
+ *  similarities, as their own docs state.
  */
 USEARCH_EXPORT typedef struct usearch_matches_span_t {
 
@@ -321,7 +322,7 @@ USEARCH_EXPORT typedef struct usearch_matches_span_t {
     /** Matches written per query - one entry per query, never strided. */
     size_t* counts;
 
-    /** Columns per row, and the upper bound on matches - the "k" in "kANN". */
+    /** Columns per row, and the upper bound on matches - the "k" in "kANN"; zero lands only the counts. */
     size_t wanted;
 } usearch_matches_span_t;
 

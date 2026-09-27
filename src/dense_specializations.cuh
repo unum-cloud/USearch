@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date August 14, 2026
  *  @brief What one dense arm is spelled with and compiled through: the scalar and capability
- *      tables, the CPU and GPU classes with their waiters, the key hash, and the
+ *      tables, the CPU and GPU classes with their waiters, and the
  *      @c specialized_index view every class unit instantiates.
  *
  *  Every class unit includes this to instantiate its arms; @c dense_index.cuh adds the variant
@@ -12,7 +12,6 @@
 #pragma once
 
 #include <cstddef> // `std::size_t`
-#include <cstdint> // `std::uint64_t` - the sliced key hash
 
 #include <atomic>      // `std::atomic` - serializing the progress ticks
 #include <bit>         // `std::bit_cast` - the C key struct & `us::uuid_t` share sixteen bytes
@@ -520,6 +519,15 @@ struct specialized_index {
                                      std::size_t wanted, keys_span_t keys, distances_span_t distances,
                                      counts_span_t counts, key_predicate_t& predicate) noexcept
         requires is_ram_index<index_type_>;
+    expected<search_result_t> multiply(vectors_view_t left, executor_t& executor, search_config_t config,
+                                       std::size_t wanted, keys_span_t keys,
+                                       std::span<typename index_type_::dot_result_t> products,
+                                       counts_span_t counts) noexcept
+        requires(index_type_::kernel_kind_k == nk_kernel_dot_k);
+    expected<search_result_t> maxsim(vectors_view_t queries, std::size_t rows_per_query, executor_t& executor,
+                                     search_config_t config, std::size_t wanted, keys_span_t keys,
+                                     std::span<f64_t> scores, counts_span_t counts) noexcept
+        requires(index_type_::kernel_kind_k == nk_kernel_dot_k);
     status_t save(std::string_view path, executor_t& executor, shard_ticks_t& ticks) noexcept;
     status_t save(bytes_span_t buffer, executor_t& executor, shard_ticks_t& ticks) noexcept;
     status_t load(std::string_view path, executor_t& executor, shard_ticks_t& ticks) noexcept;
@@ -621,7 +629,23 @@ expected<typename specialized_index<index_type_>::search_result_t> specialized_i
     distances_span_t distances, counts_span_t counts, key_predicate_t& predicate) noexcept
     requires is_ram_index<index_type_>
 {
-    return index.search(queries, executor, config, wanted, keys, distances, counts, predicate);
+    return index.search_if(queries, executor, config, wanted, keys, distances, counts, predicate);
+}
+template <typename index_type_>
+expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::multiply(
+    vectors_view_t left, executor_t& executor, search_config_t config, std::size_t wanted, keys_span_t keys,
+    std::span<typename index_type_::dot_result_t> products, counts_span_t counts) noexcept
+    requires(index_type_::kernel_kind_k == nk_kernel_dot_k)
+{
+    return index.multiply(left, executor, config, wanted, keys, products, counts);
+}
+template <typename index_type_>
+expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::maxsim(
+    vectors_view_t queries, std::size_t rows_per_query, executor_t& executor, search_config_t config,
+    std::size_t wanted, keys_span_t keys, std::span<f64_t> scores, counts_span_t counts) noexcept
+    requires(index_type_::kernel_kind_k == nk_kernel_dot_k)
+{
+    return index.maxsim(queries, rows_per_query, executor, config, wanted, keys, scores, counts);
 }
 template <typename index_type_>
 status_t specialized_index<index_type_>::save(std::string_view path, executor_t& executor,
